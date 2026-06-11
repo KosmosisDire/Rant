@@ -871,6 +871,11 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
 #define DART_GAP  4
 
 #define DART_NACK_WINDOW 32u    /* seqnos covered by one ACKNACK bitmap */
+#define DART__NIL 0xFFFFFFFFu
+
+#ifndef DART_HB_SWEEP_US
+#define DART_HB_SWEEP_US 25000u /* the timer sweep covers every lane this often */
+#endif
 
 /* little-endian pack helpers */
 static void dart_w16(uint8_t*p,uint16_t v){p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);}
@@ -955,8 +960,21 @@ struct dart_state {
     dart_channel  *chans;     /* [n_channels] */
     dart_wproxy   *wprox;     /* [n_channels*max_peers] */
     dart_rproxy   *rprox;     /* [n_channels*max_peers] */
-    /* poll_send round-robin cursor */
-    uint32_t     scan;
+    /* active-lane scheduler. A lane is one (channel, peer) proxy pair, or a
+       channel's multicast group lane; the event that gives a lane sendable
+       work also enqueues it, so poll_send pays for work done, never for idle
+       lanes. Lanes queue at most once, grouped per destination so one pop
+       drains one datagram's worth. Timer work (heartbeats, delayed acks) has
+       no event to ride and is found by an amortized clock-driven sweep. */
+    uint32_t    *lane_next;   /* [n_channels*(max_peers+1)] next in dest list */
+    uint8_t     *lane_inq;    /* [n_channels*(max_peers+1)] queued flag */
+    uint32_t    *dest_head;   /* [max_peers+n_channels] lane list per dest */
+    uint32_t    *dest_tail;
+    uint8_t     *dest_inq;
+    uint32_t    *destq;       /* ring of active destinations */
+    uint32_t     destq_head, destq_n;
+    uint32_t     sweep;       /* timer-sweep lane cursor */
+    uint64_t     sweep_t;     /* clock position the sweep has paid for */
 };
 
 /* bump allocator (shared by required_memory and init) */
@@ -995,7 +1013,8 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
     metadef.qos.join_replay     = 1;       /* joiners get the current list */
     metadef.qos.max_sample_bytes= 4u + 2u*mids;
 
-    { uint32_t *pi = (uint32_t*)dart_take(b, np*sizeof(uint32_t), 8);
+    { uint32_t nlanes = nc*(np+1u), ndest = np+nc;
+      uint32_t *pi = (uint32_t*)dart_take(b, np*sizeof(uint32_t), 8);
       uint8_t  *pu = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint8_t  *pl = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint8_t  *pb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
@@ -1003,15 +1022,25 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       dart_channel *ch = (dart_channel*)dart_take(b, nc*sizeof(dart_channel), 16);
       dart_wproxy *wp = (dart_wproxy*)dart_take(b, (size_t)nc*np*sizeof(dart_wproxy), 16);
       dart_rproxy *rp = (dart_rproxy*)dart_take(b, (size_t)nc*np*sizeof(dart_rproxy), 16);
+      uint32_t *ln = (uint32_t*)dart_take(b, (size_t)nlanes*sizeof(uint32_t), 8);
+      uint8_t  *li = (uint8_t*) dart_take(b, (size_t)nlanes, 1);
+      uint32_t *dh = (uint32_t*)dart_take(b, (size_t)ndest*sizeof(uint32_t), 8);
+      uint32_t *dt = (uint32_t*)dart_take(b, (size_t)ndest*sizeof(uint32_t), 8);
+      uint8_t  *di = (uint8_t*) dart_take(b, (size_t)ndest, 1);
+      uint32_t *dq = (uint32_t*)dart_take(b, (size_t)ndest*sizeof(uint32_t), 8);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->peer_local=pl;
           st->peer_pub_bm=pb; st->peer_sub_bm=sb; st->bmlen=bml;
           st->cfg.n_channels=(uint16_t)nc; st->meta_ci=(uint16_t)ncu;
-          st->chans=ch; st->wprox=wp; st->rprox=rp; st->scan=0;
+          st->chans=ch; st->wprox=wp; st->rprox=rp;
+          st->lane_next=ln; st->lane_inq=li;
+          st->dest_head=dh; st->dest_tail=dt; st->dest_inq=di; st->destq=dq;
           memset(pu,0,np); memset(pl,0,np);
           memset(pb,0,(size_t)np*bml); memset(sb,0,(size_t)np*bml);
           memset(wp,0,(size_t)nc*np*sizeof(dart_wproxy));
           memset(rp,0,(size_t)nc*np*sizeof(dart_rproxy));
+          memset(li,0,nlanes); memset(di,0,ndest);
+          memset(dh,0xFF,(size_t)ndest*sizeof(uint32_t));   /* all DART__NIL */
       }
     }
 
@@ -1085,6 +1114,31 @@ static dart_channel *dart_chan(dart_state *st, uint16_t id, int *idx_out){
     return NULL;
 }
 
+/* active-lane scheduler. Lane index = ci*(max_peers+1)+ps; ps==max_peers is
+ * the channel's multicast group lane. Destination = peer slot ps, or
+ * max_peers+ci for a group lane. */
+static void dart__dest_push(dart_state *st, uint32_t d){
+    uint32_t ndest = st->cfg.max_peers + (uint32_t)st->cfg.n_channels, t;
+    if (st->dest_inq[d]) return;
+    st->dest_inq[d]=1;
+    t = st->destq_head + st->destq_n;
+    if (t >= ndest) t -= ndest;
+    st->destq[t]=d; st->destq_n++;
+}
+
+/* enqueue a lane that just got sendable work; idempotent while queued */
+static void dart__lane_wake(dart_state *st, uint16_t ci, uint32_t ps){
+    uint32_t np=st->cfg.max_peers, lanes=np+1u;
+    uint32_t L=(uint32_t)ci*lanes+ps;
+    uint32_t d=(ps<np) ? ps : np+(uint32_t)ci;
+    if (st->lane_inq[L]) return;
+    st->lane_inq[L]=1; st->lane_next[L]=DART__NIL;
+    if (st->dest_head[d]==DART__NIL) st->dest_head[d]=L;
+    else st->lane_next[st->dest_tail[d]]=L;
+    st->dest_tail[d]=L;
+    dart__dest_push(st, d);
+}
+
 /* unicast join seqno: the head minus qos.join_replay cached samples (reliable
  * only). Best-effort and join_replay 0 start at the head, so a late joiner
  * sees only future samples. */
@@ -1105,13 +1159,15 @@ static uint64_t dart_unicast_join_seqno(const dart_channel *chn){
 }
 
 /* group mode toggled: local subscriber lanes hand over to or resume from the
- * group cursor (reliable readers backfill any seam via NACK). */
+ * group cursor (reliable readers backfill any seam via NACK). A resuming lane
+ * may inherit backlog the group never sent, so wake it. */
 static void dart_sync_local_lanes(dart_state *st, uint16_t c, dart_channel *chn){
     uint32_t np=st->cfg.max_peers; uint16_t pj;
     for (pj=0;pj<np;pj++){
         dart_wproxy *lw=&st->wprox[(size_t)c*np+pj];
-        if (lw->used && lw->local && lw->sent_upto < chn->mc_sent_upto)
-            lw->sent_upto = chn->mc_sent_upto;
+        if (!lw->used || !lw->local) continue;
+        if (lw->sent_upto < chn->mc_sent_upto) lw->sent_upto = chn->mc_sent_upto;
+        if (lw->sent_upto < chn->next_seqno) dart__lane_wake(st, c, pj);
     }
 }
 
@@ -1143,6 +1199,7 @@ static void dart__match_w(dart_state *st, uint16_t c, uint16_t ps){
         w->sent_upto = chn->mc_sent_upto;
     }
     w->acked_upto = w->sent_upto;
+    dart__lane_wake(st, c, ps);   /* join replay + first heartbeat */
 }
 static void dart__unmatch_w(dart_state *st, uint16_t c, uint16_t ps){
     dart_channel *chn=&st->chans[c];
@@ -1230,9 +1287,10 @@ static dart_wsample *dart_find_sample(dart_channel *ch, uint64_t seqno){
     return NULL;
 }
 
-/* append the (already filled) head slot to history; poll_send picks it up via
- * sent_upto < next_seqno */
-static void dart__commit(dart_channel *ch, size_t len){
+/* append the (already filled) head slot to history and wake the lanes that
+ * will carry it */
+static void dart__commit(dart_state *st, uint16_t ci, size_t len){
+    dart_channel *ch = &st->chans[ci];
     uint16_t depth = ch->qos.history_depth ? ch->qos.history_depth : 1;
     uint16_t count = (uint16_t)((len + DART_FRAG_PAYLOAD - 1) / DART_FRAG_PAYLOAD);
     dart_wsample *slot = &ch->hist[ch->hist_head];
@@ -1245,6 +1303,13 @@ static void dart__commit(dart_channel *ch, size_t len){
     ch->first_seqno = ch->hist[ch->hist_head].valid ? ch->hist[ch->hist_head].base
                                                     : ch->hist[0].base;
     ch->have_first  = 1;
+    if (ch->mcast && ch->nsubs_remote>0)
+        dart__lane_wake(st, ci, st->cfg.max_peers);    /* group lane */
+    else {
+        uint32_t np=st->cfg.max_peers, p;
+        for (p=0;p<np;p++)
+            if (st->wprox[(size_t)ci*np+p].used) dart__lane_wake(st, ci, p);
+    }
 }
 
 int dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len, uint64_t now){
@@ -1256,7 +1321,7 @@ int dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len,
     if (len > ch->qos.max_sample_bytes) return -2;
     if (ch->dir == DART_SUB_ONLY || ch->dir == DART_NONE) return -3;
     if (len) memcpy(ch->hist[ch->hist_head].buf, data, len);
-    dart__commit(ch, len);
+    dart__commit(st, (uint16_t)ci, len);
     return 0;
 }
 
@@ -1276,7 +1341,7 @@ static void dart__meta_publish(dart_state *st){
         if (d==DART_PUBSUB || d==DART_SUB_ONLY){ dart_w16(p,st->chans[c].id); p+=2; ns++; }
     }
     dart_w16(o,(uint16_t)np); dart_w16(o+2,(uint16_t)ns);
-    dart__commit(mc, 4u + 2u*(np+ns));
+    dart__commit(st, st->meta_ci, 4u + 2u*(np+ns));
 }
 
 /* a peer's interest list arrived: refresh its bits, rematch every channel */
@@ -1368,7 +1433,17 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
 
     if (base > r->deliver_upto){
         if (reliable && r->started){
-            return;                                      /* gap in stream: wait/NACK */
+            /* out-of-order: a hole exists right now, and this datagram proves
+               the writer holds up to seqno. Arm the NACK immediately instead
+               of waiting for a heartbeat: a busy writer defers heartbeats, and
+               at high rates the ring wraps before one arrives. */
+            if (seqno > r->hb_last) r->hb_last = seqno;
+            if (!r->ack_pending){       /* keep the oldest due time: arrivals
+                                           must not keep postponing the NACK */
+                r->ack_pending=1; r->ack_due_us=now + ch->qos.nack_delay_us;
+            }
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            return;
         }
         /* first contact (reliable late-join) or best-effort: adopt the writer's
            position instead of waiting for seqnos it no longer holds */
@@ -1401,7 +1476,10 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           r->asm_active=0;
       }
     }
-    if (reliable){ r->ack_pending=1; r->ack_due_us=now + ch->qos.nack_delay_us; }
+    if (reliable){
+        r->ack_pending=1; r->ack_due_us=now + ch->qos.nack_delay_us;
+        dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+    }
 }
 
 static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, uint64_t now){
@@ -1418,6 +1496,7 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
     }
     r->hb_last=last;
     r->ack_pending=1; r->ack_due_us = now + ch->qos.nack_delay_us;
+    dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
 }
 
 static void dart_reader_gap(dart_state *st, int ci, int pslot, const uint8_t *p){
@@ -1438,7 +1517,10 @@ static void dart_writer_nack(dart_state *st, int ci, int pslot, const uint8_t *p
     uint64_t base=dart_r64(p+4); uint16_t nbits=dart_r16(p+12); uint32_t bm=dart_r32(p+14);
     if (!w->used) return;
     if (base > w->acked_upto) w->acked_upto=base;
-    if (nbits>0 && bm!=0){ w->has_nack=1; w->nack_base=base; w->nack_bits=bm; }
+    if (nbits>0 && bm!=0){
+        w->has_nack=1; w->nack_base=base; w->nack_bits=bm;
+        dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+    }
 }
 
 void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len, uint64_t now){
@@ -1641,50 +1723,108 @@ static size_t dart_group_emit(dart_state *st, int ci, uint8_t *out, size_t cap, 
     return 0;
 }
 
-int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
-    uint32_t np=st->cfg.max_peers, nc=st->cfg.n_channels;
-    uint32_t lanes=np+1u, total=nc*lanes, k;
-    for (k=0;k<total;k++){
-        uint32_t idx=(st->scan+k)%total;
-        uint16_t ci=(uint16_t)(idx/lanes), ps=(uint16_t)(idx%lanes);
-        size_t n;
+/* event work a popped lane still owes right now (timer-armed work is the
+ * sweep's job, so a lane never camps in the queue waiting on a clock) */
+static int dart__lane_work(dart_state *st, uint16_t ci, uint32_t ps, uint64_t now){
+    dart_channel *ch=&st->chans[ci];
+    uint32_t np=st->cfg.max_peers;
+    if (ps==np)
+        return ch->mcast && ch->nsubs_remote>0 && ch->mc_sent_upto < ch->next_seqno;
+    if (!st->peer_used[ps]) return 0;
+    { dart_wproxy *w=&st->wprox[(size_t)ci*np+ps];
+      dart_rproxy *r=&st->rprox[(size_t)ci*np+ps];
+      int group_mode = ch->mcast && ch->nsubs_remote>0;
+      if (w->used && w->has_nack) return 1;
+      if (w->used && !group_mode && w->sent_upto < ch->next_seqno) return 1;
+      if (r->used && ch->qos.reliability==DART_RELIABLE
+          && r->ack_pending && now >= r->ack_due_us) return 1;
+    }
+    return 0;
+}
+
+/* clock-driven counterpart of the wake calls: heartbeats and delayed acks have
+ * no triggering event, so a cursor walks the lane table at a fixed TIME rate
+ * (full coverage every DART_HB_SWEEP_US, independent of poll frequency) and
+ * wakes lanes whose timers came due. Read-only checks; cost is bounded by
+ * table size per sweep period, not per poll call. */
+static void dart__hb_sweep(dart_state *st, uint64_t now){
+    uint32_t np=st->cfg.max_peers, lanes=np+1u;
+    uint32_t total=(uint32_t)st->cfg.n_channels*lanes, due, k;
+    uint64_t span = now - st->sweep_t;
+    due = (span >= DART_HB_SWEEP_US) ? total
+        : (uint32_t)(span * total / DART_HB_SWEEP_US);
+    if (!due) return;              /* sweep_t advances only when lanes are paid */
+    st->sweep_t = now;
+    for (k=0;k<due;k++){
+        uint32_t L=st->sweep, ps=L%lanes;
+        uint16_t ci=(uint16_t)(L/lanes);
+        dart_channel *ch=&st->chans[ci];
+        st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
+        if (ch->qos.reliability!=DART_RELIABLE || ch->next_seqno==0) continue;
         if (ps==np){
-            /* group lane for channel ci: batch only same-channel submessages,
-               since each channel maps to its own multicast group */
-            n=dart_group_emit(st,ci,(uint8_t*)out,cap,now);
-            if (n){
-                size_t off=n;
-                while (off<cap){
-                    size_t m=dart_group_emit(st,ci,(uint8_t*)out+off,cap-off,now);
-                    if (!m) break;
-                    off+=m;
-                }
-                *to_peer=DART_DEST_GROUP(st->chans[ci].id); *out_len=off;
-                st->scan=(idx+1)%total;
-                return 1;
-            }
+            if (ch->mcast && ch->nsubs_remote>0 && now>=ch->mc_hb_next_us)
+                dart__lane_wake(st,ci,ps);
             continue;
         }
         if (!st->peer_used[ps]) continue;
-        n=dart_writer_emit(st,ci,ps,(uint8_t*)out,cap,now);
-        if (!n) n=dart_reader_emit(st,ci,ps,(uint8_t*)out,cap,now);
-        if (n){
-            /* opportunistic batching: append whatever else is already due for
-               this peer until the datagram is full. Never waits for future
-               data, so latency is unaffected: it only makes fuller datagrams. */
-            size_t off=n; uint16_t c2; int progress=1;
-            while (progress && off<cap){
-                progress=0;
-                for (c2=0;c2<nc;c2++){
-                    size_t m=dart_writer_emit(st,c2,ps,(uint8_t*)out+off,cap-off,now);
-                    if (!m) m=dart_reader_emit(st,c2,ps,(uint8_t*)out+off,cap-off,now);
-                    if (m){ off+=m; progress=1; }
+        { dart_wproxy *w=&st->wprox[(size_t)ci*np+ps];
+          dart_rproxy *r=&st->rprox[(size_t)ci*np+ps];
+          int group_mode = ch->mcast && ch->nsubs_remote>0;
+          if ((w->used && !group_mode && now>=w->hb_next_us)
+           || (r->used && r->ack_pending && now>=r->ack_due_us))
+              dart__lane_wake(st,ci,ps);
+        }
+    }
+}
+
+int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
+    uint32_t np=st->cfg.max_peers, lanes=np+1u;
+    uint32_t ndest = np+(uint32_t)st->cfg.n_channels;
+    dart__hb_sweep(st, now);
+    while (st->destq_n){
+        uint32_t d; size_t off=0;
+        d = st->destq[st->destq_head];
+        st->destq_head = (st->destq_head+1u>=ndest) ? 0u : st->destq_head+1u;
+        st->destq_n--; st->dest_inq[d]=0;
+        /* drain this destination's lanes into one datagram */
+        while (st->dest_head[d]!=DART__NIL){
+            uint32_t L=st->dest_head[d], ps=L%lanes;
+            uint16_t ci=(uint16_t)(L/lanes);
+            size_t n;
+            do {
+                if (ps==np) n=dart_group_emit(st,ci,(uint8_t*)out+off,cap-off,now);
+                else {
+                    /* acks first: they are 18 bytes, one-shot, and carry the
+                       NACKs that drive repair. A backlogged writer would
+                       otherwise fill every datagram and starve them. */
+                    n=dart_reader_emit(st,(int)ci,(int)ps,(uint8_t*)out+off,cap-off,now);
+                    if (!n) n=dart_writer_emit(st,(int)ci,(int)ps,(uint8_t*)out+off,cap-off,now);
                 }
+                off+=n;
+            } while (n && off<cap);
+            st->dest_head[d]=st->lane_next[L];
+            if (dart__lane_work(st,ci,ps,now)){
+                /* datagram full mid-lane: rotate the lane to the back of its
+                   destination so sibling lanes get the next datagram */
+                if (st->dest_head[d]==DART__NIL) st->dest_head[d]=L;
+                else {
+                    st->lane_next[L]=DART__NIL;
+                    st->lane_next[st->dest_tail[d]]=L;
+                    st->dest_tail[d]=L;
+                }
+                break;
             }
-            *to_peer=st->peer_ids[ps]; *out_len=off;
-            st->scan=(idx+1)%total;
+            st->lane_inq[L]=0;     /* lane drained */
+        }
+        if (st->dest_head[d]!=DART__NIL) dart__dest_push(st,d);  /* fair: re-queue at tail */
+        if (off){
+            *to_peer = (d<np) ? st->peer_ids[d]
+                              : DART_DEST_GROUP(st->chans[d-np].id);
+            *out_len = off;
             return 1;
         }
+        if (st->dest_head[d]!=DART__NIL)
+            return 0;    /* work pending but nothing fit: caller's cap too small */
     }
     return 0;
 }
