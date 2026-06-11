@@ -30,6 +30,10 @@ typedef struct {
     uint32_t              so_sndbuf;     /* data-socket SO_SNDBUF; 0 = default */
     const dart_channel_def *channels;      /* transport channels                */
     uint16_t              n_channels;
+    uint16_t              meta_max_ids;  /* largest peer interest list accepted
+                                            (pub+sub ids); 0 = 1024. Sizes the
+                                            meta channel buffers: tune down on
+                                            small targets                      */
     dart_sample_fn          on_sample;     /* sample delivery                   */
     dart_gap_fn             on_gap;        /* optional: permanently skipped TUs */
     void                 *user;
@@ -41,6 +45,10 @@ size_t   dart_node_required_memory(const dart_node_config *cfg);
 dart_node *dart_node_open(void *mem, size_t mem_size, const dart_node_config *cfg);
 int      dart_node_poll(dart_node *n, int timeout_ms);          /* one loop tick   */
 int      dart_node_send(dart_node *n, uint16_t channel_id, const void *data, size_t len);
+/* Change our interest in a channel at runtime (dart_direction; DART_NONE =
+ * inactive). Peers rematch as the change reaches them; a (re)subscribe joins
+ * like a late joiner. Returns 0 ok, <0 unknown channel. */
+int      dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir);
 /* Cumulative backpressure since open: microseconds dart_node_send waited on
  * slow readers and how many sends waited. Either out-pointer may be NULL. */
 void     dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends);

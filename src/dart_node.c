@@ -57,10 +57,6 @@
   static int  dart__would_block(void){ return errno==EAGAIN || errno==EWOULDBLOCK; }
 #endif
 
-/* node-local little-endian 16-bit helpers (the core's are static to dart_transport.c). */
-static void     dart_node_w16(uint8_t *p, uint16_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
-static uint16_t dart_node_r16(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
-
 static uint64_t dart_now_us(void){
 #ifdef _WIN32
     static LARGE_INTEGER f; LARGE_INTEGER c;
@@ -90,9 +86,6 @@ struct dart_node {
     uint16_t      max_peers;
     uint16_t      domain;
     uint16_t      mc_port;
-    /* pub/sub channel lists announced through discovery */
-    uint8_t       meta[DART_DISCOVERY_META_MAX];
-    uint8_t       meta_len;
     /* datagram consumed from the core but refused by the socket; retried first
      * next poll so it is never lost */
     uint8_t       txhold[DART_DGRAM_MAX];
@@ -118,33 +111,14 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     dc->disc_port        = cfg->disc_port;
     dc->ttl              = cfg->ttl;
     dc->mcast_if         = cfg->mcast_if;
-    tc->channels   = cfg->channels;
-    tc->n_channels = cfg->n_channels;
-    tc->max_peers  = mp;
-    tc->on_sample  = cfg->on_sample;
-    tc->on_gap     = cfg->on_gap;
-    tc->user       = cfg->user;
+    tc->channels     = cfg->channels;
+    tc->n_channels   = cfg->n_channels;
+    tc->max_peers    = mp;
+    tc->meta_max_ids = cfg->meta_max_ids;
+    tc->on_sample    = cfg->on_sample;
+    tc->on_gap       = cfg->on_gap;
+    tc->user         = cfg->user;
     if (mp_out) *mp_out = mp;
-}
-
-/* discovery meta payload: [0]=#pub [1]=#sub then little-endian u16 channel
- * ids, pubs first. */
-#define DART__META_IDS_MAX ((DART_DISCOVERY_META_MAX-2u)/2u)
-
-static int dart__node_build_meta(const dart_node_config *cfg, uint8_t *out, uint8_t *out_len){
-    uint16_t i; uint32_t np=0, ns=0; uint8_t *p=out+2;
-    for (i=0;i<cfg->n_channels;i++){
-        if (cfg->channels[i].dir!=DART_SUB_ONLY) np++;
-        if (cfg->channels[i].dir!=DART_PUB_ONLY) ns++;
-    }
-    if (np+ns > DART__META_IDS_MAX) return 0;
-    out[0]=(uint8_t)np; out[1]=(uint8_t)ns;
-    for (i=0;i<cfg->n_channels;i++)
-        if (cfg->channels[i].dir!=DART_SUB_ONLY){ dart_node_w16(p,cfg->channels[i].channel_id); p+=2; }
-    for (i=0;i<cfg->n_channels;i++)
-        if (cfg->channels[i].dir!=DART_PUB_ONLY){ dart_node_w16(p,cfg->channels[i].channel_id); p+=2; }
-    *out_len=(uint8_t)(2u+2u*(np+ns));
-    return 1;
 }
 
 /* A peer address is local iff a route probe to it selects that same address as
@@ -184,22 +158,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].used=1; n->peers[slot].id=id;
     memcpy(n->peers[slot].ip, addr->ip, 16);
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
-    /* decode the peer's pub/sub channel lists; absent/malformed meta degrades
-       to "all channels" */
-    { uint16_t pubs[DART__META_IDS_MAX], subs[DART__META_IDS_MAX];
-      const uint16_t *pp=NULL, *ss=NULL; uint16_t np=0, ns=0;
-      int is_local = (addr->ip_len==4) && dart__node_is_local_ip(addr->ip);
-      if (meta && mlen>=2){
-          uint8_t cp=meta[0], cs=meta[1];
-          if ((uint32_t)cp+cs<=DART__META_IDS_MAX && 2u+2u*((uint32_t)cp+cs)<=mlen){
-              const uint8_t *q=meta+2; uint16_t j;
-              for (j=0;j<cp;j++){ pubs[j]=dart_node_r16(q); q+=2; }
-              for (j=0;j<cs;j++){ subs[j]=dart_node_r16(q); q+=2; }
-              pp=pubs; np=cp; ss=subs; ns=cs;
-          }
-      }
-      dart_peer_add(n->tr, id, pp, np, ss, ns, is_local);
-    }
+    /* interest arrives over the transport's meta channel, not the announce */
+    (void)meta; (void)mlen;
+    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
 }
 static void dart__node_down(void *u, uint32_t id){
     dart_node *n=(dart_node*)u; uint16_t i;
@@ -287,9 +248,6 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->domain = cfg->domain_id;
     n->mc_port = cfg->mc_port ? cfg->mc_port
                : (uint16_t)((cfg->disc_port ? cfg->disc_port : 7400) + 1);
-    if (!dart__node_build_meta(cfg, n->meta, &n->meta_len)){
-        dart__net_cleanup(); return NULL;    /* too many channels for announce */
-    }
     p = base + node_sz;
     n->peers=(dart__nodepeer*)p; memset(n->peers,0,(size_t)mp*sizeof(dart__nodepeer));
     p += tbl_sz;
@@ -385,8 +343,6 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
           n->mcfd=mfd;
       } }
 
-    dc.disc.meta         = n->meta;
-    dc.disc.meta_len     = n->meta_len;
     dc.disc.on_peer_up   = dart__node_up;
     dc.disc.on_peer_down = dart__node_down;
     dc.disc.user         = n;
@@ -481,6 +437,10 @@ int dart_node_send(dart_node *n, uint16_t channel_id, const void *data, size_t l
         n->block_n++;
     }
     return dart_send(n->tr, channel_id, data, len, dart_now_us());
+}
+
+int dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir){
+    return dart_set_dir(n->tr, channel_id, dir);
 }
 
 void dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends){

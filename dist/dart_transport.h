@@ -40,11 +40,27 @@ extern "C" {
 #define DART_DGRAM_MAX (DART_FRAG_PAYLOAD + 32u)   /* + largest header */
 
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } dart_reliability;
-typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2 } dart_direction;
+/* DART_NONE: declared but inactive. All resources stay allocated at init;
+ * dart_set_dir flips interest at runtime. */
+typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
+               DART_NONE = 3 } dart_direction;
+
+/* Built-in channel carrying pub/sub interest between peers, appended to every
+ * channel table. Interest lists ride it as ordinary reliable KEEP_LAST(1)
+ * samples: latest list wins, late joiners get a replay, subscription changes
+ * are just new samples. The id is reserved; dart_init rejects it. */
+#define DART_CHAN_META 0xFFFFu
 
 typedef struct {
     dart_reliability reliability;
     uint16_t history_depth;     /* KEEP_LAST depth in samples (>=1)        */
+    uint16_t join_replay;       /* reliable: cached samples replayed to a late-
+                                   joining reader (capped at what history still
+                                   holds). 0 (default) = join at the head and
+                                   see only future samples; 1 = latest-value on
+                                   join. Deep replays burst-multiply at startup
+                                   (every joiner gets depth x sample_bytes at
+                                   once), so keep this small.               */
     uint32_t max_sample_bytes;  /* largest sample on this channel          */
     uint32_t heartbeat_us;      /* reliable: writer heartbeat cadence      */
     uint32_t nack_delay_us;     /* reader: delay before NACK (suppression) */
@@ -90,6 +106,10 @@ typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
     uint16_t              max_peers;
+    uint16_t              meta_max_ids; /* largest pub+sub id count accepted in a
+                                           peer's interest list; bounds the meta
+                                           channel's sample size (2 bytes per id).
+                                           0 = 1024. Raised to fit our own table. */
     dart_sample_fn          on_sample;
     dart_gap_fn             on_gap;     /* optional; NULL = no gap reporting */
     void                 *user;
@@ -100,15 +120,19 @@ typedef struct dart_state dart_state;
 size_t    dart_required_memory(const dart_config *cfg);
 dart_state *dart_init(void *mem, size_t mem_size, const dart_config *cfg);
 
-/* peer_pubs/peer_subs: channel ids the peer publishes/subscribes to. NULL list
- * means all channels. Proxies exist only for matching pairs and are fixed for
- * the peer's life. peer_is_local: 1 if on this host; local subscribers of mcast
- * channels stay unicast, and the group lane engages only with a remote one. */
-void      dart_peer_add   (dart_state *st, uint32_t peer_id,
-                         const uint16_t *peer_pubs, uint16_t npub,
-                         const uint16_t *peer_subs, uint16_t nsub,
-                         int peer_is_local);
+/* A new peer matches only the meta channel; data channels match as its
+ * interest list arrives over it, and rematch on every change (theirs via new
+ * lists, ours via dart_set_dir). peer_is_local: 1 if on this host; local
+ * subscribers of mcast channels stay unicast, and the group lane engages only
+ * with a remote one. */
+void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
+
+/* Change our own interest in a channel at runtime. Creates/destroys proxies
+ * against every live peer and announces the new list on the meta channel.
+ * A (re)subscribe joins like a late joiner: reliable channels replay cached
+ * history, nothing is reported as a gap. Returns 0 ok, <0 unknown channel. */
+int       dart_set_dir(dart_state *st, uint16_t channel_id, uint8_t dir);
 
 /* Publish a sample to all peers. Returns 0 ok, <0 on error. */
 int       dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len,
@@ -171,6 +195,10 @@ typedef struct {
     uint32_t              so_sndbuf;     /* data-socket SO_SNDBUF; 0 = default */
     const dart_channel_def *channels;      /* transport channels                */
     uint16_t              n_channels;
+    uint16_t              meta_max_ids;  /* largest peer interest list accepted
+                                            (pub+sub ids); 0 = 1024. Sizes the
+                                            meta channel buffers: tune down on
+                                            small targets                      */
     dart_sample_fn          on_sample;     /* sample delivery                   */
     dart_gap_fn             on_gap;        /* optional: permanently skipped TUs */
     void                 *user;
@@ -182,6 +210,10 @@ size_t   dart_node_required_memory(const dart_node_config *cfg);
 dart_node *dart_node_open(void *mem, size_t mem_size, const dart_node_config *cfg);
 int      dart_node_poll(dart_node *n, int timeout_ms);          /* one loop tick   */
 int      dart_node_send(dart_node *n, uint16_t channel_id, const void *data, size_t len);
+/* Change our interest in a channel at runtime (dart_direction; DART_NONE =
+ * inactive). Peers rematch as the change reaches them; a (re)subscribe joins
+ * like a late joiner. Returns 0 ok, <0 unknown channel. */
+int      dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir);
 /* Cumulative backpressure since open: microseconds dart_node_send waited on
  * slow readers and how many sends waited. Either out-pointer may be NULL. */
 void     dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends);
@@ -274,9 +306,17 @@ typedef struct {
 } dart_channel;
 
 struct dart_state {
-    dart_config    cfg;
+    dart_config    cfg;       /* n_channels here includes the meta channel */
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
+    uint8_t     *peer_local;/* [max_peers] */
+    /* peer interest over OUR channel table, bit per user channel index; filled
+       from meta samples. The proxies plus these bits are the whole stored
+       interest: full peer lists are never kept. */
+    uint8_t     *peer_pub_bm; /* [max_peers][bmlen] peer publishes channel c  */
+    uint8_t     *peer_sub_bm; /* [max_peers][bmlen] peer subscribes channel c */
+    uint16_t     bmlen;       /* ceil(user n_channels / 8) */
+    uint16_t     meta_ci;     /* channel index of the built-in meta channel */
     dart_channel  *chans;     /* [n_channels] */
     dart_wproxy   *wprox;     /* [n_channels*max_peers] */
     dart_rproxy   *rprox;     /* [n_channels*max_peers] */
@@ -302,27 +342,47 @@ static uint16_t dart_maxfrags(uint32_t max_sample_bytes){
     return (uint16_t)f;
 }
 
-/* Lay out everything; b->base==NULL means measure only. Returns state ptr. */
+/* Lay out everything; b->base==NULL means measure only. Returns state ptr.
+ * Appends the built-in meta channel after the user table. */
 static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
-    uint16_t c, p; uint32_t np = cfg->max_peers, nc = cfg->n_channels;
+    uint16_t c, p; uint32_t np = cfg->max_peers, ncu = cfg->n_channels, nc = ncu+1u;
+    uint16_t bml = (uint16_t)((ncu+7u)/8u);
+    uint32_t mids = cfg->meta_max_ids ? cfg->meta_max_ids : 1024u;
+    dart_channel_def metadef;
     dart_state *st = (dart_state*)dart_take(b, sizeof(dart_state), 16);
     if (st && b->base) memset(st, 0, sizeof(*st));
 
+    if (mids < 2u*ncu) mids = 2u*ncu;     /* our own list must always fit */
+    memset(&metadef, 0, sizeof metadef);
+    metadef.channel_id          = DART_CHAN_META;
+    metadef.qos.reliability     = DART_RELIABLE;
+    metadef.qos.history_depth   = 1;       /* latest interest list wins */
+    metadef.qos.join_replay     = 1;       /* joiners get the current list */
+    metadef.qos.max_sample_bytes= 4u + 2u*mids;
+
     { uint32_t *pi = (uint32_t*)dart_take(b, np*sizeof(uint32_t), 8);
       uint8_t  *pu = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
+      uint8_t  *pl = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
+      uint8_t  *pb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
+      uint8_t  *sb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       dart_channel *ch = (dart_channel*)dart_take(b, nc*sizeof(dart_channel), 16);
       dart_wproxy *wp = (dart_wproxy*)dart_take(b, (size_t)nc*np*sizeof(dart_wproxy), 16);
       dart_rproxy *rp = (dart_rproxy*)dart_take(b, (size_t)nc*np*sizeof(dart_rproxy), 16);
       if (st && b->base){
-          st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->chans=ch;
-          st->wprox=wp; st->rprox=rp; st->scan=0;
-          memset(pu,0,np); memset(wp,0,(size_t)nc*np*sizeof(dart_wproxy));
+          st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->peer_local=pl;
+          st->peer_pub_bm=pb; st->peer_sub_bm=sb; st->bmlen=bml;
+          st->cfg.n_channels=(uint16_t)nc; st->meta_ci=(uint16_t)ncu;
+          st->chans=ch; st->wprox=wp; st->rprox=rp; st->scan=0;
+          memset(pu,0,np); memset(pl,0,np);
+          memset(pb,0,(size_t)np*bml); memset(sb,0,(size_t)np*bml);
+          memset(wp,0,(size_t)nc*np*sizeof(dart_wproxy));
           memset(rp,0,(size_t)nc*np*sizeof(dart_rproxy));
       }
     }
 
     for (c=0;c<nc;c++){
-        const dart_qos *q = &cfg->channels[c].qos;
+        const dart_channel_def *def = (c < ncu) ? &cfg->channels[c] : &metadef;
+        const dart_qos *q = &def->qos;
         uint16_t depth = q->history_depth ? q->history_depth : 1;
         uint16_t mf = dart_maxfrags(q->max_sample_bytes);
         dart_wsample *hist = (dart_wsample*)dart_take(b, depth*sizeof(dart_wsample), 16);
@@ -330,8 +390,8 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
         if (st && b->base){
             dart_channel *ch = &st->chans[c];
             memset(ch,0,sizeof(*ch));
-            ch->qos=*q; ch->id=cfg->channels[c].channel_id; ch->maxfrags=mf;
-            ch->dir=cfg->channels[c].dir; ch->mcast=cfg->channels[c].mcast;
+            ch->qos=*q; ch->id=def->channel_id; ch->maxfrags=mf;
+            ch->dir=def->dir; ch->mcast=def->mcast;
             ch->hist=hist; ch->hist_head=0; ch->next_seqno=0; ch->have_first=0;
             memset(hist,0,depth*sizeof(dart_wsample));
         }
@@ -359,9 +419,13 @@ size_t dart_required_memory(const dart_config *cfg){
     return b.off + 16;   /* slack for base alignment */
 }
 
+static void dart__meta_publish(dart_state *st);
+
 dart_state *dart_init(void *mem, size_t cap, const dart_config *cfg){
-    dart_bump b; dart_state *st;
+    dart_bump b; dart_state *st; uint16_t i;
     if (!mem || !cfg || cfg->n_channels==0 || cfg->max_peers==0) return NULL;
+    for (i=0;i<cfg->n_channels;i++)
+        if (cfg->channels[i].channel_id==DART_CHAN_META) return NULL;  /* reserved */
     memset(&b,0,sizeof b);
     b.base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     b.cap  = cap - (size_t)((uint8_t*)b.base - (uint8_t*)mem);
@@ -370,6 +434,7 @@ dart_state *dart_init(void *mem, size_t cap, const dart_config *cfg){
     /* cfg.channels still points at caller memory; only read during init,
        so detach it now. */
     st->cfg.channels = NULL;
+    dart__meta_publish(st);    /* late joiners replay this initial list */
     return st;
 }
 
@@ -385,18 +450,23 @@ static dart_channel *dart_chan(dart_state *st, uint16_t id, int *idx_out){
     return NULL;
 }
 
-static int dart_idlist_has(const uint16_t *ids, uint16_t n, uint16_t id){
-    uint16_t i;
-    if (!ids) return 1;                 /* NULL list = all channels */
-    for (i=0;i<n;i++) if (ids[i]==id) return 1;
-    return 0;
-}
-
-/* unicast join seqno: reliable replays cached history (latest-value on join),
- * best-effort starts at the head so a late joiner sees only future samples. */
+/* unicast join seqno: the head minus qos.join_replay cached samples (reliable
+ * only). Best-effort and join_replay 0 start at the head, so a late joiner
+ * sees only future samples. */
 static uint64_t dart_unicast_join_seqno(const dart_channel *chn){
-    return (chn->qos.reliability==DART_RELIABLE && chn->have_first)
-           ? chn->first_seqno : chn->next_seqno;
+    uint16_t depth = chn->qos.history_depth ? chn->qos.history_depth : 1;
+    uint16_t want = chn->qos.join_replay, k, i;
+    uint64_t s = chn->next_seqno;
+    if (chn->qos.reliability != DART_RELIABLE || want == 0) return s;
+    if (want > depth) want = depth;
+    i = chn->hist_head;
+    for (k=0; k<want; k++){
+        uint16_t j = (uint16_t)(i ? i-1 : depth-1);
+        if (!chn->hist[j].valid) break;        /* fewer than want cached */
+        s = chn->hist[j].base;
+        i = j;
+    }
+    return s;
 }
 
 /* group mode toggled: local subscriber lanes hand over to or resume from the
@@ -410,77 +480,103 @@ static void dart_sync_local_lanes(dart_state *st, uint16_t c, dart_channel *chn)
     }
 }
 
-void dart_peer_add(dart_state *st, uint32_t id,
-                 const uint16_t *peer_pubs, uint16_t npub,
-                 const uint16_t *peer_subs, uint16_t nsub,
-                 int peer_is_local){
-    uint16_t i; int free=-1; uint16_t c; uint32_t np=st->cfg.max_peers;
+/* per-channel match/unmatch: create or destroy one proxy, keeping the mcast
+ * subscriber accounting and join-seqno rules in one place */
+static void dart__match_w(dart_state *st, uint16_t c, uint16_t ps){
+    dart_channel *chn=&st->chans[c];
+    dart_wproxy *w=&st->wprox[(size_t)c*st->cfg.max_peers+ps];
+    memset(w,0,sizeof(*w));
+    w->used=1; w->local=st->peer_local[ps];
+    if (!chn->mcast){
+        w->sent_upto = dart_unicast_join_seqno(chn);
+    } else if (w->local){
+        chn->nsubs_local++;
+        /* local subscriber: unicast lane while no remote subscribers exist,
+           else it rides the already joined group */
+        w->sent_upto = (chn->nsubs_remote==0)
+                       ? dart_unicast_join_seqno(chn) : chn->mc_sent_upto;
+    } else {
+        if (chn->nsubs_remote==0){
+            /* first remote subscriber: group cursor takes over at the head,
+               local lanes stop pushing */
+            chn->mc_sent_upto = chn->next_seqno;
+            dart_sync_local_lanes(st, c, chn);
+        }
+        chn->nsubs_remote++;
+        /* group lane carries new data; this lane is repairs only.
+           Reliable-from-join-point: replay only via NACK backfill. */
+        w->sent_upto = chn->mc_sent_upto;
+    }
+    w->acked_upto = w->sent_upto;
+}
+static void dart__unmatch_w(dart_state *st, uint16_t c, uint16_t ps){
+    dart_channel *chn=&st->chans[c];
+    dart_wproxy *w=&st->wprox[(size_t)c*st->cfg.max_peers+ps];
+    if (!w->used) return;
+    if (chn->mcast){
+        if (w->local){
+            if (chn->nsubs_local) chn->nsubs_local--;
+        } else if (chn->nsubs_remote){
+            chn->nsubs_remote--;
+            if (chn->nsubs_remote==0)
+                /* last remote subscriber gone: local lanes resume from
+                   where the group cursor stopped */
+                dart_sync_local_lanes(st, c, chn);
+        }
+    }
+    w->used=0; w->local=0;
+}
+static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
+    dart_rproxy *r=&st->rprox[(size_t)c*st->cfg.max_peers+ps];
+    uint8_t *abuf=r->asm_buf, *fbm=r->frag_bm;
+    memset(r,0,sizeof(*r));
+    r->asm_buf=abuf; r->frag_bm=fbm;
+    r->used=1;       /* started==0: first DATA adopts the writer's position */
+}
+static void dart__unmatch_r(dart_state *st, uint16_t c, uint16_t ps){
+    dart_rproxy *r=&st->rprox[(size_t)c*st->cfg.max_peers+ps];
+    r->used=0; r->asm_active=0;
+}
+
+/* recompute one (channel, peer) match from our dir and the peer's interest
+ * bits; transition only on change so live streams never churn */
+static void dart__rematch(dart_state *st, uint16_t c, uint16_t ps){
+    dart_channel *chn=&st->chans[c];
+    const uint8_t *pb=&st->peer_pub_bm[(size_t)ps*st->bmlen];
+    const uint8_t *sb=&st->peer_sub_bm[(size_t)ps*st->bmlen];
+    int wuse = (chn->dir==DART_PUBSUB || chn->dir==DART_PUB_ONLY) && dart_bget(sb,c);
+    int ruse = (chn->dir==DART_PUBSUB || chn->dir==DART_SUB_ONLY) && dart_bget(pb,c);
+    dart_wproxy *w=&st->wprox[(size_t)c*st->cfg.max_peers+ps];
+    dart_rproxy *r=&st->rprox[(size_t)c*st->cfg.max_peers+ps];
+    if (wuse && !w->used) dart__match_w(st,c,ps);
+    else if (!wuse && w->used) dart__unmatch_w(st,c,ps);
+    if (ruse && !r->used) dart__match_r(st,c,ps);
+    else if (!ruse && r->used) dart__unmatch_r(st,c,ps);
+}
+
+void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local){
+    uint16_t i; int free=-1; uint32_t np=st->cfg.max_peers;
     if (dart_peer_slot(st,id)>=0) return;
     for (i=0;i<np;i++) if(!st->peer_used[i]){free=(int)i;break;}
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
-    for (c=0;c<st->cfg.n_channels;c++){
-        dart_channel *chn=&st->chans[c];
-        dart_wproxy *w=&st->wprox[(size_t)c*np+free];
-        dart_rproxy *r=&st->rprox[(size_t)c*np+free];
-        uint8_t *abuf=r->asm_buf, *fbm=r->frag_bm;
-        /* writer proxy only when we publish and the peer subscribes; reader
-           proxy only when the peer publishes and we subscribe */
-        int wuse = (chn->dir!=DART_SUB_ONLY) && dart_idlist_has(peer_subs,nsub,chn->id);
-        int ruse = (chn->dir!=DART_PUB_ONLY) && dart_idlist_has(peer_pubs,npub,chn->id);
-        memset(w,0,sizeof(*w)); memset(r,0,sizeof(*r));
-        r->asm_buf=abuf; r->frag_bm=fbm;
-        w->used=(uint8_t)wuse; r->used=(uint8_t)ruse;
-        if (wuse){
-            w->local = (uint8_t)(peer_is_local?1:0);
-            if (!chn->mcast){
-                w->sent_upto = dart_unicast_join_seqno(chn);
-            } else if (peer_is_local){
-                chn->nsubs_local++;
-                /* local subscriber: unicast lane while no remote subscribers
-                   exist, else it rides the already joined group */
-                w->sent_upto = (chn->nsubs_remote==0)
-                               ? dart_unicast_join_seqno(chn) : chn->mc_sent_upto;
-            } else {
-                if (chn->nsubs_remote==0){
-                    /* first remote subscriber: group cursor takes over at the
-                       head, local lanes stop pushing */
-                    chn->mc_sent_upto = chn->next_seqno;
-                    dart_sync_local_lanes(st, c, chn);
-                }
-                chn->nsubs_remote++;
-                /* group lane carries new data; this lane is repairs only.
-                   Reliable-from-join-point: replay only via NACK backfill. */
-                w->sent_upto = chn->mc_sent_upto;
-            }
-            w->acked_upto = w->sent_upto;
-            w->hb_next_us = 0;
-        }
-        r->deliver_upto = 0;
-    }
+    st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
+    memset(&st->peer_pub_bm[(size_t)free*st->bmlen],0,st->bmlen);
+    memset(&st->peer_sub_bm[(size_t)free*st->bmlen],0,st->bmlen);
+    /* only the meta channel matches up front; everything else waits for the
+       peer's interest list to arrive over it */
+    dart__match_w(st, st->meta_ci, (uint16_t)free);
+    dart__match_r(st, st->meta_ci, (uint16_t)free);
 }
 
 void dart_peer_remove(dart_state *st, uint32_t id){
-    int s = dart_peer_slot(st,id); uint16_t c; uint32_t np=st->cfg.max_peers;
+    int s = dart_peer_slot(st,id); uint16_t c;
     if (s<0) return;
-    st->peer_used[s]=0;
     for (c=0;c<st->cfg.n_channels;c++){
-        dart_channel *chn=&st->chans[c];
-        dart_wproxy *w=&st->wprox[(size_t)c*np+s];
-        if (w->used && chn->mcast){
-            if (w->local){
-                if (chn->nsubs_local) chn->nsubs_local--;
-            } else if (chn->nsubs_remote){
-                chn->nsubs_remote--;
-                if (chn->nsubs_remote==0)
-                    /* last remote subscriber gone: local lanes resume from
-                       where the group cursor stopped */
-                    dart_sync_local_lanes(st, c, chn);
-            }
-        }
-        w->used=0; w->local=0;
-        st->rprox[(size_t)c*np+s].used=0;
+        dart__unmatch_w(st,c,(uint16_t)s);
+        dart__unmatch_r(st,c,(uint16_t)s);
     }
+    st->peer_used[s]=0;
 }
 
 /* find cached sample containing seqno; NULL if not cached. Walks newest-first,
@@ -499,30 +595,83 @@ static dart_wsample *dart_find_sample(dart_channel *ch, uint64_t seqno){
     return NULL;
 }
 
-int dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len, uint64_t now){
-    int ci; dart_channel *ch = dart_chan(st, channel_id, &ci);
-    uint16_t depth, count; dart_wsample *slot;
-    (void)now;
-    if (!ch) return -1;
-    if (len > ch->qos.max_sample_bytes) return -2;
-    if (ch->dir == DART_SUB_ONLY) return -3;
-    depth = ch->qos.history_depth ? ch->qos.history_depth : 1;
-    count = (uint16_t)((len + DART_FRAG_PAYLOAD - 1) / DART_FRAG_PAYLOAD);
+/* append the (already filled) head slot to history; poll_send picks it up via
+ * sent_upto < next_seqno */
+static void dart__commit(dart_channel *ch, size_t len){
+    uint16_t depth = ch->qos.history_depth ? ch->qos.history_depth : 1;
+    uint16_t count = (uint16_t)((len + DART_FRAG_PAYLOAD - 1) / DART_FRAG_PAYLOAD);
+    dart_wsample *slot = &ch->hist[ch->hist_head];
     if (count==0) count=1;
-
-    slot = &ch->hist[ch->hist_head];
     slot->valid=1; slot->base=ch->next_seqno; slot->count=count; slot->len=(uint32_t)len;
-    if (len) memcpy(slot->buf, data, len);
     ch->hist_head = (uint16_t)((ch->hist_head+1) % depth);
     ch->next_seqno += count;
-
     /* oldest cached: the slot the head now points at once the ring wrapped,
        else slot 0 */
     ch->first_seqno = ch->hist[ch->hist_head].valid ? ch->hist[ch->hist_head].base
                                                     : ch->hist[0].base;
     ch->have_first  = 1;
+}
 
-    /* poll_send picks this up via sent_upto < next_seqno */
+int dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len, uint64_t now){
+    int ci; dart_channel *ch;
+    (void)now;
+    if (channel_id == DART_CHAN_META) return -1;     /* internal */
+    ch = dart_chan(st, channel_id, &ci);
+    if (!ch) return -1;
+    if (len > ch->qos.max_sample_bytes) return -2;
+    if (ch->dir == DART_SUB_ONLY || ch->dir == DART_NONE) return -3;
+    if (len) memcpy(ch->hist[ch->hist_head].buf, data, len);
+    dart__commit(ch, len);
+    return 0;
+}
+
+/* publish our interest list on the meta channel: [npub u16][nsub u16] then LE
+ * u16 channel ids, pubs first. Encoded straight into the history slot; with
+ * depth 1 the newest list is all any joiner ever replays. */
+static void dart__meta_publish(dart_state *st){
+    dart_channel *mc=&st->chans[st->meta_ci];
+    uint8_t *o=mc->hist[mc->hist_head].buf, *p=o+4;
+    uint16_t c; uint32_t np=0, ns=0;
+    for (c=0;c<st->meta_ci;c++){
+        uint8_t d=st->chans[c].dir;
+        if (d==DART_PUBSUB || d==DART_PUB_ONLY){ dart_w16(p,st->chans[c].id); p+=2; np++; }
+    }
+    for (c=0;c<st->meta_ci;c++){
+        uint8_t d=st->chans[c].dir;
+        if (d==DART_PUBSUB || d==DART_SUB_ONLY){ dart_w16(p,st->chans[c].id); p+=2; ns++; }
+    }
+    dart_w16(o,(uint16_t)np); dart_w16(o+2,(uint16_t)ns);
+    dart__commit(mc, 4u + 2u*(np+ns));
+}
+
+/* a peer's interest list arrived: refresh its bits, rematch every channel */
+static void dart__meta_apply(dart_state *st, int ps, const uint8_t *d, size_t len){
+    uint16_t np, ns, c; uint32_t i; const uint8_t *pubs, *subs;
+    uint8_t *pb=&st->peer_pub_bm[(size_t)ps*st->bmlen];
+    uint8_t *sb=&st->peer_sub_bm[(size_t)ps*st->bmlen];
+    if (len < 4) return;
+    np=dart_r16(d); ns=dart_r16(d+2);
+    if (4u + 2u*((uint32_t)np+ns) > len) return;     /* malformed */
+    pubs=d+4; subs=pubs+2u*np;
+    memset(pb,0,st->bmlen); memset(sb,0,st->bmlen);
+    for (c=0;c<st->meta_ci;c++){
+        uint16_t id=st->chans[c].id;
+        for (i=0;i<np;i++) if (dart_r16(pubs+2u*i)==id){ dart_bset(pb,c); break; }
+        for (i=0;i<ns;i++) if (dart_r16(subs+2u*i)==id){ dart_bset(sb,c); break; }
+        dart__rematch(st,c,(uint16_t)ps);
+    }
+}
+
+int dart_set_dir(dart_state *st, uint16_t channel_id, uint8_t dir){
+    int ci; dart_channel *ch; uint16_t p;
+    if (channel_id == DART_CHAN_META || dir > DART_NONE) return -1;
+    ch = dart_chan(st, channel_id, &ci);
+    if (!ch) return -1;
+    if (ch->dir == dir) return 0;
+    ch->dir = dir;
+    for (p=0;p<st->cfg.max_peers;p++)
+        if (st->peer_used[p]) dart__rematch(st,(uint16_t)ci,p);
+    dart__meta_publish(st);
     return 0;
 }
 
@@ -609,7 +758,9 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
     { uint16_t i; int done=1;
       for (i=0;i<count;i++) if(!dart_bget(r->frag_bm,i)){done=0;break;}
       if (done){
-          if (st->cfg.on_sample)
+          if (ci==(int)st->meta_ci)
+              dart__meta_apply(st, pslot, r->asm_buf, r->asm_len);
+          else if (st->cfg.on_sample)
               st->cfg.on_sample(st->cfg.user, chan, st->peer_ids[pslot], r->asm_buf, r->asm_len);
           r->deliver_upto = base + count;
           r->asm_active=0;
@@ -625,7 +776,7 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
     if (first > r->deliver_upto){
-        if (r->started && st->cfg.on_gap)        /* superseded before repair */
+        if (r->started && st->cfg.on_gap && ci!=(int)st->meta_ci)  /* superseded before repair */
             st->cfg.on_gap(st->cfg.user, ch->id, st->peer_ids[pslot],
                            r->deliver_upto, first - r->deliver_upto);
         r->deliver_upto=first; r->asm_active=0;
@@ -639,7 +790,7 @@ static void dart_reader_gap(dart_state *st, int ci, int pslot, const uint8_t *p)
     uint64_t e=dart_r64(p+12);    /* gap start at p+4 is implied by deliver_upto */
     if (!r->used) return;
     if (e+1 > r->deliver_upto){
-        if (r->started && st->cfg.on_gap)
+        if (r->started && st->cfg.on_gap && ci!=(int)st->meta_ci)
             st->cfg.on_gap(st->cfg.user, st->chans[ci].id, st->peer_ids[pslot],
                            r->deliver_upto, e+1 - r->deliver_upto);
         r->deliver_upto = e+1; r->asm_active=0;
@@ -764,10 +915,15 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
 
     /* 3. heartbeat (reliable, when caught up and timer due) */
     if (reliable && now>=w->hb_next_us && ch->next_seqno>0){
+        uint64_t first = ch->have_first ? ch->first_seqno : 0;
         if (cap < 24) return 0;
+        /* nothing below acked_upto ever needs repair, so advertise from there:
+           a fresh reader then adopts the join point instead of NACKing the
+           whole cached ring past its join_replay window */
+        if (w->acked_upto > first) first = w->acked_upto;
         w->hb_next_us = now + (ch->qos.heartbeat_us?ch->qos.heartbeat_us:100000u);
         w->hb_count++;
-        return dart_mk_hb(out,ch->id,(ch->have_first?ch->first_seqno:0),ch->next_seqno-1,w->hb_count);
+        return dart_mk_hb(out,ch->id,first,ch->next_seqno-1,w->hb_count);
     }
     return 0;
 }
@@ -814,7 +970,7 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
  * dart_writer_emit. */
 static size_t dart_group_emit(dart_state *st, int ci, uint8_t *out, size_t cap, uint64_t now){
     dart_channel *ch=&st->chans[ci];
-    if (!ch->mcast || ch->dir==DART_SUB_ONLY) return 0;
+    if (!ch->mcast || ch->dir==DART_SUB_ONLY || ch->dir==DART_NONE) return 0;
     if (ch->nsubs_remote==0){
         /* no remote subscribers: pin the cursor forward so a future remote
            join never gets a stale replay */
@@ -957,10 +1113,6 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
   static int  dart__would_block(void){ return errno==EAGAIN || errno==EWOULDBLOCK; }
 #endif
 
-/* node-local little-endian 16-bit helpers (the core's are static to dart_transport.c). */
-static void     dart_node_w16(uint8_t *p, uint16_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
-static uint16_t dart_node_r16(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
-
 static uint64_t dart_now_us(void){
 #ifdef _WIN32
     static LARGE_INTEGER f; LARGE_INTEGER c;
@@ -990,9 +1142,6 @@ struct dart_node {
     uint16_t      max_peers;
     uint16_t      domain;
     uint16_t      mc_port;
-    /* pub/sub channel lists announced through discovery */
-    uint8_t       meta[DART_DISCOVERY_META_MAX];
-    uint8_t       meta_len;
     /* datagram consumed from the core but refused by the socket; retried first
      * next poll so it is never lost */
     uint8_t       txhold[DART_DGRAM_MAX];
@@ -1018,33 +1167,14 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     dc->disc_port        = cfg->disc_port;
     dc->ttl              = cfg->ttl;
     dc->mcast_if         = cfg->mcast_if;
-    tc->channels   = cfg->channels;
-    tc->n_channels = cfg->n_channels;
-    tc->max_peers  = mp;
-    tc->on_sample  = cfg->on_sample;
-    tc->on_gap     = cfg->on_gap;
-    tc->user       = cfg->user;
+    tc->channels     = cfg->channels;
+    tc->n_channels   = cfg->n_channels;
+    tc->max_peers    = mp;
+    tc->meta_max_ids = cfg->meta_max_ids;
+    tc->on_sample    = cfg->on_sample;
+    tc->on_gap       = cfg->on_gap;
+    tc->user         = cfg->user;
     if (mp_out) *mp_out = mp;
-}
-
-/* discovery meta payload: [0]=#pub [1]=#sub then little-endian u16 channel
- * ids, pubs first. */
-#define DART__META_IDS_MAX ((DART_DISCOVERY_META_MAX-2u)/2u)
-
-static int dart__node_build_meta(const dart_node_config *cfg, uint8_t *out, uint8_t *out_len){
-    uint16_t i; uint32_t np=0, ns=0; uint8_t *p=out+2;
-    for (i=0;i<cfg->n_channels;i++){
-        if (cfg->channels[i].dir!=DART_SUB_ONLY) np++;
-        if (cfg->channels[i].dir!=DART_PUB_ONLY) ns++;
-    }
-    if (np+ns > DART__META_IDS_MAX) return 0;
-    out[0]=(uint8_t)np; out[1]=(uint8_t)ns;
-    for (i=0;i<cfg->n_channels;i++)
-        if (cfg->channels[i].dir!=DART_SUB_ONLY){ dart_node_w16(p,cfg->channels[i].channel_id); p+=2; }
-    for (i=0;i<cfg->n_channels;i++)
-        if (cfg->channels[i].dir!=DART_PUB_ONLY){ dart_node_w16(p,cfg->channels[i].channel_id); p+=2; }
-    *out_len=(uint8_t)(2u+2u*(np+ns));
-    return 1;
 }
 
 /* A peer address is local iff a route probe to it selects that same address as
@@ -1084,22 +1214,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].used=1; n->peers[slot].id=id;
     memcpy(n->peers[slot].ip, addr->ip, 16);
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
-    /* decode the peer's pub/sub channel lists; absent/malformed meta degrades
-       to "all channels" */
-    { uint16_t pubs[DART__META_IDS_MAX], subs[DART__META_IDS_MAX];
-      const uint16_t *pp=NULL, *ss=NULL; uint16_t np=0, ns=0;
-      int is_local = (addr->ip_len==4) && dart__node_is_local_ip(addr->ip);
-      if (meta && mlen>=2){
-          uint8_t cp=meta[0], cs=meta[1];
-          if ((uint32_t)cp+cs<=DART__META_IDS_MAX && 2u+2u*((uint32_t)cp+cs)<=mlen){
-              const uint8_t *q=meta+2; uint16_t j;
-              for (j=0;j<cp;j++){ pubs[j]=dart_node_r16(q); q+=2; }
-              for (j=0;j<cs;j++){ subs[j]=dart_node_r16(q); q+=2; }
-              pp=pubs; np=cp; ss=subs; ns=cs;
-          }
-      }
-      dart_peer_add(n->tr, id, pp, np, ss, ns, is_local);
-    }
+    /* interest arrives over the transport's meta channel, not the announce */
+    (void)meta; (void)mlen;
+    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
 }
 static void dart__node_down(void *u, uint32_t id){
     dart_node *n=(dart_node*)u; uint16_t i;
@@ -1187,9 +1304,6 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->domain = cfg->domain_id;
     n->mc_port = cfg->mc_port ? cfg->mc_port
                : (uint16_t)((cfg->disc_port ? cfg->disc_port : 7400) + 1);
-    if (!dart__node_build_meta(cfg, n->meta, &n->meta_len)){
-        dart__net_cleanup(); return NULL;    /* too many channels for announce */
-    }
     p = base + node_sz;
     n->peers=(dart__nodepeer*)p; memset(n->peers,0,(size_t)mp*sizeof(dart__nodepeer));
     p += tbl_sz;
@@ -1285,8 +1399,6 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
           n->mcfd=mfd;
       } }
 
-    dc.disc.meta         = n->meta;
-    dc.disc.meta_len     = n->meta_len;
     dc.disc.on_peer_up   = dart__node_up;
     dc.disc.on_peer_down = dart__node_down;
     dc.disc.user         = n;
@@ -1381,6 +1493,10 @@ int dart_node_send(dart_node *n, uint16_t channel_id, const void *data, size_t l
         n->block_n++;
     }
     return dart_send(n->tr, channel_id, data, len, dart_now_us());
+}
+
+int dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir){
+    return dart_set_dir(n->tr, channel_id, dir);
 }
 
 void dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends){

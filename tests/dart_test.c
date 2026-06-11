@@ -609,7 +609,7 @@ static int sendbench_main(void){
 }
 #endif /* _WIN32 */
 
-/* ============ selftest: on_gap reporting + writer backpressure =========== *
+/* ============ selftest: on_gap, backpressure, dynamic interest =========== *
  * Two nodes in ONE process (writer pub-only, reader sub-only) so the test
  * controls exactly when each side runs. Phases:
  *   1. JOIN     : reader joins mid-stream; on_gap must NOT fire.
@@ -619,24 +619,30 @@ static int sendbench_main(void){
  *   3. BLOCKED  : on a max_block_us channel, sends that would evict un-acked
  *                 history wait ~max_block_us while the reader never acks, then
  *                 proceed (KEEP_LAST fallback, never refusal).
- *   4. RELEASED : same channel once the reader acks; sends are instant. */
+ *   4. RELEASED : same channel once the reader acks; sends are instant.
+ *   5. DYNAMIC  : reader flips a channel inactive/subscribed at runtime;
+ *                 each (re)subscribe replays cached history with no gap.
+ *   6. SCALE    : 40 channels, past the old 31-id announce cap. */
 
 #define ST_DOMAIN   33
 #define ST_CH_GAP   1   /* reliable, depth 4, no backpressure  */
 #define ST_CH_BLOCK 2   /* reliable, depth 4, max_block 100 ms */
+#define ST_CH_DYN   3   /* reliable, depth 4, reader starts DART_NONE */
 #define ST_DEPTH    4
 #define ST_BLOCK_US 100000u
+#define ST_NCH      40
 
 static int st_fail = 0;
 #define ST_CHECK(cond, ...) do { \
     printf((cond) ? "  ok   " : "  FAIL "); printf(__VA_ARGS__); printf("\n"); \
     if (!(cond)) st_fail = 1; } while (0)
 
-static unsigned long st_samples[8], st_gap_calls[8], st_gap_tus[8];
+static unsigned long st_samples[8], st_gap_calls[8], st_gap_tus[8], st_any;
 
 static void st_on_sample(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
     (void)u;(void)from;(void)d;(void)n;
     if (ch < 8) st_samples[ch]++;
+    st_any++;
 }
 static void st_on_gap(void *u, uint16_t ch, uint32_t from, uint64_t first, uint64_t count){
     (void)u;(void)from;(void)first;
@@ -653,18 +659,21 @@ static int selftest_main(void){
     uint8_t payload[32]; unsigned i;
     memset(payload, 0x5A, sizeof payload);
 
-    dart_channel_def ch[2]; memset(ch, 0, sizeof ch);
+    dart_channel_def ch[3]; memset(ch, 0, sizeof ch);
     ch[0].channel_id = ST_CH_GAP;
     ch[0].qos.reliability = DART_RELIABLE; ch[0].qos.history_depth = ST_DEPTH;
     ch[0].qos.max_sample_bytes = 64; ch[0].qos.heartbeat_us = 50000;
     ch[1] = ch[0]; ch[1].channel_id = ST_CH_BLOCK; ch[1].qos.max_block_us = ST_BLOCK_US;
+    ch[2] = ch[0]; ch[2].channel_id = ST_CH_DYN;
+    ch[2].qos.join_replay = ST_DEPTH;   /* phase 5 asserts ring replay on join */
 
     dart_node_config wc; memset(&wc, 0, sizeof wc);
-    wc.domain_id = ST_DOMAIN; wc.channels = ch; wc.n_channels = 2;
-    { dart_node_config rc = wc; dart_channel_def chr[2]; dart_node *w, *r;
+    wc.domain_id = ST_DOMAIN; wc.channels = ch; wc.n_channels = 3;
+    { dart_node_config rc = wc; dart_channel_def chr[3]; dart_node *w, *r;
       memcpy(chr, ch, sizeof ch);
-      ch[0].dir = ch[1].dir   = DART_PUB_ONLY;
+      ch[0].dir = ch[1].dir   = ch[2].dir  = DART_PUB_ONLY;
       chr[0].dir = chr[1].dir = DART_SUB_ONLY;
+      chr[2].dir = DART_NONE;
       rc.channels = chr; rc.on_sample = st_on_sample; rc.on_gap = st_on_gap;
 
       w = dart_node_open(mem_w, sizeof mem_w, &wc);
@@ -721,8 +730,71 @@ static int selftest_main(void){
                  st_gap_calls[ST_CH_BLOCK], st_samples[ST_CH_BLOCK], ST_DEPTH+2);
       }
 
+      /* 5. DYNAMIC: ST_CH_DYN is inactive on the reader; subscribe replays
+            the cached ring, unsubscribe goes silent at the writer, resubscribe
+            replays again. All joins are gap-free. */
+      st_pump(w, r, 200);
+      for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
+      st_pump(w, r, 300);
+      ST_CHECK(st_samples[ST_CH_DYN] == 0, "dynamic: inactive receives nothing (%lu)",
+               st_samples[ST_CH_DYN]);
+      dart_node_set_dir(r, ST_CH_DYN, DART_SUB_ONLY);
+      st_pump(w, r, 400);
+      ST_CHECK(st_samples[ST_CH_DYN] == 3, "dynamic: subscribe replays cached history (%lu, want 3)",
+               st_samples[ST_CH_DYN]);
+      dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
+      st_pump(w, r, 300);
+      ST_CHECK(st_samples[ST_CH_DYN] == 4, "dynamic: live sample delivered (%lu, want 4)",
+               st_samples[ST_CH_DYN]);
+      dart_node_set_dir(r, ST_CH_DYN, DART_NONE);
+      st_pump(w, r, 300);                  /* let the new list reach the writer */
+      for (i=0;i<5;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
+      st_pump(w, r, 300);
+      ST_CHECK(st_samples[ST_CH_DYN] == 4, "dynamic: unsubscribed receives nothing (%lu)",
+               st_samples[ST_CH_DYN]);
+      dart_node_set_dir(r, ST_CH_DYN, DART_SUB_ONLY);
+      st_pump(w, r, 400);
+      ST_CHECK(st_samples[ST_CH_DYN] == 4+ST_DEPTH, "dynamic: resubscribe replays ring (%lu, want %u)",
+               st_samples[ST_CH_DYN], 4+ST_DEPTH);
+      ST_CHECK(st_gap_calls[ST_CH_DYN] == 0, "dynamic: joins are silent (gaps=%lu)",
+               st_gap_calls[ST_CH_DYN]);
+
       dart_node_close(r, 1);
       dart_node_close(w, 1);
+    }
+
+    /* 6. SCALE: 40 channels, past the old 31-id announce cap; interest now
+          rides the meta channel as one reliable sample */
+    { static uint8_t mem_a[1<<20], mem_b[1<<20];
+      static dart_channel_def cha[ST_NCH], chb[ST_NCH];
+      dart_node_config ac, bc; dart_node *a, *b; uint16_t k;
+      memset(cha, 0, sizeof cha);
+      for (k=0;k<ST_NCH;k++){
+          cha[k].channel_id = (uint16_t)(100+k);
+          cha[k].qos.reliability = DART_RELIABLE;
+          cha[k].qos.history_depth = 1;
+          cha[k].qos.join_replay = 1;      /* sent before discovery completes */
+          cha[k].qos.max_sample_bytes = 32;
+          cha[k].qos.heartbeat_us = 50000;
+          cha[k].dir = DART_PUB_ONLY;
+      }
+      memcpy(chb, cha, sizeof cha);
+      for (k=0;k<ST_NCH;k++) chb[k].dir = DART_SUB_ONLY;
+      memset(&ac, 0, sizeof ac);
+      ac.domain_id = ST_DOMAIN+1; ac.channels = cha; ac.n_channels = ST_NCH;
+      bc = ac; bc.channels = chb; bc.on_sample = st_on_sample; bc.on_gap = st_on_gap;
+      a = dart_node_open(mem_a, sizeof mem_a, &ac);
+      b = dart_node_open(mem_b, sizeof mem_b, &bc);
+      ST_CHECK(a && b, "scale: %u-channel nodes open", ST_NCH);
+      if (a && b){
+          st_any = 0;
+          for (k=0;k<ST_NCH;k++) dart_node_send(a, (uint16_t)(100+k), payload, 16);
+          { uint64_t end = dart_now_us() + 5000000u;
+            while (st_any < ST_NCH && dart_now_us() < end) st_pump(a, b, 20); }
+          ST_CHECK(st_any == ST_NCH, "scale: all channels delivered (%lu/%u)", st_any, ST_NCH);
+          dart_node_close(b, 1);
+          dart_node_close(a, 1);
+      }
     }
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
@@ -1023,6 +1095,6 @@ int main(int argc, char **argv){
         "  sendbench\n"
         "        UDP send-cost microbench on loopback (Windows)\n"
         "  selftest\n"
-        "        on_gap + backpressure functional test (exit 0 = pass)\n");
+        "        on_gap, backpressure, dynamic-interest functional test (exit 0 = pass)\n");
     return 2;
 }

@@ -18,11 +18,27 @@ extern "C" {
 #define DART_DGRAM_MAX (DART_FRAG_PAYLOAD + 32u)   /* + largest header */
 
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } dart_reliability;
-typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2 } dart_direction;
+/* DART_NONE: declared but inactive. All resources stay allocated at init;
+ * dart_set_dir flips interest at runtime. */
+typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
+               DART_NONE = 3 } dart_direction;
+
+/* Built-in channel carrying pub/sub interest between peers, appended to every
+ * channel table. Interest lists ride it as ordinary reliable KEEP_LAST(1)
+ * samples: latest list wins, late joiners get a replay, subscription changes
+ * are just new samples. The id is reserved; dart_init rejects it. */
+#define DART_CHAN_META 0xFFFFu
 
 typedef struct {
     dart_reliability reliability;
     uint16_t history_depth;     /* KEEP_LAST depth in samples (>=1)        */
+    uint16_t join_replay;       /* reliable: cached samples replayed to a late-
+                                   joining reader (capped at what history still
+                                   holds). 0 (default) = join at the head and
+                                   see only future samples; 1 = latest-value on
+                                   join. Deep replays burst-multiply at startup
+                                   (every joiner gets depth x sample_bytes at
+                                   once), so keep this small.               */
     uint32_t max_sample_bytes;  /* largest sample on this channel          */
     uint32_t heartbeat_us;      /* reliable: writer heartbeat cadence      */
     uint32_t nack_delay_us;     /* reader: delay before NACK (suppression) */
@@ -68,6 +84,10 @@ typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
     uint16_t              max_peers;
+    uint16_t              meta_max_ids; /* largest pub+sub id count accepted in a
+                                           peer's interest list; bounds the meta
+                                           channel's sample size (2 bytes per id).
+                                           0 = 1024. Raised to fit our own table. */
     dart_sample_fn          on_sample;
     dart_gap_fn             on_gap;     /* optional; NULL = no gap reporting */
     void                 *user;
@@ -78,15 +98,19 @@ typedef struct dart_state dart_state;
 size_t    dart_required_memory(const dart_config *cfg);
 dart_state *dart_init(void *mem, size_t mem_size, const dart_config *cfg);
 
-/* peer_pubs/peer_subs: channel ids the peer publishes/subscribes to. NULL list
- * means all channels. Proxies exist only for matching pairs and are fixed for
- * the peer's life. peer_is_local: 1 if on this host; local subscribers of mcast
- * channels stay unicast, and the group lane engages only with a remote one. */
-void      dart_peer_add   (dart_state *st, uint32_t peer_id,
-                         const uint16_t *peer_pubs, uint16_t npub,
-                         const uint16_t *peer_subs, uint16_t nsub,
-                         int peer_is_local);
+/* A new peer matches only the meta channel; data channels match as its
+ * interest list arrives over it, and rematch on every change (theirs via new
+ * lists, ours via dart_set_dir). peer_is_local: 1 if on this host; local
+ * subscribers of mcast channels stay unicast, and the group lane engages only
+ * with a remote one. */
+void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
+
+/* Change our own interest in a channel at runtime. Creates/destroys proxies
+ * against every live peer and announces the new list on the meta channel.
+ * A (re)subscribe joins like a late joiner: reliable channels replay cached
+ * history, nothing is reported as a gap. Returns 0 ok, <0 unknown channel. */
+int       dart_set_dir(dart_state *st, uint16_t channel_id, uint8_t dir);
 
 /* Publish a sample to all peers. Returns 0 ok, <0 on error. */
 int       dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len,
