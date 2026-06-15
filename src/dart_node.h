@@ -46,6 +46,8 @@ typedef struct {
                                             small targets                      */
     dart_sample_fn          on_sample;     /* sample delivery                   */
     dart_gap_fn             on_gap;        /* optional: permanently skipped TUs */
+    dart_collision_fn       on_collision;  /* optional: two topic names hashed to
+                                              one identity; the match is refused */
     void                 *user;
 } dart_node_config;
 

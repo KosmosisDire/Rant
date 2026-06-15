@@ -676,6 +676,9 @@ static int sendbench_main(void){
  *                 history wait ~max_block_us while the reader never acks, then
  *                 proceed (KEEP_LAST fallback, never refusal).
  *   4. RELEASED : same channel once the reader acks; sends are instant.
+ *   4b SWEEP-ACK: a sub-only reader whose ACKNACK is timer-armed (nack_delay>0)
+ *                 must flush it via the periodic sweep when the writer goes
+ *                 quiet; backpressure must release with no data event to ride.
  *   5. DYNAMIC  : reader flips a channel inactive/subscribed at runtime;
  *                 each (re)subscribe replays cached history with no gap.
  *   6. SCALE    : 40 channels, past the old 31-id announce cap. */
@@ -684,8 +687,11 @@ static int sendbench_main(void){
 #define ST_CH_GAP   1   /* reliable, depth 4, no backpressure  */
 #define ST_CH_BLOCK 2   /* reliable, depth 4, max_block 100 ms */
 #define ST_CH_DYN   3   /* reliable, depth 4, reader starts DART_NONE */
+#define ST_CH_BLOCK2 4  /* like BLOCK but nack_delay>0: the reader's ack is
+                           timer-armed, so it relies on the periodic sweep */
 #define ST_DEPTH    4
 #define ST_BLOCK_US 100000u
+#define ST_NACK_US  5000u
 #define ST_NCH      40
 
 static int st_fail = 0;
@@ -704,6 +710,10 @@ static void st_on_gap(void *u, uint16_t ch, uint32_t from, uint64_t first, uint6
     (void)u;(void)from;(void)first;
     if (ch < 8){ st_gap_calls[ch]++; st_gap_tus[ch] += (unsigned long)count; }
 }
+static unsigned long st_collisions;
+static void st_on_collision(void *u, uint64_t id, const char *ours, const char *peer, size_t plen){
+    (void)u;(void)id;(void)ours;(void)peer;(void)plen; st_collisions++;
+}
 
 static void st_pump(dart_node *a, dart_node *b, int ms){     /* run both nodes */
     uint64_t end = dart_now_us() + (uint64_t)ms*1000u;
@@ -713,22 +723,25 @@ static void st_pump(dart_node *a, dart_node *b, int ms){     /* run both nodes *
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
+    setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: keep output on a crash */
     memset(payload, 0x5A, sizeof payload);
 
-    dart_channel_def ch[3]; memset(ch, 0, sizeof ch);
+    dart_channel_def ch[4]; memset(ch, 0, sizeof ch);
     ch[0].channel_id = ST_CH_GAP;
     ch[0].qos.reliability = DART_RELIABLE; ch[0].qos.history_depth = ST_DEPTH;
     ch[0].qos.max_sample_bytes = 64; ch[0].qos.heartbeat_us = 50000;
     ch[1] = ch[0]; ch[1].channel_id = ST_CH_BLOCK; ch[1].qos.max_block_us = ST_BLOCK_US;
     ch[2] = ch[0]; ch[2].channel_id = ST_CH_DYN;
     ch[2].qos.join_replay = ST_DEPTH;   /* phase 5 asserts ring replay on join */
+    ch[3] = ch[0]; ch[3].channel_id = ST_CH_BLOCK2;
+    ch[3].qos.max_block_us = ST_BLOCK_US; ch[3].qos.nack_delay_us = ST_NACK_US;
 
     dart_node_config wc; memset(&wc, 0, sizeof wc);
-    wc.domain_id = ST_DOMAIN; wc.channels = ch; wc.n_channels = 3;
-    { dart_node_config rc = wc; dart_channel_def chr[3]; dart_node *w, *r;
+    wc.domain_id = ST_DOMAIN; wc.channels = ch; wc.n_channels = 4;
+    { dart_node_config rc = wc; dart_channel_def chr[4]; dart_node *w, *r;
       memcpy(chr, ch, sizeof ch);
-      ch[0].dir = ch[1].dir   = ch[2].dir  = DART_PUB_ONLY;
-      chr[0].dir = chr[1].dir = DART_SUB_ONLY;
+      ch[0].dir = ch[1].dir = ch[2].dir = ch[3].dir = DART_PUB_ONLY;
+      chr[0].dir = chr[1].dir = chr[3].dir = DART_SUB_ONLY;
       chr[2].dir = DART_NONE;
       rc.channels = chr; rc.on_sample = st_on_sample; rc.on_gap = st_on_gap;
 
@@ -784,6 +797,27 @@ static int selftest_main(void){
         ST_CHECK(st_gap_calls[ST_CH_BLOCK] == 0 && st_samples[ST_CH_BLOCK] == ST_DEPTH+2,
                  "blocked: in-flight eviction loses nothing (gaps=%lu, samples=%lu/%u)",
                  st_gap_calls[ST_CH_BLOCK], st_samples[ST_CH_BLOCK], ST_DEPTH+2);
+      }
+
+      /* 4b. SWEEP-ACK: ST_CH_BLOCK2 has nack_delay>0, so the reader's ACKNACK is
+            timer-armed and, once a burst fills the ring and the writer goes
+            quiet, can be flushed ONLY by the periodic sweep, not a data event.
+            A sub-only reader's data channel never advances next_seqno, so a
+            sweep that skips next_seqno==0 channels starves that ack and every
+            later send waits the full max_block_us. Fill the ring, go quiet long
+            enough for the sweep, then a send that would evict must NOT block. */
+      st_pump(w, r, 200);                              /* match + settle */
+      { unsigned long s0 = st_samples[ST_CH_BLOCK2];
+        for (i=0;i<ST_DEPTH;i++) dart_node_send(w, ST_CH_BLOCK2, payload, sizeof payload);
+        st_pump(w, r, 200);                            /* reader drains burst; sweep must ack */
+        ST_CHECK(st_samples[ST_CH_BLOCK2]-s0 == ST_DEPTH, "sweep-ack: ring delivered (%lu, want %u)",
+                 st_samples[ST_CH_BLOCK2]-s0, ST_DEPTH);
+        { uint64_t t0 = dart_now_us(), dt;
+          dart_node_send(w, ST_CH_BLOCK2, payload, sizeof payload);   /* would evict slot 0 */
+          dt = dart_now_us() - t0;
+          ST_CHECK(dt < 20000,
+                   "sweep-ack: sub-only reader's timer ack releases backpressure (%.1f ms)", dt/1000.0);
+        }
       }
 
       /* 5. DYNAMIC: ST_CH_DYN is inactive on the reader; subscribe replays
@@ -869,6 +903,73 @@ static int selftest_main(void){
           ST_CHECK(st_any == ST_NCH, "scale: all channels delivered (%lu/%u)", st_any, ST_NCH);
           dart_node_close(b, 1);
           dart_node_close(a, 1);
+      }
+    }
+
+    /* 7. NAMED: the cross-peer identity is the topic NAME (its 64-bit hash),
+          independent of each node's local channel handle. A matching name matches
+          across differing handles; a distinct name never cross-wires; and clean
+          names raise no false collision. */
+    { static uint8_t mem_nw[1<<20], mem_nr[1<<20];
+      dart_channel_def nw[1], nr[2];
+      dart_node_config wc2, rc2; dart_node *w2, *r2;
+      memset(nw,0,sizeof nw); memset(nr,0,sizeof nr);
+      nw[0].channel_id=5; nw[0].name="robot/lidar"; nw[0].dir=DART_PUB_ONLY;
+      nw[0].qos.reliability=DART_RELIABLE; nw[0].qos.history_depth=1;
+      nw[0].qos.join_replay=1; nw[0].qos.max_sample_bytes=32; nw[0].qos.heartbeat_us=50000;
+      nr[0]=nw[0]; nr[0].channel_id=4; nr[0].dir=DART_SUB_ONLY;   /* same name, other handle */
+      nr[1]=nw[0]; nr[1].channel_id=6; nr[1].name="sensors/imu"; nr[1].dir=DART_SUB_ONLY;
+      memset(&wc2,0,sizeof wc2);
+      wc2.domain_id=ST_DOMAIN+2; wc2.channels=nw; wc2.n_channels=1;
+      wc2.max_peers=4; wc2.meta_max_ids=8;
+      rc2=wc2; rc2.channels=nr; rc2.n_channels=2;
+      rc2.on_sample=st_on_sample; rc2.on_gap=st_on_gap; rc2.on_collision=st_on_collision;
+      st_samples[4]=st_samples[6]=0; st_collisions=0;
+      w2=dart_node_open(mem_nw,sizeof mem_nw,&wc2);
+      r2=dart_node_open(mem_nr,sizeof mem_nr,&rc2);
+      ST_CHECK(w2 && r2, "named: nodes open");
+      if (w2 && r2){
+          uint64_t end = dart_now_us() + 5000000u;
+          while (st_samples[4]==0 && dart_now_us()<end){
+              dart_node_send(w2, 5, payload, 16); st_pump(w2,r2,20);
+          }
+          ST_CHECK(st_samples[4] > 0, "named: same name matches across differing handles (%lu)", st_samples[4]);
+          st_pump(w2,r2,200);
+          ST_CHECK(st_samples[6] == 0, "named: distinct name never cross-wires (%lu)", st_samples[6]);
+          ST_CHECK(st_collisions == 0, "named: clean names raise no collision (%lu)", st_collisions);
+          dart_node_close(r2,1); dart_node_close(w2,1);
+      }
+    }
+
+    /* 8. COLLISION: two distinct names with the SAME 64-bit identity, found by
+          Pollard's rho (see examples/collide.c). A publishes one, B subscribes
+          the other; DART must fire on_collision and refuse the match, never
+          cross-wiring. The pair is tied to the FNV-1a dart_topic_id: if that
+          ever changes, the first check fails loudly (regenerate via collide). */
+    { static uint8_t mem_cw[1<<20], mem_cr[1<<20];
+      const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> 23f58aa8628b1cce */
+      dart_channel_def cw, cr; dart_node_config wc3, rc3; dart_node *w3, *r3;
+      ST_CHECK(dart_topic_id(A)==dart_topic_id(B) && strcmp(A,B)!=0,
+               "collision: test pair still shares one identity (else regen via collide)");
+      memset(&cw,0,sizeof cw);
+      cw.channel_id=5; cw.name=A; cw.dir=DART_PUB_ONLY;
+      cw.qos.reliability=DART_RELIABLE; cw.qos.history_depth=1; cw.qos.join_replay=1;
+      cw.qos.max_sample_bytes=32; cw.qos.heartbeat_us=50000;
+      cr=cw; cr.name=B; cr.dir=DART_SUB_ONLY;
+      memset(&wc3,0,sizeof wc3);
+      wc3.domain_id=ST_DOMAIN+3; wc3.channels=&cw; wc3.n_channels=1;
+      wc3.max_peers=4; wc3.meta_max_ids=8;
+      rc3=wc3; rc3.channels=&cr;
+      rc3.on_sample=st_on_sample; rc3.on_gap=st_on_gap; rc3.on_collision=st_on_collision;
+      st_samples[5]=0; st_collisions=0;
+      w3=dart_node_open(mem_cw,sizeof mem_cw,&wc3);
+      r3=dart_node_open(mem_cr,sizeof mem_cr,&rc3);
+      ST_CHECK(w3 && r3, "collision: nodes open");
+      if (w3 && r3){
+          for (i=0;i<60;i++){ dart_node_send(w3,5,payload,16); dart_node_poll(w3,0); dart_node_poll(r3,20); }
+          ST_CHECK(st_collisions >= 1, "collision: detected (on_collision fired %lu)", st_collisions);
+          ST_CHECK(st_samples[5] == 0, "collision: match refused, no cross-wire (%lu)", st_samples[5]);
+          dart_node_close(r3,1); dart_node_close(w3,1);
       }
     }
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");

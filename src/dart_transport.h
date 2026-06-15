@@ -15,7 +15,12 @@ extern "C" {
 #ifndef DART_FRAG_PAYLOAD
 #define DART_FRAG_PAYLOAD 1024u          /* bytes of sample data per TU */
 #endif
-#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD + 32u)   /* + largest header */
+#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD + 40u)   /* + largest header */
+
+#ifndef DART_TOPIC_NAME_MAX
+#define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes carried in the
+                                            interest list; bounds meta buffers */
+#endif
 
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } dart_reliability;
 /* DART_NONE: declared but inactive. All resources stay allocated at init;
@@ -26,7 +31,8 @@ typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
 /* Built-in channel carrying pub/sub interest between peers, appended to every
  * channel table. Interest lists ride it as ordinary reliable KEEP_LAST(1)
  * samples: latest list wins, late joiners get a replay, subscription changes
- * are just new samples. The id is reserved; dart_init rejects it. */
+ * are just new samples. The id is reserved; dart_init rejects it. This is the
+ * channel's local handle; its cross-peer identity is a reserved sentinel. */
 #define DART_CHAN_META 0xFFFFu
 
 typedef struct {
@@ -51,21 +57,33 @@ typedef struct {
 } dart_qos;
 
 typedef struct {
-    uint16_t channel_id;
+    uint16_t channel_id;  /* LOCAL handle for the API (dart_send, on_sample, ...).
+                             Need not match across peers; the cross-peer identity
+                             is the name (or, if name is NULL, this id). */
+    const char *name;     /* topic name: the cross-peer identity. Peers match on
+                             its 64-bit hash and carry the name to detect a hash
+                             collision (dart_collision_fn). NULL = identify by
+                             channel_id instead (back-compat). <= DART_TOPIC_NAME_MAX
+                             bytes. Use names consistently across all nodes. */
     dart_qos   qos;
     uint8_t  dir;     /* dart_direction; 0 (zero-init) = publish + subscribe   */
-    uint8_t  mcast;   /* 1 = new data and heartbeats may use a multicast group,
-                         engaged only while remote subscribers exist. Same-host
-                         subscribers always stay unicast. Repairs, acks, and
-                         gap-to-one-reader stay unicast. Reliable mcast is
+    uint8_t  mcast;   /* 1 = this channel uses its multicast group for data.
+                         Publisher opt-in: a flagged writer sends new data and
+                         heartbeats to the group whenever >=1 subscriber is
+                         matched (local subscribers included). A flagged reader
+                         joins the group, so it also hears unicast writers of the
+                         same topic: multicast and unicast publishers can mix.
+                         Repairs, acks, and gaps stay unicast. Reliable mcast is
                          reliable-from-join-point: history replay on join is
-                         unicast-only. */
+                         unicast-only. The group is 239.255.<domain&255>.<id&255>
+                         where id is the topic's 64-bit identity. */
 } dart_channel_def;
 
-/* dart_poll_send destination: peer id, or a per-channel multicast group flagged
- * by the top bit (peer ids are small and nonzero). */
+/* dart_poll_send destination: peer id, or a multicast group flagged by the top
+ * bit (peer ids are small and nonzero). The low byte is the group selector
+ * (topic identity & 0xFF); the node maps it to 239.255.<domain&255>.<selector>. */
 #define DART_DEST_GROUP_BIT      0x80000000u
-#define DART_DEST_GROUP(ch)      (DART_DEST_GROUP_BIT | (uint32_t)(ch))
+#define DART_DEST_GROUP(sel)     (DART_DEST_GROUP_BIT | (uint32_t)(sel))
 #define DART_DEST_IS_GROUP(d)    (((d) & DART_DEST_GROUP_BIT) != 0u)
 #define DART_DEST_GROUP_CHAN(d)  ((uint16_t)((d) & 0xFFFFu))
 
@@ -80,16 +98,27 @@ typedef void (*dart_sample_fn)(void *user, uint16_t channel_id, uint32_t from_pe
 typedef void (*dart_gap_fn)(void *user, uint16_t channel_id, uint32_t from_peer,
                           uint64_t first_tu, uint64_t count);
 
+/* Optional: a peer advertised interest in a topic whose name hashes to the same
+ * 64-bit identity as one of ours but whose name differs (a hash collision). The
+ * match is refused (never silently cross-wired); this reports it for logging.
+ * peer_name is the raw wire bytes (not NUL-terminated); our_name is. */
+typedef void (*dart_collision_fn)(void *user, uint64_t identity,
+                                  const char *our_name,
+                                  const char *peer_name, size_t peer_name_len);
+
 typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
     uint16_t              max_peers;
-    uint16_t              meta_max_ids; /* largest pub+sub id count accepted in a
-                                           peer's interest list; bounds the meta
-                                           channel's sample size (2 bytes per id).
-                                           0 = 1024. Raised to fit our own table. */
+    uint16_t              meta_max_ids; /* largest pub+sub topic count accepted in
+                                           a peer's interest list. 0 = 1024. Sizes
+                                           the meta channel buffers; with named
+                                           topics each entry is up to
+                                           9+DART_TOPIC_NAME_MAX bytes, so tune
+                                           this down on small targets. */
     dart_sample_fn          on_sample;
     dart_gap_fn             on_gap;     /* optional; NULL = no gap reporting */
+    dart_collision_fn       on_collision; /* optional; NULL = silent refuse */
     void                 *user;
 } dart_config;
 
@@ -97,6 +126,13 @@ typedef struct dart_state dart_state;
 
 size_t    dart_required_memory(const dart_config *cfg);
 dart_state *dart_init(void *mem, size_t mem_size, const dart_config *cfg);
+
+/* Canonical 64-bit topic identity from a name (FNV-1a). Used to match topics
+ * across peers and to derive their multicast group. */
+uint64_t  dart_topic_id(const char *name);
+/* A channel def's identity: dart_topic_id(name), or channel_id if name is NULL.
+ * Core and node both use this so they agree on matching and group address. */
+uint64_t  dart_channel_identity(const dart_channel_def *def);
 
 /* A new peer matches only the meta channel; data channels match as its
  * interest list arrives over it, and rematch on every change (theirs via new

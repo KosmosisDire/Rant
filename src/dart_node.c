@@ -119,6 +119,7 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     tc->meta_max_ids = cfg->meta_max_ids;
     tc->on_sample    = cfg->on_sample;
     tc->on_gap       = cfg->on_gap;
+    tc->on_collision = cfg->on_collision;
     tc->user         = cfg->user;
     if (mp_out) *mp_out = mp;
 }
@@ -183,11 +184,17 @@ static int dart__node_find_id(dart_node *n, uint32_t id){
     return -1;
 }
 
-/* deterministic per-(domain, channel) data multicast group. &0xFF wrap
- * collisions are harmless: the receive path filters by peer table and channel id. */
-static uint32_t dart__node_group_addr(uint16_t domain, uint16_t chan){
-    uint32_t a = (239u<<24)|(255u<<16)|((uint32_t)(domain&0xFFu)<<8)|(uint32_t)(chan&0xFFu);
+/* deterministic data multicast group from a group selector (topic identity &
+ * 0xFF). &0xFF wrap collisions are harmless: the receive path filters by peer
+ * table and topic identity. */
+static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
+    uint32_t a = (239u<<24)|(255u<<16)|((uint32_t)(domain&0xFFu)<<8)|(uint32_t)(sel&0xFFu);
     return htonl(a);
+}
+/* the group a channel def joins/sends on, derived from its topic identity so it
+ * matches the core's DART_DEST_GROUP selector and every peer agrees. */
+static uint32_t dart__node_chan_group(uint16_t domain, const dart_channel_def *def){
+    return dart__node_group_addr(domain, (uint16_t)(dart_channel_identity(def) & 0xFFu));
 }
 
 /* Send one datagram to a peer or multicast group. Returns 1 when the datagram
@@ -332,11 +339,11 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
                  mcast channels few; a failed join fails the open. */
               for (i=0;i<cfg->n_channels;i++)
                   if (cfg->channels[i].mcast && cfg->channels[i].dir!=DART_PUB_ONLY){
-                      uint32_t g = dart__node_group_addr(cfg->domain_id, cfg->channels[i].channel_id);
+                      uint32_t g = dart__node_chan_group(cfg->domain_id, &cfg->channels[i]);
                       uint16_t j; int dup=0;
                       for (j=0;j<i;j++)
                           if (cfg->channels[j].mcast && cfg->channels[j].dir!=DART_PUB_ONLY
-                              && dart__node_group_addr(cfg->domain_id, cfg->channels[j].channel_id)==g){
+                              && dart__node_chan_group(cfg->domain_id, &cfg->channels[j])==g){
                               dup=1; break;
                           }
                       if (dup) continue;
