@@ -111,6 +111,8 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     dc->disc_port        = cfg->disc_port;
     dc->ttl              = cfg->ttl;
     dc->mcast_if         = cfg->mcast_if;
+    dc->seeds            = cfg->seeds;
+    dc->n_seeds          = cfg->n_seeds;
     tc->channels     = cfg->channels;
     tc->n_channels   = cfg->n_channels;
     tc->max_peers    = mp;
@@ -323,14 +325,27 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
               if (bind(mfd,(struct sockaddr*)&ma,sizeof ma)!=0) mc_ok=0;
           }
           if (mc_ok){
+              /* one join per distinct group: the &0xFF group mapping lets
+                 channels share a group, and kernels reject duplicate
+                 memberships. Memberships per socket are also OS-capped
+                 (often ~20: Linux net.ipv4.igmp_max_memberships), so keep
+                 mcast channels few; a failed join fails the open. */
               for (i=0;i<cfg->n_channels;i++)
                   if (cfg->channels[i].mcast && cfg->channels[i].dir!=DART_PUB_ONLY){
-                      struct ip_mreq mr; memset(&mr,0,sizeof mr);
-                      mr.imr_multiaddr.s_addr=dart__node_group_addr(cfg->domain_id, cfg->channels[i].channel_id);
-                      mr.imr_interface.s_addr=ifip;
-                      if (setsockopt(mfd,IPPROTO_IP,IP_ADD_MEMBERSHIP,(const char*)&mr,sizeof mr)!=0){
-                          mc_ok=0; break;
-                      }
+                      uint32_t g = dart__node_group_addr(cfg->domain_id, cfg->channels[i].channel_id);
+                      uint16_t j; int dup=0;
+                      for (j=0;j<i;j++)
+                          if (cfg->channels[j].mcast && cfg->channels[j].dir!=DART_PUB_ONLY
+                              && dart__node_group_addr(cfg->domain_id, cfg->channels[j].channel_id)==g){
+                              dup=1; break;
+                          }
+                      if (dup) continue;
+                      { struct ip_mreq mr; memset(&mr,0,sizeof mr);
+                        mr.imr_multiaddr.s_addr=g;
+                        mr.imr_interface.s_addr=ifip;
+                        if (setsockopt(mfd,IPPROTO_IP,IP_ADD_MEMBERSHIP,(const char*)&mr,sizeof mr)!=0){
+                            mc_ok=0; break;
+                        } }
                   }
           }
           if (!mc_ok){
@@ -382,8 +397,16 @@ static void dart__node_drain(dart_node *n, dart_sock_t fd, uint64_t deadline){
                            WSAECONNRESET); datagrams behind it are fine, keep draining */
         }
         if (r>0){
-            int pi=dart__node_find_addr(n,&src);
-            if (pi>=0) dart_on_datagram(n->tr, n->peers[pi].id, buf, (size_t)r, dart_now_us());
+            if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
+                /* unicast announce aimed at our data port: the only address
+                   that reaches THIS process when several share the disc port.
+                   Hand it to discovery. */
+                uint8_t sip[4]; memcpy(sip, &src.sin_addr.s_addr, 4);
+                dart_discovery_rt_feed(n->disc, sip, 4, buf, (size_t)r);
+            } else {
+                int pi=dart__node_find_addr(n,&src);
+                if (pi>=0) dart_on_datagram(n->tr, n->peers[pi].id, buf, (size_t)r, dart_now_us());
+            }
         }
         if (dart_now_us() >= deadline) break;      /* yield to discovery/send */
     }

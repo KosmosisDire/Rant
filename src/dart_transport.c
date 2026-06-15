@@ -37,6 +37,11 @@ typedef struct {
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
     uint8_t  local;      /* peer lives on this host         */
+    uint32_t reader_epoch; /* reader incarnation last seen in an ACKNACK; 0 =
+                              none yet. A change means the peer rebuilt its
+                              state (e.g. one-sided discovery flap): our acked/
+                              sent positions describe a dead reader, so the
+                              lane re-joins as if freshly matched. */
     uint64_t sent_upto;  /* next seqno to push as new data  */
     uint64_t acked_upto; /* peer received all TUs < this    */
     /* pending repair request (from ACKNACK) */
@@ -51,6 +56,7 @@ typedef struct {        /* writer-side, per (channel,peer) */
 typedef struct {        /* reader-side, per (channel,peer) */
     uint8_t  used;
     uint8_t  started;       /* accepted any DATA from this writer yet          */
+    uint32_t epoch;         /* this incarnation's id, sent in every ACKNACK    */
     uint64_t deliver_upto;  /* base of current sample; all below delivered/skipped */
     uint8_t  asm_active;    /* received >=1 frag of current sample */
     uint16_t asm_count;
@@ -112,6 +118,7 @@ struct dart_state {
     uint32_t     destq_head, destq_n;
     uint32_t     sweep;       /* timer-sweep lane cursor */
     uint64_t     sweep_t;     /* clock position the sweep has paid for */
+    uint32_t     repoch;      /* reader-epoch counter (starts at 1; 0 = none) */
 };
 
 /* bump allocator (shared by required_memory and init) */
@@ -169,7 +176,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->peer_local=pl;
           st->peer_pub_bm=pb; st->peer_sub_bm=sb; st->bmlen=bml;
           st->cfg.n_channels=(uint16_t)nc; st->meta_ci=(uint16_t)ncu;
-          st->chans=ch; st->wprox=wp; st->rprox=rp;
+          st->chans=ch; st->wprox=wp; st->rprox=rp; st->repoch=1;
           st->lane_next=ln; st->lane_inq=li;
           st->dest_head=dh; st->dest_tail=dt; st->dest_inq=di; st->destq=dq;
           memset(pu,0,np); memset(pl,0,np);
@@ -360,6 +367,7 @@ static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
     uint8_t *abuf=r->asm_buf, *fbm=r->frag_bm;
     memset(r,0,sizeof(*r));
     r->asm_buf=abuf; r->frag_bm=fbm;
+    r->epoch=st->repoch++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
 }
 static void dart__unmatch_r(dart_state *st, uint16_t c, uint16_t ps){
@@ -544,10 +552,13 @@ static size_t dart_mk_hb(uint8_t *o, uint16_t chan, uint64_t first, uint64_t las
     o[0]=DART_HB; o[1]=0; dart_w16(o+2,chan); dart_w64(o+4,first); dart_w64(o+12,last); dart_w32(o+20,cnt);
     return 24;
 }
-static size_t dart_mk_nack(uint8_t *o, uint16_t chan, uint64_t base, uint16_t nbits, uint32_t bm){
-    o[0]=DART_NACK; o[1]=0; dart_w16(o+2,chan); dart_w64(o+4,base); dart_w16(o+12,nbits); dart_w32(o+14,bm);
-    return 18;
+static size_t dart_mk_nack(uint8_t *o, uint16_t chan, uint64_t base, uint16_t nbits, uint32_t bm,
+                         uint32_t epoch, uint8_t flags){
+    o[0]=DART_NACK; o[1]=flags; dart_w16(o+2,chan); dart_w64(o+4,base); dart_w16(o+12,nbits); dart_w32(o+14,bm);
+    dart_w32(o+18,epoch);
+    return 22;
 }
+#define DART_NACKF_UNPOSITIONED 1u   /* reader has not delivered anything yet */
 static size_t dart_mk_gap(uint8_t *o, uint16_t chan, uint64_t s, uint64_t e){
     o[0]=DART_GAP; o[1]=0; dart_w16(o+2,chan); dart_w64(o+4,s); dart_w64(o+12,e);
     return 20;
@@ -625,8 +636,12 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
     uint64_t first=dart_r64(p+4), last=dart_r64(p+12);
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
-    if (first > r->deliver_upto){
-        if (r->started && st->cfg.on_gap && ci!=(int)st->meta_ci)  /* superseded before repair */
+    /* un-started readers adopt no position from heartbeats: the advertised
+       first may be a dead predecessor's acked position (one-sided flap). The
+       ack armed below carries our epoch; the writer re-joins on seeing it and
+       the first pushed DATA sets the start. */
+    if (r->started && first > r->deliver_upto){
+        if (st->cfg.on_gap && ci!=(int)st->meta_ci)        /* superseded before repair */
             st->cfg.on_gap(st->cfg.user, ch->id, st->peer_ids[pslot],
                            r->deliver_upto, first - r->deliver_upto);
         r->deliver_upto=first; r->asm_active=0;
@@ -650,9 +665,41 @@ static void dart_reader_gap(dart_state *st, int ci, int pslot, const uint8_t *p)
 
 /* writer side: handle ACKNACK */
 static void dart_writer_nack(dart_state *st, int ci, int pslot, const uint8_t *p){
+    dart_channel *ch=&st->chans[ci];
     dart_wproxy *w=&st->wprox[(size_t)ci*st->cfg.max_peers+pslot];
     uint64_t base=dart_r64(p+4); uint16_t nbits=dart_r16(p+12); uint32_t bm=dart_r32(p+14);
+    uint32_t ep=dart_r32(p+18); uint8_t fl=p[1];
+    int group_mode;
     if (!w->used) return;
+    group_mode = ch->mcast && ch->nsubs_remote>0;
+    if (w->reader_epoch != ep){
+        if (w->reader_epoch){
+            /* the reader is a new incarnation (e.g. the peer dropped us in a
+               one-sided discovery flap and re-added): our acked/sent positions
+               describe its dead predecessor and would tell it nothing is
+               missing. Re-join the lane as if freshly matched; this ack's
+               content belongs to a position the lane no longer has. */
+            w->sent_upto  = group_mode ? ch->mc_sent_upto : dart_unicast_join_seqno(ch);
+            w->acked_upto = w->sent_upto;
+            w->has_nack   = 0;
+            w->hb_next_us = 0;
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            w->reader_epoch = ep;
+            return;
+        }
+        w->reader_epoch = ep;      /* first contact: lane is already fresh */
+    }
+    if (fl & DART_NACKF_UNPOSITIONED){
+        /* the reader has delivered nothing yet, and un-started readers never
+           NACK: any push it missed (e.g. one that raced ahead of the peer
+           adding us) is otherwise lost for good. Re-push from the unacked
+           edge, which is exactly the join window. */
+        if (!group_mode && w->acked_upto < w->sent_upto){
+            w->sent_upto = w->acked_upto;
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+        }
+        return;                    /* no position information to apply */
+    }
     if (base > w->acked_upto) w->acked_upto=base;
     if (nbits>0 && bm!=0){
         w->has_nack=1; w->nack_base=base; w->nack_bits=bm;
@@ -672,7 +719,7 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len,
         switch(type){
             case DART_DATA: if (rem<22) return; sub=22u+(size_t)dart_r16(p+20); break;
             case DART_HB:   sub=24; break;
-            case DART_NACK: sub=18; break;
+            case DART_NACK: sub=22; break;
             case DART_GAP:  sub=20; break;
             default: return;             /* unknown type: cannot resync, drop rest */
         }
@@ -789,13 +836,14 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
     uint64_t base; uint16_t nbits=0; uint32_t bm=0;
     if (!r->used) return 0;
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
-    if (cap<18) return 0;
+    if (cap<22) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
     r->ack_pending=0;
 
     if (!r->asm_active){
         base=r->deliver_upto;
-        if (r->deliver_upto<=r->hb_last){
+        if (!r->started){ nbits=0; bm=0; }   /* no position yet: epoch hello */
+        else if (r->deliver_upto<=r->hb_last){
             /* everything in (deliver_upto..hb_last] is missing here, so request
                the whole window: one round-trip repairs a burst loss instead of
                one TU per nack_delay */
@@ -816,7 +864,8 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
               nbits=(uint16_t)(rem<DART_NACK_WINDOW?rem:DART_NACK_WINDOW); }
         }
     }
-    return dart_mk_nack(out,ch->id,base,nbits,bm);
+    return dart_mk_nack(out,ch->id,base,nbits,bm,r->epoch,
+                      r->started ? 0 : (uint8_t)DART_NACKF_UNPOSITIONED);
 }
 
 /* multicast writer lane for channel ci: new data once for the whole group,

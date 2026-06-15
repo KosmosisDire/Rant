@@ -1,2 +1,7 @@
 old
 *.exe
+# cross-compiled / native binaries (no extension)
+dart_test
+example
+node
+pack

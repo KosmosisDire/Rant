@@ -10,6 +10,8 @@
 extern "C" {
 #endif
 
+#define DART_DISCOVERY_MAX_SEEDS 4
+
 /* Zero/NULL fields get defaults. Leave disc.uuid all-zero to auto-generate a
  * per-boot random v4 UUID. */
 typedef struct {
@@ -20,6 +22,11 @@ typedef struct {
     const char  *mcast_if;    /* interface IP to join/send on; NULL = route probe.
                                  "127.0.0.1" keeps single-host setups off the
                                  network. */
+    const dart_discovery_addr *seeds;  /* initial peers: every announce is also
+                                 unicast to these, so discovery bootstraps on
+                                 networks where multicast is filtered or flaky
+                                 (copied at open; max DART_DISCOVERY_MAX_SEEDS) */
+    uint16_t     n_seeds;
 } dart_discovery_rt_config;
 
 typedef struct dart_discovery_rt dart_discovery_rt;
@@ -33,6 +40,13 @@ dart_discovery_rt  *dart_discovery_rt_open(void *mem, size_t mem_size, const dar
 int        dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms);
 /* Optionally multicast a graceful BYE, then close the socket. */
 void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
+
+/* Hand the core a discovery datagram that arrived on some other socket.
+ * Unicast announces to known peers target the peer's advertised DATA port
+ * (the only per-process address when several processes share the discovery
+ * port), so the layer owning the data socket forwards them here. */
+void       dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+                          const void *dg, size_t len);
 
 /* Fill out[16] with a random RFC 9562 v4 UUID from the platform CSPRNG.
  * Returns 1 on success, 0 if no entropy source was available. */

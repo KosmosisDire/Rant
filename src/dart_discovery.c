@@ -209,3 +209,15 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
 size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){
     return dart_discovery_build(st, 1, (uint8_t *)out, cap);
 }
+
+int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart_discovery_addr *out){
+    const dart_discovery_peer_ *p;
+    if (slot >= st->cap_peers) return 0;
+    p = &st->peers[slot];
+    if (!p->used) return 0;
+    memset(out, 0, sizeof *out);
+    memcpy(out->ip, p->ip, 16);
+    out->ip_len = p->ip_len;
+    out->port   = p->port;
+    return 1;
+}

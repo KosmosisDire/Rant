@@ -90,6 +90,12 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
+/* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
+ * fills *out when the slot holds a live peer. Lets a runtime reinforce
+ * announces over unicast so established peerings survive multicast outages
+ * (WiFi floods, IGMP snooping pruning); bootstrap still needs the group. */
+int          dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot,
+                             dart_discovery_addr *out);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) plus a boot seed,
  * for reproducible identity. RFC 9562 version-8 (custom). NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
@@ -113,6 +119,8 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 extern "C" {
 #endif
 
+#define DART_DISCOVERY_MAX_SEEDS 4
+
 /* Zero/NULL fields get defaults. Leave disc.uuid all-zero to auto-generate a
  * per-boot random v4 UUID. */
 typedef struct {
@@ -123,6 +131,11 @@ typedef struct {
     const char  *mcast_if;    /* interface IP to join/send on; NULL = route probe.
                                  "127.0.0.1" keeps single-host setups off the
                                  network. */
+    const dart_discovery_addr *seeds;  /* initial peers: every announce is also
+                                 unicast to these, so discovery bootstraps on
+                                 networks where multicast is filtered or flaky
+                                 (copied at open; max DART_DISCOVERY_MAX_SEEDS) */
+    uint16_t     n_seeds;
 } dart_discovery_rt_config;
 
 typedef struct dart_discovery_rt dart_discovery_rt;
@@ -136,6 +149,13 @@ dart_discovery_rt  *dart_discovery_rt_open(void *mem, size_t mem_size, const dar
 int        dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms);
 /* Optionally multicast a graceful BYE, then close the socket. */
 void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
+
+/* Hand the core a discovery datagram that arrived on some other socket.
+ * Unicast announces to known peers target the peer's advertised DATA port
+ * (the only per-process address when several processes share the discovery
+ * port), so the layer owning the data socket forwards them here. */
+void       dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+                          const void *dg, size_t len);
 
 /* Fill out[16] with a random RFC 9562 v4 UUID from the platform CSPRNG.
  * Returns 1 on success, 0 if no entropy source was available. */
@@ -317,7 +337,16 @@ typedef struct {
                                             239.255.<domain&255>.<chan&255>   */
     const char           *mcast_if;      /* interface IP for all multicast;
                                             NULL = auto. "127.0.0.1" keeps a
-                                            single-host run off the network   */
+                                            single-host run off the network.
+                                            Pin this on multihomed hosts: the
+                                            auto route probe follows whatever
+                                            the OS routes 239.x to (VPN, WSL,
+                                            docker bridges all candidates)    */
+    const dart_discovery_addr *seeds;    /* initial peers: announces are also
+                                            unicast here (port 0 = disc_port),
+                                            so discovery works where multicast
+                                            is filtered or flaky              */
+    uint16_t              n_seeds;
     uint32_t              announce_us;   /* default 1s                        */
     uint32_t              timeout_us;    /* default 3.5s                      */
     uint8_t               ttl;           /* multicast TTL, default 1          */
@@ -571,6 +600,18 @@ size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){
     return dart_discovery_build(st, 1, (uint8_t *)out, cap);
 }
 
+int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart_discovery_addr *out){
+    const dart_discovery_peer_ *p;
+    if (slot >= st->cap_peers) return 0;
+    p = &st->peers[slot];
+    if (!p->used) return 0;
+    memset(out, 0, sizeof *out);
+    memcpy(out->ip, p->ip, 16);
+    out->ip_len = p->ip_len;
+    out->port   = p->port;
+    return 1;
+}
+
 #ifndef DART_DISCOVERY_SANS_IO
 /* ===== dart_discovery_rt.c ===== */
 /* peer-discovery runtime: sockets, clock, UUID and the
@@ -631,7 +672,43 @@ struct dart_discovery_rt {
     dart_discovery_state        *core;
     dart_discovery_sock_t        fd;
     struct sockaddr_in  grp;
+    uint16_t            max_peers;
+    dart_discovery_addr seeds[DART_DISCOVERY_MAX_SEEDS];
+    uint16_t            n_seeds;
 };
+
+static void dart_discovery_rt_tx1(dart_discovery_rt *rt, const uint8_t *out, size_t m,
+                          const uint8_t ip[4], uint16_t port){
+    struct sockaddr_in d;
+    memset(&d, 0, sizeof d);
+    d.sin_family = AF_INET;
+    memcpy(&d.sin_addr.s_addr, ip, 4);
+    d.sin_port = htons(port);
+    sendto(rt->fd, (const char*)out, (int)m, 0, (struct sockaddr*)&d, sizeof d);
+}
+
+/* send a built announce/BYE to the group, to every configured seed, and to
+ * every known peer. Known peers get a copy at the shared disc port and one at
+ * their data port: the latter is the only per-process address when several
+ * processes on one host share the disc port (the data-socket owner forwards
+ * it via dart_discovery_rt_feed). Discovery then survives multicast outages
+ * and, with seeds, bootstraps without multicast. Receivers dedup by uuid. */
+static void dart_discovery_rt_tx(dart_discovery_rt *rt, const uint8_t *out, size_t m){
+    uint16_t s, dport = ntohs(rt->grp.sin_port);
+    dart_discovery_addr a;
+    sendto(rt->fd, (const char*)out, (int)m, 0,
+           (struct sockaddr*)&rt->grp, sizeof rt->grp);
+    for (s=0; s<rt->n_seeds; s++){
+        const dart_discovery_addr *sd = &rt->seeds[s];
+        if (sd->ip_len != 4) continue;
+        dart_discovery_rt_tx1(rt, out, m, sd->ip, sd->port ? sd->port : dport);
+    }
+    for (s=0; s<rt->max_peers; s++){
+        if (!dart_discovery_peer_addr(rt->core, s, &a) || a.ip_len != 4) continue;
+        dart_discovery_rt_tx1(rt, out, m, a.ip, dport);
+        if (a.port && a.port != dport) dart_discovery_rt_tx1(rt, out, m, a.ip, a.port);
+    }
+}
 
 static uint64_t dart_discovery_now_us(void){
 #ifdef _WIN32
@@ -649,6 +726,12 @@ static void dart_discovery_net_startup(void){
 #ifdef _WIN32
     WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
 #endif
+}
+
+void dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+                    const void *dg, size_t len){
+    if (!rt) return;
+    dart_discovery_on_datagram(rt->core, src_ip, src_ip_len, dg, len, dart_discovery_now_us());
 }
 
 /* Every multicast send and join should pin to this one interface. */
@@ -809,6 +892,14 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&loop, sizeof loop);
 
     rt->fd = fd;
+    rt->max_peers = c.disc.max_peers;
+    rt->n_seeds = 0;
+    if (c.seeds){
+        uint16_t k, ns = c.n_seeds;
+        if (ns > DART_DISCOVERY_MAX_SEEDS) ns = DART_DISCOVERY_MAX_SEEDS;
+        for (k=0;k<ns;k++) rt->seeds[k] = c.seeds[k];
+        rt->n_seeds = ns;
+    }
     memset(&rt->grp, 0, sizeof rt->grp);
     rt->grp.sin_family = AF_INET;
     rt->grp.sin_addr.s_addr = inet_addr(group);
@@ -839,8 +930,7 @@ int dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms){
     }
 
     m = dart_discovery_update(rt->core, dart_discovery_now_us(), out, sizeof out);
-    if (m) sendto(rt->fd, (const char*)out, (int)m, 0,
-                  (struct sockaddr*)&rt->grp, sizeof rt->grp);
+    if (m) dart_discovery_rt_tx(rt, out, m);
     return got;
 }
 
@@ -849,8 +939,7 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
     if (send_bye){
         uint8_t out[DART_DISCOVERY_WIRE_MAX];
         size_t m = dart_discovery_leave(rt->core, out, sizeof out);
-        if (m) sendto(rt->fd, (const char*)out, (int)m, 0,
-                      (struct sockaddr*)&rt->grp, sizeof rt->grp);
+        if (m) dart_discovery_rt_tx(rt, out, m);
     }
     DART_DISCOVERY_CLOSESOCK(rt->fd);
 #ifdef _WIN32
@@ -900,6 +989,11 @@ typedef struct {
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
     uint8_t  local;      /* peer lives on this host         */
+    uint32_t reader_epoch; /* reader incarnation last seen in an ACKNACK; 0 =
+                              none yet. A change means the peer rebuilt its
+                              state (e.g. one-sided discovery flap): our acked/
+                              sent positions describe a dead reader, so the
+                              lane re-joins as if freshly matched. */
     uint64_t sent_upto;  /* next seqno to push as new data  */
     uint64_t acked_upto; /* peer received all TUs < this    */
     /* pending repair request (from ACKNACK) */
@@ -914,6 +1008,7 @@ typedef struct {        /* writer-side, per (channel,peer) */
 typedef struct {        /* reader-side, per (channel,peer) */
     uint8_t  used;
     uint8_t  started;       /* accepted any DATA from this writer yet          */
+    uint32_t epoch;         /* this incarnation's id, sent in every ACKNACK    */
     uint64_t deliver_upto;  /* base of current sample; all below delivered/skipped */
     uint8_t  asm_active;    /* received >=1 frag of current sample */
     uint16_t asm_count;
@@ -975,6 +1070,7 @@ struct dart_state {
     uint32_t     destq_head, destq_n;
     uint32_t     sweep;       /* timer-sweep lane cursor */
     uint64_t     sweep_t;     /* clock position the sweep has paid for */
+    uint32_t     repoch;      /* reader-epoch counter (starts at 1; 0 = none) */
 };
 
 /* bump allocator (shared by required_memory and init) */
@@ -1032,7 +1128,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->peer_local=pl;
           st->peer_pub_bm=pb; st->peer_sub_bm=sb; st->bmlen=bml;
           st->cfg.n_channels=(uint16_t)nc; st->meta_ci=(uint16_t)ncu;
-          st->chans=ch; st->wprox=wp; st->rprox=rp;
+          st->chans=ch; st->wprox=wp; st->rprox=rp; st->repoch=1;
           st->lane_next=ln; st->lane_inq=li;
           st->dest_head=dh; st->dest_tail=dt; st->dest_inq=di; st->destq=dq;
           memset(pu,0,np); memset(pl,0,np);
@@ -1223,6 +1319,7 @@ static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
     uint8_t *abuf=r->asm_buf, *fbm=r->frag_bm;
     memset(r,0,sizeof(*r));
     r->asm_buf=abuf; r->frag_bm=fbm;
+    r->epoch=st->repoch++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
 }
 static void dart__unmatch_r(dart_state *st, uint16_t c, uint16_t ps){
@@ -1407,10 +1504,13 @@ static size_t dart_mk_hb(uint8_t *o, uint16_t chan, uint64_t first, uint64_t las
     o[0]=DART_HB; o[1]=0; dart_w16(o+2,chan); dart_w64(o+4,first); dart_w64(o+12,last); dart_w32(o+20,cnt);
     return 24;
 }
-static size_t dart_mk_nack(uint8_t *o, uint16_t chan, uint64_t base, uint16_t nbits, uint32_t bm){
-    o[0]=DART_NACK; o[1]=0; dart_w16(o+2,chan); dart_w64(o+4,base); dart_w16(o+12,nbits); dart_w32(o+14,bm);
-    return 18;
+static size_t dart_mk_nack(uint8_t *o, uint16_t chan, uint64_t base, uint16_t nbits, uint32_t bm,
+                         uint32_t epoch, uint8_t flags){
+    o[0]=DART_NACK; o[1]=flags; dart_w16(o+2,chan); dart_w64(o+4,base); dart_w16(o+12,nbits); dart_w32(o+14,bm);
+    dart_w32(o+18,epoch);
+    return 22;
 }
+#define DART_NACKF_UNPOSITIONED 1u   /* reader has not delivered anything yet */
 static size_t dart_mk_gap(uint8_t *o, uint16_t chan, uint64_t s, uint64_t e){
     o[0]=DART_GAP; o[1]=0; dart_w16(o+2,chan); dart_w64(o+4,s); dart_w64(o+12,e);
     return 20;
@@ -1488,8 +1588,12 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
     uint64_t first=dart_r64(p+4), last=dart_r64(p+12);
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
-    if (first > r->deliver_upto){
-        if (r->started && st->cfg.on_gap && ci!=(int)st->meta_ci)  /* superseded before repair */
+    /* un-started readers adopt no position from heartbeats: the advertised
+       first may be a dead predecessor's acked position (one-sided flap). The
+       ack armed below carries our epoch; the writer re-joins on seeing it and
+       the first pushed DATA sets the start. */
+    if (r->started && first > r->deliver_upto){
+        if (st->cfg.on_gap && ci!=(int)st->meta_ci)        /* superseded before repair */
             st->cfg.on_gap(st->cfg.user, ch->id, st->peer_ids[pslot],
                            r->deliver_upto, first - r->deliver_upto);
         r->deliver_upto=first; r->asm_active=0;
@@ -1513,9 +1617,41 @@ static void dart_reader_gap(dart_state *st, int ci, int pslot, const uint8_t *p)
 
 /* writer side: handle ACKNACK */
 static void dart_writer_nack(dart_state *st, int ci, int pslot, const uint8_t *p){
+    dart_channel *ch=&st->chans[ci];
     dart_wproxy *w=&st->wprox[(size_t)ci*st->cfg.max_peers+pslot];
     uint64_t base=dart_r64(p+4); uint16_t nbits=dart_r16(p+12); uint32_t bm=dart_r32(p+14);
+    uint32_t ep=dart_r32(p+18); uint8_t fl=p[1];
+    int group_mode;
     if (!w->used) return;
+    group_mode = ch->mcast && ch->nsubs_remote>0;
+    if (w->reader_epoch != ep){
+        if (w->reader_epoch){
+            /* the reader is a new incarnation (e.g. the peer dropped us in a
+               one-sided discovery flap and re-added): our acked/sent positions
+               describe its dead predecessor and would tell it nothing is
+               missing. Re-join the lane as if freshly matched; this ack's
+               content belongs to a position the lane no longer has. */
+            w->sent_upto  = group_mode ? ch->mc_sent_upto : dart_unicast_join_seqno(ch);
+            w->acked_upto = w->sent_upto;
+            w->has_nack   = 0;
+            w->hb_next_us = 0;
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            w->reader_epoch = ep;
+            return;
+        }
+        w->reader_epoch = ep;      /* first contact: lane is already fresh */
+    }
+    if (fl & DART_NACKF_UNPOSITIONED){
+        /* the reader has delivered nothing yet, and un-started readers never
+           NACK: any push it missed (e.g. one that raced ahead of the peer
+           adding us) is otherwise lost for good. Re-push from the unacked
+           edge, which is exactly the join window. */
+        if (!group_mode && w->acked_upto < w->sent_upto){
+            w->sent_upto = w->acked_upto;
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+        }
+        return;                    /* no position information to apply */
+    }
     if (base > w->acked_upto) w->acked_upto=base;
     if (nbits>0 && bm!=0){
         w->has_nack=1; w->nack_base=base; w->nack_bits=bm;
@@ -1535,7 +1671,7 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len,
         switch(type){
             case DART_DATA: if (rem<22) return; sub=22u+(size_t)dart_r16(p+20); break;
             case DART_HB:   sub=24; break;
-            case DART_NACK: sub=18; break;
+            case DART_NACK: sub=22; break;
             case DART_GAP:  sub=20; break;
             default: return;             /* unknown type: cannot resync, drop rest */
         }
@@ -1652,13 +1788,14 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
     uint64_t base; uint16_t nbits=0; uint32_t bm=0;
     if (!r->used) return 0;
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
-    if (cap<18) return 0;
+    if (cap<22) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
     r->ack_pending=0;
 
     if (!r->asm_active){
         base=r->deliver_upto;
-        if (r->deliver_upto<=r->hb_last){
+        if (!r->started){ nbits=0; bm=0; }   /* no position yet: epoch hello */
+        else if (r->deliver_upto<=r->hb_last){
             /* everything in (deliver_upto..hb_last] is missing here, so request
                the whole window: one round-trip repairs a burst loss instead of
                one TU per nack_delay */
@@ -1679,7 +1816,8 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
               nbits=(uint16_t)(rem<DART_NACK_WINDOW?rem:DART_NACK_WINDOW); }
         }
     }
-    return dart_mk_nack(out,ch->id,base,nbits,bm);
+    return dart_mk_nack(out,ch->id,base,nbits,bm,r->epoch,
+                      r->started ? 0 : (uint8_t)DART_NACKF_UNPOSITIONED);
 }
 
 /* multicast writer lane for channel ci: new data once for the whole group,
@@ -1942,6 +2080,8 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     dc->disc_port        = cfg->disc_port;
     dc->ttl              = cfg->ttl;
     dc->mcast_if         = cfg->mcast_if;
+    dc->seeds            = cfg->seeds;
+    dc->n_seeds          = cfg->n_seeds;
     tc->channels     = cfg->channels;
     tc->n_channels   = cfg->n_channels;
     tc->max_peers    = mp;
@@ -2154,14 +2294,27 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
               if (bind(mfd,(struct sockaddr*)&ma,sizeof ma)!=0) mc_ok=0;
           }
           if (mc_ok){
+              /* one join per distinct group: the &0xFF group mapping lets
+                 channels share a group, and kernels reject duplicate
+                 memberships. Memberships per socket are also OS-capped
+                 (often ~20: Linux net.ipv4.igmp_max_memberships), so keep
+                 mcast channels few; a failed join fails the open. */
               for (i=0;i<cfg->n_channels;i++)
                   if (cfg->channels[i].mcast && cfg->channels[i].dir!=DART_PUB_ONLY){
-                      struct ip_mreq mr; memset(&mr,0,sizeof mr);
-                      mr.imr_multiaddr.s_addr=dart__node_group_addr(cfg->domain_id, cfg->channels[i].channel_id);
-                      mr.imr_interface.s_addr=ifip;
-                      if (setsockopt(mfd,IPPROTO_IP,IP_ADD_MEMBERSHIP,(const char*)&mr,sizeof mr)!=0){
-                          mc_ok=0; break;
-                      }
+                      uint32_t g = dart__node_group_addr(cfg->domain_id, cfg->channels[i].channel_id);
+                      uint16_t j; int dup=0;
+                      for (j=0;j<i;j++)
+                          if (cfg->channels[j].mcast && cfg->channels[j].dir!=DART_PUB_ONLY
+                              && dart__node_group_addr(cfg->domain_id, cfg->channels[j].channel_id)==g){
+                              dup=1; break;
+                          }
+                      if (dup) continue;
+                      { struct ip_mreq mr; memset(&mr,0,sizeof mr);
+                        mr.imr_multiaddr.s_addr=g;
+                        mr.imr_interface.s_addr=ifip;
+                        if (setsockopt(mfd,IPPROTO_IP,IP_ADD_MEMBERSHIP,(const char*)&mr,sizeof mr)!=0){
+                            mc_ok=0; break;
+                        } }
                   }
           }
           if (!mc_ok){
@@ -2213,8 +2366,16 @@ static void dart__node_drain(dart_node *n, dart_sock_t fd, uint64_t deadline){
                            WSAECONNRESET); datagrams behind it are fine, keep draining */
         }
         if (r>0){
-            int pi=dart__node_find_addr(n,&src);
-            if (pi>=0) dart_on_datagram(n->tr, n->peers[pi].id, buf, (size_t)r, dart_now_us());
+            if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
+                /* unicast announce aimed at our data port: the only address
+                   that reaches THIS process when several share the disc port.
+                   Hand it to discovery. */
+                uint8_t sip[4]; memcpy(sip, &src.sin_addr.s_addr, 4);
+                dart_discovery_rt_feed(n->disc, sip, 4, buf, (size_t)r);
+            } else {
+                int pi=dart__node_find_addr(n,&src);
+                if (pi>=0) dart_on_datagram(n->tr, n->peers[pi].id, buf, (size_t)r, dart_now_us());
+            }
         }
         if (dart_now_us() >= deadline) break;      /* yield to discovery/send */
     }

@@ -4,6 +4,7 @@
 #define DART_NODE_H
 
 #include "dart_transport.h"
+#include "dart_discovery.h"    /* dart_discovery_addr (seed peers) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,7 +20,16 @@ typedef struct {
                                             239.255.<domain&255>.<chan&255>   */
     const char           *mcast_if;      /* interface IP for all multicast;
                                             NULL = auto. "127.0.0.1" keeps a
-                                            single-host run off the network   */
+                                            single-host run off the network.
+                                            Pin this on multihomed hosts: the
+                                            auto route probe follows whatever
+                                            the OS routes 239.x to (VPN, WSL,
+                                            docker bridges all candidates)    */
+    const dart_discovery_addr *seeds;    /* initial peers: announces are also
+                                            unicast here (port 0 = disc_port),
+                                            so discovery works where multicast
+                                            is filtered or flaky              */
+    uint16_t              n_seeds;
     uint32_t              announce_us;   /* default 1s                        */
     uint32_t              timeout_us;    /* default 3.5s                      */
     uint8_t               ttl;           /* multicast TTL, default 1          */

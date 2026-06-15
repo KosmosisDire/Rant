@@ -58,6 +58,12 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
+/* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
+ * fills *out when the slot holds a live peer. Lets a runtime reinforce
+ * announces over unicast so established peerings survive multicast outages
+ * (WiFi floods, IGMP snooping pruning); bootstrap still needs the group. */
+int          dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot,
+                             dart_discovery_addr *out);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) plus a boot seed,
  * for reproducible identity. RFC 9562 version-8 (custom). NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,

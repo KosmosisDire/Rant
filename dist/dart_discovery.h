@@ -73,6 +73,12 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
+/* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
+ * fills *out when the slot holds a live peer. Lets a runtime reinforce
+ * announces over unicast so established peerings survive multicast outages
+ * (WiFi floods, IGMP snooping pruning); bootstrap still needs the group. */
+int          dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot,
+                             dart_discovery_addr *out);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) plus a boot seed,
  * for reproducible identity. RFC 9562 version-8 (custom). NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
@@ -96,6 +102,8 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 extern "C" {
 #endif
 
+#define DART_DISCOVERY_MAX_SEEDS 4
+
 /* Zero/NULL fields get defaults. Leave disc.uuid all-zero to auto-generate a
  * per-boot random v4 UUID. */
 typedef struct {
@@ -106,6 +114,11 @@ typedef struct {
     const char  *mcast_if;    /* interface IP to join/send on; NULL = route probe.
                                  "127.0.0.1" keeps single-host setups off the
                                  network. */
+    const dart_discovery_addr *seeds;  /* initial peers: every announce is also
+                                 unicast to these, so discovery bootstraps on
+                                 networks where multicast is filtered or flaky
+                                 (copied at open; max DART_DISCOVERY_MAX_SEEDS) */
+    uint16_t     n_seeds;
 } dart_discovery_rt_config;
 
 typedef struct dart_discovery_rt dart_discovery_rt;
@@ -119,6 +132,13 @@ dart_discovery_rt  *dart_discovery_rt_open(void *mem, size_t mem_size, const dar
 int        dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms);
 /* Optionally multicast a graceful BYE, then close the socket. */
 void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
+
+/* Hand the core a discovery datagram that arrived on some other socket.
+ * Unicast announces to known peers target the peer's advertised DATA port
+ * (the only per-process address when several processes share the discovery
+ * port), so the layer owning the data socket forwards them here. */
+void       dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+                          const void *dg, size_t len);
 
 /* Fill out[16] with a random RFC 9562 v4 UUID from the platform CSPRNG.
  * Returns 1 on success, 0 if no entropy source was available. */
@@ -349,6 +369,18 @@ size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){
     return dart_discovery_build(st, 1, (uint8_t *)out, cap);
 }
 
+int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart_discovery_addr *out){
+    const dart_discovery_peer_ *p;
+    if (slot >= st->cap_peers) return 0;
+    p = &st->peers[slot];
+    if (!p->used) return 0;
+    memset(out, 0, sizeof *out);
+    memcpy(out->ip, p->ip, 16);
+    out->ip_len = p->ip_len;
+    out->port   = p->port;
+    return 1;
+}
+
 #ifndef DART_DISCOVERY_SANS_IO
 /* ===== dart_discovery_rt.c ===== */
 /* peer-discovery runtime: sockets, clock, UUID and the
@@ -409,7 +441,43 @@ struct dart_discovery_rt {
     dart_discovery_state        *core;
     dart_discovery_sock_t        fd;
     struct sockaddr_in  grp;
+    uint16_t            max_peers;
+    dart_discovery_addr seeds[DART_DISCOVERY_MAX_SEEDS];
+    uint16_t            n_seeds;
 };
+
+static void dart_discovery_rt_tx1(dart_discovery_rt *rt, const uint8_t *out, size_t m,
+                          const uint8_t ip[4], uint16_t port){
+    struct sockaddr_in d;
+    memset(&d, 0, sizeof d);
+    d.sin_family = AF_INET;
+    memcpy(&d.sin_addr.s_addr, ip, 4);
+    d.sin_port = htons(port);
+    sendto(rt->fd, (const char*)out, (int)m, 0, (struct sockaddr*)&d, sizeof d);
+}
+
+/* send a built announce/BYE to the group, to every configured seed, and to
+ * every known peer. Known peers get a copy at the shared disc port and one at
+ * their data port: the latter is the only per-process address when several
+ * processes on one host share the disc port (the data-socket owner forwards
+ * it via dart_discovery_rt_feed). Discovery then survives multicast outages
+ * and, with seeds, bootstraps without multicast. Receivers dedup by uuid. */
+static void dart_discovery_rt_tx(dart_discovery_rt *rt, const uint8_t *out, size_t m){
+    uint16_t s, dport = ntohs(rt->grp.sin_port);
+    dart_discovery_addr a;
+    sendto(rt->fd, (const char*)out, (int)m, 0,
+           (struct sockaddr*)&rt->grp, sizeof rt->grp);
+    for (s=0; s<rt->n_seeds; s++){
+        const dart_discovery_addr *sd = &rt->seeds[s];
+        if (sd->ip_len != 4) continue;
+        dart_discovery_rt_tx1(rt, out, m, sd->ip, sd->port ? sd->port : dport);
+    }
+    for (s=0; s<rt->max_peers; s++){
+        if (!dart_discovery_peer_addr(rt->core, s, &a) || a.ip_len != 4) continue;
+        dart_discovery_rt_tx1(rt, out, m, a.ip, dport);
+        if (a.port && a.port != dport) dart_discovery_rt_tx1(rt, out, m, a.ip, a.port);
+    }
+}
 
 static uint64_t dart_discovery_now_us(void){
 #ifdef _WIN32
@@ -427,6 +495,12 @@ static void dart_discovery_net_startup(void){
 #ifdef _WIN32
     WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
 #endif
+}
+
+void dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+                    const void *dg, size_t len){
+    if (!rt) return;
+    dart_discovery_on_datagram(rt->core, src_ip, src_ip_len, dg, len, dart_discovery_now_us());
 }
 
 /* Every multicast send and join should pin to this one interface. */
@@ -587,6 +661,14 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&loop, sizeof loop);
 
     rt->fd = fd;
+    rt->max_peers = c.disc.max_peers;
+    rt->n_seeds = 0;
+    if (c.seeds){
+        uint16_t k, ns = c.n_seeds;
+        if (ns > DART_DISCOVERY_MAX_SEEDS) ns = DART_DISCOVERY_MAX_SEEDS;
+        for (k=0;k<ns;k++) rt->seeds[k] = c.seeds[k];
+        rt->n_seeds = ns;
+    }
     memset(&rt->grp, 0, sizeof rt->grp);
     rt->grp.sin_family = AF_INET;
     rt->grp.sin_addr.s_addr = inet_addr(group);
@@ -617,8 +699,7 @@ int dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms){
     }
 
     m = dart_discovery_update(rt->core, dart_discovery_now_us(), out, sizeof out);
-    if (m) sendto(rt->fd, (const char*)out, (int)m, 0,
-                  (struct sockaddr*)&rt->grp, sizeof rt->grp);
+    if (m) dart_discovery_rt_tx(rt, out, m);
     return got;
 }
 
@@ -627,8 +708,7 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
     if (send_bye){
         uint8_t out[DART_DISCOVERY_WIRE_MAX];
         size_t m = dart_discovery_leave(rt->core, out, sizeof out);
-        if (m) sendto(rt->fd, (const char*)out, (int)m, 0,
-                      (struct sockaddr*)&rt->grp, sizeof rt->grp);
+        if (m) dart_discovery_rt_tx(rt, out, m);
     }
     DART_DISCOVERY_CLOSESOCK(rt->fd);
 #ifdef _WIN32

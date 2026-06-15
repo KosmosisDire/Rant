@@ -1,8 +1,10 @@
 /* middleware test & diagnostic CLI.
  *
  * Subcommands: node (full-mesh latency/throughput node), sweep (spawns node
- * children per rate, aggregates into a table), selftest (on_gap + backpressure
- * functional test), sendbench (UDP send-cost microbench, Windows-only).
+ * children per rate, aggregates into a table; --remote folds in results from
+ * `serve` workers on other machines), serve (two-machine sweep worker),
+ * selftest (on_gap, backpressure, dynamic-interest functional test),
+ * sendbench (UDP send-cost microbench, Windows-only).
  *
  * Built against single-header dist/dart.h with DART_IMPLEMENTATION, so the diag
  * sendto/recvfrom wrappers below can intercept the transport's syscalls.
@@ -67,7 +69,7 @@ static void diag_classify(const char *b, int len, unsigned long long *types,
             sub = 22 + ((unsigned char)b[off+20] | ((unsigned)(unsigned char)b[off+21] << 8));
         }
         else if (t == 2) sub = 24;
-        else if (t == 3) sub = 18;
+        else if (t == 3) sub = 22;
         else if (t == 4) sub = 20;
         else break;                       /* discovery/unknown datagram */
         if (sub > len - off) break;
@@ -159,6 +161,8 @@ static uint64_t get64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v
 
 #define CH_PROBE          1
 #define CH_LOAD           2
+#define XCH_ID0           100   /* extra load channels: ids 100..100+xch-1  */
+#define XCH_MAX           512
 #define LAT_DOMAIN        11
 #define PING_INTERVAL_NS  250000000ull    /* probe ping cadence: 250 ms       */
 #define REPORT_INTERVAL_NS 2000000000ull  /* human report cadence: 2 s        */
@@ -181,6 +185,11 @@ static uint64_t get64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v
 static const char *g_name = "node";
 static uint32_t    g_tag  = 0;
 static uint64_t    g_report_ns = 0;   /* wall time spent inside print_report */
+static int         g_xch = 0;         /* extra channels declared              */
+static int         g_spread = 0;      /* 1 = load round-robins across them;
+                                         2 = same but extras are PUB_ONLY on
+                                         every node, so those writes have no
+                                         readers anywhere (local cost only)   */
 
 static size_t build_probe(uint8_t *o, uint8_t type, uint32_t tag, uint32_t seq,
                           uint64_t t, const char *name){
@@ -206,9 +215,10 @@ typedef struct {
     double   ewma_ns;
     double   jit_ns;             /* RFC3550-style smoothed |delta RTT| */
     unsigned long rtt_n;
-    /* load / drops */
-    int      load_init;
-    uint32_t load_expect;
+    /* load / drops, tracked per channel: cross-channel arrival order is not
+       defined, so one shared counter would read reorder as drops */
+    uint8_t  ch_init[1+XCH_MAX];      /* [0]=CH_LOAD, [1+k]=extra k          */
+    uint32_t ch_expect[1+XCH_MAX];
     unsigned long load_recv, load_drops;
     uint64_t last_seen_ns;
 } peer_stat;
@@ -275,14 +285,17 @@ static void lat_on_sample(void *u, uint16_t ch, uint32_t from, const void *data,
                 e->rtt_n++;
             }
         }
-    } else if (ch==CH_LOAD){
-        uint32_t seq;
+    } else {
+        uint32_t seq; int idx;
+        if (ch==CH_LOAD) idx=0;
+        else if (ch>=XCH_ID0 && ch<XCH_ID0+g_xch) idx=1+(ch-XCH_ID0);
+        else return;
         if (len < 5 || p[0]!=LOAD_MAGIC) return;
         seq = get32(p+1);
-        if (!e->load_init){ e->load_init=1; e->load_expect=seq+1; e->load_recv=1; }
-        else if (seq >= e->load_expect){
-            e->load_drops += (seq - e->load_expect);   /* gap = dropped */
-            e->load_expect = seq+1;
+        if (!e->ch_init[idx]){ e->ch_init[idx]=1; e->ch_expect[idx]=seq+1; e->load_recv++; }
+        else if (seq >= e->ch_expect[idx]){
+            e->load_drops += (seq - e->ch_expect[idx]);   /* gap = dropped */
+            e->ch_expect[idx] = seq+1;
             e->load_recv++;
         } else {
             e->load_recv++;                             /* reorder/dup */
@@ -352,6 +365,12 @@ static int node_main(int argc, char **argv){
     int use_mcast   = (argc>5 ? atoi(argv[5]) : 0);
     int reliable    = (argc>6 ? atoi(argv[6]) : 0);
     int block_ms    = (argc>7 ? atoi(argv[7]) : 0);
+    g_xch           = (argc>8 ? atoi(argv[8]) : 0);
+    g_spread        = (argc>9 ? atoi(argv[9]) : 0);
+    const char *if_ip   = (argc>10 && strcmp(argv[10],"0")) ? argv[10] : NULL;
+    const char *peer_ip = (argc>11 && strcmp(argv[11],"0")) ? argv[11] : NULL;
+    if (g_xch < 0) g_xch = 0;
+    if (g_xch > XCH_MAX) g_xch = XCH_MAX;
 
     { uint64_t s = now_ns();
       g_tag = (uint32_t)(s ^ (s>>32) ^ ((uint32_t)
@@ -362,7 +381,7 @@ static int node_main(int argc, char **argv){
 #endif
               << 16)); }
 
-    dart_channel_def ch[2];
+    static dart_channel_def ch[2+XCH_MAX];
     memset(ch, 0, sizeof ch);
     ch[0].channel_id = CH_PROBE;
     /* depth must cover the pongs one tick can stage (one per peer) or the ring
@@ -372,17 +391,45 @@ static int node_main(int argc, char **argv){
     ch[1].qos.reliability = reliable ? DART_RELIABLE : DART_BEST_EFFORT;
     ch[1].qos.history_depth = LOAD_DEPTH; ch[1].qos.max_sample_bytes = 64;
     ch[1].qos.max_block_us = (uint32_t)(block_ms > 0 ? block_ms : 0) * 1000u;
-    ch[0].mcast = ch[1].mcast = (uint8_t)(use_mcast ? 1 : 0);
+    /* mcast 3: load rides the group, the probe stays unicast, so RTT measures
+       the path instead of the switch's multicast service cycle */
+    ch[0].mcast = (uint8_t)(use_mcast && use_mcast!=3 ? 1 : 0);
+    ch[1].mcast = (uint8_t)(use_mcast ? 1 : 0);
+    { int i;     /* extra channels: idle (depth 1) or load-bearing when spread */
+      for (i=0;i<g_xch;i++){
+          ch[2+i] = ch[1];
+          ch[2+i].channel_id = (uint16_t)(XCH_ID0+i);
+          ch[2+i].qos.history_depth = g_spread ? 128 : 1;
+          ch[2+i].mcast = 0;     /* groups are OS-capped (~20 joins/socket);
+                                    extras stay unicast, mcast tests the few
+                                    high-fanout channels (probe + load)      */
+          if (g_spread==2) ch[2+i].dir = DART_PUB_ONLY;   /* nobody subscribes */
+      } }
 
     dart_node_config cfg; memset(&cfg, 0, sizeof cfg);
     cfg.domain_id  = domain;
     cfg.data_port  = 0;
     cfg.channels   = ch;
-    cfg.n_channels = 2;
+    cfg.n_channels = (uint16_t)(2+g_xch);
+    cfg.max_peers  = MAX_PEERS;
+    cfg.meta_max_ids = (uint16_t)(2u*(2u+(uint32_t)g_xch)+8u);
     cfg.on_sample  = lat_on_sample;
     cfg.on_gap     = lat_on_gap;
-    if (use_mcast)
-        cfg.mcast_if = "127.0.0.1";   /* single-host test: stay off the NIC */
+    if (if_ip)
+        cfg.mcast_if = if_ip;         /* multihomed host: pin everything */
+    else if (use_mcast==1)
+        cfg.mcast_if = "127.0.0.1";   /* single-host test: stay off the NIC.
+                                         mcast=2 leaves the real interface for
+                                         cross-machine runs */
+    dart_discovery_addr seed;
+    if (peer_ip){                     /* bootstrap without multicast */
+        uint32_t a4 = inet_addr(peer_ip);
+        if (a4 != INADDR_NONE){
+            memset(&seed, 0, sizeof seed);
+            memcpy(seed.ip, &a4, 4); seed.ip_len = 4;   /* port 0 = disc port */
+            cfg.seeds = &seed; cfg.n_seeds = 1;
+        }
+    }
     { const char *rb = getenv("DART_DIAG_RCVBUF"), *sb = getenv("DART_DIAG_SNDBUF");
       if (rb) cfg.so_rcvbuf = (uint32_t)atoi(rb);
       if (sb) cfg.so_sndbuf = (uint32_t)atoi(sb);
@@ -390,17 +437,21 @@ static int node_main(int argc, char **argv){
                            g_name, cfg.so_rcvbuf, cfg.so_sndbuf); }
     g_trace = (getenv("DART_DIAG_TRACE") != NULL);
 
-    static uint8_t mem[4<<20];   /* deep load ring needs the headroom */
+    static uint8_t mem[48<<20];  /* deep load ring + extra channels x 64 peers */
     dart_node *n = dart_node_open(mem, sizeof mem, &cfg);
-    if (!n){ fprintf(stderr, "[%s] dart_node_open failed\n", g_name); return 1; }
+    if (!n){ fprintf(stderr, "[%s] dart_node_open failed (need %lu)\n",
+                     g_name, (unsigned long)dart_node_required_memory(&cfg)); return 1; }
 
-    printf("[%s] up (domain %u, tag %08x, load %d Hz, %ds, %s, %s load, block %d ms)\n",
+    printf("[%s] up (domain %u, tag %08x, load %d Hz, %ds, %s, %s load, block %d ms, +%d ch %s)\n",
            g_name, domain, g_tag, load_hz, duration_s,
            use_mcast ? "multicast" : "unicast",
-           reliable ? "reliable" : "best-effort", block_ms);
+           reliable ? "reliable" : "best-effort", block_ms,
+           g_xch, g_spread==2 ? "void" : g_spread ? "spread" : "idle");
 
     uint64_t start = now_ns(), last_ping = start, last_report = start;
-    uint32_t ping_seq = 0, load_seq = 0;
+    static uint32_t load_seq_ch[1+XCH_MAX];
+    uint32_t ping_seq = 0;
+    int rr = 0;                  /* spread round-robin cursor */
     unsigned long load_sent = 0, load_forgiven = 0;
     int wait_ms = (load_hz > 0) ? 1 : 20;   /* don't block long while loading */
     /* stall detection: a loop gap far beyond wait_ms means we lost the CPU, so
@@ -459,8 +510,13 @@ static int node_main(int argc, char **argv){
               if (want > done + slack){ load_forgiven += want - slack - done; done = want - slack; } }
             ph = now_ns();
             while (done + burst < want && burst < LOAD_BURST_MAX){
-                build_load(o, load_seq++);
-                dart_node_send(n, CH_LOAD, o, LOAD_LEN);
+                int idx = 0; uint16_t chid = CH_LOAD;
+                if (g_spread && g_xch){
+                    idx = rr; rr = (rr+1)%(1+g_xch);
+                    if (idx) chid = (uint16_t)(XCH_ID0+idx-1);
+                }
+                build_load(o, load_seq_ch[idx]++);
+                dart_node_send(n, chid, o, LOAD_LEN);
                 load_sent++; burst++;
             }
             t_stage += now_ns() - ph;
@@ -759,6 +815,25 @@ static int selftest_main(void){
       ST_CHECK(st_gap_calls[ST_CH_DYN] == 0, "dynamic: joins are silent (gaps=%lu)",
                st_gap_calls[ST_CH_DYN]);
 
+      /* 5b. FLAP: the reader rebuilds its transport state for the writer (a
+            one-sided discovery flap: only one side saw the peer go down). The
+            writer's lanes still describe the dead incarnation; the reader
+            epoch in the first ACKNACK must make every writer lane re-join,
+            re-deliver interest over the meta channel, and replay history. */
+      st_pump(w, r, 200);
+      { unsigned long s0 = st_samples[ST_CH_DYN];
+        uint32_t wid = 0; uint16_t k;
+        for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
+        dart_peer_remove(r->tr, wid);
+        dart_peer_add(r->tr, wid, 1);
+        st_pump(w, r, 600);
+        ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
+                 "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",
+                 st_samples[ST_CH_DYN], s0+ST_DEPTH);
+        ST_CHECK(st_gap_calls[ST_CH_DYN] == 0, "flap: recovery is silent (gaps=%lu)",
+                 st_gap_calls[ST_CH_DYN]);
+      }
+
       dart_node_close(r, 1);
       dart_node_close(w, 1);
     }
@@ -807,6 +882,13 @@ static int selftest_main(void){
 
 #define SW_MAX_NODES 64
 
+/* control plane (two-machine sweeps), constants shared by sweep and serve */
+#define CTL_DOMAIN     9     /* keep test --domain away from this */
+#define CTL_CMD        1
+#define CTL_RES        2
+#define CTL_RES_MAX    1400
+#define SW_MAX_RESULTS 128
+
 typedef struct {
 #ifdef _WIN32
     HANDLE h;
@@ -819,12 +901,14 @@ typedef struct {
 
 typedef struct { char keys[64][24]; char vals[64][40]; int n; } sw_kv;
 
-#ifndef _WIN32
 static void sw_sleep_ms(int ms){
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
     struct timespec ts; ts.tv_sec = ms/1000; ts.tv_nsec = (long)(ms%1000)*1000000L;
     nanosleep(&ts, NULL);
-}
 #endif
+}
 
 /* parse "10000" / "10k" / "1m" into an integer */
 static long sw_num(const char *p){
@@ -857,6 +941,10 @@ static double sw_kv_get(const sw_kv *o, const char *key, double dflt){
     int i; for (i=0;i<o->n;i++) if (strcmp(o->keys[i],key)==0) return atof(o->vals[i]);
     return dflt;
 }
+static const char *sw_kv_gets(const sw_kv *o, const char *key){
+    int i; for (i=0;i<o->n;i++) if (strcmp(o->keys[i],key)==0) return o->vals[i];
+    return NULL;
+}
 
 /* read the LAST SUMMARY / SUMMARY2 line out of a child's output file */
 static int sw_read_summary(const char *path, sw_kv *sum, sw_kv *sum2){
@@ -871,7 +959,10 @@ static int sw_read_summary(const char *path, sw_kv *sum, sw_kv *sum2){
 }
 
 static int sw_spawn(sw_child *c, const char *self, const char *name,
-                    int domain, long rate, int dur, int mcast, int rel, int blk){
+                    int domain, long rate, int dur, int mcast, int rel, int blk,
+                    int xch, int spread, const char *ifip, const char *peerip){
+    if (!ifip   || !*ifip)   ifip   = "0";
+    if (!peerip || !*peerip) peerip = "0";
 #ifdef _WIN32
     SECURITY_ATTRIBUTES sa; STARTUPINFOA si; PROCESS_INFORMATION pi;
     HANDLE hout; char cmd[1024];
@@ -883,8 +974,8 @@ static int sw_spawn(sw_child *c, const char *self, const char *name,
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = hout; si.hStdError = hout;
-    snprintf(cmd, sizeof cmd, "\"%s\" node %s %d %ld %d %d %d %d",
-             self, name, domain, rate, dur, mcast, rel, blk);
+    snprintf(cmd, sizeof cmd, "\"%s\" node %s %d %ld %d %d %d %d %d %d %s %s",
+             self, name, domain, rate, dur, mcast, rel, blk, xch, spread, ifip, peerip);
     memset(&pi, 0, sizeof pi);
     if (!CreateProcessA(self, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
                         NULL, NULL, &si, &pi)){
@@ -897,12 +988,14 @@ static int sw_spawn(sw_child *c, const char *self, const char *name,
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0){
-        char sd[16], sr[24], su[16], sm[8], se[8], sb[16];
+        char sd[16], sr[24], su[16], sm[8], se[8], sb[16], sx[16], sp[8];
         snprintf(sd,sizeof sd,"%d",domain);  snprintf(sr,sizeof sr,"%ld",rate);
         snprintf(su,sizeof su,"%d",dur);     snprintf(sm,sizeof sm,"%d",mcast);
         snprintf(se,sizeof se,"%d",rel);     snprintf(sb,sizeof sb,"%d",blk);
+        snprintf(sx,sizeof sx,"%d",xch);     snprintf(sp,sizeof sp,"%d",spread);
         if (!freopen(c->out, "w", stdout)) _exit(126);
-        { char *av[] = { (char*)self, "node", (char*)name, sd, sr, su, sm, se, sb, NULL };
+        { char *av[] = { (char*)self, "node", (char*)name, sd, sr, su, sm, se, sb, sx, sp,
+                         (char*)ifip, (char*)peerip, NULL };
           execvp(self, av); }
         _exit(127);
     }
@@ -911,30 +1004,297 @@ static int sw_spawn(sw_child *c, const char *self, const char *name,
 #endif
 }
 
-static void sw_wait(sw_child *cs, int n, int timeout_ms){
+/* wait for children to self-exit, pumping the control node (if any) so the
+ * control-plane discovery and result channel stay live meanwhile; kill
+ * stragglers at the deadline. cmd (optional) is re-published every 2s so a
+ * worker that lost the control plane and recovered still hears about the run
+ * (workers dedup by run nonce). */
+static void sw_wait_pump(sw_child *cs, int n, int timeout_ms, dart_node *ctl, const char *cmd){
     uint64_t deadline = now_ns() + (uint64_t)timeout_ms*1000000ull;
-#ifdef _WIN32
-    int i;
-    for (i=0;i<n;i++){
-        uint64_t now = now_ns();
-        DWORD remain = (now < deadline) ? (DWORD)((deadline-now)/1000000ull) : 0;
-        if (WaitForSingleObject(cs[i].h, remain) == WAIT_TIMEOUT)
-            TerminateProcess(cs[i].h, 1);
-        CloseHandle(cs[i].h); cs[i].reaped = 1;
-    }
-#else
-    int left = n, i;
+    uint64_t next_cmd = 0;
+    int left = 0, i;
+    for (i=0;i<n;i++) if (!cs[i].reaped) left++;
     while (left > 0 && now_ns() < deadline){
-        int any = 0;
-        for (i=0;i<n;i++){
-            int st;
-            if (cs[i].reaped) continue;
-            if (waitpid(cs[i].pid, &st, WNOHANG) == cs[i].pid){ cs[i].reaped=1; left--; any=1; }
+        if (ctl) dart_node_poll(ctl, 20); else sw_sleep_ms(5);
+        if (ctl && cmd && now_ns() >= next_cmd){
+            dart_node_send(ctl, CTL_CMD, cmd, strlen(cmd));
+            next_cmd = now_ns() + 2000000000ull;
         }
-        if (!any) sw_sleep_ms(5);
-    }
-    for (i=0;i<n;i++) if (!cs[i].reaped){ kill(cs[i].pid, SIGKILL); waitpid(cs[i].pid, NULL, 0); cs[i].reaped=1; }
+        for (i=0;i<n;i++){
+            if (cs[i].reaped) continue;
+#ifdef _WIN32
+            if (WaitForSingleObject(cs[i].h, 0) == WAIT_OBJECT_0){
+                CloseHandle(cs[i].h); cs[i].reaped=1; left--;
+            }
+#else
+            int st;
+            if (waitpid(cs[i].pid, &st, WNOHANG) == cs[i].pid){ cs[i].reaped=1; left--; }
 #endif
+        }
+    }
+    for (i=0;i<n;i++){
+        if (cs[i].reaped) continue;
+#ifdef _WIN32
+        TerminateProcess(cs[i].h, 1); CloseHandle(cs[i].h);
+#else
+        kill(cs[i].pid, SIGKILL); waitpid(cs[i].pid, NULL, 0);
+#endif
+        cs[i].reaped = 1;
+    }
+}
+
+/* ---- control plane: two-machine sweeps over DART itself ----------------- *
+ * dart_test serve            on the other machine(s): a worker that waits on
+ * a control domain, spawns the same node children the coordinator does, and
+ * publishes each child's raw SUMMARY lines back.
+ * dart_test sweep --remote   the coordinator: per rate it publishes one kv
+ * command (reliable CMD channel, join_replay 0 so stale commands never replay
+ * to late workers) and collects results (reliable RES channel, join_replay =
+ * depth so results survive a control-peer flap; entries are tagged with
+ * domain + run nonce so replays of older runs are filtered, not recounted).
+ * Workers HELLO at startup so the coordinator knows how many results to
+ * expect. Test nodes themselves discover each other over the LAN as usual:
+ * both machines must share a subnet (announce TTL is 1). */
+static char g_ctl_cmd[512];
+static int  g_ctl_cmd_new = 0;
+static char g_ctl_res[SW_MAX_RESULTS][CTL_RES_MAX];
+static int  g_ctl_res_n = 0, g_ctl_done = 0, g_ctl_res_drop = 0;
+static int  g_ctl_dom_filter = -1;   /* accept RESULTs for this domain only */
+static char g_ctl_workers[16][24];
+static int  g_ctl_nworkers = 0;
+
+static void ctl_on_sample(void *u, uint16_t ch, uint32_t from, const void *d, size_t len){
+    (void)u;(void)from;
+    if (ch==CTL_CMD && len < sizeof g_ctl_cmd){
+        memcpy(g_ctl_cmd, d, len); g_ctl_cmd[len]=0; g_ctl_cmd_new=1;
+    } else if (ch==CTL_RES){
+        /* every control-peer flap replays the worker's whole RES history (by
+           design: that is how results survive an outage). Old-rate replays
+           must not eat inbox slots, so filter by the rate's domain up front. */
+        if (g_ctl_dom_filter >= 0 && len > 7 && !memcmp(d, "RESULT ", 7)){
+            char head[48]; int dd = -1;
+            size_t hl = len < sizeof head-1 ? len : sizeof head-1;
+            memcpy(head, d, hl); head[hl] = 0;
+            sscanf(head, "RESULT domain=%d", &dd);
+            if (dd != g_ctl_dom_filter) return;
+        }
+        if (g_ctl_res_n < SW_MAX_RESULTS && len < CTL_RES_MAX){
+            memcpy(g_ctl_res[g_ctl_res_n], d, len); g_ctl_res[g_ctl_res_n][len]=0;
+            g_ctl_res_n++;
+        } else g_ctl_res_drop++;
+    }
+}
+
+static dart_node *ctl_open(uint16_t domain, int coordinator,
+                         const char *if_ip, const char *peer_ip){
+    static uint8_t mem[8<<20];
+    static dart_channel_def ch[2];
+    static dart_discovery_addr seed;
+    dart_node_config cfg;
+    memset(ch, 0, sizeof ch);
+    ch[0].channel_id            = CTL_CMD;
+    ch[0].qos.reliability       = DART_RELIABLE;
+    ch[0].qos.history_depth     = 8;
+    ch[0].qos.max_sample_bytes  = sizeof g_ctl_cmd;
+    ch[0].dir = coordinator ? DART_PUB_ONLY : DART_SUB_ONLY;
+    ch[1] = ch[0];
+    ch[1].channel_id            = CTL_RES;
+    ch[1].qos.history_depth     = SW_MAX_RESULTS;
+    ch[1].qos.join_replay       = SW_MAX_RESULTS;
+    ch[1].qos.max_sample_bytes  = CTL_RES_MAX;
+    ch[1].dir = coordinator ? DART_SUB_ONLY : DART_PUB_ONLY;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.domain_id  = domain;
+    cfg.channels   = ch;
+    cfg.n_channels = 2;
+    cfg.on_sample  = ctl_on_sample;
+    cfg.mcast_if   = if_ip;            /* pin on multihomed hosts */
+    cfg.announce_us = 500000;          /* the control plane must ride through
+                                          data floods: announce harder and
+                                          tolerate longer announce gaps      */
+    cfg.timeout_us  = 10000000;
+    if (peer_ip){                      /* bootstrap without multicast */
+        uint32_t a4 = inet_addr(peer_ip);
+        if (a4 != INADDR_NONE){
+            memset(&seed, 0, sizeof seed);
+            memcpy(seed.ip, &a4, 4); seed.ip_len = 4;
+            cfg.seeds = &seed; cfg.n_seeds = 1;
+        }
+    }
+    return dart_node_open(mem, sizeof mem, &cfg);
+}
+
+/* IP of the first control peer (the other machine), for seeding the test
+ * children; NULL if none known yet */
+static const char *ctl_peer_ip(dart_node *ctl, char out[20]){
+    uint16_t i;
+    for (i=0;i<ctl->max_peers;i++)
+        if (ctl->peers[i].used && ctl->peers[i].ip_len==4){
+            snprintf(out, 20, "%u.%u.%u.%u",
+                     ctl->peers[i].ip[0], ctl->peers[i].ip[1],
+                     ctl->peers[i].ip[2], ctl->peers[i].ip[3]);
+            return out;
+        }
+    return NULL;
+}
+
+/* log control-peer transitions: which side lost whom, and when, is the first
+ * question in any two-machine debugging session */
+static void ctl_watch(const char *who, dart_node *ctl){
+    static int had = 0;
+    static uint64_t t0 = 0;
+    char pb[20];
+    int has = ctl_peer_ip(ctl, pb) != NULL;
+    if (!t0) t0 = now_ns();
+    if (has != had){
+        printf("%s: [t=%.1fs] control peer %s%s%s\n", who,
+               (now_ns()-t0)/1e9, has?"up (":"DOWN", has?pb:"", has?")":"");
+        had = has;
+    }
+}
+
+/* consume new inbox entries: HELLOs grow the worker set; RESULTs matching
+ * (domain, run) parse into sum/sum2 at *count. Returns results consumed. */
+static int ctl_drain(int domain, unsigned long run, sw_kv *sum, sw_kv *sum2, int *count){
+    int got = 0;
+    for (; g_ctl_done < g_ctl_res_n; g_ctl_done++){
+        const char *e = g_ctl_res[g_ctl_done];
+        if (!strncmp(e, "HELLO ", 6)){
+            int k, known = 0;
+            for (k=0;k<g_ctl_nworkers;k++) if (!strcmp(g_ctl_workers[k], e+6)) known=1;
+            if (!known && g_ctl_nworkers < 16){
+                snprintf(g_ctl_workers[g_ctl_nworkers], sizeof g_ctl_workers[0], "%s", e+6);
+                g_ctl_nworkers++;
+                printf("sweep: worker %s joined\n", e+6);
+            }
+        } else if (!strncmp(e, "RESULT ", 7) && sum && count && *count < SW_MAX_RESULTS){
+            int d = -1; unsigned long r = 0;
+            sscanf(e, "RESULT domain=%d run=%lu", &d, &r);
+            if (d==domain && r==run){
+                const char *p1 = strstr(e, "\nSUMMARY "), *p2 = strstr(e, "\nSUMMARY2 ");
+                char line[2048]; size_t L;
+                if (!p1) continue;
+                L = strcspn(p1+1, "\n"); if (L >= sizeof line) L = sizeof line-1;
+                memcpy(line, p1+1, L); line[L]=0;
+                sum[*count].n = 0; sum2[*count].n = 0;
+                sw_kv_parse(line+8, &sum[*count]);
+                /* a flap replays this rate's earlier results too: same node
+                   reporting twice must not skew the aggregates */
+                { const char *nm = sw_kv_gets(&sum[*count], "name");
+                  int k, dup = 0;
+                  for (k=0;k<*count;k++){
+                      const char *nm2 = sw_kv_gets(&sum[k], "name");
+                      if (nm && nm2 && !strcmp(nm, nm2)){ dup=1; break; }
+                  }
+                  if (dup) continue;
+                }
+                if (p2){
+                    L = strcspn(p2+1, "\n"); if (L >= sizeof line) L = sizeof line-1;
+                    memcpy(line, p2+1, L); line[L]=0;
+                    sw_kv_parse(line+9, &sum2[*count]);
+                }
+                (*count)++; got++;
+            }
+        }
+    }
+    return got;
+}
+
+/* last SUMMARY/SUMMARY2 lines of a child's output, wrapped for the RES channel */
+static int sw_read_result(const char *path, char *out, size_t cap, int domain, unsigned long run){
+    FILE *f = fopen(path, "rb"); char line[1024], s1[1024]="", s2[1024]="";
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f)){
+        if (!strncmp(line, "SUMMARY2 ", 9)) snprintf(s2, sizeof s2, "%s", line);
+        else if (!strncmp(line, "SUMMARY ", 8)) snprintf(s1, sizeof s1, "%s", line);
+    }
+    fclose(f);
+    if (!s1[0]) return 0;
+    snprintf(out, cap, "RESULT domain=%d run=%lu\n%s%s", domain, run, s1, s2);
+    return 1;
+}
+
+static int worker_main(int argc, char **argv){
+    uint16_t dom = CTL_DOMAIN;
+    char prefix[8], hello[32];
+    const char *self; char tmpdir[260]; unsigned long mypid;
+    const char *if_ip = NULL, *peer_arg = NULL;
+    static sw_child cs[SW_MAX_NODES];
+    dart_node *ctl;
+    int i;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    timeBeginPeriod(1);
+#endif
+    for (i=2;i<argc;i++){
+        if (!strcmp(argv[i],"--domain") && i+1<argc) dom=(uint16_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--if")   && i+1<argc) if_ip   = argv[++i];
+        else if (!strcmp(argv[i],"--peer") && i+1<argc) peer_arg = argv[++i];
+    }
+
+#ifdef _WIN32
+    { static char selfbuf[1024]; GetModuleFileNameA(NULL, selfbuf, sizeof selfbuf); self=selfbuf; }
+    GetTempPathA(sizeof tmpdir, tmpdir);
+    mypid = (unsigned long)GetCurrentProcessId();
+#else
+    self = argv[0];
+    { const char *td=getenv("TMPDIR"); if(!td||!*td) td="/tmp";
+      snprintf(tmpdir,sizeof tmpdir,"%s/",td); }
+    mypid = (unsigned long)getpid();
+#endif
+    snprintf(prefix, sizeof prefix, "w%02lu", mypid%100);
+
+    ctl = ctl_open(dom, 0, if_ip, peer_arg);
+    if (!ctl){ fprintf(stderr, "serve: control node open failed\n"); return 1; }
+    snprintf(hello, sizeof hello, "HELLO %s", prefix);
+    dart_node_send(ctl, CTL_RES, hello, strlen(hello));
+    printf("serve: worker %s on control domain %u, waiting for sweeps\n", prefix, dom);
+
+    { unsigned long last_run = (unsigned long)-1;
+    for (;;){
+        sw_kv c; unsigned long run;
+        int domain, dur, mcast, rel, blk, xch, spread, nodes; long rate;
+        dart_node_poll(ctl, 100);
+        ctl_watch("serve", ctl);
+        if (!g_ctl_cmd_new) continue;
+        g_ctl_cmd_new = 0;
+        c.n = 0; sw_kv_parse(g_ctl_cmd, &c);
+        domain=(int)sw_kv_get(&c,"domain",-1);  rate=(long)sw_kv_get(&c,"rate",0);
+        dur   =(int)sw_kv_get(&c,"dur",5);      mcast=(int)sw_kv_get(&c,"mcast",0);
+        rel   =(int)sw_kv_get(&c,"rel",0);      blk  =(int)sw_kv_get(&c,"blk",0);
+        xch   =(int)sw_kv_get(&c,"xch",0);      spread=(int)sw_kv_get(&c,"spread",0);
+        nodes =(int)sw_kv_get(&c,"nodes",0);    run  =(unsigned long)sw_kv_get(&c,"run",0);
+        if (domain < 0 || nodes <= 0 || nodes > SW_MAX_NODES) continue;
+        if (run == last_run) continue;          /* coordinator re-publishes */
+        last_run = run;
+        printf("serve: run %lu: %d nodes, domain %d, %ld Hz, %ds\n", run, nodes, domain, rate, dur);
+        /* seed children with the coordinator's address so the test domain
+           also bootstraps without multicast */
+        { char pbuf[20];
+          const char *cpeer = ctl_peer_ip(ctl, pbuf);
+          if (!cpeer) cpeer = peer_arg;
+          for (i=0;i<nodes;i++){
+              char name[16];
+              snprintf(cs[i].out, sizeof cs[i].out, "%sdartw_%lu_n%d.txt", tmpdir, mypid, i);
+              snprintf(name, sizeof name, "%s.%d", prefix, i);
+              if (sw_spawn(&cs[i], self, name, domain, rate, dur, mcast, rel, blk, xch, spread,
+                           if_ip, cpeer) != 0){
+                  fprintf(stderr, "serve: spawn %d failed\n", i);
+                  cs[i].reaped = 1;
+              }
+          } }
+        sw_wait_pump(cs, nodes, (dur+10)*1000, ctl, NULL);
+        for (i=0;i<nodes;i++){
+            char res[CTL_RES_MAX];
+            if (sw_read_result(cs[i].out, res, sizeof res, domain, run))
+                dart_node_send(ctl, CTL_RES, res, strlen(res));
+            remove(cs[i].out);
+        }
+        { uint64_t end = now_ns()+1500000000ull;     /* flush + repair window */
+          while (now_ns() < end) dart_node_poll(ctl, 20); }
+        printf("serve: run %lu done\n", run);
+    } }
 }
 
 /* aggregate helpers over an array of parsed SUMMARY kvsets */
@@ -946,11 +1306,13 @@ static double sw_max(const sw_kv *a, int n, const char *k){
     double m=0; int i; for (i=0;i<n;i++){ double v=sw_kv_get(&a[i],k,0); if(v>m)m=v; } return m; }
 
 static int sweep_main(int argc, char **argv){
-    int nodes=10, base_domain=20, dur=8, mcast=0, rel=0, blk=0, diag=0;
+    int nodes=10, base_domain=20, dur=8, mcast=0, rel=0, blk=0, diag=0, xch=0, spread=0;
+    int remote=0; uint16_t ctl_dom=CTL_DOMAIN; dart_node *ctl=NULL;
+    const char *if_ip=NULL, *peer_arg=NULL;
     long rates[64]; int nrates=0, i, ri;
     const char *self;
     static sw_child  cs[SW_MAX_NODES];
-    static sw_kv     sum[SW_MAX_NODES], sum2[SW_MAX_NODES];
+    static sw_kv     sum[SW_MAX_RESULTS], sum2[SW_MAX_RESULTS];
     char tmpdir[260]; unsigned long mypid;
 
     for (i=2;i<argc;i++){
@@ -959,8 +1321,15 @@ static int sweep_main(int argc, char **argv){
         else if (!strcmp(argv[i],"--duration")&& i+1<argc) dur=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--mcast")   && i+1<argc) mcast=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--block-ms")&& i+1<argc) blk=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--extra-ch")&& i+1<argc) xch=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--spread"))   spread=1;
+        else if (!strcmp(argv[i],"--void"))     spread=2;
         else if (!strcmp(argv[i],"--reliable")) rel=1;
         else if (!strcmp(argv[i],"--diag"))     diag=1;
+        else if (!strcmp(argv[i],"--remote"))   remote=1;
+        else if (!strcmp(argv[i],"--ctl-domain")&& i+1<argc) ctl_dom=(uint16_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--if")   && i+1<argc) if_ip=argv[++i];
+        else if (!strcmp(argv[i],"--peer") && i+1<argc) peer_arg=argv[++i];
         else if (!strcmp(argv[i],"--rates")   && i+1<argc){
             const char *p = argv[++i];
             nrates = 0;
@@ -986,10 +1355,22 @@ static int sweep_main(int argc, char **argv){
     mypid = (unsigned long)getpid();
 #endif
 
+    if (remote){
+        ctl = ctl_open(ctl_dom, 1, if_ip, peer_arg);
+        if (!ctl){ fprintf(stderr, "sweep: control node open failed\n"); return 1; }
+        printf("sweep: control domain %u, discovering workers...\n", ctl_dom);
+        { uint64_t end = now_ns()+3000000000ull;
+          while (now_ns() < end){ dart_node_poll(ctl, 50); ctl_drain(-1, 0, NULL, NULL, NULL); } }
+        printf("sweep: %d worker(s), %d remote nodes per rate\n",
+               g_ctl_nworkers, g_ctl_nworkers*nodes);
+    }
+
     printf("sweep: %d nodes, %ds each, rates", nodes, dur);
     for (ri=0;ri<nrates;ri++) printf(" %ld", rates[ri]);
-    printf("%s%s%s\n\n", mcast?", multicast":"", rel?", reliable load":"",
+    printf("%s%s%s", mcast?", multicast":"", rel?", reliable load":"",
            blk>0?" (block)":"");
+    if (xch) printf(", +%d %s ch", xch, spread==2?"void":spread?"spread":"idle");
+    printf("\n\n");
     printf("%10s %12s %10s %10s %10s %8s %9s %9s %6s\n",
            "TargetHz","Achieved/n","RTTavg ms","RTTmin ms","Jitter ms",
            "Drop%","Block ms","Stall ms","Nodes");
@@ -997,21 +1378,38 @@ static int sweep_main(int argc, char **argv){
     for (ri=0; ri<nrates; ri++){
         long rate = rates[ri];
         int domain = base_domain + ri;     /* distinct domain per rate run */
-        int count = 0, peers_n = 0;
+        int count = 0, peers_n = 0, expect = nodes;
+        unsigned long run = mypid*100u + (unsigned long)ri;
         double achieved, rttAvg=0, rttJit=0, rttMin=1e18, recv, drops, stall, blkMs, dpct;
+        char cmd[256];
 
-        for (i=0;i<nodes;i++){
-            char name[16];
-            snprintf(cs[i].out, sizeof cs[i].out, "%smwsweep_%lu_r%ld_n%d.txt",
-                     tmpdir, mypid, rate, i);
-            snprintf(name, sizeof name, "n%d", i);
-            sum[i].n = 0; sum2[i].n = 0;
-            if (sw_spawn(&cs[i], self, name, domain, rate, dur, mcast, rel, blk) != 0){
-                fprintf(stderr, "sweep: failed to spawn node %d\n", i);
-                cs[i].reaped = 1;
-            }
+        if (remote){
+            /* fresh inbox per rate: flap replays of past rates are filtered at
+               insert (domain), so slots stay free for this rate's results */
+            g_ctl_dom_filter = domain;
+            g_ctl_res_n = 0; g_ctl_done = 0; g_ctl_res_drop = 0;
+            snprintf(cmd, sizeof cmd,
+                "domain=%d rate=%ld dur=%d mcast=%d rel=%d blk=%d xch=%d spread=%d nodes=%d run=%lu",
+                domain, rate, dur, mcast, rel, blk, xch, spread, nodes, run);
+            dart_node_send(ctl, CTL_CMD, cmd, strlen(cmd));
+            for (i=0;i<10;i++) dart_node_poll(ctl, 1);   /* push it out now */
         }
-        sw_wait(cs, nodes, (dur+10)*1000);
+
+        { char pbuf[20];
+          const char *cpeer = remote ? ctl_peer_ip(ctl, pbuf) : NULL;
+          if (!cpeer && remote) cpeer = peer_arg;
+          for (i=0;i<nodes;i++){
+              char name[16];
+              snprintf(cs[i].out, sizeof cs[i].out, "%smwsweep_%lu_r%ld_n%d.txt",
+                       tmpdir, mypid, rate, i);
+              snprintf(name, sizeof name, "n%d", i);
+              if (sw_spawn(&cs[i], self, name, domain, rate, dur, mcast, rel, blk, xch, spread,
+                           if_ip, cpeer) != 0){
+                  fprintf(stderr, "sweep: failed to spawn node %d\n", i);
+                  cs[i].reaped = 1;
+              }
+          } }
+        sw_wait_pump(cs, nodes, (dur+10)*1000, ctl, remote ? cmd : NULL);
 
         /* collect: compact the parsed SUMMARYs into [0..count) of sum[]/sum2[] */
         { sw_kv s, s2;
@@ -1019,17 +1417,41 @@ static int sweep_main(int argc, char **argv){
               s.n = 0; s2.n = 0;
               if (sw_read_summary(cs[i].out, &s, &s2)){
                   sum[count] = s; sum2[count] = s2; count++;
-                  if (sw_kv_get(&s,"peers",0) > 0){
-                      rttAvg += sw_kv_get(&s,"rtt_avg_ms",0);
-                      rttJit += sw_kv_get(&s,"rtt_jit_ms",0);
-                      peers_n++;
-                  }
-                  { double rm = sw_kv_get(&s,"rtt_min_ms",0); if (rm>0 && rm<rttMin) rttMin=rm; }
               }
               remove(cs[i].out);
           }
         }
+        if (remote){
+            /* remote results: collected until every known worker reported its
+               share or the window closes */
+            uint64_t t0 = now_ns(), next_cmd = 0; int rgot = 0;
+            for (;;){
+                uint64_t lim = (uint64_t)(g_ctl_nworkers ? 15 : 5)*1000000000ull;
+                dart_node_poll(ctl, 50);
+                ctl_watch("sweep", ctl);
+                if (now_ns() >= next_cmd){       /* keep recovered workers in sync */
+                    dart_node_send(ctl, CTL_CMD, cmd, strlen(cmd));
+                    next_cmd = now_ns() + 2000000000ull;
+                }
+                rgot += ctl_drain(domain, run, sum, sum2, &count);
+                if (g_ctl_nworkers && rgot >= g_ctl_nworkers*nodes) break;
+                if (now_ns() - t0 > lim) break;
+            }
+            expect = nodes*(1+g_ctl_nworkers);
+            if (g_ctl_nworkers && rgot < g_ctl_nworkers*nodes)
+                printf("    note: %d/%d remote results (inbox %d, dropped %d)\n",
+                       rgot, g_ctl_nworkers*nodes, g_ctl_res_n, g_ctl_res_drop);
+        }
         if (count==0){ printf("%10ld   (no SUMMARY captured)\n", rate); continue; }
+
+        for (i=0;i<count;i++){
+            if (sw_kv_get(&sum[i],"peers",0) > 0){
+                rttAvg += sw_kv_get(&sum[i],"rtt_avg_ms",0);
+                rttJit += sw_kv_get(&sum[i],"rtt_jit_ms",0);
+                peers_n++;
+            }
+            { double rm = sw_kv_get(&sum[i],"rtt_min_ms",0); if (rm>0 && rm<rttMin) rttMin=rm; }
+        }
 
         achieved = sw_avg(sum, count, "sent_hz");
         recv     = sw_sum(sum, count, "recv");
@@ -1042,7 +1464,7 @@ static int sweep_main(int argc, char **argv){
 
         printf("%10ld %12d %10.3f %10.3f %10.3f %8.2f %9.0f %9.0f %4d/%d\n",
                rate, (int)(achieved+0.5), rttAvg, rttMin, rttJit, dpct, blkMs, stall,
-               count, nodes);
+               count, expect);
 
         if (diag && count){
             double txDATA=sw_sum(sum2,count,"txDATA"), rxDATA=sw_sum(sum2,count,"rxDATA");
@@ -1074,6 +1496,8 @@ int main(int argc, char **argv){
         return selftest_main();
     if (argc >= 2 && strcmp(argv[1], "sweep") == 0)
         return sweep_main(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "serve") == 0)
+        return worker_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "sendbench") == 0){
 #ifdef _WIN32
         return sendbench_main();
@@ -1085,13 +1509,33 @@ int main(int argc, char **argv){
     fprintf(stderr,
         "usage: dart_test <command> [args]\n"
         "  node <name> [domain] [load_hz] [duration_s] [mcast] [reliable] [block_ms]\n"
+        "       [extra_ch] [spread] [if_ip] [peer_ip]\n"
+        "        if_ip: pin all multicast to this interface (multihomed hosts);\n"
+        "        peer_ip: seed discovery with this address (no multicast needed);\n"
+        "        \"0\" = unset for either\n"
         "        latency/throughput node; SUMMARY+SUMMARY2 on timed exit\n"
         "        reliable=1: load channel DART_RELIABLE; block_ms: writer\n"
         "        backpressure window (qos.max_block_us) for that channel\n"
+        "        extra_ch: declare N more channels; spread=1 round-robins the\n"
+        "        load across them (0 = they stay idle, 2 = they are PUB_ONLY\n"
+        "        everywhere so those writes have no readers)\n"
+        "        mcast: 1 = on, pinned to loopback (single host); 2 = on, real NIC;\n"
+        "        3 = like 2 but the probe stays unicast (RTT measures the path,\n"
+        "        not the switch's multicast handling)\n"
         "        env: DART_DIAG_RCVBUF/DART_DIAG_SNDBUF (bytes), DART_DIAG_TRACE\n"
         "  sweep [--nodes N] [--domain D] [--duration S] [--rates a,b,c]\n"
-        "        [--mcast 0|1] [--reliable] [--block-ms N] [--diag]\n"
-        "        spawn N node children per rate; print an RTT-vs-throughput table\n"
+        "        [--mcast 0|1|2] [--reliable] [--block-ms N] [--extra-ch N] [--spread]\n"
+        "        [--void] [--remote] [--ctl-domain D] [--if IP] [--peer IP] [--diag]\n"
+        "        spawn N node children per rate; print an RTT-vs-throughput table.\n"
+        "        --remote also commands every 'serve' worker on the LAN to spawn N\n"
+        "        nodes per rate and folds their SUMMARYs into the same table.\n"
+        "        --if pins multicast to that local interface (multihomed hosts);\n"
+        "        --peer seeds discovery with the other machine's address, so the\n"
+        "        run works even where multicast is broken or filtered\n"
+        "  serve [--domain D] [--if IP] [--peer IP]\n"
+        "        two-machine sweep worker: waits on the control domain (default 9),\n"
+        "        runs each commanded rate alongside the coordinator, reports back.\n"
+        "        Machines must share a subnet (discovery TTL is 1)\n"
         "  sendbench\n"
         "        UDP send-cost microbench on loopback (Windows)\n"
         "  selftest\n"
