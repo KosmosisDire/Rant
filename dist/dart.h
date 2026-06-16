@@ -90,6 +90,12 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
+/* Queue a one-shot solicit: the next dart_discovery_update emits a request that
+ * asks peers to announce back immediately, so membership is (re)gathered fast
+ * instead of over an announce interval. (Sent automatically once at startup.) */
+void         dart_discovery_solicit(dart_discovery_state *st);
+/* Count of live peers currently known. */
+uint16_t     dart_discovery_peer_count(const dart_discovery_state *st);
 /* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
  * fills *out when the slot holds a live peer. Lets a runtime reinforce
  * announces over unicast so established peerings survive multicast outages
@@ -147,6 +153,12 @@ dart_discovery_rt  *dart_discovery_rt_open(void *mem, size_t mem_size, const dar
  * pumps timeouts and announcements, sends what's due. Returns 1 if a datagram
  * arrived, 0 if idle, <0 on socket error. */
 int        dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms);
+/* Discover all reachable peers, reasonably reliably: solicit (asking everyone to
+ * announce now), then pump until the peer set stops growing for quiet_ms, or
+ * timeout_ms total elapses. Re-solicits periodically so a dropped request is
+ * retried. Returns the peer count found (0 at timeout if none). Blocks (drives
+ * the loop internally); use at startup to gather current membership. */
+int        dart_discovery_rt_settle(dart_discovery_rt *rt, int quiet_ms, int timeout_ms);
 /* Optionally multicast a graceful BYE, then close the socket. */
 void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
 
@@ -512,6 +524,7 @@ struct dart_discovery_state {
     uint64_t      next_announce_us;
     uint32_t      next_local_id;
     uint8_t       started;
+    uint8_t       want_solicit;   /* a solicit (REQ) is queued for the next update */
     uint16_t      cap_peers;
     dart_discovery_peer_  *peers;
 };
@@ -682,10 +695,11 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
 }
 
 size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, size_t cap){
-    uint16_t i; int first = !st->started;
-    if (first){
+    uint16_t i;
+    if (!st->started){
         st->started = 1;
         st->next_announce_us = now + (dart_discovery_fnv(st->cfg.uuid,16) % st->cfg.announce_us);
+        st->want_solicit = 1;   /* solicit on startup */
     }
     for (i=0;i<st->cap_peers;i++){
         if (!st->peers[i].used) continue;
@@ -695,14 +709,27 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
             if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
         }
     }
-    if (first)   /* solicit on startup: announces us AND asks peers to reply now,
-                    so discovery is ~instant instead of waiting an announce interval */
+    if (st->want_solicit){   /* solicit: announces us AND asks peers to reply now, so
+                                discovery is ~instant instead of waiting an interval */
+        st->want_solicit = 0;
         return dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, (uint8_t *)out, cap);
+    }
     if (now >= st->next_announce_us){
         st->next_announce_us = now + st->cfg.announce_us;
         return dart_discovery_build(st, 0, (uint8_t *)out, cap);
     }
     return 0;
+}
+
+/* Queue a one-shot solicit: the next dart_discovery_update emits a REQ, asking
+ * peers to announce back immediately. Used to (re)gather membership on demand. */
+void dart_discovery_solicit(dart_discovery_state *st){ if (st) st->want_solicit = 1; }
+
+/* Number of live peers currently in the table. */
+uint16_t dart_discovery_peer_count(const dart_discovery_state *st){
+    uint16_t i, c = 0;
+    for (i=0;i<st->cap_peers;i++) if (st->peers[i].used) c++;
+    return c;
 }
 
 size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){
@@ -1041,6 +1068,27 @@ int dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms){
     m = dart_discovery_update(rt->core, dart_discovery_now_us(), out, sizeof out);
     if (m) dart_discovery_rt_tx(rt, out, m);
     return got;
+}
+
+int dart_discovery_rt_settle(dart_discovery_rt *rt, int quiet_ms, int timeout_ms){
+    uint64_t start, last_change, last_solicit = 0;
+    uint16_t count;
+    if (!rt) return 0;
+    start = dart_discovery_now_us(); last_change = start;
+    count = dart_discovery_peer_count(rt->core);
+    for (;;){
+        uint64_t now = dart_discovery_now_us(); uint16_t c;
+        if (now - last_solicit >= 250000u){     /* (re)solicit ~4x/s so a lost one retries */
+            dart_discovery_solicit(rt->core); last_solicit = now;
+        }
+        dart_discovery_rt_poll(rt, 10);          /* sends the solicit, takes in replies */
+        now = dart_discovery_now_us();
+        c = dart_discovery_peer_count(rt->core);
+        if (c > count){ count = c; last_change = now; }   /* grew: keep waiting */
+        if (count > 0 && now - last_change >= (uint64_t)quiet_ms*1000u) break;
+        if (now - start >= (uint64_t)timeout_ms*1000u) break;
+    }
+    return (int)count;
 }
 
 void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){

@@ -319,6 +319,27 @@ int dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms){
     return got;
 }
 
+int dart_discovery_rt_settle(dart_discovery_rt *rt, int quiet_ms, int timeout_ms){
+    uint64_t start, last_change, last_solicit = 0;
+    uint16_t count;
+    if (!rt) return 0;
+    start = dart_discovery_now_us(); last_change = start;
+    count = dart_discovery_peer_count(rt->core);
+    for (;;){
+        uint64_t now = dart_discovery_now_us(); uint16_t c;
+        if (now - last_solicit >= 250000u){     /* (re)solicit ~4x/s so a lost one retries */
+            dart_discovery_solicit(rt->core); last_solicit = now;
+        }
+        dart_discovery_rt_poll(rt, 10);          /* sends the solicit, takes in replies */
+        now = dart_discovery_now_us();
+        c = dart_discovery_peer_count(rt->core);
+        if (c > count){ count = c; last_change = now; }   /* grew: keep waiting */
+        if (count > 0 && now - last_change >= (uint64_t)quiet_ms*1000u) break;
+        if (now - start >= (uint64_t)timeout_ms*1000u) break;
+    }
+    return (int)count;
+}
+
 void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
     if (!rt) return;
     if (send_bye){

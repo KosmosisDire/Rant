@@ -38,6 +38,12 @@ dart_discovery_rt  *dart_discovery_rt_open(void *mem, size_t mem_size, const dar
  * pumps timeouts and announcements, sends what's due. Returns 1 if a datagram
  * arrived, 0 if idle, <0 on socket error. */
 int        dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms);
+/* Discover all reachable peers, reasonably reliably: solicit (asking everyone to
+ * announce now), then pump until the peer set stops growing for quiet_ms, or
+ * timeout_ms total elapses. Re-solicits periodically so a dropped request is
+ * retried. Returns the peer count found (0 at timeout if none). Blocks (drives
+ * the loop internally); use at startup to gather current membership. */
+int        dart_discovery_rt_settle(dart_discovery_rt *rt, int quiet_ms, int timeout_ms);
 /* Optionally multicast a graceful BYE, then close the socket. */
 void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
 

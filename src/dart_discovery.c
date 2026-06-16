@@ -25,6 +25,7 @@ struct dart_discovery_state {
     uint64_t      next_announce_us;
     uint32_t      next_local_id;
     uint8_t       started;
+    uint8_t       want_solicit;   /* a solicit (REQ) is queued for the next update */
     uint16_t      cap_peers;
     dart_discovery_peer_  *peers;
 };
@@ -195,10 +196,11 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
 }
 
 size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, size_t cap){
-    uint16_t i; int first = !st->started;
-    if (first){
+    uint16_t i;
+    if (!st->started){
         st->started = 1;
         st->next_announce_us = now + (dart_discovery_fnv(st->cfg.uuid,16) % st->cfg.announce_us);
+        st->want_solicit = 1;   /* solicit on startup */
     }
     for (i=0;i<st->cap_peers;i++){
         if (!st->peers[i].used) continue;
@@ -208,14 +210,27 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
             if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
         }
     }
-    if (first)   /* solicit on startup: announces us AND asks peers to reply now,
-                    so discovery is ~instant instead of waiting an announce interval */
+    if (st->want_solicit){   /* solicit: announces us AND asks peers to reply now, so
+                                discovery is ~instant instead of waiting an interval */
+        st->want_solicit = 0;
         return dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, (uint8_t *)out, cap);
+    }
     if (now >= st->next_announce_us){
         st->next_announce_us = now + st->cfg.announce_us;
         return dart_discovery_build(st, 0, (uint8_t *)out, cap);
     }
     return 0;
+}
+
+/* Queue a one-shot solicit: the next dart_discovery_update emits a REQ, asking
+ * peers to announce back immediately. Used to (re)gather membership on demand. */
+void dart_discovery_solicit(dart_discovery_state *st){ if (st) st->want_solicit = 1; }
+
+/* Number of live peers currently in the table. */
+uint16_t dart_discovery_peer_count(const dart_discovery_state *st){
+    uint16_t i, c = 0;
+    for (i=0;i<st->cap_peers;i++) if (st->peers[i].used) c++;
+    return c;
 }
 
 size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){

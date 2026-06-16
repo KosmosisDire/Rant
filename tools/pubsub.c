@@ -217,19 +217,24 @@ static void *pubsub_realloc(void *u, void *ptr, size_t size){
     return realloc(ptr, size);
 }
 
-/* Wait up to timeout_ms for >=1 subscriber to match this channel (discovery +
- * interest exchange), pumping the node throughout, so a one-shot publisher never
- * fires into the void: with no matched reader a send still "succeeds" and drains
- * vacuously, yet nobody receives it. Returns 1 if matched. A brief settle after
- * the first match lets the reader's own side finish wiring up. */
+/* Wait for subscribers to match this channel, pumping the node throughout, so a
+ * one-shot publisher never fires into the void. Returns once >=1 subscriber has
+ * matched AND the count has stopped growing for a short quiet window -- so peers
+ * discovered around the same time are all captured, not just the first -- or 0 on
+ * timeout with none. (A late joiner that appears after the window still misses a
+ * one-shot send: the publisher can't know how many to expect; use --subscribers
+ * if you need a specific count, or a long-lived publisher for late joiners.) */
 static int wait_for_sub(dart_node *n, uint16_t cid, int timeout_ms){
-    int t, said = 0;
+    int t, count = 0, stable = 0, said = 0;
+    /* Short window: just longer than the startup-solicit reply jitter (~20ms),
+       so a burst of already-up subscribers is captured, but a lone subscriber --
+       the common case -- isn't made to wait for a second that will never come. */
+    const int QUIET = 60;
     for (t = 0; t < timeout_ms; t += 20){
-        if (dart_node_writer_match_count(n, cid) > 0){
-            int s; for (s = 0; s < 200; s += 20) dart_node_poll(n, 20);
-            return 1;
-        }
-        if (!said && t >= 400){ printf("[pub] waiting for a subscriber...\n"); said = 1; }
+        int c = dart_node_writer_match_count(n, cid);
+        if (c > count){ count = c; stable = 0; }              /* a new sub: keep waiting */
+        else if (count > 0 && (stable += 20) >= QUIET) return 1;
+        if (!said && count == 0 && t >= 400){ printf("[pub] waiting for a subscriber...\n"); said = 1; }
         dart_node_poll(n, 20);
     }
     return dart_node_writer_match_count(n, cid) > 0;

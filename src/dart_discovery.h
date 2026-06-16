@@ -58,6 +58,12 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
+/* Queue a one-shot solicit: the next dart_discovery_update emits a request that
+ * asks peers to announce back immediately, so membership is (re)gathered fast
+ * instead of over an announce interval. (Sent automatically once at startup.) */
+void         dart_discovery_solicit(dart_discovery_state *st);
+/* Count of live peers currently known. */
+uint16_t     dart_discovery_peer_count(const dart_discovery_state *st);
 /* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
  * fills *out when the slot holds a live peer. Lets a runtime reinforce
  * announces over unicast so established peerings survive multicast outages
