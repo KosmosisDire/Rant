@@ -1,44 +1,9 @@
 /* tiny pub/sub command-line tool over a DART node.
- *
- *   pubsub sub <channel> [opts]            subscribe: print every message
- *   pubsub pub <channel> <text...> [opts]  publish one text message, then exit
- *   pubsub pub <channel> [opts]            publish from stdin: a terminal sends
- *                                          one message per typed line; a piped
- *                                          or redirected file is sent whole
- *                                          (newlines preserved)
- *
- * <channel> is a topic name: its 64-bit hash is the cross-peer identity, and the
- * name rides discovery so a hash clash is detected, not silently cross-wired.
- * Both sides must use the same channel, domain, and transport (unicast or
- * --mcast). Messages are reliable KEEP_LAST, so a subscriber already up gets
- * them in order, and one that joins late sees the recent history a live
- * publisher still holds.
- *
- *   POSIX  : cc  -std=c99 -Wall -Idist tools/pubsub.c -o pubsub -lpthread
- *   Windows: gcc -std=c99 -Wall -Idist tools/pubsub.c -o pubsub.exe -lws2_32 -lbcrypt
- *
- * Try it: in one terminal `pubsub sub chat`, in another `pubsub pub chat hello`.
- *
- * Options:
- *   --domain N     discovery domain (default 7)
- *   --mcast        let high-fanout data ride a per-channel multicast group
- *   --if <ip>      multicast interface IP (pin this on multihomed hosts)
- *   --peer <ip>    seed a peer by IP so discovery works without multicast
- *   --best-effort  drop reliability (fire and forget, no repair)
- *   --wait MS      how long a one-shot/file publisher waits for a subscriber to
- *                  match before sending (default 5000); delivery is then awaited
- *                  automatically, so a too-short wait no longer drops a message
- *   --file <name>  pub: publish the named file's contents (whole, like piped
- *                  stdin); sub: write each received message to the named file,
- *                  OVERWRITING it (the file mirrors the latest message, so pair
- *                  with --max big enough that a whole file is one message)
- *   --max <size>   FIXED message cap (e.g. 512k, 16M): bounds memory, refuses a
- *                  bigger message, and a receiver drops + reports one over its cap.
- *                  OMIT for DYNAMIC sizing (default): buffers grow via malloc to
- *                  fit any message up to DART's ~64MB single-message limit, so no
- *                  size need be set on capable machines. A file is always sent as
- *                  ONE message (never split); too big to fit is an error.
+
+POSIX  : cc  -std=c99 -Wall -Idist tools/pubsub.c -o pubsub -lpthread
+Windows: gcc -std=c99 -Wall -Idist tools/pubsub.c -o pubsub.exe -lws2_32 -lbcrypt
  */
+
 #define DART_IMPLEMENTATION
 #include "dart.h"
 
@@ -69,8 +34,6 @@
                                  ts.tv_nsec = (long)(ms%1000)*1000000L; nanosleep(&ts, NULL); }
 #endif
 
-/* Is stdin a terminal? Interactive typing publishes one message per line; a
- * piped or redirected file is published whole, newlines and all. */
 #ifdef _WIN32
   #include <io.h>
   static int stdin_is_tty(void){ return _isatty(_fileno(stdin)); }
@@ -95,10 +58,11 @@ static long now_ms(void){
 static dart_node  *g_node;
 static lock_t      g_lock;
 static volatile int g_pumping = 1;
-static FILE        *g_outfile = NULL;   /* sub --file: received messages saved here */
+static FILE        *g_outfile = NULL; /* sub --file: received messages saved here */
+static int         g_rate_mode = 0;   /* sub --rate: report measured rate, no per-msg lines */
+static unsigned long      g_rx_msgs  = 0;  /* messages received since the last rate report */
+static unsigned long long g_rx_bytes = 0;  /* bytes received since the last rate report */
 
-/* Service the socket ~200x/s. The brief lock is dropped during the sleep, so a
- * sender on the main thread never waits long to publish. */
 #ifdef _WIN32
 static DWORD WINAPI pump_thread(LPVOID arg){
 #else
@@ -116,8 +80,6 @@ static void *pump_thread(void *arg){
 #endif
 }
 
-/* "a.b.c.d" into 4 network-order octets. Returns 0 ok, <0 on malformed input.
- * Kept local so the tool needs no socket headers of its own. */
 static int parse_ipv4(const char *s, uint8_t out[4]){
     int i;
     for (i = 0; i < 4; i++){
@@ -145,13 +107,15 @@ static size_t parse_size(const char *s){
  * payload as text is fine. ch is the channel's local handle (its index). */
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     (void)u;
+    g_rx_msgs++; g_rx_bytes += len;       /* accounting for sub --rate (the loop prints it) */
     if (g_outfile){                       /* --file: each message OVERWRITES the file */
         rewind(g_outfile);                /* back to the start, not appending */
         fwrite(data, 1, len, g_outfile);
         fflush(g_outfile);                /* flush before truncating a longer prior message */
         file_truncate(g_outfile, (long)len);
-        printf("[ch %u <- peer %u] wrote %lu bytes\n", ch, from, (unsigned long)len);
-    } else {
+        if (!g_rate_mode)
+            printf("[ch %u <- peer %u] wrote %lu bytes\n", ch, from, (unsigned long)len);
+    } else if (!g_rate_mode){             /* --rate: no per-msg line, the loop shows the rate */
         printf("[ch %u <- peer %u] %.*s\n", ch, from, (int)len, (const char*)data);
     }
 }
@@ -189,7 +153,8 @@ static void usage(void){
         "usage:\n"
         "  pubsub sub <channel> [opts]\n"
         "  pubsub pub <channel> [text...] [opts]   (no text = read lines from stdin)\n"
-        "opts: --domain N  --mcast  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n");
+        "opts: --domain N  --mcast  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
+        "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n");
 }
 
 /* Allocator for DART's dynamic message buffers (used when no --max is set).
@@ -223,39 +188,53 @@ static int wait_for_sub(dart_node *n, uint16_t cid, int timeout_ms){
     return dart_node_writer_match_count(n, cid) > 0;
 }
 
-/* Publish the whole byte stream from f as ONE message (the transport fragments
- * + reassembles it). Reads into a buffer that grows up to cap, and refuses if
- * the input would exceed cap rather than splitting. Settles first so a freshly
- * discovered subscriber is matched, then drains delivery before returning. */
-static int publish_stream(dart_node *n, uint16_t cid, FILE *f, int wait_ms, size_t cap){
+/* Read all of f into a freshly malloc'd buffer (caller frees), growing up to
+ * cap bytes. Returns NULL and sets *over=1 if the input would exceed cap (we
+ * refuse rather than split), or *over=0 on out-of-memory. *out_len gets the
+ * byte count on success. */
+static char *read_all(FILE *f, size_t cap, size_t *out_len, int *over){
     size_t bufcap = 65536, len = 0, r;
     char *buf, *nb;
-    int t;
+    *over = 0;
     if (bufcap > cap) bufcap = cap;
     buf = (char*)malloc(bufcap);
-    if (!buf){ fprintf(stderr, "out of memory\n"); return -1; }
-    if (!wait_for_sub(n, cid, wait_ms)){
-        fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
-        free(buf); return -1;
-    }
+    if (!buf) return NULL;
     for (;;){
         if (len == bufcap){
             if (bufcap >= cap){                       /* at the limit: more left? */
-                if (fgetc(f) != EOF){
-                    fprintf(stderr, "[pub] input exceeds the %lu-byte message limit; raise --max\n",
-                            (unsigned long)cap);
-                    free(buf); return -1;
-                }
+                if (fgetc(f) != EOF){ *over = 1; free(buf); return NULL; }
                 break;                                /* exactly cap, at EOF */
             }
             { size_t want = bufcap*2; if (want > cap) want = cap;
               nb = (char*)realloc(buf, want);
-              if (!nb){ free(buf); fprintf(stderr, "out of memory\n"); return -1; }
+              if (!nb){ free(buf); return NULL; }
               buf = nb; bufcap = want; }
         }
         r = fread(buf + len, 1, bufcap - len, f);
         if (r == 0) break;                            /* EOF */
         len += r;
+    }
+    *out_len = len;
+    return buf;
+}
+
+/* Publish the whole byte stream from f as ONE message (the transport fragments
+ * + reassembles it). Refuses input larger than cap rather than splitting.
+ * Settles first so a freshly discovered subscriber is matched, then drains
+ * delivery before returning. */
+static int publish_stream(dart_node *n, uint16_t cid, FILE *f, int wait_ms, size_t cap){
+    size_t len = 0; int over, t;
+    char *buf;
+    if (!wait_for_sub(n, cid, wait_ms)){
+        fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
+        return -1;
+    }
+    buf = read_all(f, cap, &len, &over);
+    if (!buf){
+        if (over) fprintf(stderr, "[pub] input exceeds the %lu-byte message limit; raise --max\n",
+                          (unsigned long)cap);
+        else      fprintf(stderr, "out of memory\n");
+        return -1;
     }
     if (dart_node_send(n, cid, buf, len) < 0){ fprintf(stderr, "send failed\n"); free(buf); return -1; }
     printf("[pub] sent %lu bytes\n", (unsigned long)len);
@@ -269,10 +248,46 @@ static int publish_stream(dart_node *n, uint16_t cid, FILE *f, int wait_ms, size
     return 0;
 }
 
+/* --rate: repeat the same payload at hz until interrupted (Ctrl-C). A long-
+ * lived publisher, so we settle for the first subscriber but publish even if
+ * none showed: late joiners are caught by discovery + KEEP_LAST history. Paced
+ * on dart_now_us so it stays on the microsecond grid; a send that falls behind
+ * resyncs to now rather than bursting to catch up (capped per tick regardless).
+ * Polls the node every tick so discovery and reliable repair keep running.
+ * Never returns. */
+static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t len,
+                         double hz, int wait_ms){
+    uint64_t period_us = (uint64_t)(1000000.0/hz + 0.5);
+    uint64_t next, now, last_sec;
+    unsigned long sent = 0, last_sent = 0;
+    if (period_us == 0) period_us = 1;                 /* clamp absurd rates to ~1 MHz */
+    if (!wait_for_sub(n, cid, wait_ms))
+        fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
+    printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
+    now = dart_now_us(); next = now; last_sec = now/1000000u;
+    for (;;){
+        int burst = 0;
+        now = dart_now_us();
+        while (now >= next && burst < 64){             /* fire every due tick, capped */
+            if (dart_node_send(n, cid, data, len) >= 0) sent++;
+            next += period_us; burst++;
+        }
+        if (next < now) next = now + period_us;        /* fell behind: resync, no flood */
+        /* sleep only when there's >=1ms of slack before the next tick; otherwise
+           spin with a non-blocking poll so high rates aren't capped at ~1 kHz */
+        dart_node_poll(n, (next - now >= 1000) ? 1 : 0);
+        if (now/1000000u != last_sec){                 /* once a second: effective Hz */
+            printf("[pub] sent %lu (%lu/s)\n", sent, sent - last_sent);
+            last_sent = sent; last_sec = now/1000000u;
+        }
+    }
+}
+
 int main(int argc, char **argv){
     const char *mode = NULL, *chan = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL;
     uint16_t domain = 7;
-    int mcast = 0, reliable = 1, wait_ms = 5000;
+    int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0;
+    double rate_hz = 0;                    /* --rate: pub repeats at N Hz; sub measures rate */
     size_t cap = 4u<<20; int max_set = 0; /* --max: fixed message cap (else dynamic) */
     char msg[65536]; size_t msg_len = 0;  /* one-shot publish text, if any */
     int i;
@@ -290,6 +305,13 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--wait")   && i+1 < argc) wait_ms = atoi(argv[++i]);
         else if (!strcmp(a, "--file")   && i+1 < argc) file_name = argv[++i];
         else if (!strcmp(a, "--max")    && i+1 < argc){ cap = parse_size(argv[++i]); max_set = 1; }
+        else if (!strcmp(a, "--rate")){              /* HZ optional: bare --rate on a sub */
+            rate_set = 1;
+            if (i+1 < argc){                         /* consume the next token only if numeric, */
+                char *end; double v = strtod(argv[i+1], &end);   /* so --rate --file isn't eaten */
+                if (end != argv[i+1] && *end == '\0'){ rate_hz = v; i++; }
+            }
+        }
         else if (!strcmp(a, "--mcast"))                mcast   = 1;
         else if (!strcmp(a, "--best-effort"))          reliable = 0;
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")){ usage(); return 0; }
@@ -389,13 +411,33 @@ int main(int argc, char **argv){
             if (!g_outfile){ fprintf(stderr, "cannot open %s for writing\n", file_name);
                              dart_node_close(n, 1); return 1; }
         }
+        g_rate_mode = rate_set;   /* --rate on a sub: report measured throughput, not each msg */
         printf("[sub] channel %s (id %u), domain %u, %s%s%s. Listening (Ctrl-C to quit)...\n",
                chan, cid, domain, reliable ? "reliable" : "best-effort",
                file_name ? ", saving to " : "", file_name ? file_name : "");
-        for (;;) dart_node_poll(n, 2);     /* short tick: let the timer sweep flush
-                                              ACKNACKs promptly (< nack_delay) so a
-                                              reliable publisher's backpressure window
-                                              keeps draining instead of stalling */
+        /* short tick either way: let the timer sweep flush ACKNACKs promptly
+           (< nack_delay) so a reliable publisher's backpressure window keeps
+           draining instead of stalling. */
+        if (g_rate_mode){
+            /* Once a second, print the measured receive rate (msg/s and KB/s)
+               over the real elapsed interval; stay quiet until the first message
+               so an idle wait isn't a stream of 0/s lines. */
+            uint64_t last = dart_now_us(); int seen = 0;
+            for (;;){
+                uint64_t now, dt;
+                dart_node_poll(n, 2);
+                now = dart_now_us(); dt = now - last;
+                if (dt >= 1000000u){
+                    double secs = dt/1000000.0;
+                    if (g_rx_msgs) seen = 1;
+                    if (seen) printf("[sub] %.0f msg/s, %.1f KB/s\n",
+                                     g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs);
+                    g_rx_msgs = 0; g_rx_bytes = 0; last = now;
+                }
+            }
+            /* not reached */
+        }
+        for (;;) dart_node_poll(n, 2);
         /* not reached */
     }
 
@@ -403,12 +445,35 @@ int main(int argc, char **argv){
     printf("[pub] channel %s (id %u), domain %u, %s.\n",
            chan, cid, domain, reliable ? "reliable" : "best-effort");
 
+    /* pub --rate must carry a positive HZ (on a sub the value is ignored). */
+    if (rate_set && rate_hz <= 0){
+        fprintf(stderr, "pub --rate needs a positive HZ, e.g. --rate 100\n");
+        dart_node_close(n, 1); return 2;
+    }
+    /* --rate needs a fixed payload to repeat: CLI text or --file, not stdin. */
+    if (rate_hz > 0 && !msg_len && !file_name){
+        fprintf(stderr, "--rate needs data to repeat: give a message or --file\n");
+        dart_node_close(n, 1); return 2;
+    }
+
     /* --file <name>: publish that file's contents (whole, same framing as piped
      * stdin), regardless of terminal. Takes precedence over CLI text and stdin. */
     if (file_name){
         FILE *f = fopen(file_name, "rb");
         if (!f){ fprintf(stderr, "cannot open %s\n", file_name);
                  dart_node_close(n, 1); return 1; }
+        if (rate_hz > 0){                    /* load once, then repeat at the rate */
+            size_t len; int over;
+            char *buf = read_all(f, send_limit, &len, &over);
+            fclose(f);
+            if (!buf){
+                if (over) fprintf(stderr, "[pub] %s exceeds the %lu-byte message limit; raise --max\n",
+                                  file_name, (unsigned long)send_limit);
+                else      fprintf(stderr, "out of memory\n");
+                dart_node_close(n, 1); return 1;
+            }
+            publish_rate(n, cid, buf, len, rate_hz, wait_ms);   /* never returns */
+        }
         int rc = publish_stream(n, cid, f, wait_ms, send_limit);
         fclose(f);
         dart_node_close(n, 1);
@@ -416,9 +481,11 @@ int main(int argc, char **argv){
     }
 
     if (msg_len){
+        int t;
+        if (rate_hz > 0)
+            publish_rate(n, cid, msg, msg_len, rate_hz, wait_ms);   /* never returns */
         /* one-shot: wait for a matched subscriber, publish the CLI text, drain
          * delivery, then exit. */
-        int t;
         if (!wait_for_sub(n, cid, wait_ms)){
             fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
             dart_node_close(n, 1); return 1;
