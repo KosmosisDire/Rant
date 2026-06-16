@@ -5,3 +5,5 @@ dart_test
 example
 node
 pack
+*.png
+*.jpg
