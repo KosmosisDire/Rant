@@ -1,5 +1,5 @@
-/* NODE runtime over the dart_transport core: owns the data socket,
- * drives discovery, wires peers into the transport. */
+/* NODE runtime over dart_transport: owns the data socket, drives discovery,
+ * wires peers into the transport. */
 #ifndef DART_NODE_H
 #define DART_NODE_H
 
@@ -10,82 +10,62 @@
 extern "C" {
 #endif
 
-/* Optional peer-discovery notifications. on_peer_up fires when a NEW peer is
- * discovered (not on address refreshes); on_peer_down when one is lost (its BYE
- * or a timeout). For visibility/logging; the transport wiring is automatic. */
-typedef void (*dart_node_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr);
-typedef void (*dart_node_peer_down_fn)(void *user, uint32_t peer_id);
-
+/* Network addressing and sockets; every field is zero-means-default (defaults shown). */
 typedef struct {
-    uint16_t              domain_id;     /* discovery domain                  */
-    uint16_t              data_port;     /* unicast data port; 0 = OS-assigned */
-    const char           *disc_group;    /* default "239.255.0.7"             */
-    uint16_t              disc_port;     /* default 7400                      */
-    uint16_t              mc_port;       /* shared multicast DATA port; default
-                                            disc_port+1. Per-channel group is
-                                            239.255.<domain&255>.<chan&255>   */
-    const char           *mcast_if;      /* interface IP for all multicast;
-                                            NULL = auto. "127.0.0.1" keeps a
-                                            single-host run off the network.
-                                            Pin this on multihomed hosts: the
-                                            auto route probe follows whatever
-                                            the OS routes 239.x to (VPN, WSL,
-                                            docker bridges all candidates)    */
-    const dart_discovery_addr *seeds;    /* initial peers: announces are also
-                                            unicast here (port 0 = disc_port),
-                                            so discovery works where multicast
-                                            is filtered or flaky              */
-    uint16_t              n_seeds;
-    uint32_t              announce_us;   /* default 1s                        */
-    uint32_t              timeout_us;    /* default 3.5s                      */
-    uint8_t               ttl;           /* multicast TTL, default 1          */
-    uint16_t              max_peers;     /* default 16                        */
-    uint32_t              so_rcvbuf;     /* data-socket SO_RCVBUF bytes; 0 = OS
-                                            default. Bigger absorbs bursts at
-                                            the cost of queuing delay         */
-    uint32_t              so_sndbuf;     /* data-socket SO_SNDBUF; 0 = default */
-    const dart_channel_def *channels;      /* transport channels                */
-    uint16_t              n_channels;
-    uint16_t              meta_max_ids;  /* largest peer interest list accepted
-                                            (pub+sub ids); 0 = 1024. Sizes the
-                                            meta channel buffers: tune down on
-                                            small targets                      */
-    dart_sample_fn          on_sample;     /* sample delivery                   */
-    dart_gap_fn             on_gap;        /* optional: permanently skipped TUs */
-    dart_collision_fn       on_collision;  /* optional: two topic names hashed to
-                                              one identity; the match is refused */
-    dart_oversize_fn        on_oversize;   /* optional: a received sample exceeds
-                                              max_sample_bytes (skipped, reported) */
-    dart_realloc_fn         realloc_fn;    /* optional: set => dynamic message sizing
-                                              (max_sample_bytes can be 0; freed at
-                                              dart_node_close) */
-    dart_node_peer_up_fn    on_peer_up;    /* optional: a peer was discovered   */
-    dart_node_peer_down_fn  on_peer_down;  /* optional: a peer was lost         */
-    void                 *user;
+    uint16_t              data_port;         /* unicast data port; 0 = OS-assigned */
+    const char           *discovery_group;   /* "239.255.0.7" */
+    uint16_t              discovery_port;    /* 7400 */
+    uint16_t              multicast_port;    /* shared multicast data port; discovery_port+1 */
+    const char           *multicast_interface;/* interface IP for all multicast; NULL = auto,
+                                                "127.0.0.1" = single-host. Pin on multihomed hosts */
+    uint8_t               multicast_ttl;     /* hops multicast may travel; 1 */
+    const dart_discovery_addr *seed_peers;   /* peers to also unicast announces to (port 0 =
+                                                discovery_port), so discovery works without multicast */
+    uint16_t              n_seed_peers;
+    uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
+    uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
+} dart_node_net;
+
+/* Discovery cadence and peer-table size; zero-means-default (defaults shown). */
+typedef struct {
+    uint32_t              announce_interval_us; /* "I'm here" broadcast period; 1s */
+    uint32_t              peer_timeout_us;   /* drop a peer after this silence; 3.5s */
+    uint16_t              max_peers;         /* peer-table capacity; 16 */
+} dart_node_discovery;
+
+/* The top fields are what most nodes set; the two sub-structs default whole when
+ * zero-initialized:
+ *   dart_node_config cfg = {
+ *       .domain = 7, .channels = ch, .n_channels = 2, .on_message = on_message };
+ */
+typedef struct {
+    uint16_t                domain;        /* logical-network selector */
+    const dart_channel_def *channels;
+    uint16_t                n_channels;
+    dart_message_fn         on_message;
+    dart_event_fn           on_event;      /* optional: loss/too-big/collision/peer up/down */
+    void                   *user_data;     /* passed to every callback */
+    dart_alloc_fn           allocator;     /* optional: set => dynamic message sizing */
+    dart_node_net           net;           /* addressing/sockets (optional) */
+    dart_node_discovery     discovery;     /* discovery cadence (optional) */
 } dart_node_config;
 
 typedef struct dart_node dart_node;
 
 size_t   dart_node_required_memory(const dart_node_config *cfg);
 dart_node *dart_node_open(void *mem, size_t mem_size, const dart_node_config *cfg);
-int      dart_node_poll(dart_node *n, int timeout_ms);          /* one loop tick   */
-int      dart_node_send(dart_node *n, uint16_t channel_id, const void *data, size_t len);
-/* Change our interest in a channel at runtime (dart_direction; DART_NONE =
- * inactive). Peers rematch as the change reaches them; a (re)subscribe joins
- * like a late joiner. Returns 0 ok, <0 unknown channel. */
-int      dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir);
-/* Cumulative backpressure since open: microseconds dart_node_send waited on
- * slow readers and how many sends waited. Either out-pointer may be NULL. */
-void     dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends);
-/* Pump the loop until every live reader has acked all samples sent on
- * channel_id, or timeout_ms elapses. Returns 1 if fully drained, 0 on timeout.
- * Call before close so a burst (e.g. a file) is delivered, not cut off by the
- * BYE. Reliable only; best-effort channels drain at once (no acks to await). */
-int      dart_node_drain(dart_node *n, uint16_t channel_id, int timeout_ms);
-/* Number of peers matched as readers (subscribers) of this channel right now.
- * A one-shot/file publisher polls this to wait for a subscriber before sending,
- * so a message isn't lost into the void before discovery + matching complete. */
-int      dart_node_writer_match_count(dart_node *n, uint16_t channel_id);
+int      dart_node_poll(dart_node *n, int timeout_ms);          /* one loop tick */
+int      dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len);
+/* Change a channel's role at runtime (DART_INACTIVE = off). Returns 0 ok, <0 unknown. */
+int      dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role);
+/* Cumulative backpressure since open: us waited on slow readers and how many sends
+ * waited. Either out-pointer may be NULL. */
+void     dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *waited_sends);
+/* Pump until every reader has acked all messages on channel, or timeout_ms elapses.
+ * Returns 1 if drained, 0 on timeout. Call before close so a burst isn't cut by the BYE. */
+int      dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms);
+/* Subscribers matched on this channel now; a one-shot publisher polls it before sending. */
+int      dart_node_writer_match_count(dart_node *n, uint16_t channel);
 void     dart_node_close(dart_node *n, int send_bye);
 
 #ifdef __cplusplus

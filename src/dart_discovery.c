@@ -188,8 +188,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
     }
 
     if ((flags & DART_DISCOVERY_FLAG_REQ) && st->started){
-        /* peer is soliciting: reply with our announce sooner than the next
-           periodic one, jittered by our uuid so many peers don't reply at once. */
+        /* peer is soliciting: reply sooner than the next periodic announce, uuid-jittered */
         uint64_t when = now + (dart_discovery_fnv(st->cfg.uuid,16) % DART_DISCOVERY_SOLICIT_JITTER_US);
         if (when < st->next_announce_us) st->next_announce_us = when;
     }
@@ -210,8 +209,7 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
             if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
         }
     }
-    if (st->want_solicit){   /* solicit: announces us AND asks peers to reply now, so
-                                discovery is ~instant instead of waiting an interval */
+    if (st->want_solicit){   /* solicit: announce us AND ask peers to reply now (near-instant) */
         st->want_solicit = 0;
         return dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, (uint8_t *)out, cap);
     }
@@ -222,11 +220,9 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
     return 0;
 }
 
-/* Queue a one-shot solicit: the next dart_discovery_update emits a REQ, asking
- * peers to announce back immediately. Used to (re)gather membership on demand. */
+/* queue a one-shot solicit: the next update emits a REQ asking peers to announce now */
 void dart_discovery_solicit(dart_discovery_state *st){ if (st) st->want_solicit = 1; }
 
-/* Number of live peers currently in the table. */
 uint16_t dart_discovery_peer_count(const dart_discovery_state *st){
     uint16_t i, c = 0;
     for (i=0;i<st->cap_peers;i++) if (st->peers[i].used) c++;

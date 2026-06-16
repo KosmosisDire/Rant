@@ -1,6 +1,6 @@
-/* sans-IO peer-discovery core (no socket, clock, or heap).
- * Feed it datagrams plus now_us; it returns datagrams to send and fires peer
- * up/down callbacks. C99. For an IO-owning layer, see dart_discovery_rt.h. */
+/* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
+ * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
+ * IO-owning layer see dart_discovery_rt.h. */
 #ifndef DART_DISCOVERY_H
 #define DART_DISCOVERY_H
 
@@ -24,11 +24,9 @@ typedef struct {
     uint16_t port;     /* data port, host order */
 } dart_discovery_addr;
 
-/* peer_up: peer reachable at addr; re-fires when a known peer's addr or meta
- * changes. peer_down: gone (timeout or BYE). peer_id is a local handle, stable
- * only while the peer stays alive; one that times out and returns gets a new
- * handle even with the same uuid. meta is the peer's opaque payload (NULL if
- * none), valid only for the call. */
+/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes).
+ * peer_down: gone. peer_id is a local handle, stable only while the peer lives.
+ * meta is the peer's opaque payload (NULL if none), valid only for the call. */
 typedef void (*dart_discovery_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr,
                                    const uint8_t *meta, uint8_t meta_len);
 typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id);
@@ -42,8 +40,7 @@ typedef struct {
     uint32_t announce_us;   /* re-announce interval */
     uint32_t timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const uint8_t *meta;    /* opaque payload appended to every announce;
-                               must stay valid for the state's lifetime */
+    const uint8_t *meta;    /* opaque payload appended to every announce; must stay valid */
     uint8_t  meta_len;      /* <= DART_DISCOVERY_META_MAX */
     dart_discovery_peer_up_fn   on_peer_up;
     dart_discovery_peer_down_fn on_peer_down;
@@ -58,20 +55,15 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
-/* Queue a one-shot solicit: the next dart_discovery_update emits a request that
- * asks peers to announce back immediately, so membership is (re)gathered fast
- * instead of over an announce interval. (Sent automatically once at startup.) */
+/* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(dart_discovery_state *st);
 /* Count of live peers currently known. */
 uint16_t     dart_discovery_peer_count(const dart_discovery_state *st);
-/* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
- * fills *out when the slot holds a live peer. Lets a runtime reinforce
- * announces over unicast so established peerings survive multicast outages
- * (WiFi floods, IGMP snooping pruning); bootstrap still needs the group. */
+/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out if it holds a
+ * live peer. Lets a runtime reinforce announces over unicast to survive multicast outages. */
 int          dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot,
                              dart_discovery_addr *out);
-/* Deterministic UUID from a stable input (e.g. serial/MAC) plus a boot seed,
- * for reproducible identity. RFC 9562 version-8 (custom). NOT cryptographic. */
+/* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
                              uint64_t boot_seed);
 

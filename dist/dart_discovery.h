@@ -13,9 +13,9 @@
 #endif
 
 /* ===== dart_discovery.h ===== */
-/* sans-IO peer-discovery core (no socket, clock, or heap).
- * Feed it datagrams plus now_us; it returns datagrams to send and fires peer
- * up/down callbacks. C99. For an IO-owning layer, see dart_discovery_rt.h. */
+/* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
+ * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
+ * IO-owning layer see dart_discovery_rt.h. */
 #ifndef DART_DISCOVERY_H
 #define DART_DISCOVERY_H
 
@@ -39,11 +39,9 @@ typedef struct {
     uint16_t port;     /* data port, host order */
 } dart_discovery_addr;
 
-/* peer_up: peer reachable at addr; re-fires when a known peer's addr or meta
- * changes. peer_down: gone (timeout or BYE). peer_id is a local handle, stable
- * only while the peer stays alive; one that times out and returns gets a new
- * handle even with the same uuid. meta is the peer's opaque payload (NULL if
- * none), valid only for the call. */
+/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes).
+ * peer_down: gone. peer_id is a local handle, stable only while the peer lives.
+ * meta is the peer's opaque payload (NULL if none), valid only for the call. */
 typedef void (*dart_discovery_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr,
                                    const uint8_t *meta, uint8_t meta_len);
 typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id);
@@ -57,8 +55,7 @@ typedef struct {
     uint32_t announce_us;   /* re-announce interval */
     uint32_t timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const uint8_t *meta;    /* opaque payload appended to every announce;
-                               must stay valid for the state's lifetime */
+    const uint8_t *meta;    /* opaque payload appended to every announce; must stay valid */
     uint8_t  meta_len;      /* <= DART_DISCOVERY_META_MAX */
     dart_discovery_peer_up_fn   on_peer_up;
     dart_discovery_peer_down_fn on_peer_down;
@@ -73,20 +70,15 @@ void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t 
                                const void *dg, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
-/* Queue a one-shot solicit: the next dart_discovery_update emits a request that
- * asks peers to announce back immediately, so membership is (re)gathered fast
- * instead of over an announce interval. (Sent automatically once at startup.) */
+/* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(dart_discovery_state *st);
 /* Count of live peers currently known. */
 uint16_t     dart_discovery_peer_count(const dart_discovery_state *st);
-/* Address of the peer in table slot `slot` (0..max_peers-1); returns 1 and
- * fills *out when the slot holds a live peer. Lets a runtime reinforce
- * announces over unicast so established peerings survive multicast outages
- * (WiFi floods, IGMP snooping pruning); bootstrap still needs the group. */
+/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out if it holds a
+ * live peer. Lets a runtime reinforce announces over unicast to survive multicast outages. */
 int          dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot,
                              dart_discovery_addr *out);
-/* Deterministic UUID from a stable input (e.g. serial/MAC) plus a boot seed,
- * for reproducible identity. RFC 9562 version-8 (custom). NOT cryptographic. */
+/* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
                              uint64_t boot_seed);
 
@@ -97,9 +89,8 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 
 #ifndef DART_DISCOVERY_SANS_IO
 /* ===== dart_discovery_rt.h ===== */
-/* peer-discovery runtime API: UDP multicast, clock, UUID
- * and one-tick loop over the dart_discovery core. On non-MSVC Windows, link
- * -lws2_32 -lbcrypt. */
+/* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over
+ * the dart_discovery core. On non-MSVC Windows, link -lws2_32 -lbcrypt. */
 #ifndef DART_DISCOVERY_RT_H
 #define DART_DISCOVERY_RT_H
 
@@ -110,56 +101,43 @@ extern "C" {
 
 #define DART_DISCOVERY_MAX_SEEDS 4
 
-/* Zero/NULL fields get defaults. Leave disc.uuid all-zero to auto-generate a
- * per-boot random v4 UUID. */
+/* Zero/NULL fields get defaults; leave disc.uuid all-zero to auto-generate one. */
 typedef struct {
     dart_discovery_config disc;        /* core config: ids, timing, callbacks */
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     disc_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
-    const char  *mcast_if;    /* interface IP to join/send on; NULL = route probe.
-                                 "127.0.0.1" keeps single-host setups off the
-                                 network. */
-    const dart_discovery_addr *seeds;  /* initial peers: every announce is also
-                                 unicast to these, so discovery bootstraps on
-                                 networks where multicast is filtered or flaky
-                                 (copied at open; max DART_DISCOVERY_MAX_SEEDS) */
+    const char  *mcast_if;    /* interface IP to join/send on; NULL = route probe,
+                                 "127.0.0.1" = single-host */
+    const dart_discovery_addr *seeds;  /* peers to also unicast announces to, for
+                                 networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
     uint16_t     n_seeds;
 } dart_discovery_rt_config;
 
 typedef struct dart_discovery_rt dart_discovery_rt;
 
 size_t     dart_discovery_rt_required_memory(const dart_discovery_rt_config *cfg);
-/* Opens the socket, joins the group, places core state in mem. NULL on failure. */
+/* Open the socket, join the group, place core state in mem. NULL on failure. */
 dart_discovery_rt  *dart_discovery_rt_open(void *mem, size_t mem_size, const dart_discovery_rt_config *cfg);
-/* One loop tick: waits up to timeout_ms for a datagram, feeds RX to the core,
- * pumps timeouts and announcements, sends what's due. Returns 1 if a datagram
- * arrived, 0 if idle, <0 on socket error. */
+/* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
+ * what's due. Returns 1 if a datagram arrived, 0 if idle, <0 on socket error. */
 int        dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms);
-/* Discover all reachable peers, reasonably reliably: solicit (asking everyone to
- * announce now), then pump until the peer set stops growing for quiet_ms, or
- * timeout_ms total elapses. Re-solicits periodically so a dropped request is
- * retried. Returns the peer count found (0 at timeout if none). Blocks (drives
- * the loop internally); use at startup to gather current membership. */
+/* Gather membership at startup: solicit, then pump until the peer set is quiet for
+ * quiet_ms or timeout_ms total. Re-solicits periodically. Returns the peer count. Blocks. */
 int        dart_discovery_rt_settle(dart_discovery_rt *rt, int quiet_ms, int timeout_ms);
 /* Optionally multicast a graceful BYE, then close the socket. */
 void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
 
-/* Hand the core a discovery datagram that arrived on some other socket.
- * Unicast announces to known peers target the peer's advertised DATA port
- * (the only per-process address when several processes share the discovery
- * port), so the layer owning the data socket forwards them here. */
+/* Hand the core a discovery datagram that arrived on another socket (unicast
+ * announces target the peer's data port, so the data-socket owner forwards them). */
 void       dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
                           const void *dg, size_t len);
 
-/* Fill out[16] with a random RFC 9562 v4 UUID from the platform CSPRNG.
- * Returns 1 on success, 0 if no entropy source was available. */
+/* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
-/* Egress interface the OS routes to group:port (INADDR_ANY on failure). Exposed
- * so layers above can pin their multicast sockets to the same interface:
- * multihomed hosts otherwise pick different ones per socket and break peer
- * matching by source address. */
+/* Egress interface the OS routes to group:port (INADDR_ANY on failure). Exposed so
+ * layers above pin their multicast sockets to the same interface on multihomed hosts. */
 uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 
 #ifdef __cplusplus
@@ -359,8 +337,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
     }
 
     if ((flags & DART_DISCOVERY_FLAG_REQ) && st->started){
-        /* peer is soliciting: reply with our announce sooner than the next
-           periodic one, jittered by our uuid so many peers don't reply at once. */
+        /* peer is soliciting: reply sooner than the next periodic announce, uuid-jittered */
         uint64_t when = now + (dart_discovery_fnv(st->cfg.uuid,16) % DART_DISCOVERY_SOLICIT_JITTER_US);
         if (when < st->next_announce_us) st->next_announce_us = when;
     }
@@ -381,8 +358,7 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
             if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
         }
     }
-    if (st->want_solicit){   /* solicit: announces us AND asks peers to reply now, so
-                                discovery is ~instant instead of waiting an interval */
+    if (st->want_solicit){   /* solicit: announce us AND ask peers to reply now (near-instant) */
         st->want_solicit = 0;
         return dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, (uint8_t *)out, cap);
     }
@@ -393,11 +369,9 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
     return 0;
 }
 
-/* Queue a one-shot solicit: the next dart_discovery_update emits a REQ, asking
- * peers to announce back immediately. Used to (re)gather membership on demand. */
+/* queue a one-shot solicit: the next update emits a REQ asking peers to announce now */
 void dart_discovery_solicit(dart_discovery_state *st){ if (st) st->want_solicit = 1; }
 
-/* Number of live peers currently in the table. */
 uint16_t dart_discovery_peer_count(const dart_discovery_state *st){
     uint16_t i, c = 0;
     for (i=0;i<st->cap_peers;i++) if (st->peers[i].used) c++;
@@ -422,10 +396,9 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
 
 #ifndef DART_DISCOVERY_SANS_IO
 /* ===== dart_discovery_rt.c ===== */
-/* peer-discovery runtime: sockets, clock, UUID and the
- * one-tick loop. Platform socket headers stay in this file. */
+/* peer-discovery runtime: sockets, clock, UUID, and the one-tick loop. */
 
-/* Feature-test macros must precede the first system header. POSIX only. */
+/* feature-test macros must precede the first system header (POSIX only) */
 #if !defined(_WIN32)
   #ifndef _POSIX_C_SOURCE
   #define _POSIX_C_SOURCE 200809L
@@ -495,12 +468,9 @@ static void dart_discovery_rt_tx1(dart_discovery_rt *rt, const uint8_t *out, siz
     sendto(rt->fd, (const char*)out, (int)m, 0, (struct sockaddr*)&d, sizeof d);
 }
 
-/* send a built announce/BYE to the group, to every configured seed, and to
- * every known peer. Known peers get a copy at the shared disc port and one at
- * their data port: the latter is the only per-process address when several
- * processes on one host share the disc port (the data-socket owner forwards
- * it via dart_discovery_rt_feed). Discovery then survives multicast outages
- * and, with seeds, bootstraps without multicast. Receivers dedup by uuid. */
+/* send to the group, every seed, and every known peer (peers get a copy at the
+ * disc port and at their data port, the only per-process address when processes
+ * share the disc port). Survives multicast outages; receivers dedup by uuid. */
 static void dart_discovery_rt_tx(dart_discovery_rt *rt, const uint8_t *out, size_t m){
     uint16_t s, dport = ntohs(rt->grp.sin_port);
     dart_discovery_addr a;
@@ -654,9 +624,7 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     group     = c.group     ? c.group     : "239.255.0.7";
     if (c.disc_port == 0)    c.disc_port  = 7400;
     ttl  = c.ttl ? c.ttl : 1;
-    /* loopback always on: the UUID self-filter drops our echoes, and it's
-     * required for multiple instances per host. */
-    loop = 1;
+    loop = 1;   /* always on (uuid self-filter drops echoes); needed for multi-instance per host */
 
     need = dart_discovery_rt_required_memory(&c);
     if (cap < need) return NULL;

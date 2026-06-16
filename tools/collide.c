@@ -56,15 +56,15 @@ static int rho_collision(uint64_t x0, uint64_t *pa_out, uint64_t *pb_out){
 }
 
 static unsigned long g_samples, g_collisions;
-static void on_sample(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
+static void on_message(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
     (void)u;(void)ch;(void)from;(void)d;(void)n; g_samples++;
 }
-static void on_collision(void *u, uint64_t id, const char *ours,
-                         const char *peer, size_t plen){
+static void on_event(void *u, const dart_event *ev){
     (void)u;
+    if (ev->kind != DART_NAME_COLLISION) return;
     g_collisions++;
-    printf("  on_collision: identity %016llx  ours=\"%s\"  peer=\"%.*s\"  -> match refused\n",
-           (unsigned long long)id, ours, (int)plen, peer);
+    printf("  DART_NAME_COLLISION: identity %016llx  ours=\"%s\"  -> match refused\n",
+           (unsigned long long)ev->first, ev->detail ? ev->detail : "");
 }
 
 int main(void){
@@ -93,17 +93,15 @@ int main(void){
         uint8_t payload[16]; uint64_t end;
         memset(payload, 0x5A, sizeof payload);
 
-        memset(&cw,0,sizeof cw);
-        cw.channel_id=1; cw.name=a; cw.dir=DART_PUB_ONLY;
-        cw.qos.reliability=DART_RELIABLE; cw.qos.history_depth=1;
-        cw.qos.join_replay=1; cw.qos.max_sample_bytes=32; cw.qos.heartbeat_us=50000;
-        cr = cw; cr.name=b; cr.dir=DART_SUB_ONLY;
+        cw = (dart_channel_def){ .name=a, .role=DART_PUB_ONLY,
+            .qos={ .reliability=DART_RELIABLE, .keep_last=1, .catch_up=1,
+                   .max_message_bytes=32, .heartbeat_us=50000 } };
+        cr = cw; cr.name=b; cr.role=DART_SUB_ONLY;
 
-        memset(&wc,0,sizeof wc);
-        wc.domain_id=41; wc.channels=&cw; wc.n_channels=1;
-        wc.max_peers=4; wc.meta_max_ids=8;
+        wc = (dart_node_config){ .domain=41, .channels=&cw, .n_channels=1,
+                                 .discovery={ .max_peers=4 } };
         rc = wc; rc.channels=&cr;
-        rc.on_sample=on_sample; rc.on_collision=on_collision;
+        rc.on_message=on_message; rc.on_event=on_event;
 
         w = dart_node_open(mem_w, sizeof mem_w, &wc);
         r = dart_node_open(mem_r, sizeof mem_r, &rc);
@@ -111,7 +109,7 @@ int main(void){
 
         end = 0;
         for (i=0;i<150;i++){            /* ~3s: discover, exchange interest, send */
-            dart_node_send(w, 1, payload, sizeof payload);
+            dart_node_send(w, 0, payload, sizeof payload);   /* channel 0 */
             dart_node_poll(w, 0); dart_node_poll(r, 20);
             (void)end;
         }

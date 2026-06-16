@@ -159,9 +159,9 @@ static uint64_t get64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v
 
 /* ======================= node: latency/throughput ======================= */
 
-#define CH_PROBE          1
-#define CH_LOAD           2
-#define XCH_ID0           100   /* extra load channels: ids 100..100+xch-1  */
+#define CH_PROBE          0     /* channel handles are array indices         */
+#define CH_LOAD           1
+#define XCH_ID0           2     /* extra load channels: indices 2..2+xch-1   */
 #define XCH_MAX           512
 #define LAT_DOMAIN        11
 #define PING_INTERVAL_NS  250000000ull    /* probe ping cadence: 250 ms       */
@@ -236,7 +236,7 @@ static peer_stat *tbl_get(uint32_t peer_id){
     return &g_tbl[freei];
 }
 
-/* deferred pong queue (no dart_* calls from on_sample) */
+/* deferred pong queue (no dart_* calls from on_message) */
 typedef struct { uint32_t tag, seq; uint64_t t; } pong_req;
 static pong_req g_pong_q[512];
 static int      g_pong_n = 0;
@@ -246,15 +246,15 @@ static int      g_pong_n = 0;
 static unsigned long      g_gap_evt = 0;
 static unsigned long long g_gap_tus = 0;
 /* backpressure cost, read from the node before SUMMARY */
-static uint64_t g_blk_us = 0;
-static uint32_t g_blk_n  = 0;
+static uint64_t g_wait_us = 0;
+static uint32_t g_wait_n  = 0;
 
-static void lat_on_gap(void *u, uint16_t ch, uint32_t from, uint64_t first, uint64_t count){
-    (void)u;(void)ch;(void)from;(void)first;
-    g_gap_evt++; g_gap_tus += count;
+static void lat_on_event(void *u, const dart_event *ev){
+    (void)u;
+    if (ev->kind == DART_MSG_LOST){ g_gap_evt++; g_gap_tus += ev->count; }
 }
 
-static void lat_on_sample(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
+static void lat_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     const uint8_t *p = (const uint8_t*)data; uint64_t now = now_ns();
     peer_stat *e = tbl_get(from);
     (void)u;
@@ -349,7 +349,7 @@ static void print_summary(uint64_t elapsed_ns, int load_hz, int reliable, int bl
            (recv+drops) ? 100.0*drops/(recv+drops) : 0.0,
            g_gap_evt, g_gap_tus,
            forgiven, max_gap_ns/1e6, stall_ns/1e6, g_report_ns/1e6,
-           g_blk_us/1000.0, (unsigned long)g_blk_n);
+           g_wait_us/1000.0, (unsigned long)g_wait_n);
 }
 
 static int node_main(int argc, char **argv){
@@ -382,59 +382,61 @@ static int node_main(int argc, char **argv){
               << 16)); }
 
     static dart_channel_def ch[2+XCH_MAX];
+    static char xnames[XCH_MAX][8];   /* "x0".."x511": extra channels' topic names */
     memset(ch, 0, sizeof ch);
-    ch[0].channel_id = CH_PROBE;
+    ch[0].name = "probe";
     /* depth must cover the pongs one tick can stage (one per peer) or the ring
        evicts them before the flush and RTT samples are lost */
-    ch[0].qos.reliability = DART_BEST_EFFORT; ch[0].qos.history_depth = 16; ch[0].qos.max_sample_bytes = 64;
-    ch[1].channel_id = CH_LOAD;
+    ch[0].qos.reliability = DART_BEST_EFFORT; ch[0].qos.keep_last = 16; ch[0].qos.max_message_bytes = 64;
+    ch[1].name = "load";
     ch[1].qos.reliability = reliable ? DART_RELIABLE : DART_BEST_EFFORT;
-    ch[1].qos.history_depth = LOAD_DEPTH; ch[1].qos.max_sample_bytes = 64;
-    ch[1].qos.max_block_us = (uint32_t)(block_ms > 0 ? block_ms : 0) * 1000u;
+    ch[1].qos.keep_last = LOAD_DEPTH; ch[1].qos.max_message_bytes = 64;
+    ch[1].qos.backpressure_wait_us = (uint32_t)(block_ms > 0 ? block_ms : 0) * 1000u;
     /* mcast 3: load rides the group, the probe stays unicast, so RTT measures
        the path instead of the switch's multicast service cycle */
-    ch[0].mcast = (uint8_t)(use_mcast && use_mcast!=3 ? 1 : 0);
-    ch[1].mcast = (uint8_t)(use_mcast ? 1 : 0);
+    ch[0].multicast = (uint8_t)(use_mcast && use_mcast!=3 ? 1 : 0);
+    ch[1].multicast = (uint8_t)(use_mcast ? 1 : 0);
     { int i;     /* extra channels: idle (depth 1) or load-bearing when spread */
       for (i=0;i<g_xch;i++){
           ch[2+i] = ch[1];
-          ch[2+i].channel_id = (uint16_t)(XCH_ID0+i);
-          ch[2+i].qos.history_depth = g_spread ? 128 : 1;
-          ch[2+i].mcast = 0;     /* groups are OS-capped (~20 joins/socket);
+          sprintf(xnames[i], "x%d", i); ch[2+i].name = xnames[i];
+          ch[2+i].qos.keep_last = g_spread ? 128 : 1;
+          ch[2+i].multicast = 0; /* groups are OS-capped (~20 joins/socket);
                                     extras stay unicast, mcast tests the few
                                     high-fanout channels (probe + load)      */
-          if (g_spread==2) ch[2+i].dir = DART_PUB_ONLY;   /* nobody subscribes */
+          if (g_spread==2) ch[2+i].role = DART_PUB_ONLY;   /* nobody subscribes */
       } }
 
-    dart_node_config cfg; memset(&cfg, 0, sizeof cfg);
-    cfg.domain_id  = domain;
-    cfg.data_port  = 0;
-    cfg.channels   = ch;
-    cfg.n_channels = (uint16_t)(2+g_xch);
-    cfg.max_peers  = MAX_PEERS;
-    cfg.meta_max_ids = (uint16_t)(2u*(2u+(uint32_t)g_xch)+8u);
-    cfg.on_sample  = lat_on_sample;
-    cfg.on_gap     = lat_on_gap;
+    /* meta_max_ids is gone: the core auto-raises it to 2*n_channels, which
+       already covers every extra channel here. */
+    dart_node_config cfg = {
+        .domain     = domain,
+        .channels   = ch,
+        .n_channels = (uint16_t)(2+g_xch),
+        .on_message = lat_on_message,
+        .on_event   = lat_on_event,
+        .discovery  = { .max_peers = MAX_PEERS },
+    };
     if (if_ip)
-        cfg.mcast_if = if_ip;         /* multihomed host: pin everything */
+        cfg.net.multicast_interface = if_ip;       /* multihomed host: pin everything */
     else if (use_mcast==1)
-        cfg.mcast_if = "127.0.0.1";   /* single-host test: stay off the NIC.
-                                         mcast=2 leaves the real interface for
-                                         cross-machine runs */
+        cfg.net.multicast_interface = "127.0.0.1"; /* single-host test: stay off the NIC.
+                                             mcast=2 leaves the real interface for
+                                             cross-machine runs */
     dart_discovery_addr seed;
     if (peer_ip){                     /* bootstrap without multicast */
         uint32_t a4 = inet_addr(peer_ip);
         if (a4 != INADDR_NONE){
             memset(&seed, 0, sizeof seed);
             memcpy(seed.ip, &a4, 4); seed.ip_len = 4;   /* port 0 = disc port */
-            cfg.seeds = &seed; cfg.n_seeds = 1;
+            cfg.net.seed_peers = &seed; cfg.net.n_seed_peers = 1;
         }
     }
     { const char *rb = getenv("DART_DIAG_RCVBUF"), *sb = getenv("DART_DIAG_SNDBUF");
-      if (rb) cfg.so_rcvbuf = (uint32_t)atoi(rb);
-      if (sb) cfg.so_sndbuf = (uint32_t)atoi(sb);
+      if (rb) cfg.net.recv_buffer_bytes = (uint32_t)atoi(rb);
+      if (sb) cfg.net.send_buffer_bytes = (uint32_t)atoi(sb);
       if (rb || sb) printf("[%s] buffer override rcvbuf=%u sndbuf=%u\n",
-                           g_name, cfg.so_rcvbuf, cfg.so_sndbuf); }
+                           g_name, cfg.net.recv_buffer_bytes, cfg.net.send_buffer_bytes); }
     g_trace = (getenv("DART_DIAG_TRACE") != NULL);
 
     static uint8_t mem[48<<20];  /* deep load ring + extra channels x 64 peers */
@@ -456,10 +458,10 @@ static int node_main(int argc, char **argv){
     int wait_ms = (load_hz > 0) ? 1 : 20;   /* don't block long while loading */
     /* stall detection: a loop gap far beyond wait_ms means we lost the CPU, so
        big stalls make a run suspect. Voluntary backpressure waits
-       (qos.max_block_us) are subtracted so stall numbers mean INVOLUNTARY loss;
+       (qos.backpressure_wait_us) are subtracted so stall numbers mean INVOLUNTARY loss;
        voluntary time is reported separately as blk_wait_ms. */
     uint64_t prev_iter = 0, max_gap = 0, stall_ns = 0, max_gap_at = 0;
-    uint64_t prev_blk_us = 0;
+    uint64_t prev_wait_us = 0;
     unsigned long nstalls = 0;
     /* loop phase timers + load pacing diagnostics (SUMMARY2) */
     unsigned long long iters = 0, t_stage = 0, t_poll0 = 0, t_poll1 = 0;
@@ -471,16 +473,16 @@ static int node_main(int argc, char **argv){
         uint8_t o[64];
         int i;
         iters++;
-        { uint64_t blk_us;
-          dart_node_block_stats(n, &blk_us, NULL);
+        { uint64_t wait_us;
+          dart_node_backpressure_stats(n, &wait_us, NULL);
           if (prev_iter){
               uint64_t gap = now - prev_iter;
-              uint64_t blk = (blk_us - prev_blk_us) * 1000u;   /* us to ns */
-              gap = (gap > blk) ? gap - blk : 0;     /* voluntary waits out */
+              uint64_t waited = (wait_us - prev_wait_us) * 1000u;   /* us to ns */
+              gap = (gap > waited) ? gap - waited : 0;     /* voluntary waits out */
               if (gap > max_gap){ max_gap = gap; max_gap_at = now - start; }
               if (gap > STALL_GAP_NS){ stall_ns += gap; nstalls++; }
           }
-          prev_blk_us = blk_us; }
+          prev_wait_us = wait_us; }
         prev_iter = now;
 
         for (i=0;i<g_pong_n;i++){
@@ -547,7 +549,7 @@ static int node_main(int argc, char **argv){
             g_report_ns += now_ns() - now;
         }
         if (duration_s > 0 && (now - start) >= (uint64_t)duration_s*1000000000ull){
-            dart_node_block_stats(n, &g_blk_us, &g_blk_n);
+            dart_node_backpressure_stats(n, &g_wait_us, &g_wait_n);
             print_summary(now - start, load_hz, reliable, block_ms,
                           load_sent, load_forgiven, max_gap, stall_ns);
 #ifdef _WIN32
@@ -669,11 +671,11 @@ static int sendbench_main(void){
  * Two nodes in ONE process (writer pub-only, reader sub-only) so the test
  * controls exactly when each side runs. Phases:
  *   1. JOIN     : reader joins mid-stream; on_gap must NOT fire.
- *   2. GAP      : writer stages a burst beyond history_depth without flushing,
+ *   2. GAP      : writer stages a burst beyond keep_last without flushing,
  *                 so KEEP_LAST evicts and the reader gets one GAP plus the
  *                 surviving tail; on_gap count must equal the evicted span.
- *   3. BLOCKED  : on a max_block_us channel, sends that would evict un-acked
- *                 history wait ~max_block_us while the reader never acks, then
+ *   3. BLOCKED  : on a backpressure_wait_us channel, sends that would evict un-acked
+ *                 history wait ~backpressure_wait_us while the reader never acks, then
  *                 proceed (KEEP_LAST fallback, never refusal).
  *   4. RELEASED : same channel once the reader acks; sends are instant.
  *   4b SWEEP-ACK: a sub-only reader whose ACKNACK is timer-armed (nack_delay>0)
@@ -684,10 +686,11 @@ static int sendbench_main(void){
  *   6. SCALE    : 40 channels, past the old 31-id announce cap. */
 
 #define ST_DOMAIN   33
-#define ST_CH_GAP   1   /* reliable, depth 4, no backpressure  */
-#define ST_CH_BLOCK 2   /* reliable, depth 4, max_block 100 ms */
-#define ST_CH_DYN   3   /* reliable, depth 4, reader starts DART_NONE */
-#define ST_CH_BLOCK2 4  /* like BLOCK but nack_delay>0: the reader's ack is
+/* channel handles are array indices (declaration order in ch[]) */
+#define ST_CH_GAP   0   /* reliable, depth 4, no backpressure  */
+#define ST_CH_BLOCK 1   /* reliable, depth 4, slow_reader_wait 100 ms */
+#define ST_CH_DYN   2   /* reliable, depth 4, reader starts DART_INACTIVE */
+#define ST_CH_BLOCK2 3  /* like BLOCK but repair_delay>0: the reader's ack is
                            timer-armed, so it relies on the periodic sweep */
 #define ST_DEPTH    4
 #define ST_BLOCK_US 100000u
@@ -701,18 +704,19 @@ static int st_fail = 0;
 
 static unsigned long st_samples[8], st_gap_calls[8], st_gap_tus[8], st_any;
 
-static void st_on_sample(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
+static void st_on_message(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
     (void)u;(void)from;(void)d;(void)n;
     if (ch < 8) st_samples[ch]++;
     st_any++;
 }
-static void st_on_gap(void *u, uint16_t ch, uint32_t from, uint64_t first, uint64_t count){
-    (void)u;(void)from;(void)first;
-    if (ch < 8){ st_gap_calls[ch]++; st_gap_tus[ch] += (unsigned long)count; }
-}
 static unsigned long st_collisions;
-static void st_on_collision(void *u, uint64_t id, const char *ours, const char *peer, size_t plen){
-    (void)u;(void)id;(void)ours;(void)peer;(void)plen; st_collisions++;
+static void st_on_event(void *u, const dart_event *ev){
+    (void)u;
+    if (ev->kind == DART_MSG_LOST){
+        if (ev->channel < 8){ st_gap_calls[ev->channel]++; st_gap_tus[ev->channel] += (unsigned long)ev->count; }
+    } else if (ev->kind == DART_NAME_COLLISION){
+        st_collisions++;
+    }
 }
 
 static void st_pump(dart_node *a, dart_node *b, int ms){     /* run both nodes */
@@ -727,23 +731,22 @@ static int selftest_main(void){
     memset(payload, 0x5A, sizeof payload);
 
     dart_channel_def ch[4]; memset(ch, 0, sizeof ch);
-    ch[0].channel_id = ST_CH_GAP;
-    ch[0].qos.reliability = DART_RELIABLE; ch[0].qos.history_depth = ST_DEPTH;
-    ch[0].qos.max_sample_bytes = 64; ch[0].qos.heartbeat_us = 50000;
-    ch[1] = ch[0]; ch[1].channel_id = ST_CH_BLOCK; ch[1].qos.max_block_us = ST_BLOCK_US;
-    ch[2] = ch[0]; ch[2].channel_id = ST_CH_DYN;
-    ch[2].qos.join_replay = ST_DEPTH;   /* phase 5 asserts ring replay on join */
-    ch[3] = ch[0]; ch[3].channel_id = ST_CH_BLOCK2;
-    ch[3].qos.max_block_us = ST_BLOCK_US; ch[3].qos.nack_delay_us = ST_NACK_US;
+    ch[0].name = "st/gap";
+    ch[0].qos.reliability = DART_RELIABLE; ch[0].qos.keep_last = ST_DEPTH;
+    ch[0].qos.max_message_bytes = 64; ch[0].qos.heartbeat_us = 50000;
+    ch[1] = ch[0]; ch[1].name = "st/block"; ch[1].qos.backpressure_wait_us = ST_BLOCK_US;
+    ch[2] = ch[0]; ch[2].name = "st/dyn";
+    ch[2].qos.catch_up = ST_DEPTH;   /* phase 5 asserts ring replay on join */
+    ch[3] = ch[0]; ch[3].name = "st/block2";
+    ch[3].qos.backpressure_wait_us = ST_BLOCK_US; ch[3].qos.repair_delay_us = ST_NACK_US;
 
-    dart_node_config wc; memset(&wc, 0, sizeof wc);
-    wc.domain_id = ST_DOMAIN; wc.channels = ch; wc.n_channels = 4;
+    dart_node_config wc = { .domain = ST_DOMAIN, .channels = ch, .n_channels = 4 };
     { dart_node_config rc = wc; dart_channel_def chr[4]; dart_node *w, *r;
       memcpy(chr, ch, sizeof ch);
-      ch[0].dir = ch[1].dir = ch[2].dir = ch[3].dir = DART_PUB_ONLY;
-      chr[0].dir = chr[1].dir = chr[3].dir = DART_SUB_ONLY;
-      chr[2].dir = DART_NONE;
-      rc.channels = chr; rc.on_sample = st_on_sample; rc.on_gap = st_on_gap;
+      ch[0].role = ch[1].role = ch[2].role = ch[3].role = DART_PUB_ONLY;
+      chr[0].role = chr[1].role = chr[3].role = DART_SUB_ONLY;
+      chr[2].role = DART_INACTIVE;
+      rc.channels = chr; rc.on_message = st_on_message; rc.on_event = st_on_event;
 
       w = dart_node_open(mem_w, sizeof mem_w, &wc);
       r = dart_node_open(mem_r, sizeof mem_r, &rc);
@@ -781,7 +784,7 @@ static int selftest_main(void){
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);   /* evicts un-acked */
         dt = dart_now_us() - t0;
         ST_CHECK(dt >= ST_BLOCK_US-10000 && dt < 4*ST_BLOCK_US,
-                 "blocked: send waited ~max_block_us (%.1f ms)", dt/1000.0);
+                 "blocked: send waited ~backpressure_wait_us (%.1f ms)", dt/1000.0);
       }
 
       /* 4. RELEASED: let the reader catch up and ack; sends are instant */
@@ -804,7 +807,7 @@ static int selftest_main(void){
             quiet, can be flushed ONLY by the periodic sweep, not a data event.
             A sub-only reader's data channel never advances next_seqno, so a
             sweep that skips next_seqno==0 channels starves that ack and every
-            later send waits the full max_block_us. Fill the ring, go quiet long
+            later send waits the full backpressure_wait_us. Fill the ring, go quiet long
             enough for the sweep, then a send that would evict must NOT block. */
       st_pump(w, r, 200);                              /* match + settle */
       { unsigned long s0 = st_samples[ST_CH_BLOCK2];
@@ -828,7 +831,7 @@ static int selftest_main(void){
       st_pump(w, r, 300);
       ST_CHECK(st_samples[ST_CH_DYN] == 0, "dynamic: inactive receives nothing (%lu)",
                st_samples[ST_CH_DYN]);
-      dart_node_set_dir(r, ST_CH_DYN, DART_SUB_ONLY);
+      dart_node_set_role(r, ST_CH_DYN, DART_SUB_ONLY);
       st_pump(w, r, 400);
       ST_CHECK(st_samples[ST_CH_DYN] == 3, "dynamic: subscribe replays cached history (%lu, want 3)",
                st_samples[ST_CH_DYN]);
@@ -836,13 +839,13 @@ static int selftest_main(void){
       st_pump(w, r, 300);
       ST_CHECK(st_samples[ST_CH_DYN] == 4, "dynamic: live sample delivered (%lu, want 4)",
                st_samples[ST_CH_DYN]);
-      dart_node_set_dir(r, ST_CH_DYN, DART_NONE);
+      dart_node_set_role(r, ST_CH_DYN, DART_INACTIVE);
       st_pump(w, r, 300);                  /* let the new list reach the writer */
       for (i=0;i<5;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
       st_pump(w, r, 300);
       ST_CHECK(st_samples[ST_CH_DYN] == 4, "dynamic: unsubscribed receives nothing (%lu)",
                st_samples[ST_CH_DYN]);
-      dart_node_set_dir(r, ST_CH_DYN, DART_SUB_ONLY);
+      dart_node_set_role(r, ST_CH_DYN, DART_SUB_ONLY);
       st_pump(w, r, 400);
       ST_CHECK(st_samples[ST_CH_DYN] == 4+ST_DEPTH, "dynamic: resubscribe replays ring (%lu, want %u)",
                st_samples[ST_CH_DYN], 4+ST_DEPTH);
@@ -876,28 +879,28 @@ static int selftest_main(void){
           rides the meta channel as one reliable sample */
     { static uint8_t mem_a[1<<20], mem_b[1<<20];
       static dart_channel_def cha[ST_NCH], chb[ST_NCH];
+      static char snames[ST_NCH][12];     /* "scale/0".."scale/39" */
       dart_node_config ac, bc; dart_node *a, *b; uint16_t k;
       memset(cha, 0, sizeof cha);
       for (k=0;k<ST_NCH;k++){
-          cha[k].channel_id = (uint16_t)(100+k);
+          sprintf(snames[k], "scale/%u", k); cha[k].name = snames[k];
           cha[k].qos.reliability = DART_RELIABLE;
-          cha[k].qos.history_depth = 1;
-          cha[k].qos.join_replay = 1;      /* sent before discovery completes */
-          cha[k].qos.max_sample_bytes = 32;
+          cha[k].qos.keep_last = 1;
+          cha[k].qos.catch_up = 1;      /* sent before discovery completes */
+          cha[k].qos.max_message_bytes = 32;
           cha[k].qos.heartbeat_us = 50000;
-          cha[k].dir = DART_PUB_ONLY;
+          cha[k].role = DART_PUB_ONLY;
       }
       memcpy(chb, cha, sizeof cha);
-      for (k=0;k<ST_NCH;k++) chb[k].dir = DART_SUB_ONLY;
-      memset(&ac, 0, sizeof ac);
-      ac.domain_id = ST_DOMAIN+1; ac.channels = cha; ac.n_channels = ST_NCH;
-      bc = ac; bc.channels = chb; bc.on_sample = st_on_sample; bc.on_gap = st_on_gap;
+      for (k=0;k<ST_NCH;k++) chb[k].role = DART_SUB_ONLY;
+      ac = (dart_node_config){ .domain = ST_DOMAIN+1, .channels = cha, .n_channels = ST_NCH };
+      bc = ac; bc.channels = chb; bc.on_message = st_on_message; bc.on_event = st_on_event;
       a = dart_node_open(mem_a, sizeof mem_a, &ac);
       b = dart_node_open(mem_b, sizeof mem_b, &bc);
       ST_CHECK(a && b, "scale: %u-channel nodes open", ST_NCH);
       if (a && b){
           st_any = 0;
-          for (k=0;k<ST_NCH;k++) dart_node_send(a, (uint16_t)(100+k), payload, 16);
+          for (k=0;k<ST_NCH;k++) dart_node_send(a, k, payload, 16);
           { uint64_t end = dart_now_us() + 5000000u;
             while (st_any < ST_NCH && dart_now_us() < end) st_pump(a, b, 20); }
           ST_CHECK(st_any == ST_NCH, "scale: all channels delivered (%lu/%u)", st_any, ST_NCH);
@@ -914,28 +917,27 @@ static int selftest_main(void){
       dart_channel_def nw[1], nr[2];
       dart_node_config wc2, rc2; dart_node *w2, *r2;
       memset(nw,0,sizeof nw); memset(nr,0,sizeof nr);
-      nw[0].channel_id=5; nw[0].name="robot/lidar"; nw[0].dir=DART_PUB_ONLY;
-      nw[0].qos.reliability=DART_RELIABLE; nw[0].qos.history_depth=1;
-      nw[0].qos.join_replay=1; nw[0].qos.max_sample_bytes=32; nw[0].qos.heartbeat_us=50000;
-      nr[0]=nw[0]; nr[0].channel_id=4; nr[0].dir=DART_SUB_ONLY;   /* same name, other handle */
-      nr[1]=nw[0]; nr[1].channel_id=6; nr[1].name="sensors/imu"; nr[1].dir=DART_SUB_ONLY;
-      memset(&wc2,0,sizeof wc2);
-      wc2.domain_id=ST_DOMAIN+2; wc2.channels=nw; wc2.n_channels=1;
-      wc2.max_peers=4; wc2.meta_max_ids=8;
+      nw[0].name="robot/lidar"; nw[0].role=DART_PUB_ONLY;
+      nw[0].qos.reliability=DART_RELIABLE; nw[0].qos.keep_last=1;
+      nw[0].qos.catch_up=1; nw[0].qos.max_message_bytes=32; nw[0].qos.heartbeat_us=50000;
+      nr[0]=nw[0]; nr[0].role=DART_SUB_ONLY;   /* same name (index 0), other node */
+      nr[1]=nw[0]; nr[1].name="sensors/imu"; nr[1].role=DART_SUB_ONLY;   /* index 1 */
+      wc2 = (dart_node_config){ .domain=ST_DOMAIN+2, .channels=nw, .n_channels=1,
+                                .discovery={ .max_peers=4 } };
       rc2=wc2; rc2.channels=nr; rc2.n_channels=2;
-      rc2.on_sample=st_on_sample; rc2.on_gap=st_on_gap; rc2.on_collision=st_on_collision;
-      st_samples[4]=st_samples[6]=0; st_collisions=0;
+      rc2.on_message=st_on_message; rc2.on_event=st_on_event;
+      st_samples[0]=st_samples[1]=0; st_collisions=0;
       w2=dart_node_open(mem_nw,sizeof mem_nw,&wc2);
       r2=dart_node_open(mem_nr,sizeof mem_nr,&rc2);
       ST_CHECK(w2 && r2, "named: nodes open");
       if (w2 && r2){
           uint64_t end = dart_now_us() + 5000000u;
-          while (st_samples[4]==0 && dart_now_us()<end){
-              dart_node_send(w2, 5, payload, 16); st_pump(w2,r2,20);
+          while (st_samples[0]==0 && dart_now_us()<end){
+              dart_node_send(w2, 0, payload, 16); st_pump(w2,r2,20);
           }
-          ST_CHECK(st_samples[4] > 0, "named: same name matches across differing handles (%lu)", st_samples[4]);
+          ST_CHECK(st_samples[0] > 0, "named: same name matches across nodes (%lu)", st_samples[0]);
           st_pump(w2,r2,200);
-          ST_CHECK(st_samples[6] == 0, "named: distinct name never cross-wires (%lu)", st_samples[6]);
+          ST_CHECK(st_samples[1] == 0, "named: distinct name never cross-wires (%lu)", st_samples[1]);
           ST_CHECK(st_collisions == 0, "named: clean names raise no collision (%lu)", st_collisions);
           dart_node_close(r2,1); dart_node_close(w2,1);
       }
@@ -952,23 +954,22 @@ static int selftest_main(void){
       ST_CHECK(dart_topic_id(A)==dart_topic_id(B) && strcmp(A,B)!=0,
                "collision: test pair still shares one identity (else regen via collide)");
       memset(&cw,0,sizeof cw);
-      cw.channel_id=5; cw.name=A; cw.dir=DART_PUB_ONLY;
-      cw.qos.reliability=DART_RELIABLE; cw.qos.history_depth=1; cw.qos.join_replay=1;
-      cw.qos.max_sample_bytes=32; cw.qos.heartbeat_us=50000;
-      cr=cw; cr.name=B; cr.dir=DART_SUB_ONLY;
-      memset(&wc3,0,sizeof wc3);
-      wc3.domain_id=ST_DOMAIN+3; wc3.channels=&cw; wc3.n_channels=1;
-      wc3.max_peers=4; wc3.meta_max_ids=8;
+      cw.name=A; cw.role=DART_PUB_ONLY;
+      cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=1; cw.qos.catch_up=1;
+      cw.qos.max_message_bytes=32; cw.qos.heartbeat_us=50000;
+      cr=cw; cr.name=B; cr.role=DART_SUB_ONLY;
+      wc3 = (dart_node_config){ .domain=ST_DOMAIN+3, .channels=&cw, .n_channels=1,
+                                .discovery={ .max_peers=4 } };
       rc3=wc3; rc3.channels=&cr;
-      rc3.on_sample=st_on_sample; rc3.on_gap=st_on_gap; rc3.on_collision=st_on_collision;
-      st_samples[5]=0; st_collisions=0;
+      rc3.on_message=st_on_message; rc3.on_event=st_on_event;
+      st_samples[0]=0; st_collisions=0;
       w3=dart_node_open(mem_cw,sizeof mem_cw,&wc3);
       r3=dart_node_open(mem_cr,sizeof mem_cr,&rc3);
       ST_CHECK(w3 && r3, "collision: nodes open");
       if (w3 && r3){
-          for (i=0;i<60;i++){ dart_node_send(w3,5,payload,16); dart_node_poll(w3,0); dart_node_poll(r3,20); }
-          ST_CHECK(st_collisions >= 1, "collision: detected (on_collision fired %lu)", st_collisions);
-          ST_CHECK(st_samples[5] == 0, "collision: match refused, no cross-wire (%lu)", st_samples[5]);
+          for (i=0;i<60;i++){ dart_node_send(w3,0,payload,16); dart_node_poll(w3,0); dart_node_poll(r3,20); }
+          ST_CHECK(st_collisions >= 1, "collision: detected (DART_NAME_COLLISION fired %lu)", st_collisions);
+          ST_CHECK(st_samples[0] == 0, "collision: match refused, no cross-wire (%lu)", st_samples[0]);
           dart_node_close(r3,1); dart_node_close(w3,1);
       }
     }
@@ -985,8 +986,8 @@ static int selftest_main(void){
 
 /* control plane (two-machine sweeps), constants shared by sweep and serve */
 #define CTL_DOMAIN     9     /* keep test --domain away from this */
-#define CTL_CMD        1
-#define CTL_RES        2
+#define CTL_CMD        0     /* channel handles are array indices */
+#define CTL_RES        1
 #define CTL_RES_MAX    1400
 #define SW_MAX_RESULTS 128
 
@@ -1149,8 +1150,8 @@ static void sw_wait_pump(sw_child *cs, int n, int timeout_ms, dart_node *ctl, co
  * a control domain, spawns the same node children the coordinator does, and
  * publishes each child's raw SUMMARY lines back.
  * dart_test sweep --remote   the coordinator: per rate it publishes one kv
- * command (reliable CMD channel, join_replay 0 so stale commands never replay
- * to late workers) and collects results (reliable RES channel, join_replay =
+ * command (reliable CMD channel, catch_up 0 so stale commands never replay
+ * to late workers) and collects results (reliable RES channel, catch_up =
  * depth so results survive a control-peer flap; entries are tagged with
  * domain + run nonce so replays of older runs are filtered, not recounted).
  * Workers HELLO at startup so the coordinator knows how many results to
@@ -1164,7 +1165,7 @@ static int  g_ctl_dom_filter = -1;   /* accept RESULTs for this domain only */
 static char g_ctl_workers[16][24];
 static int  g_ctl_nworkers = 0;
 
-static void ctl_on_sample(void *u, uint16_t ch, uint32_t from, const void *d, size_t len){
+static void ctl_on_message(void *u, uint16_t ch, uint32_t from, const void *d, size_t len){
     (void)u;(void)from;
     if (ch==CTL_CMD && len < sizeof g_ctl_cmd){
         memcpy(g_ctl_cmd, d, len); g_ctl_cmd[len]=0; g_ctl_cmd_new=1;
@@ -1193,33 +1194,34 @@ static dart_node *ctl_open(uint16_t domain, int coordinator,
     static dart_discovery_addr seed;
     dart_node_config cfg;
     memset(ch, 0, sizeof ch);
-    ch[0].channel_id            = CTL_CMD;
+    ch[0].name                  = "ctl/cmd";
     ch[0].qos.reliability       = DART_RELIABLE;
-    ch[0].qos.history_depth     = 8;
-    ch[0].qos.max_sample_bytes  = sizeof g_ctl_cmd;
-    ch[0].dir = coordinator ? DART_PUB_ONLY : DART_SUB_ONLY;
+    ch[0].qos.keep_last         = 8;
+    ch[0].qos.max_message_bytes = sizeof g_ctl_cmd;
+    ch[0].role = coordinator ? DART_PUB_ONLY : DART_SUB_ONLY;
     ch[1] = ch[0];
-    ch[1].channel_id            = CTL_RES;
-    ch[1].qos.history_depth     = SW_MAX_RESULTS;
-    ch[1].qos.join_replay       = SW_MAX_RESULTS;
-    ch[1].qos.max_sample_bytes  = CTL_RES_MAX;
-    ch[1].dir = coordinator ? DART_SUB_ONLY : DART_PUB_ONLY;
-    memset(&cfg, 0, sizeof cfg);
-    cfg.domain_id  = domain;
-    cfg.channels   = ch;
-    cfg.n_channels = 2;
-    cfg.on_sample  = ctl_on_sample;
-    cfg.mcast_if   = if_ip;            /* pin on multihomed hosts */
-    cfg.announce_us = 500000;          /* the control plane must ride through
-                                          data floods: announce harder and
-                                          tolerate longer announce gaps      */
-    cfg.timeout_us  = 10000000;
+    ch[1].name                  = "ctl/res";
+    ch[1].qos.keep_last         = SW_MAX_RESULTS;
+    ch[1].qos.catch_up          = SW_MAX_RESULTS;
+    ch[1].qos.max_message_bytes = CTL_RES_MAX;
+    ch[1].role = coordinator ? DART_SUB_ONLY : DART_PUB_ONLY;
+    cfg = (dart_node_config){
+        .domain     = domain,
+        .channels   = ch,
+        .n_channels = 2,
+        .on_message = ctl_on_message,
+        .net  = { .multicast_interface = if_ip },     /* pin on multihomed hosts */
+        .discovery = { .announce_interval_us = 500000, /* control plane must ride through
+                                              data floods: announce harder and tolerate
+                                              longer announce gaps */
+                       .peer_timeout_us  = 10000000 },
+    };
     if (peer_ip){                      /* bootstrap without multicast */
         uint32_t a4 = inet_addr(peer_ip);
         if (a4 != INADDR_NONE){
             memset(&seed, 0, sizeof seed);
             memcpy(seed.ip, &a4, 4); seed.ip_len = 4;
-            cfg.seeds = &seed; cfg.n_seeds = 1;
+            cfg.net.seed_peers = &seed; cfg.net.n_seed_peers = 1;
         }
     }
     return dart_node_open(mem, sizeof mem, &cfg);
@@ -1616,7 +1618,7 @@ int main(int argc, char **argv){
         "        \"0\" = unset for either\n"
         "        latency/throughput node; SUMMARY+SUMMARY2 on timed exit\n"
         "        reliable=1: load channel DART_RELIABLE; block_ms: writer\n"
-        "        backpressure window (qos.max_block_us) for that channel\n"
+        "        backpressure window (qos.backpressure_wait_us) for that channel\n"
         "        extra_ch: declare N more channels; spread=1 round-robins the\n"
         "        load across them (0 = they stay idle, 2 = they are PUB_ONLY\n"
         "        everywhere so those writes have no readers)\n"

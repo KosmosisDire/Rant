@@ -1,7 +1,7 @@
-/* NODE runtime: owns the data socket, drives discovery, wires
- * peers into the transport. See dart_node.h. */
+/* NODE runtime: owns the data socket, drives discovery, wires peers into the
+ * transport. See dart_node.h. */
 
-/* Feature-test macros must precede the first system header in the TU. */
+/* feature-test macros must precede the first system header in the TU */
 #if !defined(_WIN32)
   #ifndef _POSIX_C_SOURCE
   #define _POSIX_C_SOURCE 200809L
@@ -11,8 +11,8 @@
   #endif
 #endif
 
-#include "dart_node.h"   /* node API (brings dart_transport.h) */
-#include "dart_discovery_rt.h"    /* discovery runtime used by the node impl */
+#include "dart_node.h"
+#include "dart_discovery_rt.h"
 #include <string.h>
 
 #ifdef _WIN32
@@ -74,64 +74,57 @@ typedef struct {
     uint32_t id;
     uint8_t  ip[16];
     uint8_t  ip_len;
-    uint16_t port;     /* peer's advertised transport (data) port */
+    uint16_t port;     /* peer's advertised data port */
 } dart__nodepeer;
 
 struct dart_node {
     dart_state     *tr;
     dart_discovery_rt     *disc;
-    dart_sock_t     fd;       /* unicast transport data socket (also group TX) */
+    dart_sock_t     fd;       /* unicast data socket (also group TX) */
     dart_sock_t     mcfd;     /* multicast data RX socket (DART_BADSOCK if unused) */
     dart__nodepeer *peers;
     uint16_t      max_peers;
     uint16_t      domain;
     uint16_t      mc_port;
-    /* datagram consumed from the core but refused by the socket; retried first
-     * next poll so it is never lost */
+    /* datagram the socket refused; retried first next poll so it is never lost */
     uint8_t       txhold[DART_DGRAM_MAX];
     size_t        txhold_len;
     uint32_t      txhold_peer;
-    /* cumulative backpressure (max_block_us waits in dart_node_send) */
-    uint64_t      block_us;
-    uint32_t      block_n;
-    /* optional app peer-discovery callbacks (forwarded from discovery) */
-    dart_node_peer_up_fn   on_peer_up;
-    dart_node_peer_down_fn on_peer_down;
-    void                  *cb_user;
+    /* backpressure accumulators, read via dart_node_backpressure_stats */
+    uint64_t      backpressure_accum_us;
+    uint32_t      backpressure_accum_n;
+    /* one app callback for everything but message delivery; node fills PEER_UP/DOWN */
+    dart_event_fn  on_event;
+    void          *user_data;
 };
 
-/* split node config into discovery + transport sub-configs (callbacks/user
- * installed later by open) */
+/* split node config into discovery + transport sub-configs */
 static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_config *dc,
                           dart_config *tc, uint16_t *mp_out){
-    uint16_t mp = cfg->max_peers ? cfg->max_peers : 16;
+    uint16_t mp = cfg->discovery.max_peers ? cfg->discovery.max_peers : 16;
     memset(dc, 0, sizeof *dc); memset(tc, 0, sizeof *tc);
-    dc->disc.domain_id   = cfg->domain_id;
-    dc->disc.data_port   = cfg->data_port;     /* advertised to peers */
-    dc->disc.announce_us = cfg->announce_us;   /* 0 uses dart_discovery default */
-    dc->disc.timeout_us  = cfg->timeout_us;
+    dc->disc.domain_id   = cfg->domain;
+    dc->disc.data_port   = cfg->net.data_port;
+    dc->disc.announce_us = cfg->discovery.announce_interval_us; /* 0 uses default */
+    dc->disc.timeout_us  = cfg->discovery.peer_timeout_us;
     dc->disc.max_peers   = mp;
-    dc->group            = cfg->disc_group;
-    dc->disc_port        = cfg->disc_port;
-    dc->ttl              = cfg->ttl;
-    dc->mcast_if         = cfg->mcast_if;
-    dc->seeds            = cfg->seeds;
-    dc->n_seeds          = cfg->n_seeds;
-    tc->channels     = cfg->channels;
-    tc->n_channels   = cfg->n_channels;
-    tc->max_peers    = mp;
-    tc->meta_max_ids = cfg->meta_max_ids;
-    tc->on_sample    = cfg->on_sample;
-    tc->on_gap       = cfg->on_gap;
-    tc->on_collision = cfg->on_collision;
-    tc->on_oversize  = cfg->on_oversize;
-    tc->realloc_fn   = cfg->realloc_fn;
-    tc->user         = cfg->user;
+    dc->group            = cfg->net.discovery_group;
+    dc->disc_port        = cfg->net.discovery_port;
+    dc->ttl              = cfg->net.multicast_ttl;
+    dc->mcast_if         = cfg->net.multicast_interface;
+    dc->seeds            = cfg->net.seed_peers;
+    dc->n_seeds          = cfg->net.n_seed_peers;
+    tc->channels   = cfg->channels;
+    tc->n_channels = cfg->n_channels;
+    tc->max_peers  = mp;
+    tc->on_message = cfg->on_message;
+    tc->on_event   = cfg->on_event;
+    tc->allocator  = cfg->allocator;
+    tc->user       = cfg->user_data;
     if (mp_out) *mp_out = mp;
 }
 
-/* A peer address is local iff a route probe to it selects that same address as
- * source: true for 127.0.0.1 and this host's own addresses, never for another machine. */
+/* local iff a route probe to the address selects that same address as source */
 static int dart__node_is_local_ip(const uint8_t ip[4]){
     dart_sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in a; int local = 0;
@@ -167,16 +160,24 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].used=1; n->peers[slot].id=id;
     memcpy(n->peers[slot].ip, addr->ip, 16);
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
-    /* interest arrives over the transport's meta channel, not the announce */
-    (void)meta; (void)mlen;
+    (void)meta; (void)mlen;   /* interest rides the meta channel, not the announce */
     dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
-    if (n->on_peer_up) n->on_peer_up(n->cb_user, id, addr);   /* new peer discovered */
+    if (n->on_event){
+        dart_event ev; memset(&ev, 0, sizeof ev);
+        ev.kind=DART_PEER_UP; ev.peer=id; ev.detail="peer discovered";
+        memcpy(ev.ip, addr->ip, 16); ev.ip_len=addr->ip_len; ev.port=addr->port;
+        n->on_event(n->user_data, &ev);
+    }
 }
 static void dart__node_down(void *u, uint32_t id){
     dart_node *n=(dart_node*)u; uint16_t i; int found=0;
     for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; found=1; break; }
     dart_peer_remove(n->tr, id);
-    if (found && n->on_peer_down) n->on_peer_down(n->cb_user, id);   /* peer lost (BYE/timeout) */
+    if (found && n->on_event){
+        dart_event ev; memset(&ev, 0, sizeof ev);
+        ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer lost";
+        n->on_event(n->user_data, &ev);
+    }
 }
 
 static int dart__node_find_addr(dart_node *n, const struct sockaddr_in *s){
@@ -192,22 +193,18 @@ static int dart__node_find_id(dart_node *n, uint32_t id){
     return -1;
 }
 
-/* deterministic data multicast group from a group selector (topic identity &
- * 0xFF). &0xFF wrap collisions are harmless: the receive path filters by peer
- * table and topic identity. */
+/* data multicast group from a selector (topic identity & 0xFF); &0xFF wrap is
+ * harmless, RX filters by peer table + identity */
 static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
     uint32_t a = (239u<<24)|(255u<<16)|((uint32_t)(domain&0xFFu)<<8)|(uint32_t)(sel&0xFFu);
     return htonl(a);
 }
-/* the group a channel def joins/sends on, derived from its topic identity so it
- * matches the core's DART_DEST_GROUP selector and every peer agrees. */
+/* a channel's group, from its identity so it matches DART_DEST_GROUP and every peer */
 static uint32_t dart__node_chan_group(uint16_t domain, const dart_channel_def *def){
     return dart__node_group_addr(domain, (uint16_t)(dart_channel_identity(def) & 0xFFu));
 }
 
-/* Send one datagram to a peer or multicast group. Returns 1 when the datagram
- * is done with (sent, peer unknown, or hard error), 0 only on a would-block
- * TX-buffer-full condition, where the caller must keep it. */
+/* send one datagram; returns 1 when done with it, 0 only on a would-block TX-full */
 static int dart__node_tx(dart_node *n, uint32_t to, const uint8_t *buf, size_t len){
     struct sockaddr_in d;
     memset(&d, 0, sizeof d);
@@ -262,10 +259,10 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
 
     n=(dart_node*)base; memset(n,0,sizeof *n);
     n->fd = DART_BADSOCK; n->mcfd = DART_BADSOCK; n->max_peers=mp;
-    n->domain = cfg->domain_id;
-    n->on_peer_up = cfg->on_peer_up; n->on_peer_down = cfg->on_peer_down; n->cb_user = cfg->user;
-    n->mc_port = cfg->mc_port ? cfg->mc_port
-               : (uint16_t)((cfg->disc_port ? cfg->disc_port : 7400) + 1);
+    n->domain = cfg->domain;
+    n->on_event = cfg->on_event; n->user_data = cfg->user_data;
+    n->mc_port = cfg->net.multicast_port ? cfg->net.multicast_port
+               : (uint16_t)((cfg->net.discovery_port ? cfg->net.discovery_port : 7400) + 1);
     p = base + node_sz;
     n->peers=(dart__nodepeer*)p; memset(n->peers,0,(size_t)mp*sizeof(dart__nodepeer));
     p += tbl_sz;
@@ -274,15 +271,14 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     if (!n->tr){ dart__net_cleanup(); return NULL; }
     p += tr_sz;
 
-    /* Bind the unicast data socket before opening discovery so we can advertise
-       its real port (data_port == 0 gets an OS ephemeral, read back via
-       getsockname). No SO_REUSEADDR: a unicast endpoint owns its port
-       exclusively, so a port collision fails loudly here. */
+    /* Bind the data socket before opening discovery so we can advertise its real
+       port (0 => OS ephemeral, read back via getsockname). No SO_REUSEADDR: a
+       unicast endpoint owns its port, so a collision fails loudly here. */
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd==DART_BADSOCK){ dart__net_cleanup(); return NULL; }
     memset(&a,0,sizeof a);
     a.sin_family=AF_INET; a.sin_addr.s_addr=htonl(INADDR_ANY);
-    a.sin_port=htons(cfg->data_port);          /* 0 => ephemeral */
+    a.sin_port=htons(cfg->net.data_port);      /* 0 => ephemeral */
     if (bind(fd,(struct sockaddr*)&a,sizeof a)!=0){
         DART_CLOSESOCK(fd); dart__net_cleanup(); return NULL;
     }
@@ -290,37 +286,32 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     if (getsockname(fd,(struct sockaddr*)&a,&alen)!=0){
         DART_CLOSESOCK(fd); dart__net_cleanup(); return NULL;
     }
-    dart__set_nonblock(fd);   /* never block in recv/send: poll drains the whole
-                               RX queue and a full TX buffer never deadlocks */
+    dart__set_nonblock(fd);   /* never block in recv/send; poll drains the queue */
 #ifdef _WIN32
-    /* Without this, a bounced send (peer gone, ICMP port unreachable) surfaces
-       as WSAECONNRESET on a later recvfrom, injecting one peer's error into the
-       shared RX path. Turn the reporting off. */
+    /* suppress WSAECONNRESET from a bounced send leaking into the shared RX path */
     { BOOL off = FALSE; DWORD bv = 0;
       WSAIoctl(fd, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bv, NULL, NULL); }
 #endif
-    if (cfg->so_rcvbuf){ int v=(int)cfg->so_rcvbuf; setsockopt(fd,SOL_SOCKET,SO_RCVBUF,(const char*)&v,sizeof v); }
-    if (cfg->so_sndbuf){ int v=(int)cfg->so_sndbuf; setsockopt(fd,SOL_SOCKET,SO_SNDBUF,(const char*)&v,sizeof v); }
+    if (cfg->net.recv_buffer_bytes){ int v=(int)cfg->net.recv_buffer_bytes; setsockopt(fd,SOL_SOCKET,SO_RCVBUF,(const char*)&v,sizeof v); }
+    if (cfg->net.send_buffer_bytes){ int v=(int)cfg->net.send_buffer_bytes; setsockopt(fd,SOL_SOCKET,SO_SNDBUF,(const char*)&v,sizeof v); }
     n->fd=fd;
     dc.disc.data_port = ntohs(a.sin_port);     /* advertise the actual port */
 
-    /* multicast data: group TX goes out the unicast data socket (source port
-       still identifies the sender); group RX needs its own socket on the shared
-       mc_port, one IGMP join per subscribed channel. */
+    /* multicast data: group TX rides the unicast socket; group RX needs its own
+       socket on the shared mc_port with one IGMP join per subscribed channel */
     { int want_rx=0, want_tx=0; uint16_t i; uint32_t ifip;
-      for (i=0;i<cfg->n_channels;i++) if (cfg->channels[i].mcast){
-          if (cfg->channels[i].dir!=DART_PUB_ONLY) want_rx=1;
-          if (cfg->channels[i].dir!=DART_SUB_ONLY) want_tx=1;
+      for (i=0;i<cfg->n_channels;i++) if (cfg->channels[i].multicast){
+          if (cfg->channels[i].role!=DART_PUB_ONLY) want_rx=1;
+          if (cfg->channels[i].role!=DART_SUB_ONLY) want_tx=1;
       }
-      /* pin data multicast to the same egress interface discovery uses, so the
-         source address peers learned from announces matches group data. Otherwise
-         multihomed hosts pick per-group interfaces and break peer identification. */
+      /* pin data multicast to discovery's egress interface, else multihomed hosts
+         pick per-group interfaces and break peer identification by source addr */
       ifip = !(want_rx||want_tx) ? htonl(INADDR_ANY)
-           : cfg->mcast_if       ? inet_addr(cfg->mcast_if)
-           : dart_discovery_mcast_if_for(inet_addr(cfg->disc_group?cfg->disc_group:"239.255.0.7"),
-                                cfg->disc_port?cfg->disc_port:7400);
+           : cfg->net.multicast_interface ? inet_addr(cfg->net.multicast_interface)
+           : dart_discovery_mcast_if_for(inet_addr(cfg->net.discovery_group?cfg->net.discovery_group:"239.255.0.7"),
+                                cfg->net.discovery_port?cfg->net.discovery_port:7400);
       if (want_tx){
-          unsigned char mttl = cfg->ttl ? cfg->ttl : 1, mloop = 1;
+          unsigned char mttl = cfg->net.multicast_ttl ? cfg->net.multicast_ttl : 1, mloop = 1;
           setsockopt(n->fd, IPPROTO_IP, IP_MULTICAST_IF,   (const char*)&ifip,  sizeof ifip);
           setsockopt(n->fd, IPPROTO_IP, IP_MULTICAST_TTL,  (const char*)&mttl,  sizeof mttl);
           setsockopt(n->fd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&mloop, sizeof mloop);
@@ -341,18 +332,15 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
               if (bind(mfd,(struct sockaddr*)&ma,sizeof ma)!=0) mc_ok=0;
           }
           if (mc_ok){
-              /* one join per distinct group: the &0xFF group mapping lets
-                 channels share a group, and kernels reject duplicate
-                 memberships. Memberships per socket are also OS-capped
-                 (often ~20: Linux net.ipv4.igmp_max_memberships), so keep
-                 mcast channels few; a failed join fails the open. */
+              /* one join per distinct group (kernels reject dups); memberships are
+                 OS-capped (~20: Linux net.ipv4.igmp_max_memberships), a fail fails open */
               for (i=0;i<cfg->n_channels;i++)
-                  if (cfg->channels[i].mcast && cfg->channels[i].dir!=DART_PUB_ONLY){
-                      uint32_t g = dart__node_chan_group(cfg->domain_id, &cfg->channels[i]);
+                  if (cfg->channels[i].multicast && cfg->channels[i].role!=DART_PUB_ONLY){
+                      uint32_t g = dart__node_chan_group(cfg->domain, &cfg->channels[i]);
                       uint16_t j; int dup=0;
                       for (j=0;j<i;j++)
-                          if (cfg->channels[j].mcast && cfg->channels[j].dir!=DART_PUB_ONLY
-                              && dart__node_chan_group(cfg->domain_id, &cfg->channels[j])==g){
+                          if (cfg->channels[j].multicast && cfg->channels[j].role!=DART_PUB_ONLY
+                              && dart__node_chan_group(cfg->domain, &cfg->channels[j])==g){
                               dup=1; break;
                           }
                       if (dup) continue;
@@ -370,7 +358,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
           }
           setsockopt(mfd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&mloop, sizeof mloop);
           dart__set_nonblock(mfd);
-          if (cfg->so_rcvbuf){ int v=(int)cfg->so_rcvbuf; setsockopt(mfd,SOL_SOCKET,SO_RCVBUF,(const char*)&v,sizeof v); }
+          if (cfg->net.recv_buffer_bytes){ int v=(int)cfg->net.recv_buffer_bytes; setsockopt(mfd,SOL_SOCKET,SO_RCVBUF,(const char*)&v,sizeof v); }
           n->mcfd=mfd;
       } }
 
@@ -387,17 +375,15 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     return n;
 }
 
-/* Max wall-time draining the RX queue (and running on_sample) per poll tick
- * before yielding to discovery. Bounds how long a slow on_sample starves the
- * single-threaded loop, keeping discovery alive so peers never time out. */
+/* max wall-time draining RX (and running on_message) per poll tick before
+ * yielding to discovery, so a slow on_message never starves it */
 #ifndef DART_RX_BUDGET_US
 #define DART_RX_BUDGET_US 5000u
 #endif
 
-/* Drain one socket's receive queue into the transport until empty or the
- * deadline passes. Draining fully (vs one-per-tick) avoids NACK storms.
- * Sockets are non-blocking, so recvfrom <=0 means empty. */
-static void dart__node_drain(dart_node *n, dart_sock_t fd, uint64_t deadline){
+/* drain one socket's RX queue into the transport until empty or past deadline
+ * (full drain avoids NACK storms). Distinct from public dart_node_drain. */
+static void dart__node_rx_drain(dart_node *n, dart_sock_t fd, uint64_t deadline){
     uint8_t buf[DART_DGRAM_MAX];
     for (;;){
         struct sockaddr_in src;
@@ -409,14 +395,11 @@ static void dart__node_drain(dart_node *n, dart_sock_t fd, uint64_t deadline){
         int r=(int)recvfrom(fd,(char*)buf,(int)sizeof buf,0,(struct sockaddr*)&src,&sl);
         if (r<0){
             if (dart__would_block()) break;        /* queue empty */
-            continue;   /* per-datagram error (e.g. a bounced send surfaces as
-                           WSAECONNRESET); datagrams behind it are fine, keep draining */
+            continue;   /* per-datagram error (e.g. bounced send); keep draining */
         }
         if (r>0){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
-                /* unicast announce aimed at our data port: the only address
-                   that reaches THIS process when several share the disc port.
-                   Hand it to discovery. */
+                /* unicast announce aimed at our data port: hand it to discovery */
                 uint8_t sip[4]; memcpy(sip, &src.sin_addr.s_addr, 4);
                 dart_discovery_rt_feed(n->disc, sip, 4, buf, (size_t)r);
             } else {
@@ -439,13 +422,12 @@ int dart_node_poll(dart_node *n, int timeout_ms){
     if (n->mcfd!=DART_BADSOCK){ pfd[1].fd=n->mcfd; pfd[1].events=POLLIN; nf=2; }
     if (DART_POLL(pfd,nf,timeout_ms) > 0){
         uint64_t rx_deadline = dart_now_us() + DART_RX_BUDGET_US;
-        if (pfd[0].revents & POLLIN) dart__node_drain(n, n->fd, rx_deadline);
-        if (nf==2 && (pfd[1].revents & POLLIN)) dart__node_drain(n, n->mcfd, rx_deadline);
+        if (pfd[0].revents & POLLIN) dart__node_rx_drain(n, n->fd, rx_deadline);
+        if (nf==2 && (pfd[1].revents & POLLIN)) dart__node_rx_drain(n, n->mcfd, rx_deadline);
     }
 
     now=dart_now_us();
-    /* a datagram the socket refused last tick was already consumed from the core,
-       so dropping it would lose best-effort data. Retry it before pulling new. */
+    /* the core already consumed any held datagram, so retry it before pulling new */
     if (n->txhold_len && dart__node_tx(n, n->txhold_peer, n->txhold, n->txhold_len))
         n->txhold_len = 0;
     if (!n->txhold_len)
@@ -460,44 +442,42 @@ int dart_node_poll(dart_node *n, int timeout_ms){
     return 0;
 }
 
-int dart_node_send(dart_node *n, uint16_t channel_id, const void *data, size_t len){
-    /* bounded backpressure (qos.max_block_us): let slow-but-live readers ack
-       before un-acked history is overwritten. The wait pumps the node loop, so
-       on_sample/on_gap may fire from inside this call. Releases on ack, reader
-       death, or deadline; then the send proceeds. max_block_us == 0 never waits. */
-    const dart_qos *q = dart_channel_qos(n->tr, channel_id);
-    if (q && q->max_block_us && dart_send_would_evict(n->tr, channel_id)){
-        uint64_t t0 = dart_now_us(), deadline = t0 + q->max_block_us;
+int dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len){
+    /* bounded backpressure: pump the loop (on_message/on_event may fire here) until
+       a slow reader acks or qos.backpressure_wait_us elapses, then send anyway */
+    const dart_qos *q = dart_channel_qos(n->tr, channel);
+    if (q && q->backpressure_wait_us && dart_send_would_evict(n->tr, channel)){
+        uint64_t t0 = dart_now_us(), deadline = t0 + q->backpressure_wait_us;
         do {
             dart_node_poll(n, 1);
-            if (!dart_send_would_evict(n->tr, channel_id)) break;
+            if (!dart_send_would_evict(n->tr, channel)) break;
         } while (dart_now_us() < deadline);
-        n->block_us += dart_now_us() - t0;
-        n->block_n++;
+        n->backpressure_accum_us += dart_now_us() - t0;
+        n->backpressure_accum_n++;
     }
-    return dart_send(n->tr, channel_id, data, len, dart_now_us());
+    return dart_send(n->tr, channel, data, len, dart_now_us());
 }
 
-int dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir){
-    return dart_set_dir(n->tr, channel_id, dir);
+int dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role){
+    return dart_set_role(n->tr, channel, role);
 }
 
-void dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends){
-    if (block_us)      *block_us      = n->block_us;
-    if (blocked_sends) *blocked_sends = n->block_n;
+void dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *waited_sends){
+    if (waited_us)    *waited_us    = n->backpressure_accum_us;
+    if (waited_sends) *waited_sends = n->backpressure_accum_n;
 }
 
-int dart_node_drain(dart_node *n, uint16_t channel_id, int timeout_ms){
+int dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms){
     uint64_t deadline = dart_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
-    while (!dart_send_drained(n->tr, channel_id)){
+    while (!dart_send_drained(n->tr, channel)){
         if (dart_now_us() >= deadline) return 0;
         dart_node_poll(n, 1);
     }
     return 1;
 }
 
-int dart_node_writer_match_count(dart_node *n, uint16_t channel_id){
-    return dart_writer_match_count(n->tr, channel_id);
+int dart_node_writer_match_count(dart_node *n, uint16_t channel){
+    return dart_writer_match_count(n->tr, channel);
 }
 
 void dart_node_close(dart_node *n, int send_bye){
@@ -505,6 +485,6 @@ void dart_node_close(dart_node *n, int send_bye){
     if (n->disc) dart_discovery_rt_close(n->disc, send_bye);
     if (n->mcfd != DART_BADSOCK) DART_CLOSESOCK(n->mcfd);
     if (n->fd != DART_BADSOCK) DART_CLOSESOCK(n->fd);
-    if (n->tr) dart_destroy(n->tr);     /* free any hook-allocated dynamic buffers */
+    if (n->tr) dart_destroy(n->tr);     /* free hook-allocated dynamic buffers */
     dart__net_cleanup();
 }

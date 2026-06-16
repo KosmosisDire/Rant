@@ -7,9 +7,8 @@
  *                                          or redirected file is sent whole
  *                                          (newlines preserved)
  *
- * <channel> is a number (0..65534 = a local channel id, used directly as the
- * cross-peer identity) or a topic name (its 64-bit hash is the identity; the
- * name rides discovery so a hash clash is detected, not silently cross-wired).
+ * <channel> is a topic name: its 64-bit hash is the cross-peer identity, and the
+ * name rides discovery so a hash clash is detected, not silently cross-wired.
  * Both sides must use the same channel, domain, and transport (unicast or
  * --mcast). Messages are reliable KEEP_LAST, so a subscriber already up gets
  * them in order, and one that joins late sees the recent history a live
@@ -117,26 +116,6 @@ static void *pump_thread(void *arg){
 #endif
 }
 
-/* Resolve a channel token. A plain number is a local channel id (no name, so the
- * id itself is the cross-peer identity, 0..65534). Anything else is a topic NAME:
- * the transport hashes it to a 64-bit identity, and we give it a fixed local
- * handle (only this process ever sees it). */
-static void chan_from_token(const char *s, uint16_t *id_out, const char **name_out){
-    char *end;
-    long v = strtol(s, &end, 10);
-    if (*s && !*end && v >= 0 && v < (long)DART_CHAN_META){ *id_out=(uint16_t)v; *name_out=NULL; }
-    else { *id_out = 1; *name_out = s; }
-}
-
-/* Two distinct topic names hashed to the same identity: the transport refuses
- * the match (never cross-wires); we just warn. Astronomically rare at 64 bits. */
-static void on_collision(void *u, uint64_t id, const char *ours,
-                         const char *peer, size_t plen){
-    (void)u;
-    fprintf(stderr, "[warn] topic hash collision %016llx: ours=\"%s\" peer=\"%.*s\" (ignored)\n",
-            (unsigned long long)id, ours, (int)plen, peer);
-}
-
 /* "a.b.c.d" into 4 network-order octets. Returns 0 ok, <0 on malformed input.
  * Kept local so the tool needs no socket headers of its own. */
 static int parse_ipv4(const char *s, uint8_t out[4]){
@@ -162,9 +141,9 @@ static size_t parse_size(const char *s){
     return (v > 0) ? (size_t)(v*m) : 0;
 }
 
-/* subscriber callback: keep it cheap, never call back into dart_*. Printing the
- * payload as text is fine. */
-static void on_sample(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
+/* message delivery: keep it cheap, never call back into dart_*. Printing the
+ * payload as text is fine. ch is the channel's local handle (its index). */
+static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     (void)u;
     if (g_outfile){                       /* --file: each message OVERWRITES the file */
         rewind(g_outfile);                /* back to the start, not appending */
@@ -177,28 +156,32 @@ static void on_sample(void *u, uint16_t ch, uint32_t from, const void *data, siz
     }
 }
 
-/* A peer sent a message bigger than our --max, so the transport can't hold it
- * (it skips past it rather than wedging). Report it; both ends must share a
- * --max >= the largest message. */
-static void on_oversize(void *u, uint16_t ch, uint32_t from, uint32_t bytes){
+/* Everything that isn't message delivery, as one callback: peer up/down for
+ * discovery visibility, plus the diagnostics (a too-big message skipped, or a
+ * topic-name hash collision refused). */
+static void on_event(void *u, const dart_event *ev){
     (void)u;
-    fprintf(stderr, "[sub] dropped a %lu-byte message on ch %u from peer %u: exceeds --max; raise --max\n",
-            (unsigned long)bytes, ch, from);
-}
-
-/* discovery visibility: log when a peer is found / lost, with elapsed time so
- * you can see how long discovery actually took. */
-static void on_peer_up(void *u, uint32_t id, const dart_discovery_addr *a){
-    (void)u;
-    if (a->ip_len == 4)
-        fprintf(stderr, "[disc +%ldms] peer %u discovered at %u.%u.%u.%u:%u\n",
-                now_ms()-g_start_ms, id, a->ip[0],a->ip[1],a->ip[2],a->ip[3], a->port);
-    else
-        fprintf(stderr, "[disc +%ldms] peer %u discovered\n", now_ms()-g_start_ms, id);
-}
-static void on_peer_down(void *u, uint32_t id){
-    (void)u;
-    fprintf(stderr, "[disc +%ldms] peer %u lost\n", now_ms()-g_start_ms, id);
+    switch (ev->kind){
+    case DART_PEER_UP:
+        if (ev->ip_len == 4)
+            fprintf(stderr, "[disc +%ldms] peer %u discovered at %u.%u.%u.%u:%u\n",
+                    now_ms()-g_start_ms, ev->peer, ev->ip[0],ev->ip[1],ev->ip[2],ev->ip[3], ev->port);
+        else
+            fprintf(stderr, "[disc +%ldms] peer %u discovered\n", now_ms()-g_start_ms, ev->peer);
+        break;
+    case DART_PEER_DOWN:
+        fprintf(stderr, "[disc +%ldms] peer %u lost\n", now_ms()-g_start_ms, ev->peer);
+        break;
+    case DART_MSG_TOO_BIG:
+        fprintf(stderr, "[sub] dropped a %llu-byte message on ch %u from peer %u: exceeds --max; raise --max\n",
+                (unsigned long long)ev->count, ev->channel, ev->peer);
+        break;
+    case DART_NAME_COLLISION:
+        fprintf(stderr, "[warn] topic hash collision %016llx: ours=\"%s\" (match refused)\n",
+                (unsigned long long)ev->first, ev->detail ? ev->detail : "");
+        break;
+    case DART_MSG_LOST: break;   /* reliable: repaired; best-effort: expected */
+    }
 }
 
 static void usage(void){
@@ -329,63 +312,69 @@ int main(int argc, char **argv){
     if (!is_pub && !is_sub){ fprintf(stderr, "mode must be 'pub' or 'sub'\n"); usage(); return 2; }
 
     int dynamic = !max_set;                 /* no --max => grow buffers via malloc */
-    size_t send_limit = dynamic ? DART_SAMPLE_MAX : cap;
+    size_t send_limit = dynamic ? DART_MESSAGE_MAX : cap;
 
-    uint16_t cid; const char *cname;
-    chan_from_token(chan, &cid, &cname);
+    /* The channel argument is a topic NAME (its 64-bit hash is the cross-peer
+       identity); the local handle is 0 since this tool uses a single channel. */
+    const uint16_t cid = 0;
+    const char *cname = chan;
 
-    dart_channel_def ch; memset(&ch, 0, sizeof ch);
-    ch.channel_id           = cid;
-    ch.name                 = cname;
-    ch.qos.reliability      = reliable ? DART_RELIABLE : DART_BEST_EFFORT;
-    ch.qos.history_depth    = 4;        /* shallow: samples can be megabytes */
-    ch.qos.join_replay      = 2;        /* late subscribers see recent history */
-    ch.qos.max_sample_bytes = dynamic ? 0u : (uint32_t)cap;
-    ch.qos.heartbeat_us     = 200000;   /* 200 ms */
-    ch.qos.nack_delay_us    = 5000;     /* 5 ms  */
-    ch.qos.max_block_us     = 5000000;  /* 5s flow control: pace the publisher to
-                                           the reader so a multi-chunk file is
-                                           delivered before KEEP_LAST(16) evicts
-                                           un-acked history. A dead reader still
-                                           releases at the peer timeout. */
-    ch.dir   = is_pub ? DART_PUB_ONLY : DART_SUB_ONLY;
-    ch.mcast = (uint8_t)mcast;
+    /* A deliberate big-message profile (not the defaults): shallow keep_last
+       because messages can be megabytes, fast 5ms repair, and a long flow-control
+       window so a multi-chunk file drains before KEEP_LAST evicts un-acked
+       history. */
+    dart_channel_def ch = {
+        .name       = cname,
+        .qos = {
+            .reliability        = reliable ? DART_RELIABLE : DART_BEST_EFFORT,
+            .keep_last          = 4,        /* shallow: messages can be megabytes */
+            .catch_up           = 2,        /* late subscribers see recent history */
+            .max_message_bytes  = dynamic ? 0u : (uint32_t)cap,
+            .heartbeat_us       = 200000,   /* 200 ms */
+            .repair_delay_us    = 5000,     /* 5 ms  */
+            .backpressure_wait_us= 5000000,  /* 5s flow control: pace the publisher to
+                                               the reader so a multi-chunk file is
+                                               delivered before KEEP_LAST evicts
+                                               un-acked history. A dead reader still
+                                               releases at the peer timeout. */
+        },
+        .role      = is_pub ? DART_PUB_ONLY : DART_SUB_ONLY,
+        .multicast = (uint8_t)mcast,
+    };
 
-    dart_node_config cfg; memset(&cfg, 0, sizeof cfg);
-    cfg.domain_id  = domain;
-    cfg.data_port  = 0;            /* OS-assigned ephemeral port */
-    cfg.channels   = &ch;
-    cfg.n_channels = 1;
-    cfg.on_sample  = on_sample;
-    cfg.on_collision = on_collision;
-    cfg.on_oversize = on_oversize;
-    cfg.realloc_fn  = dynamic ? pubsub_realloc : NULL;   /* dynamic message sizing */
-    cfg.on_peer_up   = on_peer_up;
-    cfg.on_peer_down = on_peer_down;
     /* announce/timeout left at defaults (1s / 3.5s): the startup solicit makes
-       discovery near-instant, so the periodic announce is just the slow backstop. */
-    cfg.max_peers  = 8;            /* a few peers; bounds the per-peer reassembly */
-    /* A single big sample has no within-sample flow control, so the receive
+       discovery near-instant, so the periodic announce is just the slow backstop.
+       data_port defaults to 0 = an OS-assigned ephemeral port. */
+    dart_node_config cfg = {
+        .domain     = domain,
+        .channels   = &ch,
+        .n_channels = 1,
+        .on_message = on_message,
+        .on_event   = on_event,
+        .allocator  = dynamic ? pubsub_realloc : NULL,   /* dynamic message sizing */
+        .discovery  = { .max_peers = 8 },   /* a few peers; bounds per-peer reassembly */
+    };
+    /* A single big message has no within-message flow control, so the receive
        socket must buffer it whole or fragments drop and 32-wide NACK repair
-       crawls. Size the socket buffers to hold one sample (clamped 8..64 MB).
+       crawls. Size the socket buffers to hold one message (clamped 8..64 MB).
        On Linux raise net.core.rmem_max to match (Windows honors it as-is). */
-    { size_t sb = dynamic ? DART_SAMPLE_MAX : cap;
+    { size_t sb = dynamic ? DART_MESSAGE_MAX : cap;
       if (sb < (8u<<20))  sb = 8u<<20;
       if (sb > (64u<<20)) sb = 64u<<20;
-      cfg.so_rcvbuf = (uint32_t)sb;
-      cfg.so_sndbuf = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
-    if (if_ip)      cfg.mcast_if = if_ip;            /* multihomed: pin it */
-    else if (mcast) cfg.mcast_if = "127.0.0.1";      /* same-host: stay local */
+      cfg.net.recv_buffer_bytes = (uint32_t)sb;
+      cfg.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
+    if (if_ip)      cfg.net.multicast_interface = if_ip;          /* multihomed: pin it */
+    else if (mcast) cfg.net.multicast_interface = "127.0.0.1";    /* same-host: stay local */
 
     dart_discovery_addr seed;
     if (peer_ip){
         memset(&seed, 0, sizeof seed);
         if (parse_ipv4(peer_ip, seed.ip) < 0){ fprintf(stderr, "bad --peer ip %s\n", peer_ip); return 2; }
         seed.ip_len = 4;           /* port 0 = use the discovery port */
-        cfg.seeds = &seed; cfg.n_seeds = 1;
+        cfg.net.seed_peers = &seed; cfg.net.n_seed_peers = 1;
     }
 
-    /* Size the arena to the cap: ~ (history_depth + max_peers) x max_sample_bytes
+    /* Size the arena to the cap: ~ (keep_last + max_peers) x max_message_bytes
        plus the meta channel. malloc'd (can be tens of MB) and intentionally not
        freed: the process owns it for its whole life. */
     size_t need = dart_node_required_memory(&cfg);

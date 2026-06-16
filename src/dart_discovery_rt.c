@@ -1,7 +1,6 @@
-/* peer-discovery runtime: sockets, clock, UUID and the
- * one-tick loop. Platform socket headers stay in this file. */
+/* peer-discovery runtime: sockets, clock, UUID, and the one-tick loop. */
 
-/* Feature-test macros must precede the first system header. POSIX only. */
+/* feature-test macros must precede the first system header (POSIX only) */
 #if !defined(_WIN32)
   #ifndef _POSIX_C_SOURCE
   #define _POSIX_C_SOURCE 200809L
@@ -72,12 +71,9 @@ static void dart_discovery_rt_tx1(dart_discovery_rt *rt, const uint8_t *out, siz
     sendto(rt->fd, (const char*)out, (int)m, 0, (struct sockaddr*)&d, sizeof d);
 }
 
-/* send a built announce/BYE to the group, to every configured seed, and to
- * every known peer. Known peers get a copy at the shared disc port and one at
- * their data port: the latter is the only per-process address when several
- * processes on one host share the disc port (the data-socket owner forwards
- * it via dart_discovery_rt_feed). Discovery then survives multicast outages
- * and, with seeds, bootstraps without multicast. Receivers dedup by uuid. */
+/* send to the group, every seed, and every known peer (peers get a copy at the
+ * disc port and at their data port, the only per-process address when processes
+ * share the disc port). Survives multicast outages; receivers dedup by uuid. */
 static void dart_discovery_rt_tx(dart_discovery_rt *rt, const uint8_t *out, size_t m){
     uint16_t s, dport = ntohs(rt->grp.sin_port);
     dart_discovery_addr a;
@@ -231,9 +227,7 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     group     = c.group     ? c.group     : "239.255.0.7";
     if (c.disc_port == 0)    c.disc_port  = 7400;
     ttl  = c.ttl ? c.ttl : 1;
-    /* loopback always on: the UUID self-filter drops our echoes, and it's
-     * required for multiple instances per host. */
-    loop = 1;
+    loop = 1;   /* always on (uuid self-filter drops echoes); needed for multi-instance per host */
 
     need = dart_discovery_rt_required_memory(&c);
     if (cap < need) return NULL;
