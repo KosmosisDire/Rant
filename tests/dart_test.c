@@ -720,8 +720,8 @@ static void st_on_event(void *u, const dart_event *ev){
 }
 
 static void st_pump(dart_node *a, dart_node *b, int ms){     /* run both nodes */
-    uint64_t end = dart_now_us() + (uint64_t)ms*1000u;
-    while (dart_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
+    uint64_t end = dart_plat_now_us() + (uint64_t)ms*1000u;
+    while (dart_plat_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
 }
 
 static int selftest_main(void){
@@ -754,8 +754,8 @@ static int selftest_main(void){
 
       /* 1. JOIN: writer streams while discovery completes; the reader must
             adopt the stream head silently (no gap for a late joiner) */
-      { uint64_t end = dart_now_us() + 5000000u;
-        while (st_samples[ST_CH_GAP]==0 && dart_now_us() < end){
+      { uint64_t end = dart_plat_now_us() + 5000000u;
+        while (st_samples[ST_CH_GAP]==0 && dart_plat_now_us() < end){
             dart_node_send(w, ST_CH_GAP, payload, sizeof payload);
             st_pump(w, r, 20);
         } }
@@ -780,18 +780,18 @@ static int selftest_main(void){
       st_pump(w, r, 200);
       for (i=0;i<ST_DEPTH;i++) dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);
       st_pump(w, NULL, 50);                         /* flush; reader silent, no acks */
-      { uint64_t t0 = dart_now_us(), dt;
+      { uint64_t t0 = dart_plat_now_us(), dt;
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);   /* evicts un-acked */
-        dt = dart_now_us() - t0;
+        dt = dart_plat_now_us() - t0;
         ST_CHECK(dt >= ST_BLOCK_US-10000 && dt < 4*ST_BLOCK_US,
                  "blocked: send waited ~backpressure_wait_us (%.1f ms)", dt/1000.0);
       }
 
       /* 4. RELEASED: let the reader catch up and ack; sends are instant */
       st_pump(w, r, 300);
-      { uint64_t t0 = dart_now_us(), dt;
+      { uint64_t t0 = dart_plat_now_us(), dt;
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);
-        dt = dart_now_us() - t0;
+        dt = dart_plat_now_us() - t0;
         ST_CHECK(dt < 20000, "released: acked ring sends instantly (%.1f ms)", dt/1000.0);
         st_pump(w, r, 100);
         /* the blocked-phase eviction dropped only history already in flight to
@@ -815,9 +815,9 @@ static int selftest_main(void){
         st_pump(w, r, 200);                            /* reader drains burst; sweep must ack */
         ST_CHECK(st_samples[ST_CH_BLOCK2]-s0 == ST_DEPTH, "sweep-ack: ring delivered (%lu, want %u)",
                  st_samples[ST_CH_BLOCK2]-s0, ST_DEPTH);
-        { uint64_t t0 = dart_now_us(), dt;
+        { uint64_t t0 = dart_plat_now_us(), dt;
           dart_node_send(w, ST_CH_BLOCK2, payload, sizeof payload);   /* would evict slot 0 */
-          dt = dart_now_us() - t0;
+          dt = dart_plat_now_us() - t0;
           ST_CHECK(dt < 20000,
                    "sweep-ack: sub-only reader's timer ack releases backpressure (%.1f ms)", dt/1000.0);
         }
@@ -901,8 +901,8 @@ static int selftest_main(void){
       if (a && b){
           st_any = 0;
           for (k=0;k<ST_NCH;k++) dart_node_send(a, k, payload, 16);
-          { uint64_t end = dart_now_us() + 5000000u;
-            while (st_any < ST_NCH && dart_now_us() < end) st_pump(a, b, 20); }
+          { uint64_t end = dart_plat_now_us() + 5000000u;
+            while (st_any < ST_NCH && dart_plat_now_us() < end) st_pump(a, b, 20); }
           ST_CHECK(st_any == ST_NCH, "scale: all channels delivered (%lu/%u)", st_any, ST_NCH);
           dart_node_close(b, 1);
           dart_node_close(a, 1);
@@ -931,8 +931,8 @@ static int selftest_main(void){
       r2=dart_node_open(mem_nr,sizeof mem_nr,&rc2);
       ST_CHECK(w2 && r2, "named: nodes open");
       if (w2 && r2){
-          uint64_t end = dart_now_us() + 5000000u;
-          while (st_samples[0]==0 && dart_now_us()<end){
+          uint64_t end = dart_plat_now_us() + 5000000u;
+          while (st_samples[0]==0 && dart_plat_now_us()<end){
               dart_node_send(w2, 0, payload, 16); st_pump(w2,r2,20);
           }
           ST_CHECK(st_samples[0] > 0, "named: same name matches across nodes (%lu)", st_samples[0]);

@@ -66,12 +66,14 @@ static void build_discovery(const char *srcdir, const char *outdir){
 
     emit(out, srcdir, "dart_discovery.h", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
+    emit(out, srcdir, "dart_plat.h", 1);
     emit(out, srcdir, "dart_discovery_rt.h", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
 
     fputs("\n#ifdef DART_DISCOVERY_IMPLEMENTATION\n", out);
     emit(out, srcdir, "dart_discovery.c", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
+    emit(out, srcdir, "dart_plat.c", 1);
     emit(out, srcdir, "dart_discovery_rt.c", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
     fputs("#endif /* DART_DISCOVERY_IMPLEMENTATION */\n", out);
@@ -137,6 +139,7 @@ static void build_combined(const char *srcdir, const char *outdir){
     /* APIs in dependency order */
     emit(out, srcdir, "dart_discovery.h", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
+    emit(out, srcdir, "dart_plat.h", 1);
     emit(out, srcdir, "dart_discovery_rt.h", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
     emit(out, srcdir, "dart_transport.h", 1);
@@ -148,6 +151,7 @@ static void build_combined(const char *srcdir, const char *outdir){
     fputs("\n#ifdef DART_DISCOVERY_IMPLEMENTATION\n", out);
     emit(out, srcdir, "dart_discovery.c", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
+    emit(out, srcdir, "dart_plat.c", 1);
     emit(out, srcdir, "dart_discovery_rt.c", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
     fputs("#endif /* DART_DISCOVERY_IMPLEMENTATION */\n", out);

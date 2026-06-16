@@ -252,7 +252,7 @@ static int publish_stream(dart_node *n, uint16_t cid, FILE *f, int wait_ms, size
 /* --rate: repeat the same payload at hz until interrupted (Ctrl-C). A long-
  * lived publisher, so we settle for the first subscriber but publish even if
  * none showed: late joiners are caught by discovery + KEEP_LAST history. Paced
- * on dart_now_us so it stays on the microsecond grid; a send that falls behind
+ * on dart_plat_now_us so it stays on the microsecond grid; a send that falls behind
  * resyncs to now rather than bursting to catch up (capped per tick regardless).
  * Polls the node every tick so discovery and reliable repair keep running.
  * Never returns. */
@@ -265,10 +265,10 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
     if (!wait_for_sub(n, cid, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
     printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
-    now = dart_now_us(); next = now; last_sec = now/1000000u;
+    now = dart_plat_now_us(); next = now; last_sec = now/1000000u;
     for (;;){
         int burst = 0;
-        now = dart_now_us();
+        now = dart_plat_now_us();
         while (now >= next && burst < 64){             /* fire every due tick, capped */
             if (dart_node_send(n, cid, data, len) >= 0) sent++;
             next += period_us; burst++;
@@ -425,11 +425,11 @@ int main(int argc, char **argv){
             /* Once a second, print the measured receive rate (msg/s and KB/s)
                over the real elapsed interval; stay quiet until the first message
                so an idle wait isn't a stream of 0/s lines. */
-            uint64_t last = dart_now_us(); int seen = 0;
+            uint64_t last = dart_plat_now_us(); int seen = 0;
             for (;;){
                 uint64_t now, dt;
                 dart_node_poll(n, 2);
-                now = dart_now_us(); dt = now - last;
+                now = dart_plat_now_us(); dt = now - last;
                 if (dt >= 1000000u){
                     double secs = dt/1000000.0;
                     if (g_rx_msgs) seen = 1;

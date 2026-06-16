@@ -88,6 +88,117 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 #endif /* DART_DISCOVERY_H */
 
 #ifndef DART_DISCOVERY_SANS_IO
+/* ===== dart_plat.h ===== */
+/* dart_plat: the one platform layer. Every OS dependency the runtimes need lives
+ * behind this contract: a monotonic clock, UDP sockets, multicast, entropy, and
+ * the source-address route probe. The layers above (discovery_rt, node) speak
+ * only dart_plat_* and never touch a sockaddr, winsock, or a platform #ifdef, so
+ * a new platform is one new implementation of this header. A platform that
+ * already has BSD sockets needs no new code: the bundled implementation covers
+ * Windows and POSIX (Linux/macOS/BSD/ESP-lwIP). Pure IO: stripped under *_SANS_IO
+ * with the runtime layers. On non-MSVC Windows link -lws2_32 -lbcrypt.
+ *
+ * Address convention: endpoints (send/recv, peers, seeds) are a uint8_t ip[4]
+ * plus a host-order uint16_t port. Multicast group and interface addresses are a
+ * uint32_t in NETWORK byte order ("naddr", as from dart_plat_parse_ip /
+ * dart_plat_ipv4). The two are the same four bytes; move between them with
+ * dart_plat_ip4_to_naddr / dart_plat_naddr_to_ip4.
+ */
+#ifndef DART_PLAT_H
+#define DART_PLAT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
+typedef intptr_t dart_sock;
+#define DART_SOCK_BAD ((dart_sock)-1)
+
+/* Poll-set entry; mirrors struct pollfd but platform-neutral. */
+#define DART_POLLIN 0x01
+typedef struct { dart_sock fd; short events; short revents; } dart_pollfd;
+
+/* Process-wide net init/teardown (WSAStartup/WSACleanup; no-op elsewhere).
+ * Refcounted, so a node and its discovery opening/closing in turn pair safely.
+ * startup returns 1 on success, 0 on failure. */
+int  dart_plat_startup(void);
+void dart_plat_cleanup(void);
+
+/* Monotonic microseconds from an arbitrary epoch. */
+uint64_t dart_plat_now_us(void);
+
+/* CSPRNG fill; 1 on success, 0 if no entropy source (caller falls back). */
+int      dart_plat_random(void *buf, size_t len);
+/* Best-effort host identity for a UUID fallback when the CSPRNG is unavailable. */
+size_t   dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
+uint64_t dart_plat_pid(void);
+
+/* --- UDP sockets --- */
+dart_sock dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
+void      dart_plat_close(dart_sock s);
+/* Bind to if_naddr (0 = INADDR_ANY) : port (0 = OS ephemeral). reuse sets
+ * SO_REUSEADDR (+ SO_REUSEPORT where it exists) before binding. 1 ok, 0 fail. */
+int       dart_plat_bind(dart_sock s, uint32_t if_naddr, uint16_t port, int reuse);
+/* Bound port in host order (read an ephemeral bind back); 0 on failure. */
+uint16_t  dart_plat_local_port(dart_sock s);
+void      dart_plat_set_nonblock(dart_sock s);
+void      dart_plat_set_rcvbuf(dart_sock s, int bytes);
+void      dart_plat_set_sndbuf(dart_sock s, int bytes);
+/* Stop a bounced datagram (ICMP port-unreachable) from failing the next recv on
+ * a shared RX socket (Windows SIO_UDP_CONNRESET; no-op elsewhere). */
+void      dart_plat_suppress_connreset(dart_sock s);
+
+/* --- multicast --- */
+void dart_plat_mcast_setif(dart_sock s, uint32_t if_naddr);
+void dart_plat_mcast_ttl  (dart_sock s, uint8_t ttl);
+void dart_plat_mcast_loop (dart_sock s, int on);
+int  dart_plat_mcast_join (dart_sock s, uint32_t grp_naddr, uint32_t if_naddr); /* 1 ok */
+
+/* --- datagram IO --- */
+/* sendto: returns bytes sent, <0 on error (test dart_plat_would_block). */
+int  dart_plat_send(dart_sock s, const void *buf, size_t len,
+                    const uint8_t ip[4], uint16_t port);
+/* recvfrom: returns bytes (>0), 0 or <0 if none. src_ip/src_port out, may be NULL. */
+int  dart_plat_recv(dart_sock s, void *buf, size_t cap,
+                    uint8_t src_ip[4], uint16_t *src_port);
+int  dart_plat_would_block(void);
+/* poll up to n fds for timeout_ms; >0 ready, 0 timeout, <0 error. */
+int  dart_plat_poll(dart_pollfd *fds, int n, int timeout_ms);
+
+/* --- address helpers (uint32_t naddr is network byte order) --- */
+uint32_t dart_plat_parse_ip(const char *dotted);          /* "1.2.3.4" -> naddr */
+uint32_t dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+uint32_t dart_plat_ip4_to_naddr(const uint8_t ip[4]);
+void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
+/* Source address the OS would use to reach dst_naddr:port (connect + getsockname
+ * on an unbound UDP socket; no packet leaves). 0 on failure. Backs interface
+ * pinning and the same-host check. */
+uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
+
+/* --- SHM platform surface (DESIGN ONLY; defined when dart_shm lands) ---------
+ * The zero-copy same-host path (src/dart_shm.h) needs three more primitives,
+ * named here so the platform contract is whole. dart_plat.c does NOT define them
+ * yet; the SHM implementation adds them behind the same Windows/POSIX split.
+ *
+ *   shared-memory mapping (shm_open+ftruncate+mmap / CreateFileMapping+MapView):
+ *     void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+ *     void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+ *     void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+ *   cross-process atomics on the chunk refcount (C11 stdatomic / Interlocked*):
+ *     int32_t dart_plat_atomic_add (volatile int32_t *p, int32_t delta);
+ *     int32_t dart_plat_atomic_load(volatile int32_t *p);
+ *   a stable per-kernel id for the same-host check (boot id / machine GUID):
+ *     void dart_plat_host_uuid(uint8_t out[16]);
+ */
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* DART_PLAT_H */
 /* ===== dart_discovery_rt.h ===== */
 /* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over
  * the dart_discovery core. On non-MSVC Windows, link -lws2_32 -lbcrypt. */
@@ -395,8 +506,11 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
 }
 
 #ifndef DART_DISCOVERY_SANS_IO
-/* ===== dart_discovery_rt.c ===== */
-/* peer-discovery runtime: sockets, clock, UUID, and the one-tick loop. */
+/* ===== dart_plat.c ===== */
+/* dart_plat: the Windows + POSIX implementation of the platform contract. This
+ * is the only file in DART carrying an OS #ifdef. Port to a new platform by
+ * adding a branch here (or a sibling file against dart_plat.h); BSD-socket
+ * platforms are already covered. See dart_plat.h. */
 
 /* feature-test macros must precede the first system header (POSIX only) */
 #if !defined(_WIN32)
@@ -422,11 +536,11 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
     #pragma comment(lib, "ws2_32.lib")
     #pragma comment(lib, "bcrypt.lib")
   #endif
-  typedef SOCKET    dart_discovery_sock_t;
-  typedef WSAPOLLFD dart_discovery_pollfd_t;
-  #define DART_DISCOVERY_BADSOCK  INVALID_SOCKET
-  #define DART_DISCOVERY_CLOSESOCK closesocket
-  #define DART_DISCOVERY_POLL     WSAPoll
+  #ifndef SIO_UDP_CONNRESET
+  #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+  #endif
+  typedef int dart__socklen;
+  #define DART__FD(s) ((SOCKET)(s))
 #else
   #include <sys/socket.h>
   #include <netinet/in.h>
@@ -434,61 +548,38 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
   #include <unistd.h>
   #include <poll.h>
   #include <time.h>
+  #include <fcntl.h>
+  #include <errno.h>
   #include <stdio.h>
   #include <stdlib.h>           /* arc4random_buf on macOS/BSD */
   #if defined(ESP_PLATFORM)
     #include <esp_random.h>     /* esp_fill_random (HW RNG) */
   #elif defined(__linux__)
-    #include <errno.h>
     #include <sys/random.h>     /* getrandom(2) */
   #endif
-  typedef int           dart_discovery_sock_t;
-  typedef struct pollfd dart_discovery_pollfd_t;
-  #define DART_DISCOVERY_BADSOCK  (-1)
-  #define DART_DISCOVERY_CLOSESOCK close
-  #define DART_DISCOVERY_POLL     poll
+  typedef socklen_t dart__socklen;
+  #define DART__FD(s) ((int)(s))
 #endif
 
-struct dart_discovery_rt {
-    dart_discovery_state        *core;
-    dart_discovery_sock_t        fd;
-    struct sockaddr_in  grp;
-    uint16_t            max_peers;
-    dart_discovery_addr seeds[DART_DISCOVERY_MAX_SEEDS];
-    uint16_t            n_seeds;
-};
-
-static void dart_discovery_rt_tx1(dart_discovery_rt *rt, const uint8_t *out, size_t m,
-                          const uint8_t ip[4], uint16_t port){
-    struct sockaddr_in d;
-    memset(&d, 0, sizeof d);
-    d.sin_family = AF_INET;
-    memcpy(&d.sin_addr.s_addr, ip, 4);
-    d.sin_port = htons(port);
-    sendto(rt->fd, (const char*)out, (int)m, 0, (struct sockaddr*)&d, sizeof d);
+/* ----------------------------------------------------------------- lifecycle */
+#ifdef _WIN32
+static int dart__wsa_refs = 0;
+int dart_plat_startup(void){
+    WSADATA w;
+    if (dart__wsa_refs == 0 && WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
+    dart__wsa_refs++;
+    return 1;
 }
-
-/* send to the group, every seed, and every known peer (peers get a copy at the
- * disc port and at their data port, the only per-process address when processes
- * share the disc port). Survives multicast outages; receivers dedup by uuid. */
-static void dart_discovery_rt_tx(dart_discovery_rt *rt, const uint8_t *out, size_t m){
-    uint16_t s, dport = ntohs(rt->grp.sin_port);
-    dart_discovery_addr a;
-    sendto(rt->fd, (const char*)out, (int)m, 0,
-           (struct sockaddr*)&rt->grp, sizeof rt->grp);
-    for (s=0; s<rt->n_seeds; s++){
-        const dart_discovery_addr *sd = &rt->seeds[s];
-        if (sd->ip_len != 4) continue;
-        dart_discovery_rt_tx1(rt, out, m, sd->ip, sd->port ? sd->port : dport);
-    }
-    for (s=0; s<rt->max_peers; s++){
-        if (!dart_discovery_peer_addr(rt->core, s, &a) || a.ip_len != 4) continue;
-        dart_discovery_rt_tx1(rt, out, m, a.ip, dport);
-        if (a.port && a.port != dport) dart_discovery_rt_tx1(rt, out, m, a.ip, a.port);
-    }
+void dart_plat_cleanup(void){
+    if (dart__wsa_refs > 0 && --dart__wsa_refs == 0) WSACleanup();
 }
+#else
+int  dart_plat_startup(void){ return 1; }
+void dart_plat_cleanup(void){}
+#endif
 
-static uint64_t dart_discovery_now_us(void){
+/* --------------------------------------------------------------------- clock */
+uint64_t dart_plat_now_us(void){
 #ifdef _WIN32
     static LARGE_INTEGER f; LARGE_INTEGER c;
     if (!f.QuadPart) QueryPerformanceFrequency(&f);
@@ -500,42 +591,8 @@ static uint64_t dart_discovery_now_us(void){
 #endif
 }
 
-static void dart_discovery_net_startup(void){
-#ifdef _WIN32
-    WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
-#endif
-}
-
-void dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
-                    const void *dg, size_t len){
-    if (!rt) return;
-    dart_discovery_on_datagram(rt->core, src_ip, src_ip_len, dg, len, dart_discovery_now_us());
-}
-
-/* Every multicast send and join should pin to this one interface. */
-uint32_t dart_discovery_mcast_if_for(uint32_t grp_naddr, uint16_t port){
-    dart_discovery_sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in a;
-    uint32_t ip = htonl(INADDR_ANY);
-    if (s == DART_DISCOVERY_BADSOCK) return ip;
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET; a.sin_addr.s_addr = grp_naddr; a.sin_port = htons(port);
-    if (connect(s, (struct sockaddr*)&a, sizeof a) == 0){
-        struct sockaddr_in loc;
-#ifdef _WIN32
-        int ll = (int)sizeof loc;
-#else
-        socklen_t ll = sizeof loc;
-#endif
-        if (getsockname(s, (struct sockaddr*)&loc, &ll) == 0)
-            ip = loc.sin_addr.s_addr;
-    }
-    DART_DISCOVERY_CLOSESOCK(s);
-    return ip;
-}
-
-/* Fill buf from the platform CSPRNG. Returns 1 on success, 0 if unavailable. */
-static int dart_discovery_os_random(void *buf, size_t len){
+/* ------------------------------------------------------------ entropy / host */
+int dart_plat_random(void *buf, size_t len){
 #if defined(_WIN32)
     /* NULL handle selects the system-preferred RNG. 0 == SUCCESS. */
     return BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
@@ -571,8 +628,254 @@ static int dart_discovery_os_random(void *buf, size_t len){
 #endif
 }
 
+size_t dart_plat_hostname(char *buf, size_t cap){
+    if (!buf || cap == 0) return 0;
+    buf[0] = 0;
+    gethostname(buf, (int)cap - 1);
+    buf[cap - 1] = 0;
+    return strlen(buf);
+}
+
+uint64_t dart_plat_pid(void){
+#ifdef _WIN32
+    return (uint64_t)GetCurrentProcessId();
+#else
+    return (uint64_t)getpid();
+#endif
+}
+
+/* --------------------------------------------------------------- UDP sockets */
+dart_sock dart_plat_udp_open(void){
+#ifdef _WIN32
+    SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
+    return (fd == INVALID_SOCKET) ? DART_SOCK_BAD : (dart_sock)fd;
+#else
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    return (fd < 0) ? DART_SOCK_BAD : (dart_sock)fd;
+#endif
+}
+
+void dart_plat_close(dart_sock s){
+    if (s == DART_SOCK_BAD) return;
+#ifdef _WIN32
+    closesocket((SOCKET)s);
+#else
+    close((int)s);
+#endif
+}
+
+int dart_plat_bind(dart_sock s, uint32_t if_naddr, uint16_t port, int reuse){
+    struct sockaddr_in a;
+    if (reuse){
+        int on = 1;
+        setsockopt(DART__FD(s), SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on);
+#ifdef SO_REUSEPORT
+        setsockopt(DART__FD(s), SOL_SOCKET, SO_REUSEPORT, (const char*)&on, sizeof on);
+#endif
+    }
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = if_naddr;            /* 0 == INADDR_ANY */
+    a.sin_port = htons(port);
+    return bind(DART__FD(s), (struct sockaddr*)&a, sizeof a) == 0;
+}
+
+uint16_t dart_plat_local_port(dart_sock s){
+    struct sockaddr_in a; dart__socklen ll = sizeof a;
+    memset(&a, 0, sizeof a);
+    if (getsockname(DART__FD(s), (struct sockaddr*)&a, &ll) != 0) return 0;
+    return ntohs(a.sin_port);
+}
+
+void dart_plat_set_nonblock(dart_sock s){
+#ifdef _WIN32
+    u_long nb = 1; ioctlsocket((SOCKET)s, FIONBIO, &nb);
+#else
+    int fl = fcntl((int)s, F_GETFL, 0);
+    if (fl != -1) fcntl((int)s, F_SETFL, fl | O_NONBLOCK);
+#endif
+}
+
+void dart_plat_set_rcvbuf(dart_sock s, int bytes){
+    setsockopt(DART__FD(s), SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof bytes);
+}
+void dart_plat_set_sndbuf(dart_sock s, int bytes){
+    setsockopt(DART__FD(s), SOL_SOCKET, SO_SNDBUF, (const char*)&bytes, sizeof bytes);
+}
+
+void dart_plat_suppress_connreset(dart_sock s){
+#ifdef _WIN32
+    BOOL off = FALSE; DWORD bv = 0;
+    WSAIoctl((SOCKET)s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bv, NULL, NULL);
+#else
+    (void)s;
+#endif
+}
+
+/* ----------------------------------------------------------------- multicast */
+void dart_plat_mcast_setif(dart_sock s, uint32_t if_naddr){
+    setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_IF, (const char*)&if_naddr, sizeof if_naddr);
+}
+void dart_plat_mcast_ttl(dart_sock s, uint8_t ttl){
+    unsigned char t = ttl;
+    setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&t, sizeof t);
+}
+void dart_plat_mcast_loop(dart_sock s, int on){
+    unsigned char l = (unsigned char)(on ? 1 : 0);
+    setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
+}
+int dart_plat_mcast_join(dart_sock s, uint32_t grp_naddr, uint32_t if_naddr){
+    struct ip_mreq mr; memset(&mr, 0, sizeof mr);
+    mr.imr_multiaddr.s_addr = grp_naddr;
+    mr.imr_interface.s_addr = if_naddr;
+    return setsockopt(DART__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                      (const char*)&mr, sizeof mr) == 0;
+}
+
+/* --------------------------------------------------------------- datagram IO */
+int dart_plat_send(dart_sock s, const void *buf, size_t len,
+                   const uint8_t ip[4], uint16_t port){
+    struct sockaddr_in d;
+    memset(&d, 0, sizeof d);
+    d.sin_family = AF_INET;
+    memcpy(&d.sin_addr.s_addr, ip, 4);
+    d.sin_port = htons(port);
+    return (int)sendto(DART__FD(s), (const char*)buf, (int)len, 0,
+                       (struct sockaddr*)&d, sizeof d);
+}
+
+int dart_plat_recv(dart_sock s, void *buf, size_t cap,
+                   uint8_t src_ip[4], uint16_t *src_port){
+    struct sockaddr_in src; dart__socklen sl = sizeof src;
+    int n;
+    memset(&src, 0, sizeof src);
+    n = (int)recvfrom(DART__FD(s), (char*)buf, (int)cap, 0,
+                      (struct sockaddr*)&src, &sl);
+    if (n > 0){
+        if (src_ip)   memcpy(src_ip, &src.sin_addr.s_addr, 4);
+        if (src_port) *src_port = ntohs(src.sin_port);
+    }
+    return n;
+}
+
+int dart_plat_would_block(void){
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+int dart_plat_poll(dart_pollfd *fds, int n, int timeout_ms){
+    /* callers poll one or two sockets; cap the on-stack translation buffer */
+#ifdef _WIN32
+    WSAPOLLFD p[8];
+#else
+    struct pollfd p[8];
+#endif
+    int i, r;
+    if (n < 0) return -1;
+    if (n > 8) n = 8;
+    memset(p, 0, sizeof p);
+    for (i = 0; i < n; i++){
+        p[i].fd = DART__FD(fds[i].fd);
+        p[i].events = (short)((fds[i].events & DART_POLLIN) ? POLLIN : 0);
+    }
+#ifdef _WIN32
+    r = WSAPoll(p, (ULONG)n, timeout_ms);
+#else
+    r = poll(p, (nfds_t)n, timeout_ms);
+#endif
+    for (i = 0; i < n; i++)
+        fds[i].revents = (short)((p[i].revents & POLLIN) ? DART_POLLIN : 0);
+    return r;
+}
+
+/* ----------------------------------------------------------- address helpers */
+uint32_t dart_plat_parse_ip(const char *dotted){
+    return dotted ? (uint32_t)inet_addr(dotted) : 0;
+}
+uint32_t dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d){
+    return htonl(((uint32_t)a << 24) | ((uint32_t)b << 16) |
+                 ((uint32_t)c << 8)  |  (uint32_t)d);
+}
+uint32_t dart_plat_ip4_to_naddr(const uint8_t ip[4]){
+    uint32_t n; memcpy(&n, ip, 4); return n;
+}
+void dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
+    memcpy(out, &naddr, 4);
+}
+
+uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
+    dart_sock s = dart_plat_udp_open();
+    struct sockaddr_in a;
+    uint32_t ip = 0;                         /* INADDR_ANY on failure */
+    if (s == DART_SOCK_BAD) return ip;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_addr.s_addr = dst_naddr; a.sin_port = htons(port);
+    if (connect(DART__FD(s), (struct sockaddr*)&a, sizeof a) == 0){
+        struct sockaddr_in loc; dart__socklen ll = sizeof loc;
+        if (getsockname(DART__FD(s), (struct sockaddr*)&loc, &ll) == 0)
+            ip = loc.sin_addr.s_addr;
+    }
+    dart_plat_close(s);
+    return ip;
+}
+/* ===== dart_discovery_rt.c ===== */
+/* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
+ * UUID generation. All OS access goes through dart_plat. */
+
+#include <string.h>
+
+struct dart_discovery_rt {
+    dart_discovery_state *core;
+    dart_sock            fd;
+    uint32_t             grp_naddr;   /* discovery multicast group, network order */
+    uint16_t             disc_port;
+    uint16_t             max_peers;
+    dart_discovery_addr  seeds[DART_DISCOVERY_MAX_SEEDS];
+    uint16_t             n_seeds;
+};
+
+static void dart_discovery_rt_tx1(dart_discovery_rt *rt, const uint8_t *out, size_t m,
+                          const uint8_t ip[4], uint16_t port){
+    dart_plat_send(rt->fd, out, m, ip, port);
+}
+
+/* send to the group, every seed, and every known peer (peers get a copy at the
+ * disc port and at their data port, the only per-process address when processes
+ * share the disc port). Survives multicast outages; receivers dedup by uuid. */
+static void dart_discovery_rt_tx(dart_discovery_rt *rt, const uint8_t *out, size_t m){
+    uint16_t s, dport = rt->disc_port;
+    dart_discovery_addr a;
+    uint8_t gip[4];
+    dart_plat_naddr_to_ip4(rt->grp_naddr, gip);
+    dart_plat_send(rt->fd, out, m, gip, dport);
+    for (s=0; s<rt->n_seeds; s++){
+        const dart_discovery_addr *sd = &rt->seeds[s];
+        if (sd->ip_len != 4) continue;
+        dart_discovery_rt_tx1(rt, out, m, sd->ip, sd->port ? sd->port : dport);
+    }
+    for (s=0; s<rt->max_peers; s++){
+        if (!dart_discovery_peer_addr(rt->core, s, &a) || a.ip_len != 4) continue;
+        dart_discovery_rt_tx1(rt, out, m, a.ip, dport);
+        if (a.port && a.port != dport) dart_discovery_rt_tx1(rt, out, m, a.ip, a.port);
+    }
+}
+
+void dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+                    const void *dg, size_t len){
+    if (!rt) return;
+    dart_discovery_on_datagram(rt->core, src_ip, src_ip_len, dg, len, dart_plat_now_us());
+}
+
+/* Every multicast send and join should pin to this one interface. */
+uint32_t dart_discovery_mcast_if_for(uint32_t grp_naddr, uint16_t port){
+    return dart_plat_route_src(grp_naddr, port);
+}
+
 int dart_discovery_make_uuid4(uint8_t out[16]){
-    if (!dart_discovery_os_random(out, 16)) return 0;
+    if (!dart_plat_random(out, 16)) return 0;
     out[6] = (uint8_t)((out[6] & 0x0Fu) | 0x40u);  /* version 4 */
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x */
     return 1;
@@ -583,14 +886,8 @@ static void dart_discovery_auto_uuid(uint8_t out[16]){
     if (dart_discovery_make_uuid4(out)) return;     /* normal path */
 
     /* No CSPRNG: derive a best-effort unique id from hostname, pid and clock. */
-    memset(host, 0, sizeof host);
-    gethostname(host, (int)sizeof host - 1);
-    hl = strlen(host);
-#ifdef _WIN32
-    seed = ((uint64_t)GetCurrentProcessId() << 32) ^ dart_discovery_now_us();
-#else
-    seed = (uint64_t)getpid() ^ dart_discovery_now_us();
-#endif
+    hl = dart_plat_hostname(host, sizeof host);
+    seed = (dart_plat_pid() << 32) ^ dart_plat_now_us();
     dart_discovery_make_uuid(out, (const uint8_t*)host, hl, seed);
 }
 
@@ -610,10 +907,10 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     dart_discovery_rt *rt;
     uint8_t *base, *core_mem;
     size_t rtsz, need;
-    dart_discovery_sock_t fd;
+    dart_sock fd;
     int allzero = 1, i;
-    int on = 1; unsigned char ttl, loop;
-    struct sockaddr_in addr; struct ip_mreq mr;
+    uint8_t ttl;
+    uint32_t grp_naddr, ifip;
     const char *group;
 
     if (!mem || !cfg) return NULL;
@@ -624,7 +921,6 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     group     = c.group     ? c.group     : "239.255.0.7";
     if (c.disc_port == 0)    c.disc_port  = 7400;
     ttl  = c.ttl ? c.ttl : 1;
-    loop = 1;   /* always on (uuid self-filter drops echoes); needed for multi-instance per host */
 
     need = dart_discovery_rt_required_memory(&c);
     if (cap < need) return NULL;
@@ -636,38 +932,32 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
 
     /* auto-generate a UUID if the caller left it zero */
     for (i=0;i<16;i++) if (c.disc.uuid[i]) { allzero = 0; break; }
+
+    if (!dart_plat_startup()) return NULL;
     if (allzero) dart_discovery_auto_uuid(c.disc.uuid);
 
-    dart_discovery_net_startup();
-
     rt->core = dart_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c.disc);
-    if (!rt->core) return NULL;
+    if (!rt->core){ dart_plat_cleanup(); return NULL; }
 
-    fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd == DART_DISCOVERY_BADSOCK) return NULL;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on);
-#ifdef SO_REUSEPORT
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const char*)&on, sizeof on);
-#endif
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET; addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(c.disc_port);
-    if (bind(fd, (struct sockaddr*)&addr, sizeof addr) != 0){ DART_DISCOVERY_CLOSESOCK(fd); return NULL; }
+    fd = dart_plat_udp_open();
+    if (fd == DART_SOCK_BAD){ dart_plat_cleanup(); return NULL; }
+    if (!dart_plat_bind(fd, 0, c.disc_port, 1)){ dart_plat_close(fd); dart_plat_cleanup(); return NULL; }
 
     /* pin join and egress to one deterministic interface */
-    { uint32_t ifip = c.mcast_if ? inet_addr(c.mcast_if)
-                                 : dart_discovery_mcast_if_for(inet_addr(group), c.disc_port);
-      memset(&mr, 0, sizeof mr);
-      mr.imr_multiaddr.s_addr = inet_addr(group);
-      mr.imr_interface.s_addr = ifip;
-      if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char*)&mr, sizeof mr) != 0){
-          DART_DISCOVERY_CLOSESOCK(fd); return NULL;
-      }
-      setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (const char*)&ifip, sizeof ifip); }
-    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL,  (const char*)&ttl,  sizeof ttl);
-    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&loop, sizeof loop);
+    grp_naddr = dart_plat_parse_ip(group);
+    ifip = c.mcast_if ? dart_plat_parse_ip(c.mcast_if)
+                      : dart_plat_route_src(grp_naddr, c.disc_port);
+    if (!dart_plat_mcast_join(fd, grp_naddr, ifip)){
+        dart_plat_close(fd); dart_plat_cleanup(); return NULL;
+    }
+    dart_plat_mcast_setif(fd, ifip);
+    dart_plat_mcast_ttl(fd, ttl);
+    /* loop always on (uuid self-filter drops echoes); needed for multi-instance per host */
+    dart_plat_mcast_loop(fd, 1);
 
     rt->fd = fd;
+    rt->grp_naddr = grp_naddr;
+    rt->disc_port = c.disc_port;
     rt->max_peers = c.disc.max_peers;
     rt->n_seeds = 0;
     if (c.seeds){
@@ -676,36 +966,27 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
         for (k=0;k<ns;k++) rt->seeds[k] = c.seeds[k];
         rt->n_seeds = ns;
     }
-    memset(&rt->grp, 0, sizeof rt->grp);
-    rt->grp.sin_family = AF_INET;
-    rt->grp.sin_addr.s_addr = inet_addr(group);
-    rt->grp.sin_port = htons(c.disc_port);
     return rt;
 }
 
 int dart_discovery_rt_poll(dart_discovery_rt *rt, int timeout_ms){
-    dart_discovery_pollfd_t pfd;
+    dart_pollfd pfd;
     uint8_t out[DART_DISCOVERY_WIRE_MAX];
     int got = 0; size_t m;
 
-    memset(&pfd, 0, sizeof pfd);
-    pfd.fd = rt->fd; pfd.events = POLLIN;
-    if (DART_DISCOVERY_POLL(&pfd, 1, timeout_ms) < 0) return -1;
+    pfd.fd = rt->fd; pfd.events = DART_POLLIN; pfd.revents = 0;
+    if (dart_plat_poll(&pfd, 1, timeout_ms) < 0) return -1;
 
-    if (pfd.revents & POLLIN){
-        uint8_t buf[DART_DISCOVERY_WIRE_MAX];
-        struct sockaddr_in src; socklen_t slen = sizeof src;
-        int n = (int)recvfrom(rt->fd, (char*)buf, (int)sizeof buf, 0,
-                              (struct sockaddr*)&src, &slen);
+    if (pfd.revents & DART_POLLIN){
+        uint8_t buf[DART_DISCOVERY_WIRE_MAX]; uint8_t sip[4];
+        int n = dart_plat_recv(rt->fd, buf, sizeof buf, sip, NULL);
         if (n > 0){
-            uint8_t sip[4];
-            memcpy(sip, &src.sin_addr.s_addr, 4);
-            dart_discovery_on_datagram(rt->core, sip, 4, buf, (size_t)n, dart_discovery_now_us());
+            dart_discovery_on_datagram(rt->core, sip, 4, buf, (size_t)n, dart_plat_now_us());
             got = 1;
         }
     }
 
-    m = dart_discovery_update(rt->core, dart_discovery_now_us(), out, sizeof out);
+    m = dart_discovery_update(rt->core, dart_plat_now_us(), out, sizeof out);
     if (m) dart_discovery_rt_tx(rt, out, m);
     return got;
 }
@@ -714,15 +995,15 @@ int dart_discovery_rt_settle(dart_discovery_rt *rt, int quiet_ms, int timeout_ms
     uint64_t start, last_change, last_solicit = 0;
     uint16_t count;
     if (!rt) return 0;
-    start = dart_discovery_now_us(); last_change = start;
+    start = dart_plat_now_us(); last_change = start;
     count = dart_discovery_peer_count(rt->core);
     for (;;){
-        uint64_t now = dart_discovery_now_us(); uint16_t c;
+        uint64_t now = dart_plat_now_us(); uint16_t c;
         if (now - last_solicit >= 250000u){     /* (re)solicit ~4x/s so a lost one retries */
             dart_discovery_solicit(rt->core); last_solicit = now;
         }
         dart_discovery_rt_poll(rt, 10);          /* sends the solicit, takes in replies */
-        now = dart_discovery_now_us();
+        now = dart_plat_now_us();
         c = dart_discovery_peer_count(rt->core);
         if (c > count){ count = c; last_change = now; }   /* grew: keep waiting */
         if (count > 0 && now - last_change >= (uint64_t)quiet_ms*1000u) break;
@@ -738,10 +1019,8 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
         size_t m = dart_discovery_leave(rt->core, out, sizeof out);
         if (m) dart_discovery_rt_tx(rt, out, m);
     }
-    DART_DISCOVERY_CLOSESOCK(rt->fd);
-#ifdef _WIN32
-    WSACleanup();
-#endif
+    dart_plat_close(rt->fd);
+    dart_plat_cleanup();
 }
 #endif /* !DART_DISCOVERY_SANS_IO */
 #endif /* DART_DISCOVERY_IMPLEMENTATION */
