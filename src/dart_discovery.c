@@ -4,6 +4,8 @@
 
 #define DART_DISCOVERY_HDR_LEN 43
 #define DART_DISCOVERY_FLAG_BYE 0x01
+#define DART_DISCOVERY_FLAG_REQ 0x02         /* solicit: recipients announce back now */
+#define DART_DISCOVERY_SOLICIT_JITTER_US 20000u  /* spread replies so they don't storm */
 
 struct dart_discovery_peer_ {
     uint8_t  used;
@@ -100,11 +102,11 @@ static int dart_discovery_alloc(dart_discovery_state *st){
     return (int)stalest;
 }
 
-static size_t dart_discovery_build(dart_discovery_state *st, int bye, uint8_t *p, size_t cap){
+static size_t dart_discovery_build(dart_discovery_state *st, uint8_t flags, uint8_t *p, size_t cap){
     if (cap < (size_t)DART_DISCOVERY_HDR_LEN + 1u + st->cfg.meta_len) return 0;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
     p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
-    p[5]=(uint8_t)(bye ? DART_DISCOVERY_FLAG_BYE : 0);
+    p[5]=flags;
     dart_discovery_wr16(p+6, st->cfg.domain_id);
     memcpy(p+8, st->cfg.uuid, 16);
     dart_discovery_wr16(p+24, st->cfg.data_port);
@@ -183,11 +185,18 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
             st->cfg.on_peer_up(st->cfg.user, st->peers[idx].local_id, &addr,
                                mlen ? st->peers[idx].meta : NULL, mlen);
     }
+
+    if ((flags & DART_DISCOVERY_FLAG_REQ) && st->started){
+        /* peer is soliciting: reply with our announce sooner than the next
+           periodic one, jittered by our uuid so many peers don't reply at once. */
+        uint64_t when = now + (dart_discovery_fnv(st->cfg.uuid,16) % DART_DISCOVERY_SOLICIT_JITTER_US);
+        if (when < st->next_announce_us) st->next_announce_us = when;
+    }
 }
 
 size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, size_t cap){
-    uint16_t i;
-    if (!st->started){
+    uint16_t i; int first = !st->started;
+    if (first){
         st->started = 1;
         st->next_announce_us = now + (dart_discovery_fnv(st->cfg.uuid,16) % st->cfg.announce_us);
     }
@@ -199,6 +208,9 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
             if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
         }
     }
+    if (first)   /* solicit on startup: announces us AND asks peers to reply now,
+                    so discovery is ~instant instead of waiting an announce interval */
+        return dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, (uint8_t *)out, cap);
     if (now >= st->next_announce_us){
         st->next_announce_us = now + st->cfg.announce_us;
         return dart_discovery_build(st, 0, (uint8_t *)out, cap);
@@ -207,7 +219,7 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
 }
 
 size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){
-    return dart_discovery_build(st, 1, (uint8_t *)out, cap);
+    return dart_discovery_build(st, DART_DISCOVERY_FLAG_BYE, (uint8_t *)out, cap);
 }
 
 int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart_discovery_addr *out){

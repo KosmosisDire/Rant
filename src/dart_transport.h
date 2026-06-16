@@ -106,6 +106,26 @@ typedef void (*dart_collision_fn)(void *user, uint64_t identity,
                                   const char *our_name,
                                   const char *peer_name, size_t peer_name_len);
 
+/* Optional: a peer sent a sample whose declared size exceeds this channel's
+ * max_sample_bytes, so it cannot be reassembled here. The transport skips it
+ * (the in-order stream is not wedged) and reports it; raise max_sample_bytes,
+ * or shrink the sender's message, to carry it. NULL = skip silently. */
+typedef void (*dart_oversize_fn)(void *user, uint16_t channel_id, uint32_t from_peer,
+                                 uint32_t sample_bytes);
+
+/* Largest single sample the wire can carry: the fragment count is 16-bit, so a
+ * sample spans at most 65535 TUs of DART_FRAG_PAYLOAD each (~64 MB by default). */
+#define DART_SAMPLE_MAX (65535u * DART_FRAG_PAYLOAD)
+
+/* Optional allocator for dynamic (unbounded-up-to-DART_SAMPLE_MAX) messages.
+ * realloc semantics: ptr NULL = allocate, size 0 = free(ptr) and return NULL,
+ * else resize. When set, USER channels grow their sample/reassembly buffers via
+ * it to fit any message, so max_sample_bytes need not be set (use 0). When NULL
+ * (the default, and for embedded/ESP32), buffers are fixed at max_sample_bytes
+ * and a bigger message is refused (send) or skipped+reported (receive). The meta
+ * channel is always fixed. Pair with dart_destroy to free what this allocated. */
+typedef void *(*dart_realloc_fn)(void *user, void *ptr, size_t size);
+
 typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
@@ -119,6 +139,8 @@ typedef struct {
     dart_sample_fn          on_sample;
     dart_gap_fn             on_gap;     /* optional; NULL = no gap reporting */
     dart_collision_fn       on_collision; /* optional; NULL = silent refuse */
+    dart_oversize_fn        on_oversize;  /* optional; sample too big to reassemble */
+    dart_realloc_fn         realloc_fn;   /* optional; set => dynamic message sizing */
     void                 *user;
 } dart_config;
 
@@ -126,6 +148,10 @@ typedef struct dart_state dart_state;
 
 size_t    dart_required_memory(const dart_config *cfg);
 dart_state *dart_init(void *mem, size_t mem_size, const dart_config *cfg);
+/* Free buffers a realloc_fn allocated (dynamic channels). No-op in fixed mode.
+ * The caller still owns the arena passed to dart_init; this only releases the
+ * hook-allocated sample/reassembly buffers. The node calls it from close. */
+void      dart_destroy(dart_state *st);
 
 /* Canonical 64-bit topic identity from a name (FNV-1a). Used to match topics
  * across peers and to derive their multicast group. */
@@ -160,6 +186,17 @@ const dart_qos *dart_channel_qos(dart_state *st, uint16_t channel_id);
  * accepting pressure pumps its loop while this returns 1, then sends anyway
  * after qos.max_block_us (KEEP_LAST eviction is the fallback, never refusal). */
 int       dart_send_would_evict(dart_state *st, uint16_t channel_id);
+
+/* 1 if every live reader has acked all samples sent on this reliable channel,
+ * so a writer may stop/close without truncating in-flight data; 0 if any reader
+ * is still behind. Best-effort or unknown channels return 1 (no acks to await).
+ * The node wraps this as dart_node_drain. */
+int       dart_send_drained(dart_state *st, uint16_t channel_id);
+
+/* Number of peers currently matched as readers of this channel (subscribers we
+ * would send to). 0 means a publish goes nowhere; a one-shot/file publisher can
+ * poll this to wait for a subscriber before sending instead of into the void. */
+int       dart_writer_match_count(dart_state *st, uint16_t channel_id);
 
 /* Feed a received datagram, tagged with the peer it came from. */
 void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *dg, size_t len,

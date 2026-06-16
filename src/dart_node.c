@@ -94,6 +94,10 @@ struct dart_node {
     /* cumulative backpressure (max_block_us waits in dart_node_send) */
     uint64_t      block_us;
     uint32_t      block_n;
+    /* optional app peer-discovery callbacks (forwarded from discovery) */
+    dart_node_peer_up_fn   on_peer_up;
+    dart_node_peer_down_fn on_peer_down;
+    void                  *cb_user;
 };
 
 /* split node config into discovery + transport sub-configs (callbacks/user
@@ -120,6 +124,8 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     tc->on_sample    = cfg->on_sample;
     tc->on_gap       = cfg->on_gap;
     tc->on_collision = cfg->on_collision;
+    tc->on_oversize  = cfg->on_oversize;
+    tc->realloc_fn   = cfg->realloc_fn;
     tc->user         = cfg->user;
     if (mp_out) *mp_out = mp;
 }
@@ -164,11 +170,13 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     /* interest arrives over the transport's meta channel, not the announce */
     (void)meta; (void)mlen;
     dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
+    if (n->on_peer_up) n->on_peer_up(n->cb_user, id, addr);   /* new peer discovered */
 }
 static void dart__node_down(void *u, uint32_t id){
-    dart_node *n=(dart_node*)u; uint16_t i;
-    for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; break; }
+    dart_node *n=(dart_node*)u; uint16_t i; int found=0;
+    for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; found=1; break; }
     dart_peer_remove(n->tr, id);
+    if (found && n->on_peer_down) n->on_peer_down(n->cb_user, id);   /* peer lost (BYE/timeout) */
 }
 
 static int dart__node_find_addr(dart_node *n, const struct sockaddr_in *s){
@@ -255,6 +263,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n=(dart_node*)base; memset(n,0,sizeof *n);
     n->fd = DART_BADSOCK; n->mcfd = DART_BADSOCK; n->max_peers=mp;
     n->domain = cfg->domain_id;
+    n->on_peer_up = cfg->on_peer_up; n->on_peer_down = cfg->on_peer_down; n->cb_user = cfg->user;
     n->mc_port = cfg->mc_port ? cfg->mc_port
                : (uint16_t)((cfg->disc_port ? cfg->disc_port : 7400) + 1);
     p = base + node_sz;
@@ -478,10 +487,24 @@ void dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_s
     if (blocked_sends) *blocked_sends = n->block_n;
 }
 
+int dart_node_drain(dart_node *n, uint16_t channel_id, int timeout_ms){
+    uint64_t deadline = dart_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
+    while (!dart_send_drained(n->tr, channel_id)){
+        if (dart_now_us() >= deadline) return 0;
+        dart_node_poll(n, 1);
+    }
+    return 1;
+}
+
+int dart_node_writer_match_count(dart_node *n, uint16_t channel_id){
+    return dart_writer_match_count(n->tr, channel_id);
+}
+
 void dart_node_close(dart_node *n, int send_bye){
     if (!n) return;
     if (n->disc) dart_discovery_rt_close(n->disc, send_bye);
     if (n->mcfd != DART_BADSOCK) DART_CLOSESOCK(n->mcfd);
     if (n->fd != DART_BADSOCK) DART_CLOSESOCK(n->fd);
+    if (n->tr) dart_destroy(n->tr);     /* free any hook-allocated dynamic buffers */
     dart__net_cleanup();
 }

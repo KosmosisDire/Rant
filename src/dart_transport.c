@@ -55,7 +55,8 @@ typedef struct {
     uint64_t base;       /* seqno of frag 0 */
     uint16_t count;      /* frag count      */
     uint32_t len;        /* sample bytes    */
-    uint8_t *buf;        /* len bytes        */
+    uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
+    uint32_t cap;        /* allocated bytes of buf (dynamic grows it)              */
 } dart_wsample;
 
 typedef struct {        /* writer-side, per (channel,peer) */
@@ -84,8 +85,10 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint8_t  asm_active;    /* received >=1 frag of current sample */
     uint16_t asm_count;
     uint32_t asm_len;
-    uint8_t *asm_buf;       /* max_sample_bytes */
-    uint8_t *frag_bm;       /* ceil(maxfrags/8) */
+    uint8_t *asm_buf;       /* >= asm_len; arena (fixed) or hook-malloc'd (dynamic) */
+    uint8_t *frag_bm;       /* ceil(asm_count/8) */
+    uint32_t asm_cap;       /* allocated bytes of asm_buf (dynamic grows it)       */
+    uint32_t bm_cap;        /* allocated bytes of frag_bm                          */
     uint64_t hb_last;       /* highest seqno writer claims to hold */
     uint8_t  ack_pending;
     uint64_t ack_due_us;
@@ -96,9 +99,10 @@ typedef struct {
     uint64_t  identity;     /* cross-peer topic identity (hash of name or id) */
     const char *name;       /* our copy of the topic name; NULL if id-identified */
     uint16_t  id;           /* local handle (API + on_sample) */
-    uint16_t  maxfrags;     /* ceil(max_sample_bytes/FRAG) */
+    uint16_t  maxfrags;     /* ceil(max_sample_bytes/FRAG) (fixed mode only) */
     uint8_t   dir;          /* dart_direction */
     uint8_t   mcast;
+    uint8_t   dynamic;      /* 1 = buffers grow via cfg.realloc_fn, no fixed cap */
     uint16_t  nsubs;        /* live matched subscribers; mcast: >0 = group mode */
     /* writer */
     dart_wsample *hist;       /* [depth] ring */
@@ -237,13 +241,17 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
         const dart_qos *q = &def->qos;
         uint16_t depth = q->history_depth ? q->history_depth : 1;
         uint16_t mf = dart_maxfrags(q->max_sample_bytes);
+        /* dynamic = user channel with a realloc hook: its sample/reassembly
+           buffers are grown via the hook at runtime, not taken from the arena.
+           The meta channel is always fixed (its size is known and bounded). */
+        int dyn = (cfg->realloc_fn != NULL) && (c < ncu);
         dart_wsample *hist = (dart_wsample*)dart_take(b, depth*sizeof(dart_wsample), 16);
         uint16_t d;
         if (st && b->base){
             dart_channel *ch = &st->chans[c];
             memset(ch,0,sizeof(*ch));
             ch->qos=*q; ch->id=def->channel_id; ch->maxfrags=mf;
-            ch->dir=def->dir; ch->mcast=def->mcast;
+            ch->dir=def->dir; ch->mcast=def->mcast; ch->dynamic=(uint8_t)dyn;
             ch->identity = (c < ncu) ? dart_channel_identity(def) : DART_META_IDENTITY;
             ch->name = NULL;
             if (c < ncu){
@@ -256,16 +264,19 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
             memset(hist,0,depth*sizeof(dart_wsample));
         }
         for (d=0; d<depth; d++){
-            uint8_t *buf = (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
-            if (st && b->base) st->chans[c].hist[d].buf = buf;
+            uint8_t *buf = dyn ? NULL : (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
+            if (st && b->base){ st->chans[c].hist[d].buf = buf;
+                                st->chans[c].hist[d].cap = dyn ? 0u : q->max_sample_bytes; }
         }
-        /* reader asm buffers and frag bitmaps, per peer */
+        /* reader asm buffers and frag bitmaps, per peer (skipped when dynamic) */
         for (p=0;p<np;p++){
-            uint8_t *abuf = (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
-            uint8_t *fbm  = (uint8_t*)dart_take(b, (mf+7u)/8u, 1);
+            uint8_t *abuf = dyn ? NULL : (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
+            uint8_t *fbm  = dyn ? NULL : (uint8_t*)dart_take(b, (mf+7u)/8u, 1);
             if (st && b->base){
                 dart_rproxy *r = &st->rprox[(size_t)c*np+p];
                 r->asm_buf=abuf; r->frag_bm=fbm;
+                r->asm_cap = dyn ? 0u : q->max_sample_bytes;
+                r->bm_cap  = dyn ? 0u : (uint32_t)((mf+7u)/8u);
             }
         }
     }
@@ -394,8 +405,9 @@ static void dart__unmatch_w(dart_state *st, uint16_t c, uint16_t ps){
 static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
     dart_rproxy *r=&st->rprox[(size_t)c*st->cfg.max_peers+ps];
     uint8_t *abuf=r->asm_buf, *fbm=r->frag_bm;
+    uint32_t acap=r->asm_cap, bcap=r->bm_cap;   /* keep grown buffers across rematch */
     memset(r,0,sizeof(*r));
-    r->asm_buf=abuf; r->frag_bm=fbm;
+    r->asm_buf=abuf; r->frag_bm=fbm; r->asm_cap=acap; r->bm_cap=bcap;
     r->epoch=st->repoch++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
 }
@@ -493,11 +505,40 @@ int dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len,
     if (channel_id == DART_CHAN_META) return -1;     /* internal */
     ch = dart_chan(st, channel_id, &ci);
     if (!ch) return -1;
-    if (len > ch->qos.max_sample_bytes) return -2;
+    if (ch->dynamic){
+        dart_wsample *slot = &ch->hist[ch->hist_head];
+        size_t need = len ? len : 1u;
+        if (len > 65535u*DART_FRAG_PAYLOAD) return -2;   /* wire fragment-count cap (~64MB) */
+        if ((size_t)slot->cap < need){                    /* grow the slot to fit */
+            uint8_t *nb = (uint8_t*)st->cfg.realloc_fn(st->cfg.user, slot->buf, need);
+            if (!nb) return -4;                           /* out of memory */
+            slot->buf = nb; slot->cap = (uint32_t)need;
+        }
+    } else if (len > ch->qos.max_sample_bytes) return -2;
     if (ch->dir == DART_SUB_ONLY || ch->dir == DART_NONE) return -3;
     if (len) memcpy(ch->hist[ch->hist_head].buf, data, len);
     dart__commit(st, (uint16_t)ci, len);
     return 0;
+}
+
+void dart_destroy(dart_state *st){
+    uint16_t c; uint32_t p, np;
+    if (!st || !st->cfg.realloc_fn) return;     /* fixed mode: nothing hook-allocated */
+    np = st->cfg.max_peers;
+    for (c=0;c<st->cfg.n_channels;c++){
+        dart_channel *ch=&st->chans[c];
+        uint16_t depth, d;
+        if (!ch->dynamic) continue;
+        depth = ch->qos.history_depth ? ch->qos.history_depth : 1;
+        for (d=0; d<depth; d++)
+            if (ch->hist[d].buf){ st->cfg.realloc_fn(st->cfg.user, ch->hist[d].buf, 0);
+                                  ch->hist[d].buf=NULL; ch->hist[d].cap=0; }
+        for (p=0;p<np;p++){
+            dart_rproxy *r=&st->rprox[(size_t)c*np+p];
+            if (r->asm_buf){ st->cfg.realloc_fn(st->cfg.user, r->asm_buf, 0); r->asm_buf=NULL; r->asm_cap=0; }
+            if (r->frag_bm){ st->cfg.realloc_fn(st->cfg.user, r->frag_bm, 0); r->frag_bm=NULL; r->bm_cap=0; }
+        }
+    }
 }
 
 /* one interest entry: [u16 alias][u64 identity][u8 namelen][name bytes]. The
@@ -613,6 +654,27 @@ int dart_send_would_evict(dart_state *st, uint16_t channel_id){
     return 0;
 }
 
+int dart_send_drained(dart_state *st, uint16_t channel_id){
+    int ci; dart_channel *ch = dart_chan(st, channel_id, &ci);
+    uint32_t np; uint16_t p;
+    if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
+    np = st->cfg.max_peers;
+    for (p=0;p<(uint16_t)np;p++){
+        dart_wproxy *w=&st->wprox[(size_t)ci*np+p];
+        if (w->used && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
+    }
+    return 1;
+}
+
+int dart_writer_match_count(dart_state *st, uint16_t channel_id){
+    int ci; dart_channel *ch = dart_chan(st, channel_id, &ci);
+    uint32_t np, p; int cnt = 0;
+    if (!ch) return 0;
+    np = st->cfg.max_peers;
+    for (p=0;p<np;p++) if (st->wprox[(size_t)ci*np+p].used) cnt++;  /* matched readers */
+    return cnt;
+}
+
 /* wire alias for a local channel: its index, or 0xFFFF for the meta channel
  * (reserved and known a priori, so meta works before any alias is learned). */
 static uint16_t dart__alias_of(dart_state *st, int ci){
@@ -668,8 +730,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
     base = seqno - frag;
 
     if (!r->used) return;                               /* not subscribed */
-    if (slen > ch->qos.max_sample_bytes) return;        /* malformed */
-    if (count==0 || frag>=count) return;
+    if (count==0 || frag>=count) return;                /* malformed */
     if (base < r->deliver_upto) return;                 /* old/dup */
 
     if (base > r->deliver_upto){
@@ -694,16 +755,44 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
         r->deliver_upto = base; r->asm_active=0;
     }
     r->started = 1;
-    /* base == deliver_upto: current sample */
-    if (!r->asm_active){
-        r->asm_active=1; r->asm_count=count; r->asm_len=slen;
-        memset(r->frag_bm,0,(ch->maxfrags+7u)/8u);
-    }
-    if (count!=r->asm_count) return;                    /* inconsistent, ignore */
-    if (!dart_bget(r->frag_bm,frag)){
-        uint32_t off=(uint32_t)frag*DART_FRAG_PAYLOAD;
-        if (off+plen<=ch->qos.max_sample_bytes) memcpy(r->asm_buf+off,pay,plen);
-        dart_bset(r->frag_bm,frag);
+    /* Ensure the reassembly buffers fit this sample. A dynamic channel grows
+       asm_buf + frag_bm via the hook (only an OOM is "too big"); a fixed channel
+       cannot hold a sample over max_sample_bytes. Either way "too big" reports it
+       and skips the whole sample, so in-order delivery is never wedged. */
+    { uint32_t bmneed = ((uint32_t)count + 7u) / 8u, bufcap, bmbytes; int toobig = 0;
+      if (ch->dynamic){
+          if (r->asm_cap < slen){
+              uint8_t *nb = (uint8_t*)st->cfg.realloc_fn(st->cfg.user, r->asm_buf, slen?slen:1u);
+              if (!nb) toobig = 1; else { r->asm_buf = nb; r->asm_cap = slen?slen:1u; }
+          }
+          if (!toobig && r->bm_cap < bmneed){
+              uint8_t *nbm = (uint8_t*)st->cfg.realloc_fn(st->cfg.user, r->frag_bm, bmneed?bmneed:1u);
+              if (!nbm) toobig = 1; else { r->frag_bm = nbm; r->bm_cap = bmneed?bmneed:1u; }
+          }
+      } else if (slen > ch->qos.max_sample_bytes) toobig = 1;
+      if (toobig){
+          if (st->cfg.on_oversize)
+              st->cfg.on_oversize(st->cfg.user, ch->id, st->peer_ids[pslot], slen);
+          r->deliver_upto = base + count; r->asm_active = 0;
+          if (reliable){
+              r->ack_pending = 1; r->ack_due_us = now + ch->qos.nack_delay_us;
+              dart__lane_wake(st, (uint16_t)ci, (uint32_t)pslot);
+          }
+          return;
+      }
+      bufcap  = ch->dynamic ? r->asm_cap : ch->qos.max_sample_bytes;
+      bmbytes = ch->dynamic ? bmneed     : (uint32_t)((ch->maxfrags+7u)/8u);
+      /* base == deliver_upto: current sample */
+      if (!r->asm_active){
+          r->asm_active=1; r->asm_count=count; r->asm_len=slen;
+          memset(r->frag_bm,0,bmbytes);
+      }
+      if (count!=r->asm_count) return;                  /* inconsistent, ignore */
+      if (!dart_bget(r->frag_bm,frag)){
+          uint32_t off=(uint32_t)frag*DART_FRAG_PAYLOAD;
+          if (off+plen<=bufcap) memcpy(r->asm_buf+off,pay,plen);
+          dart_bset(r->frag_bm,frag);
+      }
     }
     /* complete? */
     { uint16_t i; int done=1;

@@ -10,6 +10,12 @@
 extern "C" {
 #endif
 
+/* Optional peer-discovery notifications. on_peer_up fires when a NEW peer is
+ * discovered (not on address refreshes); on_peer_down when one is lost (its BYE
+ * or a timeout). For visibility/logging; the transport wiring is automatic. */
+typedef void (*dart_node_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr);
+typedef void (*dart_node_peer_down_fn)(void *user, uint32_t peer_id);
+
 typedef struct {
     uint16_t              domain_id;     /* discovery domain                  */
     uint16_t              data_port;     /* unicast data port; 0 = OS-assigned */
@@ -48,6 +54,13 @@ typedef struct {
     dart_gap_fn             on_gap;        /* optional: permanently skipped TUs */
     dart_collision_fn       on_collision;  /* optional: two topic names hashed to
                                               one identity; the match is refused */
+    dart_oversize_fn        on_oversize;   /* optional: a received sample exceeds
+                                              max_sample_bytes (skipped, reported) */
+    dart_realloc_fn         realloc_fn;    /* optional: set => dynamic message sizing
+                                              (max_sample_bytes can be 0; freed at
+                                              dart_node_close) */
+    dart_node_peer_up_fn    on_peer_up;    /* optional: a peer was discovered   */
+    dart_node_peer_down_fn  on_peer_down;  /* optional: a peer was lost         */
     void                 *user;
 } dart_node_config;
 
@@ -64,6 +77,15 @@ int      dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir);
 /* Cumulative backpressure since open: microseconds dart_node_send waited on
  * slow readers and how many sends waited. Either out-pointer may be NULL. */
 void     dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends);
+/* Pump the loop until every live reader has acked all samples sent on
+ * channel_id, or timeout_ms elapses. Returns 1 if fully drained, 0 on timeout.
+ * Call before close so a burst (e.g. a file) is delivered, not cut off by the
+ * BYE. Reliable only; best-effort channels drain at once (no acks to await). */
+int      dart_node_drain(dart_node *n, uint16_t channel_id, int timeout_ms);
+/* Number of peers matched as readers (subscribers) of this channel right now.
+ * A one-shot/file publisher polls this to wait for a subscriber before sending,
+ * so a message isn't lost into the void before discovery + matching complete. */
+int      dart_node_writer_match_count(dart_node *n, uint16_t channel_id);
 void     dart_node_close(dart_node *n, int send_bye);
 
 #ifdef __cplusplus

@@ -281,6 +281,26 @@ typedef void (*dart_collision_fn)(void *user, uint64_t identity,
                                   const char *our_name,
                                   const char *peer_name, size_t peer_name_len);
 
+/* Optional: a peer sent a sample whose declared size exceeds this channel's
+ * max_sample_bytes, so it cannot be reassembled here. The transport skips it
+ * (the in-order stream is not wedged) and reports it; raise max_sample_bytes,
+ * or shrink the sender's message, to carry it. NULL = skip silently. */
+typedef void (*dart_oversize_fn)(void *user, uint16_t channel_id, uint32_t from_peer,
+                                 uint32_t sample_bytes);
+
+/* Largest single sample the wire can carry: the fragment count is 16-bit, so a
+ * sample spans at most 65535 TUs of DART_FRAG_PAYLOAD each (~64 MB by default). */
+#define DART_SAMPLE_MAX (65535u * DART_FRAG_PAYLOAD)
+
+/* Optional allocator for dynamic (unbounded-up-to-DART_SAMPLE_MAX) messages.
+ * realloc semantics: ptr NULL = allocate, size 0 = free(ptr) and return NULL,
+ * else resize. When set, USER channels grow their sample/reassembly buffers via
+ * it to fit any message, so max_sample_bytes need not be set (use 0). When NULL
+ * (the default, and for embedded/ESP32), buffers are fixed at max_sample_bytes
+ * and a bigger message is refused (send) or skipped+reported (receive). The meta
+ * channel is always fixed. Pair with dart_destroy to free what this allocated. */
+typedef void *(*dart_realloc_fn)(void *user, void *ptr, size_t size);
+
 typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
@@ -294,6 +314,8 @@ typedef struct {
     dart_sample_fn          on_sample;
     dart_gap_fn             on_gap;     /* optional; NULL = no gap reporting */
     dart_collision_fn       on_collision; /* optional; NULL = silent refuse */
+    dart_oversize_fn        on_oversize;  /* optional; sample too big to reassemble */
+    dart_realloc_fn         realloc_fn;   /* optional; set => dynamic message sizing */
     void                 *user;
 } dart_config;
 
@@ -301,6 +323,10 @@ typedef struct dart_state dart_state;
 
 size_t    dart_required_memory(const dart_config *cfg);
 dart_state *dart_init(void *mem, size_t mem_size, const dart_config *cfg);
+/* Free buffers a realloc_fn allocated (dynamic channels). No-op in fixed mode.
+ * The caller still owns the arena passed to dart_init; this only releases the
+ * hook-allocated sample/reassembly buffers. The node calls it from close. */
+void      dart_destroy(dart_state *st);
 
 /* Canonical 64-bit topic identity from a name (FNV-1a). Used to match topics
  * across peers and to derive their multicast group. */
@@ -336,6 +362,17 @@ const dart_qos *dart_channel_qos(dart_state *st, uint16_t channel_id);
  * after qos.max_block_us (KEEP_LAST eviction is the fallback, never refusal). */
 int       dart_send_would_evict(dart_state *st, uint16_t channel_id);
 
+/* 1 if every live reader has acked all samples sent on this reliable channel,
+ * so a writer may stop/close without truncating in-flight data; 0 if any reader
+ * is still behind. Best-effort or unknown channels return 1 (no acks to await).
+ * The node wraps this as dart_node_drain. */
+int       dart_send_drained(dart_state *st, uint16_t channel_id);
+
+/* Number of peers currently matched as readers of this channel (subscribers we
+ * would send to). 0 means a publish goes nowhere; a one-shot/file publisher can
+ * poll this to wait for a subscriber before sending instead of into the void. */
+int       dart_writer_match_count(dart_state *st, uint16_t channel_id);
+
 /* Feed a received datagram, tagged with the peer it came from. */
 void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *dg, size_t len,
                          uint64_t now_us);
@@ -362,6 +399,12 @@ int       dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t ca
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Optional peer-discovery notifications. on_peer_up fires when a NEW peer is
+ * discovered (not on address refreshes); on_peer_down when one is lost (its BYE
+ * or a timeout). For visibility/logging; the transport wiring is automatic. */
+typedef void (*dart_node_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr);
+typedef void (*dart_node_peer_down_fn)(void *user, uint32_t peer_id);
 
 typedef struct {
     uint16_t              domain_id;     /* discovery domain                  */
@@ -401,6 +444,13 @@ typedef struct {
     dart_gap_fn             on_gap;        /* optional: permanently skipped TUs */
     dart_collision_fn       on_collision;  /* optional: two topic names hashed to
                                               one identity; the match is refused */
+    dart_oversize_fn        on_oversize;   /* optional: a received sample exceeds
+                                              max_sample_bytes (skipped, reported) */
+    dart_realloc_fn         realloc_fn;    /* optional: set => dynamic message sizing
+                                              (max_sample_bytes can be 0; freed at
+                                              dart_node_close) */
+    dart_node_peer_up_fn    on_peer_up;    /* optional: a peer was discovered   */
+    dart_node_peer_down_fn  on_peer_down;  /* optional: a peer was lost         */
     void                 *user;
 } dart_node_config;
 
@@ -417,6 +467,15 @@ int      dart_node_set_dir(dart_node *n, uint16_t channel_id, uint8_t dir);
 /* Cumulative backpressure since open: microseconds dart_node_send waited on
  * slow readers and how many sends waited. Either out-pointer may be NULL. */
 void     dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_sends);
+/* Pump the loop until every live reader has acked all samples sent on
+ * channel_id, or timeout_ms elapses. Returns 1 if fully drained, 0 on timeout.
+ * Call before close so a burst (e.g. a file) is delivered, not cut off by the
+ * BYE. Reliable only; best-effort channels drain at once (no acks to await). */
+int      dart_node_drain(dart_node *n, uint16_t channel_id, int timeout_ms);
+/* Number of peers matched as readers (subscribers) of this channel right now.
+ * A one-shot/file publisher polls this to wait for a subscriber before sending,
+ * so a message isn't lost into the void before discovery + matching complete. */
+int      dart_node_writer_match_count(dart_node *n, uint16_t channel_id);
 void     dart_node_close(dart_node *n, int send_bye);
 
 #ifdef __cplusplus
@@ -432,6 +491,8 @@ void     dart_node_close(dart_node *n, int send_bye);
 
 #define DART_DISCOVERY_HDR_LEN 43
 #define DART_DISCOVERY_FLAG_BYE 0x01
+#define DART_DISCOVERY_FLAG_REQ 0x02         /* solicit: recipients announce back now */
+#define DART_DISCOVERY_SOLICIT_JITTER_US 20000u  /* spread replies so they don't storm */
 
 struct dart_discovery_peer_ {
     uint8_t  used;
@@ -528,11 +589,11 @@ static int dart_discovery_alloc(dart_discovery_state *st){
     return (int)stalest;
 }
 
-static size_t dart_discovery_build(dart_discovery_state *st, int bye, uint8_t *p, size_t cap){
+static size_t dart_discovery_build(dart_discovery_state *st, uint8_t flags, uint8_t *p, size_t cap){
     if (cap < (size_t)DART_DISCOVERY_HDR_LEN + 1u + st->cfg.meta_len) return 0;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
     p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
-    p[5]=(uint8_t)(bye ? DART_DISCOVERY_FLAG_BYE : 0);
+    p[5]=flags;
     dart_discovery_wr16(p+6, st->cfg.domain_id);
     memcpy(p+8, st->cfg.uuid, 16);
     dart_discovery_wr16(p+24, st->cfg.data_port);
@@ -611,11 +672,18 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
             st->cfg.on_peer_up(st->cfg.user, st->peers[idx].local_id, &addr,
                                mlen ? st->peers[idx].meta : NULL, mlen);
     }
+
+    if ((flags & DART_DISCOVERY_FLAG_REQ) && st->started){
+        /* peer is soliciting: reply with our announce sooner than the next
+           periodic one, jittered by our uuid so many peers don't reply at once. */
+        uint64_t when = now + (dart_discovery_fnv(st->cfg.uuid,16) % DART_DISCOVERY_SOLICIT_JITTER_US);
+        if (when < st->next_announce_us) st->next_announce_us = when;
+    }
 }
 
 size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, size_t cap){
-    uint16_t i;
-    if (!st->started){
+    uint16_t i; int first = !st->started;
+    if (first){
         st->started = 1;
         st->next_announce_us = now + (dart_discovery_fnv(st->cfg.uuid,16) % st->cfg.announce_us);
     }
@@ -627,6 +695,9 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
             if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
         }
     }
+    if (first)   /* solicit on startup: announces us AND asks peers to reply now,
+                    so discovery is ~instant instead of waiting an announce interval */
+        return dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, (uint8_t *)out, cap);
     if (now >= st->next_announce_us){
         st->next_announce_us = now + st->cfg.announce_us;
         return dart_discovery_build(st, 0, (uint8_t *)out, cap);
@@ -635,7 +706,7 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
 }
 
 size_t dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap){
-    return dart_discovery_build(st, 1, (uint8_t *)out, cap);
+    return dart_discovery_build(st, DART_DISCOVERY_FLAG_BYE, (uint8_t *)out, cap);
 }
 
 int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart_discovery_addr *out){
@@ -1045,7 +1116,8 @@ typedef struct {
     uint64_t base;       /* seqno of frag 0 */
     uint16_t count;      /* frag count      */
     uint32_t len;        /* sample bytes    */
-    uint8_t *buf;        /* len bytes        */
+    uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
+    uint32_t cap;        /* allocated bytes of buf (dynamic grows it)              */
 } dart_wsample;
 
 typedef struct {        /* writer-side, per (channel,peer) */
@@ -1074,8 +1146,10 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint8_t  asm_active;    /* received >=1 frag of current sample */
     uint16_t asm_count;
     uint32_t asm_len;
-    uint8_t *asm_buf;       /* max_sample_bytes */
-    uint8_t *frag_bm;       /* ceil(maxfrags/8) */
+    uint8_t *asm_buf;       /* >= asm_len; arena (fixed) or hook-malloc'd (dynamic) */
+    uint8_t *frag_bm;       /* ceil(asm_count/8) */
+    uint32_t asm_cap;       /* allocated bytes of asm_buf (dynamic grows it)       */
+    uint32_t bm_cap;        /* allocated bytes of frag_bm                          */
     uint64_t hb_last;       /* highest seqno writer claims to hold */
     uint8_t  ack_pending;
     uint64_t ack_due_us;
@@ -1086,9 +1160,10 @@ typedef struct {
     uint64_t  identity;     /* cross-peer topic identity (hash of name or id) */
     const char *name;       /* our copy of the topic name; NULL if id-identified */
     uint16_t  id;           /* local handle (API + on_sample) */
-    uint16_t  maxfrags;     /* ceil(max_sample_bytes/FRAG) */
+    uint16_t  maxfrags;     /* ceil(max_sample_bytes/FRAG) (fixed mode only) */
     uint8_t   dir;          /* dart_direction */
     uint8_t   mcast;
+    uint8_t   dynamic;      /* 1 = buffers grow via cfg.realloc_fn, no fixed cap */
     uint16_t  nsubs;        /* live matched subscribers; mcast: >0 = group mode */
     /* writer */
     dart_wsample *hist;       /* [depth] ring */
@@ -1227,13 +1302,17 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
         const dart_qos *q = &def->qos;
         uint16_t depth = q->history_depth ? q->history_depth : 1;
         uint16_t mf = dart_maxfrags(q->max_sample_bytes);
+        /* dynamic = user channel with a realloc hook: its sample/reassembly
+           buffers are grown via the hook at runtime, not taken from the arena.
+           The meta channel is always fixed (its size is known and bounded). */
+        int dyn = (cfg->realloc_fn != NULL) && (c < ncu);
         dart_wsample *hist = (dart_wsample*)dart_take(b, depth*sizeof(dart_wsample), 16);
         uint16_t d;
         if (st && b->base){
             dart_channel *ch = &st->chans[c];
             memset(ch,0,sizeof(*ch));
             ch->qos=*q; ch->id=def->channel_id; ch->maxfrags=mf;
-            ch->dir=def->dir; ch->mcast=def->mcast;
+            ch->dir=def->dir; ch->mcast=def->mcast; ch->dynamic=(uint8_t)dyn;
             ch->identity = (c < ncu) ? dart_channel_identity(def) : DART_META_IDENTITY;
             ch->name = NULL;
             if (c < ncu){
@@ -1246,16 +1325,19 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
             memset(hist,0,depth*sizeof(dart_wsample));
         }
         for (d=0; d<depth; d++){
-            uint8_t *buf = (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
-            if (st && b->base) st->chans[c].hist[d].buf = buf;
+            uint8_t *buf = dyn ? NULL : (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
+            if (st && b->base){ st->chans[c].hist[d].buf = buf;
+                                st->chans[c].hist[d].cap = dyn ? 0u : q->max_sample_bytes; }
         }
-        /* reader asm buffers and frag bitmaps, per peer */
+        /* reader asm buffers and frag bitmaps, per peer (skipped when dynamic) */
         for (p=0;p<np;p++){
-            uint8_t *abuf = (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
-            uint8_t *fbm  = (uint8_t*)dart_take(b, (mf+7u)/8u, 1);
+            uint8_t *abuf = dyn ? NULL : (uint8_t*)dart_take(b, q->max_sample_bytes, 8);
+            uint8_t *fbm  = dyn ? NULL : (uint8_t*)dart_take(b, (mf+7u)/8u, 1);
             if (st && b->base){
                 dart_rproxy *r = &st->rprox[(size_t)c*np+p];
                 r->asm_buf=abuf; r->frag_bm=fbm;
+                r->asm_cap = dyn ? 0u : q->max_sample_bytes;
+                r->bm_cap  = dyn ? 0u : (uint32_t)((mf+7u)/8u);
             }
         }
     }
@@ -1384,8 +1466,9 @@ static void dart__unmatch_w(dart_state *st, uint16_t c, uint16_t ps){
 static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
     dart_rproxy *r=&st->rprox[(size_t)c*st->cfg.max_peers+ps];
     uint8_t *abuf=r->asm_buf, *fbm=r->frag_bm;
+    uint32_t acap=r->asm_cap, bcap=r->bm_cap;   /* keep grown buffers across rematch */
     memset(r,0,sizeof(*r));
-    r->asm_buf=abuf; r->frag_bm=fbm;
+    r->asm_buf=abuf; r->frag_bm=fbm; r->asm_cap=acap; r->bm_cap=bcap;
     r->epoch=st->repoch++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
 }
@@ -1483,11 +1566,40 @@ int dart_send(dart_state *st, uint16_t channel_id, const void *data, size_t len,
     if (channel_id == DART_CHAN_META) return -1;     /* internal */
     ch = dart_chan(st, channel_id, &ci);
     if (!ch) return -1;
-    if (len > ch->qos.max_sample_bytes) return -2;
+    if (ch->dynamic){
+        dart_wsample *slot = &ch->hist[ch->hist_head];
+        size_t need = len ? len : 1u;
+        if (len > 65535u*DART_FRAG_PAYLOAD) return -2;   /* wire fragment-count cap (~64MB) */
+        if ((size_t)slot->cap < need){                    /* grow the slot to fit */
+            uint8_t *nb = (uint8_t*)st->cfg.realloc_fn(st->cfg.user, slot->buf, need);
+            if (!nb) return -4;                           /* out of memory */
+            slot->buf = nb; slot->cap = (uint32_t)need;
+        }
+    } else if (len > ch->qos.max_sample_bytes) return -2;
     if (ch->dir == DART_SUB_ONLY || ch->dir == DART_NONE) return -3;
     if (len) memcpy(ch->hist[ch->hist_head].buf, data, len);
     dart__commit(st, (uint16_t)ci, len);
     return 0;
+}
+
+void dart_destroy(dart_state *st){
+    uint16_t c; uint32_t p, np;
+    if (!st || !st->cfg.realloc_fn) return;     /* fixed mode: nothing hook-allocated */
+    np = st->cfg.max_peers;
+    for (c=0;c<st->cfg.n_channels;c++){
+        dart_channel *ch=&st->chans[c];
+        uint16_t depth, d;
+        if (!ch->dynamic) continue;
+        depth = ch->qos.history_depth ? ch->qos.history_depth : 1;
+        for (d=0; d<depth; d++)
+            if (ch->hist[d].buf){ st->cfg.realloc_fn(st->cfg.user, ch->hist[d].buf, 0);
+                                  ch->hist[d].buf=NULL; ch->hist[d].cap=0; }
+        for (p=0;p<np;p++){
+            dart_rproxy *r=&st->rprox[(size_t)c*np+p];
+            if (r->asm_buf){ st->cfg.realloc_fn(st->cfg.user, r->asm_buf, 0); r->asm_buf=NULL; r->asm_cap=0; }
+            if (r->frag_bm){ st->cfg.realloc_fn(st->cfg.user, r->frag_bm, 0); r->frag_bm=NULL; r->bm_cap=0; }
+        }
+    }
 }
 
 /* one interest entry: [u16 alias][u64 identity][u8 namelen][name bytes]. The
@@ -1603,6 +1715,27 @@ int dart_send_would_evict(dart_state *st, uint16_t channel_id){
     return 0;
 }
 
+int dart_send_drained(dart_state *st, uint16_t channel_id){
+    int ci; dart_channel *ch = dart_chan(st, channel_id, &ci);
+    uint32_t np; uint16_t p;
+    if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
+    np = st->cfg.max_peers;
+    for (p=0;p<(uint16_t)np;p++){
+        dart_wproxy *w=&st->wprox[(size_t)ci*np+p];
+        if (w->used && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
+    }
+    return 1;
+}
+
+int dart_writer_match_count(dart_state *st, uint16_t channel_id){
+    int ci; dart_channel *ch = dart_chan(st, channel_id, &ci);
+    uint32_t np, p; int cnt = 0;
+    if (!ch) return 0;
+    np = st->cfg.max_peers;
+    for (p=0;p<np;p++) if (st->wprox[(size_t)ci*np+p].used) cnt++;  /* matched readers */
+    return cnt;
+}
+
 /* wire alias for a local channel: its index, or 0xFFFF for the meta channel
  * (reserved and known a priori, so meta works before any alias is learned). */
 static uint16_t dart__alias_of(dart_state *st, int ci){
@@ -1658,8 +1791,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
     base = seqno - frag;
 
     if (!r->used) return;                               /* not subscribed */
-    if (slen > ch->qos.max_sample_bytes) return;        /* malformed */
-    if (count==0 || frag>=count) return;
+    if (count==0 || frag>=count) return;                /* malformed */
     if (base < r->deliver_upto) return;                 /* old/dup */
 
     if (base > r->deliver_upto){
@@ -1684,16 +1816,44 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
         r->deliver_upto = base; r->asm_active=0;
     }
     r->started = 1;
-    /* base == deliver_upto: current sample */
-    if (!r->asm_active){
-        r->asm_active=1; r->asm_count=count; r->asm_len=slen;
-        memset(r->frag_bm,0,(ch->maxfrags+7u)/8u);
-    }
-    if (count!=r->asm_count) return;                    /* inconsistent, ignore */
-    if (!dart_bget(r->frag_bm,frag)){
-        uint32_t off=(uint32_t)frag*DART_FRAG_PAYLOAD;
-        if (off+plen<=ch->qos.max_sample_bytes) memcpy(r->asm_buf+off,pay,plen);
-        dart_bset(r->frag_bm,frag);
+    /* Ensure the reassembly buffers fit this sample. A dynamic channel grows
+       asm_buf + frag_bm via the hook (only an OOM is "too big"); a fixed channel
+       cannot hold a sample over max_sample_bytes. Either way "too big" reports it
+       and skips the whole sample, so in-order delivery is never wedged. */
+    { uint32_t bmneed = ((uint32_t)count + 7u) / 8u, bufcap, bmbytes; int toobig = 0;
+      if (ch->dynamic){
+          if (r->asm_cap < slen){
+              uint8_t *nb = (uint8_t*)st->cfg.realloc_fn(st->cfg.user, r->asm_buf, slen?slen:1u);
+              if (!nb) toobig = 1; else { r->asm_buf = nb; r->asm_cap = slen?slen:1u; }
+          }
+          if (!toobig && r->bm_cap < bmneed){
+              uint8_t *nbm = (uint8_t*)st->cfg.realloc_fn(st->cfg.user, r->frag_bm, bmneed?bmneed:1u);
+              if (!nbm) toobig = 1; else { r->frag_bm = nbm; r->bm_cap = bmneed?bmneed:1u; }
+          }
+      } else if (slen > ch->qos.max_sample_bytes) toobig = 1;
+      if (toobig){
+          if (st->cfg.on_oversize)
+              st->cfg.on_oversize(st->cfg.user, ch->id, st->peer_ids[pslot], slen);
+          r->deliver_upto = base + count; r->asm_active = 0;
+          if (reliable){
+              r->ack_pending = 1; r->ack_due_us = now + ch->qos.nack_delay_us;
+              dart__lane_wake(st, (uint16_t)ci, (uint32_t)pslot);
+          }
+          return;
+      }
+      bufcap  = ch->dynamic ? r->asm_cap : ch->qos.max_sample_bytes;
+      bmbytes = ch->dynamic ? bmneed     : (uint32_t)((ch->maxfrags+7u)/8u);
+      /* base == deliver_upto: current sample */
+      if (!r->asm_active){
+          r->asm_active=1; r->asm_count=count; r->asm_len=slen;
+          memset(r->frag_bm,0,bmbytes);
+      }
+      if (count!=r->asm_count) return;                  /* inconsistent, ignore */
+      if (!dart_bget(r->frag_bm,frag)){
+          uint32_t off=(uint32_t)frag*DART_FRAG_PAYLOAD;
+          if (off+plen<=bufcap) memcpy(r->asm_buf+off,pay,plen);
+          dart_bset(r->frag_bm,frag);
+      }
     }
     /* complete? */
     { uint16_t i; int done=1;
@@ -2207,6 +2367,10 @@ struct dart_node {
     /* cumulative backpressure (max_block_us waits in dart_node_send) */
     uint64_t      block_us;
     uint32_t      block_n;
+    /* optional app peer-discovery callbacks (forwarded from discovery) */
+    dart_node_peer_up_fn   on_peer_up;
+    dart_node_peer_down_fn on_peer_down;
+    void                  *cb_user;
 };
 
 /* split node config into discovery + transport sub-configs (callbacks/user
@@ -2233,6 +2397,8 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     tc->on_sample    = cfg->on_sample;
     tc->on_gap       = cfg->on_gap;
     tc->on_collision = cfg->on_collision;
+    tc->on_oversize  = cfg->on_oversize;
+    tc->realloc_fn   = cfg->realloc_fn;
     tc->user         = cfg->user;
     if (mp_out) *mp_out = mp;
 }
@@ -2277,11 +2443,13 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     /* interest arrives over the transport's meta channel, not the announce */
     (void)meta; (void)mlen;
     dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
+    if (n->on_peer_up) n->on_peer_up(n->cb_user, id, addr);   /* new peer discovered */
 }
 static void dart__node_down(void *u, uint32_t id){
-    dart_node *n=(dart_node*)u; uint16_t i;
-    for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; break; }
+    dart_node *n=(dart_node*)u; uint16_t i; int found=0;
+    for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; found=1; break; }
     dart_peer_remove(n->tr, id);
+    if (found && n->on_peer_down) n->on_peer_down(n->cb_user, id);   /* peer lost (BYE/timeout) */
 }
 
 static int dart__node_find_addr(dart_node *n, const struct sockaddr_in *s){
@@ -2368,6 +2536,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n=(dart_node*)base; memset(n,0,sizeof *n);
     n->fd = DART_BADSOCK; n->mcfd = DART_BADSOCK; n->max_peers=mp;
     n->domain = cfg->domain_id;
+    n->on_peer_up = cfg->on_peer_up; n->on_peer_down = cfg->on_peer_down; n->cb_user = cfg->user;
     n->mc_port = cfg->mc_port ? cfg->mc_port
                : (uint16_t)((cfg->disc_port ? cfg->disc_port : 7400) + 1);
     p = base + node_sz;
@@ -2591,11 +2760,25 @@ void dart_node_block_stats(dart_node *n, uint64_t *block_us, uint32_t *blocked_s
     if (blocked_sends) *blocked_sends = n->block_n;
 }
 
+int dart_node_drain(dart_node *n, uint16_t channel_id, int timeout_ms){
+    uint64_t deadline = dart_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
+    while (!dart_send_drained(n->tr, channel_id)){
+        if (dart_now_us() >= deadline) return 0;
+        dart_node_poll(n, 1);
+    }
+    return 1;
+}
+
+int dart_node_writer_match_count(dart_node *n, uint16_t channel_id){
+    return dart_writer_match_count(n->tr, channel_id);
+}
+
 void dart_node_close(dart_node *n, int send_bye){
     if (!n) return;
     if (n->disc) dart_discovery_rt_close(n->disc, send_bye);
     if (n->mcfd != DART_BADSOCK) DART_CLOSESOCK(n->mcfd);
     if (n->fd != DART_BADSOCK) DART_CLOSESOCK(n->fd);
+    if (n->tr) dart_destroy(n->tr);     /* free any hook-allocated dynamic buffers */
     dart__net_cleanup();
 }
 #endif /* !DART_TRANSPORT_SANS_IO */
