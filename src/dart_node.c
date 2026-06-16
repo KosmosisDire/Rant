@@ -96,7 +96,25 @@ struct dart_node {
     /* one app callback for everything but message delivery; node fills PEER_UP/DOWN */
     dart_event_fn  on_event;
     void          *user_data;
+    /* opaque payload appended to every discovery announce; must outlive the node.
+       Currently advertises this node's UDP fragment size (see dart__meta_*). */
+    uint8_t        disc_meta[8];
+    uint8_t        disc_meta_len;
 };
+
+/* Discovery-announce metadata. A tiny versioned blob; today it carries only this
+ * node's fragment size, but it is laid out to grow (e.g. a future SHM segment id).
+ * Layout: ['D','N', ver=1, frag_lo, frag_hi]. */
+static uint8_t dart__meta_encode(uint8_t out[8], uint16_t frag){
+    out[0]='D'; out[1]='N'; out[2]=1;
+    out[3]=(uint8_t)(frag & 0xFF); out[4]=(uint8_t)(frag >> 8);
+    return 5;
+}
+/* Read a peer's advertised fragment size; 0 if absent/unrecognized (caller defaults). */
+static uint16_t dart__meta_frag(const uint8_t *meta, uint8_t mlen){
+    if (!meta || mlen < 5 || meta[0]!='D' || meta[1]!='N' || meta[2]!=1) return 0;
+    return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
+}
 
 /* split node config into discovery + transport sub-configs */
 static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_config *dc,
@@ -117,6 +135,7 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     tc->channels   = cfg->channels;
     tc->n_channels = cfg->n_channels;
     tc->max_peers  = mp;
+    tc->frag_payload = cfg->net.fragment_size;   /* 0 = default; dart_init clamps to [MIN,MAX] */
     tc->on_message = cfg->on_message;
     tc->on_event   = cfg->on_event;
     tc->allocator  = cfg->allocator;
@@ -160,8 +179,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].used=1; n->peers[slot].id=id;
     memcpy(n->peers[slot].ip, addr->ip, 16);
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
-    (void)meta; (void)mlen;   /* interest rides the meta channel, not the announce */
-    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
+    /* interest rides the meta channel; the announce meta carries the peer's frag size */
+    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip),
+                  dart__meta_frag(meta, mlen));
     if (n->on_event){
         dart_event ev; memset(&ev, 0, sizeof ev);
         ev.kind=DART_PEER_UP; ev.peer=id; ev.detail="peer discovered";
@@ -365,6 +385,13 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     dc.disc.on_peer_up   = dart__node_up;
     dc.disc.on_peer_down = dart__node_down;
     dc.disc.user         = n;
+    /* advertise our fragment size (clamped exactly as dart_init clamps it) so peers
+       reassemble our messages at the right size. The buffer lives in the node. */
+    { uint16_t f = cfg->net.fragment_size ? cfg->net.fragment_size : DART_FRAG_PAYLOAD;
+      if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
+      if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
+      n->disc_meta_len = dart__meta_encode(n->disc_meta, f);
+      dc.disc.meta = n->disc_meta; dc.disc.meta_len = n->disc_meta_len; }
     n->disc = dart_discovery_rt_open(p, disc_sz, &dc);
     if (!n->disc){
         if (n->mcfd!=DART_BADSOCK){ DART_CLOSESOCK(n->mcfd); n->mcfd=DART_BADSOCK; }

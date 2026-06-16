@@ -35,9 +35,24 @@ extern "C" {
 #endif
 
 #ifndef DART_FRAG_PAYLOAD
-#define DART_FRAG_PAYLOAD 1024u          /* bytes of message data per fragment */
+#define DART_FRAG_PAYLOAD 1024u          /* default bytes of message data per fragment */
 #endif
-#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD + 40u)   /* + largest header */
+/* The UDP fragment size is set PER NODE at init (dart_config.frag_payload) and
+ * advertised via discovery, so a receiver reassembles each message at the SOURCE
+ * node's size -- a writer always fragments with one size, so its seqno line stays
+ * self-consistent (no per-message field on the wire). These two compile bounds
+ * frame the runtime range so fixed buffers can be sized; both default to
+ * DART_FRAG_PAYLOAD, i.e. no change unless you opt in. MAX sizes the datagram
+ * buffers (raise it for jumbo frames / a bigger same-LAN size); MIN sizes the
+ * reassembly bitmaps (lower it only if some node uses a smaller size). Every
+ * node's frag_payload must lie in [MIN, MAX]. */
+#ifndef DART_FRAG_PAYLOAD_MAX
+#define DART_FRAG_PAYLOAD_MAX DART_FRAG_PAYLOAD
+#endif
+#ifndef DART_FRAG_PAYLOAD_MIN
+#define DART_FRAG_PAYLOAD_MIN DART_FRAG_PAYLOAD
+#endif
+#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD_MAX + 40u)   /* + largest header */
 
 #ifndef DART_TOPIC_NAME_MAX
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
@@ -114,7 +129,7 @@ typedef struct {
 typedef void (*dart_event_fn)(void *user, const dart_event *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
-#define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD)
+#define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
 
 /* Optional realloc-style hook for growable messages (ptr NULL = alloc, size 0 =
  * free). Set => user channels grow to fit, max_message_bytes may be 0. NULL
@@ -126,6 +141,8 @@ typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
     uint16_t              max_peers;
+    uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
+                                           DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
     dart_message_fn         on_message;
     dart_event_fn           on_event;   /* optional: loss/too-big/name-collision */
     dart_alloc_fn           allocator;  /* optional: set => dynamic message sizing */
@@ -145,8 +162,10 @@ uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_channel_identity(const dart_channel_def *def);   /* = dart_topic_id(def->name) */
 
 /* A new peer matches only the meta channel; data channels match as its interest
- * list arrives and rematch on change. peer_is_local: 1 if on this host. */
-void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local);
+ * list arrives and rematch on change. peer_is_local: 1 if on this host.
+ * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
+ * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
+void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
 
 /* Change a channel's role at runtime (rematches peers, re-announces). A
@@ -213,6 +232,10 @@ typedef struct {
     uint16_t              n_seed_peers;
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
+    uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
+                                                0 = DART_FRAG_PAYLOAD. Advertised via discovery so
+                                                peers reassemble at our size. Clamp [MIN, MAX]; raise
+                                                MAX (compile) for jumbo frames. One size per node. */
 } dart_node_net;
 
 /* Discovery cadence and peer-table size; zero-means-default (defaults shown). */
@@ -378,6 +401,8 @@ struct dart_state {
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
     uint8_t     *peer_local;/* [max_peers] */
+    uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
+    uint16_t     frag;      /* this node's fragment size: what we fragment our sends into */
     /* peer interest over OUR channel table, one bit per user channel; the proxies
        plus these bits are the whole stored interest (full peer lists are not kept) */
     uint8_t     *peer_pub_bm; /* [max_peers][bmlen] peer publishes channel c */
@@ -418,8 +443,10 @@ static void *dart_take(dart_bump *b, size_t n, size_t align){
     return NULL; /* sizing mode */
 }
 
+/* Reader-side fragment-count bound: a peer may fragment at the smallest size in
+ * the deployment, so size the reassembly bitmap by DART_FRAG_PAYLOAD_MIN. */
 static uint16_t dart_maxfrags(uint32_t max_message_bytes){
-    uint32_t f = (max_message_bytes + DART_FRAG_PAYLOAD - 1) / DART_FRAG_PAYLOAD;
+    uint32_t f = (max_message_bytes + DART_FRAG_PAYLOAD_MIN - 1) / DART_FRAG_PAYLOAD_MIN;
     if (f == 0) f = 1;
     return (uint16_t)f;
 }
@@ -467,6 +494,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       uint32_t *pi = (uint32_t*)dart_take(b, np*sizeof(uint32_t), 8);
       uint8_t  *pu = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint8_t  *pl = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
+      uint16_t *pf = (uint16_t*)dart_take(b, np*sizeof(uint16_t), 2);
       uint8_t  *pb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       uint8_t  *sb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       dart_channel *ch = (dart_channel*)dart_take(b, nc*sizeof(dart_channel), 16);
@@ -482,6 +510,10 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       npool = (char*)dart_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->peer_local=pl;
+          st->peer_frag=pf;
+          st->frag = cfg->frag_payload ? cfg->frag_payload : DART_FRAG_PAYLOAD;
+          if (st->frag < DART_FRAG_PAYLOAD_MIN) st->frag = DART_FRAG_PAYLOAD_MIN;
+          if (st->frag > DART_FRAG_PAYLOAD_MAX) st->frag = DART_FRAG_PAYLOAD_MAX;
           st->peer_pub_bm=pb; st->peer_sub_bm=sb; st->bmlen=bml;
           st->cfg.n_channels=(uint16_t)nc; st->meta_ci=(uint16_t)ncu;
           st->chans=ch; st->wprox=wp; st->rprox=rp; st->repoch=1;
@@ -489,6 +521,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           st->dest_head=dh; st->dest_tail=dt; st->dest_inq=di; st->destq=dq;
           st->alias_ci=ac; st->amax=mids;
           memset(pu,0,np); memset(pl,0,np);
+          { uint32_t k; for (k=0;k<np;k++) pf[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
           memset(ac,0xFF,(size_t)np*mids*sizeof(uint16_t));   /* all unmapped */
           memset(pb,0,(size_t)np*bml); memset(sb,0,(size_t)np*bml);
           memset(wp,0,(size_t)nc*np*sizeof(dart_wproxy));
@@ -697,13 +730,17 @@ static void dart__rematch(dart_state *st, uint16_t c, uint16_t ps){
     else if (!ruse && r->used) dart__unmatch_r(st,c,ps);
 }
 
-void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local){
+void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local, uint16_t peer_frag){
     uint16_t i; int free=-1; uint32_t np=st->cfg.max_peers;
     if (dart_peer_slot(st,id)>=0) return;
     for (i=0;i<np;i++) if(!st->peer_used[i]){free=(int)i;break;}
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
     st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
+    if (peer_frag==0) peer_frag = DART_FRAG_PAYLOAD;
+    if (peer_frag < DART_FRAG_PAYLOAD_MIN) peer_frag = DART_FRAG_PAYLOAD_MIN;
+    if (peer_frag > DART_FRAG_PAYLOAD_MAX) peer_frag = DART_FRAG_PAYLOAD_MAX;
+    st->peer_frag[free]=peer_frag;
     memset(&st->peer_pub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->peer_sub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->alias_ci[(size_t)free*st->amax],0xFF,(size_t)st->amax*sizeof(uint16_t));
@@ -741,7 +778,7 @@ static dart_wsample *dart_find_sample(dart_channel *ch, uint64_t seqno){
 static void dart__commit(dart_state *st, uint16_t ci, size_t len){
     dart_channel *ch = &st->chans[ci];
     uint16_t depth = ch->qos.keep_last;
-    uint16_t count = (uint16_t)((len + DART_FRAG_PAYLOAD - 1) / DART_FRAG_PAYLOAD);
+    uint16_t count = (uint16_t)((len + st->frag - 1) / st->frag);
     dart_wsample *slot = &ch->hist[ch->hist_head];
     if (count==0) count=1;
     slot->valid=1; slot->base=ch->next_seqno; slot->count=count; slot->len=(uint32_t)len;
@@ -768,7 +805,7 @@ int dart_send(dart_state *st, uint16_t channel, const void *data, size_t len, ui
     if (ch->dynamic){
         dart_wsample *slot = &ch->hist[ch->hist_head];
         size_t need = len ? len : 1u;
-        if (len > 65535u*DART_FRAG_PAYLOAD) return -2;   /* wire fragment-count cap (~64MB) */
+        if (len > 65535u*(uint32_t)st->frag) return -2;   /* wire fragment-count cap */
         if ((size_t)slot->cap < need){                    /* grow the slot to fit */
             uint8_t *nb = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);
             if (!nb) return -4;                           /* out of memory */
@@ -1036,7 +1073,10 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
       }
       if (count!=r->asm_count) return;                  /* inconsistent, ignore */
       if (!dart_bget(r->frag_bm,frag)){
-          uint32_t off=(uint32_t)frag*DART_FRAG_PAYLOAD;
+          /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
+             a peer staying within [MIN, MAX] keeps count <= maxfrags, so the bitmap
+             can't overflow and the bufcap guard catches any stray offset */
+          uint32_t off=(uint32_t)frag*st->peer_frag[pslot];
           if (off+plen<=bufcap) memcpy(r->asm_buf+off,pay,plen);
           dart_bset(r->frag_bm,frag);
       }
@@ -1190,8 +1230,8 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
                 s=dart_find_sample(ch,seqno);
                 if (s){
                     uint16_t fi=(uint16_t)(seqno - s->base);
-                    uint32_t off=(uint32_t)fi*DART_FRAG_PAYLOAD;
-                    uint16_t plen=(uint16_t)((s->len-off)<DART_FRAG_PAYLOAD?(s->len-off):DART_FRAG_PAYLOAD);
+                    uint32_t off=(uint32_t)fi*st->frag;
+                    uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
                     if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;   /* bit stays set */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
@@ -1220,8 +1260,8 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
         dart_wsample *s=dart_find_sample(ch,seqno);
         if (s){
             uint16_t fi=(uint16_t)(seqno - s->base);
-            uint32_t off=(uint32_t)fi*DART_FRAG_PAYLOAD;
-            uint16_t plen=(uint16_t)((s->len-off)<DART_FRAG_PAYLOAD?(s->len-off):DART_FRAG_PAYLOAD);
+            uint32_t off=(uint32_t)fi*st->frag;
+            uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
             if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;
             w->sent_upto++;
             return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
@@ -1305,8 +1345,8 @@ static size_t dart_group_emit(dart_state *st, int ci, uint8_t *out, size_t cap, 
         dart_wsample *s=dart_find_sample(ch,seqno);
         if (s){
             uint16_t fi=(uint16_t)(seqno - s->base);
-            uint32_t off=(uint32_t)fi*DART_FRAG_PAYLOAD;
-            uint16_t plen=(uint16_t)((s->len-off)<DART_FRAG_PAYLOAD?(s->len-off):DART_FRAG_PAYLOAD);
+            uint32_t off=(uint32_t)fi*st->frag;
+            uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
             if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;
             ch->mc_sent_upto++;
             return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
@@ -1530,7 +1570,25 @@ struct dart_node {
     /* one app callback for everything but message delivery; node fills PEER_UP/DOWN */
     dart_event_fn  on_event;
     void          *user_data;
+    /* opaque payload appended to every discovery announce; must outlive the node.
+       Currently advertises this node's UDP fragment size (see dart__meta_*). */
+    uint8_t        disc_meta[8];
+    uint8_t        disc_meta_len;
 };
+
+/* Discovery-announce metadata. A tiny versioned blob; today it carries only this
+ * node's fragment size, but it is laid out to grow (e.g. a future SHM segment id).
+ * Layout: ['D','N', ver=1, frag_lo, frag_hi]. */
+static uint8_t dart__meta_encode(uint8_t out[8], uint16_t frag){
+    out[0]='D'; out[1]='N'; out[2]=1;
+    out[3]=(uint8_t)(frag & 0xFF); out[4]=(uint8_t)(frag >> 8);
+    return 5;
+}
+/* Read a peer's advertised fragment size; 0 if absent/unrecognized (caller defaults). */
+static uint16_t dart__meta_frag(const uint8_t *meta, uint8_t mlen){
+    if (!meta || mlen < 5 || meta[0]!='D' || meta[1]!='N' || meta[2]!=1) return 0;
+    return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
+}
 
 /* split node config into discovery + transport sub-configs */
 static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_config *dc,
@@ -1551,6 +1609,7 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     tc->channels   = cfg->channels;
     tc->n_channels = cfg->n_channels;
     tc->max_peers  = mp;
+    tc->frag_payload = cfg->net.fragment_size;   /* 0 = default; dart_init clamps to [MIN,MAX] */
     tc->on_message = cfg->on_message;
     tc->on_event   = cfg->on_event;
     tc->allocator  = cfg->allocator;
@@ -1594,8 +1653,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].used=1; n->peers[slot].id=id;
     memcpy(n->peers[slot].ip, addr->ip, 16);
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
-    (void)meta; (void)mlen;   /* interest rides the meta channel, not the announce */
-    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip));
+    /* interest rides the meta channel; the announce meta carries the peer's frag size */
+    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip),
+                  dart__meta_frag(meta, mlen));
     if (n->on_event){
         dart_event ev; memset(&ev, 0, sizeof ev);
         ev.kind=DART_PEER_UP; ev.peer=id; ev.detail="peer discovered";
@@ -1799,6 +1859,13 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     dc.disc.on_peer_up   = dart__node_up;
     dc.disc.on_peer_down = dart__node_down;
     dc.disc.user         = n;
+    /* advertise our fragment size (clamped exactly as dart_init clamps it) so peers
+       reassemble our messages at the right size. The buffer lives in the node. */
+    { uint16_t f = cfg->net.fragment_size ? cfg->net.fragment_size : DART_FRAG_PAYLOAD;
+      if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
+      if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
+      n->disc_meta_len = dart__meta_encode(n->disc_meta, f);
+      dc.disc.meta = n->disc_meta; dc.disc.meta_len = n->disc_meta_len; }
     n->disc = dart_discovery_rt_open(p, disc_sz, &dc);
     if (!n->disc){
         if (n->mcfd!=DART_BADSOCK){ DART_CLOSESOCK(n->mcfd); n->mcfd=DART_BADSOCK; }

@@ -862,7 +862,7 @@ static int selftest_main(void){
         uint32_t wid = 0; uint16_t k;
         for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
         dart_peer_remove(r->tr, wid);
-        dart_peer_add(r->tr, wid, 1);
+        dart_peer_add(r->tr, wid, 1, DART_FRAG_PAYLOAD);
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
                  "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",

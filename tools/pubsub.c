@@ -154,7 +154,8 @@ static void usage(void){
         "  pubsub sub <channel> [opts]\n"
         "  pubsub pub <channel> [text...] [opts]   (no text = read lines from stdin)\n"
         "opts: --domain N  --mcast  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
-        "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n");
+        "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
+        "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_PAYLOAD_MAX>=N)\n");
 }
 
 /* Allocator for DART's dynamic message buffers (used when no --max is set).
@@ -286,7 +287,7 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
 int main(int argc, char **argv){
     const char *mode = NULL, *chan = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL;
     uint16_t domain = 7;
-    int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0;
+    int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0, frag = 0;
     double rate_hz = 0;                    /* --rate: pub repeats at N Hz; sub measures rate */
     size_t cap = 4u<<20; int max_set = 0; /* --max: fixed message cap (else dynamic) */
     char msg[65536]; size_t msg_len = 0;  /* one-shot publish text, if any */
@@ -305,6 +306,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--wait")   && i+1 < argc) wait_ms = atoi(argv[++i]);
         else if (!strcmp(a, "--file")   && i+1 < argc) file_name = argv[++i];
         else if (!strcmp(a, "--max")    && i+1 < argc){ cap = parse_size(argv[++i]); max_set = 1; }
+        else if (!strcmp(a, "--frag")   && i+1 < argc) frag = atoi(argv[++i]);
         else if (!strcmp(a, "--rate")){              /* HZ optional: bare --rate on a sub */
             rate_set = 1;
             if (i+1 < argc){                         /* consume the next token only if numeric, */
@@ -385,6 +387,7 @@ int main(int argc, char **argv){
       if (sb > (64u<<20)) sb = 64u<<20;
       cfg.net.recv_buffer_bytes = (uint32_t)sb;
       cfg.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
+    if (frag) cfg.net.fragment_size = (uint16_t)frag;   /* needs -DDART_FRAG_PAYLOAD_MAX>=frag */
     if (if_ip)      cfg.net.multicast_interface = if_ip;          /* multihomed: pin it */
     else if (mcast) cfg.net.multicast_interface = "127.0.0.1";    /* same-host: stay local */
 

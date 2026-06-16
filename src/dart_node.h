@@ -24,6 +24,10 @@ typedef struct {
     uint16_t              n_seed_peers;
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
+    uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
+                                                0 = DART_FRAG_PAYLOAD. Advertised via discovery so
+                                                peers reassemble at our size. Clamp [MIN, MAX]; raise
+                                                MAX (compile) for jumbo frames. One size per node. */
 } dart_node_net;
 
 /* Discovery cadence and peer-table size; zero-means-default (defaults shown). */

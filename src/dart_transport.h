@@ -13,9 +13,24 @@ extern "C" {
 #endif
 
 #ifndef DART_FRAG_PAYLOAD
-#define DART_FRAG_PAYLOAD 1024u          /* bytes of message data per fragment */
+#define DART_FRAG_PAYLOAD 1024u          /* default bytes of message data per fragment */
 #endif
-#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD + 40u)   /* + largest header */
+/* The UDP fragment size is set PER NODE at init (dart_config.frag_payload) and
+ * advertised via discovery, so a receiver reassembles each message at the SOURCE
+ * node's size -- a writer always fragments with one size, so its seqno line stays
+ * self-consistent (no per-message field on the wire). These two compile bounds
+ * frame the runtime range so fixed buffers can be sized; both default to
+ * DART_FRAG_PAYLOAD, i.e. no change unless you opt in. MAX sizes the datagram
+ * buffers (raise it for jumbo frames / a bigger same-LAN size); MIN sizes the
+ * reassembly bitmaps (lower it only if some node uses a smaller size). Every
+ * node's frag_payload must lie in [MIN, MAX]. */
+#ifndef DART_FRAG_PAYLOAD_MAX
+#define DART_FRAG_PAYLOAD_MAX DART_FRAG_PAYLOAD
+#endif
+#ifndef DART_FRAG_PAYLOAD_MIN
+#define DART_FRAG_PAYLOAD_MIN DART_FRAG_PAYLOAD
+#endif
+#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD_MAX + 40u)   /* + largest header */
 
 #ifndef DART_TOPIC_NAME_MAX
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
@@ -92,7 +107,7 @@ typedef struct {
 typedef void (*dart_event_fn)(void *user, const dart_event *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
-#define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD)
+#define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
 
 /* Optional realloc-style hook for growable messages (ptr NULL = alloc, size 0 =
  * free). Set => user channels grow to fit, max_message_bytes may be 0. NULL
@@ -104,6 +119,8 @@ typedef struct {
     const dart_channel_def *channels;
     uint16_t              n_channels;
     uint16_t              max_peers;
+    uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
+                                           DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
     dart_message_fn         on_message;
     dart_event_fn           on_event;   /* optional: loss/too-big/name-collision */
     dart_alloc_fn           allocator;  /* optional: set => dynamic message sizing */
@@ -123,8 +140,10 @@ uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_channel_identity(const dart_channel_def *def);   /* = dart_topic_id(def->name) */
 
 /* A new peer matches only the meta channel; data channels match as its interest
- * list arrives and rematch on change. peer_is_local: 1 if on this host. */
-void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local);
+ * list arrives and rematch on change. peer_is_local: 1 if on this host.
+ * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
+ * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
+void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
 
 /* Change a channel's role at runtime (rematches peers, re-announces). A
