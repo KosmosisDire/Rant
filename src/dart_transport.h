@@ -36,9 +36,9 @@ extern "C" {
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
 #endif
 
-/* Max pub+sub topic count accepted in a peer's interest list; sizes the meta
- * channel + alias buffers per peer. Auto-raised to 2*n_channels; raise (a compile
- * bound) only to accept a peer with more topics. */
+/* Max pub+sub topic count accepted in a peer's interest list; sizes the per-peer
+ * alias table. Auto-raised to 2*n_channels; raise (a compile bound) only to accept
+ * a peer with more topics. */
 #ifndef DART_META_MAX_IDS
 #define DART_META_MAX_IDS 256u
 #endif
@@ -139,15 +139,28 @@ void      dart_destroy(dart_state *st);
 uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_channel_identity(const dart_channel_def *def);   /* = dart_topic_id(def->name) */
 
-/* A new peer matches only the meta channel; data channels match as its interest
- * list arrives and rematch on change. peer_is_local: 1 if on this host.
+/* A new peer matches nothing until dart_apply_peer_interest feeds its interest
+ * list (carried in its discovery announce). peer_is_local: 1 if on this host.
  * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
  * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
 void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
+/* Update a peer's advertised UDP fragment size (its announce blob may arrive after
+ * first contact). Clamped to [MIN, MAX]; no-op for an unknown peer. */
+void      dart_peer_set_frag(dart_state *st, uint32_t peer_id, uint16_t peer_frag);
 
-/* Change a channel's role at runtime (rematches peers, re-announces). A
- * (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown channel. */
+/* Interest exchange (the node carries these in discovery announces; sans-IO callers
+ * disseminate them however they like). dart_build_interest serializes OUR pub/sub
+ * set into out ([u16 npub][u16 nsub] then [u16 alias][u8 namelen][name] entries),
+ * returning bytes written or 0 if cap is too small; size out via dart_interest_max.
+ * dart_apply_peer_interest applies a peer's serialized set, (re)matching channels;
+ * it is idempotent. Re-build + re-disseminate after dart_set_role. */
+size_t    dart_interest_max(uint16_t n_channels);
+size_t    dart_build_interest(dart_state *st, void *out, size_t cap);
+void      dart_apply_peer_interest(dart_state *st, uint32_t peer_id, const void *blob, size_t len);
+
+/* Change a channel's role at runtime (rematches peers locally; caller re-advertises
+ * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_set_role(dart_state *st, uint16_t channel, uint8_t role);
 
 /* Publish a message to all peers. Returns 0 ok, <0 on error. */

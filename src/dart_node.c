@@ -33,24 +33,47 @@ struct dart_node {
     /* one app callback for everything but message delivery; node fills PEER_UP/DOWN */
     dart_event_fn  on_event;
     void          *user_data;
-    /* opaque payload appended to every discovery announce; must outlive the node.
-       Currently advertises this node's UDP fragment size (see dart__meta_*). */
-    uint8_t        disc_meta[8];
-    uint8_t        disc_meta_len;
+    /* opaque blob carried in every discovery announce; must outlive the node. Holds
+       this node's UDP fragment size + pub/sub interest list (see dart__meta_*). */
+    uint8_t       *disc_meta;     /* arena, disc_meta_cap bytes */
+    uint16_t       disc_meta_cap;
+    uint16_t       disc_meta_len;
+    uint16_t       frag_size;     /* our clamped UDP fragment size, baked into the blob */
 };
 
-/* Discovery-announce metadata. A tiny versioned blob; today it carries only this
- * node's fragment size, but it is laid out to grow (e.g. a future SHM segment id).
- * Layout: ['D','N', ver=1, frag_lo, frag_hi]. */
-static uint8_t dart__meta_encode(uint8_t out[8], uint16_t frag){
-    out[0]='D'; out[1]='N'; out[2]=1;
-    out[3]=(uint8_t)(frag & 0xFF); out[4]=(uint8_t)(frag >> 8);
-    return 5;
-}
-/* Read a peer's advertised fragment size; 0 if absent/unrecognized (caller defaults). */
-static uint16_t dart__meta_frag(const uint8_t *meta, uint8_t mlen){
-    if (!meta || mlen < 5 || meta[0]!='D' || meta[1]!='N' || meta[2]!=1) return 0;
+/* Discovery-announce metadata: a versioned blob carrying this node's fragment size
+ * then its interest list (dart_build_interest output). Layout:
+ * ['D','N', ver=2, frag_lo, frag_hi, <interest blob...>]. Laid out to grow (e.g. a
+ * future SHM segment id between the prefix and the interest). */
+#define DART__META_PREFIX 5u
+
+static uint16_t dart__meta_frag(const uint8_t *meta, uint16_t mlen){
+    if (!meta || mlen < DART__META_PREFIX || meta[0]!='D' || meta[1]!='N' || meta[2]!=2) return 0;
     return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
+}
+/* Locate the interest sub-blob within a peer's meta; NULL/0 if absent. */
+static const uint8_t *dart__meta_interest(const uint8_t *meta, uint16_t mlen, size_t *out_len){
+    if (!meta || mlen < DART__META_PREFIX || meta[0]!='D' || meta[1]!='N' || meta[2]!=2){
+        *out_len = 0; return NULL;
+    }
+    *out_len = (size_t)(mlen - DART__META_PREFIX);
+    return meta + DART__META_PREFIX;
+}
+/* (Re)build our blob: frag prefix + current interest list. Returns its length. */
+static uint16_t dart__meta_build(dart_node *n){
+    uint8_t *o = n->disc_meta; size_t il;
+    o[0]='D'; o[1]='N'; o[2]=2;
+    o[3]=(uint8_t)(n->frag_size & 0xFF); o[4]=(uint8_t)(n->frag_size >> 8);
+    il = dart_build_interest(n->tr, o + DART__META_PREFIX, n->disc_meta_cap - DART__META_PREFIX);
+    return (uint16_t)(DART__META_PREFIX + il);
+}
+
+/* announce blob capacity: frag prefix + the largest interest list our channels can
+ * produce, capped to fit one (IP-fragmentable) UDP datagram */
+static uint16_t dart__node_meta_cap(const dart_node_config *cfg){
+    size_t mc = DART__META_PREFIX + dart_interest_max(cfg->n_channels);
+    if (mc > 65000u) mc = 65000u;
+    return (uint16_t)mc;
 }
 
 /* split node config into discovery + transport sub-configs */
@@ -63,6 +86,7 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     dc->disc.announce_us = cfg->discovery.announce_interval_us; /* 0 uses default */
     dc->disc.timeout_us  = cfg->discovery.peer_timeout_us;
     dc->disc.max_peers   = mp;
+    dc->disc.meta_cap    = dart__node_meta_cap(cfg);
     dc->group            = cfg->net.discovery_group;
     dc->disc_port        = cfg->net.discovery_port;
     dc->ttl              = cfg->net.multicast_ttl;
@@ -87,12 +111,16 @@ static int dart__node_is_local_ip(const uint8_t ip[4]){
 }
 
 static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
-                        const uint8_t *meta, uint8_t mlen){
+                        const uint8_t *meta, uint16_t mlen){
     dart_node *n = (dart_node*)u; uint16_t i; int slot = -1;
+    uint16_t frag = dart__meta_frag(meta, mlen);
+    size_t ilen = 0; const uint8_t *interest = dart__meta_interest(meta, mlen, &ilen);
     for (i=0;i<n->max_peers;i++){
-        if (n->peers[i].used && n->peers[i].id==id){      /* address update */
+        if (n->peers[i].used && n->peers[i].id==id){      /* known peer: addr/interest update */
             memcpy(n->peers[i].ip, addr->ip, 16);
             n->peers[i].ip_len = addr->ip_len; n->peers[i].port = addr->port;
+            dart_peer_set_frag(n->tr, id, frag);
+            if (interest) dart_apply_peer_interest(n->tr, id, interest, ilen);
             return;
         }
         if (!n->peers[i].used && slot<0) slot=(int)i;
@@ -101,9 +129,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].used=1; n->peers[slot].id=id;
     memcpy(n->peers[slot].ip, addr->ip, 16);
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
-    /* interest rides the meta channel; the announce meta carries the peer's frag size */
-    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip),
-                  dart__meta_frag(meta, mlen));
+    /* the announce blob carries the peer's frag size + pub/sub interest list */
+    dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip), frag);
+    if (interest) dart_apply_peer_interest(n->tr, id, interest, ilen);
     if (n->on_event){
         dart_event ev; memset(&ev, 0, sizeof ev);
         ev.kind=DART_PEER_UP; ev.peer=id; ev.detail="peer discovered";
@@ -164,20 +192,21 @@ static int dart__node_tx(dart_node *n, uint32_t to, const uint8_t *buf, size_t l
 
 size_t dart_node_required_memory(const dart_node_config *cfg){
     dart_discovery_rt_config dc; dart_config tc; uint16_t mp;
-    size_t node_sz, tbl_sz, disc_sz, tr_sz;
+    size_t node_sz, tbl_sz, meta_sz, disc_sz, tr_sz;
     if (!cfg || cfg->n_channels==0) return 0;
     dart__node_cfgs(cfg,&dc,&tc,&mp);
     node_sz = (sizeof(struct dart_node)+15u)&~(size_t)15u;
     tbl_sz  = ((size_t)mp*sizeof(dart__nodepeer)+15u)&~(size_t)15u;
+    meta_sz = ((size_t)dart__node_meta_cap(cfg)+15u)&~(size_t)15u;
     disc_sz = (dart_discovery_rt_required_memory(&dc)+15u)&~(size_t)15u;
     tr_sz   = (dart_required_memory(&tc)+15u)&~(size_t)15u;
-    return 32u + node_sz + tbl_sz + disc_sz + tr_sz;
+    return 32u + node_sz + tbl_sz + meta_sz + disc_sz + tr_sz;
 }
 
 dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     dart_discovery_rt_config dc; dart_config tc; uint16_t mp;
-    uint8_t *base, *p; size_t node_sz, tbl_sz, disc_sz, tr_sz;
-    dart_node *n; dart_sock fd; uint16_t lp;
+    uint8_t *base, *p; size_t node_sz, tbl_sz, meta_sz, disc_sz, tr_sz;
+    dart_node *n; dart_sock fd; uint16_t lp, f;
     if (!mem || !cfg || cfg->n_channels==0) return NULL;
     if (cap < dart_node_required_memory(cfg)) return NULL;
     dart__node_cfgs(cfg,&dc,&tc,&mp);
@@ -187,6 +216,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     base = (uint8_t*)(((uintptr_t)mem+15u)&~(uintptr_t)15u);
     node_sz = (sizeof(struct dart_node)+15u)&~(size_t)15u;
     tbl_sz  = ((size_t)mp*sizeof(dart__nodepeer)+15u)&~(size_t)15u;
+    meta_sz = ((size_t)dart__node_meta_cap(cfg)+15u)&~(size_t)15u;
     disc_sz = (dart_discovery_rt_required_memory(&dc)+15u)&~(size_t)15u;
     tr_sz   = (dart_required_memory(&tc)+15u)&~(size_t)15u;
 
@@ -196,9 +226,16 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->on_event = cfg->on_event; n->user_data = cfg->user_data;
     n->mc_port = cfg->net.multicast_port ? cfg->net.multicast_port
                : (uint16_t)((cfg->net.discovery_port ? cfg->net.discovery_port : 7400) + 1);
+    /* our fragment size, clamped exactly as dart_init clamps it, baked into the blob */
+    f = cfg->net.fragment_size ? cfg->net.fragment_size : DART_FRAG_PAYLOAD;
+    if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
+    if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
+    n->frag_size = f;
     p = base + node_sz;
     n->peers=(dart__nodepeer*)p; memset(n->peers,0,(size_t)mp*sizeof(dart__nodepeer));
     p += tbl_sz;
+    n->disc_meta = p; n->disc_meta_cap = dart__node_meta_cap(cfg);
+    p += meta_sz;
 
     n->tr = dart_init(p, tr_sz, &tc);
     if (!n->tr){ dart_plat_cleanup(); return NULL; }
@@ -274,13 +311,10 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     dc.disc.on_peer_up   = dart__node_up;
     dc.disc.on_peer_down = dart__node_down;
     dc.disc.user         = n;
-    /* advertise our fragment size (clamped exactly as dart_init clamps it) so peers
-       reassemble our messages at the right size. The buffer lives in the node. */
-    { uint16_t f = cfg->net.fragment_size ? cfg->net.fragment_size : DART_FRAG_PAYLOAD;
-      if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
-      if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
-      n->disc_meta_len = dart__meta_encode(n->disc_meta, f);
-      dc.disc.meta = n->disc_meta; dc.disc.meta_len = n->disc_meta_len; }
+    /* advertise our frag size + interest list so peers reassemble our messages and
+       match topics straight from discovery. The buffer lives in the node. */
+    n->disc_meta_len = dart__meta_build(n);
+    dc.disc.meta = n->disc_meta; dc.disc.meta_len = n->disc_meta_len;
     n->disc = dart_discovery_rt_open(p, disc_sz, &dc);
     if (!n->disc){
         if (n->mcfd!=DART_SOCK_BAD){ dart_plat_close(n->mcfd); n->mcfd=DART_SOCK_BAD; }
@@ -369,7 +403,12 @@ int dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len)
 }
 
 int dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role){
-    return dart_set_role(n->tr, channel, role);
+    int r = dart_set_role(n->tr, channel, role);
+    if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
+        n->disc_meta_len = dart__meta_build(n);
+        dart_discovery_rt_set_meta(n->disc, n->disc_meta, n->disc_meta_len);
+    }
+    return r;
 }
 
 void dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *waited_sends){

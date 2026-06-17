@@ -12,11 +12,14 @@ extern "C" {
 #endif
 
 #ifndef DART_DISCOVERY_PROTO_VERSION
-#define DART_DISCOVERY_PROTO_VERSION 2     /* v2: announces carry opaque meta */
+#define DART_DISCOVERY_PROTO_VERSION 3     /* v3: versioned meta blob, u16 meta_len */
 #endif
 
+#define DART_DISCOVERY_META_MAX 64   /* default per-peer meta capacity (cfg.meta_cap overrides) */
+/* fixed header through self_ip, then [u32 meta_version][u16 meta_len][meta...] */
+#define DART_DISCOVERY_META_OFF 49   /* DART_DISCOVERY_HDR_LEN(43) + 4 (version) + 2 (len) */
+/* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_cap */
 #define DART_DISCOVERY_WIRE_MAX 128
-#define DART_DISCOVERY_META_MAX 64   /* max app payload bytes per announce */
 
 typedef struct {
     uint8_t  ip[16];   /* network-order bytes */
@@ -28,7 +31,7 @@ typedef struct {
  * peer_down: gone. peer_id is a local handle, stable only while the peer lives.
  * meta is the peer's opaque payload (NULL if none), valid only for the call. */
 typedef void (*dart_discovery_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr,
-                                   const uint8_t *meta, uint8_t meta_len);
+                                   const uint8_t *meta, uint16_t meta_len);
 typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id);
 
 typedef struct {
@@ -40,8 +43,10 @@ typedef struct {
     uint32_t announce_us;   /* re-announce interval */
     uint32_t timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const uint8_t *meta;    /* opaque payload appended to every announce; must stay valid */
-    uint8_t  meta_len;      /* <= DART_DISCOVERY_META_MAX */
+    const uint8_t *meta;    /* opaque versioned blob; the INITIAL value (dart_discovery_set_meta
+                               updates it at runtime). Must stay valid. <= meta_cap */
+    uint16_t meta_len;
+    uint16_t meta_cap;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     dart_discovery_peer_up_fn   on_peer_up;
     dart_discovery_peer_down_fn on_peer_down;
     void *user;
@@ -57,6 +62,16 @@ size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, vo
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(dart_discovery_state *st);
+/* Replace the opaque meta blob and bump its version, so peers re-fetch it. The
+ * blob rides the next few announces, then announces carry the version only; a peer
+ * that fell behind re-fetches via a targeted solicit. meta must stay valid. */
+void         dart_discovery_set_meta(dart_discovery_state *st, const uint8_t *meta, uint16_t meta_len);
+/* Drain one targeted (unicast) datagram and its destination: a solicit REPLY to a
+ * peer that solicited us (carries the blob), or a re-fetch REQ to a peer whose
+ * advertised version is ahead of what we hold. Returns bytes + fills *to, or 0 when
+ * none. Loop like dart_discovery_update; the runtime unicasts each to *to. */
+size_t       dart_discovery_poll_targeted(dart_discovery_state *st, void *out, size_t cap,
+                             dart_discovery_addr *to);
 /* Count of live peers currently known. */
 uint16_t     dart_discovery_peer_count(const dart_discovery_state *st);
 /* Address of the peer in table slot (0..max_peers-1); 1 + fills *out if it holds a

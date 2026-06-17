@@ -43,6 +43,10 @@ void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
 void       dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
                           const void *dg, size_t len);
 
+/* Replace the opaque meta blob carried in announces and bump its version, so peers
+ * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
+void       dart_discovery_rt_set_meta(dart_discovery_rt *rt, const uint8_t *meta, uint16_t meta_len);
+
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 

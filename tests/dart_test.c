@@ -855,14 +855,17 @@ static int selftest_main(void){
       /* 5b. FLAP: the reader rebuilds its transport state for the writer (a
             one-sided discovery flap: only one side saw the peer go down). The
             writer's lanes still describe the dead incarnation; the reader
-            epoch in the first ACKNACK must make every writer lane re-join,
-            re-deliver interest over the meta channel, and replay history. */
+            epoch in the first ACKNACK must make every writer lane re-join and
+            replay history. Re-applying the writer's interest stands in for the
+            announce that re-discovery would deliver. */
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN];
-        uint32_t wid = 0; uint16_t k;
+        uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
         for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
         dart_peer_remove(r->tr, wid);
         dart_peer_add(r->tr, wid, 1, DART_FRAG_PAYLOAD);
+        il = dart_build_interest(w->tr, ib, sizeof ib);
+        dart_apply_peer_interest(r->tr, wid, ib, il);
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
                  "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",
@@ -875,8 +878,8 @@ static int selftest_main(void){
       dart_node_close(w, 1);
     }
 
-    /* 6. SCALE: 40 channels, past the old 31-id announce cap; interest now
-          rides the meta channel as one reliable sample */
+    /* 6. SCALE: 40 channels; the full interest list rides one discovery announce
+          blob (IP-fragmented if large), matched at peer_up */
     { static uint8_t mem_a[1<<20], mem_b[1<<20];
       static dart_channel_def cha[ST_NCH], chb[ST_NCH];
       static char snames[ST_NCH][12];     /* "scale/0".."scale/39" */
