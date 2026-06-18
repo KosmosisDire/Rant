@@ -828,6 +828,173 @@ static void disc_core_checks(void){
     }
 }
 
+#ifdef DART_SHM
+/* ===================== SHM self-tests (only when built -DDART_SHM) ========= */
+static void *shmt_alloc(void *u, void *p, size_t n){ (void)u; if(!n){ free(p); return NULL; } return realloc(p,n); }
+
+/* (1) the dart_shm mapping module: create/attach by name, write/stamp/read, the
+   generation recycle guard, and the seqlock verify tail. */
+static void shm_module_checks(void){
+    dart_shm_config cfg; void *pw, *pr; dart_shm_pool *w, *r;
+    uint32_t cap=0, rlen=0; void *cp; const void *rp;
+    dart_shm_desc d, d2; uint8_t wire[DART_SHM_DESC_WIRE], a[16], b[16];
+    const char msg[] = "hello shared memory";
+    dart_plat_startup();
+    memset(&cfg,0,sizeof cfg);
+#ifdef _WIN32
+    strcpy(cfg.name,"dart-shm-stmod");
+#else
+    strcpy(cfg.name,"/dart-shm-stmod");
+#endif
+    cfg.segment_id=0x1234; cfg.chunk_bytes=4096; cfg.n_chunks=4;
+    pw=malloc(dart_shm_state_bytes()); pr=malloc(dart_shm_state_bytes());
+    w=dart_shm_create(pw,&cfg); r=dart_shm_attach(pr,&cfg);
+    ST_CHECK(w && r, "shm-mod: create + attach by name");
+    if (w && r){
+        dart_plat_host_uuid(a); dart_plat_host_uuid(b);
+        ST_CHECK(dart_shm_host_match(a,b)==1, "shm-mod: host_uuid stable + matches");
+        cp=dart_shm_chunk(w,0,&cap); memcpy(cp,msg,sizeof msg);
+        dart_shm_stamp(w,0,(uint32_t)sizeof msg,&d);
+        ST_CHECK(cap==4096 && d.generation==1, "shm-mod: loan + stamp (gen=%llu)", (unsigned long long)d.generation);
+        dart_shm_desc_encode(&d,wire);
+        ST_CHECK(dart_shm_desc_decode(&d2,wire,sizeof wire) &&
+                 d2.chunk==d.chunk && d2.length==d.length && d2.generation==d.generation,
+                 "shm-mod: descriptor wire round-trip");
+        rp=dart_shm_read(r,&d2,&rlen);
+        ST_CHECK(rp && rlen==sizeof msg && memcmp(rp,msg,sizeof msg)==0, "shm-mod: read sees writer bytes");
+        ST_CHECK(dart_shm_verify(r,&d2)==1, "shm-mod: verify current gen ok");
+        { void *cp2=dart_shm_chunk(w,0,NULL); dart_shm_desc dn; uint32_t l;
+          memcpy(cp2,"new",4); dart_shm_stamp(w,0,4,&dn);
+          ST_CHECK(dart_shm_read(r,&d2,&l)==NULL, "shm-mod: recycled chunk -> old descriptor refused");
+          ST_CHECK(dart_shm_verify(r,&d2)==0, "shm-mod: verify recycled gen fails (torn guard)"); }
+        dart_shm_detach(r); dart_shm_detach(w);
+    }
+    free(pw); free(pr);
+    dart_plat_cleanup();
+}
+
+/* (2) transport-core loss/repair: a mock on_shm whose success is controllable and a
+   pump that can drop SHM-DATA. Proves a failed resolve does NOT ack (so it repairs),
+   a dropped descriptor re-sends, and a persistently unresolvable descriptor is
+   skipped after the retry cap (MSG_LOST) without wedging the reader. */
+static int shml_ok, shml_recv, shml_lost, shml_drop;
+static uint64_t shml_now;
+static dart_state *shml_W, *shml_R;
+static int shml_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
+    (void)u;(void)ch;(void)from;(void)desc; if (shml_ok){ shml_recv++; return 1; } return 0;
+}
+static void shml_on_event(void *u, const dart_event *ev){ (void)u; if (ev->kind==DART_MSG_LOST) shml_lost++; }
+static void shml_pump(int n){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol; int i;
+    for (i=0;i<n;i++){
+        while (dart_poll_send(shml_W,&to,buf,sizeof buf,&ol,shml_now)){
+            if (shml_drop>0 && (buf[0]&0x20u)){ shml_drop--; continue; }   /* drop SHM-DATA */
+            dart_on_datagram(shml_R, 1u, buf, ol, shml_now);
+        }
+        while (dart_poll_send(shml_R,&to,buf,sizeof buf,&ol,shml_now))
+            dart_on_datagram(shml_W, 2u, buf, ol, shml_now);
+        shml_now += 30000;   /* 30 ms: past repair_delay (20ms), lets heartbeats fire */
+    }
+}
+static void shml_send(void){
+    static unsigned char chunk[2048]; unsigned char desc[DART_SHM_DESC_WIRE];
+    memset(desc,0,sizeof desc); dart_send_shm(shml_W, 0, chunk, 1000, desc, shml_now);
+}
+static void shm_loss_checks(void){
+    dart_channel_def cw, cr; dart_config wc, rc; void *mw, *mr; size_t nw, nr; uint8_t blob[256]; size_t bl;
+    dart_qos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
+    q.heartbeat_us=50000; q.repair_delay_us=20000;
+    memset(&cw,0,sizeof cw); cw.name="shmloss"; cw.qos=q; cw.role=DART_PUB_ONLY;
+    memset(&cr,0,sizeof cr); cr.name="shmloss"; cr.qos=q; cr.role=DART_SUB_ONLY;
+    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
+    rc.on_shm=shml_on_shm; rc.on_event=shml_on_event;
+    nw=dart_required_memory(&wc); mw=malloc(nw); shml_W=dart_init(mw,nw,&wc);
+    nr=dart_required_memory(&rc); mr=malloc(nr); shml_R=dart_init(mr,nr,&rc);
+    shml_now=1000000;
+    dart_peer_add(shml_W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(shml_R,1u,1,DART_FRAG_PAYLOAD);
+    bl=dart_build_interest(shml_W,blob,sizeof blob); dart_apply_peer_interest(shml_R,1u,blob,bl);
+    bl=dart_build_interest(shml_R,blob,sizeof blob); dart_apply_peer_interest(shml_W,2u,blob,bl);
+    dart_peer_set_shm(shml_W,2u,1);
+    ST_CHECK(dart_writer_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
+    shml_ok=1; shml_recv=0; shml_lost=0; shml_drop=0; shml_send(); shml_pump(5);
+    ST_CHECK(shml_recv==1 && shml_lost==0, "shm-loss: [a] normal delivered");
+    shml_recv=0; shml_lost=0; shml_drop=1; shml_send(); shml_pump(10);
+    ST_CHECK(shml_recv==1 && shml_lost==0, "shm-loss: [b] dropped descriptor repaired");
+    shml_recv=0; shml_lost=0; shml_drop=0; shml_ok=0; shml_send(); shml_pump(4);
+    ST_CHECK(shml_recv==0, "shm-loss: [c] unresolvable not delivered");
+    shml_ok=1; shml_pump(6);
+    ST_CHECK(shml_recv==1 && shml_lost==0, "shm-loss: [c] delivered after transient clears");
+    shml_recv=0; shml_lost=0; shml_ok=0; shml_send(); shml_pump(20);
+    ST_CHECK(shml_recv==0 && shml_lost>=1, "shm-loss: [d] persistent -> skip + MSG_LOST");
+    shml_ok=1; shml_recv=0; shml_send(); shml_pump(6);
+    ST_CHECK(shml_recv==1, "shm-loss: [d] not wedged, next delivered");
+    dart_destroy(shml_W); dart_destroy(shml_R); free(mw); free(mr);
+}
+
+/* (3) full nodes on loopback: SHM across size classes (byte-exact + shm_tx/rx), and
+   the inline fallback for a non-SHM-capable subscriber. */
+static int shmn_recv; static size_t shmn_len; static unsigned long shmn_sum;
+static void shmn_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
+    const unsigned char *p=(const unsigned char*)data; size_t i; unsigned long s=0;
+    (void)u;(void)ch;(void)from; for(i=0;i<len;i++) s+=p[i]; shmn_recv++; shmn_len=len; shmn_sum=s;
+}
+static dart_node *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **mem_out){
+    static dart_channel_def ch[2]; static int slot;
+    dart_channel_def *d=&ch[slot++ & 1]; dart_discovery_addr seed; dart_node_config cfg;
+    size_t need; void *mem; dart_qos q; memset(&q,0,sizeof q);
+    q.reliability=DART_RELIABLE; q.keep_last=4; q.catch_up=1;
+    if (!shm_capable) q.max_message_bytes=128u*1024u;
+    memset(d,0,sizeof *d); d->name="shmnode"; d->qos=q; d->role=is_pub?DART_PUB_ONLY:DART_SUB_ONLY;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&cfg,0,sizeof cfg); cfg.domain=domain; cfg.channels=d; cfg.n_channels=1;
+    if (shm_capable) cfg.allocator=shmt_alloc;
+    if (!is_pub) cfg.on_message=shmn_on_message;
+    cfg.discovery.max_peers=4;
+    cfg.net.multicast_interface="127.0.0.1"; cfg.net.seed_peers=&seed; cfg.net.n_seed_peers=1;
+    need=dart_node_required_memory(&cfg); mem=malloc(need); *mem_out=mem;
+    return dart_node_open(mem,need,&cfg);
+}
+static void shm_node_checks(void){
+    static unsigned char buf[6*1024*1024];
+    dart_node *P,*S; void *mp,*ms; int i; uint32_t tx=0, rx=0; size_t sizes[3];
+    P=shmn_open(1,1,77,&mp); S=shmn_open(0,1,77,&ms);
+    ST_CHECK(P&&S, "shm-node: SHM-capable pub + sub open");
+    if (P&&S){
+        for (i=0;i<800 && dart_node_writer_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+        ST_CHECK(dart_node_writer_match_count(P,0)>0, "shm-node: matched");
+        sizes[0]=200; sizes[1]=300*1024; sizes[2]=4*1024*1024;
+        for (i=0;i<3;i++){
+            unsigned long want=0; size_t j; int before=shmn_recv, t;
+            for (j=0;j<sizes[i];j++){ buf[j]=(unsigned char)((j*31u+(unsigned)i+1)&0xFF); want+=buf[j]; }
+            dart_node_send(P,0,buf,sizes[i]);
+            for (t=0;t<500 && shmn_recv==before;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+            ST_CHECK(shmn_recv==before+1 && shmn_len==sizes[i] && shmn_sum==want,
+                     "shm-node: byte-exact %lu bytes", (unsigned long)sizes[i]);
+        }
+        dart_node_shm_stats(P,&tx,NULL); dart_node_shm_stats(S,NULL,&rx);
+        ST_CHECK(tx==3 && rx==3, "shm-node: all 3 over SHM (tx=%u rx=%u)", tx, rx);
+        dart_node_close(P,1); dart_node_close(S,1);
+    }
+    free(mp); free(ms);
+    /* inline fallback: a non-SHM-capable subscriber forces inline UDP */
+    shmn_recv=0;
+    P=shmn_open(1,1,78,&mp); S=shmn_open(0,0,78,&ms);
+    if (P&&S){
+        unsigned long want=0; size_t j; int before, t;
+        for (i=0;i<800 && dart_node_writer_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+        for (j=0;j<50*1024;j++){ buf[j]=(unsigned char)((j*31u+9)&0xFF); want+=buf[j]; }
+        before=shmn_recv; dart_node_send(P,0,buf,50*1024);
+        for (t=0;t<500 && shmn_recv==before;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+        ST_CHECK(shmn_recv==before+1 && shmn_sum==want, "shm-node: non-SHM sub -> inline byte-exact");
+        tx=0; dart_node_shm_stats(P,&tx,NULL);
+        ST_CHECK(tx==0, "shm-node: no SHM used for the non-SHM reader (tx=%u)", tx);
+        dart_node_close(P,1); dart_node_close(S,1);
+    }
+    free(mp); free(ms);
+}
+#endif /* DART_SHM */
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1111,6 +1278,11 @@ static int selftest_main(void){
       }
     }
     disc_core_checks();   /* 8. discovery-core peer lifecycle (sans-IO) */
+#ifdef DART_SHM
+    shm_module_checks();  /* 9.  SHM mapping module + seqlock guards          */
+    shm_loss_checks();    /* 10. SHM loss/repair/skip (transport core)        */
+    shm_node_checks();    /* 11. SHM full-node: size classes + inline fallback */
+#endif
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;

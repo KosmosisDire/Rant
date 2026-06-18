@@ -23,6 +23,12 @@
 extern "C" {
 #endif
 
+/* SHM (the zero-fragment same-host path) is ON by default; DART_NO_SHM strips it.
+ * Mirrors dart_transport.h so every TU agrees whether or not it includes that header. */
+#if !defined(DART_SHM) && !defined(DART_NO_SHM)
+#define DART_SHM
+#endif
+
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
 typedef intptr_t dart_sock;
 #define DART_SOCK_BAD ((dart_sock)-1)
@@ -88,21 +94,26 @@ void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
  * pinning and the same-host check. */
 uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
 
-/* --- SHM platform surface (DESIGN ONLY; defined when dart_shm lands) ---------
- * The zero-copy same-host path (src/dart_shm.h) needs three more primitives,
- * named here so the platform contract is whole. dart_plat.c does NOT define them
- * yet; the SHM implementation adds them behind the same Windows/POSIX split.
- *
- *   shared-memory mapping (shm_open+ftruncate+mmap / CreateFileMapping+MapView):
- *     void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
- *     void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
- *     void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
- *   cross-process atomics on the chunk refcount (C11 stdatomic / Interlocked*):
- *     int32_t dart_plat_atomic_add (volatile int32_t *p, int32_t delta);
- *     int32_t dart_plat_atomic_load(volatile int32_t *p);
- *   a stable per-kernel id for the same-host check (boot id / machine GUID):
- *     void dart_plat_host_uuid(uint8_t out[16]);
- */
+/* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
+ * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
+ * lacking shm support builds and links without them. (POSIX: shm_open may want
+ * -lrt on older glibc.) */
+#ifdef DART_SHM
+/* create maps a FRESH named segment of `bytes` RW (zero-filled); attach maps an
+ * EXISTING one (bytes must match the creator). *handle receives an OS handle that
+ * detach needs. Return the mapped base, or NULL on failure. Names: POSIX "/name"
+ * form, Windows a plain object name; dart_shm derives one from the node uuid. */
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+/* unmap; the creator passes unlink_it=1 to also remove the OS object. */
+void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+/* stable per-host id (Linux machine-id, else a hostname hash) for the same-host
+ * pre-check; a successful attach is the real gate. */
+void  dart_plat_host_uuid(uint8_t out[16]);
+/* cross-process 64-bit atomic for the chunk generation stamp (acquire/release). */
+uint64_t dart_plat_atomic_load64 (volatile uint64_t *p);
+void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
+#endif /* DART_SHM */
 
 #ifdef __cplusplus
 }

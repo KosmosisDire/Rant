@@ -143,6 +143,12 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 extern "C" {
 #endif
 
+/* SHM (the zero-fragment same-host path) is ON by default; DART_NO_SHM strips it.
+ * Mirrors dart_transport.h so every TU agrees whether or not it includes that header. */
+#if !defined(DART_SHM) && !defined(DART_NO_SHM)
+#define DART_SHM
+#endif
+
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
 typedef intptr_t dart_sock;
 #define DART_SOCK_BAD ((dart_sock)-1)
@@ -208,21 +214,26 @@ void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
  * pinning and the same-host check. */
 uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
 
-/* --- SHM platform surface (DESIGN ONLY; defined when dart_shm lands) ---------
- * The zero-copy same-host path (src/dart_shm.h) needs three more primitives,
- * named here so the platform contract is whole. dart_plat.c does NOT define them
- * yet; the SHM implementation adds them behind the same Windows/POSIX split.
- *
- *   shared-memory mapping (shm_open+ftruncate+mmap / CreateFileMapping+MapView):
- *     void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
- *     void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
- *     void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
- *   cross-process atomics on the chunk refcount (C11 stdatomic / Interlocked*):
- *     int32_t dart_plat_atomic_add (volatile int32_t *p, int32_t delta);
- *     int32_t dart_plat_atomic_load(volatile int32_t *p);
- *   a stable per-kernel id for the same-host check (boot id / machine GUID):
- *     void dart_plat_host_uuid(uint8_t out[16]);
- */
+/* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
+ * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
+ * lacking shm support builds and links without them. (POSIX: shm_open may want
+ * -lrt on older glibc.) */
+#ifdef DART_SHM
+/* create maps a FRESH named segment of `bytes` RW (zero-filled); attach maps an
+ * EXISTING one (bytes must match the creator). *handle receives an OS handle that
+ * detach needs. Return the mapped base, or NULL on failure. Names: POSIX "/name"
+ * form, Windows a plain object name; dart_shm derives one from the node uuid. */
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+/* unmap; the creator passes unlink_it=1 to also remove the OS object. */
+void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+/* stable per-host id (Linux machine-id, else a hostname hash) for the same-host
+ * pre-check; a successful attach is the real gate. */
+void  dart_plat_host_uuid(uint8_t out[16]);
+/* cross-process 64-bit atomic for the chunk generation stamp (acquire/release). */
+uint64_t dart_plat_atomic_load64 (volatile uint64_t *p);
+void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
+#endif /* DART_SHM */
 
 #ifdef __cplusplus
 }
@@ -970,6 +981,117 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
     dart_plat_close(s);
     return ip;
 }
+
+/* ------------------------------------------------------------- shared memory */
+#ifdef DART_SHM
+#ifndef _WIN32
+  #include <sys/mman.h>            /* shm_open/mmap; fcntl/unistd/stdlib already in */
+#endif
+
+/* 128-bit non-cryptographic id from a byte string: two FNV-1a passes with distinct
+ * seeds. Stable per input, enough to pre-filter same-host (attach is the real gate). */
+static void dart__hash16(const void *data, size_t len, uint8_t out[16]){
+    const uint8_t *p = (const uint8_t*)data; size_t i;
+    uint64_t a = 14695981039346656037ull, b = 1099511628211ull;
+    for (i = 0; i < len; i++){
+        a = (a ^ p[i]) * 1099511628211ull;
+        b = (b ^ (uint8_t)(p[i] + 0x9Eu)) * 1099511628211ull;
+    }
+    for (i = 0; i < 8; i++){ out[i] = (uint8_t)(a >> (8*i)); out[8+i] = (uint8_t)(b >> (8*i)); }
+}
+
+void dart_plat_host_uuid(uint8_t out[16]){
+#if defined(__linux__)
+    FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars = a 128-bit id */
+    if (f){
+        char hx[32]; size_t n = fread(hx, 1, sizeof hx, f); int i, ok = (n == 32);
+        fclose(f);
+        for (i = 0; ok && i < 16; i++){
+            int hi = hx[2*i], lo = hx[2*i+1];
+            hi = (hi>='0'&&hi<='9')?hi-'0':(hi>='a'&&hi<='f')?hi-'a'+10:(hi>='A'&&hi<='F')?hi-'A'+10:-1;
+            lo = (lo>='0'&&lo<='9')?lo-'0':(lo>='a'&&lo<='f')?lo-'a'+10:(lo>='A'&&lo<='F')?lo-'A'+10:-1;
+            if (hi < 0 || lo < 0) ok = 0; else out[i] = (uint8_t)((hi<<4)|lo);
+        }
+        if (ok) return;
+    }
+#endif
+    {   char host[256]; size_t n = dart_plat_hostname(host, sizeof host);
+        if (n == 0){ host[0] = '?'; n = 1; }
+        dart__hash16(host, n, out);
+    }
+}
+
+#ifdef _WIN32
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+    HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                  (DWORD)((uint64_t)bytes >> 32),
+                                  (DWORD)(bytes & 0xFFFFFFFFu), name);
+    void *base;
+    if (!h) return NULL;
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    if (!base){ CloseHandle(h); return NULL; }
+    *handle = h;
+    return base;
+}
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+    HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
+    void *base;
+    if (!h) return NULL;
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    if (!base){ CloseHandle(h); return NULL; }
+    *handle = h;
+    return base;
+}
+void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+    (void)bytes; (void)unlink_it;   /* the object dies when the last handle closes */
+    if (base) UnmapViewOfFile(base);
+    if (handle) CloseHandle((HANDLE)handle);
+}
+uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+    return (uint64_t)InterlockedCompareExchange64((volatile LONGLONG*)p, 0, 0);
+}
+void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+    InterlockedExchange64((volatile LONGLONG*)p, (LONGLONG)v);
+}
+#else /* POSIX */
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+    int fd = shm_open(name, O_CREAT|O_RDWR, 0600);
+    void *base; char *nm;
+    if (fd < 0) return NULL;
+    if (ftruncate(fd, (off_t)bytes) != 0){ close(fd); shm_unlink(name); return NULL; }
+    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);                                  /* the mapping outlives the fd */
+    if (base == MAP_FAILED){ shm_unlink(name); return NULL; }
+    nm = (char*)malloc(strlen(name) + 1);       /* carry the name for shm_unlink */
+    if (nm) strcpy(nm, name);
+    *handle = nm;
+    return base;
+}
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+    int fd = shm_open(name, O_RDWR, 0600);
+    void *base;
+    if (fd < 0) return NULL;
+    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) return NULL;
+    *handle = NULL;                             /* a reader never unlinks */
+    return base;
+}
+void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+    if (base && base != MAP_FAILED) munmap(base, bytes);
+    if (handle){
+        if (unlink_it) shm_unlink((const char*)handle);
+        free(handle);
+    }
+}
+uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+#endif /* _WIN32 */
+#endif /* DART_SHM */
 /* ===== dart_discovery_rt.c ===== */
 /* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
  * UUID generation. All OS access goes through dart_plat. */

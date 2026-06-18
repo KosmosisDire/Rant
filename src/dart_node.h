@@ -70,6 +70,11 @@ void     dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_
 int      dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms);
 /* Subscribers matched on this channel now; a one-shot publisher polls it before sending. */
 int      dart_node_writer_match_count(dart_node *n, uint16_t channel);
+#ifdef DART_SHM
+/* Messages published / delivered via the zero-fragment shared-memory path since open
+ * (observability; same-host readers only). Either out-pointer may be NULL. */
+void     dart_node_shm_stats(dart_node *n, uint32_t *sent, uint32_t *recv);
+#endif
 void     dart_node_close(dart_node *n, int send_bye);
 
 #ifdef __cplusplus

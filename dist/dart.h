@@ -160,6 +160,12 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 extern "C" {
 #endif
 
+/* SHM (the zero-fragment same-host path) is ON by default; DART_NO_SHM strips it.
+ * Mirrors dart_transport.h so every TU agrees whether or not it includes that header. */
+#if !defined(DART_SHM) && !defined(DART_NO_SHM)
+#define DART_SHM
+#endif
+
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
 typedef intptr_t dart_sock;
 #define DART_SOCK_BAD ((dart_sock)-1)
@@ -225,21 +231,26 @@ void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
  * pinning and the same-host check. */
 uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
 
-/* --- SHM platform surface (DESIGN ONLY; defined when dart_shm lands) ---------
- * The zero-copy same-host path (src/dart_shm.h) needs three more primitives,
- * named here so the platform contract is whole. dart_plat.c does NOT define them
- * yet; the SHM implementation adds them behind the same Windows/POSIX split.
- *
- *   shared-memory mapping (shm_open+ftruncate+mmap / CreateFileMapping+MapView):
- *     void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
- *     void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
- *     void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
- *   cross-process atomics on the chunk refcount (C11 stdatomic / Interlocked*):
- *     int32_t dart_plat_atomic_add (volatile int32_t *p, int32_t delta);
- *     int32_t dart_plat_atomic_load(volatile int32_t *p);
- *   a stable per-kernel id for the same-host check (boot id / machine GUID):
- *     void dart_plat_host_uuid(uint8_t out[16]);
- */
+/* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
+ * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
+ * lacking shm support builds and links without them. (POSIX: shm_open may want
+ * -lrt on older glibc.) */
+#ifdef DART_SHM
+/* create maps a FRESH named segment of `bytes` RW (zero-filled); attach maps an
+ * EXISTING one (bytes must match the creator). *handle receives an OS handle that
+ * detach needs. Return the mapped base, or NULL on failure. Names: POSIX "/name"
+ * form, Windows a plain object name; dart_shm derives one from the node uuid. */
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+/* unmap; the creator passes unlink_it=1 to also remove the OS object. */
+void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+/* stable per-host id (Linux machine-id, else a hostname hash) for the same-host
+ * pre-check; a successful attach is the real gate. */
+void  dart_plat_host_uuid(uint8_t out[16]);
+/* cross-process 64-bit atomic for the chunk generation stamp (acquire/release). */
+uint64_t dart_plat_atomic_load64 (volatile uint64_t *p);
+void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
+#endif /* DART_SHM */
 
 #ifdef __cplusplus
 }
@@ -321,6 +332,14 @@ uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 extern "C" {
 #endif
 
+/* The zero-fragment same-host shared-memory path is ON by default. Opt out with
+ * DART_NO_SHM for a slimmer build or a target without shm_open/mmap (on POSIX, link
+ * -lrt on older glibc). It is used only between same-host nodes that set an allocator;
+ * a node with no local SHM peer creates no segment and pays nothing at runtime. */
+#if !defined(DART_SHM) && !defined(DART_NO_SHM)
+#define DART_SHM
+#endif
+
 #ifndef DART_FRAG_PAYLOAD
 #define DART_FRAG_PAYLOAD 1024u          /* default bytes of message data per fragment */
 #endif
@@ -340,6 +359,10 @@ extern "C" {
 #define DART_FRAG_PAYLOAD_MIN DART_FRAG_PAYLOAD
 #endif
 #define DART_DGRAM_MAX (DART_FRAG_PAYLOAD_MAX + 40u)   /* + largest header */
+
+#ifdef DART_SHM
+#define DART_SHM_DESC_BYTES 24u   /* opaque SHM descriptor on the wire; == dart_shm.h DART_SHM_DESC_WIRE */
+#endif
 
 #ifndef DART_TOPIC_NAME_MAX
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
@@ -392,6 +415,17 @@ typedef struct {
 typedef void (*dart_message_fn)(void *user, uint16_t channel, uint32_t from_peer,
                              const void *data, size_t len);
 
+#ifdef DART_SHM
+/* SHM delivery: the transport reassembled nothing -- it hands the node the
+ * DART_SHM_DESC_BYTES descriptor from an SHM-DATA submessage and the node resolves it
+ * to bytes and calls the user's on_message. Returns 1 if delivered, 0 if it could not
+ * resolve the chunk (recycled / unattachable) -- then the reader leaves the gap so the
+ * reliability layer repairs or skips it. Internal (transport->node); the user's
+ * on_message is unchanged and never sees this. */
+typedef int (*dart_shm_msg_fn)(void *user, uint16_t channel, uint32_t from_peer,
+                             const uint8_t *desc);
+#endif
+
 /* Everything that isn't message delivery, as one notification (optional). The
  * meaningful dart_event fields depend on .kind. */
 typedef enum {
@@ -432,6 +466,9 @@ typedef struct {
     uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
                                            DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
     dart_message_fn         on_message;
+#ifdef DART_SHM
+    dart_shm_msg_fn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
+#endif
     dart_event_fn           on_event;   /* optional: loss/too-big/name-collision */
     dart_alloc_fn           allocator;  /* optional: set => dynamic message sizing */
     void                 *user;
@@ -486,6 +523,24 @@ int       dart_set_role(dart_state *st, uint16_t channel, uint8_t role);
 /* Publish a message to all peers. Returns 0 ok, <0 on error. */
 int       dart_send(dart_state *st, uint16_t channel, const void *data, size_t len,
                   uint64_t now_us);
+
+#ifdef DART_SHM
+/* Publish a message whose payload lives in an external shared-memory buffer: the
+ * transport stores the sample referencing chunk (NOT copied) plus the descriptor,
+ * fragments from chunk for non-SHM peers, and sends ONE SHM-DATA (the descriptor) to
+ * SHM-capable peers. desc is DART_SHM_DESC_BYTES. Same return as dart_send. The chunk
+ * must stay valid until the sample leaves history (acked / evicted). */
+int       dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t len,
+                      const uint8_t *desc, uint64_t now_us);
+/* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).
+ * Off by default; the node sets it on attach, clears it on dormant/remove. */
+void      dart_peer_set_shm(dart_state *st, uint32_t peer_id, int is_shm);
+/* 1 if every matched reader of channel is SHM-capable and it is non-multicast, so a
+ * publish may go via SHM (else inline). The node checks this per message. */
+int       dart_writer_shm_eligible(dart_state *st, uint16_t channel);
+/* The history slot the next publish to channel will occupy (binds chunk<->slot). */
+uint16_t  dart_channel_hist_head(dart_state *st, uint16_t channel);
+#endif
 
 /* The channel's qos as stored at init; NULL if unknown. */
 const dart_qos *dart_channel_qos(dart_state *st, uint16_t channel);
@@ -589,12 +644,234 @@ void     dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_
 int      dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms);
 /* Subscribers matched on this channel now; a one-shot publisher polls it before sending. */
 int      dart_node_writer_match_count(dart_node *n, uint16_t channel);
+#ifdef DART_SHM
+/* Messages published / delivered via the zero-fragment shared-memory path since open
+ * (observability; same-host readers only). Either out-pointer may be NULL. */
+void     dart_node_shm_stats(dart_node *n, uint32_t *sent, uint32_t *recv);
+#endif
 void     dart_node_close(dart_node *n, int send_bye);
 
 #ifdef __cplusplus
 }
 #endif
 #endif /* DART_NODE_H */
+/* ===== dart_shm.h ===== */
+/* dart_shm: zero-copy same-host payload path. OPT-IN -- nothing here compiles or
+ * links unless you define DART_SHM, so embedded / non-SHM targets carry zero cost
+ * and need no shared-memory platform support. Speaks only dart_plat_* (shm mapping,
+ * host uuid, an atomic for the generation stamp).
+ *
+ * Model (per-peer, inside the transport's reliable stream -- NOT a side channel).
+ * A published message occupies count seqnos on the writer's per-channel line, as
+ * today. The per-peer LANE picks the wire form:
+ *   - remote peer  -> count DATA fragments, read from the message buffer (as now)
+ *   - same-host peer-> ONE SHM-DATA submessage (a DATA flag) covering [base,count),
+ *                      carrying a 24-byte descriptor (segment+chunk+gen+len); the
+ *                      reader marks the whole range delivered and reads the chunk
+ *                      in place (zero copy), then ACKs the range like any reader.
+ * The shared seqno line is untouched, so a channel serves local and remote
+ * subscribers at once (and multicast: group-multicast to remote, unicast SHM-DATA
+ * to each local sub). Eligibility is automatic: a lane uses SHM iff that peer is
+ * same-host and attached.
+ *
+ * Lifecycle reuses reliability, so there is NO separate refcount/reclaim protocol:
+ *   - the chunk IS the writer's history slot's buffer (one chunk per keep_last slot)
+ *   - the reader delivers SYNCHRONOUSLY (on_message reads the chunk in place) and only
+ *     THEN arms its ACK, which leaves on a later poll_send -> an ACK provably means
+ *     "the user finished reading." The writer holds the chunk until that ACK.
+ *   - so the writer recycles a slot only when the reader ACKED (done) or discovery
+ *     declared it dormant/gone (a live reader mid-read is announcing, never dormant).
+ *     SHM eviction is gated on ACK-or-LIVENESS, NOT the short backpressure_wait_us
+ *     timer -- a slow-but-alive reader applies backpressure instead of having its
+ *     chunk yanked mid-read. That is the torn-free guarantee for RELIABLE SHM.
+ *   - generation is the backstop: a straggler that reads a reused chunk sees a
+ *     generation mismatch and counts the sample lost (repaired on reliable, dropped
+ *     on best-effort) instead of delivering torn bytes. Best-effort SHM has no ACKs,
+ *     so a too-slow reader misses lapped samples, exactly like best-effort UDP.
+ *   - contract: the on_message pointer is valid FOR THE CALL ONLY (already true for
+ *     UDP); consume or copy it there. SHM just makes honoring it matter for safety.
+ *
+ * Zero copy both ways: the app loans a chunk and writes into it (dart_node_loan),
+ * remote peers fragment straight from that chunk, local peers read it in place in
+ * on_message (valid-for-the-call, the existing contract). One-copy fallback:
+ * plain dart_node_send memcpys into the chunk.
+ *
+ * Read modes (a future toggle; ship the safe one first):
+ *   - ONE-COPY SHM (default): the reader memcpys the chunk into its own asm_buf, then
+ *     OWNS the bytes -- so it acks like UDP (ack timing is free, no deliver-before-ack
+ *     coupling), the writer is released immediately, and there is no slow-reader stall
+ *     or torn-read window. Still a big win: one SHM-DATA submessage + one local bulk
+ *     copy replaces N fragment datagrams + reassembly.
+ *   - ZERO-COPY SHM (opt-in): no copy, on_message reads the chunk in place; REQUIRES
+ *     deliver-before-ack and holds the writer until the read completes (see below).
+ *     The last increment, for latency/throughput-critical paths that accept the
+ *     coupling. The difference is purely read-side: same wire format, same descriptor.
+ *
+ * This header is the portable mapping + chunk module. Its hooks into the transport
+ * (the SHM-DATA submessage, the per-peer lane choice, chunk-backed history) and the
+ * node (advertise, attach, deliver) are the contract in "INTEGRATION" below.
+ */
+#ifndef DART_SHM_H
+#define DART_SHM_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Compile bounds (a fixed segment; an SBC sets these small, a workstation large). */
+#ifndef DART_SHM_CHUNK_BYTES
+#define DART_SHM_CHUNK_BYTES (4u*1024u*1024u)  /* default chunk; node overrides per size class */
+#endif
+#ifndef DART_SHM_CHUNKS
+#define DART_SHM_CHUNKS 4u                     /* default chunks/segment; node overrides per class */
+#endif
+#ifndef DART_SHM_NAME_MAX
+#define DART_SHM_NAME_MAX 64u                  /* OS object name, derived from the node uuid */
+#endif
+
+/* Size-class ladder (iceoryx-style): class k chunk payload = BASE << (k*SHIFT).
+ * Defaults 64K,256K,1M,4M,16M,64M,256M (k=0..6) at SHIFT=2. The node lazily creates
+ * one segment per class and routes by the class in the low 3 bits of segment_id. */
+#ifndef DART_SHM_CLASS_BASE
+#define DART_SHM_CLASS_BASE  (64u*1024u)
+#endif
+#ifndef DART_SHM_CLASS_SHIFT
+#define DART_SHM_CLASS_SHIFT 2u
+#endif
+#ifndef DART_SHM_N_CLASSES
+#define DART_SHM_N_CLASSES   7u
+#endif
+#ifndef DART_SHM_CHUNKS_PER_CLASS
+#define DART_SHM_CHUNKS_PER_CLASS 4u
+#endif
+#define DART_SHM_CLASS_MASK  0x7u               /* class lives in the low 3 bits of segment_id */
+
+uint32_t dart_shm_class_bytes(uint32_t k);      /* chunk payload bytes for class k */
+uint32_t dart_shm_class_for(uint32_t len);      /* smallest class fitting len; N_CLASSES if too big */
+
+/* ----------------------------------------------------------------- descriptor
+ * The SHM locator. Travels INSIDE an SHM-DATA submessage, whose framing supplies
+ * the seqno base + count (the transport fills those from the history sample), so
+ * the descriptor itself is just where-to-read. generation lets a straggling reader
+ * detect a recycled chunk and fall back to reliable repair. */
+typedef struct {
+    uint64_t segment_id;   /* writer's segment (its discovery uuid, hashed to 64) */
+    uint32_t chunk;        /* chunk index in [0, n_chunks) */
+    uint32_t length;       /* payload bytes */
+    uint64_t generation;   /* chunk reuse counter at publish; reader rechecks after reading */
+} dart_shm_desc;
+
+#define DART_SHM_DESC_WIRE 24u   /* little-endian; rides the SHM-DATA submessage body */
+size_t dart_shm_desc_encode(const dart_shm_desc *d, uint8_t out[DART_SHM_DESC_WIRE]);
+int    dart_shm_desc_decode(dart_shm_desc *d, const uint8_t *in, size_t len);  /* 1 ok, 0 malformed */
+
+/* ------------------------------------------------------------- segment layout
+ *   [ dart_shm_seg_hdr ][ chunk 0 ] ... [ chunk N-1 ]
+ *   chunk = [ dart_shm_chunk_hdr (padded to 16) ][ chunk_bytes payload ]
+ * generation is the only cross-process mutable field: written (atomic release) by
+ * the writer before the descriptor is sent, read (atomic acquire) by the reader
+ * after reading the payload. No refcount -- reliability owns the lifecycle. */
+typedef struct {
+    uint32_t magic;         /* DART_SHM_MAGIC; reject a stale/foreign mapping */
+    uint32_t version;
+    uint64_t segment_id;
+    uint32_t chunk_bytes;   /* must equal the reader's compile bound, else reject */
+    uint32_t n_chunks;
+    uint64_t owner_pid;     /* writer pid: external janitor can reclaim an orphan */
+    uint8_t  owner_host[16];/* writer host uuid: reader confirms same kernel */
+} dart_shm_seg_hdr;
+
+typedef struct {
+    uint64_t generation;    /* bumped each reuse; matched against the descriptor */
+    uint32_t length;
+    uint32_t _pad;
+} dart_shm_chunk_hdr;
+
+#define DART_SHM_MAGIC    0x4D484453u   /* 'DSHM' */
+#define DART_SHM_VERSION  1u
+
+/* ------------------------------------------------------------------ pool (API)
+ * Opaque per-process handle over one mapped segment, placed in caller memory
+ * (the node arena; size via dart_shm_state_bytes). A node CREATEs one segment for
+ * its own publishes and ATTACHes one per same-host peer it subscribes to. */
+typedef struct dart_shm_pool dart_shm_pool;
+size_t dart_shm_state_bytes(void);
+
+typedef struct {
+    char     name[DART_SHM_NAME_MAX];  /* writer makes it from its uuid; reader gets it via meta */
+    uint64_t segment_id;
+    uint32_t chunk_bytes;              /* 0 => DART_SHM_CHUNK_BYTES */
+    uint32_t n_chunks;                 /* 0 => DART_SHM_CHUNKS */
+} dart_shm_config;
+
+/* Writer. create maps a fresh segment (dart_plat_shm_create); NULL => stay on UDP. */
+dart_shm_pool *dart_shm_create(void *pool_mem, const dart_shm_config *cfg);
+/* The chunk backing a history slot: loan returns a writable pointer (app fills it),
+ * stamp bumps generation + sets length and fills *out for the transport to frame in
+ * the SHM-DATA submessage. The node owns chunk<->slot assignment (1 chunk per
+ * keep_last slot), so there is no free list here. */
+void *dart_shm_chunk(dart_shm_pool *p, uint32_t chunk, uint32_t *out_cap);
+void  dart_shm_stamp(dart_shm_pool *p, uint32_t chunk, uint32_t len, dart_shm_desc *out);
+
+/* Reader. attach maps an existing segment by name; validates magic/version/
+ * chunk_bytes/owner_host==ours. NULL => fall back to the UDP path. read resolves a
+ * descriptor to an in-segment pointer and verifies generation still matches (else
+ * recycled -> NULL, reliable repair covers it). No release call: the reader's
+ * transport ACK of the range is the release. */
+dart_shm_pool *dart_shm_attach(void *pool_mem, const dart_shm_config *cfg);
+const void    *dart_shm_read  (dart_shm_pool *p, const dart_shm_desc *d, uint32_t *out_len);
+/* re-check the chunk generation AFTER a one-copy read (seqlock tail): 1 if it still
+ * matches d (the copy is clean), 0 if a best-effort writer recycled it mid-copy (the
+ * copy may be torn -> discard). Lock-free: the writer never blocks. */
+int            dart_shm_verify(dart_shm_pool *p, const dart_shm_desc *d);
+
+void dart_shm_detach(dart_shm_pool *p);  /* unmap; the writer also unlinks the OS object */
+
+/* Same-host id: SHM is valid only between processes sharing one kernel AND able to
+ * map the object (loopback addr alone is not sufficient -- containers/namespaces).
+ * The node advertises dart_plat_host_uuid() + segment name in discovery; a peer is
+ * SHM-reachable iff its host uuid equals ours and dart_shm_attach succeeds. */
+int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16]);
+
+/* === INTEGRATION (implemented under #ifdef DART_SHM) ========================
+ *
+ * dart_plat (add behind the existing Windows/POSIX split):
+ *   void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+ *   void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+ *   void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+ *   void  dart_plat_host_uuid(uint8_t out[16]);             (boot id / machine guid)
+ *   uint64_t dart_plat_atomic_load64 / _store64(volatile uint64_t*[, v]);  (generation)
+ *
+ * transport (the per-peer lane + the new submessage; the only core change):
+ *   - per-peer flag peer_shm[] (node sets it; like the existing peer_local/peer_frag)
+ *   - a history sample may be chunk-backed: a publish that hands in an external
+ *     buffer (the chunk) + its descriptor, so dart_send does not memcpy (zero copy)
+ *   - SHM-DATA submessage: byte0 = DATA | DART_F_SHM, [alias][base seqno][count]
+ *     [24-byte descriptor]. Writer lane emits it for an SHM peer instead of frags;
+ *     reader marks [base,base+count) delivered, hands the descriptor up flagged.
+ *   - delivery carries an "is SHM descriptor" flag to the node (the public app
+ *     on_message is unchanged; the node wraps it -- see below)
+ *
+ * node (wiring):
+ *   - advertise: meta blob -> ver 3, insert [u8 shm][u8 host[16]][u64 segment_id]
+ *     between the frag prefix and the interest list (ver-2 peers ignore it)
+ *   - on peer up: if peer.shm and host matches ours, dart_shm_attach its segment and
+ *     set peer_shm in the transport; on down/dormant, detach / clear it
+ *   - dart_node_loan(n, ch, len, &ptr) / dart_node_publish(n, ch): loan a chunk for
+ *     the channel's next history slot, app fills ptr, publish hands the chunk +
+ *     descriptor to the transport. dart_node_send keeps working (one-copy into the
+ *     chunk when the channel has any SHM peer, else plain inline)
+ *   - on receive: the node's on_message wrapper sees the SHM flag, dart_shm_read the
+ *     descriptor, calls the app on_message with the in-place pointer
+ */
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* DART_SHM_H */
 #endif /* !DART_TRANSPORT_SANS_IO */
 
 #ifdef DART_DISCOVERY_IMPLEMENTATION
@@ -1277,6 +1554,117 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
     dart_plat_close(s);
     return ip;
 }
+
+/* ------------------------------------------------------------- shared memory */
+#ifdef DART_SHM
+#ifndef _WIN32
+  #include <sys/mman.h>            /* shm_open/mmap; fcntl/unistd/stdlib already in */
+#endif
+
+/* 128-bit non-cryptographic id from a byte string: two FNV-1a passes with distinct
+ * seeds. Stable per input, enough to pre-filter same-host (attach is the real gate). */
+static void dart__hash16(const void *data, size_t len, uint8_t out[16]){
+    const uint8_t *p = (const uint8_t*)data; size_t i;
+    uint64_t a = 14695981039346656037ull, b = 1099511628211ull;
+    for (i = 0; i < len; i++){
+        a = (a ^ p[i]) * 1099511628211ull;
+        b = (b ^ (uint8_t)(p[i] + 0x9Eu)) * 1099511628211ull;
+    }
+    for (i = 0; i < 8; i++){ out[i] = (uint8_t)(a >> (8*i)); out[8+i] = (uint8_t)(b >> (8*i)); }
+}
+
+void dart_plat_host_uuid(uint8_t out[16]){
+#if defined(__linux__)
+    FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars = a 128-bit id */
+    if (f){
+        char hx[32]; size_t n = fread(hx, 1, sizeof hx, f); int i, ok = (n == 32);
+        fclose(f);
+        for (i = 0; ok && i < 16; i++){
+            int hi = hx[2*i], lo = hx[2*i+1];
+            hi = (hi>='0'&&hi<='9')?hi-'0':(hi>='a'&&hi<='f')?hi-'a'+10:(hi>='A'&&hi<='F')?hi-'A'+10:-1;
+            lo = (lo>='0'&&lo<='9')?lo-'0':(lo>='a'&&lo<='f')?lo-'a'+10:(lo>='A'&&lo<='F')?lo-'A'+10:-1;
+            if (hi < 0 || lo < 0) ok = 0; else out[i] = (uint8_t)((hi<<4)|lo);
+        }
+        if (ok) return;
+    }
+#endif
+    {   char host[256]; size_t n = dart_plat_hostname(host, sizeof host);
+        if (n == 0){ host[0] = '?'; n = 1; }
+        dart__hash16(host, n, out);
+    }
+}
+
+#ifdef _WIN32
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+    HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                  (DWORD)((uint64_t)bytes >> 32),
+                                  (DWORD)(bytes & 0xFFFFFFFFu), name);
+    void *base;
+    if (!h) return NULL;
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    if (!base){ CloseHandle(h); return NULL; }
+    *handle = h;
+    return base;
+}
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+    HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
+    void *base;
+    if (!h) return NULL;
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    if (!base){ CloseHandle(h); return NULL; }
+    *handle = h;
+    return base;
+}
+void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+    (void)bytes; (void)unlink_it;   /* the object dies when the last handle closes */
+    if (base) UnmapViewOfFile(base);
+    if (handle) CloseHandle((HANDLE)handle);
+}
+uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+    return (uint64_t)InterlockedCompareExchange64((volatile LONGLONG*)p, 0, 0);
+}
+void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+    InterlockedExchange64((volatile LONGLONG*)p, (LONGLONG)v);
+}
+#else /* POSIX */
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+    int fd = shm_open(name, O_CREAT|O_RDWR, 0600);
+    void *base; char *nm;
+    if (fd < 0) return NULL;
+    if (ftruncate(fd, (off_t)bytes) != 0){ close(fd); shm_unlink(name); return NULL; }
+    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);                                  /* the mapping outlives the fd */
+    if (base == MAP_FAILED){ shm_unlink(name); return NULL; }
+    nm = (char*)malloc(strlen(name) + 1);       /* carry the name for shm_unlink */
+    if (nm) strcpy(nm, name);
+    *handle = nm;
+    return base;
+}
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+    int fd = shm_open(name, O_RDWR, 0600);
+    void *base;
+    if (fd < 0) return NULL;
+    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) return NULL;
+    *handle = NULL;                             /* a reader never unlinks */
+    return base;
+}
+void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+    if (base && base != MAP_FAILED) munmap(base, bytes);
+    if (handle){
+        if (unlink_it) shm_unlink((const char*)handle);
+        free(handle);
+    }
+}
+uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+#endif /* _WIN32 */
+#endif /* DART_SHM */
 /* ===== dart_discovery_rt.c ===== */
 /* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
  * UUID generation. All OS access goes through dart_plat. */
@@ -1524,6 +1912,9 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
 #define DART_MSG_MASK 0x07u
 #define DART_F_SINGLE 0x08u     /* DATA: single fragment (frag/count/len omitted) */
 #define DART_F_UNPOS  0x10u     /* NACK: reader has delivered nothing yet */
+#ifdef DART_SHM
+#define DART_F_SHM    0x20u     /* DATA: SHM-DATA -- body is a descriptor, no payload */
+#endif
 
 #define DART_NACK_WINDOW 32u    /* seqnos covered by one ACKNACK bitmap */
 #define DART__NIL 0xFFFFFFFFu
@@ -1575,7 +1966,19 @@ typedef struct {
     uint32_t len;        /* message bytes */
     uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
     uint32_t cap;        /* allocated bytes of buf (dynamic grows it) */
+#ifdef DART_SHM
+    uint8_t  shm;        /* 1 = SHM-backed: bytes live in shm_buf, desc set, buf unused */
+    const uint8_t *shm_buf;            /* external chunk payload (remote peers fragment from it) */
+    uint8_t  desc[DART_SHM_DESC_BYTES];/* descriptor sent to SHM peers as one SHM-DATA */
+#endif
 } dart_wsample;
+
+#ifdef DART_SHM
+/* where a sample's bytes live: the external chunk for SHM samples, else our buf */
+static const uint8_t *dart__sbuf(const dart_wsample *s){ return s->shm ? s->shm_buf : s->buf; }
+#else
+static const uint8_t *dart__sbuf(const dart_wsample *s){ return s->buf; }
+#endif
 
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
@@ -1605,7 +2008,16 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint64_t hb_last;       /* highest seqno writer claims to hold */
     uint8_t  ack_pending;
     uint64_t ack_due_us;
+#ifdef DART_SHM
+    uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
+#endif
 } dart_rproxy;
+
+#ifdef DART_SHM
+#ifndef DART_SHM_MAX_RETRY
+#define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
+#endif
+#endif
 
 typedef struct {
     dart_qos    qos;
@@ -1637,6 +2049,9 @@ struct dart_state {
                                  proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
     uint16_t     frag;      /* this node's fragment size: what we fragment our sends into */
+#ifdef DART_SHM
+    uint8_t     *peer_shm;  /* [max_peers] 1 = peer can receive SHM-DATA (same host, attached) */
+#endif
     /* peer interest over OUR channel table, one bit per user channel; the proxies
        plus these bits are the whole stored interest (full peer lists are not kept).
        Fed by dart_apply_peer_interest from the peer's discovery announce. */
@@ -1720,6 +2135,9 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       uint8_t  *pl = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint8_t  *pdm= (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint16_t *pf = (uint16_t*)dart_take(b, np*sizeof(uint16_t), 2);
+#ifdef DART_SHM
+      uint8_t  *psh= (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
+#endif
       uint8_t  *pb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       uint8_t  *sb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       dart_channel *ch = (dart_channel*)dart_take(b, nc*sizeof(dart_channel), 16);
@@ -1746,6 +2164,9 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           st->alias_ci=ac; st->amax=mids;
           memset(pu,0,np); memset(pl,0,np); memset(pdm,0,np);
           { uint32_t k; for (k=0;k<np;k++) pf[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
+#ifdef DART_SHM
+          st->peer_shm=psh; memset(psh,0,np);
+#endif
           memset(ac,0xFF,(size_t)np*mids*sizeof(uint16_t));   /* all unmapped */
           memset(pb,0,(size_t)np*bml); memset(sb,0,(size_t)np*bml);
           memset(wp,0,(size_t)nc*np*sizeof(dart_wproxy));
@@ -1973,6 +2394,9 @@ void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local, uint16_t peer
     st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
     st->peer_dormant[free]=0;
     st->peer_frag[free]=dart__clamp_frag(peer_frag);
+#ifdef DART_SHM
+    st->peer_shm[free]=0;   /* node sets it once the peer's segment is attached */
+#endif
     memset(&st->peer_pub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->peer_sub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->alias_ci[(size_t)free*st->amax],0xFF,(size_t)st->amax*sizeof(uint16_t));
@@ -1988,6 +2412,9 @@ void dart_peer_remove(dart_state *st, uint32_t id){
         dart__unmatch_r(st,c,(uint16_t)s);
     }
     st->peer_used[s]=0; st->peer_dormant[s]=0;
+#ifdef DART_SHM
+    st->peer_shm[s]=0;
+#endif
 }
 
 /* A peer fell silent (discovery timeout): keep every proxy and the reader's
@@ -2022,6 +2449,13 @@ void dart_peer_set_frag(dart_state *st, uint32_t id, uint16_t peer_frag){
     int s = dart_peer_slot(st,id);
     if (s>=0) st->peer_frag[s]=dart__clamp_frag(peer_frag);
 }
+
+#ifdef DART_SHM
+void dart_peer_set_shm(dart_state *st, uint32_t id, int is_shm){
+    int s = dart_peer_slot(st,id);
+    if (s>=0) st->peer_shm[s]=(uint8_t)(is_shm?1:0);
+}
+#endif
 
 /* find cached sample containing seqno (newest-first, so pushing new data is O(1)) */
 static dart_wsample *dart_find_sample(dart_channel *ch, uint64_t seqno){
@@ -2078,9 +2512,33 @@ int dart_send(dart_state *st, uint16_t channel, const void *data, size_t len, ui
     } else if (len > ch->qos.max_message_bytes) return -2;
     if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return -3;
     if (len) memcpy(ch->hist[ch->hist_head].buf, data, len);
+#ifdef DART_SHM
+    ch->hist[ch->hist_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
+#endif
     dart__commit(st, (uint16_t)ci, len);
     return 0;
 }
+
+#ifdef DART_SHM
+/* publish a sample whose bytes live in an external (shared-memory) chunk: store the
+ * chunk pointer + descriptor on the history slot without copying. Remote peers
+ * fragment from the chunk; SHM peers get the one-submessage descriptor. */
+int dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t len,
+                  const uint8_t *desc, uint64_t now){
+    int ci; dart_channel *ch; dart_wsample *slot;
+    (void)now;
+    ch = dart_chan(st, channel, &ci);
+    if (!ch) return -1;
+    if (len > 65535u*(uint32_t)st->frag) return -2;      /* wire fragment-count cap */
+    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return -3;
+    slot = &ch->hist[ch->hist_head];
+    slot->shm = 1;
+    slot->shm_buf = (const uint8_t*)chunk;
+    memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
+    dart__commit(st, (uint16_t)ci, len);
+    return 0;
+}
+#endif
 
 void dart_destroy(dart_state *st){
     uint16_t c; uint32_t p, np;
@@ -2248,6 +2706,29 @@ int dart_writer_match_count(dart_state *st, uint16_t channel){
     return cnt;
 }
 
+#ifdef DART_SHM
+/* 1 if the channel is non-multicast, has >=1 matched reader, and EVERY matched
+ * (non-dormant) reader is SHM-capable -> the node may publish this message via SHM.
+ * One non-SHM (remote) reader forces inline UDP for the whole message. */
+int dart_writer_shm_eligible(dart_state *st, uint16_t channel){
+    int ci; dart_channel *ch = dart_chan(st, channel, &ci);
+    uint32_t np, p; int any=0;
+    if (!ch || ch->multicast) return 0;
+    np = st->cfg.max_peers;
+    for (p=0;p<np;p++){
+        if (!st->wprox[(size_t)ci*np+p].used || st->peer_dormant[p]) continue;
+        if (!st->peer_shm[p]) return 0;
+        any = 1;
+    }
+    return any;
+}
+/* the history slot the next publish will occupy (so the node binds a chunk to it) */
+uint16_t dart_channel_hist_head(dart_state *st, uint16_t channel){
+    int ci; dart_channel *ch = dart_chan(st, channel, &ci);
+    return ch ? ch->hist_head : 0;
+}
+#endif
+
 /* wire alias for a local channel: its own index (the advertiser's handle). The
  * peer mapped this alias to its matching channel from our interest list. */
 static uint16_t dart__alias_of(dart_state *st, int ci){
@@ -2271,6 +2752,18 @@ static size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_wsam
     memcpy(o+21,payload,plen);
     return 21u+plen;
 }
+#ifdef DART_SHM
+/* SHM-DATA: one submessage covers [base, base+count); body is the descriptor, no
+ * payload. 37 bytes = 1 (type|F_SHM) + 2 (alias) + 8 (base) + 2 (count) + 24 (desc). */
+#define DART_SHM_DATA_BYTES (13u + DART_SHM_DESC_BYTES)
+static size_t dart_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count,
+                          const uint8_t *desc){
+    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); dart_w16(o+1,alias);
+    dart_w64(o+3,base); dart_w16(o+11,count);
+    memcpy(o+13,desc,DART_SHM_DESC_BYTES);
+    return DART_SHM_DATA_BYTES;
+}
+#endif
 static size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt){
     o[0]=DART_HB; dart_w16(o+1,alias); dart_w64(o+3,first); dart_w64(o+11,last); dart_w32(o+19,cnt);
     return 23;
@@ -2294,6 +2787,67 @@ static size_t dart_writer_hb(dart_channel *ch, dart_wproxy *w, uint16_t alias,
     w->hb_count++;
     return dart_mk_hb(out, alias, first, ch->next_seqno-1, w->hb_count);
 }
+
+#ifdef DART_SHM
+/* reader side: handle an SHM-DATA submessage. It covers [base, base+count) in one
+ * shot (payload is in shared memory), so there is no reassembly -- just ordering,
+ * then hand the descriptor to on_shm (the node resolves + delivers + acks). The gap
+ * case re-uses the normal NACK window (dart_reader_emit's !asm_active branch). */
+static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p, uint64_t now){
+    dart_channel *ch=&st->chans[ci];
+    dart_rproxy *r=&st->rprox[(size_t)ci*st->cfg.max_peers+pslot];
+    int reliable = (ch->qos.reliability==DART_RELIABLE);
+    uint64_t base = dart_r64(p+3);
+    uint16_t count = dart_r16(p+11);
+    const uint8_t *desc = p+13;          /* DART_SHM_DESC_BYTES */
+    if (!r->used || count==0) return;
+    if (base < r->deliver_upto) return;                 /* old/dup */
+    if (base > r->deliver_upto){
+        if (reliable && r->started){                    /* gap: arm a NACK for the window */
+            if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
+            if (!r->ack_pending){ r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us; }
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            return;
+        }
+        if (r->started)                                 /* best-effort / first contact: adopt */
+            dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
+                        r->deliver_upto, base - r->deliver_upto, "message(s) lost");
+        r->deliver_upto = base;
+    }
+    r->started = 1; r->asm_active = 0;
+    /* in order (base == deliver_upto). Resolve the chunk; advance + ack ONLY if the
+       node delivered. A failed resolve (recycled, or a transient unattachable segment)
+       leaves the gap so the reliability layer repairs it (re-sent descriptor) or skips
+       it (writer HB, sample evicted). A persistently unresolvable descriptor (mis-
+       configured SHM constants) would loop, so after DART_SHM_MAX_RETRY tries we skip
+       it loudly instead of wedging. */
+    {   int ok = st->cfg.on_shm &&
+                 st->cfg.on_shm(st->cfg.user, (uint16_t)ci, st->peer_ids[pslot], desc);
+        if (ok){
+            r->shm_fail = 0;
+            r->deliver_upto = base + count;
+            if (reliable){                              /* ack AFTER delivery (zero-copy invariant) */
+                r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+                dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            }
+            return;
+        }
+        if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
+            dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
+                        base, count, "SHM descriptor unresolvable (check DART_SHM_* build constants)");
+            r->shm_fail = 0;
+            r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
+            r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+        } else if (reliable){                           /* leave the gap, NACK for a re-send */
+            if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
+            r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+        } else {
+            r->deliver_upto = base + count;             /* best-effort: no repair, drop it */
+        }
+        dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+    }
+}
+#endif
 
 /* reader side: handle DATA */
 static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p,
@@ -2382,6 +2936,13 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           r->asm_active=0;
       }
     }
+    /* FUTURE OPT: the ack is armed AFTER on_message, but for UDP that order is
+       INCIDENTAL -- the payload is already copied into r->asm_buf, which the reader
+       owns, so the ack could be armed BEFORE delivery to release the writer's
+       backpressure sooner. Safe to reorder for UDP and for one-copy SHM (reader still
+       owns a copy). DO NOT reorder for zero-copy SHM: there on_message reads the
+       writer's chunk in place and MUST finish before the ack, else the chunk can be
+       recycled under the user. Gate any ack-early change on the delivery mode. */
     if (reliable){
         r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
         dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
@@ -2400,6 +2961,9 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
         dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto, "message(s) lost");
         r->deliver_upto=first; r->asm_active=0;
+#ifdef DART_SHM
+        r->shm_fail=0;          /* skipped past the stuck descriptor: fresh count */
+#endif
     }
     r->hb_last=last;
     r->ack_pending=1; r->ack_due_us = now + ch->qos.repair_delay_us;
@@ -2453,7 +3017,12 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len,
     while (rem>=3){
         uint8_t b0=p[0], type=(uint8_t)(b0 & DART_MSG_MASK); uint16_t alias; size_t sub; int ci;
         switch(type){
-            case DART_DATA: if (b0 & DART_F_SINGLE){ if (rem<13) return; sub=13u+(size_t)dart_r16(p+11); }
+            case DART_DATA:
+#ifdef DART_SHM
+                            if (b0 & DART_F_SHM){ if (rem<DART_SHM_DATA_BYTES) return; sub=DART_SHM_DATA_BYTES; }
+                            else
+#endif
+                            if (b0 & DART_F_SINGLE){ if (rem<13) return; sub=13u+(size_t)dart_r16(p+11); }
                             else { if (rem<21) return; sub=21u+(size_t)dart_r16(p+19); } break;
             case DART_HB:   if (rem<23) return; sub=23; break;
             case DART_NACK: if (rem<21) return; sub=21; break;
@@ -2466,7 +3035,11 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len,
         } else ci=-1;
         if (ci>=0){
             switch(type){
-                case DART_DATA: dart_reader_data(st,ci,ps,p,now); break;
+                case DART_DATA:
+#ifdef DART_SHM
+                                if (p[0] & DART_F_SHM){ dart_reader_shm(st,ci,ps,p,now); break; }
+#endif
+                                dart_reader_data(st,ci,ps,p,now); break;
                 case DART_HB:   dart_reader_hb  (st,ci,ps,p,now); break;
                 case DART_NACK: dart_writer_nack(st,ci,ps,p); break;
             }
@@ -2502,13 +3075,27 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
                 }
                 s=dart_find_sample(ch,seqno);
                 if (s){
+#ifdef DART_SHM
+                    if (st->peer_shm[pslot] && s->shm){   /* re-send the whole message as one SHM-DATA */
+                        uint32_t j;
+                        if (cap < DART_SHM_DATA_BYTES) return 0;
+                        for (j=0;j<DART_NACK_WINDOW;j++){
+                            uint64_t sq=w->nack_base+j;
+                            if (sq>=s->base && sq<s->base+s->count) w->nack_bits &= ~(1u<<j);
+                        }
+                        if (w->nack_bits==0) w->has_nack=0;
+                        return dart_mk_shm(out,alias,s->base,s->count,s->desc);
+                    }
+#endif
+                    {
                     uint16_t fi=(uint16_t)(seqno - s->base);
                     uint32_t off=(uint32_t)fi*st->frag;
                     uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
                     if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;   /* bit stays set */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
-                    return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
+                    return dart_mk_data(out,alias,seqno,s,fi,dart__sbuf(s)+off,plen);
+                    }
                 } else {
                     /* superseded: skip the reader past the dropped region with an HB
                        (its first = our floor); keep still-cached seqnos for later repair */
@@ -2531,12 +3118,23 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
         uint64_t seqno=w->sent_upto;
         dart_wsample *s=dart_find_sample(ch,seqno);
         if (s){
+#ifdef DART_SHM
+            /* peer_shm is set at attach (before data flows), so sent_upto sits at a
+               sample boundary here: emit the whole message as one SHM-DATA */
+            if (st->peer_shm[pslot] && s->shm){
+                if (cap < DART_SHM_DATA_BYTES) return 0;
+                w->sent_upto = s->base + s->count;
+                return dart_mk_shm(out,alias,s->base,s->count,s->desc);
+            }
+#endif
+            {
             uint16_t fi=(uint16_t)(seqno - s->base);
             uint32_t off=(uint32_t)fi*st->frag;
             uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
             if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;
             w->sent_upto++;
-            return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
+            return dart_mk_data(out,alias,seqno,s,fi,dart__sbuf(s)+off,plen);
+            }
         } else {
             /* fell out of the ring before we sent it: skip the reader up to first
                cached with an HB (its first = our floor) */
@@ -2749,10 +3347,176 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
 }
 
 #ifndef DART_TRANSPORT_SANS_IO
+/* ===== dart_shm.c ===== */
+/* dart_shm: the portable segment-mapping + chunk module behind dart_shm.h. Pure
+ * over dart_plat (shm mapping, host uuid, the generation atomic); no transport or
+ * node knowledge. Compiles to nothing without DART_SHM. See dart_shm.h. */
+
+
+#ifdef DART_SHM
+#include <string.h>
+#include <stdlib.h>
+
+/* little-endian scalar IO for the wire descriptor */
+static void shm_w32(uint8_t *p, uint32_t v){ p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);p[2]=(uint8_t)(v>>16);p[3]=(uint8_t)(v>>24); }
+static void shm_w64(uint8_t *p, uint64_t v){ int i; for(i=0;i<8;i++) p[i]=(uint8_t)(v>>(8*i)); }
+static uint32_t shm_r32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
+static uint64_t shm_r64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
+
+size_t dart_shm_desc_encode(const dart_shm_desc *d, uint8_t out[DART_SHM_DESC_WIRE]){
+    shm_w64(out,    d->segment_id);
+    shm_w32(out+8,  d->chunk);
+    shm_w32(out+12, d->length);
+    shm_w64(out+16, d->generation);
+    return DART_SHM_DESC_WIRE;
+}
+int dart_shm_desc_decode(dart_shm_desc *d, const uint8_t *in, size_t len){
+    if (len < DART_SHM_DESC_WIRE) return 0;
+    d->segment_id = shm_r64(in);
+    d->chunk      = shm_r32(in+8);
+    d->length     = shm_r32(in+12);
+    d->generation = shm_r64(in+16);
+    return 1;
+}
+
+uint32_t dart_shm_class_bytes(uint32_t k){ return DART_SHM_CLASS_BASE << (k*DART_SHM_CLASS_SHIFT); }
+uint32_t dart_shm_class_for(uint32_t len){
+    uint32_t k;
+    for (k=0;k<DART_SHM_N_CLASSES;k++) if (dart_shm_class_bytes(k) >= len) return k;
+    return DART_SHM_N_CLASSES;   /* bigger than the top class -> caller sends inline */
+}
+
+struct dart_shm_pool {
+    void    *base;          /* mapping base */
+    void    *handle;        /* OS handle for detach */
+    size_t   map_bytes;     /* total mapped size */
+    dart_shm_seg_hdr *hdr;
+    uint8_t *chunks;        /* base of the chunk region */
+    uint32_t chunk_bytes;
+    uint32_t n_chunks;
+    uint32_t stride;        /* per-chunk bytes incl. header */
+    int      is_creator;
+};
+
+size_t dart_shm_state_bytes(void){ return (sizeof(struct dart_shm_pool) + 15u) & ~(size_t)15u; }
+
+#define DART__SHM_HDR_SZ  ((uint32_t)((sizeof(dart_shm_seg_hdr) + 15u) & ~(size_t)15u))
+#define DART__SHM_CHDR_SZ ((uint32_t)((sizeof(dart_shm_chunk_hdr) + 15u) & ~(size_t)15u))
+
+static void dart__shm_geom(uint32_t chunk_bytes, uint32_t n_chunks,
+                           uint32_t *out_stride, size_t *out_total){
+    uint32_t cb = (chunk_bytes + 15u) & ~15u;
+    uint32_t stride = DART__SHM_CHDR_SZ + cb;
+    *out_stride = stride;
+    *out_total  = (size_t)DART__SHM_HDR_SZ + (size_t)n_chunks * stride;
+}
+
+static dart_shm_chunk_hdr *dart__shm_chunk_hdr(struct dart_shm_pool *p, uint32_t i){
+    return (dart_shm_chunk_hdr*)(p->chunks + (size_t)i * p->stride);
+}
+static uint8_t *dart__shm_chunk_pay(struct dart_shm_pool *p, uint32_t i){
+    return (uint8_t*)dart__shm_chunk_hdr(p, i) + DART__SHM_CHDR_SZ;
+}
+
+dart_shm_pool *dart_shm_create(void *pool_mem, const dart_shm_config *cfg){
+    struct dart_shm_pool *p = (struct dart_shm_pool*)pool_mem;
+    uint32_t cb = cfg->chunk_bytes ? cfg->chunk_bytes : DART_SHM_CHUNK_BYTES;
+    uint32_t nc = cfg->n_chunks    ? cfg->n_chunks    : DART_SHM_CHUNKS;
+    uint32_t stride; size_t total; void *handle = NULL, *base; uint32_t i;
+    if (!p || !cfg) return NULL;
+    dart__shm_geom(cb, nc, &stride, &total);
+    base = dart_plat_shm_create(cfg->name, total, &handle);
+    if (!base) return NULL;
+    memset(p, 0, sizeof *p);
+    p->base = base; p->handle = handle; p->map_bytes = total;
+    p->hdr = (dart_shm_seg_hdr*)base;
+    p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
+    p->chunk_bytes = cb; p->n_chunks = nc; p->stride = stride; p->is_creator = 1;
+    /* the segment starts zero-filled; stamp the header and clear generations */
+    p->hdr->magic = DART_SHM_MAGIC; p->hdr->version = DART_SHM_VERSION;
+    p->hdr->segment_id = cfg->segment_id; p->hdr->chunk_bytes = cb; p->hdr->n_chunks = nc;
+    p->hdr->owner_pid = dart_plat_pid();
+    dart_plat_host_uuid(p->hdr->owner_host);
+    for (i = 0; i < nc; i++){ dart_shm_chunk_hdr *c = dart__shm_chunk_hdr(p, i); c->generation = 0; c->length = 0; }
+    return p;
+}
+
+dart_shm_pool *dart_shm_attach(void *pool_mem, const dart_shm_config *cfg){
+    struct dart_shm_pool *p = (struct dart_shm_pool*)pool_mem;
+    uint32_t cb = cfg->chunk_bytes ? cfg->chunk_bytes : DART_SHM_CHUNK_BYTES;
+    uint32_t nc = cfg->n_chunks    ? cfg->n_chunks    : DART_SHM_CHUNKS;
+    uint32_t stride; size_t total; void *handle = NULL, *base; uint8_t ours[16];
+    if (!p || !cfg) return NULL;
+    dart__shm_geom(cb, nc, &stride, &total);
+    base = dart_plat_shm_attach(cfg->name, total, &handle);
+    if (!base) return NULL;
+    memset(p, 0, sizeof *p);
+    p->base = base; p->handle = handle; p->map_bytes = total;
+    p->hdr = (dart_shm_seg_hdr*)base;
+    p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
+    p->chunk_bytes = cb; p->n_chunks = nc; p->stride = stride; p->is_creator = 0;
+    dart_plat_host_uuid(ours);
+    /* reject a stale/foreign/mismatched segment -> caller falls back to UDP */
+    if (p->hdr->magic != DART_SHM_MAGIC || p->hdr->version != DART_SHM_VERSION ||
+        p->hdr->chunk_bytes != cb || p->hdr->n_chunks != nc ||
+        memcmp(p->hdr->owner_host, ours, 16) != 0){
+        dart_plat_shm_detach(base, total, handle, 0);
+        return NULL;
+    }
+    return p;
+}
+
+void *dart_shm_chunk(dart_shm_pool *p, uint32_t chunk, uint32_t *out_cap){
+    if (!p || chunk >= p->n_chunks) return NULL;
+    if (out_cap) *out_cap = p->chunk_bytes;
+    return dart__shm_chunk_pay(p, chunk);
+}
+
+void dart_shm_stamp(dart_shm_pool *p, uint32_t chunk, uint32_t len, dart_shm_desc *out){
+    dart_shm_chunk_hdr *c;
+    uint64_t gen;
+    if (!p || chunk >= p->n_chunks) return;
+    c = dart__shm_chunk_hdr(p, chunk);
+    c->length = len;
+    gen = c->generation + 1u;                       /* bump so a straggler sees the reuse */
+    dart_plat_atomic_store64(&c->generation, gen);  /* release: publishes the payload writes */
+    if (out){ out->segment_id = p->hdr->segment_id; out->chunk = chunk; out->length = len; out->generation = gen; }
+}
+
+const void *dart_shm_read(dart_shm_pool *p, const dart_shm_desc *d, uint32_t *out_len){
+    dart_shm_chunk_hdr *c;
+    if (!p || !d || d->chunk >= p->n_chunks) return NULL;
+    c = dart__shm_chunk_hdr(p, d->chunk);
+    if (dart_plat_atomic_load64(&c->generation) != d->generation) return NULL;  /* recycled */
+    if (d->length > p->chunk_bytes) return NULL;
+    if (out_len) *out_len = d->length;
+    return dart__shm_chunk_pay(p, d->chunk);
+}
+
+int dart_shm_verify(dart_shm_pool *p, const dart_shm_desc *d){
+    dart_shm_chunk_hdr *c;
+    if (!p || !d || d->chunk >= p->n_chunks) return 0;
+    c = dart__shm_chunk_hdr(p, d->chunk);
+    return dart_plat_atomic_load64(&c->generation) == d->generation;
+}
+
+void dart_shm_detach(dart_shm_pool *p){
+    if (!p || !p->base) return;
+    dart_plat_shm_detach(p->base, p->map_bytes, p->handle, p->is_creator);
+    p->base = NULL; p->handle = NULL;
+}
+
+int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16]){
+    return memcmp(peer_host, our_host, 16) == 0;
+}
+
+#endif /* DART_SHM */
 /* ===== dart_node.c ===== */
 /* NODE runtime: owns the data socket, drives discovery, wires peers into the
  * transport. All OS access goes through dart_plat. See dart_node.h. */
 
+#ifdef DART_SHM
+#endif
 #include <string.h>
 
 typedef struct {
@@ -2789,33 +3553,77 @@ struct dart_node {
     uint16_t       disc_meta_cap;
     uint16_t       disc_meta_len;
     uint16_t       frag_size;     /* our clamped UDP fragment size, baked into the blob */
+#ifdef DART_SHM
+    /* zero-fragment same-host path: lazy per-size-class segments (see dart_shm.h) */
+    uint8_t        shm_cap;       /* 1 = an allocator is set, so SHM is usable */
+    uint8_t        shm_host[16];  /* our host uuid (advertised; same-host check) */
+    uint64_t       shm_base;      /* segment id base; low 3 bits carry the size class */
+    dart_message_fn shm_user_on_message;  /* the app's real callback (we wrap it) */
+    dart_alloc_fn  shm_alloc;     /* one-copy receive scratch (== cfg.allocator) */
+    void          *shm_scratch; uint32_t shm_scratch_cap;
+    void          *shm_pool[DART_SHM_N_CLASSES];   /* our outgoing pools (NULL = not yet created) */
+    uint8_t       *shm_pool_mem;  /* arena: N_CLASSES * dart_shm_state_bytes */
+    uint32_t       shm_free[DART_SHM_N_CLASSES][DART_SHM_CHUNKS_PER_CLASS];  /* free-chunk stacks */
+    uint8_t        shm_nfree[DART_SHM_N_CLASSES];
+    uint16_t      *shm_slot;      /* [nchan*keepmax] 0xFFFF=none else (class<<8)|chunk */
+    uint16_t       shm_keepmax;
+    uint16_t       shm_nchan;
+    uint64_t      *shm_rseg;      /* [rmax] attached reader-segment ids (0 = empty) */
+    uint8_t       *shm_rpool_mem; /* [rmax * dart_shm_state_bytes] */
+    uint16_t       shm_rmax;
+    uint32_t       shm_tx, shm_rx;/* messages published / delivered via SHM (observability) */
+#endif
 };
 
-/* Discovery-announce metadata: a versioned blob carrying this node's fragment size
- * then its interest list (dart_build_interest output). Layout:
- * ['D','N', ver=2, frag_lo, frag_hi, <interest blob...>]. Laid out to grow (e.g. a
- * future SHM segment id between the prefix and the interest). */
-#define DART__META_PREFIX 5u
+/* Discovery-announce metadata: a versioned blob carrying this node's fragment size,
+ * (v3) its SHM capability + host uuid, then its interest list. Layout:
+ *   v2: ['D','N',2, frag_lo, frag_hi,                      <interest>]   prefix 5
+ *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],       <interest>]   prefix 22
+ * Decode is version-aware so v2 (non-SHM) and v3 nodes interop; frag is at [3..4] in
+ * both. We write v3 when DART_SHM is compiled, v2 otherwise. */
+#define DART__META_PREFIX_V2 5u
+#define DART__META_PREFIX_V3 22u
+#ifdef DART_SHM
+#define DART__META_PREFIX DART__META_PREFIX_V3   /* what WE write */
+#else
+#define DART__META_PREFIX DART__META_PREFIX_V2
+#endif
 
+static int dart__meta_ok(const uint8_t *meta, uint16_t mlen){
+    return meta && mlen >= 5 && meta[0]=='D' && meta[1]=='N' && (meta[2]==2 || meta[2]==3);
+}
+static uint16_t dart__meta_pfx(const uint8_t *meta){
+    return meta[2]==3 ? DART__META_PREFIX_V3 : DART__META_PREFIX_V2;
+}
 static uint16_t dart__meta_frag(const uint8_t *meta, uint16_t mlen){
-    if (!meta || mlen < DART__META_PREFIX || meta[0]!='D' || meta[1]!='N' || meta[2]!=2) return 0;
+    if (!dart__meta_ok(meta, mlen)) return 0;
     return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
 }
 /* Locate the interest sub-blob within a peer's meta; NULL/0 if absent. */
 static const uint8_t *dart__meta_interest(const uint8_t *meta, uint16_t mlen, size_t *out_len){
-    if (!meta || mlen < DART__META_PREFIX || meta[0]!='D' || meta[1]!='N' || meta[2]!=2){
-        *out_len = 0; return NULL;
-    }
-    *out_len = (size_t)(mlen - DART__META_PREFIX);
-    return meta + DART__META_PREFIX;
+    uint16_t pfx;
+    if (!dart__meta_ok(meta, mlen) || mlen < (pfx = dart__meta_pfx(meta))){ *out_len = 0; return NULL; }
+    *out_len = (size_t)(mlen - pfx);
+    return meta + pfx;
 }
-/* (Re)build our blob: frag prefix + current interest list. Returns its length. */
+#ifdef DART_SHM
+/* A peer's SHM capability + host uuid (v3 only); 1 if SHM-capable, fills host[16]. */
+static int dart__meta_shm(const uint8_t *meta, uint16_t mlen, uint8_t host[16]){
+    if (!dart__meta_ok(meta, mlen) || meta[2]!=3 || mlen < DART__META_PREFIX_V3 || !meta[5]) return 0;
+    memcpy(host, meta+6, 16);
+    return 1;
+}
+#endif
+/* (Re)build our blob: prefix (frag [+ shm/host]) + current interest list. */
 static uint16_t dart__meta_build(dart_node *n){
-    uint8_t *o = n->disc_meta; size_t il;
-    o[0]='D'; o[1]='N'; o[2]=2;
+    uint8_t *o = n->disc_meta; size_t il; uint16_t pre = DART__META_PREFIX;
+    o[0]='D'; o[1]='N'; o[2]=(uint8_t)(DART__META_PREFIX==DART__META_PREFIX_V3 ? 3 : 2);
     o[3]=(uint8_t)(n->frag_size & 0xFF); o[4]=(uint8_t)(n->frag_size >> 8);
-    il = dart_build_interest(n->tr, o + DART__META_PREFIX, n->disc_meta_cap - DART__META_PREFIX);
-    return (uint16_t)(DART__META_PREFIX + il);
+#ifdef DART_SHM
+    o[5]=(uint8_t)(n->shm_cap?1:0); memcpy(o+6, n->shm_host, 16);
+#endif
+    il = dart_build_interest(n->tr, o + pre, n->disc_meta_cap - pre);
+    return (uint16_t)(pre + il);
 }
 
 /* announce blob capacity: frag prefix + the largest interest list our channels can
@@ -2825,6 +3633,29 @@ static uint16_t dart__node_meta_cap(const dart_node_config *cfg){
     if (mc > 65000u) mc = 65000u;
     return (uint16_t)mc;
 }
+
+#ifdef DART_SHM
+/* largest keep_last across channels (the per-channel SHM slot-binding stride) */
+static uint16_t dart__node_keepmax(const dart_node_config *cfg){
+    uint16_t i, m = 1;
+    for (i=0;i<cfg->n_channels;i++){ uint16_t k = cfg->channels[i].qos.keep_last; if (!k) k=1; if (k>m) m=k; }
+    return m;
+}
+/* reader-pool cache capacity: a peer may publish at several size classes */
+static uint16_t dart__node_shm_rmax(uint16_t mp){ return (uint16_t)(mp * DART_SHM_N_CLASSES); }
+/* arena bytes for the SHM bookkeeping (handles + caches + slot map; the segments
+ * themselves are OS-mapped, lazily, outside the arena) */
+static size_t dart__node_shm_bytes(const dart_node_config *cfg, uint16_t mp){
+    size_t sb = dart_shm_state_bytes();
+    uint16_t keepmax = dart__node_keepmax(cfg), nch = cfg->n_channels, rmax = dart__node_shm_rmax(mp);
+    size_t s = 0;
+    s += ((size_t)DART_SHM_N_CLASSES*sb + 15u)&~(size_t)15u;   /* our pool handles */
+    s += ((size_t)nch*keepmax*2u + 15u)&~(size_t)15u;         /* slot binding (u16) */
+    s += ((size_t)rmax*8u + 15u)&~(size_t)15u;                /* reader segment ids */
+    s += ((size_t)rmax*sb + 15u)&~(size_t)15u;                /* reader pool handles */
+    return s;
+}
+#endif
 
 /* split node config into discovery + transport sub-configs */
 static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_config *dc,
@@ -2862,6 +3693,17 @@ static int dart__node_is_local_ip(const uint8_t ip[4]){
 
 static int dart__node_find_id(dart_node *n, uint32_t id);   /* peer table lookups, defined below */
 
+#ifdef DART_SHM
+/* a peer can receive our SHM-DATA iff we are SHM-capable, it advertised SHM, and its
+ * host uuid equals ours (same kernel). Set the transport's per-peer flag. */
+static void dart__node_set_peer_shm(dart_node *n, uint32_t id, const uint8_t *meta, uint16_t mlen){
+    uint8_t host[16];
+    int shm = n->shm_cap && dart__meta_shm(meta, mlen, host) &&
+              dart_shm_host_match(host, n->shm_host);
+    dart_peer_set_shm(n->tr, id, shm);
+}
+#endif
+
 static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
                         const uint8_t *meta, uint16_t mlen){
     dart_node *n = (dart_node*)u; uint16_t i; int slot = -1;
@@ -2872,6 +3714,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
             memcpy(n->peers[i].ip, addr->ip, 16);
             n->peers[i].ip_len = addr->ip_len; n->peers[i].port = addr->port;
             dart_peer_set_frag(n->tr, id, frag);
+#ifdef DART_SHM
+            dart__node_set_peer_shm(n, id, meta, mlen);
+#endif
             if (interest) dart_apply_peer_interest(n->tr, id, interest, ilen);
             if (n->peers[i].dormant){    /* a DROPPED peer's same incarnation returned: resume */
                 n->peers[i].dormant = 0;
@@ -2893,6 +3738,9 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
     n->peers[slot].ip_len=addr->ip_len; n->peers[slot].port=addr->port;
     /* the announce blob carries the peer's frag size + pub/sub interest list */
     dart_peer_add(n->tr, id, (addr->ip_len==4) && dart__node_is_local_ip(addr->ip), frag);
+#ifdef DART_SHM
+    dart__node_set_peer_shm(n, id, meta, mlen);
+#endif
     if (interest) dart_apply_peer_interest(n->tr, id, interest, ilen);
     if (n->on_event){
         dart_event ev; memset(&ev, 0, sizeof ev);
@@ -2976,6 +3824,84 @@ static int dart__node_tx(dart_node *n, uint32_t to, const uint8_t *buf, size_t l
     return 1;
 }
 
+#ifdef DART_SHM
+/* OS object name "/dart.shm.<16 hex>" -- valid on POSIX (leading /) and Windows. */
+static void dart__shm_name(char *buf, uint64_t seg){
+    static const char hx[] = "0123456789abcdef";
+    const char pre[] = "/dart.shm."; int i, k = 0;
+    while (pre[k]){ buf[k] = pre[k]; k++; }
+    for (i=15;i>=0;i--) buf[k++] = hx[(seg >> (4*i)) & 0xF];
+    buf[k] = 0;
+}
+/* lazily create our outgoing pool for size class k; fill its free-list. NULL on fail. */
+static dart_shm_pool *dart__shm_our_pool(dart_node *n, uint32_t k){
+    dart_shm_config c; uint8_t *mem; uint32_t i;
+    if (n->shm_pool[k]) return (dart_shm_pool*)n->shm_pool[k];
+    memset(&c, 0, sizeof c);
+    c.segment_id = n->shm_base | k;
+    dart__shm_name(c.name, c.segment_id);
+    c.chunk_bytes = dart_shm_class_bytes(k);
+    c.n_chunks = DART_SHM_CHUNKS_PER_CLASS;
+    mem = n->shm_pool_mem + (size_t)k * dart_shm_state_bytes();
+    n->shm_pool[k] = dart_shm_create(mem, &c);
+    if (n->shm_pool[k]){
+        n->shm_nfree[k] = 0;
+        for (i=0;i<DART_SHM_CHUNKS_PER_CLASS;i++) n->shm_free[k][n->shm_nfree[k]++] = i;
+    }
+    return (dart_shm_pool*)n->shm_pool[k];
+}
+/* lazily attach a peer's segment by id (class is in the low bits); cache it. */
+static dart_shm_pool *dart__shm_reader_pool(dart_node *n, uint64_t seg){
+    uint16_t i, slot = 0xFFFF; dart_shm_config c; uint32_t k; uint8_t *mem; size_t sb;
+    sb = dart_shm_state_bytes();
+    for (i=0;i<n->shm_rmax;i++){
+        if (n->shm_rseg[i]==seg) return (dart_shm_pool*)(n->shm_rpool_mem + (size_t)i*sb);
+        if (n->shm_rseg[i]==0 && slot==0xFFFF) slot = i;
+    }
+    if (slot==0xFFFF) return NULL;                         /* cache full */
+    k = (uint32_t)(seg & DART_SHM_CLASS_MASK);
+    if (k >= DART_SHM_N_CLASSES) return NULL;
+    memset(&c, 0, sizeof c);
+    c.segment_id = seg; dart__shm_name(c.name, seg);
+    c.chunk_bytes = dart_shm_class_bytes(k); c.n_chunks = DART_SHM_CHUNKS_PER_CLASS;
+    mem = n->shm_rpool_mem + (size_t)slot*sb;
+    if (!dart_shm_attach(mem, &c)) return NULL;
+    n->shm_rseg[slot] = seg;
+    return (dart_shm_pool*)mem;
+}
+/* transport->node delivery wrappers (the transport's user is the node so on_shm can
+ * reach SHM state; the app's single on_message sees identical bytes inline or SHM).
+ * Because the transport shares one user across on_message/on_shm/allocator, we also
+ * wrap the allocator to forward the app's real user_data. */
+static void *dart__node_alloc(void *u, void *ptr, size_t size){
+    dart_node *n = (dart_node*)u;
+    return n->shm_alloc(n->user_data, ptr, size);
+}
+static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
+    dart_node *n = (dart_node*)u;
+    if (n->shm_user_on_message) n->shm_user_on_message(n->user_data, ch, from, data, len);
+}
+static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
+    dart_node *n = (dart_node*)u; dart_shm_desc d; dart_shm_pool *rp; const void *p; uint32_t len;
+    if (!dart_shm_desc_decode(&d, desc, DART_SHM_DESC_WIRE)) return 0;
+    rp = dart__shm_reader_pool(n, d.segment_id);
+    if (!rp) return 0;                                     /* can't attach -> reader NACKs (repair) */
+    p = dart_shm_read(rp, &d, &len);                       /* seqlock head: generation == descriptor? */
+    if (!p) return 0;                                      /* recycled -> NACK -> repair or skip */
+    /* one-copy: copy out of shared memory so the user owns the bytes (ack-timing safe) */
+    if (len > n->shm_scratch_cap){
+        void *nb = n->shm_alloc(n->user_data, n->shm_scratch, len?len:1u);
+        if (!nb) return 0;
+        n->shm_scratch = nb; n->shm_scratch_cap = len;
+    }
+    memcpy(n->shm_scratch, p, len);
+    if (!dart_shm_verify(rp, &d)) return 0;                /* seqlock tail: writer recycled mid-copy -> torn -> drop */
+    n->shm_rx++;
+    if (n->shm_user_on_message) n->shm_user_on_message(n->user_data, ch, from, n->shm_scratch, len);
+    return 1;
+}
+#endif
+
 size_t dart_node_required_memory(const dart_node_config *cfg){
     dart_discovery_rt_config dc; dart_config tc; uint16_t mp;
     size_t node_sz, tbl_sz, meta_sz, disc_sz, tr_sz;
@@ -2986,7 +3912,12 @@ size_t dart_node_required_memory(const dart_node_config *cfg){
     meta_sz = ((size_t)dart__node_meta_cap(cfg)+15u)&~(size_t)15u;
     disc_sz = (dart_discovery_rt_required_memory(&dc)+15u)&~(size_t)15u;
     tr_sz   = (dart_required_memory(&tc)+15u)&~(size_t)15u;
-    return 32u + node_sz + tbl_sz + meta_sz + disc_sz + tr_sz;
+    {   size_t shm_sz = 0;
+#ifdef DART_SHM
+        shm_sz = dart__node_shm_bytes(cfg, mp);
+#endif
+        return 32u + node_sz + tbl_sz + meta_sz + disc_sz + tr_sz + shm_sz;
+    }
 }
 
 dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
@@ -3017,6 +3948,25 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
     if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
     n->frag_size = f;
+#ifdef DART_SHM
+    /* SHM is usable only with an allocator (the one-copy receive scratch + dynamic
+       buffers); advertise capability accordingly and wrap the transport callbacks so
+       on_shm can reach node state. The big segments are OS-mapped lazily, not here. */
+    n->shm_cap = (uint8_t)(cfg->allocator != NULL);
+    if (n->shm_cap){
+        dart_plat_host_uuid(n->shm_host);
+        if (!dart_plat_random(&n->shm_base, sizeof n->shm_base)) n->shm_base = dart_plat_pid();
+        n->shm_base = (n->shm_base & ~(uint64_t)DART_SHM_CLASS_MASK) | ((uint64_t)dart_plat_pid() << 8);
+        n->shm_base &= ~(uint64_t)DART_SHM_CLASS_MASK;     /* low 3 bits reserved for the class */
+        if (n->shm_base == 0) n->shm_base = 0x10u;
+        n->shm_user_on_message = cfg->on_message;
+        n->shm_alloc = cfg->allocator;
+        tc.on_message = dart__node_on_message;
+        tc.on_shm     = dart__node_on_shm;
+        tc.allocator  = dart__node_alloc;
+        tc.user       = n;
+    }
+#endif
     p = base + node_sz;
     n->peers=(dart__nodepeer*)p; memset(n->peers,0,(size_t)mp*sizeof(dart__nodepeer));
     p += tbl_sz;
@@ -3026,6 +3976,20 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->tr = dart_init(p, tr_sz, &tc);
     if (!n->tr){ dart_plat_cleanup(); return NULL; }
     p += tr_sz;
+#ifdef DART_SHM
+    {   size_t sb = dart_shm_state_bytes();
+        uint16_t keepmax = dart__node_keepmax(cfg), nch = cfg->n_channels;
+        uint16_t rmax = dart__node_shm_rmax(mp); uint32_t i;
+        n->shm_keepmax = keepmax; n->shm_nchan = nch; n->shm_rmax = rmax;
+        n->shm_pool_mem = p;  p += ((size_t)DART_SHM_N_CLASSES*sb + 15u)&~(size_t)15u;
+        n->shm_slot = (uint16_t*)p; p += ((size_t)nch*keepmax*2u + 15u)&~(size_t)15u;
+        n->shm_rseg = (uint64_t*)p; p += ((size_t)rmax*8u + 15u)&~(size_t)15u;
+        n->shm_rpool_mem = p; p += ((size_t)rmax*sb + 15u)&~(size_t)15u;
+        for (i=0;i<DART_SHM_N_CLASSES;i++){ n->shm_pool[i]=NULL; n->shm_nfree[i]=0; }
+        for (i=0;i<(uint32_t)nch*keepmax;i++) n->shm_slot[i]=0xFFFF;
+        for (i=0;i<rmax;i++) n->shm_rseg[i]=0;
+    }
+#endif
 
     /* Bind the data socket before opening discovery so we can advertise its real
        port (0 => OS ephemeral, read back via getsockname). No reuse: a unicast
@@ -3186,6 +4150,40 @@ int dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len)
         n->backpressure_accum_us += dart_plat_now_us() - t0;
         n->backpressure_accum_n++;
     }
+#ifdef DART_SHM
+    if (n->shm_cap){
+        /* free the SHM chunk bound to the slot we are about to overwrite (the
+           transport only reuses a slot after ack/evict, so this release is safe) --
+           done for inline sends too, so a slot transitioning SHM->inline is released */
+        uint16_t slot = dart_channel_hist_head(n->tr, channel);
+        size_t si = (size_t)channel*n->shm_keepmax + slot;
+        uint16_t cur = (si < (size_t)n->shm_nchan*n->shm_keepmax) ? n->shm_slot[si] : 0xFFFF;
+        if (cur != 0xFFFF){ uint32_t oc=cur>>8, ock=cur&0xFFu;
+                            if (oc<DART_SHM_N_CLASSES) n->shm_free[oc][n->shm_nfree[oc]++]=ock;
+                            n->shm_slot[si]=0xFFFF; }
+        /* eligible (all readers same-host SHM) and it fits a class -> publish via SHM */
+        if (len>0 && dart_writer_shm_eligible(n->tr, channel)){
+            uint32_t k = dart_shm_class_for((uint32_t)len);
+            if (k < DART_SHM_N_CLASSES){
+                dart_shm_pool *pool = dart__shm_our_pool(n, k);
+                if (pool && n->shm_nfree[k] > 0){
+                    uint32_t chunk = n->shm_free[k][--n->shm_nfree[k]];
+                    void *cp = dart_shm_chunk(pool, chunk, NULL);
+                    dart_shm_desc d; uint8_t desc[DART_SHM_DESC_WIRE];
+                    memcpy(cp, data, len);                       /* one-copy write into shm */
+                    dart_shm_stamp(pool, chunk, (uint32_t)len, &d);
+                    dart_shm_desc_encode(&d, desc);
+                    if (dart_send_shm(n->tr, channel, cp, len, desc, dart_plat_now_us())==0){
+                        n->shm_slot[si] = (uint16_t)((k<<8)|chunk);   /* bind chunk to the slot */
+                        n->shm_tx++;
+                        return 0;
+                    }
+                    n->shm_free[k][n->shm_nfree[k]++] = chunk;   /* send_shm failed: give it back */
+                }
+            }
+        }
+    }
+#endif
     return dart_send(n->tr, channel, data, len, dart_plat_now_us());
 }
 
@@ -3202,6 +4200,13 @@ void dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *w
     if (waited_us)    *waited_us    = n->backpressure_accum_us;
     if (waited_sends) *waited_sends = n->backpressure_accum_n;
 }
+
+#ifdef DART_SHM
+void dart_node_shm_stats(dart_node *n, uint32_t *sent, uint32_t *recv){
+    if (sent) *sent = n->shm_tx;
+    if (recv) *recv = n->shm_rx;
+}
+#endif
 
 int dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms){
     uint64_t deadline = dart_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
@@ -3222,6 +4227,16 @@ void dart_node_close(dart_node *n, int send_bye){
     if (n->mcfd != DART_SOCK_BAD) dart_plat_close(n->mcfd);
     if (n->fd != DART_SOCK_BAD) dart_plat_close(n->fd);
     if (n->tr) dart_destroy(n->tr);     /* free hook-allocated dynamic buffers */
+#ifdef DART_SHM
+    if (n->shm_cap){
+        size_t sb = dart_shm_state_bytes(); uint32_t k; uint16_t i;
+        for (k=0;k<DART_SHM_N_CLASSES;k++)
+            if (n->shm_pool[k]) dart_shm_detach((dart_shm_pool*)n->shm_pool[k]);   /* unlinks ours */
+        for (i=0;i<n->shm_rmax;i++)
+            if (n->shm_rseg[i]) dart_shm_detach((dart_shm_pool*)(n->shm_rpool_mem + (size_t)i*sb));
+        if (n->shm_scratch) n->shm_alloc(n->user_data, n->shm_scratch, 0);
+    }
+#endif
     dart_plat_cleanup();
 }
 #endif /* !DART_TRANSPORT_SANS_IO */

@@ -1,7 +1,11 @@
 /* tiny pub/sub command-line tool over a DART node.
 
-POSIX  : cc  -std=c99 -Wall -Idist tools/pubsub.c -o pubsub -lpthread
+POSIX  : cc  -std=c99 -Wall -Idist tools/pubsub.c -o pubsub -lpthread -lrt
 Windows: gcc -std=c99 -Wall -Idist tools/pubsub.c -o pubsub.exe -lws2_32 -lbcrypt
+
+Same-host pub/sub goes over shared memory automatically (no extra flags): SHM is on
+by default; the dynamic mode (no --max) provides the allocator it needs. -lrt is for
+shm_open on Linux (drop it on macOS/BSD, or build -DDART_NO_SHM).
  */
 
 #define DART_IMPLEMENTATION

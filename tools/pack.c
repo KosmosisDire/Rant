@@ -103,11 +103,13 @@ static void build_transport(const char *srcdir, const char *outdir){
     emit(out, srcdir, "dart_transport.h", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
     emit(out, srcdir, "dart_node.h", 1);
+    emit(out, srcdir, "dart_shm.h", 1);    /* SHM module (inert without DART_SHM) */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
 
     fputs("\n#ifdef DART_TRANSPORT_IMPLEMENTATION\n", out);
     emit(out, srcdir, "dart_transport.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
+    emit(out, srcdir, "dart_shm.c", 1);    /* SHM module impl, before node.c uses it */
     emit(out, srcdir, "dart_node.c", 1);
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
     fputs("#endif /* DART_TRANSPORT_IMPLEMENTATION */\n", out);
@@ -145,6 +147,7 @@ static void build_combined(const char *srcdir, const char *outdir){
     emit(out, srcdir, "dart_transport.h", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
     emit(out, srcdir, "dart_node.h", 1);
+    emit(out, srcdir, "dart_shm.h", 1);    /* SHM module (inert without DART_SHM) */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
 
     /* implementations in dependency order */
@@ -159,6 +162,7 @@ static void build_combined(const char *srcdir, const char *outdir){
     fputs("\n#ifdef DART_TRANSPORT_IMPLEMENTATION\n", out);
     emit(out, srcdir, "dart_transport.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
+    emit(out, srcdir, "dart_shm.c", 1);    /* SHM module impl, before node.c uses it */
     emit(out, srcdir, "dart_node.c", 1);
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
     fputs("#endif /* DART_TRANSPORT_IMPLEMENTATION */\n", out);

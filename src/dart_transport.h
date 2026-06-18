@@ -12,6 +12,14 @@
 extern "C" {
 #endif
 
+/* The zero-fragment same-host shared-memory path is ON by default. Opt out with
+ * DART_NO_SHM for a slimmer build or a target without shm_open/mmap (on POSIX, link
+ * -lrt on older glibc). It is used only between same-host nodes that set an allocator;
+ * a node with no local SHM peer creates no segment and pays nothing at runtime. */
+#if !defined(DART_SHM) && !defined(DART_NO_SHM)
+#define DART_SHM
+#endif
+
 #ifndef DART_FRAG_PAYLOAD
 #define DART_FRAG_PAYLOAD 1024u          /* default bytes of message data per fragment */
 #endif
@@ -31,6 +39,10 @@ extern "C" {
 #define DART_FRAG_PAYLOAD_MIN DART_FRAG_PAYLOAD
 #endif
 #define DART_DGRAM_MAX (DART_FRAG_PAYLOAD_MAX + 40u)   /* + largest header */
+
+#ifdef DART_SHM
+#define DART_SHM_DESC_BYTES 24u   /* opaque SHM descriptor on the wire; == dart_shm.h DART_SHM_DESC_WIRE */
+#endif
 
 #ifndef DART_TOPIC_NAME_MAX
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
@@ -83,6 +95,17 @@ typedef struct {
 typedef void (*dart_message_fn)(void *user, uint16_t channel, uint32_t from_peer,
                              const void *data, size_t len);
 
+#ifdef DART_SHM
+/* SHM delivery: the transport reassembled nothing -- it hands the node the
+ * DART_SHM_DESC_BYTES descriptor from an SHM-DATA submessage and the node resolves it
+ * to bytes and calls the user's on_message. Returns 1 if delivered, 0 if it could not
+ * resolve the chunk (recycled / unattachable) -- then the reader leaves the gap so the
+ * reliability layer repairs or skips it. Internal (transport->node); the user's
+ * on_message is unchanged and never sees this. */
+typedef int (*dart_shm_msg_fn)(void *user, uint16_t channel, uint32_t from_peer,
+                             const uint8_t *desc);
+#endif
+
 /* Everything that isn't message delivery, as one notification (optional). The
  * meaningful dart_event fields depend on .kind. */
 typedef enum {
@@ -123,6 +146,9 @@ typedef struct {
     uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
                                            DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
     dart_message_fn         on_message;
+#ifdef DART_SHM
+    dart_shm_msg_fn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
+#endif
     dart_event_fn           on_event;   /* optional: loss/too-big/name-collision */
     dart_alloc_fn           allocator;  /* optional: set => dynamic message sizing */
     void                 *user;
@@ -177,6 +203,24 @@ int       dart_set_role(dart_state *st, uint16_t channel, uint8_t role);
 /* Publish a message to all peers. Returns 0 ok, <0 on error. */
 int       dart_send(dart_state *st, uint16_t channel, const void *data, size_t len,
                   uint64_t now_us);
+
+#ifdef DART_SHM
+/* Publish a message whose payload lives in an external shared-memory buffer: the
+ * transport stores the sample referencing chunk (NOT copied) plus the descriptor,
+ * fragments from chunk for non-SHM peers, and sends ONE SHM-DATA (the descriptor) to
+ * SHM-capable peers. desc is DART_SHM_DESC_BYTES. Same return as dart_send. The chunk
+ * must stay valid until the sample leaves history (acked / evicted). */
+int       dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t len,
+                      const uint8_t *desc, uint64_t now_us);
+/* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).
+ * Off by default; the node sets it on attach, clears it on dormant/remove. */
+void      dart_peer_set_shm(dart_state *st, uint32_t peer_id, int is_shm);
+/* 1 if every matched reader of channel is SHM-capable and it is non-multicast, so a
+ * publish may go via SHM (else inline). The node checks this per message. */
+int       dart_writer_shm_eligible(dart_state *st, uint16_t channel);
+/* The history slot the next publish to channel will occupy (binds chunk<->slot). */
+uint16_t  dart_channel_hist_head(dart_state *st, uint16_t channel);
+#endif
 
 /* The channel's qos as stored at init; NULL if unknown. */
 const dart_qos *dart_channel_qos(dart_state *st, uint16_t channel);

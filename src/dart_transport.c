@@ -9,6 +9,9 @@
 #define DART_MSG_MASK 0x07u
 #define DART_F_SINGLE 0x08u     /* DATA: single fragment (frag/count/len omitted) */
 #define DART_F_UNPOS  0x10u     /* NACK: reader has delivered nothing yet */
+#ifdef DART_SHM
+#define DART_F_SHM    0x20u     /* DATA: SHM-DATA -- body is a descriptor, no payload */
+#endif
 
 #define DART_NACK_WINDOW 32u    /* seqnos covered by one ACKNACK bitmap */
 #define DART__NIL 0xFFFFFFFFu
@@ -60,7 +63,19 @@ typedef struct {
     uint32_t len;        /* message bytes */
     uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
     uint32_t cap;        /* allocated bytes of buf (dynamic grows it) */
+#ifdef DART_SHM
+    uint8_t  shm;        /* 1 = SHM-backed: bytes live in shm_buf, desc set, buf unused */
+    const uint8_t *shm_buf;            /* external chunk payload (remote peers fragment from it) */
+    uint8_t  desc[DART_SHM_DESC_BYTES];/* descriptor sent to SHM peers as one SHM-DATA */
+#endif
 } dart_wsample;
+
+#ifdef DART_SHM
+/* where a sample's bytes live: the external chunk for SHM samples, else our buf */
+static const uint8_t *dart__sbuf(const dart_wsample *s){ return s->shm ? s->shm_buf : s->buf; }
+#else
+static const uint8_t *dart__sbuf(const dart_wsample *s){ return s->buf; }
+#endif
 
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
@@ -90,7 +105,16 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint64_t hb_last;       /* highest seqno writer claims to hold */
     uint8_t  ack_pending;
     uint64_t ack_due_us;
+#ifdef DART_SHM
+    uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
+#endif
 } dart_rproxy;
+
+#ifdef DART_SHM
+#ifndef DART_SHM_MAX_RETRY
+#define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
+#endif
+#endif
 
 typedef struct {
     dart_qos    qos;
@@ -122,6 +146,9 @@ struct dart_state {
                                  proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
     uint16_t     frag;      /* this node's fragment size: what we fragment our sends into */
+#ifdef DART_SHM
+    uint8_t     *peer_shm;  /* [max_peers] 1 = peer can receive SHM-DATA (same host, attached) */
+#endif
     /* peer interest over OUR channel table, one bit per user channel; the proxies
        plus these bits are the whole stored interest (full peer lists are not kept).
        Fed by dart_apply_peer_interest from the peer's discovery announce. */
@@ -205,6 +232,9 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       uint8_t  *pl = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint8_t  *pdm= (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint16_t *pf = (uint16_t*)dart_take(b, np*sizeof(uint16_t), 2);
+#ifdef DART_SHM
+      uint8_t  *psh= (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
+#endif
       uint8_t  *pb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       uint8_t  *sb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       dart_channel *ch = (dart_channel*)dart_take(b, nc*sizeof(dart_channel), 16);
@@ -231,6 +261,9 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           st->alias_ci=ac; st->amax=mids;
           memset(pu,0,np); memset(pl,0,np); memset(pdm,0,np);
           { uint32_t k; for (k=0;k<np;k++) pf[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
+#ifdef DART_SHM
+          st->peer_shm=psh; memset(psh,0,np);
+#endif
           memset(ac,0xFF,(size_t)np*mids*sizeof(uint16_t));   /* all unmapped */
           memset(pb,0,(size_t)np*bml); memset(sb,0,(size_t)np*bml);
           memset(wp,0,(size_t)nc*np*sizeof(dart_wproxy));
@@ -458,6 +491,9 @@ void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local, uint16_t peer
     st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
     st->peer_dormant[free]=0;
     st->peer_frag[free]=dart__clamp_frag(peer_frag);
+#ifdef DART_SHM
+    st->peer_shm[free]=0;   /* node sets it once the peer's segment is attached */
+#endif
     memset(&st->peer_pub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->peer_sub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->alias_ci[(size_t)free*st->amax],0xFF,(size_t)st->amax*sizeof(uint16_t));
@@ -473,6 +509,9 @@ void dart_peer_remove(dart_state *st, uint32_t id){
         dart__unmatch_r(st,c,(uint16_t)s);
     }
     st->peer_used[s]=0; st->peer_dormant[s]=0;
+#ifdef DART_SHM
+    st->peer_shm[s]=0;
+#endif
 }
 
 /* A peer fell silent (discovery timeout): keep every proxy and the reader's
@@ -507,6 +546,13 @@ void dart_peer_set_frag(dart_state *st, uint32_t id, uint16_t peer_frag){
     int s = dart_peer_slot(st,id);
     if (s>=0) st->peer_frag[s]=dart__clamp_frag(peer_frag);
 }
+
+#ifdef DART_SHM
+void dart_peer_set_shm(dart_state *st, uint32_t id, int is_shm){
+    int s = dart_peer_slot(st,id);
+    if (s>=0) st->peer_shm[s]=(uint8_t)(is_shm?1:0);
+}
+#endif
 
 /* find cached sample containing seqno (newest-first, so pushing new data is O(1)) */
 static dart_wsample *dart_find_sample(dart_channel *ch, uint64_t seqno){
@@ -563,9 +609,33 @@ int dart_send(dart_state *st, uint16_t channel, const void *data, size_t len, ui
     } else if (len > ch->qos.max_message_bytes) return -2;
     if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return -3;
     if (len) memcpy(ch->hist[ch->hist_head].buf, data, len);
+#ifdef DART_SHM
+    ch->hist[ch->hist_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
+#endif
     dart__commit(st, (uint16_t)ci, len);
     return 0;
 }
+
+#ifdef DART_SHM
+/* publish a sample whose bytes live in an external (shared-memory) chunk: store the
+ * chunk pointer + descriptor on the history slot without copying. Remote peers
+ * fragment from the chunk; SHM peers get the one-submessage descriptor. */
+int dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t len,
+                  const uint8_t *desc, uint64_t now){
+    int ci; dart_channel *ch; dart_wsample *slot;
+    (void)now;
+    ch = dart_chan(st, channel, &ci);
+    if (!ch) return -1;
+    if (len > 65535u*(uint32_t)st->frag) return -2;      /* wire fragment-count cap */
+    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return -3;
+    slot = &ch->hist[ch->hist_head];
+    slot->shm = 1;
+    slot->shm_buf = (const uint8_t*)chunk;
+    memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
+    dart__commit(st, (uint16_t)ci, len);
+    return 0;
+}
+#endif
 
 void dart_destroy(dart_state *st){
     uint16_t c; uint32_t p, np;
@@ -733,6 +803,29 @@ int dart_writer_match_count(dart_state *st, uint16_t channel){
     return cnt;
 }
 
+#ifdef DART_SHM
+/* 1 if the channel is non-multicast, has >=1 matched reader, and EVERY matched
+ * (non-dormant) reader is SHM-capable -> the node may publish this message via SHM.
+ * One non-SHM (remote) reader forces inline UDP for the whole message. */
+int dart_writer_shm_eligible(dart_state *st, uint16_t channel){
+    int ci; dart_channel *ch = dart_chan(st, channel, &ci);
+    uint32_t np, p; int any=0;
+    if (!ch || ch->multicast) return 0;
+    np = st->cfg.max_peers;
+    for (p=0;p<np;p++){
+        if (!st->wprox[(size_t)ci*np+p].used || st->peer_dormant[p]) continue;
+        if (!st->peer_shm[p]) return 0;
+        any = 1;
+    }
+    return any;
+}
+/* the history slot the next publish will occupy (so the node binds a chunk to it) */
+uint16_t dart_channel_hist_head(dart_state *st, uint16_t channel){
+    int ci; dart_channel *ch = dart_chan(st, channel, &ci);
+    return ch ? ch->hist_head : 0;
+}
+#endif
+
 /* wire alias for a local channel: its own index (the advertiser's handle). The
  * peer mapped this alias to its matching channel from our interest list. */
 static uint16_t dart__alias_of(dart_state *st, int ci){
@@ -756,6 +849,18 @@ static size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_wsam
     memcpy(o+21,payload,plen);
     return 21u+plen;
 }
+#ifdef DART_SHM
+/* SHM-DATA: one submessage covers [base, base+count); body is the descriptor, no
+ * payload. 37 bytes = 1 (type|F_SHM) + 2 (alias) + 8 (base) + 2 (count) + 24 (desc). */
+#define DART_SHM_DATA_BYTES (13u + DART_SHM_DESC_BYTES)
+static size_t dart_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count,
+                          const uint8_t *desc){
+    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); dart_w16(o+1,alias);
+    dart_w64(o+3,base); dart_w16(o+11,count);
+    memcpy(o+13,desc,DART_SHM_DESC_BYTES);
+    return DART_SHM_DATA_BYTES;
+}
+#endif
 static size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt){
     o[0]=DART_HB; dart_w16(o+1,alias); dart_w64(o+3,first); dart_w64(o+11,last); dart_w32(o+19,cnt);
     return 23;
@@ -779,6 +884,67 @@ static size_t dart_writer_hb(dart_channel *ch, dart_wproxy *w, uint16_t alias,
     w->hb_count++;
     return dart_mk_hb(out, alias, first, ch->next_seqno-1, w->hb_count);
 }
+
+#ifdef DART_SHM
+/* reader side: handle an SHM-DATA submessage. It covers [base, base+count) in one
+ * shot (payload is in shared memory), so there is no reassembly -- just ordering,
+ * then hand the descriptor to on_shm (the node resolves + delivers + acks). The gap
+ * case re-uses the normal NACK window (dart_reader_emit's !asm_active branch). */
+static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p, uint64_t now){
+    dart_channel *ch=&st->chans[ci];
+    dart_rproxy *r=&st->rprox[(size_t)ci*st->cfg.max_peers+pslot];
+    int reliable = (ch->qos.reliability==DART_RELIABLE);
+    uint64_t base = dart_r64(p+3);
+    uint16_t count = dart_r16(p+11);
+    const uint8_t *desc = p+13;          /* DART_SHM_DESC_BYTES */
+    if (!r->used || count==0) return;
+    if (base < r->deliver_upto) return;                 /* old/dup */
+    if (base > r->deliver_upto){
+        if (reliable && r->started){                    /* gap: arm a NACK for the window */
+            if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
+            if (!r->ack_pending){ r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us; }
+            dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            return;
+        }
+        if (r->started)                                 /* best-effort / first contact: adopt */
+            dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
+                        r->deliver_upto, base - r->deliver_upto, "message(s) lost");
+        r->deliver_upto = base;
+    }
+    r->started = 1; r->asm_active = 0;
+    /* in order (base == deliver_upto). Resolve the chunk; advance + ack ONLY if the
+       node delivered. A failed resolve (recycled, or a transient unattachable segment)
+       leaves the gap so the reliability layer repairs it (re-sent descriptor) or skips
+       it (writer HB, sample evicted). A persistently unresolvable descriptor (mis-
+       configured SHM constants) would loop, so after DART_SHM_MAX_RETRY tries we skip
+       it loudly instead of wedging. */
+    {   int ok = st->cfg.on_shm &&
+                 st->cfg.on_shm(st->cfg.user, (uint16_t)ci, st->peer_ids[pslot], desc);
+        if (ok){
+            r->shm_fail = 0;
+            r->deliver_upto = base + count;
+            if (reliable){                              /* ack AFTER delivery (zero-copy invariant) */
+                r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+                dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+            }
+            return;
+        }
+        if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
+            dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
+                        base, count, "SHM descriptor unresolvable (check DART_SHM_* build constants)");
+            r->shm_fail = 0;
+            r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
+            r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+        } else if (reliable){                           /* leave the gap, NACK for a re-send */
+            if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
+            r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+        } else {
+            r->deliver_upto = base + count;             /* best-effort: no repair, drop it */
+        }
+        dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+    }
+}
+#endif
 
 /* reader side: handle DATA */
 static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p,
@@ -867,6 +1033,13 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           r->asm_active=0;
       }
     }
+    /* FUTURE OPT: the ack is armed AFTER on_message, but for UDP that order is
+       INCIDENTAL -- the payload is already copied into r->asm_buf, which the reader
+       owns, so the ack could be armed BEFORE delivery to release the writer's
+       backpressure sooner. Safe to reorder for UDP and for one-copy SHM (reader still
+       owns a copy). DO NOT reorder for zero-copy SHM: there on_message reads the
+       writer's chunk in place and MUST finish before the ack, else the chunk can be
+       recycled under the user. Gate any ack-early change on the delivery mode. */
     if (reliable){
         r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
         dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
@@ -885,6 +1058,9 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
         dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto, "message(s) lost");
         r->deliver_upto=first; r->asm_active=0;
+#ifdef DART_SHM
+        r->shm_fail=0;          /* skipped past the stuck descriptor: fresh count */
+#endif
     }
     r->hb_last=last;
     r->ack_pending=1; r->ack_due_us = now + ch->qos.repair_delay_us;
@@ -938,7 +1114,12 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len,
     while (rem>=3){
         uint8_t b0=p[0], type=(uint8_t)(b0 & DART_MSG_MASK); uint16_t alias; size_t sub; int ci;
         switch(type){
-            case DART_DATA: if (b0 & DART_F_SINGLE){ if (rem<13) return; sub=13u+(size_t)dart_r16(p+11); }
+            case DART_DATA:
+#ifdef DART_SHM
+                            if (b0 & DART_F_SHM){ if (rem<DART_SHM_DATA_BYTES) return; sub=DART_SHM_DATA_BYTES; }
+                            else
+#endif
+                            if (b0 & DART_F_SINGLE){ if (rem<13) return; sub=13u+(size_t)dart_r16(p+11); }
                             else { if (rem<21) return; sub=21u+(size_t)dart_r16(p+19); } break;
             case DART_HB:   if (rem<23) return; sub=23; break;
             case DART_NACK: if (rem<21) return; sub=21; break;
@@ -951,7 +1132,11 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *dg, size_t len,
         } else ci=-1;
         if (ci>=0){
             switch(type){
-                case DART_DATA: dart_reader_data(st,ci,ps,p,now); break;
+                case DART_DATA:
+#ifdef DART_SHM
+                                if (p[0] & DART_F_SHM){ dart_reader_shm(st,ci,ps,p,now); break; }
+#endif
+                                dart_reader_data(st,ci,ps,p,now); break;
                 case DART_HB:   dart_reader_hb  (st,ci,ps,p,now); break;
                 case DART_NACK: dart_writer_nack(st,ci,ps,p); break;
             }
@@ -987,13 +1172,27 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
                 }
                 s=dart_find_sample(ch,seqno);
                 if (s){
+#ifdef DART_SHM
+                    if (st->peer_shm[pslot] && s->shm){   /* re-send the whole message as one SHM-DATA */
+                        uint32_t j;
+                        if (cap < DART_SHM_DATA_BYTES) return 0;
+                        for (j=0;j<DART_NACK_WINDOW;j++){
+                            uint64_t sq=w->nack_base+j;
+                            if (sq>=s->base && sq<s->base+s->count) w->nack_bits &= ~(1u<<j);
+                        }
+                        if (w->nack_bits==0) w->has_nack=0;
+                        return dart_mk_shm(out,alias,s->base,s->count,s->desc);
+                    }
+#endif
+                    {
                     uint16_t fi=(uint16_t)(seqno - s->base);
                     uint32_t off=(uint32_t)fi*st->frag;
                     uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
                     if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;   /* bit stays set */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
-                    return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
+                    return dart_mk_data(out,alias,seqno,s,fi,dart__sbuf(s)+off,plen);
+                    }
                 } else {
                     /* superseded: skip the reader past the dropped region with an HB
                        (its first = our floor); keep still-cached seqnos for later repair */
@@ -1016,12 +1215,23 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
         uint64_t seqno=w->sent_upto;
         dart_wsample *s=dart_find_sample(ch,seqno);
         if (s){
+#ifdef DART_SHM
+            /* peer_shm is set at attach (before data flows), so sent_upto sits at a
+               sample boundary here: emit the whole message as one SHM-DATA */
+            if (st->peer_shm[pslot] && s->shm){
+                if (cap < DART_SHM_DATA_BYTES) return 0;
+                w->sent_upto = s->base + s->count;
+                return dart_mk_shm(out,alias,s->base,s->count,s->desc);
+            }
+#endif
+            {
             uint16_t fi=(uint16_t)(seqno - s->base);
             uint32_t off=(uint32_t)fi*st->frag;
             uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
             if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;
             w->sent_upto++;
-            return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
+            return dart_mk_data(out,alias,seqno,s,fi,dart__sbuf(s)+off,plen);
+            }
         } else {
             /* fell out of the ring before we sent it: skip the reader up to first
                cached with an HB (its first = our floor) */

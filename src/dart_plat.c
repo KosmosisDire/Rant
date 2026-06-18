@@ -313,3 +313,114 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
     dart_plat_close(s);
     return ip;
 }
+
+/* ------------------------------------------------------------- shared memory */
+#ifdef DART_SHM
+#ifndef _WIN32
+  #include <sys/mman.h>            /* shm_open/mmap; fcntl/unistd/stdlib already in */
+#endif
+
+/* 128-bit non-cryptographic id from a byte string: two FNV-1a passes with distinct
+ * seeds. Stable per input, enough to pre-filter same-host (attach is the real gate). */
+static void dart__hash16(const void *data, size_t len, uint8_t out[16]){
+    const uint8_t *p = (const uint8_t*)data; size_t i;
+    uint64_t a = 14695981039346656037ull, b = 1099511628211ull;
+    for (i = 0; i < len; i++){
+        a = (a ^ p[i]) * 1099511628211ull;
+        b = (b ^ (uint8_t)(p[i] + 0x9Eu)) * 1099511628211ull;
+    }
+    for (i = 0; i < 8; i++){ out[i] = (uint8_t)(a >> (8*i)); out[8+i] = (uint8_t)(b >> (8*i)); }
+}
+
+void dart_plat_host_uuid(uint8_t out[16]){
+#if defined(__linux__)
+    FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars = a 128-bit id */
+    if (f){
+        char hx[32]; size_t n = fread(hx, 1, sizeof hx, f); int i, ok = (n == 32);
+        fclose(f);
+        for (i = 0; ok && i < 16; i++){
+            int hi = hx[2*i], lo = hx[2*i+1];
+            hi = (hi>='0'&&hi<='9')?hi-'0':(hi>='a'&&hi<='f')?hi-'a'+10:(hi>='A'&&hi<='F')?hi-'A'+10:-1;
+            lo = (lo>='0'&&lo<='9')?lo-'0':(lo>='a'&&lo<='f')?lo-'a'+10:(lo>='A'&&lo<='F')?lo-'A'+10:-1;
+            if (hi < 0 || lo < 0) ok = 0; else out[i] = (uint8_t)((hi<<4)|lo);
+        }
+        if (ok) return;
+    }
+#endif
+    {   char host[256]; size_t n = dart_plat_hostname(host, sizeof host);
+        if (n == 0){ host[0] = '?'; n = 1; }
+        dart__hash16(host, n, out);
+    }
+}
+
+#ifdef _WIN32
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+    HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                  (DWORD)((uint64_t)bytes >> 32),
+                                  (DWORD)(bytes & 0xFFFFFFFFu), name);
+    void *base;
+    if (!h) return NULL;
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    if (!base){ CloseHandle(h); return NULL; }
+    *handle = h;
+    return base;
+}
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+    HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
+    void *base;
+    if (!h) return NULL;
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    if (!base){ CloseHandle(h); return NULL; }
+    *handle = h;
+    return base;
+}
+void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+    (void)bytes; (void)unlink_it;   /* the object dies when the last handle closes */
+    if (base) UnmapViewOfFile(base);
+    if (handle) CloseHandle((HANDLE)handle);
+}
+uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+    return (uint64_t)InterlockedCompareExchange64((volatile LONGLONG*)p, 0, 0);
+}
+void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+    InterlockedExchange64((volatile LONGLONG*)p, (LONGLONG)v);
+}
+#else /* POSIX */
+void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+    int fd = shm_open(name, O_CREAT|O_RDWR, 0600);
+    void *base; char *nm;
+    if (fd < 0) return NULL;
+    if (ftruncate(fd, (off_t)bytes) != 0){ close(fd); shm_unlink(name); return NULL; }
+    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);                                  /* the mapping outlives the fd */
+    if (base == MAP_FAILED){ shm_unlink(name); return NULL; }
+    nm = (char*)malloc(strlen(name) + 1);       /* carry the name for shm_unlink */
+    if (nm) strcpy(nm, name);
+    *handle = nm;
+    return base;
+}
+void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+    int fd = shm_open(name, O_RDWR, 0600);
+    void *base;
+    if (fd < 0) return NULL;
+    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) return NULL;
+    *handle = NULL;                             /* a reader never unlinks */
+    return base;
+}
+void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+    if (base && base != MAP_FAILED) munmap(base, bytes);
+    if (handle){
+        if (unlink_it) shm_unlink((const char*)handle);
+        free(handle);
+    }
+}
+uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+#endif /* _WIN32 */
+#endif /* DART_SHM */
