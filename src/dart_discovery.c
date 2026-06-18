@@ -9,6 +9,7 @@
 
 struct dart_discovery_peer_ {
     uint8_t  used;
+    uint8_t  dropped;       /* used but silent past timeout_us: state kept for a same-UUID return */
     uint8_t  uuid[16];
     uint32_t local_id;
     uint8_t  ip[16];
@@ -109,6 +110,8 @@ dart_discovery_state *dart_discovery_init(void *mem, size_t cap, const dart_disc
     return st;
 }
 
+/* find by UUID, including DROPPED entries: a same-UUID return reuses the slot (and
+ * thus the local_id), so the IO layer's transport state keyed by local_id resumes. */
 static int dart_discovery_find(dart_discovery_state *st, const uint8_t *uuid){
     uint16_t i;
     for (i=0;i<st->cap_peers;i++)
@@ -116,17 +119,38 @@ static int dart_discovery_find(dart_discovery_state *st, const uint8_t *uuid){
     return -1;
 }
 
+/* a slot for a brand-new peer: a FREE one, else the oldest DROPPED one (evicted,
+ * fired GONE so its state is freed). ACTIVE peers are never evicted; -1 = refuse. */
 static int dart_discovery_alloc(dart_discovery_state *st){
-    uint16_t i, stalest = 0; uint64_t oldest = (uint64_t)-1; int any = -1;
+    uint16_t i, victim = 0; uint64_t oldest = (uint64_t)-1; int found = -1;
     for (i=0;i<st->cap_peers;i++){
         if (!st->peers[i].used) return (int)i;
-        if (st->peers[i].last_heard_us <= oldest){ oldest = st->peers[i].last_heard_us; stalest = i; }
-        any = 1;
+        if (st->peers[i].dropped && st->peers[i].last_heard_us <= oldest){
+            oldest = st->peers[i].last_heard_us; victim = i; found = 1;
+        }
     }
-    if (any < 0) return -1;
-    if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[stalest].local_id);
-    st->peers[stalest].used = 0;
-    return (int)stalest;
+    if (found < 0) return -1;   /* table full of ACTIVE peers: caller refuses + signals */
+    if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[victim].local_id, DART_DISCOVERY_GONE);
+    st->peers[victim].used = 0;
+    return (int)victim;
+}
+
+/* A different uuid announcing from an (ip,port) we already hold means that endpoint's
+ * process restarted: one socket is one process, so the old entry is provably dead.
+ * Evict it as GONE (state freed) before adopting the newcomer, so its stale transport
+ * state can't shadow the new incarnation whose data routes to the same address. */
+static void dart_discovery_evict_endpoint(dart_discovery_state *st, const dart_discovery_addr *addr){
+    uint16_t i;
+    if (!addr->ip_len) return;
+    for (i=0;i<st->cap_peers;i++){
+        dart_discovery_peer_ *pe = &st->peers[i];
+        if (!pe->used) continue;
+        if (pe->ip_len==addr->ip_len && pe->port==addr->port && memcmp(pe->ip, addr->ip, 16)==0){
+            uint32_t lid = pe->local_id;
+            pe->used = 0;
+            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid, DART_DISCOVERY_GONE);
+        }
+    }
 }
 
 /* build an announce/solicit/bye into p. with_blob includes the current meta blob;
@@ -164,7 +188,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
     const uint8_t *p = (const uint8_t *)dg;
     uint8_t flags, sipl; uint16_t mlen, port; uint32_t mver;
     const uint8_t *uuid, *sip, *meta;
-    dart_discovery_addr addr; int idx, addr_changed, first_contact=0, blob_changed=0;
+    dart_discovery_addr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
     dart_discovery_peer_ *pe;
 
     if (len < (size_t)DART_DISCOVERY_META_OFF) return;
@@ -196,15 +220,21 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
         if (idx >= 0){
             uint32_t lid = st->peers[idx].local_id;
             st->peers[idx].used = 0;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
+            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid, DART_DISCOVERY_GONE);
         }
         return;
     }
 
     if (idx < 0){
         uint8_t *keep_meta;
+        /* new uuid from an address we already hold => the endpoint's process restarted;
+           evict the dead predecessor (frees its slot for reuse) so it can't shadow us */
+        dart_discovery_evict_endpoint(st, &addr);
         idx = dart_discovery_alloc(st);
-        if (idx < 0) return;
+        if (idx < 0){       /* table full of active peers: refuse, never evict a live one */
+            if (st->cfg.on_peer_refused) st->cfg.on_peer_refused(st->cfg.user, &addr);
+            return;
+        }
         keep_meta = st->peers[idx].meta;            /* preserve the pool pointer across reset */
         memset(&st->peers[idx], 0, sizeof(dart_discovery_peer_));
         st->peers[idx].meta     = keep_meta;
@@ -215,6 +245,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
         first_contact = 1;
     }
     pe = &st->peers[idx];
+    if (pe->dropped){ pe->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     pe->last_heard_us = now;
 
     addr_changed = (pe->ip_len != addr.ip_len)
@@ -239,7 +270,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
         pe->solicit_due = 1;
     }
 
-    if ((first_contact || addr_changed || blob_changed) && st->cfg.on_peer_up)
+    if ((first_contact || addr_changed || blob_changed || revived) && st->cfg.on_peer_up)
         st->cfg.on_peer_up(st->cfg.user, pe->local_id, &addr,
                            pe->meta_len ? pe->meta : NULL, pe->meta_len);
 
@@ -255,11 +286,12 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
         st->want_solicit = 1;   /* solicit on startup */
     }
     for (i=0;i<st->cap_peers;i++){
-        if (!st->peers[i].used) continue;
+        if (!st->peers[i].used || st->peers[i].dropped) continue;
         if (now - st->peers[i].last_heard_us > st->cfg.timeout_us){
-            uint32_t lid = st->peers[i].local_id;
-            st->peers[i].used = 0;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
+            /* fell silent: DEMOTE (keep the entry + local_id) so a same-UUID return
+               resumes; the IO layer keeps its transport state on a DROP reason */
+            st->peers[i].dropped = 1;
+            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[i].local_id, DART_DISCOVERY_DROP);
         }
     }
     if (st->want_solicit){   /* multicast solicit: announce us (with blob) AND ask peers to reply */
@@ -311,8 +343,8 @@ size_t dart_discovery_poll_targeted(dart_discovery_state *st, void *out, size_t 
 void dart_discovery_solicit(dart_discovery_state *st){ if (st) st->want_solicit = 1; }
 
 uint16_t dart_discovery_peer_count(const dart_discovery_state *st){
-    uint16_t i, c = 0;
-    for (i=0;i<st->cap_peers;i++) if (st->peers[i].used) c++;
+    uint16_t i, c = 0;   /* live peers only; DROPPED entries linger for resume, not as members */
+    for (i=0;i<st->cap_peers;i++) if (st->peers[i].used && !st->peers[i].dropped) c++;
     return c;
 }
 

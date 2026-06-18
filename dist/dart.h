@@ -59,12 +59,25 @@ typedef struct {
     uint16_t port;     /* data port, host order */
 } dart_discovery_addr;
 
-/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes).
- * peer_down: gone. peer_id is a local handle, stable only while the peer lives.
- * meta is the peer's opaque payload (NULL if none), valid only for the call. */
+/* Why a peer is going down, so the IO layer can keep transport state across a
+ * transient blip instead of tearing it down on every silence timeout. */
+typedef enum {
+    DART_DISCOVERY_DROP = 0,  /* fell silent past timeout_us: same UUID may return, keep state */
+    DART_DISCOVERY_GONE = 1   /* said BYE, or its slot was reclaimed for a new peer: free state */
+} dart_discovery_down_reason;
+
+/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes, and
+ * when a DROPPED peer returns under the SAME peer_id, so the IO layer can resume).
+ * peer_down: going down; reason says whether the state is worth keeping. peer_id is
+ * a local handle, stable across a DROP/return, freed only on GONE. meta is the
+ * peer's opaque payload (NULL if none), valid only for the call. */
 typedef void (*dart_discovery_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr,
                                    const uint8_t *meta, uint16_t meta_len);
-typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id);
+typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id,
+                                   dart_discovery_down_reason reason);
+/* A new peer arrived but the table is full of ACTIVE peers (none droppable): the
+ * peer is refused rather than evicting a live conversation. Diagnostic only. */
+typedef void (*dart_discovery_peer_refused_fn)(void *user, const dart_discovery_addr *addr);
 
 typedef struct {
     uint8_t  uuid[16];      /* unique per process instance (regen each boot) */
@@ -79,8 +92,9 @@ typedef struct {
                                updates it at runtime). Must stay valid. <= meta_cap */
     uint16_t meta_len;
     uint16_t meta_cap;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
-    dart_discovery_peer_up_fn   on_peer_up;
-    dart_discovery_peer_down_fn on_peer_down;
+    dart_discovery_peer_up_fn      on_peer_up;
+    dart_discovery_peer_down_fn    on_peer_down;
+    dart_discovery_peer_refused_fn on_peer_refused;  /* optional: table full of active peers */
     void *user;
 } dart_discovery_config;
 
@@ -381,11 +395,12 @@ typedef void (*dart_message_fn)(void *user, uint16_t channel, uint32_t from_peer
 /* Everything that isn't message delivery, as one notification (optional). The
  * meaningful dart_event fields depend on .kind. */
 typedef enum {
-    DART_PEER_UP,        /* peer discovered: .peer, .ip/.ip_len/.port (node) */
-    DART_PEER_DOWN,      /* peer lost: .peer (node) */
+    DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port (node) */
+    DART_PEER_DOWN,      /* peer lost or fell silent: .peer (node) */
     DART_MSG_LOST,       /* messages skipped: .channel, .peer, .first .. .first+.count-1 */
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.count = its size), skipped */
-    DART_NAME_COLLISION  /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
+    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
+    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
 } dart_event_kind;
 
 typedef struct {
@@ -440,6 +455,16 @@ uint64_t  dart_channel_identity(const dart_channel_def *def);   /* = dart_topic_
  * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
 void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
+
+/* Discovery-blip lifecycle: a peer that fell silent (discovery timeout) is made
+ * DORMANT instead of removed, so its reader position survives and a same-incarnation
+ * return resumes losslessly. Dormant peers are dropped from flow control (the writer
+ * stops heartbeating/draining them so a dead reader can't stall it; the reader stops
+ * acking them), but their proxies and deliver position are preserved. dart_peer_resume
+ * re-includes the peer and re-reports reader positions so the writer fills any gap.
+ * Both no-op for an unknown peer; the node drives them off discovery DROP/return. */
+void      dart_peer_dormant(dart_state *st, uint32_t peer_id);
+void      dart_peer_resume (dart_state *st, uint32_t peer_id);
 /* Update a peer's advertised UDP fragment size (its announce blob may arrive after
  * first contact). Clamped to [MIN, MAX]; no-op for an unknown peer. */
 void      dart_peer_set_frag(dart_state *st, uint32_t peer_id, uint16_t peer_frag);
@@ -584,6 +609,7 @@ void     dart_node_close(dart_node *n, int send_bye);
 
 struct dart_discovery_peer_ {
     uint8_t  used;
+    uint8_t  dropped;       /* used but silent past timeout_us: state kept for a same-UUID return */
     uint8_t  uuid[16];
     uint32_t local_id;
     uint8_t  ip[16];
@@ -684,6 +710,8 @@ dart_discovery_state *dart_discovery_init(void *mem, size_t cap, const dart_disc
     return st;
 }
 
+/* find by UUID, including DROPPED entries: a same-UUID return reuses the slot (and
+ * thus the local_id), so the IO layer's transport state keyed by local_id resumes. */
 static int dart_discovery_find(dart_discovery_state *st, const uint8_t *uuid){
     uint16_t i;
     for (i=0;i<st->cap_peers;i++)
@@ -691,17 +719,38 @@ static int dart_discovery_find(dart_discovery_state *st, const uint8_t *uuid){
     return -1;
 }
 
+/* a slot for a brand-new peer: a FREE one, else the oldest DROPPED one (evicted,
+ * fired GONE so its state is freed). ACTIVE peers are never evicted; -1 = refuse. */
 static int dart_discovery_alloc(dart_discovery_state *st){
-    uint16_t i, stalest = 0; uint64_t oldest = (uint64_t)-1; int any = -1;
+    uint16_t i, victim = 0; uint64_t oldest = (uint64_t)-1; int found = -1;
     for (i=0;i<st->cap_peers;i++){
         if (!st->peers[i].used) return (int)i;
-        if (st->peers[i].last_heard_us <= oldest){ oldest = st->peers[i].last_heard_us; stalest = i; }
-        any = 1;
+        if (st->peers[i].dropped && st->peers[i].last_heard_us <= oldest){
+            oldest = st->peers[i].last_heard_us; victim = i; found = 1;
+        }
     }
-    if (any < 0) return -1;
-    if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[stalest].local_id);
-    st->peers[stalest].used = 0;
-    return (int)stalest;
+    if (found < 0) return -1;   /* table full of ACTIVE peers: caller refuses + signals */
+    if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[victim].local_id, DART_DISCOVERY_GONE);
+    st->peers[victim].used = 0;
+    return (int)victim;
+}
+
+/* A different uuid announcing from an (ip,port) we already hold means that endpoint's
+ * process restarted: one socket is one process, so the old entry is provably dead.
+ * Evict it as GONE (state freed) before adopting the newcomer, so its stale transport
+ * state can't shadow the new incarnation whose data routes to the same address. */
+static void dart_discovery_evict_endpoint(dart_discovery_state *st, const dart_discovery_addr *addr){
+    uint16_t i;
+    if (!addr->ip_len) return;
+    for (i=0;i<st->cap_peers;i++){
+        dart_discovery_peer_ *pe = &st->peers[i];
+        if (!pe->used) continue;
+        if (pe->ip_len==addr->ip_len && pe->port==addr->port && memcmp(pe->ip, addr->ip, 16)==0){
+            uint32_t lid = pe->local_id;
+            pe->used = 0;
+            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid, DART_DISCOVERY_GONE);
+        }
+    }
 }
 
 /* build an announce/solicit/bye into p. with_blob includes the current meta blob;
@@ -739,7 +788,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
     const uint8_t *p = (const uint8_t *)dg;
     uint8_t flags, sipl; uint16_t mlen, port; uint32_t mver;
     const uint8_t *uuid, *sip, *meta;
-    dart_discovery_addr addr; int idx, addr_changed, first_contact=0, blob_changed=0;
+    dart_discovery_addr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
     dart_discovery_peer_ *pe;
 
     if (len < (size_t)DART_DISCOVERY_META_OFF) return;
@@ -771,15 +820,21 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
         if (idx >= 0){
             uint32_t lid = st->peers[idx].local_id;
             st->peers[idx].used = 0;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
+            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid, DART_DISCOVERY_GONE);
         }
         return;
     }
 
     if (idx < 0){
         uint8_t *keep_meta;
+        /* new uuid from an address we already hold => the endpoint's process restarted;
+           evict the dead predecessor (frees its slot for reuse) so it can't shadow us */
+        dart_discovery_evict_endpoint(st, &addr);
         idx = dart_discovery_alloc(st);
-        if (idx < 0) return;
+        if (idx < 0){       /* table full of active peers: refuse, never evict a live one */
+            if (st->cfg.on_peer_refused) st->cfg.on_peer_refused(st->cfg.user, &addr);
+            return;
+        }
         keep_meta = st->peers[idx].meta;            /* preserve the pool pointer across reset */
         memset(&st->peers[idx], 0, sizeof(dart_discovery_peer_));
         st->peers[idx].meta     = keep_meta;
@@ -790,6 +845,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
         first_contact = 1;
     }
     pe = &st->peers[idx];
+    if (pe->dropped){ pe->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     pe->last_heard_us = now;
 
     addr_changed = (pe->ip_len != addr.ip_len)
@@ -814,7 +870,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
         pe->solicit_due = 1;
     }
 
-    if ((first_contact || addr_changed || blob_changed) && st->cfg.on_peer_up)
+    if ((first_contact || addr_changed || blob_changed || revived) && st->cfg.on_peer_up)
         st->cfg.on_peer_up(st->cfg.user, pe->local_id, &addr,
                            pe->meta_len ? pe->meta : NULL, pe->meta_len);
 
@@ -830,11 +886,12 @@ size_t dart_discovery_update(dart_discovery_state *st, uint64_t now, void *out, 
         st->want_solicit = 1;   /* solicit on startup */
     }
     for (i=0;i<st->cap_peers;i++){
-        if (!st->peers[i].used) continue;
+        if (!st->peers[i].used || st->peers[i].dropped) continue;
         if (now - st->peers[i].last_heard_us > st->cfg.timeout_us){
-            uint32_t lid = st->peers[i].local_id;
-            st->peers[i].used = 0;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, lid);
+            /* fell silent: DEMOTE (keep the entry + local_id) so a same-UUID return
+               resumes; the IO layer keeps its transport state on a DROP reason */
+            st->peers[i].dropped = 1;
+            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[i].local_id, DART_DISCOVERY_DROP);
         }
     }
     if (st->want_solicit){   /* multicast solicit: announce us (with blob) AND ask peers to reply */
@@ -886,8 +943,8 @@ size_t dart_discovery_poll_targeted(dart_discovery_state *st, void *out, size_t 
 void dart_discovery_solicit(dart_discovery_state *st){ if (st) st->want_solicit = 1; }
 
 uint16_t dart_discovery_peer_count(const dart_discovery_state *st){
-    uint16_t i, c = 0;
-    for (i=0;i<st->cap_peers;i++) if (st->peers[i].used) c++;
+    uint16_t i, c = 0;   /* live peers only; DROPPED entries linger for resume, not as members */
+    for (i=0;i<st->cap_peers;i++) if (st->peers[i].used && !st->peers[i].dropped) c++;
     return c;
 }
 
@@ -1469,7 +1526,6 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
 #define DART_F_UNPOS  0x10u     /* NACK: reader has delivered nothing yet */
 
 #define DART_NACK_WINDOW 32u    /* seqnos covered by one ACKNACK bitmap */
-#define DART_HELLO_TRIES 4u     /* (re)subscribe announces, bounded against loss */
 #define DART__NIL 0xFFFFFFFFu
 
 #ifndef DART_HB_SWEEP_US
@@ -1549,9 +1605,6 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint64_t hb_last;       /* highest seqno writer claims to hold */
     uint8_t  ack_pending;
     uint64_t ack_due_us;
-    uint8_t  hello_left;    /* (re)subscribe announces still owed: a bounded burst that
-                               tells a caught-up writer about this new incarnation so it
-                               re-joins, since it no longer idle-pings us to ask */
 } dart_rproxy;
 
 typedef struct {
@@ -1580,6 +1633,8 @@ struct dart_state {
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
     uint8_t     *peer_local;/* [max_peers] */
+    uint8_t     *peer_dormant;/* [max_peers] 1 = silent (discovery DROP): out of flow control,
+                                 proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
     uint16_t     frag;      /* this node's fragment size: what we fragment our sends into */
     /* peer interest over OUR channel table, one bit per user channel; the proxies
@@ -1663,6 +1718,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       uint32_t *pi = (uint32_t*)dart_take(b, np*sizeof(uint32_t), 8);
       uint8_t  *pu = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint8_t  *pl = (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
+      uint8_t  *pdm= (uint8_t*) dart_take(b, np*sizeof(uint8_t), 1);
       uint16_t *pf = (uint16_t*)dart_take(b, np*sizeof(uint16_t), 2);
       uint8_t  *pb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
       uint8_t  *sb = (uint8_t*) dart_take(b, (size_t)np*bml, 1);
@@ -1679,7 +1735,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       npool = (char*)dart_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=pi; st->peer_used=pu; st->peer_local=pl;
-          st->peer_frag=pf;
+          st->peer_dormant=pdm; st->peer_frag=pf;
           st->frag = cfg->frag_payload ? cfg->frag_payload : DART_FRAG_PAYLOAD;
           if (st->frag < DART_FRAG_PAYLOAD_MIN) st->frag = DART_FRAG_PAYLOAD_MIN;
           if (st->frag > DART_FRAG_PAYLOAD_MAX) st->frag = DART_FRAG_PAYLOAD_MAX;
@@ -1688,7 +1744,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           st->lane_next=ln; st->lane_inq=li;
           st->dest_head=dh; st->dest_tail=dt; st->dest_inq=di; st->destq=dq;
           st->alias_ci=ac; st->amax=mids;
-          memset(pu,0,np); memset(pl,0,np);
+          memset(pu,0,np); memset(pl,0,np); memset(pdm,0,np);
           { uint32_t k; for (k=0;k<np;k++) pf[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
           memset(ac,0xFF,(size_t)np*mids*sizeof(uint16_t));   /* all unmapped */
           memset(pb,0,(size_t)np*bml); memset(sb,0,(size_t)np*bml);
@@ -1873,10 +1929,11 @@ static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
     r->asm_buf=abuf; r->frag_bm=fbm; r->asm_cap=acap; r->bm_cap=bcap;
     r->epoch=st->repoch++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
-    /* announce this incarnation so a caught-up (idle, non-pinging) writer re-joins
-       and replays; a small bounded burst rides out a lost announce */
+    /* announce this incarnation once so a caught-up (idle, non-pinging) writer
+       re-joins and replays. A genuine discovery blip keeps its position through
+       dart_peer_dormant/resume and never lands here, so a single ACKNACK suffices. */
     if (st->chans[c].qos.reliability==DART_RELIABLE){
-        r->hello_left=(uint8_t)DART_HELLO_TRIES; r->ack_pending=1; r->ack_due_us=0;
+        r->ack_pending=1; r->ack_due_us=0;
         dart__lane_wake(st,c,ps);
     }
 }
@@ -1914,6 +1971,7 @@ void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local, uint16_t peer
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
     st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
+    st->peer_dormant[free]=0;
     st->peer_frag[free]=dart__clamp_frag(peer_frag);
     memset(&st->peer_pub_bm[(size_t)free*st->bmlen],0,st->bmlen);
     memset(&st->peer_sub_bm[(size_t)free*st->bmlen],0,st->bmlen);
@@ -1929,7 +1987,34 @@ void dart_peer_remove(dart_state *st, uint32_t id){
         dart__unmatch_w(st,c,(uint16_t)s);
         dart__unmatch_r(st,c,(uint16_t)s);
     }
-    st->peer_used[s]=0;
+    st->peer_used[s]=0; st->peer_dormant[s]=0;
+}
+
+/* A peer fell silent (discovery timeout): keep every proxy and the reader's
+ * deliver position, just drop the peer from flow control so a dead reader can't
+ * stall the writer and a dead writer isn't acked. State revives via dart_peer_resume. */
+void dart_peer_dormant(dart_state *st, uint32_t id){
+    int s = dart_peer_slot(st,id);
+    if (s>=0) st->peer_dormant[s]=1;
+}
+
+/* A dormant peer's SAME incarnation returned: re-include it in flow control and
+ * re-report each reader position so the writer fills any gap (the reader dedups any
+ * replay for free). The writer side needs nothing proactive; the reader's ACKNACK
+ * re-arms its heartbeats. Proxies and deliver_upto were never touched, so no dup,
+ * no loss. */
+void dart_peer_resume(dart_state *st, uint32_t id){
+    int s = dart_peer_slot(st,id); uint16_t c; uint32_t np;
+    if (s<0) return;
+    st->peer_dormant[s]=0;
+    np = st->cfg.max_peers;
+    for (c=0;c<st->cfg.n_channels;c++){
+        dart_wproxy *w=&st->wprox[(size_t)c*np+s];
+        dart_rproxy *r=&st->rprox[(size_t)c*np+s];
+        if (st->chans[c].qos.reliability!=DART_RELIABLE) continue;
+        if (r->used){ r->ack_pending=1; r->ack_due_us=0; }  /* report our position now */
+        if (w->used || r->used) dart__lane_wake(st,c,(uint16_t)s);
+    }
 }
 
 /* update a peer's advertised fragment size (its blob may arrive after first contact) */
@@ -1972,7 +2057,7 @@ static void dart__commit(dart_state *st, uint16_t ci, size_t len){
     else {
         uint32_t np=st->cfg.max_peers, p;
         for (p=0;p<np;p++)
-            if (st->wprox[(size_t)ci*np+p].used) dart__lane_wake(st, ci, p);
+            if (st->wprox[(size_t)ci*np+p].used && !st->peer_dormant[p]) dart__lane_wake(st, ci, p);
     }
 }
 
@@ -2137,7 +2222,7 @@ int dart_send_would_evict(dart_state *st, uint16_t channel){
     np = st->cfg.max_peers;
     for (p=0;p<(uint16_t)np;p++){
         dart_wproxy *w=&st->wprox[(size_t)ci*np+p];
-        if (w->used && w->acked_upto < slot->base + slot->count) return 1;
+        if (w->used && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
 }
@@ -2149,7 +2234,7 @@ int dart_send_drained(dart_state *st, uint16_t channel){
     np = st->cfg.max_peers;
     for (p=0;p<(uint16_t)np;p++){
         dart_wproxy *w=&st->wprox[(size_t)ci*np+p];
-        if (w->used && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
+        if (w->used && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
     }
     return 1;
 }
@@ -2246,7 +2331,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
                         r->deliver_upto, base - r->deliver_upto, "message(s) lost");
         r->deliver_upto = base; r->asm_active=0;
     }
-    r->started = 1; r->hello_left = 0;   /* writer re-engaged: stop the (re)subscribe burst */
+    r->started = 1;   /* writer engaged: position adopted */
     /* fit the reassembly buffers (dynamic grows via the hook, fixed is capped at
        max_message_bytes); "too big" skips the whole sample and reports it */
     { uint32_t bmneed = ((uint32_t)count + 7u) / 8u, bufcap, bmbytes; int toobig = 0;
@@ -2400,7 +2485,7 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
        data + HBs ride the group lane, this per-peer lane only answers NACKs */
     int group_mode = ch->multicast && ch->nsubs>0;
     uint16_t alias = dart__alias_of(st, ci);
-    if (!w->used) return 0;
+    if (!w->used || st->peer_dormant[pslot]) return 0;   /* dormant: out of flow control */
     if (group_mode && (!reliable || !w->has_nack)) return 0;
 
     /* 1. repair (reliable only) */
@@ -2476,7 +2561,7 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
     dart_rproxy *r=&st->rprox[(size_t)ci*st->cfg.max_peers+pslot];
     uint64_t base; uint16_t nbits=0; uint32_t bm=0;
     uint16_t alias = dart__alias_of(st, ci);
-    if (!r->used) return 0;
+    if (!r->used || st->peer_dormant[pslot]) return 0;   /* dormant: don't ack a silent writer */
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
     if (cap<21) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
@@ -2484,7 +2569,7 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
 
     if (!r->asm_active){
         base=r->deliver_upto;
-        if (!r->started){ nbits=0; bm=0; }   /* no position yet: epoch hello */
+        if (!r->started){ nbits=0; bm=0; }   /* no position yet: F_UNPOS announces our epoch */
         else if (r->deliver_upto<=r->hb_last){
             /* request the whole missing window so one round-trip repairs a burst */
             uint64_t miss = r->hb_last - r->deliver_upto + 1;
@@ -2504,11 +2589,6 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
               nbits=(uint16_t)(rem<DART_NACK_WINDOW?rem:DART_NACK_WINDOW); }
         }
     }
-    /* un-started: re-arm the (re)subscribe announce a bounded number of times so a
-       lost one still reaches the writer; data arriving clears hello_left (started) */
-    if (!r->started && r->hello_left){
-        if (--r->hello_left){ r->ack_pending=1; r->ack_due_us = now + ch->qos.heartbeat_us; }
-    }
     return dart_mk_nack(out,alias,base,nbits,bm,r->epoch,
                       r->started ? 0 : (uint8_t)DART_F_UNPOS);
 }
@@ -2519,7 +2599,7 @@ static int dart__group_all_acked(dart_state *st, int ci){
     uint32_t np=st->cfg.max_peers, p; uint64_t seq=st->chans[ci].next_seqno;
     for (p=0;p<np;p++){
         dart_wproxy *w=&st->wprox[(size_t)ci*np+p];
-        if (w->used && w->acked_upto < seq) return 0;
+        if (w->used && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
     }
     return 1;
 }
@@ -2570,7 +2650,7 @@ static int dart__lane_work(dart_state *st, uint16_t ci, uint32_t ps, uint64_t no
     uint32_t np=st->cfg.max_peers;
     if (ps==np)
         return ch->multicast && ch->nsubs>0 && ch->mc_sent_upto < ch->next_seqno;
-    if (!st->peer_used[ps]) return 0;
+    if (!st->peer_used[ps] || st->peer_dormant[ps]) return 0;   /* dormant: out of flow control */
     { dart_wproxy *w=&st->wprox[(size_t)ci*np+ps];
       dart_rproxy *r=&st->rprox[(size_t)ci*np+ps];
       int group_mode = ch->multicast && ch->nsubs>0;
@@ -2607,7 +2687,7 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
                 dart__lane_wake(st,ci,ps);
             continue;
         }
-        if (!st->peer_used[ps]) continue;
+        if (!st->peer_used[ps] || st->peer_dormant[ps]) continue;   /* dormant: out of flow control */
         { dart_wproxy *w=&st->wprox[(size_t)ci*np+ps];
           dart_rproxy *r=&st->rprox[(size_t)ci*np+ps];
           int group_mode = ch->multicast && ch->nsubs>0;
@@ -2677,6 +2757,7 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
 
 typedef struct {
     uint8_t  used;
+    uint8_t  dormant;  /* discovery DROPPED it: kept for a same-incarnation resume */
     uint32_t id;
     uint8_t  ip[16];
     uint8_t  ip_len;
@@ -2779,6 +2860,8 @@ static int dart__node_is_local_ip(const uint8_t ip[4]){
     return dart_plat_route_src(d, 7) == d;
 }
 
+static int dart__node_find_id(dart_node *n, uint32_t id);   /* peer table lookups, defined below */
+
 static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
                         const uint8_t *meta, uint16_t mlen){
     dart_node *n = (dart_node*)u; uint16_t i; int slot = -1;
@@ -2790,6 +2873,16 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
             n->peers[i].ip_len = addr->ip_len; n->peers[i].port = addr->port;
             dart_peer_set_frag(n->tr, id, frag);
             if (interest) dart_apply_peer_interest(n->tr, id, interest, ilen);
+            if (n->peers[i].dormant){    /* a DROPPED peer's same incarnation returned: resume */
+                n->peers[i].dormant = 0;
+                dart_peer_resume(n->tr, id);   /* keeps reader position; writer fills any gap */
+                if (n->on_event){
+                    dart_event ev; memset(&ev, 0, sizeof ev);
+                    ev.kind=DART_PEER_UP; ev.peer=id; ev.detail="peer resumed";
+                    memcpy(ev.ip, addr->ip, 16); ev.ip_len=addr->ip_len; ev.port=addr->port;
+                    n->on_event(n->user_data, &ev);
+                }
+            }
             return;
         }
         if (!n->peers[i].used && slot<0) slot=(int)i;
@@ -2808,13 +2901,37 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
         n->on_event(n->user_data, &ev);
     }
 }
-static void dart__node_down(void *u, uint32_t id){
-    dart_node *n=(dart_node*)u; uint16_t i; int found=0;
-    for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; found=1; break; }
-    dart_peer_remove(n->tr, id);
-    if (found && n->on_event){
+static void dart__node_down(void *u, uint32_t id, dart_discovery_down_reason reason){
+    dart_node *n=(dart_node*)u; int i = dart__node_find_id(n, id);
+    if (reason == DART_DISCOVERY_DROP){
+        /* fell silent: keep transport state so a same-incarnation return resumes
+           losslessly; just stop flow-controlling it and tell the app once */
+        if (i>=0 && !n->peers[i].dormant){
+            n->peers[i].dormant = 1;
+            dart_peer_dormant(n->tr, id);
+            if (n->on_event){
+                dart_event ev; memset(&ev, 0, sizeof ev);
+                ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer dropped";
+                n->on_event(n->user_data, &ev);
+            }
+        }
+    } else {   /* GONE: said BYE or its slot was reclaimed; free the transport state */
+        int notify = (i>=0 && !n->peers[i].dormant);   /* active->gone: app not yet told */
+        if (i>=0) n->peers[i].used=0;
+        dart_peer_remove(n->tr, id);
+        if (notify && n->on_event){
+            dart_event ev; memset(&ev, 0, sizeof ev);
+            ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer lost";
+            n->on_event(n->user_data, &ev);
+        }
+    }
+}
+static void dart__node_refused(void *u, const dart_discovery_addr *addr){
+    dart_node *n=(dart_node*)u;
+    if (n->on_event){
         dart_event ev; memset(&ev, 0, sizeof ev);
-        ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer lost";
+        ev.kind=DART_PEER_REFUSED; ev.detail="peer table full (all active)";
+        memcpy(ev.ip, addr->ip, 16); ev.ip_len=addr->ip_len; ev.port=addr->port;
         n->on_event(n->user_data, &ev);
     }
 }
@@ -2977,9 +3094,10 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
           n->mcfd=mfd;
       } }
 
-    dc.disc.on_peer_up   = dart__node_up;
-    dc.disc.on_peer_down = dart__node_down;
-    dc.disc.user         = n;
+    dc.disc.on_peer_up      = dart__node_up;
+    dc.disc.on_peer_down    = dart__node_down;
+    dc.disc.on_peer_refused = dart__node_refused;
+    dc.disc.user            = n;
     /* advertise our frag size + interest list so peers reassemble our messages and
        match topics straight from discovery. The buffer lives in the node. */
     n->disc_meta_len = dart__meta_build(n);

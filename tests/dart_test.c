@@ -724,6 +724,110 @@ static void st_pump(dart_node *a, dart_node *b, int ms){     /* run both nodes *
     while (dart_plat_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
 }
 
+/* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
+static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
+static int      dc_down_reason;
+static void dc_up(void *u, uint32_t id, const dart_discovery_addr *a, const uint8_t *m, uint16_t ml){
+    (void)u;(void)a;(void)m;(void)ml; dc_up_id=id; dc_up_n++;
+}
+static void dc_down(void *u, uint32_t id, dart_discovery_down_reason r){
+    (void)u; dc_down_id=id; dc_down_reason=(int)r; dc_down_n++;
+}
+static void dc_refused(void *u, const dart_discovery_addr *a){ (void)u;(void)a; dc_refused_n++; }
+
+/* craft a v3 announce for sender `uid` (uuid = all uid bytes), meta_len 0 */
+static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
+    size_t off = DART_DISCOVERY_META_OFF;
+    memset(p, 0, off);
+    p[0]='u';p[1]='D';p[2]='S';p[3]='C';
+    p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
+    p[5]=flags;                                   /* 0x01 = BYE (internal flag) */
+    p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
+    memset(p+8, uid, 16);                         /* a distinct uuid per uid */
+    p[24]=(uint8_t)port; p[25]=(uint8_t)(port>>8);
+    /* p[26] self_ip_len = 0 -> receiver uses the src ip */
+    p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
+    p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
+    /* p[off-2..off-1] meta_len = 0 (memset) */
+    return off;
+}
+
+static void disc_core_checks(void){
+    static uint8_t mem[8192];
+    uint8_t buf[DART_DISCOVERY_WIRE_MAX], out[DART_DISCOVERY_WIRE_MAX];
+    uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
+    dart_discovery_config c; dart_discovery_state *st;
+    uint32_t idA, idB; size_t n;
+    memset(&c,0,sizeof c);
+    memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */
+    c.domain_id=99; c.announce_us=1000000; c.timeout_us=1000000; c.max_peers=2;
+    c.on_peer_up=dc_up; c.on_peer_down=dc_down; c.on_peer_refused=dc_refused;
+    st = dart_discovery_init(mem,sizeof mem,&c);
+    ST_CHECK(st!=NULL, "disc-core: init");
+    if (!st) return;
+    dart_discovery_update(st, 1000, out, sizeof out);   /* start */
+
+    /* 1. two peers announce -> two ups, both ACTIVE */
+    dc_up_n=dc_down_n=dc_refused_n=0;
+    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,buf,n,2000); idA=dc_up_id;
+    n=dc_mk(buf,2,0,99,5002,1); dart_discovery_on_datagram(st,sb,4,buf,n,2000); idB=dc_up_id;
+    ST_CHECK(dc_up_n==2 && dart_discovery_peer_count(st)==2,
+             "disc-core: two peers up (ups=%u count=%u)", dc_up_n, dart_discovery_peer_count(st));
+
+    /* 2. a new peer is REFUSED when the table is full of ACTIVE peers */
+    dc_up_n=dc_refused_n=0;
+    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,buf,n,2000);
+    ST_CHECK(dc_refused_n==1 && dc_up_n==0 && dart_discovery_peer_count(st)==2,
+             "disc-core: refuse new peer when full of active (refused=%u up=%u count=%u)",
+             dc_refused_n, dc_up_n, dart_discovery_peer_count(st));
+
+    /* 3. silence past timeout DROPS both (kept, not freed; excluded from count) */
+    dc_down_n=0;
+    dart_discovery_update(st, 2002000, out, sizeof out);
+    ST_CHECK(dc_down_n==2 && dc_down_reason==(int)DART_DISCOVERY_DROP && dart_discovery_peer_count(st)==0,
+             "disc-core: timeout drops both (downs=%u reason=%d count=%u)",
+             dc_down_n, dc_down_reason, dart_discovery_peer_count(st));
+
+    /* 4. same uuid returns -> RESUME under the SAME local_id */
+    dc_up_n=0;
+    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,buf,n,2100000);
+    ST_CHECK(dc_up_n==1 && dc_up_id==idA && dart_discovery_peer_count(st)==1,
+             "disc-core: same uuid resumes same id (up=%u sameid=%d count=%u)",
+             dc_up_n, dc_up_id==idA, dart_discovery_peer_count(st));
+
+    /* 5. a new peer now evicts the oldest DROPPED peer (B) as GONE */
+    dc_down_n=dc_up_n=0;
+    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,buf,n,2100000);
+    ST_CHECK(dc_down_n==1 && dc_down_id==idB && dc_down_reason==(int)DART_DISCOVERY_GONE && dc_up_n==1,
+             "disc-core: new peer evicts oldest dropped as GONE (downs=%u sameid=%d reason=%d up=%u)",
+             dc_down_n, dc_down_id==idB, dc_down_reason, dc_up_n);
+
+    /* 6. BYE is GONE */
+    dc_down_n=0;
+    n=dc_mk(buf,1,0x01,99,5001,1); dart_discovery_on_datagram(st,sa,4,buf,n,2100000);
+    ST_CHECK(dc_down_n==1 && dc_down_id==idA && dc_down_reason==(int)DART_DISCOVERY_GONE
+             && dart_discovery_peer_count(st)==1,
+             "disc-core: BYE is GONE (downs=%u sameid=%d reason=%d count=%u)",
+             dc_down_n, dc_down_id==idA, dc_down_reason, dart_discovery_peer_count(st));
+
+    /* 7. a NEW uuid announcing from an (ip,port) we already hold = that endpoint's
+          process restarted; the predecessor is provably dead (one socket == one
+          process), so it must be evicted (GONE) rather than lingering to shadow the
+          newcomer's data (the writer-restart-with-address-reuse hole). */
+    { uint32_t idP;
+      st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
+      dart_discovery_update(st, 1000, out, sizeof out);
+      dc_up_n=dc_down_n=0;
+      n=dc_mk(buf,7,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,buf,n,3000); idP=dc_up_id;
+      dc_up_n=dc_down_n=0;
+      n=dc_mk(buf,8,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,buf,n,3100);  /* new uuid, same ip:port */
+      ST_CHECK(dc_down_n==1 && dc_down_id==idP && dc_down_reason==(int)DART_DISCOVERY_GONE
+               && dc_up_n==1 && dart_discovery_peer_count(st)==1,
+               "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
+               dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, dart_discovery_peer_count(st));
+    }
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -852,12 +956,14 @@ static int selftest_main(void){
       ST_CHECK(st_gap_calls[ST_CH_DYN] == 0, "dynamic: joins are silent (gaps=%lu)",
                st_gap_calls[ST_CH_DYN]);
 
-      /* 5b. FLAP: the reader rebuilds its transport state for the writer (a
-            one-sided discovery flap: only one side saw the peer go down). The
-            writer's lanes still describe the dead incarnation; the reader
-            epoch in the first ACKNACK must make every writer lane re-join and
-            replay history. Re-applying the writer's interest stands in for the
-            announce that re-discovery would deliver. */
+      /* 5b. FLAP / EPOCH GUARD: the reader rebuilds its transport state for the
+            writer (a one-sided flap: only one side saw the peer go down). The
+            writer's lanes still describe the dead incarnation; the changed reader
+            EPOCH in the first ACKNACK must make every writer lane re-join and replay
+            history. This is the regression guard for the epoch itself (also covers a
+            reader restart that reuses its ip:port before discovery learns the new
+            uuid). Re-applying the writer's interest stands in for the announce that
+            re-discovery would deliver. */
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN];
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
@@ -872,6 +978,34 @@ static int selftest_main(void){
                  st_samples[ST_CH_DYN], s0+ST_DEPTH);
         ST_CHECK(st_gap_calls[ST_CH_DYN] == 0, "flap: recovery is silent (gaps=%lu)",
                  st_gap_calls[ST_CH_DYN]);
+      }
+
+      /* 5c. RESUME: a discovery blip DROPS the peer on both sides without tearing
+            down transport state. Dormant peers leave flow control, so new sends are
+            withheld (the writer won't push to a dropped reader); a same-incarnation
+            resume keeps the reader's deliver position, so the withheld backlog
+            replays with no gap and no dup. This is the resume-model primitive that
+            dart_peer_dormant/dart_peer_resume expose (the node drives them off
+            discovery DROP/return). */
+      st_pump(w, r, 200);
+      { unsigned long s0 = st_samples[ST_CH_DYN], g0 = st_gap_calls[ST_CH_DYN];
+        uint32_t wid = 0, rid = 0; uint16_t k;
+        for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
+        for (k=0;k<w->max_peers;k++) if (w->peers[k].used){ rid = w->peers[k].id; break; }
+        dart_peer_dormant(w->tr, rid);   /* writer drops the reader from flow control */
+        dart_peer_dormant(r->tr, wid);   /* reader stops acking the writer */
+        for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
+        st_pump(w, r, 300);
+        ST_CHECK(st_samples[ST_CH_DYN] == s0, "resume: dormant peer withholds sends (%lu, want %lu)",
+                 st_samples[ST_CH_DYN], s0);
+        dart_peer_resume(w->tr, rid);
+        dart_peer_resume(r->tr, wid);
+        st_pump(w, r, 400);
+        ST_CHECK(st_samples[ST_CH_DYN] == s0+3,
+                 "resume: backlog replays from preserved position (%lu, want %lu)",
+                 st_samples[ST_CH_DYN], s0+3);
+        ST_CHECK(st_gap_calls[ST_CH_DYN] == g0, "resume: lossless, no gap (gaps=%lu, want %lu)",
+                 st_gap_calls[ST_CH_DYN], g0);
       }
 
       dart_node_close(r, 1);
@@ -976,6 +1110,8 @@ static int selftest_main(void){
           dart_node_close(r3,1); dart_node_close(w3,1);
       }
     }
+    disc_core_checks();   /* 8. discovery-core peer lifecycle (sans-IO) */
+
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
 }

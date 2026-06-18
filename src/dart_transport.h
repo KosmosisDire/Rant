@@ -86,11 +86,12 @@ typedef void (*dart_message_fn)(void *user, uint16_t channel, uint32_t from_peer
 /* Everything that isn't message delivery, as one notification (optional). The
  * meaningful dart_event fields depend on .kind. */
 typedef enum {
-    DART_PEER_UP,        /* peer discovered: .peer, .ip/.ip_len/.port (node) */
-    DART_PEER_DOWN,      /* peer lost: .peer (node) */
+    DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port (node) */
+    DART_PEER_DOWN,      /* peer lost or fell silent: .peer (node) */
     DART_MSG_LOST,       /* messages skipped: .channel, .peer, .first .. .first+.count-1 */
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.count = its size), skipped */
-    DART_NAME_COLLISION  /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
+    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
+    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
 } dart_event_kind;
 
 typedef struct {
@@ -145,6 +146,16 @@ uint64_t  dart_channel_identity(const dart_channel_def *def);   /* = dart_topic_
  * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
 void      dart_peer_add   (dart_state *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
 void      dart_peer_remove(dart_state *st, uint32_t peer_id);
+
+/* Discovery-blip lifecycle: a peer that fell silent (discovery timeout) is made
+ * DORMANT instead of removed, so its reader position survives and a same-incarnation
+ * return resumes losslessly. Dormant peers are dropped from flow control (the writer
+ * stops heartbeating/draining them so a dead reader can't stall it; the reader stops
+ * acking them), but their proxies and deliver position are preserved. dart_peer_resume
+ * re-includes the peer and re-reports reader positions so the writer fills any gap.
+ * Both no-op for an unknown peer; the node drives them off discovery DROP/return. */
+void      dart_peer_dormant(dart_state *st, uint32_t peer_id);
+void      dart_peer_resume (dart_state *st, uint32_t peer_id);
 /* Update a peer's advertised UDP fragment size (its announce blob may arrive after
  * first contact). Clamped to [MIN, MAX]; no-op for an unknown peer. */
 void      dart_peer_set_frag(dart_state *st, uint32_t peer_id, uint16_t peer_frag);

@@ -27,12 +27,25 @@ typedef struct {
     uint16_t port;     /* data port, host order */
 } dart_discovery_addr;
 
-/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes).
- * peer_down: gone. peer_id is a local handle, stable only while the peer lives.
- * meta is the peer's opaque payload (NULL if none), valid only for the call. */
+/* Why a peer is going down, so the IO layer can keep transport state across a
+ * transient blip instead of tearing it down on every silence timeout. */
+typedef enum {
+    DART_DISCOVERY_DROP = 0,  /* fell silent past timeout_us: same UUID may return, keep state */
+    DART_DISCOVERY_GONE = 1   /* said BYE, or its slot was reclaimed for a new peer: free state */
+} dart_discovery_down_reason;
+
+/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes, and
+ * when a DROPPED peer returns under the SAME peer_id, so the IO layer can resume).
+ * peer_down: going down; reason says whether the state is worth keeping. peer_id is
+ * a local handle, stable across a DROP/return, freed only on GONE. meta is the
+ * peer's opaque payload (NULL if none), valid only for the call. */
 typedef void (*dart_discovery_peer_up_fn)  (void *user, uint32_t peer_id, const dart_discovery_addr *addr,
                                    const uint8_t *meta, uint16_t meta_len);
-typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id);
+typedef void (*dart_discovery_peer_down_fn)(void *user, uint32_t peer_id,
+                                   dart_discovery_down_reason reason);
+/* A new peer arrived but the table is full of ACTIVE peers (none droppable): the
+ * peer is refused rather than evicting a live conversation. Diagnostic only. */
+typedef void (*dart_discovery_peer_refused_fn)(void *user, const dart_discovery_addr *addr);
 
 typedef struct {
     uint8_t  uuid[16];      /* unique per process instance (regen each boot) */
@@ -47,8 +60,9 @@ typedef struct {
                                updates it at runtime). Must stay valid. <= meta_cap */
     uint16_t meta_len;
     uint16_t meta_cap;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
-    dart_discovery_peer_up_fn   on_peer_up;
-    dart_discovery_peer_down_fn on_peer_down;
+    dart_discovery_peer_up_fn      on_peer_up;
+    dart_discovery_peer_down_fn    on_peer_down;
+    dart_discovery_peer_refused_fn on_peer_refused;  /* optional: table full of active peers */
     void *user;
 } dart_discovery_config;
 

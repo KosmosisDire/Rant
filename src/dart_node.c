@@ -8,6 +8,7 @@
 
 typedef struct {
     uint8_t  used;
+    uint8_t  dormant;  /* discovery DROPPED it: kept for a same-incarnation resume */
     uint32_t id;
     uint8_t  ip[16];
     uint8_t  ip_len;
@@ -110,6 +111,8 @@ static int dart__node_is_local_ip(const uint8_t ip[4]){
     return dart_plat_route_src(d, 7) == d;
 }
 
+static int dart__node_find_id(dart_node *n, uint32_t id);   /* peer table lookups, defined below */
+
 static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
                         const uint8_t *meta, uint16_t mlen){
     dart_node *n = (dart_node*)u; uint16_t i; int slot = -1;
@@ -121,6 +124,16 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
             n->peers[i].ip_len = addr->ip_len; n->peers[i].port = addr->port;
             dart_peer_set_frag(n->tr, id, frag);
             if (interest) dart_apply_peer_interest(n->tr, id, interest, ilen);
+            if (n->peers[i].dormant){    /* a DROPPED peer's same incarnation returned: resume */
+                n->peers[i].dormant = 0;
+                dart_peer_resume(n->tr, id);   /* keeps reader position; writer fills any gap */
+                if (n->on_event){
+                    dart_event ev; memset(&ev, 0, sizeof ev);
+                    ev.kind=DART_PEER_UP; ev.peer=id; ev.detail="peer resumed";
+                    memcpy(ev.ip, addr->ip, 16); ev.ip_len=addr->ip_len; ev.port=addr->port;
+                    n->on_event(n->user_data, &ev);
+                }
+            }
             return;
         }
         if (!n->peers[i].used && slot<0) slot=(int)i;
@@ -139,13 +152,37 @@ static void dart__node_up(void *u, uint32_t id, const dart_discovery_addr *addr,
         n->on_event(n->user_data, &ev);
     }
 }
-static void dart__node_down(void *u, uint32_t id){
-    dart_node *n=(dart_node*)u; uint16_t i; int found=0;
-    for (i=0;i<n->max_peers;i++) if (n->peers[i].used && n->peers[i].id==id){ n->peers[i].used=0; found=1; break; }
-    dart_peer_remove(n->tr, id);
-    if (found && n->on_event){
+static void dart__node_down(void *u, uint32_t id, dart_discovery_down_reason reason){
+    dart_node *n=(dart_node*)u; int i = dart__node_find_id(n, id);
+    if (reason == DART_DISCOVERY_DROP){
+        /* fell silent: keep transport state so a same-incarnation return resumes
+           losslessly; just stop flow-controlling it and tell the app once */
+        if (i>=0 && !n->peers[i].dormant){
+            n->peers[i].dormant = 1;
+            dart_peer_dormant(n->tr, id);
+            if (n->on_event){
+                dart_event ev; memset(&ev, 0, sizeof ev);
+                ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer dropped";
+                n->on_event(n->user_data, &ev);
+            }
+        }
+    } else {   /* GONE: said BYE or its slot was reclaimed; free the transport state */
+        int notify = (i>=0 && !n->peers[i].dormant);   /* active->gone: app not yet told */
+        if (i>=0) n->peers[i].used=0;
+        dart_peer_remove(n->tr, id);
+        if (notify && n->on_event){
+            dart_event ev; memset(&ev, 0, sizeof ev);
+            ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer lost";
+            n->on_event(n->user_data, &ev);
+        }
+    }
+}
+static void dart__node_refused(void *u, const dart_discovery_addr *addr){
+    dart_node *n=(dart_node*)u;
+    if (n->on_event){
         dart_event ev; memset(&ev, 0, sizeof ev);
-        ev.kind=DART_PEER_DOWN; ev.peer=id; ev.detail="peer lost";
+        ev.kind=DART_PEER_REFUSED; ev.detail="peer table full (all active)";
+        memcpy(ev.ip, addr->ip, 16); ev.ip_len=addr->ip_len; ev.port=addr->port;
         n->on_event(n->user_data, &ev);
     }
 }
@@ -308,9 +345,10 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
           n->mcfd=mfd;
       } }
 
-    dc.disc.on_peer_up   = dart__node_up;
-    dc.disc.on_peer_down = dart__node_down;
-    dc.disc.user         = n;
+    dc.disc.on_peer_up      = dart__node_up;
+    dc.disc.on_peer_down    = dart__node_down;
+    dc.disc.on_peer_refused = dart__node_refused;
+    dc.disc.user            = n;
     /* advertise our frag size + interest list so peers reassemble our messages and
        match topics straight from discovery. The buffer lives in the node. */
     n->disc_meta_len = dart__meta_build(n);
