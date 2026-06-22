@@ -47,16 +47,12 @@ struct dart_node {
     /* zero-fragment same-host path: lazy per-size-class segments (see dart_shm.h) */
     uint8_t        shm_cap;       /* 1 = an allocator is set, so SHM is usable */
     uint8_t        shm_host[16];  /* our host uuid (advertised; same-host check) */
-    uint64_t       shm_base;      /* segment id base; low 3 bits carry the size class */
+    uint64_t       shm_base;      /* per-node segment id base; low 19 bits = (channel<<3)|class */
     dart_message_fn shm_user_on_message;  /* the app's real callback (we wrap it) */
     dart_alloc_fn  shm_alloc;     /* one-copy receive scratch (== cfg.allocator) */
     void          *shm_scratch; uint32_t shm_scratch_cap;
-    void          *shm_pool[DART_SHM_N_CLASSES];   /* our outgoing pools (NULL = not yet created) */
-    uint8_t       *shm_pool_mem;  /* arena: N_CLASSES * dart_shm_state_bytes */
-    uint32_t       shm_free[DART_SHM_N_CLASSES][DART_SHM_CHUNKS_PER_CLASS];  /* free-chunk stacks */
-    uint8_t        shm_nfree[DART_SHM_N_CLASSES];
-    uint16_t      *shm_slot;      /* [nchan*keepmax] 0xFFFF=none else (class<<8)|chunk */
-    uint16_t       shm_keepmax;
+    void         **shm_pool;      /* [nchan*N_CLASSES] our (channel,class) segments (NULL = not created) */
+    uint8_t       *shm_pool_mem;  /* arena: nchan * N_CLASSES * dart_shm_state_bytes */
     uint16_t       shm_nchan;
     uint64_t      *shm_rseg;      /* [rmax] attached reader-segment ids (0 = empty) */
     uint8_t       *shm_rpool_mem; /* [rmax * dart_shm_state_bytes] */
@@ -125,24 +121,23 @@ static uint16_t dart__node_meta_cap(const dart_node_config *cfg){
 }
 
 #ifdef DART_SHM
-/* largest keep_last across channels (the per-channel SHM slot-binding stride) */
-static uint16_t dart__node_keepmax(const dart_node_config *cfg){
-    uint16_t i, m = 1;
-    for (i=0;i<cfg->n_channels;i++){ uint16_t k = cfg->channels[i].qos.keep_last; if (!k) k=1; if (k>m) m=k; }
-    return m;
+/* reader-pool cache capacity: a same-host peer publishes on its channels, one segment
+ * each, so size to peers x channels (clamped to the u16 the cache index uses) */
+static uint16_t dart__node_shm_rmax(uint16_t mp, uint16_t nch){
+    uint32_t r = (uint32_t)mp * (nch ? nch : 1u) * DART_SHM_N_CLASSES;
+    return (uint16_t)(r > 0xFFFFu ? 0xFFFFu : r);
 }
-/* reader-pool cache capacity: a peer may publish at several size classes */
-static uint16_t dart__node_shm_rmax(uint16_t mp){ return (uint16_t)(mp * DART_SHM_N_CLASSES); }
-/* arena bytes for the SHM bookkeeping (handles + caches + slot map; the segments
- * themselves are OS-mapped, lazily, outside the arena) */
+/* arena bytes for the SHM bookkeeping (per-channel pool ptrs + handles + locked class,
+ * plus the reader caches; the segments themselves are OS-mapped, lazily, outside it) */
 static size_t dart__node_shm_bytes(const dart_node_config *cfg, uint16_t mp){
     size_t sb = dart_shm_state_bytes();
-    uint16_t keepmax = dart__node_keepmax(cfg), nch = cfg->n_channels, rmax = dart__node_shm_rmax(mp);
+    uint32_t np = (uint32_t)cfg->n_channels * DART_SHM_N_CLASSES;   /* (channel,class) segments */
+    uint16_t rmax = dart__node_shm_rmax(mp, cfg->n_channels);
     size_t s = 0;
-    s += ((size_t)DART_SHM_N_CLASSES*sb + 15u)&~(size_t)15u;   /* our pool handles */
-    s += ((size_t)nch*keepmax*2u + 15u)&~(size_t)15u;         /* slot binding (u16) */
-    s += ((size_t)rmax*8u + 15u)&~(size_t)15u;                /* reader segment ids */
-    s += ((size_t)rmax*sb + 15u)&~(size_t)15u;                /* reader pool handles */
+    s += ((size_t)np*sizeof(void*) + 15u)&~(size_t)15u;      /* (channel,class) pool ptr array */
+    s += ((size_t)np*sb + 15u)&~(size_t)15u;                 /* (channel,class) pool handles */
+    s += ((size_t)rmax*8u + 15u)&~(size_t)15u;               /* reader segment ids */
+    s += ((size_t)rmax*sb + 15u)&~(size_t)15u;               /* reader pool handles */
     return s;
 }
 #endif
@@ -323,37 +318,34 @@ static void dart__shm_name(char *buf, uint64_t seg){
     for (i=15;i>=0;i--) buf[k++] = hx[(seg >> (4*i)) & 0xF];
     buf[k] = 0;
 }
-/* lazily create our outgoing pool for size class k; fill its free-list. NULL on fail. */
-static dart_shm_pool *dart__shm_our_pool(dart_node *n, uint32_t k){
-    dart_shm_config c; uint8_t *mem; uint32_t i;
-    if (n->shm_pool[k]) return (dart_shm_pool*)n->shm_pool[k];
+/* lazily create our per-channel segment: chunk_bytes = the channel's locked size class,
+ * n_chunks = its keep_last, so history slot i binds chunk i (no free list). NULL on fail. */
+static dart_shm_pool *dart__shm_chan_pool(dart_node *n, uint16_t ch, uint32_t k, uint16_t keep_last){
+    dart_shm_config c; uint8_t *mem; uint64_t seg; size_t idx;
+    if (k >= DART_SHM_N_CLASSES) return NULL;
+    idx = (size_t)ch * DART_SHM_N_CLASSES + k;
+    if (n->shm_pool[idx]) return (dart_shm_pool*)n->shm_pool[idx];
     memset(&c, 0, sizeof c);
-    c.segment_id = n->shm_base | k;
-    dart__shm_name(c.name, c.segment_id);
+    seg = n->shm_base | ((uint64_t)ch << 3) | (uint64_t)k;   /* low 3 bits class, next 16 channel */
+    c.segment_id = seg;
+    dart__shm_name(c.name, seg);
     c.chunk_bytes = dart_shm_class_bytes(k);
-    c.n_chunks = DART_SHM_CHUNKS_PER_CLASS;
-    mem = n->shm_pool_mem + (size_t)k * dart_shm_state_bytes();
-    n->shm_pool[k] = dart_shm_create(mem, &c);
-    if (n->shm_pool[k]){
-        n->shm_nfree[k] = 0;
-        for (i=0;i<DART_SHM_CHUNKS_PER_CLASS;i++) n->shm_free[k][n->shm_nfree[k]++] = i;
-    }
-    return (dart_shm_pool*)n->shm_pool[k];
+    c.n_chunks = keep_last ? keep_last : 1u;
+    mem = n->shm_pool_mem + idx * dart_shm_state_bytes();
+    n->shm_pool[idx] = dart_shm_create(mem, &c);
+    return (dart_shm_pool*)n->shm_pool[idx];
 }
 /* lazily attach a peer's segment by id (class is in the low bits); cache it. */
 static dart_shm_pool *dart__shm_reader_pool(dart_node *n, uint64_t seg){
-    uint16_t i, slot = 0xFFFF; dart_shm_config c; uint32_t k; uint8_t *mem; size_t sb;
+    uint16_t i, slot = 0xFFFF; dart_shm_config c; uint8_t *mem; size_t sb;
     sb = dart_shm_state_bytes();
     for (i=0;i<n->shm_rmax;i++){
         if (n->shm_rseg[i]==seg) return (dart_shm_pool*)(n->shm_rpool_mem + (size_t)i*sb);
         if (n->shm_rseg[i]==0 && slot==0xFFFF) slot = i;
     }
     if (slot==0xFFFF) return NULL;                         /* cache full */
-    k = (uint32_t)(seg & DART_SHM_CLASS_MASK);
-    if (k >= DART_SHM_N_CLASSES) return NULL;
     memset(&c, 0, sizeof c);
-    c.segment_id = seg; dart__shm_name(c.name, seg);
-    c.chunk_bytes = dart_shm_class_bytes(k); c.n_chunks = DART_SHM_CHUNKS_PER_CLASS;
+    c.segment_id = seg; dart__shm_name(c.name, seg);        /* attach maps whole + reads geometry */
     mem = n->shm_rpool_mem + (size_t)slot*sb;
     if (!dart_shm_attach(mem, &c)) return NULL;
     n->shm_rseg[slot] = seg;
@@ -446,9 +438,9 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     if (n->shm_cap){
         dart_plat_host_uuid(n->shm_host);
         if (!dart_plat_random(&n->shm_base, sizeof n->shm_base)) n->shm_base = dart_plat_pid();
-        n->shm_base = (n->shm_base & ~(uint64_t)DART_SHM_CLASS_MASK) | ((uint64_t)dart_plat_pid() << 8);
-        n->shm_base &= ~(uint64_t)DART_SHM_CLASS_MASK;     /* low 3 bits reserved for the class */
-        if (n->shm_base == 0) n->shm_base = 0x10u;
+        n->shm_base ^= (uint64_t)dart_plat_pid() << 32;    /* fold in pid for cross-process uniqueness */
+        n->shm_base &= ~(((uint64_t)1u << 19) - 1u);       /* low 19 bits: 3 class + 16 channel index */
+        if (n->shm_base == 0) n->shm_base = (uint64_t)1u << 19;
         n->shm_user_on_message = cfg->on_message;
         n->shm_alloc = cfg->allocator;
         tc.on_message = dart__node_on_message;
@@ -468,15 +460,14 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     p += tr_sz;
 #ifdef DART_SHM
     {   size_t sb = dart_shm_state_bytes();
-        uint16_t keepmax = dart__node_keepmax(cfg), nch = cfg->n_channels;
-        uint16_t rmax = dart__node_shm_rmax(mp); uint32_t i;
-        n->shm_keepmax = keepmax; n->shm_nchan = nch; n->shm_rmax = rmax;
-        n->shm_pool_mem = p;  p += ((size_t)DART_SHM_N_CLASSES*sb + 15u)&~(size_t)15u;
-        n->shm_slot = (uint16_t*)p; p += ((size_t)nch*keepmax*2u + 15u)&~(size_t)15u;
-        n->shm_rseg = (uint64_t*)p; p += ((size_t)rmax*8u + 15u)&~(size_t)15u;
-        n->shm_rpool_mem = p; p += ((size_t)rmax*sb + 15u)&~(size_t)15u;
-        for (i=0;i<DART_SHM_N_CLASSES;i++){ n->shm_pool[i]=NULL; n->shm_nfree[i]=0; }
-        for (i=0;i<(uint32_t)nch*keepmax;i++) n->shm_slot[i]=0xFFFF;
+        uint32_t np = (uint32_t)cfg->n_channels * DART_SHM_N_CLASSES;
+        uint16_t rmax = dart__node_shm_rmax(mp, cfg->n_channels); uint32_t i;
+        n->shm_nchan = cfg->n_channels; n->shm_rmax = rmax;
+        n->shm_pool = (void**)p;     p += ((size_t)np*sizeof(void*) + 15u)&~(size_t)15u;
+        n->shm_pool_mem = p;         p += ((size_t)np*sb + 15u)&~(size_t)15u;
+        n->shm_rseg = (uint64_t*)p;  p += ((size_t)rmax*8u + 15u)&~(size_t)15u;
+        n->shm_rpool_mem = p;        p += ((size_t)rmax*sb + 15u)&~(size_t)15u;
+        for (i=0;i<np;i++) n->shm_pool[i]=NULL;
         for (i=0;i<rmax;i++) n->shm_rseg[i]=0;
     }
 #endif
@@ -641,34 +632,27 @@ int dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len)
         n->backpressure_accum_n++;
     }
 #ifdef DART_SHM
-    if (n->shm_cap){
-        /* free the SHM chunk bound to the slot we are about to overwrite (the
-           transport only reuses a slot after ack/evict, so this release is safe) --
-           done for inline sends too, so a slot transitioning SHM->inline is released */
-        uint16_t slot = dart_channel_hist_head(n->tr, channel);
-        size_t si = (size_t)channel*n->shm_keepmax + slot;
-        uint16_t cur = (si < (size_t)n->shm_nchan*n->shm_keepmax) ? n->shm_slot[si] : 0xFFFF;
-        if (cur != 0xFFFF){ uint32_t oc=cur>>8, ock=cur&0xFFu;
-                            if (oc<DART_SHM_N_CLASSES) n->shm_free[oc][n->shm_nfree[oc]++]=ock;
-                            n->shm_slot[si]=0xFFFF; }
-        /* eligible (all readers same-host SHM) and it fits a class -> publish via SHM */
-        if (len>0 && dart_writer_shm_eligible(n->tr, channel)){
-            uint32_t k = dart_shm_class_for((uint32_t)len);
-            if (k < DART_SHM_N_CLASSES){
-                dart_shm_pool *pool = dart__shm_our_pool(n, k);
-                if (pool && n->shm_nfree[k] > 0){
-                    uint32_t chunk = n->shm_free[k][--n->shm_nfree[k]];
-                    void *cp = dart_shm_chunk(pool, chunk, NULL);
-                    dart_shm_desc d; uint8_t desc[DART_SHM_DESC_WIRE];
-                    memcpy(cp, data, len);                       /* one-copy write into shm */
-                    dart_shm_stamp(pool, chunk, (uint32_t)len, &d);
-                    dart_shm_desc_encode(&d, desc);
-                    if (dart_send_shm(n->tr, channel, cp, len, desc, dart_plat_now_us())==0){
-                        n->shm_slot[si] = (uint16_t)((k<<8)|chunk);   /* bind chunk to the slot */
-                        n->shm_tx++;
-                        return 0;
-                    }
-                    n->shm_free[k][n->shm_nfree[k]++] = chunk;   /* send_shm failed: give it back */
+    if (n->shm_cap && len>0 && channel < n->shm_nchan && dart_writer_shm_eligible(n->tr, channel)){
+        uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
+        /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
+           same-sized traffic reuses a single pre-sized segment; without it each message
+           uses its own size class's segment, created on demand. Per channel either way. */
+        uint32_t hint = q ? (q->shm_max_bytes ? q->shm_max_bytes : q->max_message_bytes) : 0u;
+        uint32_t k = dart_shm_class_for(hint ? hint : (uint32_t)len);
+        /* fits its class (with a hint, the hinted class) -> publish via SHM; chunk index =
+           the history slot this send will occupy, so chunk i binds slot i (no free list) */
+        if (k < DART_SHM_N_CLASSES && (uint32_t)len <= dart_shm_class_bytes(k)){
+            dart_shm_pool *pool = dart__shm_chan_pool(n, channel, k, keep_last);
+            uint16_t slot = dart_channel_hist_head(n->tr, channel);
+            void *cp = pool ? dart_shm_chunk(pool, slot, NULL) : NULL;
+            if (cp){
+                dart_shm_desc d; uint8_t desc[DART_SHM_DESC_WIRE];
+                memcpy(cp, data, len);                       /* one-copy write into shm */
+                dart_shm_stamp(pool, slot, (uint32_t)len, &d);
+                dart_shm_desc_encode(&d, desc);
+                if (dart_send_shm(n->tr, channel, cp, len, desc, dart_plat_now_us())==0){
+                    n->shm_tx++;
+                    return 0;
                 }
             }
         }
@@ -719,9 +703,9 @@ void dart_node_close(dart_node *n, int send_bye){
     if (n->tr) dart_destroy(n->tr);     /* free hook-allocated dynamic buffers */
 #ifdef DART_SHM
     if (n->shm_cap){
-        size_t sb = dart_shm_state_bytes(); uint32_t k; uint16_t i;
-        for (k=0;k<DART_SHM_N_CLASSES;k++)
-            if (n->shm_pool[k]) dart_shm_detach((dart_shm_pool*)n->shm_pool[k]);   /* unlinks ours */
+        size_t sb = dart_shm_state_bytes(); uint32_t i, np = (uint32_t)n->shm_nchan * DART_SHM_N_CLASSES;
+        for (i=0;i<np;i++)
+            if (n->shm_pool[i]) dart_shm_detach((dart_shm_pool*)n->shm_pool[i]);   /* unlinks ours */
         for (i=0;i<n->shm_rmax;i++)
             if (n->shm_rseg[i]) dart_shm_detach((dart_shm_pool*)(n->shm_rpool_mem + (size_t)i*sb));
         if (n->shm_scratch) n->shm_alloc(n->user_data, n->shm_scratch, 0);

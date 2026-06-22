@@ -94,26 +94,29 @@ dart_shm_pool *dart_shm_create(void *pool_mem, const dart_shm_config *cfg){
 
 dart_shm_pool *dart_shm_attach(void *pool_mem, const dart_shm_config *cfg){
     struct dart_shm_pool *p = (struct dart_shm_pool*)pool_mem;
-    uint32_t cb = cfg->chunk_bytes ? cfg->chunk_bytes : DART_SHM_CHUNK_BYTES;
-    uint32_t nc = cfg->n_chunks    ? cfg->n_chunks    : DART_SHM_CHUNKS;
-    uint32_t stride; size_t total; void *handle = NULL, *base; uint8_t ours[16];
+    uint32_t cb, nc, stride; size_t map_bytes = 0, expect;
+    void *handle = NULL, *base; uint8_t ours[16];
     if (!p || !cfg) return NULL;
-    dart__shm_geom(cb, nc, &stride, &total);
-    base = dart_plat_shm_attach(cfg->name, total, &handle);
+    /* map the whole OS object; its geometry (chunk_bytes/n_chunks) comes from the
+       header the writer stamped, so the reader needs to know nothing up front --
+       cfg's chunk_bytes/n_chunks are create-only. */
+    base = dart_plat_shm_attach(cfg->name, &map_bytes, &handle);
     if (!base) return NULL;
     memset(p, 0, sizeof *p);
-    p->base = base; p->handle = handle; p->map_bytes = total;
+    p->base = base; p->handle = handle; p->map_bytes = map_bytes;
     p->hdr = (dart_shm_seg_hdr*)base;
-    p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
-    p->chunk_bytes = cb; p->n_chunks = nc; p->stride = stride; p->is_creator = 0;
     dart_plat_host_uuid(ours);
-    /* reject a stale/foreign/mismatched segment -> caller falls back to UDP */
+    cb = p->hdr->chunk_bytes; nc = p->hdr->n_chunks;
+    dart__shm_geom(cb, nc, &stride, &expect);
+    /* reject a stale/foreign/mismatched/truncated segment -> caller falls back to UDP */
     if (p->hdr->magic != DART_SHM_MAGIC || p->hdr->version != DART_SHM_VERSION ||
-        p->hdr->chunk_bytes != cb || p->hdr->n_chunks != nc ||
-        memcmp(p->hdr->owner_host, ours, 16) != 0){
-        dart_plat_shm_detach(base, total, handle, 0);
+        memcmp(p->hdr->owner_host, ours, 16) != 0 ||
+        cb == 0 || nc == 0 || expect > map_bytes){
+        dart_plat_shm_detach(base, map_bytes, handle, 0);
         return NULL;
     }
+    p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
+    p->chunk_bytes = cb; p->n_chunks = nc; p->stride = stride; p->is_creator = 0;
     return p;
 }
 

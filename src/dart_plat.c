@@ -318,6 +318,7 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
 #ifdef DART_SHM
 #ifndef _WIN32
   #include <sys/mman.h>            /* shm_open/mmap; fcntl/unistd/stdlib already in */
+  #include <sys/stat.h>            /* fstat: a reader learns a segment's size from the OS */
 #endif
 
 /* 128-bit non-cryptographic id from a byte string: two FNV-1a passes with distinct
@@ -365,12 +366,13 @@ void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
     *handle = h;
     return base;
 }
-void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
-    void *base;
+    void *base; MEMORY_BASIC_INFORMATION mbi;
     if (!h) return NULL;
-    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, bytes);
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 0);   /* 0 = the whole section */
     if (!base){ CloseHandle(h); return NULL; }
+    if (out_bytes) *out_bytes = VirtualQuery(base, &mbi, sizeof mbi) ? (size_t)mbi.RegionSize : 0;
     *handle = h;
     return base;
 }
@@ -399,13 +401,15 @@ void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
     *handle = nm;
     return base;
 }
-void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle){
+void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     int fd = shm_open(name, O_RDWR, 0600);
-    void *base;
+    void *base; struct stat st;
     if (fd < 0) return NULL;
-    base = mmap(NULL, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (fstat(fd, &st) != 0 || st.st_size <= 0){ close(fd); return NULL; }
+    base = mmap(NULL, (size_t)st.st_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (base == MAP_FAILED) return NULL;
+    if (out_bytes) *out_bytes = (size_t)st.st_size;
     *handle = NULL;                             /* a reader never unlinks */
     return base;
 }

@@ -72,6 +72,10 @@ typedef struct {
     uint32_t repair_delay_us;    /* reliable: reader's delay before requesting a resend. 0 = 20ms */
     uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow reader before
                                     evicting un-acked history. 0 = none (pure KEEP_LAST) */
+    uint32_t shm_max_bytes;      /* same-host SHM: pin this channel to one size class big enough for
+                                    this many bytes, so same-sized traffic reuses one pre-sized
+                                    segment (a larger message falls back to UDP). 0 = each message
+                                    uses its own size class's segment, created on demand. */
 } dart_qos;
 
 /* A channel (topic). Cross-peer identity is the name (64-bit hash); the LOCAL

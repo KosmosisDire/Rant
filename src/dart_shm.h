@@ -77,7 +77,8 @@ extern "C" {
 
 /* Size-class ladder (iceoryx-style): class k chunk payload = BASE << (k*SHIFT).
  * Defaults 64K,256K,1M,4M,16M,64M,256M (k=0..6) at SHIFT=2. The node lazily creates
- * one segment per class and routes by the class in the low 3 bits of segment_id. */
+ * one segment PER CHANNEL at that channel's size class (n_chunks = its keep_last), and
+ * encodes the class in the low 3 bits of segment_id, the channel in the next 16. */
 #ifndef DART_SHM_CLASS_BASE
 #define DART_SHM_CLASS_BASE  (64u*1024u)
 #endif
@@ -86,9 +87,6 @@ extern "C" {
 #endif
 #ifndef DART_SHM_N_CLASSES
 #define DART_SHM_N_CLASSES   7u
-#endif
-#ifndef DART_SHM_CHUNKS_PER_CLASS
-#define DART_SHM_CHUNKS_PER_CLASS 4u
 #endif
 #define DART_SHM_CLASS_MASK  0x7u               /* class lives in the low 3 bits of segment_id */
 
@@ -146,8 +144,8 @@ size_t dart_shm_state_bytes(void);
 typedef struct {
     char     name[DART_SHM_NAME_MAX];  /* writer makes it from its uuid; reader gets it via meta */
     uint64_t segment_id;
-    uint32_t chunk_bytes;              /* 0 => DART_SHM_CHUNK_BYTES */
-    uint32_t n_chunks;                 /* 0 => DART_SHM_CHUNKS */
+    uint32_t chunk_bytes;              /* create only (0 => DART_SHM_CHUNK_BYTES); attach reads it from the header */
+    uint32_t n_chunks;                 /* create only (0 => DART_SHM_CHUNKS); attach reads it from the header */
 } dart_shm_config;
 
 /* Writer. create maps a fresh segment (dart_plat_shm_create); NULL => stay on UDP. */
@@ -159,8 +157,10 @@ dart_shm_pool *dart_shm_create(void *pool_mem, const dart_shm_config *cfg);
 void *dart_shm_chunk(dart_shm_pool *p, uint32_t chunk, uint32_t *out_cap);
 void  dart_shm_stamp(dart_shm_pool *p, uint32_t chunk, uint32_t len, dart_shm_desc *out);
 
-/* Reader. attach maps an existing segment by name; validates magic/version/
- * chunk_bytes/owner_host==ours. NULL => fall back to the UDP path. read resolves a
+/* Reader. attach maps an existing segment WHOLE by name and reads its geometry
+ * (chunk_bytes/n_chunks) from the header the writer stamped, so the reader needs to
+ * know nothing about its size; validates magic/version/owner_host==ours and that the
+ * geometry fits the mapped object. NULL => fall back to the UDP path. read resolves a
  * descriptor to an in-segment pointer and verifies generation still matches (else
  * recycled -> NULL, reliable repair covers it). No release call: the reader's
  * transport ACK of the range is the release. */
@@ -183,7 +183,7 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
  *
  * dart_plat (add behind the existing Windows/POSIX split):
  *   void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
- *   void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+ *   void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
  *   void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
  *   void  dart_plat_host_uuid(uint8_t out[16]);             (boot id / machine guid)
  *   uint64_t dart_plat_atomic_load64 / _store64(volatile uint64_t*[, v]);  (generation)

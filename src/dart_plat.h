@@ -99,12 +99,13 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
  * lacking shm support builds and links without them. (POSIX: shm_open may want
  * -lrt on older glibc.) */
 #ifdef DART_SHM
-/* create maps a FRESH named segment of `bytes` RW (zero-filled); attach maps an
- * EXISTING one (bytes must match the creator). *handle receives an OS handle that
- * detach needs. Return the mapped base, or NULL on failure. Names: POSIX "/name"
- * form, Windows a plain object name; dart_shm derives one from the node uuid. */
+/* create maps a FRESH named segment of `bytes` RW (zero-filled). attach maps an
+ * EXISTING one WHOLE: the reader needn't know its size, it discovers it from the OS
+ * and reports it via *out_bytes (which detach then needs). *handle receives an OS
+ * handle that detach needs. Return the mapped base, or NULL on failure. Names: POSIX
+ * "/name" form, Windows a plain object name; dart_shm derives one from the node uuid. */
 void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
-void *dart_plat_shm_attach(const char *name, size_t bytes, void **handle);
+void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
 /* unmap; the creator passes unlink_it=1 to also remove the OS object. */
 void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
 /* stable per-host id (Linux machine-id, else a hostname hash) for the same-host

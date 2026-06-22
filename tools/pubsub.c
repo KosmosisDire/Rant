@@ -148,7 +148,9 @@ static void on_event(void *u, const dart_event *ev){
         fprintf(stderr, "[warn] topic hash collision %016llx: ours=\"%s\" (match refused)\n",
                 (unsigned long long)ev->first, ev->detail ? ev->detail : "");
         break;
-    case DART_MSG_LOST: break;   /* reliable: repaired; best-effort: expected */
+    case DART_MSG_LOST:
+        fprintf(stderr, "[sub] lost a message on ch %u from peer %u\n", ev->channel, ev->peer);
+        break;
     }
 }
 
@@ -359,7 +361,7 @@ int main(int argc, char **argv){
             .catch_up           = 2,        /* late subscribers see recent history */
             .max_message_bytes  = dynamic ? 0u : (uint32_t)cap,
             .heartbeat_us       = 200000,   /* 200 ms */
-            .repair_delay_us    = 5000,     /* 5 ms  */
+            .repair_delay_us    = 300,
             .backpressure_wait_us= 5000000,  /* 5s flow control: pace the publisher to
                                                the reader so a multi-chunk file is
                                                delivered before KEEP_LAST evicts
