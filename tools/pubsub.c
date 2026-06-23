@@ -297,10 +297,14 @@ static int publish_stream(dart_node *n, uint16_t cid, FILE *f, int wait_ms, size
  * a backpressure-blocked stretch came back owing dozens of ticks and (a) bursted
  * them into the 4-deep history and (b) made the once-a-second print fire every few
  * REAL seconds while labelling the accumulated count as "/s" -- which is what made
- * a true ~6 msg/s look like "64/s". One-send-per-iteration + resync-to-now (drop
- * missed ticks, never burst) + a wall-clock-normalised rate readout fix both.
- * When the bottleneck is bandwidth there is nothing to "catch up" anyway: the wire
- * is already full and extra sends would only be backpressured or evicted.
+ * a true ~6 msg/s look like "64/s". One-send-per-iteration + bounded catch-up
+ * (recover sub-RESYNC_LAG_US jitter so the target rate holds, but resync past a long
+ * block so we never burst a backlog) + a wall-clock-normalised rate readout fix both.
+ * The unbounded "drop every missed tick" rebase this replaced lost ~(lag*hz) messages
+ * for EVERY jitter event -- the once-a-second status print alone capped 2000 Hz at
+ * ~1998 -- because a tick was only ever dropped, never made up. When the bottleneck
+ * is bandwidth there is nothing to "catch up" anyway: the wire is already full and a
+ * long block resyncs, so extra sends would only be backpressured or evicted.
  * Never returns. */
 static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t len,
                          double hz, int wait_ms){
@@ -311,6 +315,13 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
     dart_repair_stats_t rep, last_rep;                     /* reliable-repair throughput (writer side) */
     memset(&last_rep, 0, sizeof last_rep);
     if (period_us == 0) period_us = 1;                 /* clamp absurd rates to ~1 MHz */
+    /* Lag below this is jitter (the status print, a scheduler preempt): we leave the
+       grid in the past and fire the missed ticks back-to-back over the next few spin
+       iterations, so the rate holds. Lag above it is a real reliable-backpressure
+       block (seconds): resync instead, so a multi-second stall never bursts a backlog
+       into the 4-deep history. Sits well above expected jitter (~1-10ms) and well
+       below a backpressure block. */
+    const uint64_t RESYNC_LAG_US = 50000;              /* 50 ms */
     if (!wait_for_sub(n, cid, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
     printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
@@ -321,7 +332,9 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
             if (dart_node_send(n, cid, data, len) >= 0) sent++;  /* may block in backpressure */
             next += period_us;
             now = dart_plat_now_us();                  /* a blocking send moved the clock */
-            if (next < now) next = now + period_us;    /* fell behind: drop missed ticks, no burst */
+            if (next + RESYNC_LAG_US < now) next = now; /* far behind = real block: resync, no burst.
+                                                           a small lag is left in the past so the next
+                                                           spin iterations catch it up one send each */
         }
         /* sleep only when there's >=1ms of real slack before the next tick; otherwise
            spin with a non-blocking poll so high rates aren't capped at ~1 kHz */
