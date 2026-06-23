@@ -683,6 +683,15 @@ void dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *w
     if (waited_sends) *waited_sends = n->backpressure_accum_n;
 }
 
+void dart_node_repair_stats(dart_node *n, uint16_t channel, dart_repair_stats_t *out){
+    dart_repair_stats(n->tr, channel, out);
+}
+
+int dart_node_reader_progress(dart_node *n, uint16_t channel, uint32_t peer,
+                              uint64_t *base_seqno, uint32_t *have, uint32_t *total){
+    return dart_reader_progress(n->tr, channel, peer, base_seqno, have, total);
+}
+
 #ifdef DART_SHM
 void dart_node_shm_stats(dart_node *n, uint32_t *sent, uint32_t *recv){
     if (sent) *sent = n->shm_tx;

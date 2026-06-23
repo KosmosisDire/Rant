@@ -242,6 +242,38 @@ int       dart_send_drained(dart_state *st, uint16_t channel);
  * goes nowhere; a one-shot publisher can poll this before sending. */
 int       dart_writer_match_count(dart_state *st, uint16_t channel);
 
+/* Cumulative reliable-repair counters for a channel, summed over its peer/reader
+ * proxies (writer side = this node publishing; reader side = subscribing). Always on;
+ * each field is a plain bump on a path that already runs. The per-second deltas of
+ * frags_resent (writer) and non-dup frags_recv (reader) are repair throughput; a flat
+ * HOL snapshot (dart_reader_progress) with rising nacks_sent is a wedged stream. */
+typedef struct {
+    /* writer side (node as publisher) */
+    uint64_t nacks_recv;     /* ACKNACKs received that requested missing fragments (nbits>0) */
+    uint64_t frags_resent;   /* DATA fragments retransmitted to satisfy a NACK */
+    uint64_t frags_sent;     /* all DATA fragments sent (new + repair); repair fraction = resent/sent */
+    /* reader side (node as subscriber) */
+    uint64_t nacks_sent;     /* repair requests we emitted (ACKNACK with nbits>0) */
+    uint64_t frags_recv;     /* all DATA fragments received, including duplicates */
+    uint64_t frags_dup;      /* fragments received that we already held (repair overlap / waste) */
+    uint64_t msgs_skipped;   /* messages given up on (sum of DART_MSG_LOST counts) */
+} dart_repair_stats_t;
+
+/* Fill *out with the channel's cumulative repair counters (zeroed if channel is
+ * out of range). Per-channel aggregate; a per-peer breakdown is a later extension. */
+void      dart_repair_stats(dart_state *st, uint16_t channel, dart_repair_stats_t *out);
+
+/* Head-of-line reassembly snapshot for the in-progress message from `peer` on
+ * `channel` (the message at the reader's deliver_upto). Returns 1 and fills the
+ * out-params if a message is mid-reassembly, else 0.
+ *   base_seqno : first seqno of the in-progress message (= reader deliver_upto)
+ *   have       : fragments received so far (popcount of the reassembly bitmap)
+ *   total      : fragments the message needs
+ * `have` rising across calls => repair is crawling forward; flat => wedged. Any
+ * out-pointer may be NULL. Wrapped as dart_node_reader_progress. */
+int       dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
+                            uint64_t *base_seqno, uint32_t *have, uint32_t *total);
+
 /* Feed a received datagram, tagged with the peer it came from. */
 void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *dg, size_t len,
                          uint64_t now_us);

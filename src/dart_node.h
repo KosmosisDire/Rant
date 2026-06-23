@@ -65,6 +65,14 @@ int      dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role);
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *waited_sends);
+/* Cumulative reliable-repair counters for a channel (see dart_repair_stats_t). The
+ * per-second deltas are repair throughput; *out is zeroed for an unknown channel. */
+void     dart_node_repair_stats(dart_node *n, uint16_t channel, dart_repair_stats_t *out);
+/* Head-of-line reassembly snapshot for the in-progress message from `peer` on
+ * `channel`: returns 1 + fills base_seqno/have/total if one is mid-reassembly, else 0.
+ * `have` rising across calls = repair crawling; flat = wedged. Any pointer may be NULL. */
+int      dart_node_reader_progress(dart_node *n, uint16_t channel, uint32_t peer,
+                            uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 /* Pump until every reader has acked all messages on channel, or timeout_ms elapses.
  * Returns 1 if drained, 0 on timeout. Call before close so a burst isn't cut by the BYE. */
 int      dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms);

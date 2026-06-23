@@ -563,6 +563,38 @@ int       dart_send_drained(dart_state *st, uint16_t channel);
  * goes nowhere; a one-shot publisher can poll this before sending. */
 int       dart_writer_match_count(dart_state *st, uint16_t channel);
 
+/* Cumulative reliable-repair counters for a channel, summed over its peer/reader
+ * proxies (writer side = this node publishing; reader side = subscribing). Always on;
+ * each field is a plain bump on a path that already runs. The per-second deltas of
+ * frags_resent (writer) and non-dup frags_recv (reader) are repair throughput; a flat
+ * HOL snapshot (dart_reader_progress) with rising nacks_sent is a wedged stream. */
+typedef struct {
+    /* writer side (node as publisher) */
+    uint64_t nacks_recv;     /* ACKNACKs received that requested missing fragments (nbits>0) */
+    uint64_t frags_resent;   /* DATA fragments retransmitted to satisfy a NACK */
+    uint64_t frags_sent;     /* all DATA fragments sent (new + repair); repair fraction = resent/sent */
+    /* reader side (node as subscriber) */
+    uint64_t nacks_sent;     /* repair requests we emitted (ACKNACK with nbits>0) */
+    uint64_t frags_recv;     /* all DATA fragments received, including duplicates */
+    uint64_t frags_dup;      /* fragments received that we already held (repair overlap / waste) */
+    uint64_t msgs_skipped;   /* messages given up on (sum of DART_MSG_LOST counts) */
+} dart_repair_stats_t;
+
+/* Fill *out with the channel's cumulative repair counters (zeroed if channel is
+ * out of range). Per-channel aggregate; a per-peer breakdown is a later extension. */
+void      dart_repair_stats(dart_state *st, uint16_t channel, dart_repair_stats_t *out);
+
+/* Head-of-line reassembly snapshot for the in-progress message from `peer` on
+ * `channel` (the message at the reader's deliver_upto). Returns 1 and fills the
+ * out-params if a message is mid-reassembly, else 0.
+ *   base_seqno : first seqno of the in-progress message (= reader deliver_upto)
+ *   have       : fragments received so far (popcount of the reassembly bitmap)
+ *   total      : fragments the message needs
+ * `have` rising across calls => repair is crawling forward; flat => wedged. Any
+ * out-pointer may be NULL. Wrapped as dart_node_reader_progress. */
+int       dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
+                            uint64_t *base_seqno, uint32_t *have, uint32_t *total);
+
 /* Feed a received datagram, tagged with the peer it came from. */
 void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *dg, size_t len,
                          uint64_t now_us);
@@ -649,6 +681,14 @@ int      dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role);
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *waited_sends);
+/* Cumulative reliable-repair counters for a channel (see dart_repair_stats_t). The
+ * per-second deltas are repair throughput; *out is zeroed for an unknown channel. */
+void     dart_node_repair_stats(dart_node *n, uint16_t channel, dart_repair_stats_t *out);
+/* Head-of-line reassembly snapshot for the in-progress message from `peer` on
+ * `channel`: returns 1 + fills base_seqno/have/total if one is mid-reassembly, else 0.
+ * `have` rising across calls = repair crawling; flat = wedged. Any pointer may be NULL. */
+int      dart_node_reader_progress(dart_node *n, uint16_t channel, uint32_t peer,
+                            uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 /* Pump until every reader has acked all messages on channel, or timeout_ms elapses.
  * Returns 1 if drained, 0 on timeout. Call before close so a burst isn't cut by the BYE. */
 int      dart_node_drain(dart_node *n, uint16_t channel, int timeout_ms);
@@ -2066,6 +2106,8 @@ typedef struct {
     uint64_t  mc_sent_upto;
     uint64_t  mc_hb_next_us;
     uint32_t  mc_hb_count;
+    /* cumulative repair counters, summed over proxies; read via dart_repair_stats */
+    dart_repair_stats_t rep;
 } dart_channel;
 
 struct dart_state {
@@ -2756,6 +2798,32 @@ int dart_writer_match_count(dart_state *st, uint16_t channel){
     return cnt;
 }
 
+void dart_repair_stats(dart_state *st, uint16_t channel, dart_repair_stats_t *out){
+    dart_channel *ch = dart_chan(st, channel, NULL);
+    if (!out) return;
+    if (ch) *out = ch->rep;
+    else memset(out, 0, sizeof *out);
+}
+
+int dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
+                         uint64_t *base_seqno, uint32_t *have, uint32_t *total){
+    int ci; dart_channel *ch = dart_chan(st, channel, &ci);
+    int ps; dart_rproxy *r;
+    if (!ch) return 0;
+    ps = dart_peer_slot(st, peer);
+    if (ps < 0) return 0;
+    r = &st->rprox[(size_t)ci*st->cfg.max_peers+ps];
+    if (!r->used || !r->asm_active) return 0;            /* no message mid-reassembly */
+    if (base_seqno) *base_seqno = r->deliver_upto;       /* HOL message starts here */
+    if (total)      *total      = r->asm_count;
+    if (have){
+        uint32_t i, c=0;
+        for (i=0;i<r->asm_count;i++) if (dart_bget(r->frag_bm,i)) c++;
+        *have = c;
+    }
+    return 1;
+}
+
 #ifdef DART_SHM
 /* 1 if the channel is non-multicast, has >=1 matched reader, and EVERY matched
  * (non-dormant) reader is SHM-capable -> the node may publish this message via SHM.
@@ -2860,9 +2928,11 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
             dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             return;
         }
-        if (r->started)                                 /* best-effort / first contact: adopt */
+        if (r->started){                                /* best-effort / first contact: adopt */
             dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
                         r->deliver_upto, base - r->deliver_upto, "message(s) lost");
+            ch->rep.msgs_skipped += base - r->deliver_upto;
+        }
         r->deliver_upto = base;
     }
     r->started = 1; r->asm_active = 0;
@@ -2886,6 +2956,7 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
         if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
             dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
                         base, count, "SHM descriptor unresolvable (check DART_SHM_* build constants)");
+            ch->rep.msgs_skipped += count;
             r->shm_fail = 0;
             r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
             r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
@@ -2931,9 +3002,11 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
             return;
         }
         /* first contact or best-effort: adopt the writer's position */
-        if (r->started)                                  /* best-effort loss */
+        if (r->started){                                 /* best-effort loss */
             dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],
                         r->deliver_upto, base - r->deliver_upto, "message(s) lost");
+            ch->rep.msgs_skipped += base - r->deliver_upto;
+        }
         r->deliver_upto = base; r->asm_active=0;
     }
     r->started = 1;   /* writer engaged: position adopted */
@@ -2968,6 +3041,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           memset(r->frag_bm,0,bmbytes);
       }
       if (count!=r->asm_count) return;                  /* inconsistent, ignore */
+      ch->rep.frags_recv++;                             /* every accepted DATA fragment, dups included */
       if (!dart_bget(r->frag_bm,frag)){
           /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
              a peer staying within [MIN, MAX] keeps count <= maxfrags, so the bitmap
@@ -2975,7 +3049,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           uint32_t off=(uint32_t)frag*st->peer_frag[pslot];
           if (off+plen<=bufcap) memcpy(r->asm_buf+off,pay,plen);
           dart_bset(r->frag_bm,frag);
-      }
+      } else ch->rep.frags_dup++;                        /* already held: repair overlap / waste */
     }
     /* complete? in order -> deliver, advance, ack NOW: an in-order cumulative ack
        has no gap to coalesce, so repair_delay would only stall the writer's window.
@@ -3007,6 +3081,7 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
     if (r->started && first > r->deliver_upto){
         dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto, "message(s) lost");
+        ch->rep.msgs_skipped += first - r->deliver_upto;
         r->deliver_upto=first; r->asm_active=0;
 #ifdef DART_SHM
         r->shm_fail=0;          /* skipped past the stuck descriptor: fresh count */
@@ -3051,6 +3126,7 @@ static void dart_writer_nack(dart_state *st, int ci, int pslot, const uint8_t *p
     }
     if (base > w->acked_upto) w->acked_upto=base;
     if (nbits>0 && bm!=0){
+        ch->rep.nacks_recv++;                           /* a repair request, not a bare ack */
         w->has_nack=1; w->nack_base=base; w->nack_bits=bm;
         dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
     }
@@ -3141,6 +3217,7 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
                     if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;   /* bit stays set */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
+                    ch->rep.frags_sent++; ch->rep.frags_resent++;   /* retransmit to satisfy a NACK */
                     return dart_mk_data(out,alias,seqno,s,fi,dart__sbuf(s)+off,plen);
                     }
                 } else {
@@ -3180,6 +3257,7 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
             uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
             if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;
             w->sent_upto++;
+            ch->rep.frags_sent++;                       /* new data (unicast lane) */
             return dart_mk_data(out,alias,seqno,s,fi,dart__sbuf(s)+off,plen);
             }
         } else {
@@ -3234,6 +3312,7 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
               nbits=(uint16_t)(rem<DART_NACK_WINDOW?rem:DART_NACK_WINDOW); }
         }
     }
+    if (nbits>0) ch->rep.nacks_sent++;                  /* a repair request, not a bare cumulative ack */
     return dart_mk_nack(out,alias,base,nbits,bm,r->epoch,
                       r->started ? 0 : (uint8_t)DART_F_UNPOS);
 }
@@ -3269,6 +3348,7 @@ static size_t dart_group_emit(dart_state *st, int ci, uint8_t *out, size_t cap, 
             uint16_t plen=(uint16_t)((s->len-off)<st->frag?(s->len-off):st->frag);
             if (cap < (size_t)(s->count==1?13u:21u)+(size_t)plen) return 0;
             ch->mc_sent_upto++;
+            ch->rep.frags_sent++;                       /* new data, once for the whole group */
             return dart_mk_data(out,alias,seqno,s,fi,s->buf+off,plen);
         } else {
             /* overran the ring: skip the group past it with an HB (first = our floor) */
@@ -4263,6 +4343,15 @@ int dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role){
 void dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *waited_sends){
     if (waited_us)    *waited_us    = n->backpressure_accum_us;
     if (waited_sends) *waited_sends = n->backpressure_accum_n;
+}
+
+void dart_node_repair_stats(dart_node *n, uint16_t channel, dart_repair_stats_t *out){
+    dart_repair_stats(n->tr, channel, out);
+}
+
+int dart_node_reader_progress(dart_node *n, uint16_t channel, uint32_t peer,
+                              uint64_t *base_seqno, uint32_t *have, uint32_t *total){
+    return dart_reader_progress(n->tr, channel, peer, base_seqno, have, total);
 }
 
 #ifdef DART_SHM

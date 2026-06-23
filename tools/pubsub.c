@@ -68,6 +68,7 @@ static unsigned long      g_rx_msgs  = 0;  /* messages received since the last r
 static unsigned long long g_rx_bytes = 0;  /* bytes received since the last rate report */
 static unsigned long long g_rx_total = 0;  /* cumulative messages delivered to on_message */
 static unsigned long long g_lost     = 0;  /* cumulative messages the transport reported lost */
+static uint32_t           g_last_peer = 0; /* most recent sender: the peer we snapshot HOL progress for */
 
 #ifdef _WIN32
 static DWORD WINAPI pump_thread(LPVOID arg){
@@ -114,6 +115,7 @@ static size_t parse_size(const char *s){
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     (void)u;
     g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* accounting for sub --rate (the loop prints it) */
+    g_last_peer = from;                              /* the loop snapshots this writer's HOL progress */
     if (g_outfile){                       /* --file: each message OVERWRITES the file */
         rewind(g_outfile);                /* back to the start, not appending */
         fwrite(data, 1, len, g_outfile);
@@ -289,6 +291,8 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
     uint64_t next, now, last_print;
     unsigned long sent = 0, last_sent = 0;
     uint64_t bp_us = 0; uint32_t bp_n = 0, last_bp_n = 0;   /* backpressure engagement */
+    dart_repair_stats_t rep, last_rep;                     /* reliable-repair throughput (writer side) */
+    memset(&last_rep, 0, sizeof last_rep);
     if (period_us == 0) period_us = 1;                 /* clamp absurd rates to ~1 MHz */
     if (!wait_for_sub(n, cid, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
@@ -313,7 +317,16 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
                    (sent - last_sent)/secs, sent,
                    dart_node_writer_match_count(n, cid),
                    bp_n - last_bp_n, bp_us/1e6);
-            last_sent = sent; last_print = now; last_bp_n = bp_n;
+            dart_node_repair_stats(n, cid, &rep);   /* only meaningful for a reliable channel */
+            if (rep.nacks_recv != last_rep.nacks_recv || rep.frags_resent != last_rep.frags_resent){
+                uint64_t d_sent = rep.frags_sent - last_rep.frags_sent;
+                uint64_t d_res  = rep.frags_resent - last_rep.frags_resent;
+                printf("[pub]   repair: nacks +%llu/s  resent +%llu/s  (%.1f%% of TX)\n",
+                       (unsigned long long)(rep.nacks_recv - last_rep.nacks_recv),
+                       (unsigned long long)d_res,
+                       d_sent ? 100.0*(double)d_res/(double)d_sent : 0.0);
+            }
+            last_sent = sent; last_print = now; last_bp_n = bp_n; last_rep = rep;
         }
     }
 }
@@ -460,6 +473,7 @@ int main(int argc, char **argv){
                over the real elapsed interval; stay quiet until the first message
                so an idle wait isn't a stream of 0/s lines. */
             uint64_t last = dart_plat_now_us(); int seen = 0;
+            dart_repair_stats_t rep, last_rep; memset(&last_rep, 0, sizeof last_rep);
             for (;;){
                 uint64_t now, dt;
                 dart_node_poll(n, 2);
@@ -469,7 +483,20 @@ int main(int argc, char **argv){
                     if (g_rx_msgs) seen = 1;
                     if (seen) printf("[sub] %.0f msg/s, %.1f KB/s (total %llu, lost %llu)\n",
                                      g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs, g_rx_total, g_lost);
-                    g_rx_msgs = 0; g_rx_bytes = 0; last = now;
+                    dart_node_repair_stats(n, cid, &rep);   /* only meaningful for a reliable channel */
+                    if (seen && (rep.nacks_sent != last_rep.nacks_sent
+                                 || rep.frags_recv != last_rep.frags_recv)){
+                        uint64_t base; uint32_t have, total;
+                        int hol = dart_node_reader_progress(n, cid, g_last_peer, &base, &have, &total);
+                        printf("[sub]   repair: nacks +%llu/s  recv +%llu/s  dup +%llu/s",
+                               (unsigned long long)(rep.nacks_sent - last_rep.nacks_sent),
+                               (unsigned long long)(rep.frags_recv - last_rep.frags_recv),
+                               (unsigned long long)(rep.frags_dup  - last_rep.frags_dup));
+                        if (hol) printf("  | HOL msg base=%llu have=%u/%u",
+                                        (unsigned long long)base, have, total);
+                        printf("  skipped=%llu\n", (unsigned long long)rep.msgs_skipped);
+                    }
+                    g_rx_msgs = 0; g_rx_bytes = 0; last = now; last_rep = rep;
                 }
             }
             /* not reached */
