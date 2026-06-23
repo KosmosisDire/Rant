@@ -66,6 +66,8 @@ static FILE        *g_outfile = NULL; /* sub --file: received messages saved her
 static int         g_rate_mode = 0;   /* sub --rate: report measured rate, no per-msg lines */
 static unsigned long      g_rx_msgs  = 0;  /* messages received since the last rate report */
 static unsigned long long g_rx_bytes = 0;  /* bytes received since the last rate report */
+static unsigned long long g_rx_total = 0;  /* cumulative messages delivered to on_message */
+static unsigned long long g_lost     = 0;  /* cumulative messages the transport reported lost */
 
 #ifdef _WIN32
 static DWORD WINAPI pump_thread(LPVOID arg){
@@ -111,7 +113,7 @@ static size_t parse_size(const char *s){
  * payload as text is fine. ch is the channel's local handle (its index). */
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     (void)u;
-    g_rx_msgs++; g_rx_bytes += len;       /* accounting for sub --rate (the loop prints it) */
+    g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* accounting for sub --rate (the loop prints it) */
     if (g_outfile){                       /* --file: each message OVERWRITES the file */
         rewind(g_outfile);                /* back to the start, not appending */
         fwrite(data, 1, len, g_outfile);
@@ -138,7 +140,11 @@ static void on_event(void *u, const dart_event *ev){
             fprintf(stderr, "[disc +%ldms] peer %u discovered\n", now_ms()-g_start_ms, ev->peer);
         break;
     case DART_PEER_DOWN:
-        fprintf(stderr, "[disc +%ldms] peer %u lost\n", now_ms()-g_start_ms, ev->peer);
+        /* detail distinguishes "peer dropped" (silent past timeout -> dormant, OUT of
+           flow control, state kept) from "peer lost" (GONE). Dormancy disengages
+           backpressure, so surface which one it is. */
+        fprintf(stderr, "[disc +%ldms] peer %u DOWN: %s\n", now_ms()-g_start_ms, ev->peer,
+                ev->detail ? ev->detail : "lost");
         break;
     case DART_MSG_TOO_BIG:
         fprintf(stderr, "[sub] dropped a %llu-byte message on ch %u from peer %u: exceeds --max; raise --max\n",
@@ -149,8 +155,14 @@ static void on_event(void *u, const dart_event *ev){
                 (unsigned long long)ev->first, ev->detail ? ev->detail : "");
         break;
     case DART_MSG_LOST:
-        fprintf(stderr, "[sub] lost a message on ch %u from peer %u\n", ev->channel, ev->peer);
+        g_lost += ev->count;
+        fprintf(stderr, "[sub] LOST %llu msg(s) on ch %u from peer %u (seqno %llu..%llu); cumulative lost %llu\n",
+                (unsigned long long)ev->count, ev->channel, ev->peer,
+                (unsigned long long)ev->first,
+                (unsigned long long)(ev->first + ev->count - 1),
+                g_lost);
         break;
+    default: break;   /* DART_PEER_REFUSED etc. */
     }
 }
 
@@ -257,35 +269,51 @@ static int publish_stream(dart_node *n, uint16_t cid, FILE *f, int wait_ms, size
 
 /* --rate: repeat the same payload at hz until interrupted (Ctrl-C). A long-
  * lived publisher, so we settle for the first subscriber but publish even if
- * none showed: late joiners are caught by discovery + KEEP_LAST history. Paced
- * on dart_plat_now_us so it stays on the microsecond grid; a send that falls behind
- * resyncs to now rather than bursting to catch up (capped per tick regardless).
- * Polls the node every tick so discovery and reliable repair keep running.
+ * none showed: late joiners are caught by discovery + KEEP_LAST history.
+ *
+ * Paced on dart_plat_now_us. We fire at most ONE message per loop and re-read the
+ * clock right after the send, because dart_node_send blocks here while reliable
+ * backpressure waits on a slow reader -- a blocking send can consume seconds. The
+ * old loop sampled the clock once and fired "every due tick" in an inner burst, so
+ * a backpressure-blocked stretch came back owing dozens of ticks and (a) bursted
+ * them into the 4-deep history and (b) made the once-a-second print fire every few
+ * REAL seconds while labelling the accumulated count as "/s" -- which is what made
+ * a true ~6 msg/s look like "64/s". One-send-per-iteration + resync-to-now (drop
+ * missed ticks, never burst) + a wall-clock-normalised rate readout fix both.
+ * When the bottleneck is bandwidth there is nothing to "catch up" anyway: the wire
+ * is already full and extra sends would only be backpressured or evicted.
  * Never returns. */
 static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t len,
                          double hz, int wait_ms){
     uint64_t period_us = (uint64_t)(1000000.0/hz + 0.5);
-    uint64_t next, now, last_sec;
+    uint64_t next, now, last_print;
     unsigned long sent = 0, last_sent = 0;
+    uint64_t bp_us = 0; uint32_t bp_n = 0, last_bp_n = 0;   /* backpressure engagement */
     if (period_us == 0) period_us = 1;                 /* clamp absurd rates to ~1 MHz */
     if (!wait_for_sub(n, cid, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
     printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
-    now = dart_plat_now_us(); next = now; last_sec = now/1000000u;
+    now = dart_plat_now_us(); next = now; last_print = now;
     for (;;){
-        int burst = 0;
         now = dart_plat_now_us();
-        while (now >= next && burst < 64){             /* fire every due tick, capped */
-            if (dart_node_send(n, cid, data, len) >= 0) sent++;
-            next += period_us; burst++;
+        if (now >= next){
+            if (dart_node_send(n, cid, data, len) >= 0) sent++;  /* may block in backpressure */
+            next += period_us;
+            now = dart_plat_now_us();                  /* a blocking send moved the clock */
+            if (next < now) next = now + period_us;    /* fell behind: drop missed ticks, no burst */
         }
-        if (next < now) next = now + period_us;        /* fell behind: resync, no flood */
-        /* sleep only when there's >=1ms of slack before the next tick; otherwise
+        /* sleep only when there's >=1ms of real slack before the next tick; otherwise
            spin with a non-blocking poll so high rates aren't capped at ~1 kHz */
-        dart_node_poll(n, (next - now >= 1000) ? 1 : 0);
-        if (now/1000000u != last_sec){                 /* once a second: effective Hz */
-            printf("[pub] sent %lu (%lu/s)\n", sent, sent - last_sent);
-            last_sent = sent; last_sec = now/1000000u;
+        dart_node_poll(n, (next > now && next - now >= 1000) ? 1 : 0);
+        now = dart_plat_now_us();
+        if (now - last_print >= 1000000u){             /* >=1 REAL second: true rate + flow control */
+            double secs = (now - last_print)/1e6;
+            dart_node_backpressure_stats(n, &bp_us, &bp_n);
+            printf("[pub] %.1f msg/s (sent %lu)  matched=%d  bp_waits=+%u  bp_total=%.2fs\n",
+                   (sent - last_sent)/secs, sent,
+                   dart_node_writer_match_count(n, cid),
+                   bp_n - last_bp_n, bp_us/1e6);
+            last_sent = sent; last_print = now; last_bp_n = bp_n;
         }
     }
 }
@@ -439,8 +467,8 @@ int main(int argc, char **argv){
                 if (dt >= 1000000u){
                     double secs = dt/1000000.0;
                     if (g_rx_msgs) seen = 1;
-                    if (seen) printf("[sub] %.0f msg/s, %.1f KB/s\n",
-                                     g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs);
+                    if (seen) printf("[sub] %.0f msg/s, %.1f KB/s (total %llu, lost %llu)\n",
+                                     g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs, g_rx_total, g_lost);
                     g_rx_msgs = 0; g_rx_bytes = 0; last = now;
                 }
             }

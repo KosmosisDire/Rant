@@ -20,6 +20,8 @@
 #define DART_HB_SWEEP_US 25000u /* the timer sweep covers every lane this often */
 #endif
 
+#define DART__NO_DEADLINE ((uint64_t)-1)  /* next_deadline_us: nothing armed */
+
 /* little-endian pack helpers */
 static void dart_w16(uint8_t*p,uint16_t v){p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);}
 static void dart_w32(uint8_t*p,uint32_t v){p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);p[2]=(uint8_t)(v>>16);p[3]=(uint8_t)(v>>24);}
@@ -174,8 +176,18 @@ struct dart_state {
     uint32_t     destq_head, destq_n;
     uint32_t     sweep;       /* timer-sweep lane cursor */
     uint64_t     sweep_t;     /* clock position the sweep has paid for */
+    uint64_t     next_deadline_us; /* earliest armed timer (ack/HB); caps the poll wait.
+                                      Lower bound fed at arm sites, made exact by a full sweep.
+                                      DART__NO_DEADLINE = nothing deferred (the hot path). */
     uint32_t     repoch;      /* reader-epoch counter (starts at 1; 0 = none) */
 };
+
+/* a deferred timer was (re)armed for absolute time t: keep next_deadline as the
+   minimum so the poll wakes when it is due. t==0 is an immediate ack (woken via the
+   active-lane queue, not a timer), so it is ignored here. */
+static void dart__deadline(dart_state *st, uint64_t t){
+    if (t && t < st->next_deadline_us) st->next_deadline_us = t;
+}
 
 /* bump allocator (shared by required_memory and init) */
 typedef struct { uint8_t *base; size_t off; size_t cap; int oom; } dart_bump;
@@ -256,6 +268,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
           if (st->frag > DART_FRAG_PAYLOAD_MAX) st->frag = DART_FRAG_PAYLOAD_MAX;
           st->peer_pub_bm=pb; st->peer_sub_bm=sb; st->bmlen=bml;
           st->chans=ch; st->wprox=wp; st->rprox=rp; st->repoch=1;
+          st->next_deadline_us=DART__NO_DEADLINE;
           st->lane_next=ln; st->lane_inq=li;
           st->dest_head=dh; st->dest_tail=dt; st->dest_inq=di; st->destq=dq;
           st->alias_ci=ac; st->amax=mids;
@@ -384,7 +397,7 @@ static void dart__dest_push(dart_state *st, uint32_t d){
 }
 
 /* enqueue a lane that just got sendable work; idempotent while queued */
-static void dart__lane_wake(dart_state *st, uint16_t ci, uint32_t ps){
+static void dart__lane_enq(dart_state *st, uint16_t ci, uint32_t ps){
     uint32_t np=st->cfg.max_peers, lanes=np+1u;
     uint32_t L=(uint32_t)ci*lanes+ps;
     uint32_t d=(ps<np) ? ps : np+(uint32_t)ci;
@@ -394,6 +407,17 @@ static void dart__lane_wake(dart_state *st, uint16_t ci, uint32_t ps){
     else st->lane_next[st->dest_tail[d]]=L;
     st->dest_tail[d]=L;
     dart__dest_push(st, d);
+}
+
+/* enqueue, and track a freshly-armed reader ack/NACK deadline for the poll cap. Used
+ * by the arm sites (ack_due_us is future or 0); the sweep enqueues due lanes with
+ * dart__lane_enq instead, since it recomputes next_deadline itself. */
+static void dart__lane_wake(dart_state *st, uint16_t ci, uint32_t ps){
+    if (ps < st->cfg.max_peers){
+        dart_rproxy *r=&st->rprox[(size_t)ci*st->cfg.max_peers+ps];
+        if (r->used && r->ack_pending) dart__deadline(st, r->ack_due_us);
+    }
+    dart__lane_enq(st, ci, ps);
 }
 
 /* unicast join seqno: head minus qos.catch_up cached samples (reliable only) */
@@ -875,12 +899,13 @@ static size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t n
  * hole" signal that replaces GAP: reader_hb advances deliver_upto to `first`, so a
  * superseded NACK or a ring-overrun push answers with an HB whose first = our floor.
  * Resets the idle-HB timer so we don't double-send. */
-static size_t dart_writer_hb(dart_channel *ch, dart_wproxy *w, uint16_t alias,
+static size_t dart_writer_hb(dart_state *st, dart_channel *ch, dart_wproxy *w, uint16_t alias,
                              uint8_t *out, size_t cap, uint64_t now){
     uint64_t first = ch->have_first ? ch->first_seqno : 0;
     if (cap < 23) return 0;
     if (w->acked_upto > first) first = w->acked_upto;   /* fresh reader adopts join point */
     w->hb_next_us = now + ch->qos.heartbeat_us;
+    dart__deadline(st, w->hb_next_us);                  /* wake to send the next idle HB */
     w->hb_count++;
     return dart_mk_hb(out, alias, first, ch->next_seqno-1, w->hb_count);
 }
@@ -923,8 +948,8 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
         if (ok){
             r->shm_fail = 0;
             r->deliver_upto = base + count;
-            if (reliable){                              /* ack AFTER delivery (zero-copy invariant) */
-                r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+            if (reliable){                  /* ack now, AFTER delivery (zero-copy invariant) */
+                r->ack_pending=1; r->ack_due_us=0;      /* in-order: no gap to coalesce */
                 dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             }
             return;
@@ -1023,7 +1048,9 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           dart_bset(r->frag_bm,frag);
       }
     }
-    /* complete? */
+    /* complete? in order -> deliver, advance, ack NOW: an in-order cumulative ack
+       has no gap to coalesce, so repair_delay would only stall the writer's window.
+       A partial sample keeps the deferred timer; ack stays armed after delivery. */
     { uint16_t i; int done=1;
       for (i=0;i<count;i++) if(!dart_bget(r->frag_bm,i)){done=0;break;}
       if (done){
@@ -1032,17 +1059,11 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           r->deliver_upto = base + count;
           r->asm_active=0;
       }
-    }
-    /* FUTURE OPT: the ack is armed AFTER on_message, but for UDP that order is
-       INCIDENTAL -- the payload is already copied into r->asm_buf, which the reader
-       owns, so the ack could be armed BEFORE delivery to release the writer's
-       backpressure sooner. Safe to reorder for UDP and for one-copy SHM (reader still
-       owns a copy). DO NOT reorder for zero-copy SHM: there on_message reads the
-       writer's chunk in place and MUST finish before the ack, else the chunk can be
-       recycled under the user. Gate any ack-early change on the delivery mode. */
-    if (reliable){
-        r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
-        dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+      if (reliable){
+          r->ack_pending=1;
+          r->ack_due_us = done ? 0 : now + ch->qos.repair_delay_us;
+          dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+      }
     }
 }
 
@@ -1202,7 +1223,7 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
                     for (j=0;j<DART_NACK_WINDOW;j++)
                         if (w->nack_base+j < floor) w->nack_bits &= ~(1u<<j);
                     if (w->nack_bits==0) w->has_nack=0;
-                    return dart_writer_hb(ch,w,alias,out,cap,now);
+                    return dart_writer_hb(st,ch,w,alias,out,cap,now);
                 }
             }
         }
@@ -1237,7 +1258,7 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
                cached with an HB (its first = our floor) */
             if (cap < 23) return 0;
             w->sent_upto=(ch->have_first?ch->first_seqno:ch->next_seqno);
-            return dart_writer_hb(ch,w,alias,out,cap,now);
+            return dart_writer_hb(st,ch,w,alias,out,cap,now);
         }
     }
 
@@ -1246,7 +1267,7 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
        lane goes silent until new data or a (re)subscribe drops acked_upto again. The
        HB advertises from acked_upto so a fresh reader adopts the join point. */
     if (reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
-        return dart_writer_hb(ch,w,alias,out,cap,now);
+        return dart_writer_hb(st,ch,w,alias,out,cap,now);
     return 0;
 }
 
@@ -1325,6 +1346,7 @@ static size_t dart_group_emit(dart_state *st, int ci, uint8_t *out, size_t cap, 
             if (cap < 23) return 0;
             ch->mc_sent_upto=(ch->have_first?ch->first_seqno:ch->next_seqno);
             ch->mc_hb_next_us = now + ch->qos.heartbeat_us;
+            dart__deadline(st, ch->mc_hb_next_us);
             ch->mc_hb_count++;
             return dart_mk_hb(out,alias,(ch->have_first?ch->first_seqno:0),ch->next_seqno-1,ch->mc_hb_count);
         }
@@ -1333,6 +1355,7 @@ static size_t dart_group_emit(dart_state *st, int ci, uint8_t *out, size_t cap, 
         && !dart__group_all_acked(st, ci)){
         if (cap < 23) return 0;
         ch->mc_hb_next_us = now + ch->qos.heartbeat_us;
+        dart__deadline(st, ch->mc_hb_next_us);
         ch->mc_hb_count++;
         return dart_mk_hb(out,alias,(ch->have_first?ch->first_seqno:0),ch->next_seqno-1,ch->mc_hb_count);
     }
@@ -1357,16 +1380,23 @@ static int dart__lane_work(dart_state *st, uint16_t ci, uint32_t ps, uint64_t no
     return 0;
 }
 
-/* clock-driven counterpart of the wake calls: a cursor walks the lane table at a
- * fixed TIME rate (full coverage every DART_HB_SWEEP_US) and wakes lanes whose
- * timers came due. Read-only; cost is bounded by table size per sweep period. */
+/* clock-driven counterpart of the wake calls: a cursor walks the lane table waking
+ * lanes whose timers came due. Two triggers: the amortized backstop (full coverage
+ * every DART_HB_SWEEP_US) and a forced full pass when next_deadline_us comes due, so
+ * a deadline-capped poll that wakes for a timer actually services it. A full pass
+ * also recomputes next_deadline_us exactly (the global min of not-yet-due timers).
+ * Read-only; cost is bounded by table size. */
 static void dart__hb_sweep(dart_state *st, uint64_t now){
     uint32_t np=st->cfg.max_peers, lanes=np+1u;
     uint32_t total=(uint32_t)st->cfg.n_channels*lanes, due, k;
     uint64_t span = now - st->sweep_t;
-    due = (span >= DART_HB_SWEEP_US) ? total
+    int forced = (now >= st->next_deadline_us);    /* a tracked timer is due */
+    int full;
+    uint64_t mind = DART__NO_DEADLINE;             /* earliest not-yet-due timer seen */
+    due = (forced || span >= DART_HB_SWEEP_US) ? total
         : (uint32_t)(span * total / DART_HB_SWEEP_US);
     if (!due) return;              /* sweep_t advances only when lanes are paid */
+    full = (due >= total);         /* covered every lane -> mind is the global minimum */
     st->sweep_t = now;
     for (k=0;k<due;k++){
         uint32_t L=st->sweep, ps=L%lanes;
@@ -1377,20 +1407,29 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
            sub-only node's data channels never advance next_seqno but still owe acks */
         if (ch->qos.reliability!=DART_RELIABLE) continue;
         if (ps==np){
-            if (ch->next_seqno && ch->multicast && ch->nsubs>0 && now>=ch->mc_hb_next_us
-                && !dart__group_all_acked(st,(int)ci))
-                dart__lane_wake(st,ci,ps);
+            if (ch->next_seqno && ch->multicast && ch->nsubs>0 && !dart__group_all_acked(st,(int)ci)){
+                if (now>=ch->mc_hb_next_us) dart__lane_enq(st,ci,ps);
+                else if (ch->mc_hb_next_us < mind) mind = ch->mc_hb_next_us;
+            }
             continue;
         }
         if (!st->peer_used[ps] || st->peer_dormant[ps]) continue;   /* dormant: out of flow control */
         { dart_wproxy *w=&st->wprox[(size_t)ci*np+ps];
           dart_rproxy *r=&st->rprox[(size_t)ci*np+ps];
           int group_mode = ch->multicast && ch->nsubs>0;
-          if ((w->used && !group_mode && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
-           || (r->used && r->ack_pending && now>=r->ack_due_us))
-              dart__lane_wake(st,ci,ps);
+          if (w->used && !group_mode && w->acked_upto < ch->next_seqno){
+              if (now>=w->hb_next_us) dart__lane_enq(st,ci,ps);
+              else if (w->hb_next_us < mind) mind = w->hb_next_us;
+          }
+          if (r->used && r->ack_pending){
+              if (now>=r->ack_due_us) dart__lane_enq(st,ci,ps);
+              else if (r->ack_due_us < mind) mind = r->ack_due_us;
+          }
         }
     }
+    /* a full pass saw every timer: mind is the exact next deadline. Lanes woken above
+       re-arm during emit (dart__deadline) and re-lower it; reader acks just clear. */
+    if (full) st->next_deadline_us = mind;
 }
 
 int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
@@ -1441,4 +1480,8 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
             return 0;    /* work pending but nothing fit: caller's cap too small */
     }
     return 0;
+}
+
+uint64_t dart_next_deadline_us(dart_state *st){
+    return st->next_deadline_us == DART__NO_DEADLINE ? 0 : st->next_deadline_us;
 }

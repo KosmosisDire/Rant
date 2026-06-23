@@ -693,9 +693,11 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
   #include <ws2tcpip.h>
   #include <windows.h>
   #include <bcrypt.h>            /* BCryptGenRandom (CSPRNG) */
+  #include <mmsystem.h>          /* timeBeginPeriod */
   #ifdef _MSC_VER
     #pragma comment(lib, "ws2_32.lib")
     #pragma comment(lib, "bcrypt.lib")
+    #pragma comment(lib, "winmm.lib")
   #endif
   #ifndef SIO_UDP_CONNRESET
   #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
@@ -727,12 +729,22 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
 static int dart__wsa_refs = 0;
 int dart_plat_startup(void){
     WSADATA w;
-    if (dart__wsa_refs == 0 && WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
+    if (dart__wsa_refs == 0){
+        if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
+  #ifndef DART_NO_HIGHRES_TIMER
+        timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
+  #endif
+    }
     dart__wsa_refs++;
     return 1;
 }
 void dart_plat_cleanup(void){
-    if (dart__wsa_refs > 0 && --dart__wsa_refs == 0) WSACleanup();
+    if (dart__wsa_refs > 0 && --dart__wsa_refs == 0){
+  #ifndef DART_NO_HIGHRES_TIMER
+        timeEndPeriod(1);
+  #endif
+        WSACleanup();
+    }
 }
 #else
 int  dart_plat_startup(void){ return 1; }

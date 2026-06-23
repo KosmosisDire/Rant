@@ -596,6 +596,14 @@ int dart_node_poll(dart_node *n, int timeout_ms){
     memset(pfd,0,sizeof pfd);
     pfd[0].fd=n->fd; pfd[0].events=DART_POLLIN;
     if (n->mcfd!=DART_SOCK_BAD){ pfd[1].fd=n->mcfd; pfd[1].events=DART_POLLIN; nf=2; }
+    /* cap the wait at the next internal timer so a due ack/NACK/heartbeat fires on
+       time, not after the full quantum (no traffic to wake us when a writer stalls) */
+    { uint64_t nd = dart_next_deadline_us(n->tr);
+      if (nd){ uint64_t t0 = dart_plat_now_us();
+               uint64_t us = (nd > t0) ? nd - t0 : 0;          /* until the timer */
+               int ms = (us >= (uint64_t)timeout_ms*1000u) ? timeout_ms
+                                                           : (int)((us + 999u)/1000u);
+               if (ms < timeout_ms) timeout_ms = ms; } }       /* round up: no busy-spin */
     if (dart_plat_poll(pfd,nf,timeout_ms) > 0){
         uint64_t rx_deadline = dart_plat_now_us() + DART_RX_BUDGET_US;
         if (pfd[0].revents & DART_POLLIN) dart__node_rx_drain(n, n->fd, rx_deadline);

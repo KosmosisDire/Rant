@@ -251,6 +251,11 @@ void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *dg, s
 int       dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap,
                        size_t *out_len, uint64_t now_us);
 
+/* Absolute us of the next internal timer (deferred ack / NACK / heartbeat), or 0 if
+ * none is pending. Cap a blocking poll at this so a due timer is serviced on time
+ * instead of waiting out the poll quantum or the amortized sweep. */
+uint64_t  dart_next_deadline_us(dart_state *st);
+
 #ifdef __cplusplus
 }
 #endif
