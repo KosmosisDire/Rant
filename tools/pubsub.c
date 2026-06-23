@@ -421,7 +421,7 @@ int main(int argc, char **argv){
             .catch_up           = 2,        /* late subscribers see recent history */
             .max_message_bytes  = dynamic ? 0u : (uint32_t)cap,
             .heartbeat_us       = 200000,   /* 200 ms */
-            .repair_delay_us    = 300,
+            .repair_delay_us    = 2000,
             .backpressure_wait_us= 5000000,  /* 5s flow control: pace the publisher to
                                                the reader so a multi-chunk file is
                                                delivered before KEEP_LAST evicts
