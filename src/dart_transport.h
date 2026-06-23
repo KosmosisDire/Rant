@@ -257,11 +257,23 @@ typedef struct {
     uint64_t frags_recv;     /* all DATA fragments received, including duplicates */
     uint64_t frags_dup;      /* fragments received that we already held (repair overlap / waste) */
     uint64_t msgs_skipped;   /* messages given up on (sum of DART_MSG_LOST counts) */
+    /* repair-arm attribution (diagnostic): each counts a 0->1 arming of the reader's
+       pending-ACK, by what triggered it. arms_data = a DATA/SHM-DATA arrival re-armed
+       it; arms_hb = a heartbeat did. A stall where arms_hb ticks at the heartbeat rate
+       while arms_data is flat means the reader only re-asks on arrivals, not on a timer. */
+    uint64_t arms_data;
+    uint64_t arms_hb;
 } dart_repair_stats_t;
 
 /* Fill *out with the channel's cumulative repair counters (zeroed if channel is
  * out of range). Per-channel aggregate; a per-peer breakdown is a later extension. */
 void      dart_repair_stats(dart_state *st, uint16_t channel, dart_repair_stats_t *out);
+
+/* Writer-side: number of reader lanes on this channel with a pending repair NACK to
+ * service. 0 => the writer has nothing to resend right now (idle for lack of NACKs).
+ * Diagnostic for the backpressure stall (distinguishes "no NACKs" from "resends
+ * dropped"); sampled by the node's in-pump probe. */
+int       dart_repair_pending(dart_state *st, uint16_t channel);
 
 /* Head-of-line reassembly snapshot for the in-progress message from `peer` on
  * `channel` (the message at the reader's deliver_upto). Returns 1 and fills the

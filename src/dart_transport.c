@@ -836,6 +836,15 @@ void dart_repair_stats(dart_state *st, uint16_t channel, dart_repair_stats_t *ou
     else memset(out, 0, sizeof *out);
 }
 
+int dart_repair_pending(dart_state *st, uint16_t channel){
+    int ci; dart_channel *ch = dart_chan(st, channel, &ci);
+    uint32_t np, p; int cnt = 0;
+    if (!ch) return 0;
+    np = st->cfg.max_peers;
+    for (p=0;p<np;p++) if (st->wprox[(size_t)ci*np+p].used && st->wprox[(size_t)ci*np+p].has_nack) cnt++;
+    return cnt;   /* writer lanes with a NACK to service; 0 = nothing to resend right now */
+}
+
 int dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
                          uint64_t *base_seqno, uint32_t *have, uint32_t *total){
     int ci; dart_channel *ch = dart_chan(st, channel, &ci);
@@ -938,6 +947,16 @@ static size_t dart_writer_hb(dart_state *st, dart_channel *ch, dart_wproxy *w, u
     return dart_mk_hb(out, alias, first, ch->next_seqno-1, w->hb_count);
 }
 
+/* diagnostic: attribute each reader NACK-arm (a 0->1 transition of ack_pending) to
+ * its cause -- a DATA/SHM-DATA arrival or a heartbeat. Pure counting, call it right
+ * before any r->ack_pending=1 in the repair paths. During a repair stall's "dead
+ * period" the prediction is arms_hb ticks at the heartbeat rate while arms_data is
+ * flat -- i.e. the reader only re-asks when a packet arrives, never on its own timer.
+ * Read via dart_repair_stats. (Resume/position-report arms are control, not counted.) */
+static void dart__arm(dart_channel *ch, dart_rproxy *r, int is_hb){
+    if (!r->ack_pending){ if (is_hb) ch->rep.arms_hb++; else ch->rep.arms_data++; }
+}
+
 #ifdef DART_SHM
 /* reader side: handle an SHM-DATA submessage. It covers [base, base+count) in one
  * shot (payload is in shared memory), so there is no reassembly -- just ordering,
@@ -955,7 +974,7 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
     if (base > r->deliver_upto){
         if (reliable && r->started){                    /* gap: arm a NACK for the window */
             if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
-            if (!r->ack_pending){ r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us; }
+            if (!r->ack_pending){ dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us; }
             dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             return;
         }
@@ -979,7 +998,7 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
             r->shm_fail = 0;
             r->deliver_upto = base + count;
             if (reliable){                  /* ack now, AFTER delivery (zero-copy invariant) */
-                r->ack_pending=1; r->ack_due_us=0;      /* in-order: no gap to coalesce */
+                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;      /* in-order: no gap to coalesce */
                 dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             }
             return;
@@ -990,10 +1009,10 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
             ch->rep.msgs_skipped += count;
             r->shm_fail = 0;
             r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
-            r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+            dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
         } else if (reliable){                           /* leave the gap, NACK for a re-send */
             if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
-            r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+            dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
         } else {
             r->deliver_upto = base + count;             /* best-effort: no repair, drop it */
         }
@@ -1027,7 +1046,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
                (a busy writer defers HBs and the ring may wrap before one arrives) */
             if (seqno > r->hb_last) r->hb_last = seqno;
             if (!r->ack_pending){       /* keep the oldest due time so arrivals don't postpone it */
-                r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
             }
             dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             return;
@@ -1059,7 +1078,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
                       0, slen, "message exceeds max_message_bytes");
           r->deliver_upto = base + count; r->asm_active = 0;
           if (reliable){
-              r->ack_pending = 1; r->ack_due_us = now + ch->qos.repair_delay_us;
+              dart__arm(ch,r,0); r->ack_pending = 1; r->ack_due_us = now + ch->qos.repair_delay_us;
               dart__lane_wake(st, (uint16_t)ci, (uint32_t)pslot);
           }
           return;
@@ -1094,7 +1113,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           r->asm_active=0;
       }
       if (reliable){
-          r->ack_pending=1;
+          dart__arm(ch,r,0); r->ack_pending=1;
           r->ack_due_us = done ? 0 : now + ch->qos.repair_delay_us;
           dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
       }
@@ -1119,7 +1138,7 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
 #endif
     }
     r->hb_last=last;
-    r->ack_pending=1; r->ack_due_us = now + ch->qos.repair_delay_us;
+    dart__arm(ch,r,1); r->ack_pending=1; r->ack_due_us = now + ch->qos.repair_delay_us;
     dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
 }
 

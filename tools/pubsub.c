@@ -101,6 +101,23 @@ static int parse_ipv4(const char *s, uint8_t out[4]){
     return 0;
 }
 
+/* in-pump probe: the per-second publisher loop is BLOCKED inside dart_node_send for
+ * the whole backpressure wait, so it can't print within a stall. The node calls this
+ * on a ~200ms timer DURING that wait, giving a within-block time series. resent/nacks
+ * are normalised to /s by the sample interval. The key discriminator: resent bursty-
+ * then-flat (with idle ~= polls) => the reader stopped asking [self-quench]; resent
+ * steady while the reader receives nothing => resends are being dropped. To stderr so
+ * it never interleaves with the stdout rate lines. */
+static void pump_probe(void *u, const dart_pump_sample *s){
+    double secs = s->interval_us/1e6;
+    (void)u;
+    fprintf(stderr, "[pub]   in-pump @%.2fs: resent %.0f/s  nacks %.0f/s  idle %u/%u polls\n",
+            s->wait_elapsed_us/1e6,
+            secs>0 ? s->frags_resent/secs : 0.0,
+            secs>0 ? s->nacks_recv/secs   : 0.0,
+            s->polls_idle, s->polls);
+}
+
 /* "4M" / "512k" / "1048576" -> bytes (binary K/M/G suffix). 0 on garbage. */
 static size_t parse_size(const char *s){
     char *end; double v = strtod(s, &end), m = 1.0;
@@ -321,9 +338,11 @@ static void publish_rate(dart_node *n, uint16_t cid, const void *data, size_t le
             if (rep.nacks_recv != last_rep.nacks_recv || rep.frags_resent != last_rep.frags_resent){
                 uint64_t d_sent = rep.frags_sent - last_rep.frags_sent;
                 uint64_t d_res  = rep.frags_resent - last_rep.frags_resent;
-                printf("[pub]   repair: nacks +%llu/s  resent +%llu/s  (%.1f%% of TX)\n",
-                       (unsigned long long)(rep.nacks_recv - last_rep.nacks_recv),
-                       (unsigned long long)d_res,
+                /* normalise by REAL elapsed: a backpressure-blocked second can span many
+                   wall seconds, so a raw delta labelled "/s" overstates the true rate. */
+                printf("[pub]   repair: nacks %.1f/s  resent %.1f/s  (%.1f%% of TX)\n",
+                       (rep.nacks_recv - last_rep.nacks_recv)/secs,
+                       d_res/secs,
                        d_sent ? 100.0*(double)d_res/(double)d_sent : 0.0);
             }
             last_sent = sent; last_print = now; last_bp_n = bp_n; last_rep = rep;
@@ -472,31 +491,42 @@ int main(int argc, char **argv){
             /* Once a second, print the measured receive rate (msg/s and KB/s)
                over the real elapsed interval; stay quiet until the first message
                so an idle wait isn't a stream of 0/s lines. */
-            uint64_t last = dart_plat_now_us(); int seen = 0;
+            uint64_t last = dart_plat_now_us(), rlast = last; int seen = 0;
             dart_repair_stats_t rep, last_rep; memset(&last_rep, 0, sizeof last_rep);
             for (;;){
-                uint64_t now, dt;
+                uint64_t now, dt, rdt;
                 dart_node_poll(n, 2);
-                now = dart_plat_now_us(); dt = now - last;
-                if (dt >= 1000000u){
-                    double secs = dt/1000000.0;
-                    if (g_rx_msgs) seen = 1;
-                    if (seen) printf("[sub] %.0f msg/s, %.1f KB/s (total %llu, lost %llu)\n",
-                                     g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs, g_rx_total, g_lost);
-                    dart_node_repair_stats(n, cid, &rep);   /* only meaningful for a reliable channel */
-                    if (seen && (rep.nacks_sent != last_rep.nacks_sent
-                                 || rep.frags_recv != last_rep.frags_recv)){
+                now = dart_plat_now_us();
+                if (g_rx_msgs) seen = 1;
+                /* fine-grained (~250ms) reader repair series: finer than the 1s rate line
+                   so a within-stall plateau is visible. Deltas normalised to /s, plus the
+                   arm attribution -- during the dead period the prediction is arms_hb ticks
+                   at the heartbeat rate while arms_data is flat (reader only re-asks on a
+                   packet, never on its own timer). Gated on activity so idle stays quiet. */
+                rdt = now - rlast;
+                if (rdt >= 250000u){
+                    double rs = rdt/1e6;
+                    dart_node_repair_stats(n, cid, &rep);
+                    if (rep.nacks_sent != last_rep.nacks_sent || rep.frags_recv != last_rep.frags_recv){
                         uint64_t base; uint32_t have, total;
                         int hol = dart_node_reader_progress(n, cid, g_last_peer, &base, &have, &total);
-                        printf("[sub]   repair: nacks +%llu/s  recv +%llu/s  dup +%llu/s",
-                               (unsigned long long)(rep.nacks_sent - last_rep.nacks_sent),
-                               (unsigned long long)(rep.frags_recv - last_rep.frags_recv),
-                               (unsigned long long)(rep.frags_dup  - last_rep.frags_dup));
-                        if (hol) printf("  | HOL msg base=%llu have=%u/%u",
-                                        (unsigned long long)base, have, total);
+                        printf("[sub]   repair: nacks %.0f/s  recv %.0f/s  dup %.0f/s  arms(d/hb) %.0f/%.0f",
+                               (rep.nacks_sent - last_rep.nacks_sent)/rs,
+                               (rep.frags_recv - last_rep.frags_recv)/rs,
+                               (rep.frags_dup  - last_rep.frags_dup)/rs,
+                               (rep.arms_data  - last_rep.arms_data)/rs,
+                               (rep.arms_hb    - last_rep.arms_hb)/rs);
+                        if (hol) printf("  | HOL base=%llu have=%u/%u", (unsigned long long)base, have, total);
                         printf("  skipped=%llu\n", (unsigned long long)rep.msgs_skipped);
                     }
-                    g_rx_msgs = 0; g_rx_bytes = 0; last = now; last_rep = rep;
+                    last_rep = rep; rlast = now;
+                }
+                dt = now - last;
+                if (dt >= 1000000u){                       /* 1s: measured receive rate */
+                    double secs = dt/1e6;
+                    if (seen) printf("[sub] %.0f msg/s, %.1f KB/s (total %llu, lost %llu)\n",
+                                     g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs, g_rx_total, g_lost);
+                    g_rx_msgs = 0; g_rx_bytes = 0; last = now;
                 }
             }
             /* not reached */
@@ -508,6 +538,10 @@ int main(int argc, char **argv){
     /* publisher */
     printf("[pub] channel %s (id %u), domain %u, %s.\n",
            chan, cid, domain, reliable ? "reliable" : "best-effort");
+    /* in-pump diagnostic: fires only while a send is blocked in backpressure (the stall
+       condition), so it is silent in healthy operation. Surfaces the within-block repair
+       series the once-a-second loop can't (it's blocked inside the send). */
+    dart_node_set_pump_probe(n, pump_probe, 200000u, NULL);
 
     /* pub --rate must carry a positive HZ (on a sub the value is ignored). */
     if (rate_set && rate_hz <= 0){

@@ -34,6 +34,10 @@ struct dart_node {
     /* backpressure accumulators, read via dart_node_backpressure_stats */
     uint64_t      backpressure_accum_us;
     uint32_t      backpressure_accum_n;
+    /* diagnostic: in-pump probe sampled inside the backpressure wait (dart_node_send) */
+    dart_pump_probe_fn pump_probe;
+    void          *pump_probe_user;
+    uint64_t       pump_probe_interval_us;
     /* one app callback for everything but message delivery; node fills PEER_UP/DOWN */
     dart_event_fn  on_event;
     void          *user_data;
@@ -632,8 +636,35 @@ int dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len)
     const dart_qos *q = dart_channel_qos(n->tr, channel);
     if (q && q->backpressure_wait_us && dart_send_would_evict(n->tr, channel)){
         uint64_t t0 = dart_plat_now_us(), deadline = t0 + q->backpressure_wait_us;
+        /* in-pump diagnostic: the publisher is blocked here for the whole wait, so its
+           normal per-message print sees nothing within it. When a probe is set, sample
+           the writer's repair progress on a ~interval timer so the stall is visible as a
+           within-block time series (resends bursty-then-flat vs steady; writer idle for
+           lack of NACKs). Observational; when no probe is set this whole block is skipped. */
+        uint64_t s_last = t0; uint32_t s_polls = 0, s_idle = 0;
+        uint64_t interval = n->pump_probe_interval_us ? n->pump_probe_interval_us : 200000u;
+        dart_repair_stats_t s_prev;
+        if (n->pump_probe) dart_repair_stats(n->tr, channel, &s_prev);
         do {
             dart_node_poll(n, 1);
+            if (n->pump_probe){
+                uint64_t now = dart_plat_now_us();
+                s_polls++;
+                if (dart_repair_pending(n->tr, channel) == 0) s_idle++;
+                if (now - s_last >= interval){
+                    dart_repair_stats_t s_now; dart_pump_sample smp;
+                    dart_repair_stats(n->tr, channel, &s_now);
+                    smp.channel         = channel;
+                    smp.wait_elapsed_us = now - t0;
+                    smp.interval_us     = now - s_last;
+                    smp.frags_resent    = s_now.frags_resent - s_prev.frags_resent;
+                    smp.nacks_recv      = s_now.nacks_recv  - s_prev.nacks_recv;
+                    smp.polls           = s_polls;
+                    smp.polls_idle      = s_idle;
+                    n->pump_probe(n->pump_probe_user, &smp);
+                    s_prev = s_now; s_last = now; s_polls = 0; s_idle = 0;
+                }
+            }
             if (!dart_send_would_evict(n->tr, channel)) break;
         } while (dart_plat_now_us() < deadline);
         n->backpressure_accum_us += dart_plat_now_us() - t0;
@@ -685,6 +716,10 @@ void dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_t *w
 
 void dart_node_repair_stats(dart_node *n, uint16_t channel, dart_repair_stats_t *out){
     dart_repair_stats(n->tr, channel, out);
+}
+
+void dart_node_set_pump_probe(dart_node *n, dart_pump_probe_fn fn, uint64_t interval_us, void *user){
+    n->pump_probe = fn; n->pump_probe_interval_us = interval_us; n->pump_probe_user = user;
 }
 
 int dart_node_reader_progress(dart_node *n, uint16_t channel, uint32_t peer,

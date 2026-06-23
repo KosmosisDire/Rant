@@ -68,6 +68,25 @@ void     dart_node_backpressure_stats(dart_node *n, uint64_t *waited_us, uint32_
 /* Cumulative reliable-repair counters for a channel (see dart_repair_stats_t). The
  * per-second deltas are repair throughput; *out is zeroed for an unknown channel. */
 void     dart_node_repair_stats(dart_node *n, uint16_t channel, dart_repair_stats_t *out);
+
+/* In-pump diagnostic probe. A reliable publisher blocks inside dart_node_send for the
+ * whole backpressure wait, so its normal once-a-second print can't see within a stall.
+ * A registered probe is called on a ~interval_us timer DURING that wait with the
+ * writer's repair progress over each interval -- making the stall a within-block time
+ * series (resends bursty-then-flat => reader stopped asking; steady => resends dropped).
+ * Observational only; deltas are since the previous sample in the same wait. */
+typedef struct {
+    uint16_t channel;         /* channel being pumped */
+    uint64_t wait_elapsed_us; /* us since this backpressure wait began */
+    uint64_t interval_us;     /* us since the previous sample (normalise deltas by this for true /s) */
+    uint64_t frags_resent;    /* writer DATA fragments resent in the interval */
+    uint64_t nacks_recv;      /* repair NACKs received in the interval */
+    uint32_t polls;           /* dart_node_poll calls in the interval */
+    uint32_t polls_idle;      /* of those, polls with no repair pending (writer idle for lack of NACKs) */
+} dart_pump_sample;
+typedef void (*dart_pump_probe_fn)(void *user, const dart_pump_sample *s);
+/* Register the in-pump probe (NULL fn disables). interval_us 0 => default 200ms. */
+void     dart_node_set_pump_probe(dart_node *n, dart_pump_probe_fn fn, uint64_t interval_us, void *user);
 /* Head-of-line reassembly snapshot for the in-progress message from `peer` on
  * `channel`: returns 1 + fills base_seqno/have/total if one is mid-reassembly, else 0.
  * `have` rising across calls = repair crawling; flat = wedged. Any pointer may be NULL. */
