@@ -507,13 +507,19 @@ int main(int argc, char **argv){
                 if (rdt >= 250000u){
                     double rs = rdt/1e6;
                     dart_node_repair_stats(n, cid, &rep);
-                    if (rep.nacks_sent != last_rep.nacks_sent || rep.frags_recv != last_rep.frags_recv){
+                    if (rep.nacks_sent != last_rep.nacks_sent || rep.frags_recv != last_rep.frags_recv
+                        || rep.frags_old != last_rep.frags_old || rep.frags_ahead != last_rep.frags_ahead){
                         uint64_t base; uint32_t have, total;
                         int hol = dart_node_reader_progress(n, cid, g_last_peer, &base, &have, &total);
-                        printf("[sub]   repair: nacks %.0f/s  recv %.0f/s  dup %.0f/s  arms(d/hb) %.0f/%.0f",
+                        /* recv = ACCEPTED (base==deliver_upto). old/ahead = arrived-but-rejected,
+                           so "recv 0" with old/ahead high means the flood is landing on the wrong
+                           seqno position, not failing to arrive. */
+                        printf("[sub]   repair: nacks %.0f/s  recv %.0f/s  dup %.0f/s  old %.0f/s  ahead %.0f/s  arms(d/hb) %.0f/%.0f",
                                (rep.nacks_sent - last_rep.nacks_sent)/rs,
                                (rep.frags_recv - last_rep.frags_recv)/rs,
                                (rep.frags_dup  - last_rep.frags_dup)/rs,
+                               (rep.frags_old  - last_rep.frags_old)/rs,
+                               (rep.frags_ahead- last_rep.frags_ahead)/rs,
                                (rep.arms_data  - last_rep.arms_data)/rs,
                                (rep.arms_hb    - last_rep.arms_hb)/rs);
                         if (hol) printf("  | HOL base=%llu have=%u/%u", (unsigned long long)base, have, total);

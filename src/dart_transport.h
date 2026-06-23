@@ -263,6 +263,13 @@ typedef struct {
        while arms_data is flat means the reader only re-asks on arrivals, not on a timer. */
     uint64_t arms_data;
     uint64_t arms_hb;
+    /* RX disposition of received DATA fragments (diagnostic): every DATA fragment that
+       reaches the reader is one of these. frags_recv counts ACCEPTED only (base ==
+       deliver_upto), so "recv 0" while the writer floods can mean the fragments are
+       landing but being rejected as old/ahead, not that they aren't arriving. */
+    uint64_t frags_old;        /* base < deliver_upto: whole message already delivered/skipped */
+    uint64_t frags_ahead;      /* base > deliver_upto: a future message (no out-of-order buffer) */
+    uint64_t frags_malformed;  /* count==0 || frag>=count, or not subscribed */
 } dart_repair_stats_t;
 
 /* Fill *out with the channel's cumulative repair counters (zeroed if channel is

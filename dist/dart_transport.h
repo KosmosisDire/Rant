@@ -285,6 +285,13 @@ typedef struct {
        while arms_data is flat means the reader only re-asks on arrivals, not on a timer. */
     uint64_t arms_data;
     uint64_t arms_hb;
+    /* RX disposition of received DATA fragments (diagnostic): every DATA fragment that
+       reaches the reader is one of these. frags_recv counts ACCEPTED only (base ==
+       deliver_upto), so "recv 0" while the writer floods can mean the fragments are
+       landing but being rejected as old/ahead, not that they aren't arriving. */
+    uint64_t frags_old;        /* base < deliver_upto: whole message already delivered/skipped */
+    uint64_t frags_ahead;      /* base > deliver_upto: a future message (no out-of-order buffer) */
+    uint64_t frags_malformed;  /* count==0 || frag>=count, or not subscribed */
 } dart_repair_stats_t;
 
 /* Fill *out with the channel's cumulative repair counters (zeroed if channel is
@@ -1695,11 +1702,12 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
     }
     base = seqno - frag;
 
-    if (!r->used) return;                               /* not subscribed */
-    if (count==0 || frag>=count) return;                /* malformed */
-    if (base < r->deliver_upto) return;                 /* old/dup */
+    if (!r->used){ ch->rep.frags_malformed++; return; }     /* not subscribed */
+    if (count==0 || frag>=count){ ch->rep.frags_malformed++; return; }  /* malformed */
+    if (base < r->deliver_upto){ ch->rep.frags_old++; return; }   /* old: already delivered/skipped */
 
     if (base > r->deliver_upto){
+        ch->rep.frags_ahead++;                          /* future message: we can't store it (no OOO buffer) */
         if (reliable && r->started){
             /* out-of-order: arm the NACK immediately, don't wait for a heartbeat
                (a busy writer defers HBs and the ring may wrap before one arrives) */
@@ -2021,7 +2029,21 @@ static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
               nbits=(uint16_t)(rem<DART_NACK_WINDOW?rem:DART_NACK_WINDOW); }
         }
     }
-    if (nbits>0) ch->rep.nacks_sent++;                  /* a repair request, not a bare cumulative ack */
+    if (nbits>0){
+        ch->rep.nacks_sent++;                           /* a repair request, not a bare cumulative ack */
+        /* self-driven repair cadence: while we are still missing data, keep the ACK
+           armed on the repair_delay timer so the NEXT request goes out on our own clock.
+           Previously ack_pending was re-armed only by a DATA/HB arrival, so once the
+           writer's resends stopped arriving the reader fell silent (~1 NACK per heartbeat)
+           and thousands of outstanding fragments of a big message could not be refilled
+           before the writer evicted the head-of-line sample -- the burst/dead/evict stall.
+           dart__deadline caps the poll wait and the timer sweep re-enqueues this lane when
+           ack_due comes due. (Re-requesting still-in-flight fragments can duplicate;
+           bounding that is a separate selective-NACK change, not done here.) */
+        r->ack_pending = 1;
+        r->ack_due_us  = now + ch->qos.repair_delay_us;
+        dart__deadline(st, r->ack_due_us);
+    }
     return dart_mk_nack(out,alias,base,nbits,bm,r->epoch,
                       r->started ? 0 : (uint8_t)DART_F_UNPOS);
 }
