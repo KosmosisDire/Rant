@@ -99,12 +99,22 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint64_t deliver_upto;  /* base of current sample; all below delivered/skipped */
     uint8_t  asm_active;    /* received >=1 frag of current sample */
     uint16_t asm_count;
+    uint16_t asm_lo;        /* lowest still-missing frag index of current sample (its
+                               contiguous-received front); deliver_upto+asm_lo = first hole */
     uint32_t asm_len;
     uint8_t *asm_buf;       /* >= asm_len; arena (fixed) or hook-malloc'd (dynamic) */
     uint8_t *frag_bm;       /* ceil(asm_count/8) */
     uint32_t asm_cap;       /* allocated bytes of asm_buf (dynamic grows it) */
     uint32_t bm_cap;        /* allocated bytes of frag_bm */
-    uint64_t hb_last;       /* highest seqno writer claims to hold */
+    uint64_t hb_last;       /* highest seqno the writer CLAIMS to hold (heartbeat only) */
+    uint64_t rcv_high;      /* highest seqno we have actually RECEIVED a frag for. UDP is
+                               assumed in-order, so a hole below this is real loss to repair
+                               while anything above it is still in flight: never NACK past it. */
+    uint64_t nack_hi;       /* highest seqno already requested this episode; refills ask only
+                               (nack_hi, top] so in-flight repairs are not re-requested */
+    uint64_t nack_retx_us;  /* earliest time to re-request a stalled floor (lost-repair backstop) */
+    uint8_t  ack_force;     /* a delivery/skip/HB/(re)match owes the writer an ACKNACK even if
+                               the repair floor did not move (avoids a stuck cumulative ack) */
     uint8_t  ack_pending;
     uint64_t ack_due_us;
 #ifdef DART_SHM
@@ -477,7 +487,7 @@ static void dart__match_r(dart_state *st, uint16_t c, uint16_t ps){
        re-joins and replays. A genuine discovery blip keeps its position through
        dart_peer_dormant/resume and never lands here, so a single ACKNACK suffices. */
     if (st->chans[c].qos.reliability==DART_RELIABLE){
-        r->ack_pending=1; r->ack_due_us=0;
+        r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
         dart__lane_wake(st,c,ps);
     }
 }
@@ -562,7 +572,7 @@ void dart_peer_resume(dart_state *st, uint32_t id){
         dart_wproxy *w=&st->wprox[(size_t)c*np+s];
         dart_rproxy *r=&st->rprox[(size_t)c*np+s];
         if (st->chans[c].qos.reliability!=DART_RELIABLE) continue;
-        if (r->used){ r->ack_pending=1; r->ack_due_us=0; }  /* report our position now */
+        if (r->used){ r->ack_pending=1; r->ack_due_us=0; r->ack_force=1; }  /* report our position now */
         if (w->used || r->used) dart__lane_wake(st,c,(uint16_t)s);
     }
 }
@@ -949,10 +959,11 @@ static size_t dart_writer_hb(dart_state *st, dart_channel *ch, dart_wproxy *w, u
 
 /* diagnostic: attribute each reader NACK-arm (a 0->1 transition of ack_pending) to
  * its cause -- a DATA/SHM-DATA arrival or a heartbeat. Pure counting, call it right
- * before any r->ack_pending=1 in the repair paths. During a repair stall's "dead
- * period" the prediction is arms_hb ticks at the heartbeat rate while arms_data is
- * flat -- i.e. the reader only re-asks when a packet arrives, never on its own timer.
- * Read via dart_repair_stats. (Resume/position-report arms are control, not counted.) */
+ * before any r->ack_pending=1 in the repair paths. arms_data tracks gap-triggered and
+ * progress-refill arming; arms_hb tracks the writer's idle ping (which also drives the
+ * tail-loss backstop). Read via dart_repair_stats. (The self-clocked retransmit backstop
+ * re-fires via nack_retx_us without a fresh arm, so it is not counted here. Resume/
+ * position-report arms are control, not counted.) */
 static void dart__arm(dart_channel *ch, dart_rproxy *r, int is_hb){
     if (!r->ack_pending){ if (is_hb) ch->rep.arms_hb++; else ch->rep.arms_data++; }
 }
@@ -971,10 +982,10 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
     const uint8_t *desc = p+13;          /* DART_SHM_DESC_BYTES */
     if (!r->used || count==0) return;
     if (base < r->deliver_upto) return;                 /* old/dup */
+    if (base+count-1 > r->rcv_high) r->rcv_high = base+count-1;   /* proof this seqno exists */
     if (base > r->deliver_upto){
         if (reliable && r->started){                    /* gap: arm a NACK for the window */
-            if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
-            if (!r->ack_pending){ dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us; }
+            if (!r->ack_pending){ dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; }
             dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             return;
         }
@@ -998,7 +1009,7 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
             r->shm_fail = 0;
             r->deliver_upto = base + count;
             if (reliable){                  /* ack now, AFTER delivery (zero-copy invariant) */
-                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;      /* in-order: no gap to coalesce */
+                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
                 dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             }
             return;
@@ -1009,10 +1020,9 @@ static void dart_reader_shm(dart_state *st, int ci, int pslot, const uint8_t *p,
             ch->rep.msgs_skipped += count;
             r->shm_fail = 0;
             r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
-            dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+            dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
         } else if (reliable){                           /* leave the gap, NACK for a re-send */
-            if (base+count-1 > r->hb_last) r->hb_last = base+count-1;
-            dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+            dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
         } else {
             r->deliver_upto = base + count;             /* best-effort: no repair, drop it */
         }
@@ -1027,6 +1037,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
     dart_channel *ch=&st->chans[ci];
     dart_rproxy *r=&st->rprox[(size_t)ci*st->cfg.max_peers+pslot];
     int reliable = (ch->qos.reliability==DART_RELIABLE);
+    int newbit = 0;
     uint64_t seqno, base; uint16_t frag, count, plen; uint32_t slen; const uint8_t *pay;
     if (p[0] & DART_F_SINGLE){           /* single fragment: frag/count/len implied */
         seqno=dart_r64(p+3); frag=0; count=1; plen=dart_r16(p+11); slen=plen; pay=p+13;
@@ -1039,15 +1050,15 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
     if (!r->used){ ch->rep.frags_malformed++; return; }     /* not subscribed */
     if (count==0 || frag>=count){ ch->rep.frags_malformed++; return; }  /* malformed */
     if (base < r->deliver_upto){ ch->rep.frags_old++; return; }   /* old: already delivered/skipped */
+    if (seqno > r->rcv_high) r->rcv_high = seqno;       /* proof this seqno exists (skip detector) */
 
     if (base > r->deliver_upto){
         ch->rep.frags_ahead++;                          /* future message: we can't store it (no OOO buffer) */
         if (reliable && r->started){
-            /* out-of-order: arm the NACK immediately, don't wait for a heartbeat
-               (a busy writer defers HBs and the ring may wrap before one arrives) */
-            if (seqno > r->hb_last) r->hb_last = seqno;
+            /* a future frag proves the head was skipped: arm a repair now (don't wait for a
+               heartbeat). emit gates the actual request rate, so this can't flood. */
             if (!r->ack_pending){       /* keep the oldest due time so arrivals don't postpone it */
-                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=now + ch->qos.repair_delay_us;
+                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
             }
             dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
             return;
@@ -1079,7 +1090,7 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
                       0, slen, "message exceeds max_message_bytes");
           r->deliver_upto = base + count; r->asm_active = 0;
           if (reliable){
-              dart__arm(ch,r,0); r->ack_pending = 1; r->ack_due_us = now + ch->qos.repair_delay_us;
+              dart__arm(ch,r,0); r->ack_pending = 1; r->ack_due_us = 0; r->ack_force = 1;
               dart__lane_wake(st, (uint16_t)ci, (uint32_t)pslot);
           }
           return;
@@ -1088,25 +1099,32 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
       bmbytes = ch->dynamic ? bmneed     : (uint32_t)((ch->maxfrags+7u)/8u);
       /* base == deliver_upto: current sample */
       if (!r->asm_active){
-          r->asm_active=1; r->asm_count=count; r->asm_len=slen;
+          r->asm_active=1; r->asm_count=count; r->asm_len=slen; r->asm_lo=0;
+          r->nack_hi=base;     /* in-flight dedup is per-message: start this one fresh */
           memset(r->frag_bm,0,bmbytes);
       }
       if (count!=r->asm_count) return;                  /* inconsistent, ignore */
       ch->rep.frags_recv++;                             /* every accepted DATA fragment, dups included */
-      if (!dart_bget(r->frag_bm,frag)){
+      newbit = !dart_bget(r->frag_bm,frag);
+      if (newbit){
           /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
              a peer staying within [MIN, MAX] keeps count <= maxfrags, so the bitmap
              can't overflow and the bufcap guard catches any stray offset */
           uint32_t off=(uint32_t)frag*st->peer_frag[pslot];
           if (off+plen<=bufcap) memcpy(r->asm_buf+off,pay,plen);
           dart_bset(r->frag_bm,frag);
+          if (frag==r->asm_lo)                          /* extended the contiguous-received front */
+              while (r->asm_lo<count && dart_bget(r->frag_bm,r->asm_lo)) r->asm_lo++;
       } else ch->rep.frags_dup++;                        /* already held: repair overlap / waste */
     }
-    /* complete? in order -> deliver, advance, ack NOW: an in-order cumulative ack
-       has no gap to coalesce, so repair_delay would only stall the writer's window.
-       A partial sample keeps the deferred timer; ack stays armed after delivery. */
-    { uint16_t i; int done=1;
-      for (i=0;i<count;i++) if(!dart_bget(r->frag_bm,i)){done=0;break;}
+    /* asm_lo is the contiguous front, so the sample is complete iff it reached the end.
+       Deliver in order, advance, then arm the ACKNACK. A completed sample owes an immediate
+       cumulative ack (ack_force). A still-partial sample only re-arms when this frag opened or
+       advanced a real gap (a hole below rcv_high): a healthy in-order fill owes nothing, and
+       emit dedups + paces the repair request so we never re-flood the writer with in-flight
+       fragments. */
+    { int done = (r->asm_lo == count);
+      int hole = r->asm_active && (r->deliver_upto + r->asm_lo <= r->rcv_high);
       if (done){
           if (st->cfg.on_message)
               st->cfg.on_message(st->cfg.user, (uint16_t)ci, st->peer_ids[pslot], r->asm_buf, r->asm_len);
@@ -1114,9 +1132,13 @@ static void dart_reader_data(dart_state *st, int ci, int pslot, const uint8_t *p
           r->asm_active=0;
       }
       if (reliable){
-          dart__arm(ch,r,0); r->ack_pending=1;
-          r->ack_due_us = done ? 0 : now + ch->qos.repair_delay_us;
-          dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+          if (done){
+              dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+              dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+          } else if (newbit && hole){           /* gap revealed, or repair advanced: request now */
+              dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
+              dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
+          }
       }
     }
 }
@@ -1128,8 +1150,15 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
     /* un-started readers adopt no position from heartbeats (a one-sided flap's
-       advertised first may be a dead predecessor's); the ack below carries our epoch */
-    if (r->started && first > r->deliver_upto){
+       advertised first may be a dead predecessor's); the ack below carries our epoch.
+       A writer raises its HB `first` to our acked_upto (the join-point trick), and our
+       ACKNACK acks the contiguous-received front -- which sits INSIDE the sample we are
+       still assembling. Eviction is whole-message, so a genuine floor never splits a
+       sample: ignore a `first` that lands in our current partial (it is just our own
+       mid-message ack echoed back), else we would skip past frags we are repairing and
+       reject every resend as old. */
+    if (r->started && first > r->deliver_upto &&
+        (!r->asm_active || first >= r->deliver_upto + r->asm_count)){
         dart__event(st, DART_MSG_LOST, (uint16_t)ci, st->peer_ids[pslot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto, "message(s) lost");
         ch->rep.msgs_skipped += first - r->deliver_upto;
@@ -1138,8 +1167,12 @@ static void dart_reader_hb(dart_state *st, int ci, int pslot, const uint8_t *p, 
         r->shm_fail=0;          /* skipped past the stuck descriptor: fresh count */
 #endif
     }
+    /* hb_last is the writer's CLAIM (it may exceed what we've received). It is the only
+       way to learn of tail loss -- frags past rcv_high that no later arrival will reveal --
+       so emit lets the slow retransmit backstop chase up to it, never the fast gap path.
+       The HB always owes a cumulative ack so a writer that lost ours stops re-pinging. */
     r->hb_last=last;
-    dart__arm(ch,r,1); r->ack_pending=1; r->ack_due_us = now + ch->qos.repair_delay_us;
+    dart__arm(ch,r,1); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
     dart__lane_wake(st,(uint16_t)ci,(uint32_t)pslot);
 }
 
@@ -1329,57 +1362,77 @@ static size_t dart_writer_emit(dart_state *st, int ci, int pslot, uint8_t *out, 
     return 0;
 }
 
-/* produce a reader ACKNACK for (ci,pslot) if due; 0 if none */
+/* produce a reader ACKNACK for (ci,pslot) if due; 0 if none.
+ *
+ * The repair request is GAP-TRIGGERED and bounded by what we have actually RECEIVED.
+ * UDP frags are assumed delivered in order, so a hole below rcv_high is real loss while
+ * anything above it is still in flight and must NOT be NACKed -- that "request up to the
+ * writer's heartbeat CLAIM, every poll" was the old congestion collapse. Each floor is
+ * asked once: nack_hi tracks how far we have already requested, so a progress refill asks
+ * only (nack_hi, top] and never re-requests the still-outstanding lower frags. A stalled
+ * floor is re-asked only after the retransmit backstop (repair_delay), which is also the
+ * one path allowed to chase the writer's claim (hb_last) so tail loss still repairs.
+ * Outstanding repair is therefore capped at one DART_NACK_WINDOW and clocked to delivery,
+ * so it cannot scale into a flood with the gap size or the message size. */
 static size_t dart_reader_emit(dart_state *st, int ci, int pslot, uint8_t *out, size_t cap, uint64_t now){
     dart_channel *ch=&st->chans[ci];
     dart_rproxy *r=&st->rprox[(size_t)ci*st->cfg.max_peers+pslot];
-    uint64_t base; uint16_t nbits=0; uint32_t bm=0;
+    uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bm=0;
     uint16_t alias = dart__alias_of(st, ci);
+    int due, holes=0, repair=0, force;
     if (!r->used || st->peer_dormant[pslot]) return 0;   /* dormant: don't ack a silent writer */
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
     if (cap<21) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
-    r->ack_pending=0;
+    r->ack_pending=0; force=r->ack_force; r->ack_force=0;
 
-    if (!r->asm_active){
-        base=r->deliver_upto;
-        if (!r->started){ nbits=0; bm=0; }   /* no position yet: F_UNPOS announces our epoch */
-        else if (r->deliver_upto<=r->hb_last){
-            /* request the whole missing window so one round-trip repairs a burst */
-            uint64_t miss = r->hb_last - r->deliver_upto + 1;
-            nbits = (uint16_t)(miss < DART_NACK_WINDOW ? miss : DART_NACK_WINDOW);
-            bm = (nbits >= 32) ? 0xFFFFFFFFu : (uint32_t)((1u<<nbits)-1u);
+    if (!r->started)                                     /* no position yet: F_UNPOS announces our epoch */
+        return dart_mk_nack(out,alias,r->deliver_upto,0,0,r->epoch,(uint8_t)DART_F_UNPOS);
+
+    /* the cumulative-ack point and repair-window base: our contiguous-received front */
+    first_missing = r->asm_active ? r->deliver_upto + r->asm_lo : r->deliver_upto;
+
+    /* request ceiling = what we've received. Only the slow backstop may reach the writer's
+       claim, so tail loss (no later frag will ever reveal it) still gets repaired. */
+    due   = (now >= r->nack_retx_us);
+    bound = r->rcv_high;
+    if (due && r->hb_last > bound) bound = r->hb_last;
+
+    if (first_missing <= bound){                         /* a hole sits below something we've heard */
+        holes = 1;
+        top = first_missing + DART_NACK_WINDOW;          /* one window per ACKNACK: the in-flight cap */
+        if (top > bound + 1) top = bound + 1;
+        if (r->asm_active && top > r->deliver_upto + r->asm_count)
+            top = r->deliver_upto + r->asm_count;        /* this sample's frags only (bitmap range) */
+        {   /* in-flight dedup (skip the still-outstanding lower part) is only valid while we
+               are assembling THIS message: its clear frag_bm bits are genuinely in flight. With
+               no sample yet (whole message missing) there is nothing we can hold, and the slow
+               backstop re-asks everything, so both ask from the floor. */
+            uint64_t from = (due || !r->asm_active) ? first_missing
+                : (r->nack_hi > first_missing ? r->nack_hi : first_missing); /* refill: only the new part */
+            uint64_t s;
+            for (s=from; s<top; s++){
+                int missing = r->asm_active ? !dart_bget(r->frag_bm,(uint32_t)(s - r->deliver_upto)) : 1;
+                if (missing) bm |= (1u << (uint32_t)(s - first_missing));
+            }
+            if (bm){
+                nbits = (uint16_t)(top - first_missing);
+                repair = 1;
+                ch->rep.nacks_sent++;
+                if (top > r->nack_hi) r->nack_hi = top;
+                r->nack_retx_us = now + ch->qos.repair_delay_us;
+            }
         }
-        else { nbits=0; bm=0; }                                /* caught up */
-    } else {
-        uint16_t lm=0, i; int found=-1;
-        for (i=0;i<r->asm_count;i++) if(!dart_bget(r->frag_bm,i)){found=(int)i;break;}
-        if (found<0){ base=r->deliver_upto; nbits=0; bm=0; }
-        else {
-            lm=(uint16_t)found; base=r->deliver_upto+lm;
-            for (i=0;i<DART_NACK_WINDOW && (lm+i)<r->asm_count;i++)
-                if(!dart_bget(r->frag_bm,(uint32_t)(lm+i))){ bm|=(1u<<i); }
-            { uint32_t rem=(uint32_t)(r->asm_count-lm);
-              nbits=(uint16_t)(rem<DART_NACK_WINDOW?rem:DART_NACK_WINDOW); }
-        }
-    }
-    if (nbits>0){
-        ch->rep.nacks_sent++;                           /* a repair request, not a bare cumulative ack */
-        /* self-driven repair cadence: while we are still missing data, keep the ACK
-           armed on the repair_delay timer so the NEXT request goes out on our own clock.
-           Previously ack_pending was re-armed only by a DATA/HB arrival, so once the
-           writer's resends stopped arriving the reader fell silent (~1 NACK per heartbeat)
-           and thousands of outstanding fragments of a big message could not be refilled
-           before the writer evicted the head-of-line sample -- the burst/dead/evict stall.
-           dart__deadline caps the poll wait and the timer sweep re-enqueues this lane when
-           ack_due comes due. (Re-requesting still-in-flight fragments can duplicate;
-           bounding that is a separate selective-NACK change, not done here.) */
-        r->ack_pending = 1;
-        r->ack_due_us  = now + ch->qos.repair_delay_us;
-        dart__deadline(st, r->ack_due_us);
-    }
-    return dart_mk_nack(out,alias,base,nbits,bm,r->epoch,
-                      r->started ? 0 : (uint8_t)DART_F_UNPOS);
+    } else r->nack_hi = first_missing;                   /* caught up to received: end the episode */
+
+    /* keep the lane live while a hole remains so the backstop re-fires; an arrival that
+       advances the floor re-arms us immediately (ack_due_us=0) for the next window. */
+    if (holes){ r->ack_pending=1; r->ack_due_us=r->nack_retx_us; dart__deadline(st,r->ack_due_us); }
+
+    /* send only to carry a repair request or a delivery/skip/HB/(re)match cumulative ack;
+       a bare re-ack at an unchanged floor would be pure noise. */
+    if (!repair && !force) return 0;
+    return dart_mk_nack(out,alias,first_missing,nbits,bm,r->epoch,0);
 }
 
 /* multicast: 1 if every matched subscriber has acked all data, so the group
