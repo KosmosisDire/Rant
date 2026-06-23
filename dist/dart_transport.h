@@ -43,7 +43,7 @@ extern "C" {
 #endif
 
 #ifndef DART_FRAG_PAYLOAD
-#define DART_FRAG_PAYLOAD 1024u          /* default bytes of message data per fragment */
+#define DART_FRAG_PAYLOAD 1350u          /* default bytes of message data per fragment */
 #endif
 /* The UDP fragment size is set PER NODE at init (dart_config.frag_payload) and
  * advertised via discovery, so a receiver reassembles each message at the SOURCE
