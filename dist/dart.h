@@ -4307,7 +4307,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     p += meta_bytes;
 
     n->transport = dart_init(p, transport_bytes, &transport_cfg);
-    if (!n->transport){ dart_plat_cleanup(); return NULL; }
+    if (!n->transport) goto fail_startup;
     p += transport_bytes;
 #ifdef DART_SHM
     {   size_t state_bytes = dart_shm_state_bytes();
@@ -4327,18 +4327,16 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
        port (0 => OS ephemeral, read back via getsockname). No reuse: a unicast
        endpoint owns its port, so a collision fails loudly here. */
     fd = dart_plat_udp_open();
-    if (fd==DART_SOCK_BAD){ dart_plat_cleanup(); return NULL; }
-    if (!dart_plat_bind(fd, 0, cfg->net.data_port, 0)){
-        dart_plat_close(fd); dart_plat_cleanup(); return NULL;
-    }
+    if (fd==DART_SOCK_BAD) goto fail_startup;
+    n->fd=fd;                       /* owned now: fail_sock closes it */
+    if (!dart_plat_bind(fd, 0, cfg->net.data_port, 0)) goto fail_sock;
     local_port = dart_plat_local_port(fd);
-    if (local_port==0){ dart_plat_close(fd); dart_plat_cleanup(); return NULL; }
+    if (local_port==0) goto fail_sock;
     dart_plat_set_nonblock(fd);   /* never block in recv/send; poll drains the queue */
     /* suppress WSAECONNRESET from a bounced send leaking into the shared RX path */
     dart_plat_suppress_connreset(fd);
     if (cfg->net.recv_buffer_bytes) dart_plat_set_rcvbuf(fd, (int)cfg->net.recv_buffer_bytes);
     if (cfg->net.send_buffer_bytes) dart_plat_set_sndbuf(fd, (int)cfg->net.send_buffer_bytes);
-    n->fd=fd;
     discovery_rt_cfg.discovery.data_port = local_port;       /* advertise the actual port */
 
     /* multicast data: group TX rides the unicast socket; group RX needs its own
@@ -4362,32 +4360,26 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
       }
       if (want_rx){
           dart_sock multicast_fd = dart_plat_udp_open();
-          int multicast_ok = (multicast_fd!=DART_SOCK_BAD);
-          if (multicast_ok && !dart_plat_bind(multicast_fd, 0, n->multicast_port, 1)) multicast_ok=0;
-          if (multicast_ok){
-              /* one join per distinct group (kernels reject dups); memberships are
-                 OS-capped (~20: Linux net.ipv4.igmp_max_memberships), a fail fails open */
-              for (i=0;i<cfg->n_channels;i++)
-                  if (cfg->channels[i].multicast && cfg->channels[i].role!=DART_PUB_ONLY){
-                      uint32_t group_addr = dart__node_chan_group(cfg->domain, &cfg->channels[i]);
-                      uint16_t j; int dup=0;
-                      for (j=0;j<i;j++)
-                          if (cfg->channels[j].multicast && cfg->channels[j].role!=DART_PUB_ONLY
-                              && dart__node_chan_group(cfg->domain, &cfg->channels[j])==group_addr){
-                              dup=1; break;
-                          }
-                      if (dup) continue;
-                      if (!dart_plat_mcast_join(multicast_fd, group_addr, interface_ip)){ multicast_ok=0; break; }
-                  }
-          }
-          if (!multicast_ok){
-              if (multicast_fd!=DART_SOCK_BAD) dart_plat_close(multicast_fd);
-              dart_plat_close(fd); n->fd=DART_SOCK_BAD; dart_plat_cleanup(); return NULL;
-          }
+          if (multicast_fd==DART_SOCK_BAD) goto fail_sock;
+          n->multicast_fd=multicast_fd;       /* owned now: fail_mcast closes it */
+          if (!dart_plat_bind(multicast_fd, 0, n->multicast_port, 1)) goto fail_mcast;
+          /* one join per distinct group (kernels reject dups); memberships are
+             OS-capped (~20: Linux net.ipv4.igmp_max_memberships) */
+          for (i=0;i<cfg->n_channels;i++)
+              if (cfg->channels[i].multicast && cfg->channels[i].role!=DART_PUB_ONLY){
+                  uint32_t group_addr = dart__node_chan_group(cfg->domain, &cfg->channels[i]);
+                  uint16_t j; int dup=0;
+                  for (j=0;j<i;j++)
+                      if (cfg->channels[j].multicast && cfg->channels[j].role!=DART_PUB_ONLY
+                          && dart__node_chan_group(cfg->domain, &cfg->channels[j])==group_addr){
+                          dup=1; break;
+                      }
+                  if (dup) continue;
+                  if (!dart_plat_mcast_join(multicast_fd, group_addr, interface_ip)) goto fail_mcast;
+              }
           dart_plat_mcast_loop(multicast_fd, 1);
           dart_plat_set_nonblock(multicast_fd);
           if (cfg->net.recv_buffer_bytes) dart_plat_set_rcvbuf(multicast_fd, (int)cfg->net.recv_buffer_bytes);
-          n->multicast_fd=multicast_fd;
       } }
 
     discovery_rt_cfg.discovery.on_peer_up      = dart__node_up;
@@ -4399,13 +4391,20 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->discovery_meta_len = dart__meta_build(n);
     discovery_rt_cfg.discovery.meta = n->discovery_meta; discovery_rt_cfg.discovery.meta_len = n->discovery_meta_len;
     n->discovery = dart_discovery_rt_open(p, discovery_bytes, &discovery_rt_cfg);
-    if (!n->discovery){
-        if (n->multicast_fd!=DART_SOCK_BAD){ dart_plat_close(n->multicast_fd); n->multicast_fd=DART_SOCK_BAD; }
-        dart_plat_close(fd); n->fd=DART_SOCK_BAD; dart_plat_cleanup(); return NULL;
-    }
+    if (!n->discovery) goto fail_mcast;
     p += discovery_bytes;
 
     return n;
+
+fail_mcast:
+    if (n->multicast_fd != DART_SOCK_BAD) dart_plat_close(n->multicast_fd);
+    n->multicast_fd = DART_SOCK_BAD;
+fail_sock:
+    if (n->fd != DART_SOCK_BAD) dart_plat_close(n->fd);
+    n->fd = DART_SOCK_BAD;
+fail_startup:
+    dart_plat_cleanup();
+    return NULL;
 }
 
 /* max wall-time draining RX (and running on_message) per poll tick before
