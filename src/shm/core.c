@@ -4,6 +4,7 @@
 
 #include "core.h"
 #include "../common/bytes.h"
+#include "../common/arena.h"
 
 #ifdef DART_SHM
 #include <string.h>
@@ -44,14 +45,14 @@ struct dart_shm_pool {
     int      is_creator;
 };
 
-size_t dart_shm_state_bytes(void){ return (sizeof(struct dart_shm_pool) + 15u) & ~(size_t)15u; }
+size_t dart_shm_state_bytes(void){ return dart_align_up(sizeof(struct dart_shm_pool), 16u); }
 
-#define DART__SHM_HDR_SZ  ((uint32_t)((sizeof(dart_shm_seg_hdr) + 15u) & ~(size_t)15u))
-#define DART__SHM_CHDR_SZ ((uint32_t)((sizeof(dart_shm_chunk_hdr) + 15u) & ~(size_t)15u))
+#define DART__SHM_HDR_SZ  ((uint32_t)dart_align_up(sizeof(dart_shm_seg_hdr), 16u))
+#define DART__SHM_CHDR_SZ ((uint32_t)dart_align_up(sizeof(dart_shm_chunk_hdr), 16u))
 
 static void dart__shm_geom(uint32_t chunk_bytes, uint32_t n_chunks,
                            uint32_t *out_stride, size_t *out_total){
-    uint32_t aligned = (chunk_bytes + 15u) & ~15u;
+    uint32_t aligned = (uint32_t)dart_align_up(chunk_bytes, 16u);
     uint32_t stride = DART__SHM_CHDR_SZ + aligned;
     *out_stride = stride;
     *out_total  = (size_t)DART__SHM_HDR_SZ + (size_t)n_chunks * stride;

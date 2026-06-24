@@ -3,6 +3,7 @@
 
 #include "runtime.h"
 #include "../platform/core.h"
+#include "../common/arena.h"
 #include <string.h>
 
 struct dart_discovery_rt {
@@ -90,24 +91,41 @@ static uint32_t dart_discovery_rt_wire_max(const dart_discovery_config *c){
     return w < DART_DISCOVERY_WIRE_MAX ? DART_DISCOVERY_WIRE_MAX : w;
 }
 
+/* Single source of the discovery-runtime arena layout: the rt struct, the rx/tx wire
+   scratch buffers, then the discovery-core sub-arena. measure feeds required_memory;
+   build feeds open -- one definition. */
+typedef struct {
+    dart_discovery_rt *rt;
+    uint8_t *rxbuf, *txbuf, *core;
+    size_t   wire_max, core_bytes;
+} dart_rt_blocks;
+static void dart__rt_layout(dart_bump *b, const dart_discovery_config *c, dart_rt_blocks *o){
+    o->wire_max   = dart_discovery_rt_wire_max(c);
+    o->rt    = (dart_discovery_rt*)dart_take(b, sizeof(struct dart_discovery_rt), 16);
+    o->rxbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
+    o->txbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
+    o->core_bytes = dart_discovery_required_memory(c);
+    o->core  = (uint8_t*)dart_take(b, o->core_bytes, 16);
+}
+
 size_t dart_discovery_rt_required_memory(const dart_discovery_rt_config *cfg){
-    dart_discovery_config c;
-    size_t rt = (sizeof(struct dart_discovery_rt) + 15u) & ~(size_t)15u;
-    size_t wmax;
+    dart_discovery_config c; dart_bump b; dart_rt_blocks blk;
     if (!cfg) return 0;
     c = cfg->discovery;
     if (c.announce_interval_us == 0) c.announce_interval_us = 1000000u;
     if (c.peer_timeout_us  == 0) c.peer_timeout_us  = c.announce_interval_us * 7u / 2u;
     if (c.max_peers   == 0) c.max_peers   = 32u;
-    wmax = ((size_t)dart_discovery_rt_wire_max(&c) + 15u) & ~(size_t)15u;
-    return 16u + rt + 2u*wmax + dart_discovery_required_memory(&c);
+    memset(&b, 0, sizeof b);
+    dart__rt_layout(&b, &c, &blk);
+    return b.offset + 16u;     /* slack to align the caller's mem up to base */
 }
 
 dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_discovery_rt_config *cfg){
     dart_discovery_rt_config c;
     dart_discovery_rt *rt;
     uint8_t *base, *core_mem;
-    size_t rtsz, wmax, need;
+    size_t need;
+    dart_rt_blocks blk;
     dart_sock fd;
     int allzero = 1, i;
     uint8_t ttl;
@@ -127,14 +145,14 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     if (cap < need) return NULL;
 
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
-    rt   = (dart_discovery_rt*)base;
-    rtsz = (sizeof(struct dart_discovery_rt) + 15u) & ~(size_t)15u;
-    wmax = ((size_t)dart_discovery_rt_wire_max(&c.discovery) + 15u) & ~(size_t)15u;
-
-    rt->wire_max = (uint32_t)dart_discovery_rt_wire_max(&c.discovery);
-    rt->rxbuf    = base + rtsz;
-    rt->txbuf    = rt->rxbuf + wmax;
-    core_mem     = rt->txbuf + wmax;
+    {   dart_bump b; memset(&b, 0, sizeof b);
+        b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
+        dart__rt_layout(&b, &c.discovery, &blk); }
+    rt = blk.rt;
+    rt->wire_max = (uint32_t)blk.wire_max;
+    rt->rxbuf    = blk.rxbuf;
+    rt->txbuf    = blk.txbuf;
+    core_mem     = blk.core;
 
     /* auto-generate a UUID if the caller left it zero */
     for (i=0;i<16;i++) if (c.discovery.uuid[i]) { allzero = 0; break; }

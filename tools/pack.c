@@ -84,6 +84,7 @@ static void build_discovery(const char *srcdir, const char *outdir){
 
     fputs("\n#ifdef DART_DISCOVERY_IMPLEMENTATION\n", out);
     emit(out, srcdir, "common/bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "common/arena.h", 1);   /* shared bump allocator, before first use */
     emit(out, srcdir, "discovery/core.c", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
     emit(out, srcdir, "platform/core.c", 1);
@@ -175,6 +176,7 @@ static void build_combined(const char *srcdir, const char *outdir){
     /* implementations in dependency order */
     fputs("\n#ifdef DART_DISCOVERY_IMPLEMENTATION\n", out);
     emit(out, srcdir, "common/bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "common/arena.h", 1);   /* shared bump allocator, before first use */
     emit(out, srcdir, "discovery/core.c", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
     emit(out, srcdir, "platform/core.c", 1);

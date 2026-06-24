@@ -1,6 +1,7 @@
 /* sans-IO peer-discovery core. See dart_discovery.h. */
 #include "core.h"
 #include "../common/bytes.h"
+#include "../common/arena.h"
 #include <string.h>
 
 #define DART_DISCOVERY_HDR_LEN 43
@@ -68,15 +69,26 @@ static uint16_t dart_discovery_meta_capacity(const dart_discovery_config *cfg){
     return cfg->meta_capacity ? cfg->meta_capacity : DART_DISCOVERY_META_MAX;
 }
 
+/* Single source of the discovery arena layout: state, the peer table, the meta pool.
+   measure (bump.base NULL) feeds required_memory; build feeds init -- one definition. */
+typedef struct { dart_discovery_state *st; uint8_t *peers, *meta_pool; } dart_discovery_blocks;
+static void dart__discovery_layout(dart_bump *b, const dart_discovery_config *cfg, dart_discovery_blocks *o){
+    uint16_t meta_capacity = dart_discovery_meta_capacity(cfg);
+    o->st        = (dart_discovery_state*)dart_take(b, sizeof(struct dart_discovery_state), 8);
+    o->peers     = (uint8_t*)dart_take(b, (size_t)cfg->max_peers * sizeof(dart_discovery_peer_), 8);
+    o->meta_pool = (uint8_t*)dart_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
+}
+
 size_t dart_discovery_required_memory(const dart_discovery_config *cfg){
-    size_t s = (sizeof(struct dart_discovery_state) + 7u) & ~(size_t)7u;
+    dart_bump b; dart_discovery_blocks blk;
     if (!cfg) return 0;
-    return 8u + s + (size_t)cfg->max_peers * sizeof(dart_discovery_peer_)
-                  + (size_t)cfg->max_peers * dart_discovery_meta_capacity(cfg);
+    memset(&b, 0, sizeof b);
+    dart__discovery_layout(&b, cfg, &blk);
+    return b.offset + 8u;     /* slack to align the caller's mem up to base */
 }
 
 dart_discovery_state *dart_discovery_init(void *mem, size_t cap, const dart_discovery_config *cfg){
-    uintptr_t a; uint8_t *base; size_t state_size; dart_discovery_state *st; uint16_t i, meta_capacity;
+    dart_bump b; dart_discovery_blocks blk; dart_discovery_state *st; uint16_t i, meta_capacity;
     if (!mem || !cfg || cfg->max_peers == 0) return NULL;
     if (cfg->announce_interval_us == 0 || cfg->peer_timeout_us == 0) return NULL;
     meta_capacity = dart_discovery_meta_capacity(cfg);
@@ -84,17 +96,18 @@ dart_discovery_state *dart_discovery_init(void *mem, size_t cap, const dart_disc
     if (cfg->meta_len && !cfg->meta) return NULL;
     if (cap < dart_discovery_required_memory(cfg)) return NULL;
 
-    a = ((uintptr_t)mem + 7u) & ~(uintptr_t)7u;
-    base = (uint8_t *)a;
-    state_size = (sizeof(struct dart_discovery_state) + 7u) & ~(size_t)7u;
+    memset(&b, 0, sizeof b);
+    b.base = (uint8_t*)(((uintptr_t)mem + 7u) & ~(uintptr_t)7u);
+    b.cap  = cap - (size_t)(b.base - (uint8_t*)mem);
+    dart__discovery_layout(&b, cfg, &blk);
 
-    st = (dart_discovery_state *)base;
+    st = blk.st;
     memset(st, 0, sizeof(*st));
     st->cfg           = *cfg;
     st->cap_peers     = cfg->max_peers;
     st->meta_capacity      = meta_capacity;
-    st->peers         = (dart_discovery_peer_ *)(base + state_size);
-    st->meta_pool     = (uint8_t *)st->peers + (size_t)st->cap_peers * sizeof(dart_discovery_peer_);
+    st->peers         = (dart_discovery_peer_ *)blk.peers;
+    st->meta_pool     = blk.meta_pool;
     st->next_local_id = 1;
     st->started       = 0;
     memset(st->peers, 0, (size_t)st->cap_peers * sizeof(dart_discovery_peer_));

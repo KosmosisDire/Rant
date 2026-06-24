@@ -1005,6 +1005,37 @@ static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (
 
 #endif /* DART_BYTES_H */
 #pragma endregion
+#pragma region common/arena.h
+/* Bump allocator shared by the layers that pack sub-blocks into one caller-provided
+ * arena (transport state, node). Measure mode (base==NULL): dart_take returns NULL but
+ * still advances offset, so the sizing pass and the build pass run the SAME code and
+ * cannot drift. Build mode (base set): returns base + aligned offset, or sets oom and
+ * returns NULL once the offset passes cap. static inline: no link symbol and no unused
+ * warning in a layer that doesn't use it. The amalgamator emits this once per
+ * implementation TU; the local #include is for standalone compilation of a layer. */
+#ifndef DART_ARENA_H
+#define DART_ARENA_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
+
+/* round n up to the next multiple of align (a power of two): names the (x+15)&~15 idiom */
+static inline size_t dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
+
+static inline void *dart_take(dart_bump *b, size_t n, size_t align){
+    size_t a = dart_align_up(b->offset, align);
+    b->offset = a + n;
+    if (b->base){
+        if (b->offset > b->cap){ b->oom = 1; return NULL; }
+        return b->base + a;
+    }
+    return NULL;   /* measure mode */
+}
+
+#endif /* DART_ARENA_H */
+#pragma endregion
 #pragma region discovery/core.c
 /* sans-IO peer-discovery core. See dart_discovery.h. */
 #include <string.h>
@@ -1074,15 +1105,26 @@ static uint16_t dart_discovery_meta_capacity(const dart_discovery_config *cfg){
     return cfg->meta_capacity ? cfg->meta_capacity : DART_DISCOVERY_META_MAX;
 }
 
+/* Single source of the discovery arena layout: state, the peer table, the meta pool.
+   measure (bump.base NULL) feeds required_memory; build feeds init -- one definition. */
+typedef struct { dart_discovery_state *st; uint8_t *peers, *meta_pool; } dart_discovery_blocks;
+static void dart__discovery_layout(dart_bump *b, const dart_discovery_config *cfg, dart_discovery_blocks *o){
+    uint16_t meta_capacity = dart_discovery_meta_capacity(cfg);
+    o->st        = (dart_discovery_state*)dart_take(b, sizeof(struct dart_discovery_state), 8);
+    o->peers     = (uint8_t*)dart_take(b, (size_t)cfg->max_peers * sizeof(dart_discovery_peer_), 8);
+    o->meta_pool = (uint8_t*)dart_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
+}
+
 size_t dart_discovery_required_memory(const dart_discovery_config *cfg){
-    size_t s = (sizeof(struct dart_discovery_state) + 7u) & ~(size_t)7u;
+    dart_bump b; dart_discovery_blocks blk;
     if (!cfg) return 0;
-    return 8u + s + (size_t)cfg->max_peers * sizeof(dart_discovery_peer_)
-                  + (size_t)cfg->max_peers * dart_discovery_meta_capacity(cfg);
+    memset(&b, 0, sizeof b);
+    dart__discovery_layout(&b, cfg, &blk);
+    return b.offset + 8u;     /* slack to align the caller's mem up to base */
 }
 
 dart_discovery_state *dart_discovery_init(void *mem, size_t cap, const dart_discovery_config *cfg){
-    uintptr_t a; uint8_t *base; size_t state_size; dart_discovery_state *st; uint16_t i, meta_capacity;
+    dart_bump b; dart_discovery_blocks blk; dart_discovery_state *st; uint16_t i, meta_capacity;
     if (!mem || !cfg || cfg->max_peers == 0) return NULL;
     if (cfg->announce_interval_us == 0 || cfg->peer_timeout_us == 0) return NULL;
     meta_capacity = dart_discovery_meta_capacity(cfg);
@@ -1090,17 +1132,18 @@ dart_discovery_state *dart_discovery_init(void *mem, size_t cap, const dart_disc
     if (cfg->meta_len && !cfg->meta) return NULL;
     if (cap < dart_discovery_required_memory(cfg)) return NULL;
 
-    a = ((uintptr_t)mem + 7u) & ~(uintptr_t)7u;
-    base = (uint8_t *)a;
-    state_size = (sizeof(struct dart_discovery_state) + 7u) & ~(size_t)7u;
+    memset(&b, 0, sizeof b);
+    b.base = (uint8_t*)(((uintptr_t)mem + 7u) & ~(uintptr_t)7u);
+    b.cap  = cap - (size_t)(b.base - (uint8_t*)mem);
+    dart__discovery_layout(&b, cfg, &blk);
 
-    st = (dart_discovery_state *)base;
+    st = blk.st;
     memset(st, 0, sizeof(*st));
     st->cfg           = *cfg;
     st->cap_peers     = cfg->max_peers;
     st->meta_capacity      = meta_capacity;
-    st->peers         = (dart_discovery_peer_ *)(base + state_size);
-    st->meta_pool     = (uint8_t *)st->peers + (size_t)st->cap_peers * sizeof(dart_discovery_peer_);
+    st->peers         = (dart_discovery_peer_ *)blk.peers;
+    st->meta_pool     = blk.meta_pool;
     st->next_local_id = 1;
     st->started       = 0;
     memset(st->peers, 0, (size_t)st->cap_peers * sizeof(dart_discovery_peer_));
@@ -1899,24 +1942,41 @@ static uint32_t dart_discovery_rt_wire_max(const dart_discovery_config *c){
     return w < DART_DISCOVERY_WIRE_MAX ? DART_DISCOVERY_WIRE_MAX : w;
 }
 
+/* Single source of the discovery-runtime arena layout: the rt struct, the rx/tx wire
+   scratch buffers, then the discovery-core sub-arena. measure feeds required_memory;
+   build feeds open -- one definition. */
+typedef struct {
+    dart_discovery_rt *rt;
+    uint8_t *rxbuf, *txbuf, *core;
+    size_t   wire_max, core_bytes;
+} dart_rt_blocks;
+static void dart__rt_layout(dart_bump *b, const dart_discovery_config *c, dart_rt_blocks *o){
+    o->wire_max   = dart_discovery_rt_wire_max(c);
+    o->rt    = (dart_discovery_rt*)dart_take(b, sizeof(struct dart_discovery_rt), 16);
+    o->rxbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
+    o->txbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
+    o->core_bytes = dart_discovery_required_memory(c);
+    o->core  = (uint8_t*)dart_take(b, o->core_bytes, 16);
+}
+
 size_t dart_discovery_rt_required_memory(const dart_discovery_rt_config *cfg){
-    dart_discovery_config c;
-    size_t rt = (sizeof(struct dart_discovery_rt) + 15u) & ~(size_t)15u;
-    size_t wmax;
+    dart_discovery_config c; dart_bump b; dart_rt_blocks blk;
     if (!cfg) return 0;
     c = cfg->discovery;
     if (c.announce_interval_us == 0) c.announce_interval_us = 1000000u;
     if (c.peer_timeout_us  == 0) c.peer_timeout_us  = c.announce_interval_us * 7u / 2u;
     if (c.max_peers   == 0) c.max_peers   = 32u;
-    wmax = ((size_t)dart_discovery_rt_wire_max(&c) + 15u) & ~(size_t)15u;
-    return 16u + rt + 2u*wmax + dart_discovery_required_memory(&c);
+    memset(&b, 0, sizeof b);
+    dart__rt_layout(&b, &c, &blk);
+    return b.offset + 16u;     /* slack to align the caller's mem up to base */
 }
 
 dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_discovery_rt_config *cfg){
     dart_discovery_rt_config c;
     dart_discovery_rt *rt;
     uint8_t *base, *core_mem;
-    size_t rtsz, wmax, need;
+    size_t need;
+    dart_rt_blocks blk;
     dart_sock fd;
     int allzero = 1, i;
     uint8_t ttl;
@@ -1936,14 +1996,14 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
     if (cap < need) return NULL;
 
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
-    rt   = (dart_discovery_rt*)base;
-    rtsz = (sizeof(struct dart_discovery_rt) + 15u) & ~(size_t)15u;
-    wmax = ((size_t)dart_discovery_rt_wire_max(&c.discovery) + 15u) & ~(size_t)15u;
-
-    rt->wire_max = (uint32_t)dart_discovery_rt_wire_max(&c.discovery);
-    rt->rxbuf    = base + rtsz;
-    rt->txbuf    = rt->rxbuf + wmax;
-    core_mem     = rt->txbuf + wmax;
+    {   dart_bump b; memset(&b, 0, sizeof b);
+        b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
+        dart__rt_layout(&b, &c.discovery, &blk); }
+    rt = blk.rt;
+    rt->wire_max = (uint32_t)blk.wire_max;
+    rt->rxbuf    = blk.rxbuf;
+    rt->txbuf    = blk.txbuf;
+    core_mem     = blk.core;
 
     /* auto-generate a UUID if the caller left it zero */
     for (i=0;i<16;i++) if (c.discovery.uuid[i]) { allzero = 0; break; }
@@ -2081,8 +2141,11 @@ static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (
 
 typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
 
+/* round n up to the next multiple of align (a power of two): names the (x+15)&~15 idiom */
+static inline size_t dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
+
 static inline void *dart_take(dart_bump *b, size_t n, size_t align){
-    size_t a = (b->offset + (align - 1)) & ~(align - 1);
+    size_t a = dart_align_up(b->offset, align);
     b->offset = a + n;
     if (b->base){
         if (b->offset > b->cap){ b->oom = 1; return NULL; }
@@ -3886,14 +3949,14 @@ struct dart_shm_pool {
     int      is_creator;
 };
 
-size_t dart_shm_state_bytes(void){ return (sizeof(struct dart_shm_pool) + 15u) & ~(size_t)15u; }
+size_t dart_shm_state_bytes(void){ return dart_align_up(sizeof(struct dart_shm_pool), 16u); }
 
-#define DART__SHM_HDR_SZ  ((uint32_t)((sizeof(dart_shm_seg_hdr) + 15u) & ~(size_t)15u))
-#define DART__SHM_CHDR_SZ ((uint32_t)((sizeof(dart_shm_chunk_hdr) + 15u) & ~(size_t)15u))
+#define DART__SHM_HDR_SZ  ((uint32_t)dart_align_up(sizeof(dart_shm_seg_hdr), 16u))
+#define DART__SHM_CHDR_SZ ((uint32_t)dart_align_up(sizeof(dart_shm_chunk_hdr), 16u))
 
 static void dart__shm_geom(uint32_t chunk_bytes, uint32_t n_chunks,
                            uint32_t *out_stride, size_t *out_total){
-    uint32_t aligned = (chunk_bytes + 15u) & ~15u;
+    uint32_t aligned = (uint32_t)dart_align_up(chunk_bytes, 16u);
     uint32_t stride = DART__SHM_CHDR_SZ + aligned;
     *out_stride = stride;
     *out_total  = (size_t)DART__SHM_HDR_SZ + (size_t)n_chunks * stride;

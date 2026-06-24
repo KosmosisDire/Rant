@@ -13,8 +13,11 @@
 
 typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
 
+/* round n up to the next multiple of align (a power of two): names the (x+15)&~15 idiom */
+static inline size_t dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
+
 static inline void *dart_take(dart_bump *b, size_t n, size_t align){
-    size_t a = (b->offset + (align - 1)) & ~(align - 1);
+    size_t a = dart_align_up(b->offset, align);
     b->offset = a + n;
     if (b->base){
         if (b->offset > b->cap){ b->oom = 1; return NULL; }
