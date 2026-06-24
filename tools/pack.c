@@ -64,18 +64,18 @@ static void build_discovery(const char *srcdir, const char *outdir){
     fputs(BANNER, out);
     posix_preamble(out, "DART_DISCOVERY_IMPLEMENTATION", "DART_DISCOVERY_SANS_IO");
 
-    emit(out, srcdir, "dart_discovery.h", 1);
+    emit(out, srcdir, "discovery/core.h", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
-    emit(out, srcdir, "dart_plat.h", 1);
-    emit(out, srcdir, "dart_discovery_rt.h", 1);
+    emit(out, srcdir, "platform/core.h", 1);
+    emit(out, srcdir, "discovery/runtime.h", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
 
     fputs("\n#ifdef DART_DISCOVERY_IMPLEMENTATION\n", out);
-    emit(out, srcdir, "dart_bytes.h", 1);   /* shared LE helpers, before first use */
-    emit(out, srcdir, "dart_discovery.c", 1);
+    emit(out, srcdir, "common/bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "discovery/core.c", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
-    emit(out, srcdir, "dart_plat.c", 1);
-    emit(out, srcdir, "dart_discovery_rt.c", 1);
+    emit(out, srcdir, "platform/core.c", 1);
+    emit(out, srcdir, "discovery/runtime.c", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
     fputs("#endif /* DART_DISCOVERY_IMPLEMENTATION */\n", out);
     fclose(out);
@@ -101,24 +101,24 @@ static void build_transport(const char *srcdir, const char *outdir){
         "  #include \"dart_discovery.h\"   /* discovery: needed by the node runtime */\n"
         "#endif\n\n", out);
 
-    emit(out, srcdir, "dart_transport.h", 1);
+    emit(out, srcdir, "transport/core.h", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "dart_node.h", 1);
-    emit(out, srcdir, "dart_shm.h", 1);    /* SHM module (inert without DART_SHM) */
+    emit(out, srcdir, "node/core.h", 1);
+    emit(out, srcdir, "shm/core.h", 1);    /* SHM module (inert without DART_SHM) */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
 
     fputs("\n#ifdef DART_TRANSPORT_IMPLEMENTATION\n", out);
-    emit(out, srcdir, "dart_bytes.h", 1);   /* shared LE helpers, before first use */
-    emit(out, srcdir, "dart_arena.h", 1);   /* shared bump allocator, before first use */
+    emit(out, srcdir, "common/bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "common/arena.h", 1);   /* shared bump allocator, before first use */
     emit(out, srcdir, "transport/internal.h", 1);  /* split transport: shared decls first */
     emit(out, srcdir, "transport/wire.c", 1);
     emit(out, srcdir, "transport/sched.c", 1);
     emit(out, srcdir, "transport/writer.c", 1);
     emit(out, srcdir, "transport/reader.c", 1);
-    emit(out, srcdir, "dart_transport.c", 1);
+    emit(out, srcdir, "transport/core.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "dart_shm.c", 1);    /* SHM module impl, before node.c uses it */
-    emit(out, srcdir, "dart_node.c", 1);
+    emit(out, srcdir, "shm/core.c", 1);    /* SHM module impl, before node.c uses it */
+    emit(out, srcdir, "node/core.c", 1);
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
     fputs("#endif /* DART_TRANSPORT_IMPLEMENTATION */\n", out);
     fclose(out);
@@ -147,39 +147,39 @@ static void build_combined(const char *srcdir, const char *outdir){
     posix_preamble(out, "DART_DISCOVERY_IMPLEMENTATION", "DART_DISCOVERY_SANS_IO");
 
     /* APIs in dependency order */
-    emit(out, srcdir, "dart_discovery.h", 1);
+    emit(out, srcdir, "discovery/core.h", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
-    emit(out, srcdir, "dart_plat.h", 1);
-    emit(out, srcdir, "dart_discovery_rt.h", 1);
+    emit(out, srcdir, "platform/core.h", 1);
+    emit(out, srcdir, "discovery/runtime.h", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
-    emit(out, srcdir, "dart_transport.h", 1);
+    emit(out, srcdir, "transport/core.h", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "dart_node.h", 1);
-    emit(out, srcdir, "dart_shm.h", 1);    /* SHM module (inert without DART_SHM) */
+    emit(out, srcdir, "node/core.h", 1);
+    emit(out, srcdir, "shm/core.h", 1);    /* SHM module (inert without DART_SHM) */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
 
     /* implementations in dependency order */
     fputs("\n#ifdef DART_DISCOVERY_IMPLEMENTATION\n", out);
-    emit(out, srcdir, "dart_bytes.h", 1);   /* shared LE helpers, before first use */
-    emit(out, srcdir, "dart_discovery.c", 1);
+    emit(out, srcdir, "common/bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "discovery/core.c", 1);
     fputs("\n#ifndef DART_DISCOVERY_SANS_IO\n", out);
-    emit(out, srcdir, "dart_plat.c", 1);
-    emit(out, srcdir, "dart_discovery_rt.c", 1);
+    emit(out, srcdir, "platform/core.c", 1);
+    emit(out, srcdir, "discovery/runtime.c", 1);
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
     fputs("#endif /* DART_DISCOVERY_IMPLEMENTATION */\n", out);
 
     fputs("\n#ifdef DART_TRANSPORT_IMPLEMENTATION\n", out);
-    emit(out, srcdir, "dart_bytes.h", 1);   /* shared LE helpers, before first use */
-    emit(out, srcdir, "dart_arena.h", 1);   /* shared bump allocator, before first use */
+    emit(out, srcdir, "common/bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "common/arena.h", 1);   /* shared bump allocator, before first use */
     emit(out, srcdir, "transport/internal.h", 1);  /* split transport: shared decls first */
     emit(out, srcdir, "transport/wire.c", 1);
     emit(out, srcdir, "transport/sched.c", 1);
     emit(out, srcdir, "transport/writer.c", 1);
     emit(out, srcdir, "transport/reader.c", 1);
-    emit(out, srcdir, "dart_transport.c", 1);
+    emit(out, srcdir, "transport/core.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "dart_shm.c", 1);    /* SHM module impl, before node.c uses it */
-    emit(out, srcdir, "dart_node.c", 1);
+    emit(out, srcdir, "shm/core.c", 1);    /* SHM module impl, before node.c uses it */
+    emit(out, srcdir, "node/core.c", 1);
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
     fputs("#endif /* DART_TRANSPORT_IMPLEMENTATION */\n", out);
     fclose(out);

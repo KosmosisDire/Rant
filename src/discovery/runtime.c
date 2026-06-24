@@ -1,8 +1,8 @@
 /* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
  * UUID generation. All OS access goes through dart_plat. */
 
-#include "dart_discovery_rt.h"
-#include "dart_plat.h"
+#include "runtime.h"
+#include "../platform/core.h"
 #include <string.h>
 
 struct dart_discovery_rt {

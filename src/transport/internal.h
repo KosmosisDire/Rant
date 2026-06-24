@@ -4,8 +4,8 @@
 #ifndef DART_TRANSPORT_INTERNAL_H
 #define DART_TRANSPORT_INTERNAL_H
 
-#include "../dart_transport.h"
-#include "../dart_bytes.h"
+#include "core.h"
+#include "../common/bytes.h"
 #include <string.h>
 
 /* byte 0 of every submessage: type in the low 3 bits, flags above */

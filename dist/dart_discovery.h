@@ -12,7 +12,7 @@
   #endif
 #endif
 
-/* ===== dart_discovery.h ===== */
+/* ===== discovery/core.h ===== */
 /* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
  * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
  * IO-owning layer see dart_discovery_rt.h. */
@@ -117,7 +117,7 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 #endif /* DART_DISCOVERY_H */
 
 #ifndef DART_DISCOVERY_SANS_IO
-/* ===== dart_plat.h ===== */
+/* ===== platform/core.h ===== */
 /* dart_plat: the one platform layer. Every OS dependency the runtimes need lives
  * behind this contract: a monotonic clock, UDP sockets, multicast, entropy, and
  * the source-address route probe. The layers above (discovery_rt, node) speak
@@ -240,7 +240,7 @@ void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
 }
 #endif
 #endif /* DART_PLAT_H */
-/* ===== dart_discovery_rt.h ===== */
+/* ===== discovery/runtime.h ===== */
 /* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over
  * the dart_discovery core. On non-MSVC Windows, link -lws2_32 -lbcrypt. */
 #ifndef DART_DISCOVERY_RT_H
@@ -303,7 +303,7 @@ uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 #endif /* !DART_DISCOVERY_SANS_IO */
 
 #ifdef DART_DISCOVERY_IMPLEMENTATION
-/* ===== dart_bytes.h ===== */
+/* ===== common/bytes.h ===== */
 /* Shared little-endian byte packing, used by the discovery, transport, and SHM
  * layers (each formerly carried its own copy). static inline: no link symbol and
  * no unused-function warning in a layer that doesn't use a given width. The
@@ -322,7 +322,7 @@ static inline uint32_t dart_le_r32(const uint8_t *p){ return (uint32_t)p[0] | ((
 static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
 
 #endif /* DART_BYTES_H */
-/* ===== dart_discovery.c ===== */
+/* ===== discovery/core.c ===== */
 /* sans-IO peer-discovery core. See dart_discovery.h. */
 #include <string.h>
 
@@ -681,7 +681,7 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
 }
 
 #ifndef DART_DISCOVERY_SANS_IO
-/* ===== dart_plat.c ===== */
+/* ===== platform/core.c ===== */
 /* dart_plat: the Windows + POSIX implementation of the platform contract. This
  * is the only file in DART carrying an OS #ifdef. Port to a new platform by
  * adding a branch here (or a sibling file against dart_plat.h); BSD-socket
@@ -1123,7 +1123,7 @@ void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
 }
 #endif /* _WIN32 */
 #endif /* DART_SHM */
-/* ===== dart_discovery_rt.c ===== */
+/* ===== discovery/runtime.c ===== */
 /* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
  * UUID generation. All OS access goes through dart_plat. */
 

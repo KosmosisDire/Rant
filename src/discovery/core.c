@@ -1,6 +1,6 @@
 /* sans-IO peer-discovery core. See dart_discovery.h. */
-#include "dart_discovery.h"
-#include "dart_bytes.h"
+#include "core.h"
+#include "../common/bytes.h"
 #include <string.h>
 
 #define DART_DISCOVERY_HDR_LEN 43

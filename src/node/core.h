@@ -3,8 +3,8 @@
 #ifndef DART_NODE_H
 #define DART_NODE_H
 
-#include "dart_transport.h"
-#include "dart_discovery.h"    /* dart_discovery_addr (seed peers) */
+#include "../transport/core.h"
+#include "../discovery/core.h"    /* dart_discovery_addr (seed peers) */
 
 #ifdef __cplusplus
 extern "C" {

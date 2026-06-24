@@ -58,7 +58,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "dart_plat.h"   /* dart_plat_shm_*, dart_plat_host_uuid, dart_plat_atomic_* */
+#include "../platform/core.h"   /* dart_plat_shm_*, dart_plat_host_uuid, dart_plat_atomic_* */
 
 #ifdef __cplusplus
 extern "C" {

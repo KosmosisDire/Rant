@@ -13,7 +13,7 @@
   #endif
 #endif
 
-#include "dart_plat.h"
+#include "core.h"
 #include <string.h>
 
 #ifdef _WIN32

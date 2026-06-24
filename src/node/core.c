@@ -1,13 +1,13 @@
 /* NODE runtime: owns the data socket, drives discovery, wires peers into the
  * transport. All OS access goes through dart_plat. See dart_node.h. */
 
-#include "dart_node.h"
-#include "dart_discovery_rt.h"
-#include "dart_plat.h"
+#include "core.h"
+#include "../discovery/runtime.h"
+#include "../platform/core.h"
 #ifdef DART_SHM
-#include "dart_shm.h"
+#include "../shm/core.h"
 #endif
-#include "dart_arena.h"
+#include "../common/arena.h"
 #include <string.h>
 
 typedef struct {

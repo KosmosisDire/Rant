@@ -2,8 +2,8 @@
  * over dart_plat (shm mapping, host uuid, the generation atomic); no transport or
  * node knowledge. Compiles to nothing without DART_SHM. See dart_shm.h. */
 
-#include "dart_shm.h"
-#include "dart_bytes.h"
+#include "core.h"
+#include "../common/bytes.h"
 
 #ifdef DART_SHM
 #include <string.h>

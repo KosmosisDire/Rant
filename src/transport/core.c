@@ -1,10 +1,10 @@
 /* sans-IO reliable-UDP transport core: state, init/teardown, peer + interest matching,
  * the RX demux, and public queries. The wire codec, scheduler, and writer/reader paths
  * live in transport/{wire,sched,writer,reader}.c; shared decls in transport/internal.h. */
-#include "dart_transport.h"
-#include "dart_bytes.h"
-#include "dart_arena.h"
-#include "transport/internal.h"
+#include "core.h"
+#include "../common/bytes.h"
+#include "../common/arena.h"
+#include "internal.h"
 #include <string.h>
 
 

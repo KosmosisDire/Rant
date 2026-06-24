@@ -3,7 +3,7 @@
 #ifndef DART_DISCOVERY_RT_H
 #define DART_DISCOVERY_RT_H
 
-#include "dart_discovery.h"
+#include "core.h"
 
 #ifdef __cplusplus
 extern "C" {

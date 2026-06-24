@@ -19,7 +19,7 @@
   #include "dart_discovery.h"   /* discovery: needed by the node runtime */
 #endif
 
-/* ===== dart_transport.h ===== */
+/* ===== transport/core.h ===== */
 /* sans-IO reliable-UDP transport core: no socket, clock, or heap. Feed it
  * datagrams + now_us + a peer set; it returns datagrams to send and delivers
  * reassembled messages. RTPS-inspired, not wire-compatible. Layer dart_node.h
@@ -348,7 +348,7 @@ uint64_t  dart_next_deadline_us(dart_state *st);
 #endif /* DART_TRANSPORT_H */
 
 #ifndef DART_TRANSPORT_SANS_IO
-/* ===== dart_node.h ===== */
+/* ===== node/core.h ===== */
 /* NODE runtime over dart_transport: owns the data socket, drives discovery,
  * wires peers into the transport. */
 #ifndef DART_NODE_H
@@ -457,7 +457,7 @@ void     dart_node_close(dart_node *n, int send_bye);
 }
 #endif
 #endif /* DART_NODE_H */
-/* ===== dart_shm.h ===== */
+/* ===== shm/core.h ===== */
 /* dart_shm: zero-copy same-host payload path. OPT-IN -- nothing here compiles or
  * links unless you define DART_SHM, so embedded / non-SHM targets carry zero cost
  * and need no shared-memory platform support. Speaks only dart_plat_* (shm mapping,
@@ -677,7 +677,7 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
 #endif /* !DART_TRANSPORT_SANS_IO */
 
 #ifdef DART_TRANSPORT_IMPLEMENTATION
-/* ===== dart_bytes.h ===== */
+/* ===== common/bytes.h ===== */
 /* Shared little-endian byte packing, used by the discovery, transport, and SHM
  * layers (each formerly carried its own copy). static inline: no link symbol and
  * no unused-function warning in a layer that doesn't use a given width. The
@@ -696,7 +696,7 @@ static inline uint32_t dart_le_r32(const uint8_t *p){ return (uint32_t)p[0] | ((
 static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
 
 #endif /* DART_BYTES_H */
-/* ===== dart_arena.h ===== */
+/* ===== common/arena.h ===== */
 /* Bump allocator shared by the layers that pack sub-blocks into one caller-provided
  * arena (transport state, node). Measure mode (base==NULL): dart_take returns NULL but
  * still advances offset, so the sizing pass and the build pass run the SAME code and
@@ -1881,7 +1881,7 @@ size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t 
     if (!repair && !force) return 0;
     return dart_mk_nack(out,alias,first_missing,nbits,bitmap,r->epoch,0);
 }
-/* ===== dart_transport.c ===== */
+/* ===== transport/core.c ===== */
 /* sans-IO reliable-UDP transport core: state, init/teardown, peer + interest matching,
  * the RX demux, and public queries. The wire codec, scheduler, and writer/reader paths
  * live in transport/{wire,sched,writer,reader}.c; shared decls in transport/internal.h. */
@@ -2465,7 +2465,7 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *datagram, size_
 }
 
 #ifndef DART_TRANSPORT_SANS_IO
-/* ===== dart_shm.c ===== */
+/* ===== shm/core.c ===== */
 /* dart_shm: the portable segment-mapping + chunk module behind dart_shm.h. Pure
  * over dart_plat (shm mapping, host uuid, the generation atomic); no transport or
  * node knowledge. Compiles to nothing without DART_SHM. See dart_shm.h. */
@@ -2626,7 +2626,7 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
 }
 
 #endif /* DART_SHM */
-/* ===== dart_node.c ===== */
+/* ===== node/core.c ===== */
 /* NODE runtime: owns the data socket, drives discovery, wires peers into the
  * transport. All OS access goes through dart_plat. See dart_node.h. */
 
