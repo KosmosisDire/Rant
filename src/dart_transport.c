@@ -1,5 +1,6 @@
 /* sans-IO reliable-UDP transport core. See dart_transport.h. */
 #include "dart_transport.h"
+#include "dart_bytes.h"
 #include <string.h>
 
 /* byte 0 of every submessage: type in the low 3 bits, flags above */
@@ -21,14 +22,6 @@
 #endif
 
 #define DART__NO_DEADLINE ((uint64_t)-1)  /* next_deadline_us: nothing armed */
-
-/* little-endian pack helpers */
-static void dart_w16(uint8_t*p,uint16_t v){p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);}
-static void dart_w32(uint8_t*p,uint32_t v){p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);p[2]=(uint8_t)(v>>16);p[3]=(uint8_t)(v>>24);}
-static void dart_w64(uint8_t*p,uint64_t v){int i;for(i=0;i<8;i++)p[i]=(uint8_t)(v>>(8*i));}
-static uint16_t dart_r16(const uint8_t*p){return (uint16_t)(p[0]|((uint16_t)p[1]<<8));}
-static uint32_t dart_r32(const uint8_t*p){return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
-static uint64_t dart_r64(const uint8_t*p){uint64_t v=0;int i;for(i=0;i<8;i++)v|=((uint64_t)p[i])<<(8*i);return v;}
 
 static void dart_bset(uint8_t*bitmap,uint32_t i){bitmap[i>>3]|=(uint8_t)(1u<<(i&7));}
 static int  dart_bget(const uint8_t*bitmap,uint32_t i){return (bitmap[i>>3]>>(i&7))&1;}
@@ -706,7 +699,7 @@ void dart_destroy(dart_state *st){
  * hash collision is detected (not cross-wired); the identity is recomputed from it. */
 static uint8_t *dart__meta_put(uint8_t *p, uint16_t alias, const dart_channel *ch){
     size_t lane = dart__namelen(ch->name);
-    dart_w16(p, alias); p += 2;
+    dart_le_w16(p, alias); p += 2;
     *p++ = (uint8_t)lane;
     if (lane){ memcpy(p, ch->name, lane); p += lane; }
     return p;
@@ -722,7 +715,7 @@ static const uint8_t *dart__meta_scan(dart_state *st, int peer_slot, const uint8
                                       uint32_t count, uint8_t *bitmap){
     uint32_t k;
     for (k=0;k<count;k++){
-        uint16_t alias=dart_r16(p); uint32_t nlen=p[2]; const uint8_t *name=p+3; int channel_idx;
+        uint16_t alias=dart_le_r16(p); uint32_t nlen=p[2]; const uint8_t *name=p+3; int channel_idx;
         uint64_t id=dart__id_n(name,nlen);
         dart_channel *ch=dart_chan_by_identity(st,id,&channel_idx);
         p = name + nlen;
@@ -767,7 +760,7 @@ size_t dart_build_interest(dart_state *st, void *out, size_t cap){
             p=dart__meta_put(p,c,&st->channels[c]); n_sub++;
         }
     }
-    dart_w16(o,(uint16_t)n_pub); dart_w16(o+2,(uint16_t)n_sub);
+    dart_le_w16(o,(uint16_t)n_pub); dart_le_w16(o+2,(uint16_t)n_sub);
     return (size_t)(p - o);
 }
 
@@ -780,7 +773,7 @@ void dart_apply_peer_interest(dart_state *st, uint32_t peer_id, const void *blob
     if (peer_slot<0 || len<4) return;
     peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
-    n_pub=dart_r16(d); n_sub=dart_r16(d+2);
+    n_pub=dart_le_r16(d); n_sub=dart_le_r16(d+2);
     /* validate the whole variable-length list first: a truncated blob must not drop a match */
     { uint32_t k, tot=(uint32_t)n_pub+n_sub; p=d+4;
       for (k=0;k<tot;k++){
@@ -938,16 +931,16 @@ static uint16_t dart__alias_of(dart_state *st, int channel_idx){
 /* datagram builders (return length) */
 static size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_writer_sample *s,
                          uint16_t frag, const uint8_t *payload, uint16_t payload_len){
-    dart_w16(o+DART_O_ALIAS,alias);
+    dart_le_w16(o+DART_O_ALIAS,alias);
     if (s->count==1){                       /* frag=0, count=1, len=payload_len implied */
         o[0]=(uint8_t)(DART_DATA|DART_F_SINGLE);
-        dart_w64(o+DART_O_SEQNO,seqno); dart_w16(o+DART_O_PLEN1,payload_len);
+        dart_le_w64(o+DART_O_SEQNO,seqno); dart_le_w16(o+DART_O_PLEN1,payload_len);
         memcpy(o+DART_HDR_DATA1,payload,payload_len);
         return DART_HDR_DATA1+payload_len;
     }
     o[0]=DART_DATA;
-    dart_w64(o+DART_O_SEQNO,seqno); dart_w16(o+DART_O_FRAG,frag); dart_w16(o+DART_O_COUNT,s->count);
-    dart_w32(o+DART_O_SLEN,s->len); dart_w16(o+DART_O_PLEN,payload_len);
+    dart_le_w64(o+DART_O_SEQNO,seqno); dart_le_w16(o+DART_O_FRAG,frag); dart_le_w16(o+DART_O_COUNT,s->count);
+    dart_le_w32(o+DART_O_SLEN,s->len); dart_le_w16(o+DART_O_PLEN,payload_len);
     memcpy(o+DART_HDR_DATA,payload,payload_len);
     return DART_HDR_DATA+payload_len;
 }
@@ -957,20 +950,20 @@ static size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_writ
 #define DART_SHM_DATA_BYTES (DART_O_SHM_DESC + DART_SHM_DESC_BYTES)
 static size_t dart_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count,
                           const uint8_t *desc){
-    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); dart_w16(o+DART_O_ALIAS,alias);
-    dart_w64(o+DART_O_SEQNO,base); dart_w16(o+DART_O_SHM_COUNT,count);
+    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); dart_le_w16(o+DART_O_ALIAS,alias);
+    dart_le_w64(o+DART_O_SEQNO,base); dart_le_w16(o+DART_O_SHM_COUNT,count);
     memcpy(o+DART_O_SHM_DESC,desc,DART_SHM_DESC_BYTES);
     return DART_SHM_DATA_BYTES;
 }
 #endif
 static size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt){
-    o[0]=DART_HB; dart_w16(o+DART_O_ALIAS,alias); dart_w64(o+DART_O_SEQNO,first); dart_w64(o+DART_O_HB_LAST,last); dart_w32(o+DART_O_HB_CNT,cnt);
+    o[0]=DART_HB; dart_le_w16(o+DART_O_ALIAS,alias); dart_le_w64(o+DART_O_SEQNO,first); dart_le_w64(o+DART_O_HB_LAST,last); dart_le_w32(o+DART_O_HB_CNT,cnt);
     return DART_HDR_HB;
 }
 static size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap,
                          uint32_t epoch, uint8_t flags){
-    o[0]=(uint8_t)(DART_NACK|flags); dart_w16(o+DART_O_ALIAS,alias); dart_w64(o+DART_O_SEQNO,base);
-    dart_w16(o+DART_O_NK_NBITS,nbits); dart_w32(o+DART_O_NK_BITS,bitmap); dart_w32(o+DART_O_NK_EPOCH,epoch);
+    o[0]=(uint8_t)(DART_NACK|flags); dart_le_w16(o+DART_O_ALIAS,alias); dart_le_w64(o+DART_O_SEQNO,base);
+    dart_le_w16(o+DART_O_NK_NBITS,nbits); dart_le_w32(o+DART_O_NK_BITS,bitmap); dart_le_w32(o+DART_O_NK_EPOCH,epoch);
     return DART_HDR_NACK;
 }
 /* emit an HB advertising this lane's current window. Doubles as the "skip past a
@@ -1008,8 +1001,8 @@ static void dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, cons
     dart_channel *ch=&st->channels[channel_idx];
     dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
     int reliable = (ch->qos.reliability==DART_RELIABLE);
-    uint64_t base = dart_r64(p+DART_O_SEQNO);
-    uint16_t count = dart_r16(p+DART_O_SHM_COUNT);
+    uint64_t base = dart_le_r64(p+DART_O_SEQNO);
+    uint16_t count = dart_le_r16(p+DART_O_SHM_COUNT);
     const uint8_t *desc = p+DART_O_SHM_DESC;          /* DART_SHM_DESC_BYTES */
     if (!r->used || count==0) return;
     if (base < r->deliver_upto) return;                 /* old/dup */
@@ -1071,10 +1064,10 @@ static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, con
     int new_fragment = 0;
     uint64_t seqno, base; uint16_t frag, count, payload_len; uint32_t sample_len; const uint8_t *payload;
     if (p[0] & DART_F_SINGLE){           /* single fragment: frag/count/len implied */
-        seqno=dart_r64(p+DART_O_SEQNO); frag=0; count=1; payload_len=dart_r16(p+DART_O_PLEN1); sample_len=payload_len; payload=p+DART_HDR_DATA1;
+        seqno=dart_le_r64(p+DART_O_SEQNO); frag=0; count=1; payload_len=dart_le_r16(p+DART_O_PLEN1); sample_len=payload_len; payload=p+DART_HDR_DATA1;
     } else {
-        seqno=dart_r64(p+DART_O_SEQNO); frag=dart_r16(p+DART_O_FRAG); count=dart_r16(p+DART_O_COUNT);
-        sample_len=dart_r32(p+DART_O_SLEN); payload_len=dart_r16(p+DART_O_PLEN); payload=p+DART_HDR_DATA;
+        seqno=dart_le_r64(p+DART_O_SEQNO); frag=dart_le_r16(p+DART_O_FRAG); count=dart_le_r16(p+DART_O_COUNT);
+        sample_len=dart_le_r32(p+DART_O_SLEN); payload_len=dart_le_r16(p+DART_O_PLEN); payload=p+DART_HDR_DATA;
     }
     base = seqno - frag;
 
@@ -1177,7 +1170,7 @@ static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, con
 static void dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
     dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
-    uint64_t first=dart_r64(p+DART_O_SEQNO), last=dart_r64(p+DART_O_HB_LAST);
+    uint64_t first=dart_le_r64(p+DART_O_SEQNO), last=dart_le_r64(p+DART_O_HB_LAST);
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
     /* un-started readers adopt no position from heartbeats (a one-sided flap's
@@ -1211,8 +1204,8 @@ static void dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const
 static void dart_writer_nack(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p){
     dart_channel *ch=&st->channels[channel_idx];
     dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
-    uint64_t base=dart_r64(p+DART_O_SEQNO); uint16_t nbits=dart_r16(p+DART_O_NK_NBITS); uint32_t bitmap=dart_r32(p+DART_O_NK_BITS);
-    uint32_t epoch=dart_r32(p+DART_O_NK_EPOCH); uint8_t flags=p[0];
+    uint64_t base=dart_le_r64(p+DART_O_SEQNO); uint16_t nbits=dart_le_r16(p+DART_O_NK_NBITS); uint32_t bitmap=dart_le_r32(p+DART_O_NK_BITS);
+    uint32_t epoch=dart_le_r32(p+DART_O_NK_EPOCH); uint8_t flags=p[0];
     int group_mode;
     if (!w->used) return;
     group_mode = ch->multicast && ch->n_subscribers>0;
@@ -1260,14 +1253,14 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *datagram, size_
                             if (b0 & DART_F_SHM){ if (rem<DART_SHM_DATA_BYTES) return; sub=DART_SHM_DATA_BYTES; }
                             else
 #endif
-                            if (b0 & DART_F_SINGLE){ if (rem<DART_HDR_DATA1) return; sub=DART_HDR_DATA1+(size_t)dart_r16(p+DART_O_PLEN1); }
-                            else { if (rem<DART_HDR_DATA) return; sub=DART_HDR_DATA+(size_t)dart_r16(p+DART_O_PLEN); } break;
+                            if (b0 & DART_F_SINGLE){ if (rem<DART_HDR_DATA1) return; sub=DART_HDR_DATA1+(size_t)dart_le_r16(p+DART_O_PLEN1); }
+                            else { if (rem<DART_HDR_DATA) return; sub=DART_HDR_DATA+(size_t)dart_le_r16(p+DART_O_PLEN); } break;
             case DART_HB:   if (rem<DART_HDR_HB) return; sub=DART_HDR_HB; break;
             case DART_NACK: if (rem<DART_HDR_NACK) return; sub=DART_HDR_NACK; break;
             default: return;             /* unknown type: cannot resync, drop rest */
         }
         if (sub>rem) return;             /* truncated/malformed */
-        alias = dart_r16(p+DART_O_ALIAS);
+        alias = dart_le_r16(p+DART_O_ALIAS);
         if ((uint32_t)alias < st->alias_max){
             uint16_t m=st->alias_to_channel[(size_t)peer_slot*st->alias_max+alias]; channel_idx=(m==0xFFFFu)?-1:(int)m;
         } else channel_idx=-1;

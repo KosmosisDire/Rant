@@ -3,30 +3,25 @@
  * node knowledge. Compiles to nothing without DART_SHM. See dart_shm.h. */
 
 #include "dart_shm.h"
+#include "dart_bytes.h"
 
 #ifdef DART_SHM
 #include <string.h>
 #include <stdlib.h>
 
-/* little-endian scalar IO for the wire descriptor */
-static void shm_w32(uint8_t *p, uint32_t v){ p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);p[2]=(uint8_t)(v>>16);p[3]=(uint8_t)(v>>24); }
-static void shm_w64(uint8_t *p, uint64_t v){ int i; for(i=0;i<8;i++) p[i]=(uint8_t)(v>>(8*i)); }
-static uint32_t shm_r32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
-static uint64_t shm_r64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
-
 size_t dart_shm_desc_encode(const dart_shm_desc *d, uint8_t out[DART_SHM_DESC_WIRE]){
-    shm_w64(out,    d->segment_id);
-    shm_w32(out+8,  d->chunk);
-    shm_w32(out+12, d->length);
-    shm_w64(out+16, d->generation);
+    dart_le_w64(out,    d->segment_id);
+    dart_le_w32(out+8,  d->chunk);
+    dart_le_w32(out+12, d->length);
+    dart_le_w64(out+16, d->generation);
     return DART_SHM_DESC_WIRE;
 }
 int dart_shm_desc_decode(dart_shm_desc *d, const uint8_t *in, size_t len){
     if (len < DART_SHM_DESC_WIRE) return 0;
-    d->segment_id = shm_r64(in);
-    d->chunk      = shm_r32(in+8);
-    d->length     = shm_r32(in+12);
-    d->generation = shm_r64(in+16);
+    d->segment_id = dart_le_r64(in);
+    d->chunk      = dart_le_r32(in+8);
+    d->length     = dart_le_r32(in+12);
+    d->generation = dart_le_r64(in+16);
     return 1;
 }
 

@@ -1,5 +1,6 @@
 /* sans-IO peer-discovery core. See dart_discovery.h. */
 #include "dart_discovery.h"
+#include "dart_bytes.h"
 #include <string.h>
 
 #define DART_DISCOVERY_HDR_LEN 43
@@ -41,11 +42,6 @@ struct dart_discovery_state {
     uint16_t      targeted_cursor;  /* round-robin over peers for poll_targeted */
     dart_discovery_peer_  *peers;
 };
-
-static void     dart_discovery_wr16(uint8_t *p, uint16_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
-static uint16_t dart_discovery_rd16(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
-static void     dart_discovery_wr32(uint8_t *p, uint32_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
-static uint32_t dart_discovery_rd32(const uint8_t *p){ return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
 
 static uint32_t dart_discovery_fnv(const uint8_t *d, size_t n){
     uint32_t h = 2166136261u; size_t i;
@@ -163,15 +159,15 @@ static size_t dart_discovery_build(dart_discovery_state *st, uint8_t flags, int 
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
     p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
     p[5]=flags;
-    dart_discovery_wr16(p+6, st->cfg.domain_id);
+    dart_le_w16(p+6, st->cfg.domain_id);
     memcpy(p+8, st->cfg.uuid, 16);
-    dart_discovery_wr16(p+24, st->cfg.data_port);
+    dart_le_w16(p+24, st->cfg.data_port);
     p[26]= st->cfg.self_ip_len;
     memset(p+27, 0, 16);
     if (st->cfg.self_ip_len==4 || st->cfg.self_ip_len==16)
         memcpy(p+27, st->cfg.self_ip, st->cfg.self_ip_len);
-    dart_discovery_wr32(p+DART_DISCOVERY_HDR_LEN, st->self_meta_version);
-    dart_discovery_wr16(p+DART_DISCOVERY_HDR_LEN+4, meta_len);
+    dart_le_w32(p+DART_DISCOVERY_HDR_LEN, st->self_meta_version);
+    dart_le_w16(p+DART_DISCOVERY_HDR_LEN+4, meta_len);
     if (meta_len) memcpy(p+DART_DISCOVERY_META_OFF, st->self_meta, meta_len);
     return need;
 }
@@ -194,9 +190,9 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
     if (len < (size_t)DART_DISCOVERY_META_OFF) return;
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
     if (p[4]!=(uint8_t)DART_DISCOVERY_PROTO_VERSION) return;
-    if (dart_discovery_rd16(p+6) != st->cfg.domain_id) return;
-    meta_version = dart_discovery_rd32(p+DART_DISCOVERY_HDR_LEN);
-    meta_len = dart_discovery_rd16(p+DART_DISCOVERY_HDR_LEN+4);
+    if (dart_le_r16(p+6) != st->cfg.domain_id) return;
+    meta_version = dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
+    meta_len = dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
     if (meta_len > st->meta_capacity || (size_t)DART_DISCOVERY_META_OFF + meta_len > len) return;
     meta = p + DART_DISCOVERY_META_OFF;
 
@@ -204,7 +200,7 @@ void dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip,
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
 
     flags = p[5];
-    port  = dart_discovery_rd16(p+24);
+    port  = dart_le_r16(p+24);
     self_ip_len  = p[26];
     self_ip   = p+27;
 
