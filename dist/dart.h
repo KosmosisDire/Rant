@@ -2249,10 +2249,10 @@ static void dart__deadline(dart_state *st, uint64_t t){
 /* writer/reader proxy for a (channel,peer) lane. The proxies are
    [n_channels][max_peers] row-major; centralizing the index math here keeps a
    transposed channel/peer from silently corrupting a neighbor lane. */
-static dart_writer_proxy *dart__wp(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+static dart_writer_proxy *dart__writer_proxy_at(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
 }
-static dart_reader_proxy *dart__rp(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+static dart_reader_proxy *dart__reader_proxy_at(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
 }
 
@@ -2394,7 +2394,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
             uint8_t *assembly_buf = dyn ? NULL : (uint8_t*)dart_take(b, q.max_message_bytes, 8);
             uint8_t *frag_bitmap  = dyn ? NULL : (uint8_t*)dart_take(b, (max_fragments+7u)/8u, 1);
             if (st && b->base){
-                dart_reader_proxy *r = dart__rp(st,c,p);
+                dart_reader_proxy *r = dart__reader_proxy_at(st,c,p);
                 r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
                 r->assembly_cap = dyn ? 0u : q.max_message_bytes;
                 r->bitmap_cap  = dyn ? 0u : (uint32_t)((max_fragments+7u)/8u);
@@ -2488,7 +2488,7 @@ static void dart__lane_enq(dart_state *st, uint16_t channel_idx, uint32_t peer_s
  * dart__lane_enq instead, since it recomputes next_deadline itself. */
 static void dart__lane_wake(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
     if (peer_slot < st->cfg.max_peers){
-        dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
+        dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
         if (r->used && r->ack_pending) dart__deadline(st, r->ack_due_us);
     }
     dart__lane_enq(st, channel_idx, peer_slot);
@@ -2515,7 +2515,7 @@ static uint64_t dart_unicast_join_seqno(const dart_channel *ch){
  * the first subscriber; per-peer lanes then carry repairs only */
 static void dart__match_w(dart_state *st, uint16_t c, uint16_t peer_slot){
     dart_channel *ch=&st->channels[c];
-    dart_writer_proxy *w=dart__wp(st,c,peer_slot);
+    dart_writer_proxy *w=dart__writer_proxy_at(st,c,peer_slot);
     memset(w,0,sizeof(*w));
     w->used=1;
     if (!ch->multicast){
@@ -2532,13 +2532,13 @@ static void dart__match_w(dart_state *st, uint16_t c, uint16_t peer_slot){
 }
 static void dart__unmatch_w(dart_state *st, uint16_t c, uint16_t peer_slot){
     dart_channel *ch=&st->channels[c];
-    dart_writer_proxy *w=dart__wp(st,c,peer_slot);
+    dart_writer_proxy *w=dart__writer_proxy_at(st,c,peer_slot);
     if (!w->used) return;
     if (ch->multicast && ch->n_subscribers) ch->n_subscribers--;
     w->used=0;
 }
 static void dart__match_r(dart_state *st, uint16_t c, uint16_t peer_slot){
-    dart_reader_proxy *r=dart__rp(st,c,peer_slot);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,c,peer_slot);
     uint8_t *assembly_buf=r->assembly_buf, *frag_bitmap=r->frag_bitmap;
     uint32_t assembly_cap=r->assembly_cap, bitmap_cap=r->bitmap_cap;   /* keep grown buffers across rematch */
     memset(r,0,sizeof(*r));
@@ -2554,7 +2554,7 @@ static void dart__match_r(dart_state *st, uint16_t c, uint16_t peer_slot){
     }
 }
 static void dart__unmatch_r(dart_state *st, uint16_t c, uint16_t peer_slot){
-    dart_reader_proxy *r=dart__rp(st,c,peer_slot);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,c,peer_slot);
     r->used=0; r->assembly_active=0;
 }
 
@@ -2565,8 +2565,8 @@ static void dart__rematch(dart_state *st, uint16_t c, uint16_t peer_slot){
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     int wuse = (ch->role==DART_PUBSUB || ch->role==DART_PUB_ONLY) && dart_bget(peer_sub_bitmap,c);
     int ruse = (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) && dart_bget(peer_pub_bitmap,c);
-    dart_writer_proxy *w=dart__wp(st,c,peer_slot);
-    dart_reader_proxy *r=dart__rp(st,c,peer_slot);
+    dart_writer_proxy *w=dart__writer_proxy_at(st,c,peer_slot);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,c,peer_slot);
     if (wuse && !w->used) dart__match_w(st,c,peer_slot);
     else if (!wuse && w->used) dart__unmatch_w(st,c,peer_slot);
     if (ruse && !r->used) dart__match_r(st,c,peer_slot);
@@ -2623,8 +2623,8 @@ void dart_peer_resume(dart_state *st, uint32_t id){
     if (s<0) return;
     st->peer_dormant[s]=0;
     for (c=0;c<st->cfg.n_channels;c++){
-        dart_writer_proxy *w=dart__wp(st,c,s);
-        dart_reader_proxy *r=dart__rp(st,c,s);
+        dart_writer_proxy *w=dart__writer_proxy_at(st,c,s);
+        dart_reader_proxy *r=dart__reader_proxy_at(st,c,s);
         if (st->channels[c].qos.reliability!=DART_RELIABLE) continue;
         if (r->used){ r->ack_pending=1; r->ack_due_us=0; r->ack_force=1; }  /* report our position now */
         if (w->used || r->used) dart__lane_wake(st,c,(uint16_t)s);
@@ -2678,7 +2678,7 @@ static void dart__commit(dart_state *st, uint16_t channel_idx, size_t len){
     else {
         uint32_t max_peers=st->cfg.max_peers, p;
         for (p=0;p<max_peers;p++)
-            if (dart__wp(st,channel_idx,p)->used && !st->peer_dormant[p]) dart__lane_wake(st, channel_idx, p);
+            if (dart__writer_proxy_at(st,channel_idx,p)->used && !st->peer_dormant[p]) dart__lane_wake(st, channel_idx, p);
     }
 }
 
@@ -2740,7 +2740,7 @@ void dart_destroy(dart_state *st){
             if (ch->history[d].buf){ st->cfg.allocator(st->cfg.user, ch->history[d].buf, 0);
                                   ch->history[d].buf=NULL; ch->history[d].cap=0; }
         for (p=0;p<max_peers;p++){
-            dart_reader_proxy *r=dart__rp(st,c,p);
+            dart_reader_proxy *r=dart__reader_proxy_at(st,c,p);
             if (r->assembly_buf){ st->cfg.allocator(st->cfg.user, r->assembly_buf, 0); r->assembly_buf=NULL; r->assembly_cap=0; }
             if (r->frag_bitmap){ st->cfg.allocator(st->cfg.user, r->frag_bitmap, 0); r->frag_bitmap=NULL; r->bitmap_cap=0; }
         }
@@ -2866,7 +2866,7 @@ int dart_send_would_evict(dart_state *st, uint16_t channel){
     if (!slot->valid) return 0;
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
-        dart_writer_proxy *w=dart__wp(st,channel_idx,p);
+        dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
@@ -2878,7 +2878,7 @@ int dart_send_drained(dart_state *st, uint16_t channel){
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
-        dart_writer_proxy *w=dart__wp(st,channel_idx,p);
+        dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
     }
     return 1;
@@ -2889,7 +2889,7 @@ int dart_writer_match_count(dart_state *st, uint16_t channel){
     uint32_t max_peers, p; int cnt = 0;
     if (!ch) return 0;
     max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++) if (dart__wp(st,channel_idx,p)->used) cnt++;  /* matched readers */
+    for (p=0;p<max_peers;p++) if (dart__writer_proxy_at(st,channel_idx,p)->used) cnt++;  /* matched readers */
     return cnt;
 }
 
@@ -2905,7 +2905,7 @@ int dart_repair_pending(dart_state *st, uint16_t channel){
     uint32_t max_peers, p; int cnt = 0;
     if (!ch) return 0;
     max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++){ dart_writer_proxy *w=dart__wp(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
+    for (p=0;p<max_peers;p++){ dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
     return cnt;   /* writer lanes with a NACK to service; 0 = nothing to resend right now */
 }
 
@@ -2916,7 +2916,7 @@ int dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
     if (!ch) return 0;
     peer_slot = dart_peer_slot(st, peer);
     if (peer_slot < 0) return 0;
-    r = dart__rp(st,channel_idx,peer_slot);
+    r = dart__reader_proxy_at(st,channel_idx,peer_slot);
     if (!r->used || !r->assembly_active) return 0;            /* no message mid-reassembly */
     if (base_seqno) *base_seqno = r->deliver_upto;       /* HOL message starts here */
     if (total)      *total      = r->assembly_count;
@@ -2938,7 +2938,7 @@ int dart_writer_shm_eligible(dart_state *st, uint16_t channel){
     if (!ch || ch->multicast) return 0;
     max_peers = st->cfg.max_peers;
     for (p=0;p<max_peers;p++){
-        if (!dart__wp(st,channel_idx,p)->used || st->peer_dormant[p]) continue;
+        if (!dart__writer_proxy_at(st,channel_idx,p)->used || st->peer_dormant[p]) continue;
         if (!st->peer_shm[p]) return 0;
         any = 1;
     }
@@ -2961,62 +2961,62 @@ static uint16_t dart__alias_of(dart_state *st, int channel_idx){
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one
  * edit, never a silent builder/parser drift. Several fields share an offset (distinct
  * names on purpose). Header sizes: DATA 13 (single)/21 (multi), HB 23, NACK 21. */
-#define DART_O_ALIAS      1u  /* u16, every submessage */
-#define DART_O_SEQNO      3u  /* DATA seqno; also HB first, NACK base, SHM base (u64) */
-#define DART_O_PLEN1     11u  /* DATA single: u16 payload_len (payload at DART_HDR_DATA1) */
-#define DART_HDR_DATA1   13u  /* DATA single: header bytes */
-#define DART_O_FRAG      11u  /* DATA multi: u16 frag */
-#define DART_O_COUNT     13u  /* DATA multi: u16 count */
-#define DART_O_SLEN      15u  /* DATA multi: u32 sample_len */
-#define DART_O_PLEN      19u  /* DATA multi: u16 payload_len (payload at DART_HDR_DATA) */
-#define DART_HDR_DATA    21u  /* DATA multi: header bytes */
-#define DART_O_HB_LAST   11u  /* HB: u64 last */
-#define DART_O_HB_CNT    19u  /* HB: u32 count */
-#define DART_HDR_HB      23u
-#define DART_O_NK_NBITS  11u  /* NACK: u16 nbits */
-#define DART_O_NK_BITS   13u  /* NACK: u32 bitmap */
-#define DART_O_NK_EPOCH  17u  /* NACK: u32 epoch */
-#define DART_HDR_NACK    21u
-#define DART_O_SHM_COUNT 11u  /* SHM-DATA: u16 count */
-#define DART_O_SHM_DESC  13u  /* SHM-DATA: descriptor (DART_SHM_DESC_BYTES follow) */
+#define DART_OFFSET_ALIAS      1u  /* u16, every submessage */
+#define DART_OFFSET_SEQNO      3u  /* DATA seqno; also HB first, NACK base, SHM base (u64) */
+#define DART_OFFSET_PAYLOAD_LEN_SINGLE     11u  /* DATA single: u16 payload_len (payload at DART_HEADER_DATA_SINGLE) */
+#define DART_HEADER_DATA_SINGLE   13u  /* DATA single: header bytes */
+#define DART_OFFSET_FRAG      11u  /* DATA multi: u16 frag */
+#define DART_OFFSET_COUNT     13u  /* DATA multi: u16 count */
+#define DART_OFFSET_SAMPLE_LEN      15u  /* DATA multi: u32 sample_len */
+#define DART_OFFSET_PAYLOAD_LEN      19u  /* DATA multi: u16 payload_len (payload at DART_HEADER_DATA_MULTI) */
+#define DART_HEADER_DATA_MULTI    21u  /* DATA multi: header bytes */
+#define DART_OFFSET_HB_LAST   11u  /* HB: u64 last */
+#define DART_OFFSET_HB_COUNT    19u  /* HB: u32 count */
+#define DART_HEADER_HB      23u
+#define DART_OFFSET_NACK_NBITS  11u  /* NACK: u16 nbits */
+#define DART_OFFSET_NACK_BITMAP   13u  /* NACK: u32 bitmap */
+#define DART_OFFSET_NACK_EPOCH  17u  /* NACK: u32 epoch */
+#define DART_HEADER_NACK    21u
+#define DART_OFFSET_SHM_COUNT 11u  /* SHM-DATA: u16 count */
+#define DART_OFFSET_SHM_DESC  13u  /* SHM-DATA: descriptor (DART_SHM_DESC_BYTES follow) */
 
 /* datagram builders (return length) */
 static size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_writer_sample *s,
                          uint16_t frag, const uint8_t *payload, uint16_t payload_len){
-    dart_le_w16(o+DART_O_ALIAS,alias);
+    dart_le_w16(o+DART_OFFSET_ALIAS,alias);
     if (s->count==1){                       /* frag=0, count=1, len=payload_len implied */
         o[0]=(uint8_t)(DART_DATA|DART_F_SINGLE);
-        dart_le_w64(o+DART_O_SEQNO,seqno); dart_le_w16(o+DART_O_PLEN1,payload_len);
-        memcpy(o+DART_HDR_DATA1,payload,payload_len);
-        return DART_HDR_DATA1+payload_len;
+        dart_le_w64(o+DART_OFFSET_SEQNO,seqno); dart_le_w16(o+DART_OFFSET_PAYLOAD_LEN_SINGLE,payload_len);
+        memcpy(o+DART_HEADER_DATA_SINGLE,payload,payload_len);
+        return DART_HEADER_DATA_SINGLE+payload_len;
     }
     o[0]=DART_DATA;
-    dart_le_w64(o+DART_O_SEQNO,seqno); dart_le_w16(o+DART_O_FRAG,frag); dart_le_w16(o+DART_O_COUNT,s->count);
-    dart_le_w32(o+DART_O_SLEN,s->len); dart_le_w16(o+DART_O_PLEN,payload_len);
-    memcpy(o+DART_HDR_DATA,payload,payload_len);
-    return DART_HDR_DATA+payload_len;
+    dart_le_w64(o+DART_OFFSET_SEQNO,seqno); dart_le_w16(o+DART_OFFSET_FRAG,frag); dart_le_w16(o+DART_OFFSET_COUNT,s->count);
+    dart_le_w32(o+DART_OFFSET_SAMPLE_LEN,s->len); dart_le_w16(o+DART_OFFSET_PAYLOAD_LEN,payload_len);
+    memcpy(o+DART_HEADER_DATA_MULTI,payload,payload_len);
+    return DART_HEADER_DATA_MULTI+payload_len;
 }
 #ifdef DART_SHM
 /* SHM-DATA: one submessage covers [base, base+count); body is the descriptor, no
  * payload. 37 bytes = 1 (type|F_SHM) + 2 (alias) + 8 (base) + 2 (count) + 24 (desc). */
-#define DART_SHM_DATA_BYTES (DART_O_SHM_DESC + DART_SHM_DESC_BYTES)
+#define DART_SHM_DATA_BYTES (DART_OFFSET_SHM_DESC + DART_SHM_DESC_BYTES)
 static size_t dart_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count,
                           const uint8_t *desc){
-    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); dart_le_w16(o+DART_O_ALIAS,alias);
-    dart_le_w64(o+DART_O_SEQNO,base); dart_le_w16(o+DART_O_SHM_COUNT,count);
-    memcpy(o+DART_O_SHM_DESC,desc,DART_SHM_DESC_BYTES);
+    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); dart_le_w16(o+DART_OFFSET_ALIAS,alias);
+    dart_le_w64(o+DART_OFFSET_SEQNO,base); dart_le_w16(o+DART_OFFSET_SHM_COUNT,count);
+    memcpy(o+DART_OFFSET_SHM_DESC,desc,DART_SHM_DESC_BYTES);
     return DART_SHM_DATA_BYTES;
 }
 #endif
 static size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt){
-    o[0]=DART_HB; dart_le_w16(o+DART_O_ALIAS,alias); dart_le_w64(o+DART_O_SEQNO,first); dart_le_w64(o+DART_O_HB_LAST,last); dart_le_w32(o+DART_O_HB_CNT,cnt);
-    return DART_HDR_HB;
+    o[0]=DART_HB; dart_le_w16(o+DART_OFFSET_ALIAS,alias); dart_le_w64(o+DART_OFFSET_SEQNO,first); dart_le_w64(o+DART_OFFSET_HB_LAST,last); dart_le_w32(o+DART_OFFSET_HB_COUNT,cnt);
+    return DART_HEADER_HB;
 }
 static size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap,
                          uint32_t epoch, uint8_t flags){
-    o[0]=(uint8_t)(DART_NACK|flags); dart_le_w16(o+DART_O_ALIAS,alias); dart_le_w64(o+DART_O_SEQNO,base);
-    dart_le_w16(o+DART_O_NK_NBITS,nbits); dart_le_w32(o+DART_O_NK_BITS,bitmap); dart_le_w32(o+DART_O_NK_EPOCH,epoch);
-    return DART_HDR_NACK;
+    o[0]=(uint8_t)(DART_NACK|flags); dart_le_w16(o+DART_OFFSET_ALIAS,alias); dart_le_w64(o+DART_OFFSET_SEQNO,base);
+    dart_le_w16(o+DART_OFFSET_NACK_NBITS,nbits); dart_le_w32(o+DART_OFFSET_NACK_BITMAP,bitmap); dart_le_w32(o+DART_OFFSET_NACK_EPOCH,epoch);
+    return DART_HEADER_NACK;
 }
 /* emit an HB advertising this lane's current window. Doubles as the "skip past a
  * hole" signal that replaces GAP: reader_hb advances deliver_upto to `first`, so a
@@ -3025,7 +3025,7 @@ static size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t n
 static size_t dart_writer_hb(dart_state *st, dart_channel *ch, dart_writer_proxy *w, uint16_t alias,
                              uint8_t *out, size_t cap, uint64_t now){
     uint64_t first = ch->have_first ? ch->first_seqno : 0;
-    if (cap < DART_HDR_HB) return 0;
+    if (cap < DART_HEADER_HB) return 0;
     if (w->acked_upto > first) first = w->acked_upto;   /* fresh reader adopts join point */
     w->hb_next_us = now + ch->qos.heartbeat_us;
     dart__deadline(st, w->hb_next_us);                  /* wake to send the next idle HB */
@@ -3051,11 +3051,11 @@ static void dart__arm(dart_channel *ch, dart_reader_proxy *r, int is_hb){
  * case re-uses the normal NACK window (dart_reader_emit's !assembly_active branch). */
 static void dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
     int reliable = (ch->qos.reliability==DART_RELIABLE);
-    uint64_t base = dart_le_r64(p+DART_O_SEQNO);
-    uint16_t count = dart_le_r16(p+DART_O_SHM_COUNT);
-    const uint8_t *desc = p+DART_O_SHM_DESC;          /* DART_SHM_DESC_BYTES */
+    uint64_t base = dart_le_r64(p+DART_OFFSET_SEQNO);
+    uint16_t count = dart_le_r16(p+DART_OFFSET_SHM_COUNT);
+    const uint8_t *desc = p+DART_OFFSET_SHM_DESC;          /* DART_SHM_DESC_BYTES */
     if (!r->used || count==0) return;
     if (base < r->deliver_upto) return;                 /* old/dup */
     if (base+count-1 > r->received_high) r->received_high = base+count-1;   /* proof this seqno exists */
@@ -3111,15 +3111,15 @@ static void dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, cons
 static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p,
                            uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
     int reliable = (ch->qos.reliability==DART_RELIABLE);
     int new_fragment = 0;
     uint64_t seqno, base; uint16_t frag, count, payload_len; uint32_t sample_len; const uint8_t *payload;
     if (p[0] & DART_F_SINGLE){           /* single fragment: frag/count/len implied */
-        seqno=dart_le_r64(p+DART_O_SEQNO); frag=0; count=1; payload_len=dart_le_r16(p+DART_O_PLEN1); sample_len=payload_len; payload=p+DART_HDR_DATA1;
+        seqno=dart_le_r64(p+DART_OFFSET_SEQNO); frag=0; count=1; payload_len=dart_le_r16(p+DART_OFFSET_PAYLOAD_LEN_SINGLE); sample_len=payload_len; payload=p+DART_HEADER_DATA_SINGLE;
     } else {
-        seqno=dart_le_r64(p+DART_O_SEQNO); frag=dart_le_r16(p+DART_O_FRAG); count=dart_le_r16(p+DART_O_COUNT);
-        sample_len=dart_le_r32(p+DART_O_SLEN); payload_len=dart_le_r16(p+DART_O_PLEN); payload=p+DART_HDR_DATA;
+        seqno=dart_le_r64(p+DART_OFFSET_SEQNO); frag=dart_le_r16(p+DART_OFFSET_FRAG); count=dart_le_r16(p+DART_OFFSET_COUNT);
+        sample_len=dart_le_r32(p+DART_OFFSET_SAMPLE_LEN); payload_len=dart_le_r16(p+DART_OFFSET_PAYLOAD_LEN); payload=p+DART_HEADER_DATA_MULTI;
     }
     base = seqno - frag;
 
@@ -3221,8 +3221,8 @@ static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, con
 
 static void dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
-    uint64_t first=dart_le_r64(p+DART_O_SEQNO), last=dart_le_r64(p+DART_O_HB_LAST);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
+    uint64_t first=dart_le_r64(p+DART_OFFSET_SEQNO), last=dart_le_r64(p+DART_OFFSET_HB_LAST);
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
     /* un-started readers adopt no position from heartbeats (a one-sided flap's
@@ -3255,9 +3255,9 @@ static void dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const
 /* writer side: handle ACKNACK */
 static void dart_writer_nack(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
-    uint64_t base=dart_le_r64(p+DART_O_SEQNO); uint16_t nbits=dart_le_r16(p+DART_O_NK_NBITS); uint32_t bitmap=dart_le_r32(p+DART_O_NK_BITS);
-    uint32_t epoch=dart_le_r32(p+DART_O_NK_EPOCH); uint8_t flags=p[0];
+    dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+    uint64_t base=dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
+    uint32_t epoch=dart_le_r32(p+DART_OFFSET_NACK_EPOCH); uint8_t flags=p[0];
     int group_mode;
     if (!w->used) return;
     group_mode = ch->multicast && ch->n_subscribers>0;
@@ -3305,14 +3305,14 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *datagram, size_
                             if (b0 & DART_F_SHM){ if (rem<DART_SHM_DATA_BYTES) return; sub=DART_SHM_DATA_BYTES; }
                             else
 #endif
-                            if (b0 & DART_F_SINGLE){ if (rem<DART_HDR_DATA1) return; sub=DART_HDR_DATA1+(size_t)dart_le_r16(p+DART_O_PLEN1); }
-                            else { if (rem<DART_HDR_DATA) return; sub=DART_HDR_DATA+(size_t)dart_le_r16(p+DART_O_PLEN); } break;
-            case DART_HB:   if (rem<DART_HDR_HB) return; sub=DART_HDR_HB; break;
-            case DART_NACK: if (rem<DART_HDR_NACK) return; sub=DART_HDR_NACK; break;
+                            if (b0 & DART_F_SINGLE){ if (rem<DART_HEADER_DATA_SINGLE) return; sub=DART_HEADER_DATA_SINGLE+(size_t)dart_le_r16(p+DART_OFFSET_PAYLOAD_LEN_SINGLE); }
+                            else { if (rem<DART_HEADER_DATA_MULTI) return; sub=DART_HEADER_DATA_MULTI+(size_t)dart_le_r16(p+DART_OFFSET_PAYLOAD_LEN); } break;
+            case DART_HB:   if (rem<DART_HEADER_HB) return; sub=DART_HEADER_HB; break;
+            case DART_NACK: if (rem<DART_HEADER_NACK) return; sub=DART_HEADER_NACK; break;
             default: return;             /* unknown type: cannot resync, drop rest */
         }
         if (sub>rem) return;             /* truncated/malformed */
-        alias = dart_le_r16(p+DART_O_ALIAS);
+        alias = dart_le_r16(p+DART_OFFSET_ALIAS);
         if ((uint32_t)alias < st->alias_max){
             uint16_t m=st->alias_to_channel[(size_t)peer_slot*st->alias_max+alias]; channel_idx=(m==0xFFFFu)?-1:(int)m;
         } else channel_idx=-1;
@@ -3335,7 +3335,7 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *datagram, size_
  * On no-fit, state is untouched so the same submessage is produced next time. */
 static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
+    dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
     int reliable=(ch->qos.reliability==DART_RELIABLE);
     /* group mode active only while a multicast channel has remote subscribers: new
        data + HBs ride the group lane, this per-peer lane only answers NACKs */
@@ -3374,7 +3374,7 @@ static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, u
                     uint16_t frag_idx=(uint16_t)(seqno - s->base);
                     uint32_t offset=(uint32_t)frag_idx*st->frag;
                     uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
-                    if (cap < (size_t)(s->count==1?DART_HDR_DATA1:DART_HDR_DATA)+(size_t)payload_len) return 0;   /* bit stays set */
+                    if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;   /* bit stays set */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
                     ch->repair_stats.frags_sent++; ch->repair_stats.frags_resent++;   /* retransmit to satisfy a NACK */
@@ -3385,7 +3385,7 @@ static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, u
                        (its first = our floor); keep still-cached seqnos for later repair */
                     uint64_t floor = (ch->have_first?ch->first_seqno:ch->next_seqno);
                     uint32_t j;
-                    if (cap < DART_HDR_HB) return 0;
+                    if (cap < DART_HEADER_HB) return 0;
                     for (j=0;j<DART_NACK_WINDOW;j++)
                         if (w->nack_base+j < floor) w->nack_bits &= ~(1u<<j);
                     if (w->nack_bits==0) w->has_nack=0;
@@ -3415,7 +3415,7 @@ static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, u
             uint16_t frag_idx=(uint16_t)(seqno - s->base);
             uint32_t offset=(uint32_t)frag_idx*st->frag;
             uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
-            if (cap < (size_t)(s->count==1?DART_HDR_DATA1:DART_HDR_DATA)+(size_t)payload_len) return 0;
+            if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             w->sent_upto++;
             ch->repair_stats.frags_sent++;                       /* new data (unicast lane) */
             return dart_mk_data(out,alias,seqno,s,frag_idx,dart__sbuf(s)+offset,payload_len);
@@ -3423,7 +3423,7 @@ static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, u
         } else {
             /* fell out of the ring before we sent it: skip the reader up to first
                cached with an HB (its first = our floor) */
-            if (cap < DART_HDR_HB) return 0;
+            if (cap < DART_HEADER_HB) return 0;
             w->sent_upto=(ch->have_first?ch->first_seqno:ch->next_seqno);
             return dart_writer_hb(st,ch,w,alias,out,cap,now);
         }
@@ -3452,13 +3452,13 @@ static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, u
  * so it cannot scale into a flood with the gap size or the message size. */
 static size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
+    dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;
     uint16_t alias = dart__alias_of(st, channel_idx);
     int due, holes=0, repair=0, force;
     if (!r->used || st->peer_dormant[peer_slot]) return 0;   /* dormant: don't ack a silent writer */
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
-    if (cap<DART_HDR_NACK) return 0;
+    if (cap<DART_HEADER_NACK) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
     r->ack_pending=0; force=r->ack_force; r->ack_force=0;
 
@@ -3516,7 +3516,7 @@ static size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, u
 static int dart__group_all_acked(dart_state *st, int channel_idx){
     uint32_t max_peers=st->cfg.max_peers, p; uint64_t seq=st->channels[channel_idx].next_seqno;
     for (p=0;p<max_peers;p++){
-        dart_writer_proxy *w=dart__wp(st,channel_idx,p);
+        dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
     }
     return 1;
@@ -3540,13 +3540,13 @@ static size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, siz
             uint16_t frag_idx=(uint16_t)(seqno - s->base);
             uint32_t offset=(uint32_t)frag_idx*st->frag;
             uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
-            if (cap < (size_t)(s->count==1?DART_HDR_DATA1:DART_HDR_DATA)+(size_t)payload_len) return 0;
+            if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             ch->multicast_sent_upto++;
             ch->repair_stats.frags_sent++;                       /* new data, once for the whole group */
             return dart_mk_data(out,alias,seqno,s,frag_idx,s->buf+offset,payload_len);
         } else {
             /* overran the ring: skip the group past it with an HB (first = our floor) */
-            if (cap < DART_HDR_HB) return 0;
+            if (cap < DART_HEADER_HB) return 0;
             ch->multicast_sent_upto=(ch->have_first?ch->first_seqno:ch->next_seqno);
             ch->multicast_hb_next_us = now + ch->qos.heartbeat_us;
             dart__deadline(st, ch->multicast_hb_next_us);
@@ -3556,7 +3556,7 @@ static size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, siz
     }
     if (ch->qos.reliability==DART_RELIABLE && now>=ch->multicast_hb_next_us && ch->next_seqno>0
         && !dart__group_all_acked(st, channel_idx)){
-        if (cap < DART_HDR_HB) return 0;
+        if (cap < DART_HEADER_HB) return 0;
         ch->multicast_hb_next_us = now + ch->qos.heartbeat_us;
         dart__deadline(st, ch->multicast_hb_next_us);
         ch->multicast_hb_count++;
@@ -3572,8 +3572,8 @@ static int dart__lane_work(dart_state *st, uint16_t channel_idx, uint32_t peer_s
     if (peer_slot==max_peers)
         return ch->multicast && ch->n_subscribers>0 && ch->multicast_sent_upto < ch->next_seqno;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
-    { dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
-      dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
+    { dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+      dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
       int group_mode = ch->multicast && ch->n_subscribers>0;
       if (w->used && w->has_nack) return 1;
       if (w->used && !group_mode && w->sent_upto < ch->next_seqno) return 1;
@@ -3617,8 +3617,8 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
             continue;
         }
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
-        { dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
-          dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
+        { dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+          dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
           int group_mode = ch->multicast && ch->n_subscribers>0;
           if (w->used && !group_mode && w->acked_upto < ch->next_seqno){
               if (now>=w->hb_next_us) dart__lane_enq(st,channel_idx,peer_slot);
