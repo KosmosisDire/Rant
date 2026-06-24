@@ -1,77 +1,50 @@
-/* full node demo: discovery + reliable transport, no socket code. Run two on one
- * host (./node alice, ./node bob); they discover and exchange a reliable counter.
- *   POSIX  : cc  -std=c99 -Wall -Idist examples/example.c -o node -lrt  (Linux; SHM shm_open)
- *   Windows: gcc -std=c99 -Wall -Idist examples/example.c -o example.exe -lws2_32 -lbcrypt */
+/* Minimal node: type a line, it publishes on topic "msg". Lines from peers print.
+ * Run two copies (one host, or two on a LAN) and type in each. All defaults:
+ * best-effort, domain 0, unicast data, multicast discovery.
+ *   POSIX  : cc  -std=c99 -Idist examples/example.c -o node -lrt
+ *   Windows: gcc -std=c99 -Idist examples/example.c -o example.exe -lws2_32 -lbcrypt -lwinmm */
 #define DART_TRANSPORT_IMPLEMENTATION
 #include "dart_transport.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
-#include <time.h>
 
-static const char *g_name = "node";
-
-/* per-channel receive counters; keep on_message cheap so it never throttles poll */
-#define MAX_CH 64
-static unsigned long g_recv_count[MAX_CH];
+/* a non-blocking "is a line waiting?" check, so the poll loop never stalls on input */
+#ifdef _WIN32
+#include <conio.h>
+static int input_ready(void){ return _kbhit(); }
+#else
+#include <unistd.h>
+#include <sys/select.h>
+static int input_ready(void){
+    fd_set r; struct timeval t; FD_ZERO(&r); FD_SET(0, &r); t.tv_sec = 0; t.tv_usec = 0;
+    return select(1, &r, NULL, NULL, &t) > 0;
+}
+#endif
 
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
-    (void)u; (void)from; (void)data; (void)len;
-    if (ch < MAX_CH) g_recv_count[ch]++;   /* ch is the channel handle (its index) */
+    (void)u; (void)ch; (void)from;
+    printf("> %.*s\n", (int)len, (const char *)data);
 }
 
-int main(int argc, char **argv){
-    setvbuf(stdout, NULL, _IONBF, 0);
-    if (argc>1) g_name = argv[1];
-    /* Optional role: "pub", "sub", or "both" (default). */
-    const char *role = (argc>2 ? argv[2] : "both");
+int main(void){
+    dart_channel_def ch  = { .name = "msg", .qos = { .reliability = DART_RELIABLE } };
+    dart_node_config cfg = { .channels = &ch, .n_channels = 1, .on_message = on_message, .domain = 7 };
+    static uint8_t mem[1 << 20];
 
-    uint8_t role_dir = strcmp(role,"pub")==0 ? DART_PUB_ONLY
-                     : strcmp(role,"sub")==0 ? DART_SUB_ONLY : DART_PUBSUB;
-    uint8_t use_mcast = (uint8_t)(argc>3 ? atoi(argv[3]) : 0);
-
-    dart_channel_def ch = {
-        .name       = "counter",
-        .qos        = { .reliability = DART_RELIABLE },
-        .role       = role_dir,
-        .multicast  = use_mcast,
-    };
-
-    dart_node_config cfg = {
-        .domain     = 7,
-        .channels   = &ch,
-        .n_channels = 1,
-        .on_message = on_message,
-        .net        = { .multicast_interface = use_mcast ? "127.0.0.1" : NULL },
-    };
-
-    static uint8_t mem[1<<20];   /* 1 MB */
     dart_node *n = dart_node_open(mem, sizeof mem, &cfg);
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
-    printf("[%s] up (%s), discovering...\n", g_name, role);
-
-    time_t last = time(NULL);
-    int counter = 0;
+    printf("type a message and press enter (ctrl-d / ctrl-z to quit):\n");
     for (;;){
-        dart_node_poll(n, 10);         /* service the socket, 10 ms tick */
-        char msg[64];
-        int msg_len = sprintf(msg, "%s #%d", g_name, counter++);
-        dart_node_send(n, 0, msg, (size_t)msg_len);   /* channel 0 = first in channels[] */
-
-        /* Every 5s, report the receive rate (Hz) on each channel. */
-        time_t now = time(NULL);
-        if (now - last >= 5){
-            double secs = (double)(now - last);
-            uint16_t i;
-            for (i = 0; i < cfg.n_channels; i++){
-                if (i < MAX_CH){
-                    printf("[%s] channel %u: %.1f Hz\n", g_name, i, g_recv_count[i]/secs);
-                    g_recv_count[i] = 0;
-                }
-            }
-            last = now;
+        dart_node_poll(n, 10);                 /* service discovery and the socket */
+        if (input_ready()){
+            char line[256];
+            if (!fgets(line, sizeof line, stdin)) break;     /* EOF: quit */
+            size_t len = strcspn(line, "\n");                /* drop the trailing newline */
+            if (len) dart_node_send(n, 0, line, len);
         }
     }
+    dart_node_close(n, 1);
+    return 0;
 }
