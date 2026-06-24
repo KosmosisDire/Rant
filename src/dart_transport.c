@@ -634,24 +634,24 @@ int dart_send(dart_state *st, uint16_t channel, const void *data, size_t len, ui
     int channel_idx; dart_channel *ch;
     (void)now;
     ch = dart_chan(st, channel, &channel_idx);                /* rejects the internal meta channel */
-    if (!ch) return -1;
+    if (!ch) return DART_ERR_NO_CHANNEL;
     if (ch->dynamic){
         dart_writer_sample *slot = &ch->history[ch->history_head];
         size_t need = len ? len : 1u;
-        if (len > 65535u*(uint32_t)st->frag) return -2;   /* wire fragment-count cap */
+        if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
         if ((size_t)slot->cap < need){                    /* grow the slot to fit */
             uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);
-            if (!new_buf) return -4;                           /* out of memory */
+            if (!new_buf) return DART_ERR_OOM;                 /* out of memory */
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
-    } else if (len > ch->qos.max_message_bytes) return -2;
-    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return -3;
+    } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
+    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
     if (len) memcpy(ch->history[ch->history_head].buf, data, len);
 #ifdef DART_SHM
     ch->history[ch->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
 #endif
     dart__commit(st, (uint16_t)channel_idx, len);
-    return 0;
+    return DART_OK;
 }
 
 #ifdef DART_SHM
@@ -663,15 +663,15 @@ int dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t le
     int channel_idx; dart_channel *ch; dart_writer_sample *slot;
     (void)now;
     ch = dart_chan(st, channel, &channel_idx);
-    if (!ch) return -1;
-    if (len > 65535u*(uint32_t)st->frag) return -2;      /* wire fragment-count cap */
-    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return -3;
+    if (!ch) return DART_ERR_NO_CHANNEL;
+    if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;      /* wire fragment-count cap */
+    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
     slot = &ch->history[ch->history_head];
     slot->shm = 1;
     slot->shm_buf = (const uint8_t*)chunk;
     memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
     dart__commit(st, (uint16_t)channel_idx, len);
-    return 0;
+    return DART_OK;
 }
 #endif
 

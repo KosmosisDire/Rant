@@ -208,7 +208,16 @@ void      dart_apply_peer_interest(dart_state *st, uint32_t peer_id, const void 
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_set_role(dart_state *st, uint16_t channel, uint8_t role);
 
-/* Publish a message to all peers. Returns 0 ok, <0 on error. */
+/* dart_send / dart_send_shm result: 0 ok, negative on error (returned as int). */
+typedef enum {
+    DART_OK             =  0,
+    DART_ERR_NO_CHANNEL = -1,  /* channel index out of range */
+    DART_ERR_TOO_BIG    = -2,  /* exceeds max_message_bytes or the wire fragment cap */
+    DART_ERR_ROLE       = -3,  /* channel is SUB_ONLY or INACTIVE: cannot publish */
+    DART_ERR_OOM        = -4   /* dynamic allocator returned NULL */
+} dart_result;
+
+/* Publish a message to all peers. Returns DART_OK, or a negative dart_result. */
 int       dart_send(dart_state *st, uint16_t channel, const void *data, size_t len,
                   uint64_t now_us);
 
