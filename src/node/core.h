@@ -29,6 +29,8 @@ typedef int (*dart_node_is_local_fn)(void *user, const uint8_t *ip, uint8_t ip_l
 typedef struct {
     dart_state           *transport;    /* the peers are wired into this (sans-IO) */
     uint16_t              max_peers;     /* peer-table capacity */
+    uint16_t              n_channels;    /* sizes the announce-blob buffer */
+    uint16_t              frag_size;     /* our UDP fragment size, baked into the announce blob */
     dart_event_fn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
     dart_node_is_local_fn is_local;      /* runtime route probe (optional) */
@@ -39,8 +41,16 @@ typedef struct {
 
 typedef struct dart_node_core dart_node_core;
 
-size_t          dart_node_core_required_memory(uint16_t max_peers);
+size_t          dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels);
 dart_node_core *dart_node_core_init(void *mem, size_t mem_size, const dart_node_core_config *cfg);
+
+/* The discovery announce blob this node sends: its frag size, OOB host, and interest
+ * list. The core owns the buffer and builds it (the codec is dart_meta_* in the
+ * transport core). build_meta (re)builds it from the core's current fields and returns
+ * the length. meta returns the bytes + length for the runtime to feed to discovery.
+ * Rebuild after a role change, then re-feed discovery. */
+uint16_t        dart_node_core_build_meta(dart_node_core *c);
+const uint8_t  *dart_node_core_meta(dart_node_core *c, uint16_t *len);
 
 /* Discovery callbacks: register these with the discovery runtime, user = the core.
  * They keep the peer table and the transport's peer set in lockstep (handling the

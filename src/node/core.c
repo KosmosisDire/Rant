@@ -24,31 +24,37 @@ struct dart_node_core {
     void                 *is_local_user;
     int                   oob_capable;
     uint8_t               oob_host[16];
+    uint8_t              *meta_buf;    /* our outgoing discovery announce blob */
+    uint16_t              meta_cap;
+    uint16_t              meta_len;
+    uint16_t              frag_size;   /* baked into the blob */
 };
 
-/* arena layout: the core struct, then the peer table. One sequence so measure and
-   build agree (dart_take with a NULL base just advances the offset). */
-static void dart__core_layout(dart_bump *b, uint16_t max_peers,
-                              dart_node_core **out_c, uint8_t **out_peers){
+/* arena layout: the core struct, the peer table, then the announce-blob buffer. One
+   sequence so measure and build agree (dart_take with a NULL base just advances). */
+static void dart__core_layout(dart_bump *b, uint16_t max_peers, uint16_t n_channels,
+                              dart_node_core **out_c, uint8_t **out_peers, uint8_t **out_meta){
     dart_node_core *c = (dart_node_core*)dart_take(b, sizeof(struct dart_node_core), 16);
     uint8_t *peers    = (uint8_t*)       dart_take(b, (size_t)max_peers * sizeof(dart_node_peer), 16);
+    uint8_t *meta     = (uint8_t*)       dart_take(b, dart_meta_capacity(n_channels), 16);
     if (out_c)     *out_c     = c;
     if (out_peers) *out_peers = peers;
+    if (out_meta)  *out_meta  = meta;
 }
 
-size_t dart_node_core_required_memory(uint16_t max_peers){
+size_t dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels){
     dart_bump b; memset(&b, 0, sizeof b);
-    dart__core_layout(&b, max_peers, NULL, NULL);
+    dart__core_layout(&b, max_peers, n_channels, NULL, NULL, NULL);
     return b.offset + 16u;   /* slack to align the caller's mem up to base */
 }
 
 dart_node_core *dart_node_core_init(void *mem, size_t cap, const dart_node_core_config *cfg){
-    dart_bump b; dart_node_core *c; uint8_t *base, *peers;
+    dart_bump b; dart_node_core *c; uint8_t *base, *peers, *meta;
     if (!mem || !cfg || !cfg->transport || cfg->max_peers == 0) return NULL;
-    if (cap < dart_node_core_required_memory(cfg->max_peers)) return NULL;
+    if (cap < dart_node_core_required_memory(cfg->max_peers, cfg->n_channels)) return NULL;
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     memset(&b, 0, sizeof b); b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
-    dart__core_layout(&b, cfg->max_peers, &c, &peers);
+    dart__core_layout(&b, cfg->max_peers, cfg->n_channels, &c, &peers, &meta);
 
     memset(c, 0, sizeof *c);
     c->transport     = cfg->transport;
@@ -58,8 +64,25 @@ dart_node_core *dart_node_core_init(void *mem, size_t cap, const dart_node_core_
     c->is_local      = cfg->is_local;      c->is_local_user = cfg->is_local_user;
     c->oob_capable   = cfg->oob_capable;
     memcpy(c->oob_host, cfg->oob_host, 16);
+    c->meta_buf      = meta;
+    c->meta_cap      = dart_meta_capacity(cfg->n_channels);
+    c->frag_size     = cfg->frag_size;
     memset(peers, 0, (size_t)cfg->max_peers * sizeof(dart_node_peer));
     return c;
+}
+
+/* (Re)build our announce blob from the core's current fields. The codec lives in the
+   transport core; the OOB fields default to 0/zero in a non-SHM build, so the codec
+   just writes the v2 (non-SHM) prefix. */
+uint16_t dart_node_core_build_meta(dart_node_core *c){
+    c->meta_len = dart_meta_build(c->transport, c->meta_buf, c->meta_cap,
+                                  c->frag_size, c->oob_capable, c->oob_host);
+    return c->meta_len;
+}
+
+const uint8_t *dart_node_core_meta(dart_node_core *c, uint16_t *len){
+    if (len) *len = c->meta_len;
+    return c->meta_buf;
 }
 
 static int dart__core_find_id(dart_node_core *c, uint32_t id){

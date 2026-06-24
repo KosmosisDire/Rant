@@ -878,11 +878,19 @@ static void node_core_checks(void){
     mlen = dart_meta_build(tr, meta, sizeof meta, 1200, 0, NULL);   /* a valid announce blob */
 
     memset(&cc,0,sizeof cc);
-    cc.transport=tr; cc.max_peers=2; cc.on_event=nc_event;
+    cc.transport=tr; cc.max_peers=2; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event;
     cc.is_local=NULL;                                              /* no platform: every peer remote */
     nc = dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
+
+    /* the core builds our outgoing announce blob from its own fields */
+    {   uint16_t ml; const uint8_t *mb;
+        dart_node_core_build_meta(nc);
+        mb = dart_node_core_meta(nc, &ml);
+        ST_CHECK(ml>=5 && dart_meta_frag(mb, ml)==1200,
+                 "node-core: builds announce blob (frag=%u)", dart_meta_frag(mb, ml));
+    }
 
     memset(&a,0,sizeof a); a.ip[0]=10;a.ip[1]=0;a.ip[2]=0;a.ip[3]=1; a.ip_len=4; a.port=5001;
     memset(&b,0,sizeof b); b.ip[0]=10;b.ip[1]=0;b.ip[2]=0;b.ip[3]=2; b.ip_len=4; b.port=5002;

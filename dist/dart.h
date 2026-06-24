@@ -727,6 +727,8 @@ typedef int (*dart_node_is_local_fn)(void *user, const uint8_t *ip, uint8_t ip_l
 typedef struct {
     dart_state           *transport;    /* the peers are wired into this (sans-IO) */
     uint16_t              max_peers;     /* peer-table capacity */
+    uint16_t              n_channels;    /* sizes the announce-blob buffer */
+    uint16_t              frag_size;     /* our UDP fragment size, baked into the announce blob */
     dart_event_fn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
     dart_node_is_local_fn is_local;      /* runtime route probe (optional) */
@@ -737,8 +739,16 @@ typedef struct {
 
 typedef struct dart_node_core dart_node_core;
 
-size_t          dart_node_core_required_memory(uint16_t max_peers);
+size_t          dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels);
 dart_node_core *dart_node_core_init(void *mem, size_t mem_size, const dart_node_core_config *cfg);
+
+/* The discovery announce blob this node sends: its frag size, OOB host, and interest
+ * list. The core owns the buffer and builds it (the codec is dart_meta_* in the
+ * transport core). build_meta (re)builds it from the core's current fields and returns
+ * the length. meta returns the bytes + length for the runtime to feed to discovery.
+ * Rebuild after a role change, then re-feed discovery. */
+uint16_t        dart_node_core_build_meta(dart_node_core *c);
+const uint8_t  *dart_node_core_meta(dart_node_core *c, uint16_t *len);
 
 /* Discovery callbacks: register these with the discovery runtime, user = the core.
  * They keep the peer table and the transport's peer set in lockstep (handling the
@@ -4295,31 +4305,37 @@ struct dart_node_core {
     void                 *is_local_user;
     int                   oob_capable;
     uint8_t               oob_host[16];
+    uint8_t              *meta_buf;    /* our outgoing discovery announce blob */
+    uint16_t              meta_cap;
+    uint16_t              meta_len;
+    uint16_t              frag_size;   /* baked into the blob */
 };
 
-/* arena layout: the core struct, then the peer table. One sequence so measure and
-   build agree (dart_take with a NULL base just advances the offset). */
-static void dart__core_layout(dart_bump *b, uint16_t max_peers,
-                              dart_node_core **out_c, uint8_t **out_peers){
+/* arena layout: the core struct, the peer table, then the announce-blob buffer. One
+   sequence so measure and build agree (dart_take with a NULL base just advances). */
+static void dart__core_layout(dart_bump *b, uint16_t max_peers, uint16_t n_channels,
+                              dart_node_core **out_c, uint8_t **out_peers, uint8_t **out_meta){
     dart_node_core *c = (dart_node_core*)dart_take(b, sizeof(struct dart_node_core), 16);
     uint8_t *peers    = (uint8_t*)       dart_take(b, (size_t)max_peers * sizeof(dart_node_peer), 16);
+    uint8_t *meta     = (uint8_t*)       dart_take(b, dart_meta_capacity(n_channels), 16);
     if (out_c)     *out_c     = c;
     if (out_peers) *out_peers = peers;
+    if (out_meta)  *out_meta  = meta;
 }
 
-size_t dart_node_core_required_memory(uint16_t max_peers){
+size_t dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels){
     dart_bump b; memset(&b, 0, sizeof b);
-    dart__core_layout(&b, max_peers, NULL, NULL);
+    dart__core_layout(&b, max_peers, n_channels, NULL, NULL, NULL);
     return b.offset + 16u;   /* slack to align the caller's mem up to base */
 }
 
 dart_node_core *dart_node_core_init(void *mem, size_t cap, const dart_node_core_config *cfg){
-    dart_bump b; dart_node_core *c; uint8_t *base, *peers;
+    dart_bump b; dart_node_core *c; uint8_t *base, *peers, *meta;
     if (!mem || !cfg || !cfg->transport || cfg->max_peers == 0) return NULL;
-    if (cap < dart_node_core_required_memory(cfg->max_peers)) return NULL;
+    if (cap < dart_node_core_required_memory(cfg->max_peers, cfg->n_channels)) return NULL;
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     memset(&b, 0, sizeof b); b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
-    dart__core_layout(&b, cfg->max_peers, &c, &peers);
+    dart__core_layout(&b, cfg->max_peers, cfg->n_channels, &c, &peers, &meta);
 
     memset(c, 0, sizeof *c);
     c->transport     = cfg->transport;
@@ -4329,8 +4345,25 @@ dart_node_core *dart_node_core_init(void *mem, size_t cap, const dart_node_core_
     c->is_local      = cfg->is_local;      c->is_local_user = cfg->is_local_user;
     c->oob_capable   = cfg->oob_capable;
     memcpy(c->oob_host, cfg->oob_host, 16);
+    c->meta_buf      = meta;
+    c->meta_cap      = dart_meta_capacity(cfg->n_channels);
+    c->frag_size     = cfg->frag_size;
     memset(peers, 0, (size_t)cfg->max_peers * sizeof(dart_node_peer));
     return c;
+}
+
+/* (Re)build our announce blob from the core's current fields. The codec lives in the
+   transport core; the OOB fields default to 0/zero in a non-SHM build, so the codec
+   just writes the v2 (non-SHM) prefix. */
+uint16_t dart_node_core_build_meta(dart_node_core *c){
+    c->meta_len = dart_meta_build(c->transport, c->meta_buf, c->meta_cap,
+                                  c->frag_size, c->oob_capable, c->oob_host);
+    return c->meta_len;
+}
+
+const uint8_t *dart_node_core_meta(dart_node_core *c, uint16_t *len){
+    if (len) *len = c->meta_len;
+    return c->meta_buf;
 }
 
 static int dart__core_find_id(dart_node_core *c, uint32_t id){
@@ -4489,12 +4522,6 @@ struct dart_node {
     /* one app callback for everything but message delivery; node fills PEER_UP/DOWN */
     dart_event_fn  on_event;
     void          *user_data;
-    /* opaque blob carried in every discovery announce; must outlive the node. Holds
-       this node's UDP fragment size + pub/sub interest list (see dart__meta_*). */
-    uint8_t       *discovery_meta;     /* arena, discovery_meta_cap bytes */
-    uint16_t       discovery_meta_cap;
-    uint16_t       discovery_meta_len;
-    uint16_t       frag_size;     /* our clamped UDP fragment size, baked into the blob */
 #ifdef DART_SHM
     /* zero-fragment same-host path: lazy per-size-class segments (see dart_shm.h) */
     uint8_t        shm_capable;       /* 1 = an allocator is set, so SHM is usable */
@@ -4512,19 +4539,6 @@ struct dart_node {
     uint32_t       shm_tx, shm_rx;/* messages published / delivered via SHM (observability) */
 #endif
 };
-
-/* The discovery-announce meta blob (this node's frag size + SHM capability/host +
-   interest list) is encoded and parsed by the sans-IO codec in the transport core
-   (dart_meta_*). The node just feeds the codec its own fields. */
-static uint16_t dart__meta_build(dart_node *n){
-#ifdef DART_SHM
-    return dart_meta_build(n->transport, n->discovery_meta, n->discovery_meta_cap,
-                           n->frag_size, n->shm_capable, n->shm_host);
-#else
-    return dart_meta_build(n->transport, n->discovery_meta, n->discovery_meta_cap,
-                           n->frag_size, 0, NULL);
-#endif
-}
 
 #ifdef DART_SHM
 /* reader-pool cache capacity: a same-host peer publishes on its channels, one segment
@@ -4568,7 +4582,7 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
  * pointers) run the same dart_take sequence and can never drift. */
 typedef struct {
     dart_node *n;
-    uint8_t   *node_core, *meta, *transport, *discovery;
+    uint8_t   *node_core, *transport, *discovery;
 #ifdef DART_SHM
     uint8_t   *shm_pool, *shm_pool_mem, *shm_reader_segments, *shm_reader_pool;
 #endif
@@ -4579,9 +4593,8 @@ static void dart__node_layout(dart_bump *b, const dart_node_config *cfg, uint16_
                               const dart_config *transport_cfg,
                               const dart_discovery_rt_config *discovery_rt_cfg, dart_node_blocks *o){
     o->n     = (dart_node*)dart_take(b, sizeof(struct dart_node), 16);
-    o->node_core_bytes = dart_node_core_required_memory(max_peers);
+    o->node_core_bytes = dart_node_core_required_memory(max_peers, cfg->n_channels);
     o->node_core = (uint8_t*)dart_take(b, o->node_core_bytes, 16);
-    o->meta  = (uint8_t*)  dart_take(b, dart_meta_capacity(cfg->n_channels), 16);
     o->transport_bytes = dart_required_memory(transport_cfg);
     o->transport = (uint8_t*)dart_take(b, o->transport_bytes, 16);
 #ifdef DART_SHM
@@ -4740,8 +4753,6 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->on_event = cfg->on_event; n->user_data = cfg->user_data;
     n->multicast_port = cfg->net.multicast_port ? cfg->net.multicast_port
                : (uint16_t)((cfg->net.discovery_port ? cfg->net.discovery_port : 7400) + 1);
-    /* our fragment size, baked into the announce blob; same clamp dart_init applies */
-    n->frag_size = dart_clamp_frag(cfg->net.fragment_size);
 #ifdef DART_SHM
     /* SHM is usable only with an allocator (the one-copy receive scratch + dynamic
        buffers); advertise capability accordingly and wrap the transport callbacks so
@@ -4762,8 +4773,6 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
         transport_cfg.user       = n;
     }
 #endif
-    n->discovery_meta = blocks.meta; n->discovery_meta_cap = dart_meta_capacity(cfg->n_channels);
-
     n->transport = dart_init(blocks.transport, blocks.transport_bytes, &transport_cfg);
     if (!n->transport) goto fail_startup;
 #ifdef DART_SHM
@@ -4783,6 +4792,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
        transport lifecycle; the runtime drives it and resolves addresses for IO. */
     {   dart_node_core_config cc; memset(&cc, 0, sizeof cc);
         cc.transport = n->transport; cc.max_peers = max_peers;
+        cc.n_channels = cfg->n_channels; cc.frag_size = dart_clamp_frag(cfg->net.fragment_size);
         cc.on_event = cfg->on_event; cc.user = cfg->user_data;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM
@@ -4863,10 +4873,10 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     discovery_rt_cfg.discovery.on_peer_down    = dart_node_core_peer_down;
     discovery_rt_cfg.discovery.on_peer_refused = dart_node_core_peer_refused;
     discovery_rt_cfg.discovery.user            = n->core;
-    /* advertise our frag size + interest list so peers reassemble our messages and
-       match topics straight from discovery. The buffer lives in the node. */
-    n->discovery_meta_len = dart__meta_build(n);
-    discovery_rt_cfg.discovery.meta = n->discovery_meta; discovery_rt_cfg.discovery.meta_len = n->discovery_meta_len;
+    /* the core owns + builds our announce blob (frag size + OOB host + interest); we
+       just hand its bytes to discovery so peers reassemble and match from discovery */
+    dart_node_core_build_meta(n->core);
+    discovery_rt_cfg.discovery.meta = dart_node_core_meta(n->core, &discovery_rt_cfg.discovery.meta_len);
     n->discovery = dart_discovery_rt_open(blocks.discovery, blocks.discovery_bytes, &discovery_rt_cfg);
     if (!n->discovery) goto fail_mcast;
 
@@ -5026,8 +5036,8 @@ int dart_node_send(dart_node *n, uint16_t channel, const void *data, size_t len)
 int dart_node_set_role(dart_node *n, uint16_t channel, uint8_t role){
     int r = dart_set_role(n->transport, channel, role);
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
-        n->discovery_meta_len = dart__meta_build(n);
-        dart_discovery_rt_set_meta(n->discovery, n->discovery_meta, n->discovery_meta_len);
+        uint16_t mlen = dart_node_core_build_meta(n->core);
+        dart_discovery_rt_set_meta(n->discovery, dart_node_core_meta(n->core, NULL), mlen);
     }
     return r;
 }
