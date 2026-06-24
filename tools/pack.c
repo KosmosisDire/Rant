@@ -15,13 +15,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Copy srcdir/name into out. If strip_local, drop local #include "..." lines. */
+/* Foldable section markers: VSCode (and others) collapse #pragma region blocks and
+ * list them in the minimap. The guard silences -Wunknown-pragmas on the toolchains
+ * (older gcc/clang) that don't recognize the markers; MSVC folds them natively. */
+static void emit_region_guard(FILE *out){
+    fputs("#if defined(__GNUC__)   /* let the section markers below fold quietly */\n"
+          "#pragma GCC diagnostic ignored \"-Wunknown-pragmas\"\n"
+          "#endif\n", out);
+}
+
+/* Copy srcdir/name into out, wrapped in a foldable #pragma region. If strip_local,
+ * drop local #include "..." lines. */
 static void emit(FILE *out, const char *srcdir, const char *name, int strip_local){
     char path[512]; char line[8192]; FILE *in;
     snprintf(path, sizeof path, "%s/%s", srcdir, name);
     in = fopen(path, "rb");
     if (!in){ fprintf(stderr, "pack: cannot open %s\n", path); exit(1); }
-    fprintf(out, "/* ===== %s ===== */\n", name);
+    fprintf(out, "#pragma region %s\n", name);
     while (fgets(line, sizeof line, in)){
         if (strip_local){
             const char *s = line;
@@ -35,6 +45,7 @@ static void emit(FILE *out, const char *srcdir, const char *name, int strip_loca
         fputs(line, out);
     }
     if (line[strlen(line)?strlen(line)-1:0] != '\n') fputc('\n', out);
+    fputs("#pragma endregion\n", out);
     fclose(in);
 }
 
@@ -62,6 +73,7 @@ static void build_discovery(const char *srcdir, const char *outdir){
     out = fopen(path, "wb");
     if (!out){ fprintf(stderr, "pack: cannot write %s\n", path); exit(1); }
     fputs(BANNER, out);
+    emit_region_guard(out);
     posix_preamble(out, "DART_DISCOVERY_IMPLEMENTATION", "DART_DISCOVERY_SANS_IO");
 
     emit(out, srcdir, "discovery/core.h", 1);
@@ -90,6 +102,7 @@ static void build_transport(const char *srcdir, const char *outdir){
     out = fopen(path, "wb");
     if (!out){ fprintf(stderr, "pack: cannot write %s\n", path); exit(1); }
     fputs(BANNER, out);
+    emit_region_guard(out);
     posix_preamble(out, "DART_TRANSPORT_IMPLEMENTATION", "DART_TRANSPORT_SANS_IO");
 
     /* bridge DART_TRANSPORT_* flags to the bundled discovery and pull it in. */
@@ -132,6 +145,7 @@ static void build_combined(const char *srcdir, const char *outdir){
     out = fopen(path, "wb");
     if (!out){ fprintf(stderr, "pack: cannot write %s\n", path); exit(1); }
     fputs(BANNER, out);
+    emit_region_guard(out);
 
     /* DART_* is the one knob users touch. Map it onto the per-module flags. */
     fputs(

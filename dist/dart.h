@@ -3,6 +3,9 @@
  * tools/pack.c. Edit the split sources in src/ and re-run pack to regenerate.
  * See the flag scheme at the top of tools/pack.c.
  */
+#if defined(__GNUC__)   /* let the section markers below fold quietly */
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
 #ifdef DART_IMPLEMENTATION
   #ifndef DART_DISCOVERY_IMPLEMENTATION
   #define DART_DISCOVERY_IMPLEMENTATION
@@ -29,7 +32,7 @@
   #endif
 #endif
 
-/* ===== discovery/core.h ===== */
+#pragma region discovery/core.h
 /* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
  * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
  * IO-owning layer see dart_discovery_rt.h. */
@@ -132,9 +135,10 @@ void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, si
 }
 #endif
 #endif /* DART_DISCOVERY_H */
+#pragma endregion
 
 #ifndef DART_DISCOVERY_SANS_IO
-/* ===== platform/core.h ===== */
+#pragma region platform/core.h
 /* dart_plat: the one platform layer. Every OS dependency the runtimes need lives
  * behind this contract: a monotonic clock, UDP sockets, multicast, entropy, and
  * the source-address route probe. The layers above (discovery_rt, node) speak
@@ -257,7 +261,8 @@ void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
 }
 #endif
 #endif /* DART_PLAT_H */
-/* ===== discovery/runtime.h ===== */
+#pragma endregion
+#pragma region discovery/runtime.h
 /* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over
  * the dart_discovery core. On non-MSVC Windows, link -lws2_32 -lbcrypt. */
 #ifndef DART_DISCOVERY_RT_H
@@ -317,8 +322,9 @@ uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 }
 #endif
 #endif /* DART_DISCOVERY_RT_H */
+#pragma endregion
 #endif /* !DART_DISCOVERY_SANS_IO */
-/* ===== transport/core.h ===== */
+#pragma region transport/core.h
 /* sans-IO reliable-UDP transport core: no socket, clock, or heap. Feed it
  * datagrams + now_us + a peer set; it returns datagrams to send and delivers
  * reassembled messages. RTPS-inspired, not wire-compatible. Layer dart_node.h
@@ -645,9 +651,10 @@ uint64_t  dart_next_deadline_us(dart_state *st);
 }
 #endif
 #endif /* DART_TRANSPORT_H */
+#pragma endregion
 
 #ifndef DART_TRANSPORT_SANS_IO
-/* ===== node/core.h ===== */
+#pragma region node/core.h
 /* NODE runtime over dart_transport: owns the data socket, drives discovery,
  * wires peers into the transport. */
 #ifndef DART_NODE_H
@@ -756,7 +763,8 @@ void     dart_node_close(dart_node *n, int send_bye);
 }
 #endif
 #endif /* DART_NODE_H */
-/* ===== shm/core.h ===== */
+#pragma endregion
+#pragma region shm/core.h
 /* dart_shm: zero-copy same-host payload path. OPT-IN -- nothing here compiles or
  * links unless you define DART_SHM, so embedded / non-SHM targets carry zero cost
  * and need no shared-memory platform support. Speaks only dart_plat_* (shm mapping,
@@ -973,10 +981,11 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
 }
 #endif
 #endif /* DART_SHM_H */
+#pragma endregion
 #endif /* !DART_TRANSPORT_SANS_IO */
 
 #ifdef DART_DISCOVERY_IMPLEMENTATION
-/* ===== common/bytes.h ===== */
+#pragma region common/bytes.h
 /* Shared little-endian byte packing, used by the discovery, transport, and SHM
  * layers (each formerly carried its own copy). static inline: no link symbol and
  * no unused-function warning in a layer that doesn't use a given width. The
@@ -995,7 +1004,8 @@ static inline uint32_t dart_le_r32(const uint8_t *p){ return (uint32_t)p[0] | ((
 static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
 
 #endif /* DART_BYTES_H */
-/* ===== discovery/core.c ===== */
+#pragma endregion
+#pragma region discovery/core.c
 /* sans-IO peer-discovery core. See dart_discovery.h. */
 #include <string.h>
 
@@ -1352,9 +1362,10 @@ int dart_discovery_peer_addr(const dart_discovery_state *st, uint16_t slot, dart
     dart_discovery_addr_of(p, out);
     return 1;
 }
+#pragma endregion
 
 #ifndef DART_DISCOVERY_SANS_IO
-/* ===== platform/core.c ===== */
+#pragma region platform/core.c
 /* dart_plat: the Windows + POSIX implementation of the platform contract. This
  * is the only file in DART carrying an OS #ifdef. Port to a new platform by
  * adding a branch here (or a sibling file against dart_plat.h); BSD-socket
@@ -1796,7 +1807,8 @@ void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
 }
 #endif /* _WIN32 */
 #endif /* DART_SHM */
-/* ===== discovery/runtime.c ===== */
+#pragma endregion
+#pragma region discovery/runtime.c
 /* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
  * UUID generation. All OS access goes through dart_plat. */
 
@@ -2028,11 +2040,12 @@ void dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye){
     dart_plat_close(rt->fd);
     dart_plat_cleanup();
 }
+#pragma endregion
 #endif /* !DART_DISCOVERY_SANS_IO */
 #endif /* DART_DISCOVERY_IMPLEMENTATION */
 
 #ifdef DART_TRANSPORT_IMPLEMENTATION
-/* ===== common/bytes.h ===== */
+#pragma region common/bytes.h
 /* Shared little-endian byte packing, used by the discovery, transport, and SHM
  * layers (each formerly carried its own copy). static inline: no link symbol and
  * no unused-function warning in a layer that doesn't use a given width. The
@@ -2051,7 +2064,8 @@ static inline uint32_t dart_le_r32(const uint8_t *p){ return (uint32_t)p[0] | ((
 static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
 
 #endif /* DART_BYTES_H */
-/* ===== common/arena.h ===== */
+#pragma endregion
+#pragma region common/arena.h
 /* Bump allocator shared by the layers that pack sub-blocks into one caller-provided
  * arena (transport state, node). Measure mode (base==NULL): dart_take returns NULL but
  * still advances offset, so the sizing pass and the build pass run the SAME code and
@@ -2078,7 +2092,8 @@ static inline void *dart_take(dart_bump *b, size_t n, size_t align){
 }
 
 #endif /* DART_ARENA_H */
-/* ===== transport/internal.h ===== */
+#pragma endregion
+#pragma region transport/internal.h
 /* Shared internals of the split transport core: wire/scheduler constants, the state
  * structs, the small cross-file inline helpers, and prototypes for the helpers that
  * cross the wire/sched/writer/reader file boundaries. Not a public header. */
@@ -2322,7 +2337,8 @@ void   dart__event(dart_state *st, dart_event_kind kind, uint16_t channel, uint3
 uint64_t dart_unicast_join_seqno(const dart_channel *ch);
 
 #endif /* DART_TRANSPORT_INTERNAL_H */
-/* ===== transport/wire.c ===== */
+#pragma endregion
+#pragma region transport/wire.c
 /* Transport wire codec: the DATA/HB/NACK[/SHM-DATA] submessage builders. */
 
 
@@ -2371,7 +2387,8 @@ size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, u
     dart_le_w16(o+DART_OFFSET_NACK_NBITS,nbits); dart_le_w32(o+DART_OFFSET_NACK_BITMAP,bitmap); dart_le_w32(o+DART_OFFSET_NACK_EPOCH,epoch);
     return DART_HEADER_NACK;
 }
-/* ===== transport/sched.c ===== */
+#pragma endregion
+#pragma region transport/sched.c
 /* Transport active-lane scheduler and the outgoing poll. */
 
 
@@ -2539,7 +2556,8 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
 uint64_t dart_next_deadline_us(dart_state *st){
     return st->next_deadline_us == DART__NO_DEADLINE ? 0 : st->next_deadline_us;
 }
-/* ===== transport/writer.c ===== */
+#pragma endregion
+#pragma region transport/writer.c
 /* Transport writer path: history, send, per-lane + group emit, ACKNACK handling. */
 
 
@@ -2923,7 +2941,8 @@ size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, size_t cap
     }
     return 0;
 }
-/* ===== transport/reader.c ===== */
+#pragma endregion
+#pragma region transport/reader.c
 /* Transport reader path: ordering, reassembly, delivery, the ACKNACK emit. */
 
 
@@ -3236,7 +3255,8 @@ size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t 
     if (!repair && !force) return 0;
     return dart_mk_nack(out,alias,first_missing,nbits,bitmap,r->epoch,0);
 }
-/* ===== transport/core.c ===== */
+#pragma endregion
+#pragma region transport/core.c
 /* sans-IO reliable-UDP transport core: state, init/teardown, peer + interest matching,
  * the RX demux, and public queries. The wire codec, scheduler, and writer/reader paths
  * live in transport/{wire,sched,writer,reader}.c; shared decls in transport/internal.h. */
@@ -3818,9 +3838,10 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *datagram, size_
         p+=sub; rem-=sub;
     }
 }
+#pragma endregion
 
 #ifndef DART_TRANSPORT_SANS_IO
-/* ===== shm/core.c ===== */
+#pragma region shm/core.c
 /* dart_shm: the portable segment-mapping + chunk module behind dart_shm.h. Pure
  * over dart_plat (shm mapping, host uuid, the generation atomic); no transport or
  * node knowledge. Compiles to nothing without DART_SHM. See dart_shm.h. */
@@ -3981,7 +4002,8 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
 }
 
 #endif /* DART_SHM */
-/* ===== node/core.c ===== */
+#pragma endregion
+#pragma region node/core.c
 /* NODE runtime: owns the data socket, drives discovery, wires peers into the
  * transport. All OS access goes through dart_plat. See dart_node.h. */
 
@@ -4746,5 +4768,6 @@ void dart_node_close(dart_node *n, int send_bye){
 #endif
     dart_plat_cleanup();
 }
+#pragma endregion
 #endif /* !DART_TRANSPORT_SANS_IO */
 #endif /* DART_TRANSPORT_IMPLEMENTATION */
