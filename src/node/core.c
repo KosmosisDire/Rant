@@ -389,6 +389,13 @@ static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const voi
     dart_node *n = (dart_node*)u;
     if (n->shm_user_on_message) n->shm_user_on_message(n->user_data, ch, from, data, len);
 }
+/* transport events (MSG_LOST/TOO_BIG/NAME_COLLISION) fire with the transport's user,
+ * which the rewrap below points at the node; forward them to the app's real user_data
+ * (same chokepoint as on_message so the wrap can never go half-applied again). */
+static void dart__node_on_event(void *u, const dart_event *ev){
+    dart_node *n = (dart_node*)u;
+    if (n->on_event) n->on_event(n->user_data, ev);
+}
 static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
     dart_node *n = (dart_node*)u; dart_shm_desc d; dart_shm_pool *reader_pool; const void *p; uint32_t len;
     if (!dart_shm_desc_decode(&d, desc, DART_SHM_DESC_WIRE)) return 0;
@@ -457,6 +464,7 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
         n->shm_user_on_message = cfg->on_message;
         n->shm_alloc = cfg->allocator;
         transport_cfg.on_message = dart__node_on_message;
+        transport_cfg.on_event   = dart__node_on_event;
         transport_cfg.on_shm     = dart__node_on_shm;
         transport_cfg.allocator  = dart__node_alloc;
         transport_cfg.user       = n;

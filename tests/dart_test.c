@@ -1102,6 +1102,44 @@ static void open_fail_checks(void){
     }
 }
 
+/* Bug-1 regression: in an SHM+allocator build the node rewraps the transport's app
+ * callbacks (on_message/on_shm/allocator) to forward the app's user_data, and points
+ * the transport's user at the node. A transport-fired event (MSG_LOST/TOO_BIG/
+ * NAME_COLLISION) must reach the app's on_event with that SAME user_data, not the node
+ * pointer. NAME_COLLISION is the deterministic transport event: open a subscriber with
+ * an allocator (so the node is SHM-capable, taking the rewrap path) and a sentinel
+ * user_data, drive a topic-hash collision, and assert on_event saw the sentinel. */
+static void *evu_user; static int evu_collisions;
+static void evu_on_event(void *u, const dart_event *ev){
+    if (ev->kind == DART_NAME_COLLISION){ evu_user = u; evu_collisions++; }
+}
+static void *evu_alloc(void *u, void *p, size_t n){ (void)u; if(!n){ free(p); return NULL; } return realloc(p,n); }
+static void event_user_checks(void){
+    static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
+    const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> one identity (see collide.c) */
+    dart_channel_def cw, cr; dart_node_config wc, rc; dart_node *w, *r;
+    uint8_t payload[16]; int i; memset(payload,0x5A,sizeof payload);
+    memset(&cw,0,sizeof cw);
+    cw.name=A; cw.role=DART_PUB_ONLY;
+    cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=1; cw.qos.catch_up=1;
+    cw.qos.max_message_bytes=32; cw.qos.heartbeat_us=50000;
+    cr=cw; cr.name=B; cr.role=DART_SUB_ONLY;
+    wc = (dart_node_config){ .domain=ST_DOMAIN+5, .channels=&cw, .n_channels=1, .discovery={ .max_peers=4 } };
+    rc=wc; rc.channels=&cr;
+    rc.on_event=evu_on_event; rc.user_data=&sentinel; rc.allocator=evu_alloc;   /* allocator -> SHM-capable */
+    evu_user=NULL; evu_collisions=0;
+    w=dart_node_open(mem_w,sizeof mem_w,&wc);
+    r=dart_node_open(mem_r,sizeof mem_r,&rc);
+    ST_CHECK(w && r, "event-user: nodes open");
+    if (w && r){
+        for (i=0;i<120 && evu_collisions==0;i++){ dart_node_send(w,0,payload,16); dart_node_poll(w,0); dart_node_poll(r,20); }
+        ST_CHECK(evu_collisions >= 1, "event-user: collision event fired (%d)", evu_collisions);
+        ST_CHECK(evu_user == (void*)&sentinel,
+                 "event-user: on_event gets user_data not node ptr (got %p want %p)", evu_user, (void*)&sentinel);
+        dart_node_close(r,1); dart_node_close(w,1);
+    }
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1392,6 +1430,7 @@ static int selftest_main(void){
 #endif
     unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
     open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */
+    event_user_checks();  /* 14. transport-fired event reaches on_event with the app user_data */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
