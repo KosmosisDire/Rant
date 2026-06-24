@@ -69,6 +69,9 @@ static unsigned long long g_rx_bytes = 0;  /* bytes received since the last rate
 static unsigned long long g_rx_total = 0;  /* cumulative messages delivered to on_message */
 static unsigned long long g_lost     = 0;  /* cumulative messages the transport reported lost */
 static uint32_t           g_last_peer = 0; /* most recent sender: the peer we snapshot HOL progress for */
+#define MAX_TOPICS 64
+static const char *g_topics[MAX_TOPICS];   /* channel handle -> topic name, for the receive print */
+static int         g_n_topics = 0;
 
 #ifdef _WIN32
 static DWORD WINAPI pump_thread(LPVOID arg){
@@ -130,6 +133,7 @@ static size_t parse_size(const char *s){
 /* message delivery: keep it cheap, never call back into dart_*. Printing the
  * payload as text is fine. ch is the channel's local handle (its index). */
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
+    const char *topic = (ch < (uint16_t)g_n_topics) ? g_topics[ch] : "?";
     (void)u;
     g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* accounting for sub --rate (the loop prints it) */
     g_last_peer = from;                              /* the loop snapshots this writer's HOL progress */
@@ -139,9 +143,9 @@ static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, si
         fflush(g_outfile);                /* flush before truncating a longer prior message */
         file_truncate(g_outfile, (long)len);
         if (!g_rate_mode)
-            printf("[ch %u <- peer %u] wrote %lu bytes\n", ch, from, (unsigned long)len);
+            printf("[%s <- peer %u] wrote %lu bytes\n", topic, from, (unsigned long)len);
     } else if (!g_rate_mode){             /* --rate: no per-msg line, the loop shows the rate */
-        printf("[ch %u <- peer %u] %.*s\n", ch, from, (int)len, (const char*)data);
+        printf("[%s <- peer %u] %.*s\n", topic, from, (int)len, (const char*)data);
     }
 }
 
@@ -188,8 +192,8 @@ static void on_event(void *u, const dart_event *ev){
 static void usage(void){
     fprintf(stderr,
         "usage:\n"
-        "  pubsub sub <channel> [opts]\n"
-        "  pubsub pub <channel> [text...] [opts]   (no text = read lines from stdin)\n"
+        "  pubsub sub <topic> [<topic>...] [opts]   (subscribe to one or more topics)\n"
+        "  pubsub pub <topic> [text...] [opts]      (no text = read lines from stdin)\n"
         "opts: --domain N  --mcast  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
         "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
         "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_PAYLOAD_MAX>=N)\n");
@@ -364,7 +368,8 @@ static void publish_rate(dart_node *n, uint16_t channel, const void *data, size_
 }
 
 int main(int argc, char **argv){
-    const char *mode = NULL, *channel_name = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL;
+    const char *mode = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL;
+    const char *pos[64]; int npos = 0;     /* positional args: [mode, topic(s)/message...] */
     uint16_t domain = 7;
     int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0, frag = 0;
     double rate_hz = 0;                    /* --rate: pub repeats at N Hz; sub measures rate */
@@ -397,61 +402,67 @@ int main(int argc, char **argv){
         else if (!strcmp(arg, "--best-effort"))          reliable = 0;
         else if (!strcmp(arg, "--help") || !strcmp(arg, "-h")){ usage(); return 0; }
         else if (arg[0] == '-' && arg[1] == '-'){ fprintf(stderr, "unknown option %s\n", arg); usage(); return 2; }
-        else if (!mode) mode = arg;
-        else if (!channel_name) channel_name = arg;
-        else {   /* message word: append with a separating space */
-            size_t word_len = strlen(arg);
-            if (msg_len && msg_len < sizeof msg - 1) msg[msg_len++] = ' ';
-            if (word_len > sizeof msg - 1 - msg_len) word_len = sizeof msg - 1 - msg_len;
-            memcpy(msg + msg_len, arg, word_len); msg_len += word_len;
-        }
+        else if (npos < 64) pos[npos++] = arg;
     }
-    msg[msg_len] = '\0';
     if (max_set && cap < 64) cap = 64;   /* --max 0/garbage: keep a sane floor */
 
-    if (!mode || !channel_name){ usage(); return 2; }
+    mode = npos > 0 ? pos[0] : NULL;
+    if (!mode){ usage(); return 2; }
     int is_pub = !strcmp(mode, "pub");
     int is_sub = !strcmp(mode, "sub");
     if (!is_pub && !is_sub){ fprintf(stderr, "mode must be 'pub' or 'sub'\n"); usage(); return 2; }
 
+    /* sub takes every positional after the mode as a topic (a list); pub takes the
+       first as its topic and joins the rest as the message text. */
+    if (is_sub){
+        for (i = 1; i < npos && g_n_topics < MAX_TOPICS; i++) g_topics[g_n_topics++] = pos[i];
+    } else {
+        if (npos > 1) g_topics[g_n_topics++] = pos[1];
+        for (i = 2; i < npos; i++){
+            size_t word_len = strlen(pos[i]);
+            if (msg_len && msg_len < sizeof msg - 1) msg[msg_len++] = ' ';
+            if (word_len > sizeof msg - 1 - msg_len) word_len = sizeof msg - 1 - msg_len;
+            memcpy(msg + msg_len, pos[i], word_len); msg_len += word_len;
+        }
+    }
+    msg[msg_len] = '\0';
+    if (g_n_topics == 0){ usage(); return 2; }
+
     int dynamic = !max_set;                 /* no --max => grow buffers via malloc */
     size_t send_limit = dynamic ? DART_MESSAGE_MAX : cap;
 
-    /* The channel argument is a topic NAME (its 64-bit hash is the cross-peer
-       identity); the local handle is 0 since this tool uses a single channel. */
+    /* A topic name's 64-bit hash is its cross-peer identity; the local handle is the
+       index in channels[]. The publisher sends on the first channel (handle 0). */
     const uint16_t channel = 0;
-    const char *topic_name = channel_name;
 
-    /* A deliberate big-message profile (not the defaults): shallow keep_last
-       because messages can be megabytes, fast 5ms repair, and a long flow-control
-       window so a multi-chunk file drains before KEEP_LAST evicts un-acked
-       history. */
-    dart_channel_def ch = {
-        .name       = topic_name,
-        .qos = {
-            .reliability        = reliable ? DART_RELIABLE : DART_BEST_EFFORT,
-            .keep_last          = 4,        /* shallow: messages can be megabytes */
-            .catch_up           = 2,        /* late subscribers see recent history */
-            .max_message_bytes  = dynamic ? 0u : (uint32_t)cap,
-            .heartbeat_us       = 200000,   /* 200 ms */
-            .repair_delay_us    = 2000,
-            .backpressure_wait_us= 5000000,  /* 5s flow control: pace the publisher to
-                                               the reader so a multi-chunk file is
-                                               delivered before KEEP_LAST evicts
-                                               un-acked history. A dead reader still
-                                               releases at the peer timeout. */
-        },
-        .role      = is_pub ? DART_PUB_ONLY : DART_SUB_ONLY,
-        .multicast = (uint8_t)mcast,
+    /* A deliberate big-message profile (not the defaults), shared by every topic:
+       shallow keep_last because messages can be megabytes, fast 5ms repair, and a long
+       flow-control window so a multi-chunk file drains before KEEP_LAST evicts un-acked
+       history. A dead reader still releases at the peer timeout. */
+    dart_qos qos = {
+        .reliability         = reliable ? DART_RELIABLE : DART_BEST_EFFORT,
+        .keep_last           = 4,
+        .catch_up            = 2,
+        .max_message_bytes   = dynamic ? 0u : (uint32_t)cap,
+        .heartbeat_us        = 200000,
+        .repair_delay_us     = 2000,
+        .backpressure_wait_us= 5000000,
     };
+    static dart_channel_def chans[MAX_TOPICS];
+    for (i = 0; i < g_n_topics; i++){
+        chans[i].name      = g_topics[i];
+        chans[i].qos       = qos;
+        chans[i].role      = is_pub ? DART_PUB_ONLY : DART_SUB_ONLY;
+        chans[i].multicast = (uint8_t)mcast;
+    }
 
     /* announce/timeout left at defaults (1s / 3.5s): the startup solicit makes
        discovery near-instant, so the periodic announce is just the slow backstop.
        data_port defaults to 0 = an OS-assigned ephemeral port. */
     dart_node_config cfg = {
         .domain     = domain,
-        .channels   = &ch,
-        .n_channels = 1,
+        .channels   = chans,
+        .n_channels = (uint16_t)g_n_topics,
         .on_message = on_message,
         .on_event   = on_event,
         .allocator  = dynamic ? pubsub_realloc : NULL,   /* dynamic message sizing */
@@ -494,8 +505,10 @@ int main(int argc, char **argv){
                              dart_node_close(n, 1); return 1; }
         }
         g_rate_mode = rate_set;   /* --rate on a sub: report measured throughput, not each msg */
-        printf("[sub] channel %s (id %u), domain %u, %s%s%s. Listening (Ctrl-C to quit)...\n",
-               channel_name, channel, domain, reliable ? "reliable" : "best-effort",
+        printf("[sub] %d topic(s):", g_n_topics);
+        for (i = 0; i < g_n_topics; i++) printf(" %s", g_topics[i]);
+        printf(" | domain %u, %s%s%s. Listening (Ctrl-C to quit)...\n",
+               domain, reliable ? "reliable" : "best-effort",
                file_name ? ", saving to " : "", file_name ? file_name : "");
         /* short tick either way: let the timer sweep flush ACKNACKs promptly
            (< nack_delay) so a reliable publisher's backpressure window keeps
@@ -555,8 +568,8 @@ int main(int argc, char **argv){
     }
 
     /* publisher */
-    printf("[pub] channel %s (id %u), domain %u, %s.\n",
-           channel_name, channel, domain, reliable ? "reliable" : "best-effort");
+    printf("[pub] topic %s, domain %u, %s.\n",
+           g_topics[0], domain, reliable ? "reliable" : "best-effort");
     /* in-pump diagnostic: fires only while a send is blocked in backpressure (the stall
        condition), so it is silent in healthy operation. Surfaces the within-block repair
        series the once-a-second loop can't (it's blocked inside the send). */
