@@ -130,9 +130,30 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #define recvfrom diag_recvfrom
 #endif /* _WIN32 */
 
+/* setsockopt failure injection: force a multicast group join to fail on demand, so the
+ * selftest can drive dart_node_open's degrade-on-join-failure path deterministically (a
+ * real over-the-OS-cap join failure is platform-specific). Wraps setsockopt like the
+ * sendto/recvfrom diag wrappers above; a pure passthrough unless armed. */
+static int g_fail_mcast_join = 0;   /* >0: fail that many upcoming IP_ADD_MEMBERSHIP calls */
+#ifdef _WIN32
+static int diag_setsockopt(SOCKET s, int level, int optname, const char *optval, int optlen){
+    if (g_fail_mcast_join > 0 && optname == IP_ADD_MEMBERSHIP){ g_fail_mcast_join--; return -1; }
+    return setsockopt(s, level, optname, optval, optlen);
+}
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+static int diag_setsockopt(int s, int level, int optname, const void *optval, socklen_t optlen){
+    if (g_fail_mcast_join > 0 && optname == IP_ADD_MEMBERSHIP){ g_fail_mcast_join--; return -1; }
+    return setsockopt(s, level, optname, optval, optlen);
+}
+#endif
+#define setsockopt diag_setsockopt
+
 #define DART_IMPLEMENTATION
 #include "dart.h"   /* discovery + transport + node runtime */
 
+#undef setsockopt
 #ifdef _WIN32
 #undef sendto
 #undef recvfrom
@@ -1180,6 +1201,33 @@ static void event_user_checks(void){
     }
 }
 
+/* Bug-2 regression: a per-channel multicast (IGMP) join past the OS membership cap must
+ * DEGRADE -- skip that channel's group join, keep the node alive, and fire a
+ * DART_MCAST_JOIN_FAILED diagnostic -- not hard-fail dart_node_open. A real over-cap
+ * failure is OS-specific, so g_fail_mcast_join forces the FIRST IP_ADD_MEMBERSHIP (the
+ * data-channel join, which runs before discovery's own join) to fail, leaving discovery
+ * to join normally so the open can still succeed. */
+static int mjf_events; static uint16_t mjf_channel;
+static void mjf_on_event(void *u, const dart_event *ev){
+    (void)u; if (ev->kind==DART_MCAST_JOIN_FAILED){ mjf_events++; mjf_channel=ev->channel; }
+}
+static void mcast_join_degrade_checks(void){
+    static uint8_t mem[1<<20];
+    dart_channel_def ch; dart_node_config cfg; dart_node *n;
+    memset(&ch,0,sizeof ch); ch.name="mjf/topic"; ch.role=DART_SUB_ONLY; ch.multicast=1;
+    ch.qos.reliability=DART_RELIABLE; ch.qos.keep_last=1; ch.qos.max_message_bytes=64;
+    memset(&cfg,0,sizeof cfg); cfg.domain=ST_DOMAIN+6; cfg.channels=&ch; cfg.n_channels=1;
+    cfg.on_event=mjf_on_event; cfg.net.multicast_interface="127.0.0.1"; cfg.discovery.max_peers=4;
+    mjf_events=0; mjf_channel=0xFFFF;
+    g_fail_mcast_join=1;                 /* fail only the first join: the data-channel join */
+    n=dart_node_open(mem,sizeof mem,&cfg);
+    g_fail_mcast_join=0;
+    ST_CHECK(n != NULL, "mcast-degrade: node still opens when a channel multicast join fails");
+    ST_CHECK(mjf_events==1 && mjf_channel==0,
+             "mcast-degrade: DART_MCAST_JOIN_FAILED fired for the channel (events=%d ch=%u)", mjf_events, mjf_channel);
+    if (n) dart_node_close(n, 0);
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1472,6 +1520,7 @@ static int selftest_main(void){
     unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
     open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */
     event_user_checks();  /* 14. transport-fired event reaches on_event with the app user_data */
+    mcast_join_degrade_checks();  /* 15. multicast join failure degrades (skip + signal), not hard-fail */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;

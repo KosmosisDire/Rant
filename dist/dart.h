@@ -445,7 +445,9 @@ typedef enum {
     DART_MSG_LOST,       /* messages skipped: .channel, .peer, .first .. .first+.count-1 */
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.count = its size), skipped */
     DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
-    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
+    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
+    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap: that
+                              channel got no group join and receives only unicast-published data (.channel) (node) */
 } dart_event_kind;
 
 typedef struct {
@@ -4593,7 +4595,10 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
           n->multicast_fd=multicast_fd;       /* owned now: fail_mcast closes it */
           if (!dart_plat_bind(multicast_fd, 0, n->multicast_port, 1)) goto fail_mcast;
           /* one join per distinct group (kernels reject dups); memberships are
-             OS-capped (~20: Linux net.ipv4.igmp_max_memberships) */
+             OS-capped (~20: Linux net.ipv4.igmp_max_memberships). Past the cap a join
+             fails: degrade instead of failing the whole node -- skip that channel's
+             group (it still receives data sent to it unicast) and fire a diagnostic so
+             the over-subscription is never silent. */
           for (i=0;i<cfg->n_channels;i++)
               if (cfg->channels[i].multicast && cfg->channels[i].role!=DART_PUB_ONLY){
                   uint32_t group_addr = dart__node_chan_group(cfg->domain, &cfg->channels[i]);
@@ -4604,7 +4609,12 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
                           dup=1; break;
                       }
                   if (dup) continue;
-                  if (!dart_plat_mcast_join(multicast_fd, group_addr, interface_ip)) goto fail_mcast;
+                  if (!dart_plat_mcast_join(multicast_fd, group_addr, interface_ip) && n->on_event){
+                      dart_event ev; memset(&ev, 0, sizeof ev);
+                      ev.kind=DART_MCAST_JOIN_FAILED; ev.channel=i;
+                      ev.detail="multicast group join failed (over OS membership cap); channel receives unicast only";
+                      n->on_event(n->user_data, &ev);
+                  }
               }
           dart_plat_mcast_loop(multicast_fd, 1);
           dart_plat_set_nonblock(multicast_fd);

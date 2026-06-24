@@ -118,7 +118,9 @@ typedef enum {
     DART_MSG_LOST,       /* messages skipped: .channel, .peer, .first .. .first+.count-1 */
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.count = its size), skipped */
     DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
-    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
+    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
+    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap: that
+                              channel got no group join and receives only unicast-published data (.channel) (node) */
 } dart_event_kind;
 
 typedef struct {
