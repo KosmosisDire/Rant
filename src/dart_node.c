@@ -409,7 +409,7 @@ size_t dart_node_required_memory(const dart_node_config *cfg){
 dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     dart_discovery_rt_config discovery_rt_cfg; dart_config transport_cfg; uint16_t max_peers;
     uint8_t *base, *p; size_t node_bytes, table_bytes, meta_bytes, discovery_bytes, transport_bytes;
-    dart_node *n; dart_sock fd; uint16_t local_port, frag;
+    dart_node *n; dart_sock fd; uint16_t local_port;
     if (!mem || !cfg || cfg->n_channels==0) return NULL;
     if (cap < dart_node_required_memory(cfg)) return NULL;
     dart__node_cfgs(cfg,&discovery_rt_cfg,&transport_cfg,&max_peers);
@@ -429,11 +429,8 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     n->on_event = cfg->on_event; n->user_data = cfg->user_data;
     n->multicast_port = cfg->net.multicast_port ? cfg->net.multicast_port
                : (uint16_t)((cfg->net.discovery_port ? cfg->net.discovery_port : 7400) + 1);
-    /* our fragment size, clamped exactly as dart_init clamps it, baked into the blob */
-    frag = cfg->net.fragment_size ? cfg->net.fragment_size : DART_FRAG_PAYLOAD;
-    if (frag < DART_FRAG_PAYLOAD_MIN) frag = DART_FRAG_PAYLOAD_MIN;
-    if (frag > DART_FRAG_PAYLOAD_MAX) frag = DART_FRAG_PAYLOAD_MAX;
-    n->frag_size = frag;
+    /* our fragment size, baked into the announce blob; same clamp dart_init applies */
+    n->frag_size = dart_clamp_frag(cfg->net.fragment_size);
 #ifdef DART_SHM
     /* SHM is usable only with an allocator (the one-copy receive scratch + dynamic
        buffers); advertise capability accordingly and wrap the transport callbacks so

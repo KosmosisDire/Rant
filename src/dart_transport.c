@@ -237,6 +237,15 @@ static void dart__qos_defaults(dart_qos *q, int dynamic){
     if (!dynamic && q->max_message_bytes == 0) q->max_message_bytes = DART_FRAG_PAYLOAD;
 }
 
+/* Normalize a node/peer UDP fragment size: 0 -> default, then clamp to [MIN,MAX].
+   Public so the transport (dart_init) and the node (announce blob) clamp identically. */
+uint16_t dart_clamp_frag(uint16_t frag_payload){
+    uint16_t f = frag_payload ? frag_payload : DART_FRAG_PAYLOAD;
+    if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
+    if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
+    return f;
+}
+
 /* lay out everything (b->base==NULL = measure only) */
 static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
     uint16_t c, p; uint32_t max_peers = cfg->max_peers, n_channels = cfg->n_channels;
@@ -278,9 +287,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used; st->peer_local=peer_local;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
-          st->frag = cfg->frag_payload ? cfg->frag_payload : DART_FRAG_PAYLOAD;
-          if (st->frag < DART_FRAG_PAYLOAD_MIN) st->frag = DART_FRAG_PAYLOAD_MIN;
-          if (st->frag > DART_FRAG_PAYLOAD_MAX) st->frag = DART_FRAG_PAYLOAD_MAX;
+          st->frag = dart_clamp_frag(cfg->frag_payload);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap; st->bitmap_len=bitmap_len;
           st->channels=ch; st->writer_proxies=writer_proxies; st->reader_proxies=reader_proxies; st->reader_epoch_counter=1;
           st->next_deadline_us=DART__NO_DEADLINE;
@@ -514,13 +521,6 @@ static void dart__rematch(dart_state *st, uint16_t c, uint16_t peer_slot){
     else if (!ruse && r->used) dart__unmatch_r(st,c,peer_slot);
 }
 
-static uint16_t dart__clamp_frag(uint16_t f){
-    if (f==0) f = DART_FRAG_PAYLOAD;
-    if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
-    if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
-    return f;
-}
-
 void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local, uint16_t peer_frag){
     uint16_t i; int free=-1; uint32_t max_peers=st->cfg.max_peers;
     if (dart_peer_slot(st,id)>=0) return;
@@ -529,7 +529,7 @@ void dart_peer_add(dart_state *st, uint32_t id, int peer_is_local, uint16_t peer
     st->peer_used[free]=1; st->peer_ids[free]=id;
     st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
     st->peer_dormant[free]=0;
-    st->peer_frag[free]=dart__clamp_frag(peer_frag);
+    st->peer_frag[free]=dart_clamp_frag(peer_frag);
 #ifdef DART_SHM
     st->peer_shm[free]=0;   /* node sets it once the peer's segment is attached */
 #endif
@@ -582,7 +582,7 @@ void dart_peer_resume(dart_state *st, uint32_t id){
 /* update a peer's advertised fragment size (its blob may arrive after first contact) */
 void dart_peer_set_frag(dart_state *st, uint32_t id, uint16_t peer_frag){
     int s = dart_peer_slot(st,id);
-    if (s>=0) st->peer_frag[s]=dart__clamp_frag(peer_frag);
+    if (s>=0) st->peer_frag[s]=dart_clamp_frag(peer_frag);
 }
 
 #ifdef DART_SHM

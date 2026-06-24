@@ -170,6 +170,10 @@ void      dart_destroy(dart_state *st);
 uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_channel_identity(const dart_channel_def *def);   /* = dart_topic_id(def->name) */
 
+/* Normalize a UDP fragment size: 0 -> DART_FRAG_PAYLOAD, then clamp to [MIN,MAX].
+ * The rule dart_init and the node's announce blob both apply (single source). */
+uint16_t  dart_clamp_frag(uint16_t frag_payload);
+
 /* A new peer matches nothing until dart_apply_peer_interest feeds its interest
  * list (carried in its discovery announce). peer_is_local: 1 if on this host.
  * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
