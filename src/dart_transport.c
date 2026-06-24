@@ -201,6 +201,16 @@ static void dart__deadline(dart_state *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
 }
 
+/* writer/reader proxy for a (channel,peer) lane. The proxies are
+   [n_channels][max_peers] row-major; centralizing the index math here keeps a
+   transposed channel/peer from silently corrupting a neighbor lane. */
+static dart_writer_proxy *dart__wp(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+    return &st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
+}
+static dart_reader_proxy *dart__rp(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+    return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
+}
+
 /* bump allocator (shared by required_memory and init) */
 typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
 static void *dart_take(dart_bump *b, size_t n, size_t align){
@@ -332,7 +342,7 @@ static dart_state *dart_build(dart_bump *b, const dart_config *cfg){
             uint8_t *assembly_buf = dyn ? NULL : (uint8_t*)dart_take(b, q.max_message_bytes, 8);
             uint8_t *frag_bitmap  = dyn ? NULL : (uint8_t*)dart_take(b, (max_fragments+7u)/8u, 1);
             if (st && b->base){
-                dart_reader_proxy *r = &st->reader_proxies[(size_t)c*max_peers+p];
+                dart_reader_proxy *r = dart__rp(st,c,p);
                 r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
                 r->assembly_cap = dyn ? 0u : q.max_message_bytes;
                 r->bitmap_cap  = dyn ? 0u : (uint32_t)((max_fragments+7u)/8u);
@@ -426,7 +436,7 @@ static void dart__lane_enq(dart_state *st, uint16_t channel_idx, uint32_t peer_s
  * dart__lane_enq instead, since it recomputes next_deadline itself. */
 static void dart__lane_wake(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
     if (peer_slot < st->cfg.max_peers){
-        dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+        dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
         if (r->used && r->ack_pending) dart__deadline(st, r->ack_due_us);
     }
     dart__lane_enq(st, channel_idx, peer_slot);
@@ -453,7 +463,7 @@ static uint64_t dart_unicast_join_seqno(const dart_channel *ch){
  * the first subscriber; per-peer lanes then carry repairs only */
 static void dart__match_w(dart_state *st, uint16_t c, uint16_t peer_slot){
     dart_channel *ch=&st->channels[c];
-    dart_writer_proxy *w=&st->writer_proxies[(size_t)c*st->cfg.max_peers+peer_slot];
+    dart_writer_proxy *w=dart__wp(st,c,peer_slot);
     memset(w,0,sizeof(*w));
     w->used=1;
     if (!ch->multicast){
@@ -470,13 +480,13 @@ static void dart__match_w(dart_state *st, uint16_t c, uint16_t peer_slot){
 }
 static void dart__unmatch_w(dart_state *st, uint16_t c, uint16_t peer_slot){
     dart_channel *ch=&st->channels[c];
-    dart_writer_proxy *w=&st->writer_proxies[(size_t)c*st->cfg.max_peers+peer_slot];
+    dart_writer_proxy *w=dart__wp(st,c,peer_slot);
     if (!w->used) return;
     if (ch->multicast && ch->n_subscribers) ch->n_subscribers--;
     w->used=0;
 }
 static void dart__match_r(dart_state *st, uint16_t c, uint16_t peer_slot){
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)c*st->cfg.max_peers+peer_slot];
+    dart_reader_proxy *r=dart__rp(st,c,peer_slot);
     uint8_t *assembly_buf=r->assembly_buf, *frag_bitmap=r->frag_bitmap;
     uint32_t assembly_cap=r->assembly_cap, bitmap_cap=r->bitmap_cap;   /* keep grown buffers across rematch */
     memset(r,0,sizeof(*r));
@@ -492,7 +502,7 @@ static void dart__match_r(dart_state *st, uint16_t c, uint16_t peer_slot){
     }
 }
 static void dart__unmatch_r(dart_state *st, uint16_t c, uint16_t peer_slot){
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)c*st->cfg.max_peers+peer_slot];
+    dart_reader_proxy *r=dart__rp(st,c,peer_slot);
     r->used=0; r->assembly_active=0;
 }
 
@@ -503,8 +513,8 @@ static void dart__rematch(dart_state *st, uint16_t c, uint16_t peer_slot){
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     int wuse = (ch->role==DART_PUBSUB || ch->role==DART_PUB_ONLY) && dart_bget(peer_sub_bitmap,c);
     int ruse = (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) && dart_bget(peer_pub_bitmap,c);
-    dart_writer_proxy *w=&st->writer_proxies[(size_t)c*st->cfg.max_peers+peer_slot];
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)c*st->cfg.max_peers+peer_slot];
+    dart_writer_proxy *w=dart__wp(st,c,peer_slot);
+    dart_reader_proxy *r=dart__rp(st,c,peer_slot);
     if (wuse && !w->used) dart__match_w(st,c,peer_slot);
     else if (!wuse && w->used) dart__unmatch_w(st,c,peer_slot);
     if (ruse && !r->used) dart__match_r(st,c,peer_slot);
@@ -564,13 +574,12 @@ void dart_peer_dormant(dart_state *st, uint32_t id){
  * re-arms its heartbeats. Proxies and deliver_upto were never touched, so no dup,
  * no loss. */
 void dart_peer_resume(dart_state *st, uint32_t id){
-    int s = dart_peer_slot(st,id); uint16_t c; uint32_t max_peers;
+    int s = dart_peer_slot(st,id); uint16_t c;
     if (s<0) return;
     st->peer_dormant[s]=0;
-    max_peers = st->cfg.max_peers;
     for (c=0;c<st->cfg.n_channels;c++){
-        dart_writer_proxy *w=&st->writer_proxies[(size_t)c*max_peers+s];
-        dart_reader_proxy *r=&st->reader_proxies[(size_t)c*max_peers+s];
+        dart_writer_proxy *w=dart__wp(st,c,s);
+        dart_reader_proxy *r=dart__rp(st,c,s);
         if (st->channels[c].qos.reliability!=DART_RELIABLE) continue;
         if (r->used){ r->ack_pending=1; r->ack_due_us=0; r->ack_force=1; }  /* report our position now */
         if (w->used || r->used) dart__lane_wake(st,c,(uint16_t)s);
@@ -624,7 +633,7 @@ static void dart__commit(dart_state *st, uint16_t channel_idx, size_t len){
     else {
         uint32_t max_peers=st->cfg.max_peers, p;
         for (p=0;p<max_peers;p++)
-            if (st->writer_proxies[(size_t)channel_idx*max_peers+p].used && !st->peer_dormant[p]) dart__lane_wake(st, channel_idx, p);
+            if (dart__wp(st,channel_idx,p)->used && !st->peer_dormant[p]) dart__lane_wake(st, channel_idx, p);
     }
 }
 
@@ -686,7 +695,7 @@ void dart_destroy(dart_state *st){
             if (ch->history[d].buf){ st->cfg.allocator(st->cfg.user, ch->history[d].buf, 0);
                                   ch->history[d].buf=NULL; ch->history[d].cap=0; }
         for (p=0;p<max_peers;p++){
-            dart_reader_proxy *r=&st->reader_proxies[(size_t)c*max_peers+p];
+            dart_reader_proxy *r=dart__rp(st,c,p);
             if (r->assembly_buf){ st->cfg.allocator(st->cfg.user, r->assembly_buf, 0); r->assembly_buf=NULL; r->assembly_cap=0; }
             if (r->frag_bitmap){ st->cfg.allocator(st->cfg.user, r->frag_bitmap, 0); r->frag_bitmap=NULL; r->bitmap_cap=0; }
         }
@@ -812,7 +821,7 @@ int dart_send_would_evict(dart_state *st, uint16_t channel){
     if (!slot->valid) return 0;
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
-        dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*max_peers+p];
+        dart_writer_proxy *w=dart__wp(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
@@ -824,7 +833,7 @@ int dart_send_drained(dart_state *st, uint16_t channel){
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
-        dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*max_peers+p];
+        dart_writer_proxy *w=dart__wp(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
     }
     return 1;
@@ -835,7 +844,7 @@ int dart_writer_match_count(dart_state *st, uint16_t channel){
     uint32_t max_peers, p; int cnt = 0;
     if (!ch) return 0;
     max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++) if (st->writer_proxies[(size_t)channel_idx*max_peers+p].used) cnt++;  /* matched readers */
+    for (p=0;p<max_peers;p++) if (dart__wp(st,channel_idx,p)->used) cnt++;  /* matched readers */
     return cnt;
 }
 
@@ -851,7 +860,7 @@ int dart_repair_pending(dart_state *st, uint16_t channel){
     uint32_t max_peers, p; int cnt = 0;
     if (!ch) return 0;
     max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++) if (st->writer_proxies[(size_t)channel_idx*max_peers+p].used && st->writer_proxies[(size_t)channel_idx*max_peers+p].has_nack) cnt++;
+    for (p=0;p<max_peers;p++){ dart_writer_proxy *w=dart__wp(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
     return cnt;   /* writer lanes with a NACK to service; 0 = nothing to resend right now */
 }
 
@@ -862,7 +871,7 @@ int dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
     if (!ch) return 0;
     peer_slot = dart_peer_slot(st, peer);
     if (peer_slot < 0) return 0;
-    r = &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    r = dart__rp(st,channel_idx,peer_slot);
     if (!r->used || !r->assembly_active) return 0;            /* no message mid-reassembly */
     if (base_seqno) *base_seqno = r->deliver_upto;       /* HOL message starts here */
     if (total)      *total      = r->assembly_count;
@@ -884,7 +893,7 @@ int dart_writer_shm_eligible(dart_state *st, uint16_t channel){
     if (!ch || ch->multicast) return 0;
     max_peers = st->cfg.max_peers;
     for (p=0;p<max_peers;p++){
-        if (!st->writer_proxies[(size_t)channel_idx*max_peers+p].used || st->peer_dormant[p]) continue;
+        if (!dart__wp(st,channel_idx,p)->used || st->peer_dormant[p]) continue;
         if (!st->peer_shm[p]) return 0;
         any = 1;
     }
@@ -975,7 +984,7 @@ static void dart__arm(dart_channel *ch, dart_reader_proxy *r, int is_hb){
  * case re-uses the normal NACK window (dart_reader_emit's !assembly_active branch). */
 static void dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
     int reliable = (ch->qos.reliability==DART_RELIABLE);
     uint64_t base = dart_r64(p+3);
     uint16_t count = dart_r16(p+11);
@@ -1035,7 +1044,7 @@ static void dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, cons
 static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p,
                            uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
     int reliable = (ch->qos.reliability==DART_RELIABLE);
     int new_fragment = 0;
     uint64_t seqno, base; uint16_t frag, count, payload_len; uint32_t sample_len; const uint8_t *payload;
@@ -1145,7 +1154,7 @@ static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, con
 
 static void dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
     uint64_t first=dart_r64(p+3), last=dart_r64(p+11);
     if (!r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
@@ -1179,7 +1188,7 @@ static void dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const
 /* writer side: handle ACKNACK */
 static void dart_writer_nack(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
     uint64_t base=dart_r64(p+3); uint16_t nbits=dart_r16(p+11); uint32_t bitmap=dart_r32(p+13);
     uint32_t epoch=dart_r32(p+17); uint8_t flags=p[0];
     int group_mode;
@@ -1259,7 +1268,7 @@ void dart_on_datagram(dart_state *st, uint32_t from, const void *datagram, size_
  * On no-fit, state is untouched so the same submessage is produced next time. */
 static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
     int reliable=(ch->qos.reliability==DART_RELIABLE);
     /* group mode active only while a multicast channel has remote subscribers: new
        data + HBs ride the group lane, this per-peer lane only answers NACKs */
@@ -1376,7 +1385,7 @@ static size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, u
  * so it cannot scale into a flood with the gap size or the message size. */
 static size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     dart_channel *ch=&st->channels[channel_idx];
-    dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers+peer_slot];
+    dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;
     uint16_t alias = dart__alias_of(st, channel_idx);
     int due, holes=0, repair=0, force;
@@ -1440,7 +1449,7 @@ static size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, u
 static int dart__group_all_acked(dart_state *st, int channel_idx){
     uint32_t max_peers=st->cfg.max_peers, p; uint64_t seq=st->channels[channel_idx].next_seqno;
     for (p=0;p<max_peers;p++){
-        dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*max_peers+p];
+        dart_writer_proxy *w=dart__wp(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
     }
     return 1;
@@ -1496,8 +1505,8 @@ static int dart__lane_work(dart_state *st, uint16_t channel_idx, uint32_t peer_s
     if (peer_slot==max_peers)
         return ch->multicast && ch->n_subscribers>0 && ch->multicast_sent_upto < ch->next_seqno;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
-    { dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*max_peers+peer_slot];
-      dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*max_peers+peer_slot];
+    { dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
+      dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
       int group_mode = ch->multicast && ch->n_subscribers>0;
       if (w->used && w->has_nack) return 1;
       if (w->used && !group_mode && w->sent_upto < ch->next_seqno) return 1;
@@ -1541,8 +1550,8 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
             continue;
         }
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
-        { dart_writer_proxy *w=&st->writer_proxies[(size_t)channel_idx*max_peers+peer_slot];
-          dart_reader_proxy *r=&st->reader_proxies[(size_t)channel_idx*max_peers+peer_slot];
+        { dart_writer_proxy *w=dart__wp(st,channel_idx,peer_slot);
+          dart_reader_proxy *r=dart__rp(st,channel_idx,peer_slot);
           int group_mode = ch->multicast && ch->n_subscribers>0;
           if (w->used && !group_mode && w->acked_upto < ch->next_seqno){
               if (now>=w->hb_next_us) dart__lane_enq(st,channel_idx,peer_slot);
