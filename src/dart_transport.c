@@ -1,6 +1,7 @@
 /* sans-IO reliable-UDP transport core. See dart_transport.h. */
 #include "dart_transport.h"
 #include "dart_bytes.h"
+#include "dart_arena.h"
 #include <string.h>
 
 /* byte 0 of every submessage: type in the low 3 bits, flags above */
@@ -202,18 +203,6 @@ static dart_writer_proxy *dart__writer_proxy_at(dart_state *st, uint16_t channel
 }
 static dart_reader_proxy *dart__reader_proxy_at(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
-}
-
-/* bump allocator (shared by required_memory and init) */
-typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
-static void *dart_take(dart_bump *b, size_t n, size_t align){
-    size_t a = (b->offset + (align-1)) & ~(align-1);
-    b->offset = a + n;
-    if (b->base){
-        if (b->offset > b->cap){ b->oom = 1; return NULL; }
-        return b->base + a;
-    }
-    return NULL; /* sizing mode */
 }
 
 /* Reader-side fragment-count bound: a peer may fragment at the smallest size in

@@ -109,6 +109,7 @@ static void build_transport(const char *srcdir, const char *outdir){
 
     fputs("\n#ifdef DART_TRANSPORT_IMPLEMENTATION\n", out);
     emit(out, srcdir, "dart_bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "dart_arena.h", 1);   /* shared bump allocator, before first use */
     emit(out, srcdir, "dart_transport.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
     emit(out, srcdir, "dart_shm.c", 1);    /* SHM module impl, before node.c uses it */
@@ -164,6 +165,7 @@ static void build_combined(const char *srcdir, const char *outdir){
 
     fputs("\n#ifdef DART_TRANSPORT_IMPLEMENTATION\n", out);
     emit(out, srcdir, "dart_bytes.h", 1);   /* shared LE helpers, before first use */
+    emit(out, srcdir, "dart_arena.h", 1);   /* shared bump allocator, before first use */
     emit(out, srcdir, "dart_transport.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
     emit(out, srcdir, "dart_shm.c", 1);    /* SHM module impl, before node.c uses it */

@@ -2051,6 +2051,33 @@ static inline uint32_t dart_le_r32(const uint8_t *p){ return (uint32_t)p[0] | ((
 static inline uint64_t dart_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
 
 #endif /* DART_BYTES_H */
+/* ===== dart_arena.h ===== */
+/* Bump allocator shared by the layers that pack sub-blocks into one caller-provided
+ * arena (transport state, node). Measure mode (base==NULL): dart_take returns NULL but
+ * still advances offset, so the sizing pass and the build pass run the SAME code and
+ * cannot drift. Build mode (base set): returns base + aligned offset, or sets oom and
+ * returns NULL once the offset passes cap. static inline: no link symbol and no unused
+ * warning in a layer that doesn't use it. The amalgamator emits this once per
+ * implementation TU; the local #include is for standalone compilation of a layer. */
+#ifndef DART_ARENA_H
+#define DART_ARENA_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
+
+static inline void *dart_take(dart_bump *b, size_t n, size_t align){
+    size_t a = (b->offset + (align - 1)) & ~(align - 1);
+    b->offset = a + n;
+    if (b->base){
+        if (b->offset > b->cap){ b->oom = 1; return NULL; }
+        return b->base + a;
+    }
+    return NULL;   /* measure mode */
+}
+
+#endif /* DART_ARENA_H */
 /* ===== dart_transport.c ===== */
 /* sans-IO reliable-UDP transport core. See dart_transport.h. */
 #include <string.h>
@@ -2254,18 +2281,6 @@ static dart_writer_proxy *dart__writer_proxy_at(dart_state *st, uint16_t channel
 }
 static dart_reader_proxy *dart__reader_proxy_at(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
-}
-
-/* bump allocator (shared by required_memory and init) */
-typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
-static void *dart_take(dart_bump *b, size_t n, size_t align){
-    size_t a = (b->offset + (align-1)) & ~(align-1);
-    b->offset = a + n;
-    if (b->base){
-        if (b->offset > b->cap){ b->oom = 1; return NULL; }
-        return b->base + a;
-    }
-    return NULL; /* sizing mode */
 }
 
 /* Reader-side fragment-count bound: a peer may fragment at the smallest size in
@@ -3981,19 +3996,6 @@ static uint16_t dart__node_shm_reader_max(uint16_t max_peers, uint16_t n_channel
     uint32_t r = (uint32_t)max_peers * (n_channels ? n_channels : 1u) * DART_SHM_N_CLASSES;
     return (uint16_t)(r > 0xFFFFu ? 0xFFFFu : r);
 }
-/* arena bytes for the SHM bookkeeping (per-channel pool ptrs + handles + locked class,
- * plus the reader caches; the segments themselves are OS-mapped, lazily, outside it) */
-static size_t dart__node_shm_bytes(const dart_node_config *cfg, uint16_t max_peers){
-    size_t state_bytes = dart_shm_state_bytes();
-    uint32_t n_segments = (uint32_t)cfg->n_channels * DART_SHM_N_CLASSES;   /* (channel,class) segments */
-    uint16_t reader_max = dart__node_shm_reader_max(max_peers, cfg->n_channels);
-    size_t s = 0;
-    s += ((size_t)n_segments*sizeof(void*) + 15u)&~(size_t)15u;      /* (channel,class) pool ptr array */
-    s += ((size_t)n_segments*state_bytes + 15u)&~(size_t)15u;                 /* (channel,class) pool handles */
-    s += ((size_t)reader_max*8u + 15u)&~(size_t)15u;               /* reader segment ids */
-    s += ((size_t)reader_max*state_bytes + 15u)&~(size_t)15u;               /* reader pool handles */
-    return s;
-}
 #endif
 
 /* split node config into discovery + transport sub-configs */
@@ -4022,6 +4024,40 @@ static void dart__node_cfgs(const dart_node_config *cfg, dart_discovery_rt_confi
     transport_cfg->allocator  = cfg->allocator;
     transport_cfg->user       = cfg->user_data;
     if (max_peers_out) *max_peers_out = max_peers;
+}
+
+/* The node arena's sub-blocks, laid out in ONE place so dart_node_required_memory
+ * (measure: bump.base NULL, read bump.offset) and dart_node_open (build: read the
+ * pointers) run the same dart_take sequence and can never drift. */
+typedef struct {
+    dart_node *n;
+    uint8_t   *peers, *meta, *transport, *discovery;
+#ifdef DART_SHM
+    uint8_t   *shm_pool, *shm_pool_mem, *shm_reader_segments, *shm_reader_pool;
+#endif
+    size_t     transport_bytes, discovery_bytes;
+} dart_node_blocks;
+
+static void dart__node_layout(dart_bump *b, const dart_node_config *cfg, uint16_t max_peers,
+                              const dart_config *transport_cfg,
+                              const dart_discovery_rt_config *discovery_rt_cfg, dart_node_blocks *o){
+    o->n     = (dart_node*)dart_take(b, sizeof(struct dart_node), 16);
+    o->peers = (uint8_t*)  dart_take(b, (size_t)max_peers * sizeof(dart_node_peer), 16);
+    o->meta  = (uint8_t*)  dart_take(b, dart__node_meta_capacity(cfg), 16);
+    o->transport_bytes = dart_required_memory(transport_cfg);
+    o->transport = (uint8_t*)dart_take(b, o->transport_bytes, 16);
+#ifdef DART_SHM
+    {   size_t state_bytes  = dart_shm_state_bytes();
+        uint32_t n_segments = (uint32_t)cfg->n_channels * DART_SHM_N_CLASSES;
+        uint16_t reader_max = dart__node_shm_reader_max(max_peers, cfg->n_channels);
+        o->shm_pool            = (uint8_t*)dart_take(b, (size_t)n_segments * sizeof(void*), 16);
+        o->shm_pool_mem        = (uint8_t*)dart_take(b, (size_t)n_segments * state_bytes, 16);
+        o->shm_reader_segments = (uint8_t*)dart_take(b, (size_t)reader_max * 8u, 16);
+        o->shm_reader_pool     = (uint8_t*)dart_take(b, (size_t)reader_max * state_bytes, 16);
+    }
+#endif
+    o->discovery_bytes = dart_discovery_rt_required_memory(discovery_rt_cfg);
+    o->discovery = (uint8_t*)dart_take(b, o->discovery_bytes, 16);
 }
 
 /* local iff a route probe to the address selects that same address as source */
@@ -4240,40 +4276,30 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
 
 size_t dart_node_required_memory(const dart_node_config *cfg){
     dart_discovery_rt_config discovery_rt_cfg; dart_config transport_cfg; uint16_t max_peers;
-    size_t node_bytes, table_bytes, meta_bytes, discovery_bytes, transport_bytes;
+    dart_bump b; dart_node_blocks blocks;
     if (!cfg || cfg->n_channels==0) return 0;
     dart__node_cfgs(cfg,&discovery_rt_cfg,&transport_cfg,&max_peers);
-    node_bytes = (sizeof(struct dart_node)+15u)&~(size_t)15u;
-    table_bytes  = ((size_t)max_peers*sizeof(dart_node_peer)+15u)&~(size_t)15u;
-    meta_bytes = ((size_t)dart__node_meta_capacity(cfg)+15u)&~(size_t)15u;
-    discovery_bytes = (dart_discovery_rt_required_memory(&discovery_rt_cfg)+15u)&~(size_t)15u;
-    transport_bytes   = (dart_required_memory(&transport_cfg)+15u)&~(size_t)15u;
-    {   size_t shm_bytes = 0;
-#ifdef DART_SHM
-        shm_bytes = dart__node_shm_bytes(cfg, max_peers);
-#endif
-        return 32u + node_bytes + table_bytes + meta_bytes + discovery_bytes + transport_bytes + shm_bytes;
-    }
+    memset(&b,0,sizeof b);
+    dart__node_layout(&b, cfg, max_peers, &transport_cfg, &discovery_rt_cfg, &blocks);
+    return b.offset + 32u;     /* slack to align the caller's mem up to base */
 }
 
 dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
     dart_discovery_rt_config discovery_rt_cfg; dart_config transport_cfg; uint16_t max_peers;
-    uint8_t *base, *p; size_t node_bytes, table_bytes, meta_bytes, discovery_bytes, transport_bytes;
+    uint8_t *base; dart_node_blocks blocks;
     dart_node *n; dart_sock fd; uint16_t local_port;
     if (!mem || !cfg || cfg->n_channels==0) return NULL;
     if (cap < dart_node_required_memory(cfg)) return NULL;
     dart__node_cfgs(cfg,&discovery_rt_cfg,&transport_cfg,&max_peers);
+    base = (uint8_t*)(((uintptr_t)mem+15u)&~(uintptr_t)15u);
+    {   dart_bump b; memset(&b,0,sizeof b);
+        b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
+        dart__node_layout(&b, cfg, max_peers, &transport_cfg, &discovery_rt_cfg, &blocks);
+    }
 
     if (!dart_plat_startup()) return NULL;
 
-    base = (uint8_t*)(((uintptr_t)mem+15u)&~(uintptr_t)15u);
-    node_bytes = (sizeof(struct dart_node)+15u)&~(size_t)15u;
-    table_bytes  = ((size_t)max_peers*sizeof(dart_node_peer)+15u)&~(size_t)15u;
-    meta_bytes = ((size_t)dart__node_meta_capacity(cfg)+15u)&~(size_t)15u;
-    discovery_bytes = (dart_discovery_rt_required_memory(&discovery_rt_cfg)+15u)&~(size_t)15u;
-    transport_bytes   = (dart_required_memory(&transport_cfg)+15u)&~(size_t)15u;
-
-    n=(dart_node*)base; memset(n,0,sizeof *n);
+    n=blocks.n; memset(n,0,sizeof *n);
     n->fd = DART_SOCK_BAD; n->multicast_fd = DART_SOCK_BAD; n->max_peers=max_peers;
     n->domain = cfg->domain;
     n->on_event = cfg->on_event; n->user_data = cfg->user_data;
@@ -4300,24 +4326,19 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
         transport_cfg.user       = n;
     }
 #endif
-    p = base + node_bytes;
-    n->peers=(dart_node_peer*)p; memset(n->peers,0,(size_t)max_peers*sizeof(dart_node_peer));
-    p += table_bytes;
-    n->discovery_meta = p; n->discovery_meta_cap = dart__node_meta_capacity(cfg);
-    p += meta_bytes;
+    n->peers=(dart_node_peer*)blocks.peers; memset(n->peers,0,(size_t)max_peers*sizeof(dart_node_peer));
+    n->discovery_meta = blocks.meta; n->discovery_meta_cap = dart__node_meta_capacity(cfg);
 
-    n->transport = dart_init(p, transport_bytes, &transport_cfg);
+    n->transport = dart_init(blocks.transport, blocks.transport_bytes, &transport_cfg);
     if (!n->transport) goto fail_startup;
-    p += transport_bytes;
 #ifdef DART_SHM
-    {   size_t state_bytes = dart_shm_state_bytes();
-        uint32_t n_segments = (uint32_t)cfg->n_channels * DART_SHM_N_CLASSES;
+    {   uint32_t n_segments = (uint32_t)cfg->n_channels * DART_SHM_N_CLASSES;
         uint16_t reader_max = dart__node_shm_reader_max(max_peers, cfg->n_channels); uint32_t i;
         n->shm_n_channels = cfg->n_channels; n->shm_reader_max = reader_max;
-        n->shm_pool = (void**)p;     p += ((size_t)n_segments*sizeof(void*) + 15u)&~(size_t)15u;
-        n->shm_pool_mem = p;         p += ((size_t)n_segments*state_bytes + 15u)&~(size_t)15u;
-        n->shm_reader_segments = (uint64_t*)p;  p += ((size_t)reader_max*8u + 15u)&~(size_t)15u;
-        n->shm_reader_pool_mem = p;        p += ((size_t)reader_max*state_bytes + 15u)&~(size_t)15u;
+        n->shm_pool            = (void**)blocks.shm_pool;
+        n->shm_pool_mem        = blocks.shm_pool_mem;
+        n->shm_reader_segments = (uint64_t*)blocks.shm_reader_segments;
+        n->shm_reader_pool_mem = blocks.shm_reader_pool;
         for (i=0;i<n_segments;i++) n->shm_pool[i]=NULL;
         for (i=0;i<reader_max;i++) n->shm_reader_segments[i]=0;
     }
@@ -4390,9 +4411,8 @@ dart_node *dart_node_open(void *mem, size_t cap, const dart_node_config *cfg){
        match topics straight from discovery. The buffer lives in the node. */
     n->discovery_meta_len = dart__meta_build(n);
     discovery_rt_cfg.discovery.meta = n->discovery_meta; discovery_rt_cfg.discovery.meta_len = n->discovery_meta_len;
-    n->discovery = dart_discovery_rt_open(p, discovery_bytes, &discovery_rt_cfg);
+    n->discovery = dart_discovery_rt_open(blocks.discovery, blocks.discovery_bytes, &discovery_rt_cfg);
     if (!n->discovery) goto fail_mcast;
-    p += discovery_bytes;
 
     return n;
 
