@@ -75,7 +75,7 @@ typedef struct {
     const uint8_t *shm_buf;            /* external chunk payload (remote peers fragment from it) */
     uint8_t  desc[DART_SHM_DESC_BYTES];/* descriptor sent to SHM peers as one SHM-DATA */
 #endif
-} dart_writer_sample;
+} i_DartWriterSample;
 
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
@@ -88,7 +88,7 @@ typedef struct {        /* writer-side, per (channel,peer) */
     uint32_t nack_bits;
     uint64_t hb_next_us; /* heartbeat timer */
     uint32_t hb_count;
-} dart_writer_proxy;
+} i_DartWriterProxy;
 
 typedef struct {        /* reader-side, per (channel,peer) */
     uint8_t  used;
@@ -118,19 +118,19 @@ typedef struct {        /* reader-side, per (channel,peer) */
 #ifdef DART_SHM
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
 #endif
-} dart_reader_proxy;
+} i_DartReaderProxy;
 
 typedef struct {
-    dart_qos    qos;
+    DartQos    qos;
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
     const char *name;       /* our copy of the topic name */
     uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
-    uint8_t   role;         /* dart_role */
+    uint8_t   role;         /* DartRole */
     uint8_t   multicast;
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint16_t  n_subscribers;        /* live matched subscribers; multicast: >0 = group mode */
     /* writer */
-    dart_writer_sample *history;       /* [depth] ring */
+    i_DartWriterSample *history;       /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
     uint64_t  next_seqno;
     uint64_t  first_seqno;  /* lowest seqno still cached */
@@ -140,11 +140,11 @@ typedef struct {
     uint64_t  multicast_hb_next_us;
     uint32_t  multicast_hb_count;
     /* cumulative repair counters, summed over proxies; read via dart_repair_stats */
-    dart_repair_stats_t repair_stats;
-} dart_channel;
+    DartRepairStats repair_stats;
+} i_DartChannel;
 
-struct dart_state {
-    dart_config    cfg;       /* n_channels = user channels (no internal channel) */
+struct DartState {
+    DartConfig    cfg;       /* n_channels = user channels (no internal channel) */
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
     uint8_t     *peer_local;/* [max_peers] */
@@ -165,9 +165,9 @@ struct dart_state {
        alias instead of the topic name */
     uint16_t    *alias_to_channel;    /* [max_peers * alias_max]; 0xFFFF = unmapped */
     uint32_t     alias_max;        /* alias-table stride = effective meta_max_ids */
-    dart_channel  *channels;     /* [n_channels] */
-    dart_writer_proxy   *writer_proxies;     /* [n_channels*max_peers] */
-    dart_reader_proxy   *reader_proxies;     /* [n_channels*max_peers] */
+    i_DartChannel  *channels;     /* [n_channels] */
+    i_DartWriterProxy   *writer_proxies;     /* [n_channels*max_peers] */
+    i_DartReaderProxy   *reader_proxies;     /* [n_channels*max_peers] */
     /* active-lane scheduler: a lane is one (channel,peer) pair or a channel's group
        lane. The event that gives a lane work enqueues it, so poll_send pays for work
        done, not idle lanes. Timer work is found by an amortized clock-driven sweep. */
@@ -186,60 +186,60 @@ struct dart_state {
     uint32_t     reader_epoch_counter;      /* reader-epoch counter (starts at 1; 0 = none) */
 };
 
-typedef enum { DART_ORDER_OLD, DART_ORDER_GAP, DART_ORDER_ADOPTED, DART_ORDER_INORDER } dart_reader_order;
+typedef enum { DART_ORDER_OLD, DART_ORDER_GAP, DART_ORDER_ADOPTED, DART_ORDER_INORDER } i_DartReaderOrder;
 
 /* small shared helpers (kept inline so every fragment can use them) */
 static inline void dart_bset(uint8_t*bitmap,uint32_t i){bitmap[i>>3]|=(uint8_t)(1u<<(i&7));}
 static inline int  dart_bget(const uint8_t*bitmap,uint32_t i){return (bitmap[i>>3]>>(i&7))&1;}
 #ifdef DART_SHM
 /* where a sample's bytes live: the external chunk for SHM samples, else our buf */
-static inline const uint8_t *dart__sbuf(const dart_writer_sample *s){ return s->shm ? s->shm_buf : s->buf; }
+static inline const uint8_t *dart__sbuf(const i_DartWriterSample *s){ return s->shm ? s->shm_buf : s->buf; }
 #else
-static inline const uint8_t *dart__sbuf(const dart_writer_sample *s){ return s->buf; }
+static inline const uint8_t *dart__sbuf(const i_DartWriterSample *s){ return s->buf; }
 #endif
 /* a deferred timer was (re)armed for absolute time t: keep next_deadline as the
    minimum so the poll wakes when it is due. t==0 is an immediate ack (woken via the
    active-lane queue, not a timer), so it is ignored here. */
-static inline void dart__deadline(dart_state *st, uint64_t t){
+static inline void dart__deadline(DartState *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
 }
 
 /* writer/reader proxy for a (channel,peer) lane. The proxies are
    [n_channels][max_peers] row-major; centralizing the index math here keeps a
    transposed channel/peer from silently corrupting a neighbor lane. */
-static inline dart_writer_proxy *dart__writer_proxy_at(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+static inline i_DartWriterProxy *dart__writer_proxy_at(DartState *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
 }
-static inline dart_reader_proxy *dart__reader_proxy_at(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+static inline i_DartReaderProxy *dart__reader_proxy_at(DartState *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
 }
 /* wire alias for a local channel: its own index (the advertiser's handle). The
  * peer mapped this alias to its matching channel from our interest list. */
-static inline uint16_t dart__alias_of(dart_state *st, int channel_idx){
+static inline uint16_t dart__alias_of(DartState *st, int channel_idx){
     (void)st; return (uint16_t)channel_idx;
 }
 
 /* cross-file helper prototypes (definitions in wire/sched/writer/reader.c + transport.c) */
-size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_writer_sample *s, uint16_t frag, const uint8_t *payload, uint16_t payload_len);
+size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWriterSample *s, uint16_t frag, const uint8_t *payload, uint16_t payload_len);
 #ifdef DART_SHM
 size_t dart_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count, const uint8_t *desc);
 #endif
 size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt);
 size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
-void   dart__lane_wake(dart_state *st, uint16_t channel_idx, uint32_t peer_slot);
-size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, size_t cap, uint64_t now);
-int    dart__group_all_acked(dart_state *st, int channel_idx);
-void   dart_writer_nack(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p);
-void   dart_reader_data(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+void   dart__lane_wake(DartState *st, uint16_t channel_idx, uint32_t peer_slot);
+size_t dart_writer_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+size_t dart_group_emit(DartState *st, int channel_idx, uint8_t *out, size_t cap, uint64_t now);
+int    dart__group_all_acked(DartState *st, int channel_idx);
+void   dart_writer_nack(DartState *st, int channel_idx, int peer_slot, const uint8_t *p);
+void   dart_reader_data(DartState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef DART_SHM
-void   dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+void   dart_reader_shm(DartState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
 #endif
-void   dart_reader_hb(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
-size_t dart_reader_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-dart_channel *dart_chan(dart_state *st, uint16_t channel, int *idx_out);
-int    dart_peer_slot(dart_state *st, uint32_t id);
-void   dart__event(dart_state *st, dart_event_kind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
-uint64_t dart_unicast_join_seqno(const dart_channel *ch);
+void   dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+size_t dart_reader_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+i_DartChannel *dart_chan(DartState *st, uint16_t channel, int *idx_out);
+int    dart_peer_slot(DartState *st, uint32_t id);
+void   dart__event(DartState *st, DartEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
+uint64_t dart_unicast_join_seqno(const i_DartChannel *ch);
 
 #endif /* DART_TRANSPORT_INTERNAL_H */

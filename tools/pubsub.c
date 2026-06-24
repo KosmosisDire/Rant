@@ -59,7 +59,7 @@ static long now_ms(void){
 #endif
 }
 
-static dart_node  *g_node;
+static DartNode  *g_node;
 static lock_t      g_lock;
 static volatile int g_pumping = 1;
 static FILE        *g_outfile = NULL; /* sub --file: received messages saved here */
@@ -111,7 +111,7 @@ static int parse_ipv4(const char *s, uint8_t out[4]){
  * then-flat (with idle ~= polls) => the reader stopped asking [self-quench]; resent
  * steady while the reader receives nothing => resends are being dropped. To stderr so
  * it never interleaves with the stdout rate lines. */
-static void pump_probe(void *u, const dart_pump_sample *s){
+static void pump_probe(void *u, const DartPumpSample *s){
     double secs = s->interval_us/1e6;
     (void)u;
     fprintf(stderr, "[pub]   in-pump @%.2fs: resent %.0f/s  nacks %.0f/s  idle %u/%u polls\n",
@@ -152,7 +152,7 @@ static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, si
 /* Everything that isn't message delivery, as one callback: peer up/down for
  * discovery visibility, plus the diagnostics (a too-big message skipped, or a
  * topic-name hash collision refused). */
-static void on_event(void *u, const dart_event *ev){
+static void on_event(void *u, const DartEvent *ev){
     (void)u;
     switch (ev->kind){
     case DART_PEER_UP:
@@ -214,7 +214,7 @@ static void *pubsub_realloc(void *u, void *ptr, size_t size){
  * timeout with none. (A late joiner that appears after the window still misses a
  * one-shot send: the publisher can't know how many to expect; use --subscribers
  * if you need a specific count, or a long-lived publisher for late joiners.) */
-static int wait_for_sub(dart_node *n, uint16_t channel, int timeout_ms){
+static int wait_for_sub(DartNode *n, uint16_t channel, int timeout_ms){
     int t, count = 0, stable = 0, printed_wait = 0;
     /* Short window: just longer than the startup-solicit reply jitter (~20ms),
        so a burst of already-up subscribers is captured, but a lone subscriber --
@@ -264,7 +264,7 @@ static char *read_all(FILE *file, size_t cap, size_t *out_len, int *too_big){
  * + reassembles it). Refuses input larger than cap rather than splitting.
  * Settles first so a freshly discovered subscriber is matched, then drains
  * delivery before returning. */
-static int publish_stream(dart_node *n, uint16_t channel, FILE *file, int wait_ms, size_t cap){
+static int publish_stream(DartNode *n, uint16_t channel, FILE *file, int wait_ms, size_t cap){
     size_t len = 0; int too_big, t;
     char *buf;
     if (!wait_for_sub(n, channel, wait_ms)){
@@ -310,13 +310,13 @@ static int publish_stream(dart_node *n, uint16_t channel, FILE *file, int wait_m
  * is bandwidth there is nothing to "catch up" anyway: the wire is already full and a
  * long block resyncs, so extra sends would only be backpressured or evicted.
  * Never returns. */
-static void publish_rate(dart_node *n, uint16_t channel, const void *data, size_t len,
+static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t len,
                          double hz, int wait_ms){
     uint64_t period_us = (uint64_t)(1000000.0/hz + 0.5);
     uint64_t next, now, last_print;
     unsigned long sent = 0, last_sent = 0;
     uint64_t backpressure_us = 0; uint32_t backpressure_waits = 0, last_backpressure_waits = 0;   /* backpressure engagement */
-    dart_repair_stats_t repair_stats, prev_repair_stats;                     /* reliable-repair throughput (writer side) */
+    DartRepairStats repair_stats, prev_repair_stats;                     /* reliable-repair throughput (writer side) */
     memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
     if (period_us == 0) period_us = 1;                 /* clamp absurd rates to ~1 MHz */
     /* Lag below this is jitter (the status print, a scheduler preempt): we leave the
@@ -439,7 +439,7 @@ int main(int argc, char **argv){
        shallow keep_last because messages can be megabytes, fast 5ms repair, and a long
        flow-control window so a multi-chunk file drains before KEEP_LAST evicts un-acked
        history. A dead reader still releases at the peer timeout. */
-    dart_qos qos = {
+    DartQos qos = {
         .reliability         = reliable ? DART_RELIABLE : DART_BEST_EFFORT,
         .keep_last           = 4,
         .catch_up            = 2,
@@ -448,7 +448,7 @@ int main(int argc, char **argv){
         .repair_delay_us     = 2000,
         .backpressure_wait_us= 5000000,
     };
-    static dart_channel_def chans[MAX_TOPICS];
+    static DartChannelDef chans[MAX_TOPICS];
     for (i = 0; i < g_n_topics; i++){
         chans[i].name      = g_topics[i];
         chans[i].qos       = qos;
@@ -459,7 +459,7 @@ int main(int argc, char **argv){
     /* announce/timeout left at defaults (1s / 3.5s): the startup solicit makes
        discovery near-instant, so the periodic announce is just the slow backstop.
        data_port defaults to 0 = an OS-assigned ephemeral port. */
-    dart_node_config cfg = {
+    DartNodeConfig cfg = {
         .domain     = domain,
         .channels   = chans,
         .n_channels = (uint16_t)g_n_topics,
@@ -481,7 +481,7 @@ int main(int argc, char **argv){
     if (if_ip)      cfg.net.multicast_interface = if_ip;          /* multihomed: pin it */
     else if (mcast) cfg.net.multicast_interface = "127.0.0.1";    /* same-host: stay local */
 
-    dart_discovery_addr seed;
+    DartDiscoveryAddr seed;
     if (peer_ip){
         memset(&seed, 0, sizeof seed);
         if (parse_ipv4(peer_ip, seed.ip) < 0){ fprintf(stderr, "bad --peer ip %s\n", peer_ip); return 2; }
@@ -495,7 +495,7 @@ int main(int argc, char **argv){
     size_t need = dart_node_required_memory(&cfg);
     uint8_t *mem = (uint8_t*)malloc(need);
     if (!mem){ fprintf(stderr, "out of memory (need %lu bytes)\n", (unsigned long)need); return 1; }
-    dart_node *n = dart_node_open(mem, need, &cfg);
+    DartNode *n = dart_node_open(mem, need, &cfg);
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); free(mem); return 1; }
 
     if (is_sub){
@@ -518,7 +518,7 @@ int main(int argc, char **argv){
                over the real elapsed interval; stay quiet until the first message
                so an idle wait isn't a stream of 0/s lines. */
             uint64_t last = dart_plat_now_us(), repair_last = last; int seen = 0;
-            dart_repair_stats_t repair_stats, prev_repair_stats; memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
+            DartRepairStats repair_stats, prev_repair_stats; memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
             for (;;){
                 uint64_t now, rate_elapsed, repair_elapsed;
                 dart_node_poll(n, 2);

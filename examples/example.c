@@ -29,11 +29,11 @@ static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, si
 
 int main(int argc, char *argv[]){
     const char *ch_name = argc > 1 ? argv[1] : "msg";
-    dart_channel_def ch  = { .name = ch_name, .qos = { .reliability = DART_RELIABLE } };
-    dart_node_config cfg = { .channels = &ch, .n_channels = 1, .on_message = on_message };
+    DartChannelDef ch  = { .name = ch_name, .qos = { .reliability = DART_RELIABLE } };
+    DartNodeConfig cfg = { .channels = &ch, .n_channels = 1, .on_message = on_message };
     static uint8_t mem[1 << 20];
 
-    dart_node *n = dart_node_open(mem, sizeof mem, &cfg);
+    DartNode *n = dart_node_open(mem, sizeof mem, &cfg);
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     printf("type a message and press enter (ctrl-d / ctrl-z to quit):\n");

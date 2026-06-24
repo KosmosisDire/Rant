@@ -59,7 +59,7 @@ static unsigned long g_samples, g_collisions;
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
     (void)u;(void)ch;(void)from;(void)d;(void)n; g_samples++;
 }
-static void on_event(void *u, const dart_event *ev){
+static void on_event(void *u, const DartEvent *ev){
     (void)u;
     if (ev->kind != DART_NAME_COLLISION) return;
     g_collisions++;
@@ -89,16 +89,16 @@ int main(void){
     printf("Standing up a publisher on A and a subscriber on B...\n");
     {
         static uint8_t mem_w[1<<20], mem_r[1<<20];
-        dart_channel_def cw, cr; dart_node_config wc, rc; dart_node *w, *r;
+        DartChannelDef cw, cr; DartNodeConfig wc, rc; DartNode *w, *r;
         uint8_t payload[16]; uint64_t end;
         memset(payload, 0x5A, sizeof payload);
 
-        cw = (dart_channel_def){ .name=a, .role=DART_PUB_ONLY,
+        cw = (DartChannelDef){ .name=a, .role=DART_PUB_ONLY,
             .qos={ .reliability=DART_RELIABLE, .keep_last=1, .catch_up=1,
                    .max_message_bytes=32, .heartbeat_us=50000 } };
         cr = cw; cr.name=b; cr.role=DART_SUB_ONLY;
 
-        wc = (dart_node_config){ .domain=41, .channels=&cw, .n_channels=1,
+        wc = (DartNodeConfig){ .domain=41, .channels=&cw, .n_channels=1,
                                  .discovery={ .max_peers=4 } };
         rc = wc; rc.channels=&cr;
         rc.on_message=on_message; rc.on_event=on_event;

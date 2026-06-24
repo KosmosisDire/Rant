@@ -33,7 +33,7 @@
   #ifndef SIO_UDP_CONNRESET
   #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
   #endif
-  typedef int dart__socklen;
+  typedef int i_DartSocklen;
   #define DART__FD(s) ((SOCKET)(s))
 #else
   #include <sys/socket.h>
@@ -51,7 +51,7 @@
   #elif defined(__linux__)
     #include <sys/random.h>     /* getrandom(2) */
   #endif
-  typedef socklen_t dart__socklen;
+  typedef socklen_t i_DartSocklen;
   #define DART__FD(s) ((int)(s))
 #endif
 
@@ -149,17 +149,17 @@ uint64_t dart_plat_pid(void){
 }
 
 /* --------------------------------------------------------------- UDP sockets */
-dart_sock dart_plat_udp_open(void){
+i_DartSock dart_plat_udp_open(void){
 #ifdef _WIN32
     SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
-    return (fd == INVALID_SOCKET) ? DART_SOCK_BAD : (dart_sock)fd;
+    return (fd == INVALID_SOCKET) ? DART_SOCK_BAD : (i_DartSock)fd;
 #else
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    return (fd < 0) ? DART_SOCK_BAD : (dart_sock)fd;
+    return (fd < 0) ? DART_SOCK_BAD : (i_DartSock)fd;
 #endif
 }
 
-void dart_plat_close(dart_sock s){
+void dart_plat_close(i_DartSock s){
     if (s == DART_SOCK_BAD) return;
 #ifdef _WIN32
     closesocket((SOCKET)s);
@@ -168,7 +168,7 @@ void dart_plat_close(dart_sock s){
 #endif
 }
 
-int dart_plat_bind(dart_sock s, uint32_t if_naddr, uint16_t port, int reuse){
+int dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse){
     struct sockaddr_in a;
     if (reuse){
         int on = 1;
@@ -184,14 +184,14 @@ int dart_plat_bind(dart_sock s, uint32_t if_naddr, uint16_t port, int reuse){
     return bind(DART__FD(s), (struct sockaddr*)&a, sizeof a) == 0;
 }
 
-uint16_t dart_plat_local_port(dart_sock s){
-    struct sockaddr_in a; dart__socklen ll = sizeof a;
+uint16_t dart_plat_local_port(i_DartSock s){
+    struct sockaddr_in a; i_DartSocklen ll = sizeof a;
     memset(&a, 0, sizeof a);
     if (getsockname(DART__FD(s), (struct sockaddr*)&a, &ll) != 0) return 0;
     return ntohs(a.sin_port);
 }
 
-void dart_plat_set_nonblock(dart_sock s){
+void dart_plat_set_nonblock(i_DartSock s){
 #ifdef _WIN32
     u_long nb = 1; ioctlsocket((SOCKET)s, FIONBIO, &nb);
 #else
@@ -200,14 +200,14 @@ void dart_plat_set_nonblock(dart_sock s){
 #endif
 }
 
-void dart_plat_set_rcvbuf(dart_sock s, int bytes){
+void dart_plat_set_rcvbuf(i_DartSock s, int bytes){
     setsockopt(DART__FD(s), SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof bytes);
 }
-void dart_plat_set_sndbuf(dart_sock s, int bytes){
+void dart_plat_set_sndbuf(i_DartSock s, int bytes){
     setsockopt(DART__FD(s), SOL_SOCKET, SO_SNDBUF, (const char*)&bytes, sizeof bytes);
 }
 
-void dart_plat_suppress_connreset(dart_sock s){
+void dart_plat_suppress_connreset(i_DartSock s){
 #ifdef _WIN32
     BOOL off = FALSE; DWORD bv = 0;
     WSAIoctl((SOCKET)s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bv, NULL, NULL);
@@ -217,18 +217,18 @@ void dart_plat_suppress_connreset(dart_sock s){
 }
 
 /* ----------------------------------------------------------------- multicast */
-void dart_plat_mcast_setif(dart_sock s, uint32_t if_naddr){
+void dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr){
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_IF, (const char*)&if_naddr, sizeof if_naddr);
 }
-void dart_plat_mcast_ttl(dart_sock s, uint8_t ttl){
+void dart_plat_mcast_ttl(i_DartSock s, uint8_t ttl){
     unsigned char t = ttl;
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&t, sizeof t);
 }
-void dart_plat_mcast_loop(dart_sock s, int on){
+void dart_plat_mcast_loop(i_DartSock s, int on){
     unsigned char l = (unsigned char)(on ? 1 : 0);
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
 }
-int dart_plat_mcast_join(dart_sock s, uint32_t group_naddr, uint32_t if_naddr){
+int dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
     mr.imr_multiaddr.s_addr = group_naddr;
     mr.imr_interface.s_addr = if_naddr;
@@ -237,7 +237,7 @@ int dart_plat_mcast_join(dart_sock s, uint32_t group_naddr, uint32_t if_naddr){
 }
 
 /* --------------------------------------------------------------- datagram IO */
-int dart_plat_send(dart_sock s, const void *buf, size_t len,
+int dart_plat_send(i_DartSock s, const void *buf, size_t len,
                    const uint8_t ip[4], uint16_t port){
     struct sockaddr_in d;
     memset(&d, 0, sizeof d);
@@ -248,9 +248,9 @@ int dart_plat_send(dart_sock s, const void *buf, size_t len,
                        (struct sockaddr*)&d, sizeof d);
 }
 
-int dart_plat_recv(dart_sock s, void *buf, size_t cap,
+int dart_plat_recv(i_DartSock s, void *buf, size_t cap,
                    uint8_t src_ip[4], uint16_t *src_port){
-    struct sockaddr_in src; dart__socklen sl = sizeof src;
+    struct sockaddr_in src; i_DartSocklen sl = sizeof src;
     int n;
     memset(&src, 0, sizeof src);
     n = (int)recvfrom(DART__FD(s), (char*)buf, (int)cap, 0,
@@ -270,7 +270,7 @@ int dart_plat_would_block(void){
 #endif
 }
 
-int dart_plat_poll(dart_pollfd *fds, int n, int timeout_ms){
+int dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
     /* callers poll one or two sockets; cap the on-stack translation buffer */
 #ifdef _WIN32
     WSAPOLLFD p[8];
@@ -311,14 +311,14 @@ void dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
 }
 
 uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
-    dart_sock s = dart_plat_udp_open();
+    i_DartSock s = dart_plat_udp_open();
     struct sockaddr_in a;
     uint32_t ip = 0;                         /* INADDR_ANY on failure */
     if (s == DART_SOCK_BAD) return ip;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_addr.s_addr = dst_naddr; a.sin_port = htons(port);
     if (connect(DART__FD(s), (struct sockaddr*)&a, sizeof a) == 0){
-        struct sockaddr_in loc; dart__socklen ll = sizeof loc;
+        struct sockaddr_in loc; i_DartSocklen ll = sizeof loc;
         if (getsockname(DART__FD(s), (struct sockaddr*)&loc, &ll) == 0)
             ip = loc.sin_addr.s_addr;
     }

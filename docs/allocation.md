@@ -20,9 +20,9 @@ for the life of the node.
 |--------|-------|---------|
 | peer ids, used, local, dormant, frag, shm | max_peers | 1 to 4 bytes |
 | interest bitmaps (pub, sub) | max_peers x ceil(n_channels/8) | 1 byte |
-| channels | n_channels | dart_channel |
-| writer proxies | n_channels x max_peers | dart_wproxy |
-| reader proxies | n_channels x max_peers | dart_rproxy |
+| channels | n_channels | i_DartChannel |
+| writer proxies | n_channels x max_peers | i_DartWriterProxy |
+| reader proxies | n_channels x max_peers | i_DartReaderProxy |
 | lane scheduler | n_channels x (max_peers+1), and max_peers+n_channels | 1 to 4 bytes |
 | alias table | max_peers x DART_META_MAX_IDS | 2 bytes |
 | name pool | sum of topic name lengths | 1 byte |

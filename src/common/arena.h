@@ -11,12 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } dart_bump;
+typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } i_DartBump;
 
 /* round n up to the next multiple of align (a power of two): names the (x+15)&~15 idiom */
 static inline size_t dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
 
-static inline void *dart_take(dart_bump *b, size_t n, size_t align){
+static inline void *dart_take(i_DartBump *b, size_t n, size_t align){
     size_t a = dart_align_up(b->offset, align);
     b->offset = a + n;
     if (b->base){

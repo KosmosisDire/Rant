@@ -95,7 +95,7 @@ uint32_t dart_shm_class_for(uint32_t len);      /* smallest class fitting len; N
 
 /* Derive the OS object name for a segment id into buf[DART_SHM_NAME_MAX]:
  * "/dart.shm.<16 hex>", valid on POSIX (leading /) and Windows. The node fills
- * dart_shm_config.name with this for create/attach. */
+ * i_DartShmConfig.name with this for create/attach. */
 void dart_shm_seg_name(char *buf, uint64_t segment_id);
 
 /* ----------------------------------------------------------------- descriptor
@@ -108,15 +108,15 @@ typedef struct {
     uint32_t chunk;        /* chunk index in [0, n_chunks) */
     uint32_t length;       /* payload bytes */
     uint64_t generation;   /* chunk reuse counter at publish; reader rechecks after reading */
-} dart_shm_desc;
+} i_DartShmDesc;
 
 #define DART_SHM_DESC_WIRE 24u   /* little-endian; rides the SHM-DATA submessage body */
-size_t dart_shm_desc_encode(const dart_shm_desc *d, uint8_t out[DART_SHM_DESC_WIRE]);
-int    dart_shm_desc_decode(dart_shm_desc *d, const uint8_t *in, size_t len);  /* 1 ok, 0 malformed */
+size_t dart_shm_desc_encode(const i_DartShmDesc *d, uint8_t out[DART_SHM_DESC_WIRE]);
+int    dart_shm_desc_decode(i_DartShmDesc *d, const uint8_t *in, size_t len);  /* 1 ok, 0 malformed */
 
 /* ------------------------------------------------------------- segment layout
- *   [ dart_shm_seg_hdr ][ chunk 0 ] ... [ chunk N-1 ]
- *   chunk = [ dart_shm_chunk_hdr (padded to 16) ][ chunk_bytes payload ]
+ *   [ i_DartShmSegHdr ][ chunk 0 ] ... [ chunk N-1 ]
+ *   chunk = [ i_DartShmChunkHdr (padded to 16) ][ chunk_bytes payload ]
  * generation is the only cross-process mutable field: written (atomic release) by
  * the writer before the descriptor is sent, read (atomic acquire) by the reader
  * after reading the payload. No refcount -- reliability owns the lifecycle. */
@@ -128,13 +128,13 @@ typedef struct {
     uint32_t n_chunks;
     uint64_t owner_pid;     /* writer pid: external janitor can reclaim an orphan */
     uint8_t  owner_host[16];/* writer host uuid: reader confirms same kernel */
-} dart_shm_seg_hdr;
+} i_DartShmSegHdr;
 
 typedef struct {
     uint64_t generation;    /* bumped each reuse; matched against the descriptor */
     uint32_t length;
     uint32_t _pad;
-} dart_shm_chunk_hdr;
+} i_DartShmChunkHdr;
 
 #define DART_SHM_MAGIC    0x4D484453u   /* 'DSHM' */
 #define DART_SHM_VERSION  1u
@@ -143,7 +143,7 @@ typedef struct {
  * Opaque per-process handle over one mapped segment, placed in caller memory
  * (the node arena; size via dart_shm_state_bytes). A node CREATEs one segment for
  * its own publishes and ATTACHes one per same-host peer it subscribes to. */
-typedef struct dart_shm_pool dart_shm_pool;
+typedef struct i_DartShmPool i_DartShmPool;
 size_t dart_shm_state_bytes(void);
 
 typedef struct {
@@ -151,16 +151,16 @@ typedef struct {
     uint64_t segment_id;
     uint32_t chunk_bytes;              /* create only (0 => DART_SHM_CHUNK_BYTES); attach reads it from the header */
     uint32_t n_chunks;                 /* create only (0 => DART_SHM_CHUNKS); attach reads it from the header */
-} dart_shm_config;
+} i_DartShmConfig;
 
 /* Writer. create maps a fresh segment (dart_plat_shm_create); NULL => stay on UDP. */
-dart_shm_pool *dart_shm_create(void *pool_mem, const dart_shm_config *cfg);
+i_DartShmPool *dart_shm_create(void *pool_mem, const i_DartShmConfig *cfg);
 /* The chunk backing a history slot: loan returns a writable pointer (app fills it),
  * stamp bumps generation + sets length and fills *out for the transport to frame in
  * the SHM-DATA submessage. The node owns chunk<->slot assignment (1 chunk per
  * keep_last slot), so there is no free list here. */
-void *dart_shm_chunk(dart_shm_pool *p, uint32_t chunk, uint32_t *out_cap);
-void  dart_shm_stamp(dart_shm_pool *p, uint32_t chunk, uint32_t len, dart_shm_desc *out);
+void *dart_shm_chunk(i_DartShmPool *p, uint32_t chunk, uint32_t *out_cap);
+void  dart_shm_stamp(i_DartShmPool *p, uint32_t chunk, uint32_t len, i_DartShmDesc *out);
 
 /* Reader. attach maps an existing segment WHOLE by name and reads its geometry
  * (chunk_bytes/n_chunks) from the header the writer stamped, so the reader needs to
@@ -169,14 +169,14 @@ void  dart_shm_stamp(dart_shm_pool *p, uint32_t chunk, uint32_t len, dart_shm_de
  * descriptor to an in-segment pointer and verifies generation still matches (else
  * recycled -> NULL, reliable repair covers it). No release call: the reader's
  * transport ACK of the range is the release. */
-dart_shm_pool *dart_shm_attach(void *pool_mem, const dart_shm_config *cfg);
-const void    *dart_shm_read  (dart_shm_pool *p, const dart_shm_desc *d, uint32_t *out_len);
+i_DartShmPool *dart_shm_attach(void *pool_mem, const i_DartShmConfig *cfg);
+const void    *dart_shm_read  (i_DartShmPool *p, const i_DartShmDesc *d, uint32_t *out_len);
 /* re-check the chunk generation AFTER a one-copy read (seqlock tail): 1 if it still
  * matches d (the copy is clean), 0 if a best-effort writer recycled it mid-copy (the
  * copy may be torn -> discard). Lock-free: the writer never blocks. */
-int            dart_shm_verify(dart_shm_pool *p, const dart_shm_desc *d);
+int            dart_shm_verify(i_DartShmPool *p, const i_DartShmDesc *d);
 
-void dart_shm_detach(dart_shm_pool *p);  /* unmap; the writer also unlinks the OS object */
+void dart_shm_detach(i_DartShmPool *p);  /* unmap; the writer also unlinks the OS object */
 
 /* Same-host id: SHM is valid only between processes sharing one kernel AND able to
  * map the object (loopback addr alone is not sufficient -- containers/namespaces).

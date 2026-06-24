@@ -30,12 +30,12 @@ extern "C" {
 #endif
 
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
-typedef intptr_t dart_sock;
-#define DART_SOCK_BAD ((dart_sock)-1)
+typedef intptr_t i_DartSock;
+#define DART_SOCK_BAD ((i_DartSock)-1)
 
 /* Poll-set entry; mirrors struct pollfd but platform-neutral. */
 #define DART_POLLIN 0x01
-typedef struct { dart_sock fd; short events; short revents; } dart_pollfd;
+typedef struct { i_DartSock fd; short events; short revents; } i_DartPollfd;
 
 /* Process-wide net init/teardown (WSAStartup/WSACleanup; no-op elsewhere).
  * Refcounted, so a node and its discovery opening/closing in turn pair safely.
@@ -53,36 +53,36 @@ size_t   dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written *
 uint64_t dart_plat_pid(void);
 
 /* --- UDP sockets --- */
-dart_sock dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
-void      dart_plat_close(dart_sock s);
+i_DartSock dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
+void      dart_plat_close(i_DartSock s);
 /* Bind to if_naddr (0 = INADDR_ANY) : port (0 = OS ephemeral). reuse sets
  * SO_REUSEADDR (+ SO_REUSEPORT where it exists) before binding. 1 ok, 0 fail. */
-int       dart_plat_bind(dart_sock s, uint32_t if_naddr, uint16_t port, int reuse);
+int       dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse);
 /* Bound port in host order (read an ephemeral bind back); 0 on failure. */
-uint16_t  dart_plat_local_port(dart_sock s);
-void      dart_plat_set_nonblock(dart_sock s);
-void      dart_plat_set_rcvbuf(dart_sock s, int bytes);
-void      dart_plat_set_sndbuf(dart_sock s, int bytes);
+uint16_t  dart_plat_local_port(i_DartSock s);
+void      dart_plat_set_nonblock(i_DartSock s);
+void      dart_plat_set_rcvbuf(i_DartSock s, int bytes);
+void      dart_plat_set_sndbuf(i_DartSock s, int bytes);
 /* Stop a bounced datagram (ICMP port-unreachable) from failing the next recv on
  * a shared RX socket (Windows SIO_UDP_CONNRESET; no-op elsewhere). */
-void      dart_plat_suppress_connreset(dart_sock s);
+void      dart_plat_suppress_connreset(i_DartSock s);
 
 /* --- multicast --- */
-void dart_plat_mcast_setif(dart_sock s, uint32_t if_naddr);
-void dart_plat_mcast_ttl  (dart_sock s, uint8_t ttl);
-void dart_plat_mcast_loop (dart_sock s, int on);
-int  dart_plat_mcast_join (dart_sock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
+void dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr);
+void dart_plat_mcast_ttl  (i_DartSock s, uint8_t ttl);
+void dart_plat_mcast_loop (i_DartSock s, int on);
+int  dart_plat_mcast_join (i_DartSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
 
 /* --- datagram IO --- */
 /* sendto: returns bytes sent, <0 on error (test dart_plat_would_block). */
-int  dart_plat_send(dart_sock s, const void *buf, size_t len,
+int  dart_plat_send(i_DartSock s, const void *buf, size_t len,
                     const uint8_t ip[4], uint16_t port);
 /* recvfrom: returns bytes (>0), 0 or <0 if none. src_ip/src_port out, may be NULL. */
-int  dart_plat_recv(dart_sock s, void *buf, size_t cap,
+int  dart_plat_recv(i_DartSock s, void *buf, size_t cap,
                     uint8_t src_ip[4], uint16_t *src_port);
 int  dart_plat_would_block(void);
 /* poll up to n fds for timeout_ms; >0 ready, 0 timeout, <0 error. */
-int  dart_plat_poll(dart_pollfd *fds, int n, int timeout_ms);
+int  dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms);
 
 /* --- address helpers (uint32_t naddr is network byte order) --- */
 uint32_t dart_plat_parse_ip(const char *dotted);          /* "1.2.3.4" -> naddr */

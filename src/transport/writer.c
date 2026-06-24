@@ -3,11 +3,11 @@
 
 
 /* find cached sample containing seqno (newest-first, so pushing new data is O(1)) */
-static dart_writer_sample *dart_find_sample(dart_channel *ch, uint64_t seqno){
+static i_DartWriterSample *dart_find_sample(i_DartChannel *ch, uint64_t seqno){
     uint16_t depth = ch->qos.keep_last, k;
     uint16_t i = ch->history_head;
     for (k=0;k<depth;k++){
-        dart_writer_sample *s;
+        i_DartWriterSample *s;
         i = (uint16_t)(i ? i-1 : depth-1);
         s = &ch->history[i];
         if (!s->valid) break;                  /* reached the unwritten tail */
@@ -19,11 +19,11 @@ static dart_writer_sample *dart_find_sample(dart_channel *ch, uint64_t seqno){
 
 
 /* append the filled head slot to history and wake the lanes that carry it */
-static void dart__commit(dart_state *st, uint16_t channel_idx, size_t len){
-    dart_channel *ch = &st->channels[channel_idx];
+static void dart__commit(DartState *st, uint16_t channel_idx, size_t len){
+    i_DartChannel *ch = &st->channels[channel_idx];
     uint16_t depth = ch->qos.keep_last;
     uint16_t count = (uint16_t)((len + st->frag - 1) / st->frag);
-    dart_writer_sample *slot = &ch->history[ch->history_head];
+    i_DartWriterSample *slot = &ch->history[ch->history_head];
     if (count==0) count=1;
     slot->valid=1; slot->base=ch->next_seqno; slot->count=count; slot->len=(uint32_t)len;
     ch->history_head = (uint16_t)((ch->history_head+1) % depth);
@@ -42,13 +42,13 @@ static void dart__commit(dart_state *st, uint16_t channel_idx, size_t len){
 }
 
 
-int dart_send(dart_state *st, uint16_t channel, const void *data, size_t len, uint64_t now){
-    int channel_idx; dart_channel *ch;
+int dart_send(DartState *st, uint16_t channel, const void *data, size_t len, uint64_t now){
+    int channel_idx; i_DartChannel *ch;
     (void)now;
     ch = dart_chan(st, channel, &channel_idx);                /* rejects the internal meta channel */
     if (!ch) return DART_ERR_NO_CHANNEL;
     if (ch->dynamic){
-        dart_writer_sample *slot = &ch->history[ch->history_head];
+        i_DartWriterSample *slot = &ch->history[ch->history_head];
         size_t need = len ? len : 1u;
         if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
         if ((size_t)slot->cap < need){                    /* grow the slot to fit */
@@ -71,9 +71,9 @@ int dart_send(dart_state *st, uint16_t channel, const void *data, size_t len, ui
 /* publish a sample whose bytes live in an external (shared-memory) chunk: store the
  * chunk pointer + descriptor on the history slot without copying. Remote peers
  * fragment from the chunk; SHM peers get the one-submessage descriptor. */
-int dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t len,
+int dart_send_shm(DartState *st, uint16_t channel, const void *chunk, size_t len,
                   const uint8_t *desc, uint64_t now){
-    int channel_idx; dart_channel *ch; dart_writer_sample *slot;
+    int channel_idx; i_DartChannel *ch; i_DartWriterSample *slot;
     (void)now;
     ch = dart_chan(st, channel, &channel_idx);
     if (!ch) return DART_ERR_NO_CHANNEL;
@@ -89,36 +89,36 @@ int dart_send_shm(dart_state *st, uint16_t channel, const void *chunk, size_t le
 #endif
 
 
-int dart_send_would_evict(dart_state *st, uint16_t channel){
-    int channel_idx; dart_channel *ch = dart_chan(st, channel, &channel_idx);
-    dart_writer_sample *slot; uint32_t max_peers; uint16_t p;
+int dart_send_would_evict(DartState *st, uint16_t channel){
+    int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
+    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 0;
     slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
-        dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p);
+        i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
 }
 
 
-int dart_send_drained(dart_state *st, uint16_t channel){
-    int channel_idx; dart_channel *ch = dart_chan(st, channel, &channel_idx);
+int dart_send_drained(DartState *st, uint16_t channel){
+    int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     uint32_t max_peers; uint16_t p;
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
-        dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p);
+        i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
     }
     return 1;
 }
 
 
-int dart_writer_match_count(dart_state *st, uint16_t channel){
-    int channel_idx; dart_channel *ch = dart_chan(st, channel, &channel_idx);
+int dart_writer_match_count(DartState *st, uint16_t channel){
+    int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     uint32_t max_peers, p; int cnt = 0;
     if (!ch) return 0;
     max_peers = st->cfg.max_peers;
@@ -127,12 +127,12 @@ int dart_writer_match_count(dart_state *st, uint16_t channel){
 }
 
 
-int dart_repair_pending(dart_state *st, uint16_t channel){
-    int channel_idx; dart_channel *ch = dart_chan(st, channel, &channel_idx);
+int dart_repair_pending(DartState *st, uint16_t channel){
+    int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     uint32_t max_peers, p; int cnt = 0;
     if (!ch) return 0;
     max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++){ dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
+    for (p=0;p<max_peers;p++){ i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
     return cnt;   /* writer lanes with a NACK to service; 0 = nothing to resend right now */
 }
 
@@ -141,8 +141,8 @@ int dart_repair_pending(dart_state *st, uint16_t channel){
 /* 1 if the channel is non-multicast, has >=1 matched reader, and EVERY matched
  * (non-dormant) reader is SHM-capable -> the node may publish this message via SHM.
  * One non-SHM (remote) reader forces inline UDP for the whole message. */
-int dart_writer_shm_eligible(dart_state *st, uint16_t channel){
-    int channel_idx; dart_channel *ch = dart_chan(st, channel, &channel_idx);
+int dart_writer_shm_eligible(DartState *st, uint16_t channel){
+    int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     uint32_t max_peers, p; int any=0;
     if (!ch || ch->multicast) return 0;
     max_peers = st->cfg.max_peers;
@@ -157,8 +157,8 @@ int dart_writer_shm_eligible(dart_state *st, uint16_t channel){
 
 #ifdef DART_SHM
 /* the history slot the next publish will occupy (so the node binds a chunk to it) */
-uint16_t dart_channel_hist_head(dart_state *st, uint16_t channel){
-    int channel_idx; dart_channel *ch = dart_chan(st, channel, &channel_idx);
+uint16_t dart_channel_hist_head(DartState *st, uint16_t channel){
+    int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     return ch ? ch->history_head : 0;
 }
 #endif
@@ -167,7 +167,7 @@ uint16_t dart_channel_hist_head(dart_state *st, uint16_t channel){
  * hole" signal that replaces GAP: reader_hb advances deliver_upto to `first`, so a
  * superseded NACK or a ring-overrun push answers with an HB whose first = our floor.
  * Resets the idle-HB timer so we don't double-send. */
-static size_t dart_writer_hb(dart_state *st, dart_channel *ch, dart_writer_proxy *w, uint16_t alias,
+static size_t dart_writer_hb(DartState *st, i_DartChannel *ch, i_DartWriterProxy *w, uint16_t alias,
                              uint8_t *out, size_t cap, uint64_t now){
     uint64_t first = ch->have_first ? ch->first_seqno : 0;
     if (cap < DART_HEADER_HB) return 0;
@@ -180,9 +180,9 @@ static size_t dart_writer_hb(dart_state *st, dart_channel *ch, dart_writer_proxy
 
 
 /* writer side: handle ACKNACK */
-void dart_writer_nack(dart_state *st, int channel_idx, int peer_slot, const uint8_t *p){
-    dart_channel *ch=&st->channels[channel_idx];
-    dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+void dart_writer_nack(DartState *st, int channel_idx, int peer_slot, const uint8_t *p){
+    i_DartChannel *ch=&st->channels[channel_idx];
+    i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
     uint64_t base=dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
     uint32_t epoch=dart_le_r32(p+DART_OFFSET_NACK_EPOCH); uint8_t flags=p[0];
     int group_mode;
@@ -222,9 +222,9 @@ void dart_writer_nack(dart_state *st, int channel_idx, int peer_slot, const uint
 
 /* produce one writer submessage for (channel_idx,peer_slot) if due and it fits cap; 0 if none.
  * On no-fit, state is untouched so the same submessage is produced next time. */
-size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
-    dart_channel *ch=&st->channels[channel_idx];
-    dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+size_t dart_writer_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
+    i_DartChannel *ch=&st->channels[channel_idx];
+    i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
     int reliable=(ch->qos.reliability==DART_RELIABLE);
     /* group mode active only while a multicast channel has remote subscribers: new
        data + HBs ride the group lane, this per-peer lane only answers NACKs */
@@ -239,7 +239,7 @@ size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t 
         for (i=0;i<DART_NACK_WINDOW;i++){
             if (w->nack_bits & (1u<<i)){
                 uint64_t seqno=w->nack_base+i;
-                dart_writer_sample *s;
+                i_DartWriterSample *s;
                 if (seqno>=ch->next_seqno){                 /* nothing there */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
@@ -289,7 +289,7 @@ size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t 
     /* 2. push new data */
     if (w->sent_upto < ch->next_seqno){
         uint64_t seqno=w->sent_upto;
-        dart_writer_sample *s=dart_find_sample(ch,seqno);
+        i_DartWriterSample *s=dart_find_sample(ch,seqno);
         if (s){
 #ifdef DART_SHM
             /* peer_shm is set at attach (before data flows), so sent_upto sits at a
@@ -330,10 +330,10 @@ size_t dart_writer_emit(dart_state *st, int channel_idx, int peer_slot, uint8_t 
 
 /* multicast: 1 if every matched subscriber has acked all data, so the group
  * heartbeat can stop until new data arrives or a new/lagging subscriber needs it */
-int dart__group_all_acked(dart_state *st, int channel_idx){
+int dart__group_all_acked(DartState *st, int channel_idx){
     uint32_t max_peers=st->cfg.max_peers, p; uint64_t seq=st->channels[channel_idx].next_seqno;
     for (p=0;p<max_peers;p++){
-        dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,p);
+        i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
         if (w->used && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
     }
     return 1;
@@ -342,8 +342,8 @@ int dart__group_all_acked(dart_state *st, int channel_idx){
 
 /* multicast writer lane: new data once for the whole group, then a channel-level
  * heartbeat (reliable). Same per-call contract as dart_writer_emit. */
-size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, size_t cap, uint64_t now){
-    dart_channel *ch=&st->channels[channel_idx];
+size_t dart_group_emit(DartState *st, int channel_idx, uint8_t *out, size_t cap, uint64_t now){
+    i_DartChannel *ch=&st->channels[channel_idx];
     uint16_t alias = dart__alias_of(st, channel_idx);
     if (!ch->multicast || ch->role==DART_SUB_ONLY || ch->role==DART_INACTIVE) return 0;
     if (ch->n_subscribers==0){
@@ -353,7 +353,7 @@ size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, size_t cap
     }
     if (ch->multicast_sent_upto < ch->next_seqno){
         uint64_t seqno=ch->multicast_sent_upto;
-        dart_writer_sample *s=dart_find_sample(ch,seqno);
+        i_DartWriterSample *s=dart_find_sample(ch,seqno);
         if (s){
             uint16_t frag_idx=(uint16_t)(seqno - s->base);
             uint32_t offset=(uint32_t)frag_idx*st->frag;

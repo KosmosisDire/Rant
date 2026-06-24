@@ -8,7 +8,7 @@
  * names on purpose). Header sizes: DATA 13 (single)/21 (multi), HB 23, NACK 21. */
 
 /* datagram builders (return length) */
-size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, dart_writer_sample *s,
+size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWriterSample *s,
                          uint16_t frag, const uint8_t *payload, uint16_t payload_len){
     dart_le_w16(o+DART_OFFSET_ALIAS,alias);
     if (s->count==1){                       /* frag=0, count=1, len=payload_len implied */

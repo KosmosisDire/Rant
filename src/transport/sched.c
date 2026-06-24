@@ -4,7 +4,7 @@
 
 /* scheduler: lane index = channel_idx*(max_peers+1)+peer_slot (peer_slot==max_peers = group lane);
  * destination = peer slot peer_slot, or max_peers+channel_idx for a group lane */
-static void dart__dest_push(dart_state *st, uint32_t d){
+static void dart__dest_push(DartState *st, uint32_t d){
     uint32_t ndest = st->cfg.max_peers + (uint32_t)st->cfg.n_channels, t;
     if (st->dest_queued[d]) return;
     st->dest_queued[d]=1;
@@ -15,7 +15,7 @@ static void dart__dest_push(dart_state *st, uint32_t d){
 
 
 /* enqueue a lane that just got sendable work; idempotent while queued */
-static void dart__lane_enq(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+static void dart__lane_enq(DartState *st, uint16_t channel_idx, uint32_t peer_slot){
     uint32_t max_peers=st->cfg.max_peers, lanes=max_peers+1u;
     uint32_t lane=(uint32_t)channel_idx*lanes+peer_slot;
     uint32_t d=(peer_slot<max_peers) ? peer_slot : max_peers+(uint32_t)channel_idx;
@@ -31,9 +31,9 @@ static void dart__lane_enq(dart_state *st, uint16_t channel_idx, uint32_t peer_s
 /* enqueue, and track a freshly-armed reader ack/NACK deadline for the poll cap. Used
  * by the arm sites (ack_due_us is future or 0); the sweep enqueues due lanes with
  * dart__lane_enq instead, since it recomputes next_deadline itself. */
-void dart__lane_wake(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
+void dart__lane_wake(DartState *st, uint16_t channel_idx, uint32_t peer_slot){
     if (peer_slot < st->cfg.max_peers){
-        dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
+        i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
         if (r->used && r->ack_pending) dart__deadline(st, r->ack_due_us);
     }
     dart__lane_enq(st, channel_idx, peer_slot);
@@ -41,14 +41,14 @@ void dart__lane_wake(dart_state *st, uint16_t channel_idx, uint32_t peer_slot){
 
 
 /* sendable work a popped lane still owes now (timer-armed work is the sweep's job) */
-static int dart__lane_work(dart_state *st, uint16_t channel_idx, uint32_t peer_slot, uint64_t now){
-    dart_channel *ch=&st->channels[channel_idx];
+static int dart__lane_work(DartState *st, uint16_t channel_idx, uint32_t peer_slot, uint64_t now){
+    i_DartChannel *ch=&st->channels[channel_idx];
     uint32_t max_peers=st->cfg.max_peers;
     if (peer_slot==max_peers)
         return ch->multicast && ch->n_subscribers>0 && ch->multicast_sent_upto < ch->next_seqno;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
-    { dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
-      dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
+    { i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+      i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
       int group_mode = ch->multicast && ch->n_subscribers>0;
       if (w->used && w->has_nack) return 1;
       if (w->used && !group_mode && w->sent_upto < ch->next_seqno) return 1;
@@ -65,7 +65,7 @@ static int dart__lane_work(dart_state *st, uint16_t channel_idx, uint32_t peer_s
  * a deadline-capped poll that wakes for a timer actually services it. A full pass
  * also recomputes next_deadline_us exactly (the global min of not-yet-due timers).
  * Read-only; cost is bounded by table size. */
-static void dart__hb_sweep(dart_state *st, uint64_t now){
+static void dart__hb_sweep(DartState *st, uint64_t now){
     uint32_t max_peers=st->cfg.max_peers, lanes=max_peers+1u;
     uint32_t total=(uint32_t)st->cfg.n_channels*lanes, due, k;
     uint64_t span = now - st->sweep_time_us;
@@ -80,7 +80,7 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
     for (k=0;k<due;k++){
         uint32_t lane=st->sweep, peer_slot=lane%lanes;
         uint16_t channel_idx=(uint16_t)(lane/lanes);
-        dart_channel *ch=&st->channels[channel_idx];
+        i_DartChannel *ch=&st->channels[channel_idx];
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
         /* gate writer/multicast heartbeats on next_seqno, never the reader ack: a
            sub-only node's data channels never advance next_seqno but still owe acks */
@@ -93,8 +93,8 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
             continue;
         }
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
-        { dart_writer_proxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
-          dart_reader_proxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
+        { i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
+          i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
           int group_mode = ch->multicast && ch->n_subscribers>0;
           if (w->used && !group_mode && w->acked_upto < ch->next_seqno){
               if (now>=w->hb_next_us) dart__lane_enq(st,channel_idx,peer_slot);
@@ -112,7 +112,7 @@ static void dart__hb_sweep(dart_state *st, uint64_t now){
 }
 
 
-int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
+int dart_poll_send(DartState *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
     uint32_t max_peers=st->cfg.max_peers, lanes=max_peers+1u;
     uint32_t ndest = max_peers+(uint32_t)st->cfg.n_channels;
     dart__hb_sweep(st, now);
@@ -163,6 +163,6 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
 }
 
 
-uint64_t dart_next_deadline_us(dart_state *st){
+uint64_t dart_next_deadline_us(DartState *st){
     return st->next_deadline_us == DART__NO_DEADLINE ? 0 : st->next_deadline_us;
 }
