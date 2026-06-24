@@ -866,7 +866,8 @@ static void node_core_checks(void){
     dart_node_core_config cc; dart_node_core *nc;
     dart_channel_def ch[1];
     dart_discovery_addr a, b;
-    uint8_t meta[256]; uint16_t mlen, port; uint8_t ip[4]; uint32_t id;
+    dart_node_dest d;
+    uint8_t meta[256]; uint16_t mlen; uint32_t id;
 
     memset(ch,0,sizeof ch); ch[0].name="nc/topic";
     memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=1; tc.max_peers=2;
@@ -886,21 +887,23 @@ static void node_core_checks(void){
     memset(&a,0,sizeof a); a.ip[0]=10;a.ip[1]=0;a.ip[2]=0;a.ip[3]=1; a.ip_len=4; a.port=5001;
     memset(&b,0,sizeof b); b.ip[0]=10;b.ip[1]=0;b.ip[2]=0;b.ip[3]=2; b.ip_len=4; b.port=5002;
 
-    /* 1. two peers up: events fire and both addresses resolve, each way */
+    /* 1. two peers up: events fire and destinations resolve, each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
     dart_node_core_peer_up(nc, 11, &a, meta, mlen);
     dart_node_core_peer_up(nc, 22, &b, meta, mlen);
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
-    ST_CHECK(dart_node_core_addr_for_id(nc,11,ip,&port) && port==5001 && ip[3]==1,
-             "node-core: id->addr resolves (port=%u ip3=%u)", port, ip[3]);
+    ST_CHECK(dart_node_core_resolve(nc,11,&d) && !d.is_group && d.port==5001 && d.ip[3]==1,
+             "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
     ST_CHECK(dart_node_core_id_for_addr(nc, b.ip, 5002, &id) && id==22,
-             "node-core: addr->id resolves (id=%u)", id);
+             "node-core: addr resolves to id (id=%u)", id);
+    ST_CHECK(dart_node_core_resolve(nc, DART_DEST_GROUP(0x07), &d) && d.is_group && d.group_sel==0x07,
+             "node-core: group dest resolves to selector (sel=%u)", d.group_sel);
 
     /* 2. DROP makes the peer dormant: one PEER_DOWN, but the slot is kept (still resolves) */
     nc_down_n=0;
     dart_node_core_peer_down(nc, 11, DART_DISCOVERY_DROP);
     ST_CHECK(nc_down_n==1 && nc_down_id==11, "node-core: DROP fires one down (downs=%u id=%u)", nc_down_n, nc_down_id);
-    ST_CHECK(dart_node_core_addr_for_id(nc,11,ip,&port)==1, "node-core: dropped peer kept (resolves)");
+    ST_CHECK(dart_node_core_resolve(nc,11,&d)==1, "node-core: dropped peer kept (resolves)");
 
     /* 3. same id returns -> RESUME re-fires PEER_UP, no new slot */
     nc_up_n=0;
@@ -911,7 +914,7 @@ static void node_core_checks(void){
     nc_down_n=0;
     dart_node_core_peer_down(nc, 22, DART_DISCOVERY_GONE);
     ST_CHECK(nc_down_n==1, "node-core: GONE fires down (downs=%u)", nc_down_n);
-    ST_CHECK(dart_node_core_addr_for_id(nc,22,ip,&port)==0, "node-core: GONE peer freed (no resolve)");
+    ST_CHECK(dart_node_core_resolve(nc,22,&d)==0, "node-core: GONE peer freed (no resolve)");
 
     /* 5. a refused peer is forwarded as PEER_REFUSED */
     nc_refused_n=0;

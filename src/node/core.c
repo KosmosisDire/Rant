@@ -148,11 +148,19 @@ void dart_node_core_peer_refused(void *user, const dart_discovery_addr *addr){
     dart__core_fire(c, DART_PEER_REFUSED, 0, addr, "peer table full (all active)");
 }
 
-int dart_node_core_addr_for_id(dart_node_core *c, uint32_t id, uint8_t ip[4], uint16_t *port){
-    int i = dart__core_find_id(c, id);
-    if (i < 0) return 0;
-    memcpy(ip, c->peers[i].ip, 4);
-    if (port) *port = c->peers[i].port;
+int dart_node_core_resolve(dart_node_core *c, uint32_t to, dart_node_dest *out){
+    int i;
+    memset(out, 0, sizeof *out);
+    if (DART_DEST_IS_GROUP(to)){            /* the transport's group encoding stays inside the core */
+        out->is_group = 1;
+        out->group_sel = DART_DEST_GROUP_CHAN(to);
+        return 1;
+    }
+    i = dart__core_find_id(c, to);
+    if (i < 0) return 0;                    /* peer vanished */
+    memcpy(out->ip, c->peers[i].ip, 16);
+    out->ip_len = c->peers[i].ip_len;
+    out->port   = c->peers[i].port;
     return 1;
 }
 

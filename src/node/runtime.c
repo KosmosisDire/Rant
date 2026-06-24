@@ -158,19 +158,22 @@ static int dart__node_is_local(void *user, const uint8_t *ip, uint8_t ip_len){
 static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
     return dart_plat_ipv4(239u, 255u, (uint8_t)(domain & 0xFFu), (uint8_t)(sel & 0xFFu));
 }
-/* a channel's group, from its identity so it matches DART_DEST_GROUP and every peer */
+/* a channel's group, from its identity so it matches the core's group send and every peer */
 static uint32_t dart__node_chan_group(uint16_t domain, const dart_channel_def *def){
-    return dart__node_group_addr(domain, (uint16_t)(dart_channel_identity(def) & 0xFFu));
+    return dart__node_group_addr(domain, DART_DEST_GROUP_SEL(dart_channel_identity(def)));
 }
 
-/* send one datagram; returns 1 when done with it, 0 only on a would-block TX-full */
+/* send one datagram; returns 1 when done with it, 0 only on a would-block TX-full. The
+ * core resolves the abstract destination; we just map it to a UDP address. */
 static int dart__node_tx(dart_node *n, uint32_t to, const uint8_t *buf, size_t len){
-    uint8_t ip[4]; uint16_t port;
-    if (DART_DEST_IS_GROUP(to)){
-        dart_plat_naddr_to_ip4(dart__node_group_addr(n->domain, DART_DEST_GROUP_CHAN(to)), ip);
+    dart_node_dest d; uint8_t ip[4]; uint16_t port;
+    if (!dart_node_core_resolve(n->core, to, &d)) return 1;   /* peer vanished */
+    if (d.is_group){
+        dart_plat_naddr_to_ip4(dart__node_group_addr(n->domain, d.group_sel), ip);
         port = n->multicast_port;
     } else {
-        if (!dart_node_core_addr_for_id(n->core, to, ip, &port)) return 1;   /* peer vanished */
+        memcpy(ip, d.ip, 4);
+        port = d.port;
     }
     if (dart_plat_send(n->fd, buf, len, ip, port) < 0 && dart_plat_would_block())
         return 0;

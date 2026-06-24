@@ -152,7 +152,7 @@ int dart_poll_send(dart_state *st, uint32_t *to_peer, void *out, size_t cap, siz
         if (st->dest_head[d]!=DART__NIL) dart__dest_push(st,d);  /* fair: re-queue at tail */
         if (offset){
             *to_peer = (d<max_peers) ? st->peer_ids[d]
-                              : DART_DEST_GROUP(st->channels[d-max_peers].identity & 0xFFu);
+                              : DART_DEST_GROUP(DART_DEST_GROUP_SEL(st->channels[d-max_peers].identity));
             *out_len = offset;
             return 1;
         }

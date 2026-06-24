@@ -94,6 +94,9 @@ typedef struct {
 #define DART_DEST_GROUP(sel)     (DART_DEST_GROUP_BIT | (uint32_t)(sel))
 #define DART_DEST_IS_GROUP(d)    (((d) & DART_DEST_GROUP_BIT) != 0u)
 #define DART_DEST_GROUP_CHAN(d)  ((uint16_t)((d) & 0xFFFFu))
+/* group selector = low byte of the topic identity. One source for the core's group
+ * send and the node's group join, so the two can never derive it differently. */
+#define DART_DEST_GROUP_SEL(identity)  ((uint16_t)((identity) & 0xFFu))
 
 /* A complete message; channel is the local handle. Do not call back into dart_*. */
 typedef void (*dart_message_fn)(void *user, uint16_t channel, uint32_t from_peer,

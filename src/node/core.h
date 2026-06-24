@@ -50,10 +50,23 @@ void dart_node_core_peer_up     (void *user, uint32_t id, const dart_discovery_a
 void dart_node_core_peer_down   (void *user, uint32_t id, dart_discovery_down_reason reason);
 void dart_node_core_peer_refused(void *user, const dart_discovery_addr *addr);
 
-/* Address resolution: the node-core/runtime boundary. The runtime resolves an
- * outbound peer id to its physical address before sending, and maps an inbound
- * source address back to a peer id. 1 + fills the out-params on a hit, else 0. */
-int  dart_node_core_addr_for_id(dart_node_core *c, uint32_t id, uint8_t ip[4], uint16_t *port);
+/* A resolved outbound destination: a multicast group (by selector), or a unicast
+ * peer (by physical address). The runtime turns this into wire bytes for its link. */
+typedef struct {
+    uint8_t  is_group;   /* 1 = group send, 0 = unicast peer */
+    uint16_t group_sel;  /* group: the selector (low byte of topic identity) */
+    uint8_t  ip[16];     /* unicast: peer physical address (IPv4 today) */
+    uint8_t  ip_len;
+    uint16_t port;       /* unicast: peer data port */
+} dart_node_dest;
+
+/* Destination resolution: the node-core/runtime boundary. resolve turns the transport's
+ * abstract destination (dart_poll_send's to_peer) into a group or a peer address, so the
+ * runtime only maps the result to wire bytes. The group address convention is the
+ * runtime's (UDP uses 239.255.<domain>.<sel>). Returns 1 if sendable, 0 if a unicast
+ * peer is unknown. id_for_addr maps an inbound source address back to a peer id (1 + *id
+ * on a hit, else 0). */
+int  dart_node_core_resolve(dart_node_core *c, uint32_t to, dart_node_dest *out);
 int  dart_node_core_id_for_addr(dart_node_core *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 
 /* Read-only peer-table enumeration (diagnostics / tests). max_peers is the capacity;
