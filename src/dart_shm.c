@@ -56,8 +56,8 @@ size_t dart_shm_state_bytes(void){ return (sizeof(struct dart_shm_pool) + 15u) &
 
 static void dart__shm_geom(uint32_t chunk_bytes, uint32_t n_chunks,
                            uint32_t *out_stride, size_t *out_total){
-    uint32_t cb = (chunk_bytes + 15u) & ~15u;
-    uint32_t stride = DART__SHM_CHDR_SZ + cb;
+    uint32_t aligned = (chunk_bytes + 15u) & ~15u;
+    uint32_t stride = DART__SHM_CHDR_SZ + aligned;
     *out_stride = stride;
     *out_total  = (size_t)DART__SHM_HDR_SZ + (size_t)n_chunks * stride;
 }
@@ -71,30 +71,30 @@ static uint8_t *dart__shm_chunk_pay(struct dart_shm_pool *p, uint32_t i){
 
 dart_shm_pool *dart_shm_create(void *pool_mem, const dart_shm_config *cfg){
     struct dart_shm_pool *p = (struct dart_shm_pool*)pool_mem;
-    uint32_t cb = cfg->chunk_bytes ? cfg->chunk_bytes : DART_SHM_CHUNK_BYTES;
-    uint32_t nc = cfg->n_chunks    ? cfg->n_chunks    : DART_SHM_CHUNKS;
+    uint32_t chunk_bytes = cfg->chunk_bytes ? cfg->chunk_bytes : DART_SHM_CHUNK_BYTES;
+    uint32_t n_chunks = cfg->n_chunks    ? cfg->n_chunks    : DART_SHM_CHUNKS;
     uint32_t stride; size_t total; void *handle = NULL, *base; uint32_t i;
     if (!p || !cfg) return NULL;
-    dart__shm_geom(cb, nc, &stride, &total);
+    dart__shm_geom(chunk_bytes, n_chunks, &stride, &total);
     base = dart_plat_shm_create(cfg->name, total, &handle);
     if (!base) return NULL;
     memset(p, 0, sizeof *p);
     p->base = base; p->handle = handle; p->map_bytes = total;
     p->hdr = (dart_shm_seg_hdr*)base;
     p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
-    p->chunk_bytes = cb; p->n_chunks = nc; p->stride = stride; p->is_creator = 1;
+    p->chunk_bytes = chunk_bytes; p->n_chunks = n_chunks; p->stride = stride; p->is_creator = 1;
     /* the segment starts zero-filled; stamp the header and clear generations */
     p->hdr->magic = DART_SHM_MAGIC; p->hdr->version = DART_SHM_VERSION;
-    p->hdr->segment_id = cfg->segment_id; p->hdr->chunk_bytes = cb; p->hdr->n_chunks = nc;
+    p->hdr->segment_id = cfg->segment_id; p->hdr->chunk_bytes = chunk_bytes; p->hdr->n_chunks = n_chunks;
     p->hdr->owner_pid = dart_plat_pid();
     dart_plat_host_uuid(p->hdr->owner_host);
-    for (i = 0; i < nc; i++){ dart_shm_chunk_hdr *c = dart__shm_chunk_hdr(p, i); c->generation = 0; c->length = 0; }
+    for (i = 0; i < n_chunks; i++){ dart_shm_chunk_hdr *c = dart__shm_chunk_hdr(p, i); c->generation = 0; c->length = 0; }
     return p;
 }
 
 dart_shm_pool *dart_shm_attach(void *pool_mem, const dart_shm_config *cfg){
     struct dart_shm_pool *p = (struct dart_shm_pool*)pool_mem;
-    uint32_t cb, nc, stride; size_t map_bytes = 0, expect;
+    uint32_t chunk_bytes, n_chunks, stride; size_t map_bytes = 0, expect;
     void *handle = NULL, *base; uint8_t ours[16];
     if (!p || !cfg) return NULL;
     /* map the whole OS object; its geometry (chunk_bytes/n_chunks) comes from the
@@ -106,17 +106,17 @@ dart_shm_pool *dart_shm_attach(void *pool_mem, const dart_shm_config *cfg){
     p->base = base; p->handle = handle; p->map_bytes = map_bytes;
     p->hdr = (dart_shm_seg_hdr*)base;
     dart_plat_host_uuid(ours);
-    cb = p->hdr->chunk_bytes; nc = p->hdr->n_chunks;
-    dart__shm_geom(cb, nc, &stride, &expect);
+    chunk_bytes = p->hdr->chunk_bytes; n_chunks = p->hdr->n_chunks;
+    dart__shm_geom(chunk_bytes, n_chunks, &stride, &expect);
     /* reject a stale/foreign/mismatched/truncated segment -> caller falls back to UDP */
     if (p->hdr->magic != DART_SHM_MAGIC || p->hdr->version != DART_SHM_VERSION ||
         memcmp(p->hdr->owner_host, ours, 16) != 0 ||
-        cb == 0 || nc == 0 || expect > map_bytes){
+        chunk_bytes == 0 || n_chunks == 0 || expect > map_bytes){
         dart_plat_shm_detach(base, map_bytes, handle, 0);
         return NULL;
     }
     p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
-    p->chunk_bytes = cb; p->n_chunks = nc; p->stride = stride; p->is_creator = 0;
+    p->chunk_bytes = chunk_bytes; p->n_chunks = n_chunks; p->stride = stride; p->is_creator = 0;
     return p;
 }
 
@@ -128,13 +128,13 @@ void *dart_shm_chunk(dart_shm_pool *p, uint32_t chunk, uint32_t *out_cap){
 
 void dart_shm_stamp(dart_shm_pool *p, uint32_t chunk, uint32_t len, dart_shm_desc *out){
     dart_shm_chunk_hdr *c;
-    uint64_t gen;
+    uint64_t generation;
     if (!p || chunk >= p->n_chunks) return;
     c = dart__shm_chunk_hdr(p, chunk);
     c->length = len;
-    gen = c->generation + 1u;                       /* bump so a straggler sees the reuse */
-    dart_plat_atomic_store64(&c->generation, gen);  /* release: publishes the payload writes */
-    if (out){ out->segment_id = p->hdr->segment_id; out->chunk = chunk; out->length = len; out->generation = gen; }
+    generation = c->generation + 1u;                       /* bump so a straggler sees the reuse */
+    dart_plat_atomic_store64(&c->generation, generation);  /* release: publishes the payload writes */
+    if (out){ out->segment_id = p->hdr->segment_id; out->chunk = chunk; out->length = len; out->generation = generation; }
 }
 
 const void *dart_shm_read(dart_shm_pool *p, const dart_shm_desc *d, uint32_t *out_len){

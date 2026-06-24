@@ -294,7 +294,7 @@ int       dart_reader_progress(dart_state *st, uint16_t channel, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 
 /* Feed a received datagram, tagged with the peer it came from. */
-void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *dg, size_t len,
+void      dart_on_datagram(dart_state *st, uint32_t from_peer, const void *datagram, size_t len,
                          uint64_t now_us);
 
 /* Pull one outgoing datagram (may batch submessages for one peer). Returns 1 and

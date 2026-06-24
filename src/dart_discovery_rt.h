@@ -11,13 +11,13 @@ extern "C" {
 
 #define DART_DISCOVERY_MAX_SEEDS 4
 
-/* Zero/NULL fields get defaults; leave disc.uuid all-zero to auto-generate one. */
+/* Zero/NULL fields get defaults; leave discovery.uuid all-zero to auto-generate one. */
 typedef struct {
-    dart_discovery_config disc;        /* core config: ids, timing, callbacks */
+    dart_discovery_config discovery;        /* core config: ids, timing, callbacks */
     const char  *group;       /* multicast group, default "239.255.0.7" */
-    uint16_t     disc_port;   /* rendezvous port, default 7400 */
+    uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
-    const char  *mcast_if;    /* interface IP to join/send on; NULL = route probe,
+    const char  *multicast_interface;    /* interface IP to join/send on; NULL = route probe,
                                  "127.0.0.1" = single-host */
     const dart_discovery_addr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
@@ -41,7 +41,7 @@ void       dart_discovery_rt_close(dart_discovery_rt *rt, int send_bye);
 /* Hand the core a discovery datagram that arrived on another socket (unicast
  * announces target the peer's data port, so the data-socket owner forwards them). */
 void       dart_discovery_rt_feed(dart_discovery_rt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
-                          const void *dg, size_t len);
+                          const void *datagram, size_t len);
 
 /* Replace the opaque meta blob carried in announces and bump its version, so peers
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */

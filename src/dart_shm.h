@@ -39,7 +39,7 @@
  * plain dart_node_send memcpys into the chunk.
  *
  * Read modes (a future toggle; ship the safe one first):
- *   - ONE-COPY SHM (default): the reader memcpys the chunk into its own asm_buf, then
+ *   - ONE-COPY SHM (default): the reader memcpys the chunk into its own assembly_buf, then
  *     OWNS the bytes -- so it acks like UDP (ack timing is free, no deliver-before-ack
  *     coupling), the writer is released immediately, and there is no slow-reader stall
  *     or torn-read window. Still a big win: one SHM-DATA submessage + one local bulk

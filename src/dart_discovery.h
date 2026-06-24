@@ -15,10 +15,10 @@ extern "C" {
 #define DART_DISCOVERY_PROTO_VERSION 3     /* v3: versioned meta blob, u16 meta_len */
 #endif
 
-#define DART_DISCOVERY_META_MAX 64   /* default per-peer meta capacity (cfg.meta_cap overrides) */
+#define DART_DISCOVERY_META_MAX 64   /* default per-peer meta capacity (cfg.meta_capacity overrides) */
 /* fixed header through self_ip, then [u32 meta_version][u16 meta_len][meta...] */
 #define DART_DISCOVERY_META_OFF 49   /* DART_DISCOVERY_HDR_LEN(43) + 4 (version) + 2 (len) */
-/* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_cap */
+/* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_capacity */
 #define DART_DISCOVERY_WIRE_MAX 128
 
 typedef struct {
@@ -30,7 +30,7 @@ typedef struct {
 /* Why a peer is going down, so the IO layer can keep transport state across a
  * transient blip instead of tearing it down on every silence timeout. */
 typedef enum {
-    DART_DISCOVERY_DROP = 0,  /* fell silent past timeout_us: same UUID may return, keep state */
+    DART_DISCOVERY_DROP = 0,  /* fell silent past peer_timeout_us: same UUID may return, keep state */
     DART_DISCOVERY_GONE = 1   /* said BYE, or its slot was reclaimed for a new peer: free state */
 } dart_discovery_down_reason;
 
@@ -53,13 +53,13 @@ typedef struct {
     uint16_t data_port;     /* unicast port we advertise */
     uint8_t  self_ip[16];   /* optional advertised IP; len 0 => use src addr */
     uint8_t  self_ip_len;   /* 0, 4, or 16 */
-    uint32_t announce_us;   /* re-announce interval */
-    uint32_t timeout_us;    /* drop peer after this much silence */
+    uint32_t announce_interval_us;   /* re-announce interval */
+    uint32_t peer_timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
     const uint8_t *meta;    /* opaque versioned blob; the INITIAL value (dart_discovery_set_meta
-                               updates it at runtime). Must stay valid. <= meta_cap */
+                               updates it at runtime). Must stay valid. <= meta_capacity */
     uint16_t meta_len;
-    uint16_t meta_cap;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
+    uint16_t meta_capacity;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     dart_discovery_peer_up_fn      on_peer_up;
     dart_discovery_peer_down_fn    on_peer_down;
     dart_discovery_peer_refused_fn on_peer_refused;  /* optional: table full of active peers */
@@ -71,7 +71,7 @@ typedef struct dart_discovery_state dart_discovery_state;
 size_t       dart_discovery_required_memory(const dart_discovery_config *cfg);
 dart_discovery_state *dart_discovery_init(void *mem, size_t mem_size, const dart_discovery_config *cfg);
 void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip, uint8_t src_ip_len,
-                               const void *dg, size_t len, uint64_t now_us);
+                               const void *datagram, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(dart_discovery_state *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(dart_discovery_state *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */

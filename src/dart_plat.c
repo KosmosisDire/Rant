@@ -228,9 +228,9 @@ void dart_plat_mcast_loop(dart_sock s, int on){
     unsigned char l = (unsigned char)(on ? 1 : 0);
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
 }
-int dart_plat_mcast_join(dart_sock s, uint32_t grp_naddr, uint32_t if_naddr){
+int dart_plat_mcast_join(dart_sock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
-    mr.imr_multiaddr.s_addr = grp_naddr;
+    mr.imr_multiaddr.s_addr = group_naddr;
     mr.imr_interface.s_addr = if_naddr;
     return setsockopt(DART__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
                       (const char*)&mr, sizeof mr) == 0;

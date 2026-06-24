@@ -531,7 +531,7 @@ static int node_main(int argc, char **argv){
         if (g_trace && !traced_peers && now_ns() - start > 3000000000ull){
             traced_peers = 1;
             printf("TRACE node fd=%u mcfd=%u domain=%u mc_port=%u\n",
-                   (unsigned)n->fd, (unsigned)n->mcfd, n->domain, n->mc_port);
+                   (unsigned)n->fd, (unsigned)n->multicast_fd, n->domain, n->multicast_port);
             for (i = 0; i < (int)n->max_peers; i++)
                 if (n->peers[i].used)
                     printf("TRACE peer id=%u addr=%u.%u.%u.%u:%u\n", n->peers[i].id,
@@ -760,7 +760,7 @@ static void disc_core_checks(void){
     uint32_t idA, idB; size_t n;
     memset(&c,0,sizeof c);
     memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */
-    c.domain_id=99; c.announce_us=1000000; c.timeout_us=1000000; c.max_peers=2;
+    c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=1000000; c.max_peers=2;
     c.on_peer_up=dc_up; c.on_peer_down=dc_down; c.on_peer_refused=dc_refused;
     st = dart_discovery_init(mem,sizeof mem,&c);
     ST_CHECK(st!=NULL, "disc-core: init");
@@ -1135,10 +1135,10 @@ static int selftest_main(void){
       { unsigned long s0 = st_samples[ST_CH_DYN];
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
         for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
-        dart_peer_remove(r->tr, wid);
-        dart_peer_add(r->tr, wid, 1, DART_FRAG_PAYLOAD);
-        il = dart_build_interest(w->tr, ib, sizeof ib);
-        dart_apply_peer_interest(r->tr, wid, ib, il);
+        dart_peer_remove(r->transport, wid);
+        dart_peer_add(r->transport, wid, 1, DART_FRAG_PAYLOAD);
+        il = dart_build_interest(w->transport, ib, sizeof ib);
+        dart_apply_peer_interest(r->transport, wid, ib, il);
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
                  "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",
@@ -1159,14 +1159,14 @@ static int selftest_main(void){
         uint32_t wid = 0, rid = 0; uint16_t k;
         for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
         for (k=0;k<w->max_peers;k++) if (w->peers[k].used){ rid = w->peers[k].id; break; }
-        dart_peer_dormant(w->tr, rid);   /* writer drops the reader from flow control */
-        dart_peer_dormant(r->tr, wid);   /* reader stops acking the writer */
+        dart_peer_dormant(w->transport, rid);   /* writer drops the reader from flow control */
+        dart_peer_dormant(r->transport, wid);   /* reader stops acking the writer */
         for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
         st_pump(w, r, 300);
         ST_CHECK(st_samples[ST_CH_DYN] == s0, "resume: dormant peer withholds sends (%lu, want %lu)",
                  st_samples[ST_CH_DYN], s0);
-        dart_peer_resume(w->tr, rid);
-        dart_peer_resume(r->tr, wid);
+        dart_peer_resume(w->transport, rid);
+        dart_peer_resume(r->transport, wid);
         st_pump(w, r, 400);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+3,
                  "resume: backlog replays from preserved position (%lu, want %lu)",

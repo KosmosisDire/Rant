@@ -71,7 +71,7 @@ void      dart_plat_suppress_connreset(dart_sock s);
 void dart_plat_mcast_setif(dart_sock s, uint32_t if_naddr);
 void dart_plat_mcast_ttl  (dart_sock s, uint8_t ttl);
 void dart_plat_mcast_loop (dart_sock s, int on);
-int  dart_plat_mcast_join (dart_sock s, uint32_t grp_naddr, uint32_t if_naddr); /* 1 ok */
+int  dart_plat_mcast_join (dart_sock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
 
 /* --- datagram IO --- */
 /* sendto: returns bytes sent, <0 on error (test dart_plat_would_block). */

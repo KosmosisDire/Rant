@@ -14,11 +14,11 @@ static const char *g_name = "node";
 
 /* per-channel receive counters; keep on_message cheap so it never throttles poll */
 #define MAX_CH 64
-static unsigned long g_rx[MAX_CH];
+static unsigned long g_recv_count[MAX_CH];
 
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     (void)u; (void)from; (void)data; (void)len;
-    if (ch < MAX_CH) g_rx[ch]++;   /* ch is the channel handle (its index) */
+    if (ch < MAX_CH) g_recv_count[ch]++;   /* ch is the channel handle (its index) */
 }
 
 int main(int argc, char **argv){
@@ -57,8 +57,8 @@ int main(int argc, char **argv){
     for (;;){
         dart_node_poll(n, 10);         /* service the socket, 10 ms tick */
         char msg[64];
-        int ln = sprintf(msg, "%s #%d", g_name, counter++);
-        dart_node_send(n, 0, msg, (size_t)ln);   /* channel 0 = first in channels[] */
+        int msg_len = sprintf(msg, "%s #%d", g_name, counter++);
+        dart_node_send(n, 0, msg, (size_t)msg_len);   /* channel 0 = first in channels[] */
 
         /* Every 5s, report the receive rate (Hz) on each channel. */
         time_t now = time(NULL);
@@ -67,8 +67,8 @@ int main(int argc, char **argv){
             uint16_t i;
             for (i = 0; i < cfg.n_channels; i++){
                 if (i < MAX_CH){
-                    printf("[%s] channel %u: %.1f Hz\n", g_name, i, g_rx[i]/secs);
-                    g_rx[i] = 0;
+                    printf("[%s] channel %u: %.1f Hz\n", g_name, i, g_recv_count[i]/secs);
+                    g_recv_count[i] = 0;
                 }
             }
             last = now;
