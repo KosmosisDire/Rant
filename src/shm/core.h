@@ -93,6 +93,11 @@ extern "C" {
 uint32_t dart_shm_class_bytes(uint32_t k);      /* chunk payload bytes for class k */
 uint32_t dart_shm_class_for(uint32_t len);      /* smallest class fitting len; N_CLASSES if too big */
 
+/* Derive the OS object name for a segment id into buf[DART_SHM_NAME_MAX]:
+ * "/dart.shm.<16 hex>", valid on POSIX (leading /) and Windows. The node fills
+ * dart_shm_config.name with this for create/attach. */
+void dart_shm_seg_name(char *buf, uint64_t segment_id);
+
 /* ----------------------------------------------------------------- descriptor
  * The SHM locator. Travels INSIDE an SHM-DATA submessage, whose framing supplies
  * the seqno base + count (the transport fills those from the history sample), so

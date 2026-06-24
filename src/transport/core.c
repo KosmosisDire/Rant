@@ -517,6 +517,66 @@ void dart_apply_peer_interest(dart_state *st, uint32_t peer_id, const void *blob
 }
 
 
+/* Discovery-announce meta blob codec (see dart_meta_* in core.h for the layout). The
+   interest list is wrapped in a versioned prefix carrying frag size and (v3) SHM info;
+   decode is version-aware so v2 and v3 nodes interop. */
+#define DART__META_PREFIX_V2 5u
+#define DART__META_PREFIX_V3 22u
+#ifdef DART_SHM
+#define DART__META_PREFIX DART__META_PREFIX_V3   /* what WE write */
+#else
+#define DART__META_PREFIX DART__META_PREFIX_V2
+#endif
+
+static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
+    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && (meta[2]==2 || meta[2]==3);
+}
+static uint16_t dart__meta_pfx(const uint8_t *meta){
+    return meta[2]==3 ? DART__META_PREFIX_V3 : DART__META_PREFIX_V2;
+}
+
+uint16_t dart_meta_capacity(uint16_t n_channels){
+    size_t cap = (size_t)DART__META_PREFIX + dart_interest_max(n_channels);
+    if (cap > 65000u) cap = 65000u;
+    return (uint16_t)cap;
+}
+
+uint16_t dart_meta_build(dart_state *st, uint8_t *out, uint16_t cap,
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
+    size_t interest_len; uint16_t prefix = DART__META_PREFIX;
+    out[0]='D'; out[1]='N'; out[2]=(uint8_t)(DART__META_PREFIX==DART__META_PREFIX_V3 ? 3 : 2);
+    out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
+#ifdef DART_SHM
+    out[5]=(uint8_t)(shm_capable?1:0);
+    if (host) memcpy(out+6, host, 16); else memset(out+6, 0, 16);
+#else
+    (void)shm_capable; (void)host;
+#endif
+    interest_len = dart_build_interest(st, out + prefix, cap - prefix);
+    return (uint16_t)(prefix + interest_len);
+}
+
+uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
+    if (!dart__meta_ok(meta, meta_len)) return 0;
+    return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
+}
+
+const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len){
+    uint16_t prefix;
+    if (!dart__meta_ok(meta, meta_len) || meta_len < (prefix = dart__meta_pfx(meta))){ *out_len = 0; return NULL; }
+    *out_len = (size_t)(meta_len - prefix);
+    return meta + prefix;
+}
+
+#ifdef DART_SHM
+int dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]){
+    if (!dart__meta_ok(meta, meta_len) || meta[2]!=3 || meta_len < DART__META_PREFIX_V3 || !meta[5]) return 0;
+    memcpy(host, meta+6, 16);
+    return 1;
+}
+#endif
+
+
 int dart_set_role(dart_state *st, uint16_t channel, uint8_t role){
     int channel_idx; dart_channel *ch; uint16_t p;
     if (role > DART_INACTIVE) return -1;

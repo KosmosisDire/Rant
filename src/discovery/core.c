@@ -69,6 +69,19 @@ static uint16_t dart_discovery_meta_capacity(const dart_discovery_config *cfg){
     return cfg->meta_capacity ? cfg->meta_capacity : DART_DISCOVERY_META_MAX;
 }
 
+void dart_discovery_config_defaults(dart_discovery_config *cfg){
+    if (!cfg) return;
+    if (cfg->announce_interval_us == 0) cfg->announce_interval_us = 1000000u;
+    if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = cfg->announce_interval_us * 7u / 2u;
+    if (cfg->max_peers == 0)            cfg->max_peers = 32u;
+}
+
+uint32_t dart_discovery_wire_size(uint16_t meta_capacity){
+    uint32_t cap = meta_capacity ? meta_capacity : DART_DISCOVERY_META_MAX;
+    uint32_t w = (uint32_t)DART_DISCOVERY_META_OFF + cap;
+    return w < DART_DISCOVERY_WIRE_MAX ? DART_DISCOVERY_WIRE_MAX : w;
+}
+
 /* Single source of the discovery arena layout: state, the peer table, the meta pool.
    measure (bump.base NULL) feeds required_memory; build feeds init -- one definition. */
 typedef struct { dart_discovery_state *st; uint8_t *peers, *meta_pool; } dart_discovery_blocks;

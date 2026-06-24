@@ -85,12 +85,6 @@ static void dart_discovery_auto_uuid(uint8_t out[16]){
     dart_discovery_make_uuid(out, (const uint8_t*)host, hostname_len, seed);
 }
 
-static uint32_t dart_discovery_rt_wire_max(const dart_discovery_config *c){
-    uint32_t cap = c->meta_capacity ? c->meta_capacity : DART_DISCOVERY_META_MAX;
-    uint32_t w = (uint32_t)DART_DISCOVERY_META_OFF + cap;
-    return w < DART_DISCOVERY_WIRE_MAX ? DART_DISCOVERY_WIRE_MAX : w;
-}
-
 /* Single source of the discovery-runtime arena layout: the rt struct, the rx/tx wire
    scratch buffers, then the discovery-core sub-arena. measure feeds required_memory;
    build feeds open -- one definition. */
@@ -100,7 +94,7 @@ typedef struct {
     size_t   wire_max, core_bytes;
 } dart_rt_blocks;
 static void dart__rt_layout(dart_bump *b, const dart_discovery_config *c, dart_rt_blocks *o){
-    o->wire_max   = dart_discovery_rt_wire_max(c);
+    o->wire_max   = dart_discovery_wire_size(c->meta_capacity);
     o->rt    = (dart_discovery_rt*)dart_take(b, sizeof(struct dart_discovery_rt), 16);
     o->rxbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
     o->txbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
@@ -112,9 +106,7 @@ size_t dart_discovery_rt_required_memory(const dart_discovery_rt_config *cfg){
     dart_discovery_config c; dart_bump b; dart_rt_blocks blk;
     if (!cfg) return 0;
     c = cfg->discovery;
-    if (c.announce_interval_us == 0) c.announce_interval_us = 1000000u;
-    if (c.peer_timeout_us  == 0) c.peer_timeout_us  = c.announce_interval_us * 7u / 2u;
-    if (c.max_peers   == 0) c.max_peers   = 32u;
+    dart_discovery_config_defaults(&c);
     memset(&b, 0, sizeof b);
     dart__rt_layout(&b, &c, &blk);
     return b.offset + 16u;     /* slack to align the caller's mem up to base */
@@ -134,9 +126,7 @@ dart_discovery_rt *dart_discovery_rt_open(void *mem, size_t cap, const dart_disc
 
     if (!mem || !cfg) return NULL;
     c = *cfg;
-    if (c.discovery.announce_interval_us == 0) c.discovery.announce_interval_us = 1000000u;
-    if (c.discovery.peer_timeout_us  == 0) c.discovery.peer_timeout_us  = c.discovery.announce_interval_us * 7u / 2u;
-    if (c.discovery.max_peers   == 0) c.discovery.max_peers   = 32u;
+    dart_discovery_config_defaults(&c.discovery);
     group     = c.group     ? c.group     : "239.255.0.7";
     if (c.discovery_port == 0)    c.discovery_port  = 7400;
     ttl  = c.ttl ? c.ttl : 1;

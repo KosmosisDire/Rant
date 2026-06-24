@@ -117,7 +117,8 @@ static void build_transport(const char *srcdir, const char *outdir){
 
     emit(out, srcdir, "transport/core.h", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "node/core.h", 1);
+    emit(out, srcdir, "node/core.h", 1);    /* sans-IO node core */
+    emit(out, srcdir, "node/runtime.h", 1); /* public dart_node_* API */
     emit(out, srcdir, "shm/core.h", 1);    /* SHM module (inert without DART_SHM) */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
 
@@ -131,8 +132,9 @@ static void build_transport(const char *srcdir, const char *outdir){
     emit(out, srcdir, "transport/reader.c", 1);
     emit(out, srcdir, "transport/core.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "shm/core.c", 1);    /* SHM module impl, before node.c uses it */
-    emit(out, srcdir, "node/core.c", 1);
+    emit(out, srcdir, "shm/core.c", 1);    /* SHM module impl, before node uses it */
+    emit(out, srcdir, "node/core.c", 1);    /* sans-IO node core */
+    emit(out, srcdir, "node/runtime.c", 1); /* IO node runtime */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
     fputs("#endif /* DART_TRANSPORT_IMPLEMENTATION */\n", out);
     fclose(out);
@@ -169,7 +171,8 @@ static void build_combined(const char *srcdir, const char *outdir){
     fputs("#endif /* !DART_DISCOVERY_SANS_IO */\n", out);
     emit(out, srcdir, "transport/core.h", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "node/core.h", 1);
+    emit(out, srcdir, "node/core.h", 1);    /* sans-IO node core */
+    emit(out, srcdir, "node/runtime.h", 1); /* public dart_node_* API */
     emit(out, srcdir, "shm/core.h", 1);    /* SHM module (inert without DART_SHM) */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
 
@@ -194,8 +197,9 @@ static void build_combined(const char *srcdir, const char *outdir){
     emit(out, srcdir, "transport/reader.c", 1);
     emit(out, srcdir, "transport/core.c", 1);
     fputs("\n#ifndef DART_TRANSPORT_SANS_IO\n", out);
-    emit(out, srcdir, "shm/core.c", 1);    /* SHM module impl, before node.c uses it */
-    emit(out, srcdir, "node/core.c", 1);
+    emit(out, srcdir, "shm/core.c", 1);    /* SHM module impl, before node uses it */
+    emit(out, srcdir, "node/core.c", 1);    /* sans-IO node core */
+    emit(out, srcdir, "node/runtime.c", 1); /* IO node runtime */
     fputs("#endif /* !DART_TRANSPORT_SANS_IO */\n", out);
     fputs("#endif /* DART_TRANSPORT_IMPLEMENTATION */\n", out);
     fclose(out);

@@ -26,6 +26,15 @@ int dart_shm_desc_decode(dart_shm_desc *d, const uint8_t *in, size_t len){
     return 1;
 }
 
+/* OS object name "/dart.shm.<16 hex>" -- valid on POSIX (leading /) and Windows. */
+void dart_shm_seg_name(char *buf, uint64_t segment_id){
+    static const char hex_digits[] = "0123456789abcdef";
+    const char prefix[] = "/dart.shm."; int i, k = 0;
+    while (prefix[k]){ buf[k] = prefix[k]; k++; }
+    for (i=15;i>=0;i--) buf[k++] = hex_digits[(segment_id >> (4*i)) & 0xF];
+    buf[k] = 0;
+}
+
 uint32_t dart_shm_class_bytes(uint32_t k){ return DART_SHM_CLASS_BASE << (k*DART_SHM_CLASS_SHIFT); }
 uint32_t dart_shm_class_for(uint32_t len){
     uint32_t k;

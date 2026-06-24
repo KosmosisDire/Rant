@@ -206,6 +206,33 @@ size_t    dart_interest_max(uint16_t n_channels);
 size_t    dart_build_interest(dart_state *st, void *out, size_t cap);
 void      dart_apply_peer_interest(dart_state *st, uint32_t peer_id, const void *blob, size_t len);
 
+/* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
+ * payload wrapping this node's UDP fragment size, its SHM capability + host uuid
+ * (v3), and its interest list. The node carries it in announces; a bring-your-own-IO
+ * caller builds and parses the identical blob. Layout:
+ *   v2: ['D','N',2, frag_lo, frag_hi,                 <interest>]   prefix 5
+ *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],  <interest>]   prefix 22
+ * frag sits at [3..4] in both, so v2 (non-SHM) and v3 nodes interop. The build writes
+ * v3 when DART_SHM is compiled, v2 otherwise; the readers are version-aware. */
+
+/* Bytes to reserve for our blob: prefix + the largest interest list n_channels can
+ * produce, capped to one (IP-fragmentable) UDP datagram. Size the announce buffer here. */
+uint16_t  dart_meta_capacity(uint16_t n_channels);
+/* Build our blob into out[cap] (cap >= dart_meta_capacity): the version prefix
+ * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled) then st's interest
+ * list. Returns total bytes. host may be NULL when !shm_capable. */
+uint16_t  dart_meta_build(dart_state *st, uint8_t *out, uint16_t cap,
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+/* A peer's advertised UDP fragment size from its blob; 0 if the blob is malformed. */
+uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
+/* Locate the interest sub-blob inside a peer's blob; NULL + *out_len 0 if absent. */
+const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
+#ifdef DART_SHM
+/* A peer's SHM capability + host uuid (v3 blobs only): 1 if SHM-capable (fills
+ * host[16]), else 0. */
+int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]);
+#endif
+
 /* Change a channel's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_set_role(dart_state *st, uint16_t channel, uint8_t role);

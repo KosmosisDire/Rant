@@ -68,6 +68,17 @@ typedef struct {
 
 typedef struct dart_discovery_state dart_discovery_state;
 
+/* Fill any zero (unset) timing/size field with its default: announce_interval_us
+ * (1s), peer_timeout_us (3.5x the interval), max_peers (32). dart_discovery_init
+ * REQUIRES these non-zero (it rejects a zero), so an IO layer applies this once before
+ * both sizing and init so the two always agree. Idempotent. */
+void         dart_discovery_config_defaults(dart_discovery_config *cfg);
+
+/* Bytes an IO layer must allocate for one rx/tx datagram scratch buffer: the fixed
+ * header + version + len + meta_capacity (0 => DART_DISCOVERY_META_MAX), floored at
+ * DART_DISCOVERY_WIRE_MAX. The core constants that size it live here, so it owns the math. */
+uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
+
 size_t       dart_discovery_required_memory(const dart_discovery_config *cfg);
 dart_discovery_state *dart_discovery_init(void *mem, size_t mem_size, const dart_discovery_config *cfg);
 void         dart_discovery_on_datagram(dart_discovery_state *st, const uint8_t *src_ip, uint8_t src_ip_len,

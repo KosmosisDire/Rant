@@ -553,11 +553,12 @@ static int node_main(int argc, char **argv){
             traced_peers = 1;
             printf("TRACE node fd=%u mcfd=%u domain=%u mc_port=%u\n",
                    (unsigned)n->fd, (unsigned)n->multicast_fd, n->domain, n->multicast_port);
-            for (i = 0; i < (int)n->max_peers; i++)
-                if (n->peers[i].used)
-                    printf("TRACE peer id=%u addr=%u.%u.%u.%u:%u\n", n->peers[i].id,
-                           n->peers[i].ip[0], n->peers[i].ip[1], n->peers[i].ip[2],
-                           n->peers[i].ip[3], n->peers[i].port);
+            for (i = 0; i < (int)dart_node_core_max_peers(n->core); i++){
+                uint32_t pid; uint8_t pip[16]; uint16_t pport;
+                if (dart_node_core_peer_at(n->core, (uint16_t)i, &pid, pip, NULL, &pport))
+                    printf("TRACE peer id=%u addr=%u.%u.%u.%u:%u\n", pid,
+                           pip[0], pip[1], pip[2], pip[3], pport);
+            }
         }
 
         now = now_ns();
@@ -847,6 +848,75 @@ static void disc_core_checks(void){
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
                dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, dart_discovery_peer_count(st));
     }
+}
+
+/* node-core peer lifecycle (sans-IO): drive dart_node_core_peer_up/down/refused
+   directly over a transport, with NO sockets, clock, or platform anywhere. Proves
+   the split: the peer table + discovery->transport wiring is testable in isolation. */
+static uint32_t nc_up_n, nc_down_n, nc_refused_n, nc_up_id, nc_down_id;
+static void nc_event(void *u, const dart_event *ev){
+    (void)u;
+    if      (ev->kind==DART_PEER_UP)     { nc_up_n++;   nc_up_id=ev->peer; }
+    else if (ev->kind==DART_PEER_DOWN)   { nc_down_n++; nc_down_id=ev->peer; }
+    else if (ev->kind==DART_PEER_REFUSED){ nc_refused_n++; }
+}
+static void node_core_checks(void){
+    static uint8_t tmem[1<<18], cmem[4096];
+    dart_config tc; dart_state *tr;
+    dart_node_core_config cc; dart_node_core *nc;
+    dart_channel_def ch[1];
+    dart_discovery_addr a, b;
+    uint8_t meta[256]; uint16_t mlen, port; uint8_t ip[4]; uint32_t id;
+
+    memset(ch,0,sizeof ch); ch[0].name="nc/topic";
+    memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=1; tc.max_peers=2;
+    ST_CHECK(dart_required_memory(&tc) <= sizeof tmem, "node-core: transport fits");
+    tr = dart_init(tmem, sizeof tmem, &tc);
+    ST_CHECK(tr!=NULL, "node-core: transport init");
+    if (!tr) return;
+    mlen = dart_meta_build(tr, meta, sizeof meta, 1200, 0, NULL);   /* a valid announce blob */
+
+    memset(&cc,0,sizeof cc);
+    cc.transport=tr; cc.max_peers=2; cc.on_event=nc_event;
+    cc.is_local=NULL;                                              /* no platform: every peer remote */
+    nc = dart_node_core_init(cmem, sizeof cmem, &cc);
+    ST_CHECK(nc!=NULL, "node-core: init");
+    if (!nc) return;
+
+    memset(&a,0,sizeof a); a.ip[0]=10;a.ip[1]=0;a.ip[2]=0;a.ip[3]=1; a.ip_len=4; a.port=5001;
+    memset(&b,0,sizeof b); b.ip[0]=10;b.ip[1]=0;b.ip[2]=0;b.ip[3]=2; b.ip_len=4; b.port=5002;
+
+    /* 1. two peers up: events fire and both addresses resolve, each way */
+    nc_up_n=nc_down_n=nc_refused_n=0;
+    dart_node_core_peer_up(nc, 11, &a, meta, mlen);
+    dart_node_core_peer_up(nc, 22, &b, meta, mlen);
+    ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
+    ST_CHECK(dart_node_core_addr_for_id(nc,11,ip,&port) && port==5001 && ip[3]==1,
+             "node-core: id->addr resolves (port=%u ip3=%u)", port, ip[3]);
+    ST_CHECK(dart_node_core_id_for_addr(nc, b.ip, 5002, &id) && id==22,
+             "node-core: addr->id resolves (id=%u)", id);
+
+    /* 2. DROP makes the peer dormant: one PEER_DOWN, but the slot is kept (still resolves) */
+    nc_down_n=0;
+    dart_node_core_peer_down(nc, 11, DART_DISCOVERY_DROP);
+    ST_CHECK(nc_down_n==1 && nc_down_id==11, "node-core: DROP fires one down (downs=%u id=%u)", nc_down_n, nc_down_id);
+    ST_CHECK(dart_node_core_addr_for_id(nc,11,ip,&port)==1, "node-core: dropped peer kept (resolves)");
+
+    /* 3. same id returns -> RESUME re-fires PEER_UP, no new slot */
+    nc_up_n=0;
+    dart_node_core_peer_up(nc, 11, &a, meta, mlen);
+    ST_CHECK(nc_up_n==1 && nc_up_id==11, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
+
+    /* 4. GONE frees the peer: one down, no longer resolves */
+    nc_down_n=0;
+    dart_node_core_peer_down(nc, 22, DART_DISCOVERY_GONE);
+    ST_CHECK(nc_down_n==1, "node-core: GONE fires down (downs=%u)", nc_down_n);
+    ST_CHECK(dart_node_core_addr_for_id(nc,22,ip,&port)==0, "node-core: GONE peer freed (no resolve)");
+
+    /* 5. a refused peer is forwarded as PEER_REFUSED */
+    nc_refused_n=0;
+    dart_node_core_peer_refused(nc, &b);
+    ST_CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 }
 
 #ifdef DART_SHM
@@ -1367,7 +1437,7 @@ static int selftest_main(void){
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN];
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
-        for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
+        for (k=0;k<dart_node_core_max_peers(r->core);k++) if (dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
         dart_peer_remove(r->transport, wid);
         dart_peer_add(r->transport, wid, 1, DART_FRAG_PAYLOAD);
         il = dart_build_interest(w->transport, ib, sizeof ib);
@@ -1390,8 +1460,8 @@ static int selftest_main(void){
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN], g0 = st_gap_calls[ST_CH_DYN];
         uint32_t wid = 0, rid = 0; uint16_t k;
-        for (k=0;k<r->max_peers;k++) if (r->peers[k].used){ wid = r->peers[k].id; break; }
-        for (k=0;k<w->max_peers;k++) if (w->peers[k].used){ rid = w->peers[k].id; break; }
+        for (k=0;k<dart_node_core_max_peers(r->core);k++) if (dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
+        for (k=0;k<dart_node_core_max_peers(w->core);k++) if (dart_node_core_peer_at(w->core,k,&rid,NULL,NULL,NULL)) break;
         dart_peer_dormant(w->transport, rid);   /* writer drops the reader from flow control */
         dart_peer_dormant(r->transport, wid);   /* reader stops acking the writer */
         for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
@@ -1511,6 +1581,7 @@ static int selftest_main(void){
       }
     }
     disc_core_checks();   /* 8. discovery-core peer lifecycle (sans-IO) */
+    node_core_checks();   /* 8b. node-core peer table + lifecycle (sans-IO, no sockets) */
 #ifdef DART_SHM
     shm_module_checks();  /* 9.  SHM mapping module + seqlock guards          */
     shm_loss_checks();    /* 10. SHM loss/repair/skip (transport core)        */
@@ -1780,13 +1851,13 @@ static dart_node *ctl_open(uint16_t domain, int coordinator,
  * children; NULL if none known yet */
 static const char *ctl_peer_ip(dart_node *ctl, char out[20]){
     uint16_t i;
-    for (i=0;i<ctl->max_peers;i++)
-        if (ctl->peers[i].used && ctl->peers[i].ip_len==4){
-            snprintf(out, 20, "%u.%u.%u.%u",
-                     ctl->peers[i].ip[0], ctl->peers[i].ip[1],
-                     ctl->peers[i].ip[2], ctl->peers[i].ip[3]);
+    for (i=0;i<dart_node_core_max_peers(ctl->core);i++){
+        uint8_t pip[16], pil;
+        if (dart_node_core_peer_at(ctl->core, i, NULL, pip, &pil, NULL) && pil==4){
+            snprintf(out, 20, "%u.%u.%u.%u", pip[0], pip[1], pip[2], pip[3]);
             return out;
         }
+    }
     return NULL;
 }
 
