@@ -995,6 +995,58 @@ static void shm_node_checks(void){
 }
 #endif /* DART_SHM */
 
+/* Unit checks for the small pure helpers the Tier-1 cleanup touched: the fragment
+ * clamp, the dart_send result codes, and the shared little-endian byte packing.
+ * These need no sockets, so they run straight against the transport core. */
+static void unit_checks(void){
+    /* dart_clamp_frag: 0 -> default, otherwise clamp into [MIN, MAX] */
+    ST_CHECK(dart_clamp_frag(0) == DART_FRAG_PAYLOAD,
+             "clamp: 0 -> default frag (%u)", (unsigned)dart_clamp_frag(0));
+    ST_CHECK(dart_clamp_frag(65535) == DART_FRAG_PAYLOAD_MAX,
+             "clamp: above-max -> MAX (%u)", (unsigned)dart_clamp_frag(65535));
+    ST_CHECK(dart_clamp_frag(1) >= DART_FRAG_PAYLOAD_MIN,
+             "clamp: tiny -> >= MIN (%u)", (unsigned)dart_clamp_frag(1));
+
+    /* shared little-endian helpers: byte order + round-trip */
+    {   uint8_t b[8];
+        dart_le_w16(b, 0xBEEFu);
+        ST_CHECK(b[0]==0xEF && b[1]==0xBE && dart_le_r16(b)==0xBEEFu,
+                 "bytes: w16/r16 little-endian round-trip");
+        dart_le_w32(b, 0x01020304u);
+        ST_CHECK(b[0]==0x04 && b[3]==0x01 && dart_le_r32(b)==0x01020304u,
+                 "bytes: w32/r32 little-endian round-trip");
+        dart_le_w64(b, 0x0102030405060708ull);
+        ST_CHECK(b[0]==0x08 && b[7]==0x01 && dart_le_r64(b)==0x0102030405060708ull,
+                 "bytes: w64/r64 little-endian round-trip");
+    }
+
+    /* topic identity: deterministic and name-distinct */
+    ST_CHECK(dart_topic_id("alpha") == dart_topic_id("alpha")
+             && dart_topic_id("alpha") != dart_topic_id("beta"),
+             "topic-id: deterministic and name-distinct");
+
+    /* dart_send result codes (transport core, no sockets). The size check precedes
+       the role check, so an oversize send on the pub channel is TOO_BIG, while a
+       valid-size send on the sub-only channel is ROLE. */
+    {   static uint8_t tmem[1<<16];
+        dart_channel_def uch[2]; dart_config tc; dart_state *ts; uint8_t buf[128];
+        memset(uch, 0, sizeof uch);
+        uch[0].name = "u/pub"; uch[0].role = DART_PUBSUB;   uch[0].qos.max_message_bytes = 64;
+        uch[1].name = "u/sub"; uch[1].role = DART_SUB_ONLY; uch[1].qos.max_message_bytes = 64;
+        memset(&tc, 0, sizeof tc);
+        tc.channels = uch; tc.n_channels = 2; tc.max_peers = 2;
+        ts = dart_init(tmem, sizeof tmem, &tc);
+        ST_CHECK(ts != NULL, "result: transport init");
+        if (ts){
+            memset(buf, 0, sizeof buf);
+            ST_CHECK(dart_send(ts, 5, buf, 16,  0) == DART_ERR_NO_CHANNEL, "result: out-of-range channel -> NO_CHANNEL");
+            ST_CHECK(dart_send(ts, 1, buf, 16,  0) == DART_ERR_ROLE,       "result: sub-only channel -> ROLE");
+            ST_CHECK(dart_send(ts, 0, buf, 100, 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
+            ST_CHECK(dart_send(ts, 0, buf, 16,  0) == DART_OK,             "result: valid publish -> OK");
+        }
+    }
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1283,6 +1335,7 @@ static int selftest_main(void){
     shm_loss_checks();    /* 10. SHM loss/repair/skip (transport core)        */
     shm_node_checks();    /* 11. SHM full-node: size classes + inline fallback */
 #endif
+    unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
