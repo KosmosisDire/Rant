@@ -981,6 +981,38 @@ static void dart__arm(dart_channel *ch, dart_reader_proxy *r, int is_hb){
     if (!r->ack_pending){ if (is_hb) ch->repair_stats.arms_hb++; else ch->repair_stats.arms_data++; }
 }
 
+/* Front-door ordering for an arriving submessage that begins at seqno `base` and proves
+ * seqnos up to `top` exist. Shared by the DATA and SHM-DATA readers. Returns:
+ *   OLD     base is below deliver_upto (already delivered/skipped); caller drops it.
+ *   GAP     reliable + started and base is ahead: a repair NACK was armed; caller returns.
+ *   ADOPTED best-effort / first contact and base is ahead: deliver_upto skipped forward to
+ *           base (MSG_LOST fired, skip counted); caller proceeds at the new floor.
+ *   INORDER base == deliver_upto; caller proceeds.
+ * received_high advances to `top` for any non-OLD arrival. The caller keeps its own per-kind
+ * bookkeeping (the frags_old/frags_ahead counters and the assembly_active reset). */
+typedef enum { DART_ORDER_OLD, DART_ORDER_GAP, DART_ORDER_ADOPTED, DART_ORDER_INORDER } dart_reader_order;
+static dart_reader_order dart__order_arrival(dart_state *st, int channel_idx, int peer_slot,
+                                             dart_reader_proxy *r, uint64_t base, uint64_t top){
+    dart_channel *ch=&st->channels[channel_idx];
+    if (base < r->deliver_upto) return DART_ORDER_OLD;
+    if (top > r->received_high) r->received_high = top;          /* proof these seqnos exist */
+    if (base > r->deliver_upto){
+        if (ch->qos.reliability==DART_RELIABLE && r->started){   /* gap: arm a repair NACK */
+            if (!r->ack_pending){ dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; }
+            dart__lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+            return DART_ORDER_GAP;
+        }
+        if (r->started){                                         /* best-effort / first contact: adopt */
+            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+                        r->deliver_upto, base - r->deliver_upto, "message(s) lost");
+            ch->repair_stats.msgs_skipped += base - r->deliver_upto;
+        }
+        r->deliver_upto = base;
+        return DART_ORDER_ADOPTED;
+    }
+    return DART_ORDER_INORDER;
+}
+
 #ifdef DART_SHM
 /* reader side: handle an SHM-DATA submessage. It covers [base, base+count) in one
  * shot (payload is in shared memory), so there is no reassembly -- just ordering,
@@ -994,20 +1026,8 @@ static void dart_reader_shm(dart_state *st, int channel_idx, int peer_slot, cons
     uint16_t count = dart_le_r16(p+DART_OFFSET_SHM_COUNT);
     const uint8_t *desc = p+DART_OFFSET_SHM_DESC;          /* DART_SHM_DESC_BYTES */
     if (!r->used || count==0) return;
-    if (base < r->deliver_upto) return;                 /* old/dup */
-    if (base+count-1 > r->received_high) r->received_high = base+count-1;   /* proof this seqno exists */
-    if (base > r->deliver_upto){
-        if (reliable && r->started){                    /* gap: arm a NACK for the window */
-            if (!r->ack_pending){ dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; }
-            dart__lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
-            return;
-        }
-        if (r->started){                                /* best-effort / first contact: adopt */
-            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                        r->deliver_upto, base - r->deliver_upto, "message(s) lost");
-            ch->repair_stats.msgs_skipped += base - r->deliver_upto;
-        }
-        r->deliver_upto = base;
+    {   dart_reader_order ord = dart__order_arrival(st, channel_idx, peer_slot, r, base, base+count-1);
+        if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
     r->started = 1; r->assembly_active = 0;
     /* in order (base == deliver_upto). Resolve the chunk; advance + ack ONLY if the
@@ -1062,27 +1082,11 @@ static void dart_reader_data(dart_state *st, int channel_idx, int peer_slot, con
 
     if (!r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
     if (count==0 || frag>=count){ ch->repair_stats.frags_malformed++; return; }  /* malformed */
-    if (base < r->deliver_upto){ ch->repair_stats.frags_old++; return; }   /* old: already delivered/skipped */
-    if (seqno > r->received_high) r->received_high = seqno;       /* proof this seqno exists (skip detector) */
-
-    if (base > r->deliver_upto){
-        ch->repair_stats.frags_ahead++;                          /* future message: we can't store it (no OOO buffer) */
-        if (reliable && r->started){
-            /* a future frag proves the head was skipped: arm a repair now (don't wait for a
-               heartbeat). emit gates the actual request rate, so this can't flood. */
-            if (!r->ack_pending){       /* keep the oldest due time so arrivals don't postpone it */
-                dart__arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
-            }
-            dart__lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
-            return;
-        }
-        /* first contact or best-effort: adopt the writer's position */
-        if (r->started){                                 /* best-effort loss */
-            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                        r->deliver_upto, base - r->deliver_upto, "message(s) lost");
-            ch->repair_stats.msgs_skipped += base - r->deliver_upto;
-        }
-        r->deliver_upto = base; r->assembly_active=0;
+    switch (dart__order_arrival(st, channel_idx, peer_slot, r, base, seqno)){
+        case DART_ORDER_OLD:     ch->repair_stats.frags_old++;   return;   /* already delivered/skipped */
+        case DART_ORDER_GAP:     ch->repair_stats.frags_ahead++; return;   /* future frag; repair armed */
+        case DART_ORDER_ADOPTED: ch->repair_stats.frags_ahead++; r->assembly_active=0; break;  /* skipped past loss */
+        case DART_ORDER_INORDER: break;
     }
     r->started = 1;   /* writer engaged: position adopted */
     /* fit the reassembly buffers (dynamic grows via the hook, fixed is capped at
