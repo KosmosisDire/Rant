@@ -993,6 +993,46 @@ static void shm_node_checks(void){
     }
     free(mp); free(ms);
 }
+
+/* (4) Bug-3 regression: the multicast writer lane (dart_group_emit) must fragment a
+   SHM-backed sample from its external chunk (dart__sbuf), not the unused slot->buf.
+   The normal path never makes a multicast sample SHM-backed (shm-eligibility rejects
+   multicast), so force one via dart_send_shm on a fixed-buffer channel, then read the
+   emitted group DATA back off the wire: its payload must equal the chunk bytes. With
+   the bug it fragments slot->buf (the empty arena slot) instead. */
+static void shm_mcast_buf_checks(void){
+    static uint8_t chunk[64];
+    dart_channel_def cw, cr; dart_config wc, rc; void *mw, *mr; size_t nw, nr;
+    uint8_t blob[256]; size_t bl; dart_state *W, *R; dart_qos q;
+    uint8_t out[DART_DGRAM_MAX]; uint32_t to; size_t ol; uint64_t now=1000000;
+    int got_data=0, payload_ok=0, i;
+    for (i=0;i<(int)sizeof chunk;i++) chunk[i]=(uint8_t)(0xA5u ^ (unsigned)i);   /* recognizable pattern */
+    memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=4; q.max_message_bytes=4096;
+    q.heartbeat_us=50000; q.repair_delay_us=20000;
+    memset(&cw,0,sizeof cw); cw.name="mcbuf"; cw.qos=q; cw.role=DART_PUB_ONLY; cw.multicast=1;
+    memset(&cr,0,sizeof cr); cr.name="mcbuf"; cr.qos=q; cr.role=DART_SUB_ONLY; cr.multicast=1;
+    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;   /* no allocator: fixed buf */
+    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
+    nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
+    nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
+    dart_peer_add(W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,1,DART_FRAG_PAYLOAD);
+    bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,blob,bl);  /* R subscribes -> group mode */
+    ST_CHECK(dart_writer_match_count(W,0)>0, "mcast-buf: writer matched multicast subscriber");
+    {   uint8_t desc[DART_SHM_DESC_WIRE]; memset(desc,0,sizeof desc);
+        dart_send_shm(W, 0, chunk, sizeof chunk, desc, now);   /* force a SHM-backed multicast sample */
+    }
+    while (dart_poll_send(W,&to,out,sizeof out,&ol,now)){
+        if ((out[0]&0x07u)==1u && !(out[0]&0x20u)){            /* a normal DATA (not SHM-DATA, not HB) */
+            uint16_t plen = dart_le_r16(out+11);              /* single-fragment payload_len (offset 11) */
+            got_data=1;
+            payload_ok = (out[0]&0x08u) && plen==sizeof chunk && memcmp(out+13, chunk, sizeof chunk)==0;
+            break;
+        }
+    }
+    ST_CHECK(got_data, "mcast-buf: group lane emitted DATA for the SHM sample");
+    ST_CHECK(payload_ok, "mcast-buf: group DATA fragments from the chunk, not slot->buf");
+    dart_destroy(W); dart_destroy(R); free(mw); free(mr);
+}
 #endif /* DART_SHM */
 
 /* Unit checks for the small pure helpers the Tier-1 cleanup touched: the fragment
@@ -1427,6 +1467,7 @@ static int selftest_main(void){
     shm_module_checks();  /* 9.  SHM mapping module + seqlock guards          */
     shm_loss_checks();    /* 10. SHM loss/repair/skip (transport core)        */
     shm_node_checks();    /* 11. SHM full-node: size classes + inline fallback */
+    shm_mcast_buf_checks();/* 11b. multicast group lane fragments a SHM sample from the chunk */
 #endif
     unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
     open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */

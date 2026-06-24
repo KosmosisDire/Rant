@@ -361,7 +361,7 @@ size_t dart_group_emit(dart_state *st, int channel_idx, uint8_t *out, size_t cap
             if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             ch->multicast_sent_upto++;
             ch->repair_stats.frags_sent++;                       /* new data, once for the whole group */
-            return dart_mk_data(out,alias,seqno,s,frag_idx,s->buf+offset,payload_len);
+            return dart_mk_data(out,alias,seqno,s,frag_idx,dart__sbuf(s)+offset,payload_len);
         } else {
             /* overran the ring: skip the group past it with an HB (first = our floor) */
             if (cap < DART_HEADER_HB) return 0;
