@@ -1047,6 +1047,61 @@ static void unit_checks(void){
     }
 }
 
+/* Exercise dart_node_open's staged-cleanup (goto fail) paths: force a failure at a
+ * different stage each time so a distinct label runs, assert the open returns NULL,
+ * then confirm a normal open still works -- proving cleanup left the platform balanced
+ * (a missed dart_plat_cleanup unbalances the refcount; a missed close leaks the socket). */
+static void open_fail_checks(void){
+    static uint8_t mem[1<<20];
+    dart_channel_def ch; dart_node_config cfg; dart_node *n;
+
+    /* fail_startup: dart_init rejects a topic name longer than DART_TOPIC_NAME_MAX */
+    {   static char longname[DART_TOPIC_NAME_MAX + 8];
+        memset(longname, 'x', sizeof longname - 1); longname[sizeof longname - 1] = 0;
+        memset(&ch, 0, sizeof ch); ch.name = longname;
+        memset(&cfg, 0, sizeof cfg); cfg.domain = ST_DOMAIN; cfg.channels = &ch; cfg.n_channels = 1;
+        n = dart_node_open(mem, sizeof mem, &cfg);
+        ST_CHECK(n == NULL, "open-fail: over-long topic name -> NULL (fail_startup)");
+        if (n) dart_node_close(n, 0);
+    }
+
+    /* fail_mcast: a non-multicast discovery group makes the IGMP join fail, so
+       dart_discovery_rt_open returns NULL and the node unwinds through fail_mcast */
+    {   memset(&ch, 0, sizeof ch); ch.name = "of/disc";
+        memset(&cfg, 0, sizeof cfg); cfg.domain = ST_DOMAIN; cfg.channels = &ch; cfg.n_channels = 1;
+        cfg.net.discovery_group = "1.2.3.4";   /* not a 224-239 group: join fails everywhere */
+        n = dart_node_open(mem, sizeof mem, &cfg);
+        ST_CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL (fail_mcast)");
+        if (n) dart_node_close(n, 0);
+    }
+
+    /* fail_sock: occupy an ephemeral port, then aim the node's data socket at it; the
+       unicast data bind takes no reuse, so it collides and unwinds through fail_sock */
+    {   dart_sock occupy;
+        dart_plat_startup();
+        occupy = dart_plat_udp_open();
+        if (occupy != DART_SOCK_BAD && dart_plat_bind(occupy, 0, 0, 0)){
+            uint16_t port = dart_plat_local_port(occupy);
+            memset(&ch, 0, sizeof ch); ch.name = "of/port";
+            memset(&cfg, 0, sizeof cfg); cfg.domain = ST_DOMAIN; cfg.channels = &ch; cfg.n_channels = 1;
+            cfg.net.data_port = port;
+            n = dart_node_open(mem, sizeof mem, &cfg);
+            ST_CHECK(n == NULL, "open-fail: data-port collision -> NULL (fail_sock)");
+            if (n) dart_node_close(n, 0);
+        }
+        if (occupy != DART_SOCK_BAD) dart_plat_close(occupy);
+        dart_plat_cleanup();
+    }
+
+    /* after three failed opens a normal open must still succeed (cleanup balanced) */
+    {   memset(&ch, 0, sizeof ch); ch.name = "of/ok";
+        memset(&cfg, 0, sizeof cfg); cfg.domain = ST_DOMAIN; cfg.channels = &ch; cfg.n_channels = 1;
+        n = dart_node_open(mem, sizeof mem, &cfg);
+        ST_CHECK(n != NULL, "open-fail: normal open still works after failures");
+        if (n) dart_node_close(n, 0);
+    }
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1336,6 +1391,7 @@ static int selftest_main(void){
     shm_node_checks();    /* 11. SHM full-node: size classes + inline fallback */
 #endif
     unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
+    open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
