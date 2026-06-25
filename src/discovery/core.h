@@ -81,6 +81,12 @@ uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
 
 size_t       dart_discovery_required_memory(const DartDiscoveryConfig *cfg);
 DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryConfig *cfg);
+/* Relocate a live core into a bigger block at grown counts, preserving UUID, blob version,
+ * local-id counter and the peer table (NOT a re-init). self_meta = the announce blob's new
+ * address (the node core moved). Caller frees the old block afterward. Dynamic growth only. */
+DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
+        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
+        const uint8_t *self_meta, void *peer_cb_user);
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                const void *datagram, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);

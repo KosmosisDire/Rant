@@ -208,6 +208,69 @@ DartState *dart_init(void *mem, size_t cap, const DartConfig *cfg){
 }
 
 
+/* Relocate a live transport into a bigger block at grown counts (dynamic-mode growth).
+ * Heap buffers (history rings, sample/assembly bufs, frag bitmaps) are NOT in the arena,
+ * so the struct copies carry their pointers across and the OLD arena can be freed without
+ * touching them. The 2D tables are re-strided into the new max_peers/n_channels; the
+ * active-lane scheduler (indices encode the old strides) is dropped and rebuilt from the
+ * proxy state. The caller frees old's arena block afterward; it must NOT dart_destroy old
+ * (that would free the heap buffers now owned by the new state). Returns the new state. */
+DartState *dart_migrate(DartState *old, void *new_mem, size_t new_cap,
+                        uint16_t new_max_peers, uint16_t new_n_channels){
+    DartConfig nc; DartState *nw; uint16_t omp, onc, c, p;
+    if (!old) return NULL;
+    nc = old->cfg; nc.channels = NULL;
+    nc.max_peers = new_max_peers; nc.n_channels = new_n_channels;
+    nw = dart_init(new_mem, new_cap, &nc);
+    if (!nw) return NULL;
+    omp = old->cfg.max_peers; onc = old->cfg.n_channels;
+
+    nw->reader_epoch_counter = old->reader_epoch_counter;
+    nw->frag = old->frag;
+    memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
+    memcpy(nw->peer_used,    old->peer_used,    omp);
+    memcpy(nw->peer_local,   old->peer_local,   omp);
+    memcpy(nw->peer_dormant, old->peer_dormant, omp);
+    memcpy(nw->peer_frag,    old->peer_frag,    (size_t)omp*sizeof(uint16_t));
+#ifdef DART_SHM
+    memcpy(nw->peer_shm,     old->peer_shm,     omp);
+#endif
+    /* channels: keep the new name-pool slot pointer, carry everything else (incl. the
+       heap history ring pointer) and re-copy the name string into the new pool */
+    for (c=0;c<onc;c++){
+        char *nm = (char*)nw->channels[c].name;
+        size_t l = dart__namelen(old->channels[c].name);
+        nw->channels[c] = old->channels[c];
+        nw->channels[c].name = nm;
+        if (l) memcpy(nm, old->channels[c].name, l);
+        nm[l] = '\0';
+    }
+    /* per-(channel,peer) proxies: re-stride into the new max_peers (heap bufs ride along) */
+    for (c=0;c<onc;c++) for (p=0;p<omp;p++){
+        *dart__writer_proxy_at(nw,c,p) = *dart__writer_proxy_at(old,c,p);
+        *dart__reader_proxy_at(nw,c,p) = *dart__reader_proxy_at(old,c,p);
+    }
+    /* per-peer interest bitmaps (stride grows with n_channels) + alias table */
+    for (p=0;p<omp;p++){
+        memcpy(nw->peer_pub_bitmap + (size_t)p*nw->bitmap_len,
+               old->peer_pub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
+        memcpy(nw->peer_sub_bitmap + (size_t)p*nw->bitmap_len,
+               old->peer_sub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
+        memcpy(nw->alias_to_channel + (size_t)p*nw->alias_max,
+               old->alias_to_channel + (size_t)p*old->alias_max,
+               (size_t)old->alias_max*sizeof(uint16_t));
+    }
+    /* scheduler is fresh/empty: re-enqueue every used lane + group lane, then force a full
+       sweep next poll so timers re-arm and next_deadline is recomputed exactly */
+    for (c=0;c<onc;c++){
+        for (p=0;p<omp;p++) if (nw->peer_used[p]) dart__lane_wake(nw, c, p);
+        dart__lane_wake(nw, c, new_max_peers);
+    }
+    nw->next_deadline_us = 0;
+    return nw;
+}
+
+
 int dart_peer_slot(DartState *st, uint32_t id){
     uint16_t i;
     for (i=0;i<st->cfg.max_peers;i++) if (st->peer_used[i] && st->peer_ids[i]==id) return (int)i;

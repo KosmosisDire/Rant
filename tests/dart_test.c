@@ -1356,6 +1356,60 @@ static void mcast_join_degrade_checks(void){
     if (n) dart_node_close(n, 0);
 }
 
+/* Dynamic growth: creating channels past the reserve relocates the whole node into a bigger
+ * arena, carrying live reliable state across. Stream on channel 0, force several grows by
+ * creating channels mid-stream, then keep streaming on the ORIGINAL handle and assert no
+ * message was lost, duplicated or reordered -- i.e. the migration preserved reader/writer
+ * position, the peer/discovery state and the user's handle. */
+static int dg_recv[24]; static int dg_seq_ok; static int dg_next0;
+static void dg_on_message(const DartMsg *msg){
+    if (msg->channel_id < 24) dg_recv[msg->channel_id]++;
+    if (msg->channel_id == 0 && msg->len >= 1){
+        int s = ((const uint8_t*)msg->data)[0];
+        if (s != dg_next0) dg_seq_ok = 0;            /* gap, dup or reorder */
+        dg_next0 = s + 1;
+    }
+}
+static void dynamic_grow_checks(void){
+    static const char *names[12] = {"dg/0","dg/1","dg/2","dg/3","dg/4","dg/5",
+                                    "dg/6","dg/7","dg/8","dg/9","dg/10","dg/11"};
+    DartAllocator pa = dart_allocator_dynamic(0), sa = dart_allocator_dynamic(0);
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc0=NULL, *pcN;
+    DartChannelOpts co; DartDiscoveryAddr seed; uint8_t payload[8]; int i, t;
+    memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=32;
+    co.qos.catch_up=32; co.qos.heartbeat_us=50000;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+7; po.max_channels=2; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    for (i=0;i<24;i++) dg_recv[i]=0;
+    dg_seq_ok=1; dg_next0=0;
+    P = dart_node_open(&pa, "dg-pub", NULL, &po);
+    S = dart_node_open(&sa, "dg-sub", dg_on_message, &so);
+    ST_CHECK(P&&S, "dyn-grow: nodes open (max_channels=2)");
+    if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); return; }
+    pc0 = dart_node_create_channel(P, names[0], DART_PUB_ONLY, &co);
+    dart_node_create_channel(S, names[0], DART_SUB_ONLY, &co);
+    ST_CHECK(pc0 != NULL, "dyn-grow: channel 0 created");
+    for (t=0;t<800 && dart_channel_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 matched");
+    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,payload,1); dart_node_poll(P,1); dart_node_poll(S,2); }
+    /* create channels 1..11 on both -> several grows (max_channels 2 -> 4 -> 8 -> 16) */
+    for (i=1;i<12;i++){ dart_node_create_channel(P, names[i], DART_PUB_ONLY, &co);
+                        dart_node_create_channel(S, names[i], DART_SUB_ONLY, &co);
+                        dart_node_poll(P,1); dart_node_poll(S,1); }
+    ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 still matched after grows");
+    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,payload,1); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (t=0;t<400 && dg_recv[0]<10;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
+    ST_CHECK(dg_recv[0]==10, "dyn-grow: all 10 on channel 0 delivered across grows (got %d)", dg_recv[0]);
+    ST_CHECK(dg_seq_ok, "dyn-grow: channel 0 in-order, no loss/dup across grows");
+    pcN = dart_node_channel(P, 11);                  /* a channel created AFTER a grow */
+    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_channel_send(pcN,payload,1); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (t=0;t<200 && dg_recv[11]<3;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
+    ST_CHECK(dg_recv[11]==3, "dyn-grow: post-grow channel delivers (got %d)", dg_recv[11]);
+    dart_node_close(P,1); dart_node_close(S,1);
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1653,6 +1707,7 @@ static int selftest_main(void){
     open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */
     event_user_checks();  /* 14. transport-fired event reaches on_event with the app user_data */
     mcast_join_degrade_checks();  /* 15. multicast join failure degrades (skip + signal), not hard-fail */
+    dynamic_grow_checks();        /* 16. dynamic-mode grow: relocate mid-stream, lose nothing       */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;

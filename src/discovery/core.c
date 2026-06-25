@@ -132,6 +132,45 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     return st;
 }
 
+
+/* Relocate a live discovery core into a bigger block at grown counts. NOT a re-init:
+ * the UUID, the monotonic blob version, the local-id counter and the peer table must
+ * survive (a re-init would reset them and peers would treat us as a new node). self_meta
+ * is an external pointer (our announce blob, in the node core); the caller passes its new
+ * address. Each peer's meta is re-pointed into the new pool and its blob bytes copied. */
+DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
+        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
+        const uint8_t *self_meta, void *peer_cb_user){
+    i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; DartDiscoveryConfig dc; uint16_t i, omp;
+    if (!old) return NULL;
+    dc = old->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
+    if (new_cap < dart_discovery_required_memory(&dc)) return NULL;
+    memset(&b,0,sizeof b);
+    b.base = (uint8_t*)(((uintptr_t)new_mem + 7u) & ~(uintptr_t)7u);
+    b.cap  = new_cap - (size_t)(b.base - (uint8_t*)new_mem);
+    dart__discovery_layout(&b, &dc, &blk);
+    st = blk.st;
+    *st = *old;                            /* cfg (uuid!), counters, version, started, cursors */
+    st->cfg.max_peers     = new_max_peers;
+    st->cfg.meta_capacity = new_meta_capacity;
+    st->cfg.user          = peer_cb_user;  /* peer callbacks fire on the relocated node core */
+    st->cap_peers         = new_max_peers;
+    st->meta_capacity     = new_meta_capacity;
+    st->peers             = (i_DartDiscoveryPeer*)blk.peers;
+    st->meta_pool         = blk.meta_pool;
+    st->self_meta         = self_meta;     /* re-point our blob; version NOT bumped */
+    memset(st->peers, 0, (size_t)new_max_peers * sizeof(i_DartDiscoveryPeer));
+    for (i=0;i<new_max_peers;i++) st->peers[i].meta = st->meta_pool + (size_t)i * new_meta_capacity;
+    omp = old->cap_peers;
+    for (i=0;i<omp;i++){
+        uint8_t *nmeta = st->peers[i].meta;
+        st->peers[i] = old->peers[i];      /* carries old meta ptr + meta_len + everything */
+        st->peers[i].meta = nmeta;
+        if (old->peers[i].meta_len) memcpy(nmeta, old->peers[i].meta, old->peers[i].meta_len);
+    }
+    return st;
+}
+
 /* find by UUID, including DROPPED entries: a same-UUID return reuses the slot (and
  * thus the local_id), so the IO layer's transport state keyed by local_id resumes. */
 static int dart_discovery_find(DartDiscoveryState *st, const uint8_t *uuid){

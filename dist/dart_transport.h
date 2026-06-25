@@ -219,6 +219,13 @@ typedef struct DartState DartState;
 
 size_t    dart_required_memory(const DartConfig *cfg);
 DartState *dart_init(void *mem, size_t mem_size, const DartConfig *cfg);
+/* Relocate a live transport into new_mem (>= dart_required_memory at the grown counts),
+ * re-striding its tables to new_max_peers/new_n_channels and carrying live reliability
+ * state (positions, history, in-flight repair) across. Heap buffers are not in the arena,
+ * so the caller frees old's arena block afterward but must NOT dart_destroy old. Returns
+ * the new state, or NULL on failure (old is left intact). Dynamic-mode growth only. */
+DartState *dart_migrate(DartState *old, void *new_mem, size_t new_cap,
+                        uint16_t new_max_peers, uint16_t new_n_channels);
 /* Free allocator-allocated buffers (dynamic channels). No-op in fixed mode; the
  * arena stays the caller's. The node calls it from close. */
 void      dart_destroy(DartState *st);
@@ -485,6 +492,10 @@ typedef struct i_DartNodeCore i_DartNodeCore;
 
 size_t          dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels);
 i_DartNodeCore *dart_node_core_init(void *mem, size_t mem_size, const i_DartNodeCoreConfig *cfg);
+/* Relocate the sans-IO core into a bigger block at grown counts. The transport pointer and
+ * the announce-blob pointer are re-pointed by the caller after those move. Dynamic growth. */
+i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
+                                       uint16_t new_max_peers, uint16_t new_n_channels);
 
 /* The discovery announce blob this node sends: its frag size, OOB host, and interest
  * list. The core owns the buffer and builds it (the codec is dart_meta_* in the
@@ -2377,6 +2388,69 @@ DartState *dart_init(void *mem, size_t cap, const DartConfig *cfg){
 }
 
 
+/* Relocate a live transport into a bigger block at grown counts (dynamic-mode growth).
+ * Heap buffers (history rings, sample/assembly bufs, frag bitmaps) are NOT in the arena,
+ * so the struct copies carry their pointers across and the OLD arena can be freed without
+ * touching them. The 2D tables are re-strided into the new max_peers/n_channels; the
+ * active-lane scheduler (indices encode the old strides) is dropped and rebuilt from the
+ * proxy state. The caller frees old's arena block afterward; it must NOT dart_destroy old
+ * (that would free the heap buffers now owned by the new state). Returns the new state. */
+DartState *dart_migrate(DartState *old, void *new_mem, size_t new_cap,
+                        uint16_t new_max_peers, uint16_t new_n_channels){
+    DartConfig nc; DartState *nw; uint16_t omp, onc, c, p;
+    if (!old) return NULL;
+    nc = old->cfg; nc.channels = NULL;
+    nc.max_peers = new_max_peers; nc.n_channels = new_n_channels;
+    nw = dart_init(new_mem, new_cap, &nc);
+    if (!nw) return NULL;
+    omp = old->cfg.max_peers; onc = old->cfg.n_channels;
+
+    nw->reader_epoch_counter = old->reader_epoch_counter;
+    nw->frag = old->frag;
+    memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
+    memcpy(nw->peer_used,    old->peer_used,    omp);
+    memcpy(nw->peer_local,   old->peer_local,   omp);
+    memcpy(nw->peer_dormant, old->peer_dormant, omp);
+    memcpy(nw->peer_frag,    old->peer_frag,    (size_t)omp*sizeof(uint16_t));
+#ifdef DART_SHM
+    memcpy(nw->peer_shm,     old->peer_shm,     omp);
+#endif
+    /* channels: keep the new name-pool slot pointer, carry everything else (incl. the
+       heap history ring pointer) and re-copy the name string into the new pool */
+    for (c=0;c<onc;c++){
+        char *nm = (char*)nw->channels[c].name;
+        size_t l = dart__namelen(old->channels[c].name);
+        nw->channels[c] = old->channels[c];
+        nw->channels[c].name = nm;
+        if (l) memcpy(nm, old->channels[c].name, l);
+        nm[l] = '\0';
+    }
+    /* per-(channel,peer) proxies: re-stride into the new max_peers (heap bufs ride along) */
+    for (c=0;c<onc;c++) for (p=0;p<omp;p++){
+        *dart__writer_proxy_at(nw,c,p) = *dart__writer_proxy_at(old,c,p);
+        *dart__reader_proxy_at(nw,c,p) = *dart__reader_proxy_at(old,c,p);
+    }
+    /* per-peer interest bitmaps (stride grows with n_channels) + alias table */
+    for (p=0;p<omp;p++){
+        memcpy(nw->peer_pub_bitmap + (size_t)p*nw->bitmap_len,
+               old->peer_pub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
+        memcpy(nw->peer_sub_bitmap + (size_t)p*nw->bitmap_len,
+               old->peer_sub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
+        memcpy(nw->alias_to_channel + (size_t)p*nw->alias_max,
+               old->alias_to_channel + (size_t)p*old->alias_max,
+               (size_t)old->alias_max*sizeof(uint16_t));
+    }
+    /* scheduler is fresh/empty: re-enqueue every used lane + group lane, then force a full
+       sweep next poll so timers re-arm and next_deadline is recomputed exactly */
+    for (c=0;c<onc;c++){
+        for (p=0;p<omp;p++) if (nw->peer_used[p]) dart__lane_wake(nw, c, p);
+        dart__lane_wake(nw, c, new_max_peers);
+    }
+    nw->next_deadline_us = 0;
+    return nw;
+}
+
+
 int dart_peer_slot(DartState *st, uint32_t id){
     uint16_t i;
     for (i=0;i<st->cfg.max_peers;i++) if (st->peer_used[i] && st->peer_ids[i]==id) return (int)i;
@@ -3243,6 +3317,27 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     return c;
 }
 
+/* Relocate the sans-IO node core into a bigger block at grown counts. Peers are inline
+ * (no internal pointers) so a struct copy carries them; the transport pointer and the
+ * announce-blob pointer are re-pointed by the caller after the transport/blob move. */
+i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
+                                       uint16_t new_max_peers, uint16_t new_n_channels){
+    i_DartBump b; i_DartNodeCore *c; uint8_t *base, *peers, *meta;
+    if (!old) return NULL;
+    if (new_cap < dart_node_core_required_memory(new_max_peers, new_n_channels)) return NULL;
+    base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
+    memset(&b, 0, sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
+    dart__core_layout(&b, new_max_peers, new_n_channels, &c, &peers, &meta);
+    *c = *old;                          /* scalars, name, transport ptr (caller re-points) */
+    c->peers     = (i_DartNodePeer*)peers;
+    c->max_peers = new_max_peers;
+    c->meta_buf  = meta;                /* caller rebuilds the blob into it */
+    c->meta_cap  = dart_meta_capacity(new_n_channels);
+    memset(peers, 0, (size_t)new_max_peers * sizeof(i_DartNodePeer));
+    memcpy(peers, old->peers, (size_t)old->max_peers * sizeof(i_DartNodePeer));
+    return c;
+}
+
 /* (Re)build our announce blob from the core's current fields. The codec lives in the
    transport core; the OOB fields default to 0/zero in a non-SHM build, so the codec
    just writes the v2 (non-SHM) prefix. */
@@ -3460,6 +3555,8 @@ struct DartNode {
     /* message-buffer allocation behind dart__node_alloc: static bumps from the arena
        tail [static_pos,static_end); dynamic uses dart_plat_realloc, bounded by mem_cap */
     uint8_t        alloc_dynamic;
+    uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
+    uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
     uint8_t       *static_pos, *static_end;
     size_t         mem_cap, mem_used;
     /* channel handles + lazy multicast bookkeeping. handles is a pointer array in the
@@ -3568,6 +3665,10 @@ static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const voi
  * user_data before handing the event on. */
 static void dart__node_on_event(const DartEvent *ev){
     DartNode *n = (DartNode*)ev->user;
+    /* dynamic mode has no peer cap: a refusal means grow the table (deferred to the next
+       poll, out of this callback); the peer re-announces and is admitted, so the app is
+       never told it was refused. Static mode keeps the cap and surfaces the event. */
+    if (n->alloc_dynamic && ev->kind == DART_PEER_REFUSED){ n->grow_pending = 1; return; }
     if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
 }
 
@@ -3859,6 +3960,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
     n->joined_groups = (uint32_t*)blocks.joined_groups;
     n->max_channels = max_channels;
+    n->max_peers = max_peers;
     n->multicast_port = o.net.multicast_port ? o.net.multicast_port
                : (uint16_t)((o.net.discovery_port ? o.net.discovery_port : 7400) + 1);
 
@@ -3952,10 +4054,92 @@ fail_startup:
     return NULL;
 }
 
+/* Dynamic-mode growth: relocate the whole node into a bigger arena at the given counts so
+ * a full peer table or channel reserve stops being a hard cap. Heap message buffers and SHM
+ * writer segments stay put (only their owning control structures move); the user-held
+ * DartNode and DartChannel handles live outside the arena, so they survive. Returns 1 with n
+ * now on the new arena, or 0 if the bigger arena couldn't be allocated (n left unchanged). */
+static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels){
+    DartConfig tc; DartDiscoveryRtConfig dc; i_DartNodeBlocks nb; i_DartBump b;
+    DartState *nt; i_DartNodeCore *ncore; DartDiscoveryRt *ndisc;
+    void *new_arena, *old_arena = n->arena;
+    uint8_t *nbase; size_t need;
+    uint16_t old_max_channels = n->max_channels, new_meta_cap = dart_meta_capacity(new_max_channels);
+
+    if (!n->alloc_dynamic) return 0;
+    if (new_max_peers <= n->max_peers && new_max_channels <= n->max_channels) return 0;
+
+    memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
+    tc.channels=NULL; tc.n_channels=new_max_channels; tc.max_peers=new_max_peers;
+    tc.allocator=dart__node_alloc; tc.frag_payload=n->net.fragment_size;
+    dc.discovery.max_peers=new_max_peers; dc.discovery.meta_capacity=new_meta_cap;
+
+    memset(&b,0,sizeof b);
+    dart__node_layout(&b, new_max_peers, new_max_channels, &tc, &dc, &nb);
+    need = b.offset + 32u;
+    new_arena = dart_plat_realloc(NULL, need);
+    if (!new_arena) return 0;
+    nbase = (uint8_t*)(((uintptr_t)new_arena+15u)&~(uintptr_t)15u);
+    memset(&b,0,sizeof b); b.base=nbase; b.cap=need-(size_t)(nbase-(uint8_t*)new_arena);
+    dart__node_layout(&b, new_max_peers, new_max_channels, &tc, &dc, &nb);
+
+    /* migrate the three cores; each leaves the old intact, so a failure just frees the new
+       arena and bails (the old node keeps running, only refusing the would-be growth) */
+    nt = dart_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_channels);
+    if (!nt){ dart_plat_realloc(new_arena,0); return 0; }
+    ncore = dart_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_peers, new_max_channels);
+    if (!ncore){ dart_plat_realloc(new_arena,0); return 0; }
+    ncore->transport = nt;                         /* re-point cross-layer pointer */
+    dart_node_core_build_meta(ncore);              /* rebuild the announce blob into the new buf */
+    ndisc = dart_discovery_rt_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
+                                      new_max_peers, new_meta_cap, dart_node_core_meta(ncore,NULL), ncore);
+    if (!ndisc){ dart_plat_realloc(new_arena,0); return 0; }
+
+    /* handle pointer array + joined-group table (handle structs are stable, not moved) */
+    memcpy(nb.handles, n->handles, (size_t)old_max_channels*sizeof(DartChannel*));
+    memset((DartChannel**)nb.handles + old_max_channels, 0,
+           (size_t)(new_max_channels-old_max_channels)*sizeof(DartChannel*));
+    memcpy(nb.joined_groups, n->joined_groups, (size_t)old_max_channels*sizeof(uint32_t));
+
+#ifdef DART_SHM
+    if (n->shm_capable){
+        size_t sb = dart_shm_state_bytes();
+        uint32_t old_segs=(uint32_t)n->shm_n_channels*DART_SHM_N_CLASSES;
+        uint32_t new_segs=(uint32_t)new_max_channels*DART_SHM_N_CLASSES, i;
+        uint16_t new_reader_max = dart__node_shm_reader_max(new_max_peers, new_max_channels);
+        void **np = (void**)nb.shm_pool;
+        for (i=0;i<new_segs;i++) np[i]=NULL;
+        for (i=0;i<old_segs;i++)        /* writer pool: keep segments mapped, relocate the state */
+            if (n->shm_pool[i]){
+                memcpy(nb.shm_pool_mem + (size_t)i*sb, n->shm_pool[i], sb);
+                np[i] = nb.shm_pool_mem + (size_t)i*sb;
+            }
+        for (i=0;i<n->shm_reader_max;i++)  /* reader pool: detach + reset (re-attaches lazily) */
+            if (n->shm_reader_segments[i]) dart_shm_detach((i_DartShmPool*)(n->shm_reader_pool_mem+(size_t)i*sb));
+        n->shm_pool=np; n->shm_pool_mem=nb.shm_pool_mem;
+        n->shm_reader_segments=(uint64_t*)nb.shm_reader_segments;
+        n->shm_reader_pool_mem=nb.shm_reader_pool;
+        for (i=0;i<new_reader_max;i++) n->shm_reader_segments[i]=0;
+        n->shm_reader_max=new_reader_max; n->shm_n_channels=new_max_channels;
+    }
+#endif
+
+    n->transport=nt; n->core=ncore; n->discovery=ndisc;
+    n->handles=(DartChannel**)nb.handles; n->joined_groups=(uint32_t*)nb.joined_groups;
+    n->max_channels=new_max_channels; n->max_peers=new_max_peers;
+    dart_plat_realloc(old_arena,0);    /* control structs only; heap bufs + segments moved by ref */
+    n->arena=new_arena;
+    return 1;
+}
+
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
                                       const DartChannelOpts *opts){
     DartChannelDef def; DartChannel *h; uint16_t idx, mlen;
-    if (!n || !name || n->n_created >= n->max_channels) return NULL;
+    if (!n || !name) return NULL;
+    if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
+        uint16_t want = n->max_channels < 0x8000u ? (uint16_t)(n->max_channels*2u) : 0xFFFFu;
+        if (want <= n->max_channels || !dart__node_grow(n, n->max_peers, want)) return NULL;
+    }
     idx = n->n_created;
     h = (DartChannel*)dart__node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
     if (!h) return NULL;
@@ -4008,6 +4192,14 @@ static void dart__node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
 int dart_node_poll(DartNode *n, int timeout_ms){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
     i_DartPollfd pfd[2]; int n_fds=1;
+
+    /* a peer was refused last tick for lack of slots: grow the table now, between ticks
+       (safe: not inside any layer's processing), then the peer's next announce is admitted */
+    if (n->grow_pending){
+        uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
+        n->grow_pending = 0;
+        if (want > n->max_peers) dart__node_grow(n, want, n->max_channels);
+    }
 
     dart_discovery_rt_poll(n->discovery, 0);                 /* discovery tick (non-blocking) */
 

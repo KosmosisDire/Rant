@@ -226,6 +226,34 @@ DartDiscoveryRt *dart_discovery_rt_open(void *mem, size_t cap, const DartDiscove
     return rt;
 }
 
+/* Relocate the discovery runtime into a bigger block at grown counts (node arena grow).
+ * The rt struct copy preserves the live socket fd, the multicast group/interface and the
+ * seed list; the core is migrated (UUID/version/peers preserved) and self_meta re-pointed
+ * to the node core's new announce-blob address. Caller frees the old block afterward. */
+DartDiscoveryRt *dart_discovery_rt_migrate(DartDiscoveryRt *old, void *new_mem, size_t new_cap,
+        uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user){
+    DartDiscoveryConfig dc; i_DartRtBlocks blk; i_DartBump b; DartDiscoveryRt *rt;
+    DartDiscoveryState *nc; uint8_t *base; size_t need;
+    if (!old) return NULL;
+    dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
+    {   i_DartBump mb; memset(&mb,0,sizeof mb); dart__rt_layout(&mb, &dc, &blk); need = mb.offset + 16u; }
+    if (new_cap < need) return NULL;
+    base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
+    memset(&b,0,sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
+    dart__rt_layout(&b, &dc, &blk);
+    rt = blk.rt;
+    *rt = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds */
+    rt->wire_max = (uint32_t)blk.wire_max;
+    rt->rxbuf = blk.rxbuf; rt->txbuf = blk.txbuf;
+    rt->max_peers = new_max_peers;
+    nc = dart_discovery_core_migrate(old->core, blk.core,
+             new_cap - (size_t)(blk.core - (uint8_t*)new_mem), new_max_peers, new_meta_capacity,
+             self_meta, peer_cb_user);
+    if (!nc) return NULL;                /* old left intact; caller frees the new block */
+    rt->core = nc;
+    return rt;
+}
+
 int dart_discovery_rt_poll(DartDiscoveryRt *rt, int timeout_ms){
     i_DartPollfd pfd;
     DartDiscoveryAddr to;

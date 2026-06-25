@@ -46,6 +46,10 @@ typedef struct i_DartNodeCore i_DartNodeCore;
 
 size_t          dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels);
 i_DartNodeCore *dart_node_core_init(void *mem, size_t mem_size, const i_DartNodeCoreConfig *cfg);
+/* Relocate the sans-IO core into a bigger block at grown counts. The transport pointer and
+ * the announce-blob pointer are re-pointed by the caller after those move. Dynamic growth. */
+i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
+                                       uint16_t new_max_peers, uint16_t new_n_channels);
 
 /* The discovery announce blob this node sends: its frag size, OOB host, and interest
  * list. The core owns the buffer and builds it (the codec is dart_meta_* in the

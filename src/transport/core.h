@@ -194,6 +194,13 @@ typedef struct DartState DartState;
 
 size_t    dart_required_memory(const DartConfig *cfg);
 DartState *dart_init(void *mem, size_t mem_size, const DartConfig *cfg);
+/* Relocate a live transport into new_mem (>= dart_required_memory at the grown counts),
+ * re-striding its tables to new_max_peers/new_n_channels and carrying live reliability
+ * state (positions, history, in-flight repair) across. Heap buffers are not in the arena,
+ * so the caller frees old's arena block afterward but must NOT dart_destroy old. Returns
+ * the new state, or NULL on failure (old is left intact). Dynamic-mode growth only. */
+DartState *dart_migrate(DartState *old, void *new_mem, size_t new_cap,
+                        uint16_t new_max_peers, uint16_t new_n_channels);
 /* Free allocator-allocated buffers (dynamic channels). No-op in fixed mode; the
  * arena stays the caller's. The node calls it from close. */
 void      dart_destroy(DartState *st);

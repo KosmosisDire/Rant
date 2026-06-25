@@ -30,6 +30,11 @@ typedef struct DartDiscoveryRt DartDiscoveryRt;
 size_t     dart_discovery_rt_required_memory(const DartDiscoveryRtConfig *cfg);
 /* Open the socket, join the group, place core state in mem. NULL on failure. */
 DartDiscoveryRt  *dart_discovery_rt_open(void *mem, size_t mem_size, const DartDiscoveryRtConfig *cfg);
+/* Relocate the runtime into a bigger block at grown counts, preserving the live socket,
+ * UUID and peer table. self_meta = the node core's new announce-blob address. Caller frees
+ * the old block afterward. Dynamic-mode growth only. */
+DartDiscoveryRt  *dart_discovery_rt_migrate(DartDiscoveryRt *old, void *new_mem, size_t new_cap,
+        uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user);
 /* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
  * what's due. Returns 1 if a datagram arrived, 0 if idle, <0 on socket error. */
 int        dart_discovery_rt_poll(DartDiscoveryRt *rt, int timeout_ms);

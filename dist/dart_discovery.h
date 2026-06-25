@@ -99,6 +99,12 @@ uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
 
 size_t       dart_discovery_required_memory(const DartDiscoveryConfig *cfg);
 DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryConfig *cfg);
+/* Relocate a live core into a bigger block at grown counts, preserving UUID, blob version,
+ * local-id counter and the peer table (NOT a re-init). self_meta = the announce blob's new
+ * address (the node core moved). Caller frees the old block afterward. Dynamic growth only. */
+DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
+        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
+        const uint8_t *self_meta, void *peer_cb_user);
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                const void *datagram, size_t len, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
@@ -304,6 +310,11 @@ typedef struct DartDiscoveryRt DartDiscoveryRt;
 size_t     dart_discovery_rt_required_memory(const DartDiscoveryRtConfig *cfg);
 /* Open the socket, join the group, place core state in mem. NULL on failure. */
 DartDiscoveryRt  *dart_discovery_rt_open(void *mem, size_t mem_size, const DartDiscoveryRtConfig *cfg);
+/* Relocate the runtime into a bigger block at grown counts, preserving the live socket,
+ * UUID and peer table. self_meta = the node core's new announce-blob address. Caller frees
+ * the old block afterward. Dynamic-mode growth only. */
+DartDiscoveryRt  *dart_discovery_rt_migrate(DartDiscoveryRt *old, void *new_mem, size_t new_cap,
+        uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user);
 /* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
  * what's due. Returns 1 if a datagram arrived, 0 if idle, <0 on socket error. */
 int        dart_discovery_rt_poll(DartDiscoveryRt *rt, int timeout_ms);
@@ -524,6 +535,45 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     st->self_meta_len     = cfg->meta_len;
     st->self_meta_version = 1;
     st->self_blob_resend  = DART_DISCOVERY_BLOB_RESEND;
+    return st;
+}
+
+
+/* Relocate a live discovery core into a bigger block at grown counts. NOT a re-init:
+ * the UUID, the monotonic blob version, the local-id counter and the peer table must
+ * survive (a re-init would reset them and peers would treat us as a new node). self_meta
+ * is an external pointer (our announce blob, in the node core); the caller passes its new
+ * address. Each peer's meta is re-pointed into the new pool and its blob bytes copied. */
+DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
+        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
+        const uint8_t *self_meta, void *peer_cb_user){
+    i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; DartDiscoveryConfig dc; uint16_t i, omp;
+    if (!old) return NULL;
+    dc = old->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
+    if (new_cap < dart_discovery_required_memory(&dc)) return NULL;
+    memset(&b,0,sizeof b);
+    b.base = (uint8_t*)(((uintptr_t)new_mem + 7u) & ~(uintptr_t)7u);
+    b.cap  = new_cap - (size_t)(b.base - (uint8_t*)new_mem);
+    dart__discovery_layout(&b, &dc, &blk);
+    st = blk.st;
+    *st = *old;                            /* cfg (uuid!), counters, version, started, cursors */
+    st->cfg.max_peers     = new_max_peers;
+    st->cfg.meta_capacity = new_meta_capacity;
+    st->cfg.user          = peer_cb_user;  /* peer callbacks fire on the relocated node core */
+    st->cap_peers         = new_max_peers;
+    st->meta_capacity     = new_meta_capacity;
+    st->peers             = (i_DartDiscoveryPeer*)blk.peers;
+    st->meta_pool         = blk.meta_pool;
+    st->self_meta         = self_meta;     /* re-point our blob; version NOT bumped */
+    memset(st->peers, 0, (size_t)new_max_peers * sizeof(i_DartDiscoveryPeer));
+    for (i=0;i<new_max_peers;i++) st->peers[i].meta = st->meta_pool + (size_t)i * new_meta_capacity;
+    omp = old->cap_peers;
+    for (i=0;i<omp;i++){
+        uint8_t *nmeta = st->peers[i].meta;
+        st->peers[i] = old->peers[i];      /* carries old meta ptr + meta_len + everything */
+        st->peers[i].meta = nmeta;
+        if (old->peers[i].meta_len) memcpy(nmeta, old->peers[i].meta, old->peers[i].meta_len);
+    }
     return st;
 }
 
@@ -1523,6 +1573,34 @@ DartDiscoveryRt *dart_discovery_rt_open(void *mem, size_t cap, const DartDiscove
         for (k=0;k<seed_count;k++) rt->seeds[k] = c.seeds[k];
         rt->n_seeds = seed_count;
     }
+    return rt;
+}
+
+/* Relocate the discovery runtime into a bigger block at grown counts (node arena grow).
+ * The rt struct copy preserves the live socket fd, the multicast group/interface and the
+ * seed list; the core is migrated (UUID/version/peers preserved) and self_meta re-pointed
+ * to the node core's new announce-blob address. Caller frees the old block afterward. */
+DartDiscoveryRt *dart_discovery_rt_migrate(DartDiscoveryRt *old, void *new_mem, size_t new_cap,
+        uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user){
+    DartDiscoveryConfig dc; i_DartRtBlocks blk; i_DartBump b; DartDiscoveryRt *rt;
+    DartDiscoveryState *nc; uint8_t *base; size_t need;
+    if (!old) return NULL;
+    dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
+    {   i_DartBump mb; memset(&mb,0,sizeof mb); dart__rt_layout(&mb, &dc, &blk); need = mb.offset + 16u; }
+    if (new_cap < need) return NULL;
+    base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
+    memset(&b,0,sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
+    dart__rt_layout(&b, &dc, &blk);
+    rt = blk.rt;
+    *rt = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds */
+    rt->wire_max = (uint32_t)blk.wire_max;
+    rt->rxbuf = blk.rxbuf; rt->txbuf = blk.txbuf;
+    rt->max_peers = new_max_peers;
+    nc = dart_discovery_core_migrate(old->core, blk.core,
+             new_cap - (size_t)(blk.core - (uint8_t*)new_mem), new_max_peers, new_meta_capacity,
+             self_meta, peer_cb_user);
+    if (!nc) return NULL;                /* old left intact; caller frees the new block */
+    rt->core = nc;
     return rt;
 }
 

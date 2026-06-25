@@ -79,6 +79,27 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     return c;
 }
 
+/* Relocate the sans-IO node core into a bigger block at grown counts. Peers are inline
+ * (no internal pointers) so a struct copy carries them; the transport pointer and the
+ * announce-blob pointer are re-pointed by the caller after the transport/blob move. */
+i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
+                                       uint16_t new_max_peers, uint16_t new_n_channels){
+    i_DartBump b; i_DartNodeCore *c; uint8_t *base, *peers, *meta;
+    if (!old) return NULL;
+    if (new_cap < dart_node_core_required_memory(new_max_peers, new_n_channels)) return NULL;
+    base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
+    memset(&b, 0, sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
+    dart__core_layout(&b, new_max_peers, new_n_channels, &c, &peers, &meta);
+    *c = *old;                          /* scalars, name, transport ptr (caller re-points) */
+    c->peers     = (i_DartNodePeer*)peers;
+    c->max_peers = new_max_peers;
+    c->meta_buf  = meta;                /* caller rebuilds the blob into it */
+    c->meta_cap  = dart_meta_capacity(new_n_channels);
+    memset(peers, 0, (size_t)new_max_peers * sizeof(i_DartNodePeer));
+    memcpy(peers, old->peers, (size_t)old->max_peers * sizeof(i_DartNodePeer));
+    return c;
+}
+
 /* (Re)build our announce blob from the core's current fields. The codec lives in the
    transport core; the OOB fields default to 0/zero in a non-SHM build, so the codec
    just writes the v2 (non-SHM) prefix. */
