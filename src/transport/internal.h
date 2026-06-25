@@ -128,6 +128,8 @@ typedef struct {
     uint8_t   role;         /* DartRole */
     uint8_t   multicast;
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
+    uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
+                               dart_channel_define), so dart_destroy frees it */
     uint16_t  n_subscribers;        /* live matched subscribers; multicast: >0 = group mode */
     /* writer */
     i_DartWriterSample *history;       /* [depth] ring */

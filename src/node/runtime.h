@@ -1,7 +1,7 @@
-/* NODE runtime (the public dart_node_* API): owns the data sockets, drives
- * discovery, and the clock; it wires peers into the transport via the sans-IO
- * node core (node/core.h). A second transport would be a new runtime over that
- * same core. */
+/* NODE runtime (the public dart_node_* / dart_channel_* API): owns the data sockets,
+ * drives discovery and the clock, and wires peers into the transport via the sans-IO
+ * node core (node/core.h). Channels are created at runtime and handed back as opaque
+ * handles; a second transport would be a new runtime over that same core. */
 #ifndef DART_NODE_H
 #define DART_NODE_H
 
@@ -39,46 +39,87 @@ typedef struct {
     uint16_t              max_peers;         /* peer-table capacity; 16 */
 } DartNodeDiscovery;
 
-/* The top fields are what most nodes set; the two sub-structs default whole when
- * zero-initialized:
- *   DartNodeConfig cfg = {
- *       .domain = 7, .channels = ch, .n_channels = 2, .on_message = on_message };
+/* Optional node config, passed to dart_node_open as a compound literal (every field is
+ * zero-means-default, so &(DartNodeOpts){0} or NULL is "all defaults"):
+ *   dart_node_open(1<<20, on_message, &(DartNodeOpts){ .domain = 7, .max_channels = 16 });
  */
 typedef struct {
-    uint16_t                domain;        /* logical-network selector */
-    const DartChannelDef *channels;
-    uint16_t                n_channels;
-    DartMessageFn         on_message;
-    DartEventFn           on_event;      /* optional: loss/too-big/collision/peer up/down */
-    void                   *user_data;     /* passed to every callback */
-    DartAllocFn           allocator;     /* optional: set => dynamic message sizing */
-    DartNodeNet           net;           /* addressing/sockets (optional) */
-    DartNodeDiscovery     discovery;     /* discovery cadence (optional) */
-} DartNodeConfig;
+    uint16_t              domain;        /* logical-network selector */
+    uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
+    DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
+    void                 *user_data;     /* passed to on_message (DartMsg.user) and on_event */
+    DartAllocFn         allocator;     /* message-buffer allocator; 0 = built-in realloc */
+    void                 *memory;        /* bring-your-own arena of mem_size bytes; 0 = malloc it */
+    uint8_t               disable_shm;   /* 1 = never use the same-host shared-memory fast path
+                                            (force on-wire UDP even to a same-host peer) */
+    DartNodeNet         net;           /* addressing/sockets (optional) */
+    DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
+} DartNodeOpts;
 
-typedef struct DartNode DartNode;
+/* Optional per-channel config, passed to dart_node_create_channel as a compound literal:
+ *   dart_node_create_channel(n, "msg", DART_PUBSUB,
+ *                            &(DartChannelOpts){ .qos = { .reliability = DART_RELIABLE } });
+ */
+typedef struct {
+    DartQos  qos;
+    uint8_t  multicast;   /* 1 = publish to / join this topic's multicast group (see DartChannelDef) */
+} DartChannelOpts;
 
-size_t   dart_node_required_memory(const DartNodeConfig *cfg);
-DartNode *dart_node_open(void *mem, size_t mem_size, const DartNodeConfig *cfg);
-int      dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
-int      dart_node_send(DartNode *n, uint16_t channel, const void *data, size_t len);
-/* Change a channel's role at runtime (DART_INACTIVE = off). Returns 0 ok, <0 unknown. */
-int      dart_node_set_role(DartNode *n, uint16_t channel, uint8_t role);
+typedef struct DartNode    DartNode;
+typedef struct DartChannel DartChannel;   /* opaque channel handle (stable for the node's life) */
+
+/* A delivered message: all of its properties in one place. channel_name is a local
+ * lookup (never on the wire). Do not call back into dart_* from the callback. */
+typedef struct {
+    DartNode      *node;
+    void          *user;             /* DartNodeOpts.user_data */
+    uint16_t       channel_id;       /* local channel index */
+    uint32_t       sender_id;        /* peer id the message came from */
+    const char    *channel_name;     /* topic name (NUL-terminated), or NULL */
+    uint8_t        channel_name_len; /* its length */
+    const void    *data;
+    size_t         len;
+} DartMsg;
+typedef void (*DartMsgFn)(const DartMsg *msg);
+
+/* Open a node with a mem_size-byte arena (malloc'd, or opts->memory if you bring your
+ * own). on_message may be NULL for a publish-only node. opts may be NULL for all
+ * defaults. Returns NULL on failure. */
+DartNode    *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOpts *opts);
+int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
+void         dart_node_close(DartNode *n, int send_bye);
+
+/* Create a channel (topic). name is the cross-peer identity (same on every node, copied
+ * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. opts may be
+ * NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_channels) is
+ * full, the name is bad/too long, or out of memory. */
+DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
+                                      const DartChannelOpts *opts);
+/* Publish to all matched subscribers. Returns DART_OK or a negative DartResult. */
+int          dart_channel_send(DartChannel *ch, const void *data, size_t len);
+/* Flip a channel's role at runtime (re-advertises interest). Returns 0 ok, <0 on error. */
+int          dart_channel_set_role(DartChannel *ch, DartRole role);
+/* This channel's local index (== DartMsg.channel_id for its messages). */
+uint16_t     dart_channel_index(const DartChannel *ch);
+/* Recover an already-created channel handle by its creation index (0-based), or NULL if
+ * out of range. Lets a caller use a handle without storing the create_channel result. */
+DartChannel *dart_node_channel(DartNode *n, uint16_t index);
+
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends);
 /* Cumulative reliable-repair counters for a channel (see DartRepairStats). The
- * per-second deltas are repair throughput; *out is zeroed for an unknown channel. */
-void     dart_node_repair_stats(DartNode *n, uint16_t channel, DartRepairStats *out);
+ * per-second deltas are repair throughput; *out is zeroed for a NULL channel. */
+void     dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out);
 
-/* In-pump diagnostic probe. A reliable publisher blocks inside dart_node_send for the
+/* In-pump diagnostic probe. A reliable publisher blocks inside dart_channel_send for the
  * whole backpressure wait, so its normal once-a-second print can't see within a stall.
  * A registered probe is called on a ~interval_us timer DURING that wait with the
  * writer's repair progress over each interval -- making the stall a within-block time
  * series (resends bursty-then-flat => reader stopped asking; steady => resends dropped).
  * Observational only; deltas are since the previous sample in the same wait. */
 typedef struct {
-    uint16_t channel;         /* channel being pumped */
+    uint16_t channel;         /* channel index being pumped */
     uint64_t wait_elapsed_us; /* us since this backpressure wait began */
     uint64_t interval_us;     /* us since the previous sample (normalise deltas by this for true /s) */
     uint64_t frags_resent;    /* writer DATA fragments resent in the interval */
@@ -89,22 +130,21 @@ typedef struct {
 typedef void (*DartPumpProbeFn)(void *user, const DartPumpSample *s);
 /* Register the in-pump probe (NULL fn disables). interval_us 0 => default 200ms. */
 void     dart_node_set_pump_probe(DartNode *n, DartPumpProbeFn fn, uint64_t interval_us, void *user);
-/* Head-of-line reassembly snapshot for the in-progress message from `peer` on
- * `channel`: returns 1 + fills base_seqno/have/total if one is mid-reassembly, else 0.
+/* Head-of-line reassembly snapshot for the in-progress message from `peer` on this
+ * channel: returns 1 + fills base_seqno/have/total if one is mid-reassembly, else 0.
  * `have` rising across calls = repair crawling; flat = wedged. Any pointer may be NULL. */
-int      dart_node_reader_progress(DartNode *n, uint16_t channel, uint32_t peer,
+int      dart_channel_reader_progress(DartChannel *ch, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
-/* Pump until every reader has acked all messages on channel, or timeout_ms elapses.
+/* Pump until every reader has acked all messages on this channel, or timeout_ms elapses.
  * Returns 1 if drained, 0 on timeout. Call before close so a burst isn't cut by the BYE. */
-int      dart_node_drain(DartNode *n, uint16_t channel, int timeout_ms);
+int      dart_channel_drain(DartChannel *ch, int timeout_ms);
 /* Subscribers matched on this channel now; a one-shot publisher polls it before sending. */
-int      dart_node_writer_match_count(DartNode *n, uint16_t channel);
+int      dart_channel_match_count(DartChannel *ch);
 #ifdef DART_SHM
 /* Messages published / delivered via the zero-fragment shared-memory path since open
  * (observability; same-host readers only). Either out-pointer may be NULL. */
 void     dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv);
 #endif
-void     dart_node_close(DartNode *n, int send_bye);
 
 #ifdef __cplusplus
 }

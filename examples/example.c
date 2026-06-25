@@ -22,19 +22,20 @@ static int input_ready(void){
 }
 #endif
 
-static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
-    (void)u; (void)ch; (void)from;
-    printf("> %.*s\n", (int)len, (const char *)data);
+static void on_message(const DartMsg *msg){
+    printf("%.*s > %.*s\n", (int)msg->channel_name_len, msg->channel_name,
+                            (int)msg->len, (const char *)msg->data);
 }
 
 int main(int argc, char *argv[]){
     const char *ch_name = argc > 1 ? argv[1] : "msg";
-    DartChannelDef ch  = { .name = ch_name, .qos = { .reliability = DART_RELIABLE } };
-    DartNodeConfig cfg = { .channels = &ch, .n_channels = 1, .on_message = on_message };
-    static uint8_t mem[1 << 20];
 
-    DartNode *n = dart_node_open(mem, sizeof mem, &cfg);
+    DartNode *n = dart_node_open(1 << 20, on_message, NULL);
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
+
+    DartChannel *ch = dart_node_create_channel(n, ch_name, DART_PUBSUB,
+                          &(DartChannelOpts){ .qos = { .reliability = DART_RELIABLE } });
+    if (!ch){ fprintf(stderr, "dart_node_create_channel failed\n"); dart_node_close(n, 1); return 1; }
 
     printf("type a message and press enter (ctrl-d / ctrl-z to quit):\n");
     for (;;){
@@ -43,7 +44,7 @@ int main(int argc, char *argv[]){
             char line[256];
             if (!fgets(line, sizeof line, stdin)) break;     /* EOF: quit */
             size_t len = strcspn(line, "\n");                /* drop the trailing newline */
-            if (len) dart_node_send(n, 0, line, len);
+            if (len) dart_channel_send(ch, line, len);
         }
     }
     dart_node_close(n, 1);

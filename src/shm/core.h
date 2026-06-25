@@ -36,7 +36,7 @@
  * Zero copy both ways: the app loans a chunk and writes into it (dart_node_loan),
  * remote peers fragment straight from that chunk, local peers read it in place in
  * on_message (valid-for-the-call, the existing contract). One-copy fallback:
- * plain dart_node_send memcpys into the chunk.
+ * plain dart_channel_send memcpys into the chunk.
  *
  * Read modes (a future toggle; ship the safe one first):
  *   - ONE-COPY SHM (default): the reader memcpys the chunk into its own assembly_buf, then
@@ -210,7 +210,7 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
  *     set peer_shm in the transport; on down/dormant, detach / clear it
  *   - dart_node_loan(n, ch, len, &ptr) / dart_node_publish(n, ch): loan a chunk for
  *     the channel's next history slot, app fills ptr, publish hands the chunk +
- *     descriptor to the transport. dart_node_send keeps working (one-copy into the
+ *     descriptor to the transport. dart_channel_send keeps working (one-copy into the
  *     chunk when the channel has any SHM peer, else plain inline)
  *   - on receive: the node's on_message wrapper sees the SHM flag, dart_shm_read the
  *     descriptor, calls the app on_message with the in-place pointer

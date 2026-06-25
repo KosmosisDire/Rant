@@ -148,9 +148,15 @@ typedef void (*DartEventFn)(void *user, const DartEvent *ev);
  * Pair with dart_destroy to free what it allocated. */
 typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
 
+/* Two ways to populate the channel table:
+ *   fixed/at-init : channels != NULL, n_channels = its length. Slots are defined now;
+ *                   buffers come from the arena (or the allocator if one is set).
+ *   reserve/lazy  : channels == NULL, n_channels = the reserved capacity, allocator set.
+ *                   All slots start DART_INACTIVE; fill them later with dart_channel_define
+ *                   (this is how the node's runtime dart_node_create_channel works). */
 typedef struct {
-    const DartChannelDef *channels;
-    uint16_t              n_channels;
+    const DartChannelDef *channels;     /* NULL = reserve mode (see above) */
+    uint16_t              n_channels;   /* defined count, or reserved capacity in reserve mode */
     uint16_t              max_peers;
     uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
                                            DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
@@ -240,6 +246,18 @@ int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_set_role(DartState *st, uint16_t channel, uint8_t role);
 
+/* Define a reserved (currently inactive) channel slot at runtime: set its name/qos/
+ * role/multicast, allocate its history ring via the allocator, and rematch known peers.
+ * Reserve mode only (an allocator is required). Returns 0 ok, or negative: -1 bad index/
+ * name / slot already defined / no allocator, -4 out of memory. Re-advertise interest
+ * after (the node bumps its discovery announce). */
+int       dart_channel_define(DartState *st, uint16_t channel, const DartChannelDef *def);
+
+/* The channel's topic name (NULL + *len 0 if undefined or out of range), for surfacing
+ * it on a delivered message. *len (may be NULL) gets the name length. The name is a
+ * local lookup; it is never on the data path. */
+const char *dart_channel_name(DartState *st, uint16_t channel, uint8_t *len);
+
 /* dart_send / dart_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {
     DART_OK             =  0,
@@ -280,7 +298,7 @@ int       dart_send_would_evict(DartState *st, uint16_t channel);
 
 /* 1 if every live reader has acked all messages on this reliable channel (so a
  * writer may close without truncating). Best-effort/unknown return 1. Wrapped as
- * dart_node_drain. */
+ * dart_channel_drain. */
 int       dart_send_drained(DartState *st, uint16_t channel);
 
 /* Peers currently matched as readers (subscribers) of this channel. 0 = a publish
@@ -334,7 +352,7 @@ int       dart_repair_pending(DartState *st, uint16_t channel);
  *   have       : fragments received so far (popcount of the reassembly bitmap)
  *   total      : fragments the message needs
  * `have` rising across calls => repair is crawling forward; flat => wedged. Any
- * out-pointer may be NULL. Wrapped as dart_node_reader_progress. */
+ * out-pointer may be NULL. Wrapped as dart_channel_reader_progress. */
 int       dart_reader_progress(DartState *st, uint16_t channel, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 

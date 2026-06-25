@@ -72,15 +72,13 @@ static DartState *dart_build(i_DartBump *b, const DartConfig *cfg){
     uint16_t c, p; uint32_t max_peers = cfg->max_peers, n_channels = cfg->n_channels;
     uint16_t bitmap_len = (uint16_t)((n_channels+7u)/8u);
     uint32_t meta_ids = DART_META_MAX_IDS;
-    uint32_t name_bytes = 0; char *name_pool = NULL; uint32_t name_cursor = 0;
+    uint32_t name_bytes = 0; char *name_pool = NULL;
     DartState *st = (DartState*)dart_take(b, sizeof(DartState), 16);
     if (st && b->base) memset(st, 0, sizeof(*st));
 
-    /* name pool (our copies of the topic names) */
-    for (c=0;c<n_channels;c++){
-        size_t lane = dart__namelen(cfg->channels[c].name);
-        if (lane) name_bytes += (uint32_t)lane + 1u;
-    }
+    /* name pool: one fixed-size slot per channel so a reserve-mode slot can be named
+       later by dart_channel_define without repacking. ch->name points at its slot. */
+    name_bytes = (uint32_t)n_channels * (DART_TOPIC_NAME_MAX + 1u);
     if (meta_ids < 2u*n_channels) meta_ids = 2u*n_channels;     /* our own interest list must always fit */
 
     { uint32_t nlanes = n_channels*(max_peers+1u), ndest = max_peers+n_channels;
@@ -130,43 +128,50 @@ static DartState *dart_build(i_DartBump *b, const DartConfig *cfg){
     }
 
     for (c=0;c<n_channels;c++){
-        const DartChannelDef *def = &cfg->channels[c];
-        /* dynamic = an allocator is set: buffers grow via the hook, not the arena */
-        int dyn = (cfg->allocator != NULL);
-        DartQos q = def->qos;            /* local, normalized copy */
-        i_DartWriterSample *history; uint16_t depth, max_fragments, d;
-        dart__qos_defaults(&q, dyn);
-        depth = q.keep_last;
-        max_fragments = dart_max_fragments(q.max_message_bytes);
-        history = (i_DartWriterSample*)dart_take(b, depth*sizeof(i_DartWriterSample), 16);
+        /* every slot starts inactive with its own name-pool slot; reserve-mode slots
+           stay this way until dart_channel_define fills them. */
         if (st && b->base){
             i_DartChannel *ch = &st->channels[c];
-            size_t lane = dart__namelen(def->name);
             memset(ch,0,sizeof(*ch));
-            ch->qos=q; ch->max_fragments=max_fragments;
-            ch->role=def->role; ch->multicast=def->multicast; ch->dynamic=(uint8_t)dyn;
-            ch->identity = dart_channel_identity(def);
-            ch->name = NULL;
-            if (lane){ char *dst = name_pool + name_cursor;
-                    memcpy(dst, def->name, lane); dst[lane]='\0';
-                    ch->name = dst; name_cursor += (uint32_t)(lane + 1u); }
-            ch->history=history; ch->history_head=0; ch->next_seqno=0; ch->have_first=0;
-            memset(history,0,depth*sizeof(i_DartWriterSample));
+            ch->role = DART_INACTIVE;
+            ch->name = name_pool + (size_t)c*(DART_TOPIC_NAME_MAX + 1u);
+            ((char*)ch->name)[0] = '\0';
         }
-        for (d=0; d<depth; d++){
-            uint8_t *buf = dyn ? NULL : (uint8_t*)dart_take(b, q.max_message_bytes, 8);
-            if (st && b->base){ st->channels[c].history[d].buf = buf;
-                                st->channels[c].history[d].cap = dyn ? 0u : q.max_message_bytes; }
-        }
-        /* reader asm buffers + frag bitmaps, per peer (skipped when dynamic) */
-        for (p=0;p<max_peers;p++){
-            uint8_t *assembly_buf = dyn ? NULL : (uint8_t*)dart_take(b, q.max_message_bytes, 8);
-            uint8_t *frag_bitmap  = dyn ? NULL : (uint8_t*)dart_take(b, (max_fragments+7u)/8u, 1);
+        if (!cfg->channels) continue;    /* reserve mode: arena holds no per-channel buffers */
+        {   const DartChannelDef *def = &cfg->channels[c];
+            /* dynamic = an allocator is set: buffers grow via the hook, not the arena */
+            int dyn = (cfg->allocator != NULL);
+            DartQos q = def->qos;            /* local, normalized copy */
+            i_DartWriterSample *history; uint16_t depth, max_fragments, d;
+            dart__qos_defaults(&q, dyn);
+            depth = q.keep_last;
+            max_fragments = dart_max_fragments(q.max_message_bytes);
+            history = (i_DartWriterSample*)dart_take(b, depth*sizeof(i_DartWriterSample), 16);
             if (st && b->base){
-                i_DartReaderProxy *r = dart__reader_proxy_at(st,c,p);
-                r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
-                r->assembly_cap = dyn ? 0u : q.max_message_bytes;
-                r->bitmap_cap  = dyn ? 0u : (uint32_t)((max_fragments+7u)/8u);
+                i_DartChannel *ch = &st->channels[c];
+                size_t lane = dart__namelen(def->name);
+                ch->qos=q; ch->max_fragments=max_fragments;
+                ch->role=def->role; ch->multicast=def->multicast; ch->dynamic=(uint8_t)dyn;
+                ch->identity = dart_channel_identity(def);
+                if (lane){ memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane]='\0'; }
+                ch->history=history; ch->history_owned=0; ch->history_head=0; ch->next_seqno=0; ch->have_first=0;
+                memset(history,0,depth*sizeof(i_DartWriterSample));
+            }
+            for (d=0; d<depth; d++){
+                uint8_t *buf = dyn ? NULL : (uint8_t*)dart_take(b, q.max_message_bytes, 8);
+                if (st && b->base){ st->channels[c].history[d].buf = buf;
+                                    st->channels[c].history[d].cap = dyn ? 0u : q.max_message_bytes; }
+            }
+            /* reader asm buffers + frag bitmaps, per peer (skipped when dynamic) */
+            for (p=0;p<max_peers;p++){
+                uint8_t *assembly_buf = dyn ? NULL : (uint8_t*)dart_take(b, q.max_message_bytes, 8);
+                uint8_t *frag_bitmap  = dyn ? NULL : (uint8_t*)dart_take(b, (max_fragments+7u)/8u, 1);
+                if (st && b->base){
+                    i_DartReaderProxy *r = dart__reader_proxy_at(st,c,p);
+                    r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
+                    r->assembly_cap = dyn ? 0u : q.max_message_bytes;
+                    r->bitmap_cap  = dyn ? 0u : (uint32_t)((max_fragments+7u)/8u);
+                }
             }
         }
     }
@@ -185,7 +190,8 @@ size_t dart_required_memory(const DartConfig *cfg){
 DartState *dart_init(void *mem, size_t cap, const DartConfig *cfg){
     i_DartBump b; DartState *st; uint16_t i;
     if (!mem || !cfg || cfg->n_channels==0 || cfg->max_peers==0) return NULL;
-    for (i=0;i<cfg->n_channels;i++){
+    if (!cfg->channels && !cfg->allocator) return NULL;    /* reserve mode needs an allocator */
+    if (cfg->channels) for (i=0;i<cfg->n_channels;i++){
         const DartChannelDef *d = &cfg->channels[i];
         size_t lane = 0;
         if (!d->name || !d->name[0]) return NULL;          /* name = identity, required */
@@ -414,6 +420,10 @@ void dart_destroy(DartState *st){
             if (r->assembly_buf){ st->cfg.allocator(st->cfg.user, r->assembly_buf, 0); r->assembly_buf=NULL; r->assembly_cap=0; }
             if (r->frag_bitmap){ st->cfg.allocator(st->cfg.user, r->frag_bitmap, 0); r->frag_bitmap=NULL; r->bitmap_cap=0; }
         }
+        if (ch->history_owned && ch->history){   /* ring allocated by dart_channel_define */
+            st->cfg.allocator(st->cfg.user, ch->history, 0);
+            ch->history=NULL; ch->history_owned=0;
+        }
     }
 }
 
@@ -588,6 +598,41 @@ int dart_set_role(DartState *st, uint16_t channel, uint8_t role){
         if (st->peer_used[p]) dart__rematch(st,(uint16_t)channel_idx,p);
     /* caller re-advertises interest (the node bumps its discovery announce) */
     return 0;
+}
+
+
+int dart_channel_define(DartState *st, uint16_t channel, const DartChannelDef *def){
+    i_DartChannel *ch; DartQos q; uint16_t depth, p; size_t lane;
+    if (!st || !def || !st->cfg.allocator) return -1;       /* dynamic (reserve) mode only */
+    if (channel >= st->cfg.n_channels) return -1;            /* out of reserved range */
+    if (!def->name || !def->name[0]) return -1;             /* name = identity, required */
+    lane = dart__namelen(def->name);
+    if (def->name[lane]) return -1;                          /* longer than DART_TOPIC_NAME_MAX */
+    ch = &st->channels[channel];
+    if (ch->identity != 0 || ch->history) return -1;        /* slot already defined */
+    q = def->qos; dart__qos_defaults(&q, 1);                 /* dynamic: grow-to-fit buffers */
+    depth = q.keep_last;
+    ch->history = (i_DartWriterSample*)st->cfg.allocator(st->cfg.user, NULL,
+                                                         (size_t)depth*sizeof(i_DartWriterSample));
+    if (!ch->history) return -4;                            /* OOM */
+    memset(ch->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
+    ch->history_owned = 1; ch->dynamic = 1;
+    ch->qos = q; ch->max_fragments = dart_max_fragments(q.max_message_bytes);
+    ch->role = def->role; ch->multicast = def->multicast;
+    ch->identity = dart_channel_identity(def);
+    memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane] = '\0';
+    ch->history_head = 0; ch->next_seqno = 0; ch->have_first = 0;
+    for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active channel to known peers */
+        if (st->peer_used[p]) dart__rematch(st, channel, p);
+    return 0;
+}
+
+
+const char *dart_channel_name(DartState *st, uint16_t channel, uint8_t *len){
+    i_DartChannel *ch = dart_chan(st, channel, NULL);
+    if (!ch || !ch->name || !ch->name[0]){ if (len) *len = 0; return NULL; }
+    if (len) *len = (uint8_t)dart__namelen(ch->name);
+    return ch->name;
 }
 
 
