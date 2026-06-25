@@ -47,7 +47,8 @@ struct DartNode {
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
     uint8_t       *static_pos, *static_end;
-    size_t         mem_cap, mem_used;
+    size_t         mem_cap, mem_used, mem_peak;
+    uint64_t       mem_alloc_calls;  /* message-buffer (re)allocations: ~0 in steady state */
     /* channel handles + lazy multicast bookkeeping. handles is a pointer array in the
        arena; each DartChannel struct is a separate stable allocation, so a grow that
        relocates the arena never moves a handle the user holds. */
@@ -103,6 +104,8 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
         nb = (uint8_t*)dart_plat_realloc(base, newtot);
         if (!nb) return NULL;
         n->mem_used = used + newtot;
+        if (n->mem_used > n->mem_peak) n->mem_peak = n->mem_used;
+        n->mem_alloc_calls++;                          /* a real heap (re)alloc -- cold in steady state */
         *(size_t*)nb = size;
         return nb + DART_ALLOC_HDR;
     } else {                                           /* static: bump from the arena tail */
@@ -110,6 +113,7 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
         uint8_t *nb;
         if (base && old >= size) return ptr;           /* fits in place: no re-bump */
         if ((size_t)(n->static_end - n->static_pos) < need) return NULL;
+        n->mem_alloc_calls++;
         nb = n->static_pos; n->static_pos += need;
         *(size_t*)nb = size;
         if (base) memcpy(nb + DART_ALLOC_HDR, ptr, old);
@@ -823,6 +827,13 @@ DartChannel *dart_node_channel(DartNode *n, uint16_t index){
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){
     if (waited_us)    *waited_us    = n->backpressure_total_us;
     if (waited_sends) *waited_sends = n->backpressure_wait_count;
+}
+
+void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
+    if (!n) return;
+    if (in_use)      *in_use      = n->mem_used;        /* live message-buffer bytes (dynamic) */
+    if (peak)        *peak        = n->mem_peak;        /* high-water of the above */
+    if (alloc_calls) *alloc_calls = n->mem_alloc_calls; /* (re)allocations so far; flat in steady state */
 }
 
 void dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out){

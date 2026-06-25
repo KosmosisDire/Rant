@@ -2325,7 +2325,93 @@ static int sweep_main(int argc, char **argv){
 }
 
 /* ============================== dispatch ================================ */
+/* ===================== memscale: in-process memory/alloc scale test ===========
+ * Spins up 1 reliable publisher + N subscribers on loopback and, for a grid of payload
+ * size / keep_last / subscriber count, reports peak message-buffer memory, how many heap
+ * (re)allocations happen during warmup vs steady state, end-to-end msg/s, and the cost of
+ * a send call cold (allocating a new ring slot) vs warm (reusing it). The point: steady
+ * state must be alloc-free (steady_alloc ~ 0) and warm sends must not pay an alloc cost. */
+static int g_ms_rx;
+static void ms_on_message(const DartMsg *m){ (void)m; g_ms_rx++; }
+
+static unsigned ms_domain = 200;
+/* sum heap (re)alloc counts across the publisher and every subscriber */
+static uint64_t ms_allocs(DartNode *P, DartNode **S, int nsubs){
+    uint64_t a, sum=0; int i; dart_node_mem_stats(P,NULL,NULL,&a); sum=a;
+    for (i=0;i<nsubs;i++){ dart_node_mem_stats(S[i],NULL,NULL,&a); sum+=a; }
+    return sum;
+}
+static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
+    DartAllocator pa, sa[16]; DartNodeOpts po, so; DartNode *P=NULL, *S[16];
+    DartChannel *pc=NULL; DartChannelOpts co; DartDiscoveryAddr seed;
+    uint8_t *payload; int i, j, k, t, nwarm, nsteady; unsigned dom = ms_domain++;
+    uint64_t a0=0, a1=0, a2=0; size_t ppeak=0, speak=0;
+    double cold_sum=0, warm_sum=0, t0, t1, msg_s; int coldc=0;
+    if (nsubs>16) nsubs=16;
+    payload=(uint8_t*)malloc(plen?plen:1); if(!payload) return; memset(payload,0x5A,plen?plen:1);
+    nsteady = plen<=1024 ? 300 : plen<=65536 ? 100 : 20;
+    nwarm   = keep + 4;
+    memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=keep; co.qos.heartbeat_us=50000;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=(uint16_t)dom; po.max_channels=4;
+    po.discovery.max_peers=(uint16_t)(nsubs+2); po.disable_shm=(uint8_t)disable_shm;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    pa=dart_allocator_dynamic(0);
+    P=dart_node_open(&pa,"ms-pub",NULL,&po);
+    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,&so); }
+    if (!P){ free(payload); return; }
+    pc=dart_node_create_channel(P,"ms/ch",DART_PUB_ONLY,&co);
+    for (i=0;i<nsubs;i++) dart_node_create_channel(S[i],"ms/ch",DART_SUB_ONLY,&co);
+    for (t=0;t<4000 && dart_channel_match_count(pc)<nsubs;t++){ dart_node_poll(P,1); for(j=0;j<nsubs;j++) dart_node_poll(S[j],1); }
+
+    a0=ms_allocs(P,S,nsubs);                              /* total allocs before any traffic */
+    g_ms_rx=0;                                            /* warmup: fill + size the buffers */
+    for (i=0;i<nwarm;i++){
+        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,payload,plen); double s1=(double)dart_plat_now_us();
+        if (i<keep){ cold_sum += s1-s0; coldc++; }
+        for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
+    }
+    a1=ms_allocs(P,S,nsubs);                              /* allocs after warmup */
+    g_ms_rx=0; t0=(double)dart_plat_now_us();             /* steady: buffers sized -> must not alloc */
+    for (i=0;i<nsteady;i++){
+        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,payload,plen); double s1=(double)dart_plat_now_us();
+        warm_sum += s1-s0;
+        for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
+    }
+    t1=(double)dart_plat_now_us();
+    a2=ms_allocs(P,S,nsubs);
+    dart_node_mem_stats(P,NULL,&ppeak,NULL); dart_node_mem_stats(S[0],NULL,&speak,NULL);
+    msg_s = (t1>t0) ? nsteady / ((t1-t0)/1e6) : 0;
+    printf("%-9lu %-5u %-5d %11.1f %11.1f %11llu %13llu %10.0f %9.2f %9.2f\n",
+        (unsigned long)plen, keep, nsubs, ppeak/1024.0, speak/1024.0,
+        (unsigned long long)(a1-a0), (unsigned long long)(a2-a1),
+        msg_s, coldc?cold_sum/coldc:0.0, nsteady?warm_sum/nsteady:0.0);
+    dart_node_close(P,0); for(i=0;i<nsubs;i++) dart_node_close(S[i],0);
+    free(payload);
+}
+static void ms_grid(int disable_shm){
+    printf("\n--- %s path ---\n", disable_shm ? "UDP (cross-host; writer/reader buffers on the heap)"
+                                              : "SHM (same-host; payload in mmap'd segments)");
+    printf("%-9s %-5s %-5s %11s %11s %11s %13s %10s %9s %9s\n",
+        "payload","keep","subs","pub_peak_kB","sub_peak_kB","warm_alloc","steady_alloc","msg/s","cold_us","warm_us");
+    ms_run(64,8,1,disable_shm); ms_run(1024,8,1,disable_shm);
+    ms_run(65536,8,1,disable_shm); ms_run(1048576,8,1,disable_shm);              /* payload sweep */
+    ms_run(1024,1,1,disable_shm); ms_run(1024,16,1,disable_shm); ms_run(1024,256,1,disable_shm); /* history */
+    ms_run(1024,8,4,disable_shm); ms_run(1024,8,16,disable_shm);                 /* subscriber sweep */
+}
+static int memscale_main(void){
+    setvbuf(stdout,NULL,_IONBF,0);
+    printf("DART dynamic-allocator scale test (in-process, reliable, loopback)\n");
+    printf("peak = live message-buffer bytes; warm/steady_alloc = heap (re)allocs (pub+subs); cold/warm_us = send-call time\n");
+    ms_grid(1);   /* the allocation-relevant path */
+    ms_grid(0);   /* same-host fast path, for comparison */
+    return 0;
+}
+
 int main(int argc, char **argv){
+    if (argc >= 2 && strcmp(argv[1], "memscale") == 0)
+        return memscale_main();
     if (argc >= 2 && strcmp(argv[1], "node") == 0)
         return node_main(argc-1, argv+1);
     if (argc >= 2 && strcmp(argv[1], "selftest") == 0)

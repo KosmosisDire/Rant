@@ -145,6 +145,12 @@ DartChannel *dart_node_channel(DartNode *n, uint16_t index);
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends);
+
+/* Message-buffer memory (dynamic mode): in_use = live bytes, peak = high-water, alloc_calls
+ * = how many heap (re)allocations have happened. alloc_calls stops rising once buffers reach
+ * their steady-state sizes, so a flat count over a window proves the hot path is alloc-free.
+ * Any out-pointer may be NULL. (Static mode: in_use/peak are 0; alloc_calls counts bumps.) */
+void     dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls);
 /* Cumulative reliable-repair counters for a channel (see DartRepairStats). The
  * per-second deltas are repair throughput; *out is zeroed for a NULL channel. */
 void     dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out);
