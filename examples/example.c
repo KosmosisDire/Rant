@@ -4,8 +4,9 @@
  *   pubsub <topic>   do both
  *   drop   <topic>   stop pub and sub on that topic
  * Any other line is published to every topic you currently publish on.
- * Run two copies (one host, or two on a LAN) and type in each; pass a node name as
- * argv[1] (e.g. ./node alice) to label who a message came from. All defaults:
+ * Run two copies (one host, or two on a LAN) and type in each; pass a node name
+ * (e.g. ./node alice) to label who a message came from, and --verbose to print
+ * discovery/transport events. All defaults:
  * best-effort, domain 0, unicast data, multicast discovery.
  *
  * DART runs on its own thread so the main thread can read stdin with a normal
@@ -50,6 +51,7 @@ static void   thread_join(Thread t){ pthread_join(t, NULL); }
 
 static Mutex        g_lock;            /* guards every dart_* node call */
 static volatile int g_running = 1;     /* cleared on EOF to stop the poll thread */
+static int          g_verbose = 0;     /* --verbose: print discovery/transport events */
 
 /* One topic the user has touched. We track the pub/sub bits locally because the
  * transport role enum has no getter, and we keep the handle to send/re-role it.
@@ -119,6 +121,7 @@ static void on_message(const DartMsg *msg){
  * reports how many topics now flow each way. Also fires on the poll thread. */
 static void on_event(void *user, const DartEvent *ev){
     (void)user;
+    if (!g_verbose) return;
     switch (ev->kind){
     case DART_PEER_UP:
         printf("  <event> peer-up id=%u at %u.%u.%u.%u:%u (%s)\n", ev->peer,
@@ -182,13 +185,18 @@ static THREAD_RET poll_thread(void *arg){
 }
 
 int main(int argc, char **argv){
-    const char *name = argc > 1 ? argv[1] : NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
+    const char *name = NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
+    for (int i = 1; i < argc; i++){
+        if      (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) g_verbose = 1;
+        else if (!name) name = argv[i];
+    }
     DartNode *n = dart_node_open(1 << 20, name, on_message,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS, .on_event = on_event });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     printf("commands: sub <topic> | pub <topic> | pubsub <topic> | drop <topic>\n"
-           "any other line is published to every topic you pub on. ctrl-d / ctrl-z to quit.\n");
+           "any other line is published to every topic you pub on. ctrl-d / ctrl-z to quit.\n"
+           "%s", g_verbose ? "" : "(run with --verbose to print discovery/transport events)\n");
 
     mutex_init(&g_lock);
     Thread poller = thread_start(poll_thread, n);
