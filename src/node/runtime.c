@@ -313,7 +313,7 @@ static uint8_t dart__node_name(const char *want, char *buf){
     return 13;
 }
 
-DartNode *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOpts *opts){
+DartNode *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryRtConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_channels; DartAllocFn allocator;
     uint8_t *base; void *arena; int owns; size_t need;
@@ -408,7 +408,7 @@ DartNode *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOp
         memset(&cc, 0, sizeof cc);
         cc.transport = n->transport; cc.max_peers = max_peers;
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
-        cc.name = name_buf; cc.name_len = dart__node_name(o.name, name_buf);
+        cc.name = name_buf; cc.name_len = dart__node_name(name, name_buf);
         cc.on_event = dart__node_on_event; cc.user = n;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM

@@ -41,14 +41,10 @@ typedef struct {
 
 /* Optional node config, passed to dart_node_open as a compound literal (every field is
  * zero-means-default, so &(DartNodeOpts){0} or NULL is "all defaults"):
- *   dart_node_open(1<<20, on_message, &(DartNodeOpts){ .domain = 7, .max_channels = 16 });
+ *   dart_node_open(1<<20, "robot1", on_message, &(DartNodeOpts){ .domain = 7, .max_channels = 16 });
  */
 typedef struct {
     uint16_t              domain;        /* logical-network selector */
-    const char           *name;          /* human-readable node name, synced via discovery and
-                                            surfaced as DartMsg.sender_name (debug/observability).
-                                            Copied in; clamped to DART_NODE_NAME_MAX. NULL/empty =>
-                                            an auto-generated "node-XXXXXXXX" default. */
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
     DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
     void                 *user_data;     /* passed to on_message (DartMsg.user) and on_event */
@@ -92,9 +88,11 @@ typedef struct {
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
 /* Open a node with a mem_size-byte arena (malloc'd, or opts->memory if you bring your
- * own). on_message may be NULL for a publish-only node. opts may be NULL for all
- * defaults. Returns NULL on failure. */
-DartNode    *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOpts *opts);
+ * own). name is this node's human-readable label, synced via discovery and surfaced as
+ * DartMsg.sender_name; NULL/empty => an auto-generated "node-XXXXXXXX". on_message may be
+ * NULL for a publish-only node. opts may be NULL for all defaults. Returns NULL on failure. */
+DartNode    *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message,
+                            const DartNodeOpts *opts);
 int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
 void         dart_node_close(DartNode *n, int send_bye);
 

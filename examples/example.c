@@ -7,7 +7,12 @@
  * Run two copies (one host, or two on a LAN) and type in each; pass a node name as
  * argv[1] (e.g. ./node alice) to label who a message came from. All defaults:
  * best-effort, domain 0, unicast data, multicast discovery.
- *   POSIX  : cc  -std=c99 -Idist examples/example.c -o node -lrt
+ *
+ * DART runs on its own thread so the main thread can read stdin with a normal
+ * blocking fgets. The node is not internally locked, so a mutex guards every node
+ * call: the poll thread holds it for each non-blocking tick, the input thread holds
+ * it while creating channels / setting roles / sending.
+ *   POSIX  : cc  -std=c99 -Idist examples/example.c -o node -lrt -lpthread
  *   Windows: gcc -std=c99 -Idist examples/example.c -o example.exe -lws2_32 -lbcrypt -lwinmm */
 #define DART_TRANSPORT_IMPLEMENTATION
 #include "dart_transport.h"
@@ -15,23 +20,40 @@
 #include <stdio.h>
 #include <string.h>
 
-/* a non-blocking "is a line waiting?" check, so the poll loop never stalls on input */
+/* tiny cross-platform thread + mutex + sleep shim (Windows / POSIX) */
 #ifdef _WIN32
-#include <conio.h>
-static int input_ready(void){ return _kbhit(); }
+#include <windows.h>
+typedef CRITICAL_SECTION Mutex;
+static void mutex_init(Mutex *m){ InitializeCriticalSection(m); }
+static void mutex_lock(Mutex *m){ EnterCriticalSection(m); }
+static void mutex_unlock(Mutex *m){ LeaveCriticalSection(m); }
+static void sleep_ms(int ms){ Sleep(ms); }
+typedef HANDLE Thread;
+#define THREAD_RET DWORD WINAPI
+static Thread thread_start(LPTHREAD_START_ROUTINE fn, void *arg){ return CreateThread(NULL, 0, fn, arg, 0, NULL); }
+static void   thread_join(Thread t){ WaitForSingleObject(t, INFINITE); CloseHandle(t); }
 #else
+#include <pthread.h>
 #include <unistd.h>
-#include <sys/select.h>
-static int input_ready(void){
-    fd_set r; struct timeval t; FD_ZERO(&r); FD_SET(0, &r); t.tv_sec = 0; t.tv_usec = 0;
-    return select(1, &r, NULL, NULL, &t) > 0;
-}
+typedef pthread_mutex_t Mutex;
+static void mutex_init(Mutex *m){ pthread_mutex_init(m, NULL); }
+static void mutex_lock(Mutex *m){ pthread_mutex_lock(m); }
+static void mutex_unlock(Mutex *m){ pthread_mutex_unlock(m); }
+static void sleep_ms(int ms){ usleep(ms * 1000); }
+typedef pthread_t Thread;
+#define THREAD_RET void *
+static Thread thread_start(void *(*fn)(void *), void *arg){ pthread_t t; pthread_create(&t, NULL, fn, arg); return t; }
+static void   thread_join(Thread t){ pthread_join(t, NULL); }
 #endif
 
 #define MAX_TOPICS 32
 
+static Mutex        g_lock;            /* guards every dart_* node call */
+static volatile int g_running = 1;     /* cleared on EOF to stop the poll thread */
+
 /* One topic the user has touched. We track the pub/sub bits locally because the
- * transport role enum has no getter, and we keep the handle to send/re-role it. */
+ * transport role enum has no getter, and we keep the handle to send/re-role it.
+ * Only the input thread touches this table, so it needs no lock of its own. */
 typedef struct {
     char         name[DART_TOPIC_NAME_MAX + 1];
     DartChannel *ch;
@@ -55,7 +77,8 @@ static Topic *find_topic(const char *name){
     return NULL;
 }
 
-/* Find the topic, or create it on the node the first time it's named. */
+/* Find the topic, or create it on the node the first time it's named.
+ * Caller must hold g_lock (it touches the node via dart_node_create_channel). */
 static Topic *get_topic(DartNode *n, const char *name){
     Topic *t = find_topic(name);
     if (t) return t;
@@ -73,16 +96,21 @@ static Topic *get_topic(DartNode *n, const char *name){
 
 /* Apply a pub/sub change to a topic and push the new role to the transport. */
 static void set_role(DartNode *n, const char *name, int pub, int sub){
+    mutex_lock(&g_lock);
     Topic *t = get_topic(n, name);
+    if (t){
+        t->pub = pub; t->sub = sub;
+        dart_channel_set_role(t->ch, role_of(pub, sub));
+    }
+    mutex_unlock(&g_lock);
     if (!t) return;
-    t->pub = pub; t->sub = sub;
-    dart_channel_set_role(t->ch, role_of(pub, sub));
     const char *s = pub && sub ? "pubsub" : pub ? "pub" : sub ? "sub" : "drop";
     printf("  [%s] %s\n", s, name);
 }
 
 static void on_message(const DartMsg *msg){
-    /* sender_name comes from discovery (never on the wire) and is never NULL */
+    /* fires on the poll thread, inside dart_node_poll; just prints. sender_name comes
+     * from discovery (never on the wire) and is never NULL */
     printf("[%s] %s > %.*s\n", msg->sender_name, msg->channel_name, (int)msg->len, (const char *)msg->data);
 }
 
@@ -100,32 +128,50 @@ static int handle_command(DartNode *n, char *line){
     return 1;
 }
 
+/* Background thread: drive discovery and the socket while the main thread blocks on
+ * stdin. Each tick is a non-blocking poll under the lock, then a short sleep so the
+ * input thread can take the lock to send. */
+static THREAD_RET poll_thread(void *arg){
+    DartNode *n = (DartNode *)arg;
+    while (g_running){
+        mutex_lock(&g_lock);
+        dart_node_poll(n, 0);          /* non-blocking: drain RX, service timers/TX */
+        mutex_unlock(&g_lock);
+        sleep_ms(1);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv){
     const char *name = argc > 1 ? argv[1] : NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
-    DartNode *n = dart_node_open(1 << 20, on_message,
-                                 &(DartNodeOpts){ .name = name, .max_channels = MAX_TOPICS });
+    DartNode *n = dart_node_open(1 << 20, name, on_message,
+                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     printf("commands: sub <topic> | pub <topic> | pubsub <topic> | drop <topic>\n"
            "any other line is published to every topic you pub on. ctrl-d / ctrl-z to quit.\n");
 
-    for (;;){
-        dart_node_poll(n, 10);                 /* service discovery and the socket */
-        if (input_ready()){
-            char line[256];
-            if (!fgets(line, sizeof line, stdin)) break;     /* EOF: quit */
-            size_t len = strcspn(line, "\n");                /* drop the trailing newline */
-            line[len] = '\0';
-            if (!len) continue;
-            if (handle_command(n, line)) continue;
+    mutex_init(&g_lock);
+    Thread poller = thread_start(poll_thread, n);
 
-            /* plain chat: publish to every topic we currently publish on */
-            int sent = 0;
-            for (int i = 0; i < g_n_topics; i++)
-                if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, line, len); sent++; }
-            if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
-        }
+    char line[256];
+    while (fgets(line, sizeof line, stdin)){          /* normal blocking input */
+        size_t len = strcspn(line, "\n");             /* drop the trailing newline */
+        line[len] = '\0';
+        if (!len) continue;
+        if (handle_command(n, line)) continue;
+
+        /* plain chat: publish to every topic we currently publish on */
+        int sent = 0;
+        mutex_lock(&g_lock);
+        for (int i = 0; i < g_n_topics; i++)
+            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, line, len); sent++; }
+        mutex_unlock(&g_lock);
+        if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }
+
+    g_running = 0;                                     /* EOF: stop the poll thread and exit */
+    thread_join(poller);
     dart_node_close(n, 1);
     return 0;
 }

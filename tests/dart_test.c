@@ -175,12 +175,12 @@ static int diag_setsockopt(int s, int level, int optname, const void *optval, so
 /* Open a node and create its channels from a DartChannelDef array in index order, so
  * the array index is the channel handle index the shims above resolve. opts carries
  * everything that used to live in DartNodeConfig except channels/on_message. */
-static DartNode *test_node_open(uint8_t *mem, size_t cap, DartMsgFn on_msg, DartNodeOpts opts,
-                               const DartChannelDef *chans, uint16_t nch){
+static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
+                               DartNodeOpts opts, const DartChannelDef *chans, uint16_t nch){
     DartNode *node; uint16_t i;
     opts.memory = mem;
     if (!opts.max_channels) opts.max_channels = nch ? nch : 1;
-    node = dart_node_open(cap, on_msg, &opts);
+    node = dart_node_open(cap, name, on_msg, &opts);
     if (!node) return NULL;
     for (i=0;i<nch;i++){
         DartChannelOpts co; memset(&co, 0, sizeof co);
@@ -467,7 +467,6 @@ static int node_main(int argc, char **argv){
        UDP path, so don't let same-host peers silently switch to shared memory. */
     DartNodeOpts opts = {
         .domain      = domain,
-        .name        = g_name,          /* advertised via discovery; surfaces as DartMsg.sender_name */
         .disable_shm = 1,
         .on_event    = lat_on_event,
         .discovery   = { .max_peers = MAX_PEERS },
@@ -495,7 +494,7 @@ static int node_main(int argc, char **argv){
     g_trace = (getenv("DART_DIAG_TRACE") != NULL);
 
     static uint8_t mem[48<<20];  /* deep load ring + extra channels x 64 peers */
-    DartNode *n = test_node_open(mem, sizeof mem, lat_on_message, opts, ch, (uint16_t)(2+g_xch));
+    DartNode *n = test_node_open(mem, sizeof mem, g_name, lat_on_message, opts, ch, (uint16_t)(2+g_xch));
     if (!n){ fprintf(stderr, "[%s] dart_node_open failed\n", g_name); return 1; }
 
     printf("[%s] up (domain %u, tag %08x, load %d Hz, %ds, %s, %s load, block %d ms, +%d ch %s)\n",
@@ -1108,7 +1107,7 @@ static DartNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **
     opts.discovery.max_peers=4;
     opts.net.multicast_interface="127.0.0.1"; opts.net.seed_peers=&seed; opts.net.n_seed_peers=1;
     mem=malloc(cap); *mem_out=mem;
-    return test_node_open(mem, cap, is_pub?NULL:shmn_on_message, opts, d, 1);
+    return test_node_open(mem, cap, NULL, is_pub?NULL:shmn_on_message, opts, d, 1);
 }
 static void shm_node_checks(void){
     static unsigned char buf[6*1024*1024];
@@ -1254,7 +1253,7 @@ static void open_fail_checks(void){
        node opened fine and stays usable (validation moved from init to channel create) */
     {   static char longname[DART_TOPIC_NAME_MAX + 8]; DartChannel *c;
         memset(longname, 'x', sizeof longname - 1); longname[sizeof longname - 1] = 0;
-        n = dart_node_open(sizeof mem, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem });
+        n = dart_node_open(sizeof mem, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem });
         ST_CHECK(n != NULL, "open-fail: node opens for create-fail check");
         c = n ? dart_node_create_channel(n, longname, DART_PUBSUB, NULL) : NULL;
         ST_CHECK(c == NULL, "open-fail: over-long topic name -> create_channel NULL");
@@ -1263,7 +1262,7 @@ static void open_fail_checks(void){
 
     /* fail_mcast: a non-multicast discovery group makes the IGMP join fail, so
        dart_discovery_rt_open returns NULL and the node unwinds through fail_mcast */
-    {   n = dart_node_open(sizeof mem, NULL,
+    {   n = dart_node_open(sizeof mem, NULL, NULL,
             &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem, .net={ .discovery_group="1.2.3.4" } });
         ST_CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL (fail_mcast)");
         if (n) dart_node_close(n, 0);
@@ -1276,7 +1275,7 @@ static void open_fail_checks(void){
         occupy = dart_plat_udp_open();
         if (occupy != DART_SOCK_BAD && dart_plat_bind(occupy, 0, 0, 0)){
             uint16_t port = dart_plat_local_port(occupy);
-            n = dart_node_open(sizeof mem, NULL,
+            n = dart_node_open(sizeof mem, NULL, NULL,
                 &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem, .net={ .data_port=port } });
             ST_CHECK(n == NULL, "open-fail: data-port collision -> NULL (fail_sock)");
             if (n) dart_node_close(n, 0);
@@ -1286,7 +1285,7 @@ static void open_fail_checks(void){
     }
 
     /* after the failed opens a normal open must still succeed (cleanup balanced) */
-    {   n = dart_node_open(sizeof mem, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem });
+    {   n = dart_node_open(sizeof mem, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem });
         ST_CHECK(n != NULL, "open-fail: normal open still works after failures");
         if (n) dart_node_close(n, 0);
     }
@@ -1318,8 +1317,8 @@ static void event_user_checks(void){
     ro = wo;
     ro.on_event=evu_on_event; ro.user_data=&sentinel; ro.allocator=evu_alloc;   /* allocator -> SHM-capable */
     evu_user=NULL; evu_collisions=0;
-    w=test_node_open(mem_w,sizeof mem_w,NULL,wo,&cw,1);
-    r=test_node_open(mem_r,sizeof mem_r,NULL,ro,&cr,1);
+    w=test_node_open(mem_w,sizeof mem_w,NULL,NULL,wo,&cw,1);
+    r=test_node_open(mem_r,sizeof mem_r,NULL,NULL,ro,&cr,1);
     ST_CHECK(w && r, "event-user: nodes open");
     if (w && r){
         for (i=0;i<120 && evu_collisions==0;i++){ dart_node_send(w,0,payload,16); dart_node_poll(w,0); dart_node_poll(r,20); }
@@ -1344,7 +1343,7 @@ static void mcast_join_degrade_checks(void){
     static uint8_t mem[1<<20];
     DartNode *n;
     mjf_events=0; mjf_channel=0xFFFF;
-    n=dart_node_open(sizeof mem, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN+6, .on_event=mjf_on_event,
+    n=dart_node_open(sizeof mem, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN+6, .on_event=mjf_on_event,
                      .memory=mem, .net={ .multicast_interface="127.0.0.1" }, .discovery={ .max_peers=4 } });
     ST_CHECK(n != NULL, "mcast-degrade: node opens (discovery joins its own group)");
     if (n){
@@ -1386,8 +1385,8 @@ static int selftest_main(void){
       chr[2].role = DART_INACTIVE;
       ro.on_event = st_on_event;
 
-      w = test_node_open(mem_w, sizeof mem_w, NULL, wo, ch, 4);
-      r = test_node_open(mem_r, sizeof mem_r, st_on_message, ro, chr, 4);
+      w = test_node_open(mem_w, sizeof mem_w, NULL, NULL, wo, ch, 4);
+      r = test_node_open(mem_r, sizeof mem_r, NULL, st_on_message, ro, chr, 4);
       if (!w || !r){ fprintf(stderr, "node open failed\n"); return 1; }
 
       /* 1. JOIN: writer streams while discovery completes; the reader must
@@ -1566,8 +1565,8 @@ static int selftest_main(void){
       for (k=0;k<ST_NCH;k++) chb[k].role = DART_SUB_ONLY;
       ao = (DartNodeOpts){ .domain = ST_DOMAIN+1 };
       bo = ao; bo.on_event = st_on_event;
-      a = test_node_open(mem_a, sizeof mem_a, NULL, ao, cha, ST_NCH);
-      b = test_node_open(mem_b, sizeof mem_b, st_on_message, bo, chb, ST_NCH);
+      a = test_node_open(mem_a, sizeof mem_a, NULL, NULL, ao, cha, ST_NCH);
+      b = test_node_open(mem_b, sizeof mem_b, NULL, st_on_message, bo, chb, ST_NCH);
       ST_CHECK(a && b, "scale: %u-channel nodes open", ST_NCH);
       if (a && b){
           st_any = 0;
@@ -1593,11 +1592,11 @@ static int selftest_main(void){
       nw[0].qos.catch_up=1; nw[0].qos.max_message_bytes=32; nw[0].qos.heartbeat_us=50000;
       nr[0]=nw[0]; nr[0].role=DART_SUB_ONLY;   /* same name (index 0), other node */
       nr[1]=nw[0]; nr[1].name="sensors/imu"; nr[1].role=DART_SUB_ONLY;   /* index 1 */
-      wo2 = (DartNodeOpts){ .name="lidar-node", .domain=ST_DOMAIN+2, .discovery={ .max_peers=4 } };
-      ro2=wo2; ro2.name="reader-node"; ro2.on_event=st_on_event;
+      wo2 = (DartNodeOpts){ .domain=ST_DOMAIN+2, .discovery={ .max_peers=4 } };
+      ro2=wo2; ro2.on_event=st_on_event;
       st_samples[0]=st_samples[1]=0; st_collisions=0; st_last_sender[0]='\0';
-      w2=test_node_open(mem_nw,sizeof mem_nw,NULL,wo2,nw,1);
-      r2=test_node_open(mem_nr,sizeof mem_nr,st_on_message,ro2,nr,2);
+      w2=test_node_open(mem_nw,sizeof mem_nw,"lidar-node",NULL,wo2,nw,1);
+      r2=test_node_open(mem_nr,sizeof mem_nr,"reader-node",st_on_message,ro2,nr,2);
       ST_CHECK(w2 && r2, "named: nodes open");
       if (w2 && r2){
           uint64_t end = dart_plat_now_us() + 5000000u;
@@ -1633,8 +1632,8 @@ static int selftest_main(void){
       wo3 = (DartNodeOpts){ .domain=ST_DOMAIN+3, .discovery={ .max_peers=4 } };
       ro3=wo3; ro3.on_event=st_on_event;
       st_samples[0]=0; st_collisions=0;
-      w3=test_node_open(mem_cw,sizeof mem_cw,NULL,wo3,&cw,1);
-      r3=test_node_open(mem_cr,sizeof mem_cr,st_on_message,ro3,&cr,1);
+      w3=test_node_open(mem_cw,sizeof mem_cw,NULL,NULL,wo3,&cw,1);
+      r3=test_node_open(mem_cr,sizeof mem_cr,NULL,st_on_message,ro3,&cr,1);
       ST_CHECK(w3 && r3, "collision: nodes open");
       if (w3 && r3){
           for (i=0;i<60;i++){ dart_node_send(w3,0,payload,16); dart_node_poll(w3,0); dart_node_poll(r3,20); }
@@ -1904,7 +1903,7 @@ static DartNode *ctl_open(uint16_t domain, int coordinator,
             opts.net.seed_peers = &seed; opts.net.n_seed_peers = 1;
         }
     }
-    return test_node_open(mem, sizeof mem, ctl_on_message, opts, ch, 2);
+    return test_node_open(mem, sizeof mem, NULL, ctl_on_message, opts, ch, 2);
 }
 
 /* IP of the first control peer (the other machine), for seeding the test

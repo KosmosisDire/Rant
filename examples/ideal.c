@@ -22,6 +22,7 @@ static void on_message(DartMsg *msg)
     // Access the fields of the DartMessage structure
     msg.channel_id // get channel id
     msg.sender_id // get sender id
+    msg.sender_name // get sender node name as string (never NULL)
     msg.channel_name // get channel name as string
     msg.channel_name_len // get channel name length
     msg.data // get message data
@@ -34,7 +35,7 @@ static void on_message(DartMsg *msg)
 int main(int argc, char *argv[]){
     const char *ch_name = argc > 1 ? argv[1] : "msg";
     
-    DartNode *node = dart_node_open(1 << 20, on_message, { /*options here*/ });    
+    DartNode *node = dart_node_open(1 << 20, "my-node", on_message, { /*options here*/ });
     if (!node){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     DartChannel *channel = dart_node_create_channel(node, ch_name, DART_PUBSUB, { /*options here*/ });
