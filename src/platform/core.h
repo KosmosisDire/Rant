@@ -52,6 +52,11 @@ int      dart_plat_random(void *buf, size_t len);
 size_t   dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
 uint64_t dart_plat_pid(void);
 
+/* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =
+ * allocate, size 0 = free (returns NULL). The single heap dependency, so the node
+ * layer holds no <stdlib.h>; a target with a custom heap overrides just this. */
+void    *dart_plat_realloc(void *ptr, size_t size);
+
 /* --- UDP sockets --- */
 i_DartSock dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
 void      dart_plat_close(i_DartSock s);

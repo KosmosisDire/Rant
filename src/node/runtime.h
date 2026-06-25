@@ -12,6 +12,35 @@
 extern "C" {
 #endif
 
+/* Dynamic-mode growth ceiling when DartAllocator.max_bytes is 0: a runaway guard,
+ * not a reservation. Define before the include to override. */
+#ifndef DART_MEM_DEFAULT_MAX
+#define DART_MEM_DEFAULT_MAX ((size_t)1 << 30)   /* 1 GiB */
+#endif
+
+/* The node's memory contract: construct one and hand it to dart_node_open. One
+ * allocator backs exactly one node (claimed on open). Two modes, set by the
+ * constructor, never by hand:
+ *   static  - all node memory is carved from your fixed buffer; no heap, no growth.
+ *             For embedded (ESP32/Arduino). A bigger buffer admits more/larger
+ *             messages; exhaustion refuses the work rather than growing.
+ *   dynamic - memory comes from the platform heap and message buffers grow to fit,
+ *             so a desktop node need not pre-size anything.
+ */
+typedef struct {
+    void   *buffer;     /* static: your block. dynamic: NULL (heap-backed) */
+    size_t  size;       /* static: its size (hard budget). dynamic: initial size hint */
+    size_t  max_bytes;  /* dynamic: growth ceiling (0 = DART_MEM_DEFAULT_MAX). static: ignored */
+    uint8_t dynamic;    /* set by the constructor: 0 = static, 1 = dynamic */
+    uint8_t claimed;    /* set when a node takes ownership; reuse is then refused */
+} DartAllocator;
+
+/* Static: no heap, no growth; all of the node lives in buffer[0..size). */
+DartAllocator dart_allocator_static(void *buffer, size_t size);
+/* Dynamic: heap-backed, message buffers grow to fit. size_hint pre-sizes the
+ * initial block (advisory). Set .max_bytes on the result to override the ceiling. */
+DartAllocator dart_allocator_dynamic(size_t size_hint);
+
 /* Network addressing and sockets; every field is zero-means-default (defaults shown). */
 typedef struct {
     uint16_t              data_port;         /* unicast data port; 0 = OS-assigned */
@@ -48,10 +77,9 @@ typedef struct {
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
     DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
     void                 *user_data;     /* surfaced as DartMsg.user and DartEvent.user */
-    DartAllocFn         allocator;     /* message-buffer allocator; 0 = built-in realloc */
-    void                 *memory;        /* bring-your-own arena of mem_size bytes; 0 = malloc it */
     uint8_t               disable_shm;   /* 1 = never use the same-host shared-memory fast path
-                                            (force on-wire UDP even to a same-host peer) */
+                                            (force on-wire UDP even to a same-host peer; dynamic
+                                            mode only, the static path never uses SHM) */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;
@@ -87,11 +115,13 @@ typedef struct {
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
-/* Open a node with a mem_size-byte arena (malloc'd, or opts->memory if you bring your
- * own). name is this node's human-readable label, synced via discovery and surfaced as
- * DartMsg.sender_name; NULL/empty => an auto-generated "node-XXXXXXXX". on_message may be
- * NULL for a publish-only node. opts may be NULL for all defaults. Returns NULL on failure. */
-DartNode    *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message,
+/* Open a node backed by mem (required): a static or dynamic DartAllocator, taken over
+ * by this node (mem->claimed is set; reuse it for another node is refused). name is this
+ * node's human-readable label, synced via discovery and surfaced as DartMsg.sender_name;
+ * NULL/empty => an auto-generated "node-XXXXXXXX". on_message may be NULL for a publish-only
+ * node. opts may be NULL for all defaults. Returns NULL on failure (incl. a static buffer
+ * too small for the node, or an already-claimed allocator). */
+DartNode    *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message,
                             const DartNodeOpts *opts);
 int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
 void         dart_node_close(DartNode *n, int send_bye);

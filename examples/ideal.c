@@ -35,7 +35,8 @@ static void on_message(DartMsg *msg)
 int main(int argc, char *argv[]){
     const char *ch_name = argc > 1 ? argv[1] : "msg";
     
-    DartNode *node = dart_node_open(1 << 20, "my-node", on_message, { /*options here*/ });
+    DartAllocator mem = dart_allocator_dynamic(1 << 20);   /* or dart_allocator_static(buf, n) on embedded */
+    DartNode *node = dart_node_open(&mem, "my-node", on_message, { /*options here*/ });
     if (!node){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     DartChannel *channel = dart_node_create_channel(node, ch_name, DART_PUBSUB, { /*options here*/ });

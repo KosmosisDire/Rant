@@ -177,10 +177,10 @@ static int diag_setsockopt(int s, int level, int optname, const void *optval, so
  * everything that used to live in DartNodeConfig except channels/on_message. */
 static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
                                DartNodeOpts opts, const DartChannelDef *chans, uint16_t nch){
-    DartNode *node; uint16_t i;
-    opts.memory = mem;
+    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(0);
+    (void)mem; (void)cap;             /* heap-backed: the node self-sizes (was a static arena) */
     if (!opts.max_channels) opts.max_channels = nch ? nch : 1;
-    node = dart_node_open(cap, name, on_msg, &opts);
+    node = dart_node_open(&alloc, name, on_msg, &opts);
     if (!node) return NULL;
     for (i=0;i<nch;i++){
         DartChannelOpts co; memset(&co, 0, sizeof co);
@@ -982,7 +982,6 @@ static void node_core_checks(void){
 
 #ifdef DART_SHM
 /* ===================== SHM self-tests (only when built -DDART_SHM) ========= */
-static void *shmt_alloc(void *u, void *p, size_t n){ (void)u; if(!n){ free(p); return NULL; } return realloc(p,n); }
 
 /* (1) the dart_shm mapping module: create/attach by name, write/stamp/read, the
    generation recycle guard, and the seqlock verify tail. */
@@ -1099,7 +1098,7 @@ static DartNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **
     q.reliability=DART_RELIABLE; q.keep_last=4; q.catch_up=1;
     memset(d,0,sizeof *d); d->name="shmnode"; d->qos=q; d->role=is_pub?DART_PUB_ONLY:DART_SUB_ONLY;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
-    memset(&opts,0,sizeof opts); opts.domain=domain; opts.allocator=shmt_alloc;
+    memset(&opts,0,sizeof opts); opts.domain=domain;   /* dynamic mode (test_node_open) is SHM-capable */
     opts.disable_shm = (uint8_t)(!shm_capable);   /* a non-SHM peer forces the inline UDP path */
     opts.discovery.max_peers=4;
     opts.net.multicast_interface="127.0.0.1"; opts.net.seed_peers=&seed; opts.net.n_seed_peers=1;
@@ -1249,8 +1248,9 @@ static void open_fail_checks(void){
     /* create-fail: an over-long topic name is rejected by dart_node_create_channel; the
        node opened fine and stays usable (validation moved from init to channel create) */
     {   static char longname[DART_TOPIC_NAME_MAX + 8]; DartChannel *c;
+        DartAllocator a = dart_allocator_static(mem, sizeof mem);
         memset(longname, 'x', sizeof longname - 1); longname[sizeof longname - 1] = 0;
-        n = dart_node_open(sizeof mem, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem });
+        n = dart_node_open(&a, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN });
         ST_CHECK(n != NULL, "open-fail: node opens for create-fail check");
         c = n ? dart_node_create_channel(n, longname, DART_PUBSUB, NULL) : NULL;
         ST_CHECK(c == NULL, "open-fail: over-long topic name -> create_channel NULL");
@@ -1259,8 +1259,9 @@ static void open_fail_checks(void){
 
     /* fail_mcast: a non-multicast discovery group makes the IGMP join fail, so
        dart_discovery_rt_open returns NULL and the node unwinds through fail_mcast */
-    {   n = dart_node_open(sizeof mem, NULL, NULL,
-            &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem, .net={ .discovery_group="1.2.3.4" } });
+    {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
+        n = dart_node_open(&a, NULL, NULL,
+            &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .discovery_group="1.2.3.4" } });
         ST_CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL (fail_mcast)");
         if (n) dart_node_close(n, 0);
     }
@@ -1272,8 +1273,9 @@ static void open_fail_checks(void){
         occupy = dart_plat_udp_open();
         if (occupy != DART_SOCK_BAD && dart_plat_bind(occupy, 0, 0, 0)){
             uint16_t port = dart_plat_local_port(occupy);
-            n = dart_node_open(sizeof mem, NULL, NULL,
-                &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem, .net={ .data_port=port } });
+            DartAllocator a = dart_allocator_static(mem, sizeof mem);
+            n = dart_node_open(&a, NULL, NULL,
+                &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .data_port=port } });
             ST_CHECK(n == NULL, "open-fail: data-port collision -> NULL (fail_sock)");
             if (n) dart_node_close(n, 0);
         }
@@ -1282,7 +1284,8 @@ static void open_fail_checks(void){
     }
 
     /* after the failed opens a normal open must still succeed (cleanup balanced) */
-    {   n = dart_node_open(sizeof mem, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN, .memory=mem });
+    {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
+        n = dart_node_open(&a, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN });
         ST_CHECK(n != NULL, "open-fail: normal open still works after failures");
         if (n) dart_node_close(n, 0);
     }
@@ -1292,14 +1295,13 @@ static void open_fail_checks(void){
  * callbacks (on_message/on_shm/allocator) to forward the app's user_data, and points
  * the transport's user at the node. A transport-fired event (MSG_LOST/TOO_BIG/
  * NAME_COLLISION) must reach the app's on_event with that SAME user_data, not the node
- * pointer. NAME_COLLISION is the deterministic transport event: open a subscriber with
- * an allocator (so the node is SHM-capable, taking the rewrap path) and a sentinel
+ * pointer. NAME_COLLISION is the deterministic transport event: open a subscriber in
+ * dynamic mode (so the node is SHM-capable, taking the rewrap path) with a sentinel
  * user_data, drive a topic-hash collision, and assert on_event saw the sentinel. */
 static void *evu_user; static int evu_collisions;
 static void evu_on_event(const DartEvent *ev){
     if (ev->kind == DART_NAME_COLLISION){ evu_user = ev->user; evu_collisions++; }
 }
-static void *evu_alloc(void *u, void *p, size_t n){ (void)u; if(!n){ free(p); return NULL; } return realloc(p,n); }
 static void event_user_checks(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
     const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> one identity (see collide.c) */
@@ -1312,7 +1314,7 @@ static void event_user_checks(void){
     cr=cw; cr.name=B; cr.role=DART_SUB_ONLY;
     wo = (DartNodeOpts){ .domain=ST_DOMAIN+5, .discovery={ .max_peers=4 } };
     ro = wo;
-    ro.on_event=evu_on_event; ro.user_data=&sentinel; ro.allocator=evu_alloc;   /* allocator -> SHM-capable */
+    ro.on_event=evu_on_event; ro.user_data=&sentinel;   /* dynamic mode (test_node_open) -> SHM-capable */
     evu_user=NULL; evu_collisions=0;
     w=test_node_open(mem_w,sizeof mem_w,NULL,NULL,wo,&cw,1);
     r=test_node_open(mem_r,sizeof mem_r,NULL,NULL,ro,&cr,1);
@@ -1338,10 +1340,10 @@ static void mjf_on_event(const DartEvent *ev){
 }
 static void mcast_join_degrade_checks(void){
     static uint8_t mem[1<<20];
-    DartNode *n;
+    DartNode *n; DartAllocator alloc = dart_allocator_static(mem, sizeof mem);
     mjf_events=0; mjf_channel=0xFFFF;
-    n=dart_node_open(sizeof mem, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN+6, .on_event=mjf_on_event,
-                     .memory=mem, .net={ .multicast_interface="127.0.0.1" }, .discovery={ .max_peers=4 } });
+    n=dart_node_open(&alloc, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN+6, .on_event=mjf_on_event,
+                     .net={ .multicast_interface="127.0.0.1" }, .discovery={ .max_peers=4 } });
     ST_CHECK(n != NULL, "mcast-degrade: node opens (discovery joins its own group)");
     if (n){
         g_fail_mcast_join=1;             /* fail the channel's group join only */

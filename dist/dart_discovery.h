@@ -193,6 +193,11 @@ int      dart_plat_random(void *buf, size_t len);
 size_t   dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
 uint64_t dart_plat_pid(void);
 
+/* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =
+ * allocate, size 0 = free (returns NULL). The single heap dependency, so the node
+ * layer holds no <stdlib.h>; a target with a custom heap overrides just this. */
+void    *dart_plat_realloc(void *ptr, size_t size);
+
 /* --- UDP sockets --- */
 i_DartSock dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
 void      dart_plat_close(i_DartSock s);
@@ -809,6 +814,7 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
 #endif
 
 #include <string.h>
+#include <stdlib.h>           /* malloc/realloc/free behind dart_plat_realloc */
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -944,6 +950,13 @@ uint64_t dart_plat_pid(void){
 #else
     return (uint64_t)getpid();
 #endif
+}
+
+/* The one heap dependency, kept behind the platform layer so the node holds no
+ * <stdlib.h>: ptr NULL = allocate, size 0 = free (returns NULL), else realloc. */
+void *dart_plat_realloc(void *ptr, size_t size){
+    if (size == 0){ free(ptr); return NULL; }
+    return realloc(ptr, size);
 }
 
 /* --------------------------------------------------------------- UDP sockets */

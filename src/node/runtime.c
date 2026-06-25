@@ -11,8 +11,7 @@
 #include "../shm/core.h"
 #endif
 #include "../common/arena.h"
-#include <string.h>
-#include <stdlib.h>    /* malloc/free/realloc for the default arena + allocator */
+#include <string.h>    /* heap access goes through dart_plat_realloc (no <stdlib.h> here) */
 
 struct DartChannel { DartNode *n; uint16_t index; };
 
@@ -39,10 +38,14 @@ struct DartNode {
     /* app callbacks: one message sink (wrapped to build a DartMsg) + everything-else */
     DartMsgFn    user_on_message;
     DartEventFn  on_event;
-    DartAllocFn  allocator;   /* message-buffer allocator (default realloc or opts.allocator) */
     void          *user_data;
     void          *arena;      /* the memory block; freed at close iff we own it */
     int            owns_arena;
+    /* message-buffer allocation behind dart__node_alloc: static bumps from the arena
+       tail [static_pos,static_end); dynamic uses dart_plat_realloc, bounded by mem_cap */
+    uint8_t        alloc_dynamic;
+    uint8_t       *static_pos, *static_end;
+    size_t         mem_cap, mem_used;
     /* channel handles + lazy multicast bookkeeping */
     DartChannel  *handles;    /* [max_channels] */
     uint16_t      max_channels;
@@ -68,18 +71,59 @@ struct DartNode {
 #endif
 };
 
-/* default message-buffer allocator: realloc semantics (size 0 = free). */
-static void *dart__default_alloc(void *u, void *ptr, size_t size){
-    (void)u;
-    if (size == 0){ free(ptr); return NULL; }
-    return realloc(ptr, size);
-}
-
-/* the transport gets ONE user pointer (the node); this wrapper forwards the app's
- * real user_data to its allocator, matching the on_message/on_event wrappers. */
+/* The node's message-buffer allocator, handed to the transport as its realloc hook
+ * (u is the node). Every block carries a DART_ALLOC_HDR-byte header storing its
+ * payload size so realloc/free know the old size: the static path needs it to copy
+ * on grow, the dynamic path to maintain the memory cap. The header keeps the
+ * returned pointer 16-aligned. Static: bump from the arena tail, free is a no-op
+ * (the whole arena is reclaimed at node close). Dynamic: dart_plat_realloc, refused
+ * past mem_cap. */
+#define DART_ALLOC_HDR 16u
 static void *dart__node_alloc(void *u, void *ptr, size_t size){
     DartNode *n = (DartNode*)u;
-    return n->allocator(n->user_data, ptr, size);
+    uint8_t *base = ptr ? (uint8_t*)ptr - DART_ALLOC_HDR : NULL;
+    size_t   old  = base ? *(size_t*)base : 0;
+
+    if (size == 0){                                   /* free */
+        if (base && n->alloc_dynamic){
+            n->mem_used -= old + DART_ALLOC_HDR;
+            dart_plat_realloc(base, 0);
+        }
+        return NULL;
+    }
+    if (n->alloc_dynamic){
+        size_t newtot = size + DART_ALLOC_HDR, used = n->mem_used;
+        uint8_t *nb;
+        if (base) used -= old + DART_ALLOC_HDR;
+        if (used + newtot > n->mem_cap) return NULL;   /* runaway guard */
+        nb = (uint8_t*)dart_plat_realloc(base, newtot);
+        if (!nb) return NULL;
+        n->mem_used = used + newtot;
+        *(size_t*)nb = size;
+        return nb + DART_ALLOC_HDR;
+    } else {                                           /* static: bump from the arena tail */
+        size_t need = DART_ALLOC_HDR + ((size + 15u) & ~(size_t)15u);
+        uint8_t *nb;
+        if (base && old >= size) return ptr;           /* fits in place: no re-bump */
+        if ((size_t)(n->static_end - n->static_pos) < need) return NULL;
+        nb = n->static_pos; n->static_pos += need;
+        *(size_t*)nb = size;
+        if (base) memcpy(nb + DART_ALLOC_HDR, ptr, old);
+        return nb + DART_ALLOC_HDR;
+    }
+}
+
+/* Construct a node memory contract. The node copies what it needs at open, so the
+ * DartAllocator value itself need not outlive the call (the static buffer must). */
+DartAllocator dart_allocator_static(void *buffer, size_t size){
+    DartAllocator a; memset(&a, 0, sizeof a);
+    a.buffer = buffer; a.size = size; a.dynamic = 0;
+    return a;
+}
+DartAllocator dart_allocator_dynamic(size_t size_hint){
+    DartAllocator a; memset(&a, 0, sizeof a);
+    a.size = size_hint; a.dynamic = 1;
+    return a;
 }
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
@@ -285,7 +329,7 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
     if (!p) return 0;                                      /* recycled -> NACK -> repair or skip */
     /* one-copy: copy out of shared memory so the user owns the bytes (ack-timing safe) */
     if (len > n->shm_scratch_cap){
-        void *new_buf = n->allocator(n->user_data, n->shm_scratch, len?len:1u);
+        void *new_buf = dart__node_alloc(n, n->shm_scratch, len?len:1u);
         if (!new_buf) return 0;
         n->shm_scratch = new_buf; n->shm_scratch_cap = len;
     }
@@ -315,15 +359,15 @@ static uint8_t dart__node_name(const char *want, char *buf){
     return 13;
 }
 
-DartNode *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message, const DartNodeOpts *opts){
+DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryRtConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
-    uint16_t max_peers, max_channels; DartAllocFn allocator;
-    uint8_t *base; void *arena; int owns; size_t need;
+    uint16_t max_peers, max_channels;
+    uint8_t *base; void *arena; int owns; size_t need, arena_size, ctrl_end, ctrl_cap;
     DartNode *n; i_DartSock fd; uint16_t local_port;
 
+    if (!mem || mem->claimed) return NULL;             /* required, and one allocator per node */
     memset(&o, 0, sizeof o);
     if (opts) o = *opts;
-    allocator    = o.allocator ? o.allocator : dart__default_alloc;
     max_channels = o.max_channels ? o.max_channels : 8;
     max_peers    = o.discovery.max_peers ? o.discovery.max_peers : 16;
 
@@ -350,24 +394,41 @@ DartNode *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message
     {   i_DartBump b; memset(&b,0,sizeof b);
         dart__node_layout(&b, max_peers, max_channels, &tc, &dc, &blocks);
         need = b.offset + 32u; }
-    if (mem_size < need) return NULL;
 
-    if (o.memory){ arena = o.memory; owns = 0; }
-    else { arena = malloc(mem_size); owns = 1; if (!arena) return NULL; }
+    /* control plane is one contiguous block; in static mode the slack past it backs
+       the message-buffer bump (dart__node_alloc), in dynamic mode it is heap-grown. */
+    if (mem->dynamic){
+        arena_size = mem->size > need ? mem->size : need;   /* hint floors at the layout need */
+        arena = dart_plat_realloc(NULL, arena_size); owns = 1;
+        if (!arena) return NULL;
+    } else {
+        if (!mem->buffer || mem->size < need) return NULL;
+        arena = mem->buffer; arena_size = mem->size; owns = 0;
+    }
     base = (uint8_t*)(((uintptr_t)arena+15u)&~(uintptr_t)15u);
     {   i_DartBump b; memset(&b,0,sizeof b);
-        b.base = base; b.cap = mem_size - (size_t)(base - (uint8_t*)arena);
-        dart__node_layout(&b, max_peers, max_channels, &tc, &dc, &blocks); }
+        b.base = base; b.cap = arena_size - (size_t)(base - (uint8_t*)arena);
+        dart__node_layout(&b, max_peers, max_channels, &tc, &dc, &blocks);
+        ctrl_end = (b.offset + 15u) & ~(size_t)15u;   /* 16-aligned tail: static bump start */
+        ctrl_cap = b.cap; }
 
-    if (!dart_plat_startup()){ if (owns) free(arena); return NULL; }
+    if (!dart_plat_startup()){ if (owns) dart_plat_realloc(arena, 0); return NULL; }
 
     n = blocks.n; memset(n, 0, sizeof *n);
     n->fd = DART_SOCK_BAD; n->multicast_fd = DART_SOCK_BAD;
     n->domain = o.domain;
     n->net = o.net;
     n->user_on_message = on_message; n->on_event = o.on_event;
-    n->allocator = allocator; n->user_data = o.user_data;
+    n->user_data = o.user_data;
     n->arena = arena; n->owns_arena = owns;
+    n->alloc_dynamic = mem->dynamic;
+    if (mem->dynamic){
+        n->mem_cap = mem->max_bytes ? mem->max_bytes : DART_MEM_DEFAULT_MAX;
+        n->static_pos = n->static_end = NULL;
+    } else {
+        n->static_pos = base + ctrl_end;     /* message buffers bump from the arena tail */
+        n->static_end = base + ctrl_cap;
+    }
     n->handles = (DartChannel*)blocks.handles;
     n->joined_groups = (uint32_t*)blocks.joined_groups;
     n->max_channels = max_channels;
@@ -378,7 +439,7 @@ DartNode *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message
     tc.on_event   = dart__node_on_event;
     tc.user       = n;
 #ifdef DART_SHM
-    n->shm_capable = (uint8_t)(!o.disable_shm);   /* the node always has an allocator */
+    n->shm_capable = (uint8_t)(mem->dynamic && !o.disable_shm);   /* static mode never uses SHM */
     if (n->shm_capable){
         dart_plat_host_uuid(n->shm_host);
         if (!dart_plat_random(&n->shm_base, sizeof n->shm_base)) n->shm_base = dart_plat_pid();
@@ -449,6 +510,7 @@ DartNode *dart_node_open(size_t mem_size, const char *name, DartMsgFn on_message
     n->discovery = dart_discovery_rt_open(blocks.discovery, blocks.discovery_bytes, &dc);
     if (!n->discovery) goto fail_mcast;
 
+    mem->claimed = 1;          /* taken over; the allocator can't back a second node */
     return n;
 
 fail_mcast:
@@ -459,7 +521,7 @@ fail_sock:
     n->fd = DART_SOCK_BAD;
 fail_startup:
     dart_plat_cleanup();
-    if (owns) free(arena);
+    if (owns) dart_plat_realloc(arena, 0);
     return NULL;
 }
 
@@ -705,9 +767,9 @@ void dart_node_close(DartNode *n, int send_bye){
             if (n->shm_pool[i]) dart_shm_detach((i_DartShmPool*)n->shm_pool[i]);   /* unlinks ours */
         for (i=0;i<n->shm_reader_max;i++)
             if (n->shm_reader_segments[i]) dart_shm_detach((i_DartShmPool*)(n->shm_reader_pool_mem + (size_t)i*state_bytes));
-        if (n->shm_scratch) n->allocator(n->user_data, n->shm_scratch, 0);
+        if (n->shm_scratch) dart__node_alloc(n, n->shm_scratch, 0);
     }
 #endif
     dart_plat_cleanup();
-    if (owns) free(arena);     /* the node struct lives in the arena: touch nothing after */
+    if (owns) dart_plat_realloc(arena, 0);   /* the node struct lives in the arena: touch nothing after */
 }

@@ -157,7 +157,8 @@ int main(int argc, char **argv){
         else if ((strcmp(argv[i], "--if") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) ifc = argv[++i];
         else if (!name) name = argv[i];
     }
-    DartNode *n = dart_node_open(1 << 20, name, on_message,
+    DartAllocator mem = dart_allocator_dynamic(1 << 20);
+    DartNode *n = dart_node_open(&mem, name, on_message,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS, .on_event = on_event,
                                                   .net = { .multicast_interface = ifc } });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }

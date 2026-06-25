@@ -15,6 +15,7 @@
 
 #include "core.h"
 #include <string.h>
+#include <stdlib.h>           /* malloc/realloc/free behind dart_plat_realloc */
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -150,6 +151,13 @@ uint64_t dart_plat_pid(void){
 #else
     return (uint64_t)getpid();
 #endif
+}
+
+/* The one heap dependency, kept behind the platform layer so the node holds no
+ * <stdlib.h>: ptr NULL = allocate, size 0 = free (returns NULL), else realloc. */
+void *dart_plat_realloc(void *ptr, size_t size){
+    if (size == 0){ free(ptr); return NULL; }
+    return realloc(ptr, size);
 }
 
 /* --------------------------------------------------------------- UDP sockets */
