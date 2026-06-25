@@ -93,6 +93,11 @@ void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
  * on an unbound UDP socket; no packet leaves). 0 on failure. Backs interface
  * pinning and the same-host check. */
 uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
+/* Enumerate this host's usable IPv4 interface addresses (up, non-loopback) as
+ * network-order naddr into out[0..max), returning the count written (0 if none, or
+ * if the platform offers no enumeration). Backs the auto interface-pin fallback when
+ * a route probe can't name a real LAN interface. */
+int      dart_plat_local_ipv4s(uint32_t *out, int max);
 
 /* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
  * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target

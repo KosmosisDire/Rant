@@ -178,7 +178,7 @@ static uint32_t dart__node_chan_group(uint16_t domain, const DartChannelDef *def
 static uint32_t dart__node_mcast_if(DartNode *n){
     if (!n->mcast_if_set){
         n->mcast_if = n->net.multicast_interface ? dart_plat_parse_ip(n->net.multicast_interface)
-            : dart_plat_route_src(dart_plat_parse_ip(n->net.discovery_group ? n->net.discovery_group : "239.255.0.7"),
+            : dart_discovery_mcast_if_for(dart_plat_parse_ip(n->net.discovery_group ? n->net.discovery_group : "239.255.0.7"),
                                    n->net.discovery_port ? n->net.discovery_port : 7400);
         n->mcast_if_set = 1;
     }

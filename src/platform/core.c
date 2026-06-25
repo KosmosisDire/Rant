@@ -39,6 +39,10 @@
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
+  #if !defined(ESP_PLATFORM)
+    #include <ifaddrs.h>         /* getifaddrs: enumerate local interfaces */
+    #include <net/if.h>          /* IFF_UP / IFF_LOOPBACK */
+  #endif
   #include <unistd.h>
   #include <poll.h>
   #include <time.h>
@@ -325,6 +329,54 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
     dart_plat_close(s);
     return ip;
 }
+
+#if defined(_WIN32)
+/* SIO_GET_INTERFACE_LIST flag values (mirrors the BSD IFF_* bits) if the SDK's
+ * headers didn't define them for this WSAIoctl. */
+#ifndef IFF_UP
+#define IFF_UP 0x00000001
+#endif
+#ifndef IFF_LOOPBACK
+#define IFF_LOOPBACK 0x00000004
+#endif
+int dart_plat_local_ipv4s(uint32_t *out, int max){
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    INTERFACE_INFO info[32];
+    DWORD bytes = 0;
+    int n = 0, i, count;
+    if (s == INVALID_SOCKET || !out || max <= 0){ if (s != INVALID_SOCKET) closesocket(s); return 0; }
+    if (WSAIoctl(s, SIO_GET_INTERFACE_LIST, NULL, 0, info, sizeof info, &bytes, NULL, NULL) != 0){
+        closesocket(s); return 0;
+    }
+    closesocket(s);
+    count = (int)(bytes / sizeof(INTERFACE_INFO));
+    for (i = 0; i < count && n < max; i++){
+        u_long flags = info[i].iiFlags;
+        struct sockaddr_in *a = &info[i].iiAddress.AddressIn;
+        if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) continue;
+        if (a->sin_family != AF_INET) continue;
+        out[n++] = a->sin_addr.s_addr;
+    }
+    return n;
+}
+#elif defined(ESP_PLATFORM)
+int dart_plat_local_ipv4s(uint32_t *out, int max){ (void)out; (void)max; return 0; }
+#else
+int dart_plat_local_ipv4s(uint32_t *out, int max){
+    struct ifaddrs *ifs = NULL, *p;
+    int n = 0;
+    if (!out || max <= 0 || getifaddrs(&ifs) != 0) return 0;
+    for (p = ifs; p && n < max; p = p->ifa_next){
+        struct sockaddr_in *a;
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
+        a = (struct sockaddr_in*)p->ifa_addr;
+        out[n++] = a->sin_addr.s_addr;
+    }
+    freeifaddrs(ifs);
+    return n;
+}
+#endif
 
 /* ------------------------------------------------------------- shared memory */
 #ifdef DART_SHM

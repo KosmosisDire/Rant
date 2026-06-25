@@ -5,8 +5,10 @@
  *   drop   <topic>   stop pub and sub on that topic
  * Any other line is published to every topic you currently publish on.
  * Run two copies (one host, or two on a LAN) and type in each; pass a node name
- * (e.g. ./node alice) to label who a message came from, and --verbose to print
- * discovery/transport events. All defaults:
+ * (e.g. ./node alice) to label who a message came from, --verbose to print
+ * discovery/transport events, and --if <ip> to pin multicast to a given interface
+ * (rarely needed: the interface is auto-detected, but pin it on a multihomed host
+ * where the wrong NIC is chosen). All defaults:
  * best-effort, domain 0, unicast data, multicast discovery.
  *
  * DART runs on its own thread so the main thread can read stdin with a normal
@@ -186,12 +188,15 @@ static THREAD_RET poll_thread(void *arg){
 
 int main(int argc, char **argv){
     const char *name = NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
+    const char *ifc  = NULL;   /* --if <ip>: pin multicast to this interface (multihomed hosts) */
     for (int i = 1; i < argc; i++){
         if      (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) g_verbose = 1;
+        else if ((strcmp(argv[i], "--if") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) ifc = argv[++i];
         else if (!name) name = argv[i];
     }
     DartNode *n = dart_node_open(1 << 20, name, on_message,
-                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS, .on_event = on_event });
+                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS, .on_event = on_event,
+                                                  .net = { .multicast_interface = ifc } });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     printf("commands: sub <topic> | pub <topic> | pubsub <topic> | drop <topic>\n"

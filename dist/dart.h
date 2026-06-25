@@ -251,6 +251,11 @@ void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
  * on an unbound UDP socket; no packet leaves). 0 on failure. Backs interface
  * pinning and the same-host check. */
 uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
+/* Enumerate this host's usable IPv4 interface addresses (up, non-loopback) as
+ * network-order naddr into out[0..max), returning the count written (0 if none, or
+ * if the platform offers no enumeration). Backs the auto interface-pin fallback when
+ * a route probe can't name a real LAN interface. */
+int      dart_plat_local_ipv4s(uint32_t *out, int max);
 
 /* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
  * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
@@ -298,7 +303,8 @@ typedef struct {
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
-    const char  *multicast_interface;    /* interface IP to join/send on; NULL = route probe,
+    const char  *multicast_interface;    /* interface IP to join/send on; NULL = auto
+                                 (route probe, falling back to a real LAN interface),
                                  "127.0.0.1" = single-host */
     const DartDiscoveryAddr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
@@ -336,8 +342,10 @@ void       dart_discovery_rt_replay(DartDiscoveryRt *rt);
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
-/* Egress interface the OS routes to group:port (INADDR_ANY on failure). Exposed so
- * layers above pin their multicast sockets to the same interface on multihomed hosts. */
+/* The one interface every multicast socket should pin to: route-probe group:port,
+ * falling back to the default-route LAN interface (a multicast route can resolve to
+ * loopback on Windows) and then to interface enumeration. INADDR_ANY (0) only if nothing
+ * usable is found. Exposed so layers above pin to the same interface on multihomed hosts. */
 uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 
 #ifdef __cplusplus
@@ -1729,6 +1737,10 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
+  #if !defined(ESP_PLATFORM)
+    #include <ifaddrs.h>         /* getifaddrs: enumerate local interfaces */
+    #include <net/if.h>          /* IFF_UP / IFF_LOOPBACK */
+  #endif
   #include <unistd.h>
   #include <poll.h>
   #include <time.h>
@@ -2016,6 +2028,54 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
     return ip;
 }
 
+#if defined(_WIN32)
+/* SIO_GET_INTERFACE_LIST flag values (mirrors the BSD IFF_* bits) if the SDK's
+ * headers didn't define them for this WSAIoctl. */
+#ifndef IFF_UP
+#define IFF_UP 0x00000001
+#endif
+#ifndef IFF_LOOPBACK
+#define IFF_LOOPBACK 0x00000004
+#endif
+int dart_plat_local_ipv4s(uint32_t *out, int max){
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    INTERFACE_INFO info[32];
+    DWORD bytes = 0;
+    int n = 0, i, count;
+    if (s == INVALID_SOCKET || !out || max <= 0){ if (s != INVALID_SOCKET) closesocket(s); return 0; }
+    if (WSAIoctl(s, SIO_GET_INTERFACE_LIST, NULL, 0, info, sizeof info, &bytes, NULL, NULL) != 0){
+        closesocket(s); return 0;
+    }
+    closesocket(s);
+    count = (int)(bytes / sizeof(INTERFACE_INFO));
+    for (i = 0; i < count && n < max; i++){
+        u_long flags = info[i].iiFlags;
+        struct sockaddr_in *a = &info[i].iiAddress.AddressIn;
+        if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) continue;
+        if (a->sin_family != AF_INET) continue;
+        out[n++] = a->sin_addr.s_addr;
+    }
+    return n;
+}
+#elif defined(ESP_PLATFORM)
+int dart_plat_local_ipv4s(uint32_t *out, int max){ (void)out; (void)max; return 0; }
+#else
+int dart_plat_local_ipv4s(uint32_t *out, int max){
+    struct ifaddrs *ifs = NULL, *p;
+    int n = 0;
+    if (!out || max <= 0 || getifaddrs(&ifs) != 0) return 0;
+    for (p = ifs; p && n < max; p = p->ifa_next){
+        struct sockaddr_in *a;
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
+        a = (struct sockaddr_in*)p->ifa_addr;
+        out[n++] = a->sin_addr.s_addr;
+    }
+    freeifaddrs(ifs);
+    return n;
+}
+#endif
+
 /* ------------------------------------------------------------- shared memory */
 #ifdef DART_SHM
 #ifndef _WIN32
@@ -2198,9 +2258,48 @@ void dart_discovery_rt_replay(DartDiscoveryRt *rt){
     if (rt) dart_discovery_replay_peers(rt->core);
 }
 
-/* Every multicast send and join should pin to this one interface. */
+/* A loopback (127/8) or unspecified address is never a usable multicast egress. */
+static int dart__if_routable(uint32_t naddr){
+    uint8_t ip[4];
+    if (!naddr) return 0;
+    dart_plat_naddr_to_ip4(naddr, ip);
+    return ip[0] != 127;
+}
+/* Link-local autoconfig (169.254/16): an adapter with no DHCP lease. Usable only as a
+ * last resort, behind any properly addressed LAN interface. */
+static int dart__if_apipa(uint32_t naddr){
+    uint8_t ip[4];
+    dart_plat_naddr_to_ip4(naddr, ip);
+    return ip[0] == 169 && ip[1] == 254;
+}
+
+/* Every multicast send and join should pin to this one interface. Auto path (no
+ * explicit --if): route-probe the group, which is correct on POSIX. But Windows
+ * source-address selection for a multicast destination can resolve to loopback, which
+ * would strand all traffic on 127.0.0.1; so when the group probe isn't a routable
+ * address, probe the default route via a reserved global-unicast destination (connect()
+ * on UDP sends nothing) to get the LAN interface, then finally enumerate and prefer a
+ * real (non-APIPA) LAN address. Returns 0 only if nothing usable was found (the OS then
+ * picks the default interface). */
 uint32_t dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port){
-    return dart_plat_route_src(group_naddr, port);
+    uint32_t ip, ifs[16];
+    int n, i, apipa = -1;
+
+    ip = dart_plat_route_src(group_naddr, port);
+    if (dart__if_routable(ip)) return ip;
+
+    /* 192.0.2.1 is TEST-NET-1 (RFC 5737): never a real host, so this resolves only the
+     * default-route source interface; no datagram is transmitted. */
+    ip = dart_plat_route_src(dart_plat_ipv4(192u, 0u, 2u, 1u), port);
+    if (dart__if_routable(ip)) return ip;
+
+    n = dart_plat_local_ipv4s(ifs, (int)(sizeof ifs / sizeof ifs[0]));
+    for (i = 0; i < n; i++){
+        if (!dart__if_routable(ifs[i])) continue;
+        if (dart__if_apipa(ifs[i])){ if (apipa < 0) apipa = i; continue; }
+        return ifs[i];                 /* first real (DHCP/static) LAN address */
+    }
+    return apipa >= 0 ? ifs[apipa] : 0;  /* APIPA only if nothing better; else OS default */
 }
 
 int dart_discovery_make_uuid4(uint8_t out[16]){
@@ -2295,7 +2394,7 @@ DartDiscoveryRt *dart_discovery_rt_open(void *mem, size_t cap, const DartDiscove
     /* pin join and egress to one deterministic interface */
     group_naddr = dart_plat_parse_ip(group);
     interface_ip = c.multicast_interface ? dart_plat_parse_ip(c.multicast_interface)
-                      : dart_plat_route_src(group_naddr, c.discovery_port);
+                      : dart_discovery_mcast_if_for(group_naddr, c.discovery_port);
     if (!dart_plat_mcast_join(fd, group_naddr, interface_ip)){
         dart_plat_close(fd); dart_plat_cleanup(); return NULL;
     }
@@ -4936,7 +5035,7 @@ static uint32_t dart__node_chan_group(uint16_t domain, const DartChannelDef *def
 static uint32_t dart__node_mcast_if(DartNode *n){
     if (!n->mcast_if_set){
         n->mcast_if = n->net.multicast_interface ? dart_plat_parse_ip(n->net.multicast_interface)
-            : dart_plat_route_src(dart_plat_parse_ip(n->net.discovery_group ? n->net.discovery_group : "239.255.0.7"),
+            : dart_discovery_mcast_if_for(dart_plat_parse_ip(n->net.discovery_group ? n->net.discovery_group : "239.255.0.7"),
                                    n->net.discovery_port ? n->net.discovery_port : 7400);
         n->mcast_if_set = 1;
     }

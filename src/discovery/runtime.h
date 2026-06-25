@@ -17,7 +17,8 @@ typedef struct {
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
-    const char  *multicast_interface;    /* interface IP to join/send on; NULL = route probe,
+    const char  *multicast_interface;    /* interface IP to join/send on; NULL = auto
+                                 (route probe, falling back to a real LAN interface),
                                  "127.0.0.1" = single-host */
     const DartDiscoveryAddr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
@@ -55,8 +56,10 @@ void       dart_discovery_rt_replay(DartDiscoveryRt *rt);
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
-/* Egress interface the OS routes to group:port (INADDR_ANY on failure). Exposed so
- * layers above pin their multicast sockets to the same interface on multihomed hosts. */
+/* The one interface every multicast socket should pin to: route-probe group:port,
+ * falling back to the default-route LAN interface (a multicast route can resolve to
+ * loopback on Windows) and then to interface enumeration. INADDR_ANY (0) only if nothing
+ * usable is found. Exposed so layers above pin to the same interface on multihomed hosts. */
 uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 
 #ifdef __cplusplus
