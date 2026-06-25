@@ -1,7 +1,7 @@
 /* tiny pub/sub command-line tool over a DART node.
 
 POSIX  : cc  -std=c99 -Wall -Idist tools/pubsub.c -o pubsub -lpthread -lrt
-Windows: gcc -std=c99 -Wall -Idist tools/pubsub.c -o pubsub.exe -lws2_32 -lbcrypt
+Windows: gcc -std=c99 -Wall -Idist tools/pubsub.c -o pubsub.exe -lws2_32 -lbcrypt -lwinmm
 
 Same-host pub/sub goes over shared memory automatically (no extra flags): SHM is on
 by default; the dynamic mode (no --max) provides the allocator it needs. -lrt is for
@@ -14,6 +14,17 @@ shm_open on Linux (drop it on macOS/BSD, or build -DDART_NO_SHM).
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+/* The public node API is handle-based (dart_node_create_channel -> DartChannel*,
+ * dart_channel_send, ...). This tool creates its channels in index order, so these
+ * shims keep the concise (node, channel-index) call form: dart_node_channel(n, i)
+ * maps a creation index back to its handle. */
+#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), (d), (l))
+#define dart_node_drain(n, idx, ms)          dart_channel_drain(dart_node_channel((n),(idx)), (ms))
+#define dart_node_writer_match_count(n, idx) dart_channel_match_count(dart_node_channel((n),(idx)))
+#define dart_node_repair_stats(n, idx, o)    dart_channel_repair_stats(dart_node_channel((n),(idx)), (o))
+#define dart_node_reader_progress(n, idx, p, b, h, t) \
+        dart_channel_reader_progress(dart_node_channel((n),(idx)), (p),(b),(h),(t))
 
 /* Minimal thread + lock shim. A DART node only does discovery, liveness, and
  * reliable repair inside dart_node_poll, so the interactive publisher must keep
@@ -130,9 +141,9 @@ static size_t parse_size(const char *s){
     return (value > 0) ? (size_t)(value*mult) : 0;
 }
 
-static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
-    const char *topic = (ch < (uint16_t)g_n_topics) ? g_topics[ch] : "?";
-    (void)u;
+static void on_message(const DartMsg *msg){
+    const char *topic = msg->channel_name ? msg->channel_name : "?";
+    uint32_t from = msg->sender_id; const void *data = msg->data; size_t len = msg->len;
     g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* accounting for sub --rate (the loop prints it) */
     g_last_peer = from;                              /* the loop snapshots this writer's HOL progress */
     if (g_outfile){                       /* --file: each message OVERWRITES the file */
@@ -396,7 +407,7 @@ int main(int argc, char **argv){
     size_t send_limit = dynamic ? DART_MESSAGE_MAX : cap;
 
     /* A topic name's 64-bit hash is its cross-peer identity; the local handle is the
-       index in channels[]. The publisher sends on the first channel (handle 0). */
+       channel's creation index. The publisher sends on the first channel (index 0). */
     const uint16_t channel = 0;
 
     /* A deliberate big-message profile (not the defaults), shared by every topic:
@@ -412,26 +423,17 @@ int main(int argc, char **argv){
         .repair_delay_us     = 2000,
         .backpressure_wait_us= 5000000,
     };
-    static DartChannelDef chans[MAX_TOPICS];
-    for (i = 0; i < g_n_topics; i++){
-        chans[i].name      = g_topics[i];
-        chans[i].qos       = qos;
-        chans[i].role      = is_pub ? DART_PUB_ONLY : DART_SUB_ONLY;
-        chans[i].multicast = (uint8_t)mcast;
-    }
+    const uint16_t max_peers = 8;   /* a few peers; bounds per-peer reassembly */
 
     /* announce/timeout left at defaults (1s / 3.5s): the startup solicit makes
        discovery near-instant, so the periodic announce is just the slow backstop.
        data_port defaults to 0 = an OS-assigned ephemeral port. */
-    DartNodeConfig cfg = {
-        .domain     = domain,
-        .channels   = chans,
-        .n_channels = (uint16_t)g_n_topics,
-        .on_message = on_message,
-        .on_event   = on_event,
-        .allocator  = dynamic ? pubsub_realloc : NULL,   /* dynamic message sizing */
-        .discovery  = { .max_peers = 8 },   /* a few peers; bounds per-peer reassembly */
-    };
+    DartNodeOpts opts; memset(&opts, 0, sizeof opts);
+    opts.domain       = domain;
+    opts.max_channels = (uint16_t)g_n_topics;
+    opts.on_event     = on_event;
+    opts.allocator    = dynamic ? pubsub_realloc : NULL;   /* dynamic message sizing */
+    opts.discovery.max_peers = max_peers;
     /* A single big message has no within-message flow control, so the receive
        socket must buffer it whole or fragments drop and 32-wide NACK repair
        crawls. Size the socket buffers to hold one message (clamped 8..64 MB).
@@ -439,28 +441,40 @@ int main(int argc, char **argv){
     { size_t sb = dynamic ? DART_MESSAGE_MAX : cap;
       if (sb < (8u<<20))  sb = 8u<<20;
       if (sb > (64u<<20)) sb = 64u<<20;
-      cfg.net.recv_buffer_bytes = (uint32_t)sb;
-      cfg.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
-    if (frag) cfg.net.fragment_size = (uint16_t)frag;   /* needs -DDART_FRAG_PAYLOAD_MAX>=frag */
-    if (if_ip)      cfg.net.multicast_interface = if_ip;          /* multihomed: pin it */
-    else if (mcast) cfg.net.multicast_interface = "127.0.0.1";    /* same-host: stay local */
+      opts.net.recv_buffer_bytes = (uint32_t)sb;
+      opts.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
+    if (frag) opts.net.fragment_size = (uint16_t)frag;   /* needs -DDART_FRAG_PAYLOAD_MAX>=frag */
+    if (if_ip)      opts.net.multicast_interface = if_ip;          /* multihomed: pin it */
+    else if (mcast) opts.net.multicast_interface = "127.0.0.1";    /* same-host: stay local */
 
     DartDiscoveryAddr seed;
     if (peer_ip){
         memset(&seed, 0, sizeof seed);
         if (parse_ipv4(peer_ip, seed.ip) < 0){ fprintf(stderr, "bad --peer ip %s\n", peer_ip); return 2; }
         seed.ip_len = 4;           /* port 0 = use the discovery port */
-        cfg.net.seed_peers = &seed; cfg.net.n_seed_peers = 1;
+        opts.net.seed_peers = &seed; opts.net.n_seed_peers = 1;
     }
 
-    /* Size the arena to the cap: ~ (keep_last + max_peers) x max_message_bytes
-       plus the meta channel. malloc'd (can be tens of MB) and intentionally not
-       freed: the process owns it for its whole life. */
-    size_t need = dart_node_required_memory(&cfg);
-    uint8_t *mem = (uint8_t*)malloc(need);
-    if (!mem){ fprintf(stderr, "out of memory (need %lu bytes)\n", (unsigned long)need); return 1; }
-    DartNode *n = dart_node_open(mem, need, &cfg);
-    if (!n){ fprintf(stderr, "dart_node_open failed\n"); free(mem); return 1; }
+    /* Size the arena. Dynamic mode keeps message buffers out of the arena (the
+       allocator mallocs them on demand), so a small fixed arena suffices; fixed
+       mode (--max) carves (keep_last + max_peers) x cap of history+reassembly per
+       channel from it. The node mallocs this and owns it for the whole run. */
+    size_t mem_size = 8u<<20;
+    if (!dynamic)
+        mem_size += (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
+    DartNode *n = dart_node_open(mem_size, NULL, on_message, &opts);
+    if (!n){ fprintf(stderr, "dart_node_open failed (arena %lu bytes)\n", (unsigned long)mem_size); return 1; }
+
+    /* Create channels in index order, so channel index i is g_topics[i] and the
+       shims above resolve an index straight to its handle. */
+    for (i = 0; i < g_n_topics; i++){
+        DartChannelOpts co; memset(&co, 0, sizeof co);
+        co.qos = qos; co.multicast = (uint8_t)mcast;
+        if (!dart_node_create_channel(n, g_topics[i], is_pub ? DART_PUB_ONLY : DART_SUB_ONLY, &co)){
+            fprintf(stderr, "create channel '%s' failed\n", g_topics[i]);
+            dart_node_close(n, 0); return 1;
+        }
+    }
 
     if (is_sub){
         if (file_name){

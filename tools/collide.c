@@ -7,8 +7,8 @@
  * name B (A != B, same identity). DART must fire on_collision and refuse the
  * match, so the subscriber receives nothing: a hash clash never cross-wires.
  *
- *   Windows: gcc -O2 -std=c99 -Wall -Idist examples/collide.c -o collide.exe -lws2_32 -lbcrypt
- *   POSIX  : cc  -O2 -std=c99 -Wall -Idist examples/collide.c -o collide -lpthread
+ *   Windows: gcc -O2 -std=c99 -Wall -Idist tools/collide.c -o collide.exe -lws2_32 -lbcrypt -lwinmm
+ *   POSIX  : cc  -O2 -std=c99 -Wall -Idist tools/collide.c -o collide -lrt
  */
 #define DART_IMPLEMENTATION
 #include "dart.h"
@@ -56,8 +56,8 @@ static int rho_collision(uint64_t x0, uint64_t *pa_out, uint64_t *pb_out){
 }
 
 static unsigned long g_samples, g_collisions;
-static void on_message(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
-    (void)u;(void)ch;(void)from;(void)d;(void)n; g_samples++;
+static void on_message(const DartMsg *msg){
+    (void)msg; g_samples++;
 }
 static void on_event(const DartEvent *ev){
     if (ev->kind != DART_NAME_COLLISION) return;
@@ -88,29 +88,28 @@ int main(void){
     printf("Standing up a publisher on A and a subscriber on B...\n");
     {
         static uint8_t mem_w[1<<20], mem_r[1<<20];
-        DartChannelDef cw, cr; DartNodeConfig wc, rc; DartNode *w, *r;
-        uint8_t payload[16]; uint64_t end;
+        DartNode *w, *r; DartChannel *wch;
+        DartQos qos = { .reliability=DART_RELIABLE, .keep_last=1, .catch_up=1,
+                        .max_message_bytes=32, .heartbeat_us=50000 };
+        uint8_t payload[16];
         memset(payload, 0x5A, sizeof payload);
 
-        cw = (DartChannelDef){ .name=a, .role=DART_PUB_ONLY,
-            .qos={ .reliability=DART_RELIABLE, .keep_last=1, .catch_up=1,
-                   .max_message_bytes=32, .heartbeat_us=50000 } };
-        cr = cw; cr.name=b; cr.role=DART_SUB_ONLY;
-
-        wc = (DartNodeConfig){ .domain=41, .channels=&cw, .n_channels=1,
-                                 .discovery={ .max_peers=4 } };
-        rc = wc; rc.channels=&cr;
-        rc.on_message=on_message; rc.on_event=on_event;
-
-        w = dart_node_open(mem_w, sizeof mem_w, &wc);
-        r = dart_node_open(mem_r, sizeof mem_r, &rc);
+        /* fixed mode (BYO arena, no allocator): tiny messages fit the 1 MB arena.
+           Publisher on name A, subscriber on name B -- distinct names, same identity. */
+        w = dart_node_open(sizeof mem_w, NULL, NULL,
+                &(DartNodeOpts){ .domain=41, .memory=mem_w, .discovery={ .max_peers=4 } });
+        r = dart_node_open(sizeof mem_r, NULL, on_message,
+                &(DartNodeOpts){ .domain=41, .memory=mem_r, .on_event=on_event,
+                                 .discovery={ .max_peers=4 } });
         if (!w || !r){ fprintf(stderr, "node open failed\n"); return 1; }
+        wch = dart_node_create_channel(w, a, DART_PUB_ONLY, &(DartChannelOpts){ .qos=qos });
+        if (!wch || !dart_node_create_channel(r, b, DART_SUB_ONLY, &(DartChannelOpts){ .qos=qos })){
+            fprintf(stderr, "create channel failed\n"); return 1;
+        }
 
-        end = 0;
         for (i=0;i<150;i++){            /* ~3s: discover, exchange interest, send */
-            dart_node_send(w, 0, payload, sizeof payload);   /* channel 0 */
+            dart_channel_send(wch, payload, sizeof payload);
             dart_node_poll(w, 0); dart_node_poll(r, 20);
-            (void)end;
         }
         dart_node_close(r, 1);
         dart_node_close(w, 1);
