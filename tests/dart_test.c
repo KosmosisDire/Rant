@@ -303,9 +303,8 @@ static unsigned long long g_gap_tus = 0;
 static uint64_t g_wait_us = 0;
 static uint32_t g_wait_n  = 0;
 
-static void lat_on_event(void *u, const DartEvent *ev){
-    (void)u;
-    if (ev->kind == DART_MSG_LOST){ g_gap_evt++; g_gap_tus += ev->count; }
+static void lat_on_event(const DartEvent *ev){
+    if (ev->kind == DART_MSG_LOST){ g_gap_evt++; g_gap_tus += ev->lost_count; }
 }
 
 static void lat_on_message(const DartMsg *msg){
@@ -769,10 +768,9 @@ static void st_on_message(const DartMsg *msg){
     st_any++;
 }
 static unsigned long st_collisions;
-static void st_on_event(void *u, const DartEvent *ev){
-    (void)u;
+static void st_on_event(const DartEvent *ev){
     if (ev->kind == DART_MSG_LOST){
-        if (ev->channel < 8){ st_gap_calls[ev->channel]++; st_gap_tus[ev->channel] += (unsigned long)ev->count; }
+        if (ev->channel < 8){ st_gap_calls[ev->channel]++; st_gap_tus[ev->channel] += (unsigned long)ev->lost_count; }
     } else if (ev->kind == DART_NAME_COLLISION){
         st_collisions++;
     }
@@ -891,8 +889,7 @@ static void disc_core_checks(void){
    directly over a transport, with NO sockets, clock, or platform anywhere. Proves
    the split: the peer table + discovery->transport wiring is testable in isolation. */
 static uint32_t nc_up_n, nc_down_n, nc_refused_n, nc_up_id, nc_down_id;
-static void nc_event(void *u, const DartEvent *ev){
-    (void)u;
+static void nc_event(const DartEvent *ev){
     if      (ev->kind==DART_PEER_UP)     { nc_up_n++;   nc_up_id=ev->peer; }
     else if (ev->kind==DART_PEER_DOWN)   { nc_down_n++; nc_down_id=ev->peer; }
     else if (ev->kind==DART_PEER_REFUSED){ nc_refused_n++; }
@@ -1038,7 +1035,7 @@ static DartState *shml_W, *shml_R;
 static int shml_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
     (void)u;(void)ch;(void)from;(void)desc; if (shml_ok){ shml_recv++; return 1; } return 0;
 }
-static void shml_on_event(void *u, const DartEvent *ev){ (void)u; if (ev->kind==DART_MSG_LOST) shml_lost++; }
+static void shml_on_event(const DartEvent *ev){ if (ev->kind==DART_MSG_LOST) shml_lost++; }
 static void shml_pump(int n){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol; int i;
     for (i=0;i<n;i++){
@@ -1299,8 +1296,8 @@ static void open_fail_checks(void){
  * an allocator (so the node is SHM-capable, taking the rewrap path) and a sentinel
  * user_data, drive a topic-hash collision, and assert on_event saw the sentinel. */
 static void *evu_user; static int evu_collisions;
-static void evu_on_event(void *u, const DartEvent *ev){
-    if (ev->kind == DART_NAME_COLLISION){ evu_user = u; evu_collisions++; }
+static void evu_on_event(const DartEvent *ev){
+    if (ev->kind == DART_NAME_COLLISION){ evu_user = ev->user; evu_collisions++; }
 }
 static void *evu_alloc(void *u, void *p, size_t n){ (void)u; if(!n){ free(p); return NULL; } return realloc(p,n); }
 static void event_user_checks(void){
@@ -1336,8 +1333,8 @@ static void event_user_checks(void){
  * joins its own group at open, so arm the injection AFTER open and before the channel
  * create, where the channel's group join happens. */
 static int mjf_events; static uint16_t mjf_channel;
-static void mjf_on_event(void *u, const DartEvent *ev){
-    (void)u; if (ev->kind==DART_MCAST_JOIN_FAILED){ mjf_events++; mjf_channel=ev->channel; }
+static void mjf_on_event(const DartEvent *ev){
+    if (ev->kind==DART_MCAST_JOIN_FAILED){ mjf_events++; mjf_channel=ev->channel; }
 }
 static void mcast_join_degrade_checks(void){
     static uint8_t mem[1<<20];

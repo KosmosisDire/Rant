@@ -130,8 +130,6 @@ static size_t parse_size(const char *s){
     return (value > 0) ? (size_t)(value*mult) : 0;
 }
 
-/* message delivery: keep it cheap, never call back into dart_*. Printing the
- * payload as text is fine. ch is the channel's local handle (its index). */
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     const char *topic = (ch < (uint16_t)g_n_topics) ? g_topics[ch] : "?";
     (void)u;
@@ -149,44 +147,10 @@ static void on_message(void *u, uint16_t ch, uint32_t from, const void *data, si
     }
 }
 
-/* Everything that isn't message delivery, as one callback: peer up/down for
- * discovery visibility, plus the diagnostics (a too-big message skipped, or a
- * topic-name hash collision refused). */
-static void on_event(void *u, const DartEvent *ev){
-    (void)u;
-    switch (ev->kind){
-    case DART_PEER_UP:
-        if (ev->ip_len == 4)
-            fprintf(stderr, "[disc +%ldms] peer %u discovered at %u.%u.%u.%u:%u\n",
-                    now_ms()-g_start_ms, ev->peer, ev->ip[0],ev->ip[1],ev->ip[2],ev->ip[3], ev->port);
-        else
-            fprintf(stderr, "[disc +%ldms] peer %u discovered\n", now_ms()-g_start_ms, ev->peer);
-        break;
-    case DART_PEER_DOWN:
-        /* detail distinguishes "peer dropped" (silent past timeout -> dormant, OUT of
-           flow control, state kept) from "peer lost" (GONE). Dormancy disengages
-           backpressure, so surface which one it is. */
-        fprintf(stderr, "[disc +%ldms] peer %u DOWN: %s\n", now_ms()-g_start_ms, ev->peer,
-                ev->detail ? ev->detail : "lost");
-        break;
-    case DART_MSG_TOO_BIG:
-        fprintf(stderr, "[sub] dropped a %llu-byte message on ch %u from peer %u: exceeds --max; raise --max\n",
-                (unsigned long long)ev->count, ev->channel, ev->peer);
-        break;
-    case DART_NAME_COLLISION:
-        fprintf(stderr, "[warn] topic hash collision %016llx: ours=\"%s\" (match refused)\n",
-                (unsigned long long)ev->first, ev->detail ? ev->detail : "");
-        break;
-    case DART_MSG_LOST:
-        g_lost += ev->count;
-        fprintf(stderr, "[sub] LOST %llu msg(s) on ch %u from peer %u (seqno %llu..%llu); cumulative lost %llu\n",
-                (unsigned long long)ev->count, ev->channel, ev->peer,
-                (unsigned long long)ev->first,
-                (unsigned long long)(ev->first + ev->count - 1),
-                g_lost);
-        break;
-    default: break;   /* DART_PEER_REFUSED etc. */
-    }
+static void on_event(const DartEvent *ev)
+{
+    char line[160];
+    printf("  <event> %s\n", dart_event_str(ev, line, sizeof line));
 }
 
 static void usage(void){

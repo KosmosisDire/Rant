@@ -142,35 +142,48 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
                              const uint8_t *desc);
 #endif
 
-/* Everything that isn't message delivery, as one notification (optional). The
- * meaningful DartEvent fields depend on .kind. */
+/* Everything that isn't message delivery, as one notification (optional). Each
+ * kind populates its own named DartEvent fields (below): no field carries a
+ * different meaning depending on .kind, and dart_event_str() formats any event
+ * as a ready-made human-readable line. */
 typedef enum {
     DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port (node) */
     DART_PEER_DOWN,      /* peer lost or fell silent: .peer (node) */
-    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .first = topics we now
-                            publish to it, .count = topics we now receive from it (node) */
-    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .first .. .first+.count-1 */
-    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.count = its size), skipped */
-    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
+    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics,
+                            .receive_topics (node) */
+    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. .lost_first+.lost_count-1 */
+    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
     DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
     DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap: that
                               channel got no group join and receives only unicast-published data (.channel) (node) */
 } DartEventKind;
 
+/* Flat, self-describing: read only the fields named for the event's .kind (the
+ * rest are zero). detail is always a short human label, except NAME_COLLISION
+ * where it carries our channel name. */
 typedef struct {
     DartEventKind kind;
-    uint32_t   peer;     /* peer id (0 = n/a) */
-    uint16_t   channel;  /* local handle, where applicable */
-    uint64_t   first;    /* MSG_LOST: first lost seqno; NAME_COLLISION: identity;
-                            PEER_INTEREST: # topics we now publish to this peer */
-    uint64_t   count;    /* MSG_LOST: # lost; MSG_TOO_BIG: message bytes;
-                            PEER_INTEREST: # topics we now receive from this peer */
-    uint8_t    ip[16];   /* PEER_UP: peer address (network order) */
-    uint8_t    ip_len;   /* PEER_UP: 4 or 16; else 0 */
-    uint16_t   port;     /* PEER_UP: peer data port */
-    const char *detail;  /* short human-readable label */
+    const char *detail;        /* short human-readable label (NAME_COLLISION: our channel name) */
+    void       *user;          /* your DartNodeOpts.user_data, as on every event (mirrors DartMsg.user) */
+    uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
+    uint16_t   channel;        /* local channel handle, where applicable */
+    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED: peer address (network order) */
+    uint8_t    ip_len;         /* PEER_UP / PEER_REFUSED: 4 or 16; else 0 */
+    uint16_t   port;           /* PEER_UP / PEER_REFUSED: peer data port */
+    uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
+    uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
+    uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
+    uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
+    uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
+    uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
 } DartEvent;
-typedef void (*DartEventFn)(void *user, const DartEvent *ev);
+typedef void (*DartEventFn)(const DartEvent *ev);   /* user data rides ev->user, like DartMsgFn */
+
+/* Format ev as a one-line human-readable message into buf (always NUL-terminated,
+ * truncated to cap). Returns buf, for inline use:
+ *     char b[160]; puts(dart_event_str(ev, b, sizeof b)); */
+const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
@@ -574,7 +587,7 @@ typedef struct {
     uint16_t              domain;        /* logical-network selector */
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
     DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
-    void                 *user_data;     /* passed to on_message (DartMsg.user) and on_event */
+    void                 *user_data;     /* surfaced as DartMsg.user and DartEvent.user */
     DartAllocFn         allocator;     /* message-buffer allocator; 0 = built-in realloc */
     void                 *memory;        /* bring-your-own arena of mem_size bytes; 0 = malloc it */
     uint8_t               disable_shm;   /* 1 = never use the same-host shared-memory fast path
@@ -2355,15 +2368,98 @@ static i_DartChannel *dart_chan_by_identity(DartState *st, uint64_t identity, in
 }
 
 
-/* fire one DartEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/COLLISION. */
+/* fire one DartEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/COLLISION.
+ * first/count are the kind's two numeric slots; route them to the named fields. */
 void dart__event(DartState *st, DartEventKind kind, uint16_t channel,
                         uint32_t peer, uint64_t first, uint64_t count, const char *detail){
     DartEvent ev;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind=kind; ev.channel=channel; ev.peer=peer; ev.first=first; ev.count=count;
-    ev.detail=detail;
-    st->cfg.on_event(st->cfg.user, &ev);
+    ev.kind=kind; ev.channel=channel; ev.peer=peer; ev.detail=detail; ev.user=st->cfg.user;
+    switch (kind){
+    case DART_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
+    case DART_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
+    case DART_NAME_COLLISION: ev.identity = first; break;
+    default: break;
+    }
+    st->cfg.on_event(&ev);
+}
+
+/* bounded appenders for dart_event_str: write into [*pp, end) and advance *pp,
+ * never past end (so a final '\0' at *pp stays in range). No stdio, so the
+ * formatter compiles in the sans-IO core. */
+static char *i_ev_str(char *p, char *end, const char *s){
+    if (!s) return p;
+    while (*s && p < end) *p++ = *s++;
+    return p;
+}
+static char *i_ev_u64(char *p, char *end, uint64_t v){
+    char tmp[20]; int n = 0;
+    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static char *i_ev_hex(char *p, char *end, uint64_t v){
+    char tmp[16]; int n = 0;
+    do { int d = (int)(v & 0xF); tmp[n++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static char *i_ev_addr(char *p, char *end, const DartEvent *ev){   /* dotted quad + :port (IPv4 only) */
+    int i;
+    for (i = 0; i < 4; i++){ if (i) p = i_ev_str(p,end,"."); p = i_ev_u64(p,end,ev->ip[i]); }
+    p = i_ev_str(p,end,":"); return i_ev_u64(p,end,ev->port);
+}
+
+const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
+    char *p, *end;
+    if (!buf || !cap) return buf;
+    p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
+    switch (ev->kind){
+    case DART_PEER_UP:
+        p = i_ev_str(p,end,"peer-up id="); p = i_ev_u64(p,end,ev->peer);
+        if (ev->ip_len == 4){ p = i_ev_str(p,end," at "); p = i_ev_addr(p,end,ev); }
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    case DART_PEER_DOWN:
+        p = i_ev_str(p,end,"peer-down id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    case DART_PEER_INTEREST:
+        p = i_ev_str(p,end,"interest id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," publish-to="); p = i_ev_u64(p,end,ev->publish_topics);
+        p = i_ev_str(p,end," topics, receive-from="); p = i_ev_u64(p,end,ev->receive_topics);
+        p = i_ev_str(p,end," topics");
+        break;
+    case DART_PEER_REFUSED:
+        p = i_ev_str(p,end,"peer-refused at "); p = i_ev_addr(p,end,ev);
+        p = i_ev_str(p,end," (table full of active peers)");
+        break;
+    case DART_NAME_COLLISION:
+        p = i_ev_str(p,end,"name-collision ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," id=0x"); p = i_ev_hex(p,end,ev->identity);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
+        p = i_ev_str(p,end,"): match refused");
+        break;
+    case DART_MSG_LOST:
+        p = i_ev_str(p,end,"msg-lost ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," seqno "); p = i_ev_u64(p,end,ev->lost_first);
+        p = i_ev_str(p,end,".."); p = i_ev_u64(p,end,ev->lost_first + ev->lost_count - 1);
+        break;
+    case DART_MSG_TOO_BIG:
+        p = i_ev_str(p,end,"msg-too-big ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_u64(p,end,ev->too_big_bytes);
+        p = i_ev_str(p,end," bytes), skipped");
+        break;
+    case DART_MCAST_JOIN_FAILED:
+        p = i_ev_str(p,end,"mcast-join-failed ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    }
+    *p = '\0';                                     /* p <= end = buf+cap-1, in range */
+    return buf;
 }
 
 
@@ -3169,9 +3265,9 @@ static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
     DartEvent ev;
     if (!c->on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind = kind; ev.peer = id; ev.detail = detail;
+    ev.kind = kind; ev.peer = id; ev.detail = detail; ev.user = c->user;
     if (addr){ memcpy(ev.ip, addr->ip, 16); ev.ip_len = addr->ip_len; ev.port = addr->port; }
-    c->on_event(c->user, &ev);
+    c->on_event(&ev);
 }
 
 /* fired whenever a peer's interest list is (re)applied to the transport: reports how
@@ -3182,9 +3278,9 @@ static void dart__core_fire_interest(i_DartNodeCore *c, uint32_t id){
     dart_peer_match_counts(c->transport, id, &publish_to, &receive_from);
     memset(&ev, 0, sizeof ev);
     ev.kind = DART_PEER_INTEREST; ev.peer = id;
-    ev.first = publish_to; ev.count = receive_from;
-    ev.detail = "interest applied";
-    c->on_event(c->user, &ev);
+    ev.publish_topics = publish_to; ev.receive_topics = receive_from;
+    ev.detail = "interest applied"; ev.user = c->user;
+    c->on_event(&ev);
 }
 
 void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *addr,
@@ -3391,11 +3487,12 @@ static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *d
 static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     dart__deliver((DartNode*)u, ch, from, data, len);
 }
-/* transport + node-core events (MSG_LOST/TOO_BIG/COLLISION/PEER_*) funnel through here
- * so the app's real user_data reaches its on_event. */
-static void dart__node_on_event(void *u, const DartEvent *ev){
-    DartNode *n = (DartNode*)u;
-    if (n->on_event) n->on_event(n->user_data, ev);
+/* transport + node-core events (MSG_LOST/TOO_BIG/COLLISION/PEER_*) funnel through here.
+ * The cores set ev->user to their context (this node); swap it for the app's real
+ * user_data before handing the event on. */
+static void dart__node_on_event(const DartEvent *ev){
+    DartNode *n = (DartNode*)ev->user;
+    if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
 }
 
 #ifdef DART_SHM
@@ -3507,7 +3604,8 @@ static void dart__node_channel_mcast(DartNode *n, uint16_t index, const DartChan
                 DartEvent ev; memset(&ev, 0, sizeof ev);
                 ev.kind=DART_MCAST_JOIN_FAILED; ev.channel=index;
                 ev.detail="multicast group join failed (over OS membership cap); channel receives unicast only";
-                n->on_event(n->user_data, &ev);
+                ev.user=n->user_data;
+                n->on_event(&ev);
             }
         }
     }

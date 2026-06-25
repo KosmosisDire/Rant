@@ -59,12 +59,11 @@ static unsigned long g_samples, g_collisions;
 static void on_message(void *u, uint16_t ch, uint32_t from, const void *d, size_t n){
     (void)u;(void)ch;(void)from;(void)d;(void)n; g_samples++;
 }
-static void on_event(void *u, const DartEvent *ev){
-    (void)u;
+static void on_event(const DartEvent *ev){
     if (ev->kind != DART_NAME_COLLISION) return;
     g_collisions++;
     printf("  DART_NAME_COLLISION: identity %016llx  ours=\"%s\"  -> match refused\n",
-           (unsigned long long)ev->first, ev->detail ? ev->detail : "");
+           (unsigned long long)ev->identity, ev->detail ? ev->detail : "");
 }
 
 int main(void){

@@ -101,11 +101,12 @@ static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *d
 static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     dart__deliver((DartNode*)u, ch, from, data, len);
 }
-/* transport + node-core events (MSG_LOST/TOO_BIG/COLLISION/PEER_*) funnel through here
- * so the app's real user_data reaches its on_event. */
-static void dart__node_on_event(void *u, const DartEvent *ev){
-    DartNode *n = (DartNode*)u;
-    if (n->on_event) n->on_event(n->user_data, ev);
+/* transport + node-core events (MSG_LOST/TOO_BIG/COLLISION/PEER_*) funnel through here.
+ * The cores set ev->user to their context (this node); swap it for the app's real
+ * user_data before handing the event on. */
+static void dart__node_on_event(const DartEvent *ev){
+    DartNode *n = (DartNode*)ev->user;
+    if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
 }
 
 #ifdef DART_SHM
@@ -217,7 +218,8 @@ static void dart__node_channel_mcast(DartNode *n, uint16_t index, const DartChan
                 DartEvent ev; memset(&ev, 0, sizeof ev);
                 ev.kind=DART_MCAST_JOIN_FAILED; ev.channel=index;
                 ev.detail="multicast group join failed (over OS membership cap); channel receives unicast only";
-                n->on_event(n->user_data, &ev);
+                ev.user=n->user_data;
+                n->on_event(&ev);
             }
         }
     }

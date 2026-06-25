@@ -47,7 +47,7 @@ typedef struct {
     uint16_t              domain;        /* logical-network selector */
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
     DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
-    void                 *user_data;     /* passed to on_message (DartMsg.user) and on_event */
+    void                 *user_data;     /* surfaced as DartMsg.user and DartEvent.user */
     DartAllocFn         allocator;     /* message-buffer allocator; 0 = built-in realloc */
     void                 *memory;        /* bring-your-own arena of mem_size bytes; 0 = malloc it */
     uint8_t               disable_shm;   /* 1 = never use the same-host shared-memory fast path

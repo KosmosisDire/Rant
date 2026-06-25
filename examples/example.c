@@ -113,49 +113,12 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
 }
 
 static void on_message(const DartMsg *msg){
-    /* fires on the poll thread, inside dart_node_poll; just prints. sender_name comes
-     * from discovery (never on the wire) and is never NULL */
     printf("[%s] %s > %.*s\n", msg->sender_name, msg->channel_name, (int)msg->len, (const char *)msg->data);
 }
 
-/* Everything that isn't a message: peers coming and going, and -- the useful part for
- * debugging interest propagation -- a peer's interest list being (re)applied, which
- * reports how many topics now flow each way. Also fires on the poll thread. */
-static void on_event(void *user, const DartEvent *ev){
-    (void)user;
-    if (!g_verbose) return;
-    switch (ev->kind){
-    case DART_PEER_UP:
-        printf("  <event> peer-up id=%u at %u.%u.%u.%u:%u (%s)\n", ev->peer,
-               ev->ip[0], ev->ip[1], ev->ip[2], ev->ip[3], ev->port, ev->detail ? ev->detail : "");
-        break;
-    case DART_PEER_DOWN:
-        printf("  <event> peer-down id=%u (%s)\n", ev->peer, ev->detail ? ev->detail : "");
-        break;
-    case DART_PEER_INTEREST:
-        printf("  <event> interest id=%u publish-to=%u topics, receive-from=%u topics\n",
-               ev->peer, (unsigned)ev->first, (unsigned)ev->count);
-        break;
-    case DART_PEER_REFUSED:
-        printf("  <event> peer-refused at %u.%u.%u.%u:%u (table full of active peers)\n",
-               ev->ip[0], ev->ip[1], ev->ip[2], ev->ip[3], ev->port);
-        break;
-    case DART_NAME_COLLISION:
-        printf("  <event> name-collision ch=%u id=0x%llx (%s): match refused\n",
-               ev->channel, (unsigned long long)ev->first, ev->detail ? ev->detail : "");
-        break;
-    case DART_MSG_LOST:
-        printf("  <event> msg-lost ch=%u from id=%u seqno %llu..%llu\n", ev->channel, ev->peer,
-               (unsigned long long)ev->first, (unsigned long long)(ev->first + ev->count - 1));
-        break;
-    case DART_MSG_TOO_BIG:
-        printf("  <event> msg-too-big ch=%u from id=%u (%llu bytes), skipped\n",
-               ev->channel, ev->peer, (unsigned long long)ev->count);
-        break;
-    case DART_MCAST_JOIN_FAILED:
-        printf("  <event> mcast-join-failed ch=%u (%s)\n", ev->channel, ev->detail ? ev->detail : "");
-        break;
-    }
+static void on_event(const DartEvent *ev){
+    char line[160];
+    if (g_verbose) printf("  <event> %s\n", dart_event_str(ev, line, sizeof line));
 }
 
 /* Handle a command line. Returns 1 if it was a command, 0 if it's plain chat. */

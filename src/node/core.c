@@ -131,9 +131,9 @@ static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
     DartEvent ev;
     if (!c->on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind = kind; ev.peer = id; ev.detail = detail;
+    ev.kind = kind; ev.peer = id; ev.detail = detail; ev.user = c->user;
     if (addr){ memcpy(ev.ip, addr->ip, 16); ev.ip_len = addr->ip_len; ev.port = addr->port; }
-    c->on_event(c->user, &ev);
+    c->on_event(&ev);
 }
 
 /* fired whenever a peer's interest list is (re)applied to the transport: reports how
@@ -144,9 +144,9 @@ static void dart__core_fire_interest(i_DartNodeCore *c, uint32_t id){
     dart_peer_match_counts(c->transport, id, &publish_to, &receive_from);
     memset(&ev, 0, sizeof ev);
     ev.kind = DART_PEER_INTEREST; ev.peer = id;
-    ev.first = publish_to; ev.count = receive_from;
-    ev.detail = "interest applied";
-    c->on_event(c->user, &ev);
+    ev.publish_topics = publish_to; ev.receive_topics = receive_from;
+    ev.detail = "interest applied"; ev.user = c->user;
+    c->on_event(&ev);
 }
 
 void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *addr,
