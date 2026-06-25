@@ -527,6 +527,25 @@ void dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob,
 }
 
 
+/* diagnostic: how many channels we now publish to / receive from this peer (unicast
+ * lanes). Surfaced on DART_PEER_INTEREST so a caller can see a match form (or not). */
+void dart_peer_match_counts(DartState *st, uint32_t peer_id,
+                            uint16_t *publish_to, uint16_t *receive_from){
+    int s; uint16_t c, w=0, r=0;
+    if (publish_to)   *publish_to   = 0;
+    if (receive_from) *receive_from = 0;
+    if (!st) return;
+    s = dart_peer_slot(st, peer_id);
+    if (s < 0) return;
+    for (c=0;c<st->cfg.n_channels;c++){
+        if (dart__writer_proxy_at(st,c,(uint32_t)s)->used) w++;
+        if (dart__reader_proxy_at(st,c,(uint32_t)s)->used) r++;
+    }
+    if (publish_to)   *publish_to   = w;
+    if (receive_from) *receive_from = r;
+}
+
+
 /* Discovery-announce meta blob codec (see dart_meta_* in core.h for the layout). The
    interest list is wrapped in a versioned prefix carrying frag size, (v3/v5) SHM info,
    and (v4/v5) the node name; decode is version-aware so older and newer nodes interop. */

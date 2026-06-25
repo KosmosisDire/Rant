@@ -63,6 +63,10 @@ void dart_discovery_rt_set_meta(DartDiscoveryRt *rt, const uint8_t *meta, uint16
     if (rt) dart_discovery_set_meta(rt->core, meta, meta_len);
 }
 
+void dart_discovery_rt_replay(DartDiscoveryRt *rt){
+    if (rt) dart_discovery_replay_peers(rt->core);
+}
+
 /* Every multicast send and join should pin to this one interface. */
 uint32_t dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port){
     return dart_plat_route_src(group_naddr, port);

@@ -114,6 +114,45 @@ static void on_message(const DartMsg *msg){
     printf("[%s] %s > %.*s\n", msg->sender_name, msg->channel_name, (int)msg->len, (const char *)msg->data);
 }
 
+/* Everything that isn't a message: peers coming and going, and -- the useful part for
+ * debugging interest propagation -- a peer's interest list being (re)applied, which
+ * reports how many topics now flow each way. Also fires on the poll thread. */
+static void on_event(void *user, const DartEvent *ev){
+    (void)user;
+    switch (ev->kind){
+    case DART_PEER_UP:
+        printf("  <event> peer-up id=%u at %u.%u.%u.%u:%u (%s)\n", ev->peer,
+               ev->ip[0], ev->ip[1], ev->ip[2], ev->ip[3], ev->port, ev->detail ? ev->detail : "");
+        break;
+    case DART_PEER_DOWN:
+        printf("  <event> peer-down id=%u (%s)\n", ev->peer, ev->detail ? ev->detail : "");
+        break;
+    case DART_PEER_INTEREST:
+        printf("  <event> interest id=%u publish-to=%u topics, receive-from=%u topics\n",
+               ev->peer, (unsigned)ev->first, (unsigned)ev->count);
+        break;
+    case DART_PEER_REFUSED:
+        printf("  <event> peer-refused at %u.%u.%u.%u:%u (table full of active peers)\n",
+               ev->ip[0], ev->ip[1], ev->ip[2], ev->ip[3], ev->port);
+        break;
+    case DART_NAME_COLLISION:
+        printf("  <event> name-collision ch=%u id=0x%llx (%s): match refused\n",
+               ev->channel, (unsigned long long)ev->first, ev->detail ? ev->detail : "");
+        break;
+    case DART_MSG_LOST:
+        printf("  <event> msg-lost ch=%u from id=%u seqno %llu..%llu\n", ev->channel, ev->peer,
+               (unsigned long long)ev->first, (unsigned long long)(ev->first + ev->count - 1));
+        break;
+    case DART_MSG_TOO_BIG:
+        printf("  <event> msg-too-big ch=%u from id=%u (%llu bytes), skipped\n",
+               ev->channel, ev->peer, (unsigned long long)ev->count);
+        break;
+    case DART_MCAST_JOIN_FAILED:
+        printf("  <event> mcast-join-failed ch=%u (%s)\n", ev->channel, ev->detail ? ev->detail : "");
+        break;
+    }
+}
+
 /* Handle a command line. Returns 1 if it was a command, 0 if it's plain chat. */
 static int handle_command(DartNode *n, char *line){
     char verb[16], topic[DART_TOPIC_NAME_MAX + 1];
@@ -145,7 +184,7 @@ static THREAD_RET poll_thread(void *arg){
 int main(int argc, char **argv){
     const char *name = argc > 1 ? argv[1] : NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
     DartNode *n = dart_node_open(1 << 20, name, on_message,
-                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS });
+                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS, .on_event = on_event });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     printf("commands: sub <topic> | pub <topic> | pubsub <topic> | drop <topic>\n"

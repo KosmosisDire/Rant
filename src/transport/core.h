@@ -122,6 +122,8 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
 typedef enum {
     DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port (node) */
     DART_PEER_DOWN,      /* peer lost or fell silent: .peer (node) */
+    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .first = topics we now
+                            publish to it, .count = topics we now receive from it (node) */
     DART_MSG_LOST,       /* messages skipped: .channel, .peer, .first .. .first+.count-1 */
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.count = its size), skipped */
     DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.first = identity, .detail = our name), refused */
@@ -134,8 +136,10 @@ typedef struct {
     DartEventKind kind;
     uint32_t   peer;     /* peer id (0 = n/a) */
     uint16_t   channel;  /* local handle, where applicable */
-    uint64_t   first;    /* MSG_LOST: first lost seqno; NAME_COLLISION: identity */
-    uint64_t   count;    /* MSG_LOST: # lost; MSG_TOO_BIG: message bytes */
+    uint64_t   first;    /* MSG_LOST: first lost seqno; NAME_COLLISION: identity;
+                            PEER_INTEREST: # topics we now publish to this peer */
+    uint64_t   count;    /* MSG_LOST: # lost; MSG_TOO_BIG: message bytes;
+                            PEER_INTEREST: # topics we now receive from this peer */
     uint8_t    ip[16];   /* PEER_UP: peer address (network order) */
     uint8_t    ip_len;   /* PEER_UP: 4 or 16; else 0 */
     uint16_t   port;     /* PEER_UP: peer data port */
@@ -316,6 +320,13 @@ int       dart_send_drained(DartState *st, uint16_t channel);
 /* Peers currently matched as readers (subscribers) of this channel. 0 = a publish
  * goes nowhere; a one-shot publisher can poll this before sending. */
 int       dart_writer_match_count(DartState *st, uint16_t channel);
+
+/* Per-peer match summary (diagnostic): how many channels we now PUBLISH to this peer
+ * (it subscribes and we publish) and how many we RECEIVE from it (it publishes and we
+ * subscribe). Counts unicast lanes; either out-pointer may be NULL, both 0 for an
+ * unknown peer. Surfaced on DART_PEER_INTEREST so a caller can watch a connection form. */
+void      dart_peer_match_counts(DartState *st, uint32_t peer_id,
+                                 uint16_t *publish_to, uint16_t *receive_from);
 
 /* Cumulative reliable-repair counters for a channel, summed over its peer/reader
  * proxies (writer side = this node publishing; reader side = subscribing). Always on;

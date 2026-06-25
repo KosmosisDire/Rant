@@ -364,6 +364,23 @@ size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t ca
 /* queue a one-shot multicast solicit: the next update emits a REQ asking peers to announce now */
 void dart_discovery_solicit(DartDiscoveryState *st){ if (st) st->want_solicit = 1; }
 
+/* re-deliver every live peer's last-known announce to on_peer_up, so a caller that just
+ * changed its own advertised data re-applies all peer interest against the new state. No
+ * version change is involved: a peer's blob is unchanged, but the LOCAL side may now have
+ * a channel that the blob's interest matches. */
+void dart_discovery_replay_peers(DartDiscoveryState *st){
+    uint16_t i;
+    if (!st || !st->cfg.on_peer_up) return;
+    for (i=0;i<st->cap_peers;i++){
+        i_DartDiscoveryPeer *peer = &st->peers[i];
+        DartDiscoveryAddr addr;
+        if (!peer->used || peer->dropped) continue;
+        dart_discovery_addr_of(peer, &addr);
+        st->cfg.on_peer_up(st->cfg.user, peer->local_id, &addr,
+                           peer->meta_len ? peer->meta : NULL, peer->meta_len);
+    }
+}
+
 uint16_t dart_discovery_peer_count(const DartDiscoveryState *st){
     uint16_t i, c = 0;   /* live peers only; DROPPED entries linger for resume, not as members */
     for (i=0;i<st->cap_peers;i++) if (st->peers[i].used && !st->peers[i].dropped) c++;

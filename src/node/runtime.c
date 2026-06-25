@@ -471,9 +471,11 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     if (opts){ def.qos = opts->qos; def.multicast = opts->multicast; }
     if (dart_channel_define(n->transport, idx, &def) != 0) return NULL;
     if (def.multicast) dart__node_channel_mcast(n, idx, &def);
-    /* re-advertise our interest so peers match the new channel as the blob arrives */
+    /* re-advertise our interest so peers match the new channel as the blob arrives, and
+       replay known peers' interest so this channel matches what they already advertised */
     mlen = dart_node_core_build_meta(n->core);
     dart_discovery_rt_set_meta(n->discovery, dart_node_core_meta(n->core, NULL), mlen);
+    dart_discovery_rt_replay(n->discovery);
     n->handles[idx].n = n; n->handles[idx].index = idx;
     n->n_created++;
     return &n->handles[idx];
@@ -632,6 +634,7 @@ int dart_channel_set_role(DartChannel *ch, DartRole role){
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
         mlen = dart_node_core_build_meta(ch->n->core);
         dart_discovery_rt_set_meta(ch->n->discovery, dart_node_core_meta(ch->n->core, NULL), mlen);
+        dart_discovery_rt_replay(ch->n->discovery);   /* re-apply peers' interest to our new role */
     }
     return r;
 }

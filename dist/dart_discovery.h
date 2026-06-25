@@ -105,6 +105,12 @@ size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void
 size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(DartDiscoveryState *st);
+/* Re-fire on_peer_up for every live (non-dropped) peer with the meta blob we already
+ * hold, without any version change. A caller that just changed its OWN advertised data
+ * (e.g. added a local channel / changed a role) uses this to re-apply every peer's
+ * interest, so the new local state matches interest the peers advertised earlier --
+ * which the peer would otherwise only re-send on its own next change. */
+void         dart_discovery_replay_peers(DartDiscoveryState *st);
 /* Replace the opaque meta blob and bump its version, so peers re-fetch it. The
  * blob rides the next few announces, then announces carry the version only; a peer
  * that fell behind re-fetches via a targeted solicit. meta must stay valid. */
@@ -304,6 +310,11 @@ void       dart_discovery_rt_feed(DartDiscoveryRt *rt, const uint8_t *src_ip, ui
 /* Replace the opaque meta blob carried in announces and bump its version, so peers
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
 void       dart_discovery_rt_set_meta(DartDiscoveryRt *rt, const uint8_t *meta, uint16_t meta_len);
+
+/* Re-apply every known peer's interest against our current local state (see
+ * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
+ * added local channel matches interest peers advertised before it existed. */
+void       dart_discovery_rt_replay(DartDiscoveryRt *rt);
 
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
@@ -734,6 +745,23 @@ size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t ca
 
 /* queue a one-shot multicast solicit: the next update emits a REQ asking peers to announce now */
 void dart_discovery_solicit(DartDiscoveryState *st){ if (st) st->want_solicit = 1; }
+
+/* re-deliver every live peer's last-known announce to on_peer_up, so a caller that just
+ * changed its own advertised data re-applies all peer interest against the new state. No
+ * version change is involved: a peer's blob is unchanged, but the LOCAL side may now have
+ * a channel that the blob's interest matches. */
+void dart_discovery_replay_peers(DartDiscoveryState *st){
+    uint16_t i;
+    if (!st || !st->cfg.on_peer_up) return;
+    for (i=0;i<st->cap_peers;i++){
+        i_DartDiscoveryPeer *peer = &st->peers[i];
+        DartDiscoveryAddr addr;
+        if (!peer->used || peer->dropped) continue;
+        dart_discovery_addr_of(peer, &addr);
+        st->cfg.on_peer_up(st->cfg.user, peer->local_id, &addr,
+                           peer->meta_len ? peer->meta : NULL, peer->meta_len);
+    }
+}
 
 uint16_t dart_discovery_peer_count(const DartDiscoveryState *st){
     uint16_t i, c = 0;   /* live peers only; DROPPED entries linger for resume, not as members */
@@ -1260,6 +1288,10 @@ void dart_discovery_rt_feed(DartDiscoveryRt *rt, const uint8_t *src_ip, uint8_t 
 
 void dart_discovery_rt_set_meta(DartDiscoveryRt *rt, const uint8_t *meta, uint16_t meta_len){
     if (rt) dart_discovery_set_meta(rt->core, meta, meta_len);
+}
+
+void dart_discovery_rt_replay(DartDiscoveryRt *rt){
+    if (rt) dart_discovery_replay_peers(rt->core);
 }
 
 /* Every multicast send and join should pin to this one interface. */

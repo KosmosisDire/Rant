@@ -136,6 +136,19 @@ static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
     c->on_event(c->user, &ev);
 }
 
+/* fired whenever a peer's interest list is (re)applied to the transport: reports how
+ * many topics now flow each way, so an app/example can watch a connection form. */
+static void dart__core_fire_interest(i_DartNodeCore *c, uint32_t id){
+    DartEvent ev; uint16_t publish_to = 0, receive_from = 0;
+    if (!c->on_event) return;
+    dart_peer_match_counts(c->transport, id, &publish_to, &receive_from);
+    memset(&ev, 0, sizeof ev);
+    ev.kind = DART_PEER_INTEREST; ev.peer = id;
+    ev.first = publish_to; ev.count = receive_from;
+    ev.detail = "interest applied";
+    c->on_event(c->user, &ev);
+}
+
 void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *addr,
                             const uint8_t *meta, uint16_t meta_len){
     i_DartNodeCore *c = (i_DartNodeCore*)user; uint16_t i; int slot = -1;
@@ -148,7 +161,8 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
             dart__core_set_peer_name(&c->peers[i], meta, meta_len);
             dart_peer_set_frag(c->transport, id, frag);
             dart__core_set_peer_oob(c, id, meta, meta_len);
-            if (interest) dart_apply_peer_interest(c->transport, id, interest, interest_len);
+            if (interest){ dart_apply_peer_interest(c->transport, id, interest, interest_len);
+                           dart__core_fire_interest(c, id); }
             if (c->peers[i].dormant){    /* a DROPPED peer's same incarnation returned: resume */
                 c->peers[i].dormant = 0;
                 dart_peer_resume(c->transport, id);   /* keeps reader position; writer fills any gap */
@@ -167,8 +181,9 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
     {   int local = (addr->ip_len==4) && c->is_local && c->is_local(c->is_local_user, addr->ip, addr->ip_len);
         dart_peer_add(c->transport, id, local, frag); }
     dart__core_set_peer_oob(c, id, meta, meta_len);
-    if (interest) dart_apply_peer_interest(c->transport, id, interest, interest_len);
     dart__core_fire(c, DART_PEER_UP, id, addr, "peer discovered");
+    if (interest){ dart_apply_peer_interest(c->transport, id, interest, interest_len);
+                   dart__core_fire_interest(c, id); }
 }
 
 void dart_node_core_peer_down(void *user, uint32_t id, DartDiscoveryDownReason reason){

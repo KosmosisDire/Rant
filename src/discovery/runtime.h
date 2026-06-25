@@ -47,6 +47,11 @@ void       dart_discovery_rt_feed(DartDiscoveryRt *rt, const uint8_t *src_ip, ui
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
 void       dart_discovery_rt_set_meta(DartDiscoveryRt *rt, const uint8_t *meta, uint16_t meta_len);
 
+/* Re-apply every known peer's interest against our current local state (see
+ * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
+ * added local channel matches interest peers advertised before it existed. */
+void       dart_discovery_rt_replay(DartDiscoveryRt *rt);
+
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
