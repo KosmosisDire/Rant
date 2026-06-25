@@ -31,6 +31,9 @@ typedef struct {
     uint16_t              max_peers;     /* peer-table capacity */
     uint16_t              n_channels;    /* sizes the announce-blob buffer */
     uint16_t              frag_size;     /* our UDP fragment size, baked into the announce blob */
+    const char           *name;          /* our human-readable node name, baked into the announce
+                                            blob (copied in; clamped to DART_NODE_NAME_MAX) */
+    uint8_t               name_len;
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
     i_DartNodeIsLocalFn is_local;      /* runtime route probe (optional) */
@@ -78,6 +81,12 @@ typedef struct {
  * on a hit, else 0). */
 int  dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
+
+/* A peer's human-readable name, learned from its announce blob: a NUL-terminated
+ * pointer into the peer-table slot (stable until the peer is evicted). Non-empty for
+ * any known peer ("unknown-peer" if its announce carried none); NULL only when id is
+ * not a known peer. *out_len gets its length. For debug/observability only. */
+const char *dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id, uint8_t *out_len);
 
 /* Read-only peer-table enumeration (diagnostics / tests). max_peers is the capacity;
  * peer_at fills the out-params for table slot in [0, max_peers) and returns 1 if it

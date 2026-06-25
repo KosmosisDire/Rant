@@ -12,6 +12,8 @@ typedef struct {
     uint8_t  ip[16];   /* peer's physical address (IPv4 today; opaque to the core) */
     uint8_t  ip_len;
     uint16_t port;     /* peer's advertised data port */
+    char     name[DART_NODE_NAME_MAX + 1];  /* from its announce blob (NUL-terminated, debug) */
+    uint8_t  name_len;
 } i_DartNodePeer;
 
 struct i_DartNodeCore {
@@ -28,6 +30,8 @@ struct i_DartNodeCore {
     uint16_t              meta_cap;
     uint16_t              meta_len;
     uint16_t              frag_size;   /* baked into the blob */
+    char                  name[DART_NODE_NAME_MAX + 1];  /* our node name, baked into the blob */
+    uint8_t               name_len;
 };
 
 /* arena layout: the core struct, the peer table, then the announce-blob buffer. One
@@ -67,6 +71,10 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     c->meta_buf      = meta;
     c->meta_cap      = dart_meta_capacity(cfg->n_channels);
     c->frag_size     = cfg->frag_size;
+    {   uint8_t nl = cfg->name_len;
+        if (nl > DART_NODE_NAME_MAX) nl = DART_NODE_NAME_MAX;
+        if (cfg->name && nl) memcpy(c->name, cfg->name, nl);
+        c->name[nl] = '\0'; c->name_len = nl; }
     memset(peers, 0, (size_t)cfg->max_peers * sizeof(i_DartNodePeer));
     return c;
 }
@@ -76,7 +84,8 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
    just writes the v2 (non-SHM) prefix. */
 uint16_t dart_node_core_build_meta(i_DartNodeCore *c){
     c->meta_len = dart_meta_build(c->transport, c->meta_buf, c->meta_cap,
-                                  c->frag_size, c->oob_capable, c->oob_host);
+                                  c->frag_size, c->oob_capable, c->oob_host,
+                                  c->name, c->name_len);
     return c->meta_len;
 }
 
@@ -105,6 +114,18 @@ static void dart__core_set_peer_oob(i_DartNodeCore *c, uint32_t id, const uint8_
 #define dart__core_set_peer_oob(c, id, meta, meta_len) ((void)0)
 #endif
 
+/* copy the peer's advertised name out of its (call-lifetime) announce blob into the
+ * peer slot, so DartMsg.sender_name can point at stable storage. A peer that somehow
+ * advertised no name gets "unknown-peer", so a slot is never empty-named. */
+static void dart__core_set_peer_name(i_DartNodePeer *p, const uint8_t *meta, uint16_t meta_len){
+    uint8_t nl = 0;
+    const char *nm = dart_meta_name(meta, meta_len, &nl);
+    if (!nm || nl == 0){ nm = "unknown-peer"; nl = 12; }
+    if (nl > DART_NODE_NAME_MAX) nl = DART_NODE_NAME_MAX;
+    memcpy(p->name, nm, nl);
+    p->name[nl] = '\0'; p->name_len = nl;
+}
+
 static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
                             const DartDiscoveryAddr *addr, const char *detail){
     DartEvent ev;
@@ -124,6 +145,7 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
         if (c->peers[i].used && c->peers[i].id==id){      /* known peer: addr/interest update */
             memcpy(c->peers[i].ip, addr->ip, 16);
             c->peers[i].ip_len = addr->ip_len; c->peers[i].port = addr->port;
+            dart__core_set_peer_name(&c->peers[i], meta, meta_len);
             dart_peer_set_frag(c->transport, id, frag);
             dart__core_set_peer_oob(c, id, meta, meta_len);
             if (interest) dart_apply_peer_interest(c->transport, id, interest, interest_len);
@@ -140,6 +162,7 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
     c->peers[slot].used=1; c->peers[slot].id=id;
     memcpy(c->peers[slot].ip, addr->ip, 16);
     c->peers[slot].ip_len=addr->ip_len; c->peers[slot].port=addr->port;
+    dart__core_set_peer_name(&c->peers[slot], meta, meta_len);
     /* the announce blob carries the peer's frag size + pub/sub interest list */
     {   int local = (addr->ip_len==4) && c->is_local && c->is_local(c->is_local_user, addr->ip, addr->ip_len);
         dart_peer_add(c->transport, id, local, frag); }
@@ -193,6 +216,13 @@ int dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t 
         if (c->peers[i].used && c->peers[i].ip_len>=4 && c->peers[i].port==port
             && memcmp(c->peers[i].ip, ip, 4)==0){ if (id) *id = c->peers[i].id; return 1; }
     return 0;
+}
+
+const char *dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id, uint8_t *out_len){
+    int i = dart__core_find_id(c, id);
+    if (i < 0){ if (out_len) *out_len = 0; return NULL; }   /* not a known peer */
+    if (out_len) *out_len = c->peers[i].name_len;           /* always non-empty (see set_peer_name) */
+    return c->peers[i].name;
 }
 
 uint16_t dart_node_core_max_peers(i_DartNodeCore *c){ return c->max_peers; }

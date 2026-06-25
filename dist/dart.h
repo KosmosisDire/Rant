@@ -386,6 +386,10 @@ extern "C" {
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
 #endif
 
+#ifndef DART_NODE_NAME_MAX
+#define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
+#endif
+
 /* Max pub+sub topic count accepted in a peer's interest list; sizes the per-peer
  * alias table. Auto-raised to 2*n_channels; raise (a compile bound) only to accept
  * a peer with more topics. */
@@ -554,28 +558,36 @@ size_t    dart_build_interest(DartState *st, void *out, size_t cap);
 void      dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob, size_t len);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, its SHM capability + host uuid
- * (v3), and its interest list. The node carries it in announces; a bring-your-own-IO
- * caller builds and parses the identical blob. Layout:
- *   v2: ['D','N',2, frag_lo, frag_hi,                 <interest>]   prefix 5
- *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],  <interest>]   prefix 22
- * frag sits at [3..4] in both, so v2 (non-SHM) and v3 nodes interop. The build writes
- * v3 when DART_SHM is compiled, v2 otherwise; the readers are version-aware. */
+ * payload wrapping this node's UDP fragment size, its SHM capability + host uuid,
+ * its human-readable name, and its interest list. The node carries it in announces;
+ * a bring-your-own-IO caller builds and parses the identical blob. Layout:
+ *   v2: ['D','N',2, frag_lo, frag_hi,                                       <interest>]
+ *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],                        <interest>]
+ *   v4: ['D','N',4, frag_lo, frag_hi,              namelen, name[namelen],  <interest>]
+ *   v5: ['D','N',5, frag_lo, frag_hi, shm, host[16], namelen, name[namelen],<interest>]
+ * frag sits at [3..4] in every version. v4/v5 add the node name (v2/v3 are the older,
+ * nameless formats, still decoded for interop). The build writes v5 when DART_SHM is
+ * compiled, v4 otherwise; the readers are version-aware. */
 
-/* Bytes to reserve for our blob: prefix + the largest interest list n_channels can
- * produce, capped to one (IP-fragmentable) UDP datagram. Size the announce buffer here. */
+/* Bytes to reserve for our blob: prefix + name + the largest interest list n_channels
+ * can produce, capped to one (IP-fragmentable) UDP datagram. Size the announce buffer here. */
 uint16_t  dart_meta_capacity(uint16_t n_channels);
 /* Build our blob into out[cap] (cap >= dart_meta_capacity): the version prefix
- * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled) then st's interest
- * list. Returns total bytes. host may be NULL when !shm_capable. */
+ * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), the node name
+ * (clamped to DART_NODE_NAME_MAX), then st's interest list. Returns total bytes. host
+ * may be NULL when !shm_capable; name may be NULL (name_len then 0). */
 uint16_t  dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                       const char *name, uint8_t name_len);
 /* A peer's advertised UDP fragment size from its blob; 0 if the blob is malformed. */
 uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
+/* A peer's advertised node name (v4/v5 blobs): pointer into meta + its length via
+ * *out_len; NULL + *out_len 0 if the blob is nameless or malformed. Not NUL-terminated. */
+const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len);
 /* Locate the interest sub-blob inside a peer's blob; NULL + *out_len 0 if absent. */
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
 #ifdef DART_SHM
-/* A peer's SHM capability + host uuid (v3 blobs only): 1 if SHM-capable (fills
+/* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
 int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]);
 #endif
@@ -747,6 +759,9 @@ typedef struct {
     uint16_t              max_peers;     /* peer-table capacity */
     uint16_t              n_channels;    /* sizes the announce-blob buffer */
     uint16_t              frag_size;     /* our UDP fragment size, baked into the announce blob */
+    const char           *name;          /* our human-readable node name, baked into the announce
+                                            blob (copied in; clamped to DART_NODE_NAME_MAX) */
+    uint8_t               name_len;
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
     i_DartNodeIsLocalFn is_local;      /* runtime route probe (optional) */
@@ -794,6 +809,12 @@ typedef struct {
  * on a hit, else 0). */
 int  dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
+
+/* A peer's human-readable name, learned from its announce blob: a NUL-terminated
+ * pointer into the peer-table slot (stable until the peer is evicted). Non-empty for
+ * any known peer ("unknown-peer" if its announce carried none); NULL only when id is
+ * not a known peer. *out_len gets its length. For debug/observability only. */
+const char *dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id, uint8_t *out_len);
 
 /* Read-only peer-table enumeration (diagnostics / tests). max_peers is the capacity;
  * peer_at fills the out-params for table slot in [0, max_peers) and returns 1 if it
@@ -853,6 +874,10 @@ typedef struct {
  */
 typedef struct {
     uint16_t              domain;        /* logical-network selector */
+    const char           *name;          /* human-readable node name, synced via discovery and
+                                            surfaced as DartMsg.sender_name (debug/observability).
+                                            Copied in; clamped to DART_NODE_NAME_MAX. NULL/empty =>
+                                            an auto-generated "node-XXXXXXXX" default. */
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
     DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
     void                 *user_data;     /* passed to on_message (DartMsg.user) and on_event */
@@ -883,6 +908,11 @@ typedef struct {
     void          *user;             /* DartNodeOpts.user_data */
     uint16_t       channel_id;       /* local channel index */
     uint32_t       sender_id;        /* peer id the message came from */
+    const char    *sender_name;      /* sender's node name, NUL-terminated and never NULL
+                                        ("unknown-peer" if somehow unavailable), so no null check
+                                        is needed. A pointer into discovery state, never on the
+                                        per-message wire; valid for the callback's duration. */
+    uint8_t        sender_name_len;  /* its length */
     const char    *channel_name;     /* topic name (NUL-terminated), or NULL */
     uint8_t        channel_name_len; /* its length */
     const void    *data;
@@ -4051,33 +4081,38 @@ void dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob,
 
 
 /* Discovery-announce meta blob codec (see dart_meta_* in core.h for the layout). The
-   interest list is wrapped in a versioned prefix carrying frag size and (v3) SHM info;
-   decode is version-aware so v2 and v3 nodes interop. */
-#define DART__META_PREFIX_V2 5u
-#define DART__META_PREFIX_V3 22u
+   interest list is wrapped in a versioned prefix carrying frag size, (v3/v5) SHM info,
+   and (v4/v5) the node name; decode is version-aware so older and newer nodes interop. */
+#define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
+#define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
 #ifdef DART_SHM
-#define DART__META_PREFIX DART__META_PREFIX_V3   /* what WE write */
+#define DART__META_VER  5u                  /* what WE write */
+#define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_PREFIX DART__META_PREFIX_V2
+#define DART__META_VER  4u
+#define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
-    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && (meta[2]==2 || meta[2]==3);
+    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && meta[2]>=2 && meta[2]<=5;
 }
-static uint16_t dart__meta_pfx(const uint8_t *meta){
-    return meta[2]==3 ? DART__META_PREFIX_V3 : DART__META_PREFIX_V2;
+/* base prefix through host[16], by version (v3/v5 carry shm+host, v2/v4 don't). */
+static uint16_t dart__meta_base(const uint8_t *meta){
+    return (meta[2]==3 || meta[2]==5) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
+static int dart__meta_named(const uint8_t *meta){ return meta[2] >= 4; }
 
 uint16_t dart_meta_capacity(uint16_t n_channels){
-    size_t cap = (size_t)DART__META_PREFIX + dart_interest_max(n_channels);
+    size_t cap = (size_t)DART__META_BASE + 1u + DART_NODE_NAME_MAX + dart_interest_max(n_channels);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
 uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
-    size_t interest_len; uint16_t prefix = DART__META_PREFIX;
-    out[0]='D'; out[1]='N'; out[2]=(uint8_t)(DART__META_PREFIX==DART__META_PREFIX_V3 ? 3 : 2);
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                         const char *name, uint8_t name_len){
+    size_t interest_len; uint16_t off = DART__META_BASE;
+    out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
 #ifdef DART_SHM
     out[5]=(uint8_t)(shm_capable?1:0);
@@ -4085,8 +4120,13 @@ uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
 #else
     (void)shm_capable; (void)host;
 #endif
-    interest_len = dart_build_interest(st, out + prefix, cap - prefix);
-    return (uint16_t)(prefix + interest_len);
+    if (!name) name_len = 0;
+    if (name_len > DART_NODE_NAME_MAX) name_len = DART_NODE_NAME_MAX;
+    out[off] = name_len;
+    if (name_len) memcpy(out + off + 1, name, name_len);
+    off = (uint16_t)(off + 1u + name_len);
+    interest_len = dart_build_interest(st, out + off, cap - off);
+    return (uint16_t)(off + interest_len);
 }
 
 uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
@@ -4094,16 +4134,36 @@ uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
     return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
 }
 
+const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len){
+    uint16_t base; uint8_t nl;
+    if (out_len) *out_len = 0;
+    if (!dart__meta_ok(meta, meta_len) || !dart__meta_named(meta)) return NULL;
+    base = dart__meta_base(meta);
+    if (meta_len < (uint16_t)(base + 1u)) return NULL;
+    nl = meta[base];
+    if (meta_len < (uint16_t)(base + 1u + nl)) return NULL;
+    if (out_len) *out_len = nl;
+    return nl ? (const char*)(meta + base + 1) : NULL;
+}
+
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len){
-    uint16_t prefix;
-    if (!dart__meta_ok(meta, meta_len) || meta_len < (prefix = dart__meta_pfx(meta))){ *out_len = 0; return NULL; }
-    *out_len = (size_t)(meta_len - prefix);
-    return meta + prefix;
+    uint16_t off;
+    *out_len = 0;
+    if (!dart__meta_ok(meta, meta_len)) return NULL;
+    off = dart__meta_base(meta);
+    if (dart__meta_named(meta)){     /* skip [namelen][name] before the interest list */
+        if (meta_len < (uint16_t)(off + 1u)) return NULL;
+        off = (uint16_t)(off + 1u + meta[off]);
+    }
+    if (meta_len < off) return NULL;
+    *out_len = (size_t)(meta_len - off);
+    return meta + off;
 }
 
 #ifdef DART_SHM
 int dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]){
-    if (!dart__meta_ok(meta, meta_len) || meta[2]!=3 || meta_len < DART__META_PREFIX_V3 || !meta[5]) return 0;
+    if (!dart__meta_ok(meta, meta_len) || !(meta[2]==3 || meta[2]==5)
+        || meta_len < DART__META_BASE_SHM || !meta[5]) return 0;
     memcpy(host, meta+6, 16);
     return 1;
 }
@@ -4398,6 +4458,8 @@ typedef struct {
     uint8_t  ip[16];   /* peer's physical address (IPv4 today; opaque to the core) */
     uint8_t  ip_len;
     uint16_t port;     /* peer's advertised data port */
+    char     name[DART_NODE_NAME_MAX + 1];  /* from its announce blob (NUL-terminated, debug) */
+    uint8_t  name_len;
 } i_DartNodePeer;
 
 struct i_DartNodeCore {
@@ -4414,6 +4476,8 @@ struct i_DartNodeCore {
     uint16_t              meta_cap;
     uint16_t              meta_len;
     uint16_t              frag_size;   /* baked into the blob */
+    char                  name[DART_NODE_NAME_MAX + 1];  /* our node name, baked into the blob */
+    uint8_t               name_len;
 };
 
 /* arena layout: the core struct, the peer table, then the announce-blob buffer. One
@@ -4453,6 +4517,10 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     c->meta_buf      = meta;
     c->meta_cap      = dart_meta_capacity(cfg->n_channels);
     c->frag_size     = cfg->frag_size;
+    {   uint8_t nl = cfg->name_len;
+        if (nl > DART_NODE_NAME_MAX) nl = DART_NODE_NAME_MAX;
+        if (cfg->name && nl) memcpy(c->name, cfg->name, nl);
+        c->name[nl] = '\0'; c->name_len = nl; }
     memset(peers, 0, (size_t)cfg->max_peers * sizeof(i_DartNodePeer));
     return c;
 }
@@ -4462,7 +4530,8 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
    just writes the v2 (non-SHM) prefix. */
 uint16_t dart_node_core_build_meta(i_DartNodeCore *c){
     c->meta_len = dart_meta_build(c->transport, c->meta_buf, c->meta_cap,
-                                  c->frag_size, c->oob_capable, c->oob_host);
+                                  c->frag_size, c->oob_capable, c->oob_host,
+                                  c->name, c->name_len);
     return c->meta_len;
 }
 
@@ -4491,6 +4560,18 @@ static void dart__core_set_peer_oob(i_DartNodeCore *c, uint32_t id, const uint8_
 #define dart__core_set_peer_oob(c, id, meta, meta_len) ((void)0)
 #endif
 
+/* copy the peer's advertised name out of its (call-lifetime) announce blob into the
+ * peer slot, so DartMsg.sender_name can point at stable storage. A peer that somehow
+ * advertised no name gets "unknown-peer", so a slot is never empty-named. */
+static void dart__core_set_peer_name(i_DartNodePeer *p, const uint8_t *meta, uint16_t meta_len){
+    uint8_t nl = 0;
+    const char *nm = dart_meta_name(meta, meta_len, &nl);
+    if (!nm || nl == 0){ nm = "unknown-peer"; nl = 12; }
+    if (nl > DART_NODE_NAME_MAX) nl = DART_NODE_NAME_MAX;
+    memcpy(p->name, nm, nl);
+    p->name[nl] = '\0'; p->name_len = nl;
+}
+
 static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
                             const DartDiscoveryAddr *addr, const char *detail){
     DartEvent ev;
@@ -4510,6 +4591,7 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
         if (c->peers[i].used && c->peers[i].id==id){      /* known peer: addr/interest update */
             memcpy(c->peers[i].ip, addr->ip, 16);
             c->peers[i].ip_len = addr->ip_len; c->peers[i].port = addr->port;
+            dart__core_set_peer_name(&c->peers[i], meta, meta_len);
             dart_peer_set_frag(c->transport, id, frag);
             dart__core_set_peer_oob(c, id, meta, meta_len);
             if (interest) dart_apply_peer_interest(c->transport, id, interest, interest_len);
@@ -4526,6 +4608,7 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
     c->peers[slot].used=1; c->peers[slot].id=id;
     memcpy(c->peers[slot].ip, addr->ip, 16);
     c->peers[slot].ip_len=addr->ip_len; c->peers[slot].port=addr->port;
+    dart__core_set_peer_name(&c->peers[slot], meta, meta_len);
     /* the announce blob carries the peer's frag size + pub/sub interest list */
     {   int local = (addr->ip_len==4) && c->is_local && c->is_local(c->is_local_user, addr->ip, addr->ip_len);
         dart_peer_add(c->transport, id, local, frag); }
@@ -4579,6 +4662,13 @@ int dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t 
         if (c->peers[i].used && c->peers[i].ip_len>=4 && c->peers[i].port==port
             && memcmp(c->peers[i].ip, ip, 4)==0){ if (id) *id = c->peers[i].id; return 1; }
     return 0;
+}
+
+const char *dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id, uint8_t *out_len){
+    int i = dart__core_find_id(c, id);
+    if (i < 0){ if (out_len) *out_len = 0; return NULL; }   /* not a known peer */
+    if (out_len) *out_len = c->peers[i].name_len;           /* always non-empty (see set_peer_name) */
+    return c->peers[i].name;
 }
 
 uint16_t dart_node_core_max_peers(i_DartNodeCore *c){ return c->max_peers; }
@@ -4678,11 +4768,14 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. */
 static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *data, size_t len){
-    DartMsg m; uint8_t nl = 0;
+    DartMsg m; uint8_t nl = 0, snl = 0;
     if (!n->user_on_message) return;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
     m.channel_id = ch; m.sender_id = from;
+    m.sender_name = dart_node_core_peer_name(n->core, from, &snl);   /* pointer into discovery state */
+    if (!m.sender_name){ m.sender_name = "unknown-peer"; snl = 12; } /* never NULL: no caller null-check */
+    m.sender_name_len = snl;
     m.channel_name = dart_channel_name(n->transport, ch, &nl);
     m.channel_name_len = nl;
     m.data = data; m.len = len;
@@ -4885,6 +4978,24 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
 }
 #endif
 
+/* effective node name into buf[DART_NODE_NAME_MAX+1]: the caller's (clamped), or an
+ * auto-generated "node-XXXXXXXX" debug default (random suffix, pid fallback). Returns
+ * its length. A node always has a name, so peers always have one to reference. */
+static uint8_t dart__node_name(const char *want, char *buf){
+    static const char hex[] = "0123456789abcdef";
+    uint32_t r; size_t i;
+    if (want && *want){
+        for (i=0; i<DART_NODE_NAME_MAX && want[i]; i++) buf[i] = want[i];
+        buf[i] = '\0';
+        return (uint8_t)i;
+    }
+    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
+    memcpy(buf, "node-", 5);
+    for (i=0; i<8; i++) buf[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
+    buf[13] = '\0';
+    return 13;
+}
+
 DartNode *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryRtConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_channels; DartAllocFn allocator;
@@ -4976,9 +5087,11 @@ DartNode *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOp
 
     /* sans-IO node core: owns the peer table (id<->address) and the discovery->
        transport lifecycle; the runtime drives it and resolves addresses for IO. */
-    {   i_DartNodeCoreConfig cc; memset(&cc, 0, sizeof cc);
+    {   i_DartNodeCoreConfig cc; char name_buf[DART_NODE_NAME_MAX + 1];
+        memset(&cc, 0, sizeof cc);
         cc.transport = n->transport; cc.max_peers = max_peers;
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
+        cc.name = name_buf; cc.name_len = dart__node_name(o.name, name_buf);
         cc.on_event = dart__node_on_event; cc.user = n;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM

@@ -48,6 +48,10 @@ extern "C" {
 #define DART_TOPIC_NAME_MAX 64u          /* max topic-name bytes on the wire */
 #endif
 
+#ifndef DART_NODE_NAME_MAX
+#define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
+#endif
+
 /* Max pub+sub topic count accepted in a peer's interest list; sizes the per-peer
  * alias table. Auto-raised to 2*n_channels; raise (a compile bound) only to accept
  * a peer with more topics. */
@@ -216,28 +220,36 @@ size_t    dart_build_interest(DartState *st, void *out, size_t cap);
 void      dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob, size_t len);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, its SHM capability + host uuid
- * (v3), and its interest list. The node carries it in announces; a bring-your-own-IO
- * caller builds and parses the identical blob. Layout:
- *   v2: ['D','N',2, frag_lo, frag_hi,                 <interest>]   prefix 5
- *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],  <interest>]   prefix 22
- * frag sits at [3..4] in both, so v2 (non-SHM) and v3 nodes interop. The build writes
- * v3 when DART_SHM is compiled, v2 otherwise; the readers are version-aware. */
+ * payload wrapping this node's UDP fragment size, its SHM capability + host uuid,
+ * its human-readable name, and its interest list. The node carries it in announces;
+ * a bring-your-own-IO caller builds and parses the identical blob. Layout:
+ *   v2: ['D','N',2, frag_lo, frag_hi,                                       <interest>]
+ *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],                        <interest>]
+ *   v4: ['D','N',4, frag_lo, frag_hi,              namelen, name[namelen],  <interest>]
+ *   v5: ['D','N',5, frag_lo, frag_hi, shm, host[16], namelen, name[namelen],<interest>]
+ * frag sits at [3..4] in every version. v4/v5 add the node name (v2/v3 are the older,
+ * nameless formats, still decoded for interop). The build writes v5 when DART_SHM is
+ * compiled, v4 otherwise; the readers are version-aware. */
 
-/* Bytes to reserve for our blob: prefix + the largest interest list n_channels can
- * produce, capped to one (IP-fragmentable) UDP datagram. Size the announce buffer here. */
+/* Bytes to reserve for our blob: prefix + name + the largest interest list n_channels
+ * can produce, capped to one (IP-fragmentable) UDP datagram. Size the announce buffer here. */
 uint16_t  dart_meta_capacity(uint16_t n_channels);
 /* Build our blob into out[cap] (cap >= dart_meta_capacity): the version prefix
- * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled) then st's interest
- * list. Returns total bytes. host may be NULL when !shm_capable. */
+ * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), the node name
+ * (clamped to DART_NODE_NAME_MAX), then st's interest list. Returns total bytes. host
+ * may be NULL when !shm_capable; name may be NULL (name_len then 0). */
 uint16_t  dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                       const char *name, uint8_t name_len);
 /* A peer's advertised UDP fragment size from its blob; 0 if the blob is malformed. */
 uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
+/* A peer's advertised node name (v4/v5 blobs): pointer into meta + its length via
+ * *out_len; NULL + *out_len 0 if the blob is nameless or malformed. Not NUL-terminated. */
+const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len);
 /* Locate the interest sub-blob inside a peer's blob; NULL + *out_len 0 if absent. */
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
 #ifdef DART_SHM
-/* A peer's SHM capability + host uuid (v3 blobs only): 1 if SHM-capable (fills
+/* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
 int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]);
 #endif

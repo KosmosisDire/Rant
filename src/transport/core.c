@@ -528,33 +528,38 @@ void dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob,
 
 
 /* Discovery-announce meta blob codec (see dart_meta_* in core.h for the layout). The
-   interest list is wrapped in a versioned prefix carrying frag size and (v3) SHM info;
-   decode is version-aware so v2 and v3 nodes interop. */
-#define DART__META_PREFIX_V2 5u
-#define DART__META_PREFIX_V3 22u
+   interest list is wrapped in a versioned prefix carrying frag size, (v3/v5) SHM info,
+   and (v4/v5) the node name; decode is version-aware so older and newer nodes interop. */
+#define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
+#define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
 #ifdef DART_SHM
-#define DART__META_PREFIX DART__META_PREFIX_V3   /* what WE write */
+#define DART__META_VER  5u                  /* what WE write */
+#define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_PREFIX DART__META_PREFIX_V2
+#define DART__META_VER  4u
+#define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
-    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && (meta[2]==2 || meta[2]==3);
+    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && meta[2]>=2 && meta[2]<=5;
 }
-static uint16_t dart__meta_pfx(const uint8_t *meta){
-    return meta[2]==3 ? DART__META_PREFIX_V3 : DART__META_PREFIX_V2;
+/* base prefix through host[16], by version (v3/v5 carry shm+host, v2/v4 don't). */
+static uint16_t dart__meta_base(const uint8_t *meta){
+    return (meta[2]==3 || meta[2]==5) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
+static int dart__meta_named(const uint8_t *meta){ return meta[2] >= 4; }
 
 uint16_t dart_meta_capacity(uint16_t n_channels){
-    size_t cap = (size_t)DART__META_PREFIX + dart_interest_max(n_channels);
+    size_t cap = (size_t)DART__META_BASE + 1u + DART_NODE_NAME_MAX + dart_interest_max(n_channels);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
 uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
-    size_t interest_len; uint16_t prefix = DART__META_PREFIX;
-    out[0]='D'; out[1]='N'; out[2]=(uint8_t)(DART__META_PREFIX==DART__META_PREFIX_V3 ? 3 : 2);
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                         const char *name, uint8_t name_len){
+    size_t interest_len; uint16_t off = DART__META_BASE;
+    out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
 #ifdef DART_SHM
     out[5]=(uint8_t)(shm_capable?1:0);
@@ -562,8 +567,13 @@ uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
 #else
     (void)shm_capable; (void)host;
 #endif
-    interest_len = dart_build_interest(st, out + prefix, cap - prefix);
-    return (uint16_t)(prefix + interest_len);
+    if (!name) name_len = 0;
+    if (name_len > DART_NODE_NAME_MAX) name_len = DART_NODE_NAME_MAX;
+    out[off] = name_len;
+    if (name_len) memcpy(out + off + 1, name, name_len);
+    off = (uint16_t)(off + 1u + name_len);
+    interest_len = dart_build_interest(st, out + off, cap - off);
+    return (uint16_t)(off + interest_len);
 }
 
 uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
@@ -571,16 +581,36 @@ uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
     return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
 }
 
+const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len){
+    uint16_t base; uint8_t nl;
+    if (out_len) *out_len = 0;
+    if (!dart__meta_ok(meta, meta_len) || !dart__meta_named(meta)) return NULL;
+    base = dart__meta_base(meta);
+    if (meta_len < (uint16_t)(base + 1u)) return NULL;
+    nl = meta[base];
+    if (meta_len < (uint16_t)(base + 1u + nl)) return NULL;
+    if (out_len) *out_len = nl;
+    return nl ? (const char*)(meta + base + 1) : NULL;
+}
+
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len){
-    uint16_t prefix;
-    if (!dart__meta_ok(meta, meta_len) || meta_len < (prefix = dart__meta_pfx(meta))){ *out_len = 0; return NULL; }
-    *out_len = (size_t)(meta_len - prefix);
-    return meta + prefix;
+    uint16_t off;
+    *out_len = 0;
+    if (!dart__meta_ok(meta, meta_len)) return NULL;
+    off = dart__meta_base(meta);
+    if (dart__meta_named(meta)){     /* skip [namelen][name] before the interest list */
+        if (meta_len < (uint16_t)(off + 1u)) return NULL;
+        off = (uint16_t)(off + 1u + meta[off]);
+    }
+    if (meta_len < off) return NULL;
+    *out_len = (size_t)(meta_len - off);
+    return meta + off;
 }
 
 #ifdef DART_SHM
 int dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]){
-    if (!dart__meta_ok(meta, meta_len) || meta[2]!=3 || meta_len < DART__META_PREFIX_V3 || !meta[5]) return 0;
+    if (!dart__meta_ok(meta, meta_len) || !(meta[2]==3 || meta[2]==5)
+        || meta_len < DART__META_BASE_SHM || !meta[5]) return 0;
     memcpy(host, meta+6, 16);
     return 1;
 }

@@ -45,6 +45,10 @@ typedef struct {
  */
 typedef struct {
     uint16_t              domain;        /* logical-network selector */
+    const char           *name;          /* human-readable node name, synced via discovery and
+                                            surfaced as DartMsg.sender_name (debug/observability).
+                                            Copied in; clamped to DART_NODE_NAME_MAX. NULL/empty =>
+                                            an auto-generated "node-XXXXXXXX" default. */
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
     DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
     void                 *user_data;     /* passed to on_message (DartMsg.user) and on_event */
@@ -75,6 +79,11 @@ typedef struct {
     void          *user;             /* DartNodeOpts.user_data */
     uint16_t       channel_id;       /* local channel index */
     uint32_t       sender_id;        /* peer id the message came from */
+    const char    *sender_name;      /* sender's node name, NUL-terminated and never NULL
+                                        ("unknown-peer" if somehow unavailable), so no null check
+                                        is needed. A pointer into discovery state, never on the
+                                        per-message wire; valid for the callback's duration. */
+    uint8_t        sender_name_len;  /* its length */
     const char    *channel_name;     /* topic name (NUL-terminated), or NULL */
     uint8_t        channel_name_len; /* its length */
     const void    *data;

@@ -85,11 +85,14 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. */
 static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *data, size_t len){
-    DartMsg m; uint8_t nl = 0;
+    DartMsg m; uint8_t nl = 0, snl = 0;
     if (!n->user_on_message) return;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
     m.channel_id = ch; m.sender_id = from;
+    m.sender_name = dart_node_core_peer_name(n->core, from, &snl);   /* pointer into discovery state */
+    if (!m.sender_name){ m.sender_name = "unknown-peer"; snl = 12; } /* never NULL: no caller null-check */
+    m.sender_name_len = snl;
     m.channel_name = dart_channel_name(n->transport, ch, &nl);
     m.channel_name_len = nl;
     m.data = data; m.len = len;
@@ -292,6 +295,24 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
 }
 #endif
 
+/* effective node name into buf[DART_NODE_NAME_MAX+1]: the caller's (clamped), or an
+ * auto-generated "node-XXXXXXXX" debug default (random suffix, pid fallback). Returns
+ * its length. A node always has a name, so peers always have one to reference. */
+static uint8_t dart__node_name(const char *want, char *buf){
+    static const char hex[] = "0123456789abcdef";
+    uint32_t r; size_t i;
+    if (want && *want){
+        for (i=0; i<DART_NODE_NAME_MAX && want[i]; i++) buf[i] = want[i];
+        buf[i] = '\0';
+        return (uint8_t)i;
+    }
+    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
+    memcpy(buf, "node-", 5);
+    for (i=0; i<8; i++) buf[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
+    buf[13] = '\0';
+    return 13;
+}
+
 DartNode *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryRtConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_channels; DartAllocFn allocator;
@@ -383,9 +404,11 @@ DartNode *dart_node_open(size_t mem_size, DartMsgFn on_message, const DartNodeOp
 
     /* sans-IO node core: owns the peer table (id<->address) and the discovery->
        transport lifecycle; the runtime drives it and resolves addresses for IO. */
-    {   i_DartNodeCoreConfig cc; memset(&cc, 0, sizeof cc);
+    {   i_DartNodeCoreConfig cc; char name_buf[DART_NODE_NAME_MAX + 1];
+        memset(&cc, 0, sizeof cc);
         cc.transport = n->transport; cc.max_peers = max_peers;
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
+        cc.name = name_buf; cc.name_len = dart__node_name(o.name, name_buf);
         cc.on_event = dart__node_on_event; cc.user = n;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM
