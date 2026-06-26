@@ -174,14 +174,6 @@ static void usage(void){
         "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_PAYLOAD_MAX>=N)\n");
 }
 
-/* Allocator for DART's dynamic message buffers (used when no --max is set).
- * realloc semantics: size 0 frees. */
-static void *pubsub_realloc(void *u, void *ptr, size_t size){
-    (void)u;
-    if (size == 0){ free(ptr); return NULL; }
-    return realloc(ptr, size);
-}
-
 /* Wait for subscribers to match this channel, pumping the node throughout, so a
  * one-shot publisher never fires into the void. Returns once >=1 subscriber has
  * matched AND the count has stopped growing for a short quiet window -- so peers
@@ -432,7 +424,6 @@ int main(int argc, char **argv){
     opts.domain       = domain;
     opts.max_channels = (uint16_t)g_n_topics;
     opts.on_event     = on_event;
-    opts.allocator    = dynamic ? pubsub_realloc : NULL;   /* dynamic message sizing */
     opts.discovery.max_peers = max_peers;
     /* A single big message has no within-message flow control, so the receive
        socket must buffer it whole or fragments drop and 32-wide NACK repair
@@ -455,15 +446,24 @@ int main(int argc, char **argv){
         opts.net.seed_peers = &seed; opts.net.n_seed_peers = 1;
     }
 
-    /* Size the arena. Dynamic mode keeps message buffers out of the arena (the
-       allocator mallocs them on demand), so a small fixed arena suffices; fixed
-       mode (--max) carves (keep_last + max_peers) x cap of history+reassembly per
-       channel from it. The node mallocs this and owns it for the whole run. */
-    size_t mem_size = 8u<<20;
-    if (!dynamic)
-        mem_size += (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
-    DartNode *n = dart_node_open(mem_size, NULL, on_message, &opts);
-    if (!n){ fprintf(stderr, "dart_node_open failed (arena %lu bytes)\n", (unsigned long)mem_size); return 1; }
+    /* The node's memory allocator. Dynamic mode (no --max) is heap-backed and grows
+       message buffers to fit, so a small initial hint suffices and a megabyte file
+       still goes through. Fixed mode (--max) is a static allocator over one pre-sized
+       block: a small base for node/channel structures plus (keep_last + max_peers) x
+       cap of history+reassembly per channel. The block must outlive the node; here it
+       lives for the whole process (freed implicitly at exit). */
+    DartAllocator alloc;
+    if (dynamic){
+        alloc = dart_allocator_dynamic(8u<<20);
+    } else {
+        size_t mem_size = (8u<<20)
+                        + (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
+        void *block = malloc(mem_size);
+        if (!block){ fprintf(stderr, "out of memory (arena %lu bytes)\n", (unsigned long)mem_size); return 1; }
+        alloc = dart_allocator_static(block, mem_size);
+    }
+    DartNode *n = dart_node_open(&alloc, NULL, on_message, &opts);
+    if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     /* Create channels in index order, so channel index i is g_topics[i] and the
        shims above resolve an index straight to its handle. */
