@@ -107,3 +107,18 @@ if(DART_BUILD_TOOLS)
   dart_program(dart_test_noshm tests/dart_test.c)
   target_compile_definitions(dart_test_noshm PRIVATE DART_NO_SHM)
 endif()
+
+# ---------------------------------------------------------------------------
+# 4. The DART Explorer GUI (explore/). A sizable project in its own right, so it
+#    keeps its own CMakeLists; we just pull it in so it builds alongside the host
+#    programs and drops dart_explorer in the repo root like the rest. OFF by
+#    default: it fetches and builds SDL3 + SDL3_ttf from source (network + a slow
+#    first build), which the core/tools build has no need for. Enable with
+#    -DDART_BUILD_EXPLORER=ON. When built this way it consumes the `dart` target
+#    above (dist include + regeneration); it also still builds standalone
+#    (cmake -S explore -B explore/build).
+# ---------------------------------------------------------------------------
+option(DART_BUILD_EXPLORER "Build the DART Explorer GUI (fetches SDL3)" OFF)
+if(DART_BUILD_EXPLORER)
+  add_subdirectory(explore)
+endif()

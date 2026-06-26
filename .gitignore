@@ -11,3 +11,8 @@ old
 /pubsub
 *.png
 *.jpg
+# explorer UI: handoff package + fetched reference docs + standalone build tree
+/DART Network Debugging Interface.zip
+/_unzipped/
+/_ref/
+/explore/build/
