@@ -377,6 +377,10 @@ void dart_discovery_set_meta(DartDiscoveryState *st, const uint8_t *meta, uint16
     st->next_announce_us  = 0;   /* announce the change now, don't wait for the timer */
 }
 
+void dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port){
+    if (st) st->cfg.data_port = port;
+}
+
 size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
                                     DartDiscoveryAddr *to){
     uint16_t n = st->cap_peers, k;

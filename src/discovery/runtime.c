@@ -9,6 +9,8 @@
 struct DartDiscoveryRt {
     DartDiscoveryState *core;
     i_DartSock            fd;
+    i_DartSock            unicast_fd;    /* own same-host unicast RX on a unique port, or
+                                            DART_SOCK_BAD when the caller gave a data_port */
     uint32_t             group_naddr;   /* discovery multicast group, network order */
     uint16_t             discovery_port;
     uint16_t             max_peers;
@@ -213,6 +215,7 @@ DartDiscoveryRt *dart_discovery_rt_open(void *mem, size_t cap, const DartDiscove
     dart_plat_mcast_loop(fd, 1);
 
     rt->fd = fd;
+    rt->unicast_fd = DART_SOCK_BAD;
     rt->group_naddr = group_naddr;
     rt->discovery_port = c.discovery_port;
     rt->max_peers = c.discovery.max_peers;
@@ -222,6 +225,24 @@ DartDiscoveryRt *dart_discovery_rt_open(void *mem, size_t cap, const DartDiscove
         if (seed_count > DART_DISCOVERY_MAX_SEEDS) seed_count = DART_DISCOVERY_MAX_SEEDS;
         for (k=0;k<seed_count;k++) rt->seeds[k] = c.seeds[k];
         rt->n_seeds = seed_count;
+    }
+
+    /* If the caller advertised no unicast locator (data_port 0: a discovery-only instance
+       with no transport socket to multiplex discovery onto), bind our own unicast RX socket
+       on a unique ephemeral port and advertise it. A same-host peer's unicast reply (a
+       solicit answer or a re-fetch) then reaches THIS process instead of the shared discovery
+       port, which the OS hands to one arbitrary same-port socket. Best-effort: on failure we
+       keep data_port 0 and only cross-host unicast (where we own the discovery port) works. */
+    if (c.discovery.data_port == 0){
+        i_DartSock uc = dart_plat_udp_open();
+        if (uc != DART_SOCK_BAD){
+            uint16_t uport = dart_plat_bind(uc, 0, 0, 0) ? dart_plat_local_port(uc) : 0;
+            if (uport){
+                dart_plat_set_nonblock(uc);
+                rt->unicast_fd = uc;
+                dart_discovery_set_data_port(rt->core, uport);
+            } else dart_plat_close(uc);
+        }
     }
     return rt;
 }
@@ -255,16 +276,28 @@ DartDiscoveryRt *dart_discovery_rt_migrate(DartDiscoveryRt *old, void *new_mem, 
 }
 
 int dart_discovery_rt_poll(DartDiscoveryRt *rt, int timeout_ms){
-    i_DartPollfd pfd;
+    i_DartPollfd pfd[2];
     DartDiscoveryAddr to;
-    int got = 0; size_t n_bytes;
+    int got = 0, nfds = 1; size_t n_bytes;
 
-    pfd.fd = rt->fd; pfd.events = DART_POLLIN; pfd.revents = 0;
-    if (dart_plat_poll(&pfd, 1, timeout_ms) < 0) return -1;
+    memset(pfd, 0, sizeof pfd);
+    pfd[0].fd = rt->fd; pfd[0].events = DART_POLLIN;
+    if (rt->unicast_fd != DART_SOCK_BAD){ pfd[1].fd = rt->unicast_fd; pfd[1].events = DART_POLLIN; nfds = 2; }
+    if (dart_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
 
-    if (pfd.revents & DART_POLLIN){
+    if (pfd[0].revents & DART_POLLIN){
         uint8_t src_ip[4];
         int n = dart_plat_recv(rt->fd, rt->rxbuf, rt->wire_max, src_ip, NULL);
+        if (n > 0){
+            dart_discovery_on_datagram(rt->core, src_ip, 4, rt->rxbuf, (size_t)n, dart_plat_now_us());
+            got = 1;
+        }
+    }
+    /* our own unicast port: solicit replies + re-fetch answers land here, so a same-host
+       peer's reply reaches THIS process rather than the shared discovery port */
+    if (nfds == 2 && (pfd[1].revents & DART_POLLIN)){
+        uint8_t src_ip[4];
+        int n = dart_plat_recv(rt->unicast_fd, rt->rxbuf, rt->wire_max, src_ip, NULL);
         if (n > 0){
             dart_discovery_on_datagram(rt->core, src_ip, 4, rt->rxbuf, (size_t)n, dart_plat_now_us());
             got = 1;
@@ -308,5 +341,6 @@ void dart_discovery_rt_close(DartDiscoveryRt *rt, int send_bye){
         if (n_bytes) dart_discovery_rt_tx(rt, rt->txbuf, n_bytes);
     }
     dart_plat_close(rt->fd);
+    if (rt->unicast_fd != DART_SOCK_BAD) dart_plat_close(rt->unicast_fd);
     dart_plat_cleanup();
 }

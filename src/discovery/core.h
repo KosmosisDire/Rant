@@ -103,6 +103,11 @@ void         dart_discovery_replay_peers(DartDiscoveryState *st);
  * blob rides the next few announces, then announces carry the version only; a peer
  * that fell behind re-fetches via a targeted solicit. meta must stay valid. */
 void         dart_discovery_set_meta(DartDiscoveryState *st, const uint8_t *meta, uint16_t meta_len);
+/* Set the unicast locator port advertised in announces (the header data_port). The IO
+ * runtime calls this when it binds its own same-host unicast RX socket, so peers reply
+ * to a port unique to THIS process instead of the shared discovery port (which the OS
+ * hands to one arbitrary same-port socket). 0 = none (peers fall back to the disc port). */
+void         dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port);
 /* Drain one targeted (unicast) datagram and its destination: a solicit REPLY to a
  * peer that solicited us (carries the blob), or a re-fetch REQ to a peer whose
  * advertised version is ahead of what we hold. Returns bytes + fills *to, or 0 when
