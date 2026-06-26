@@ -79,6 +79,10 @@ typedef struct {
 
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
+    uint8_t  reader_reliable; /* the matched reader requested RELIABLE: only then does this
+                                 lane impose backpressure + heartbeats. A best-effort reader
+                                 never acks, so it must stay out of flow control (fire-and-
+                                 forget), else it stalls a reliable writer forever. */
     uint32_t reader_epoch; /* reader incarnation from last ACKNACK (0 = none); a change
                               means the peer rebuilt state, so the lane re-joins */
     uint64_t sent_upto;  /* next seqno to push as new data */
@@ -162,6 +166,8 @@ struct DartState {
        Fed by dart_apply_peer_interest from the peer's discovery announce. */
     uint8_t     *peer_pub_bitmap; /* [max_peers][bitmap_len] peer publishes channel c */
     uint8_t     *peer_sub_bitmap; /* [max_peers][bitmap_len] peer subscribes channel c */
+    uint8_t     *peer_sub_reliable; /* [max_peers][bitmap_len] ...and requested RELIABLE; sourced
+                                       at match time into i_DartWriterProxy.reader_reliable */
     uint16_t     bitmap_len;       /* ceil(n_channels / 8) */
     /* per-peer wire alias -> our channel index; the data path carries the 2-byte
        alias instead of the topic name */

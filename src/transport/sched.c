@@ -96,7 +96,7 @@ static void dart__hb_sweep(DartState *st, uint64_t now){
         { i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
           i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
           int group_mode = ch->multicast && ch->n_subscribers>0;
-          if (w->used && !group_mode && w->acked_upto < ch->next_seqno){
+          if (w->used && w->reader_reliable && !group_mode && w->acked_upto < ch->next_seqno){
               if (now>=w->hb_next_us) dart__lane_enq(st,channel_idx,peer_slot);
               else if (w->hb_next_us < mind) mind = w->hb_next_us;
           }

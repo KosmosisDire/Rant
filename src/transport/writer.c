@@ -98,7 +98,7 @@ int dart_send_would_evict(DartState *st, uint16_t channel){
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
         i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
+        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
 }
@@ -111,7 +111,7 @@ int dart_send_drained(DartState *st, uint16_t channel){
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
         i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
+        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
     }
     return 1;
 }
@@ -322,7 +322,7 @@ size_t dart_writer_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *
        acked everything (acked_upto == next_seqno) there's nothing to repair, so the
        lane goes silent until new data or a (re)subscribe drops acked_upto again. The
        HB advertises from acked_upto so a fresh reader adopts the join point. */
-    if (reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
+    if (reliable && w->reader_reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
         return dart_writer_hb(st,ch,w,alias,out,cap,now);
     return 0;
 }
@@ -334,7 +334,7 @@ int dart__group_all_acked(DartState *st, int channel_idx){
     uint32_t max_peers=st->cfg.max_peers, p; uint64_t seq=st->channels[channel_idx].next_seqno;
     for (p=0;p<max_peers;p++){
         i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
+        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
     }
     return 1;
 }

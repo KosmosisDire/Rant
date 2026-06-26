@@ -1410,6 +1410,70 @@ static void dynamic_grow_checks(void){
     dart_node_close(P,1); dart_node_close(S,1);
 }
 
+/* (17) QoS RxO: a DART_RELIABLE subscriber must REFUSE a best-effort publisher (no
+   silent downgrade); every other direction matches. Sans-IO transport core, no data
+   pump: build the publisher's interest, apply it to the reader, read the match. */
+static unsigned long qos_incompat_n;
+static void qos_on_event(const DartEvent *ev){ if (ev->kind==DART_QOS_INCOMPATIBLE) qos_incompat_n++; }
+static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
+    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartState *W, *R; uint8_t blob[128]; size_t bl; uint16_t pub=0, recv=0;
+    memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=DART_PUB_ONLY;
+    cw.qos.reliability=wrel?DART_RELIABLE:DART_BEST_EFFORT; cw.qos.keep_last=4;
+    memset(&cr,0,sizeof cr); cr.name="qostopic"; cr.role=DART_SUB_ONLY;
+    cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=4;
+    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2; rc.on_event=qos_on_event;
+    nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
+    nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
+    dart_peer_add(W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,1,DART_FRAG_PAYLOAD);
+    qos_incompat_n=0;
+    bl=dart_build_interest(W,blob,sizeof blob); dart_apply_peer_interest(R,1u,blob,bl);
+    dart_peer_match_counts(R,1u,&pub,&recv);
+    if (recv_out) *recv_out=recv;
+    if (evt_out)  *evt_out=qos_incompat_n;
+    dart_destroy(W); dart_destroy(R); free(mw); free(mr);
+}
+static void qos_match_checks(void){
+    uint16_t recv; unsigned long evt;
+    qos_pair(0,1,&recv,&evt);   /* best-effort pub, reliable sub: REFUSED */
+    ST_CHECK(recv==0, "qos: reliable sub refuses best-effort pub (receive_from=%u)", recv);
+    ST_CHECK(evt>=1,  "qos: refusal raised DART_QOS_INCOMPATIBLE (n=%lu)", evt);
+    qos_pair(1,1,&recv,&evt);   /* reliable pub, reliable sub */
+    ST_CHECK(recv==1 && evt==0, "qos: reliable sub matches reliable pub (recv=%u evt=%lu)", recv, evt);
+    qos_pair(1,0,&recv,&evt);   /* reliable pub, best-effort sub: allowed downgrade */
+    ST_CHECK(recv==1 && evt==0, "qos: best-effort sub matches reliable pub (recv=%u evt=%lu)", recv, evt);
+    qos_pair(0,0,&recv,&evt);   /* both best-effort */
+    ST_CHECK(recv==1 && evt==0, "qos: best-effort sub matches best-effort pub (recv=%u evt=%lu)", recv, evt);
+}
+
+/* (17b) flow control: a best-effort reader matched to a RELIABLE writer must NOT count
+   toward backpressure (it never acks). Reliable writer + (rrel?reliable:best-effort)
+   reader; fill the history ring past keep_last with no acks, return would-evict. */
+static int beff_would_evict(int rrel){
+    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartState *W, *R; uint8_t blob[128], payload[8]; size_t bl; int i, evict;
+    memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=DART_PUB_ONLY;
+    cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2; cw.qos.max_message_bytes=8;
+    memset(&cr,0,sizeof cr); cr.name="beff"; cr.role=DART_SUB_ONLY;
+    cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=2; cr.qos.max_message_bytes=8;
+    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
+    nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
+    nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
+    dart_peer_add(W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,1,DART_FRAG_PAYLOAD);
+    bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,blob,bl);  /* W learns R subscribes */
+    memset(payload,0x5A,sizeof payload);
+    for (i=0;i<5;i++) dart_send(W,0,payload,sizeof payload,1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
+    evict = dart_send_would_evict(W,0);
+    dart_destroy(W); dart_destroy(R); free(mw); free(mr);
+    return evict;
+}
+static void beff_flow_checks(void){
+    ST_CHECK(beff_would_evict(0)==0, "flow: best-effort reader never stalls a reliable writer");
+    ST_CHECK(beff_would_evict(1)==1, "flow: reliable reader does apply backpressure");
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1708,6 +1772,8 @@ static int selftest_main(void){
     event_user_checks();  /* 14. transport-fired event reaches on_event with the app user_data */
     mcast_join_degrade_checks();  /* 15. multicast join failure degrades (skip + signal), not hard-fail */
     dynamic_grow_checks();        /* 16. dynamic-mode grow: relocate mid-stream, lose nothing       */
+    qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
+    beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;

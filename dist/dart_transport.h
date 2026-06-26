@@ -154,14 +154,16 @@ typedef enum {
     DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. .lost_first+.lost_count-1 */
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
+    DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher: no silent downgrade,
+                              no data flows for this (.channel, .peer); .detail = our channel name */
     DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
     DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap: that
                               channel got no group join and receives only unicast-published data (.channel) (node) */
 } DartEventKind;
 
 /* Flat, self-describing: read only the fields named for the event's .kind (the
- * rest are zero). detail is always a short human label, except NAME_COLLISION
- * where it carries our channel name. */
+ * rest are zero). detail is always a short human label, except NAME_COLLISION /
+ * QOS_INCOMPATIBLE where it carries our channel name. */
 typedef struct {
     DartEventKind kind;
     const char *detail;        /* short human-readable label (NAME_COLLISION: our channel name) */
@@ -1102,6 +1104,10 @@ typedef struct {
 
 typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  used;
+    uint8_t  reader_reliable; /* the matched reader requested RELIABLE: only then does this
+                                 lane impose backpressure + heartbeats. A best-effort reader
+                                 never acks, so it must stay out of flow control (fire-and-
+                                 forget), else it stalls a reliable writer forever. */
     uint32_t reader_epoch; /* reader incarnation from last ACKNACK (0 = none); a change
                               means the peer rebuilt state, so the lane re-joins */
     uint64_t sent_upto;  /* next seqno to push as new data */
@@ -1185,6 +1191,8 @@ struct DartState {
        Fed by dart_apply_peer_interest from the peer's discovery announce. */
     uint8_t     *peer_pub_bitmap; /* [max_peers][bitmap_len] peer publishes channel c */
     uint8_t     *peer_sub_bitmap; /* [max_peers][bitmap_len] peer subscribes channel c */
+    uint8_t     *peer_sub_reliable; /* [max_peers][bitmap_len] ...and requested RELIABLE; sourced
+                                       at match time into i_DartWriterProxy.reader_reliable */
     uint16_t     bitmap_len;       /* ceil(n_channels / 8) */
     /* per-peer wire alias -> our channel index; the data path carries the 2-byte
        alias instead of the topic name */
@@ -1417,7 +1425,7 @@ static void dart__hb_sweep(DartState *st, uint64_t now){
         { i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
           i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
           int group_mode = ch->multicast && ch->n_subscribers>0;
-          if (w->used && !group_mode && w->acked_upto < ch->next_seqno){
+          if (w->used && w->reader_reliable && !group_mode && w->acked_upto < ch->next_seqno){
               if (now>=w->hb_next_us) dart__lane_enq(st,channel_idx,peer_slot);
               else if (w->hb_next_us < mind) mind = w->hb_next_us;
           }
@@ -1588,7 +1596,7 @@ int dart_send_would_evict(DartState *st, uint16_t channel){
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
         i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
+        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
 }
@@ -1601,7 +1609,7 @@ int dart_send_drained(DartState *st, uint16_t channel){
     max_peers = st->cfg.max_peers;
     for (p=0;p<(uint16_t)max_peers;p++){
         i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reader still behind */
+        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
     }
     return 1;
 }
@@ -1812,7 +1820,7 @@ size_t dart_writer_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *
        acked everything (acked_upto == next_seqno) there's nothing to repair, so the
        lane goes silent until new data or a (re)subscribe drops acked_upto again. The
        HB advertises from acked_upto so a fresh reader adopts the join point. */
-    if (reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
+    if (reliable && w->reader_reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
         return dart_writer_hb(st,ch,w,alias,out,cap,now);
     return 0;
 }
@@ -1824,7 +1832,7 @@ int dart__group_all_acked(DartState *st, int channel_idx){
     uint32_t max_peers=st->cfg.max_peers, p; uint64_t seq=st->channels[channel_idx].next_seqno;
     for (p=0;p<max_peers;p++){
         i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
+        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
     }
     return 1;
 }
@@ -2278,6 +2286,7 @@ static DartState *dart_build(i_DartBump *b, const DartConfig *cfg){
 #endif
       uint8_t  *peer_pub_bitmap = (uint8_t*) dart_take(b, (size_t)max_peers*bitmap_len, 1);
       uint8_t  *peer_sub_bitmap = (uint8_t*) dart_take(b, (size_t)max_peers*bitmap_len, 1);
+      uint8_t  *peer_sub_reliable = (uint8_t*) dart_take(b, (size_t)max_peers*bitmap_len, 1);
       i_DartChannel *ch = (i_DartChannel*)dart_take(b, n_channels*sizeof(i_DartChannel), 16);
       i_DartWriterProxy *writer_proxies = (i_DartWriterProxy*)dart_take(b, (size_t)n_channels*max_peers*sizeof(i_DartWriterProxy), 16);
       i_DartReaderProxy *reader_proxies = (i_DartReaderProxy*)dart_take(b, (size_t)n_channels*max_peers*sizeof(i_DartReaderProxy), 16);
@@ -2293,7 +2302,8 @@ static DartState *dart_build(i_DartBump *b, const DartConfig *cfg){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used; st->peer_local=peer_local;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
           st->frag = dart_clamp_frag(cfg->frag_payload);
-          st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap; st->bitmap_len=bitmap_len;
+          st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
+          st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
           st->channels=ch; st->writer_proxies=writer_proxies; st->reader_proxies=reader_proxies; st->reader_epoch_counter=1;
           st->next_deadline_us=DART__NO_DEADLINE;
           st->lane_next=lane_next; st->lane_queued=lane_queued;
@@ -2306,6 +2316,7 @@ static DartState *dart_build(i_DartBump *b, const DartConfig *cfg){
 #endif
           memset(alias_to_channel,0xFF,(size_t)max_peers*meta_ids*sizeof(uint16_t));   /* all unmapped */
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
+          memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
           memset(writer_proxies,0,(size_t)n_channels*max_peers*sizeof(i_DartWriterProxy));
           memset(reader_proxies,0,(size_t)n_channels*max_peers*sizeof(i_DartReaderProxy));
           memset(lane_queued,0,nlanes); memset(dest_queued,0,ndest);
@@ -2442,6 +2453,8 @@ DartState *dart_migrate(DartState *old, void *new_mem, size_t new_cap,
                old->peer_pub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
         memcpy(nw->peer_sub_bitmap + (size_t)p*nw->bitmap_len,
                old->peer_sub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
+        memcpy(nw->peer_sub_reliable + (size_t)p*nw->bitmap_len,
+               old->peer_sub_reliable + (size_t)p*old->bitmap_len, old->bitmap_len);
         memcpy(nw->alias_to_channel + (size_t)p*nw->alias_max,
                old->alias_to_channel + (size_t)p*old->alias_max,
                (size_t)old->alias_max*sizeof(uint16_t));
@@ -2551,6 +2564,12 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
         p = i_ev_str(p,end,"): match refused");
         break;
+    case DART_QOS_INCOMPATIBLE:
+        p = i_ev_str(p,end,"qos-incompatible ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
+        p = i_ev_str(p,end,"): reliable subscriber refused best-effort publisher");
+        break;
     case DART_MSG_LOST:
         p = i_ev_str(p,end,"msg-lost ch="); p = i_ev_u64(p,end,ev->channel);
         p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
@@ -2598,6 +2617,9 @@ static void dart__match_w(DartState *st, uint16_t c, uint16_t peer_slot){
     i_DartWriterProxy *w=dart__writer_proxy_at(st,c,peer_slot);
     memset(w,0,sizeof(*w));
     w->used=1;
+    /* only a reader that advertised RELIABLE acks; a best-effort reader stays out of
+       flow control so it can't stall this writer (it gets new data, never repairs/HB) */
+    w->reader_reliable = dart_bget(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], c) ? 1u : 0u;
     if (!ch->multicast){
         w->sent_upto = dart_unicast_join_seqno(ch);
     } else {
@@ -2672,6 +2694,7 @@ void dart_peer_add(DartState *st, uint32_t id, int peer_is_local, uint16_t peer_
 #endif
     memset(&st->peer_pub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
+    memset(&st->peer_sub_reliable[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->alias_to_channel[(size_t)free*st->alias_max],0xFF,(size_t)st->alias_max*sizeof(uint16_t));
     /* nothing matches until dart_apply_peer_interest feeds the peer's interest
        list (carried in its discovery announce) */
@@ -2760,11 +2783,15 @@ void dart_destroy(DartState *st){
 }
 
 
-/* one interest entry: [u16 alias][u8 namelen][name]. The name rides along so a
- * hash collision is detected (not cross-wired); the identity is recomputed from it. */
+/* per-entry flags byte (interest is sent rarely, so a whole byte, not a stolen bit) */
+#define DART_META_F_RELIABLE 0x01u   /* advertiser offers reliable delivery on this topic */
+
+/* one interest entry: [u16 alias][u8 flags][u8 namelen][name]. The name rides along so
+ * a hash collision is detected (not cross-wired); the identity is recomputed from it. */
 static uint8_t *dart__meta_put(uint8_t *p, uint16_t alias, const i_DartChannel *ch){
     size_t lane = dart__namelen(ch->name);
     dart_le_w16(p, alias); p += 2;
+    *p++ = (uint8_t)(ch->qos.reliability==DART_RELIABLE ? DART_META_F_RELIABLE : 0u);
     *p++ = (uint8_t)lane;
     if (lane){ memcpy(p, ch->name, lane); p += lane; }
     return p;
@@ -2777,24 +2804,39 @@ static int dart__meta_name_eq(const i_DartChannel *ch, const uint8_t *name, size
 }
 
 /* match count entries to local channels by identity (recomputed from each name),
- * recording the alias map. Same-identity-different-name is a collision: refused. */
+ * recording the alias map. Same-identity-different-name is a collision: refused.
+ * is_pub: the peer's publish list, so each entry's flags carry its OFFERED QoS, which
+ * the RxO check uses to refuse a reliable subscriber a best-effort publisher. rel_bitmap
+ * (sub list only, else NULL): records which subscribed channels the peer requested RELIABLE,
+ * so the writer can keep best-effort readers out of flow control. */
 static const uint8_t *dart__meta_scan(DartState *st, int peer_slot, const uint8_t *p,
-                                      uint32_t count, uint8_t *bitmap){
+                                      uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap){
     uint32_t k;
     for (k=0;k<count;k++){
-        uint16_t alias=dart_le_r16(p); uint32_t nlen=p[2]; const uint8_t *name=p+3; int channel_idx;
+        uint16_t alias=dart_le_r16(p); uint8_t flags=p[2]; uint32_t nlen=p[3];
+        const uint8_t *name=p+4; int channel_idx;
         uint64_t id=dart__id_n(name,nlen);
         i_DartChannel *ch=dart_chan_by_identity(st,id,&channel_idx);
         p = name + nlen;
         if (!ch) continue;                                  /* not ours */
-        if (dart__meta_name_eq(ch,name,nlen)){
-            dart_bset(bitmap,(uint32_t)channel_idx);
-            if ((uint32_t)alias < st->alias_max)
-                st->alias_to_channel[(size_t)peer_slot*st->alias_max + alias] = (uint16_t)channel_idx;
-        }
-        else
+        if (!dart__meta_name_eq(ch,name,nlen)){
             dart__event(st, DART_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         id, 0, ch->name ? ch->name : "");
+            continue;
+        }
+        /* RxO QoS: a reliable subscriber refuses a best-effort publisher (no silent
+           downgrade). We keep requesting reliable, so the match forms automatically if
+           the publisher later upgrades and re-advertises. */
+        if (is_pub && (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) &&
+            ch->qos.reliability==DART_RELIABLE && !(flags & DART_META_F_RELIABLE)){
+            dart__event(st, DART_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
+                        st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
+            continue;                                       /* refuse: no bit, no alias map */
+        }
+        dart_bset(bitmap,(uint32_t)channel_idx);
+        if (rel_bitmap && (flags & DART_META_F_RELIABLE)) dart_bset(rel_bitmap,(uint32_t)channel_idx);
+        if ((uint32_t)alias < st->alias_max)
+            st->alias_to_channel[(size_t)peer_slot*st->alias_max + alias] = (uint16_t)channel_idx;
     }
     return p;
 }
@@ -2803,7 +2845,7 @@ static const uint8_t *dart__meta_scan(DartState *st, int peer_slot, const uint8_
 /* Upper bound on dart_build_interest output, for sizing the announce buffer: a
  * PUBSUB channel appears in both lists, so 2*n_channels max-length entries. */
 size_t dart_interest_max(uint16_t n_channels){
-    return 4u + (size_t)(2u+1u+DART_TOPIC_NAME_MAX) * 2u * (size_t)n_channels;
+    return 4u + (size_t)(2u+1u+1u+DART_TOPIC_NAME_MAX) * 2u * (size_t)n_channels;  /* alias+flags+namelen+name */
 }
 
 
@@ -2818,14 +2860,14 @@ size_t dart_build_interest(DartState *st, void *out, size_t cap){
     for (c=0;c<st->cfg.n_channels;c++){
         uint8_t d=st->channels[c].role;
         if (d==DART_PUBSUB || d==DART_PUB_ONLY){
-            if (p + 3u + dart__namelen(st->channels[c].name) > end) return 0;
+            if (p + 4u + dart__namelen(st->channels[c].name) > end) return 0;
             p=dart__meta_put(p,c,&st->channels[c]); n_pub++;
         }
     }
     for (c=0;c<st->cfg.n_channels;c++){
         uint8_t d=st->channels[c].role;
         if (d==DART_PUBSUB || d==DART_SUB_ONLY){
-            if (p + 3u + dart__namelen(st->channels[c].name) > end) return 0;
+            if (p + 4u + dart__namelen(st->channels[c].name) > end) return 0;
             p=dart__meta_put(p,c,&st->channels[c]); n_sub++;
         }
     }
@@ -2847,14 +2889,16 @@ void dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob,
     /* validate the whole variable-length list first: a truncated blob must not drop a match */
     { uint32_t k, tot=(uint32_t)n_pub+n_sub; p=d+4;
       for (k=0;k<tot;k++){
-          if (p+3 > end) return;
-          p += 3u + (uint32_t)p[2];
+          if (p+4 > end) return;
+          p += 4u + (uint32_t)p[3];
           if (p > end) return;
       } }
     memset(peer_pub_bitmap,0,st->bitmap_len); memset(peer_sub_bitmap,0,st->bitmap_len);
+    memset(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len],0,st->bitmap_len);
     memset(&st->alias_to_channel[(size_t)peer_slot*st->alias_max],0xFF,(size_t)st->alias_max*sizeof(uint16_t));
-    p = dart__meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap);
-    p = dart__meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap);
+    p = dart__meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL);   /* pub list: offered QoS */
+    p = dart__meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,         /* sub list: requested QoS */
+                        &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len]);
     for (c=0;c<st->cfg.n_channels;c++) dart__rematch(st,c,(uint16_t)peer_slot);
 }
 
@@ -2879,24 +2923,28 @@ void dart_peer_match_counts(DartState *st, uint32_t peer_id,
 
 
 /* Discovery-announce meta blob codec (see dart_meta_* in core.h for the layout). The
-   interest list is wrapped in a versioned prefix carrying frag size, (v3/v5) SHM info,
-   and (v4/v5) the node name; decode is version-aware so older and newer nodes interop. */
+   interest list is wrapped in a prefix carrying frag size, (odd ver) SHM info, and the
+   node name. No back-compat: the version byte just tags the one current format, and a
+   blob whose magic/version we don't expect is rejected, not reinterpreted. An interest
+   entry is [u16 alias][u8 flags][u8 namelen][name]; flags bit 0 = offered reliability.
+   Parsing is fully bounds-checked (see dart_apply_peer_interest), so a malformed or
+   foreign blob is dropped wholesale, never trusted. */
 #define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
 #define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
 #ifdef DART_SHM
-#define DART__META_VER  5u                  /* what WE write */
+#define DART__META_VER  7u                  /* what WE write */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  4u
+#define DART__META_VER  6u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
-    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && meta[2]>=2 && meta[2]<=5;
+    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && meta[2]>=6 && meta[2]<=7;
 }
-/* base prefix through host[16], by version (v3/v5 carry shm+host, v2/v4 don't). */
+/* base prefix through host[16], by version (odd v7 carries shm+host, even v6 doesn't). */
 static uint16_t dart__meta_base(const uint8_t *meta){
-    return (meta[2]==3 || meta[2]==5) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
+    return (meta[2]==7) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
 static int dart__meta_named(const uint8_t *meta){ return meta[2] >= 4; }
 
@@ -2960,7 +3008,7 @@ const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t
 
 #ifdef DART_SHM
 int dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]){
-    if (!dart__meta_ok(meta, meta_len) || !(meta[2]==3 || meta[2]==5)
+    if (!dart__meta_ok(meta, meta_len) || meta[2]!=7
         || meta_len < DART__META_BASE_SHM || !meta[5]) return 0;
     memcpy(host, meta+6, 16);
     return 1;
