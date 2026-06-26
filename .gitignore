@@ -16,3 +16,4 @@ old
 /_unzipped/
 /_ref/
 /explore/build/
+*.pdb
