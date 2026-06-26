@@ -1,7 +1,7 @@
 /* GENERATED single-header build. DO NOT EDIT.
- * DART = Discovery And Realtime Transport. Amalgamated from src/ by
- * tools/pack.c. Edit the split sources in src/ and re-run pack to regenerate.
- * See the flag scheme at the top of tools/pack.c.
+ * DART = Discovery And Realtime Transport. Amalgamated from src/ by the CMake
+ * build (tools/pack.cmake). Edit the split sources in src/ and rebuild (or run
+ * tools/pack.cmake) to regenerate. See the flag scheme in tools/pack.cmake.
  */
 #if defined(__GNUC__)   /* let the section markers below fold quietly */
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
