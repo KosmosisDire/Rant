@@ -44,6 +44,33 @@ struct DartDiscoveryState {
     i_DartDiscoveryPeer  *peers;
 };
 
+/* peer events out: build the DartDiscoveryEvent and hand it to the one on_event sink. */
+static void dart__disc_fire_up(DartDiscoveryState *st, uint32_t id, const DartDiscoveryAddr *addr,
+                               const uint8_t *meta, uint16_t meta_len){
+    DartDiscoveryEvent ev;
+    if (!st->cfg.on_event) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = DART_DISCOVERY_PEER_UP; ev.user = st->cfg.user; ev.peer = id;
+    if (addr) ev.addr = *addr;
+    ev.meta = meta; ev.meta_len = meta_len;
+    st->cfg.on_event(&ev);
+}
+static void dart__disc_fire_down(DartDiscoveryState *st, uint32_t id, DartDiscoveryDownReason reason){
+    DartDiscoveryEvent ev;
+    if (!st->cfg.on_event) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = DART_DISCOVERY_PEER_DOWN; ev.user = st->cfg.user; ev.peer = id; ev.reason = reason;
+    st->cfg.on_event(&ev);
+}
+static void dart__disc_fire_refused(DartDiscoveryState *st, const DartDiscoveryAddr *addr){
+    DartDiscoveryEvent ev;
+    if (!st->cfg.on_event) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = DART_DISCOVERY_PEER_REFUSED; ev.user = st->cfg.user;
+    if (addr) ev.addr = *addr;
+    st->cfg.on_event(&ev);
+}
+
 static uint32_t dart_discovery_fnv(const uint8_t *d, size_t n){
     uint32_t h = 2166136261u; size_t i;
     for (i=0;i<n;i++){ h ^= d[i]; h *= 16777619u; }
@@ -191,7 +218,7 @@ static int dart_discovery_alloc(DartDiscoveryState *st){
         }
     }
     if (found < 0) return -1;   /* table full of ACTIVE peers: caller refuses + signals */
-    if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[victim].local_id, DART_DISCOVERY_GONE);
+    dart__disc_fire_down(st, st->peers[victim].local_id, DART_DISCOVERY_GONE);
     st->peers[victim].used = 0;
     return (int)victim;
 }
@@ -209,7 +236,7 @@ static void dart_discovery_evict_endpoint(DartDiscoveryState *st, const DartDisc
         if (peer->ip_len==addr->ip_len && peer->port==addr->port && memcmp(peer->ip, addr->ip, 16)==0){
             uint32_t local_id = peer->local_id;
             peer->used = 0;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, local_id, DART_DISCOVERY_GONE);
+            dart__disc_fire_down(st, local_id, DART_DISCOVERY_GONE);
         }
     }
 }
@@ -281,7 +308,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         if (idx >= 0){
             uint32_t local_id = st->peers[idx].local_id;
             st->peers[idx].used = 0;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, local_id, DART_DISCOVERY_GONE);
+            dart__disc_fire_down(st, local_id, DART_DISCOVERY_GONE);
         }
         return;
     }
@@ -293,7 +320,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         dart_discovery_evict_endpoint(st, &addr);
         idx = dart_discovery_alloc(st);
         if (idx < 0){       /* table full of active peers: refuse, never evict a live one */
-            if (st->cfg.on_peer_refused) st->cfg.on_peer_refused(st->cfg.user, &addr);
+            dart__disc_fire_refused(st, &addr);
             return;
         }
         keep_meta = st->peers[idx].meta;            /* preserve the pool pointer across reset */
@@ -331,8 +358,8 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         peer->solicit_due = 1;
     }
 
-    if ((first_contact || addr_changed || blob_changed || revived) && st->cfg.on_peer_up)
-        st->cfg.on_peer_up(st->cfg.user, peer->local_id, &addr,
+    if (first_contact || addr_changed || blob_changed || revived)
+        dart__disc_fire_up(st, peer->local_id, &addr,
                            peer->meta_len ? peer->meta : NULL, peer->meta_len);
 
     if ((flags & DART_DISCOVERY_FLAG_REQ) && st->started)
@@ -352,7 +379,7 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
             /* fell silent: DEMOTE (keep the entry + local_id) so a same-UUID return
                resumes; the IO layer keeps its transport state on a DROP reason */
             st->peers[i].dropped = 1;
-            if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, st->peers[i].local_id, DART_DISCOVERY_DROP);
+            dart__disc_fire_down(st, st->peers[i].local_id, DART_DISCOVERY_DROP);
         }
     }
     if (st->want_solicit){   /* multicast solicit: announce us (with blob) AND ask peers to reply */
@@ -413,13 +440,13 @@ void dart_discovery_solicit(DartDiscoveryState *st){ if (st) st->want_solicit = 
  * a channel that the blob's interest matches. */
 void dart_discovery_replay_peers(DartDiscoveryState *st){
     uint16_t i;
-    if (!st || !st->cfg.on_peer_up) return;
+    if (!st || !st->cfg.on_event) return;
     for (i=0;i<st->cap_peers;i++){
         i_DartDiscoveryPeer *peer = &st->peers[i];
         DartDiscoveryAddr addr;
         if (!peer->used || peer->dropped) continue;
         dart_discovery_addr_of(peer, &addr);
-        st->cfg.on_peer_up(st->cfg.user, peer->local_id, &addr,
+        dart__disc_fire_up(st, peer->local_id, &addr,
                            peer->meta_len ? peer->meta : NULL, peer->meta_len);
     }
 }

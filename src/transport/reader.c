@@ -45,7 +45,7 @@ static i_DartReaderOrder dart__order_arrival(DartState *st, int channel_idx, int
             return DART_ORDER_GAP;
         }
         if (r->started){                                         /* best-effort / first contact: adopt */
-            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            dart__event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         r->deliver_upto, base - r->deliver_upto, "message(s) lost");
             ch->repair_stats.msgs_skipped += base - r->deliver_upto;
         }
@@ -91,7 +91,7 @@ void dart_reader_shm(DartState *st, int channel_idx, int peer_slot, const uint8_
             return;
         }
         if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
-            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            dart__event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         base, count, "SHM descriptor unresolvable (check DART_SHM_* build constants)");
             ch->repair_stats.msgs_skipped += count;
             r->shm_fail = 0;
@@ -147,7 +147,7 @@ void dart_reader_data(DartState *st, int channel_idx, int peer_slot, const uint8
           }
       } else if (sample_len > ch->qos.max_message_bytes) too_big = 1;
       if (too_big){
-          dart__event(st, DART_MSG_TOO_BIG, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+          dart__event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                       0, sample_len, "message exceeds max_message_bytes");
           r->deliver_upto = base + count; r->assembly_active = 0;
           if (reliable){
@@ -221,7 +221,7 @@ void dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8_t
        reject every resend as old. */
     if (r->started && first > r->deliver_upto &&
         (!r->assembly_active || first >= r->deliver_upto + r->assembly_count)){
-        dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
+        dart__event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto, "message(s) lost");
         ch->repair_stats.msgs_skipped += first - r->deliver_upto;
         r->deliver_upto=first; r->assembly_active=0;

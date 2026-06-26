@@ -34,18 +34,34 @@ typedef enum {
     DART_DISCOVERY_GONE = 1   /* said BYE, or its slot was reclaimed for a new peer: free state */
 } DartDiscoveryDownReason;
 
-/* peer_up: reachable at addr (re-fires when a known peer's addr/meta changes, and
- * when a DROPPED peer returns under the SAME peer_id, so the IO layer can resume).
- * peer_down: going down; reason says whether the state is worth keeping. peer_id is
- * a local handle, stable across a DROP/return, freed only on GONE. meta is the
- * peer's opaque payload (NULL if none), valid only for the call. */
-typedef void (*DartDiscoveryPeerUpFn)  (void *user, uint32_t peer_id, const DartDiscoveryAddr *addr,
-                                   const uint8_t *meta, uint16_t meta_len);
-typedef void (*DartDiscoveryPeerDownFn)(void *user, uint32_t peer_id,
-                                   DartDiscoveryDownReason reason);
-/* A new peer arrived but the table is full of ACTIVE peers (none droppable): the
- * peer is refused rather than evicting a live conversation. Diagnostic only. */
-typedef void (*DartDiscoveryPeerRefusedFn)(void *user, const DartDiscoveryAddr *addr);
+/* Discovery's own event, delivered through one on_event. Discovery is generic: it
+ * carries an opaque meta blob and knows nothing of the overlay (transport/node), so it
+ * has its own event type rather than sharing one. The node translates these into its
+ * app-facing DartEvent.
+ *   DART_DISCOVERY_PEER_UP      reachable at .addr; .meta/.meta_len is the opaque blob
+ *                               (NULL if none, valid only for the call). Re-fires on a
+ *                               known peer's addr/meta change and when a DROPPED peer
+ *                               returns under the SAME .peer, so the IO layer can resume.
+ *   DART_DISCOVERY_PEER_DOWN    going down; .reason (DROP keep / GONE freed). .peer is a
+ *                               local handle, stable across a DROP/return, freed on GONE.
+ *   DART_DISCOVERY_PEER_REFUSED table full of ACTIVE peers: a new peer at .addr was
+ *                               refused rather than evicting a live one. Diagnostic. */
+typedef enum {
+    DART_DISCOVERY_PEER_UP,
+    DART_DISCOVERY_PEER_DOWN,
+    DART_DISCOVERY_PEER_REFUSED
+} DartDiscoveryEventKind;
+
+typedef struct {
+    DartDiscoveryEventKind   kind;
+    void                    *user;     /* DartDiscoveryConfig.user */
+    uint32_t                 peer;     /* local peer id (UP / DOWN) */
+    DartDiscoveryAddr        addr;     /* UP / REFUSED: advertised locator */
+    DartDiscoveryDownReason  reason;   /* DOWN: DROP vs GONE */
+    const uint8_t           *meta;     /* UP: opaque announce blob (NULL if none) */
+    uint16_t                 meta_len;
+} DartDiscoveryEvent;
+typedef void (*DartDiscoveryEventFn)(const DartDiscoveryEvent *ev);
 
 typedef struct {
     uint8_t  uuid[16];      /* unique per process instance (regen each boot) */
@@ -60,9 +76,7 @@ typedef struct {
                                updates it at runtime). Must stay valid. <= meta_capacity */
     uint16_t meta_len;
     uint16_t meta_capacity;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
-    DartDiscoveryPeerUpFn      on_peer_up;
-    DartDiscoveryPeerDownFn    on_peer_down;
-    DartDiscoveryPeerRefusedFn on_peer_refused;  /* optional: table full of active peers */
+    DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
 } DartDiscoveryConfig;
 

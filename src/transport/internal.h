@@ -247,7 +247,7 @@ void   dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8
 size_t dart_reader_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 i_DartChannel *dart_chan(DartState *st, uint16_t channel, int *idx_out);
 int    dart_peer_slot(DartState *st, uint32_t id);
-void   dart__event(DartState *st, DartEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
+void   dart__event(DartState *st, DartTransportEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
 uint64_t dart_unicast_join_seqno(const i_DartChannel *ch);
 
 #endif /* DART_TRANSPORT_INTERNAL_H */

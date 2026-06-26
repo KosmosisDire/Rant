@@ -153,9 +153,9 @@ static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *d
 static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     dart__deliver((DartNode*)u, ch, from, data, len);
 }
-/* transport + node-core events (MSG_LOST/TOO_BIG/COLLISION/PEER_*) funnel through here.
- * The cores set ev->user to their context (this node); swap it for the app's real
- * user_data before handing the event on. */
+/* node-core events (the app DartEvent: PEER_UP/DOWN/INTEREST/REFUSED) funnel through
+ * here; transport events arrive separately via dart__node_on_transport_event. The core
+ * sets ev->user to this node; swap it for the app's real user_data before handing on. */
 static void dart__node_on_event(const DartEvent *ev){
     DartNode *n = (DartNode*)ev->user;
     /* dynamic mode has no peer cap: a refusal means grow the table (deferred to the next
@@ -163,6 +163,27 @@ static void dart__node_on_event(const DartEvent *ev){
        never told it was refused. Static mode keeps the cap and surfaces the event. */
     if (n->alloc_dynamic && ev->kind == DART_PEER_REFUSED){ n->grow_pending = 1; return; }
     if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
+}
+
+/* transport events arrive as a DartTransportEvent; the node maps them onto its app
+ * DartEvent union and hands them on. This is the node combining the two lower layers'
+ * events into one app callback (peer events come via the node core, above). */
+static void dart__node_on_transport_event(const DartTransportEvent *tev){
+    DartNode *n = (DartNode*)tev->user;
+    DartEvent e;
+    if (!n->on_event) return;
+    memset(&e, 0, sizeof e);
+    switch (tev->kind){
+    case DART_TRANSPORT_MSG_LOST:        e.kind = DART_MSG_LOST; break;
+    case DART_TRANSPORT_MSG_TOO_BIG:     e.kind = DART_MSG_TOO_BIG; break;
+    case DART_TRANSPORT_NAME_COLLISION:  e.kind = DART_NAME_COLLISION; break;
+    case DART_TRANSPORT_QOS_INCOMPATIBLE:e.kind = DART_QOS_INCOMPATIBLE; break;
+    default: return;
+    }
+    e.detail = tev->detail; e.user = n->user_data; e.peer = tev->peer; e.channel = tev->channel;
+    e.lost_first = tev->lost_first; e.lost_count = tev->lost_count;
+    e.too_big_bytes = tev->too_big_bytes; e.identity = tev->identity;
+    n->on_event(&e);
 }
 
 #ifdef DART_SHM
@@ -458,7 +479,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
                : (uint16_t)((o.net.discovery_port ? o.net.discovery_port : 7400) + 1);
 
     tc.on_message = dart__node_on_message;     /* wrap so on_message receives a DartMsg */
-    tc.on_event   = dart__node_on_event;
+    tc.on_event   = dart__node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
     tc.user       = n;
 #ifdef DART_SHM
     n->shm_capable = (uint8_t)(mem->dynamic && !o.disable_shm);   /* static mode never uses SHM */
@@ -521,10 +542,8 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     /* multicast sockets/joins are set up lazily by dart_node_create_channel, since no
        channel exists yet at open. */
 
-    dc.discovery.on_peer_up      = dart_node_core_peer_up;
-    dc.discovery.on_peer_down    = dart_node_core_peer_down;
-    dc.discovery.on_peer_refused = dart_node_core_peer_refused;
-    dc.discovery.user            = n->core;
+    dc.discovery.on_event = dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
+    dc.discovery.user     = n->core;
     /* the core owns + builds our announce blob (frag size + OOB host + interest); we
        just hand its bytes to discovery so peers reassemble and match from discovery */
     dart_node_core_build_meta(n->core);

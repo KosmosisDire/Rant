@@ -142,50 +142,29 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
                              const uint8_t *desc);
 #endif
 
-/* Everything that isn't message delivery, as one notification (optional). Each
- * kind populates its own named DartEvent fields (below): no field carries a
- * different meaning depending on .kind, and dart_event_str() formats any event
- * as a ready-made human-readable line. */
+/* Transport events (optional), delivered through one on_event. The transport is
+ * independent of discovery/node: it emits only its own kinds. The node maps these
+ * into its app-facing DartEvent (node/core.h); a sans-IO transport user handles them
+ * directly. Flat and self-describing: read only the fields named for the .kind. */
 typedef enum {
-    DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port (node) */
-    DART_PEER_DOWN,      /* peer lost or fell silent: .peer (node) */
-    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics,
-                            .receive_topics (node) */
-    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. .lost_first+.lost_count-1 */
-    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
-    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
-    DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher: no silent downgrade,
-                              no data flows for this (.channel, .peer); .detail = our channel name */
-    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
-    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap: that
-                              channel got no group join and receives only unicast-published data (.channel) (node) */
-} DartEventKind;
+    DART_TRANSPORT_MSG_LOST,        /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
+    DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
+    DART_TRANSPORT_QOS_INCOMPATIBLE /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
+} DartTransportEventKind;
 
-/* Flat, self-describing: read only the fields named for the event's .kind (the
- * rest are zero). detail is always a short human label, except NAME_COLLISION /
- * QOS_INCOMPATIBLE where it carries our channel name. */
 typedef struct {
-    DartEventKind kind;
-    const char *detail;        /* short human-readable label (NAME_COLLISION: our channel name) */
-    void       *user;          /* your DartNodeOpts.user_data, as on every event (mirrors DartMsg.user) */
-    uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
-    uint16_t   channel;        /* local channel handle, where applicable */
-    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED: peer address (network order) */
-    uint8_t    ip_len;         /* PEER_UP / PEER_REFUSED: 4 or 16; else 0 */
-    uint16_t   port;           /* PEER_UP / PEER_REFUSED: peer data port */
+    DartTransportEventKind kind;
+    const char *detail;        /* short human label (NAME_COLLISION / QOS_INCOMPATIBLE: our channel name) */
+    void       *user;          /* DartConfig.user */
+    uint32_t   peer;           /* peer id (0 = n/a) */
+    uint16_t   channel;        /* local channel handle */
     uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
     uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
     uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
-    uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
-    uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
-} DartEvent;
-typedef void (*DartEventFn)(const DartEvent *ev);   /* user data rides ev->user, like DartMsgFn */
-
-/* Format ev as a one-line human-readable message into buf (always NUL-terminated,
- * truncated to cap). Returns buf, for inline use:
- *     char b[160]; puts(dart_event_str(ev, b, sizeof b)); */
-const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
+} DartTransportEvent;
+typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
@@ -212,7 +191,7 @@ typedef struct {
 #ifdef DART_SHM
     i_DartShmMsgFn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
 #endif
-    DartEventFn           on_event;   /* optional: loss/too-big/name-collision */
+    DartTransportEventFn  on_event;   /* optional: transport events (loss/too-big/collision/qos) */
     DartAllocFn           allocator;  /* optional: set => dynamic message sizing */
     void                 *user;
 } DartConfig;
@@ -469,6 +448,45 @@ uint64_t  dart_next_deadline_us(DartState *st);
 extern "C" {
 #endif
 
+/* The node's app-facing event: the union the user receives via DartNodeOpts.on_event.
+ * The node maps discovery's DartDiscoveryEvent (the peer kinds) and the transport's
+ * DartTransportEvent (the message/QoS kinds) into this one type, and adds its own
+ * (PEER_INTEREST, MCAST_JOIN_FAILED). Flat and self-describing: read only the fields
+ * named for the .kind. dart_event_str formats any of them as a one-line message. */
+typedef enum {
+    DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port */
+    DART_PEER_DOWN,      /* peer lost or fell silent: .peer */
+    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics, .receive_topics */
+    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
+    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
+    DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
+    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
+    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap (.channel) */
+} DartEventKind;
+
+typedef struct {
+    DartEventKind kind;
+    const char *detail;        /* short human-readable label (NAME_COLLISION / QOS_INCOMPATIBLE: our channel name) */
+    void       *user;          /* your DartNodeOpts.user_data (mirrors DartMsg.user) */
+    uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
+    uint16_t   channel;        /* local channel handle, where applicable */
+    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED: peer address (network order) */
+    uint8_t    ip_len;         /* PEER_UP / PEER_REFUSED: 4 or 16; else 0 */
+    uint16_t   port;           /* PEER_UP / PEER_REFUSED: peer data port */
+    uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
+    uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
+    uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
+    uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
+    uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
+    uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
+} DartEvent;
+typedef void (*DartEventFn)(const DartEvent *ev);
+
+/* Format ev as a one-line human-readable message into buf (always NUL-terminated,
+ * truncated to cap). Returns buf. */
+const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
+
 /* Runtime hook: 1 if a physical address is on this host (a route probe, on UDP),
  * so the peer is flagged out-of-band (SHM) eligible. NULL => every peer is remote. */
 typedef int (*i_DartNodeIsLocalFn)(void *user, const uint8_t *ip, uint8_t ip_len);
@@ -507,13 +525,11 @@ i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_
 uint16_t        dart_node_core_build_meta(i_DartNodeCore *c);
 const uint8_t  *dart_node_core_meta(i_DartNodeCore *c, uint16_t *len);
 
-/* Discovery callbacks: register these with the discovery runtime, user = the core.
- * They keep the peer table and the transport's peer set in lockstep (handling the
- * dormant/resume/evict lifecycle) and fire the app's PEER_UP/DOWN/REFUSED events. */
-void dart_node_core_peer_up     (void *user, uint32_t id, const DartDiscoveryAddr *addr,
-                                 const uint8_t *meta, uint16_t meta_len);
-void dart_node_core_peer_down   (void *user, uint32_t id, DartDiscoveryDownReason reason);
-void dart_node_core_peer_refused(void *user, const DartDiscoveryAddr *addr);
+/* Discovery event sink: register as the discovery core's on_event (cfg.user = this
+ * core). Demuxes the generic DartDiscoveryEvent (PEER_UP/DOWN/REFUSED), keeps the peer
+ * table and transport peer set in lockstep (dormant/resume/evict), and fires the app's
+ * PEER_UP/DOWN/INTEREST/REFUSED DartEvents (the node maps discovery's events to its own). */
+void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev);
 
 /* A resolved outbound destination: a multicast group (by selector), or a unicast
  * peer (by physical address). The runtime turns this into wire bytes for its link. */
@@ -1272,7 +1288,7 @@ void   dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8
 size_t dart_reader_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 i_DartChannel *dart_chan(DartState *st, uint16_t channel, int *idx_out);
 int    dart_peer_slot(DartState *st, uint32_t id);
-void   dart__event(DartState *st, DartEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
+void   dart__event(DartState *st, DartTransportEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
 uint64_t dart_unicast_join_seqno(const i_DartChannel *ch);
 
 #endif /* DART_TRANSPORT_INTERNAL_H */
@@ -1928,7 +1944,7 @@ static i_DartReaderOrder dart__order_arrival(DartState *st, int channel_idx, int
             return DART_ORDER_GAP;
         }
         if (r->started){                                         /* best-effort / first contact: adopt */
-            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            dart__event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         r->deliver_upto, base - r->deliver_upto, "message(s) lost");
             ch->repair_stats.msgs_skipped += base - r->deliver_upto;
         }
@@ -1974,7 +1990,7 @@ void dart_reader_shm(DartState *st, int channel_idx, int peer_slot, const uint8_
             return;
         }
         if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
-            dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            dart__event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         base, count, "SHM descriptor unresolvable (check DART_SHM_* build constants)");
             ch->repair_stats.msgs_skipped += count;
             r->shm_fail = 0;
@@ -2030,7 +2046,7 @@ void dart_reader_data(DartState *st, int channel_idx, int peer_slot, const uint8
           }
       } else if (sample_len > ch->qos.max_message_bytes) too_big = 1;
       if (too_big){
-          dart__event(st, DART_MSG_TOO_BIG, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+          dart__event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                       0, sample_len, "message exceeds max_message_bytes");
           r->deliver_upto = base + count; r->assembly_active = 0;
           if (reliable){
@@ -2104,7 +2120,7 @@ void dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8_t
        reject every resend as old. */
     if (r->started && first > r->deliver_upto &&
         (!r->assembly_active || first >= r->deliver_upto + r->assembly_count)){
-        dart__event(st, DART_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
+        dart__event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto, "message(s) lost");
         ch->repair_stats.msgs_skipped += first - r->deliver_upto;
         r->deliver_upto=first; r->assembly_active=0;
@@ -2491,105 +2507,26 @@ static i_DartChannel *dart_chan_by_identity(DartState *st, uint64_t identity, in
 }
 
 
-/* fire one DartEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/COLLISION.
- * first/count are the kind's two numeric slots; route them to the named fields. */
-void dart__event(DartState *st, DartEventKind kind, uint16_t channel,
+/* fire one DartTransportEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/
+ * COLLISION/QOS. first/count are the kind's two numeric slots; route them to named fields. */
+void dart__event(DartState *st, DartTransportEventKind kind, uint16_t channel,
                         uint32_t peer, uint64_t first, uint64_t count, const char *detail){
-    DartEvent ev;
+    DartTransportEvent ev;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
     ev.kind=kind; ev.channel=channel; ev.peer=peer; ev.detail=detail; ev.user=st->cfg.user;
     switch (kind){
-    case DART_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
-    case DART_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
-    case DART_NAME_COLLISION: ev.identity = first; break;
+    case DART_TRANSPORT_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
+    case DART_TRANSPORT_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
+    case DART_TRANSPORT_NAME_COLLISION: ev.identity = first; break;
     default: break;
     }
     st->cfg.on_event(&ev);
 }
 
-/* bounded appenders for dart_event_str: write into [*pp, end) and advance *pp,
- * never past end (so a final '\0' at *pp stays in range). No stdio, so the
- * formatter compiles in the sans-IO core. */
-static char *i_ev_str(char *p, char *end, const char *s){
-    if (!s) return p;
-    while (*s && p < end) *p++ = *s++;
-    return p;
-}
-static char *i_ev_u64(char *p, char *end, uint64_t v){
-    char tmp[20]; int n = 0;
-    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v);
-    while (n && p < end) *p++ = tmp[--n];
-    return p;
-}
-static char *i_ev_hex(char *p, char *end, uint64_t v){
-    char tmp[16]; int n = 0;
-    do { int d = (int)(v & 0xF); tmp[n++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; } while (v);
-    while (n && p < end) *p++ = tmp[--n];
-    return p;
-}
-static char *i_ev_addr(char *p, char *end, const DartEvent *ev){   /* dotted quad + :port (IPv4 only) */
-    int i;
-    for (i = 0; i < 4; i++){ if (i) p = i_ev_str(p,end,"."); p = i_ev_u64(p,end,ev->ip[i]); }
-    p = i_ev_str(p,end,":"); return i_ev_u64(p,end,ev->port);
-}
-
-const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
-    char *p, *end;
-    if (!buf || !cap) return buf;
-    p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
-    switch (ev->kind){
-    case DART_PEER_UP:
-        p = i_ev_str(p,end,"peer-up id="); p = i_ev_u64(p,end,ev->peer);
-        if (ev->ip_len == 4){ p = i_ev_str(p,end," at "); p = i_ev_addr(p,end,ev); }
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
-    case DART_PEER_DOWN:
-        p = i_ev_str(p,end,"peer-down id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
-    case DART_PEER_INTEREST:
-        p = i_ev_str(p,end,"interest id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," publish-to="); p = i_ev_u64(p,end,ev->publish_topics);
-        p = i_ev_str(p,end," topics, receive-from="); p = i_ev_u64(p,end,ev->receive_topics);
-        p = i_ev_str(p,end," topics");
-        break;
-    case DART_PEER_REFUSED:
-        p = i_ev_str(p,end,"peer-refused at "); p = i_ev_addr(p,end,ev);
-        p = i_ev_str(p,end," (table full of active peers)");
-        break;
-    case DART_NAME_COLLISION:
-        p = i_ev_str(p,end,"name-collision ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," id=0x"); p = i_ev_hex(p,end,ev->identity);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
-        p = i_ev_str(p,end,"): match refused");
-        break;
-    case DART_QOS_INCOMPATIBLE:
-        p = i_ev_str(p,end,"qos-incompatible ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
-        p = i_ev_str(p,end,"): reliable subscriber refused best-effort publisher");
-        break;
-    case DART_MSG_LOST:
-        p = i_ev_str(p,end,"msg-lost ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," seqno "); p = i_ev_u64(p,end,ev->lost_first);
-        p = i_ev_str(p,end,".."); p = i_ev_u64(p,end,ev->lost_first + ev->lost_count - 1);
-        break;
-    case DART_MSG_TOO_BIG:
-        p = i_ev_str(p,end,"msg-too-big ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," ("); p = i_ev_u64(p,end,ev->too_big_bytes);
-        p = i_ev_str(p,end," bytes), skipped");
-        break;
-    case DART_MCAST_JOIN_FAILED:
-        p = i_ev_str(p,end,"mcast-join-failed ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
-    }
-    *p = '\0';                                     /* p <= end = buf+cap-1, in range */
-    return buf;
-}
+/* dart_event_str (and its bounded appenders) moved to the node (node/core.c): the
+   formatter covers the node's app-facing DartEvent union, not the transport's own
+   events. The transport stays independent of the node's event vocabulary. */
 
 
 /* unicast join seqno: head minus qos.catch_up cached samples (reliable only) */
@@ -2820,7 +2757,7 @@ static const uint8_t *dart__meta_scan(DartState *st, int peer_slot, const uint8_
         p = name + nlen;
         if (!ch) continue;                                  /* not ours */
         if (!dart__meta_name_eq(ch,name,nlen)){
-            dart__event(st, DART_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            dart__event(st, DART_TRANSPORT_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         id, 0, ch->name ? ch->name : "");
             continue;
         }
@@ -2829,7 +2766,7 @@ static const uint8_t *dart__meta_scan(DartState *st, int peer_slot, const uint8_
            the publisher later upgrades and re-advertises. */
         if (is_pub && (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) &&
             ch->qos.reliability==DART_RELIABLE && !(flags & DART_META_F_RELIABLE)){
-            dart__event(st, DART_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
+            dart__event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
                         st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
             continue;                                       /* refuse: no bit, no alias map */
         }
@@ -3297,6 +3234,89 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
 
 #include <string.h>
 
+/* dart_event_str + bounded appenders: format the node's app DartEvent as one line.
+   No stdio, so it stays in the sans-IO core. (It covers the union event, including the
+   peer/interest/mcast kinds the node adds; the transport keeps no formatter of its own.) */
+static char *i_ev_str(char *p, char *end, const char *s){
+    if (!s) return p;
+    while (*s && p < end) *p++ = *s++;
+    return p;
+}
+static char *i_ev_u64(char *p, char *end, uint64_t v){
+    char tmp[20]; int n = 0;
+    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static char *i_ev_hex(char *p, char *end, uint64_t v){
+    char tmp[16]; int n = 0;
+    do { int d = (int)(v & 0xF); tmp[n++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static char *i_ev_addr(char *p, char *end, const DartEvent *ev){   /* dotted quad + :port (IPv4 only) */
+    int i;
+    for (i = 0; i < 4; i++){ if (i) p = i_ev_str(p,end,"."); p = i_ev_u64(p,end,ev->ip[i]); }
+    p = i_ev_str(p,end,":"); return i_ev_u64(p,end,ev->port);
+}
+
+const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
+    char *p, *end;
+    if (!buf || !cap) return buf;
+    p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
+    switch (ev->kind){
+    case DART_PEER_UP:
+        p = i_ev_str(p,end,"peer-up id="); p = i_ev_u64(p,end,ev->peer);
+        if (ev->ip_len == 4){ p = i_ev_str(p,end," at "); p = i_ev_addr(p,end,ev); }
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    case DART_PEER_DOWN:
+        p = i_ev_str(p,end,"peer-down id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    case DART_PEER_INTEREST:
+        p = i_ev_str(p,end,"interest id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," publish-to="); p = i_ev_u64(p,end,ev->publish_topics);
+        p = i_ev_str(p,end," topics, receive-from="); p = i_ev_u64(p,end,ev->receive_topics);
+        p = i_ev_str(p,end," topics");
+        break;
+    case DART_PEER_REFUSED:
+        p = i_ev_str(p,end,"peer-refused at "); p = i_ev_addr(p,end,ev);
+        p = i_ev_str(p,end," (table full of active peers)");
+        break;
+    case DART_NAME_COLLISION:
+        p = i_ev_str(p,end,"name-collision ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," id=0x"); p = i_ev_hex(p,end,ev->identity);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
+        p = i_ev_str(p,end,"): match refused");
+        break;
+    case DART_QOS_INCOMPATIBLE:
+        p = i_ev_str(p,end,"qos-incompatible ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
+        p = i_ev_str(p,end,"): reliable subscriber refused best-effort publisher");
+        break;
+    case DART_MSG_LOST:
+        p = i_ev_str(p,end,"msg-lost ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," seqno "); p = i_ev_u64(p,end,ev->lost_first);
+        p = i_ev_str(p,end,".."); p = i_ev_u64(p,end,ev->lost_first + ev->lost_count - 1);
+        break;
+    case DART_MSG_TOO_BIG:
+        p = i_ev_str(p,end,"msg-too-big ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_u64(p,end,ev->too_big_bytes);
+        p = i_ev_str(p,end," bytes), skipped");
+        break;
+    case DART_MCAST_JOIN_FAILED:
+        p = i_ev_str(p,end,"mcast-join-failed ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    }
+    *p = '\0';                                     /* p <= end = buf+cap-1, in range */
+    return buf;
+}
+
 typedef struct {
     uint8_t  used;
     uint8_t  dormant;  /* discovery DROPPED it: kept for a same-incarnation resume */
@@ -3462,9 +3482,9 @@ static void dart__core_fire_interest(i_DartNodeCore *c, uint32_t id){
     c->on_event(&ev);
 }
 
-void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *addr,
+static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscoveryAddr *addr,
                             const uint8_t *meta, uint16_t meta_len){
-    i_DartNodeCore *c = (i_DartNodeCore*)user; uint16_t i; int slot = -1;
+    uint16_t i; int slot = -1;
     uint16_t frag = dart_meta_frag(meta, meta_len);
     size_t interest_len = 0; const uint8_t *interest = dart_meta_interest(meta, meta_len, &interest_len);
     for (i=0;i<c->max_peers;i++){
@@ -3499,8 +3519,8 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
                    dart__core_fire_interest(c, id); }
 }
 
-void dart_node_core_peer_down(void *user, uint32_t id, DartDiscoveryDownReason reason){
-    i_DartNodeCore *c = (i_DartNodeCore*)user; int i = dart__core_find_id(c, id);
+static void dart__core_peer_down(i_DartNodeCore *c, uint32_t id, DartDiscoveryDownReason reason){
+    int i = dart__core_find_id(c, id);
     if (reason == DART_DISCOVERY_DROP){
         /* fell silent: keep transport state so a same-incarnation return resumes
            losslessly; just stop flow-controlling it and tell the app once */
@@ -3517,9 +3537,26 @@ void dart_node_core_peer_down(void *user, uint32_t id, DartDiscoveryDownReason r
     }
 }
 
-void dart_node_core_peer_refused(void *user, const DartDiscoveryAddr *addr){
-    i_DartNodeCore *c = (i_DartNodeCore*)user;
+static void dart__core_peer_refused(i_DartNodeCore *c, const DartDiscoveryAddr *addr){
     dart__core_fire(c, DART_PEER_REFUSED, 0, addr, "peer table full (all active)");
+}
+
+/* The discovery core's on_event sink (cfg.user = this core): demux the generic
+ * DartDiscoveryEvent into the lifecycle handlers above, which fire the app DartEvents. */
+void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
+    i_DartNodeCore *c = (i_DartNodeCore*)ev->user;
+    switch (ev->kind){
+        case DART_DISCOVERY_PEER_UP:
+            dart__core_peer_up(c, ev->peer, &ev->addr, ev->meta, ev->meta_len);
+            break;
+        case DART_DISCOVERY_PEER_DOWN:
+            dart__core_peer_down(c, ev->peer, ev->reason);
+            break;
+        case DART_DISCOVERY_PEER_REFUSED:
+            dart__core_peer_refused(c, &ev->addr);
+            break;
+        default: break;
+    }
 }
 
 int dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out){
@@ -3718,9 +3755,9 @@ static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *d
 static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
     dart__deliver((DartNode*)u, ch, from, data, len);
 }
-/* transport + node-core events (MSG_LOST/TOO_BIG/COLLISION/PEER_*) funnel through here.
- * The cores set ev->user to their context (this node); swap it for the app's real
- * user_data before handing the event on. */
+/* node-core events (the app DartEvent: PEER_UP/DOWN/INTEREST/REFUSED) funnel through
+ * here; transport events arrive separately via dart__node_on_transport_event. The core
+ * sets ev->user to this node; swap it for the app's real user_data before handing on. */
 static void dart__node_on_event(const DartEvent *ev){
     DartNode *n = (DartNode*)ev->user;
     /* dynamic mode has no peer cap: a refusal means grow the table (deferred to the next
@@ -3728,6 +3765,27 @@ static void dart__node_on_event(const DartEvent *ev){
        never told it was refused. Static mode keeps the cap and surfaces the event. */
     if (n->alloc_dynamic && ev->kind == DART_PEER_REFUSED){ n->grow_pending = 1; return; }
     if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
+}
+
+/* transport events arrive as a DartTransportEvent; the node maps them onto its app
+ * DartEvent union and hands them on. This is the node combining the two lower layers'
+ * events into one app callback (peer events come via the node core, above). */
+static void dart__node_on_transport_event(const DartTransportEvent *tev){
+    DartNode *n = (DartNode*)tev->user;
+    DartEvent e;
+    if (!n->on_event) return;
+    memset(&e, 0, sizeof e);
+    switch (tev->kind){
+    case DART_TRANSPORT_MSG_LOST:        e.kind = DART_MSG_LOST; break;
+    case DART_TRANSPORT_MSG_TOO_BIG:     e.kind = DART_MSG_TOO_BIG; break;
+    case DART_TRANSPORT_NAME_COLLISION:  e.kind = DART_NAME_COLLISION; break;
+    case DART_TRANSPORT_QOS_INCOMPATIBLE:e.kind = DART_QOS_INCOMPATIBLE; break;
+    default: return;
+    }
+    e.detail = tev->detail; e.user = n->user_data; e.peer = tev->peer; e.channel = tev->channel;
+    e.lost_first = tev->lost_first; e.lost_count = tev->lost_count;
+    e.too_big_bytes = tev->too_big_bytes; e.identity = tev->identity;
+    n->on_event(&e);
 }
 
 #ifdef DART_SHM
@@ -4023,7 +4081,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
                : (uint16_t)((o.net.discovery_port ? o.net.discovery_port : 7400) + 1);
 
     tc.on_message = dart__node_on_message;     /* wrap so on_message receives a DartMsg */
-    tc.on_event   = dart__node_on_event;
+    tc.on_event   = dart__node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
     tc.user       = n;
 #ifdef DART_SHM
     n->shm_capable = (uint8_t)(mem->dynamic && !o.disable_shm);   /* static mode never uses SHM */
@@ -4086,10 +4144,8 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     /* multicast sockets/joins are set up lazily by dart_node_create_channel, since no
        channel exists yet at open. */
 
-    dc.discovery.on_peer_up      = dart_node_core_peer_up;
-    dc.discovery.on_peer_down    = dart_node_core_peer_down;
-    dc.discovery.on_peer_refused = dart_node_core_peer_refused;
-    dc.discovery.user            = n->core;
+    dc.discovery.on_event = dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
+    dc.discovery.user     = n->core;
     /* the core owns + builds our announce blob (frag size + OOB host + interest); we
        just hand its bytes to discovery so peers reassemble and match from discovery */
     dart_node_core_build_meta(n->core);

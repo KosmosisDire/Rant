@@ -21,6 +21,45 @@
 extern "C" {
 #endif
 
+/* The node's app-facing event: the union the user receives via DartNodeOpts.on_event.
+ * The node maps discovery's DartDiscoveryEvent (the peer kinds) and the transport's
+ * DartTransportEvent (the message/QoS kinds) into this one type, and adds its own
+ * (PEER_INTEREST, MCAST_JOIN_FAILED). Flat and self-describing: read only the fields
+ * named for the .kind. dart_event_str formats any of them as a one-line message. */
+typedef enum {
+    DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port */
+    DART_PEER_DOWN,      /* peer lost or fell silent: .peer */
+    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics, .receive_topics */
+    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
+    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
+    DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
+    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
+    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap (.channel) */
+} DartEventKind;
+
+typedef struct {
+    DartEventKind kind;
+    const char *detail;        /* short human-readable label (NAME_COLLISION / QOS_INCOMPATIBLE: our channel name) */
+    void       *user;          /* your DartNodeOpts.user_data (mirrors DartMsg.user) */
+    uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
+    uint16_t   channel;        /* local channel handle, where applicable */
+    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED: peer address (network order) */
+    uint8_t    ip_len;         /* PEER_UP / PEER_REFUSED: 4 or 16; else 0 */
+    uint16_t   port;           /* PEER_UP / PEER_REFUSED: peer data port */
+    uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
+    uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
+    uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
+    uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
+    uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
+    uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
+} DartEvent;
+typedef void (*DartEventFn)(const DartEvent *ev);
+
+/* Format ev as a one-line human-readable message into buf (always NUL-terminated,
+ * truncated to cap). Returns buf. */
+const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
+
 /* Runtime hook: 1 if a physical address is on this host (a route probe, on UDP),
  * so the peer is flagged out-of-band (SHM) eligible. NULL => every peer is remote. */
 typedef int (*i_DartNodeIsLocalFn)(void *user, const uint8_t *ip, uint8_t ip_len);
@@ -59,13 +98,11 @@ i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_
 uint16_t        dart_node_core_build_meta(i_DartNodeCore *c);
 const uint8_t  *dart_node_core_meta(i_DartNodeCore *c, uint16_t *len);
 
-/* Discovery callbacks: register these with the discovery runtime, user = the core.
- * They keep the peer table and the transport's peer set in lockstep (handling the
- * dormant/resume/evict lifecycle) and fire the app's PEER_UP/DOWN/REFUSED events. */
-void dart_node_core_peer_up     (void *user, uint32_t id, const DartDiscoveryAddr *addr,
-                                 const uint8_t *meta, uint16_t meta_len);
-void dart_node_core_peer_down   (void *user, uint32_t id, DartDiscoveryDownReason reason);
-void dart_node_core_peer_refused(void *user, const DartDiscoveryAddr *addr);
+/* Discovery event sink: register as the discovery core's on_event (cfg.user = this
+ * core). Demuxes the generic DartDiscoveryEvent (PEER_UP/DOWN/REFUSED), keeps the peer
+ * table and transport peer set in lockstep (dormant/resume/evict), and fires the app's
+ * PEER_UP/DOWN/INTEREST/REFUSED DartEvents (the node maps discovery's events to its own). */
+void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev);
 
 /* A resolved outbound destination: a multicast group (by selector), or a unicast
  * peer (by physical address). The runtime turns this into wire bytes for its link. */

@@ -117,50 +117,29 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
                              const uint8_t *desc);
 #endif
 
-/* Everything that isn't message delivery, as one notification (optional). Each
- * kind populates its own named DartEvent fields (below): no field carries a
- * different meaning depending on .kind, and dart_event_str() formats any event
- * as a ready-made human-readable line. */
+/* Transport events (optional), delivered through one on_event. The transport is
+ * independent of discovery/node: it emits only its own kinds. The node maps these
+ * into its app-facing DartEvent (node/core.h); a sans-IO transport user handles them
+ * directly. Flat and self-describing: read only the fields named for the .kind. */
 typedef enum {
-    DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port (node) */
-    DART_PEER_DOWN,      /* peer lost or fell silent: .peer (node) */
-    DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics,
-                            .receive_topics (node) */
-    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. .lost_first+.lost_count-1 */
-    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
-    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
-    DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher: no silent downgrade,
-                              no data flows for this (.channel, .peer); .detail = our channel name */
-    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) (node) */
-    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap: that
-                              channel got no group join and receives only unicast-published data (.channel) (node) */
-} DartEventKind;
+    DART_TRANSPORT_MSG_LOST,        /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
+    DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
+    DART_TRANSPORT_QOS_INCOMPATIBLE /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
+} DartTransportEventKind;
 
-/* Flat, self-describing: read only the fields named for the event's .kind (the
- * rest are zero). detail is always a short human label, except NAME_COLLISION /
- * QOS_INCOMPATIBLE where it carries our channel name. */
 typedef struct {
-    DartEventKind kind;
-    const char *detail;        /* short human-readable label (NAME_COLLISION: our channel name) */
-    void       *user;          /* your DartNodeOpts.user_data, as on every event (mirrors DartMsg.user) */
-    uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
-    uint16_t   channel;        /* local channel handle, where applicable */
-    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED: peer address (network order) */
-    uint8_t    ip_len;         /* PEER_UP / PEER_REFUSED: 4 or 16; else 0 */
-    uint16_t   port;           /* PEER_UP / PEER_REFUSED: peer data port */
+    DartTransportEventKind kind;
+    const char *detail;        /* short human label (NAME_COLLISION / QOS_INCOMPATIBLE: our channel name) */
+    void       *user;          /* DartConfig.user */
+    uint32_t   peer;           /* peer id (0 = n/a) */
+    uint16_t   channel;        /* local channel handle */
     uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
     uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
     uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
-    uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
-    uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
-} DartEvent;
-typedef void (*DartEventFn)(const DartEvent *ev);   /* user data rides ev->user, like DartMsgFn */
-
-/* Format ev as a one-line human-readable message into buf (always NUL-terminated,
- * truncated to cap). Returns buf, for inline use:
- *     char b[160]; puts(dart_event_str(ev, b, sizeof b)); */
-const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
+} DartTransportEvent;
+typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
@@ -187,7 +166,7 @@ typedef struct {
 #ifdef DART_SHM
     i_DartShmMsgFn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
 #endif
-    DartEventFn           on_event;   /* optional: loss/too-big/name-collision */
+    DartTransportEventFn  on_event;   /* optional: transport events (loss/too-big/collision/qos) */
     DartAllocFn           allocator;  /* optional: set => dynamic message sizing */
     void                 *user;
 } DartConfig;

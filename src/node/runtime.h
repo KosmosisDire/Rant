@@ -7,6 +7,7 @@
 
 #include "../transport/core.h"
 #include "../discovery/core.h"    /* DartDiscoveryAddr (seed peers) */
+#include "core.h"                 /* DartEvent / DartEventFn / dart_event_str (node's app event) */
 
 #ifdef __cplusplus
 extern "C" {

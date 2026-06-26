@@ -297,105 +297,26 @@ static i_DartChannel *dart_chan_by_identity(DartState *st, uint64_t identity, in
 }
 
 
-/* fire one DartEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/COLLISION.
- * first/count are the kind's two numeric slots; route them to the named fields. */
-void dart__event(DartState *st, DartEventKind kind, uint16_t channel,
+/* fire one DartTransportEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/
+ * COLLISION/QOS. first/count are the kind's two numeric slots; route them to named fields. */
+void dart__event(DartState *st, DartTransportEventKind kind, uint16_t channel,
                         uint32_t peer, uint64_t first, uint64_t count, const char *detail){
-    DartEvent ev;
+    DartTransportEvent ev;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
     ev.kind=kind; ev.channel=channel; ev.peer=peer; ev.detail=detail; ev.user=st->cfg.user;
     switch (kind){
-    case DART_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
-    case DART_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
-    case DART_NAME_COLLISION: ev.identity = first; break;
+    case DART_TRANSPORT_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
+    case DART_TRANSPORT_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
+    case DART_TRANSPORT_NAME_COLLISION: ev.identity = first; break;
     default: break;
     }
     st->cfg.on_event(&ev);
 }
 
-/* bounded appenders for dart_event_str: write into [*pp, end) and advance *pp,
- * never past end (so a final '\0' at *pp stays in range). No stdio, so the
- * formatter compiles in the sans-IO core. */
-static char *i_ev_str(char *p, char *end, const char *s){
-    if (!s) return p;
-    while (*s && p < end) *p++ = *s++;
-    return p;
-}
-static char *i_ev_u64(char *p, char *end, uint64_t v){
-    char tmp[20]; int n = 0;
-    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v);
-    while (n && p < end) *p++ = tmp[--n];
-    return p;
-}
-static char *i_ev_hex(char *p, char *end, uint64_t v){
-    char tmp[16]; int n = 0;
-    do { int d = (int)(v & 0xF); tmp[n++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; } while (v);
-    while (n && p < end) *p++ = tmp[--n];
-    return p;
-}
-static char *i_ev_addr(char *p, char *end, const DartEvent *ev){   /* dotted quad + :port (IPv4 only) */
-    int i;
-    for (i = 0; i < 4; i++){ if (i) p = i_ev_str(p,end,"."); p = i_ev_u64(p,end,ev->ip[i]); }
-    p = i_ev_str(p,end,":"); return i_ev_u64(p,end,ev->port);
-}
-
-const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
-    char *p, *end;
-    if (!buf || !cap) return buf;
-    p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
-    switch (ev->kind){
-    case DART_PEER_UP:
-        p = i_ev_str(p,end,"peer-up id="); p = i_ev_u64(p,end,ev->peer);
-        if (ev->ip_len == 4){ p = i_ev_str(p,end," at "); p = i_ev_addr(p,end,ev); }
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
-    case DART_PEER_DOWN:
-        p = i_ev_str(p,end,"peer-down id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
-    case DART_PEER_INTEREST:
-        p = i_ev_str(p,end,"interest id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," publish-to="); p = i_ev_u64(p,end,ev->publish_topics);
-        p = i_ev_str(p,end," topics, receive-from="); p = i_ev_u64(p,end,ev->receive_topics);
-        p = i_ev_str(p,end," topics");
-        break;
-    case DART_PEER_REFUSED:
-        p = i_ev_str(p,end,"peer-refused at "); p = i_ev_addr(p,end,ev);
-        p = i_ev_str(p,end," (table full of active peers)");
-        break;
-    case DART_NAME_COLLISION:
-        p = i_ev_str(p,end,"name-collision ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," id=0x"); p = i_ev_hex(p,end,ev->identity);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
-        p = i_ev_str(p,end,"): match refused");
-        break;
-    case DART_QOS_INCOMPATIBLE:
-        p = i_ev_str(p,end,"qos-incompatible ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
-        p = i_ev_str(p,end,"): reliable subscriber refused best-effort publisher");
-        break;
-    case DART_MSG_LOST:
-        p = i_ev_str(p,end,"msg-lost ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," seqno "); p = i_ev_u64(p,end,ev->lost_first);
-        p = i_ev_str(p,end,".."); p = i_ev_u64(p,end,ev->lost_first + ev->lost_count - 1);
-        break;
-    case DART_MSG_TOO_BIG:
-        p = i_ev_str(p,end,"msg-too-big ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
-        p = i_ev_str(p,end," ("); p = i_ev_u64(p,end,ev->too_big_bytes);
-        p = i_ev_str(p,end," bytes), skipped");
-        break;
-    case DART_MCAST_JOIN_FAILED:
-        p = i_ev_str(p,end,"mcast-join-failed ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
-    }
-    *p = '\0';                                     /* p <= end = buf+cap-1, in range */
-    return buf;
-}
+/* dart_event_str (and its bounded appenders) moved to the node (node/core.c): the
+   formatter covers the node's app-facing DartEvent union, not the transport's own
+   events. The transport stays independent of the node's event vocabulary. */
 
 
 /* unicast join seqno: head minus qos.catch_up cached samples (reliable only) */
@@ -626,7 +547,7 @@ static const uint8_t *dart__meta_scan(DartState *st, int peer_slot, const uint8_
         p = name + nlen;
         if (!ch) continue;                                  /* not ours */
         if (!dart__meta_name_eq(ch,name,nlen)){
-            dart__event(st, DART_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            dart__event(st, DART_TRANSPORT_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
                         id, 0, ch->name ? ch->name : "");
             continue;
         }
@@ -635,7 +556,7 @@ static const uint8_t *dart__meta_scan(DartState *st, int peer_slot, const uint8_
            the publisher later upgrades and re-advertises. */
         if (is_pub && (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) &&
             ch->qos.reliability==DART_RELIABLE && !(flags & DART_META_F_RELIABLE)){
-            dart__event(st, DART_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
+            dart__event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
                         st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
             continue;                                       /* refuse: no bit, no alias map */
         }

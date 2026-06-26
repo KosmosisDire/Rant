@@ -784,13 +784,11 @@ static void st_pump(DartNode *a, DartNode *b, int ms){     /* run both nodes */
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
-static void dc_up(void *u, uint32_t id, const DartDiscoveryAddr *a, const uint8_t *m, uint16_t ml){
-    (void)u;(void)a;(void)m;(void)ml; dc_up_id=id; dc_up_n++;
+static void dc_event(const DartDiscoveryEvent *ev){
+    if      (ev->kind==DART_DISCOVERY_PEER_UP)     { dc_up_id=ev->peer; dc_up_n++; }
+    else if (ev->kind==DART_DISCOVERY_PEER_DOWN)   { dc_down_id=ev->peer; dc_down_reason=(int)ev->reason; dc_down_n++; }
+    else if (ev->kind==DART_DISCOVERY_PEER_REFUSED){ dc_refused_n++; }
 }
-static void dc_down(void *u, uint32_t id, DartDiscoveryDownReason r){
-    (void)u; dc_down_id=id; dc_down_reason=(int)r; dc_down_n++;
-}
-static void dc_refused(void *u, const DartDiscoveryAddr *a){ (void)u;(void)a; dc_refused_n++; }
 
 /* craft a v3 announce for sender `uid` (uuid = all uid bytes), meta_len 0 */
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
@@ -818,7 +816,7 @@ static void disc_core_checks(void){
     memset(&c,0,sizeof c);
     memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */
     c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=1000000; c.max_peers=2;
-    c.on_peer_up=dc_up; c.on_peer_down=dc_down; c.on_peer_refused=dc_refused;
+    c.on_event=dc_event;
     st = dart_discovery_init(mem,sizeof mem,&c);
     ST_CHECK(st!=NULL, "disc-core: init");
     if (!st) return;
@@ -894,6 +892,23 @@ static void nc_event(const DartEvent *ev){
     else if (ev->kind==DART_PEER_DOWN)   { nc_down_n++; nc_down_id=ev->peer; }
     else if (ev->kind==DART_PEER_REFUSED){ nc_refused_n++; }
 }
+/* drive the node core's discovery sink as the discovery core would: build the generic
+   DartDiscoveryEvent (user = the core) and hand it to dart_node_core_on_disc_event. */
+static void nc_up(i_DartNodeCore *nc, uint32_t id, const DartDiscoveryAddr *a, const uint8_t *m, uint16_t ml){
+    DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
+    ev.kind=DART_DISCOVERY_PEER_UP; ev.user=nc; ev.peer=id; ev.addr=*a; ev.meta=m; ev.meta_len=ml;
+    dart_node_core_on_disc_event(&ev);
+}
+static void nc_down(i_DartNodeCore *nc, uint32_t id, DartDiscoveryDownReason r){
+    DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
+    ev.kind=DART_DISCOVERY_PEER_DOWN; ev.user=nc; ev.peer=id; ev.reason=r;
+    dart_node_core_on_disc_event(&ev);
+}
+static void nc_refused(i_DartNodeCore *nc, const DartDiscoveryAddr *a){
+    DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
+    ev.kind=DART_DISCOVERY_PEER_REFUSED; ev.user=nc; ev.addr=*a;
+    dart_node_core_on_disc_event(&ev);
+}
 static void node_core_checks(void){
     static uint8_t tmem[1<<18], cmem[4096];
     DartConfig tc; DartState *tr;
@@ -935,8 +950,8 @@ static void node_core_checks(void){
 
     /* 1. two peers up: events fire and destinations resolve, each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    dart_node_core_peer_up(nc, 11, &a, meta, mlen);
-    dart_node_core_peer_up(nc, 22, &b, meta, mlen);
+    nc_up(nc, 11, &a, meta, mlen);
+    nc_up(nc, 22, &b, meta, mlen);
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
     {   uint8_t pnl=0; const char *pn = dart_node_core_peer_name(nc, 11, &pnl);
         ST_CHECK(pn && pnl==7 && strcmp(pn,"nc-self")==0,
@@ -944,11 +959,11 @@ static void node_core_checks(void){
     /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
     {   uint8_t nmeta[64]; uint16_t nlen; uint8_t pnl=0; const char *pn;
         nlen = dart_meta_build(tr, nmeta, sizeof nmeta, 1200, 0, NULL, NULL, 0);
-        dart_node_core_peer_up(nc, 11, &a, nmeta, nlen);     /* known-peer update, no name */
+        nc_up(nc, 11, &a, nmeta, nlen);     /* known-peer update, no name */
         pn = dart_node_core_peer_name(nc, 11, &pnl);
         ST_CHECK(pn && strcmp(pn,"unknown-peer")==0,
                  "node-core: nameless announce -> unknown-peer (%s)", pn?pn:"(null)");
-        dart_node_core_peer_up(nc, 11, &a, meta, mlen);      /* restore the real name */
+        nc_up(nc, 11, &a, meta, mlen);      /* restore the real name */
     }
     ST_CHECK(dart_node_core_resolve(nc,11,&d) && !d.is_group && d.port==5001 && d.ip[3]==1,
              "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
@@ -959,24 +974,24 @@ static void node_core_checks(void){
 
     /* 2. DROP makes the peer dormant: one PEER_DOWN, but the slot is kept (still resolves) */
     nc_down_n=0;
-    dart_node_core_peer_down(nc, 11, DART_DISCOVERY_DROP);
+    nc_down(nc, 11, DART_DISCOVERY_DROP);
     ST_CHECK(nc_down_n==1 && nc_down_id==11, "node-core: DROP fires one down (downs=%u id=%u)", nc_down_n, nc_down_id);
     ST_CHECK(dart_node_core_resolve(nc,11,&d)==1, "node-core: dropped peer kept (resolves)");
 
     /* 3. same id returns -> RESUME re-fires PEER_UP, no new slot */
     nc_up_n=0;
-    dart_node_core_peer_up(nc, 11, &a, meta, mlen);
+    nc_up(nc, 11, &a, meta, mlen);
     ST_CHECK(nc_up_n==1 && nc_up_id==11, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* 4. GONE frees the peer: one down, no longer resolves */
     nc_down_n=0;
-    dart_node_core_peer_down(nc, 22, DART_DISCOVERY_GONE);
+    nc_down(nc, 22, DART_DISCOVERY_GONE);
     ST_CHECK(nc_down_n==1, "node-core: GONE fires down (downs=%u)", nc_down_n);
     ST_CHECK(dart_node_core_resolve(nc,22,&d)==0, "node-core: GONE peer freed (no resolve)");
 
     /* 5. a refused peer is forwarded as PEER_REFUSED */
     nc_refused_n=0;
-    dart_node_core_peer_refused(nc, &b);
+    nc_refused(nc, &b);
     ST_CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 }
 
@@ -1034,7 +1049,7 @@ static DartState *shml_W, *shml_R;
 static int shml_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
     (void)u;(void)ch;(void)from;(void)desc; if (shml_ok){ shml_recv++; return 1; } return 0;
 }
-static void shml_on_event(const DartEvent *ev){ if (ev->kind==DART_MSG_LOST) shml_lost++; }
+static void shml_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANSPORT_MSG_LOST) shml_lost++; }
 static void shml_pump(int n){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol; int i;
     for (i=0;i<n;i++){
@@ -1414,7 +1429,7 @@ static void dynamic_grow_checks(void){
    silent downgrade); every other direction matches. Sans-IO transport core, no data
    pump: build the publisher's interest, apply it to the reader, read the match. */
 static unsigned long qos_incompat_n;
-static void qos_on_event(const DartEvent *ev){ if (ev->kind==DART_QOS_INCOMPATIBLE) qos_incompat_n++; }
+static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANSPORT_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartState *W, *R; uint8_t blob[128]; size_t bl; uint16_t pub=0, recv=0;

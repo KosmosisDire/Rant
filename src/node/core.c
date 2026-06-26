@@ -5,6 +5,89 @@
 #include "../common/arena.h"
 #include <string.h>
 
+/* dart_event_str + bounded appenders: format the node's app DartEvent as one line.
+   No stdio, so it stays in the sans-IO core. (It covers the union event, including the
+   peer/interest/mcast kinds the node adds; the transport keeps no formatter of its own.) */
+static char *i_ev_str(char *p, char *end, const char *s){
+    if (!s) return p;
+    while (*s && p < end) *p++ = *s++;
+    return p;
+}
+static char *i_ev_u64(char *p, char *end, uint64_t v){
+    char tmp[20]; int n = 0;
+    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static char *i_ev_hex(char *p, char *end, uint64_t v){
+    char tmp[16]; int n = 0;
+    do { int d = (int)(v & 0xF); tmp[n++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static char *i_ev_addr(char *p, char *end, const DartEvent *ev){   /* dotted quad + :port (IPv4 only) */
+    int i;
+    for (i = 0; i < 4; i++){ if (i) p = i_ev_str(p,end,"."); p = i_ev_u64(p,end,ev->ip[i]); }
+    p = i_ev_str(p,end,":"); return i_ev_u64(p,end,ev->port);
+}
+
+const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
+    char *p, *end;
+    if (!buf || !cap) return buf;
+    p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
+    switch (ev->kind){
+    case DART_PEER_UP:
+        p = i_ev_str(p,end,"peer-up id="); p = i_ev_u64(p,end,ev->peer);
+        if (ev->ip_len == 4){ p = i_ev_str(p,end," at "); p = i_ev_addr(p,end,ev); }
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    case DART_PEER_DOWN:
+        p = i_ev_str(p,end,"peer-down id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    case DART_PEER_INTEREST:
+        p = i_ev_str(p,end,"interest id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," publish-to="); p = i_ev_u64(p,end,ev->publish_topics);
+        p = i_ev_str(p,end," topics, receive-from="); p = i_ev_u64(p,end,ev->receive_topics);
+        p = i_ev_str(p,end," topics");
+        break;
+    case DART_PEER_REFUSED:
+        p = i_ev_str(p,end,"peer-refused at "); p = i_ev_addr(p,end,ev);
+        p = i_ev_str(p,end," (table full of active peers)");
+        break;
+    case DART_NAME_COLLISION:
+        p = i_ev_str(p,end,"name-collision ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," id=0x"); p = i_ev_hex(p,end,ev->identity);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
+        p = i_ev_str(p,end,"): match refused");
+        break;
+    case DART_QOS_INCOMPATIBLE:
+        p = i_ev_str(p,end,"qos-incompatible ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail);
+        p = i_ev_str(p,end,"): reliable subscriber refused best-effort publisher");
+        break;
+    case DART_MSG_LOST:
+        p = i_ev_str(p,end,"msg-lost ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," seqno "); p = i_ev_u64(p,end,ev->lost_first);
+        p = i_ev_str(p,end,".."); p = i_ev_u64(p,end,ev->lost_first + ev->lost_count - 1);
+        break;
+    case DART_MSG_TOO_BIG:
+        p = i_ev_str(p,end,"msg-too-big ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," from id="); p = i_ev_u64(p,end,ev->peer);
+        p = i_ev_str(p,end," ("); p = i_ev_u64(p,end,ev->too_big_bytes);
+        p = i_ev_str(p,end," bytes), skipped");
+        break;
+    case DART_MCAST_JOIN_FAILED:
+        p = i_ev_str(p,end,"mcast-join-failed ch="); p = i_ev_u64(p,end,ev->channel);
+        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
+        break;
+    }
+    *p = '\0';                                     /* p <= end = buf+cap-1, in range */
+    return buf;
+}
+
 typedef struct {
     uint8_t  used;
     uint8_t  dormant;  /* discovery DROPPED it: kept for a same-incarnation resume */
@@ -170,9 +253,9 @@ static void dart__core_fire_interest(i_DartNodeCore *c, uint32_t id){
     c->on_event(&ev);
 }
 
-void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *addr,
+static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscoveryAddr *addr,
                             const uint8_t *meta, uint16_t meta_len){
-    i_DartNodeCore *c = (i_DartNodeCore*)user; uint16_t i; int slot = -1;
+    uint16_t i; int slot = -1;
     uint16_t frag = dart_meta_frag(meta, meta_len);
     size_t interest_len = 0; const uint8_t *interest = dart_meta_interest(meta, meta_len, &interest_len);
     for (i=0;i<c->max_peers;i++){
@@ -207,8 +290,8 @@ void dart_node_core_peer_up(void *user, uint32_t id, const DartDiscoveryAddr *ad
                    dart__core_fire_interest(c, id); }
 }
 
-void dart_node_core_peer_down(void *user, uint32_t id, DartDiscoveryDownReason reason){
-    i_DartNodeCore *c = (i_DartNodeCore*)user; int i = dart__core_find_id(c, id);
+static void dart__core_peer_down(i_DartNodeCore *c, uint32_t id, DartDiscoveryDownReason reason){
+    int i = dart__core_find_id(c, id);
     if (reason == DART_DISCOVERY_DROP){
         /* fell silent: keep transport state so a same-incarnation return resumes
            losslessly; just stop flow-controlling it and tell the app once */
@@ -225,9 +308,26 @@ void dart_node_core_peer_down(void *user, uint32_t id, DartDiscoveryDownReason r
     }
 }
 
-void dart_node_core_peer_refused(void *user, const DartDiscoveryAddr *addr){
-    i_DartNodeCore *c = (i_DartNodeCore*)user;
+static void dart__core_peer_refused(i_DartNodeCore *c, const DartDiscoveryAddr *addr){
     dart__core_fire(c, DART_PEER_REFUSED, 0, addr, "peer table full (all active)");
+}
+
+/* The discovery core's on_event sink (cfg.user = this core): demux the generic
+ * DartDiscoveryEvent into the lifecycle handlers above, which fire the app DartEvents. */
+void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
+    i_DartNodeCore *c = (i_DartNodeCore*)ev->user;
+    switch (ev->kind){
+        case DART_DISCOVERY_PEER_UP:
+            dart__core_peer_up(c, ev->peer, &ev->addr, ev->meta, ev->meta_len);
+            break;
+        case DART_DISCOVERY_PEER_DOWN:
+            dart__core_peer_down(c, ev->peer, ev->reason);
+            break;
+        case DART_DISCOVERY_PEER_REFUSED:
+            dart__core_peer_refused(c, &ev->addr);
+            break;
+        default: break;
+    }
 }
 
 int dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out){
