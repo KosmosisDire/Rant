@@ -37,13 +37,13 @@ typedef struct {
     const uint8_t        *meta;                 /* optional OPAQUE overlay to advertise; NULL = none */
     uint16_t              meta_len;
     uint16_t              meta_capacity;        /* per-peer INCOMING overlay buffer; 0 = default */
-} DartDiscoveryOpts;
+} DartDiscoveryConfig;
 
 /* Open a discovery runtime backed by mem (a static or dynamic DartAllocator, taken
  * over here: mem->claimed is set). opts may be NULL for all defaults. The UUID is
  * auto-generated. Returns NULL on failure (allocator too small / already claimed /
  * socket setup failed). Close with dart_discovery_close. */
-DartDiscovery   *dart_discovery_open(DartAllocator *mem, const DartDiscoveryOpts *opts);
+DartDiscovery   *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig *cfg);
 
 /* ------------------------------------------------------------------ lifecycle */
 /* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
@@ -65,7 +65,7 @@ const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count)
  * discovery.uuid all-zero to auto-generate one. Used by dart_discovery_place when a
  * caller (e.g. the node) supplies the memory and needs the full config surface. */
 typedef struct {
-    DartDiscoveryConfig discovery;        /* core config: ids, timing, callbacks, meta */
+    DartDiscoveryCoreConfig discovery;        /* core config: ids, timing, callbacks, meta */
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */

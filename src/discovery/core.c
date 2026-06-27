@@ -31,7 +31,7 @@ struct i_DartDiscoveryPeer {
 typedef struct i_DartDiscoveryPeer i_DartDiscoveryPeer;
 
 struct DartDiscoveryState {
-    DartDiscoveryConfig  cfg;
+    DartDiscoveryCoreConfig  cfg;
     uint64_t      next_announce_us;
     uint32_t      next_local_id;
     uint8_t       started;
@@ -100,11 +100,11 @@ void dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t n, 
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x (RFC) */
 }
 
-static uint16_t dart_discovery_meta_capacity(const DartDiscoveryConfig *cfg){
+static uint16_t dart_discovery_meta_capacity(const DartDiscoveryCoreConfig *cfg){
     return cfg->meta_capacity ? cfg->meta_capacity : DART_DISCOVERY_META_MAX;
 }
 
-void dart_discovery_config_defaults(DartDiscoveryConfig *cfg){
+void dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg){
     if (!cfg) return;
     if (cfg->announce_interval_us == 0) cfg->announce_interval_us = 1000000u;
     if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = cfg->announce_interval_us * 7u / 2u;
@@ -121,14 +121,14 @@ uint32_t dart_discovery_wire_size(uint16_t meta_capacity){
 /* Single source of the discovery arena layout: state, the peer table, the meta pool.
    measure (bump.base NULL) feeds required_memory; build feeds init -- one definition. */
 typedef struct { DartDiscoveryState *st; uint8_t *peers, *meta_pool; } i_DartDiscoveryBlocks;
-static void dart__discovery_layout(i_DartBump *b, const DartDiscoveryConfig *cfg, i_DartDiscoveryBlocks *o){
+static void dart__discovery_layout(i_DartBump *b, const DartDiscoveryCoreConfig *cfg, i_DartDiscoveryBlocks *o){
     uint16_t meta_capacity = dart_discovery_meta_capacity(cfg);
     o->st        = (DartDiscoveryState*)dart_take(b, sizeof(struct DartDiscoveryState), 8);
     o->peers     = (uint8_t*)dart_take(b, (size_t)cfg->max_peers * sizeof(i_DartDiscoveryPeer), 8);
     o->meta_pool = (uint8_t*)dart_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
 }
 
-size_t dart_discovery_required_memory(const DartDiscoveryConfig *cfg){
+size_t dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg){
     i_DartBump b; i_DartDiscoveryBlocks blk;
     if (!cfg) return 0;
     memset(&b, 0, sizeof b);
@@ -136,7 +136,7 @@ size_t dart_discovery_required_memory(const DartDiscoveryConfig *cfg){
     return b.offset + 8u;     /* slack to align the caller's mem up to base */
 }
 
-DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscoveryConfig *cfg){
+DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscoveryCoreConfig *cfg){
     i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; uint16_t i, meta_capacity;
     if (!mem || !cfg || cfg->max_peers == 0) return NULL;
     if (cfg->announce_interval_us == 0 || cfg->peer_timeout_us == 0) return NULL;
@@ -180,7 +180,7 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
 DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
         size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
         const uint8_t *self_meta, void *peer_cb_user){
-    i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; DartDiscoveryConfig dc; uint16_t i, omp;
+    i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; DartDiscoveryCoreConfig dc; uint16_t i, omp;
     if (!old) return NULL;
     dc = old->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
     if (new_cap < dart_discovery_required_memory(&dc)) return NULL;

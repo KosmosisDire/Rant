@@ -813,7 +813,7 @@ static void disc_core_checks(void){
     static uint8_t mem[8192];
     uint8_t buf[DART_DISCOVERY_WIRE_MAX], out[DART_DISCOVERY_WIRE_MAX];
     uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
-    DartDiscoveryConfig c; DartDiscoveryState *st;
+    DartDiscoveryCoreConfig c; DartDiscoveryState *st;
     uint32_t idA, idB; size_t n;
     memset(&c,0,sizeof c);
     memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */

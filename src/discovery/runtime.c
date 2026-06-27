@@ -140,7 +140,7 @@ typedef struct {
     uint8_t *rxbuf, *txbuf, *peer_view, *core;
     size_t   wire_max, core_bytes;
 } i_DartRtBlocks;
-static void dart__rt_layout(i_DartBump *b, const DartDiscoveryConfig *c, i_DartRtBlocks *o){
+static void dart__rt_layout(i_DartBump *b, const DartDiscoveryCoreConfig *c, i_DartRtBlocks *o){
     uint16_t max_peers = c->max_peers ? c->max_peers : 32u;
     o->wire_max   = dart_discovery_wire_size(c->meta_capacity);
     o->d     = (DartDiscovery*)dart_take(b, sizeof(struct DartDiscovery), 16);
@@ -152,7 +152,7 @@ static void dart__rt_layout(i_DartBump *b, const DartDiscoveryConfig *c, i_DartR
 }
 
 size_t dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg){
-    DartDiscoveryConfig c; i_DartBump b; i_DartRtBlocks blk;
+    DartDiscoveryCoreConfig c; i_DartBump b; i_DartRtBlocks blk;
     if (!cfg) return 0;
     c = cfg->discovery;
     dart_discovery_config_defaults(&c);
@@ -257,11 +257,11 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
  * mirrors dart_node_open). Translates the flat opts into the placement config, sizes,
  * allocates, and places the runtime; dart_discovery_close frees the heap block. No
  * automatic growth: a full peer table refuses rather than relocating. */
-DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryOpts *opts){
-    DartDiscoveryNetConfig nc; DartDiscoveryOpts o; DartDiscovery *d;
+DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig *cfg){
+    DartDiscoveryNetConfig nc; DartDiscoveryConfig o; DartDiscovery *d;
     void *block; size_t need, block_size;
     if (!mem || mem->claimed) return NULL;
-    memset(&o, 0, sizeof o); if (opts) o = *opts;
+    memset(&o, 0, sizeof o); if (cfg) o = *cfg;
 
     memset(&nc, 0, sizeof nc);
     nc.discovery.domain_id     = o.domain;
@@ -305,7 +305,7 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryOpts *
  * to the node core's new announce-blob address. Caller frees the old block afterward. */
 DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t new_cap,
         uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user){
-    DartDiscoveryConfig dc; i_DartRtBlocks blk; i_DartBump b; DartDiscovery *d;
+    DartDiscoveryCoreConfig dc; i_DartRtBlocks blk; i_DartBump b; DartDiscovery *d;
     DartDiscoveryState *nc; uint8_t *base; size_t need;
     if (!old) return NULL;
     dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;

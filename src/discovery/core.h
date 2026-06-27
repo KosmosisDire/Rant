@@ -58,7 +58,7 @@ typedef enum {
 
 typedef struct {
     DartDiscoveryEventKind   kind;
-    void                    *user;     /* DartDiscoveryConfig.user */
+    void                    *user;     /* DartDiscoveryCoreConfig.user */
     uint32_t                 peer;     /* local peer id (UP / DOWN) */
     DartDiscoveryAddr        addr;     /* UP / REFUSED: advertised locator */
     DartDiscoveryDownReason  reason;   /* DOWN: DROP vs GONE */
@@ -115,7 +115,7 @@ typedef struct {
     uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
-} DartDiscoveryConfig;
+} DartDiscoveryCoreConfig;
 
 typedef struct DartDiscoveryState DartDiscoveryState;
 
@@ -123,15 +123,15 @@ typedef struct DartDiscoveryState DartDiscoveryState;
  * (1s), peer_timeout_us (3.5x the interval), max_peers (32). dart_discovery_init
  * REQUIRES these non-zero (it rejects a zero), so an IO layer applies this once before
  * both sizing and init so the two always agree. Idempotent. */
-void         dart_discovery_config_defaults(DartDiscoveryConfig *cfg);
+void         dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg);
 
 /* Bytes an IO layer must allocate for one rx/tx datagram scratch buffer: the fixed
  * header + version + len + meta_capacity (0 => DART_DISCOVERY_META_MAX), floored at
  * DART_DISCOVERY_WIRE_MAX. The core constants that size it live here, so it owns the math. */
 uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
 
-size_t       dart_discovery_required_memory(const DartDiscoveryConfig *cfg);
-DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryConfig *cfg);
+size_t       dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg);
+DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryCoreConfig *cfg);
 /* Relocate a live core into a bigger block at grown counts, preserving UUID, blob version,
  * local-id counter and the peer table (NOT a re-init). self_meta = the announce blob's new
  * address (the node core moved). Caller frees the old block afterward. Dynamic growth only. */
