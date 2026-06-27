@@ -793,18 +793,20 @@ static void dc_event(const DartDiscoveryEvent *ev){
 /* craft a v3 announce for sender `uid` (uuid = all uid bytes), meta_len 0 */
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
     size_t off = DART_DISCOVERY_META_OFF;
+    uint8_t *b = p + off;
     memset(p, 0, off);
     p[0]='u';p[1]='D';p[2]='S';p[3]='C';
     p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
     p[5]=flags;                                   /* 0x01 = BYE (internal flag) */
     p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
     memset(p+8, uid, 16);                         /* a distinct uuid per uid */
-    p[24]=(uint8_t)port; p[25]=(uint8_t)(port>>8);
-    /* p[26] self_ip_len = 0 -> receiver uses the src ip */
     p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
     p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    /* p[off-2..off-1] meta_len = 0 (memset) */
-    return off;
+    /* blob = discovery section [u16 data_port][u8 self_ip_len=0][u8 name_len=0]; no overlay.
+       self_ip_len 0 -> the receiver uses the datagram src ip; the port now rides here. */
+    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=0;
+    p[off-2]=4; p[off-1]=0;                        /* meta_len = 4 (the discovery section) */
+    return off + 4;
 }
 
 static void disc_core_checks(void){
@@ -894,9 +896,11 @@ static void nc_event(const DartEvent *ev){
 }
 /* drive the node core's discovery sink as the discovery core would: build the generic
    DartDiscoveryEvent (user = the core) and hand it to dart_node_core_on_disc_event. */
-static void nc_up(i_DartNodeCore *nc, uint32_t id, const DartDiscoveryAddr *a, const uint8_t *m, uint16_t ml){
+static void nc_up(i_DartNodeCore *nc, uint32_t id, const DartDiscoveryAddr *a, const char *nm, uint8_t nl,
+                  const uint8_t *m, uint16_t ml){
     DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
-    ev.kind=DART_DISCOVERY_PEER_UP; ev.user=nc; ev.peer=id; ev.addr=*a; ev.meta=m; ev.meta_len=ml;
+    ev.kind=DART_DISCOVERY_PEER_UP; ev.user=nc; ev.peer=id; ev.addr=*a;
+    ev.name=nm; ev.name_len=nl; ev.meta=m; ev.meta_len=ml;
     dart_node_core_on_disc_event(&ev);
 }
 static void nc_down(i_DartNodeCore *nc, uint32_t id, DartDiscoveryDownReason r){
@@ -924,25 +928,21 @@ static void node_core_checks(void){
     tr = dart_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "node-core: transport init");
     if (!tr) return;
-    mlen = dart_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, "nc-self", 7);   /* a valid announce blob */
+    mlen = dart_meta_build(tr, meta, sizeof meta, 1200, 0, NULL);   /* the overlay (no name) */
 
     memset(&cc,0,sizeof cc);
     cc.transport=tr; cc.max_peers=2; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event;
-    cc.name="nc-self"; cc.name_len=7;
     cc.is_local=NULL;                                              /* no platform: every peer remote */
     nc = dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
 
-    /* the core builds our outgoing announce blob from its own fields */
-    {   uint16_t ml; const uint8_t *mb; uint8_t nnl=0; const char *nn;
+    /* the core builds our OVERLAY from its own fields (frag size + interest; no name) */
+    {   uint16_t ml; const uint8_t *mb;
         dart_node_core_build_meta(nc);
         mb = dart_node_core_meta(nc, &ml);
         ST_CHECK(ml>=5 && dart_meta_frag(mb, ml)==1200,
-                 "node-core: builds announce blob (frag=%u)", dart_meta_frag(mb, ml));
-        nn = dart_meta_name(mb, ml, &nnl);
-        ST_CHECK(nn && nnl==7 && memcmp(nn,"nc-self",7)==0,
-                 "node-core: announce blob carries node name (len=%u)", nnl);
+                 "node-core: builds overlay (frag=%u)", dart_meta_frag(mb, ml));
     }
 
     memset(&a,0,sizeof a); a.ip[0]=10;a.ip[1]=0;a.ip[2]=0;a.ip[3]=1; a.ip_len=4; a.port=5001;
@@ -950,20 +950,19 @@ static void node_core_checks(void){
 
     /* 1. two peers up: events fire and destinations resolve, each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    nc_up(nc, 11, &a, meta, mlen);
-    nc_up(nc, 22, &b, meta, mlen);
+    nc_up(nc, 11, &a, "nc-self", 7, meta, mlen);
+    nc_up(nc, 22, &b, "nc-self", 7, meta, mlen);
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
     {   uint8_t pnl=0; const char *pn = dart_node_core_peer_name(nc, 11, &pnl);
         ST_CHECK(pn && pnl==7 && strcmp(pn,"nc-self")==0,
                  "node-core: peer name learned from announce (%s)", pn?pn:"?"); }
     /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
-    {   uint8_t nmeta[64]; uint16_t nlen; uint8_t pnl=0; const char *pn;
-        nlen = dart_meta_build(tr, nmeta, sizeof nmeta, 1200, 0, NULL, NULL, 0);
-        nc_up(nc, 11, &a, nmeta, nlen);     /* known-peer update, no name */
+    {   uint8_t pnl=0; const char *pn;
+        nc_up(nc, 11, &a, NULL, 0, meta, mlen);      /* known-peer update, no name in the event */
         pn = dart_node_core_peer_name(nc, 11, &pnl);
         ST_CHECK(pn && strcmp(pn,"unknown-peer")==0,
                  "node-core: nameless announce -> unknown-peer (%s)", pn?pn:"(null)");
-        nc_up(nc, 11, &a, meta, mlen);      /* restore the real name */
+        nc_up(nc, 11, &a, "nc-self", 7, meta, mlen); /* restore the real name */
     }
     ST_CHECK(dart_node_core_resolve(nc,11,&d) && !d.is_group && d.port==5001 && d.ip[3]==1,
              "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
@@ -980,7 +979,7 @@ static void node_core_checks(void){
 
     /* 3. same id returns -> RESUME re-fires PEER_UP, no new slot */
     nc_up_n=0;
-    nc_up(nc, 11, &a, meta, mlen);
+    nc_up(nc, 11, &a, "nc-self", 7, meta, mlen);
     ST_CHECK(nc_up_n==1 && nc_up_id==11, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* 4. GONE frees the peer: one down, no longer resolves */

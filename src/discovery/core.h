@@ -15,9 +15,13 @@ extern "C" {
 #define DART_DISCOVERY_PROTO_VERSION 3     /* v3: versioned meta blob, u16 meta_len */
 #endif
 
-#define DART_DISCOVERY_META_MAX 64   /* default per-peer meta capacity (cfg.meta_capacity overrides) */
-/* fixed header through self_ip, then [u32 meta_version][u16 meta_len][meta...] */
-#define DART_DISCOVERY_META_OFF 49   /* DART_DISCOVERY_HDR_LEN(43) + 4 (version) + 2 (len) */
+#define DART_DISCOVERY_META_MAX 64   /* default per-peer OVERLAY capacity (cfg.meta_capacity overrides) */
+#define DART_DISCOVERY_NAME_MAX 32   /* max advertised peer-name bytes (blob's discovery section) */
+/* Fixed header (magic, ver, flags, domain, uuid) is sent EVERY announce, then
+ * [u32 meta_version][u16 meta_len][meta...]. The meta blob = [discovery section: locator +
+ * name][opaque overlay]: the locator + name moved out of the per-announce header into the
+ * on-change blob so steady-state announces stay small (cached on the other side). */
+#define DART_DISCOVERY_META_OFF 30   /* HDR_LEN(24) + 4 (version) + 2 (len) */
 /* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_capacity */
 #define DART_DISCOVERY_WIRE_MAX 128
 
@@ -38,10 +42,10 @@ typedef enum {
  * carries an opaque meta blob and knows nothing of the overlay (transport/node), so it
  * has its own event type rather than sharing one. The node translates these into its
  * app-facing DartEvent.
- *   DART_DISCOVERY_PEER_UP      reachable at .addr; .meta/.meta_len is the opaque blob
- *                               (NULL if none, valid only for the call). Re-fires on a
- *                               known peer's addr/meta change and when a DROPPED peer
- *                               returns under the SAME .peer, so the IO layer can resume.
+ *   DART_DISCOVERY_PEER_UP      reachable at .addr; .name is the advertised peer name and
+ *                               .meta/.meta_len the opaque overlay (NULL if none, valid only
+ *                               for the call). Re-fires on a known peer's addr/meta change and
+ *                               when a DROPPED peer returns under the SAME .peer (resume).
  *   DART_DISCOVERY_PEER_DOWN    going down; .reason (DROP keep / GONE freed). .peer is a
  *                               local handle, stable across a DROP/return, freed on GONE.
  *   DART_DISCOVERY_PEER_REFUSED table full of ACTIVE peers: a new peer at .addr was
@@ -58,7 +62,9 @@ typedef struct {
     uint32_t                 peer;     /* local peer id (UP / DOWN) */
     DartDiscoveryAddr        addr;     /* UP / REFUSED: advertised locator */
     DartDiscoveryDownReason  reason;   /* DOWN: DROP vs GONE */
-    const uint8_t           *meta;     /* UP: opaque announce blob (NULL if none) */
+    const char              *name;     /* UP: advertised peer name (NUL-terminated; "" if none) */
+    uint8_t                  name_len;
+    const uint8_t           *meta;     /* UP: opaque overlay blob (NULL if none) */
     uint16_t                 meta_len;
 } DartDiscoveryEvent;
 typedef void (*DartDiscoveryEventFn)(const DartDiscoveryEvent *ev);
@@ -72,10 +78,15 @@ typedef struct {
     uint32_t announce_interval_us;   /* re-announce interval */
     uint32_t peer_timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const uint8_t *meta;    /* opaque versioned blob; the INITIAL value (dart_discovery_set_meta
-                               updates it at runtime). Must stay valid. <= meta_capacity */
+    const char *name;       /* advertised peer name (goes in the blob's discovery section);
+                               NULL = none. Copied at init, so it need not outlive the call. */
+    uint8_t  name_len;
+    const uint8_t *meta;    /* opaque OVERLAY blob (the higher layer's data, e.g. transport
+                               frag/interest); discovery carries it after its own section. The
+                               INITIAL value (dart_discovery_set_meta updates it). Must stay
+                               valid. <= meta_capacity */
     uint16_t meta_len;
-    uint16_t meta_capacity;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
+    uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
 } DartDiscoveryConfig;

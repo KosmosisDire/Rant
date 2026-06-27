@@ -69,10 +69,7 @@ typedef struct {
     DartState           *transport;    /* the peers are wired into this (sans-IO) */
     uint16_t              max_peers;     /* peer-table capacity */
     uint16_t              n_channels;    /* sizes the announce-blob buffer */
-    uint16_t              frag_size;     /* our UDP fragment size, baked into the announce blob */
-    const char           *name;          /* our human-readable node name, baked into the announce
-                                            blob (copied in; clamped to DART_NODE_NAME_MAX) */
-    uint8_t               name_len;
+    uint16_t              frag_size;     /* our UDP fragment size, baked into the overlay */
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
     i_DartNodeIsLocalFn is_local;      /* runtime route probe (optional) */

@@ -50,9 +50,13 @@ extern "C" {
 #define DART_DISCOVERY_PROTO_VERSION 3     /* v3: versioned meta blob, u16 meta_len */
 #endif
 
-#define DART_DISCOVERY_META_MAX 64   /* default per-peer meta capacity (cfg.meta_capacity overrides) */
-/* fixed header through self_ip, then [u32 meta_version][u16 meta_len][meta...] */
-#define DART_DISCOVERY_META_OFF 49   /* DART_DISCOVERY_HDR_LEN(43) + 4 (version) + 2 (len) */
+#define DART_DISCOVERY_META_MAX 64   /* default per-peer OVERLAY capacity (cfg.meta_capacity overrides) */
+#define DART_DISCOVERY_NAME_MAX 32   /* max advertised peer-name bytes (blob's discovery section) */
+/* Fixed header (magic, ver, flags, domain, uuid) is sent EVERY announce, then
+ * [u32 meta_version][u16 meta_len][meta...]. The meta blob = [discovery section: locator +
+ * name][opaque overlay]: the locator + name moved out of the per-announce header into the
+ * on-change blob so steady-state announces stay small (cached on the other side). */
+#define DART_DISCOVERY_META_OFF 30   /* HDR_LEN(24) + 4 (version) + 2 (len) */
 /* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_capacity */
 #define DART_DISCOVERY_WIRE_MAX 128
 
@@ -73,10 +77,10 @@ typedef enum {
  * carries an opaque meta blob and knows nothing of the overlay (transport/node), so it
  * has its own event type rather than sharing one. The node translates these into its
  * app-facing DartEvent.
- *   DART_DISCOVERY_PEER_UP      reachable at .addr; .meta/.meta_len is the opaque blob
- *                               (NULL if none, valid only for the call). Re-fires on a
- *                               known peer's addr/meta change and when a DROPPED peer
- *                               returns under the SAME .peer, so the IO layer can resume.
+ *   DART_DISCOVERY_PEER_UP      reachable at .addr; .name is the advertised peer name and
+ *                               .meta/.meta_len the opaque overlay (NULL if none, valid only
+ *                               for the call). Re-fires on a known peer's addr/meta change and
+ *                               when a DROPPED peer returns under the SAME .peer (resume).
  *   DART_DISCOVERY_PEER_DOWN    going down; .reason (DROP keep / GONE freed). .peer is a
  *                               local handle, stable across a DROP/return, freed on GONE.
  *   DART_DISCOVERY_PEER_REFUSED table full of ACTIVE peers: a new peer at .addr was
@@ -93,7 +97,9 @@ typedef struct {
     uint32_t                 peer;     /* local peer id (UP / DOWN) */
     DartDiscoveryAddr        addr;     /* UP / REFUSED: advertised locator */
     DartDiscoveryDownReason  reason;   /* DOWN: DROP vs GONE */
-    const uint8_t           *meta;     /* UP: opaque announce blob (NULL if none) */
+    const char              *name;     /* UP: advertised peer name (NUL-terminated; "" if none) */
+    uint8_t                  name_len;
+    const uint8_t           *meta;     /* UP: opaque overlay blob (NULL if none) */
     uint16_t                 meta_len;
 } DartDiscoveryEvent;
 typedef void (*DartDiscoveryEventFn)(const DartDiscoveryEvent *ev);
@@ -107,10 +113,15 @@ typedef struct {
     uint32_t announce_interval_us;   /* re-announce interval */
     uint32_t peer_timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const uint8_t *meta;    /* opaque versioned blob; the INITIAL value (dart_discovery_set_meta
-                               updates it at runtime). Must stay valid. <= meta_capacity */
+    const char *name;       /* advertised peer name (goes in the blob's discovery section);
+                               NULL = none. Copied at init, so it need not outlive the call. */
+    uint8_t  name_len;
+    const uint8_t *meta;    /* opaque OVERLAY blob (the higher layer's data, e.g. transport
+                               frag/interest); discovery carries it after its own section. The
+                               INITIAL value (dart_discovery_set_meta updates it). Must stay
+                               valid. <= meta_capacity */
     uint16_t meta_len;
-    uint16_t meta_capacity;      /* per-peer meta buffer capacity; 0 => DART_DISCOVERY_META_MAX */
+    uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
 } DartDiscoveryConfig;
@@ -617,33 +628,26 @@ size_t    dart_build_interest(DartState *st, void *out, size_t cap);
 void      dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob, size_t len);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, its SHM capability + host uuid,
- * its human-readable name, and its interest list. The node carries it in announces;
- * a bring-your-own-IO caller builds and parses the identical blob. Layout:
- *   v2: ['D','N',2, frag_lo, frag_hi,                                       <interest>]
- *   v3: ['D','N',3, frag_lo, frag_hi, shm, host[16],                        <interest>]
- *   v4: ['D','N',4, frag_lo, frag_hi,              namelen, name[namelen],  <interest>]
- *   v5: ['D','N',5, frag_lo, frag_hi, shm, host[16], namelen, name[namelen],<interest>]
- * frag sits at [3..4] in every version. v4/v5 add the node name (v2/v3 are the older,
- * nameless formats, still decoded for interop). The build writes v5 when DART_SHM is
- * compiled, v4 otherwise; the readers are version-aware. */
+ * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
+ * interest list: the transport's OVERLAY, carried opaquely inside discovery's announce blob
+ * (the node name lives in discovery's own section, not here). Layout:
+ *   v6: ['D','N',6, frag_lo, frag_hi,                <interest>]
+ *   v7: ['D','N',7, frag_lo, frag_hi, shm, host[16], <interest>]
+ * frag sits at [3..4] in both; v7 adds the SHM byte + host. dart_meta_build writes v7 when
+ * DART_SHM is compiled, v6 otherwise. */
 
-/* Bytes to reserve for our blob: prefix + name + the largest interest list n_channels
- * can produce, capped to one (IP-fragmentable) UDP datagram. Size the announce buffer here. */
+/* Bytes to reserve for the overlay: prefix + the largest interest list n_channels can
+ * produce, capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_capacity. */
 uint16_t  dart_meta_capacity(uint16_t n_channels);
-/* Build our blob into out[cap] (cap >= dart_meta_capacity): the version prefix
- * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), the node name
- * (clamped to DART_NODE_NAME_MAX), then st's interest list. Returns total bytes. host
- * may be NULL when !shm_capable; name may be NULL (name_len then 0). */
+/* Build the overlay into out[cap] (cap >= dart_meta_capacity): the version prefix (frag_size,
+ * plus shm_capable + host[16] when DART_SHM is compiled), then st's interest list. Returns
+ * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
+ * discovery's own section of the announce blob. */
 uint16_t  dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
-                       const char *name, uint8_t name_len);
-/* A peer's advertised UDP fragment size from its blob; 0 if the blob is malformed. */
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+/* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
 uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
-/* A peer's advertised node name (v4/v5 blobs): pointer into meta + its length via
- * *out_len; NULL + *out_len 0 if the blob is nameless or malformed. Not NUL-terminated. */
-const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len);
-/* Locate the interest sub-blob inside a peer's blob; NULL + *out_len 0 if absent. */
+/* Locate the interest sub-blob inside the overlay; NULL + *out_len 0 if absent. */
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
@@ -863,10 +867,7 @@ typedef struct {
     DartState           *transport;    /* the peers are wired into this (sans-IO) */
     uint16_t              max_peers;     /* peer-table capacity */
     uint16_t              n_channels;    /* sizes the announce-blob buffer */
-    uint16_t              frag_size;     /* our UDP fragment size, baked into the announce blob */
-    const char           *name;          /* our human-readable node name, baked into the announce
-                                            blob (copied in; clamped to DART_NODE_NAME_MAX) */
-    uint8_t               name_len;
+    uint16_t              frag_size;     /* our UDP fragment size, baked into the overlay */
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
     i_DartNodeIsLocalFn is_local;      /* runtime route probe (optional) */
@@ -1411,7 +1412,9 @@ static inline void *dart_take(i_DartBump *b, size_t n, size_t align){
 /* sans-IO peer-discovery core. See dart_discovery.h. */
 #include <string.h>
 
-#define DART_DISCOVERY_HDR_LEN 43
+#define DART_DISCOVERY_HDR_LEN 24            /* magic(4) ver(1) flags(1) domain(2) uuid(16) */
+/* the blob's discovery section: [u16 data_port][u8 self_ip_len][self_ip..][u8 name_len][name..] */
+#define DART_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + DART_DISCOVERY_NAME_MAX)
 #define DART_DISCOVERY_FLAG_BYE 0x01
 #define DART_DISCOVERY_FLAG_REQ 0x02         /* solicit: recipients announce back now */
 #define DART_DISCOVERY_BLOB_RESEND 3u        /* announces that carry the full blob after a change */
@@ -1425,9 +1428,11 @@ struct i_DartDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
-    uint8_t *meta;          /* -> meta_pool slot, capacity st->meta_capacity */
+    uint8_t *meta;          /* -> meta_pool slot (the OVERLAY only), capacity st->meta_capacity */
     uint16_t meta_len;
     uint32_t meta_version;  /* version of the blob we hold (0 = none yet) */
+    char     name[DART_DISCOVERY_NAME_MAX + 1];  /* advertised peer name, parsed from the blob */
+    uint8_t  name_len;
     uint8_t  reply_due;     /* owes a unicast announce+blob (this peer solicited us) */
     uint8_t  solicit_due;   /* owes a unicast REQ (re-fetch: peer's version is ahead) */
 };
@@ -1443,23 +1448,27 @@ struct DartDiscoveryState {
     uint16_t      meta_capacity;       /* per-peer meta buffer capacity */
     uint8_t      *meta_pool;      /* [cap_peers * meta_capacity] */
     /* our outgoing blob + monotonic version */
-    const uint8_t *self_meta;
+    const uint8_t *self_meta;       /* our OVERLAY (the node's frag/interest); discovery carries it */
     uint16_t      self_meta_len;
     uint32_t      self_meta_version;
+    char          self_name[DART_DISCOVERY_NAME_MAX + 1];  /* our advertised name (copied from cfg) */
+    uint8_t       self_name_len;
     uint16_t      self_blob_resend; /* announces remaining that carry the full blob */
     uint16_t      targeted_cursor;  /* round-robin over peers for poll_targeted */
     i_DartDiscoveryPeer  *peers;
 };
 
-/* peer events out: build the DartDiscoveryEvent and hand it to the one on_event sink. */
-static void dart__disc_fire_up(DartDiscoveryState *st, uint32_t id, const DartDiscoveryAddr *addr,
-                               const uint8_t *meta, uint16_t meta_len){
+/* peer events out: build the DartDiscoveryEvent and hand it to the one on_event sink.
+ * peer_up surfaces the parsed name + the opaque overlay we hold for the peer. */
+static void dart__disc_fire_up(DartDiscoveryState *st, const i_DartDiscoveryPeer *peer,
+                               const DartDiscoveryAddr *addr){
     DartDiscoveryEvent ev;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind = DART_DISCOVERY_PEER_UP; ev.user = st->cfg.user; ev.peer = id;
+    ev.kind = DART_DISCOVERY_PEER_UP; ev.user = st->cfg.user; ev.peer = peer->local_id;
     if (addr) ev.addr = *addr;
-    ev.meta = meta; ev.meta_len = meta_len;
+    ev.name = peer->name; ev.name_len = peer->name_len;
+    ev.meta = peer->meta_len ? peer->meta : NULL; ev.meta_len = peer->meta_len;
     st->cfg.on_event(&ev);
 }
 static void dart__disc_fire_down(DartDiscoveryState *st, uint32_t id, DartDiscoveryDownReason reason){
@@ -1512,7 +1521,8 @@ void dart_discovery_config_defaults(DartDiscoveryConfig *cfg){
 
 uint32_t dart_discovery_wire_size(uint16_t meta_capacity){
     uint32_t cap = meta_capacity ? meta_capacity : DART_DISCOVERY_META_MAX;
-    uint32_t w = (uint32_t)DART_DISCOVERY_META_OFF + cap;
+    /* the wire blob = discovery section + overlay, so the scratch buffer must hold both */
+    uint32_t w = (uint32_t)DART_DISCOVERY_META_OFF + DART_DISCOVERY_DISC_MAX + cap;
     return w < DART_DISCOVERY_WIRE_MAX ? DART_DISCOVERY_WIRE_MAX : w;
 }
 
@@ -1563,6 +1573,9 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     st->self_meta_len     = cfg->meta_len;
     st->self_meta_version = 1;
     st->self_blob_resend  = DART_DISCOVERY_BLOB_RESEND;
+    {   uint8_t nl = cfg->name_len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : cfg->name_len;
+        if (cfg->name && nl) memcpy(st->self_name, cfg->name, nl);
+        st->self_name[nl] = '\0'; st->self_name_len = nl; }
     return st;
 }
 
@@ -1648,27 +1661,34 @@ static void dart_discovery_evict_endpoint(DartDiscoveryState *st, const DartDisc
     }
 }
 
-/* build an announce/solicit/bye into p. with_blob includes the current meta blob;
- * every datagram carries the meta version so a blob-less announce still signals change. */
+/* build an announce/solicit/bye into p. with_blob includes the meta blob =
+ * [discovery section: locator + name][opaque overlay]; every datagram carries the meta
+ * version so a blob-less announce still signals change. The fixed header is the small part. */
 static size_t dart_discovery_build(DartDiscoveryState *st, uint8_t flags, int with_blob,
                                    uint8_t *p, size_t cap){
-    uint16_t meta_len = with_blob ? st->self_meta_len : 0;
-    size_t need = (size_t)DART_DISCOVERY_META_OFF + meta_len;
-    if (cap < need) return 0;
+    uint16_t meta_len = 0;
+    if (cap < (size_t)DART_DISCOVERY_META_OFF) return 0;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
     p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
     p[5]=flags;
     dart_le_w16(p+6, st->cfg.domain_id);
     memcpy(p+8, st->cfg.uuid, 16);
-    dart_le_w16(p+24, st->cfg.data_port);
-    p[26]= st->cfg.self_ip_len;
-    memset(p+27, 0, 16);
-    if (st->cfg.self_ip_len==4 || st->cfg.self_ip_len==16)
-        memcpy(p+27, st->cfg.self_ip, st->cfg.self_ip_len);
+    if (with_blob){
+        uint8_t *b = p + DART_DISCOVERY_META_OFF, *bend = p + cap;
+        uint8_t ipl = (st->cfg.self_ip_len==4 || st->cfg.self_ip_len==16) ? st->cfg.self_ip_len : 0;
+        size_t need = 2u + 1u + (size_t)ipl + 1u + st->self_name_len + st->self_meta_len;
+        if ((size_t)(bend - b) < need) return 0;
+        dart_le_w16(b, st->cfg.data_port); b += 2;            /* discovery section: locator */
+        *b++ = ipl;
+        if (ipl){ memcpy(b, st->cfg.self_ip, ipl); b += ipl; }
+        *b++ = st->self_name_len;                             /* ... + name */
+        if (st->self_name_len){ memcpy(b, st->self_name, st->self_name_len); b += st->self_name_len; }
+        if (st->self_meta_len){ memcpy(b, st->self_meta, st->self_meta_len); b += st->self_meta_len; }  /* overlay */
+        meta_len = (uint16_t)(b - (p + DART_DISCOVERY_META_OFF));
+    }
     dart_le_w32(p+DART_DISCOVERY_HDR_LEN, st->self_meta_version);
     dart_le_w16(p+DART_DISCOVERY_HDR_LEN+4, meta_len);
-    if (meta_len) memcpy(p+DART_DISCOVERY_META_OFF, st->self_meta, meta_len);
-    return need;
+    return (size_t)DART_DISCOVERY_META_OFF + meta_len;
 }
 
 static void dart_discovery_addr_of(const i_DartDiscoveryPeer *peer, DartDiscoveryAddr *out){
@@ -1681,10 +1701,13 @@ static void dart_discovery_addr_of(const i_DartDiscoveryPeer *peer, DartDiscover
 void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                        const void *datagram, size_t len, uint64_t now){
     const uint8_t *p = (const uint8_t *)datagram;
-    uint8_t flags, self_ip_len; uint16_t meta_len, port; uint32_t meta_version;
-    const uint8_t *uuid, *self_ip, *meta;
+    uint8_t flags; uint16_t meta_len; uint32_t meta_version;
+    const uint8_t *uuid, *blob;
     DartDiscoveryAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
     i_DartDiscoveryPeer *peer;
+    /* the blob's discovery section (valid only when have_disc): locator + name, then overlay */
+    int have_disc=0; uint16_t disc_port=0, overlay_len=0; uint8_t disc_ip_len=0, disc_name_len=0;
+    const uint8_t *disc_ip=NULL, *overlay=NULL; const char *disc_name=NULL;
 
     if (len < (size_t)DART_DISCOVERY_META_OFF) return;
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
@@ -1692,22 +1715,29 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (dart_le_r16(p+6) != st->cfg.domain_id) return;
     meta_version = dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
     meta_len = dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
-    if (meta_len > st->meta_capacity || (size_t)DART_DISCOVERY_META_OFF + meta_len > len) return;
-    meta = p + DART_DISCOVERY_META_OFF;
+    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len) return;
+    blob = p + DART_DISCOVERY_META_OFF;
 
     uuid = p+8;
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
-
     flags = p[5];
-    port  = dart_le_r16(p+24);
-    self_ip_len  = p[26];
-    self_ip   = p+27;
 
-    memset(&addr, 0, sizeof addr);
-    if (self_ip_len==4 || self_ip_len==16){ addr.ip_len = self_ip_len; memcpy(addr.ip, self_ip, self_ip_len); }
-    else if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
-    else return;
-    addr.port = port;
+    /* parse the blob's discovery section (locator + name); the remainder is the opaque
+       overlay we hand up. Fully bounds-checked: a malformed blob drops the datagram. */
+    if (meta_len){
+        const uint8_t *b = blob, *bend = blob + meta_len;
+        if (b + 3 > bend) return;                          /* port(2) + ip_len(1) */
+        disc_port = dart_le_r16(b); b += 2;
+        disc_ip_len = *b++;
+        if (disc_ip_len==4 || disc_ip_len==16){ if (b + disc_ip_len > bend) return; disc_ip = b; b += disc_ip_len; }
+        else disc_ip_len = 0;
+        if (b + 1 > bend) return;                          /* name_len(1) */
+        disc_name_len = *b++;
+        if (disc_name_len){ if (b + disc_name_len > bend) return; disc_name = (const char*)b; b += disc_name_len; }
+        overlay = b; overlay_len = (uint16_t)(bend - b);
+        if (overlay_len > st->meta_capacity) return;       /* overlay must fit the per-peer buffer */
+        have_disc = 1;
+    }
 
     idx = dart_discovery_find(st, uuid);
 
@@ -1719,6 +1749,22 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         }
         return;
     }
+
+    /* address: from the blob's locator when present (self_ip override, else the datagram
+       source); otherwise the cached locator (it is static between blob updates), or the
+       datagram source on first contact with no blob. */
+    memset(&addr, 0, sizeof addr);
+    if (have_disc){
+        if (disc_ip_len){ addr.ip_len = disc_ip_len; memcpy(addr.ip, disc_ip, disc_ip_len); }
+        else if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
+        else return;
+        addr.port = disc_port;
+    } else if (idx >= 0){
+        addr.ip_len = st->peers[idx].ip_len; addr.port = st->peers[idx].port;
+        memcpy(addr.ip, st->peers[idx].ip, 16);
+    } else if (src_ip && (src_ip_len==4 || src_ip_len==16)){
+        addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len);   /* port unknown until the blob */
+    } else return;
 
     if (idx < 0){
         uint8_t *keep_meta;
@@ -1751,13 +1797,16 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         memcpy(peer->ip, addr.ip, 16);
     }
 
-    /* meta: a newer version with the blob present updates our copy; a newer version
-       without the blob (a steady-state version-only announce) means we fell behind,
+    /* meta: a newer version with the blob present updates our stored overlay + name; a newer
+       version without the blob (a steady-state version-only announce) means we fell behind,
        so re-fetch via a targeted solicit. */
-    if (meta_len){
+    if (have_disc){
         if (meta_version > peer->meta_version){
-            memcpy(peer->meta, meta, meta_len);
-            peer->meta_len = meta_len; peer->meta_version = meta_version;
+            uint8_t nl = disc_name_len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : disc_name_len;
+            if (overlay_len) memcpy(peer->meta, overlay, overlay_len);
+            peer->meta_len = overlay_len; peer->meta_version = meta_version;
+            if (disc_name && nl) memcpy(peer->name, disc_name, nl);
+            peer->name[nl] = '\0'; peer->name_len = nl;
             blob_changed = 1;
         }
         peer->solicit_due = 0;
@@ -1766,8 +1815,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     }
 
     if (first_contact || addr_changed || blob_changed || revived)
-        dart__disc_fire_up(st, peer->local_id, &addr,
-                           peer->meta_len ? peer->meta : NULL, peer->meta_len);
+        dart__disc_fire_up(st, peer, &addr);
 
     if ((flags & DART_DISCOVERY_FLAG_REQ) && st->started)
         peer->reply_due = 1;   /* answer the solicit with a unicast announce + blob */
@@ -1812,7 +1860,11 @@ void dart_discovery_set_meta(DartDiscoveryState *st, const uint8_t *meta, uint16
 }
 
 void dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port){
-    if (st) st->cfg.data_port = port;
+    if (!st || st->cfg.data_port == port) return;
+    st->cfg.data_port = port;            /* the port now rides the blob's discovery section, so */
+    st->self_meta_version++;             /* bump the version + re-send so peers re-fetch it */
+    st->self_blob_resend = DART_DISCOVERY_BLOB_RESEND;
+    st->next_announce_us = 0;
 }
 
 size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
@@ -1853,8 +1905,7 @@ void dart_discovery_replay_peers(DartDiscoveryState *st){
         DartDiscoveryAddr addr;
         if (!peer->used || peer->dropped) continue;
         dart_discovery_addr_of(peer, &addr);
-        dart__disc_fire_up(st, peer->local_id, &addr,
-                           peer->meta_len ? peer->meta : NULL, peer->meta_len);
+        dart__disc_fire_up(st, peer, &addr);
     }
 }
 
@@ -4625,17 +4676,14 @@ static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
 static uint16_t dart__meta_base(const uint8_t *meta){
     return (meta[2]==7) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
-static int dart__meta_named(const uint8_t *meta){ return meta[2] >= 4; }
-
 uint16_t dart_meta_capacity(uint16_t n_channels){
-    size_t cap = (size_t)DART__META_BASE + 1u + DART_NODE_NAME_MAX + dart_interest_max(n_channels);
+    size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_channels);  /* overlay: no name (it's discovery's) */
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
 uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
-                         const char *name, uint8_t name_len){
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
     size_t interest_len; uint16_t off = DART__META_BASE;
     out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
@@ -4645,12 +4693,7 @@ uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
 #else
     (void)shm_capable; (void)host;
 #endif
-    if (!name) name_len = 0;
-    if (name_len > DART_NODE_NAME_MAX) name_len = DART_NODE_NAME_MAX;
-    out[off] = name_len;
-    if (name_len) memcpy(out + off + 1, name, name_len);
-    off = (uint16_t)(off + 1u + name_len);
-    interest_len = dart_build_interest(st, out + off, cap - off);
+    interest_len = dart_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     return (uint16_t)(off + interest_len);
 }
 
@@ -4659,27 +4702,11 @@ uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
     return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
 }
 
-const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len){
-    uint16_t base; uint8_t nl;
-    if (out_len) *out_len = 0;
-    if (!dart__meta_ok(meta, meta_len) || !dart__meta_named(meta)) return NULL;
-    base = dart__meta_base(meta);
-    if (meta_len < (uint16_t)(base + 1u)) return NULL;
-    nl = meta[base];
-    if (meta_len < (uint16_t)(base + 1u + nl)) return NULL;
-    if (out_len) *out_len = nl;
-    return nl ? (const char*)(meta + base + 1) : NULL;
-}
-
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len){
     uint16_t off;
     *out_len = 0;
     if (!dart__meta_ok(meta, meta_len)) return NULL;
-    off = dart__meta_base(meta);
-    if (dart__meta_named(meta)){     /* skip [namelen][name] before the interest list */
-        if (meta_len < (uint16_t)(off + 1u)) return NULL;
-        off = (uint16_t)(off + 1u + meta[off]);
-    }
+    off = dart__meta_base(meta);          /* interest follows the base prefix (no name in the overlay) */
     if (meta_len < off) return NULL;
     *out_len = (size_t)(meta_len - off);
     return meta + off;
@@ -5083,9 +5110,7 @@ struct i_DartNodeCore {
     uint8_t              *meta_buf;    /* our outgoing discovery announce blob */
     uint16_t              meta_cap;
     uint16_t              meta_len;
-    uint16_t              frag_size;   /* baked into the blob */
-    char                  name[DART_NODE_NAME_MAX + 1];  /* our node name, baked into the blob */
-    uint8_t               name_len;
+    uint16_t              frag_size;   /* baked into the overlay */
 };
 
 /* arena layout: the core struct, the peer table, then the announce-blob buffer. One
@@ -5125,10 +5150,6 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     c->meta_buf      = meta;
     c->meta_cap      = dart_meta_capacity(cfg->n_channels);
     c->frag_size     = cfg->frag_size;
-    {   uint8_t nl = cfg->name_len;
-        if (nl > DART_NODE_NAME_MAX) nl = DART_NODE_NAME_MAX;
-        if (cfg->name && nl) memcpy(c->name, cfg->name, nl);
-        c->name[nl] = '\0'; c->name_len = nl; }
     memset(peers, 0, (size_t)cfg->max_peers * sizeof(i_DartNodePeer));
     return c;
 }
@@ -5154,13 +5175,12 @@ i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_
     return c;
 }
 
-/* (Re)build our announce blob from the core's current fields. The codec lives in the
-   transport core; the OOB fields default to 0/zero in a non-SHM build, so the codec
-   just writes the v2 (non-SHM) prefix. */
+/* (Re)build our discovery OVERLAY (frag size + OOB host + interest) from the core's
+   current fields. The codec lives in the transport core; the OOB fields default to 0 in a
+   non-SHM build. The node NAME is not here: the runtime hands it to discovery directly. */
 uint16_t dart_node_core_build_meta(i_DartNodeCore *c){
     c->meta_len = dart_meta_build(c->transport, c->meta_buf, c->meta_cap,
-                                  c->frag_size, c->oob_capable, c->oob_host,
-                                  c->name, c->name_len);
+                                  c->frag_size, c->oob_capable, c->oob_host);
     return c->meta_len;
 }
 
@@ -5189,16 +5209,14 @@ static void dart__core_set_peer_oob(i_DartNodeCore *c, uint32_t id, const uint8_
 #define dart__core_set_peer_oob(c, id, meta, meta_len) ((void)0)
 #endif
 
-/* copy the peer's advertised name out of its (call-lifetime) announce blob into the
- * peer slot, so DartMsg.sender_name can point at stable storage. A peer that somehow
- * advertised no name gets "unknown-peer", so a slot is never empty-named. */
-static void dart__core_set_peer_name(i_DartNodePeer *p, const uint8_t *meta, uint16_t meta_len){
-    uint8_t nl = 0;
-    const char *nm = dart_meta_name(meta, meta_len, &nl);
-    if (!nm || nl == 0){ nm = "unknown-peer"; nl = 12; }
-    if (nl > DART_NODE_NAME_MAX) nl = DART_NODE_NAME_MAX;
-    memcpy(p->name, nm, nl);
-    p->name[nl] = '\0'; p->name_len = nl;
+/* copy the peer's advertised name (from the discovery event) into the peer slot, so
+ * DartMsg.sender_name can point at stable storage. A peer that somehow advertised no name
+ * gets "unknown-peer", so a slot is never empty-named. */
+static void dart__core_set_peer_name(i_DartNodePeer *p, const char *name, uint8_t name_len){
+    if (!name || name_len == 0){ name = "unknown-peer"; name_len = 12; }
+    if (name_len > DART_NODE_NAME_MAX) name_len = DART_NODE_NAME_MAX;
+    memcpy(p->name, name, name_len);
+    p->name[name_len] = '\0'; p->name_len = name_len;
 }
 
 static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
@@ -5225,7 +5243,7 @@ static void dart__core_fire_interest(i_DartNodeCore *c, uint32_t id){
 }
 
 static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscoveryAddr *addr,
-                            const uint8_t *meta, uint16_t meta_len){
+                            const char *name, uint8_t name_len, const uint8_t *meta, uint16_t meta_len){
     uint16_t i; int slot = -1;
     uint16_t frag = dart_meta_frag(meta, meta_len);
     size_t interest_len = 0; const uint8_t *interest = dart_meta_interest(meta, meta_len, &interest_len);
@@ -5233,7 +5251,7 @@ static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscove
         if (c->peers[i].used && c->peers[i].id==id){      /* known peer: addr/interest update */
             memcpy(c->peers[i].ip, addr->ip, 16);
             c->peers[i].ip_len = addr->ip_len; c->peers[i].port = addr->port;
-            dart__core_set_peer_name(&c->peers[i], meta, meta_len);
+            dart__core_set_peer_name(&c->peers[i], name, name_len);
             dart_peer_set_frag(c->transport, id, frag);
             dart__core_set_peer_oob(c, id, meta, meta_len);
             if (interest){ dart_apply_peer_interest(c->transport, id, interest, interest_len);
@@ -5251,7 +5269,7 @@ static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscove
     c->peers[slot].used=1; c->peers[slot].id=id;
     memcpy(c->peers[slot].ip, addr->ip, 16);
     c->peers[slot].ip_len=addr->ip_len; c->peers[slot].port=addr->port;
-    dart__core_set_peer_name(&c->peers[slot], meta, meta_len);
+    dart__core_set_peer_name(&c->peers[slot], name, name_len);
     /* the announce blob carries the peer's frag size + pub/sub interest list */
     {   int local = (addr->ip_len==4) && c->is_local && c->is_local(c->is_local_user, addr->ip, addr->ip_len);
         dart_peer_add(c->transport, id, local, frag); }
@@ -5289,7 +5307,7 @@ void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
     i_DartNodeCore *c = (i_DartNodeCore*)ev->user;
     switch (ev->kind){
         case DART_DISCOVERY_PEER_UP:
-            dart__core_peer_up(c, ev->peer, &ev->addr, ev->meta, ev->meta_len);
+            dart__core_peer_up(c, ev->peer, &ev->addr, ev->name, ev->name_len, ev->meta, ev->meta_len);
             break;
         case DART_DISCOVERY_PEER_DOWN:
             dart__core_peer_down(c, ev->peer, ev->reason);
@@ -5739,6 +5757,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     uint16_t max_peers, max_channels;
     uint8_t *base; void *arena; int owns; size_t need, arena_size, ctrl_end, ctrl_cap;
     DartNode *n; i_DartSock fd; uint16_t local_port;
+    char node_name[DART_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;   /* name is discovery-level */
 
     if (!mem || mem->claimed) return NULL;             /* required, and one allocator per node */
     memset(&o, 0, sizeof o);
@@ -5854,11 +5873,11 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     /* sans-IO node core: owns the peer table (id<->address) and the discovery->
        transport lifecycle; the runtime drives it and resolves addresses for IO. */
-    {   i_DartNodeCoreConfig cc; char name_buf[DART_NODE_NAME_MAX + 1];
+    node_name_len = dart__node_name(name, node_name);   /* handed to discovery (the name's owner) below */
+    {   i_DartNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
         cc.transport = n->transport; cc.max_peers = max_peers;
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
-        cc.name = name_buf; cc.name_len = dart__node_name(name, name_buf);
         cc.on_event = dart__node_on_event; cc.user = n;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM
@@ -5888,8 +5907,10 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     dc.discovery.on_event = dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;
-    /* the core owns + builds our announce blob (frag size + OOB host + interest); we
-       just hand its bytes to discovery so peers reassemble and match from discovery */
+    dc.discovery.name     = node_name;        /* name is discovery-owned (its own blob section) */
+    dc.discovery.name_len = node_name_len;
+    /* the core builds our OVERLAY (frag size + OOB host + interest); discovery wraps it in
+       its blob (after the locator + name) so peers reassemble and match from discovery */
     dart_node_core_build_meta(n->core);
     dc.discovery.meta = dart_node_core_meta(n->core, &dc.discovery.meta_len);
     n->discovery = dart_discovery_rt_open(blocks.discovery, blocks.discovery_bytes, &dc);

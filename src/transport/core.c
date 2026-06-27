@@ -673,17 +673,14 @@ static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
 static uint16_t dart__meta_base(const uint8_t *meta){
     return (meta[2]==7) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
-static int dart__meta_named(const uint8_t *meta){ return meta[2] >= 4; }
-
 uint16_t dart_meta_capacity(uint16_t n_channels){
-    size_t cap = (size_t)DART__META_BASE + 1u + DART_NODE_NAME_MAX + dart_interest_max(n_channels);
+    size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_channels);  /* overlay: no name (it's discovery's) */
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
 uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
-                         const char *name, uint8_t name_len){
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
     size_t interest_len; uint16_t off = DART__META_BASE;
     out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
@@ -693,12 +690,7 @@ uint16_t dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
 #else
     (void)shm_capable; (void)host;
 #endif
-    if (!name) name_len = 0;
-    if (name_len > DART_NODE_NAME_MAX) name_len = DART_NODE_NAME_MAX;
-    out[off] = name_len;
-    if (name_len) memcpy(out + off + 1, name, name_len);
-    off = (uint16_t)(off + 1u + name_len);
-    interest_len = dart_build_interest(st, out + off, cap - off);
+    interest_len = dart_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     return (uint16_t)(off + interest_len);
 }
 
@@ -707,27 +699,11 @@ uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
     return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
 }
 
-const char *dart_meta_name(const uint8_t *meta, uint16_t meta_len, uint8_t *out_len){
-    uint16_t base; uint8_t nl;
-    if (out_len) *out_len = 0;
-    if (!dart__meta_ok(meta, meta_len) || !dart__meta_named(meta)) return NULL;
-    base = dart__meta_base(meta);
-    if (meta_len < (uint16_t)(base + 1u)) return NULL;
-    nl = meta[base];
-    if (meta_len < (uint16_t)(base + 1u + nl)) return NULL;
-    if (out_len) *out_len = nl;
-    return nl ? (const char*)(meta + base + 1) : NULL;
-}
-
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len){
     uint16_t off;
     *out_len = 0;
     if (!dart__meta_ok(meta, meta_len)) return NULL;
-    off = dart__meta_base(meta);
-    if (dart__meta_named(meta)){     /* skip [namelen][name] before the interest list */
-        if (meta_len < (uint16_t)(off + 1u)) return NULL;
-        off = (uint16_t)(off + 1u + meta[off]);
-    }
+    off = dart__meta_base(meta);          /* interest follows the base prefix (no name in the overlay) */
     if (meta_len < off) return NULL;
     *out_len = (size_t)(meta_len - off);
     return meta + off;

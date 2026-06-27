@@ -395,6 +395,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     uint16_t max_peers, max_channels;
     uint8_t *base; void *arena; int owns; size_t need, arena_size, ctrl_end, ctrl_cap;
     DartNode *n; i_DartSock fd; uint16_t local_port;
+    char node_name[DART_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;   /* name is discovery-level */
 
     if (!mem || mem->claimed) return NULL;             /* required, and one allocator per node */
     memset(&o, 0, sizeof o);
@@ -510,11 +511,11 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     /* sans-IO node core: owns the peer table (id<->address) and the discovery->
        transport lifecycle; the runtime drives it and resolves addresses for IO. */
-    {   i_DartNodeCoreConfig cc; char name_buf[DART_NODE_NAME_MAX + 1];
+    node_name_len = dart__node_name(name, node_name);   /* handed to discovery (the name's owner) below */
+    {   i_DartNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
         cc.transport = n->transport; cc.max_peers = max_peers;
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
-        cc.name = name_buf; cc.name_len = dart__node_name(name, name_buf);
         cc.on_event = dart__node_on_event; cc.user = n;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM
@@ -544,8 +545,10 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     dc.discovery.on_event = dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;
-    /* the core owns + builds our announce blob (frag size + OOB host + interest); we
-       just hand its bytes to discovery so peers reassemble and match from discovery */
+    dc.discovery.name     = node_name;        /* name is discovery-owned (its own blob section) */
+    dc.discovery.name_len = node_name_len;
+    /* the core builds our OVERLAY (frag size + OOB host + interest); discovery wraps it in
+       its blob (after the locator + name) so peers reassemble and match from discovery */
     dart_node_core_build_meta(n->core);
     dc.discovery.meta = dart_node_core_meta(n->core, &dc.discovery.meta_len);
     n->discovery = dart_discovery_rt_open(blocks.discovery, blocks.discovery_bytes, &dc);
