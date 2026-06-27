@@ -3895,24 +3895,6 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
 }
 #endif
 
-/* effective node name into buf[DART_NODE_NAME_MAX+1]: the caller's (clamped), or an
- * auto-generated "node-XXXXXXXX" debug default (random suffix, pid fallback). Returns
- * its length. A node always has a name, so peers always have one to reference. */
-static uint8_t dart__node_name(const char *want, char *buf){
-    static const char hex[] = "0123456789abcdef";
-    uint32_t r; size_t i;
-    if (want && *want){
-        for (i=0; i<DART_NODE_NAME_MAX && want[i]; i++) buf[i] = want[i];
-        buf[i] = '\0';
-        return (uint8_t)i;
-    }
-    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
-    memcpy(buf, "node-", 5);
-    for (i=0; i<8; i++) buf[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
-    buf[13] = '\0';
-    return 13;
-}
-
 DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryNetConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_channels;
@@ -4035,7 +4017,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     /* sans-IO node core: drives the discovery->transport lifecycle and resolves addresses
        over the discovery core's peer table (bound below, once discovery exists). */
-    node_name_len = dart__node_name(name, node_name);   /* handed to discovery (the name's owner) below */
+    node_name_len = dart_discovery_default_name(node_name, sizeof node_name, name);   /* handed to discovery below */
     {   i_DartNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
         cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */

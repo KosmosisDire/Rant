@@ -132,6 +132,25 @@ static void dart_discovery_auto_uuid(uint8_t out[16]){
     dart_discovery_make_uuid(out, (const uint8_t*)host, hostname_len, seed);
 }
 
+uint8_t dart_discovery_default_name(char *out, size_t cap, const char *want){
+    static const char hex[] = "0123456789abcdef";
+    uint32_t r; size_t i, max;
+    if (!out || cap == 0) return 0;
+    max = cap - 1;
+    if (max > DART_DISCOVERY_NAME_MAX) max = DART_DISCOVERY_NAME_MAX;
+    if (want && *want){                              /* the caller's name, clamped */
+        for (i = 0; i < max && want[i]; i++) out[i] = want[i];
+        out[i] = '\0';
+        return (uint8_t)i;
+    }
+    if (max < 13){ out[0] = '\0'; return 0; }        /* no room for "node-XXXXXXXX" */
+    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
+    memcpy(out, "node-", 5);                          /* auto: "node-" + 8 hex (random, pid fallback) */
+    for (i = 0; i < 8; i++) out[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
+    out[13] = '\0';
+    return 13;
+}
+
 /* Single source of the discovery-runtime arena layout: the d struct, the rx/tx wire
    scratch buffers, the zero-copy peer view, then the discovery-core sub-arena. measure
    feeds placement_memory; build feeds place -- one definition. */
@@ -257,11 +276,13 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
  * mirrors dart_node_open). Translates the flat opts into the placement config, sizes,
  * allocates, and places the runtime; dart_discovery_close frees the heap block. No
  * automatic growth: a full peer table refuses rather than relocating. */
-DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig *cfg){
+DartDiscovery *dart_discovery_open(DartAllocator *mem, const char *name, const DartDiscoveryConfig *cfg){
     DartDiscoveryNetConfig nc; DartDiscoveryConfig o; DartDiscovery *d;
+    char namebuf[DART_DISCOVERY_NAME_MAX + 1]; uint8_t namelen;
     void *block; size_t need, block_size;
     if (!mem || mem->claimed) return NULL;
     memset(&o, 0, sizeof o); if (cfg) o = *cfg;
+    namelen = dart_discovery_default_name(namebuf, sizeof namebuf, name);   /* positional; auto if NULL */
 
     memset(&nc, 0, sizeof nc);
     nc.discovery.domain_id     = o.domain;
@@ -272,11 +293,8 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig
     nc.discovery.meta_len      = o.meta_len;
     nc.discovery.on_event      = o.on_event;
     nc.discovery.user          = o.user;
-    if (o.name && *o.name){
-        size_t nl = strlen(o.name);
-        if (nl > DART_DISCOVERY_NAME_MAX) nl = DART_DISCOVERY_NAME_MAX;
-        nc.discovery.name = o.name; nc.discovery.name_len = (uint8_t)nl;
-    }
+    nc.discovery.name          = namebuf;              /* the core copies it at init */
+    nc.discovery.name_len      = namelen;
     nc.group               = o.discovery_group;
     nc.discovery_port      = o.discovery_port;
     nc.ttl                 = o.multicast_ttl;

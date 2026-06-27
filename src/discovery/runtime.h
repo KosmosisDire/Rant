@@ -24,7 +24,6 @@ typedef struct DartDiscovery DartDiscovery;
  * the optional meta blob is OPAQUE (a higher layer's overlay), carried verbatim. */
 typedef struct {
     uint16_t              domain;               /* logical-network selector; 0 */
-    const char           *name;                 /* advertised peer name; NULL = none */
     const char           *discovery_group;      /* multicast group; "239.255.0.7" */
     uint16_t              discovery_port;       /* rendezvous port; 7400 */
     const char           *multicast_interface;  /* interface IP; NULL = auto (pin on multihomed) */
@@ -42,10 +41,12 @@ typedef struct {
 } DartDiscoveryConfig;
 
 /* Open a discovery runtime backed by mem (a static or dynamic DartAllocator, taken
- * over here: mem->claimed is set). opts may be NULL for all defaults. The UUID is
- * auto-generated. Returns NULL on failure (allocator too small / already claimed /
- * socket setup failed). Close with dart_discovery_close. */
-DartDiscovery   *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig *cfg);
+ * over here: mem->claimed is set). name is this instance's advertised peer name (a
+ * primary arg, like dart_node_open); NULL/empty => an auto-generated "node-XXXXXXXX".
+ * cfg may be NULL for all defaults. The UUID is auto-generated. Returns NULL on failure
+ * (allocator too small / already claimed / socket setup failed). Close with
+ * dart_discovery_close. */
+DartDiscovery   *dart_discovery_open(DartAllocator *mem, const char *name, const DartDiscoveryConfig *cfg);
 
 /* ------------------------------------------------------------------ lifecycle */
 /* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
@@ -112,6 +113,12 @@ void       dart_discovery_replay(DartDiscovery *d);
 /* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
+
+/* Resolve an advertised peer name into out[cap]: the caller's want (clamped to cap-1 and
+ * DART_DISCOVERY_NAME_MAX), or an auto-generated "node-XXXXXXXX" if want is NULL/empty.
+ * Returns its length. Shared by dart_discovery_open and the node so both name peers the
+ * same way. */
+uint8_t    dart_discovery_default_name(char *out, size_t cap, const char *want);
 
 /* The one interface every multicast socket should pin to: route-probe group:port,
  * falling back to the default-route LAN interface (a multicast route can resolve to

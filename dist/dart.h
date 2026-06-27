@@ -451,7 +451,6 @@ typedef struct DartDiscovery DartDiscovery;
  * the optional meta blob is OPAQUE (a higher layer's overlay), carried verbatim. */
 typedef struct {
     uint16_t              domain;               /* logical-network selector; 0 */
-    const char           *name;                 /* advertised peer name; NULL = none */
     const char           *discovery_group;      /* multicast group; "239.255.0.7" */
     uint16_t              discovery_port;       /* rendezvous port; 7400 */
     const char           *multicast_interface;  /* interface IP; NULL = auto (pin on multihomed) */
@@ -469,10 +468,12 @@ typedef struct {
 } DartDiscoveryConfig;
 
 /* Open a discovery runtime backed by mem (a static or dynamic DartAllocator, taken
- * over here: mem->claimed is set). opts may be NULL for all defaults. The UUID is
- * auto-generated. Returns NULL on failure (allocator too small / already claimed /
- * socket setup failed). Close with dart_discovery_close. */
-DartDiscovery   *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig *cfg);
+ * over here: mem->claimed is set). name is this instance's advertised peer name (a
+ * primary arg, like dart_node_open); NULL/empty => an auto-generated "node-XXXXXXXX".
+ * cfg may be NULL for all defaults. The UUID is auto-generated. Returns NULL on failure
+ * (allocator too small / already claimed / socket setup failed). Close with
+ * dart_discovery_close. */
+DartDiscovery   *dart_discovery_open(DartAllocator *mem, const char *name, const DartDiscoveryConfig *cfg);
 
 /* ------------------------------------------------------------------ lifecycle */
 /* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
@@ -539,6 +540,12 @@ void       dart_discovery_replay(DartDiscovery *d);
 /* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
+
+/* Resolve an advertised peer name into out[cap]: the caller's want (clamped to cap-1 and
+ * DART_DISCOVERY_NAME_MAX), or an auto-generated "node-XXXXXXXX" if want is NULL/empty.
+ * Returns its length. Shared by dart_discovery_open and the node so both name peers the
+ * same way. */
+uint8_t    dart_discovery_default_name(char *out, size_t cap, const char *want);
 
 /* The one interface every multicast socket should pin to: route-probe group:port,
  * falling back to the default-route LAN interface (a multicast route can resolve to
@@ -2831,6 +2838,25 @@ static void dart_discovery_auto_uuid(uint8_t out[16]){
     dart_discovery_make_uuid(out, (const uint8_t*)host, hostname_len, seed);
 }
 
+uint8_t dart_discovery_default_name(char *out, size_t cap, const char *want){
+    static const char hex[] = "0123456789abcdef";
+    uint32_t r; size_t i, max;
+    if (!out || cap == 0) return 0;
+    max = cap - 1;
+    if (max > DART_DISCOVERY_NAME_MAX) max = DART_DISCOVERY_NAME_MAX;
+    if (want && *want){                              /* the caller's name, clamped */
+        for (i = 0; i < max && want[i]; i++) out[i] = want[i];
+        out[i] = '\0';
+        return (uint8_t)i;
+    }
+    if (max < 13){ out[0] = '\0'; return 0; }        /* no room for "node-XXXXXXXX" */
+    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
+    memcpy(out, "node-", 5);                          /* auto: "node-" + 8 hex (random, pid fallback) */
+    for (i = 0; i < 8; i++) out[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
+    out[13] = '\0';
+    return 13;
+}
+
 /* Single source of the discovery-runtime arena layout: the d struct, the rx/tx wire
    scratch buffers, the zero-copy peer view, then the discovery-core sub-arena. measure
    feeds placement_memory; build feeds place -- one definition. */
@@ -2956,11 +2982,13 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
  * mirrors dart_node_open). Translates the flat opts into the placement config, sizes,
  * allocates, and places the runtime; dart_discovery_close frees the heap block. No
  * automatic growth: a full peer table refuses rather than relocating. */
-DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig *cfg){
+DartDiscovery *dart_discovery_open(DartAllocator *mem, const char *name, const DartDiscoveryConfig *cfg){
     DartDiscoveryNetConfig nc; DartDiscoveryConfig o; DartDiscovery *d;
+    char namebuf[DART_DISCOVERY_NAME_MAX + 1]; uint8_t namelen;
     void *block; size_t need, block_size;
     if (!mem || mem->claimed) return NULL;
     memset(&o, 0, sizeof o); if (cfg) o = *cfg;
+    namelen = dart_discovery_default_name(namebuf, sizeof namebuf, name);   /* positional; auto if NULL */
 
     memset(&nc, 0, sizeof nc);
     nc.discovery.domain_id     = o.domain;
@@ -2971,11 +2999,8 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig
     nc.discovery.meta_len      = o.meta_len;
     nc.discovery.on_event      = o.on_event;
     nc.discovery.user          = o.user;
-    if (o.name && *o.name){
-        size_t nl = strlen(o.name);
-        if (nl > DART_DISCOVERY_NAME_MAX) nl = DART_DISCOVERY_NAME_MAX;
-        nc.discovery.name = o.name; nc.discovery.name_len = (uint8_t)nl;
-    }
+    nc.discovery.name          = namebuf;              /* the core copies it at init */
+    nc.discovery.name_len      = namelen;
     nc.group               = o.discovery_group;
     nc.discovery_port      = o.discovery_port;
     nc.ttl                 = o.multicast_ttl;
@@ -6028,24 +6053,6 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
 }
 #endif
 
-/* effective node name into buf[DART_NODE_NAME_MAX+1]: the caller's (clamped), or an
- * auto-generated "node-XXXXXXXX" debug default (random suffix, pid fallback). Returns
- * its length. A node always has a name, so peers always have one to reference. */
-static uint8_t dart__node_name(const char *want, char *buf){
-    static const char hex[] = "0123456789abcdef";
-    uint32_t r; size_t i;
-    if (want && *want){
-        for (i=0; i<DART_NODE_NAME_MAX && want[i]; i++) buf[i] = want[i];
-        buf[i] = '\0';
-        return (uint8_t)i;
-    }
-    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
-    memcpy(buf, "node-", 5);
-    for (i=0; i<8; i++) buf[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
-    buf[13] = '\0';
-    return 13;
-}
-
 DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryNetConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_channels;
@@ -6168,7 +6175,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     /* sans-IO node core: drives the discovery->transport lifecycle and resolves addresses
        over the discovery core's peer table (bound below, once discovery exists). */
-    node_name_len = dart__node_name(name, node_name);   /* handed to discovery (the name's owner) below */
+    node_name_len = dart_discovery_default_name(node_name, sizeof node_name, name);   /* handed to discovery below */
     {   i_DartNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
         cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */
