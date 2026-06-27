@@ -939,7 +939,7 @@ static void node_core_checks(void){
 
     /* node core first (discovery bound once it exists, exactly like the runtime) */
     memset(&cc,0,sizeof cc);
-    cc.transport=tr; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event; cc.is_local=NULL;
+    cc.transport=tr; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event;
     nc = dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
@@ -1092,7 +1092,7 @@ static void shm_loss_checks(void){
     nw=dart_required_memory(&wc); mw=malloc(nw); shml_W=dart_init(mw,nw,&wc);
     nr=dart_required_memory(&rc); mr=malloc(nr); shml_R=dart_init(mr,nr,&rc);
     shml_now=1000000;
-    dart_peer_add(shml_W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(shml_R,1u,1,DART_FRAG_PAYLOAD);
+    dart_peer_add(shml_W,2u,DART_FRAG_PAYLOAD); dart_peer_add(shml_R,1u,DART_FRAG_PAYLOAD);
     bl=dart_build_interest(shml_W,blob,sizeof blob); dart_apply_peer_interest(shml_R,1u,blob,bl);
     bl=dart_build_interest(shml_R,blob,sizeof blob); dart_apply_peer_interest(shml_W,2u,blob,bl);
     dart_peer_set_shm(shml_W,2u,1);
@@ -1194,7 +1194,7 @@ static void shm_mcast_buf_checks(void){
     memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
     nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
     nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
-    dart_peer_add(W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,1,DART_FRAG_PAYLOAD);
+    dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
     bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,blob,bl);  /* R subscribes -> group mode */
     ST_CHECK(dart_writer_match_count(W,0)>0, "mcast-buf: writer matched multicast subscriber");
     {   uint8_t desc[DART_SHM_DESC_WIRE]; memset(desc,0,sizeof desc);
@@ -1455,7 +1455,7 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2; rc.on_event=qos_on_event;
     nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
     nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
-    dart_peer_add(W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,1,DART_FRAG_PAYLOAD);
+    dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
     qos_incompat_n=0;
     bl=dart_build_interest(W,blob,sizeof blob); dart_apply_peer_interest(R,1u,blob,bl);
     dart_peer_match_counts(R,1u,&pub,&recv);
@@ -1490,7 +1490,7 @@ static int beff_would_evict(int rrel){
     memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
     nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
     nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
-    dart_peer_add(W,2u,1,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,1,DART_FRAG_PAYLOAD);
+    dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
     bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,blob,bl);  /* W learns R subscribes */
     memset(payload,0x5A,sizeof payload);
     for (i=0;i<5;i++) dart_send(W,0,payload,sizeof payload,1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
@@ -1648,7 +1648,7 @@ static int selftest_main(void){
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
         for (k=0;k<dart_node_core_max_peers(r->core);k++) if (dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
         dart_peer_remove(r->transport, wid);
-        dart_peer_add(r->transport, wid, 1, DART_FRAG_PAYLOAD);
+        dart_peer_add(r->transport, wid,DART_FRAG_PAYLOAD);
         il = dart_build_interest(w->transport, ib, sizeof ib);
         dart_apply_peer_interest(r->transport, wid, ib, il);
         st_pump(w, r, 600);

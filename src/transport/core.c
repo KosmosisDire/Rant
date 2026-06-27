@@ -84,7 +84,6 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
     { uint32_t nlanes = n_channels*(max_peers+1u), ndest = max_peers+n_channels;
       uint32_t *peer_ids = (uint32_t*)dart_take(b, max_peers*sizeof(uint32_t), 8);
       uint8_t  *peer_used = (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
-      uint8_t  *peer_local = (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
       uint8_t  *peer_dormant= (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
       uint16_t *peer_frag = (uint16_t*)dart_take(b, max_peers*sizeof(uint16_t), 2);
 #ifdef DART_SHM
@@ -105,7 +104,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
       uint16_t *alias_to_channel = (uint16_t*)dart_take(b, (size_t)max_peers*meta_ids*sizeof(uint16_t), 2);
       name_pool = (char*)dart_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
-          st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used; st->peer_local=peer_local;
+          st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
           st->frag = dart_clamp_frag(cfg->frag_payload);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
@@ -115,7 +114,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
           st->lane_next=lane_next; st->lane_queued=lane_queued;
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->alias_to_channel=alias_to_channel; st->alias_max=meta_ids;
-          memset(peer_used,0,max_peers); memset(peer_local,0,max_peers); memset(peer_dormant,0,max_peers);
+          memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
 #ifdef DART_SHM
           st->peer_shm=peer_shm; memset(peer_shm,0,max_peers);
@@ -232,7 +231,6 @@ DartTransportState *dart_migrate(DartTransportState *old, void *new_mem, size_t 
     nw->frag = old->frag;
     memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
     memcpy(nw->peer_used,    old->peer_used,    omp);
-    memcpy(nw->peer_local,   old->peer_local,   omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
     memcpy(nw->peer_frag,    old->peer_frag,    (size_t)omp*sizeof(uint16_t));
 #ifdef DART_SHM
@@ -407,13 +405,12 @@ static void dart__rematch(DartTransportState *st, uint16_t c, uint16_t peer_slot
 }
 
 
-void dart_peer_add(DartTransportState *st, uint32_t id, int peer_is_local, uint16_t peer_frag){
+void dart_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_frag){
     uint16_t i; int free=-1; uint32_t max_peers=st->cfg.max_peers;
     if (dart_peer_slot(st,id)>=0) return;
     for (i=0;i<max_peers;i++) if(!st->peer_used[i]){free=(int)i;break;}
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
-    st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
     st->peer_dormant[free]=0;
     st->peer_frag[free]=dart_clamp_frag(peer_frag);
 #ifdef DART_SHM

@@ -60,10 +60,6 @@ typedef void (*DartEventFn)(const DartEvent *ev);
  * truncated to cap). Returns buf. */
 const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
 
-/* Runtime hook: 1 if a physical address is on this host (a route probe, on UDP),
- * so the peer is flagged out-of-band (SHM) eligible. NULL => every peer is remote. */
-typedef int (*i_DartNodeIsLocalFn)(void *user, const uint8_t *ip, uint8_t ip_len);
-
 /* Everything the core needs from the runtime, set once at init. The peer table itself
  * lives in the discovery core: the node core delegates id<->address resolution and peer
  * naming to it (dart_discovery_*), and stores its small per-peer transport-lifecycle
@@ -76,8 +72,6 @@ typedef struct {
     uint16_t              frag_size;     /* our UDP fragment size, baked into the overlay */
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
-    i_DartNodeIsLocalFn is_local;      /* runtime route probe (optional) */
-    void                 *is_local_user;
     int                   oob_capable;   /* 1 = we can deliver out-of-band (SHM) payloads */
     uint8_t               oob_host[16];  /* our host id; a peer is OOB-reachable iff it matches */
 } i_DartNodeCoreConfig;

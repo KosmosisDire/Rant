@@ -99,8 +99,6 @@ struct i_DartNodeCore {
     DartDiscoveryState  *discovery;   /* the peer table (id<->addr, name, user scratch) we delegate to */
     DartEventFn         on_event;
     void                 *user;
-    i_DartNodeIsLocalFn is_local;
-    void                 *is_local_user;
     int                   oob_capable;
     uint8_t               oob_host[16];
     uint8_t              *meta_buf;    /* our outgoing discovery announce blob */
@@ -140,7 +138,6 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     c->transport     = cfg->transport;
     c->discovery     = cfg->discovery;     /* may be NULL now, bound via bind_discovery later */
     c->on_event      = cfg->on_event;      c->user = cfg->user;
-    c->is_local      = cfg->is_local;      c->is_local_user = cfg->is_local_user;
     c->oob_capable   = cfg->oob_capable;
     memcpy(c->oob_host, cfg->oob_host, 16);
     c->meta_buf      = meta;
@@ -230,8 +227,7 @@ static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscove
     size_t interest_len = 0; const uint8_t *interest = dart_meta_interest(meta, meta_len, &interest_len);
     if (!ex) return;                                  /* discovery not bound / no scratch */
     if (!ex->added){                                  /* brand-new peer: wire it into the transport */
-        int local = (addr->ip_len==4) && c->is_local && c->is_local(c->is_local_user, addr->ip, addr->ip_len);
-        dart_peer_add(c->transport, id, local, frag);   /* blob carries frag + pub/sub interest */
+        dart_peer_add(c->transport, id, frag);          /* blob carries frag + pub/sub interest */
         ex->added = 1; ex->dormant = 0;
         dart__core_set_peer_oob(c, id, meta, meta_len);
         dart__core_fire(c, DART_PEER_UP, id, addr, "peer discovered");

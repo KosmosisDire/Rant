@@ -195,10 +195,10 @@ uint64_t  dart_channel_identity(const DartChannelDef *def);   /* = dart_topic_id
 uint16_t  dart_clamp_frag(uint16_t frag_payload);
 
 /* A new peer matches nothing until dart_apply_peer_interest feeds its interest
- * list (carried in its discovery announce). peer_is_local: 1 if on this host.
- * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
- * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
-void      dart_peer_add   (DartTransportState *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
+ * list (carried in its discovery announce). peer_frag: that peer's advertised UDP
+ * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_PAYLOAD.
+ * Clamped to [MIN, MAX]. */
+void      dart_peer_add   (DartTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 void      dart_peer_remove(DartTransportState *st, uint32_t peer_id);
 
 /* Discovery-blip lifecycle: a peer that fell silent (discovery timeout) is made

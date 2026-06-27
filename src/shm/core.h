@@ -194,7 +194,7 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
  *   uint64_t dart_plat_atomic_load64 / _store64(volatile uint64_t*[, v]);  (generation)
  *
  * transport (the per-peer lane + the new submessage; the only core change):
- *   - per-peer flag peer_shm[] (node sets it; like the existing peer_local/peer_frag)
+ *   - per-peer flag peer_shm[] (node sets it; like the existing peer_frag)
  *   - a history sample may be chunk-backed: a publish that hands in an external
  *     buffer (the chunk) + its descriptor, so dart_send does not memcpy (zero copy)
  *   - SHM-DATA submessage: byte0 = DATA | DART_F_SHM, [alias][base seqno][count]

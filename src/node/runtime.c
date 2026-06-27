@@ -216,16 +216,6 @@ static void dart__node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_ch
     o->discovery = (uint8_t*)dart_take(b, o->discovery_bytes, 16);
 }
 
-/* node-core hook: 1 if a peer address is on this host (a route probe selecting that
- * same address as source). Drives OOB/SHM eligibility; the core stays platform-free. */
-static int dart__node_is_local(void *user, const uint8_t *ip, uint8_t ip_len){
-    uint32_t d;
-    (void)user;
-    if (ip_len != 4) return 0;
-    d = dart_plat_ip4_to_naddr(ip);
-    return dart_plat_route_src(d, 7) == d;
-}
-
 /* data multicast group from a selector (topic identity & 0xFF); &0xFF wrap is
  * harmless, RX filters by peer table + identity */
 static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
@@ -505,7 +495,6 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
         cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
         cc.on_event = dart__node_on_event; cc.user = n;
-        cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif

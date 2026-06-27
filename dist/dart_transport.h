@@ -220,10 +220,10 @@ uint64_t  dart_channel_identity(const DartChannelDef *def);   /* = dart_topic_id
 uint16_t  dart_clamp_frag(uint16_t frag_payload);
 
 /* A new peer matches nothing until dart_apply_peer_interest feeds its interest
- * list (carried in its discovery announce). peer_is_local: 1 if on this host.
- * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
- * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
-void      dart_peer_add   (DartTransportState *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
+ * list (carried in its discovery announce). peer_frag: that peer's advertised UDP
+ * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_PAYLOAD.
+ * Clamped to [MIN, MAX]. */
+void      dart_peer_add   (DartTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 void      dart_peer_remove(DartTransportState *st, uint32_t peer_id);
 
 /* Discovery-blip lifecycle: a peer that fell silent (discovery timeout) is made
@@ -509,10 +509,6 @@ typedef void (*DartEventFn)(const DartEvent *ev);
  * truncated to cap). Returns buf. */
 const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
 
-/* Runtime hook: 1 if a physical address is on this host (a route probe, on UDP),
- * so the peer is flagged out-of-band (SHM) eligible. NULL => every peer is remote. */
-typedef int (*i_DartNodeIsLocalFn)(void *user, const uint8_t *ip, uint8_t ip_len);
-
 /* Everything the core needs from the runtime, set once at init. The peer table itself
  * lives in the discovery core: the node core delegates id<->address resolution and peer
  * naming to it (dart_discovery_*), and stores its small per-peer transport-lifecycle
@@ -525,8 +521,6 @@ typedef struct {
     uint16_t              frag_size;     /* our UDP fragment size, baked into the overlay */
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
-    i_DartNodeIsLocalFn is_local;      /* runtime route probe (optional) */
-    void                 *is_local_user;
     int                   oob_capable;   /* 1 = we can deliver out-of-band (SHM) payloads */
     uint8_t               oob_host[16];  /* our host id; a peer is OOB-reachable iff it matches */
 } i_DartNodeCoreConfig;
@@ -959,7 +953,7 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
  *   uint64_t dart_plat_atomic_load64 / _store64(volatile uint64_t*[, v]);  (generation)
  *
  * transport (the per-peer lane + the new submessage; the only core change):
- *   - per-peer flag peer_shm[] (node sets it; like the existing peer_local/peer_frag)
+ *   - per-peer flag peer_shm[] (node sets it; like the existing peer_frag)
  *   - a history sample may be chunk-backed: a publish that hands in an external
  *     buffer (the chunk) + its descriptor, so dart_send does not memcpy (zero copy)
  *   - SHM-DATA submessage: byte0 = DATA | DART_F_SHM, [alias][base seqno][count]
@@ -1194,7 +1188,6 @@ struct DartTransportState {
     DartConfig    cfg;       /* n_channels = user channels (no internal channel) */
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
-    uint8_t     *peer_local;/* [max_peers] */
     uint8_t     *peer_dormant;/* [max_peers] 1 = silent (discovery DROP): out of flow control,
                                  proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
@@ -2294,7 +2287,6 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
     { uint32_t nlanes = n_channels*(max_peers+1u), ndest = max_peers+n_channels;
       uint32_t *peer_ids = (uint32_t*)dart_take(b, max_peers*sizeof(uint32_t), 8);
       uint8_t  *peer_used = (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
-      uint8_t  *peer_local = (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
       uint8_t  *peer_dormant= (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
       uint16_t *peer_frag = (uint16_t*)dart_take(b, max_peers*sizeof(uint16_t), 2);
 #ifdef DART_SHM
@@ -2315,7 +2307,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
       uint16_t *alias_to_channel = (uint16_t*)dart_take(b, (size_t)max_peers*meta_ids*sizeof(uint16_t), 2);
       name_pool = (char*)dart_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
-          st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used; st->peer_local=peer_local;
+          st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
           st->frag = dart_clamp_frag(cfg->frag_payload);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
@@ -2325,7 +2317,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
           st->lane_next=lane_next; st->lane_queued=lane_queued;
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->alias_to_channel=alias_to_channel; st->alias_max=meta_ids;
-          memset(peer_used,0,max_peers); memset(peer_local,0,max_peers); memset(peer_dormant,0,max_peers);
+          memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
 #ifdef DART_SHM
           st->peer_shm=peer_shm; memset(peer_shm,0,max_peers);
@@ -2442,7 +2434,6 @@ DartTransportState *dart_migrate(DartTransportState *old, void *new_mem, size_t 
     nw->frag = old->frag;
     memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
     memcpy(nw->peer_used,    old->peer_used,    omp);
-    memcpy(nw->peer_local,   old->peer_local,   omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
     memcpy(nw->peer_frag,    old->peer_frag,    (size_t)omp*sizeof(uint16_t));
 #ifdef DART_SHM
@@ -2617,13 +2608,12 @@ static void dart__rematch(DartTransportState *st, uint16_t c, uint16_t peer_slot
 }
 
 
-void dart_peer_add(DartTransportState *st, uint32_t id, int peer_is_local, uint16_t peer_frag){
+void dart_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_frag){
     uint16_t i; int free=-1; uint32_t max_peers=st->cfg.max_peers;
     if (dart_peer_slot(st,id)>=0) return;
     for (i=0;i<max_peers;i++) if(!st->peer_used[i]){free=(int)i;break;}
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
-    st->peer_local[free]=(uint8_t)(peer_is_local?1:0);
     st->peer_dormant[free]=0;
     st->peer_frag[free]=dart_clamp_frag(peer_frag);
 #ifdef DART_SHM
@@ -3332,8 +3322,6 @@ struct i_DartNodeCore {
     DartDiscoveryState  *discovery;   /* the peer table (id<->addr, name, user scratch) we delegate to */
     DartEventFn         on_event;
     void                 *user;
-    i_DartNodeIsLocalFn is_local;
-    void                 *is_local_user;
     int                   oob_capable;
     uint8_t               oob_host[16];
     uint8_t              *meta_buf;    /* our outgoing discovery announce blob */
@@ -3373,7 +3361,6 @@ i_DartNodeCore *dart_node_core_init(void *mem, size_t cap, const i_DartNodeCoreC
     c->transport     = cfg->transport;
     c->discovery     = cfg->discovery;     /* may be NULL now, bound via bind_discovery later */
     c->on_event      = cfg->on_event;      c->user = cfg->user;
-    c->is_local      = cfg->is_local;      c->is_local_user = cfg->is_local_user;
     c->oob_capable   = cfg->oob_capable;
     memcpy(c->oob_host, cfg->oob_host, 16);
     c->meta_buf      = meta;
@@ -3463,8 +3450,7 @@ static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscove
     size_t interest_len = 0; const uint8_t *interest = dart_meta_interest(meta, meta_len, &interest_len);
     if (!ex) return;                                  /* discovery not bound / no scratch */
     if (!ex->added){                                  /* brand-new peer: wire it into the transport */
-        int local = (addr->ip_len==4) && c->is_local && c->is_local(c->is_local_user, addr->ip, addr->ip_len);
-        dart_peer_add(c->transport, id, local, frag);   /* blob carries frag + pub/sub interest */
+        dart_peer_add(c->transport, id, frag);          /* blob carries frag + pub/sub interest */
         ex->added = 1; ex->dormant = 0;
         dart__core_set_peer_oob(c, id, meta, meta_len);
         dart__core_fire(c, DART_PEER_UP, id, addr, "peer discovered");
@@ -3776,16 +3762,6 @@ static void dart__node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_ch
     o->discovery = (uint8_t*)dart_take(b, o->discovery_bytes, 16);
 }
 
-/* node-core hook: 1 if a peer address is on this host (a route probe selecting that
- * same address as source). Drives OOB/SHM eligibility; the core stays platform-free. */
-static int dart__node_is_local(void *user, const uint8_t *ip, uint8_t ip_len){
-    uint32_t d;
-    (void)user;
-    if (ip_len != 4) return 0;
-    d = dart_plat_ip4_to_naddr(ip);
-    return dart_plat_route_src(d, 7) == d;
-}
-
 /* data multicast group from a selector (topic identity & 0xFF); &0xFF wrap is
  * harmless, RX filters by peer table + identity */
 static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
@@ -4065,7 +4041,6 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
         cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
         cc.on_event = dart__node_on_event; cc.user = n;
-        cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
 #ifdef DART_SHM
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif

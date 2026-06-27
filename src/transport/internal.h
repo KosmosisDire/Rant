@@ -153,7 +153,6 @@ struct DartTransportState {
     DartConfig    cfg;       /* n_channels = user channels (no internal channel) */
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
-    uint8_t     *peer_local;/* [max_peers] */
     uint8_t     *peer_dormant;/* [max_peers] 1 = silent (discovery DROP): out of flow control,
                                  proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
