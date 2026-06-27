@@ -611,7 +611,9 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
     const i_DartDiscoveryPeer *p;
     if (slot >= st->cap_peers) return 0;
     p = &st->peers[slot];
-    if (!p->used) return 0;
+    if (!p->used || p->dropped) return 0;   /* ACTIVE peers only: don't reinforce announces to a
+                                               dropped peer (it is silent/dead; the unicast just
+                                               bounces, and a churned table fills with such ghosts) */
     dart_discovery_addr_of(p, out);
     return 1;
 }

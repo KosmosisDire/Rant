@@ -207,8 +207,9 @@ size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, siz
 uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
 /* Table capacity (the slot range for dart_discovery_peer_addr / dart_discovery_peer_at). */
 uint16_t     dart_discovery_max_peers(const DartDiscoveryState *st);
-/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out if it holds a
- * live peer. Lets a runtime reinforce announces over unicast to survive multicast outages. */
+/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out only if it holds an
+ * ACTIVE peer (not a dropped/silent one). Lets a runtime reinforce announces over unicast to
+ * survive multicast outages, without bouncing them off peers that have gone away. */
 int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot,
                              DartDiscoveryAddr *out);
 /* Read-only peer view: fill *out for the peer in table slot (0..max_peers-1) and return
@@ -2182,7 +2183,9 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
     const i_DartDiscoveryPeer *p;
     if (slot >= st->cap_peers) return 0;
     p = &st->peers[slot];
-    if (!p->used) return 0;
+    if (!p->used || p->dropped) return 0;   /* ACTIVE peers only: don't reinforce announces to a
+                                               dropped peer (it is silent/dead; the unicast just
+                                               bounces, and a churned table fills with such ghosts) */
     dart_discovery_addr_of(p, out);
     return 1;
 }
@@ -2949,6 +2952,9 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     dart_plat_mcast_loop(fd, 1);
     dart_plat_set_nonblock(fd);   /* poll then DRAIN to empty (dart__rt_drain): the recv that
                                      finds the queue empty must return would-block, not block */
+    dart_plat_suppress_connreset(fd);   /* we reinforce announces by unicast to known peers; a
+                                           peer that died bounces an ICMP unreachable that would
+                                           otherwise surface as WSAECONNRESET and disrupt RX */
 
     d->fd = fd;
     d->unicast_fd = DART_SOCK_BAD;
@@ -2975,6 +2981,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
             uint16_t uport = dart_plat_bind(uc, 0, 0, 0) ? dart_plat_local_port(uc) : 0;
             if (uport){
                 dart_plat_set_nonblock(uc);
+                dart_plat_suppress_connreset(uc);   /* same: a bounced unicast must not disrupt RX */
                 d->unicast_fd = uc;
                 dart_discovery_set_data_port(d->core, uport);
             } else dart_plat_close(uc);

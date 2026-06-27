@@ -172,8 +172,9 @@ size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, siz
 uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
 /* Table capacity (the slot range for dart_discovery_peer_addr / dart_discovery_peer_at). */
 uint16_t     dart_discovery_max_peers(const DartDiscoveryState *st);
-/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out if it holds a
- * live peer. Lets a runtime reinforce announces over unicast to survive multicast outages. */
+/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out only if it holds an
+ * ACTIVE peer (not a dropped/silent one). Lets a runtime reinforce announces over unicast to
+ * survive multicast outages, without bouncing them off peers that have gone away. */
 int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot,
                              DartDiscoveryAddr *out);
 /* Read-only peer view: fill *out for the peer in table slot (0..max_peers-1) and return

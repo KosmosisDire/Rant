@@ -240,6 +240,9 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     dart_plat_mcast_loop(fd, 1);
     dart_plat_set_nonblock(fd);   /* poll then DRAIN to empty (dart__rt_drain): the recv that
                                      finds the queue empty must return would-block, not block */
+    dart_plat_suppress_connreset(fd);   /* we reinforce announces by unicast to known peers; a
+                                           peer that died bounces an ICMP unreachable that would
+                                           otherwise surface as WSAECONNRESET and disrupt RX */
 
     d->fd = fd;
     d->unicast_fd = DART_SOCK_BAD;
@@ -266,6 +269,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
             uint16_t uport = dart_plat_bind(uc, 0, 0, 0) ? dart_plat_local_port(uc) : 0;
             if (uport){
                 dart_plat_set_nonblock(uc);
+                dart_plat_suppress_connreset(uc);   /* same: a bounced unicast must not disrupt RX */
                 d->unicast_fd = uc;
                 dart_discovery_set_data_port(d->core, uport);
             } else dart_plat_close(uc);
