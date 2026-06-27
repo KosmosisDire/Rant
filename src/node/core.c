@@ -95,7 +95,7 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
 typedef struct { uint8_t added; uint8_t dormant; } i_DartNodePeerExtra;
 
 struct i_DartNodeCore {
-    DartState           *transport;
+    DartTransportState           *transport;
     DartDiscoveryState  *discovery;   /* the peer table (id<->addr, name, user scratch) we delegate to */
     DartEventFn         on_event;
     void                 *user;

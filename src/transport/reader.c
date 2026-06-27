@@ -2,7 +2,7 @@
 #include "internal.h"
 
 
-int dart_reader_progress(DartState *st, uint16_t channel, uint32_t peer,
+int dart_reader_progress(DartTransportState *st, uint16_t channel, uint32_t peer,
                          uint64_t *base_seqno, uint32_t *have, uint32_t *total){
     int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     int peer_slot; i_DartReaderProxy *r;
@@ -33,7 +33,7 @@ static void dart__arm(i_DartChannel *ch, i_DartReaderProxy *r, int is_hb){
     if (!r->ack_pending){ if (is_hb) ch->repair_stats.arms_hb++; else ch->repair_stats.arms_data++; }
 }
 
-static i_DartReaderOrder dart__order_arrival(DartState *st, int channel_idx, int peer_slot,
+static i_DartReaderOrder dart__order_arrival(DartTransportState *st, int channel_idx, int peer_slot,
                                              i_DartReaderProxy *r, uint64_t base, uint64_t top){
     i_DartChannel *ch=&st->channels[channel_idx];
     if (base < r->deliver_upto) return DART_ORDER_OLD;
@@ -61,7 +61,7 @@ static i_DartReaderOrder dart__order_arrival(DartState *st, int channel_idx, int
  * shot (payload is in shared memory), so there is no reassembly -- just ordering,
  * then hand the descriptor to on_shm (the node resolves + delivers + acks). The gap
  * case re-uses the normal NACK window (dart_reader_emit's !assembly_active branch). */
-void dart_reader_shm(DartState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
+void dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
     int reliable = (ch->qos.reliability==DART_RELIABLE);
@@ -109,7 +109,7 @@ void dart_reader_shm(DartState *st, int channel_idx, int peer_slot, const uint8_
 
 
 /* reader side: handle DATA */
-void dart_reader_data(DartState *st, int channel_idx, int peer_slot, const uint8_t *p,
+void dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p,
                            uint64_t now){
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
@@ -205,7 +205,7 @@ void dart_reader_data(DartState *st, int channel_idx, int peer_slot, const uint8
 }
 
 
-void dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
+void dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
     uint64_t first=dart_le_r64(p+DART_OFFSET_SEQNO), last=dart_le_r64(p+DART_OFFSET_HB_LAST);
@@ -251,7 +251,7 @@ void dart_reader_hb(DartState *st, int channel_idx, int peer_slot, const uint8_t
  * one path allowed to chase the writer's claim (hb_last) so tail loss still repairs.
  * Outstanding repair is therefore capped at one DART_NACK_WINDOW and clocked to delivery,
  * so it cannot scale into a flood with the gap size or the message size. */
-size_t dart_reader_emit(DartState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
+size_t dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartReaderProxy *r=dart__reader_proxy_at(st,channel_idx,peer_slot);
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;

@@ -926,7 +926,7 @@ static void node_core_checks(void){
     static uint8_t tmem[1<<18], cmem[4096], dmem[8192];
     uint8_t buf[256], out[DART_DISCOVERY_WIRE_MAX];
     uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
-    DartConfig tc; DartState *tr; DartChannelDef ch[1];
+    DartConfig tc; DartTransportState *tr; DartChannelDef ch[1];
     DartDiscoveryCoreConfig dcfg; DartDiscoveryState *st;
     i_DartNodeCoreConfig cc; i_DartNodeCore *nc;
     i_DartNodeDest d; uint32_t id, idA, idB; size_t n;
@@ -1059,7 +1059,7 @@ static void shm_module_checks(void){
    skipped after the retry cap (MSG_LOST) without wedging the reader. */
 static int shml_ok, shml_recv, shml_lost, shml_drop;
 static uint64_t shml_now;
-static DartState *shml_W, *shml_R;
+static DartTransportState *shml_W, *shml_R;
 static int shml_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
     (void)u;(void)ch;(void)from;(void)desc; if (shml_ok){ shml_recv++; return 1; } return 0;
 }
@@ -1182,7 +1182,7 @@ static void shm_node_checks(void){
 static void shm_mcast_buf_checks(void){
     static uint8_t chunk[64];
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    uint8_t blob[256]; size_t bl; DartState *W, *R; DartQos q;
+    uint8_t blob[256]; size_t bl; DartTransportState *W, *R; DartQos q;
     uint8_t out[DART_DGRAM_MAX]; uint32_t to; size_t ol; uint64_t now=1000000;
     int got_data=0, payload_ok=0, i;
     for (i=0;i<(int)sizeof chunk;i++) chunk[i]=(uint8_t)(0xA5u ^ (unsigned)i);   /* recognizable pattern */
@@ -1248,7 +1248,7 @@ static void unit_checks(void){
        the role check, so an oversize send on the pub channel is TOO_BIG, while a
        valid-size send on the sub-only channel is ROLE. */
     {   static uint8_t tmem[1<<16];
-        DartChannelDef uch[2]; DartConfig tc; DartState *ts; uint8_t buf[128];
+        DartChannelDef uch[2]; DartConfig tc; DartTransportState *ts; uint8_t buf[128];
         memset(uch, 0, sizeof uch);
         uch[0].name = "u/pub"; uch[0].role = DART_PUBSUB;   uch[0].qos.max_message_bytes = 64;
         uch[1].name = "u/sub"; uch[1].role = DART_SUB_ONLY; uch[1].qos.max_message_bytes = 64;
@@ -1446,7 +1446,7 @@ static unsigned long qos_incompat_n;
 static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANSPORT_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    DartState *W, *R; uint8_t blob[128]; size_t bl; uint16_t pub=0, recv=0;
+    DartTransportState *W, *R; uint8_t blob[128]; size_t bl; uint16_t pub=0, recv=0;
     memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=wrel?DART_RELIABLE:DART_BEST_EFFORT; cw.qos.keep_last=4;
     memset(&cr,0,sizeof cr); cr.name="qostopic"; cr.role=DART_SUB_ONLY;
@@ -1481,7 +1481,7 @@ static void qos_match_checks(void){
    reader; fill the history ring past keep_last with no acks, return would-evict. */
 static int beff_would_evict(int rrel){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    DartState *W, *R; uint8_t blob[128], payload[8]; size_t bl; int i, evict;
+    DartTransportState *W, *R; uint8_t blob[128], payload[8]; size_t bl; int i, evict;
     memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2; cw.qos.max_message_bytes=8;
     memset(&cr,0,sizeof cr); cr.name="beff"; cr.role=DART_SUB_ONLY;

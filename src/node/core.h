@@ -69,7 +69,7 @@ typedef int (*i_DartNodeIsLocalFn)(void *user, const uint8_t *ip, uint8_t ip_len
  * naming to it (dart_discovery_*), and stores its small per-peer transport-lifecycle
  * state in the discovery peer's user scratch (dart_node_core_peer_user_bytes). */
 typedef struct {
-    DartState           *transport;    /* the peers are wired into this (sans-IO) */
+    DartTransportState           *transport;    /* the peers are wired into this (sans-IO) */
     DartDiscoveryState  *discovery;    /* the peer table (id<->addr, name, user scratch); may be
                                           NULL at init, then bound via dart_node_core_bind_discovery */
     uint16_t              n_channels;    /* sizes the announce-blob buffer */

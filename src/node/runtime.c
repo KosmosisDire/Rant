@@ -16,7 +16,7 @@
 struct DartChannel { DartNode *n; uint16_t index; };
 
 struct DartNode {
-    DartState     *transport;
+    DartTransportState     *transport;
     i_DartNodeCore *core;     /* peer table (id<->address) + discovery lifecycle (sans-IO) */
     DartDiscovery     *discovery;
     i_DartSock       fd;       /* unicast data socket (also group TX) */
@@ -566,7 +566,7 @@ fail_startup:
  * now on the new arena, or 0 if the bigger arena couldn't be allocated (n left unchanged). */
 static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels){
     DartConfig tc; DartDiscoveryNetConfig dc; i_DartNodeBlocks nb; i_DartBump b;
-    DartState *nt; i_DartNodeCore *ncore; DartDiscovery *ndisc;
+    DartTransportState *nt; i_DartNodeCore *ncore; DartDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
     uint16_t old_max_channels = n->max_channels, new_meta_cap = dart_meta_capacity(new_max_channels);

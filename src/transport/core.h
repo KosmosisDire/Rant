@@ -171,20 +171,20 @@ typedef struct {
     void                 *user;
 } DartConfig;
 
-typedef struct DartState DartState;
+typedef struct DartTransportState DartTransportState;
 
 size_t    dart_required_memory(const DartConfig *cfg);
-DartState *dart_init(void *mem, size_t mem_size, const DartConfig *cfg);
+DartTransportState *dart_init(void *mem, size_t mem_size, const DartConfig *cfg);
 /* Relocate a live transport into new_mem (>= dart_required_memory at the grown counts),
  * re-striding its tables to new_max_peers/new_n_channels and carrying live reliability
  * state (positions, history, in-flight repair) across. Heap buffers are not in the arena,
  * so the caller frees old's arena block afterward but must NOT dart_destroy old. Returns
  * the new state, or NULL on failure (old is left intact). Dynamic-mode growth only. */
-DartState *dart_migrate(DartState *old, void *new_mem, size_t new_cap,
+DartTransportState *dart_migrate(DartTransportState *old, void *new_mem, size_t new_cap,
                         uint16_t new_max_peers, uint16_t new_n_channels);
 /* Free allocator-allocated buffers (dynamic channels). No-op in fixed mode; the
  * arena stays the caller's. The node calls it from close. */
-void      dart_destroy(DartState *st);
+void      dart_destroy(DartTransportState *st);
 
 /* 64-bit topic identity from a name (FNV-1a): matches topics, derives the group. */
 uint64_t  dart_topic_id(const char *name);
@@ -198,8 +198,8 @@ uint16_t  dart_clamp_frag(uint16_t frag_payload);
  * list (carried in its discovery announce). peer_is_local: 1 if on this host.
  * peer_frag: that peer's advertised UDP fragment size (from discovery), used to
  * reassemble its messages; 0 = DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
-void      dart_peer_add   (DartState *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
-void      dart_peer_remove(DartState *st, uint32_t peer_id);
+void      dart_peer_add   (DartTransportState *st, uint32_t peer_id, int peer_is_local, uint16_t peer_frag);
+void      dart_peer_remove(DartTransportState *st, uint32_t peer_id);
 
 /* Discovery-blip lifecycle: a peer that fell silent (discovery timeout) is made
  * DORMANT instead of removed, so its reader position survives and a same-incarnation
@@ -208,11 +208,11 @@ void      dart_peer_remove(DartState *st, uint32_t peer_id);
  * acking them), but their proxies and deliver position are preserved. dart_peer_resume
  * re-includes the peer and re-reports reader positions so the writer fills any gap.
  * Both no-op for an unknown peer; the node drives them off discovery DROP/return. */
-void      dart_peer_dormant(DartState *st, uint32_t peer_id);
-void      dart_peer_resume (DartState *st, uint32_t peer_id);
+void      dart_peer_dormant(DartTransportState *st, uint32_t peer_id);
+void      dart_peer_resume (DartTransportState *st, uint32_t peer_id);
 /* Update a peer's advertised UDP fragment size (its announce blob may arrive after
  * first contact). Clamped to [MIN, MAX]; no-op for an unknown peer. */
-void      dart_peer_set_frag(DartState *st, uint32_t peer_id, uint16_t peer_frag);
+void      dart_peer_set_frag(DartTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 
 /* Interest exchange (the node carries these in discovery announces; sans-IO callers
  * disseminate them however they like). dart_build_interest serializes OUR pub/sub
@@ -221,8 +221,8 @@ void      dart_peer_set_frag(DartState *st, uint32_t peer_id, uint16_t peer_frag
  * dart_apply_peer_interest applies a peer's serialized set, (re)matching channels;
  * it is idempotent. Re-build + re-disseminate after dart_set_role. */
 size_t    dart_interest_max(uint16_t n_channels);
-size_t    dart_build_interest(DartState *st, void *out, size_t cap);
-void      dart_apply_peer_interest(DartState *st, uint32_t peer_id, const void *blob, size_t len);
+size_t    dart_build_interest(DartTransportState *st, void *out, size_t cap);
+void      dart_apply_peer_interest(DartTransportState *st, uint32_t peer_id, const void *blob, size_t len);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
  * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
@@ -240,7 +240,7 @@ uint16_t  dart_meta_capacity(uint16_t n_channels);
  * plus shm_capable + host[16] when DART_SHM is compiled), then st's interest list. Returns
  * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
  * discovery's own section of the announce blob. */
-uint16_t  dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
+uint16_t  dart_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
                        uint16_t frag_size, int shm_capable, const uint8_t host[16]);
 /* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
 uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
@@ -283,19 +283,19 @@ int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]
 
 /* Change a channel's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
-int       dart_set_role(DartState *st, uint16_t channel, uint8_t role);
+int       dart_set_role(DartTransportState *st, uint16_t channel, uint8_t role);
 
 /* Define a reserved (currently inactive) channel slot at runtime: set its name/qos/
  * role/multicast, allocate its history ring via the allocator, and rematch known peers.
  * Reserve mode only (an allocator is required). Returns 0 ok, or negative: -1 bad index/
  * name / slot already defined / no allocator, -4 out of memory. Re-advertise interest
  * after (the node bumps its discovery announce). */
-int       dart_channel_define(DartState *st, uint16_t channel, const DartChannelDef *def);
+int       dart_channel_define(DartTransportState *st, uint16_t channel, const DartChannelDef *def);
 
 /* The channel's topic name (NULL + *len 0 if undefined or out of range), for surfacing
  * it on a delivered message. *len (may be NULL) gets the name length. The name is a
  * local lookup; it is never on the data path. */
-const char *dart_channel_name(DartState *st, uint16_t channel, uint8_t *len);
+const char *dart_channel_name(DartTransportState *st, uint16_t channel, uint8_t *len);
 
 /* dart_send / dart_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {
@@ -307,7 +307,7 @@ typedef enum {
 } DartResult;
 
 /* Publish a message to all peers. Returns DART_OK, or a negative DartResult. */
-int       dart_send(DartState *st, uint16_t channel, const void *data, size_t len,
+int       dart_send(DartTransportState *st, uint16_t channel, const void *data, size_t len,
                   uint64_t now_us);
 
 #ifdef DART_SHM
@@ -316,39 +316,39 @@ int       dart_send(DartState *st, uint16_t channel, const void *data, size_t le
  * fragments from chunk for non-SHM peers, and sends ONE SHM-DATA (the descriptor) to
  * SHM-capable peers. desc is DART_SHM_DESC_BYTES. Same return as dart_send. The chunk
  * must stay valid until the sample leaves history (acked / evicted). */
-int       dart_send_shm(DartState *st, uint16_t channel, const void *chunk, size_t len,
+int       dart_send_shm(DartTransportState *st, uint16_t channel, const void *chunk, size_t len,
                       const uint8_t *desc, uint64_t now_us);
 /* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).
  * Off by default; the node sets it on attach, clears it on dormant/remove. */
-void      dart_peer_set_shm(DartState *st, uint32_t peer_id, int is_shm);
+void      dart_peer_set_shm(DartTransportState *st, uint32_t peer_id, int is_shm);
 /* 1 if every matched reader of channel is SHM-capable and it is non-multicast, so a
  * publish may go via SHM (else inline). The node checks this per message. */
-int       dart_writer_shm_eligible(DartState *st, uint16_t channel);
+int       dart_writer_shm_eligible(DartTransportState *st, uint16_t channel);
 /* The history slot the next publish to channel will occupy (binds chunk<->slot). */
-uint16_t  dart_channel_hist_head(DartState *st, uint16_t channel);
+uint16_t  dart_channel_hist_head(DartTransportState *st, uint16_t channel);
 #endif
 
 /* The channel's qos as stored at init; NULL if unknown. */
-const DartQos *dart_channel_qos(DartState *st, uint16_t channel);
+const DartQos *dart_channel_qos(DartTransportState *st, uint16_t channel);
 
 /* 1 if appending here would overwrite history not yet acked by every reader. A
  * writer pumps while this is 1, then sends anyway after qos.backpressure_wait_us. */
-int       dart_send_would_evict(DartState *st, uint16_t channel);
+int       dart_send_would_evict(DartTransportState *st, uint16_t channel);
 
 /* 1 if every live reader has acked all messages on this reliable channel (so a
  * writer may close without truncating). Best-effort/unknown return 1. Wrapped as
  * dart_channel_drain. */
-int       dart_send_drained(DartState *st, uint16_t channel);
+int       dart_send_drained(DartTransportState *st, uint16_t channel);
 
 /* Peers currently matched as readers (subscribers) of this channel. 0 = a publish
  * goes nowhere; a one-shot publisher can poll this before sending. */
-int       dart_writer_match_count(DartState *st, uint16_t channel);
+int       dart_writer_match_count(DartTransportState *st, uint16_t channel);
 
 /* Per-peer match summary (diagnostic): how many channels we now PUBLISH to this peer
  * (it subscribes and we publish) and how many we RECEIVE from it (it publishes and we
  * subscribe). Counts unicast lanes; either out-pointer may be NULL, both 0 for an
  * unknown peer. Surfaced on DART_PEER_INTEREST so a caller can watch a connection form. */
-void      dart_peer_match_counts(DartState *st, uint32_t peer_id,
+void      dart_peer_match_counts(DartTransportState *st, uint32_t peer_id,
                                  uint16_t *publish_to, uint16_t *receive_from);
 
 /* Cumulative reliable-repair counters for a channel, summed over its peer/reader
@@ -383,13 +383,13 @@ typedef struct {
 
 /* Fill *out with the channel's cumulative repair counters (zeroed if channel is
  * out of range). Per-channel aggregate; a per-peer breakdown is a later extension. */
-void      dart_repair_stats(DartState *st, uint16_t channel, DartRepairStats *out);
+void      dart_repair_stats(DartTransportState *st, uint16_t channel, DartRepairStats *out);
 
 /* Writer-side: number of reader lanes on this channel with a pending repair NACK to
  * service. 0 => the writer has nothing to resend right now (idle for lack of NACKs).
  * Diagnostic for the backpressure stall (distinguishes "no NACKs" from "resends
  * dropped"); sampled by the node's in-pump probe. */
-int       dart_repair_pending(DartState *st, uint16_t channel);
+int       dart_repair_pending(DartTransportState *st, uint16_t channel);
 
 /* Head-of-line reassembly snapshot for the in-progress message from `peer` on
  * `channel` (the message at the reader's deliver_upto). Returns 1 and fills the
@@ -399,22 +399,22 @@ int       dart_repair_pending(DartState *st, uint16_t channel);
  *   total      : fragments the message needs
  * `have` rising across calls => repair is crawling forward; flat => wedged. Any
  * out-pointer may be NULL. Wrapped as dart_channel_reader_progress. */
-int       dart_reader_progress(DartState *st, uint16_t channel, uint32_t peer,
+int       dart_reader_progress(DartTransportState *st, uint16_t channel, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 
 /* Feed a received datagram, tagged with the peer it came from. */
-void      dart_on_datagram(DartState *st, uint32_t from_peer, const void *datagram, size_t len,
+void      dart_on_datagram(DartTransportState *st, uint32_t from_peer, const void *datagram, size_t len,
                          uint64_t now_us);
 
 /* Pull one outgoing datagram (may batch submessages for one peer). Returns 1 and
  * fills *to_peer/out/out_len, or 0 when nothing is due. Loop until 0; pass DART_DGRAM_MAX cap. */
-int       dart_poll_send(DartState *st, uint32_t *to_peer, void *out, size_t cap,
+int       dart_poll_send(DartTransportState *st, uint32_t *to_peer, void *out, size_t cap,
                        size_t *out_len, uint64_t now_us);
 
 /* Absolute us of the next internal timer (deferred ack / NACK / heartbeat), or 0 if
  * none is pending. Cap a blocking poll at this so a due timer is serviced on time
  * instead of waiting out the poll quantum or the amortized sweep. */
-uint64_t  dart_next_deadline_us(DartState *st);
+uint64_t  dart_next_deadline_us(DartTransportState *st);
 
 #ifdef __cplusplus
 }
