@@ -246,6 +246,35 @@ uint16_t  dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
 uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
 /* Locate the interest sub-blob inside the overlay; NULL + *out_len 0 if absent. */
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
+
+/* One advertised topic, as decoded by dart_meta_interest_next. name points into the
+ * source overlay (NOT NUL-terminated), so keep that blob alive while reading it. */
+typedef struct {
+    uint16_t    alias;      /* the advertiser's local channel index (opaque to us) */
+    uint8_t     reliable;   /* flags bit 0: offered (pub) / requested (sub) reliability */
+    uint8_t     is_pub;     /* 1 = a publish entry, 0 = a subscribe entry */
+    const char *name;       /* topic name in the source blob, name_len bytes (not NUL-terminated) */
+    uint8_t     name_len;
+} DartTopic;
+
+/* Iterator state for dart_meta_interest_next: zero-initialize, then call until it
+ * returns 0. The fields are internal walk state, not for direct use. */
+typedef struct {
+    uint16_t pub_left;   /* publish entries still to yield */
+    uint16_t sub_left;   /* subscribe entries still to yield */
+    uint32_t off;        /* byte offset of the next entry within the overlay */
+    uint8_t  started;    /* 0 until the first call parses the [npub][nsub] header */
+} DartInterestIter;
+
+/* Walk a peer's interest list (the publish entries, then the subscribe entries) one
+ * topic at a time, so consumers stop re-implementing the [u16 npub][u16 nsub] +
+ * [u16 alias][u8 flags][u8 namelen][name] format. Pass the same overlay/len each call
+ * with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at the end (or on a
+ * malformed/truncated blob: it stops rather than reading past the end). Usage:
+ *   DartInterestIter it = {0}; DartTopic t;
+ *   while (dart_meta_interest_next(meta, meta_len, &it, &t)) { ... } */
+int       dart_meta_interest_next(const uint8_t *meta, uint16_t meta_len,
+                       DartInterestIter *it, DartTopic *out);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */

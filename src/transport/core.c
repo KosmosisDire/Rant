@@ -709,6 +709,34 @@ const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t
     return meta + off;
 }
 
+int dart_meta_interest_next(const uint8_t *meta, uint16_t meta_len,
+                            DartInterestIter *it, DartTopic *out){
+    uint32_t off; uint8_t nlen;
+    if (!it || !out) return 0;
+    if (!it->started){                    /* first call: parse the [npub][nsub] header */
+        size_t il = 0;
+        const uint8_t *in = dart_meta_interest(meta, meta_len, &il);
+        it->started = 1; it->pub_left = it->sub_left = 0; it->off = 0;
+        if (!in || il < 4) return 0;      /* no/short interest list: nothing to yield */
+        it->pub_left = (uint16_t)(in[0] | ((uint16_t)in[1] << 8));
+        it->sub_left = (uint16_t)(in[2] | ((uint16_t)in[3] << 8));
+        it->off = (uint32_t)(in - meta) + 4u;   /* first entry, past npub/nsub */
+    }
+    if (it->pub_left == 0 && it->sub_left == 0) return 0;
+    off = it->off;
+    if (off + 4u > meta_len){ it->pub_left = it->sub_left = 0; return 0; }   /* truncated: stop */
+    nlen = meta[off + 3];
+    if (off + 4u + nlen > meta_len){ it->pub_left = it->sub_left = 0; return 0; }
+    out->alias    = (uint16_t)(meta[off] | ((uint16_t)meta[off + 1] << 8));
+    out->reliable = (uint8_t)(meta[off + 2] & DART_META_F_RELIABLE);
+    out->is_pub   = (uint8_t)(it->pub_left > 0);   /* pub list first, then sub */
+    out->name     = (const char *)(meta + off + 4u);
+    out->name_len = nlen;
+    it->off = off + 4u + nlen;
+    if (it->pub_left > 0) it->pub_left--; else it->sub_left--;
+    return 1;
+}
+
 #ifdef DART_SHM
 int dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]){
     if (!dart__meta_ok(meta, meta_len) || meta[2]!=7

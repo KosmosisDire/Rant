@@ -649,6 +649,35 @@ uint16_t  dart_meta_build(DartState *st, uint8_t *out, uint16_t cap,
 uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
 /* Locate the interest sub-blob inside the overlay; NULL + *out_len 0 if absent. */
 const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
+
+/* One advertised topic, as decoded by dart_meta_interest_next. name points into the
+ * source overlay (NOT NUL-terminated), so keep that blob alive while reading it. */
+typedef struct {
+    uint16_t    alias;      /* the advertiser's local channel index (opaque to us) */
+    uint8_t     reliable;   /* flags bit 0: offered (pub) / requested (sub) reliability */
+    uint8_t     is_pub;     /* 1 = a publish entry, 0 = a subscribe entry */
+    const char *name;       /* topic name in the source blob, name_len bytes (not NUL-terminated) */
+    uint8_t     name_len;
+} DartTopic;
+
+/* Iterator state for dart_meta_interest_next: zero-initialize, then call until it
+ * returns 0. The fields are internal walk state, not for direct use. */
+typedef struct {
+    uint16_t pub_left;   /* publish entries still to yield */
+    uint16_t sub_left;   /* subscribe entries still to yield */
+    uint32_t off;        /* byte offset of the next entry within the overlay */
+    uint8_t  started;    /* 0 until the first call parses the [npub][nsub] header */
+} DartInterestIter;
+
+/* Walk a peer's interest list (the publish entries, then the subscribe entries) one
+ * topic at a time, so consumers stop re-implementing the [u16 npub][u16 nsub] +
+ * [u16 alias][u8 flags][u8 namelen][name] format. Pass the same overlay/len each call
+ * with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at the end (or on a
+ * malformed/truncated blob: it stops rather than reading past the end). Usage:
+ *   DartInterestIter it = {0}; DartTopic t;
+ *   while (dart_meta_interest_next(meta, meta_len, &it, &t)) { ... } */
+int       dart_meta_interest_next(const uint8_t *meta, uint16_t meta_len,
+                       DartInterestIter *it, DartTopic *out);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
@@ -4710,6 +4739,34 @@ const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t
     if (meta_len < off) return NULL;
     *out_len = (size_t)(meta_len - off);
     return meta + off;
+}
+
+int dart_meta_interest_next(const uint8_t *meta, uint16_t meta_len,
+                            DartInterestIter *it, DartTopic *out){
+    uint32_t off; uint8_t nlen;
+    if (!it || !out) return 0;
+    if (!it->started){                    /* first call: parse the [npub][nsub] header */
+        size_t il = 0;
+        const uint8_t *in = dart_meta_interest(meta, meta_len, &il);
+        it->started = 1; it->pub_left = it->sub_left = 0; it->off = 0;
+        if (!in || il < 4) return 0;      /* no/short interest list: nothing to yield */
+        it->pub_left = (uint16_t)(in[0] | ((uint16_t)in[1] << 8));
+        it->sub_left = (uint16_t)(in[2] | ((uint16_t)in[3] << 8));
+        it->off = (uint32_t)(in - meta) + 4u;   /* first entry, past npub/nsub */
+    }
+    if (it->pub_left == 0 && it->sub_left == 0) return 0;
+    off = it->off;
+    if (off + 4u > meta_len){ it->pub_left = it->sub_left = 0; return 0; }   /* truncated: stop */
+    nlen = meta[off + 3];
+    if (off + 4u + nlen > meta_len){ it->pub_left = it->sub_left = 0; return 0; }
+    out->alias    = (uint16_t)(meta[off] | ((uint16_t)meta[off + 1] << 8));
+    out->reliable = (uint8_t)(meta[off + 2] & DART_META_F_RELIABLE);
+    out->is_pub   = (uint8_t)(it->pub_left > 0);   /* pub list first, then sub */
+    out->name     = (const char *)(meta + off + 4u);
+    out->name_len = nlen;
+    it->off = off + 4u + nlen;
+    if (it->pub_left > 0) it->pub_left--; else it->sub_left--;
+    return 1;
 }
 
 #ifdef DART_SHM
