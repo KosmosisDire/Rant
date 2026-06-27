@@ -1272,7 +1272,7 @@ static void open_fail_checks(void){
     }
 
     /* fail_mcast: a non-multicast discovery group makes the IGMP join fail, so
-       dart_discovery_rt_open returns NULL and the node unwinds through fail_mcast */
+       dart_discovery_place returns NULL and the node unwinds through fail_mcast */
     {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
         n = dart_node_open(&a, NULL, NULL,
             &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .discovery_group="1.2.3.4" } });

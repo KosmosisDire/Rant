@@ -1,6 +1,6 @@
 /* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
  * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
- * IO-owning layer see DartDiscoveryRt.h. */
+ * IO-owning layer see discovery/runtime.h (DartDiscovery). */
 #ifndef DART_DISCOVERY_H
 #define DART_DISCOVERY_H
 

@@ -1,9 +1,15 @@
-/* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over
- * the dart_discovery core. On non-MSVC Windows, link -lws2_32 -lbcrypt. */
+/* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over the
+ * dart_discovery core. Two ways to construct one DartDiscovery:
+ *   dart_discovery_open  - defaults-first, owns its memory via a DartAllocator
+ *                          (mirrors dart_node_open; what standalone observers use).
+ *   dart_discovery_place - advanced: place the runtime in a caller-provided buffer
+ *                          (the node embeds discovery in its own arena this way).
+ * On non-MSVC Windows, link -lws2_32 -lbcrypt. */
 #ifndef DART_DISCOVERY_RT_H
 #define DART_DISCOVERY_RT_H
 
 #include "core.h"
+#include "../common/allocator.h"   /* DartAllocator (shared with the node runtime) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,9 +17,55 @@ extern "C" {
 
 #define DART_DISCOVERY_MAX_SEEDS 4
 
-/* Zero/NULL fields get defaults; leave discovery.uuid all-zero to auto-generate one. */
+typedef struct DartDiscovery DartDiscovery;
+
+/* -------------------------------------------------------- defaults-first open */
+/* Flat, zero-means-default options for dart_discovery_open. Discovery is generic:
+ * the optional meta blob is OPAQUE (a higher layer's overlay), carried verbatim. */
 typedef struct {
-    DartDiscoveryConfig discovery;        /* core config: ids, timing, callbacks */
+    uint16_t              domain;               /* logical-network selector; 0 */
+    const char           *name;                 /* advertised peer name; NULL = none */
+    const char           *discovery_group;      /* multicast group; "239.255.0.7" */
+    uint16_t              discovery_port;       /* rendezvous port; 7400 */
+    const char           *multicast_interface;  /* interface IP; NULL = auto (pin on multihomed) */
+    uint8_t               multicast_ttl;        /* hops; 1 */
+    uint16_t              max_peers;            /* table capacity; 32 */
+    DartDiscoveryEventFn  on_event;             /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
+    void                 *user;                 /* passed to on_event */
+    const DartDiscoveryAddr *seed_peers;        /* unicast seeds for multicast-filtered nets */
+    uint16_t              n_seed_peers;
+    const uint8_t        *meta;                 /* optional OPAQUE overlay to advertise; NULL = none */
+    uint16_t              meta_len;
+    uint16_t              meta_capacity;        /* per-peer INCOMING overlay buffer; 0 = default */
+} DartDiscoveryOpts;
+
+/* Open a discovery runtime backed by mem (a static or dynamic DartAllocator, taken
+ * over here: mem->claimed is set). opts may be NULL for all defaults. The UUID is
+ * auto-generated. Returns NULL on failure (allocator too small / already claimed /
+ * socket setup failed). Close with dart_discovery_close. */
+DartDiscovery   *dart_discovery_open(DartAllocator *mem, const DartDiscoveryOpts *opts);
+
+/* ------------------------------------------------------------------ lifecycle */
+/* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
+ * what's due. Returns 1 if a datagram arrived, 0 if idle, <0 on socket error. */
+int        dart_discovery_poll(DartDiscovery *d, int timeout_ms);
+/* Gather membership at startup: solicit, then pump until the peer set is quiet for
+ * quiet_ms or timeout_ms total. Re-solicits periodically. Returns the peer count. Blocks. */
+int        dart_discovery_gather(DartDiscovery *d, int quiet_ms, int timeout_ms);
+/* Optionally multicast a graceful BYE, then close the socket and free owned memory. */
+void       dart_discovery_close(DartDiscovery *d, int send_bye);
+
+/* The live peer list, by pointer (zero copy). *count gets the length; the array is
+ * valid until the next dart_discovery_poll mutates the table. Iterate it to find peers
+ * by name/addr/overlay; the overlay is opaque (decode with the transport codec). */
+const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count);
+
+/* ---------------------------------------------------- advanced: placement open */
+/* Network addressing + the embedded core config; zero/NULL fields get defaults. Leave
+ * discovery.uuid all-zero to auto-generate one. Used by dart_discovery_place when a
+ * caller (e.g. the node) supplies the memory and needs the full config surface. */
+typedef struct {
+    DartDiscoveryConfig discovery;        /* core config: ids, timing, callbacks, meta */
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
@@ -23,41 +75,33 @@ typedef struct {
     const DartDiscoveryAddr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
     uint16_t     n_seeds;
-} DartDiscoveryRtConfig;
+} DartDiscoveryNetConfig;
 
-typedef struct DartDiscoveryRt DartDiscoveryRt;
-
-size_t     dart_discovery_rt_required_memory(const DartDiscoveryRtConfig *cfg);
-/* Open the socket, join the group, place core state in mem. NULL on failure. */
-DartDiscoveryRt  *dart_discovery_rt_open(void *mem, size_t mem_size, const DartDiscoveryRtConfig *cfg);
-/* Relocate the runtime into a bigger block at grown counts, preserving the live socket,
- * UUID and peer table. self_meta = the node core's new announce-blob address. Caller frees
- * the old block afterward. Dynamic-mode growth only. */
-DartDiscoveryRt  *dart_discovery_rt_migrate(DartDiscoveryRt *old, void *new_mem, size_t new_cap,
+size_t     dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg);
+/* Place a runtime in caller memory (mem[0..mem_size)): open the socket, join the group,
+ * init core state. NULL on failure. The caller owns mem (dart_discovery_close frees only
+ * the socket, not mem). */
+DartDiscovery   *dart_discovery_place(void *mem, size_t mem_size, const DartDiscoveryNetConfig *cfg);
+/* Relocate a placed runtime into a bigger block at grown counts, preserving the live
+ * socket, UUID and peer table. self_meta = the new announce-blob address. Caller frees
+ * the old block afterward. Placement (caller-owned) path only. */
+DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t new_cap,
         uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user);
-/* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send
- * what's due. Returns 1 if a datagram arrived, 0 if idle, <0 on socket error. */
-int        dart_discovery_rt_poll(DartDiscoveryRt *rt, int timeout_ms);
-/* Gather membership at startup: solicit, then pump until the peer set is quiet for
- * quiet_ms or timeout_ms total. Re-solicits periodically. Returns the peer count. Blocks. */
-int        dart_discovery_rt_settle(DartDiscoveryRt *rt, int quiet_ms, int timeout_ms);
-/* Optionally multicast a graceful BYE, then close the socket. */
-void       dart_discovery_rt_close(DartDiscoveryRt *rt, int send_bye);
 
-/* Hand the core a discovery datagram that arrived on another socket (unicast
- * announces target the peer's data port, so the data-socket owner forwards them). */
-void       dart_discovery_rt_feed(DartDiscoveryRt *rt, const uint8_t *src_ip, uint8_t src_ip_len,
+/* ----------------------------------------------------------- node integration */
+/* Hand the core a discovery datagram that arrived on another socket (unicast announces
+ * target the peer's data port, so the data-socket owner forwards them). */
+void       dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
                           const void *datagram, size_t len);
-
-/* Replace the opaque meta blob carried in announces and bump its version, so peers
+/* Replace the opaque overlay carried in announces and bump its version, so peers
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
-void       dart_discovery_rt_set_meta(DartDiscoveryRt *rt, const uint8_t *meta, uint16_t meta_len);
-
+void       dart_discovery_advertise(DartDiscovery *d, const uint8_t *meta, uint16_t meta_len);
 /* Re-apply every known peer's interest against our current local state (see
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
  * added local channel matches interest peers advertised before it existed. */
-void       dart_discovery_rt_replay(DartDiscoveryRt *rt);
+void       dart_discovery_replay(DartDiscovery *d);
 
+/* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
