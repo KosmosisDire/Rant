@@ -423,7 +423,6 @@ int main(int argc, char **argv){
     DartNodeOpts opts; memset(&opts, 0, sizeof opts);
     opts.domain       = domain;
     opts.max_channels = (uint16_t)g_n_topics;
-    opts.on_event     = on_event;
     opts.discovery.max_peers = max_peers;
     /* A single big message has no within-message flow control, so the receive
        socket must buffer it whole or fragments drop and 32-wide NACK repair
@@ -462,7 +461,7 @@ int main(int argc, char **argv){
         if (!block){ fprintf(stderr, "out of memory (arena %lu bytes)\n", (unsigned long)mem_size); return 1; }
         alloc = dart_allocator_static(block, mem_size);
     }
-    DartNode *n = dart_node_open(&alloc, NULL, on_message, &opts);
+    DartNode *n = dart_node_open(&alloc, NULL, on_message, on_event, &opts);
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     /* Create channels in index order, so channel index i is g_topics[i] and the

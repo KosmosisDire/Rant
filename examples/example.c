@@ -158,8 +158,8 @@ int main(int argc, char **argv){
         else if (!name) name = argv[i];
     }
     DartAllocator mem = dart_allocator_dynamic(1 << 20);
-    DartNode *n = dart_node_open(&mem, name, on_message,
-                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS, .on_event = on_event,
+    DartNode *n = dart_node_open(&mem, name, on_message, on_event,
+                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS,
                                                   .net = { .multicast_interface = ifc } });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 

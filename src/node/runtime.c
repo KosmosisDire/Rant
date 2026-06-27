@@ -349,7 +349,7 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
 }
 #endif
 
-DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message, const DartNodeOpts *opts){
+DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message, DartEventFn on_event, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryNetConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_channels;
     uint8_t *base; void *arena; int owns; size_t need, arena_size, ctrl_end, ctrl_cap;
@@ -420,7 +420,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     n->fd = DART_SOCK_BAD; n->multicast_fd = DART_SOCK_BAD;
     n->domain = o.domain;
     n->net = o.net;
-    n->user_on_message = on_message; n->on_event = o.on_event;
+    n->user_on_message = on_message; n->on_event = on_event;
     n->user_data = o.user_data;
     n->arena = arena; n->owns_arena = owns;
     n->alloc_dynamic = mem->dynamic;

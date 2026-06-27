@@ -43,12 +43,11 @@ typedef struct {
 
 /* Optional node config, passed to dart_node_open as a compound literal (every field is
  * zero-means-default, so &(DartNodeOpts){0} or NULL is "all defaults"):
- *   dart_node_open(1<<20, "robot1", on_message, &(DartNodeOpts){ .domain = 7, .max_channels = 16 });
+ *   dart_node_open(mem, "robot1", on_message, on_event, &(DartNodeOpts){ .domain = 7 });
  */
 typedef struct {
     uint16_t              domain;        /* logical-network selector */
     uint16_t              max_channels;  /* how many channels can be created; 0 = 8 */
-    DartEventFn         on_event;      /* optional: loss/too-big/collision/peer up/down */
     void                 *user_data;     /* surfaced as DartMsg.user and DartEvent.user */
     uint8_t               disable_shm;   /* 1 = never use the same-host shared-memory fast path
                                             (force on-wire UDP even to a same-host peer; dynamic
@@ -91,11 +90,12 @@ typedef void (*DartMsgFn)(const DartMsg *msg);
 /* Open a node backed by mem (required): a static or dynamic DartAllocator, taken over
  * by this node (mem->claimed is set; reuse it for another node is refused). name is this
  * node's human-readable label, synced via discovery and surfaced as DartMsg.sender_name;
- * NULL/empty => an auto-generated "node-XXXXXXXX". on_message may be NULL for a publish-only
- * node. opts may be NULL for all defaults. Returns NULL on failure (incl. a static buffer
- * too small for the node, or an already-claimed allocator). */
+ * NULL/empty => an auto-generated "node-XXXXXXXX". on_message (delivered messages) and
+ * on_event (peer/loss/QoS events) may each be NULL. opts may be NULL for all defaults.
+ * Returns NULL on failure (incl. a static buffer too small for the node, or an
+ * already-claimed allocator). */
 DartNode    *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message,
-                            const DartNodeOpts *opts);
+                            DartEventFn on_event, const DartNodeOpts *opts);
 int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
 void         dart_node_close(DartNode *n, int send_bye);
 
