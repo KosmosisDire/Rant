@@ -263,10 +263,13 @@ static int dart_discovery_alloc(DartDiscoveryState *st){
 /* A different uuid announcing from an (ip,port) we already hold means that endpoint's
  * process restarted: one socket is one process, so the old entry is provably dead.
  * Evict it as GONE (state freed) before adopting the newcomer, so its stale transport
- * state can't shadow the new incarnation whose data routes to the same address. */
+ * state can't shadow the new incarnation whose data routes to the same address.
+ * A 0 port is "locator not advertised yet" (a peer first seen via a blob-less announce),
+ * not a real socket: distinct peers awaiting their blob share that non-endpoint, so it
+ * must NOT trigger eviction (else several same-host instances churn, evicting each other). */
 static void dart_discovery_evict_endpoint(DartDiscoveryState *st, const DartDiscoveryAddr *addr){
     uint16_t i;
-    if (!addr->ip_len) return;
+    if (!addr->ip_len || !addr->port) return;
     for (i=0;i<st->cap_peers;i++){
         i_DartDiscoveryPeer *peer = &st->peers[i];
         if (!peer->used) continue;
