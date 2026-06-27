@@ -87,6 +87,32 @@ typedef struct {
 } DartDiscoveryEvent;
 typedef void (*DartDiscoveryEventFn)(const DartDiscoveryEvent *ev);
 
+/* A peer's liveness, for the read-only peer view (dart_discovery_peer_at). */
+typedef enum {
+    DART_PEER_ACTIVE  = 0,   /* heard within peer_timeout_us */
+    DART_PEER_DROPPED = 1     /* fell silent; state kept, the same UUID may return */
+} DartPeerLiveness;
+
+/* The public face of one discovered peer, filled from the internal table by
+ * dart_discovery_peer_at. Discovery is generic, so this carries only what discovery
+ * itself knows: identity, locator, liveness, name, and the OPAQUE overlay blob (the
+ * higher layer's data). The overlay's transport meaning (frag size, interest topics)
+ * is decoded by the consumer via the transport codec (dart_meta_frag /
+ * dart_meta_interest_next), never by discovery. The pointers are into discovery state,
+ * valid until the next poll mutates the table. */
+typedef struct {
+    uint32_t          id;            /* local handle, stable across a drop/return */
+    uint8_t           uuid[16];      /* the peer's real GUID */
+    DartDiscoveryAddr addr;          /* advertised unicast locator */
+    DartPeerLiveness  liveness;      /* ACTIVE, or DROPPED (silent, may return) */
+    uint64_t          last_heard_us; /* timestamp of its last announce (caller derives age) */
+    const char       *name;          /* advertised name (NUL-terminated; "" if none) */
+    uint8_t           name_len;
+    const uint8_t    *meta;          /* opaque overlay blob (NULL if none) */
+    uint16_t          meta_len;
+    uint32_t          meta_version;  /* version of the overlay we hold */
+} DartDiscoveryPeer;
+
 typedef struct {
     uint8_t  uuid[16];      /* unique per process instance (regen each boot) */
     uint16_t domain_id;     /* logical-network selector */
@@ -159,10 +185,18 @@ size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, siz
                              DartDiscoveryAddr *to);
 /* Count of live peers currently known. */
 uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
+/* Table capacity (the slot range for dart_discovery_peer_addr / dart_discovery_peer_at). */
+uint16_t     dart_discovery_max_peers(const DartDiscoveryState *st);
 /* Address of the peer in table slot (0..max_peers-1); 1 + fills *out if it holds a
  * live peer. Lets a runtime reinforce announces over unicast to survive multicast outages. */
 int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot,
                              DartDiscoveryAddr *out);
+/* Read-only peer view: fill *out for the peer in table slot (0..max_peers-1) and return
+ * 1 if it holds one (ACTIVE or DROPPED), else 0. The filled name/meta pointers point into
+ * discovery state, valid until the next poll. Scan slot 0..dart_discovery_max_peers()-1 to
+ * enumerate; the overlay is opaque (decode it with the transport codec). */
+int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
+                             DartDiscoveryPeer *out);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
                              uint64_t boot_seed);
@@ -941,6 +975,27 @@ uint16_t dart_discovery_peer_count(const DartDiscoveryState *st){
     uint16_t i, c = 0;   /* live peers only; DROPPED entries linger for resume, not as members */
     for (i=0;i<st->cap_peers;i++) if (st->peers[i].used && !st->peers[i].dropped) c++;
     return c;
+}
+
+uint16_t dart_discovery_max_peers(const DartDiscoveryState *st){ return st->cap_peers; }
+
+int dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot, DartDiscoveryPeer *out){
+    const i_DartDiscoveryPeer *p;
+    if (slot >= st->cap_peers) return 0;
+    p = &st->peers[slot];
+    if (!p->used) return 0;                  /* free slot: DROPPED entries are still "used" */
+    memset(out, 0, sizeof *out);
+    out->id = p->local_id;
+    memcpy(out->uuid, p->uuid, 16);
+    dart_discovery_addr_of(p, &out->addr);
+    out->liveness      = p->dropped ? DART_PEER_DROPPED : DART_PEER_ACTIVE;
+    out->last_heard_us = p->last_heard_us;
+    out->name          = p->name;            /* always NUL-terminated (parsed from the blob) */
+    out->name_len      = p->name_len;
+    out->meta          = p->meta_len ? p->meta : NULL;
+    out->meta_len      = p->meta_len;
+    out->meta_version  = p->meta_version;
+    return 1;
 }
 
 size_t dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap){

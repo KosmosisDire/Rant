@@ -507,6 +507,27 @@ uint16_t dart_discovery_peer_count(const DartDiscoveryState *st){
     return c;
 }
 
+uint16_t dart_discovery_max_peers(const DartDiscoveryState *st){ return st->cap_peers; }
+
+int dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot, DartDiscoveryPeer *out){
+    const i_DartDiscoveryPeer *p;
+    if (slot >= st->cap_peers) return 0;
+    p = &st->peers[slot];
+    if (!p->used) return 0;                  /* free slot: DROPPED entries are still "used" */
+    memset(out, 0, sizeof *out);
+    out->id = p->local_id;
+    memcpy(out->uuid, p->uuid, 16);
+    dart_discovery_addr_of(p, &out->addr);
+    out->liveness      = p->dropped ? DART_PEER_DROPPED : DART_PEER_ACTIVE;
+    out->last_heard_us = p->last_heard_us;
+    out->name          = p->name;            /* always NUL-terminated (parsed from the blob) */
+    out->name_len      = p->name_len;
+    out->meta          = p->meta_len ? p->meta : NULL;
+    out->meta_len      = p->meta_len;
+    out->meta_version  = p->meta_version;
+    return 1;
+}
+
 size_t dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap){
     return dart_discovery_build(st, DART_DISCOVERY_FLAG_BYE, 0, (uint8_t *)out, cap);
 }
