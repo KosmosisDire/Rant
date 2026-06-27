@@ -267,6 +267,7 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const DartDiscoveryConfig
     nc.discovery.domain_id     = o.domain;
     nc.discovery.max_peers     = o.max_peers;          /* 0 => default applied in place */
     nc.discovery.meta_capacity = o.meta_capacity;
+    nc.discovery.peer_user_bytes = o.peer_user_bytes;
     nc.discovery.meta          = o.meta;
     nc.discovery.meta_len      = o.meta_len;
     nc.discovery.on_event      = o.on_event;
@@ -386,6 +387,8 @@ int dart_discovery_gather(DartDiscovery *d, int quiet_ms, int timeout_ms){
     }
     return (int)count;
 }
+
+DartDiscoveryState *dart_discovery_state(DartDiscovery *d){ return d ? d->core : NULL; }
 
 const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count){
     uint16_t i, n = 0;

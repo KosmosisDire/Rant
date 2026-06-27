@@ -93,6 +93,7 @@ typedef struct {
     const uint8_t    *meta;          /* opaque overlay blob (NULL if none) */
     uint16_t          meta_len;
     uint32_t          meta_version;  /* version of the overlay we hold */
+    void             *user;          /* this peer's user scratch (cfg.peer_user_bytes), or NULL */
 } DartDiscoveryPeer;
 
 typedef struct {
@@ -113,6 +114,8 @@ typedef struct {
                                valid. <= meta_capacity */
     uint16_t meta_len;
     uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
+    uint16_t peer_user_bytes;    /* opaque scratch reserved per peer (0 = none); see dart_discovery_peer_user.
+                                    Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
 } DartDiscoveryCoreConfig;
@@ -179,6 +182,21 @@ int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slo
  * enumerate; the overlay is opaque (decode it with the transport codec). */
 int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
                              DartDiscoveryPeer *out);
+
+/* By-id lookups (a higher layer keys its state on the peer id). Each scans the table
+ * for the peer whose local id == id, including DROPPED peers (a dropped peer keeps its
+ * slot for a same-UUID return, so it still resolves). The peer table is discovery's; a
+ * consumer (e.g. the node core) uses these instead of duplicating it.
+ *   peer_user  -> pointer to the peer's opaque scratch (cfg.peer_user_bytes), or NULL.
+ *   addr_of_id -> 1 + fills *out with the advertised locator, else 0.
+ *   peer_name  -> NUL-terminated advertised name (into discovery state) + *out_len, or NULL.
+ *   id_for_addr-> reverse map an (ip, port) back to a peer id: 1 + *id on a hit, else 0. */
+void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
+int          dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id,
+                             DartDiscoveryAddr *out);
+const char  *dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id, uint8_t *out_len);
+int          dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint8_t *ip,
+                             uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
                              uint64_t boot_seed);

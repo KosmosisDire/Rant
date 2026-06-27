@@ -37,6 +37,8 @@ typedef struct {
     const uint8_t        *meta;                 /* optional OPAQUE overlay to advertise; NULL = none */
     uint16_t              meta_len;
     uint16_t              meta_capacity;        /* per-peer INCOMING overlay buffer; 0 = default */
+    uint16_t              peer_user_bytes;      /* opaque scratch reserved per peer; 0 = none
+                                                   (see dart_discovery_peer_user) */
 } DartDiscoveryConfig;
 
 /* Open a discovery runtime backed by mem (a static or dynamic DartAllocator, taken
@@ -57,8 +59,14 @@ void       dart_discovery_close(DartDiscovery *d, int send_bye);
 
 /* The live peer list, by pointer (zero copy). *count gets the length; the array is
  * valid until the next dart_discovery_poll mutates the table. Iterate it to find peers
- * by name/addr/overlay; the overlay is opaque (decode with the transport codec). */
+ * by name/addr/overlay; the overlay is opaque (decode with the transport codec). Each
+ * entry's .user points at that peer's scratch (cfg.peer_user_bytes), writable in place. */
 const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count);
+
+/* The underlying sans-IO core. Advanced: a higher layer (e.g. the node core) uses it for
+ * the by-id lookups (dart_discovery_peer_user / addr_of_id / peer_name / id_for_addr)
+ * instead of keeping a parallel peer table. Valid for the runtime's life (NULL if d is). */
+DartDiscoveryState *dart_discovery_state(DartDiscovery *d);
 
 /* ---------------------------------------------------- advanced: placement open */
 /* Network addressing + the embedded core config; zero/NULL fields get defaults. Leave
