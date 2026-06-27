@@ -7,40 +7,12 @@
 
 #include "../transport/core.h"
 #include "../discovery/core.h"    /* DartDiscoveryAddr (seed peers) */
+#include "../common/allocator.h"  /* DartAllocator (shared with the discovery runtime) */
 #include "core.h"                 /* DartEvent / DartEventFn / dart_event_str (node's app event) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Dynamic-mode growth ceiling when DartAllocator.max_bytes is 0: a runaway guard,
- * not a reservation. Define before the include to override. */
-#ifndef DART_MEM_DEFAULT_MAX
-#define DART_MEM_DEFAULT_MAX ((size_t)1 << 30)   /* 1 GiB */
-#endif
-
-/* The node's memory contract: construct one and hand it to dart_node_open. One
- * allocator backs exactly one node (claimed on open). Two modes, set by the
- * constructor, never by hand:
- *   static  - all node memory is carved from your fixed buffer; no heap, no growth.
- *             For embedded (ESP32/Arduino). A bigger buffer admits more/larger
- *             messages; exhaustion refuses the work rather than growing.
- *   dynamic - memory comes from the platform heap and message buffers grow to fit,
- *             so a desktop node need not pre-size anything.
- */
-typedef struct {
-    void   *buffer;     /* static: your block. dynamic: NULL (heap-backed) */
-    size_t  size;       /* static: its size (hard budget). dynamic: initial size hint */
-    size_t  max_bytes;  /* dynamic: growth ceiling (0 = DART_MEM_DEFAULT_MAX). static: ignored */
-    uint8_t dynamic;    /* set by the constructor: 0 = static, 1 = dynamic */
-    uint8_t claimed;    /* set when a node takes ownership; reuse is then refused */
-} DartAllocator;
-
-/* Static: no heap, no growth; all of the node lives in buffer[0..size). */
-DartAllocator dart_allocator_static(void *buffer, size_t size);
-/* Dynamic: heap-backed, message buffers grow to fit. size_hint pre-sizes the
- * initial block (advisory). Set .max_bytes on the result to override the ceiling. */
-DartAllocator dart_allocator_dynamic(size_t size_hint);
 
 /* Network addressing and sockets; every field is zero-means-default (defaults shown). */
 typedef struct {

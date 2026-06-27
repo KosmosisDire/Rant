@@ -121,19 +121,6 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
     }
 }
 
-/* Construct a node memory contract. The node copies what it needs at open, so the
- * DartAllocator value itself need not outlive the call (the static buffer must). */
-DartAllocator dart_allocator_static(void *buffer, size_t size){
-    DartAllocator a; memset(&a, 0, sizeof a);
-    a.buffer = buffer; a.size = size; a.dynamic = 0;
-    return a;
-}
-DartAllocator dart_allocator_dynamic(size_t size_hint){
-    DartAllocator a; memset(&a, 0, sizeof a);
-    a.size = size_hint; a.dynamic = 1;
-    return a;
-}
-
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. */
 static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *data, size_t len){

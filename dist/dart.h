@@ -359,6 +359,55 @@ void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
 #endif
 #endif /* DART_PLAT_H */
 #pragma endregion
+#pragma region common/allocator.h
+/* The runtime memory contract shared by the node and the standalone discovery
+ * runtime: construct a DartAllocator and hand it to dart_node_open /
+ * dart_discovery_open. Hoisted out of the node so discovery takes the same one.
+ * A low-level header (no socket or clock); the IO-owning runtimes consume it. */
+#ifndef DART_ALLOCATOR_H
+#define DART_ALLOCATOR_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Dynamic-mode growth ceiling when DartAllocator.max_bytes is 0: a runaway guard,
+ * not a reservation. Define before the include to override. */
+#ifndef DART_MEM_DEFAULT_MAX
+#define DART_MEM_DEFAULT_MAX ((size_t)1 << 30)   /* 1 GiB */
+#endif
+
+/* The memory contract: construct one and hand it to a runtime open. One allocator
+ * backs exactly one handle (claimed on open). Two modes, set by the constructor,
+ * never by hand:
+ *   static  - all memory is carved from your fixed buffer; no heap, no growth.
+ *             For embedded (ESP32/Arduino). A bigger buffer admits more/larger
+ *             work; exhaustion refuses the work rather than growing.
+ *   dynamic - memory comes from the platform heap and buffers grow to fit, so a
+ *             desktop caller need not pre-size anything.
+ */
+typedef struct {
+    void   *buffer;     /* static: your block. dynamic: NULL (heap-backed) */
+    size_t  size;       /* static: its size (hard budget). dynamic: initial size hint */
+    size_t  max_bytes;  /* dynamic: growth ceiling (0 = DART_MEM_DEFAULT_MAX). static: ignored */
+    uint8_t dynamic;    /* set by the constructor: 0 = static, 1 = dynamic */
+    uint8_t claimed;    /* set when a handle takes ownership; reuse is then refused */
+} DartAllocator;
+
+/* Static: no heap, no growth; everything lives in buffer[0..size). */
+DartAllocator dart_allocator_static(void *buffer, size_t size);
+/* Dynamic: heap-backed, buffers grow to fit. size_hint pre-sizes the initial block
+ * (advisory). Set .max_bytes on the result to override the ceiling. */
+DartAllocator dart_allocator_dynamic(size_t size_hint);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* DART_ALLOCATOR_H */
+#pragma endregion
 #pragma region discovery/runtime.h
 /* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over
  * the dart_discovery core. On non-MSVC Windows, link -lws2_32 -lbcrypt. */
@@ -1011,35 +1060,6 @@ int      dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Dynamic-mode growth ceiling when DartAllocator.max_bytes is 0: a runaway guard,
- * not a reservation. Define before the include to override. */
-#ifndef DART_MEM_DEFAULT_MAX
-#define DART_MEM_DEFAULT_MAX ((size_t)1 << 30)   /* 1 GiB */
-#endif
-
-/* The node's memory contract: construct one and hand it to dart_node_open. One
- * allocator backs exactly one node (claimed on open). Two modes, set by the
- * constructor, never by hand:
- *   static  - all node memory is carved from your fixed buffer; no heap, no growth.
- *             For embedded (ESP32/Arduino). A bigger buffer admits more/larger
- *             messages; exhaustion refuses the work rather than growing.
- *   dynamic - memory comes from the platform heap and message buffers grow to fit,
- *             so a desktop node need not pre-size anything.
- */
-typedef struct {
-    void   *buffer;     /* static: your block. dynamic: NULL (heap-backed) */
-    size_t  size;       /* static: its size (hard budget). dynamic: initial size hint */
-    size_t  max_bytes;  /* dynamic: growth ceiling (0 = DART_MEM_DEFAULT_MAX). static: ignored */
-    uint8_t dynamic;    /* set by the constructor: 0 = static, 1 = dynamic */
-    uint8_t claimed;    /* set when a node takes ownership; reuse is then refused */
-} DartAllocator;
-
-/* Static: no heap, no growth; all of the node lives in buffer[0..size). */
-DartAllocator dart_allocator_static(void *buffer, size_t size);
-/* Dynamic: heap-backed, message buffers grow to fit. size_hint pre-sizes the
- * initial block (advisory). Set .max_bytes on the result to override the ceiling. */
-DartAllocator dart_allocator_dynamic(size_t size_hint);
 
 /* Network addressing and sockets; every field is zero-means-default (defaults shown). */
 typedef struct {
@@ -2014,6 +2034,23 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
 #pragma endregion
 
 #ifndef DART_DISCOVERY_SANS_IO
+#pragma region common/allocator.c
+/* DartAllocator constructors. See common/allocator.h. A runtime copies what it
+ * needs at open, so the DartAllocator value itself need not outlive the call (a
+ * static buffer must). Shared by the node and discovery runtimes. */
+#include <string.h>
+
+DartAllocator dart_allocator_static(void *buffer, size_t size){
+    DartAllocator a; memset(&a, 0, sizeof a);
+    a.buffer = buffer; a.size = size; a.dynamic = 0;
+    return a;
+}
+DartAllocator dart_allocator_dynamic(size_t size_hint){
+    DartAllocator a; memset(&a, 0, sizeof a);
+    a.size = size_hint; a.dynamic = 1;
+    return a;
+}
+#pragma endregion
 #pragma region platform/core.c
 /* dart_plat: the Windows + POSIX implementation of the platform contract. This
  * is the only file in DART carrying an OS #ifdef. Port to a new platform by
@@ -5593,19 +5630,6 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
         if (base) memcpy(nb + DART_ALLOC_HDR, ptr, old);
         return nb + DART_ALLOC_HDR;
     }
-}
-
-/* Construct a node memory contract. The node copies what it needs at open, so the
- * DartAllocator value itself need not outlive the call (the static buffer must). */
-DartAllocator dart_allocator_static(void *buffer, size_t size){
-    DartAllocator a; memset(&a, 0, sizeof a);
-    a.buffer = buffer; a.size = size; a.dynamic = 0;
-    return a;
-}
-DartAllocator dart_allocator_dynamic(size_t size_hint){
-    DartAllocator a; memset(&a, 0, sizeof a);
-    a.size = size_hint; a.dynamic = 1;
-    return a;
 }
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
