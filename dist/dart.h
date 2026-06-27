@@ -2947,6 +2947,8 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     dart_plat_mcast_ttl(fd, ttl);
     /* loop always on (uuid self-filter drops echoes); needed for multi-instance per host */
     dart_plat_mcast_loop(fd, 1);
+    dart_plat_set_nonblock(fd);   /* poll then DRAIN to empty (dart__rt_drain): the recv that
+                                     finds the queue empty must return would-block, not block */
 
     d->fd = fd;
     d->unicast_fd = DART_SOCK_BAD;
@@ -3056,6 +3058,24 @@ DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t 
     return d;
 }
 
+/* Drain one socket's RX queue into the core until empty (or the burst cap, a flood
+ * backstop). One recv per poll would let the queue back up for a caller that polls
+ * slowly (e.g. the explorer at its frame rate): new peers, drops, and announce updates
+ * would then lag the network by the backlog depth (a dead peer's queued old announces
+ * keep refreshing its last_heard, so it never times out). Drain fully so timing tracks
+ * real arrival, like the node's data socket already does. */
+#define DART_DISCOVERY_RX_BURST 2048
+static int dart__rt_drain(DartDiscovery *d, i_DartSock fd){
+    int got = 0, guard;
+    for (guard = 0; guard < DART_DISCOVERY_RX_BURST; guard++){
+        uint8_t src_ip[4];
+        int n = dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, NULL);
+        if (n < 0){ if (dart_plat_would_block()) break; continue; }  /* empty vs transient error */
+        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, d->rxbuf, (size_t)n, dart_plat_now_us()); got = 1; }
+    }
+    return got;
+}
+
 int dart_discovery_poll(DartDiscovery *d, int timeout_ms){
     i_DartPollfd pfd[2];
     DartDiscoveryAddr to;
@@ -3066,24 +3086,10 @@ int dart_discovery_poll(DartDiscovery *d, int timeout_ms){
     if (d->unicast_fd != DART_SOCK_BAD){ pfd[1].fd = d->unicast_fd; pfd[1].events = DART_POLLIN; nfds = 2; }
     if (dart_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
 
-    if (pfd[0].revents & DART_POLLIN){
-        uint8_t src_ip[4];
-        int n = dart_plat_recv(d->fd, d->rxbuf, d->wire_max, src_ip, NULL);
-        if (n > 0){
-            dart_discovery_on_datagram(d->core, src_ip, 4, d->rxbuf, (size_t)n, dart_plat_now_us());
-            got = 1;
-        }
-    }
+    if (pfd[0].revents & DART_POLLIN) got |= dart__rt_drain(d, d->fd);
     /* our own unicast port: solicit replies + re-fetch answers land here, so a same-host
        peer's reply reaches THIS process rather than the shared discovery port */
-    if (nfds == 2 && (pfd[1].revents & DART_POLLIN)){
-        uint8_t src_ip[4];
-        int n = dart_plat_recv(d->unicast_fd, d->rxbuf, d->wire_max, src_ip, NULL);
-        if (n > 0){
-            dart_discovery_on_datagram(d->core, src_ip, 4, d->rxbuf, (size_t)n, dart_plat_now_us());
-            got = 1;
-        }
-    }
+    if (nfds == 2 && (pfd[1].revents & DART_POLLIN)) got |= dart__rt_drain(d, d->unicast_fd);
 
     n_bytes = dart_discovery_update(d->core, dart_plat_now_us(), d->txbuf, d->wire_max);
     if (n_bytes) dart_discovery_tx(d, d->txbuf, n_bytes);
