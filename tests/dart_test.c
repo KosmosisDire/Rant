@@ -894,104 +894,119 @@ static void nc_event(const DartEvent *ev){
     else if (ev->kind==DART_PEER_DOWN)   { nc_down_n++; nc_down_id=ev->peer; }
     else if (ev->kind==DART_PEER_REFUSED){ nc_refused_n++; }
 }
-/* drive the node core's discovery sink as the discovery core would: build the generic
-   DartDiscoveryEvent (user = the core) and hand it to dart_node_core_on_disc_event. */
-static void nc_up(i_DartNodeCore *nc, uint32_t id, const DartDiscoveryAddr *a, const char *nm, uint8_t nl,
-                  const uint8_t *m, uint16_t ml){
-    DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
-    ev.kind=DART_DISCOVERY_PEER_UP; ev.user=nc; ev.peer=id; ev.addr=*a;
-    ev.name=nm; ev.name_len=nl; ev.meta=m; ev.meta_len=ml;
-    dart_node_core_on_disc_event(&ev);
+/* feed the node core through a REAL (sans-IO) discovery core: build an announce datagram
+   (discovery section [u16 port][u8 self_ip_len=0][u8 name_len][name], no overlay) so
+   discovery populates its table and fires events INTO dart_node_core_on_disc_event.
+   flags 0x01 = BYE. */
+static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
+                       const char *name, uint32_t mver){
+    size_t off = DART_DISCOVERY_META_OFF;
+    uint8_t *b = p + off;
+    uint8_t nl = name ? (uint8_t)strlen(name) : 0;
+    uint16_t ml = (uint16_t)(4u + nl);
+    memset(p, 0, off);
+    p[0]='u';p[1]='D';p[2]='S';p[3]='C';
+    p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
+    p[5]=flags;
+    p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
+    memset(p+8, uid, 16);                          /* a distinct uuid per uid */
+    p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
+    p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
+    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=nl;   /* port, self_ip_len=0, name_len */
+    if (nl) memcpy(b+4, name, nl);
+    p[off-2]=(uint8_t)ml; p[off-1]=(uint8_t)(ml>>8);
+    return off + ml;
 }
-static void nc_down(i_DartNodeCore *nc, uint32_t id, DartDiscoveryDownReason r){
-    DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
-    ev.kind=DART_DISCOVERY_PEER_DOWN; ev.user=nc; ev.peer=id; ev.reason=r;
-    dart_node_core_on_disc_event(&ev);
-}
-static void nc_refused(i_DartNodeCore *nc, const DartDiscoveryAddr *a){
-    DartDiscoveryEvent ev; memset(&ev,0,sizeof ev);
-    ev.kind=DART_DISCOVERY_PEER_REFUSED; ev.user=nc; ev.addr=*a;
-    dart_node_core_on_disc_event(&ev);
-}
+
+/* node-core peer lifecycle, fully sans-IO: a transport + a real discovery core (no
+   sockets/clock/platform), the node core delegating its peer table to discovery. Proves
+   the collapse: id<->address resolution + naming + the transport lifecycle all ride
+   discovery's one peer table, with the node core's per-peer state in its user scratch. */
 static void node_core_checks(void){
-    static uint8_t tmem[1<<18], cmem[4096];
-    DartConfig tc; DartState *tr;
+    static uint8_t tmem[1<<18], cmem[4096], dmem[8192];
+    uint8_t buf[256], out[DART_DISCOVERY_WIRE_MAX];
+    uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
+    DartConfig tc; DartState *tr; DartChannelDef ch[1];
+    DartDiscoveryCoreConfig dcfg; DartDiscoveryState *st;
     i_DartNodeCoreConfig cc; i_DartNodeCore *nc;
-    DartChannelDef ch[1];
-    DartDiscoveryAddr a, b;
-    i_DartNodeDest d;
-    uint8_t meta[256]; uint16_t mlen; uint32_t id;
+    i_DartNodeDest d; uint32_t id, idA, idB; size_t n;
 
     memset(ch,0,sizeof ch); ch[0].name="nc/topic";
     memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=1; tc.max_peers=2;
-    ST_CHECK(dart_required_memory(&tc) <= sizeof tmem, "node-core: transport fits");
     tr = dart_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "node-core: transport init");
     if (!tr) return;
-    mlen = dart_meta_build(tr, meta, sizeof meta, 1200, 0, NULL);   /* the overlay (no name) */
 
+    /* node core first (discovery bound once it exists, exactly like the runtime) */
     memset(&cc,0,sizeof cc);
-    cc.transport=tr; cc.max_peers=2; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event;
-    cc.is_local=NULL;                                              /* no platform: every peer remote */
+    cc.transport=tr; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event; cc.is_local=NULL;
     nc = dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
 
-    /* the core builds our OVERLAY from its own fields (frag size + interest; no name) */
+    /* the discovery core whose peer table the node core delegates to: reserve the node's
+       per-peer scratch via peer_user_bytes; wire its events into the node core */
+    memset(&dcfg,0,sizeof dcfg); memset(dcfg.uuid,0xEE,16);
+    dcfg.domain_id=99; dcfg.announce_interval_us=1000000; dcfg.peer_timeout_us=1000000; dcfg.max_peers=2;
+    dcfg.peer_user_bytes=dart_node_core_peer_user_bytes();
+    dcfg.on_event=dart_node_core_on_disc_event; dcfg.user=nc;
+    st = dart_discovery_init(dmem, sizeof dmem, &dcfg);
+    ST_CHECK(st!=NULL, "node-core: discovery init");
+    if (!st) return;
+    dart_node_core_bind_discovery(nc, st);
+    dart_discovery_update(st, 1000, out, sizeof out);   /* start */
+
+    /* build-meta still works (uses the transport, not any peer table) */
     {   uint16_t ml; const uint8_t *mb;
         dart_node_core_build_meta(nc);
         mb = dart_node_core_meta(nc, &ml);
         ST_CHECK(ml>=5 && dart_meta_frag(mb, ml)==1200,
-                 "node-core: builds overlay (frag=%u)", dart_meta_frag(mb, ml));
-    }
+                 "node-core: builds overlay (frag=%u)", dart_meta_frag(mb, ml)); }
 
-    memset(&a,0,sizeof a); a.ip[0]=10;a.ip[1]=0;a.ip[2]=0;a.ip[3]=1; a.ip_len=4; a.port=5001;
-    memset(&b,0,sizeof b); b.ip[0]=10;b.ip[1]=0;b.ip[2]=0;b.ip[3]=2; b.ip_len=4; b.port=5002;
-
-    /* 1. two peers up: events fire and destinations resolve, each way */
+    /* 1. two peers announce -> two ups; discovery assigns the ids; resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    nc_up(nc, 11, &a, "nc-self", 7, meta, mlen);
-    nc_up(nc, 22, &b, "nc-self", 7, meta, mlen);
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dart_discovery_on_datagram(st,sa,4,buf,n,2000); idA=nc_up_id;
+    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dart_discovery_on_datagram(st,sb,4,buf,n,2000); idB=nc_up_id;
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
-    {   uint8_t pnl=0; const char *pn = dart_node_core_peer_name(nc, 11, &pnl);
+    {   uint8_t pnl=0; const char *pn = dart_node_core_peer_name(nc, idA, &pnl);
         ST_CHECK(pn && pnl==7 && strcmp(pn,"nc-self")==0,
                  "node-core: peer name learned from announce (%s)", pn?pn:"?"); }
-    /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
-    {   uint8_t pnl=0; const char *pn;
-        nc_up(nc, 11, &a, NULL, 0, meta, mlen);      /* known-peer update, no name in the event */
-        pn = dart_node_core_peer_name(nc, 11, &pnl);
-        ST_CHECK(pn && strcmp(pn,"unknown-peer")==0,
-                 "node-core: nameless announce -> unknown-peer (%s)", pn?pn:"(null)");
-        nc_up(nc, 11, &a, "nc-self", 7, meta, mlen); /* restore the real name */
-    }
-    ST_CHECK(dart_node_core_resolve(nc,11,&d) && !d.is_group && d.port==5001 && d.ip[3]==1,
+    ST_CHECK(dart_node_core_resolve(nc,idA,&d) && !d.is_group && d.port==5001 && d.ip[3]==1,
              "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
-    ST_CHECK(dart_node_core_id_for_addr(nc, b.ip, 5002, &id) && id==22,
+    ST_CHECK(dart_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
              "node-core: addr resolves to id (id=%u)", id);
     ST_CHECK(dart_node_core_resolve(nc, DART_DEST_GROUP(0x07), &d) && d.is_group && d.group_sel==0x07,
              "node-core: group dest resolves to selector (sel=%u)", d.group_sel);
 
-    /* 2. DROP makes the peer dormant: one PEER_DOWN, but the slot is kept (still resolves) */
-    nc_down_n=0;
-    nc_down(nc, 11, DART_DISCOVERY_DROP);
-    ST_CHECK(nc_down_n==1 && nc_down_id==11, "node-core: DROP fires one down (downs=%u id=%u)", nc_down_n, nc_down_id);
-    ST_CHECK(dart_node_core_resolve(nc,11,&d)==1, "node-core: dropped peer kept (resolves)");
+    /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
+    {   uint8_t pnl=0; const char *pn;
+        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dart_discovery_on_datagram(st,sa,4,buf,n,2001);
+        pn = dart_node_core_peer_name(nc, idA, &pnl);
+        ST_CHECK(pn && strcmp(pn,"unknown-peer")==0,
+                 "node-core: nameless announce -> unknown-peer (%s)", pn?pn:"(null)");
+        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dart_discovery_on_datagram(st,sa,4,buf,n,2002); }
 
-    /* 3. same id returns -> RESUME re-fires PEER_UP, no new slot */
-    nc_up_n=0;
-    nc_up(nc, 11, &a, "nc-self", 7, meta, mlen);
-    ST_CHECK(nc_up_n==1 && nc_up_id==11, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
-
-    /* 4. GONE frees the peer: one down, no longer resolves */
-    nc_down_n=0;
-    nc_down(nc, 22, DART_DISCOVERY_GONE);
-    ST_CHECK(nc_down_n==1, "node-core: GONE fires down (downs=%u)", nc_down_n);
-    ST_CHECK(dart_node_core_resolve(nc,22,&d)==0, "node-core: GONE peer freed (no resolve)");
-
-    /* 5. a refused peer is forwarded as PEER_REFUSED */
+    /* 2. a 3rd peer is REFUSED while the table is full of ACTIVE peers; the node forwards it */
     nc_refused_n=0;
-    nc_refused(nc, &b);
+    n=nc_dgram(buf,3,0,99,5003,"three",1); dart_discovery_on_datagram(st,sc,4,buf,n,2003);
     ST_CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
+
+    /* 3. silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
+    nc_down_n=0;
+    dart_discovery_update(st, 1003000, out, sizeof out);
+    ST_CHECK(nc_down_n==2, "node-core: timeout drops both (downs=%u)", nc_down_n);
+    ST_CHECK(dart_node_core_resolve(nc,idA,&d)==1, "node-core: dropped peer kept (resolves)");
+
+    /* 4. the same uuid returns -> RESUME re-fires PEER_UP under the same id */
+    nc_up_n=0;
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dart_discovery_on_datagram(st,sa,4,buf,n,1100000);
+    ST_CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
+
+    /* 5. GONE (BYE) on the now-active peer: one PEER_DOWN, and it no longer resolves */
+    nc_down_n=0;
+    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dart_discovery_on_datagram(st,sa,4,buf,n,1100001);
+    ST_CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
+    ST_CHECK(dart_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
 }
 
 #ifdef DART_SHM

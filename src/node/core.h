@@ -64,10 +64,14 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
  * so the peer is flagged out-of-band (SHM) eligible. NULL => every peer is remote. */
 typedef int (*i_DartNodeIsLocalFn)(void *user, const uint8_t *ip, uint8_t ip_len);
 
-/* Everything the core needs from the runtime, set once at init. */
+/* Everything the core needs from the runtime, set once at init. The peer table itself
+ * lives in the discovery core: the node core delegates id<->address resolution and peer
+ * naming to it (dart_discovery_*), and stores its small per-peer transport-lifecycle
+ * state in the discovery peer's user scratch (dart_node_core_peer_user_bytes). */
 typedef struct {
     DartState           *transport;    /* the peers are wired into this (sans-IO) */
-    uint16_t              max_peers;     /* peer-table capacity */
+    DartDiscoveryState  *discovery;    /* the peer table (id<->addr, name, user scratch); may be
+                                          NULL at init, then bound via dart_node_core_bind_discovery */
     uint16_t              n_channels;    /* sizes the announce-blob buffer */
     uint16_t              frag_size;     /* our UDP fragment size, baked into the overlay */
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
@@ -80,12 +84,18 @@ typedef struct {
 
 typedef struct i_DartNodeCore i_DartNodeCore;
 
-size_t          dart_node_core_required_memory(uint16_t max_peers, uint16_t n_channels);
+size_t          dart_node_core_required_memory(uint16_t n_channels);
 i_DartNodeCore *dart_node_core_init(void *mem, size_t mem_size, const i_DartNodeCoreConfig *cfg);
-/* Relocate the sans-IO core into a bigger block at grown counts. The transport pointer and
- * the announce-blob pointer are re-pointed by the caller after those move. Dynamic growth. */
+/* Relocate the sans-IO core into a bigger block at grown counts. The transport, discovery,
+ * and announce-blob pointers are re-pointed by the caller after those move. Dynamic growth. */
 i_DartNodeCore *dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
-                                       uint16_t new_max_peers, uint16_t new_n_channels);
+                                       uint16_t new_n_channels);
+/* Bind (or rebind, after a migrate) the discovery core whose peer table this core delegates
+ * to. The runtime calls it once discovery exists, and again after discovery relocates. */
+void            dart_node_core_bind_discovery(i_DartNodeCore *c, DartDiscoveryState *discovery);
+/* Bytes of per-peer scratch the core needs in the discovery peer table (its transport-
+ * lifecycle state). The runtime sets discovery's cfg.peer_user_bytes to this. */
+uint16_t        dart_node_core_peer_user_bytes(void);
 
 /* The discovery announce blob this node sends: its frag size, OOB host, and interest
  * list. The core owns the buffer and builds it (the codec is dart_meta_* in the

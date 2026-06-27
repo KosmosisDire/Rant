@@ -198,7 +198,7 @@ static void dart__node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_ch
                               const DartDiscoveryNetConfig *discovery_rt_cfg, i_DartNodeBlocks *o){
     o->handles       = (uint8_t*)dart_take(b, (size_t)max_channels * sizeof(DartChannel*), 16);
     o->joined_groups = (uint8_t*)dart_take(b, (size_t)max_channels * sizeof(uint32_t), 8);
-    o->node_core_bytes = dart_node_core_required_memory(max_peers, max_channels);
+    o->node_core_bytes = dart_node_core_required_memory(max_channels);   /* peers live in discovery now */
     o->node_core = (uint8_t*)dart_take(b, o->node_core_bytes, 16);
     o->transport_bytes = dart_required_memory(transport_cfg);
     o->transport = (uint8_t*)dart_take(b, o->transport_bytes, 16);
@@ -398,6 +398,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     dc.discovery.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.discovery.max_peers   = max_peers;
     dc.discovery.meta_capacity = dart_meta_capacity(max_channels);
+    dc.discovery.peer_user_bytes = dart_node_core_peer_user_bytes();   /* node-core lifecycle state per peer */
     dc.group                 = o.net.discovery_group;
     dc.discovery_port        = o.net.discovery_port;
     dc.ttl                   = o.net.multicast_ttl;
@@ -496,12 +497,12 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     }
 #endif
 
-    /* sans-IO node core: owns the peer table (id<->address) and the discovery->
-       transport lifecycle; the runtime drives it and resolves addresses for IO. */
+    /* sans-IO node core: drives the discovery->transport lifecycle and resolves addresses
+       over the discovery core's peer table (bound below, once discovery exists). */
     node_name_len = dart__node_name(name, node_name);   /* handed to discovery (the name's owner) below */
     {   i_DartNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
-        cc.transport = n->transport; cc.max_peers = max_peers;
+        cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
         cc.on_event = dart__node_on_event; cc.user = n;
         cc.is_local = dart__node_is_local; cc.is_local_user = NULL;
@@ -540,6 +541,8 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     dc.discovery.meta = dart_node_core_meta(n->core, &dc.discovery.meta_len);
     n->discovery = dart_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
     if (!n->discovery) goto fail_mcast;
+    /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
+    dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
 
     mem->claimed = 1;          /* taken over; the allocator can't back a second node */
     return n;
@@ -575,6 +578,7 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
     tc.channels=NULL; tc.n_channels=new_max_channels; tc.max_peers=new_max_peers;
     tc.allocator=dart__node_alloc; tc.frag_payload=n->net.fragment_size;
     dc.discovery.max_peers=new_max_peers; dc.discovery.meta_capacity=new_meta_cap;
+    dc.discovery.peer_user_bytes = dart_node_core_peer_user_bytes();   /* size discovery's scratch to match */
 
     memset(&b,0,sizeof b);
     dart__node_layout(&b, new_max_peers, new_max_channels, &tc, &dc, &nb);
@@ -589,13 +593,14 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
        arena and bails (the old node keeps running, only refusing the would-be growth) */
     nt = dart_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_channels);
     if (!nt){ dart_plat_realloc(new_arena,0); return 0; }
-    ncore = dart_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_peers, new_max_channels);
+    ncore = dart_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_channels);
     if (!ncore){ dart_plat_realloc(new_arena,0); return 0; }
     ncore->transport = nt;                         /* re-point cross-layer pointer */
     dart_node_core_build_meta(ncore);              /* rebuild the announce blob into the new buf */
     ndisc = dart_discovery_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
                                       new_max_peers, new_meta_cap, dart_node_core_meta(ncore,NULL), ncore);
     if (!ndisc){ dart_plat_realloc(new_arena,0); return 0; }
+    dart_node_core_bind_discovery(ncore, dart_discovery_state(ndisc));   /* re-point to the relocated table */
 
     /* handle pointer array + joined-group table (handle structs are stable, not moved) */
     memcpy(nb.handles, n->handles, (size_t)old_max_channels*sizeof(DartChannel*));
