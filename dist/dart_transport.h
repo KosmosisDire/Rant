@@ -3598,7 +3598,7 @@ int dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
 #endif
 #include <string.h>    /* heap access goes through dart_plat_realloc (no <stdlib.h> here) */
 
-struct DartChannel { DartNode *n; uint16_t index; };
+struct DartChannel { DartNode *n; uint16_t index; uint8_t multicast; uint64_t identity; };
 
 struct DartNode {
     DartTransportState     *transport;
@@ -3806,11 +3806,6 @@ static void dart__node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_ch
 static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
     return dart_plat_ipv4(239u, 255u, (uint8_t)(domain & 0xFFu), (uint8_t)(sel & 0xFFu));
 }
-/* a channel's group, from its identity so it matches the core's group send and every peer */
-static uint32_t dart__node_chan_group(uint16_t domain, const DartChannelDef *def){
-    return dart__node_group_addr(domain, DART_DEST_GROUP_SEL(dart_channel_identity(def)));
-}
-
 /* multicast egress/join interface, resolved once: explicit, else discovery's egress
  * (so multihomed hosts don't pick per-group interfaces and break source matching). */
 static uint32_t dart__node_mcast_if(DartNode *n){
@@ -3823,20 +3818,22 @@ static uint32_t dart__node_mcast_if(DartNode *n){
     return n->mcast_if;
 }
 
-/* set up multicast for a newly created multicast channel: egress on the unicast socket
- * (once), plus a lazily-created RX socket with one IGMP join per distinct group. Over
- * the OS membership cap the join fails: degrade to unicast-only and fire a diagnostic. */
-static void dart__node_channel_mcast(DartNode *n, uint16_t index, const DartChannelDef *def){
+/* set up multicast for a multicast channel at its current role: egress on the unicast socket
+ * (once), plus a lazily-created RX socket with one IGMP join per distinct group. Idempotent
+ * (TX guarded by mcast_tx_setup, joins deduped), so it is also safe to re-run on a role change
+ * -- e.g. a PUB_ONLY channel promoted to PUBSUB must now JOIN the group to receive. Over the
+ * OS membership cap the join fails: degrade to unicast-only and fire a diagnostic. */
+static void dart__node_channel_mcast(DartNode *n, uint16_t index, uint8_t role, uint64_t identity){
     uint32_t interface_ip = dart__node_mcast_if(n);
-    uint32_t group = dart__node_chan_group(n->domain, def);
-    if (def->role != DART_SUB_ONLY && !n->mcast_tx_setup){     /* we publish: set egress once */
+    uint32_t group = dart__node_group_addr(n->domain, DART_DEST_GROUP_SEL(identity));
+    if (role != DART_SUB_ONLY && !n->mcast_tx_setup){         /* we publish: set egress once */
         unsigned char ttl = n->net.multicast_ttl ? n->net.multicast_ttl : 1;
         dart_plat_mcast_setif(n->fd, interface_ip);
         dart_plat_mcast_ttl(n->fd, ttl);
         dart_plat_mcast_loop(n->fd, 1);
         n->mcast_tx_setup = 1;
     }
-    if (def->role != DART_PUB_ONLY){                           /* we receive: ensure RX socket + join */
+    if (role != DART_PUB_ONLY){                               /* we receive: ensure RX socket + join */
         uint16_t j; int dup = 0;
         if (n->multicast_fd == DART_SOCK_BAD){
             i_DartSock m = dart_plat_udp_open();
@@ -4210,13 +4207,14 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     def.name = name; def.role = (uint8_t)role;
     if (opts){ def.qos = opts->qos; def.multicast = opts->multicast; }
     if (dart_channel_define(n->transport, idx, &def) != 0){ dart__node_alloc(n, h, 0); return NULL; }
-    if (def.multicast) dart__node_channel_mcast(n, idx, &def);
+    h->n = n; h->index = idx; h->multicast = def.multicast; h->identity = dart_channel_identity(&def);
+    if (def.multicast) dart__node_channel_mcast(n, idx, def.role, h->identity);
     /* re-advertise our interest so peers match the new channel as the blob arrives, and
        replay known peers' interest so this channel matches what they already advertised */
     mlen = dart_node_core_build_meta(n->core);
     dart_discovery_advertise(n->discovery, dart_node_core_meta(n->core, NULL), mlen);
     dart_discovery_replay(n->discovery);
-    h->n = n; h->index = idx; n->handles[idx] = h;
+    n->handles[idx] = h;
     n->n_created++;
     return h;
 }
@@ -4380,6 +4378,10 @@ int dart_channel_set_role(DartChannel *ch, DartRole role){
     if (!ch) return -1;
     r = dart_set_role(ch->n->transport, ch->index, (uint8_t)role);
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
+        /* the role now allows a direction the create-time setup skipped (e.g. PUB_ONLY -> PUBSUB
+           must JOIN the group to receive), so re-run the idempotent multicast setup */
+        if (ch->multicast && role != DART_INACTIVE)
+            dart__node_channel_mcast(ch->n, ch->index, (uint8_t)role, ch->identity);
         mlen = dart_node_core_build_meta(ch->n->core);
         dart_discovery_advertise(ch->n->discovery, dart_node_core_meta(ch->n->core, NULL), mlen);
         dart_discovery_replay(ch->n->discovery);   /* re-apply peers' interest to our new role */
