@@ -28,19 +28,15 @@ sockets, the clock, the route probe, and the send and receive paths.
 ## The abstract destination
 
 The transport core never names a wire address. Every datagram it emits is addressed to
-a `to`: either a peer id, or a multicast group selector flagged by the top bit. What
-that resolves to on the wire is the runtime's job.
+a `to`: a peer id (data is unicast point-to-point). What that resolves to on the wire
+is the runtime's job.
 
 - a peer id resolves to a physical address record (an IP and a port today).
-- a group selector resolves to a group address. On UDP that is
-  `239.255.<domain>.<selector>`. On another link it is whatever that link broadcasts
-  to.
 
 This is the node core to runtime boundary, and it is the one place a transport shows
 through. The node core owns the peer id to address map and resolves a peer id
-(`dart_node_core_addr_for_id`, `dart_node_core_id_for_addr`). The runtime owns the
-wire convention and the send. The `239.255` group formula lives in the UDP runtime,
-not the core, because it is a UDP convention.
+(`dart_node_core_resolve`, `dart_node_core_id_for_addr`). The runtime owns the wire
+convention and the send.
 
 That is why a serial transport needs no sans-IO change. The serial runtime resolves
 the same abstract destinations to serial addresses, frames the same datagram bytes
@@ -99,8 +95,7 @@ The shape, concretely. None of this touches a sans-IO core.
 
 2. Node runtime. Write a second node runtime beside node/runtime.c. It owns the serial
    handle and the clock, and drives the same node core the UDP runtime does:
-   - resolve the abstract destination: a peer id to a serial address, a group selector
-     to a bus broadcast or a multidrop address.
+   - resolve the abstract destination: a peer id to a serial address.
    - frame the datagram bytes the core emits, and recover datagram boundaries on
      receive (COBS or a length prefix), then feed each complete frame to
      `dart_on_datagram`.

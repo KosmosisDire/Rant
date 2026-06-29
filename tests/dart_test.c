@@ -130,26 +130,6 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #define recvfrom diag_recvfrom
 #endif /* _WIN32 */
 
-/* setsockopt failure injection: force a multicast group join to fail on demand, so the
- * selftest can drive dart_node_open's degrade-on-join-failure path deterministically (a
- * real over-the-OS-cap join failure is platform-specific). Wraps setsockopt like the
- * sendto/recvfrom diag wrappers above; a pure passthrough unless armed. */
-static int g_fail_mcast_join = 0;   /* >0: fail that many upcoming IP_ADD_MEMBERSHIP calls */
-#ifdef _WIN32
-static int diag_setsockopt(SOCKET s, int level, int optname, const char *optval, int optlen){
-    if (g_fail_mcast_join > 0 && optname == IP_ADD_MEMBERSHIP){ g_fail_mcast_join--; return -1; }
-    return setsockopt(s, level, optname, optval, optlen);
-}
-#else
-#include <sys/socket.h>
-#include <netinet/in.h>
-static int diag_setsockopt(int s, int level, int optname, const void *optval, socklen_t optlen){
-    if (g_fail_mcast_join > 0 && optname == IP_ADD_MEMBERSHIP){ g_fail_mcast_join--; return -1; }
-    return setsockopt(s, level, optname, optval, optlen);
-}
-#endif
-#define setsockopt diag_setsockopt
-
 #define DART_IMPLEMENTATION
 #include "dart.h"   /* discovery + transport + node runtime */
 
@@ -184,7 +164,7 @@ static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, Dart
     if (!node) return NULL;
     for (i=0;i<nch;i++){
         DartChannelOpts co; memset(&co, 0, sizeof co);
-        co.qos = chans[i].qos; co.multicast = chans[i].multicast;
+        co.qos = chans[i].qos;
         if (!dart_node_create_channel(node, chans[i].name, (DartRole)chans[i].role, &co)){
             dart_node_close(node, 0); return NULL;
         }
@@ -416,7 +396,7 @@ static int node_main(int argc, char **argv){
     uint16_t domain = (uint16_t)(argc>2 ? atoi(argv[2]) : LAT_DOMAIN);
     int load_hz     = (argc>3 ? atoi(argv[3]) : 0);
     int duration_s  = (argc>4 ? atoi(argv[4]) : 0);
-    int use_mcast   = (argc>5 ? atoi(argv[5]) : 0);
+    int if_mode     = (argc>5 ? atoi(argv[5]) : 0);   /* discovery interface: 1 loopback, 2 NIC */
     int reliable    = (argc>6 ? atoi(argv[6]) : 0);
     int block_ms    = (argc>7 ? atoi(argv[7]) : 0);
     g_xch           = (argc>8 ? atoi(argv[8]) : 0);
@@ -446,18 +426,11 @@ static int node_main(int argc, char **argv){
     ch[1].qos.reliability = reliable ? DART_RELIABLE : DART_BEST_EFFORT;
     ch[1].qos.keep_last = LOAD_DEPTH; ch[1].qos.max_message_bytes = 64;
     ch[1].qos.backpressure_wait_us = (uint32_t)(block_ms > 0 ? block_ms : 0) * 1000u;
-    /* mcast 3: load rides the group, the probe stays unicast, so RTT measures
-       the path instead of the switch's multicast service cycle */
-    ch[0].multicast = (uint8_t)(use_mcast && use_mcast!=3 ? 1 : 0);
-    ch[1].multicast = (uint8_t)(use_mcast ? 1 : 0);
     { int i;     /* extra channels: idle (depth 1) or load-bearing when spread */
       for (i=0;i<g_xch;i++){
           ch[2+i] = ch[1];
           sprintf(xnames[i], "x%d", i); ch[2+i].name = xnames[i];
           ch[2+i].qos.keep_last = g_spread ? 128 : 1;
-          ch[2+i].multicast = 0; /* groups are OS-capped (~20 joins/socket);
-                                    extras stay unicast, mcast tests the few
-                                    high-fanout channels (probe + load)      */
           if (g_spread==2) ch[2+i].role = DART_PUB_ONLY;   /* nobody subscribes */
       } }
 
@@ -470,11 +443,11 @@ static int node_main(int argc, char **argv){
         .discovery   = { .max_peers = MAX_PEERS },
     };
     if (if_ip)
-        opts.net.multicast_interface = if_ip;       /* multihomed host: pin everything */
-    else if (use_mcast==1)
-        opts.net.multicast_interface = "127.0.0.1"; /* single-host test: stay off the NIC.
-                                             mcast=2 leaves the real interface for
-                                             cross-machine runs */
+        opts.net.multicast_interface = if_ip;       /* multihomed host: pin discovery here */
+    else if (if_mode==1)
+        opts.net.multicast_interface = "127.0.0.1"; /* single-host test: discovery on loopback.
+                                             if_mode=2 leaves the real interface for
+                                             cross-machine runs (data is always unicast) */
     DartDiscoveryAddr seed;
     if (peer_ip){                     /* bootstrap without multicast */
         uint32_t a4 = inet_addr(peer_ip);
@@ -495,9 +468,8 @@ static int node_main(int argc, char **argv){
     DartNode *n = test_node_open(mem, sizeof mem, g_name, lat_on_message, lat_on_event, opts, ch, (uint16_t)(2+g_xch));
     if (!n){ fprintf(stderr, "[%s] dart_node_open failed\n", g_name); return 1; }
 
-    printf("[%s] up (domain %u, tag %08x, load %d Hz, %ds, %s, %s load, block %d ms, +%d ch %s)\n",
+    printf("[%s] up (domain %u, tag %08x, load %d Hz, %ds, %s load, block %d ms, +%d ch %s)\n",
            g_name, domain, g_tag, load_hz, duration_s,
-           use_mcast ? "multicast" : "unicast",
            reliable ? "reliable" : "best-effort", block_ms,
            g_xch, g_spread==2 ? "void" : g_spread ? "spread" : "idle");
 
@@ -581,8 +553,7 @@ static int node_main(int argc, char **argv){
 
         if (g_trace && !traced_peers && now_ns() - start > 3000000000ull){
             traced_peers = 1;
-            printf("TRACE node fd=%u mcfd=%u domain=%u mc_port=%u\n",
-                   (unsigned)n->fd, (unsigned)n->multicast_fd, n->domain, n->multicast_port);
+            printf("TRACE node fd=%u domain=%u\n", (unsigned)n->fd, n->domain);
             for (i = 0; i < (int)dart_node_core_max_peers(n->core); i++){
                 uint32_t pid; uint8_t pip[16]; uint16_t pport;
                 if (dart_node_core_peer_at(n->core, (uint16_t)i, &pid, pip, NULL, &pport))
@@ -970,12 +941,10 @@ static void node_core_checks(void){
     {   uint8_t pnl=0; const char *pn = dart_node_core_peer_name(nc, idA, &pnl);
         ST_CHECK(pn && pnl==7 && strcmp(pn,"nc-self")==0,
                  "node-core: peer name learned from announce (%s)", pn?pn:"?"); }
-    ST_CHECK(dart_node_core_resolve(nc,idA,&d) && !d.is_group && d.port==5001 && d.ip[3]==1,
+    ST_CHECK(dart_node_core_resolve(nc,idA,&d) && d.port==5001 && d.ip[3]==1,
              "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
     ST_CHECK(dart_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
              "node-core: addr resolves to id (id=%u)", id);
-    ST_CHECK(dart_node_core_resolve(nc, DART_DEST_GROUP(0x07), &d) && d.is_group && d.group_sel==0x07,
-             "node-core: group dest resolves to selector (sel=%u)", d.group_sel);
 
     /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
     {   uint8_t pnl=0; const char *pn;
@@ -1172,45 +1141,6 @@ static void shm_node_checks(void){
     free(mp); free(ms);
 }
 
-/* (4) Bug-3 regression: the multicast writer lane (dart_group_emit) must fragment a
-   SHM-backed sample from its external chunk (dart__sbuf), not the unused slot->buf.
-   The normal path never makes a multicast sample SHM-backed (shm-eligibility rejects
-   multicast), so force one via dart_send_shm on a fixed-buffer channel, then read the
-   emitted group DATA back off the wire: its payload must equal the chunk bytes. With
-   the bug it fragments slot->buf (the empty arena slot) instead. */
-static void shm_mcast_buf_checks(void){
-    static uint8_t chunk[64];
-    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    uint8_t blob[256]; size_t bl; DartTransportState *W, *R; DartQos q;
-    uint8_t out[DART_DGRAM_MAX]; uint32_t to; size_t ol; uint64_t now=1000000;
-    int got_data=0, payload_ok=0, i;
-    for (i=0;i<(int)sizeof chunk;i++) chunk[i]=(uint8_t)(0xA5u ^ (unsigned)i);   /* recognizable pattern */
-    memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=4; q.max_message_bytes=4096;
-    q.heartbeat_us=50000; q.repair_delay_us=20000;
-    memset(&cw,0,sizeof cw); cw.name="mcbuf"; cw.qos=q; cw.role=DART_PUB_ONLY; cw.multicast=1;
-    memset(&cr,0,sizeof cr); cr.name="mcbuf"; cr.qos=q; cr.role=DART_SUB_ONLY; cr.multicast=1;
-    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;   /* no allocator: fixed buf */
-    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
-    nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
-    nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
-    dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,blob,bl);  /* R subscribes -> group mode */
-    ST_CHECK(dart_writer_match_count(W,0)>0, "mcast-buf: writer matched multicast subscriber");
-    {   uint8_t desc[DART_SHM_DESC_WIRE]; memset(desc,0,sizeof desc);
-        dart_send_shm(W, 0, chunk, sizeof chunk, desc, now);   /* force a SHM-backed multicast sample */
-    }
-    while (dart_poll_send(W,&to,out,sizeof out,&ol,now)){
-        if ((out[0]&0x07u)==1u && !(out[0]&0x20u)){            /* a normal DATA (not SHM-DATA, not HB) */
-            uint16_t plen = dart_le_r16(out+11);              /* single-fragment payload_len (offset 11) */
-            got_data=1;
-            payload_ok = (out[0]&0x08u) && plen==sizeof chunk && memcmp(out+13, chunk, sizeof chunk)==0;
-            break;
-        }
-    }
-    ST_CHECK(got_data, "mcast-buf: group lane emitted DATA for the SHM sample");
-    ST_CHECK(payload_ok, "mcast-buf: group DATA fragments from the chunk, not slot->buf");
-    dart_destroy(W); dart_destroy(R); free(mw); free(mr);
-}
 #endif /* DART_SHM */
 
 /* Unit checks for the small pure helpers the Tier-1 cleanup touched: the fragment
@@ -1285,12 +1215,12 @@ static void open_fail_checks(void){
         if (n) dart_node_close(n, 0);
     }
 
-    /* fail_mcast: a non-multicast discovery group makes the IGMP join fail, so
-       dart_discovery_place returns NULL and the node unwinds through fail_mcast */
+    /* a non-multicast discovery group makes discovery's IGMP join fail, so
+       dart_discovery_place returns NULL and the node unwinds through fail_sock */
     {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
         n = dart_node_open(&a, NULL, NULL, NULL,
             &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .discovery_group="1.2.3.4" } });
-        ST_CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL (fail_mcast)");
+        ST_CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL");
         if (n) dart_node_close(n, 0);
     }
 
@@ -1356,33 +1286,6 @@ static void event_user_checks(void){
     }
 }
 
-/* Bug-2 regression: a per-channel multicast (IGMP) join past the OS membership cap must
- * DEGRADE -- skip that channel's group join, keep the node alive, and fire a
- * DART_MCAST_JOIN_FAILED diagnostic -- not hard-fail. A real over-cap failure is
- * OS-specific, so g_fail_mcast_join forces one IP_ADD_MEMBERSHIP to fail. Discovery
- * joins its own group at open, so arm the injection AFTER open and before the channel
- * create, where the channel's group join happens. */
-static int mjf_events; static uint16_t mjf_channel;
-static void mjf_on_event(const DartEvent *ev){
-    if (ev->kind==DART_MCAST_JOIN_FAILED){ mjf_events++; mjf_channel=ev->channel; }
-}
-static void mcast_join_degrade_checks(void){
-    static uint8_t mem[1<<20];
-    DartNode *n; DartAllocator alloc = dart_allocator_static(mem, sizeof mem);
-    mjf_events=0; mjf_channel=0xFFFF;
-    n=dart_node_open(&alloc, NULL, NULL, mjf_on_event, &(DartNodeOpts){ .domain=ST_DOMAIN+6,
-                     .net={ .multicast_interface="127.0.0.1" }, .discovery={ .max_peers=4 } });
-    ST_CHECK(n != NULL, "mcast-degrade: node opens (discovery joins its own group)");
-    if (n){
-        g_fail_mcast_join=1;             /* fail the channel's group join only */
-        dart_node_create_channel(n, "mjf/topic", DART_SUB_ONLY, &(DartChannelOpts){
-            .qos={ .reliability=DART_RELIABLE, .keep_last=1, .max_message_bytes=64 }, .multicast=1 });
-        g_fail_mcast_join=0;
-    }
-    ST_CHECK(mjf_events==1 && mjf_channel==0,
-             "mcast-degrade: DART_MCAST_JOIN_FAILED fired for the channel (events=%d ch=%u)", mjf_events, mjf_channel);
-    if (n) dart_node_close(n, 0);
-}
 
 /* Dynamic growth: creating channels past the reserve relocates the whole node into a bigger
  * arena, carrying live reliable state across. Stream on channel 0, force several grows by
@@ -1792,12 +1695,10 @@ static int selftest_main(void){
     shm_module_checks();  /* 9.  SHM mapping module + seqlock guards          */
     shm_loss_checks();    /* 10. SHM loss/repair/skip (transport core)        */
     shm_node_checks();    /* 11. SHM full-node: size classes + inline fallback */
-    shm_mcast_buf_checks();/* 11b. multicast group lane fragments a SHM sample from the chunk */
 #endif
     unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
     open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */
     event_user_checks();  /* 14. transport-fired event reaches on_event with the app user_data */
-    mcast_join_degrade_checks();  /* 15. multicast join failure degrades (skip + signal), not hard-fail */
     dynamic_grow_checks();        /* 16. dynamic-mode grow: relocate mid-stream, lose nothing       */
     qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
     beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
@@ -2296,8 +2197,7 @@ static int sweep_main(int argc, char **argv){
 
     printf("sweep: %d nodes, %ds each, rates", nodes, dur);
     for (ri=0;ri<nrates;ri++) printf(" %ld", rates[ri]);
-    printf("%s%s%s", mcast?", multicast":"", rel?", reliable load":"",
-           blk>0?" (block)":"");
+    printf("%s%s", rel?", reliable load":"", blk>0?" (block)":"");
     if (xch) printf(", +%d %s ch", xch, spread==2?"void":spread?"spread":"idle");
     printf("\n\n");
     printf("%10s %12s %10s %10s %10s %8s %9s %9s %6s\n",
@@ -2523,28 +2423,27 @@ int main(int argc, char **argv){
     }
     fprintf(stderr,
         "usage: dart_test <command> [args]\n"
-        "  node <name> [domain] [load_hz] [duration_s] [mcast] [reliable] [block_ms]\n"
+        "  node <name> [domain] [load_hz] [duration_s] [if_mode] [reliable] [block_ms]\n"
         "       [extra_ch] [spread] [if_ip] [peer_ip]\n"
-        "        if_ip: pin all multicast to this interface (multihomed hosts);\n"
+        "        if_ip: pin the discovery interface (multihomed hosts);\n"
         "        peer_ip: seed discovery with this address (no multicast needed);\n"
         "        \"0\" = unset for either\n"
-        "        latency/throughput node; SUMMARY+SUMMARY2 on timed exit\n"
+        "        latency/throughput node; SUMMARY+SUMMARY2 on timed exit. Data is unicast.\n"
         "        reliable=1: load channel DART_RELIABLE; block_ms: writer\n"
         "        backpressure window (qos.backpressure_wait_us) for that channel\n"
         "        extra_ch: declare N more channels; spread=1 round-robins the\n"
         "        load across them (0 = they stay idle, 2 = they are PUB_ONLY\n"
         "        everywhere so those writes have no readers)\n"
-        "        mcast: 1 = on, pinned to loopback (single host); 2 = on, real NIC;\n"
-        "        3 = like 2 but the probe stays unicast (RTT measures the path,\n"
-        "        not the switch's multicast handling)\n"
+        "        if_mode: discovery interface -- 1 = loopback (single host), 2 = real NIC\n"
         "        env: DART_DIAG_RCVBUF/DART_DIAG_SNDBUF (bytes), DART_DIAG_TRACE\n"
         "  sweep [--nodes N] [--domain D] [--duration S] [--rates a,b,c]\n"
         "        [--mcast 0|1|2] [--reliable] [--block-ms N] [--extra-ch N] [--spread]\n"
         "        [--void] [--remote] [--ctl-domain D] [--if IP] [--peer IP] [--diag]\n"
         "        spawn N node children per rate; print an RTT-vs-throughput table.\n"
+        "        --mcast selects the discovery interface (1 loopback, 2 NIC; data is unicast).\n"
         "        --remote also commands every 'serve' worker on the LAN to spawn N\n"
         "        nodes per rate and folds their SUMMARYs into the same table.\n"
-        "        --if pins multicast to that local interface (multihomed hosts);\n"
+        "        --if pins the discovery interface (multihomed hosts);\n"
         "        --peer seeds discovery with the other machine's address, so the\n"
         "        run works even where multicast is broken or filtered\n"
         "  serve [--domain D] [--if IP] [--peer IP]\n"

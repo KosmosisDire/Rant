@@ -28,7 +28,6 @@ The node picks SHM per message. All of these must hold.
 
 - The build has SHM (no `DART_NO_SHM`).
 - The node has an allocator. The default dynamic mode sets one. Fixed mode and `--max` do not.
-- The channel is not multicast.
 - Every matched reader is on the same host and is SHM capable.
 - The message fits a size class.
 
@@ -97,7 +96,6 @@ messages, same as best effort over UDP.
 
 ## Not supported yet
 
-- Multicast plus SHM. A multicast channel uses multicast for all readers.
 - Zero copy read. The reader does one copy. Zero copy is a later read side mode.
 
 ## Build

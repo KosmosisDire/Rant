@@ -8,9 +8,7 @@
  *
  * The one transport-specific thing the core does NOT own is mapping the abstract
  * destination to wire bytes: it resolves a peer id to a physical address record and
- * hands that to the runtime, which sends it however its link works. The group case
- * (DART_DEST_GROUP) is resolved entirely by the runtime, since the multicast-group
- * address is a per-transport convention (UDP: 239.255.<domain>.<sel>). */
+ * hands that to the runtime, which sends it however its link works (data is unicast). */
 #ifndef DART_NODE_CORE_H
 #define DART_NODE_CORE_H
 
@@ -24,8 +22,8 @@ extern "C" {
 /* The node's app-facing event: the union the user receives via DartNodeOpts.on_event.
  * The node maps discovery's DartDiscoveryEvent (the peer kinds) and the transport's
  * DartTransportEvent (the message/QoS kinds) into this one type, and adds its own
- * (PEER_INTEREST, MCAST_JOIN_FAILED). Flat and self-describing: read only the fields
- * named for the .kind. dart_event_str formats any of them as a one-line message. */
+ * (PEER_INTEREST). Flat and self-describing: read only the fields named for the .kind.
+ * dart_event_str formats any of them as a one-line message. */
 typedef enum {
     DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port */
     DART_PEER_DOWN,      /* peer lost or fell silent: .peer */
@@ -34,8 +32,7 @@ typedef enum {
     DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
     DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
-    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
-    DART_MCAST_JOIN_FAILED /* a channel's multicast group join failed, over the OS membership cap (.channel) */
+    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
 } DartEventKind;
 
 typedef struct {
@@ -105,22 +102,19 @@ const uint8_t  *dart_node_core_meta(i_DartNodeCore *c, uint16_t *len);
  * PEER_UP/DOWN/INTEREST/REFUSED DartEvents (the node maps discovery's events to its own). */
 void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev);
 
-/* A resolved outbound destination: a multicast group (by selector), or a unicast
- * peer (by physical address). The runtime turns this into wire bytes for its link. */
+/* A resolved outbound destination: a unicast peer by physical address. The runtime
+ * turns this into wire bytes for its link. */
 typedef struct {
-    uint8_t  is_group;   /* 1 = group send, 0 = unicast peer */
-    uint16_t group_sel;  /* group: the selector (low byte of topic identity) */
-    uint8_t  ip[16];     /* unicast: peer physical address (IPv4 today) */
+    uint8_t  ip[16];     /* peer physical address (IPv4 today) */
     uint8_t  ip_len;
-    uint16_t port;       /* unicast: peer data port */
+    uint16_t port;       /* peer data port */
 } i_DartNodeDest;
 
 /* Destination resolution: the node-core/runtime boundary. resolve turns the transport's
- * abstract destination (dart_poll_send's to_peer) into a group or a peer address, so the
- * runtime only maps the result to wire bytes. The group address convention is the
- * runtime's (UDP uses 239.255.<domain>.<sel>). Returns 1 if sendable, 0 if a unicast
- * peer is unknown. id_for_addr maps an inbound source address back to a peer id (1 + *id
- * on a hit, else 0). */
+ * abstract destination (dart_poll_send's to_peer = a peer id) into a peer address, so the
+ * runtime only maps the result to wire bytes. Returns 1 if sendable, 0 if the peer is
+ * unknown. id_for_addr maps an inbound source address back to a peer id (1 + *id on a
+ * hit, else 0). */
 int  dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 

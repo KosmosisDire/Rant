@@ -88,19 +88,9 @@ typedef struct {
     const char *name;  /* topic name = cross-peer identity. Required, same on every node, <= DART_TOPIC_NAME_MAX */
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
-    uint8_t  multicast;/* 1 = use this topic's multicast group for data (publisher opt-in, reader
-                          joins). Repairs/acks stay unicast. Group 239.255.<domain&255>.<id&255> */
 } DartChannelDef;
 
-/* dart_poll_send destination: a peer id, or a multicast group flagged by the top
- * bit (low byte = topic identity & 0xFF; node maps it to 239.255.<domain&255>.<sel>). */
-#define DART_DEST_GROUP_BIT      0x80000000u
-#define DART_DEST_GROUP(sel)     (DART_DEST_GROUP_BIT | (uint32_t)(sel))
-#define DART_DEST_IS_GROUP(d)    (((d) & DART_DEST_GROUP_BIT) != 0u)
-#define DART_DEST_GROUP_CHAN(d)  ((uint16_t)((d) & 0xFFFFu))
-/* group selector = low byte of the topic identity. One source for the core's group
- * send and the node's group join, so the two can never derive it differently. */
-#define DART_DEST_GROUP_SEL(identity)  ((uint16_t)((identity) & 0xFFu))
+/* dart_poll_send destination: a peer id. Data is unicast point-to-point per matched reader. */
 
 /* A complete message; channel is the local handle. Do not call back into dart_*. */
 typedef void (*DartMessageFn)(void *user, uint16_t channel, uint32_t from_peer,
@@ -186,7 +176,7 @@ DartTransportState *dart_migrate(DartTransportState *old, void *new_mem, size_t 
  * arena stays the caller's. The node calls it from close. */
 void      dart_destroy(DartTransportState *st);
 
-/* 64-bit topic identity from a name (FNV-1a): matches topics, derives the group. */
+/* 64-bit topic identity from a name (FNV-1a): matches topics across peers. */
 uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_channel_identity(const DartChannelDef *def);   /* = dart_topic_id(def->name) */
 
@@ -286,7 +276,7 @@ int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]
 int       dart_set_role(DartTransportState *st, uint16_t channel, uint8_t role);
 
 /* Define a reserved (currently inactive) channel slot at runtime: set its name/qos/
- * role/multicast, allocate its history ring via the allocator, and rematch known peers.
+ * role, allocate its history ring via the allocator, and rematch known peers.
  * Reserve mode only (an allocator is required). Returns 0 ok, or negative: -1 bad index/
  * name / slot already defined / no allocator, -4 out of memory. Re-advertise interest
  * after (the node bumps its discovery announce). */
@@ -321,8 +311,8 @@ int       dart_send_shm(DartTransportState *st, uint16_t channel, const void *ch
 /* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).
  * Off by default; the node sets it on attach, clears it on dormant/remove. */
 void      dart_peer_set_shm(DartTransportState *st, uint32_t peer_id, int is_shm);
-/* 1 if every matched reader of channel is SHM-capable and it is non-multicast, so a
- * publish may go via SHM (else inline). The node checks this per message. */
+/* 1 if every matched reader of channel is SHM-capable, so a publish may go via SHM
+ * (else inline). The node checks this per message. */
 int       dart_writer_shm_eligible(DartTransportState *st, uint16_t channel);
 /* The history slot the next publish to channel will occupy (binds chunk<->slot). */
 uint16_t  dart_channel_hist_head(DartTransportState *st, uint16_t channel);

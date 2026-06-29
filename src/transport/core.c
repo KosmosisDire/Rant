@@ -81,7 +81,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
     name_bytes = (uint32_t)n_channels * (DART_TOPIC_NAME_MAX + 1u);
     if (meta_ids < 2u*n_channels) meta_ids = 2u*n_channels;     /* our own interest list must always fit */
 
-    { uint32_t nlanes = n_channels*(max_peers+1u), ndest = max_peers+n_channels;
+    { uint32_t nlanes = n_channels*max_peers, ndest = max_peers;
       uint32_t *peer_ids = (uint32_t*)dart_take(b, max_peers*sizeof(uint32_t), 8);
       uint8_t  *peer_used = (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
       uint8_t  *peer_dormant= (uint8_t*) dart_take(b, max_peers*sizeof(uint8_t), 1);
@@ -153,7 +153,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
                 i_DartChannel *ch = &st->channels[c];
                 size_t lane = dart__namelen(def->name);
                 ch->qos=q; ch->max_fragments=max_fragments;
-                ch->role=def->role; ch->multicast=def->multicast; ch->dynamic=(uint8_t)dyn;
+                ch->role=def->role; ch->dynamic=(uint8_t)dyn;
                 ch->identity = dart_channel_identity(def);
                 if (lane){ memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane]='\0'; }
                 ch->history=history; ch->history_owned=0; ch->history_head=0; ch->next_seqno=0; ch->have_first=0;
@@ -263,12 +263,10 @@ DartTransportState *dart_migrate(DartTransportState *old, void *new_mem, size_t 
                old->alias_to_channel + (size_t)p*old->alias_max,
                (size_t)old->alias_max*sizeof(uint16_t));
     }
-    /* scheduler is fresh/empty: re-enqueue every used lane + group lane, then force a full
-       sweep next poll so timers re-arm and next_deadline is recomputed exactly */
-    for (c=0;c<onc;c++){
+    /* scheduler is fresh/empty: re-enqueue every used lane, then force a full sweep
+       next poll so timers re-arm and next_deadline is recomputed exactly */
+    for (c=0;c<onc;c++)
         for (p=0;p<omp;p++) if (nw->peer_used[p]) dart__lane_wake(nw, c, p);
-        dart__lane_wake(nw, c, new_max_peers);
-    }
     nw->next_deadline_us = 0;
     return nw;
 }
@@ -343,8 +341,7 @@ uint64_t dart_unicast_join_seqno(const i_DartChannel *ch){
 }
 
 
-/* match one (channel,peer) proxy: a multicast channel engages its group lane on
- * the first subscriber; per-peer lanes then carry repairs only */
+/* match one (channel,peer) proxy: the per-peer lane carries new data, repairs, acks/HB */
 static void dart__match_w(DartTransportState *st, uint16_t c, uint16_t peer_slot){
     i_DartChannel *ch=&st->channels[c];
     i_DartWriterProxy *w=dart__writer_proxy_at(st,c,peer_slot);
@@ -353,24 +350,14 @@ static void dart__match_w(DartTransportState *st, uint16_t c, uint16_t peer_slot
     /* only a reader that advertised RELIABLE acks; a best-effort reader stays out of
        flow control so it can't stall this writer (it gets new data, never repairs/HB) */
     w->reader_reliable = dart_bget(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], c) ? 1u : 0u;
-    if (!ch->multicast){
-        w->sent_upto = dart_unicast_join_seqno(ch);
-    } else {
-        /* first subscriber engages group mode at the head; reliable-from-join-point,
-           later joiners backfill via NACK */
-        if (ch->n_subscribers==0) ch->multicast_sent_upto = ch->next_seqno;
-        ch->n_subscribers++;
-        w->sent_upto = ch->multicast_sent_upto;
-    }
+    w->sent_upto = dart_unicast_join_seqno(ch);
     w->acked_upto = w->sent_upto;
-    dart__lane_wake(st, c, peer_slot);   /* unicast repair lane primed + ack/hb */
+    dart__lane_wake(st, c, peer_slot);   /* lane primed for new data + ack/hb */
 }
 
 static void dart__unmatch_w(DartTransportState *st, uint16_t c, uint16_t peer_slot){
-    i_DartChannel *ch=&st->channels[c];
     i_DartWriterProxy *w=dart__writer_proxy_at(st,c,peer_slot);
     if (!w->used) return;
-    if (ch->multicast && ch->n_subscribers) ch->n_subscribers--;
     w->used=0;
 }
 
@@ -783,7 +770,7 @@ int dart_channel_define(DartTransportState *st, uint16_t channel, const DartChan
     memset(ch->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
     ch->history_owned = 1; ch->dynamic = 1;
     ch->qos = q; ch->max_fragments = dart_max_fragments(q.max_message_bytes);
-    ch->role = def->role; ch->multicast = def->multicast;
+    ch->role = def->role;
     ch->identity = dart_channel_identity(def);
     memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane] = '\0';
     ch->history_head = 0; ch->next_seqno = 0; ch->have_first = 0;

@@ -13,17 +13,15 @@
 #include "../common/arena.h"
 #include <string.h>    /* heap access goes through dart_plat_realloc (no <stdlib.h> here) */
 
-struct DartChannel { DartNode *n; uint16_t index; uint8_t multicast; uint64_t identity; };
+struct DartChannel { DartNode *n; uint16_t index; };
 
 struct DartNode {
     DartTransportState     *transport;
     i_DartNodeCore *core;     /* peer table (id<->address) + discovery lifecycle (sans-IO) */
     DartDiscovery     *discovery;
-    i_DartSock       fd;       /* unicast data socket (also group TX) */
-    i_DartSock       multicast_fd;     /* multicast data RX socket (DART_SOCK_BAD until needed) */
+    i_DartSock       fd;       /* unicast data socket */
     uint16_t      domain;
-    uint16_t      multicast_port;
-    DartNodeNet  net;         /* copy of opts.net: lazy multicast setup + socket buffers */
+    DartNodeNet  net;         /* copy of opts.net: socket buffers + discovery addressing */
     /* datagram the socket refused; retried first next poll so it is never lost */
     uint8_t       tx_hold[DART_DGRAM_MAX];
     size_t        tx_hold_len;
@@ -49,17 +47,12 @@ struct DartNode {
     uint8_t       *static_pos, *static_end;
     size_t         mem_cap, mem_used, mem_peak;
     uint64_t       mem_alloc_calls;  /* message-buffer (re)allocations: ~0 in steady state */
-    /* channel handles + lazy multicast bookkeeping. handles is a pointer array in the
-       arena; each DartChannel struct is a separate stable allocation, so a grow that
-       relocates the arena never moves a handle the user holds. */
+    /* channel handles. handles is a pointer array in the arena; each DartChannel struct
+       is a separate stable allocation, so a grow that relocates the arena never moves a
+       handle the user holds. */
     DartChannel **handles;    /* [max_channels] -> stable per-channel structs */
     uint16_t      max_channels;
     uint16_t      n_created;
-    uint32_t     *joined_groups;/* [max_channels] multicast groups already joined (dedup) */
-    uint16_t      n_joined;
-    uint32_t      mcast_if;    /* multicast egress/join interface (resolved once) */
-    uint8_t       mcast_if_set;
-    uint8_t       mcast_tx_setup;
 #ifdef DART_SHM
     /* zero-fragment same-host path: lazy per-size-class segments (see shm/core.h) */
     uint8_t        shm_capable;       /* always 1: the node always has an allocator */
@@ -186,7 +179,7 @@ static uint16_t dart__node_shm_reader_max(uint16_t max_peers, uint16_t n_channel
  * NULL, read bump.offset) and the build pass (read the pointers) run the same dart_take
  * sequence and can never drift. */
 typedef struct {
-    uint8_t   *handles, *joined_groups, *node_core, *transport, *discovery;
+    uint8_t   *handles, *node_core, *transport, *discovery;
 #ifdef DART_SHM
     uint8_t   *shm_pool, *shm_pool_mem, *shm_reader_segments, *shm_reader_pool;
 #endif
@@ -197,7 +190,6 @@ static void dart__node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_ch
                               const DartConfig *transport_cfg,
                               const DartDiscoveryNetConfig *discovery_rt_cfg, i_DartNodeBlocks *o){
     o->handles       = (uint8_t*)dart_take(b, (size_t)max_channels * sizeof(DartChannel*), 16);
-    o->joined_groups = (uint8_t*)dart_take(b, (size_t)max_channels * sizeof(uint32_t), 8);
     o->node_core_bytes = dart_node_core_required_memory(max_channels);   /* peers live in discovery now */
     o->node_core = (uint8_t*)dart_take(b, o->node_core_bytes, 16);
     o->transport_bytes = dart_required_memory(transport_cfg);
@@ -216,77 +208,12 @@ static void dart__node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_ch
     o->discovery = (uint8_t*)dart_take(b, o->discovery_bytes, 16);
 }
 
-/* data multicast group from a selector (topic identity & 0xFF); &0xFF wrap is
- * harmless, RX filters by peer table + identity */
-static uint32_t dart__node_group_addr(uint16_t domain, uint16_t sel){
-    return dart_plat_ipv4(239u, 255u, (uint8_t)(domain & 0xFFu), (uint8_t)(sel & 0xFFu));
-}
-/* multicast egress/join interface, resolved once: explicit, else discovery's egress
- * (so multihomed hosts don't pick per-group interfaces and break source matching). */
-static uint32_t dart__node_mcast_if(DartNode *n){
-    if (!n->mcast_if_set){
-        n->mcast_if = n->net.multicast_interface ? dart_plat_parse_ip(n->net.multicast_interface)
-            : dart_discovery_mcast_if_for(dart_plat_parse_ip(n->net.discovery_group ? n->net.discovery_group : "239.255.0.7"),
-                                   n->net.discovery_port ? n->net.discovery_port : 7400);
-        n->mcast_if_set = 1;
-    }
-    return n->mcast_if;
-}
-
-/* set up multicast for a multicast channel at its current role: egress on the unicast socket
- * (once), plus a lazily-created RX socket with one IGMP join per distinct group. Idempotent
- * (TX guarded by mcast_tx_setup, joins deduped), so it is also safe to re-run on a role change
- * -- e.g. a PUB_ONLY channel promoted to PUBSUB must now JOIN the group to receive. Over the
- * OS membership cap the join fails: degrade to unicast-only and fire a diagnostic. */
-static void dart__node_channel_mcast(DartNode *n, uint16_t index, uint8_t role, uint64_t identity){
-    uint32_t interface_ip = dart__node_mcast_if(n);
-    uint32_t group = dart__node_group_addr(n->domain, DART_DEST_GROUP_SEL(identity));
-    if (role != DART_SUB_ONLY && !n->mcast_tx_setup){         /* we publish: set egress once */
-        unsigned char ttl = n->net.multicast_ttl ? n->net.multicast_ttl : 1;
-        dart_plat_mcast_setif(n->fd, interface_ip);
-        dart_plat_mcast_ttl(n->fd, ttl);
-        dart_plat_mcast_loop(n->fd, 1);
-        n->mcast_tx_setup = 1;
-    }
-    if (role != DART_PUB_ONLY){                               /* we receive: ensure RX socket + join */
-        uint16_t j; int dup = 0;
-        if (n->multicast_fd == DART_SOCK_BAD){
-            i_DartSock m = dart_plat_udp_open();
-            if (m == DART_SOCK_BAD) return;
-            if (!dart_plat_bind(m, 0, n->multicast_port, 1)){ dart_plat_close(m); return; }
-            dart_plat_mcast_loop(m, 1);
-            dart_plat_set_nonblock(m);
-            if (n->net.recv_buffer_bytes) dart_plat_set_rcvbuf(m, (int)n->net.recv_buffer_bytes);
-            n->multicast_fd = m;
-        }
-        for (j=0;j<n->n_joined;j++) if (n->joined_groups[j]==group){ dup=1; break; }
-        if (!dup){
-            if (dart_plat_mcast_join(n->multicast_fd, group, interface_ip)){
-                n->joined_groups[n->n_joined++] = group;
-            } else if (n->on_event){
-                DartEvent ev; memset(&ev, 0, sizeof ev);
-                ev.kind=DART_MCAST_JOIN_FAILED; ev.channel=index;
-                ev.detail="multicast group join failed (over OS membership cap); channel receives unicast only";
-                ev.user=n->user_data;
-                n->on_event(&ev);
-            }
-        }
-    }
-}
-
-/* send one datagram; returns 1 when done with it, 0 only on a would-block TX-full. The
- * core resolves the abstract destination; we just map it to a UDP address. */
+/* send one datagram to a peer; returns 1 when done with it, 0 only on a would-block
+ * TX-full. The core resolves the abstract destination; we just map it to a UDP address. */
 static int dart__node_tx(DartNode *n, uint32_t to, const uint8_t *buf, size_t len){
-    i_DartNodeDest d; uint8_t ip[4]; uint16_t port;
+    i_DartNodeDest d;
     if (!dart_node_core_resolve(n->core, to, &d)) return 1;   /* peer vanished */
-    if (d.is_group){
-        dart_plat_naddr_to_ip4(dart__node_group_addr(n->domain, d.group_sel), ip);
-        port = n->multicast_port;
-    } else {
-        memcpy(ip, d.ip, 4);
-        port = d.port;
-    }
-    if (dart_plat_send(n->fd, buf, len, ip, port) < 0 && dart_plat_would_block())
+    if (dart_plat_send(n->fd, buf, len, d.ip, d.port) < 0 && dart_plat_would_block())
         return 0;
     return 1;
 }
@@ -414,7 +341,7 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     }
 
     memset(n, 0, sizeof *n);
-    n->fd = DART_SOCK_BAD; n->multicast_fd = DART_SOCK_BAD;
+    n->fd = DART_SOCK_BAD;
     n->domain = o.domain;
     n->net = o.net;
     n->user_on_message = on_message; n->on_event = on_event;
@@ -430,11 +357,8 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     }
     n->handles = (DartChannel**)blocks.handles;
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
-    n->joined_groups = (uint32_t*)blocks.joined_groups;
     n->max_channels = max_channels;
     n->max_peers = max_peers;
-    n->multicast_port = o.net.multicast_port ? o.net.multicast_port
-               : (uint16_t)((o.net.discovery_port ? o.net.discovery_port : 7400) + 1);
 
     tc.on_message = dart__node_on_message;     /* wrap so on_message receives a DartMsg */
     tc.on_event   = dart__node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
@@ -496,9 +420,6 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     if (o.net.send_buffer_bytes) dart_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
     dc.discovery.data_port = local_port;       /* advertise the actual port */
 
-    /* multicast sockets/joins are set up lazily by dart_node_create_channel, since no
-       channel exists yet at open. */
-
     dc.discovery.on_event = dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;
     dc.discovery.name     = node_name;        /* name is discovery-owned (its own blob section) */
@@ -508,16 +429,13 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     dart_node_core_build_meta(n->core);
     dc.discovery.meta = dart_node_core_meta(n->core, &dc.discovery.meta_len);
     n->discovery = dart_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
-    if (!n->discovery) goto fail_mcast;
+    if (!n->discovery) goto fail_sock;
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
     dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
 
     mem->claimed = 1;          /* taken over; the allocator can't back a second node */
     return n;
 
-fail_mcast:
-    if (n->multicast_fd != DART_SOCK_BAD) dart_plat_close(n->multicast_fd);
-    n->multicast_fd = DART_SOCK_BAD;
 fail_sock:
     if (n->fd != DART_SOCK_BAD) dart_plat_close(n->fd);
     n->fd = DART_SOCK_BAD;
@@ -570,11 +488,10 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
     if (!ndisc){ dart_plat_realloc(new_arena,0); return 0; }
     dart_node_core_bind_discovery(ncore, dart_discovery_state(ndisc));   /* re-point to the relocated table */
 
-    /* handle pointer array + joined-group table (handle structs are stable, not moved) */
+    /* handle pointer array (the handle structs themselves are stable, not moved) */
     memcpy(nb.handles, n->handles, (size_t)old_max_channels*sizeof(DartChannel*));
     memset((DartChannel**)nb.handles + old_max_channels, 0,
            (size_t)(new_max_channels-old_max_channels)*sizeof(DartChannel*));
-    memcpy(nb.joined_groups, n->joined_groups, (size_t)old_max_channels*sizeof(uint32_t));
 
 #ifdef DART_SHM
     if (n->shm_capable){
@@ -600,7 +517,7 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
 #endif
 
     n->transport=nt; n->core=ncore; n->discovery=ndisc;
-    n->handles=(DartChannel**)nb.handles; n->joined_groups=(uint32_t*)nb.joined_groups;
+    n->handles=(DartChannel**)nb.handles;
     n->max_channels=new_max_channels; n->max_peers=new_max_peers;
     dart_plat_realloc(old_arena,0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
@@ -620,10 +537,9 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     if (!h) return NULL;
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
-    if (opts){ def.qos = opts->qos; def.multicast = opts->multicast; }
+    if (opts) def.qos = opts->qos;
     if (dart_channel_define(n->transport, idx, &def) != 0){ dart__node_alloc(n, h, 0); return NULL; }
-    h->n = n; h->index = idx; h->multicast = def.multicast; h->identity = dart_channel_identity(&def);
-    if (def.multicast) dart__node_channel_mcast(n, idx, def.role, h->identity);
+    h->n = n; h->index = idx;
     /* re-advertise our interest so peers match the new channel as the blob arrives, and
        replay known peers' interest so this channel matches what they already advertised */
     mlen = dart_node_core_build_meta(n->core);
@@ -667,7 +583,7 @@ static void dart__node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
 
 int dart_node_poll(DartNode *n, int timeout_ms){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
-    i_DartPollfd pfd[2]; int n_fds=1;
+    i_DartPollfd pfd[1];
 
     /* a peer was refused last tick for lack of slots: grow the table now, between ticks
        (safe: not inside any layer's processing), then the peer's next announce is admitted */
@@ -681,7 +597,6 @@ int dart_node_poll(DartNode *n, int timeout_ms){
 
     memset(pfd,0,sizeof pfd);
     pfd[0].fd=n->fd; pfd[0].events=DART_POLLIN;
-    if (n->multicast_fd!=DART_SOCK_BAD){ pfd[1].fd=n->multicast_fd; pfd[1].events=DART_POLLIN; n_fds=2; }
     /* cap the wait at the next internal timer so a due ack/NACK/heartbeat fires on
        time, not after the full quantum (no traffic to wake us when a writer stalls) */
     { uint64_t next_deadline = dart_next_deadline_us(n->transport);
@@ -690,10 +605,9 @@ int dart_node_poll(DartNode *n, int timeout_ms){
                int ms = (us >= (uint64_t)timeout_ms*1000u) ? timeout_ms
                                                            : (int)((us + 999u)/1000u);
                if (ms < timeout_ms) timeout_ms = ms; } }       /* round up: no busy-spin */
-    if (dart_plat_poll(pfd,n_fds,timeout_ms) > 0){
+    if (dart_plat_poll(pfd,1,timeout_ms) > 0){
         uint64_t rx_deadline = dart_plat_now_us() + DART_RX_BUDGET_US;
         if (pfd[0].revents & DART_POLLIN) dart__node_rx_drain(n, n->fd, rx_deadline);
-        if (n_fds==2 && (pfd[1].revents & DART_POLLIN)) dart__node_rx_drain(n, n->multicast_fd, rx_deadline);
     }
 
     now=dart_plat_now_us();
@@ -793,10 +707,6 @@ int dart_channel_set_role(DartChannel *ch, DartRole role){
     if (!ch) return -1;
     r = dart_set_role(ch->n->transport, ch->index, (uint8_t)role);
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
-        /* the role now allows a direction the create-time setup skipped (e.g. PUB_ONLY -> PUBSUB
-           must JOIN the group to receive), so re-run the idempotent multicast setup */
-        if (ch->multicast && role != DART_INACTIVE)
-            dart__node_channel_mcast(ch->n, ch->index, (uint8_t)role, ch->identity);
         mlen = dart_node_core_build_meta(ch->n->core);
         dart_discovery_advertise(ch->n->discovery, dart_node_core_meta(ch->n->core, NULL), mlen);
         dart_discovery_replay(ch->n->discovery);   /* re-apply peers' interest to our new role */
@@ -872,7 +782,6 @@ void dart_node_close(DartNode *n, int send_bye){
     if (!n) return;
     arena = n->arena; owns = n->owns_arena;
     if (n->discovery) dart_discovery_close(n->discovery, send_bye);
-    if (n->multicast_fd != DART_SOCK_BAD) dart_plat_close(n->multicast_fd);
     if (n->fd != DART_SOCK_BAD) dart_plat_close(n->fd);
     if (n->transport) dart_destroy(n->transport);     /* free hook-allocated dynamic buffers + rings */
 #ifdef DART_SHM

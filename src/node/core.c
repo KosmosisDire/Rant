@@ -79,10 +79,6 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_ev_str(p,end," ("); p = i_ev_u64(p,end,ev->too_big_bytes);
         p = i_ev_str(p,end," bytes), skipped");
         break;
-    case DART_MCAST_JOIN_FAILED:
-        p = i_ev_str(p,end,"mcast-join-failed ch="); p = i_ev_u64(p,end,ev->channel);
-        p = i_ev_str(p,end," ("); p = i_ev_str(p,end,ev->detail); p = i_ev_str(p,end,")");
-        break;
     }
     *p = '\0';                                     /* p <= end = buf+cap-1, in range */
     return buf;
@@ -288,11 +284,6 @@ void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
 int dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out){
     DartDiscoveryAddr a;
     memset(out, 0, sizeof *out);
-    if (DART_DEST_IS_GROUP(to)){            /* the transport's group encoding stays inside the core */
-        out->is_group = 1;
-        out->group_sel = DART_DEST_GROUP_CHAN(to);
-        return 1;
-    }
     if (!dart_discovery_addr_of_id(c->discovery, to, &a)) return 0;   /* peer vanished */
     memcpy(out->ip, a.ip, 16);
     out->ip_len = a.ip_len;

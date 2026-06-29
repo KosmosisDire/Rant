@@ -169,7 +169,7 @@ static void usage(void){
         "usage:\n"
         "  pubsub sub <topic> [<topic>...] [opts]   (subscribe to one or more topics)\n"
         "  pubsub pub <topic> [text...] [opts]      (no text = read lines from stdin)\n"
-        "opts: --domain N  --mcast  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
+        "opts: --domain N  --mcast (same-host: discovery on loopback)  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
         "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
         "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_PAYLOAD_MAX>=N)\n");
 }
@@ -468,7 +468,7 @@ int main(int argc, char **argv){
        shims above resolve an index straight to its handle. */
     for (i = 0; i < g_n_topics; i++){
         DartChannelOpts co; memset(&co, 0, sizeof co);
-        co.qos = qos; co.multicast = (uint8_t)mcast;
+        co.qos = qos;
         if (!dart_node_create_channel(n, g_topics[i], is_pub ? DART_PUB_ONLY : DART_SUB_ONLY, &co)){
             fprintf(stderr, "create channel '%s' failed\n", g_topics[i]);
             dart_node_close(n, 0); return 1;

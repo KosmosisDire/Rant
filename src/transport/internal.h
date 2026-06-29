@@ -130,21 +130,15 @@ typedef struct {
     const char *name;       /* our copy of the topic name */
     uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
-    uint8_t   multicast;
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
                                dart_channel_define), so dart_destroy frees it */
-    uint16_t  n_subscribers;        /* live matched subscribers; multicast: >0 = group mode */
     /* writer */
     i_DartWriterSample *history;       /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
     uint64_t  next_seqno;
     uint64_t  first_seqno;  /* lowest seqno still cached */
     uint8_t   have_first;
-    /* multicast group lane: new data emitted once for all subscribers */
-    uint64_t  multicast_sent_upto;
-    uint64_t  multicast_hb_next_us;
-    uint32_t  multicast_hb_count;
     /* cumulative repair counters, summed over proxies; read via dart_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -175,12 +169,12 @@ struct DartTransportState {
     i_DartChannel  *channels;     /* [n_channels] */
     i_DartWriterProxy   *writer_proxies;     /* [n_channels*max_peers] */
     i_DartReaderProxy   *reader_proxies;     /* [n_channels*max_peers] */
-    /* active-lane scheduler: a lane is one (channel,peer) pair or a channel's group
-       lane. The event that gives a lane work enqueues it, so poll_send pays for work
-       done, not idle lanes. Timer work is found by an amortized clock-driven sweep. */
-    uint32_t    *lane_next;   /* [n_channels*(max_peers+1)] next in dest list */
-    uint8_t     *lane_queued;    /* [n_channels*(max_peers+1)] queued flag */
-    uint32_t    *dest_head;   /* [max_peers+n_channels] lane list per dest */
+    /* active-lane scheduler: a lane is one (channel,peer) pair. The event that gives a
+       lane work enqueues it, so poll_send pays for work done, not idle lanes. Timer work
+       is found by an amortized clock-driven sweep. */
+    uint32_t    *lane_next;   /* [n_channels*max_peers] next in dest list */
+    uint8_t     *lane_queued;    /* [n_channels*max_peers] queued flag */
+    uint32_t    *dest_head;   /* [max_peers] lane list per dest */
     uint32_t    *dest_tail;
     uint8_t     *dest_queued;
     uint32_t    *dest_queue;       /* ring of active destinations */
@@ -235,8 +229,6 @@ size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uin
 size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
 void   dart__lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot);
 size_t dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-size_t dart_group_emit(DartTransportState *st, int channel_idx, uint8_t *out, size_t cap, uint64_t now);
-int    dart__group_all_acked(DartTransportState *st, int channel_idx);
 void   dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p);
 void   dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef DART_SHM

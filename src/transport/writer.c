@@ -1,4 +1,4 @@
-/* Transport writer path: history, send, per-lane + group emit, ACKNACK handling. */
+/* Transport writer path: history, send, per-lane emit, ACKNACK handling. */
 #include "internal.h"
 
 
@@ -32,12 +32,9 @@ static void dart__commit(DartTransportState *st, uint16_t channel_idx, size_t le
     ch->first_seqno = ch->history[ch->history_head].valid ? ch->history[ch->history_head].base
                                                     : ch->history[0].base;
     ch->have_first  = 1;
-    if (ch->multicast && ch->n_subscribers>0)
-        dart__lane_wake(st, channel_idx, st->cfg.max_peers);    /* group lane */
-    else {
-        uint32_t max_peers=st->cfg.max_peers, p;
-        for (p=0;p<max_peers;p++)
-            if (dart__writer_proxy_at(st,channel_idx,p)->used && !st->peer_dormant[p]) dart__lane_wake(st, channel_idx, p);
+    { uint32_t max_peers=st->cfg.max_peers, p;
+      for (p=0;p<max_peers;p++)
+          if (dart__writer_proxy_at(st,channel_idx,p)->used && !st->peer_dormant[p]) dart__lane_wake(st, channel_idx, p);
     }
 }
 
@@ -138,13 +135,13 @@ int dart_repair_pending(DartTransportState *st, uint16_t channel){
 
 #ifdef DART_SHM
 
-/* 1 if the channel is non-multicast, has >=1 matched reader, and EVERY matched
- * (non-dormant) reader is SHM-capable -> the node may publish this message via SHM.
- * One non-SHM (remote) reader forces inline UDP for the whole message. */
+/* 1 if the channel has >=1 matched reader and EVERY matched (non-dormant) reader is
+ * SHM-capable -> the node may publish this message via SHM. One non-SHM (remote)
+ * reader forces inline UDP for the whole message. */
 int dart_writer_shm_eligible(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = dart_chan(st, channel, &channel_idx);
     uint32_t max_peers, p; int any=0;
-    if (!ch || ch->multicast) return 0;
+    if (!ch) return 0;
     max_peers = st->cfg.max_peers;
     for (p=0;p<max_peers;p++){
         if (!dart__writer_proxy_at(st,channel_idx,p)->used || st->peer_dormant[p]) continue;
@@ -185,14 +182,12 @@ void dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, co
     i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
     uint64_t base=dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
     uint32_t epoch=dart_le_r32(p+DART_OFFSET_NACK_EPOCH); uint8_t flags=p[0];
-    int group_mode;
     if (!w->used) return;
-    group_mode = ch->multicast && ch->n_subscribers>0;
     if (w->reader_epoch != epoch){
         if (w->reader_epoch){
             /* reader is a new incarnation (one-sided flap): our positions describe its
                dead predecessor, so re-join the lane as if freshly matched */
-            w->sent_upto  = group_mode ? ch->multicast_sent_upto : dart_unicast_join_seqno(ch);
+            w->sent_upto  = dart_unicast_join_seqno(ch);
             w->acked_upto = w->sent_upto;
             w->has_nack   = 0;
             w->hb_next_us = 0;
@@ -205,7 +200,7 @@ void dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, co
     if (flags & DART_F_UNPOS){
         /* reader has delivered nothing and never NACKs: re-push from the unacked
            edge (the join window) so a push that raced ahead isn't lost */
-        if (!group_mode && w->acked_upto < w->sent_upto){
+        if (w->acked_upto < w->sent_upto){
             w->sent_upto = w->acked_upto;
             dart__lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
         }
@@ -226,12 +221,8 @@ size_t dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, 
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,peer_slot);
     int reliable=(ch->qos.reliability==DART_RELIABLE);
-    /* group mode active only while a multicast channel has remote subscribers: new
-       data + HBs ride the group lane, this per-peer lane only answers NACKs */
-    int group_mode = ch->multicast && ch->n_subscribers>0;
     uint16_t alias = dart__alias_of(st, channel_idx);
     if (!w->used || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
-    if (group_mode && (!reliable || !w->has_nack)) return 0;
 
     /* 1. repair (reliable only) */
     if (reliable && w->has_nack){
@@ -284,7 +275,6 @@ size_t dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, 
         }
         w->has_nack=0;
     }
-    if (group_mode) return 0;   /* group lane owns everything below */
 
     /* 2. push new data */
     if (w->sent_upto < ch->next_seqno){
@@ -324,61 +314,5 @@ size_t dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, 
        HB advertises from acked_upto so a fresh reader adopts the join point. */
     if (reliable && w->reader_reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
         return dart_writer_hb(st,ch,w,alias,out,cap,now);
-    return 0;
-}
-
-
-/* multicast: 1 if every matched subscriber has acked all data, so the group
- * heartbeat can stop until new data arrives or a new/lagging subscriber needs it */
-int dart__group_all_acked(DartTransportState *st, int channel_idx){
-    uint32_t max_peers=st->cfg.max_peers, p; uint64_t seq=st->channels[channel_idx].next_seqno;
-    for (p=0;p<max_peers;p++){
-        i_DartWriterProxy *w=dart__writer_proxy_at(st,channel_idx,p);
-        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < seq) return 0;
-    }
-    return 1;
-}
-
-
-/* multicast writer lane: new data once for the whole group, then a channel-level
- * heartbeat (reliable). Same per-call contract as dart_writer_emit. */
-size_t dart_group_emit(DartTransportState *st, int channel_idx, uint8_t *out, size_t cap, uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    uint16_t alias = dart__alias_of(st, channel_idx);
-    if (!ch->multicast || ch->role==DART_SUB_ONLY || ch->role==DART_INACTIVE) return 0;
-    if (ch->n_subscribers==0){
-        /* no remote subscribers: pin the cursor forward so a future join gets no stale replay */
-        ch->multicast_sent_upto = ch->next_seqno;
-        return 0;
-    }
-    if (ch->multicast_sent_upto < ch->next_seqno){
-        uint64_t seqno=ch->multicast_sent_upto;
-        i_DartWriterSample *s=dart_find_sample(ch,seqno);
-        if (s){
-            uint16_t frag_idx=(uint16_t)(seqno - s->base);
-            uint32_t offset=(uint32_t)frag_idx*st->frag;
-            uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
-            if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
-            ch->multicast_sent_upto++;
-            ch->repair_stats.frags_sent++;                       /* new data, once for the whole group */
-            return dart_mk_data(out,alias,seqno,s,frag_idx,dart__sbuf(s)+offset,payload_len);
-        } else {
-            /* overran the ring: skip the group past it with an HB (first = our floor) */
-            if (cap < DART_HEADER_HB) return 0;
-            ch->multicast_sent_upto=(ch->have_first?ch->first_seqno:ch->next_seqno);
-            ch->multicast_hb_next_us = now + ch->qos.heartbeat_us;
-            dart__deadline(st, ch->multicast_hb_next_us);
-            ch->multicast_hb_count++;
-            return dart_mk_hb(out,alias,(ch->have_first?ch->first_seqno:0),ch->next_seqno-1,ch->multicast_hb_count);
-        }
-    }
-    if (ch->qos.reliability==DART_RELIABLE && now>=ch->multicast_hb_next_us && ch->next_seqno>0
-        && !dart__group_all_acked(st, channel_idx)){
-        if (cap < DART_HEADER_HB) return 0;
-        ch->multicast_hb_next_us = now + ch->qos.heartbeat_us;
-        dart__deadline(st, ch->multicast_hb_next_us);
-        ch->multicast_hb_count++;
-        return dart_mk_hb(out,alias,(ch->have_first?ch->first_seqno:0),ch->next_seqno-1,ch->multicast_hb_count);
-    }
     return 0;
 }

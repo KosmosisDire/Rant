@@ -19,10 +19,9 @@ typedef struct {
     uint16_t              data_port;         /* unicast data port; 0 = OS-assigned */
     const char           *discovery_group;   /* "239.255.0.7" */
     uint16_t              discovery_port;    /* 7400 */
-    uint16_t              multicast_port;    /* shared multicast data port; discovery_port+1 */
-    const char           *multicast_interface;/* interface IP for all multicast; NULL = auto,
+    const char           *multicast_interface;/* interface IP for discovery multicast; NULL = auto,
                                                 "127.0.0.1" = single-host. Pin on multihomed hosts */
-    uint8_t               multicast_ttl;     /* hops multicast may travel; 1 */
+    uint8_t               multicast_ttl;     /* hops discovery announces may travel; 1 */
     const DartDiscoveryAddr *seed_peers;   /* peers to also unicast announces to (port 0 =
                                                 discovery_port), so discovery works without multicast */
     uint16_t              n_seed_peers;
@@ -62,7 +61,6 @@ typedef struct {
  */
 typedef struct {
     DartQos  qos;
-    uint8_t  multicast;   /* 1 = publish to / join this topic's multicast group (see DartChannelDef) */
 } DartChannelOpts;
 
 typedef struct DartNode    DartNode;
