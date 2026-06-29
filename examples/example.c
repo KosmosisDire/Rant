@@ -17,8 +17,8 @@
  * it while creating channels / setting roles / sending.
  *   POSIX  : cc  -std=c99 -Idist examples/example.c -o node -lrt -lpthread
  *   Windows: gcc -std=c99 -Idist examples/example.c -o example.exe -lws2_32 -lbcrypt -lwinmm */
-#define DART_TRANSPORT_IMPLEMENTATION
-#include "dart_transport.h"
+#define DART_IMPLEMENTATION
+#include "dart.h"
 
 #include <stdio.h>
 #include <string.h>
