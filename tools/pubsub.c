@@ -337,7 +337,7 @@ static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t
 int main(int argc, char **argv){
     const char *mode = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL;
     const char *pos[64]; int npos = 0;     /* positional args: [mode, topic(s)/message...] */
-    uint16_t domain = 7;
+    uint16_t domain = 0;
     int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0, frag = 0;
     double rate_hz = 0;                    /* --rate: pub repeats at N Hz; sub measures rate */
     size_t cap = 4u<<20; int max_set = 0; /* --max: fixed message cap (else dynamic) */
