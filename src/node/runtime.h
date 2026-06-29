@@ -115,6 +115,16 @@ uint16_t     dart_channel_index(const DartChannel *ch);
  * out of range. Lets a caller use a handle without storing the create_channel result. */
 DartChannel *dart_node_channel(DartNode *n, uint16_t index);
 
+/* ---- read-only peer inspection (diagnostics / a discovery explorer) ----------------
+ * The live peer table as a zero-copy array, valid until the next dart_node_poll. A node
+ * peer IS a discovery peer: identity, locator, liveness, name, uuid, and the OPAQUE
+ * announce overlay are exactly what discovery already holds, so this hands back discovery's
+ * own view rather than copying into a parallel struct. The overlay's transport meaning (the
+ * peer's UDP fragment size and pub/sub interest) is decoded on demand via dart_node_peer_frag
+ * / dart_node_peer_interest_next (node/core.h), so a caller never touches dart_meta_*.
+ * Returns the packed array + *count (used peers, ACTIVE or DROPPED); NULL if n is NULL. */
+const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count);
+
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends);

@@ -809,6 +809,13 @@ DartChannel *dart_node_channel(DartNode *n, uint16_t index){
     return n->handles[index];
 }
 
+/* Read-only peer view: discovery already packs its peer table into a zero-copy array, and a
+ * node peer IS a discovery peer (it adds only the decoded overlay, read on demand via
+ * dart_node_peer_frag / dart_node_peer_interest_next). So this just forwards. */
+const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count){
+    return dart_discovery_peers(n ? n->discovery : NULL, count);
+}
+
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){
     if (waited_us)    *waited_us    = n->backpressure_total_us;
     if (waited_sends) *waited_sends = n->backpressure_wait_count;

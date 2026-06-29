@@ -1124,6 +1124,17 @@ uint16_t dart_node_core_max_peers(i_DartNodeCore *c);
 int      dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
                                 uint8_t ip[16], uint8_t *ip_len, uint16_t *port);
 
+/* Decode helpers for a peer's announce overlay (the transport meta blob discovery carries
+ * opaquely). The node owns the transport codec, so a diagnostics caller reads a peer's
+ * fragment size + interest off a DartDiscoveryPeer (from dart_node_peers) without ever
+ * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
+uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
+/* Walk a peer's interest list one topic at a time (publishes, then subscribes): zero a
+ * DartInterestIter, then call until it returns 0. Fills *out (out->name points into the
+ * peer's overlay, NOT NUL-terminated). 0 when the peer carries no overlay or at the end. */
+int      dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
+                              DartInterestIter *it, DartTopic *out);
+
 #ifdef __cplusplus
 }
 #endif
@@ -1242,6 +1253,16 @@ uint16_t     dart_channel_index(const DartChannel *ch);
 /* Recover an already-created channel handle by its creation index (0-based), or NULL if
  * out of range. Lets a caller use a handle without storing the create_channel result. */
 DartChannel *dart_node_channel(DartNode *n, uint16_t index);
+
+/* ---- read-only peer inspection (diagnostics / a discovery explorer) ----------------
+ * The live peer table as a zero-copy array, valid until the next dart_node_poll. A node
+ * peer IS a discovery peer: identity, locator, liveness, name, uuid, and the OPAQUE
+ * announce overlay are exactly what discovery already holds, so this hands back discovery's
+ * own view rather than copying into a parallel struct. The overlay's transport meaning (the
+ * peer's UDP fragment size and pub/sub interest) is decoded on demand via dart_node_peer_frag
+ * / dart_node_peer_interest_next (node/core.h), so a caller never touches dart_meta_*.
+ * Returns the packed array + *count (used peers, ACTIVE or DROPPED); NULL if n is NULL. */
+const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count);
 
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */
@@ -5722,6 +5743,16 @@ int dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
     if (port)   *port = v.addr.port;
     return 1;
 }
+
+uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer){
+    return (peer && peer->meta) ? dart_meta_frag(peer->meta, peer->meta_len) : 0;
+}
+
+int dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
+                                 DartInterestIter *it, DartTopic *out){
+    if (!peer || !peer->meta) return 0;
+    return dart_meta_interest_next(peer->meta, peer->meta_len, it, out);
+}
 #pragma endregion
 #pragma region node/runtime.c
 /* NODE runtime: owns the data sockets, drives discovery, and the clock; it wires
@@ -6527,6 +6558,13 @@ uint16_t dart_channel_index(const DartChannel *ch){ return ch ? ch->index : 0; }
 DartChannel *dart_node_channel(DartNode *n, uint16_t index){
     if (!n || index >= n->n_created) return NULL;
     return n->handles[index];
+}
+
+/* Read-only peer view: discovery already packs its peer table into a zero-copy array, and a
+ * node peer IS a discovery peer (it adds only the decoded overlay, read on demand via
+ * dart_node_peer_frag / dart_node_peer_interest_next). So this just forwards. */
+const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count){
+    return dart_discovery_peers(n ? n->discovery : NULL, count);
 }
 
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){

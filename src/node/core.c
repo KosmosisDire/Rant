@@ -325,3 +325,13 @@ int dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
     if (port)   *port = v.addr.port;
     return 1;
 }
+
+uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer){
+    return (peer && peer->meta) ? dart_meta_frag(peer->meta, peer->meta_len) : 0;
+}
+
+int dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
+                                 DartInterestIter *it, DartTopic *out){
+    if (!peer || !peer->meta) return 0;
+    return dart_meta_interest_next(peer->meta, peer->meta_len, it, out);
+}

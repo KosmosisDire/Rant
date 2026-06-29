@@ -137,6 +137,17 @@ uint16_t dart_node_core_max_peers(i_DartNodeCore *c);
 int      dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
                                 uint8_t ip[16], uint8_t *ip_len, uint16_t *port);
 
+/* Decode helpers for a peer's announce overlay (the transport meta blob discovery carries
+ * opaquely). The node owns the transport codec, so a diagnostics caller reads a peer's
+ * fragment size + interest off a DartDiscoveryPeer (from dart_node_peers) without ever
+ * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
+uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
+/* Walk a peer's interest list one topic at a time (publishes, then subscribes): zero a
+ * DartInterestIter, then call until it returns 0. Fills *out (out->name points into the
+ * peer's overlay, NOT NUL-terminated). 0 when the peer carries no overlay or at the end. */
+int      dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
+                              DartInterestIter *it, DartTopic *out);
+
 #ifdef __cplusplus
 }
 #endif
