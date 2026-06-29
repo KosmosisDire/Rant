@@ -287,10 +287,18 @@ i_DartChannel *dart_chan(DartTransportState *st, uint16_t channel, int *idx_out)
     return &st->channels[channel];
 }
 
-/* RX demux: find the local channel for a wire identity */
+/* Find the local channel for a wire identity. An INACTIVE channel (declared but off) must
+ * not shadow an active same-identity channel, so prefer a non-INACTIVE match; fall back to
+ * the first match (e.g. all inactive) so resolution stays deterministic. Lets a caller hold
+ * two channels of one identity (different QoS) and switch which is live by role. */
 static i_DartChannel *dart_chan_by_identity(DartTransportState *st, uint64_t identity, int *idx_out){
-    uint16_t i;
-    for (i=0;i<st->cfg.n_channels;i++) if (st->channels[i].identity==identity){ if(idx_out)*idx_out=(int)i; return &st->channels[i]; }
+    uint16_t i; int first=-1;
+    for (i=0;i<st->cfg.n_channels;i++){
+        if (st->channels[i].identity!=identity) continue;
+        if (first<0) first=(int)i;
+        if (st->channels[i].role!=DART_INACTIVE){ if(idx_out)*idx_out=(int)i; return &st->channels[i]; }
+    }
+    if (first>=0){ if(idx_out)*idx_out=first; return &st->channels[first]; }
     return NULL;
 }
 
