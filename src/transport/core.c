@@ -4,27 +4,18 @@
 #include "core.h"
 #include "../common/bytes.h"
 #include "../common/arena.h"
+#include "../common/hash.h"
 #include "internal.h"
 #include <string.h>
 
 
-/* FNV-1a over n bytes: the interest blob carries length-prefixed (not NUL-term)
- * names, so the identity is recomputed from the name on receive (it was redundant
- * on the wire, == dart_topic_id of the same name; init caps names at
- * DART_TOPIC_NAME_MAX so the wire name is the whole name). */
-static uint64_t dart__id_n(const uint8_t *name, size_t n){
-    uint64_t h = 1469598103934665603ull; size_t i;
-    for (i=0;i<n;i++){ h ^= (uint64_t)name[i]; h *= 1099511628211ull; }
-    return h;
-}
+/* Topic identity = FNV-1a 64 of the name (dart_fnv1a64, common/hash.h). The interest blob
+ * carries length-prefixed (not NUL-term) names, so the identity is recomputed from the
+ * name on receive; init caps names at DART_TOPIC_NAME_MAX so the wire name is the whole
+ * name and dart__id_n (over the wire bytes) == dart_topic_id of the same name. */
+static uint64_t dart__id_n(const uint8_t *name, size_t n){ return dart_fnv1a64(name, n); }
 
-uint64_t dart_topic_id(const char *name){
-    uint64_t h = 1469598103934665603ull;   /* FNV-1a 64 offset basis */
-    const unsigned char *p = (const unsigned char*)name;
-    if (!name) return 0;
-    for (; *p; p++){ h ^= (uint64_t)*p; h *= 1099511628211ull; }
-    return h;
-}
+uint64_t dart_topic_id(const char *name){ return dart_fnv1a64_str(name); }
 
 uint64_t dart_channel_identity(const DartChannelDef *def){
     return dart_topic_id(def->name);   /* the name is the cross-peer identity */
