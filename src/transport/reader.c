@@ -188,7 +188,8 @@ void dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, co
       int hole = r->assembly_active && (r->deliver_upto + r->assembly_low <= r->received_high);
       if (done){
           if (st->cfg.on_message)
-              st->cfg.on_message(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot], r->assembly_buf, r->assembly_len);
+              st->cfg.on_message(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+                                 dart_bytes(r->assembly_buf, r->assembly_len));
           r->deliver_upto = base + count;
           r->assembly_active=0;
       }

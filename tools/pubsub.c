@@ -19,7 +19,7 @@ shm_open on Linux (drop it on macOS/BSD, or build -DDART_NO_SHM).
  * dart_channel_send, ...). This tool creates its channels in index order, so these
  * shims keep the concise (node, channel-index) call form: dart_node_channel(n, i)
  * maps a creation index back to its handle. */
-#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), (d), (l))
+#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), dart_bytes((d),(l)))
 #define dart_node_drain(n, idx, ms)          dart_channel_drain(dart_node_channel((n),(idx)), (ms))
 #define dart_node_writer_match_count(n, idx) dart_channel_match_count(dart_node_channel((n),(idx)))
 #define dart_node_repair_stats(n, idx, o)    dart_channel_repair_stats(dart_node_channel((n),(idx)), (o))
@@ -142,8 +142,12 @@ static size_t parse_size(const char *s){
 }
 
 static void on_message(const DartMsg *msg){
-    const char *topic = msg->channel_name ? msg->channel_name : "?";
-    uint32_t from = msg->sender_id; const void *data = msg->data; size_t len = msg->len;
+    char topic[DART_TOPIC_NAME_MAX + 1];   /* NUL-terminated copy: channel_name is a DartString */
+    uint32_t from = msg->sender_id; const void *data = msg->data.data; size_t len = msg->data.len;
+    size_t tn = msg->channel_name.len < sizeof topic - 1 ? msg->channel_name.len : sizeof topic - 1;
+    if (tn) memcpy(topic, msg->channel_name.data, tn);
+    topic[tn] = '\0';
+    if (!tn){ topic[0] = '?'; topic[1] = '\0'; }
     g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* accounting for sub --rate (the loop prints it) */
     g_last_peer = from;                              /* the loop snapshots this writer's HOL progress */
     if (g_outfile){                       /* --file: each message OVERWRITES the file */

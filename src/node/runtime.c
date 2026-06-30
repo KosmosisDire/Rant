@@ -116,22 +116,20 @@ static void *dart__node_alloc(void *u, void *ptr, size_t size){
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. */
-static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, const void *data, size_t len){
-    DartMsg m; uint8_t nl = 0, snl = 0;
+static void dart__deliver(DartNode *n, uint16_t ch, uint32_t from, DartBytes data){
+    DartMsg m;
     if (!n->user_on_message) return;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
     m.channel_id = ch; m.sender_id = from;
-    m.sender_name = dart_node_core_peer_name(n->core, from, &snl);   /* pointer into discovery state */
-    if (!m.sender_name){ m.sender_name = "unknown-peer"; snl = 12; } /* never NULL: no caller null-check */
-    m.sender_name_len = snl;
-    m.channel_name = dart_channel_name(n->transport, ch, &nl);
-    m.channel_name_len = nl;
-    m.data = data; m.len = len;
+    m.sender_name = dart_node_core_peer_name(n->core, from);          /* view into discovery state */
+    if (!m.sender_name.data) m.sender_name = dart_cstr("unknown-peer"); /* .data never NULL on delivery */
+    m.channel_name = dart_channel_name(n->transport, ch);
+    m.data = data;
     n->user_on_message(&m);
 }
-static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, const void *data, size_t len){
-    dart__deliver((DartNode*)u, ch, from, data, len);
+static void dart__node_on_message(void *u, uint16_t ch, uint32_t from, DartBytes data){
+    dart__deliver((DartNode*)u, ch, from, data);
 }
 /* node-core events (the app DartEvent: PEER_UP/DOWN/INTEREST/REFUSED) funnel through
  * here; transport events arrive separately via dart__node_on_transport_event. The core
@@ -268,7 +266,7 @@ static int dart__node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t 
     memcpy(n->shm_scratch, p, len);
     if (!dart_shm_verify(reader_pool, &d)) return 0;                /* seqlock tail: writer recycled mid-copy -> torn -> drop */
     n->shm_rx++;
-    dart__deliver(n, ch, from, n->shm_scratch, len);
+    dart__deliver(n, ch, from, dart_bytes(n->shm_scratch, len));
     return 1;
 }
 #endif
@@ -422,12 +420,11 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
 
     dc.discovery.on_event = dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;
-    dc.discovery.name     = node_name;        /* name is discovery-owned (its own blob section) */
-    dc.discovery.name_len = node_name_len;
+    dc.discovery.name     = dart_string(node_name, node_name_len);   /* discovery-owned (its own blob section) */
     /* the core builds our OVERLAY (frag size + OOB host + interest); discovery wraps it in
        its blob (after the locator + name) so peers reassemble and match from discovery */
     dart_node_core_build_meta(n->core);
-    dc.discovery.meta = dart_node_core_meta(n->core, &dc.discovery.meta_len);
+    dc.discovery.meta = dart_node_core_meta(n->core);
     n->discovery = dart_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
     if (!n->discovery) goto fail_sock;
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
@@ -484,7 +481,7 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
     ncore->transport = nt;                         /* re-point cross-layer pointer */
     dart_node_core_build_meta(ncore);              /* rebuild the announce blob into the new buf */
     ndisc = dart_discovery_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
-                                      new_max_peers, new_meta_cap, dart_node_core_meta(ncore,NULL), ncore);
+                                      new_max_peers, new_meta_cap, dart_node_core_meta(ncore).data, ncore);
     if (!ndisc){ dart_plat_realloc(new_arena,0); return 0; }
     dart_node_core_bind_discovery(ncore, dart_discovery_state(ndisc));   /* re-point to the relocated table */
 
@@ -526,7 +523,7 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
 
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
                                       const DartChannelOpts *opts){
-    DartChannelDef def; DartChannel *h; uint16_t idx, mlen;
+    DartChannelDef def; DartChannel *h; uint16_t idx;
     if (!n || !name) return NULL;
     if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
         uint16_t want = n->max_channels < 0x8000u ? (uint16_t)(n->max_channels*2u) : 0xFFFFu;
@@ -542,8 +539,8 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     h->n = n; h->index = idx;
     /* re-advertise our interest so peers match the new channel as the blob arrives, and
        replay known peers' interest so this channel matches what they already advertised */
-    mlen = dart_node_core_build_meta(n->core);
-    dart_discovery_advertise(n->discovery, dart_node_core_meta(n->core, NULL), mlen);
+    dart_node_core_build_meta(n->core);
+    dart_discovery_advertise(n->discovery, dart_node_core_meta(n->core));
     dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
     n->n_created++;
@@ -570,11 +567,11 @@ static void dart__node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
         if (r>0){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
                 /* unicast announce aimed at our data port: hand it to discovery */
-                dart_discovery_feed(n->discovery, src_ip, 4, buf, (size_t)r);
+                dart_discovery_feed(n->discovery, src_ip, 4, dart_bytes(buf, (size_t)r));
             } else {
                 uint32_t from;
                 if (dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                    dart_on_datagram(n->transport, from, buf, (size_t)r, dart_plat_now_us());
+                    dart_on_datagram(n->transport, from, dart_bytes(buf, (size_t)r), dart_plat_now_us());
             }
         }
         if (dart_plat_now_us() >= deadline) break;      /* yield to discovery/send */
@@ -627,7 +624,8 @@ int dart_node_poll(DartNode *n, int timeout_ms){
 }
 
 /* publish on a channel index: bounded backpressure pump, then SHM fast path, then UDP */
-static int dart__node_do_send(DartNode *n, uint16_t channel, const void *data, size_t len){
+static int dart__node_do_send(DartNode *n, uint16_t channel, DartBytes data){
+    size_t len = data.len;
     /* bounded backpressure: pump the loop (on_message/on_event may fire here) until
        a slow reader acks or qos.backpressure_wait_us elapses, then send anyway */
     const DartQos *q = dart_channel_qos(n->transport, channel);
@@ -683,10 +681,10 @@ static int dart__node_do_send(DartNode *n, uint16_t channel, const void *data, s
             void *chunk_ptr = pool ? dart_shm_chunk(pool, slot, NULL) : NULL;
             if (chunk_ptr){
                 i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
-                memcpy(chunk_ptr, data, len);                       /* one-copy write into shm */
+                memcpy(chunk_ptr, data.data, len);                  /* one-copy write into shm */
                 dart_shm_stamp(pool, slot, (uint32_t)len, &d);
                 dart_shm_desc_encode(&d, desc);
-                if (dart_send_shm(n->transport, channel, chunk_ptr, len, desc, dart_plat_now_us())==0){
+                if (dart_send_shm(n->transport, channel, dart_bytes(chunk_ptr, len), desc, dart_plat_now_us())==0){
                     n->shm_tx++;
                     return 0;
                 }
@@ -694,21 +692,21 @@ static int dart__node_do_send(DartNode *n, uint16_t channel, const void *data, s
         }
     }
 #endif
-    return dart_send(n->transport, channel, data, len, dart_plat_now_us());
+    return dart_send(n->transport, channel, data, dart_plat_now_us());
 }
 
-int dart_channel_send(DartChannel *ch, const void *data, size_t len){
+int dart_channel_send(DartChannel *ch, DartBytes data){
     if (!ch) return DART_ERR_NO_CHANNEL;
-    return dart__node_do_send(ch->n, ch->index, data, len);
+    return dart__node_do_send(ch->n, ch->index, data);
 }
 
 int dart_channel_set_role(DartChannel *ch, DartRole role){
-    int r; uint16_t mlen;
+    int r;
     if (!ch) return -1;
     r = dart_set_role(ch->n->transport, ch->index, (uint8_t)role);
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
-        mlen = dart_node_core_build_meta(ch->n->core);
-        dart_discovery_advertise(ch->n->discovery, dart_node_core_meta(ch->n->core, NULL), mlen);
+        dart_node_core_build_meta(ch->n->core);
+        dart_discovery_advertise(ch->n->discovery, dart_node_core_meta(ch->n->core));
         dart_discovery_replay(ch->n->discovery);   /* re-apply peers' interest to our new role */
     }
     return r;

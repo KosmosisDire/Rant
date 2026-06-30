@@ -144,7 +144,7 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
  * dart_channel_send, ...). These test-internal helpers keep the index-based call
  * sites concise: dart_node_channel(n, i) maps a creation index back to its handle,
  * so the old (node, channel-index) call form maps straight onto the handle calls. */
-#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), (d), (l))
+#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), dart_bytes((d),(l)))
 #define dart_node_set_role(n, idx, r)        dart_channel_set_role(dart_node_channel((n),(idx)), (r))
 #define dart_node_drain(n, idx, ms)          dart_channel_drain(dart_node_channel((n),(idx)), (ms))
 #define dart_node_writer_match_count(n, idx) dart_channel_match_count(dart_node_channel((n),(idx)))
@@ -289,7 +289,7 @@ static void lat_on_event(const DartEvent *ev){
 
 static void lat_on_message(const DartMsg *msg){
     uint16_t ch = msg->channel_id; uint32_t from = msg->sender_id;
-    const void *data = msg->data; size_t len = msg->len;
+    const void *data = msg->data.data; size_t len = msg->data.len;
     const uint8_t *p = (const uint8_t*)data; uint64_t now = now_ns();
     peer_stat *e = tbl_get(from);
     if (!e) return;
@@ -731,9 +731,9 @@ static char st_last_sender[64];   /* sender_name of the most recently delivered 
 static void st_on_message(const DartMsg *msg){
     if (msg->channel_id < 8) st_samples[msg->channel_id]++;
     st_last_sender[0] = '\0';
-    if (msg->sender_name){
-        size_t n = msg->sender_name_len < sizeof st_last_sender - 1 ? msg->sender_name_len : sizeof st_last_sender - 1;
-        memcpy(st_last_sender, msg->sender_name, n); st_last_sender[n] = '\0';
+    if (msg->sender_name.data){
+        size_t n = msg->sender_name.len < sizeof st_last_sender - 1 ? msg->sender_name.len : sizeof st_last_sender - 1;
+        memcpy(st_last_sender, msg->sender_name.data, n); st_last_sender[n] = '\0';
     }
     st_any++;
 }
@@ -796,14 +796,14 @@ static void disc_core_checks(void){
 
     /* 1. two peers announce -> two ups, both ACTIVE */
     dc_up_n=dc_down_n=dc_refused_n=0;
-    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,buf,n,2000); idA=dc_up_id;
-    n=dc_mk(buf,2,0,99,5002,1); dart_discovery_on_datagram(st,sb,4,buf,n,2000); idB=dc_up_id;
+    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2000); idA=dc_up_id;
+    n=dc_mk(buf,2,0,99,5002,1); dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),2000); idB=dc_up_id;
     ST_CHECK(dc_up_n==2 && dart_discovery_peer_count(st)==2,
              "disc-core: two peers up (ups=%u count=%u)", dc_up_n, dart_discovery_peer_count(st));
 
     /* 2. a new peer is REFUSED when the table is full of ACTIVE peers */
     dc_up_n=dc_refused_n=0;
-    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,buf,n,2000);
+    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),2000);
     ST_CHECK(dc_refused_n==1 && dc_up_n==0 && dart_discovery_peer_count(st)==2,
              "disc-core: refuse new peer when full of active (refused=%u up=%u count=%u)",
              dc_refused_n, dc_up_n, dart_discovery_peer_count(st));
@@ -817,21 +817,21 @@ static void disc_core_checks(void){
 
     /* 4. same uuid returns -> RESUME under the SAME local_id */
     dc_up_n=0;
-    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,buf,n,2100000);
+    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2100000);
     ST_CHECK(dc_up_n==1 && dc_up_id==idA && dart_discovery_peer_count(st)==1,
              "disc-core: same uuid resumes same id (up=%u sameid=%d count=%u)",
              dc_up_n, dc_up_id==idA, dart_discovery_peer_count(st));
 
     /* 5. a new peer now evicts the oldest DROPPED peer (B) as GONE */
     dc_down_n=dc_up_n=0;
-    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,buf,n,2100000);
+    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),2100000);
     ST_CHECK(dc_down_n==1 && dc_down_id==idB && dc_down_reason==(int)DART_DISCOVERY_GONE && dc_up_n==1,
              "disc-core: new peer evicts oldest dropped as GONE (downs=%u sameid=%d reason=%d up=%u)",
              dc_down_n, dc_down_id==idB, dc_down_reason, dc_up_n);
 
     /* 6. BYE is GONE */
     dc_down_n=0;
-    n=dc_mk(buf,1,0x01,99,5001,1); dart_discovery_on_datagram(st,sa,4,buf,n,2100000);
+    n=dc_mk(buf,1,0x01,99,5001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2100000);
     ST_CHECK(dc_down_n==1 && dc_down_id==idA && dc_down_reason==(int)DART_DISCOVERY_GONE
              && dart_discovery_peer_count(st)==1,
              "disc-core: BYE is GONE (downs=%u sameid=%d reason=%d count=%u)",
@@ -845,9 +845,9 @@ static void disc_core_checks(void){
       st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
       dart_discovery_update(st, 1000, out, sizeof out);
       dc_up_n=dc_down_n=0;
-      n=dc_mk(buf,7,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,buf,n,3000); idP=dc_up_id;
+      n=dc_mk(buf,7,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),3000); idP=dc_up_id;
       dc_up_n=dc_down_n=0;
-      n=dc_mk(buf,8,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,buf,n,3100);  /* new uuid, same ip:port */
+      n=dc_mk(buf,8,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),3100);  /* new uuid, same ip:port */
       ST_CHECK(dc_down_n==1 && dc_down_id==idP && dc_down_reason==(int)DART_DISCOVERY_GONE
                && dc_up_n==1 && dart_discovery_peer_count(st)==1,
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
@@ -927,36 +927,36 @@ static void node_core_checks(void){
     dart_discovery_update(st, 1000, out, sizeof out);   /* start */
 
     /* build-meta still works (uses the transport, not any peer table) */
-    {   uint16_t ml; const uint8_t *mb;
+    {   DartBytes mb;
         dart_node_core_build_meta(nc);
-        mb = dart_node_core_meta(nc, &ml);
-        ST_CHECK(ml>=5 && dart_meta_frag(mb, ml)==1200,
-                 "node-core: builds overlay (frag=%u)", dart_meta_frag(mb, ml)); }
+        mb = dart_node_core_meta(nc);
+        ST_CHECK(mb.len>=5 && dart_meta_frag(mb)==1200,
+                 "node-core: builds overlay (frag=%u)", dart_meta_frag(mb)); }
 
     /* 1. two peers announce -> two ups; discovery assigns the ids; resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dart_discovery_on_datagram(st,sa,4,buf,n,2000); idA=nc_up_id;
-    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dart_discovery_on_datagram(st,sb,4,buf,n,2000); idB=nc_up_id;
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2000); idA=nc_up_id;
+    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),2000); idB=nc_up_id;
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
-    {   uint8_t pnl=0; const char *pn = dart_node_core_peer_name(nc, idA, &pnl);
-        ST_CHECK(pn && pnl==7 && strcmp(pn,"nc-self")==0,
-                 "node-core: peer name learned from announce (%s)", pn?pn:"?"); }
+    {   DartString pn = dart_node_core_peer_name(nc, idA);
+        ST_CHECK(pn.data && pn.len==7 && memcmp(pn.data,"nc-self",7)==0,
+                 "node-core: peer name learned from announce (%.*s)", (int)pn.len, pn.data?pn.data:"?"); }
     ST_CHECK(dart_node_core_resolve(nc,idA,&d) && d.port==5001 && d.ip[3]==1,
              "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
     ST_CHECK(dart_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
              "node-core: addr resolves to id (id=%u)", id);
 
     /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
-    {   uint8_t pnl=0; const char *pn;
-        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dart_discovery_on_datagram(st,sa,4,buf,n,2001);
-        pn = dart_node_core_peer_name(nc, idA, &pnl);
-        ST_CHECK(pn && strcmp(pn,"unknown-peer")==0,
-                 "node-core: nameless announce -> unknown-peer (%s)", pn?pn:"(null)");
-        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dart_discovery_on_datagram(st,sa,4,buf,n,2002); }
+    {   DartString pn;
+        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2001);
+        pn = dart_node_core_peer_name(nc, idA);
+        ST_CHECK(pn.data && pn.len==12 && memcmp(pn.data,"unknown-peer",12)==0,
+                 "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
+        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2002); }
 
     /* 2. a 3rd peer is REFUSED while the table is full of ACTIVE peers; the node forwards it */
     nc_refused_n=0;
-    n=nc_dgram(buf,3,0,99,5003,"three",1); dart_discovery_on_datagram(st,sc,4,buf,n,2003);
+    n=nc_dgram(buf,3,0,99,5003,"three",1); dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),2003);
     ST_CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 
     /* 3. silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
@@ -967,12 +967,12 @@ static void node_core_checks(void){
 
     /* 4. the same uuid returns -> RESUME re-fires PEER_UP under the same id */
     nc_up_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dart_discovery_on_datagram(st,sa,4,buf,n,1100000);
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),1100000);
     ST_CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* 5. GONE (BYE) on the now-active peer: one PEER_DOWN, and it no longer resolves */
     nc_down_n=0;
-    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dart_discovery_on_datagram(st,sa,4,buf,n,1100001);
+    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),1100001);
     ST_CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
     ST_CHECK(dart_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
 }
@@ -1037,16 +1037,16 @@ static void shml_pump(int n){
     for (i=0;i<n;i++){
         while (dart_poll_send(shml_W,&to,buf,sizeof buf,&ol,shml_now)){
             if (shml_drop>0 && (buf[0]&0x20u)){ shml_drop--; continue; }   /* drop SHM-DATA */
-            dart_on_datagram(shml_R, 1u, buf, ol, shml_now);
+            dart_on_datagram(shml_R, 1u, dart_bytes(buf, ol), shml_now);
         }
         while (dart_poll_send(shml_R,&to,buf,sizeof buf,&ol,shml_now))
-            dart_on_datagram(shml_W, 2u, buf, ol, shml_now);
+            dart_on_datagram(shml_W, 2u, dart_bytes(buf, ol), shml_now);
         shml_now += 30000;   /* 30 ms: past repair_delay (20ms), lets heartbeats fire */
     }
 }
 static void shml_send(void){
     static unsigned char chunk[2048]; unsigned char desc[DART_SHM_DESC_WIRE];
-    memset(desc,0,sizeof desc); dart_send_shm(shml_W, 0, chunk, 1000, desc, shml_now);
+    memset(desc,0,sizeof desc); dart_send_shm(shml_W, 0, dart_bytes(chunk, 1000), desc, shml_now);
 }
 static void shm_loss_checks(void){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; uint8_t blob[256]; size_t bl;
@@ -1061,8 +1061,8 @@ static void shm_loss_checks(void){
     nr=dart_required_memory(&rc); mr=malloc(nr); shml_R=dart_init(mr,nr,&rc);
     shml_now=1000000;
     dart_peer_add(shml_W,2u,DART_FRAG_PAYLOAD); dart_peer_add(shml_R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_build_interest(shml_W,blob,sizeof blob); dart_apply_peer_interest(shml_R,1u,blob,bl);
-    bl=dart_build_interest(shml_R,blob,sizeof blob); dart_apply_peer_interest(shml_W,2u,blob,bl);
+    bl=dart_build_interest(shml_W,blob,sizeof blob); dart_apply_peer_interest(shml_R,1u,dart_bytes(blob,bl));
+    bl=dart_build_interest(shml_R,blob,sizeof blob); dart_apply_peer_interest(shml_W,2u,dart_bytes(blob,bl));
     dart_peer_set_shm(shml_W,2u,1);
     ST_CHECK(dart_writer_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
     shml_ok=1; shml_recv=0; shml_lost=0; shml_drop=0; shml_send(); shml_pump(5);
@@ -1084,7 +1084,7 @@ static void shm_loss_checks(void){
    the inline fallback for a non-SHM-capable subscriber. */
 static int shmn_recv; static size_t shmn_len; static unsigned long shmn_sum;
 static void shmn_on_message(const DartMsg *msg){
-    const unsigned char *p=(const unsigned char*)msg->data; size_t i, len=msg->len; unsigned long s=0;
+    const unsigned char *p=(const unsigned char*)msg->data.data; size_t i, len=msg->data.len; unsigned long s=0;
     for(i=0;i<len;i++) s+=p[i];
     shmn_recv++; shmn_len=len; shmn_sum=s;
 }
@@ -1187,10 +1187,10 @@ static void unit_checks(void){
         ST_CHECK(ts != NULL, "result: transport init");
         if (ts){
             memset(buf, 0, sizeof buf);
-            ST_CHECK(dart_send(ts, 5, buf, 16,  0) == DART_ERR_NO_CHANNEL, "result: out-of-range channel -> NO_CHANNEL");
-            ST_CHECK(dart_send(ts, 1, buf, 16,  0) == DART_ERR_ROLE,       "result: sub-only channel -> ROLE");
-            ST_CHECK(dart_send(ts, 0, buf, 100, 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
-            ST_CHECK(dart_send(ts, 0, buf, 16,  0) == DART_OK,             "result: valid publish -> OK");
+            ST_CHECK(dart_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_CHANNEL, "result: out-of-range channel -> NO_CHANNEL");
+            ST_CHECK(dart_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only channel -> ROLE");
+            ST_CHECK(dart_send(ts, 0, dart_bytes(buf, 100), 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
+            ST_CHECK(dart_send(ts, 0, dart_bytes(buf, 16),  0) == DART_OK,             "result: valid publish -> OK");
         }
     }
 }
@@ -1295,8 +1295,8 @@ static void event_user_checks(void){
 static int dg_recv[24]; static int dg_seq_ok; static int dg_next0;
 static void dg_on_message(const DartMsg *msg){
     if (msg->channel_id < 24) dg_recv[msg->channel_id]++;
-    if (msg->channel_id == 0 && msg->len >= 1){
-        int s = ((const uint8_t*)msg->data)[0];
+    if (msg->channel_id == 0 && msg->data.len >= 1){
+        int s = ((const uint8_t*)msg->data.data)[0];
         if (s != dg_next0) dg_seq_ok = 0;            /* gap, dup or reorder */
         dg_next0 = s + 1;
     }
@@ -1324,18 +1324,18 @@ static void dynamic_grow_checks(void){
     ST_CHECK(pc0 != NULL, "dyn-grow: channel 0 created");
     for (t=0;t<800 && dart_channel_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 matched");
-    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,payload,1); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
     /* create channels 1..11 on both -> several grows (max_channels 2 -> 4 -> 8 -> 16) */
     for (i=1;i<12;i++){ dart_node_create_channel(P, names[i], DART_PUB_ONLY, &co);
                         dart_node_create_channel(S, names[i], DART_SUB_ONLY, &co);
                         dart_node_poll(P,1); dart_node_poll(S,1); }
     ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 still matched after grows");
-    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,payload,1); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
     for (t=0;t<400 && dg_recv[0]<10;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
     ST_CHECK(dg_recv[0]==10, "dyn-grow: all 10 on channel 0 delivered across grows (got %d)", dg_recv[0]);
     ST_CHECK(dg_seq_ok, "dyn-grow: channel 0 in-order, no loss/dup across grows");
     pcN = dart_node_channel(P, 11);                  /* a channel created AFTER a grow */
-    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_channel_send(pcN,payload,1); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_channel_send(pcN,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
     for (t=0;t<200 && dg_recv[11]<3;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
     ST_CHECK(dg_recv[11]==3, "dyn-grow: post-grow channel delivers (got %d)", dg_recv[11]);
     dart_node_close(P,1); dart_node_close(S,1);
@@ -1359,7 +1359,7 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
     dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
     qos_incompat_n=0;
-    bl=dart_build_interest(W,blob,sizeof blob); dart_apply_peer_interest(R,1u,blob,bl);
+    bl=dart_build_interest(W,blob,sizeof blob); dart_apply_peer_interest(R,1u,dart_bytes(blob,bl));
     dart_peer_match_counts(R,1u,&pub,&recv);
     if (recv_out) *recv_out=recv;
     if (evt_out)  *evt_out=qos_incompat_n;
@@ -1393,9 +1393,9 @@ static int beff_would_evict(int rrel){
     nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
     nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
     dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,blob,bl);  /* W learns R subscribes */
+    bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,dart_bytes(blob,bl));  /* W learns R subscribes */
     memset(payload,0x5A,sizeof payload);
-    for (i=0;i<5;i++) dart_send(W,0,payload,sizeof payload,1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
+    for (i=0;i<5;i++) dart_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
     evict = dart_send_would_evict(W,0);
     dart_destroy(W); dart_destroy(R); free(mw); free(mr);
     return evict;
@@ -1551,7 +1551,7 @@ static int selftest_main(void){
         dart_peer_remove(r->transport, wid);
         dart_peer_add(r->transport, wid,DART_FRAG_PAYLOAD);
         il = dart_build_interest(w->transport, ib, sizeof ib);
-        dart_apply_peer_interest(r->transport, wid, ib, il);
+        dart_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
                  "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",
@@ -1896,7 +1896,7 @@ static char g_ctl_workers[16][24];
 static int  g_ctl_nworkers = 0;
 
 static void ctl_on_message(const DartMsg *msg){
-    uint16_t ch = msg->channel_id; const void *d = msg->data; size_t len = msg->len;
+    uint16_t ch = msg->channel_id; const void *d = msg->data.data; size_t len = msg->data.len;
     if (ch==CTL_CMD && len < sizeof g_ctl_cmd){
         memcpy(g_ctl_cmd, d, len); g_ctl_cmd[len]=0; g_ctl_cmd_new=1;
     } else if (ch==CTL_RES){
@@ -2361,14 +2361,14 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     a0=ms_allocs(P,S,nsubs);                              /* total allocs before any traffic */
     g_ms_rx=0;                                            /* warmup: fill + size the buffers */
     for (i=0;i<nwarm;i++){
-        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,payload,plen); double s1=(double)dart_plat_now_us();
+        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)dart_plat_now_us();
         if (i<keep){ cold_sum += s1-s0; coldc++; }
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
     a1=ms_allocs(P,S,nsubs);                              /* allocs after warmup */
     g_ms_rx=0; t0=(double)dart_plat_now_us();             /* steady: buffers sized -> must not alloc */
     for (i=0;i<nsteady;i++){
-        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,payload,plen); double s1=(double)dart_plat_now_us();
+        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)dart_plat_now_us();
         warm_sum += s1-s0;
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }

@@ -73,15 +73,13 @@ typedef struct {
     void          *user;             /* DartNodeOpts.user_data */
     uint16_t       channel_id;       /* local channel index */
     uint32_t       sender_id;        /* peer id the message came from */
-    const char    *sender_name;      /* sender's node name, NUL-terminated and never NULL
-                                        ("unknown-peer" if somehow unavailable), so no null check
-                                        is needed. A pointer into discovery state, never on the
-                                        per-message wire; valid for the callback's duration. */
-    uint8_t        sender_name_len;  /* its length */
-    const char    *channel_name;     /* topic name (NUL-terminated), or NULL */
-    uint8_t        channel_name_len; /* its length */
-    const void    *data;
-    size_t         len;
+    DartString     sender_name;      /* sender's node name (not NUL-terminated; use .data/.len).
+                                        .data is never NULL for a delivered message ("unknown-peer"
+                                        if somehow unavailable), so no null check is needed. A view
+                                        into discovery state, never on the per-message wire; valid
+                                        for the callback's duration. */
+    DartString     channel_name;     /* topic name (not NUL-terminated; use .data/.len), or {NULL,0} */
+    DartBytes      data;             /* the message payload (data.data, data.len) */
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
@@ -104,7 +102,7 @@ void         dart_node_close(DartNode *n, int send_bye);
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
                                       const DartChannelOpts *opts);
 /* Publish to all matched subscribers. Returns DART_OK or a negative DartResult. */
-int          dart_channel_send(DartChannel *ch, const void *data, size_t len);
+int          dart_channel_send(DartChannel *ch, DartBytes data);
 /* Flip a channel's role at runtime (re-advertises interest). Returns 0 ok, <0 on error. */
 int          dart_channel_set_role(DartChannel *ch, DartRole role);
 /* This channel's local index (== DartMsg.channel_id for its messages). */

@@ -156,6 +156,7 @@ static DartTransportState *dart_build(i_DartBump *b, const DartConfig *cfg){
                 ch->role=def->role; ch->dynamic=(uint8_t)dyn;
                 ch->identity = dart_channel_identity(def);
                 if (lane){ memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane]='\0'; }
+                ch->name_len = (uint8_t)lane;
                 ch->history=history; ch->history_owned=0; ch->history_head=0; ch->next_seqno=0; ch->have_first=0;
                 memset(history,0,depth*sizeof(i_DartWriterSample));
             }
@@ -240,8 +241,8 @@ DartTransportState *dart_migrate(DartTransportState *old, void *new_mem, size_t 
        heap history ring pointer) and re-copy the name string into the new pool */
     for (c=0;c<onc;c++){
         char *nm = (char*)nw->channels[c].name;
-        size_t l = dart__namelen(old->channels[c].name);
-        nw->channels[c] = old->channels[c];
+        size_t l = old->channels[c].name_len;
+        nw->channels[c] = old->channels[c];   /* struct copy carries name_len */
         nw->channels[c].name = nm;
         if (l) memcpy(nm, old->channels[c].name, l);
         nm[l] = '\0';
@@ -508,7 +509,7 @@ void dart_destroy(DartTransportState *st){
 /* one interest entry: [u16 alias][u8 flags][u8 namelen][name]. The name rides along so
  * a hash collision is detected (not cross-wired); the identity is recomputed from it. */
 static uint8_t *dart__meta_put(uint8_t *p, uint16_t alias, const i_DartChannel *ch){
-    size_t lane = dart__namelen(ch->name);
+    size_t lane = ch->name_len;
     dart_le_w16(p, alias); p += 2;
     *p++ = (uint8_t)(ch->qos.reliability==DART_RELIABLE ? DART_META_F_RELIABLE : 0u);
     *p++ = (uint8_t)lane;
@@ -517,7 +518,7 @@ static uint8_t *dart__meta_put(uint8_t *p, uint16_t alias, const i_DartChannel *
 }
 
 static int dart__meta_name_eq(const i_DartChannel *ch, const uint8_t *name, size_t nlen){
-    size_t ours = dart__namelen(ch->name);
+    size_t ours = ch->name_len;
     if (nlen != ours) return 0;
     return nlen==0 ? 1 : (memcmp(ch->name, name, nlen)==0);
 }
@@ -579,14 +580,14 @@ size_t dart_build_interest(DartTransportState *st, void *out, size_t cap){
     for (c=0;c<st->cfg.n_channels;c++){
         uint8_t d=st->channels[c].role;
         if (d==DART_PUBSUB || d==DART_PUB_ONLY){
-            if (p + 4u + dart__namelen(st->channels[c].name) > end) return 0;
+            if (p + 4u + st->channels[c].name_len > end) return 0;
             p=dart__meta_put(p,c,&st->channels[c]); n_pub++;
         }
     }
     for (c=0;c<st->cfg.n_channels;c++){
         uint8_t d=st->channels[c].role;
         if (d==DART_PUBSUB || d==DART_SUB_ONLY){
-            if (p + 4u + dart__namelen(st->channels[c].name) > end) return 0;
+            if (p + 4u + st->channels[c].name_len > end) return 0;
             p=dart__meta_put(p,c,&st->channels[c]); n_sub++;
         }
     }
@@ -597,11 +598,11 @@ size_t dart_build_interest(DartTransportState *st, void *out, size_t cap){
 
 /* A peer's interest list arrived (from its discovery announce): refresh its bits
  * and rematch every channel. Idempotent; re-applying re-derives all matches. */
-void dart_apply_peer_interest(DartTransportState *st, uint32_t peer_id, const void *blob, size_t len){
-    const uint8_t *d=(const uint8_t*)blob, *p, *end=d+len;
+void dart_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
+    const uint8_t *d=blob.data, *p, *end=d+blob.len;
     uint16_t n_pub, n_sub, c; int peer_slot=dart_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap;
-    if (peer_slot<0 || len<4) return;
+    if (peer_slot<0 || blob.len<4) return;
     peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     n_pub=dart_le_r16(d); n_sub=dart_le_r16(d+2);
@@ -658,8 +659,9 @@ void dart_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
-static int dart__meta_ok(const uint8_t *meta, uint16_t meta_len){
-    return meta && meta_len >= 5 && meta[0]=='D' && meta[1]=='N' && meta[2]>=6 && meta[2]<=7;
+static int dart__meta_ok(DartBytes meta){
+    return meta.data && meta.len >= 5 && meta.data[0]=='D' && meta.data[1]=='N'
+        && meta.data[2]>=6 && meta.data[2]<=7;
 }
 /* base prefix through host[16], by version (odd v7 carries shm+host, even v6 doesn't). */
 static uint16_t dart__meta_base(const uint8_t *meta){
@@ -686,54 +688,49 @@ uint16_t dart_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
     return (uint16_t)(off + interest_len);
 }
 
-uint16_t dart_meta_frag(const uint8_t *meta, uint16_t meta_len){
-    if (!dart__meta_ok(meta, meta_len)) return 0;
-    return (uint16_t)(meta[3] | ((uint16_t)meta[4] << 8));
+uint16_t dart_meta_frag(DartBytes meta){
+    if (!dart__meta_ok(meta)) return 0;
+    return (uint16_t)(meta.data[3] | ((uint16_t)meta.data[4] << 8));
 }
 
-const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len){
+DartBytes dart_meta_interest(DartBytes meta){
     uint16_t off;
-    *out_len = 0;
-    if (!dart__meta_ok(meta, meta_len)) return NULL;
-    off = dart__meta_base(meta);          /* interest follows the base prefix (no name in the overlay) */
-    if (meta_len < off) return NULL;
-    *out_len = (size_t)(meta_len - off);
-    return meta + off;
+    if (!dart__meta_ok(meta)) return dart_bytes(NULL, 0);
+    off = dart__meta_base(meta.data);     /* interest follows the base prefix (no name in the overlay) */
+    if (meta.len < off) return dart_bytes(NULL, 0);
+    return dart_bytes(meta.data + off, meta.len - off);
 }
 
-int dart_meta_interest_next(const uint8_t *meta, uint16_t meta_len,
-                            DartInterestIter *it, DartTopic *out){
+int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out){
     uint32_t off; uint8_t nlen;
     if (!it || !out) return 0;
     if (!it->started){                    /* first call: parse the [npub][nsub] header */
-        size_t il = 0;
-        const uint8_t *in = dart_meta_interest(meta, meta_len, &il);
+        DartBytes in = dart_meta_interest(meta);
         it->started = 1; it->pub_left = it->sub_left = 0; it->off = 0;
-        if (!in || il < 4) return 0;      /* no/short interest list: nothing to yield */
-        it->pub_left = (uint16_t)(in[0] | ((uint16_t)in[1] << 8));
-        it->sub_left = (uint16_t)(in[2] | ((uint16_t)in[3] << 8));
-        it->off = (uint32_t)(in - meta) + 4u;   /* first entry, past npub/nsub */
+        if (!in.data || in.len < 4) return 0;      /* no/short interest list: nothing to yield */
+        it->pub_left = (uint16_t)(in.data[0] | ((uint16_t)in.data[1] << 8));
+        it->sub_left = (uint16_t)(in.data[2] | ((uint16_t)in.data[3] << 8));
+        it->off = (uint32_t)(in.data - meta.data) + 4u;   /* first entry, past npub/nsub */
     }
     if (it->pub_left == 0 && it->sub_left == 0) return 0;
     off = it->off;
-    if (off + 4u > meta_len){ it->pub_left = it->sub_left = 0; return 0; }   /* truncated: stop */
-    nlen = meta[off + 3];
-    if (off + 4u + nlen > meta_len){ it->pub_left = it->sub_left = 0; return 0; }
-    out->alias    = (uint16_t)(meta[off] | ((uint16_t)meta[off + 1] << 8));
-    out->reliable = (uint8_t)(meta[off + 2] & DART_META_F_RELIABLE);
+    if (off + 4u > meta.len){ it->pub_left = it->sub_left = 0; return 0; }   /* truncated: stop */
+    nlen = meta.data[off + 3];
+    if (off + 4u + nlen > meta.len){ it->pub_left = it->sub_left = 0; return 0; }
+    out->alias    = (uint16_t)(meta.data[off] | ((uint16_t)meta.data[off + 1] << 8));
+    out->reliable = (uint8_t)(meta.data[off + 2] & DART_META_F_RELIABLE);
     out->is_pub   = (uint8_t)(it->pub_left > 0);   /* pub list first, then sub */
-    out->name     = (const char *)(meta + off + 4u);
-    out->name_len = nlen;
+    out->name     = dart_string((const char *)(meta.data + off + 4u), nlen);
     it->off = off + 4u + nlen;
     if (it->pub_left > 0) it->pub_left--; else it->sub_left--;
     return 1;
 }
 
 #ifdef DART_SHM
-int dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]){
-    if (!dart__meta_ok(meta, meta_len) || meta[2]!=7
-        || meta_len < DART__META_BASE_SHM || !meta[5]) return 0;
-    memcpy(host, meta+6, 16);
+int dart_meta_shm(DartBytes meta, uint8_t host[16]){
+    if (!dart__meta_ok(meta) || meta.data[2]!=7
+        || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
+    memcpy(host, meta.data+6, 16);
     return 1;
 }
 #endif
@@ -773,6 +770,7 @@ int dart_channel_define(DartTransportState *st, uint16_t channel, const DartChan
     ch->role = def->role;
     ch->identity = dart_channel_identity(def);
     memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane] = '\0';
+    ch->name_len = (uint8_t)lane;
     ch->history_head = 0; ch->next_seqno = 0; ch->have_first = 0;
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active channel to known peers */
         if (st->peer_used[p]) dart__rematch(st, channel, p);
@@ -780,11 +778,10 @@ int dart_channel_define(DartTransportState *st, uint16_t channel, const DartChan
 }
 
 
-const char *dart_channel_name(DartTransportState *st, uint16_t channel, uint8_t *len){
+DartString dart_channel_name(DartTransportState *st, uint16_t channel){
     i_DartChannel *ch = dart_chan(st, channel, NULL);
-    if (!ch || !ch->name || !ch->name[0]){ if (len) *len = 0; return NULL; }
-    if (len) *len = (uint8_t)dart__namelen(ch->name);
-    return ch->name;
+    if (!ch || ch->name_len == 0) return dart_string(NULL, 0);   /* undefined / reserve slot */
+    return dart_string(ch->name, ch->name_len);
 }
 
 
@@ -802,8 +799,8 @@ void dart_repair_stats(DartTransportState *st, uint16_t channel, DartRepairStats
 }
 
 
-void dart_on_datagram(DartTransportState *st, uint32_t from, const void *datagram, size_t len, uint64_t now){
-    const uint8_t *p=(const uint8_t*)datagram; size_t rem=len;
+void dart_on_datagram(DartTransportState *st, uint32_t from, DartBytes datagram, uint64_t now){
+    const uint8_t *p=datagram.data; size_t rem=datagram.len;
     int peer_slot=dart_peer_slot(st,from);
     if (peer_slot<0) return;
     /* concatenated submessages; each length comes from its header, so no framing */

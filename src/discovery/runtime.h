@@ -33,8 +33,7 @@ typedef struct {
     void                 *user;                 /* passed to on_event */
     const DartDiscoveryAddr *seed_peers;        /* unicast seeds for multicast-filtered nets */
     uint16_t              n_seed_peers;
-    const uint8_t        *meta;                 /* optional OPAQUE overlay to advertise; NULL = none */
-    uint16_t              meta_len;
+    DartBytes             meta;                 /* optional OPAQUE overlay to advertise; {NULL,0} = none */
     uint16_t              meta_capacity;        /* per-peer INCOMING overlay buffer; 0 = default */
     uint16_t              peer_user_bytes;      /* opaque scratch reserved per peer; 0 = none
                                                    (see dart_discovery_peer_user) */
@@ -101,10 +100,10 @@ DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_
 /* Hand the core a discovery datagram that arrived on another socket (unicast announces
  * target the peer's data port, so the data-socket owner forwards them). */
 void       dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
-                          const void *datagram, size_t len);
+                          DartBytes datagram);
 /* Replace the opaque overlay carried in announces and bump its version, so peers
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
-void       dart_discovery_advertise(DartDiscovery *d, const uint8_t *meta, uint16_t meta_len);
+void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
 /* Re-apply every known peer's interest against our current local state (see
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
  * added local channel matches interest peers advertised before it existed. */

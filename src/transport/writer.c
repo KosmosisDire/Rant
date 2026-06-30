@@ -39,8 +39,8 @@ static void dart__commit(DartTransportState *st, uint16_t channel_idx, size_t le
 }
 
 
-int dart_send(DartTransportState *st, uint16_t channel, const void *data, size_t len, uint64_t now){
-    int channel_idx; i_DartChannel *ch;
+int dart_send(DartTransportState *st, uint16_t channel, DartBytes data, uint64_t now){
+    int channel_idx; i_DartChannel *ch; size_t len = data.len;
     (void)now;
     ch = dart_chan(st, channel, &channel_idx);                /* rejects the internal meta channel */
     if (!ch) return DART_ERR_NO_CHANNEL;
@@ -55,7 +55,7 @@ int dart_send(DartTransportState *st, uint16_t channel, const void *data, size_t
         }
     } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
     if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
-    if (len) memcpy(ch->history[ch->history_head].buf, data, len);
+    if (len) memcpy(ch->history[ch->history_head].buf, data.data, len);
 #ifdef DART_SHM
     ch->history[ch->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
 #endif
@@ -68,9 +68,9 @@ int dart_send(DartTransportState *st, uint16_t channel, const void *data, size_t
 /* publish a sample whose bytes live in an external (shared-memory) chunk: store the
  * chunk pointer + descriptor on the history slot without copying. Remote peers
  * fragment from the chunk; SHM peers get the one-submessage descriptor. */
-int dart_send_shm(DartTransportState *st, uint16_t channel, const void *chunk, size_t len,
+int dart_send_shm(DartTransportState *st, uint16_t channel, DartBytes chunk,
                   const uint8_t *desc, uint64_t now){
-    int channel_idx; i_DartChannel *ch; i_DartWriterSample *slot;
+    int channel_idx; i_DartChannel *ch; i_DartWriterSample *slot; size_t len = chunk.len;
     (void)now;
     ch = dart_chan(st, channel, &channel_idx);
     if (!ch) return DART_ERR_NO_CHANNEL;
@@ -78,7 +78,7 @@ int dart_send_shm(DartTransportState *st, uint16_t channel, const void *chunk, s
     if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
     slot = &ch->history[ch->history_head];
     slot->shm = 1;
-    slot->shm_buf = (const uint8_t*)chunk;
+    slot->shm_buf = chunk.data;
     memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
     dart__commit(st, (uint16_t)channel_idx, len);
     return DART_OK;

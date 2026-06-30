@@ -168,23 +168,22 @@ uint16_t dart_node_core_build_meta(i_DartNodeCore *c){
     return c->meta_len;
 }
 
-const uint8_t *dart_node_core_meta(i_DartNodeCore *c, uint16_t *len){
-    if (len) *len = c->meta_len;
-    return c->meta_buf;
+DartBytes dart_node_core_meta(i_DartNodeCore *c){
+    return dart_bytes(c->meta_buf, c->meta_len);
 }
 
 #ifdef DART_SHM
 /* a peer can receive our out-of-band (SHM) payload iff we are OOB-capable, it
  * advertised an OOB host in its meta blob, and that host equals ours (same kernel).
  * Set the transport's per-peer flag. The core knows nothing of SHM beyond this. */
-static void dart__core_set_peer_oob(i_DartNodeCore *c, uint32_t id, const uint8_t *meta, uint16_t meta_len){
+static void dart__core_set_peer_oob(i_DartNodeCore *c, uint32_t id, DartBytes meta){
     uint8_t host[16];
-    int oob = c->oob_capable && dart_meta_shm(meta, meta_len, host) &&
+    int oob = c->oob_capable && dart_meta_shm(meta, host) &&
               memcmp(host, c->oob_host, 16) == 0;
     dart_peer_set_shm(c->transport, id, oob);
 }
 #else
-#define dart__core_set_peer_oob(c, id, meta, meta_len) ((void)0)
+#define dart__core_set_peer_oob(c, id, meta) ((void)0)
 #endif
 
 static void dart__core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
@@ -217,22 +216,22 @@ static i_DartNodePeerExtra *dart__core_extra(i_DartNodeCore *c, uint32_t id){
 }
 
 static void dart__core_peer_up(i_DartNodeCore *c, uint32_t id, const DartDiscoveryAddr *addr,
-                            const uint8_t *meta, uint16_t meta_len){
+                            DartBytes meta){
     i_DartNodePeerExtra *ex = dart__core_extra(c, id);
-    uint16_t frag = dart_meta_frag(meta, meta_len);
-    size_t interest_len = 0; const uint8_t *interest = dart_meta_interest(meta, meta_len, &interest_len);
+    uint16_t frag = dart_meta_frag(meta);
+    DartBytes interest = dart_meta_interest(meta);
     if (!ex) return;                                  /* discovery not bound / no scratch */
     if (!ex->added){                                  /* brand-new peer: wire it into the transport */
         dart_peer_add(c->transport, id, frag);          /* blob carries frag + pub/sub interest */
         ex->added = 1; ex->dormant = 0;
-        dart__core_set_peer_oob(c, id, meta, meta_len);
+        dart__core_set_peer_oob(c, id, meta);
         dart__core_fire(c, DART_PEER_UP, id, addr, "peer discovered");
-        if (interest){ dart_apply_peer_interest(c->transport, id, interest, interest_len);
+        if (interest.data){ dart_apply_peer_interest(c->transport, id, interest);
                        dart__core_fire_interest(c, id); }
     } else {                                          /* known peer: addr/interest update */
         dart_peer_set_frag(c->transport, id, frag);
-        dart__core_set_peer_oob(c, id, meta, meta_len);
-        if (interest){ dart_apply_peer_interest(c->transport, id, interest, interest_len);
+        dart__core_set_peer_oob(c, id, meta);
+        if (interest.data){ dart_apply_peer_interest(c->transport, id, interest);
                        dart__core_fire_interest(c, id); }
         if (ex->dormant){    /* a DROPPED peer's same incarnation returned: resume */
             ex->dormant = 0;
@@ -269,7 +268,7 @@ void dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
     i_DartNodeCore *c = (i_DartNodeCore*)ev->user;
     switch (ev->kind){
         case DART_DISCOVERY_PEER_UP:
-            dart__core_peer_up(c, ev->peer, &ev->addr, ev->meta, ev->meta_len);  /* name lives in discovery */
+            dart__core_peer_up(c, ev->peer, &ev->addr, ev->meta);  /* name lives in discovery */
             break;
         case DART_DISCOVERY_PEER_DOWN:
             dart__core_peer_down(c, ev->peer, ev->reason);
@@ -295,12 +294,10 @@ int dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t 
     return dart_discovery_id_for_addr(c->discovery, ip, 4, port, id);
 }
 
-const char *dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id, uint8_t *out_len){
-    uint8_t nl = 0;
-    const char *name = dart_discovery_peer_name(c->discovery, id, &nl);
-    if (!name){ if (out_len) *out_len = 0; return NULL; }   /* not a known peer */
-    if (nl == 0){ name = "unknown-peer"; nl = 12; }         /* never empty for a known peer */
-    if (out_len) *out_len = nl;
+DartString dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id){
+    DartString name = dart_discovery_peer_name(c->discovery, id);
+    if (!name.data) return name;                          /* not a known peer: {NULL,0} */
+    if (name.len == 0) name = dart_cstr("unknown-peer");  /* known but unnamed */
     return name;
 }
 
@@ -318,11 +315,11 @@ int dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
 }
 
 uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer){
-    return (peer && peer->meta) ? dart_meta_frag(peer->meta, peer->meta_len) : 0;
+    return (peer && peer->meta.data) ? dart_meta_frag(peer->meta) : 0;
 }
 
 int dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
                                  DartInterestIter *it, DartTopic *out){
-    if (!peer || !peer->meta) return 0;
-    return dart_meta_interest_next(peer->meta, peer->meta_len, it, out);
+    if (!peer || !peer->meta.data) return 0;
+    return dart_meta_interest_next(peer->meta, it, out);
 }

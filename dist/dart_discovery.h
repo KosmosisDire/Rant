@@ -15,6 +15,55 @@
   #endif
 #endif
 
+#pragma region common/string.h
+/* DartBytes and DartString: the two basic (pointer + length) views DART passes
+ * bytes and strings around with. Neither owns or copies; both are valid only
+ * while the memory they reference lives, and neither implies a NUL terminator.
+ * Shared by discovery, transport, node, and the serializer, so it sits in common/
+ * and the amalgamator emits it once near the top of every distributable. */
+#ifndef DART_STRING_H
+#define DART_STRING_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+/* A run of bytes: message payloads, wire blobs (meta / interest), datagrams. */
+typedef struct {
+    const uint8_t *data;
+    size_t         len;
+} DartBytes;
+
+/* A run of string bytes that is NOT NUL-terminated: use for any string carried
+ * on the wire (a topic name, the peer name inside an announce). Where a string
+ * IS 0-delimited (a config input, a human label) keep a plain const char*. */
+typedef struct {
+    const char *data;
+    size_t      len;
+} DartString;
+
+/* Constructors and a couple of helpers. static inline: no link symbol and no
+ * unused-function warning; an FFI caller just fills the struct directly. */
+static inline DartBytes dart_bytes(const void *data, size_t len){
+    DartBytes b; b.data = (const uint8_t *)data; b.len = len; return b;
+}
+static inline DartString dart_string(const char *data, size_t len){
+    DartString s; s.data = data; s.len = len; return s;
+}
+/* From a NUL-terminated C string (NULL => empty). */
+static inline DartString dart_cstr(const char *s){
+    DartString r; size_t n = 0;
+    if (s) while (s[n]) n++;
+    r.data = s; r.len = n; return r;
+}
+static inline int dart_string_eq(DartString a, DartString b){
+    size_t i;
+    if (a.len != b.len) return 0;
+    for (i = 0; i < a.len; i++) if (a.data[i] != b.data[i]) return 0;
+    return 1;
+}
+
+#endif /* DART_STRING_H */
+#pragma endregion
 #pragma region discovery/core.h
 /* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
  * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
@@ -80,10 +129,8 @@ typedef struct {
     uint32_t                 peer;     /* local peer id (UP / DOWN) */
     DartDiscoveryAddr        addr;     /* UP / REFUSED: advertised locator */
     DartDiscoveryDownReason  reason;   /* DOWN: DROP vs GONE */
-    const char              *name;     /* UP: advertised peer name (NUL-terminated; "" if none) */
-    uint8_t                  name_len;
-    const uint8_t           *meta;     /* UP: opaque overlay blob (NULL if none) */
-    uint16_t                 meta_len;
+    DartString               name;     /* UP: advertised peer name (not NUL-terminated; {NULL,0} if none) */
+    DartBytes                meta;     /* UP: opaque overlay blob ({NULL,0} if none) */
 } DartDiscoveryEvent;
 typedef void (*DartDiscoveryEventFn)(const DartDiscoveryEvent *ev);
 
@@ -106,10 +153,8 @@ typedef struct {
     DartDiscoveryAddr addr;          /* advertised unicast locator */
     DartPeerLiveness  liveness;      /* ACTIVE, or DROPPED (silent, may return) */
     uint64_t          last_heard_us; /* timestamp of its last announce (caller derives age) */
-    const char       *name;          /* advertised name (NUL-terminated; "" if none) */
-    uint8_t           name_len;
-    const uint8_t    *meta;          /* opaque overlay blob (NULL if none) */
-    uint16_t          meta_len;
+    DartString        name;          /* advertised name (not NUL-terminated; {NULL,0} if none) */
+    DartBytes         meta;          /* opaque overlay blob ({NULL,0} if none) */
     uint32_t          meta_version;  /* version of the overlay we hold */
     void             *user;          /* this peer's user scratch (cfg.peer_user_bytes), or NULL */
 } DartDiscoveryPeer;
@@ -123,14 +168,12 @@ typedef struct {
     uint32_t announce_interval_us;   /* re-announce interval */
     uint32_t peer_timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const char *name;       /* advertised peer name (goes in the blob's discovery section);
-                               NULL = none. Copied at init, so it need not outlive the call. */
-    uint8_t  name_len;
-    const uint8_t *meta;    /* opaque OVERLAY blob (the higher layer's data, e.g. transport
+    DartString name;        /* advertised peer name (goes in the blob's discovery section);
+                               {NULL,0} = none. Copied at init, so it need not outlive the call. */
+    DartBytes meta;         /* opaque OVERLAY blob (the higher layer's data, e.g. transport
                                frag/interest); discovery carries it after its own section. The
                                INITIAL value (dart_discovery_set_meta updates it). Must stay
-                               valid. <= meta_capacity */
-    uint16_t meta_len;
+                               valid. .len <= meta_capacity */
     uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* opaque scratch reserved per peer (0 = none); see dart_discovery_peer_user.
                                     Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
@@ -160,7 +203,7 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
         size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
         const uint8_t *self_meta, void *peer_cb_user);
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
-                               const void *datagram, size_t len, uint64_t now_us);
+                               DartBytes datagram, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
@@ -174,7 +217,7 @@ void         dart_discovery_replay_peers(DartDiscoveryState *st);
 /* Replace the opaque meta blob and bump its version, so peers re-fetch it. The
  * blob rides the next few announces, then announces carry the version only; a peer
  * that fell behind re-fetches via a targeted solicit. meta must stay valid. */
-void         dart_discovery_set_meta(DartDiscoveryState *st, const uint8_t *meta, uint16_t meta_len);
+void         dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta);
 /* Set the unicast locator port advertised in announces (the header data_port). The IO
  * runtime calls this when it binds its own same-host unicast RX socket, so peers reply
  * to a port unique to THIS process instead of the shared discovery port (which the OS
@@ -208,17 +251,16 @@ int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
  * consumer (e.g. the node core) uses these instead of duplicating it.
  *   peer_user  -> pointer to the peer's opaque scratch (cfg.peer_user_bytes), or NULL.
  *   addr_of_id -> 1 + fills *out with the advertised locator, else 0.
- *   peer_name  -> NUL-terminated advertised name (into discovery state) + *out_len, or NULL.
+ *   peer_name  -> advertised name as a DartString (into discovery state; {NULL,0} if unknown).
  *   id_for_addr-> reverse map an (ip, port) back to a peer id: 1 + *id on a hit, else 0. */
 void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
 int          dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id,
                              DartDiscoveryAddr *out);
-const char  *dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id, uint8_t *out_len);
+DartString   dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id);
 int          dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint8_t *ip,
                              uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
-void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
-                             uint64_t boot_seed);
+void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t boot_seed);
 
 #ifdef __cplusplus
 }
@@ -444,8 +486,7 @@ typedef struct {
     void                 *user;                 /* passed to on_event */
     const DartDiscoveryAddr *seed_peers;        /* unicast seeds for multicast-filtered nets */
     uint16_t              n_seed_peers;
-    const uint8_t        *meta;                 /* optional OPAQUE overlay to advertise; NULL = none */
-    uint16_t              meta_len;
+    DartBytes             meta;                 /* optional OPAQUE overlay to advertise; {NULL,0} = none */
     uint16_t              meta_capacity;        /* per-peer INCOMING overlay buffer; 0 = default */
     uint16_t              peer_user_bytes;      /* opaque scratch reserved per peer; 0 = none
                                                    (see dart_discovery_peer_user) */
@@ -512,10 +553,10 @@ DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_
 /* Hand the core a discovery datagram that arrived on another socket (unicast announces
  * target the peer's data port, so the data-socket owner forwards them). */
 void       dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
-                          const void *datagram, size_t len);
+                          DartBytes datagram);
 /* Replace the opaque overlay carried in announces and bump its version, so peers
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
-void       dart_discovery_advertise(DartDiscovery *d, const uint8_t *meta, uint16_t meta_len);
+void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
 /* Re-apply every known peer's interest against our current local state (see
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
  * added local channel matches interest peers advertised before it existed. */
@@ -639,8 +680,8 @@ struct DartDiscoveryState {
     uint16_t      user_stride;         /* per-peer user-scratch bytes, 8-aligned (0 = none) */
     uint8_t      *user_pool;      /* [cap_peers * user_stride] opaque consumer scratch */
     /* our outgoing blob + monotonic version */
-    const uint8_t *self_meta;       /* our OVERLAY (the node's frag/interest); discovery carries it */
-    uint16_t      self_meta_len;
+    DartBytes     self_meta;        /* our OVERLAY (the node's frag/interest); discovery carries it.
+                                       A read-only view of the node's buffer, not owned here. */
     uint32_t      self_meta_version;
     char          self_name[DART_DISCOVERY_NAME_MAX + 1];  /* our advertised name (copied from cfg) */
     uint8_t       self_name_len;
@@ -658,8 +699,8 @@ static void dart__disc_fire_up(DartDiscoveryState *st, const i_DartDiscoveryPeer
     memset(&ev, 0, sizeof ev);
     ev.kind = DART_DISCOVERY_PEER_UP; ev.user = st->cfg.user; ev.peer = peer->local_id;
     if (addr) ev.addr = *addr;
-    ev.name = peer->name; ev.name_len = peer->name_len;
-    ev.meta = peer->meta_len ? peer->meta : NULL; ev.meta_len = peer->meta_len;
+    ev.name = dart_string(peer->name_len ? peer->name : NULL, peer->name_len);
+    ev.meta = dart_bytes(peer->meta_len ? peer->meta : NULL, peer->meta_len);
     st->cfg.on_event(&ev);
 }
 static void dart__disc_fire_down(DartDiscoveryState *st, uint32_t id, DartDiscoveryDownReason reason){
@@ -684,9 +725,9 @@ static uint32_t dart_discovery_fnv(const uint8_t *d, size_t n){
     return h;
 }
 
-void dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t n, uint64_t seed){
+void dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t seed){
     uint64_t x = 1469598103934665603ull; size_t i; int k;
-    for (i=0;i<n;i++){ x = (x ^ stable[i]) * 1099511628211ull; }
+    for (i=0;i<stable.len;i++){ x = (x ^ stable.data[i]) * 1099511628211ull; }
     x ^= seed;
     for (k=0;k<2;k++){
         uint64_t z = (x += 0x9E3779B97F4A7C15ull);
@@ -748,8 +789,8 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     if (!mem || !cfg || cfg->max_peers == 0) return NULL;
     if (cfg->announce_interval_us == 0 || cfg->peer_timeout_us == 0) return NULL;
     meta_capacity = dart_discovery_meta_capacity(cfg);
-    if (cfg->meta_len > meta_capacity) return NULL;
-    if (cfg->meta_len && !cfg->meta) return NULL;
+    if (cfg->meta.len > meta_capacity) return NULL;
+    if (cfg->meta.len && !cfg->meta.data) return NULL;
     if (cap < dart_discovery_required_memory(cfg)) return NULL;
 
     memset(&b, 0, sizeof b);
@@ -775,11 +816,10 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     st->self_meta         = cfg->meta;
-    st->self_meta_len     = cfg->meta_len;
     st->self_meta_version = 1;
     st->self_blob_resend  = DART_DISCOVERY_BLOB_RESEND;
-    {   uint8_t nl = cfg->name_len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : cfg->name_len;
-        if (cfg->name && nl) memcpy(st->self_name, cfg->name, nl);
+    {   uint8_t nl = cfg->name.len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : (uint8_t)cfg->name.len;
+        if (cfg->name.data && nl) memcpy(st->self_name, cfg->name.data, nl);
         st->self_name[nl] = '\0'; st->self_name_len = nl; }
     return st;
 }
@@ -811,7 +851,7 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
     st->peers             = (i_DartDiscoveryPeer*)blk.peers;
     st->meta_pool         = blk.meta_pool;
     st->user_pool         = blk.user_pool;     /* user_stride is unchanged (copied via *st = *old) */
-    st->self_meta         = self_meta;     /* re-point our blob; version NOT bumped */
+    st->self_meta.data    = self_meta;     /* re-point our blob (len preserved via *st=*old); version NOT bumped */
     memset(st->peers, 0, (size_t)new_max_peers * sizeof(i_DartDiscoveryPeer));
     for (i=0;i<new_max_peers;i++){
         st->peers[i].meta = st->meta_pool + (size_t)i * new_meta_capacity;
@@ -891,14 +931,14 @@ static size_t dart_discovery_build(DartDiscoveryState *st, uint8_t flags, int wi
     if (with_blob){
         uint8_t *b = p + DART_DISCOVERY_META_OFF, *bend = p + cap;
         uint8_t ipl = (st->cfg.self_ip_len==4 || st->cfg.self_ip_len==16) ? st->cfg.self_ip_len : 0;
-        size_t need = 2u + 1u + (size_t)ipl + 1u + st->self_name_len + st->self_meta_len;
+        size_t need = 2u + 1u + (size_t)ipl + 1u + st->self_name_len + st->self_meta.len;
         if ((size_t)(bend - b) < need) return 0;
         dart_le_w16(b, st->cfg.data_port); b += 2;            /* discovery section: locator */
         *b++ = ipl;
         if (ipl){ memcpy(b, st->cfg.self_ip, ipl); b += ipl; }
         *b++ = st->self_name_len;                             /* ... + name */
         if (st->self_name_len){ memcpy(b, st->self_name, st->self_name_len); b += st->self_name_len; }
-        if (st->self_meta_len){ memcpy(b, st->self_meta, st->self_meta_len); b += st->self_meta_len; }  /* overlay */
+        if (st->self_meta.len){ memcpy(b, st->self_meta.data, st->self_meta.len); b += st->self_meta.len; }  /* overlay */
         meta_len = (uint16_t)(b - (p + DART_DISCOVERY_META_OFF));
     }
     dart_le_w32(p+DART_DISCOVERY_HDR_LEN, st->self_meta_version);
@@ -914,15 +954,16 @@ static void dart_discovery_addr_of(const i_DartDiscoveryPeer *peer, DartDiscover
 }
 
 void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
-                       const void *datagram, size_t len, uint64_t now){
-    const uint8_t *p = (const uint8_t *)datagram;
+                       DartBytes datagram, uint64_t now){
+    const uint8_t *p = datagram.data; size_t len = datagram.len;
     uint8_t flags; uint16_t meta_len; uint32_t meta_version;
     const uint8_t *uuid, *blob;
     DartDiscoveryAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
     i_DartDiscoveryPeer *peer;
-    /* the blob's discovery section (valid only when have_disc): locator + name, then overlay */
-    int have_disc=0; uint16_t disc_port=0, overlay_len=0; uint8_t disc_ip_len=0, disc_name_len=0;
-    const uint8_t *disc_ip=NULL, *overlay=NULL; const char *disc_name=NULL;
+    /* the blob's discovery section (valid only when have_disc): locator + name, then overlay.
+       disc_name points into the datagram (NOT NUL-terminated): a non-NUL wire string. */
+    int have_disc=0; uint16_t disc_port=0; uint8_t disc_ip_len=0;
+    const uint8_t *disc_ip=NULL; DartBytes overlay = {NULL, 0}; DartString disc_name = {NULL, 0};
 
     if (len < (size_t)DART_DISCOVERY_META_OFF) return;
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
@@ -947,10 +988,10 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         if (disc_ip_len==4 || disc_ip_len==16){ if (b + disc_ip_len > bend) return; disc_ip = b; b += disc_ip_len; }
         else disc_ip_len = 0;
         if (b + 1 > bend) return;                          /* name_len(1) */
-        disc_name_len = *b++;
-        if (disc_name_len){ if (b + disc_name_len > bend) return; disc_name = (const char*)b; b += disc_name_len; }
-        overlay = b; overlay_len = (uint16_t)(bend - b);
-        if (overlay_len > st->meta_capacity) return;       /* overlay must fit the per-peer buffer */
+        {   uint8_t dnl = *b++;
+            if (dnl){ if (b + dnl > bend) return; disc_name = dart_string((const char*)b, dnl); b += dnl; } }
+        overlay = dart_bytes(b, (size_t)(bend - b));
+        if (overlay.len > st->meta_capacity) return;       /* overlay must fit the per-peer buffer */
         have_disc = 1;
     }
 
@@ -1021,10 +1062,10 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
        so re-fetch via a targeted solicit. */
     if (have_disc){
         if (meta_version > peer->meta_version){
-            uint8_t nl = disc_name_len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : disc_name_len;
-            if (overlay_len) memcpy(peer->meta, overlay, overlay_len);
-            peer->meta_len = overlay_len; peer->meta_version = meta_version;
-            if (disc_name && nl) memcpy(peer->name, disc_name, nl);
+            uint8_t nl = disc_name.len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : (uint8_t)disc_name.len;
+            if (overlay.len) memcpy(peer->meta, overlay.data, overlay.len);
+            peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
+            if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
             peer->name[nl] = '\0'; peer->name_len = nl;
             blob_changed = 1;
         }
@@ -1069,10 +1110,9 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
     return 0;
 }
 
-void dart_discovery_set_meta(DartDiscoveryState *st, const uint8_t *meta, uint16_t meta_len){
-    if (!st || meta_len > st->meta_capacity) return;   /* the node sizes meta_capacity to fit */
+void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
+    if (!st || meta.len > st->meta_capacity) return;   /* the node sizes meta_capacity to fit */
     st->self_meta         = meta;
-    st->self_meta_len     = meta_len;
     st->self_meta_version++;
     st->self_blob_resend  = DART_DISCOVERY_BLOB_RESEND;
     st->next_announce_us  = 0;   /* announce the change now, don't wait for the timer */
@@ -1147,10 +1187,8 @@ int dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot, DartDisc
     dart_discovery_addr_of(p, &out->addr);
     out->liveness      = p->dropped ? DART_PEER_DROPPED : DART_PEER_ACTIVE;
     out->last_heard_us = p->last_heard_us;
-    out->name          = p->name;            /* always NUL-terminated (parsed from the blob) */
-    out->name_len      = p->name_len;
-    out->meta          = p->meta_len ? p->meta : NULL;
-    out->meta_len      = p->meta_len;
+    out->name          = dart_string(p->name_len ? p->name : NULL, p->name_len);   /* parsed from the blob */
+    out->meta          = dart_bytes(p->meta_len ? p->meta : NULL, p->meta_len);
     out->meta_version  = p->meta_version;
     out->user          = st->user_stride ? p->user : NULL;
     return 1;
@@ -1178,11 +1216,10 @@ int dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id, DartDis
     return 1;
 }
 
-const char *dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id, uint8_t *out_len){
+DartString dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id){
     i_DartDiscoveryPeer *p = dart_discovery_by_id(st, id);
-    if (!p){ if (out_len) *out_len = 0; return NULL; }
-    if (out_len) *out_len = p->name_len;
-    return p->name;
+    if (!p) return dart_string(NULL, 0);                 /* unknown peer: .data NULL */
+    return dart_string(p->name, p->name_len);            /* known: .data non-NULL, .len may be 0 */
 }
 
 int dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint8_t *ip, uint8_t ip_len,
@@ -1794,13 +1831,13 @@ static void dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_byt
 }
 
 void dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
-                    const void *datagram, size_t len){
+                    DartBytes datagram){
     if (!d) return;
-    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, len, dart_plat_now_us());
+    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, dart_plat_now_us());
 }
 
-void dart_discovery_advertise(DartDiscovery *d, const uint8_t *meta, uint16_t meta_len){
-    if (d) dart_discovery_set_meta(d->core, meta, meta_len);
+void dart_discovery_advertise(DartDiscovery *d, DartBytes meta){
+    if (d) dart_discovery_set_meta(d->core, meta);
 }
 
 void dart_discovery_replay(DartDiscovery *d){
@@ -1865,7 +1902,7 @@ static void dart_discovery_auto_uuid(uint8_t out[16]){
     /* No CSPRNG: derive a best-effort unique id from hostname, pid and clock. */
     hostname_len = dart_plat_hostname(host, sizeof host);
     seed = (dart_plat_pid() << 32) ^ dart_plat_now_us();
-    dart_discovery_make_uuid(out, (const uint8_t*)host, hostname_len, seed);
+    dart_discovery_make_uuid(out, dart_bytes(host, hostname_len), seed);
 }
 
 uint8_t dart_discovery_default_name(char *out, size_t cap, const char *want){
@@ -2032,11 +2069,9 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const char *name, const D
     nc.discovery.meta_capacity = o.meta_capacity;
     nc.discovery.peer_user_bytes = o.peer_user_bytes;
     nc.discovery.meta          = o.meta;
-    nc.discovery.meta_len      = o.meta_len;
     nc.discovery.on_event      = o.on_event;
     nc.discovery.user          = o.user;
-    nc.discovery.name          = namebuf;              /* the core copies it at init */
-    nc.discovery.name_len      = namelen;
+    nc.discovery.name          = dart_string(namebuf, namelen);   /* the core copies it at init */
     nc.group               = o.discovery_group;
     nc.discovery_port      = o.discovery_port;
     nc.ttl                 = o.multicast_ttl;
@@ -2102,7 +2137,7 @@ static int dart__rt_drain(DartDiscovery *d, i_DartSock fd){
         uint8_t src_ip[4];
         int n = dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, NULL);
         if (n < 0){ if (dart_plat_would_block()) break; continue; }  /* empty vs transient error */
-        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, d->rxbuf, (size_t)n, dart_plat_now_us()); got = 1; }
+        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, dart_bytes(d->rxbuf, (size_t)n), dart_plat_now_us()); got = 1; }
     }
     return got;
 }

@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../common/string.h"   /* DartBytes (the opaque meta/overlay blob, datagrams) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,10 +63,8 @@ typedef struct {
     uint32_t                 peer;     /* local peer id (UP / DOWN) */
     DartDiscoveryAddr        addr;     /* UP / REFUSED: advertised locator */
     DartDiscoveryDownReason  reason;   /* DOWN: DROP vs GONE */
-    const char              *name;     /* UP: advertised peer name (NUL-terminated; "" if none) */
-    uint8_t                  name_len;
-    const uint8_t           *meta;     /* UP: opaque overlay blob (NULL if none) */
-    uint16_t                 meta_len;
+    DartString               name;     /* UP: advertised peer name (not NUL-terminated; {NULL,0} if none) */
+    DartBytes                meta;     /* UP: opaque overlay blob ({NULL,0} if none) */
 } DartDiscoveryEvent;
 typedef void (*DartDiscoveryEventFn)(const DartDiscoveryEvent *ev);
 
@@ -88,10 +87,8 @@ typedef struct {
     DartDiscoveryAddr addr;          /* advertised unicast locator */
     DartPeerLiveness  liveness;      /* ACTIVE, or DROPPED (silent, may return) */
     uint64_t          last_heard_us; /* timestamp of its last announce (caller derives age) */
-    const char       *name;          /* advertised name (NUL-terminated; "" if none) */
-    uint8_t           name_len;
-    const uint8_t    *meta;          /* opaque overlay blob (NULL if none) */
-    uint16_t          meta_len;
+    DartString        name;          /* advertised name (not NUL-terminated; {NULL,0} if none) */
+    DartBytes         meta;          /* opaque overlay blob ({NULL,0} if none) */
     uint32_t          meta_version;  /* version of the overlay we hold */
     void             *user;          /* this peer's user scratch (cfg.peer_user_bytes), or NULL */
 } DartDiscoveryPeer;
@@ -105,14 +102,12 @@ typedef struct {
     uint32_t announce_interval_us;   /* re-announce interval */
     uint32_t peer_timeout_us;    /* drop peer after this much silence */
     uint16_t max_peers;     /* table capacity */
-    const char *name;       /* advertised peer name (goes in the blob's discovery section);
-                               NULL = none. Copied at init, so it need not outlive the call. */
-    uint8_t  name_len;
-    const uint8_t *meta;    /* opaque OVERLAY blob (the higher layer's data, e.g. transport
+    DartString name;        /* advertised peer name (goes in the blob's discovery section);
+                               {NULL,0} = none. Copied at init, so it need not outlive the call. */
+    DartBytes meta;         /* opaque OVERLAY blob (the higher layer's data, e.g. transport
                                frag/interest); discovery carries it after its own section. The
                                INITIAL value (dart_discovery_set_meta updates it). Must stay
-                               valid. <= meta_capacity */
-    uint16_t meta_len;
+                               valid. .len <= meta_capacity */
     uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* opaque scratch reserved per peer (0 = none); see dart_discovery_peer_user.
                                     Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
@@ -142,7 +137,7 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
         size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
         const uint8_t *self_meta, void *peer_cb_user);
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
-                               const void *datagram, size_t len, uint64_t now_us);
+                               DartBytes datagram, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
 size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
@@ -156,7 +151,7 @@ void         dart_discovery_replay_peers(DartDiscoveryState *st);
 /* Replace the opaque meta blob and bump its version, so peers re-fetch it. The
  * blob rides the next few announces, then announces carry the version only; a peer
  * that fell behind re-fetches via a targeted solicit. meta must stay valid. */
-void         dart_discovery_set_meta(DartDiscoveryState *st, const uint8_t *meta, uint16_t meta_len);
+void         dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta);
 /* Set the unicast locator port advertised in announces (the header data_port). The IO
  * runtime calls this when it binds its own same-host unicast RX socket, so peers reply
  * to a port unique to THIS process instead of the shared discovery port (which the OS
@@ -190,17 +185,16 @@ int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
  * consumer (e.g. the node core) uses these instead of duplicating it.
  *   peer_user  -> pointer to the peer's opaque scratch (cfg.peer_user_bytes), or NULL.
  *   addr_of_id -> 1 + fills *out with the advertised locator, else 0.
- *   peer_name  -> NUL-terminated advertised name (into discovery state) + *out_len, or NULL.
+ *   peer_name  -> advertised name as a DartString (into discovery state; {NULL,0} if unknown).
  *   id_for_addr-> reverse map an (ip, port) back to a peer id: 1 + *id on a hit, else 0. */
 void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
 int          dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id,
                              DartDiscoveryAddr *out);
-const char  *dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id, uint8_t *out_len);
+DartString   dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id);
 int          dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint8_t *ip,
                              uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
-void         dart_discovery_make_uuid(uint8_t out[16], const uint8_t *stable, size_t stable_len,
-                             uint64_t boot_seed);
+void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t boot_seed);
 
 #ifdef __cplusplus
 }

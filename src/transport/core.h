@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../common/string.h"   /* DartBytes (payloads, wire blobs), DartString (wire names) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,8 +94,7 @@ typedef struct {
 /* dart_poll_send destination: a peer id. Data is unicast point-to-point per matched reader. */
 
 /* A complete message; channel is the local handle. Do not call back into dart_*. */
-typedef void (*DartMessageFn)(void *user, uint16_t channel, uint32_t from_peer,
-                             const void *data, size_t len);
+typedef void (*DartMessageFn)(void *user, uint16_t channel, uint32_t from_peer, DartBytes data);
 
 #ifdef DART_SHM
 /* SHM delivery: the transport reassembled nothing -- it hands the node the
@@ -212,7 +212,7 @@ void      dart_peer_set_frag(DartTransportState *st, uint32_t peer_id, uint16_t 
  * it is idempotent. Re-build + re-disseminate after dart_set_role. */
 size_t    dart_interest_max(uint16_t n_channels);
 size_t    dart_build_interest(DartTransportState *st, void *out, size_t cap);
-void      dart_apply_peer_interest(DartTransportState *st, uint32_t peer_id, const void *blob, size_t len);
+void      dart_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
  * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
@@ -233,9 +233,9 @@ uint16_t  dart_meta_capacity(uint16_t n_channels);
 uint16_t  dart_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
                        uint16_t frag_size, int shm_capable, const uint8_t host[16]);
 /* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
-uint16_t  dart_meta_frag(const uint8_t *meta, uint16_t meta_len);
-/* Locate the interest sub-blob inside the overlay; NULL + *out_len 0 if absent. */
-const uint8_t *dart_meta_interest(const uint8_t *meta, uint16_t meta_len, size_t *out_len);
+uint16_t  dart_meta_frag(DartBytes meta);
+/* The interest sub-blob inside the overlay; {NULL, 0} if absent. */
+DartBytes dart_meta_interest(DartBytes meta);
 
 /* One advertised topic, as decoded by dart_meta_interest_next. name points into the
  * source overlay (NOT NUL-terminated), so keep that blob alive while reading it. */
@@ -243,8 +243,7 @@ typedef struct {
     uint16_t    alias;      /* the advertiser's local channel index (opaque to us) */
     uint8_t     reliable;   /* flags bit 0: offered (pub) / requested (sub) reliability */
     uint8_t     is_pub;     /* 1 = a publish entry, 0 = a subscribe entry */
-    const char *name;       /* topic name in the source blob, name_len bytes (not NUL-terminated) */
-    uint8_t     name_len;
+    DartString  name;       /* topic name in the source blob (not NUL-terminated) */
 } DartTopic;
 
 /* Iterator state for dart_meta_interest_next: zero-initialize, then call until it
@@ -262,13 +261,12 @@ typedef struct {
  * with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at the end (or on a
  * malformed/truncated blob: it stops rather than reading past the end). Usage:
  *   DartInterestIter it = {0}; DartTopic t;
- *   while (dart_meta_interest_next(meta, meta_len, &it, &t)) { ... } */
-int       dart_meta_interest_next(const uint8_t *meta, uint16_t meta_len,
-                       DartInterestIter *it, DartTopic *out);
+ *   while (dart_meta_interest_next(meta, &it, &t)) { ... } */
+int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
-int       dart_meta_shm(const uint8_t *meta, uint16_t meta_len, uint8_t host[16]);
+int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
 #endif
 
 /* Change a channel's role at runtime (rematches peers locally; caller re-advertises
@@ -282,10 +280,10 @@ int       dart_set_role(DartTransportState *st, uint16_t channel, uint8_t role);
  * after (the node bumps its discovery announce). */
 int       dart_channel_define(DartTransportState *st, uint16_t channel, const DartChannelDef *def);
 
-/* The channel's topic name (NULL + *len 0 if undefined or out of range), for surfacing
- * it on a delivered message. *len (may be NULL) gets the name length. The name is a
- * local lookup; it is never on the data path. */
-const char *dart_channel_name(DartTransportState *st, uint16_t channel, uint8_t *len);
+/* The channel's topic name ({NULL,0} if undefined or out of range), for surfacing it on a
+ * delivered message. Not NUL-terminated: use .data/.len. The name is a local lookup; it is
+ * never on the data path. */
+DartString dart_channel_name(DartTransportState *st, uint16_t channel);
 
 /* dart_send / dart_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {
@@ -297,8 +295,7 @@ typedef enum {
 } DartResult;
 
 /* Publish a message to all peers. Returns DART_OK, or a negative DartResult. */
-int       dart_send(DartTransportState *st, uint16_t channel, const void *data, size_t len,
-                  uint64_t now_us);
+int       dart_send(DartTransportState *st, uint16_t channel, DartBytes data, uint64_t now_us);
 
 #ifdef DART_SHM
 /* Publish a message whose payload lives in an external shared-memory buffer: the
@@ -306,7 +303,7 @@ int       dart_send(DartTransportState *st, uint16_t channel, const void *data, 
  * fragments from chunk for non-SHM peers, and sends ONE SHM-DATA (the descriptor) to
  * SHM-capable peers. desc is DART_SHM_DESC_BYTES. Same return as dart_send. The chunk
  * must stay valid until the sample leaves history (acked / evicted). */
-int       dart_send_shm(DartTransportState *st, uint16_t channel, const void *chunk, size_t len,
+int       dart_send_shm(DartTransportState *st, uint16_t channel, DartBytes chunk,
                       const uint8_t *desc, uint64_t now_us);
 /* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).
  * Off by default; the node sets it on attach, clears it on dormant/remove. */
@@ -393,7 +390,7 @@ int       dart_reader_progress(DartTransportState *st, uint16_t channel, uint32_
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 
 /* Feed a received datagram, tagged with the peer it came from. */
-void      dart_on_datagram(DartTransportState *st, uint32_t from_peer, const void *datagram, size_t len,
+void      dart_on_datagram(DartTransportState *st, uint32_t from_peer, DartBytes datagram,
                          uint64_t now_us);
 
 /* Pull one outgoing datagram (may batch submessages for one peer). Returns 1 and

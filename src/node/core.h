@@ -91,10 +91,10 @@ uint16_t        dart_node_core_peer_user_bytes(void);
 /* The discovery announce blob this node sends: its frag size, OOB host, and interest
  * list. The core owns the buffer and builds it (the codec is dart_meta_* in the
  * transport core). build_meta (re)builds it from the core's current fields and returns
- * the length. meta returns the bytes + length for the runtime to feed to discovery.
- * Rebuild after a role change, then re-feed discovery. */
+ * the length. meta returns the bytes (a view of the core's buffer) for the runtime to
+ * feed to discovery. Rebuild after a role change, then re-feed discovery. */
 uint16_t        dart_node_core_build_meta(i_DartNodeCore *c);
-const uint8_t  *dart_node_core_meta(i_DartNodeCore *c, uint16_t *len);
+DartBytes       dart_node_core_meta(i_DartNodeCore *c);
 
 /* Discovery event sink: register as the discovery core's on_event (cfg.user = this
  * core). Demuxes the generic DartDiscoveryEvent (PEER_UP/DOWN/REFUSED), keeps the peer
@@ -118,11 +118,11 @@ typedef struct {
 int  dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 
-/* A peer's human-readable name, learned from its announce blob: a NUL-terminated
- * pointer into the peer-table slot (stable until the peer is evicted). Non-empty for
- * any known peer ("unknown-peer" if its announce carried none); NULL only when id is
- * not a known peer. *out_len gets its length. For debug/observability only. */
-const char *dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id, uint8_t *out_len);
+/* A peer's human-readable name, learned from its announce blob: a DartString viewing the
+ * peer-table slot (not NUL-terminated; stable until the peer is evicted). Non-empty for any
+ * known peer ("unknown-peer" if its announce carried none); .data is NULL only when id is
+ * not a known peer. For debug/observability only. */
+DartString dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id);
 
 /* Read-only peer-table enumeration (diagnostics / tests). max_peers is the capacity;
  * peer_at fills the out-params for table slot in [0, max_peers) and returns 1 if it

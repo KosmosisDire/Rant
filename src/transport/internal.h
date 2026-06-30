@@ -127,7 +127,8 @@ typedef struct {        /* reader-side, per (channel,peer) */
 typedef struct {
     DartQos    qos;
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
-    const char *name;       /* our copy of the topic name */
+    const char *name;       /* our copy of the topic name (NUL-terminated storage) */
+    uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_channel_name is per-delivery) */
     uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */

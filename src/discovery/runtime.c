@@ -58,13 +58,13 @@ static void dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_byt
 }
 
 void dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
-                    const void *datagram, size_t len){
+                    DartBytes datagram){
     if (!d) return;
-    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, len, dart_plat_now_us());
+    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, dart_plat_now_us());
 }
 
-void dart_discovery_advertise(DartDiscovery *d, const uint8_t *meta, uint16_t meta_len){
-    if (d) dart_discovery_set_meta(d->core, meta, meta_len);
+void dart_discovery_advertise(DartDiscovery *d, DartBytes meta){
+    if (d) dart_discovery_set_meta(d->core, meta);
 }
 
 void dart_discovery_replay(DartDiscovery *d){
@@ -129,7 +129,7 @@ static void dart_discovery_auto_uuid(uint8_t out[16]){
     /* No CSPRNG: derive a best-effort unique id from hostname, pid and clock. */
     hostname_len = dart_plat_hostname(host, sizeof host);
     seed = (dart_plat_pid() << 32) ^ dart_plat_now_us();
-    dart_discovery_make_uuid(out, (const uint8_t*)host, hostname_len, seed);
+    dart_discovery_make_uuid(out, dart_bytes(host, hostname_len), seed);
 }
 
 uint8_t dart_discovery_default_name(char *out, size_t cap, const char *want){
@@ -296,11 +296,9 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const char *name, const D
     nc.discovery.meta_capacity = o.meta_capacity;
     nc.discovery.peer_user_bytes = o.peer_user_bytes;
     nc.discovery.meta          = o.meta;
-    nc.discovery.meta_len      = o.meta_len;
     nc.discovery.on_event      = o.on_event;
     nc.discovery.user          = o.user;
-    nc.discovery.name          = namebuf;              /* the core copies it at init */
-    nc.discovery.name_len      = namelen;
+    nc.discovery.name          = dart_string(namebuf, namelen);   /* the core copies it at init */
     nc.group               = o.discovery_group;
     nc.discovery_port      = o.discovery_port;
     nc.ttl                 = o.multicast_ttl;
@@ -366,7 +364,7 @@ static int dart__rt_drain(DartDiscovery *d, i_DartSock fd){
         uint8_t src_ip[4];
         int n = dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, NULL);
         if (n < 0){ if (dart_plat_would_block()) break; continue; }  /* empty vs transient error */
-        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, d->rxbuf, (size_t)n, dart_plat_now_us()); got = 1; }
+        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, dart_bytes(d->rxbuf, (size_t)n), dart_plat_now_us()); got = 1; }
     }
     return got;
 }

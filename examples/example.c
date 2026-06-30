@@ -113,7 +113,9 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
 }
 
 static void on_message(const DartMsg *msg){
-    printf("[%s] %s > %.*s\n", msg->sender_name, msg->channel_name, (int)msg->len, (const char *)msg->data);
+    printf("[%.*s] %.*s > %.*s\n", (int)msg->sender_name.len, msg->sender_name.data,
+           (int)msg->channel_name.len, msg->channel_name.data,
+           (int)msg->data.len, (const char *)msg->data.data);
 }
 
 static void on_event(const DartEvent *ev){
@@ -181,7 +183,7 @@ int main(int argc, char **argv){
         int sent = 0;
         mutex_lock(&g_lock);
         for (int i = 0; i < g_n_topics; i++)
-            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, line, len); sent++; }
+            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(line, len)); sent++; }
         mutex_unlock(&g_lock);
         if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }
