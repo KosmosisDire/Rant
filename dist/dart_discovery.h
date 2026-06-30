@@ -156,6 +156,7 @@ typedef struct {
     DartString        name;          /* advertised name (not NUL-terminated; {NULL,0} if none) */
     DartBytes         meta;          /* opaque overlay blob ({NULL,0} if none) */
     uint32_t          meta_version;  /* version of the overlay we hold */
+    uint32_t          adv_meta_version; /* highest version the peer advertises (> meta_version => held blob is stale) */
     void             *user;          /* this peer's user scratch (cfg.peer_user_bytes), or NULL */
 } DartDiscoveryPeer;
 
@@ -660,6 +661,7 @@ struct i_DartDiscoveryPeer {
     uint8_t *meta;          /* -> meta_pool slot (the OVERLAY only), capacity st->meta_capacity */
     uint16_t meta_len;
     uint32_t meta_version;  /* version of the blob we hold (0 = none yet) */
+    uint32_t adv_version;   /* highest version the peer has advertised (> meta_version => we hold a stale blob) */
     uint8_t *user;          /* -> user_pool slot (opaque consumer scratch), stride st->user_stride */
     char     name[DART_DISCOVERY_NAME_MAX + 1];  /* advertised peer name, parsed from the blob */
     uint8_t  name_len;
@@ -1059,7 +1061,9 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
 
     /* meta: a newer version with the blob present updates our stored overlay + name; a newer
        version without the blob (a steady-state version-only announce) means we fell behind,
-       so re-fetch via a targeted solicit. */
+       so re-fetch via a targeted solicit. adv_version tracks the highest version the peer has
+       claimed (blob present or not); > meta_version means our held blob is stale. */
+    if (meta_version > peer->adv_version) peer->adv_version = meta_version;
     if (have_disc){
         if (meta_version > peer->meta_version){
             uint8_t nl = disc_name.len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : (uint8_t)disc_name.len;
@@ -1190,6 +1194,7 @@ int dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot, DartDisc
     out->name          = dart_string(p->name_len ? p->name : NULL, p->name_len);   /* parsed from the blob */
     out->meta          = dart_bytes(p->meta_len ? p->meta : NULL, p->meta_len);
     out->meta_version  = p->meta_version;
+    out->adv_meta_version = p->adv_version;
     out->user          = st->user_stride ? p->user : NULL;
     return 1;
 }

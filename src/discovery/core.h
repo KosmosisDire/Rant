@@ -90,6 +90,7 @@ typedef struct {
     DartString        name;          /* advertised name (not NUL-terminated; {NULL,0} if none) */
     DartBytes         meta;          /* opaque overlay blob ({NULL,0} if none) */
     uint32_t          meta_version;  /* version of the overlay we hold */
+    uint32_t          adv_meta_version; /* highest version the peer advertises (> meta_version => held blob is stale) */
     void             *user;          /* this peer's user scratch (cfg.peer_user_bytes), or NULL */
 } DartDiscoveryPeer;
 
