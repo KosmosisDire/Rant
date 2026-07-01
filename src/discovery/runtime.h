@@ -9,7 +9,7 @@
 #define DART_DISCOVERY_RT_H
 
 #include "core.h"
-#include "../common/allocator.h"   /* DartAllocator (shared with the node runtime) */
+#include "../common/alloc.h"        /* DartAllocator (shared with the node runtime) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,13 +39,12 @@ typedef struct {
                                                    (see dart_discovery_peer_user) */
 } DartDiscoveryConfig;
 
-/* Open a discovery runtime backed by mem (a static or dynamic DartAllocator, taken
- * over here: mem->claimed is set). name is this instance's advertised peer name (a
- * primary arg, like dart_node_open); NULL/empty => an auto-generated "node-XXXXXXXX".
+/* Open a discovery runtime backed by `alloc` (a static or dynamic DartAllocator, copied
+ * in and reset on close, so it may be a temporary). name is this instance's advertised peer
+ * name (a primary arg, like dart_node_open); NULL/empty => an auto-generated "node-XXXXXXXX".
  * cfg may be NULL for all defaults. The UUID is auto-generated. Returns NULL on failure
- * (allocator too small / already claimed / socket setup failed). Close with
- * dart_discovery_close. */
-DartDiscovery   *dart_discovery_open(DartAllocator *mem, const char *name, const DartDiscoveryConfig *cfg);
+ * (allocator too small / socket setup failed). Close with dart_discovery_close. */
+DartDiscovery   *dart_discovery_open(DartAllocator *alloc, const char *name, const DartDiscoveryConfig *cfg);
 
 /* ------------------------------------------------------------------ lifecycle */
 /* One loop tick: wait up to timeout_ms for a datagram, feed RX, pump timers, send

@@ -18,7 +18,8 @@ struct DartDiscovery {
     uint8_t             *rxbuf;       /* arena, wire_max */
     uint8_t             *txbuf;       /* arena, wire_max */
     DartDiscoveryPeer   *peer_view;   /* arena, [max_peers]: zero-copy snapshot for dart_discovery_peers */
-    void                *owned_mem;   /* dart_discovery_open's heap block (freed at close); NULL = caller owns */
+    DartAllocator       pool;        /* dart_discovery_open's allocator (owns the block; reset at close).
+                                         Empty (zeroed) for dart_discovery_place: the caller owns the memory. */
     DartDiscoveryAddr  seeds[DART_DISCOVERY_MAX_SEEDS];
     uint16_t             n_seeds;
 };
@@ -211,7 +212,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     d->rxbuf     = blk.rxbuf;
     d->txbuf     = blk.txbuf;
     d->peer_view = (DartDiscoveryPeer*)blk.peer_view;
-    d->owned_mem = NULL;                 /* caller owns mem; the allocator path sets this */
+    memset(&d->pool, 0, sizeof d->pool); /* caller owns mem; the open path overwrites this */
     core_mem     = blk.core;
 
     /* auto-generate a UUID if the caller left it zero */
@@ -282,11 +283,11 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
  * mirrors dart_node_open). Translates the flat opts into the placement config, sizes,
  * allocates, and places the runtime; dart_discovery_close frees the heap block. No
  * automatic growth: a full peer table refuses rather than relocating. */
-DartDiscovery *dart_discovery_open(DartAllocator *mem, const char *name, const DartDiscoveryConfig *cfg){
+DartDiscovery *dart_discovery_open(DartAllocator *alloc, const char *name, const DartDiscoveryConfig *cfg){
     DartDiscoveryNetConfig nc; DartDiscoveryConfig o; DartDiscovery *d;
     char namebuf[DART_DISCOVERY_NAME_MAX + 1]; uint8_t namelen;
-    void *block; size_t need, block_size;
-    if (!mem || mem->claimed) return NULL;
+    void *block; size_t need; DartAllocator pool;
+    if (!alloc) return NULL;
     memset(&o, 0, sizeof o); if (cfg) o = *cfg;
     namelen = dart_discovery_default_name(namebuf, sizeof namebuf, name);   /* positional; auto if NULL */
 
@@ -307,18 +308,12 @@ DartDiscovery *dart_discovery_open(DartAllocator *mem, const char *name, const D
     nc.n_seeds             = o.n_seed_peers;
 
     need = dart_discovery_placement_memory(&nc);
-    if (mem->dynamic){
-        block = dart_plat_realloc(NULL, need);   /* heap malloc (no startup needed for alloc) */
-        if (!block) return NULL;
-        block_size = need;
-    } else {
-        if (!mem->buffer || mem->size < need) return NULL;
-        block = mem->buffer; block_size = mem->size;
-    }
-    d = dart_discovery_place(block, block_size, &nc);
-    if (!d){ if (mem->dynamic) dart_plat_realloc(block, 0); return NULL; }
-    d->owned_mem = mem->dynamic ? block : NULL;   /* close frees the heap block, not a user buffer */
-    mem->claimed = 1;
+    pool = *alloc;                                 /* copied: the caller's allocator may be a temporary */
+    block = dart_allocator_alloc(&pool, NULL, need);
+    if (!block) return NULL;
+    d = dart_discovery_place(block, need, &nc);
+    if (!d){ DartAllocator p = pool; dart_allocator_reset(&p); return NULL; }
+    d->pool = pool;                                /* the block lives in this pool; close resets it */
     return d;
 }
 
@@ -338,7 +333,7 @@ DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t 
     memset(&b,0,sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
     dart__rt_layout(&b, &dc, &blk);
     d = blk.d;
-    *d = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds, owned_mem */
+    *d = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds, pool */
     d->wire_max = (uint32_t)blk.wire_max;
     d->rxbuf = blk.rxbuf; d->txbuf = blk.txbuf;
     d->peer_view = (DartDiscoveryPeer*)blk.peer_view;
@@ -426,9 +421,9 @@ const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count)
 }
 
 void dart_discovery_close(DartDiscovery *d, int send_bye){
-    void *owned;
+    DartAllocator pool;
     if (!d) return;
-    owned = d->owned_mem;
+    pool = d->pool;                          /* copy out: the reset below frees the block (incl d) */
     if (send_bye){
         size_t n_bytes = dart_discovery_leave(d->core, d->txbuf, d->wire_max);
         if (n_bytes) dart_discovery_tx(d, d->txbuf, n_bytes);
@@ -436,5 +431,5 @@ void dart_discovery_close(DartDiscovery *d, int send_bye){
     dart_plat_close(d->fd);
     if (d->unicast_fd != DART_SOCK_BAD) dart_plat_close(d->unicast_fd);
     dart_plat_cleanup();
-    if (owned) dart_plat_realloc(owned, 0);   /* allocator path: free the heap block last */
+    dart_allocator_reset(&pool);   /* open path: frees the block; place path: empty pool, no-op */
 }

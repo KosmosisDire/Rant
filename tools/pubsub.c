@@ -457,7 +457,7 @@ int main(int argc, char **argv){
        lives for the whole process (freed implicitly at exit). */
     DartAllocator alloc;
     if (dynamic){
-        alloc = dart_allocator_dynamic(8u<<20);
+        alloc = dart_allocator_dynamic(dart_plat_realloc, 0);
     } else {
         size_t mem_size = (8u<<20)
                         + (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;

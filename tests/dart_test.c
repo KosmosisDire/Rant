@@ -157,7 +157,7 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
  * everything that used to live in DartNodeConfig except channels/on_message. */
 static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
                                DartEventFn on_event, DartNodeOpts opts, const DartChannelDef *chans, uint16_t nch){
-    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(0);
+    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(dart_plat_realloc, 0);
     (void)mem; (void)cap;             /* heap-backed: the node self-sizes (was a static arena) */
     if (!opts.max_channels) opts.max_channels = nch ? nch : 1;
     node = dart_node_open(&alloc, name, on_msg, on_event, &opts);
@@ -1304,7 +1304,7 @@ static void dg_on_message(const DartMsg *msg){
 static void dynamic_grow_checks(void){
     static const char *names[12] = {"dg/0","dg/1","dg/2","dg/3","dg/4","dg/5",
                                     "dg/6","dg/7","dg/8","dg/9","dg/10","dg/11"};
-    DartAllocator pa = dart_allocator_dynamic(0), sa = dart_allocator_dynamic(0);
+    DartAllocator pa = dart_allocator_dynamic(dart_plat_realloc, 0), sa = dart_allocator_dynamic(dart_plat_realloc, 0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc0=NULL, *pcN;
     DartChannelOpts co; DartDiscoveryAddr seed; uint8_t payload[8]; int i, t;
     memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=32;
@@ -2350,9 +2350,9 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     po.discovery.max_peers=(uint16_t)(nsubs+2); po.disable_shm=(uint8_t)disable_shm;
     po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
     so=po;
-    pa=dart_allocator_dynamic(0);
+    pa=dart_allocator_dynamic(dart_plat_realloc, 0);
     P=dart_node_open(&pa,"ms-pub",NULL,NULL,&po);
-    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
+    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(dart_plat_realloc, 0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
     if (!P){ free(payload); return; }
     pc=dart_node_create_channel(P,"ms/ch",DART_PUB_ONLY,NULL,&co);
     for (i=0;i<nsubs;i++) dart_node_create_channel(S[i],"ms/ch",DART_SUB_ONLY,NULL,&co);

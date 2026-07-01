@@ -8,7 +8,7 @@
 #include "../transport/core.h"
 #include "../discovery/core.h"    /* DartDiscoveryAddr (seed peers) */
 #include "../serialize/schema.h"  /* DartSchema (a channel's optional data schema) */
-#include "../common/allocator.h"  /* DartAllocator (shared with the discovery runtime) */
+#include "../common/alloc.h"      /* DartAllocator (the node's memory) */
 #include "core.h"                 /* DartEvent / DartEventFn / dart_event_str (node's app event) */
 
 #ifdef __cplusplus
@@ -84,14 +84,13 @@ typedef struct {
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
-/* Open a node backed by mem (required): a static or dynamic DartAllocator, taken over
- * by this node (mem->claimed is set; reuse it for another node is refused). name is this
- * node's human-readable label, synced via discovery and surfaced as DartMsg.sender_name;
- * NULL/empty => an auto-generated "node-XXXXXXXX". on_message (delivered messages) and
- * on_event (peer/loss/QoS events) may each be NULL. opts may be NULL for all defaults.
- * Returns NULL on failure (incl. a static buffer too small for the node, or an
- * already-claimed allocator). */
-DartNode    *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_message,
+/* Open a node backed by `alloc` (required): a static or dynamic DartAllocator (common/alloc.h)
+ * the node allocates all its memory from and RESETS on close, so construct one per node and do
+ * not reuse or touch it after close. name is this node's human-readable label, synced via
+ * discovery and surfaced as DartMsg.sender_name; NULL/empty => an auto-generated "node-XXXXXXXX".
+ * on_message (delivered messages) and on_event (peer/loss/QoS events) may each be NULL. opts may
+ * be NULL for all defaults. Returns NULL on failure (incl. a static buffer too small). */
+DartNode    *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message,
                             DartEventFn on_event, const DartNodeOpts *opts);
 int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
 void         dart_node_close(DartNode *n, int send_bye);

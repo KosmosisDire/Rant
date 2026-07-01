@@ -179,7 +179,7 @@ int main(int argc, char **argv){
     }
     if (!g_schema){ fprintf(stderr, "schema build failed\n"); return 1; }
 
-    DartAllocator mem = dart_allocator_dynamic(1 << 20);
+    DartAllocator mem = dart_allocator_dynamic(dart_plat_realloc, 0);
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS,
                                                   .net = { .multicast_interface = ifc } });
