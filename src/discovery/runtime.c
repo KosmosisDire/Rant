@@ -24,44 +24,44 @@ struct DartDiscovery {
     uint16_t             n_seeds;
 };
 
-static void dart_discovery_tx1(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
+static void i_dart_discovery_tx1(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const uint8_t ip[4], uint16_t port){
-    dart_plat_send(d->fd, out, n_bytes, ip, port);
+    i_dart_plat_send(d->fd, out, n_bytes, ip, port);
 }
 
 /* unicast one datagram to a peer: at the discovery port, and at its data port too (the
  * only per-process address when processes share the discovery port; the data-socket owner
  * forwards discovery datagrams to its core). */
-static void dart_discovery_tx_to(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
+static void i_dart_discovery_tx_to(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const DartDiscoveryAddr *addr){
     if (addr->ip_len != 4) return;
-    dart_discovery_tx1(d, out, n_bytes, addr->ip, d->discovery_port);
-    if (addr->port && addr->port != d->discovery_port) dart_discovery_tx1(d, out, n_bytes, addr->ip, addr->port);
+    i_dart_discovery_tx1(d, out, n_bytes, addr->ip, d->discovery_port);
+    if (addr->port && addr->port != d->discovery_port) i_dart_discovery_tx1(d, out, n_bytes, addr->ip, addr->port);
 }
 
 /* send to the group, every seed, and every known peer. Survives multicast outages;
  * receivers dedup by uuid. */
-static void dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_bytes){
+static void i_dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_bytes){
     uint16_t s, discovery_port = d->discovery_port;
     DartDiscoveryAddr addr;
     uint8_t group_ip[4];
-    dart_plat_naddr_to_ip4(d->group_naddr, group_ip);
-    dart_plat_send(d->fd, out, n_bytes, group_ip, discovery_port);
+    i_dart_plat_naddr_to_ip4(d->group_naddr, group_ip);
+    i_dart_plat_send(d->fd, out, n_bytes, group_ip, discovery_port);
     for (s=0; s<d->n_seeds; s++){
         const DartDiscoveryAddr *seed = &d->seeds[s];
         if (seed->ip_len != 4) continue;
-        dart_discovery_tx1(d, out, n_bytes, seed->ip, seed->port ? seed->port : discovery_port);
+        i_dart_discovery_tx1(d, out, n_bytes, seed->ip, seed->port ? seed->port : discovery_port);
     }
     for (s=0; s<d->max_peers; s++){
         if (!dart_discovery_peer_addr(d->core, s, &addr)) continue;
-        dart_discovery_tx_to(d, out, n_bytes, &addr);
+        i_dart_discovery_tx_to(d, out, n_bytes, &addr);
     }
 }
 
 void dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
                     DartBytes datagram){
     if (!d) return;
-    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, dart_plat_now_us());
+    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, i_dart_plat_now_us());
 }
 
 void dart_discovery_advertise(DartDiscovery *d, DartBytes meta){
@@ -73,17 +73,17 @@ void dart_discovery_replay(DartDiscovery *d){
 }
 
 /* A loopback (127/8) or unspecified address is never a usable multicast egress. */
-static int dart__if_routable(uint32_t naddr){
+static int i_dart_discovery_if_routable(uint32_t naddr){
     uint8_t ip[4];
     if (!naddr) return 0;
-    dart_plat_naddr_to_ip4(naddr, ip);
+    i_dart_plat_naddr_to_ip4(naddr, ip);
     return ip[0] != 127;
 }
 /* Link-local autoconfig (169.254/16): an adapter with no DHCP lease. Usable only as a
  * last resort, behind any properly addressed LAN interface. */
-static int dart__if_apipa(uint32_t naddr){
+static int i_dart_discovery_if_apipa(uint32_t naddr){
     uint8_t ip[4];
-    dart_plat_naddr_to_ip4(naddr, ip);
+    i_dart_plat_naddr_to_ip4(naddr, ip);
     return ip[0] == 169 && ip[1] == 254;
 }
 
@@ -99,37 +99,37 @@ uint32_t dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port){
     uint32_t ip, ifs[16];
     int n, i, apipa = -1;
 
-    ip = dart_plat_route_src(group_naddr, port);
-    if (dart__if_routable(ip)) return ip;
+    ip = i_dart_plat_route_src(group_naddr, port);
+    if (i_dart_discovery_if_routable(ip)) return ip;
 
     /* 192.0.2.1 is TEST-NET-1 (RFC 5737): never a real host, so this resolves only the
      * default-route source interface; no datagram is transmitted. */
-    ip = dart_plat_route_src(dart_plat_ipv4(192u, 0u, 2u, 1u), port);
-    if (dart__if_routable(ip)) return ip;
+    ip = i_dart_plat_route_src(i_dart_plat_ipv4(192u, 0u, 2u, 1u), port);
+    if (i_dart_discovery_if_routable(ip)) return ip;
 
-    n = dart_plat_local_ipv4s(ifs, (int)(sizeof ifs / sizeof ifs[0]));
+    n = i_dart_plat_local_ipv4s(ifs, (int)(sizeof ifs / sizeof ifs[0]));
     for (i = 0; i < n; i++){
-        if (!dart__if_routable(ifs[i])) continue;
-        if (dart__if_apipa(ifs[i])){ if (apipa < 0) apipa = i; continue; }
+        if (!i_dart_discovery_if_routable(ifs[i])) continue;
+        if (i_dart_discovery_if_apipa(ifs[i])){ if (apipa < 0) apipa = i; continue; }
         return ifs[i];                 /* first real (DHCP/static) LAN address */
     }
     return apipa >= 0 ? ifs[apipa] : 0;  /* APIPA only if nothing better; else OS default */
 }
 
 int dart_discovery_make_uuid4(uint8_t out[16]){
-    if (!dart_plat_random(out, 16)) return 0;
+    if (!i_dart_plat_random(out, 16)) return 0;
     out[6] = (uint8_t)((out[6] & 0x0Fu) | 0x40u);  /* version 4 */
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x */
     return 1;
 }
 
-static void dart_discovery_auto_uuid(uint8_t out[16]){
+static void i_dart_discovery_auto_uuid(uint8_t out[16]){
     char host[80]; uint64_t seed; size_t hostname_len;
     if (dart_discovery_make_uuid4(out)) return;     /* normal path */
 
     /* No CSPRNG: derive a best-effort unique id from hostname, pid and clock. */
-    hostname_len = dart_plat_hostname(host, sizeof host);
-    seed = (dart_plat_pid() << 32) ^ dart_plat_now_us();
+    hostname_len = i_dart_plat_hostname(host, sizeof host);
+    seed = (i_dart_plat_pid() << 32) ^ i_dart_plat_now_us();
     dart_discovery_make_uuid(out, dart_bytes(host, hostname_len), seed);
 }
 
@@ -145,7 +145,7 @@ uint8_t dart_discovery_default_name(char *out, size_t cap, const char *want){
         return (uint8_t)i;
     }
     if (max < 13){ out[0] = '\0'; return 0; }        /* no room for "node-XXXXXXXX" */
-    if (!dart_plat_random(&r, sizeof r)) r = (uint32_t)dart_plat_pid();
+    if (!i_dart_plat_random(&r, sizeof r)) r = (uint32_t)i_dart_plat_pid();
     memcpy(out, "node-", 5);                          /* auto: "node-" + 8 hex (random, pid fallback) */
     for (i = 0; i < 8; i++) out[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
     out[13] = '\0';
@@ -160,15 +160,15 @@ typedef struct {
     uint8_t *rxbuf, *txbuf, *peer_view, *core;
     size_t   wire_max, core_bytes;
 } i_DartRtBlocks;
-static void dart__rt_layout(i_DartBump *b, const DartDiscoveryCoreConfig *c, i_DartRtBlocks *o){
+static void i_dart_discovery_rt_layout(i_DartBump *b, const DartDiscoveryCoreConfig *c, i_DartRtBlocks *o){
     uint16_t max_peers = c->max_peers ? c->max_peers : 32u;
     o->wire_max   = dart_discovery_wire_size(c->meta_capacity);
-    o->d     = (DartDiscovery*)dart_take(b, sizeof(struct DartDiscovery), 16);
-    o->rxbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
-    o->txbuf = (uint8_t*)dart_take(b, o->wire_max, 16);
-    o->peer_view = (uint8_t*)dart_take(b, (size_t)max_peers * sizeof(DartDiscoveryPeer), 16);
+    o->d     = (DartDiscovery*)i_dart_bump_take(b, sizeof(struct DartDiscovery), 16);
+    o->rxbuf = (uint8_t*)i_dart_bump_take(b, o->wire_max, 16);
+    o->txbuf = (uint8_t*)i_dart_bump_take(b, o->wire_max, 16);
+    o->peer_view = (uint8_t*)i_dart_bump_take(b, (size_t)max_peers * sizeof(DartDiscoveryPeer), 16);
     o->core_bytes = dart_discovery_required_memory(c);
-    o->core  = (uint8_t*)dart_take(b, o->core_bytes, 16);
+    o->core  = (uint8_t*)i_dart_bump_take(b, o->core_bytes, 16);
 }
 
 size_t dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg){
@@ -177,7 +177,7 @@ size_t dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg){
     c = cfg->discovery;
     dart_discovery_config_defaults(&c);
     memset(&b, 0, sizeof b);
-    dart__rt_layout(&b, &c, &blk);
+    i_dart_discovery_rt_layout(&b, &c, &blk);
     return b.offset + 16u;     /* slack to align the caller's mem up to base */
 }
 
@@ -206,7 +206,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     {   i_DartBump b; memset(&b, 0, sizeof b);
         b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
-        dart__rt_layout(&b, &c.discovery, &blk); }
+        i_dart_discovery_rt_layout(&b, &c.discovery, &blk); }
     d = blk.d;
     d->wire_max  = (uint32_t)blk.wire_max;
     d->rxbuf     = blk.rxbuf;
@@ -218,30 +218,30 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     /* auto-generate a UUID if the caller left it zero */
     for (i=0;i<16;i++) if (c.discovery.uuid[i]) { allzero = 0; break; }
 
-    if (!dart_plat_startup()) return NULL;
-    if (allzero) dart_discovery_auto_uuid(c.discovery.uuid);
+    if (!i_dart_plat_startup()) return NULL;
+    if (allzero) i_dart_discovery_auto_uuid(c.discovery.uuid);
 
     d->core = dart_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c.discovery);
-    if (!d->core){ dart_plat_cleanup(); return NULL; }
+    if (!d->core){ i_dart_plat_cleanup(); return NULL; }
 
-    fd = dart_plat_udp_open();
-    if (fd == DART_SOCK_BAD){ dart_plat_cleanup(); return NULL; }
-    if (!dart_plat_bind(fd, 0, c.discovery_port, 1)){ dart_plat_close(fd); dart_plat_cleanup(); return NULL; }
+    fd = i_dart_plat_udp_open();
+    if (fd == DART_SOCK_BAD){ i_dart_plat_cleanup(); return NULL; }
+    if (!i_dart_plat_bind(fd, 0, c.discovery_port, 1)){ i_dart_plat_close(fd); i_dart_plat_cleanup(); return NULL; }
 
     /* pin join and egress to one deterministic interface */
-    group_naddr = dart_plat_parse_ip(group);
-    interface_ip = c.multicast_interface ? dart_plat_parse_ip(c.multicast_interface)
+    group_naddr = i_dart_plat_parse_ip(group);
+    interface_ip = c.multicast_interface ? i_dart_plat_parse_ip(c.multicast_interface)
                       : dart_discovery_mcast_if_for(group_naddr, c.discovery_port);
-    if (!dart_plat_mcast_join(fd, group_naddr, interface_ip)){
-        dart_plat_close(fd); dart_plat_cleanup(); return NULL;
+    if (!i_dart_plat_mcast_join(fd, group_naddr, interface_ip)){
+        i_dart_plat_close(fd); i_dart_plat_cleanup(); return NULL;
     }
-    dart_plat_mcast_setif(fd, interface_ip);
-    dart_plat_mcast_ttl(fd, ttl);
+    i_dart_plat_mcast_setif(fd, interface_ip);
+    i_dart_plat_mcast_ttl(fd, ttl);
     /* loop always on (uuid self-filter drops echoes); needed for multi-instance per host */
-    dart_plat_mcast_loop(fd, 1);
-    dart_plat_set_nonblock(fd);   /* poll then DRAIN to empty (dart__rt_drain): the recv that
+    i_dart_plat_mcast_loop(fd, 1);
+    i_dart_plat_set_nonblock(fd);   /* poll then DRAIN to empty (i_dart_discovery_rt_drain): the recv that
                                      finds the queue empty must return would-block, not block */
-    dart_plat_suppress_connreset(fd);   /* we reinforce announces by unicast to known peers; a
+    i_dart_plat_suppress_connreset(fd);   /* we reinforce announces by unicast to known peers; a
                                            peer that died bounces an ICMP unreachable that would
                                            otherwise surface as WSAECONNRESET and disrupt RX */
 
@@ -265,15 +265,15 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
        port, which the OS hands to one arbitrary same-port socket. Best-effort: on failure we
        keep data_port 0 and only cross-host unicast (where we own the discovery port) works. */
     if (c.discovery.data_port == 0){
-        i_DartSock uc = dart_plat_udp_open();
+        i_DartSock uc = i_dart_plat_udp_open();
         if (uc != DART_SOCK_BAD){
-            uint16_t uport = dart_plat_bind(uc, 0, 0, 0) ? dart_plat_local_port(uc) : 0;
+            uint16_t uport = i_dart_plat_bind(uc, 0, 0, 0) ? i_dart_plat_local_port(uc) : 0;
             if (uport){
-                dart_plat_set_nonblock(uc);
-                dart_plat_suppress_connreset(uc);   /* same: a bounced unicast must not disrupt RX */
+                i_dart_plat_set_nonblock(uc);
+                i_dart_plat_suppress_connreset(uc);   /* same: a bounced unicast must not disrupt RX */
                 d->unicast_fd = uc;
                 dart_discovery_set_data_port(d->core, uport);
-            } else dart_plat_close(uc);
+            } else i_dart_plat_close(uc);
         }
     }
     return d;
@@ -327,11 +327,11 @@ DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t 
     DartDiscoveryState *nc; uint8_t *base; size_t need;
     if (!old) return NULL;
     dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
-    {   i_DartBump mb; memset(&mb,0,sizeof mb); dart__rt_layout(&mb, &dc, &blk); need = mb.offset + 16u; }
+    {   i_DartBump mb; memset(&mb,0,sizeof mb); i_dart_discovery_rt_layout(&mb, &dc, &blk); need = mb.offset + 16u; }
     if (new_cap < need) return NULL;
     base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
     memset(&b,0,sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
-    dart__rt_layout(&b, &dc, &blk);
+    i_dart_discovery_rt_layout(&b, &dc, &blk);
     d = blk.d;
     *d = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds, pool */
     d->wire_max = (uint32_t)blk.wire_max;
@@ -353,13 +353,13 @@ DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t 
  * keep refreshing its last_heard, so it never times out). Drain fully so timing tracks
  * real arrival, like the node's data socket already does. */
 #define DART_DISCOVERY_RX_BURST 2048
-static int dart__rt_drain(DartDiscovery *d, i_DartSock fd){
+static int i_dart_discovery_rt_drain(DartDiscovery *d, i_DartSock fd){
     int got = 0, guard;
     for (guard = 0; guard < DART_DISCOVERY_RX_BURST; guard++){
         uint8_t src_ip[4];
-        int n = dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, NULL);
-        if (n < 0){ if (dart_plat_would_block()) break; continue; }  /* empty vs transient error */
-        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, dart_bytes(d->rxbuf, (size_t)n), dart_plat_now_us()); got = 1; }
+        int n = i_dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, NULL);
+        if (n < 0){ if (i_dart_plat_would_block()) break; continue; }  /* empty vs transient error */
+        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, dart_bytes(d->rxbuf, (size_t)n), i_dart_plat_now_us()); got = 1; }
     }
     return got;
 }
@@ -372,19 +372,19 @@ int dart_discovery_poll(DartDiscovery *d, int timeout_ms){
     memset(pfd, 0, sizeof pfd);
     pfd[0].fd = d->fd; pfd[0].events = DART_POLLIN;
     if (d->unicast_fd != DART_SOCK_BAD){ pfd[1].fd = d->unicast_fd; pfd[1].events = DART_POLLIN; nfds = 2; }
-    if (dart_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
+    if (i_dart_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
 
-    if (pfd[0].revents & DART_POLLIN) got |= dart__rt_drain(d, d->fd);
+    if (pfd[0].revents & DART_POLLIN) got |= i_dart_discovery_rt_drain(d, d->fd);
     /* our own unicast port: solicit replies + re-fetch answers land here, so a same-host
        peer's reply reaches THIS process rather than the shared discovery port */
-    if (nfds == 2 && (pfd[1].revents & DART_POLLIN)) got |= dart__rt_drain(d, d->unicast_fd);
+    if (nfds == 2 && (pfd[1].revents & DART_POLLIN)) got |= i_dart_discovery_rt_drain(d, d->unicast_fd);
 
-    n_bytes = dart_discovery_update(d->core, dart_plat_now_us(), d->txbuf, d->wire_max);
-    if (n_bytes) dart_discovery_tx(d, d->txbuf, n_bytes);
+    n_bytes = dart_discovery_update(d->core, i_dart_plat_now_us(), d->txbuf, d->wire_max);
+    if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes);
 
     /* targeted unicast: replies to soliciters + re-fetch requests for stale blobs */
     while ((n_bytes = dart_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to)) != 0)
-        dart_discovery_tx_to(d, d->txbuf, n_bytes, &to);
+        i_dart_discovery_tx_to(d, d->txbuf, n_bytes, &to);
     return got;
 }
 
@@ -392,15 +392,15 @@ int dart_discovery_gather(DartDiscovery *d, int quiet_ms, int timeout_ms){
     uint64_t start, last_change, last_solicit = 0;
     uint16_t count;
     if (!d) return 0;
-    start = dart_plat_now_us(); last_change = start;
+    start = i_dart_plat_now_us(); last_change = start;
     count = dart_discovery_peer_count(d->core);
     for (;;){
-        uint64_t now = dart_plat_now_us(); uint16_t c;
+        uint64_t now = i_dart_plat_now_us(); uint16_t c;
         if (now - last_solicit >= 250000u){     /* (re)solicit ~4x/s so a lost one retries */
             dart_discovery_solicit(d->core); last_solicit = now;
         }
         dart_discovery_poll(d, 10);              /* sends the solicit, takes in replies */
-        now = dart_plat_now_us();
+        now = i_dart_plat_now_us();
         c = dart_discovery_peer_count(d->core);
         if (c > count){ count = c; last_change = now; }   /* grew: keep waiting */
         if (count > 0 && now - last_change >= (uint64_t)quiet_ms*1000u) break;
@@ -426,10 +426,10 @@ void dart_discovery_close(DartDiscovery *d, int send_bye){
     pool = d->pool;                          /* copy out: the reset below frees the block (incl d) */
     if (send_bye){
         size_t n_bytes = dart_discovery_leave(d->core, d->txbuf, d->wire_max);
-        if (n_bytes) dart_discovery_tx(d, d->txbuf, n_bytes);
+        if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes);
     }
-    dart_plat_close(d->fd);
-    if (d->unicast_fd != DART_SOCK_BAD) dart_plat_close(d->unicast_fd);
-    dart_plat_cleanup();
+    i_dart_plat_close(d->fd);
+    if (d->unicast_fd != DART_SOCK_BAD) i_dart_plat_close(d->unicast_fd);
+    i_dart_plat_cleanup();
     dart_allocator_reset(&pool);   /* open path: frees the block; place path: empty pool, no-op */
 }

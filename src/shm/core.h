@@ -58,7 +58,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "../platform/core.h"   /* dart_plat_shm_*, dart_plat_host_uuid, dart_plat_atomic_* */
+#include "../platform/core.h"   /* dart_plat_shm_*, i_dart_plat_host_uuid, dart_plat_atomic_* */
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,13 +90,13 @@ extern "C" {
 #endif
 #define DART_SHM_CLASS_MASK  0x7u               /* class lives in the low 3 bits of segment_id */
 
-uint32_t dart_shm_class_bytes(uint32_t k);      /* chunk payload bytes for class k */
-uint32_t dart_shm_class_for(uint32_t len);      /* smallest class fitting len; N_CLASSES if too big */
+uint32_t i_dart_shm_class_bytes(uint32_t k);      /* chunk payload bytes for class k */
+uint32_t i_dart_shm_class_for(uint32_t len);      /* smallest class fitting len; N_CLASSES if too big */
 
 /* Derive the OS object name for a segment id into buf[DART_SHM_NAME_MAX]:
  * "/dart.shm.<16 hex>", valid on POSIX (leading /) and Windows. The node fills
  * i_DartShmConfig.name with this for create/attach. */
-void dart_shm_seg_name(char *buf, uint64_t segment_id);
+void i_dart_shm_seg_name(char *buf, uint64_t segment_id);
 
 /* ----------------------------------------------------------------- descriptor
  * The SHM locator. Travels INSIDE an SHM-DATA submessage, whose framing supplies
@@ -111,8 +111,8 @@ typedef struct {
 } i_DartShmDesc;
 
 #define DART_SHM_DESC_WIRE 24u   /* little-endian; rides the SHM-DATA submessage body */
-size_t dart_shm_desc_encode(const i_DartShmDesc *d, uint8_t out[DART_SHM_DESC_WIRE]);
-int    dart_shm_desc_decode(i_DartShmDesc *d, const uint8_t *in, size_t len);  /* 1 ok, 0 malformed */
+size_t i_dart_shm_desc_encode(const i_DartShmDesc *d, uint8_t out[DART_SHM_DESC_WIRE]);
+int    i_dart_shm_desc_decode(i_DartShmDesc *d, const uint8_t *in, size_t len);  /* 1 ok, 0 malformed */
 
 /* ------------------------------------------------------------- segment layout
  *   [ i_DartShmSegHdr ][ chunk 0 ] ... [ chunk N-1 ]
@@ -141,10 +141,10 @@ typedef struct {
 
 /* ------------------------------------------------------------------ pool (API)
  * Opaque per-process handle over one mapped segment, placed in caller memory
- * (the node arena; size via dart_shm_state_bytes). A node CREATEs one segment for
+ * (the node arena; size via i_dart_shm_state_bytes). A node CREATEs one segment for
  * its own publishes and ATTACHes one per same-host peer it subscribes to. */
 typedef struct i_DartShmPool i_DartShmPool;
-size_t dart_shm_state_bytes(void);
+size_t i_dart_shm_state_bytes(void);
 
 typedef struct {
     char     name[DART_SHM_NAME_MAX];  /* writer makes it from its uuid; reader gets it via meta */
@@ -153,14 +153,14 @@ typedef struct {
     uint32_t n_chunks;                 /* create only (0 => DART_SHM_CHUNKS); attach reads it from the header */
 } i_DartShmConfig;
 
-/* Writer. create maps a fresh segment (dart_plat_shm_create); NULL => stay on UDP. */
-i_DartShmPool *dart_shm_create(void *pool_mem, const i_DartShmConfig *cfg);
+/* Writer. create maps a fresh segment (i_dart_plat_shm_create); NULL => stay on UDP. */
+i_DartShmPool *i_dart_shm_create(void *pool_mem, const i_DartShmConfig *cfg);
 /* The chunk backing a history slot: loan returns a writable pointer (app fills it),
  * stamp bumps generation + sets length and fills *out for the transport to frame in
  * the SHM-DATA submessage. The node owns chunk<->slot assignment (1 chunk per
  * keep_last slot), so there is no free list here. */
-void *dart_shm_chunk(i_DartShmPool *p, uint32_t chunk, uint32_t *out_cap);
-void  dart_shm_stamp(i_DartShmPool *p, uint32_t chunk, uint32_t len, i_DartShmDesc *out);
+void *i_dart_shm_chunk(i_DartShmPool *p, uint32_t chunk, uint32_t *out_cap);
+void  i_dart_shm_stamp(i_DartShmPool *p, uint32_t chunk, uint32_t len, i_DartShmDesc *out);
 
 /* Reader. attach maps an existing segment WHOLE by name and reads its geometry
  * (chunk_bytes/n_chunks) from the header the writer stamped, so the reader needs to
@@ -169,34 +169,34 @@ void  dart_shm_stamp(i_DartShmPool *p, uint32_t chunk, uint32_t len, i_DartShmDe
  * descriptor to an in-segment pointer and verifies generation still matches (else
  * recycled -> NULL, reliable repair covers it). No release call: the reader's
  * transport ACK of the range is the release. */
-i_DartShmPool *dart_shm_attach(void *pool_mem, const i_DartShmConfig *cfg);
-const void    *dart_shm_read  (i_DartShmPool *p, const i_DartShmDesc *d, uint32_t *out_len);
+i_DartShmPool *i_dart_shm_attach(void *pool_mem, const i_DartShmConfig *cfg);
+const void    *i_dart_shm_read  (i_DartShmPool *p, const i_DartShmDesc *d, uint32_t *out_len);
 /* re-check the chunk generation AFTER a one-copy read (seqlock tail): 1 if it still
  * matches d (the copy is clean), 0 if a best-effort writer recycled it mid-copy (the
  * copy may be torn -> discard). Lock-free: the writer never blocks. */
-int            dart_shm_verify(i_DartShmPool *p, const i_DartShmDesc *d);
+int            i_dart_shm_verify(i_DartShmPool *p, const i_DartShmDesc *d);
 
-void dart_shm_detach(i_DartShmPool *p);  /* unmap; the writer also unlinks the OS object */
+void i_dart_shm_detach(i_DartShmPool *p);  /* unmap; the writer also unlinks the OS object */
 
 /* Same-host id: SHM is valid only between processes sharing one kernel AND able to
  * map the object (loopback addr alone is not sufficient -- containers/namespaces).
- * The node advertises dart_plat_host_uuid() + segment name in discovery; a peer is
- * SHM-reachable iff its host uuid equals ours and dart_shm_attach succeeds. */
-int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16]);
+ * The node advertises i_dart_plat_host_uuid() + segment name in discovery; a peer is
+ * SHM-reachable iff its host uuid equals ours and i_dart_shm_attach succeeds. */
+int i_dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16]);
 
 /* === INTEGRATION (implemented under #ifdef DART_SHM) ========================
  *
  * dart_plat (add behind the existing Windows/POSIX split):
- *   void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
- *   void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
- *   void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
- *   void  dart_plat_host_uuid(uint8_t out[16]);             (boot id / machine guid)
- *   uint64_t dart_plat_atomic_load64 / _store64(volatile uint64_t*[, v]);  (generation)
+ *   void *i_dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+ *   void *i_dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
+ *   void  i_dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+ *   void  i_dart_plat_host_uuid(uint8_t out[16]);             (boot id / machine guid)
+ *   uint64_t i_dart_plat_atomic_load64 / _store64(volatile uint64_t*[, v]);  (generation)
  *
  * transport (the per-peer lane + the new submessage; the only core change):
  *   - per-peer flag peer_shm[] (node sets it; like the existing peer_frag)
  *   - a history sample may be chunk-backed: a publish that hands in an external
- *     buffer (the chunk) + its descriptor, so dart_send does not memcpy (zero copy)
+ *     buffer (the chunk) + its descriptor, so dart_transport_send does not memcpy (zero copy)
  *   - SHM-DATA submessage: byte0 = DATA | DART_F_SHM, [alias][base seqno][count]
  *     [24-byte descriptor]. Writer lane emits it for an SHM peer instead of frags;
  *     reader marks [base,base+count) delivered, hands the descriptor up flagged.
@@ -206,13 +206,13 @@ int dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16])
  * node (wiring):
  *   - advertise: meta blob -> ver 3, insert [u8 shm][u8 host[16]][u64 segment_id]
  *     between the frag prefix and the interest list (ver-2 peers ignore it)
- *   - on peer up: if peer.shm and host matches ours, dart_shm_attach its segment and
+ *   - on peer up: if peer.shm and host matches ours, i_dart_shm_attach its segment and
  *     set peer_shm in the transport; on down/dormant, detach / clear it
  *   - dart_node_loan(n, ch, len, &ptr) / dart_node_publish(n, ch): loan a chunk for
  *     the channel's next history slot, app fills ptr, publish hands the chunk +
  *     descriptor to the transport. dart_channel_send keeps working (one-copy into the
  *     chunk when the channel has any SHM peer, else plain inline)
- *   - on receive: the node's on_message wrapper sees the SHM flag, dart_shm_read the
+ *   - on receive: the node's on_message wrapper sees the SHM flag, i_dart_shm_read the
  *     descriptor, calls the app on_message with the in-place pointer
  */
 

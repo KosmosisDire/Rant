@@ -157,7 +157,7 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
  * everything that used to live in DartNodeConfig except channels/on_message. */
 static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
                                DartEventFn on_event, DartNodeOpts opts, const DartChannelDef *chans, uint16_t nch){
-    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(dart_plat_realloc, 0);
+    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     (void)mem; (void)cap;             /* heap-backed: the node self-sizes (was a static arena) */
     if (!opts.max_channels) opts.max_channels = nch ? nch : 1;
     node = dart_node_open(&alloc, name, on_msg, on_event, &opts);
@@ -554,9 +554,9 @@ static int node_main(int argc, char **argv){
         if (g_trace && !traced_peers && now_ns() - start > 3000000000ull){
             traced_peers = 1;
             printf("TRACE node fd=%u domain=%u\n", (unsigned)n->fd, n->domain);
-            for (i = 0; i < (int)dart_node_core_max_peers(n->core); i++){
+            for (i = 0; i < (int)i_dart_node_core_max_peers(n->core); i++){
                 uint32_t pid; uint8_t pip[16]; uint16_t pport;
-                if (dart_node_core_peer_at(n->core, (uint16_t)i, &pid, pip, NULL, &pport))
+                if (i_dart_node_core_peer_at(n->core, (uint16_t)i, &pid, pip, NULL, &pport))
                     printf("TRACE peer id=%u addr=%u.%u.%u.%u:%u\n", pid,
                            pip[0], pip[1], pip[2], pip[3], pport);
             }
@@ -747,8 +747,8 @@ static void st_on_event(const DartEvent *ev){
 }
 
 static void st_pump(DartNode *a, DartNode *b, int ms){     /* run both nodes */
-    uint64_t end = dart_plat_now_us() + (uint64_t)ms*1000u;
-    while (dart_plat_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
+    uint64_t end = i_dart_plat_now_us() + (uint64_t)ms*1000u;
+    while (i_dart_plat_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
 }
 
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
@@ -866,7 +866,7 @@ static void nc_event(const DartEvent *ev){
 }
 /* feed the node core through a REAL (sans-IO) discovery core: build an announce datagram
    (discovery section [u16 port][u8 self_ip_len=0][u8 name_len][name], no overlay) so
-   discovery populates its table and fires events INTO dart_node_core_on_disc_event.
+   discovery populates its table and fires events INTO i_dart_node_core_on_disc_event.
    flags 0x01 = BYE. */
 static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
                        const char *name, uint32_t mver){
@@ -903,14 +903,14 @@ static void node_core_checks(void){
 
     memset(ch,0,sizeof ch); ch[0].name="nc/topic";
     memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=1; tc.max_peers=2;
-    tr = dart_init(tmem, sizeof tmem, &tc);
+    tr = dart_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "node-core: transport init");
     if (!tr) return;
 
     /* node core first (discovery bound once it exists, exactly like the runtime) */
     memset(&cc,0,sizeof cc);
     cc.transport=tr; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event;
-    nc = dart_node_core_init(cmem, sizeof cmem, &cc);
+    nc = i_dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
 
@@ -918,18 +918,18 @@ static void node_core_checks(void){
        per-peer scratch via peer_user_bytes; wire its events into the node core */
     memset(&dcfg,0,sizeof dcfg); memset(dcfg.uuid,0xEE,16);
     dcfg.domain_id=99; dcfg.announce_interval_us=1000000; dcfg.peer_timeout_us=1000000; dcfg.max_peers=2;
-    dcfg.peer_user_bytes=dart_node_core_peer_user_bytes();
-    dcfg.on_event=dart_node_core_on_disc_event; dcfg.user=nc;
+    dcfg.peer_user_bytes=i_dart_node_core_peer_user_bytes();
+    dcfg.on_event=i_dart_node_core_on_disc_event; dcfg.user=nc;
     st = dart_discovery_init(dmem, sizeof dmem, &dcfg);
     ST_CHECK(st!=NULL, "node-core: discovery init");
     if (!st) return;
-    dart_node_core_bind_discovery(nc, st);
+    i_dart_node_core_bind_discovery(nc, st);
     dart_discovery_update(st, 1000, out, sizeof out);   /* start */
 
     /* build-meta still works (uses the transport, not any peer table) */
     {   DartBytes mb;
-        dart_node_core_build_meta(nc);
-        mb = dart_node_core_meta(nc);
+        i_dart_node_core_build_meta(nc);
+        mb = i_dart_node_core_meta(nc);
         ST_CHECK(mb.len>=5 && dart_meta_frag(mb)==1200,
                  "node-core: builds overlay (frag=%u)", dart_meta_frag(mb)); }
 
@@ -938,18 +938,18 @@ static void node_core_checks(void){
     n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2000); idA=nc_up_id;
     n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),2000); idB=nc_up_id;
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
-    {   DartString pn = dart_node_core_peer_name(nc, idA);
+    {   DartString pn = i_dart_node_core_peer_name(nc, idA);
         ST_CHECK(pn.data && pn.len==7 && memcmp(pn.data,"nc-self",7)==0,
                  "node-core: peer name learned from announce (%.*s)", (int)pn.len, pn.data?pn.data:"?"); }
-    ST_CHECK(dart_node_core_resolve(nc,idA,&d) && d.port==5001 && d.ip[3]==1,
+    ST_CHECK(i_dart_node_core_resolve(nc,idA,&d) && d.port==5001 && d.ip[3]==1,
              "node-core: peer id resolves to addr (port=%u ip3=%u)", d.port, d.ip[3]);
-    ST_CHECK(dart_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
+    ST_CHECK(i_dart_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
              "node-core: addr resolves to id (id=%u)", id);
 
     /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
     {   DartString pn;
         n=nc_dgram(buf,1,0,99,5001,NULL,2);     dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2001);
-        pn = dart_node_core_peer_name(nc, idA);
+        pn = i_dart_node_core_peer_name(nc, idA);
         ST_CHECK(pn.data && pn.len==12 && memcmp(pn.data,"unknown-peer",12)==0,
                  "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
         n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2002); }
@@ -963,7 +963,7 @@ static void node_core_checks(void){
     nc_down_n=0;
     dart_discovery_update(st, 1003000, out, sizeof out);
     ST_CHECK(nc_down_n==2, "node-core: timeout drops both (downs=%u)", nc_down_n);
-    ST_CHECK(dart_node_core_resolve(nc,idA,&d)==1, "node-core: dropped peer kept (resolves)");
+    ST_CHECK(i_dart_node_core_resolve(nc,idA,&d)==1, "node-core: dropped peer kept (resolves)");
 
     /* 4. the same uuid returns -> RESUME re-fires PEER_UP under the same id */
     nc_up_n=0;
@@ -974,7 +974,7 @@ static void node_core_checks(void){
     nc_down_n=0;
     n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),1100001);
     ST_CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
-    ST_CHECK(dart_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
+    ST_CHECK(i_dart_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
 }
 
 #ifdef DART_SHM
@@ -987,7 +987,7 @@ static void shm_module_checks(void){
     uint32_t cap=0, rlen=0; void *cp; const void *rp;
     i_DartShmDesc d, d2; uint8_t wire[DART_SHM_DESC_WIRE], a[16], b[16];
     const char msg[] = "hello shared memory";
-    dart_plat_startup();
+    i_dart_plat_startup();
     memset(&cfg,0,sizeof cfg);
 #ifdef _WIN32
     strcpy(cfg.name,"dart-shm-stmod");
@@ -995,30 +995,30 @@ static void shm_module_checks(void){
     strcpy(cfg.name,"/dart-shm-stmod");
 #endif
     cfg.segment_id=0x1234; cfg.chunk_bytes=4096; cfg.n_chunks=4;
-    pw=malloc(dart_shm_state_bytes()); pr=malloc(dart_shm_state_bytes());
-    w=dart_shm_create(pw,&cfg); r=dart_shm_attach(pr,&cfg);
+    pw=malloc(i_dart_shm_state_bytes()); pr=malloc(i_dart_shm_state_bytes());
+    w=i_dart_shm_create(pw,&cfg); r=i_dart_shm_attach(pr,&cfg);
     ST_CHECK(w && r, "shm-mod: create + attach by name");
     if (w && r){
-        dart_plat_host_uuid(a); dart_plat_host_uuid(b);
-        ST_CHECK(dart_shm_host_match(a,b)==1, "shm-mod: host_uuid stable + matches");
-        cp=dart_shm_chunk(w,0,&cap); memcpy(cp,msg,sizeof msg);
-        dart_shm_stamp(w,0,(uint32_t)sizeof msg,&d);
+        i_dart_plat_host_uuid(a); i_dart_plat_host_uuid(b);
+        ST_CHECK(i_dart_shm_host_match(a,b)==1, "shm-mod: host_uuid stable + matches");
+        cp=i_dart_shm_chunk(w,0,&cap); memcpy(cp,msg,sizeof msg);
+        i_dart_shm_stamp(w,0,(uint32_t)sizeof msg,&d);
         ST_CHECK(cap==4096 && d.generation==1, "shm-mod: loan + stamp (gen=%llu)", (unsigned long long)d.generation);
-        dart_shm_desc_encode(&d,wire);
-        ST_CHECK(dart_shm_desc_decode(&d2,wire,sizeof wire) &&
+        i_dart_shm_desc_encode(&d,wire);
+        ST_CHECK(i_dart_shm_desc_decode(&d2,wire,sizeof wire) &&
                  d2.chunk==d.chunk && d2.length==d.length && d2.generation==d.generation,
                  "shm-mod: descriptor wire round-trip");
-        rp=dart_shm_read(r,&d2,&rlen);
+        rp=i_dart_shm_read(r,&d2,&rlen);
         ST_CHECK(rp && rlen==sizeof msg && memcmp(rp,msg,sizeof msg)==0, "shm-mod: read sees writer bytes");
-        ST_CHECK(dart_shm_verify(r,&d2)==1, "shm-mod: verify current gen ok");
-        { void *cp2=dart_shm_chunk(w,0,NULL); i_DartShmDesc dn; uint32_t l;
-          memcpy(cp2,"new",4); dart_shm_stamp(w,0,4,&dn);
-          ST_CHECK(dart_shm_read(r,&d2,&l)==NULL, "shm-mod: recycled chunk -> old descriptor refused");
-          ST_CHECK(dart_shm_verify(r,&d2)==0, "shm-mod: verify recycled gen fails (torn guard)"); }
-        dart_shm_detach(r); dart_shm_detach(w);
+        ST_CHECK(i_dart_shm_verify(r,&d2)==1, "shm-mod: verify current gen ok");
+        { void *cp2=i_dart_shm_chunk(w,0,NULL); i_DartShmDesc dn; uint32_t l;
+          memcpy(cp2,"new",4); i_dart_shm_stamp(w,0,4,&dn);
+          ST_CHECK(i_dart_shm_read(r,&d2,&l)==NULL, "shm-mod: recycled chunk -> old descriptor refused");
+          ST_CHECK(i_dart_shm_verify(r,&d2)==0, "shm-mod: verify recycled gen fails (torn guard)"); }
+        i_dart_shm_detach(r); i_dart_shm_detach(w);
     }
     free(pw); free(pr);
-    dart_plat_cleanup();
+    i_dart_plat_cleanup();
 }
 
 /* (2) transport-core loss/repair: a mock on_shm whose success is controllable and a
@@ -1035,18 +1035,18 @@ static void shml_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRAN
 static void shml_pump(int n){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol; int i;
     for (i=0;i<n;i++){
-        while (dart_poll_send(shml_W,&to,buf,sizeof buf,&ol,shml_now)){
+        while (dart_transport_poll_send(shml_W,&to,buf,sizeof buf,&ol,shml_now)){
             if (shml_drop>0 && (buf[0]&0x20u)){ shml_drop--; continue; }   /* drop SHM-DATA */
-            dart_on_datagram(shml_R, 1u, dart_bytes(buf, ol), shml_now);
+            dart_transport_on_datagram(shml_R, 1u, dart_bytes(buf, ol), shml_now);
         }
-        while (dart_poll_send(shml_R,&to,buf,sizeof buf,&ol,shml_now))
-            dart_on_datagram(shml_W, 2u, dart_bytes(buf, ol), shml_now);
+        while (dart_transport_poll_send(shml_R,&to,buf,sizeof buf,&ol,shml_now))
+            dart_transport_on_datagram(shml_W, 2u, dart_bytes(buf, ol), shml_now);
         shml_now += 30000;   /* 30 ms: past repair_delay (20ms), lets heartbeats fire */
     }
 }
 static void shml_send(void){
     static unsigned char chunk[2048]; unsigned char desc[DART_SHM_DESC_WIRE];
-    memset(desc,0,sizeof desc); dart_send_shm(shml_W, 0, dart_bytes(chunk, 1000), desc, shml_now);
+    memset(desc,0,sizeof desc); dart_transport_send_shm(shml_W, 0, dart_bytes(chunk, 1000), desc, shml_now);
 }
 static void shm_loss_checks(void){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; uint8_t blob[256]; size_t bl;
@@ -1057,14 +1057,14 @@ static void shm_loss_checks(void){
     memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
     memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
     rc.on_shm=shml_on_shm; rc.on_event=shml_on_event;
-    nw=dart_required_memory(&wc); mw=malloc(nw); shml_W=dart_init(mw,nw,&wc);
-    nr=dart_required_memory(&rc); mr=malloc(nr); shml_R=dart_init(mr,nr,&rc);
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); shml_W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); shml_R=dart_transport_init(mr,nr,&rc);
     shml_now=1000000;
-    dart_peer_add(shml_W,2u,DART_FRAG_PAYLOAD); dart_peer_add(shml_R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_build_interest(shml_W,blob,sizeof blob); dart_apply_peer_interest(shml_R,1u,dart_bytes(blob,bl));
-    bl=dart_build_interest(shml_R,blob,sizeof blob); dart_apply_peer_interest(shml_W,2u,dart_bytes(blob,bl));
-    dart_peer_set_shm(shml_W,2u,1);
-    ST_CHECK(dart_writer_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
+    dart_transport_peer_add(shml_W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(shml_R,1u,DART_FRAG_PAYLOAD);
+    bl=dart_transport_build_interest(shml_W,blob,sizeof blob); dart_transport_apply_peer_interest(shml_R,1u,dart_bytes(blob,bl));
+    bl=dart_transport_build_interest(shml_R,blob,sizeof blob); dart_transport_apply_peer_interest(shml_W,2u,dart_bytes(blob,bl));
+    dart_transport_peer_set_shm(shml_W,2u,1);
+    ST_CHECK(dart_transport_writer_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
     shml_ok=1; shml_recv=0; shml_lost=0; shml_drop=0; shml_send(); shml_pump(5);
     ST_CHECK(shml_recv==1 && shml_lost==0, "shm-loss: [a] normal delivered");
     shml_recv=0; shml_lost=0; shml_drop=1; shml_send(); shml_pump(10);
@@ -1077,7 +1077,7 @@ static void shm_loss_checks(void){
     ST_CHECK(shml_recv==0 && shml_lost>=1, "shm-loss: [d] persistent -> skip + MSG_LOST");
     shml_ok=1; shml_recv=0; shml_send(); shml_pump(6);
     ST_CHECK(shml_recv==1, "shm-loss: [d] not wedged, next delivered");
-    dart_destroy(shml_W); dart_destroy(shml_R); free(mw); free(mr);
+    dart_transport_destroy(shml_W); dart_transport_destroy(shml_R); free(mw); free(mr);
 }
 
 /* (3) full nodes on loopback: SHM across size classes (byte-exact + shm_tx/rx), and
@@ -1144,7 +1144,7 @@ static void shm_node_checks(void){
 #endif /* DART_SHM */
 
 /* Unit checks for the small pure helpers the Tier-1 cleanup touched: the fragment
- * clamp, the dart_send result codes, and the shared little-endian byte packing.
+ * clamp, the dart_transport_send result codes, and the shared little-endian byte packing.
  * These need no sockets, so they run straight against the transport core. */
 static void unit_checks(void){
     /* dart_clamp_frag: 0 -> default, otherwise clamp into [MIN, MAX] */
@@ -1157,14 +1157,14 @@ static void unit_checks(void){
 
     /* shared little-endian helpers: byte order + round-trip */
     {   uint8_t b[8];
-        dart_le_w16(b, 0xBEEFu);
-        ST_CHECK(b[0]==0xEF && b[1]==0xBE && dart_le_r16(b)==0xBEEFu,
+        i_dart_le_w16(b, 0xBEEFu);
+        ST_CHECK(b[0]==0xEF && b[1]==0xBE && i_dart_le_r16(b)==0xBEEFu,
                  "bytes: w16/r16 little-endian round-trip");
-        dart_le_w32(b, 0x01020304u);
-        ST_CHECK(b[0]==0x04 && b[3]==0x01 && dart_le_r32(b)==0x01020304u,
+        i_dart_le_w32(b, 0x01020304u);
+        ST_CHECK(b[0]==0x04 && b[3]==0x01 && i_dart_le_r32(b)==0x01020304u,
                  "bytes: w32/r32 little-endian round-trip");
-        dart_le_w64(b, 0x0102030405060708ull);
-        ST_CHECK(b[0]==0x08 && b[7]==0x01 && dart_le_r64(b)==0x0102030405060708ull,
+        i_dart_le_w64(b, 0x0102030405060708ull);
+        ST_CHECK(b[0]==0x08 && b[7]==0x01 && i_dart_le_r64(b)==0x0102030405060708ull,
                  "bytes: w64/r64 little-endian round-trip");
     }
 
@@ -1173,7 +1173,7 @@ static void unit_checks(void){
              && dart_topic_id("alpha") != dart_topic_id("beta"),
              "topic-id: deterministic and name-distinct");
 
-    /* dart_send result codes (transport core, no sockets). The size check precedes
+    /* dart_transport_send result codes (transport core, no sockets). The size check precedes
        the role check, so an oversize send on the pub channel is TOO_BIG, while a
        valid-size send on the sub-only channel is ROLE. */
     {   static uint8_t tmem[1<<16];
@@ -1183,14 +1183,14 @@ static void unit_checks(void){
         uch[1].name = "u/sub"; uch[1].role = DART_SUB_ONLY; uch[1].qos.max_message_bytes = 64;
         memset(&tc, 0, sizeof tc);
         tc.channels = uch; tc.n_channels = 2; tc.max_peers = 2;
-        ts = dart_init(tmem, sizeof tmem, &tc);
+        ts = dart_transport_init(tmem, sizeof tmem, &tc);
         ST_CHECK(ts != NULL, "result: transport init");
         if (ts){
             memset(buf, 0, sizeof buf);
-            ST_CHECK(dart_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_CHANNEL, "result: out-of-range channel -> NO_CHANNEL");
-            ST_CHECK(dart_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only channel -> ROLE");
-            ST_CHECK(dart_send(ts, 0, dart_bytes(buf, 100), 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
-            ST_CHECK(dart_send(ts, 0, dart_bytes(buf, 16),  0) == DART_OK,             "result: valid publish -> OK");
+            ST_CHECK(dart_transport_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_CHANNEL, "result: out-of-range channel -> NO_CHANNEL");
+            ST_CHECK(dart_transport_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only channel -> ROLE");
+            ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, 100), 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
+            ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, 16),  0) == DART_OK,             "result: valid publish -> OK");
         }
     }
 }
@@ -1198,7 +1198,7 @@ static void unit_checks(void){
 /* Exercise dart_node_open's staged-cleanup (goto fail) paths: force a failure at a
  * different stage each time so a distinct label runs, assert the open returns NULL,
  * then confirm a normal open still works -- proving cleanup left the platform balanced
- * (a missed dart_plat_cleanup unbalances the refcount; a missed close leaks the socket). */
+ * (a missed i_dart_plat_cleanup unbalances the refcount; a missed close leaks the socket). */
 static void open_fail_checks(void){
     static uint8_t mem[1<<20];
     DartNode *n;
@@ -1227,18 +1227,18 @@ static void open_fail_checks(void){
     /* fail_sock: occupy an ephemeral port, then aim the node's data socket at it; the
        unicast data bind takes no reuse, so it collides and unwinds through fail_sock */
     {   i_DartSock occupy;
-        dart_plat_startup();
-        occupy = dart_plat_udp_open();
-        if (occupy != DART_SOCK_BAD && dart_plat_bind(occupy, 0, 0, 0)){
-            uint16_t port = dart_plat_local_port(occupy);
+        i_dart_plat_startup();
+        occupy = i_dart_plat_udp_open();
+        if (occupy != DART_SOCK_BAD && i_dart_plat_bind(occupy, 0, 0, 0)){
+            uint16_t port = i_dart_plat_local_port(occupy);
             DartAllocator a = dart_allocator_static(mem, sizeof mem);
             n = dart_node_open(&a, NULL, NULL, NULL,
                 &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .data_port=port } });
             ST_CHECK(n == NULL, "open-fail: data-port collision -> NULL (fail_sock)");
             if (n) dart_node_close(n, 0);
         }
-        if (occupy != DART_SOCK_BAD) dart_plat_close(occupy);
-        dart_plat_cleanup();
+        if (occupy != DART_SOCK_BAD) i_dart_plat_close(occupy);
+        i_dart_plat_cleanup();
     }
 
     /* after the failed opens a normal open must still succeed (cleanup balanced) */
@@ -1304,7 +1304,7 @@ static void dg_on_message(const DartMsg *msg){
 static void dynamic_grow_checks(void){
     static const char *names[12] = {"dg/0","dg/1","dg/2","dg/3","dg/4","dg/5",
                                     "dg/6","dg/7","dg/8","dg/9","dg/10","dg/11"};
-    DartAllocator pa = dart_allocator_dynamic(dart_plat_realloc, 0), sa = dart_allocator_dynamic(dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0), sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc0=NULL, *pcN;
     DartChannelOpts co; DartDiscoveryAddr seed; uint8_t payload[8]; int i, t;
     memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=32;
@@ -1355,15 +1355,15 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=4;
     memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
     memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2; rc.on_event=qos_on_event;
-    nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
-    nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
-    dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
+    dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
     qos_incompat_n=0;
-    bl=dart_build_interest(W,blob,sizeof blob); dart_apply_peer_interest(R,1u,dart_bytes(blob,bl));
-    dart_peer_match_counts(R,1u,&pub,&recv);
+    bl=dart_transport_build_interest(W,blob,sizeof blob); dart_transport_apply_peer_interest(R,1u,dart_bytes(blob,bl));
+    dart_transport_peer_match_counts(R,1u,&pub,&recv);
     if (recv_out) *recv_out=recv;
     if (evt_out)  *evt_out=qos_incompat_n;
-    dart_destroy(W); dart_destroy(R); free(mw); free(mr);
+    dart_transport_destroy(W); dart_transport_destroy(R); free(mw); free(mr);
 }
 static void qos_match_checks(void){
     uint16_t recv; unsigned long evt;
@@ -1390,14 +1390,14 @@ static int beff_would_evict(int rrel){
     cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=2; cr.qos.max_message_bytes=8;
     memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
     memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
-    nw=dart_required_memory(&wc); mw=malloc(nw); W=dart_init(mw,nw,&wc);
-    nr=dart_required_memory(&rc); mr=malloc(nr); R=dart_init(mr,nr,&rc);
-    dart_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_peer_add(R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_build_interest(R,blob,sizeof blob); dart_apply_peer_interest(W,2u,dart_bytes(blob,bl));  /* W learns R subscribes */
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
+    dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
+    bl=dart_transport_build_interest(R,blob,sizeof blob); dart_transport_apply_peer_interest(W,2u,dart_bytes(blob,bl));  /* W learns R subscribes */
     memset(payload,0x5A,sizeof payload);
-    for (i=0;i<5;i++) dart_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
-    evict = dart_send_would_evict(W,0);
-    dart_destroy(W); dart_destroy(R); free(mw); free(mr);
+    for (i=0;i<5;i++) dart_transport_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
+    evict = dart_transport_send_would_evict(W,0);
+    dart_transport_destroy(W); dart_transport_destroy(R); free(mw); free(mr);
     return evict;
 }
 static void beff_flow_checks(void){
@@ -1438,8 +1438,8 @@ static int selftest_main(void){
 
       /* 1. JOIN: writer streams while discovery completes; the reader must
             adopt the stream head silently (no gap for a late joiner) */
-      { uint64_t end = dart_plat_now_us() + 5000000u;
-        while (st_samples[ST_CH_GAP]==0 && dart_plat_now_us() < end){
+      { uint64_t end = i_dart_plat_now_us() + 5000000u;
+        while (st_samples[ST_CH_GAP]==0 && i_dart_plat_now_us() < end){
             dart_node_send(w, ST_CH_GAP, payload, sizeof payload);
             st_pump(w, r, 20);
         } }
@@ -1464,18 +1464,18 @@ static int selftest_main(void){
       st_pump(w, r, 200);
       for (i=0;i<ST_DEPTH;i++) dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);
       st_pump(w, NULL, 50);                         /* flush; reader silent, no acks */
-      { uint64_t t0 = dart_plat_now_us(), dt;
+      { uint64_t t0 = i_dart_plat_now_us(), dt;
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);   /* evicts un-acked */
-        dt = dart_plat_now_us() - t0;
+        dt = i_dart_plat_now_us() - t0;
         ST_CHECK(dt >= ST_BLOCK_US-10000 && dt < 4*ST_BLOCK_US,
                  "blocked: send waited ~backpressure_wait_us (%.1f ms)", dt/1000.0);
       }
 
       /* 4. RELEASED: let the reader catch up and ack; sends are instant */
       st_pump(w, r, 300);
-      { uint64_t t0 = dart_plat_now_us(), dt;
+      { uint64_t t0 = i_dart_plat_now_us(), dt;
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);
-        dt = dart_plat_now_us() - t0;
+        dt = i_dart_plat_now_us() - t0;
         ST_CHECK(dt < 20000, "released: acked ring sends instantly (%.1f ms)", dt/1000.0);
         st_pump(w, r, 100);
         /* the blocked-phase eviction dropped only history already in flight to
@@ -1499,9 +1499,9 @@ static int selftest_main(void){
         st_pump(w, r, 200);                            /* reader drains burst; sweep must ack */
         ST_CHECK(st_samples[ST_CH_BLOCK2]-s0 == ST_DEPTH, "sweep-ack: ring delivered (%lu, want %u)",
                  st_samples[ST_CH_BLOCK2]-s0, ST_DEPTH);
-        { uint64_t t0 = dart_plat_now_us(), dt;
+        { uint64_t t0 = i_dart_plat_now_us(), dt;
           dart_node_send(w, ST_CH_BLOCK2, payload, sizeof payload);   /* would evict slot 0 */
-          dt = dart_plat_now_us() - t0;
+          dt = i_dart_plat_now_us() - t0;
           ST_CHECK(dt < 20000,
                    "sweep-ack: sub-only reader's timer ack releases backpressure (%.1f ms)", dt/1000.0);
         }
@@ -1547,11 +1547,11 @@ static int selftest_main(void){
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN];
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
-        for (k=0;k<dart_node_core_max_peers(r->core);k++) if (dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
-        dart_peer_remove(r->transport, wid);
-        dart_peer_add(r->transport, wid,DART_FRAG_PAYLOAD);
-        il = dart_build_interest(w->transport, ib, sizeof ib);
-        dart_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
+        for (k=0;k<i_dart_node_core_max_peers(r->core);k++) if (i_dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
+        dart_transport_peer_remove(r->transport, wid);
+        dart_transport_peer_add(r->transport, wid,DART_FRAG_PAYLOAD);
+        il = dart_transport_build_interest(w->transport, ib, sizeof ib);
+        dart_transport_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
                  "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",
@@ -1565,21 +1565,21 @@ static int selftest_main(void){
             withheld (the writer won't push to a dropped reader); a same-incarnation
             resume keeps the reader's deliver position, so the withheld backlog
             replays with no gap and no dup. This is the resume-model primitive that
-            dart_peer_dormant/dart_peer_resume expose (the node drives them off
+            dart_transport_peer_dormant/dart_transport_peer_resume expose (the node drives them off
             discovery DROP/return). */
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN], g0 = st_gap_calls[ST_CH_DYN];
         uint32_t wid = 0, rid = 0; uint16_t k;
-        for (k=0;k<dart_node_core_max_peers(r->core);k++) if (dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
-        for (k=0;k<dart_node_core_max_peers(w->core);k++) if (dart_node_core_peer_at(w->core,k,&rid,NULL,NULL,NULL)) break;
-        dart_peer_dormant(w->transport, rid);   /* writer drops the reader from flow control */
-        dart_peer_dormant(r->transport, wid);   /* reader stops acking the writer */
+        for (k=0;k<i_dart_node_core_max_peers(r->core);k++) if (i_dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
+        for (k=0;k<i_dart_node_core_max_peers(w->core);k++) if (i_dart_node_core_peer_at(w->core,k,&rid,NULL,NULL,NULL)) break;
+        dart_transport_peer_dormant(w->transport, rid);   /* writer drops the reader from flow control */
+        dart_transport_peer_dormant(r->transport, wid);   /* reader stops acking the writer */
         for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
         st_pump(w, r, 300);
         ST_CHECK(st_samples[ST_CH_DYN] == s0, "resume: dormant peer withholds sends (%lu, want %lu)",
                  st_samples[ST_CH_DYN], s0);
-        dart_peer_resume(w->transport, rid);
-        dart_peer_resume(r->transport, wid);
+        dart_transport_peer_resume(w->transport, rid);
+        dart_transport_peer_resume(r->transport, wid);
         st_pump(w, r, 400);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+3,
                  "resume: backlog replays from preserved position (%lu, want %lu)",
@@ -1618,8 +1618,8 @@ static int selftest_main(void){
       if (a && b){
           st_any = 0;
           for (k=0;k<ST_NCH;k++) dart_node_send(a, k, payload, 16);
-          { uint64_t end = dart_plat_now_us() + 5000000u;
-            while (st_any < ST_NCH && dart_plat_now_us() < end) st_pump(a, b, 20); }
+          { uint64_t end = i_dart_plat_now_us() + 5000000u;
+            while (st_any < ST_NCH && i_dart_plat_now_us() < end) st_pump(a, b, 20); }
           ST_CHECK(st_any == ST_NCH, "scale: all channels delivered (%lu/%u)", st_any, ST_NCH);
           dart_node_close(b, 1);
           dart_node_close(a, 1);
@@ -1646,8 +1646,8 @@ static int selftest_main(void){
       r2=test_node_open(mem_nr,sizeof mem_nr,"reader-node",st_on_message,st_on_event,ro2,nr,2);
       ST_CHECK(w2 && r2, "named: nodes open");
       if (w2 && r2){
-          uint64_t end = dart_plat_now_us() + 5000000u;
-          while (st_samples[0]==0 && dart_plat_now_us()<end){
+          uint64_t end = i_dart_plat_now_us() + 5000000u;
+          while (st_samples[0]==0 && i_dart_plat_now_us()<end){
               dart_node_send(w2, 0, payload, 16); st_pump(w2,r2,20);
           }
           ST_CHECK(st_samples[0] > 0, "named: same name matches across nodes (%lu)", st_samples[0]);
@@ -1958,9 +1958,9 @@ static DartNode *ctl_open(uint16_t domain, int coordinator,
  * children; NULL if none known yet */
 static const char *ctl_peer_ip(DartNode *ctl, char out[20]){
     uint16_t i;
-    for (i=0;i<dart_node_core_max_peers(ctl->core);i++){
+    for (i=0;i<i_dart_node_core_max_peers(ctl->core);i++){
         uint8_t pip[16], pil;
-        if (dart_node_core_peer_at(ctl->core, i, NULL, pip, &pil, NULL) && pil==4){
+        if (i_dart_node_core_peer_at(ctl->core, i, NULL, pip, &pil, NULL) && pil==4){
             snprintf(out, 20, "%u.%u.%u.%u", pip[0], pip[1], pip[2], pip[3]);
             return out;
         }
@@ -2350,9 +2350,9 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     po.discovery.max_peers=(uint16_t)(nsubs+2); po.disable_shm=(uint8_t)disable_shm;
     po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
     so=po;
-    pa=dart_allocator_dynamic(dart_plat_realloc, 0);
+    pa=dart_allocator_dynamic(i_dart_plat_realloc, 0);
     P=dart_node_open(&pa,"ms-pub",NULL,NULL,&po);
-    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(dart_plat_realloc, 0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
+    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(i_dart_plat_realloc, 0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
     if (!P){ free(payload); return; }
     pc=dart_node_create_channel(P,"ms/ch",DART_PUB_ONLY,NULL,&co);
     for (i=0;i<nsubs;i++) dart_node_create_channel(S[i],"ms/ch",DART_SUB_ONLY,NULL,&co);
@@ -2361,18 +2361,18 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     a0=ms_allocs(P,S,nsubs);                              /* total allocs before any traffic */
     g_ms_rx=0;                                            /* warmup: fill + size the buffers */
     for (i=0;i<nwarm;i++){
-        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)dart_plat_now_us();
+        double s0=(double)i_dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
         if (i<keep){ cold_sum += s1-s0; coldc++; }
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
     a1=ms_allocs(P,S,nsubs);                              /* allocs after warmup */
-    g_ms_rx=0; t0=(double)dart_plat_now_us();             /* steady: buffers sized -> must not alloc */
+    g_ms_rx=0; t0=(double)i_dart_plat_now_us();             /* steady: buffers sized -> must not alloc */
     for (i=0;i<nsteady;i++){
-        double s0=(double)dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)dart_plat_now_us();
+        double s0=(double)i_dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
         warm_sum += s1-s0;
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
-    t1=(double)dart_plat_now_us();
+    t1=(double)i_dart_plat_now_us();
     a2=ms_allocs(P,S,nsubs);
     dart_node_mem_stats(P,NULL,&ppeak,NULL); dart_node_mem_stats(S[0],NULL,&speak,NULL);
     msg_s = (t1>t0) ? nsteady / ((t1-t0)/1e6) : 0;

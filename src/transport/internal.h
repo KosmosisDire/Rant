@@ -128,19 +128,19 @@ typedef struct {
     DartQos    qos;
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
     const char *name;       /* our copy of the topic name (NUL-terminated storage) */
-    uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_channel_name is per-delivery) */
+    uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_channel_name is per-delivery) */
     uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
-                               dart_channel_define), so dart_destroy frees it */
+                               dart_transport_channel_define), so dart_transport_destroy frees it */
     /* writer */
     i_DartWriterSample *history;       /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
     uint64_t  next_seqno;
     uint64_t  first_seqno;  /* lowest seqno still cached */
     uint8_t   have_first;
-    /* cumulative repair counters, summed over proxies; read via dart_repair_stats */
+    /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
 
@@ -157,7 +157,7 @@ struct DartTransportState {
 #endif
     /* peer interest over OUR channel table, one bit per user channel; the proxies
        plus these bits are the whole stored interest (full peer lists are not kept).
-       Fed by dart_apply_peer_interest from the peer's discovery announce. */
+       Fed by dart_transport_apply_peer_interest from the peer's discovery announce. */
     uint8_t     *peer_pub_bitmap; /* [max_peers][bitmap_len] peer publishes channel c */
     uint8_t     *peer_sub_bitmap; /* [max_peers][bitmap_len] peer subscribes channel c */
     uint8_t     *peer_sub_reliable; /* [max_peers][bitmap_len] ...and requested RELIABLE; sourced
@@ -191,55 +191,55 @@ struct DartTransportState {
 typedef enum { DART_ORDER_OLD, DART_ORDER_GAP, DART_ORDER_ADOPTED, DART_ORDER_INORDER } i_DartReaderOrder;
 
 /* small shared helpers (kept inline so every fragment can use them) */
-static inline void dart_bset(uint8_t*bitmap,uint32_t i){bitmap[i>>3]|=(uint8_t)(1u<<(i&7));}
-static inline int  dart_bget(const uint8_t*bitmap,uint32_t i){return (bitmap[i>>3]>>(i&7))&1;}
+static inline void i_dart_bit_set(uint8_t*bitmap,uint32_t i){bitmap[i>>3]|=(uint8_t)(1u<<(i&7));}
+static inline int  i_dart_bit_get(const uint8_t*bitmap,uint32_t i){return (bitmap[i>>3]>>(i&7))&1;}
 #ifdef DART_SHM
 /* where a sample's bytes live: the external chunk for SHM samples, else our buf */
-static inline const uint8_t *dart__sbuf(const i_DartWriterSample *s){ return s->shm ? s->shm_buf : s->buf; }
+static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ return s->shm ? s->shm_buf : s->buf; }
 #else
-static inline const uint8_t *dart__sbuf(const i_DartWriterSample *s){ return s->buf; }
+static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ return s->buf; }
 #endif
 /* a deferred timer was (re)armed for absolute time t: keep next_deadline as the
    minimum so the poll wakes when it is due. t==0 is an immediate ack (woken via the
    active-lane queue, not a timer), so it is ignored here. */
-static inline void dart__deadline(DartTransportState *st, uint64_t t){
+static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
 }
 
 /* writer/reader proxy for a (channel,peer) lane. The proxies are
    [n_channels][max_peers] row-major; centralizing the index math here keeps a
    transposed channel/peer from silently corrupting a neighbor lane. */
-static inline i_DartWriterProxy *dart__writer_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
+static inline i_DartWriterProxy *i_dart_writer_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
 }
-static inline i_DartReaderProxy *dart__reader_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
+static inline i_DartReaderProxy *i_dart_reader_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
     return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
 }
 /* wire alias for a local channel: its own index (the advertiser's handle). The
  * peer mapped this alias to its matching channel from our interest list. */
-static inline uint16_t dart__alias_of(DartTransportState *st, int channel_idx){
+static inline uint16_t i_dart_alias_of(DartTransportState *st, int channel_idx){
     (void)st; return (uint16_t)channel_idx;
 }
 
 /* cross-file helper prototypes (definitions in wire/sched/writer/reader.c + transport.c) */
-size_t dart_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWriterSample *s, uint16_t frag, const uint8_t *payload, uint16_t payload_len);
+size_t i_dart_wire_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWriterSample *s, uint16_t frag, const uint8_t *payload, uint16_t payload_len);
 #ifdef DART_SHM
-size_t dart_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count, const uint8_t *desc);
+size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count, const uint8_t *desc);
 #endif
-size_t dart_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt);
-size_t dart_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
-void   dart__lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot);
-size_t dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-void   dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p);
-void   dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt);
+size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
+void   i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot);
+size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+void   i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p);
+void   i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef DART_SHM
-void   dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+void   i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
 #endif
-void   dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
-size_t dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-i_DartChannel *dart_chan(DartTransportState *st, uint16_t channel, int *idx_out);
-int    dart_peer_slot(DartTransportState *st, uint32_t id);
-void   dart__event(DartTransportState *st, DartTransportEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
-uint64_t dart_unicast_join_seqno(const i_DartChannel *ch);
+void   i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+i_DartChannel *i_dart_channel_at(DartTransportState *st, uint16_t channel, int *idx_out);
+int    i_dart_peer_slot(DartTransportState *st, uint32_t id);
+void   i_dart_transport_fire_event(DartTransportState *st, DartTransportEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count, const char *detail);
+uint64_t i_dart_channel_unicast_join_seqno(const i_DartChannel *ch);
 
 #endif /* DART_TRANSPORT_INTERNAL_H */

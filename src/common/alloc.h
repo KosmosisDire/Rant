@@ -37,7 +37,7 @@ typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
 #endif
 
 /* Page backing (dynamic only): allocate/grow/free whole pages, ptr NULL = alloc, size 0 =
- * free. The runtime injects dart_plat_realloc; a test injects stdlib realloc. */
+ * free. The runtime injects i_dart_plat_realloc; a test injects stdlib realloc. */
 typedef void *(*DartPageFn)(void *ptr, size_t size);
 
 /* Header at the front of every page: a shared bump page, or a freeable one-allocation page. */
@@ -57,14 +57,14 @@ typedef struct {
     uint64_t    alloc_calls, pages_live;
 } DartAllocator;
 
-static inline size_t i_alloc_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
-static inline size_t i_alloc_pow2(size_t n){                 /* round up to a power of two, >= 16 */
+static inline size_t i_dart_allocator_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
+static inline size_t i_dart_allocator_pow2(size_t n){                 /* round up to a power of two, >= 16 */
     size_t p = 16u;
     while (p < n){ if (p > (SIZE_MAX >> 1)) return n; p <<= 1; }
     return p;
 }
 /* dynamic runaway guard: 1 if `need` more bytes would breach max_bytes */
-static inline int i_alloc_over(const DartAllocator *a, size_t need){
+static inline int i_dart_allocator_over(const DartAllocator *a, size_t need){
     return a->max_bytes && a->in_use + need > a->max_bytes;
 }
 
@@ -92,12 +92,12 @@ static inline DartAllocator dart_allocator_dynamic(DartPageFn page_realloc, uint
 }
 
 /* bump `need` bytes (16-aligned) from a shared page, adding one on overflow (dynamic). */
-static inline void *i_alloc_bump(DartAllocator *a, size_t need){
+static inline void *i_dart_allocator_bump(DartAllocator *a, size_t need){
     i_DartPage *pg = a->shared;
-    need = i_alloc_align(need);
-    if (!pg || i_alloc_align(pg->used) + need > pg->cap){
+    need = i_dart_allocator_align(need);
+    if (!pg || i_dart_allocator_align(pg->used) + need > pg->cap){
         size_t psz; i_DartPage *np;
-        if (!a->page_realloc || i_alloc_over(a, need)) return NULL;   /* static full, or over the guard */
+        if (!a->page_realloc || i_dart_allocator_over(a, need)) return NULL;   /* static full, or over the guard */
         psz = a->page_size;
         if (need + sizeof(i_DartPage) > psz) psz = need + sizeof(i_DartPage);   /* oversized page */
         np = (i_DartPage *)a->page_realloc(NULL, psz);
@@ -107,31 +107,31 @@ static inline void *i_alloc_bump(DartAllocator *a, size_t need){
         a->shared = np; a->pages_live++;
         pg = np;
     }
-    pg->used = i_alloc_align(pg->used);
+    pg->used = i_dart_allocator_align(pg->used);
     { void *out = (uint8_t *)(pg + 1) + pg->used; pg->used += need; return out; }
 }
 
 static inline void *dart_allocator_fixed(DartAllocator *a, size_t size){
     void *p;
     if (!a || size == 0) return NULL;
-    p = i_alloc_bump(a, size);
-    if (p){ a->alloc_calls++; a->in_use += i_alloc_align(size);
+    p = i_dart_allocator_bump(a, size);
+    if (p){ a->alloc_calls++; a->in_use += i_dart_allocator_align(size);
             if (a->in_use > a->peak) a->peak = a->in_use; }
     return p;
 }
 
 /* a freeable block of `cap` payload bytes: its own page (dynamic) or a header+payload bumped
  * from the buffer (static, where free is a no-op). */
-static inline void *i_alloc_new_owned(DartAllocator *a, size_t cap){
+static inline void *i_dart_allocator_new_owned(DartAllocator *a, size_t cap){
     i_DartPage *pg;
     if (a->page_realloc){
-        if (i_alloc_over(a, cap)) return NULL;
+        if (i_dart_allocator_over(a, cap)) return NULL;
         pg = (i_DartPage *)a->page_realloc(NULL, sizeof(i_DartPage) + cap);
         if (!pg) return NULL;
         pg->prev = NULL; pg->next = a->owned; if (a->owned) a->owned->prev = pg;
         a->owned = pg; a->pages_live++;
     } else {
-        pg = (i_DartPage *)i_alloc_bump(a, sizeof(i_DartPage) + cap);
+        pg = (i_DartPage *)i_dart_allocator_bump(a, sizeof(i_DartPage) + cap);
         if (!pg) return NULL;
         pg->prev = pg->next = NULL;   /* not linked; reset rewinds the buffer */
     }
@@ -140,7 +140,7 @@ static inline void *i_alloc_new_owned(DartAllocator *a, size_t cap){
     return (void *)(pg + 1);
 }
 
-static inline void i_alloc_free_owned(DartAllocator *a, void *ptr){
+static inline void i_dart_allocator_free_owned(DartAllocator *a, void *ptr){
     i_DartPage *pg = (i_DartPage *)ptr - 1;
     a->in_use -= pg->cap;
     if (a->page_realloc){                              /* dynamic: unlink + free the page */
@@ -155,15 +155,15 @@ static inline void i_alloc_free_owned(DartAllocator *a, void *ptr){
 static inline void *dart_allocator_alloc(void *alloc, void *ptr, size_t size){
     DartAllocator *a = (DartAllocator *)alloc; size_t cap;
     if (!a) return NULL;
-    if (size == 0){ if (ptr) i_alloc_free_owned(a, ptr); return NULL; }
-    cap = a->page_realloc ? i_alloc_pow2(size) : i_alloc_align(size);   /* pow2 dynamic, tight static */
-    if (!ptr) return i_alloc_new_owned(a, cap);
+    if (size == 0){ if (ptr) i_dart_allocator_free_owned(a, ptr); return NULL; }
+    cap = a->page_realloc ? i_dart_allocator_pow2(size) : i_dart_allocator_align(size);   /* pow2 dynamic, tight static */
+    if (!ptr) return i_dart_allocator_new_owned(a, cap);
     {   i_DartPage *pg = (i_DartPage *)ptr - 1;
         if (cap <= pg->cap) return ptr;                          /* still fits: keep it */
-        {   void *np = i_alloc_new_owned(a, cap);                   /* grow: new + copy + free old */
+        {   void *np = i_dart_allocator_new_owned(a, cap);                   /* grow: new + copy + free old */
             if (!np) return NULL;                                /* old left intact */
             memcpy(np, ptr, pg->cap);
-            i_alloc_free_owned(a, ptr);
+            i_dart_allocator_free_owned(a, ptr);
             return np;
         }
     }

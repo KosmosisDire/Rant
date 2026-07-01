@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-static inline uint64_t dart_fnv1a64(const void *data, size_t n){
+static inline uint64_t i_dart_fnv1a64(const void *data, size_t n){
     const uint8_t *p = (const uint8_t *)data;
     uint64_t h = 1469598103934665603ull; size_t i;
     for (i = 0; i < n; i++){ h ^= (uint64_t)p[i]; h *= 1099511628211ull; }
@@ -17,7 +17,7 @@ static inline uint64_t dart_fnv1a64(const void *data, size_t n){
 }
 
 /* Over a NUL-terminated string (the topic-name identity form); NULL => 0. */
-static inline uint64_t dart_fnv1a64_str(const char *s){
+static inline uint64_t i_dart_fnv1a64_str(const char *s){
     uint64_t h = 1469598103934665603ull;
     const unsigned char *p = (const unsigned char *)s;
     if (!s) return 0;

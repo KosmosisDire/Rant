@@ -1,5 +1,5 @@
 /* Bump allocator shared by the layers that pack sub-blocks into one caller-provided
- * arena (transport state, node). Measure mode (base==NULL): dart_take returns NULL but
+ * arena (transport state, node). Measure mode (base==NULL): i_dart_bump_take returns NULL but
  * still advances offset, so the sizing pass and the build pass run the SAME code and
  * cannot drift. Build mode (base set): returns base + aligned offset, or sets oom and
  * returns NULL once the offset passes cap. static inline: no link symbol and no unused
@@ -14,10 +14,10 @@
 typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } i_DartBump;
 
 /* round n up to the next multiple of align (a power of two): names the (x+15)&~15 idiom */
-static inline size_t dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
+static inline size_t i_dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
 
-static inline void *dart_take(i_DartBump *b, size_t n, size_t align){
-    size_t a = dart_align_up(b->offset, align);
+static inline void *i_dart_bump_take(i_DartBump *b, size_t n, size_t align){
+    size_t a = i_dart_align_up(b->offset, align);
     b->offset = a + n;
     if (b->base){
         if (b->offset > b->cap){ b->oom = 1; return NULL; }

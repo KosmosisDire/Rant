@@ -9,9 +9,9 @@
  *
  * Address convention: endpoints (send/recv, peers, seeds) are a uint8_t ip[4]
  * plus a host-order uint16_t port. Multicast group and interface addresses are a
- * uint32_t in NETWORK byte order ("naddr", as from dart_plat_parse_ip /
- * dart_plat_ipv4). The two are the same four bytes; move between them with
- * dart_plat_ip4_to_naddr / dart_plat_naddr_to_ip4.
+ * uint32_t in NETWORK byte order ("naddr", as from i_dart_plat_parse_ip /
+ * i_dart_plat_ipv4). The two are the same four bytes; move between them with
+ * i_dart_plat_ip4_to_naddr / i_dart_plat_naddr_to_ip4.
  */
 #ifndef DART_PLAT_H
 #define DART_PLAT_H
@@ -40,69 +40,69 @@ typedef struct { i_DartSock fd; short events; short revents; } i_DartPollfd;
 /* Process-wide net init/teardown (WSAStartup/WSACleanup; no-op elsewhere).
  * Refcounted, so a node and its discovery opening/closing in turn pair safely.
  * startup returns 1 on success, 0 on failure. */
-int  dart_plat_startup(void);
-void dart_plat_cleanup(void);
+int  i_dart_plat_startup(void);
+void i_dart_plat_cleanup(void);
 
 /* Monotonic microseconds from an arbitrary epoch. */
-uint64_t dart_plat_now_us(void);
+uint64_t i_dart_plat_now_us(void);
 
 /* CSPRNG fill; 1 on success, 0 if no entropy source (caller falls back). */
-int      dart_plat_random(void *buf, size_t len);
+int      i_dart_plat_random(void *buf, size_t len);
 /* Best-effort host identity for a UUID fallback when the CSPRNG is unavailable. */
-size_t   dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
-uint64_t dart_plat_pid(void);
+size_t   i_dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
+uint64_t i_dart_plat_pid(void);
 
 /* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =
  * allocate, size 0 = free (returns NULL). The single heap dependency, so the node
  * layer holds no <stdlib.h>; a target with a custom heap overrides just this. */
-void    *dart_plat_realloc(void *ptr, size_t size);
+void    *i_dart_plat_realloc(void *ptr, size_t size);
 
 /* --- UDP sockets --- */
-i_DartSock dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
-void      dart_plat_close(i_DartSock s);
+i_DartSock i_dart_plat_udp_open(void);                   /* DART_SOCK_BAD on failure */
+void      i_dart_plat_close(i_DartSock s);
 /* Bind to if_naddr (0 = INADDR_ANY) : port (0 = OS ephemeral). reuse sets
  * SO_REUSEADDR (+ SO_REUSEPORT where it exists) before binding. 1 ok, 0 fail. */
-int       dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse);
+int       i_dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse);
 /* Bound port in host order (read an ephemeral bind back); 0 on failure. */
-uint16_t  dart_plat_local_port(i_DartSock s);
-void      dart_plat_set_nonblock(i_DartSock s);
-void      dart_plat_set_rcvbuf(i_DartSock s, int bytes);
-void      dart_plat_set_sndbuf(i_DartSock s, int bytes);
+uint16_t  i_dart_plat_local_port(i_DartSock s);
+void      i_dart_plat_set_nonblock(i_DartSock s);
+void      i_dart_plat_set_rcvbuf(i_DartSock s, int bytes);
+void      i_dart_plat_set_sndbuf(i_DartSock s, int bytes);
 /* Stop a bounced datagram (ICMP port-unreachable) from failing the next recv on
  * a shared RX socket (Windows SIO_UDP_CONNRESET; no-op elsewhere). */
-void      dart_plat_suppress_connreset(i_DartSock s);
+void      i_dart_plat_suppress_connreset(i_DartSock s);
 
 /* --- multicast --- */
-void dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr);
-void dart_plat_mcast_ttl  (i_DartSock s, uint8_t ttl);
-void dart_plat_mcast_loop (i_DartSock s, int on);
-int  dart_plat_mcast_join (i_DartSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
+void i_dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr);
+void i_dart_plat_mcast_ttl  (i_DartSock s, uint8_t ttl);
+void i_dart_plat_mcast_loop (i_DartSock s, int on);
+int  i_dart_plat_mcast_join (i_DartSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
 
 /* --- datagram IO --- */
-/* sendto: returns bytes sent, <0 on error (test dart_plat_would_block). */
-int  dart_plat_send(i_DartSock s, const void *buf, size_t len,
+/* sendto: returns bytes sent, <0 on error (test i_dart_plat_would_block). */
+int  i_dart_plat_send(i_DartSock s, const void *buf, size_t len,
                     const uint8_t ip[4], uint16_t port);
 /* recvfrom: returns bytes (>0), 0 or <0 if none. src_ip/src_port out, may be NULL. */
-int  dart_plat_recv(i_DartSock s, void *buf, size_t cap,
+int  i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
                     uint8_t src_ip[4], uint16_t *src_port);
-int  dart_plat_would_block(void);
+int  i_dart_plat_would_block(void);
 /* poll up to n fds for timeout_ms; >0 ready, 0 timeout, <0 error. */
-int  dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms);
+int  i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms);
 
 /* --- address helpers (uint32_t naddr is network byte order) --- */
-uint32_t dart_plat_parse_ip(const char *dotted);          /* "1.2.3.4" -> naddr */
-uint32_t dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
-uint32_t dart_plat_ip4_to_naddr(const uint8_t ip[4]);
-void     dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
+uint32_t i_dart_plat_parse_ip(const char *dotted);          /* "1.2.3.4" -> naddr */
+uint32_t i_dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+uint32_t i_dart_plat_ip4_to_naddr(const uint8_t ip[4]);
+void     i_dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
 /* Source address the OS would use to reach dst_naddr:port (connect + getsockname
  * on an unbound UDP socket; no packet leaves). 0 on failure. Backs interface
  * pinning and the same-host check. */
-uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
+uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
 /* Enumerate this host's usable IPv4 interface addresses (up, non-loopback) as
  * network-order naddr into out[0..max), returning the count written (0 if none, or
  * if the platform offers no enumeration). Backs the auto interface-pin fallback when
  * a route probe can't name a real LAN interface. */
-int      dart_plat_local_ipv4s(uint32_t *out, int max);
+int      i_dart_plat_local_ipv4s(uint32_t *out, int max);
 
 /* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
  * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
@@ -114,16 +114,16 @@ int      dart_plat_local_ipv4s(uint32_t *out, int max);
  * and reports it via *out_bytes (which detach then needs). *handle receives an OS
  * handle that detach needs. Return the mapped base, or NULL on failure. Names: POSIX
  * "/name" form, Windows a plain object name; dart_shm derives one from the node uuid. */
-void *dart_plat_shm_create(const char *name, size_t bytes, void **handle);
-void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
+void *i_dart_plat_shm_create(const char *name, size_t bytes, void **handle);
+void *i_dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
 /* unmap; the creator passes unlink_it=1 to also remove the OS object. */
-void  dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+void  i_dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
 /* stable per-host id (Linux machine-id, else a hostname hash) for the same-host
  * pre-check; a successful attach is the real gate. */
-void  dart_plat_host_uuid(uint8_t out[16]);
+void  i_dart_plat_host_uuid(uint8_t out[16]);
 /* cross-process 64-bit atomic for the chunk generation stamp (acquire/release). */
-uint64_t dart_plat_atomic_load64 (volatile uint64_t *p);
-void     dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
+uint64_t i_dart_plat_atomic_load64 (volatile uint64_t *p);
+void     i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
 #endif /* DART_SHM */
 
 #ifdef __cplusplus

@@ -15,7 +15,7 @@
 
 #include "core.h"
 #include <string.h>
-#include <stdlib.h>           /* malloc/realloc/free behind dart_plat_realloc */
+#include <stdlib.h>           /* malloc/realloc/free behind i_dart_plat_realloc */
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -62,20 +62,20 @@
 
 /* ----------------------------------------------------------------- lifecycle */
 #ifdef _WIN32
-static int dart__wsa_refs = 0;
-int dart_plat_startup(void){
+static int i_dart_plat_wsa_refs = 0;
+int i_dart_plat_startup(void){
     WSADATA w;
-    if (dart__wsa_refs == 0){
+    if (i_dart_plat_wsa_refs == 0){
         if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
   #ifndef DART_NO_HIGHRES_TIMER
         timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
   #endif
     }
-    dart__wsa_refs++;
+    i_dart_plat_wsa_refs++;
     return 1;
 }
-void dart_plat_cleanup(void){
-    if (dart__wsa_refs > 0 && --dart__wsa_refs == 0){
+void i_dart_plat_cleanup(void){
+    if (i_dart_plat_wsa_refs > 0 && --i_dart_plat_wsa_refs == 0){
   #ifndef DART_NO_HIGHRES_TIMER
         timeEndPeriod(1);
   #endif
@@ -83,12 +83,12 @@ void dart_plat_cleanup(void){
     }
 }
 #else
-int  dart_plat_startup(void){ return 1; }
-void dart_plat_cleanup(void){}
+int  i_dart_plat_startup(void){ return 1; }
+void i_dart_plat_cleanup(void){}
 #endif
 
 /* --------------------------------------------------------------------- clock */
-uint64_t dart_plat_now_us(void){
+uint64_t i_dart_plat_now_us(void){
 #ifdef _WIN32
     static LARGE_INTEGER f; LARGE_INTEGER c;
     if (!f.QuadPart) QueryPerformanceFrequency(&f);
@@ -101,7 +101,7 @@ uint64_t dart_plat_now_us(void){
 }
 
 /* ------------------------------------------------------------ entropy / host */
-int dart_plat_random(void *buf, size_t len){
+int i_dart_plat_random(void *buf, size_t len){
 #if defined(_WIN32)
     /* NULL handle selects the system-preferred RNG. 0 == SUCCESS. */
     return BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
@@ -137,7 +137,7 @@ int dart_plat_random(void *buf, size_t len){
 #endif
 }
 
-size_t dart_plat_hostname(char *buf, size_t cap){
+size_t i_dart_plat_hostname(char *buf, size_t cap){
     if (!buf || cap == 0) return 0;
     buf[0] = 0;
     gethostname(buf, (int)cap - 1);
@@ -145,7 +145,7 @@ size_t dart_plat_hostname(char *buf, size_t cap){
     return strlen(buf);
 }
 
-uint64_t dart_plat_pid(void){
+uint64_t i_dart_plat_pid(void){
 #ifdef _WIN32
     return (uint64_t)GetCurrentProcessId();
 #else
@@ -155,13 +155,13 @@ uint64_t dart_plat_pid(void){
 
 /* The one heap dependency, kept behind the platform layer so the node holds no
  * <stdlib.h>: ptr NULL = allocate, size 0 = free (returns NULL), else realloc. */
-void *dart_plat_realloc(void *ptr, size_t size){
+void *i_dart_plat_realloc(void *ptr, size_t size){
     if (size == 0){ free(ptr); return NULL; }
     return realloc(ptr, size);
 }
 
 /* --------------------------------------------------------------- UDP sockets */
-i_DartSock dart_plat_udp_open(void){
+i_DartSock i_dart_plat_udp_open(void){
 #ifdef _WIN32
     SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
     return (fd == INVALID_SOCKET) ? DART_SOCK_BAD : (i_DartSock)fd;
@@ -171,7 +171,7 @@ i_DartSock dart_plat_udp_open(void){
 #endif
 }
 
-void dart_plat_close(i_DartSock s){
+void i_dart_plat_close(i_DartSock s){
     if (s == DART_SOCK_BAD) return;
 #ifdef _WIN32
     closesocket((SOCKET)s);
@@ -180,7 +180,7 @@ void dart_plat_close(i_DartSock s){
 #endif
 }
 
-int dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse){
+int i_dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse){
     struct sockaddr_in a;
     if (reuse){
         int on = 1;
@@ -196,14 +196,14 @@ int dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse){
     return bind(DART__FD(s), (struct sockaddr*)&a, sizeof a) == 0;
 }
 
-uint16_t dart_plat_local_port(i_DartSock s){
+uint16_t i_dart_plat_local_port(i_DartSock s){
     struct sockaddr_in a; i_DartSocklen ll = sizeof a;
     memset(&a, 0, sizeof a);
     if (getsockname(DART__FD(s), (struct sockaddr*)&a, &ll) != 0) return 0;
     return ntohs(a.sin_port);
 }
 
-void dart_plat_set_nonblock(i_DartSock s){
+void i_dart_plat_set_nonblock(i_DartSock s){
 #ifdef _WIN32
     u_long nb = 1; ioctlsocket((SOCKET)s, FIONBIO, &nb);
 #else
@@ -212,14 +212,14 @@ void dart_plat_set_nonblock(i_DartSock s){
 #endif
 }
 
-void dart_plat_set_rcvbuf(i_DartSock s, int bytes){
+void i_dart_plat_set_rcvbuf(i_DartSock s, int bytes){
     setsockopt(DART__FD(s), SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof bytes);
 }
-void dart_plat_set_sndbuf(i_DartSock s, int bytes){
+void i_dart_plat_set_sndbuf(i_DartSock s, int bytes){
     setsockopt(DART__FD(s), SOL_SOCKET, SO_SNDBUF, (const char*)&bytes, sizeof bytes);
 }
 
-void dart_plat_suppress_connreset(i_DartSock s){
+void i_dart_plat_suppress_connreset(i_DartSock s){
 #ifdef _WIN32
     BOOL off = FALSE; DWORD bv = 0;
     WSAIoctl((SOCKET)s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bv, NULL, NULL);
@@ -229,18 +229,18 @@ void dart_plat_suppress_connreset(i_DartSock s){
 }
 
 /* ----------------------------------------------------------------- multicast */
-void dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr){
+void i_dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr){
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_IF, (const char*)&if_naddr, sizeof if_naddr);
 }
-void dart_plat_mcast_ttl(i_DartSock s, uint8_t ttl){
+void i_dart_plat_mcast_ttl(i_DartSock s, uint8_t ttl){
     unsigned char t = ttl;
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&t, sizeof t);
 }
-void dart_plat_mcast_loop(i_DartSock s, int on){
+void i_dart_plat_mcast_loop(i_DartSock s, int on){
     unsigned char l = (unsigned char)(on ? 1 : 0);
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
 }
-int dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
+int i_dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
     mr.imr_multiaddr.s_addr = group_naddr;
     mr.imr_interface.s_addr = if_naddr;
@@ -249,7 +249,7 @@ int dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
 }
 
 /* --------------------------------------------------------------- datagram IO */
-int dart_plat_send(i_DartSock s, const void *buf, size_t len,
+int i_dart_plat_send(i_DartSock s, const void *buf, size_t len,
                    const uint8_t ip[4], uint16_t port){
     struct sockaddr_in d;
     memset(&d, 0, sizeof d);
@@ -260,7 +260,7 @@ int dart_plat_send(i_DartSock s, const void *buf, size_t len,
                        (struct sockaddr*)&d, sizeof d);
 }
 
-int dart_plat_recv(i_DartSock s, void *buf, size_t cap,
+int i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
                    uint8_t src_ip[4], uint16_t *src_port){
     struct sockaddr_in src; i_DartSocklen sl = sizeof src;
     int n;
@@ -274,7 +274,7 @@ int dart_plat_recv(i_DartSock s, void *buf, size_t cap,
     return n;
 }
 
-int dart_plat_would_block(void){
+int i_dart_plat_would_block(void){
 #ifdef _WIN32
     return WSAGetLastError() == WSAEWOULDBLOCK;
 #else
@@ -282,7 +282,7 @@ int dart_plat_would_block(void){
 #endif
 }
 
-int dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
+int i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
     /* callers poll one or two sockets; cap the on-stack translation buffer */
 #ifdef _WIN32
     WSAPOLLFD p[8];
@@ -308,22 +308,22 @@ int dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
 }
 
 /* ----------------------------------------------------------- address helpers */
-uint32_t dart_plat_parse_ip(const char *dotted){
+uint32_t i_dart_plat_parse_ip(const char *dotted){
     return dotted ? (uint32_t)inet_addr(dotted) : 0;
 }
-uint32_t dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d){
+uint32_t i_dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d){
     return htonl(((uint32_t)a << 24) | ((uint32_t)b << 16) |
                  ((uint32_t)c << 8)  |  (uint32_t)d);
 }
-uint32_t dart_plat_ip4_to_naddr(const uint8_t ip[4]){
+uint32_t i_dart_plat_ip4_to_naddr(const uint8_t ip[4]){
     uint32_t n; memcpy(&n, ip, 4); return n;
 }
-void dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
+void i_dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
     memcpy(out, &naddr, 4);
 }
 
-uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
-    i_DartSock s = dart_plat_udp_open();
+uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
+    i_DartSock s = i_dart_plat_udp_open();
     struct sockaddr_in a;
     uint32_t ip = 0;                         /* INADDR_ANY on failure */
     if (s == DART_SOCK_BAD) return ip;
@@ -334,7 +334,7 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
         if (getsockname(DART__FD(s), (struct sockaddr*)&loc, &ll) == 0)
             ip = loc.sin_addr.s_addr;
     }
-    dart_plat_close(s);
+    i_dart_plat_close(s);
     return ip;
 }
 
@@ -347,7 +347,7 @@ uint32_t dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
 #ifndef IFF_LOOPBACK
 #define IFF_LOOPBACK 0x00000004
 #endif
-int dart_plat_local_ipv4s(uint32_t *out, int max){
+int i_dart_plat_local_ipv4s(uint32_t *out, int max){
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
     INTERFACE_INFO info[32];
     DWORD bytes = 0;
@@ -368,9 +368,9 @@ int dart_plat_local_ipv4s(uint32_t *out, int max){
     return n;
 }
 #elif defined(ESP_PLATFORM)
-int dart_plat_local_ipv4s(uint32_t *out, int max){ (void)out; (void)max; return 0; }
+int i_dart_plat_local_ipv4s(uint32_t *out, int max){ (void)out; (void)max; return 0; }
 #else
-int dart_plat_local_ipv4s(uint32_t *out, int max){
+int i_dart_plat_local_ipv4s(uint32_t *out, int max){
     struct ifaddrs *ifs = NULL, *p;
     int n = 0;
     if (!out || max <= 0 || getifaddrs(&ifs) != 0) return 0;
@@ -395,7 +395,7 @@ int dart_plat_local_ipv4s(uint32_t *out, int max){
 
 /* 128-bit non-cryptographic id from a byte string: two FNV-1a passes with distinct
  * seeds. Stable per input, enough to pre-filter same-host (attach is the real gate). */
-static void dart__hash16(const void *data, size_t len, uint8_t out[16]){
+static void i_dart_plat_hash16(const void *data, size_t len, uint8_t out[16]){
     const uint8_t *p = (const uint8_t*)data; size_t i;
     uint64_t a = 14695981039346656037ull, b = 1099511628211ull;
     for (i = 0; i < len; i++){
@@ -405,7 +405,7 @@ static void dart__hash16(const void *data, size_t len, uint8_t out[16]){
     for (i = 0; i < 8; i++){ out[i] = (uint8_t)(a >> (8*i)); out[8+i] = (uint8_t)(b >> (8*i)); }
 }
 
-void dart_plat_host_uuid(uint8_t out[16]){
+void i_dart_plat_host_uuid(uint8_t out[16]){
 #if defined(__linux__)
     FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars = a 128-bit id */
     if (f){
@@ -420,14 +420,14 @@ void dart_plat_host_uuid(uint8_t out[16]){
         if (ok) return;
     }
 #endif
-    {   char host[256]; size_t n = dart_plat_hostname(host, sizeof host);
+    {   char host[256]; size_t n = i_dart_plat_hostname(host, sizeof host);
         if (n == 0){ host[0] = '?'; n = 1; }
-        dart__hash16(host, n, out);
+        i_dart_plat_hash16(host, n, out);
     }
 }
 
 #ifdef _WIN32
-void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+void *i_dart_plat_shm_create(const char *name, size_t bytes, void **handle){
     HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                   (DWORD)((uint64_t)bytes >> 32),
                                   (DWORD)(bytes & 0xFFFFFFFFu), name);
@@ -438,7 +438,7 @@ void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
     *handle = h;
     return base;
 }
-void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
+void *i_dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
     void *base; MEMORY_BASIC_INFORMATION mbi;
     if (!h) return NULL;
@@ -448,19 +448,19 @@ void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     *handle = h;
     return base;
 }
-void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+void i_dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
     (void)bytes; (void)unlink_it;   /* the object dies when the last handle closes */
     if (base) UnmapViewOfFile(base);
     if (handle) CloseHandle((HANDLE)handle);
 }
-uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+uint64_t i_dart_plat_atomic_load64(volatile uint64_t *p){
     return (uint64_t)InterlockedCompareExchange64((volatile LONGLONG*)p, 0, 0);
 }
-void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+void i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
     InterlockedExchange64((volatile LONGLONG*)p, (LONGLONG)v);
 }
 #else /* POSIX */
-void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
+void *i_dart_plat_shm_create(const char *name, size_t bytes, void **handle){
     int fd = shm_open(name, O_CREAT|O_RDWR, 0600);
     void *base; char *nm;
     if (fd < 0) return NULL;
@@ -473,7 +473,7 @@ void *dart_plat_shm_create(const char *name, size_t bytes, void **handle){
     *handle = nm;
     return base;
 }
-void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
+void *i_dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     int fd = shm_open(name, O_RDWR, 0600);
     void *base; struct stat st;
     if (fd < 0) return NULL;
@@ -485,17 +485,17 @@ void *dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     *handle = NULL;                             /* a reader never unlinks */
     return base;
 }
-void dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+void i_dart_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
     if (base && base != MAP_FAILED) munmap(base, bytes);
     if (handle){
         if (unlink_it) shm_unlink((const char*)handle);
         free(handle);
     }
 }
-uint64_t dart_plat_atomic_load64(volatile uint64_t *p){
+uint64_t i_dart_plat_atomic_load64(volatile uint64_t *p){
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 }
-void dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+void i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
 }
 #endif /* _WIN32 */

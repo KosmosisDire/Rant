@@ -265,7 +265,7 @@ static int publish_stream(DartNode *n, uint16_t channel, FILE *file, int wait_ms
  * lived publisher, so we settle for the first subscriber but publish even if
  * none showed: late joiners are caught by discovery + KEEP_LAST history.
  *
- * Paced on dart_plat_now_us. We fire at most ONE message per loop and re-read the
+ * Paced on i_dart_plat_now_us. We fire at most ONE message per loop and re-read the
  * clock right after the send, because dart_node_send blocks here while reliable
  * backpressure waits on a slow reader -- a blocking send can consume seconds. The
  * old loop sampled the clock once and fired "every due tick" in an inner burst, so
@@ -300,13 +300,13 @@ static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t
     if (!wait_for_sub(n, channel, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
     printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
-    now = dart_plat_now_us(); next = now; last_print = now;
+    now = i_dart_plat_now_us(); next = now; last_print = now;
     for (;;){
-        now = dart_plat_now_us();
+        now = i_dart_plat_now_us();
         if (now >= next){
             if (dart_node_send(n, channel, data, len) >= 0) sent++;  /* may block in backpressure */
             next += period_us;
-            now = dart_plat_now_us();                  /* a blocking send moved the clock */
+            now = i_dart_plat_now_us();                  /* a blocking send moved the clock */
             if (next + RESYNC_LAG_US < now) next = now; /* far behind = real block: resync, no burst.
                                                            a small lag is left in the past so the next
                                                            spin iterations catch it up one send each */
@@ -314,7 +314,7 @@ static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t
         /* sleep only when there's >=1ms of real slack before the next tick; otherwise
            spin with a non-blocking poll so high rates aren't capped at ~1 kHz */
         dart_node_poll(n, (next > now && next - now >= 1000) ? 1 : 0);
-        now = dart_plat_now_us();
+        now = i_dart_plat_now_us();
         if (now - last_print >= 1000000u){             /* >=1 REAL second: true rate + flow control */
             double secs = (now - last_print)/1e6;
             dart_node_backpressure_stats(n, &backpressure_us, &backpressure_waits);
@@ -457,7 +457,7 @@ int main(int argc, char **argv){
        lives for the whole process (freed implicitly at exit). */
     DartAllocator alloc;
     if (dynamic){
-        alloc = dart_allocator_dynamic(dart_plat_realloc, 0);
+        alloc = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     } else {
         size_t mem_size = (8u<<20)
                         + (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
@@ -498,12 +498,12 @@ int main(int argc, char **argv){
             /* Once a second, print the measured receive rate (msg/s and KB/s)
                over the real elapsed interval; stay quiet until the first message
                so an idle wait isn't a stream of 0/s lines. */
-            uint64_t last = dart_plat_now_us(), repair_last = last; int seen = 0;
+            uint64_t last = i_dart_plat_now_us(), repair_last = last; int seen = 0;
             DartRepairStats repair_stats, prev_repair_stats; memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
             for (;;){
                 uint64_t now, rate_elapsed, repair_elapsed;
                 dart_node_poll(n, 2);
-                now = dart_plat_now_us();
+                now = i_dart_plat_now_us();
                 if (g_rx_msgs) seen = 1;
                 /* fine-grained (~250ms) reader repair series: finer than the 1s rate line
                    so a within-stall plateau is visible. Deltas normalised to /s, plus the
