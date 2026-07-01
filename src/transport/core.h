@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../common/string.h"   /* DartBytes (payloads, wire blobs), DartString (wire names) */
+#include "../common/alloc.h"    /* DartAllocFn (the growable-message hook) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -134,11 +135,9 @@ typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
 
-/* Optional realloc-style hook for growable messages (ptr NULL = alloc, size 0 =
- * free). Set => user channels grow to fit, max_message_bytes may be 0. NULL
- * (default, embedded) => fixed buffers, a bigger message is refused/skipped.
- * Pair with dart_destroy to free what it allocated. */
-typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
+/* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user channels grow to
+ * fit (max_message_bytes may be 0); NULL (default, embedded) keeps fixed buffers and a
+ * bigger message is refused/skipped. Pair a set allocator with dart_destroy to free it. */
 
 /* Two ways to populate the channel table:
  *   fixed/at-init : channels != NULL, n_channels = its length. Slots are defined now;

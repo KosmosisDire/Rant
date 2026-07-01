@@ -165,7 +165,7 @@ static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, Dart
     for (i=0;i<nch;i++){
         DartChannelOpts co; memset(&co, 0, sizeof co);
         co.qos = chans[i].qos;
-        if (!dart_node_create_channel(node, chans[i].name, (DartRole)chans[i].role, &co)){
+        if (!dart_node_create_channel(node, chans[i].name, (DartRole)chans[i].role, NULL, &co)){
             dart_node_close(node, 0); return NULL;
         }
     }
@@ -1210,7 +1210,7 @@ static void open_fail_checks(void){
         memset(longname, 'x', sizeof longname - 1); longname[sizeof longname - 1] = 0;
         n = dart_node_open(&a, NULL, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN });
         ST_CHECK(n != NULL, "open-fail: node opens for create-fail check");
-        c = n ? dart_node_create_channel(n, longname, DART_PUBSUB, NULL) : NULL;
+        c = n ? dart_node_create_channel(n, longname, DART_PUBSUB, NULL, NULL) : NULL;
         ST_CHECK(c == NULL, "open-fail: over-long topic name -> create_channel NULL");
         if (n) dart_node_close(n, 0);
     }
@@ -1319,15 +1319,15 @@ static void dynamic_grow_checks(void){
     S = dart_node_open(&sa, "dg-sub", dg_on_message, NULL, &so);
     ST_CHECK(P&&S, "dyn-grow: nodes open (max_channels=2)");
     if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); return; }
-    pc0 = dart_node_create_channel(P, names[0], DART_PUB_ONLY, &co);
-    dart_node_create_channel(S, names[0], DART_SUB_ONLY, &co);
+    pc0 = dart_node_create_channel(P, names[0], DART_PUB_ONLY, NULL, &co);
+    dart_node_create_channel(S, names[0], DART_SUB_ONLY, NULL, &co);
     ST_CHECK(pc0 != NULL, "dyn-grow: channel 0 created");
     for (t=0;t<800 && dart_channel_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 matched");
     for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
     /* create channels 1..11 on both -> several grows (max_channels 2 -> 4 -> 8 -> 16) */
-    for (i=1;i<12;i++){ dart_node_create_channel(P, names[i], DART_PUB_ONLY, &co);
-                        dart_node_create_channel(S, names[i], DART_SUB_ONLY, &co);
+    for (i=1;i<12;i++){ dart_node_create_channel(P, names[i], DART_PUB_ONLY, NULL, &co);
+                        dart_node_create_channel(S, names[i], DART_SUB_ONLY, NULL, &co);
                         dart_node_poll(P,1); dart_node_poll(S,1); }
     ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 still matched after grows");
     for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
@@ -2354,8 +2354,8 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     P=dart_node_open(&pa,"ms-pub",NULL,NULL,&po);
     for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
     if (!P){ free(payload); return; }
-    pc=dart_node_create_channel(P,"ms/ch",DART_PUB_ONLY,&co);
-    for (i=0;i<nsubs;i++) dart_node_create_channel(S[i],"ms/ch",DART_SUB_ONLY,&co);
+    pc=dart_node_create_channel(P,"ms/ch",DART_PUB_ONLY,NULL,&co);
+    for (i=0;i<nsubs;i++) dart_node_create_channel(S[i],"ms/ch",DART_SUB_ONLY,NULL,&co);
     for (t=0;t<4000 && dart_channel_match_count(pc)<nsubs;t++){ dart_node_poll(P,1); for(j=0;j<nsubs;j++) dart_node_poll(S[j],1); }
 
     a0=ms_allocs(P,S,nsubs);                              /* total allocs before any traffic */

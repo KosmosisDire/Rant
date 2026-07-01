@@ -7,6 +7,7 @@
 
 #include "../transport/core.h"
 #include "../discovery/core.h"    /* DartDiscoveryAddr (seed peers) */
+#include "../serialize/schema.h"  /* DartSchema (a channel's optional data schema) */
 #include "../common/allocator.h"  /* DartAllocator (shared with the discovery runtime) */
 #include "core.h"                 /* DartEvent / DartEventFn / dart_event_str (node's app event) */
 
@@ -56,7 +57,7 @@ typedef struct {
 } DartNodeOpts;
 
 /* Optional per-channel config, passed to dart_node_create_channel as a compound literal:
- *   dart_node_create_channel(n, "msg", DART_PUBSUB,
+ *   dart_node_create_channel(n, "msg", DART_PUBSUB, pose_schema,
  *                            &(DartChannelOpts){ .qos = { .reliability = DART_RELIABLE } });
  */
 typedef struct {
@@ -96,17 +97,21 @@ int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop t
 void         dart_node_close(DartNode *n, int send_bye);
 
 /* Create a channel (topic). name is the cross-peer identity (same on every node, copied
- * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. opts may be
- * NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_channels) is
+ * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. schema is this
+ * channel's data schema (built via dart_schema_*), required and held by reference so it
+ * must outlive the channel; pass NULL for a raw-bytes channel (no serialization). opts may
+ * be NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_channels) is
  * full, the name is bad/too long, or out of memory. */
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
-                                      const DartChannelOpts *opts);
+                                      const DartSchema *schema, const DartChannelOpts *opts);
 /* Publish to all matched subscribers. Returns DART_OK or a negative DartResult. */
 int          dart_channel_send(DartChannel *ch, DartBytes data);
 /* Flip a channel's role at runtime (re-advertises interest). Returns 0 ok, <0 on error. */
 int          dart_channel_set_role(DartChannel *ch, DartRole role);
 /* This channel's local index (== DartMsg.channel_id for its messages). */
 uint16_t     dart_channel_index(const DartChannel *ch);
+/* This channel's schema, as passed to create (NULL for a raw-bytes channel). */
+const DartSchema *dart_channel_schema(const DartChannel *ch);
 /* Recover an already-created channel handle by its creation index (0-based), or NULL if
  * out of range. Lets a caller use a handle without storing the create_channel result. */
 DartChannel *dart_node_channel(DartNode *n, uint16_t index);

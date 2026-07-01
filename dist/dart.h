@@ -602,6 +602,20 @@ uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 #endif /* DART_DISCOVERY_RT_H */
 #pragma endregion
 #endif /* !DART_DISCOVERY_SANS_IO */
+#pragma region common/alloc.h
+/* The allocation hook: a realloc-style callback a memory-taking core calls for growable
+ * buffers (ptr NULL = alloc, size 0 = free, else resize). A runtime supplies one derived
+ * from its DartAllocator (static bump or dynamic heap), so the core stays memory-policy
+ * agnostic. Shared by the transport core and the serializer. */
+#ifndef DART_ALLOC_H
+#define DART_ALLOC_H
+
+#include <stddef.h>
+
+typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
+
+#endif /* DART_ALLOC_H */
+#pragma endregion
 #pragma region transport/core.h
 /* sans-IO reliable-UDP transport core: no socket, clock, or heap. Feed it
  * datagrams + now_us + a peer set; it returns datagrams to send and delivers
@@ -738,11 +752,9 @@ typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
 
-/* Optional realloc-style hook for growable messages (ptr NULL = alloc, size 0 =
- * free). Set => user channels grow to fit, max_message_bytes may be 0. NULL
- * (default, embedded) => fixed buffers, a bigger message is refused/skipped.
- * Pair with dart_destroy to free what it allocated. */
-typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
+/* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user channels grow to
+ * fit (max_message_bytes may be 0); NULL (default, embedded) keeps fixed buffers and a
+ * bigger message is refused/skipped. Pair a set allocator with dart_destroy to free it. */
 
 /* Two ways to populate the channel table:
  *   fixed/at-init : channels != NULL, n_channels = its length. Slots are defined now;
@@ -1014,6 +1026,131 @@ uint64_t  dart_next_deadline_us(DartTransportState *st);
 #pragma endregion
 
 #ifndef DART_TRANSPORT_SANS_IO
+#pragma region serialize/schema.h
+/* DART serialize: a standalone schema + (de)serialization layer. Both ends share the
+ * schema, so the wire carries no type tags or field names; a value's meaning is its
+ * position in the byte stream. Every schema is fully FIXED for now (variable-length and
+ * map types are deferred), so a message has an exact size and every field a static offset:
+ * reads are O(1), zero-copy, zero-allocation. Building and parsing a schema take a
+ * DartAllocFn hook (common/alloc.h); pass a node's and you inherit its static/dynamic
+ * memory. Depends only on common/, so it is usable on its own. */
+#ifndef DART_SCHEMA_H
+#define DART_SCHEMA_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef DART_SCHEMA_WIRE_VERSION
+#define DART_SCHEMA_WIRE_VERSION 1u    /* bumped on any schema wire-format change */
+#endif
+#ifndef DART_SCHEMA_MAX_DEPTH
+#define DART_SCHEMA_MAX_DEPTH 8u        /* struct nesting the builder accepts */
+#endif
+
+/* The type kinds; the enum value is the kind byte on the wire. All fixed: scalars are
+ * little-endian with no padding, so a field's offset is the sum of the preceding sizes. */
+typedef enum {
+    DART_U8 = 0, DART_U16 = 1, DART_U32 = 2, DART_U64 = 3,
+    DART_I8 = 4, DART_I16 = 5, DART_I32 = 6, DART_I64 = 7,
+    DART_F32 = 8, DART_F64 = 9, DART_BOOL = 10,   /* 0..10: fixed scalars */
+    DART_FIX    = 11,   /* fixed-size raw blob (UUID, covariance[72]): [u16 size]            */
+    DART_CAPARR = 12,   /* capped array, fixed footprint: [u16 cap][elem]; stores [u16 count] inline */
+    DART_STRUCT = 13    /* [u8 nfields] ( [u8 namelen][name][type] )*                        */
+} DartSchemaTypeKind;
+
+/* Bytes of a fixed scalar kind (U8..BOOL); 0 otherwise. */
+uint32_t dart_schema_scalar_size(DartSchemaTypeKind kind);
+
+/* The compiled schema (hot-path form): wire bytes, identity hash, message size, and a
+ * precomputed offset per top-level field. One block allocated via the caller's hook; free
+ * it with dart_schema_free. */
+typedef struct DartSchema DartSchema;
+
+/* Read-only view of one top-level field, filled by dart_schema_field_at. */
+typedef struct {
+    DartString name;      /* field name (into the schema's wire bytes) */
+    uint8_t    kind;      /* DartSchemaTypeKind */
+    uint8_t    elem;      /* CAPARR element kind, else 0 */
+    uint16_t   cap;       /* CAPARR capacity, else 0 */
+    uint32_t   offset;    /* byte offset of this field in a message */
+    uint32_t   size;      /* byte size of this field */
+} DartSchemaFieldInfo;
+
+/* Builder: define a schema and get back a compiled DartSchema. It grows its wire buffer
+ * through the alloc hook as you add fields; finish resizes that block to hold the compiled
+ * schema and returns it (free with dart_schema_free, same hook). A field's index is its
+ * creation order (its id on read). On OOM or misuse the builder latches an error and finish
+ * returns NULL (freeing anything it allocated). Always finish a builder you began.
+ *
+ *   DartSchemaBuilder b = dart_schema_begin(alloc, user, "Pose");
+ *   dart_schema_field(&b, "x", DART_F64);
+ *   dart_schema_field(&b, "y", DART_F64);
+ *   dart_schema_field_fix(&b, "id", 16);
+ *   DartSchema *pose = dart_schema_finish(&b);
+ */
+typedef struct {
+    DartAllocFn alloc; void *user;                 /* the memory hook and its context */
+    uint8_t *buf;
+    size_t   cap;
+    size_t   len;                              /* wire bytes written so far */
+    int      err;                              /* 0 ok; nonzero latches failure */
+    uint16_t depth;                            /* open structs (1 = root only) */
+    size_t   count_pos[DART_SCHEMA_MAX_DEPTH]; /* wire offset of each open struct's nfields byte */
+    uint16_t field_count[DART_SCHEMA_MAX_DEPTH];
+} DartSchemaBuilder;
+
+DartSchemaBuilder dart_schema_begin(DartAllocFn alloc, void *user, const char *root_name);
+/* A fixed scalar field (U8..BOOL). */
+void        dart_schema_field(DartSchemaBuilder *b, const char *name, DartSchemaTypeKind kind);
+/* Fixed raw blob of exactly `size` bytes. */
+void        dart_schema_field_fix(DartSchemaBuilder *b, const char *name, uint16_t size);
+/* Capped array of a fixed scalar element: fixed footprint, real length stored inline. */
+void        dart_schema_field_caparr(DartSchemaBuilder *b, const char *name,
+                                     DartSchemaTypeKind elem_scalar, uint16_t cap);
+/* Nested struct field: open it, add its fields, close it. */
+void        dart_schema_begin_struct(DartSchemaBuilder *b, const char *name);
+void        dart_schema_end_struct(DartSchemaBuilder *b);
+/* Close the root struct, compile, and return the schema (NULL on any latched error). */
+DartSchema *dart_schema_finish(DartSchemaBuilder *b);
+
+/* Deserialize a received schema into a compiled one, allocated via the hook. wire may be
+ * malformed, so this bounds-checks and returns NULL on overrun or version mismatch. The
+ * bytes are copied in, so wire need not outlive the call. Free with dart_schema_free. */
+DartSchema *dart_schema_parse(const void *wire, size_t wire_len, DartAllocFn alloc, void *user);
+/* Free a schema from dart_schema_finish / dart_schema_parse (same hook it was made with). */
+void        dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user);
+
+DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (advertise these) */
+uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */
+DartString  dart_schema_name(const DartSchema *s);        /* root type name */
+uint32_t    dart_schema_size(const DartSchema *s);        /* exact message size in bytes */
+uint16_t    dart_schema_field_count(const DartSchema *s);
+int         dart_schema_field_at(const DartSchema *s, uint16_t i, DartSchemaFieldInfo *out); /* 1 + fills out, else 0 */
+int         dart_schema_field_index(const DartSchema *s, const char *name);  /* index, or -1 */
+
+int       dart_schema_validate(const DartSchema *s, DartBytes msg); /* 1 if msg.len == schema size */
+
+/* Scalar getters: read the field by index, widened. Pick the family matching its kind; a
+ * mismatch or out-of-range field yields 0. Read in place, no copy. */
+uint64_t  dart_get_uint(DartBytes msg, const DartSchema *s, uint16_t field);  /* U8..U64, BOOL */
+int64_t   dart_get_int (DartBytes msg, const DartSchema *s, uint16_t field);  /* I8..I64        */
+double    dart_get_f64 (DartBytes msg, const DartSchema *s, uint16_t field);  /* F64 (or F32)   */
+float     dart_get_f32 (DartBytes msg, const DartSchema *s, uint16_t field);  /* F32            */
+/* FIX blob: a zero-copy view into the message ({NULL,0} on mismatch). */
+DartBytes dart_get_fix (DartBytes msg, const DartSchema *s, uint16_t field);
+/* CAPARR: a zero-copy view of the `*count` used elements (clamped to capacity). *count may
+ * be NULL. {NULL,0} on mismatch. */
+DartBytes dart_get_caparr(DartBytes msg, const DartSchema *s, uint16_t field, uint16_t *count);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* DART_SCHEMA_H */
+#pragma endregion
 #pragma region node/core.h
 /* sans-IO NODE core: the peer table (peer id <-> physical address), the
  * discovery->transport lifecycle (add / resume / dormant / remove + interest +
@@ -1217,7 +1354,7 @@ typedef struct {
 } DartNodeOpts;
 
 /* Optional per-channel config, passed to dart_node_create_channel as a compound literal:
- *   dart_node_create_channel(n, "msg", DART_PUBSUB,
+ *   dart_node_create_channel(n, "msg", DART_PUBSUB, pose_schema,
  *                            &(DartChannelOpts){ .qos = { .reliability = DART_RELIABLE } });
  */
 typedef struct {
@@ -1257,17 +1394,21 @@ int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop t
 void         dart_node_close(DartNode *n, int send_bye);
 
 /* Create a channel (topic). name is the cross-peer identity (same on every node, copied
- * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. opts may be
- * NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_channels) is
+ * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. schema is this
+ * channel's data schema (built via dart_schema_*), required and held by reference so it
+ * must outlive the channel; pass NULL for a raw-bytes channel (no serialization). opts may
+ * be NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_channels) is
  * full, the name is bad/too long, or out of memory. */
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
-                                      const DartChannelOpts *opts);
+                                      const DartSchema *schema, const DartChannelOpts *opts);
 /* Publish to all matched subscribers. Returns DART_OK or a negative DartResult. */
 int          dart_channel_send(DartChannel *ch, DartBytes data);
 /* Flip a channel's role at runtime (re-advertises interest). Returns 0 ok, <0 on error. */
 int          dart_channel_set_role(DartChannel *ch, DartRole role);
 /* This channel's local index (== DartMsg.channel_id for its messages). */
 uint16_t     dart_channel_index(const DartChannel *ch);
+/* This channel's schema, as passed to create (NULL for a raw-bytes channel). */
+const DartSchema *dart_channel_schema(const DartChannel *ch);
 /* Recover an already-created channel handle by its creation index (0-based), or NULL if
  * out of range. Lets a caller use a handle without storing the create_channel result. */
 DartChannel *dart_node_channel(DartNode *n, uint16_t index);
@@ -3245,6 +3386,36 @@ static inline void *dart_take(i_DartBump *b, size_t n, size_t align){
 
 #endif /* DART_ARENA_H */
 #pragma endregion
+#pragma region common/hash.h
+/* Shared FNV-1a 64 for a stable 64-bit identity from bytes (topic ids, schema ids).
+ * static inline: no link symbol and no unused-function warning in a layer that doesn't use
+ * it. The amalgamator emits it once per implementation TU; the local #include is for
+ * standalone compilation of a layer. The basis/prime match DART's existing topic ids (so
+ * on-wire identities are unchanged), not the textbook offset basis. */
+#ifndef DART_HASH_H
+#define DART_HASH_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+static inline uint64_t dart_fnv1a64(const void *data, size_t n){
+    const uint8_t *p = (const uint8_t *)data;
+    uint64_t h = 1469598103934665603ull; size_t i;
+    for (i = 0; i < n; i++){ h ^= (uint64_t)p[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+/* Over a NUL-terminated string (the topic-name identity form); NULL => 0. */
+static inline uint64_t dart_fnv1a64_str(const char *s){
+    uint64_t h = 1469598103934665603ull;
+    const unsigned char *p = (const unsigned char *)s;
+    if (!s) return 0;
+    for (; *p; p++){ h ^= (uint64_t)*p; h *= 1099511628211ull; }
+    return h;
+}
+
+#endif /* DART_HASH_H */
+#pragma endregion
 #pragma region transport/internal.h
 /* Shared internals of the split transport core: wire/scheduler constants, the state
  * structs, the small cross-file inline helpers, and prototypes for the helpers that
@@ -4330,23 +4501,13 @@ size_t dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot, 
 #include <string.h>
 
 
-/* FNV-1a over n bytes: the interest blob carries length-prefixed (not NUL-term)
- * names, so the identity is recomputed from the name on receive (it was redundant
- * on the wire, == dart_topic_id of the same name; init caps names at
- * DART_TOPIC_NAME_MAX so the wire name is the whole name). */
-static uint64_t dart__id_n(const uint8_t *name, size_t n){
-    uint64_t h = 1469598103934665603ull; size_t i;
-    for (i=0;i<n;i++){ h ^= (uint64_t)name[i]; h *= 1099511628211ull; }
-    return h;
-}
+/* Topic identity = FNV-1a 64 of the name (dart_fnv1a64, common/hash.h). The interest blob
+ * carries length-prefixed (not NUL-term) names, so the identity is recomputed from the
+ * name on receive; init caps names at DART_TOPIC_NAME_MAX so the wire name is the whole
+ * name and dart__id_n (over the wire bytes) == dart_topic_id of the same name. */
+static uint64_t dart__id_n(const uint8_t *name, size_t n){ return dart_fnv1a64(name, n); }
 
-uint64_t dart_topic_id(const char *name){
-    uint64_t h = 1469598103934665603ull;   /* FNV-1a 64 offset basis */
-    const unsigned char *p = (const unsigned char*)name;
-    if (!name) return 0;
-    for (; *p; p++){ h ^= (uint64_t)*p; h *= 1099511628211ull; }
-    return h;
-}
+uint64_t dart_topic_id(const char *name){ return dart_fnv1a64_str(name); }
 
 uint64_t dart_channel_identity(const DartChannelDef *def){
     return dart_topic_id(def->name);   /* the name is the cross-peer identity */
@@ -5162,6 +5323,400 @@ void dart_on_datagram(DartTransportState *st, uint32_t from, DartBytes datagram,
 #pragma endregion
 
 #ifndef DART_TRANSPORT_SANS_IO
+#pragma region serialize/schema.c
+#include <string.h>            /* memcpy (float bit reinterpret) */
+
+/* The schema wire format (what the builder emits and dart_schema_parse reads):
+ *   schema := [u8 version][u8 root_namelen][root_name...][type]   ; root type is a STRUCT
+ *   type   := [u8 kind] payload
+ *     scalar (U8..BOOL)      : (none; size implied by kind)
+ *     FIX                    : [u16 size]
+ *     CAPARR                 : [u16 cap][type elem]               ; elem must be fixed
+ *     STRUCT                 : [u8 nfields] ( [u8 namelen][name][type] )*nfields
+ * Every type is fixed: a field's byte offset is the sum of the preceding field sizes. */
+
+/* The per-field record the compiled schema stores for every top-level field. */
+typedef struct {
+    DartString name;      /* field name, a view into the wire bytes */
+    uint32_t   offset;    /* byte offset in a message */
+    uint32_t   size;      /* byte size */
+    uint16_t   cap;       /* CAPARR capacity, else 0 */
+    uint8_t    kind;
+    uint8_t    elem;      /* CAPARR element kind, else 0 */
+} i_Field;
+
+struct DartSchema {
+    DartBytes   wire;       /* the canonical bytes (a view into the caller's buffer) */
+    uint64_t    hash;
+    uint32_t    size;       /* exact message size in bytes */
+    DartString  name;       /* root type name, a view into the wire bytes */
+    uint16_t    nfields;
+    i_Field     fields[1];   /* nfields entries, laid out in the caller's buffer */
+};
+
+uint32_t dart_schema_scalar_size(DartSchemaTypeKind kind){
+    switch (kind){
+        case DART_U8: case DART_I8: case DART_BOOL: return 1;
+        case DART_U16: case DART_I16:               return 2;
+        case DART_U32: case DART_I32: case DART_F32: return 4;
+        case DART_U64: case DART_I64: case DART_F64: return 8;
+        default: return 0;
+    }
+}
+
+/* ---- bounds-checked reader over (possibly hostile) wire bytes ---------------------- */
+typedef struct { const uint8_t *w; size_t n, pos; int fail; } i_Rd;
+static uint8_t  i_u8 (i_Rd *r){ if (r->pos + 1 > r->n){ r->fail = 1; return 0; } return r->w[r->pos++]; }
+static uint16_t i_u16(i_Rd *r){ uint16_t v; if (r->pos + 2 > r->n){ r->fail = 1; return 0; } v = dart_le_r16(r->w + r->pos); r->pos += 2; return v; }
+static void     i_skip(i_Rd *r, size_t k){ if (r->pos + k > r->n){ r->fail = 1; r->pos = r->n; return; } r->pos += k; }
+
+/* Byte size of the type at r->pos; advances r past it. Fails on an unknown/variable kind. */
+static uint32_t i_type_size(i_Rd *r){
+    uint8_t k = i_u8(r);
+    if (r->fail) return 0;
+    switch (k){
+        case DART_U8: case DART_I8: case DART_BOOL: return 1;
+        case DART_U16: case DART_I16:               return 2;
+        case DART_U32: case DART_I32: case DART_F32: return 4;
+        case DART_U64: case DART_I64: case DART_F64: return 8;
+        case DART_FIX: return i_u16(r);
+        case DART_CAPARR: {
+            uint16_t cap = i_u16(r); uint32_t es = i_type_size(r);
+            if (r->fail || es == 0){ r->fail = 1; return 0; }    /* needs a fixed element */
+            return (uint32_t)2 + (uint32_t)cap * es;              /* [u16 count] + cap elements */
+        }
+        case DART_STRUCT: {
+            uint8_t nf = i_u8(r); uint32_t sum = 0; uint16_t i;
+            for (i = 0; i < nf && !r->fail; i++){
+                uint8_t fl = i_u8(r);
+                i_skip(r, fl);
+                sum += i_type_size(r);
+            }
+            return sum;
+        }
+        default: r->fail = 1; return 0;                          /* unknown/variable kind: reject */
+    }
+}
+
+/* Offset of the compiled handle in buf: past the wire bytes, 8-aligned for the handle. */
+static size_t i_handle_off(const uint8_t *buf, size_t wire_len){
+    uintptr_t addr = (uintptr_t)buf + wire_len;
+    size_t pad = (size_t)((8u - (addr & 7u)) & 7u);
+    return wire_len + pad;
+}
+
+/* Compile wire bytes already sitting at buf[0..wire_len] into a DartSchema placed after
+ * them in buf. Returns NULL on a malformed blob or if buf[cap] is too small. */
+static DartSchema *i_compile(uint8_t *buf, size_t wire_len, size_t cap){
+    i_Rd r; uint8_t ver, root_kind, root_namelen, nfields;
+    const char *root_name; size_t hoff, need; DartSchema *s;
+    uint16_t i; uint32_t running;
+
+    r.w = buf; r.n = wire_len; r.pos = 0; r.fail = 0;
+    ver = i_u8(&r);
+    if (r.fail || ver != DART_SCHEMA_WIRE_VERSION) return NULL;
+    root_namelen = i_u8(&r);
+    root_name = (const char *)(buf + r.pos);
+    i_skip(&r, root_namelen);
+    root_kind = i_u8(&r);
+    if (r.fail || root_kind != DART_STRUCT) return NULL;    /* the root must be a struct */
+    nfields = i_u8(&r);
+    if (r.fail) return NULL;
+
+    hoff = i_handle_off(buf, wire_len);
+    need = hoff + sizeof(DartSchema) + (size_t)(nfields ? nfields - 1u : 0u) * sizeof(i_Field);
+    if (need > cap) return NULL;
+
+    s = (DartSchema *)(buf + hoff);
+    s->wire = dart_bytes(buf, wire_len);
+    s->name = dart_string(root_name, root_namelen);
+    s->nfields = nfields;
+    s->hash = dart_fnv1a64(buf, wire_len);
+
+    running = 0;
+    for (i = 0; i < nfields; i++){
+        i_Field *f = &s->fields[i];
+        uint8_t fl = i_u8(&r); const char *fn = (const char *)(buf + r.pos);
+        size_t kpos; uint32_t sz;
+        i_skip(&r, fl);
+        kpos = r.pos;
+        f->name = dart_string(fn, fl);
+        f->kind = (kpos < r.n) ? buf[kpos] : 0;
+        f->cap = 0; f->elem = 0;
+        sz = i_type_size(&r);
+        if (r.fail) return NULL;
+        if (f->kind == DART_CAPARR){                            /* capture cap/elem for readers */
+            i_Rd q; q.w = buf; q.n = wire_len; q.pos = kpos + 1; q.fail = 0;
+            f->cap = i_u16(&q);
+            f->elem = i_u8(&q);
+        }
+        f->size = sz;
+        f->offset = running;
+        running += sz;
+    }
+    s->size = running;
+    return s;
+}
+
+/* ---- builder ----------------------------------------------------------------------- */
+/* ensure room for `extra` more bytes, growing the wire buffer through the hook */
+static int i_reserve(DartSchemaBuilder *b, size_t extra){
+    size_t newcap; uint8_t *nb;
+    if (b->err) return 0;
+    if (b->len + extra <= b->cap) return 1;
+    newcap = b->cap ? b->cap : 64u;
+    while (newcap < b->len + extra){
+        if (newcap > ((size_t)-1) / 2u){ newcap = b->len + extra; break; }
+        newcap *= 2u;
+    }
+    nb = (uint8_t *)b->alloc(b->user, b->buf, newcap);
+    if (!nb){ b->err = -1; return 0; }              /* realloc failure leaves b->buf intact */
+    b->buf = nb; b->cap = newcap;
+    return 1;
+}
+static void i_put(DartSchemaBuilder *b, uint8_t v){
+    if (!i_reserve(b, 1)) return;
+    b->buf[b->len++] = v;
+}
+static void i_put_u16(DartSchemaBuilder *b, uint16_t v){
+    if (!i_reserve(b, 2)) return;
+    dart_le_w16(b->buf + b->len, v); b->len += 2;
+}
+static void i_put_name(DartSchemaBuilder *b, const char *name){
+    size_t n = 0, i; if (name) while (name[n]) n++;
+    if (n > 255){ b->err = -4; return; }
+    if (!i_reserve(b, 1 + n)) return;
+    b->buf[b->len++] = (uint8_t)n;
+    for (i = 0; i < n; i++) b->buf[b->len++] = (uint8_t)name[i];
+}
+/* count a field on the current innermost open struct */
+static void i_count(DartSchemaBuilder *b){
+    uint16_t *c;
+    if (b->err) return;
+    if (b->depth == 0){ b->err = -3; return; }
+    c = &b->field_count[b->depth - 1];
+    if (*c >= 255){ b->err = -5; return; }   /* nfields is a u8 */
+    (*c)++;
+}
+/* open a struct type: [u8 STRUCT][u8 nfields placeholder], push a nesting level */
+static void i_open_struct(DartSchemaBuilder *b){
+    if (b->err) return;
+    if (b->depth >= DART_SCHEMA_MAX_DEPTH){ b->err = -2; return; }
+    i_put(b, (uint8_t)DART_STRUCT);
+    b->count_pos[b->depth] = b->len;
+    i_put(b, 0);
+    b->field_count[b->depth] = 0;
+    b->depth++;
+}
+
+DartSchemaBuilder dart_schema_begin(DartAllocFn alloc, void *user, const char *root_name){
+    DartSchemaBuilder b;
+    memset(&b, 0, sizeof b);
+    b.alloc = alloc; b.user = user;
+    if (!alloc){ b.err = -1; return b; }
+    b.cap = 64u;
+    b.buf = (uint8_t *)alloc(user, NULL, b.cap);
+    if (!b.buf){ b.err = -1; b.cap = 0; return b; }
+    i_put(&b, (uint8_t)DART_SCHEMA_WIRE_VERSION);
+    i_put_name(&b, root_name);
+    i_open_struct(&b);              /* the root is a struct; depth -> 1 */
+    return b;
+}
+
+void dart_schema_field(DartSchemaBuilder *b, const char *name, DartSchemaTypeKind kind){
+    if (!b || b->err) return;
+    if (dart_schema_scalar_size(kind) == 0){ b->err = -6; return; }  /* fixed scalars only */
+    i_count(b); i_put_name(b, name); i_put(b, (uint8_t)kind);
+}
+
+void dart_schema_field_fix(DartSchemaBuilder *b, const char *name, uint16_t size){
+    if (!b || b->err) return;
+    i_count(b); i_put_name(b, name); i_put(b, (uint8_t)DART_FIX); i_put_u16(b, size);
+}
+
+void dart_schema_field_caparr(DartSchemaBuilder *b, const char *name,
+                              DartSchemaTypeKind elem_scalar, uint16_t cap){
+    if (!b || b->err) return;
+    if (dart_schema_scalar_size(elem_scalar) == 0){ b->err = -6; return; }  /* fixed scalar elem */
+    i_count(b); i_put_name(b, name);
+    i_put(b, (uint8_t)DART_CAPARR); i_put_u16(b, cap); i_put(b, (uint8_t)elem_scalar);
+}
+
+void dart_schema_begin_struct(DartSchemaBuilder *b, const char *name){
+    if (!b || b->err) return;
+    i_count(b);                 /* a field of the parent */
+    i_put_name(b, name);        /* the field's name */
+    i_open_struct(b);           /* the field's type: a struct */
+}
+
+void dart_schema_end_struct(DartSchemaBuilder *b){
+    if (!b || b->err) return;
+    if (b->depth <= 1){ b->err = -3; return; }   /* the root closes in finish */
+    b->depth--;
+    b->buf[b->count_pos[b->depth]] = (uint8_t)b->field_count[b->depth];
+}
+
+DartSchema *dart_schema_finish(DartSchemaBuilder *b){
+    DartSchema *s = NULL;
+    if (b && !b->err && b->depth == 1){                       /* depth != 1 = unbalanced begin/end */
+        size_t need; uint8_t *nb;
+        b->buf[b->count_pos[0]] = (uint8_t)b->field_count[0]; /* backpatch the root field count */
+        need = b->len + 7u + sizeof(DartSchema)
+             + (size_t)(b->field_count[0] ? b->field_count[0] - 1u : 0u) * sizeof(i_Field);
+        nb = (uint8_t *)b->alloc(b->user, b->buf, need);      /* resize the block to hold the handle */
+        if (nb){ b->buf = nb; b->cap = need; s = i_compile(b->buf, b->len, b->cap); }
+    }
+    if (!s && b && b->buf) b->alloc(b->user, b->buf, 0);      /* free on any failure */
+    if (b) b->buf = NULL;                                     /* owned by s now, or freed */
+    return s;
+}
+
+/* ---- parse a received schema ------------------------------------------------------- */
+/* bytes a compiled schema needs for `wire`: copy + alignment pad + handle + field table.
+   0 if the header is malformed. */
+static size_t i_compiled_size(const void *wire, size_t wire_len){
+    i_Rd r; uint8_t ver, rl, rk, nf;
+    r.w = (const uint8_t *)wire; r.n = wire_len; r.pos = 0; r.fail = 0;
+    ver = i_u8(&r); if (r.fail || ver != DART_SCHEMA_WIRE_VERSION) return 0;
+    rl = i_u8(&r); i_skip(&r, rl);
+    rk = i_u8(&r); if (r.fail || rk != DART_STRUCT) return 0;
+    nf = i_u8(&r); if (r.fail) return 0;
+    return wire_len + 7u + sizeof(DartSchema) + (size_t)(nf ? nf - 1u : 0u) * sizeof(i_Field);
+}
+
+DartSchema *dart_schema_parse(const void *wire, size_t wire_len, DartAllocFn alloc, void *user){
+    size_t need, i; uint8_t *buf; DartSchema *s;
+    if (!wire || !alloc || wire_len == 0) return NULL;
+    need = i_compiled_size(wire, wire_len);
+    if (need == 0) return NULL;                              /* malformed header */
+    buf = (uint8_t *)alloc(user, NULL, need);
+    if (!buf) return NULL;
+    for (i = 0; i < wire_len; i++) buf[i] = ((const uint8_t *)wire)[i];   /* persist the bytes */
+    s = i_compile(buf, wire_len, need);
+    if (!s) alloc(user, buf, 0);                             /* malformed body: free, no leak */
+    return s;
+}
+
+void dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user){
+    if (s && alloc) alloc(user, (void *)s->wire.data, 0);    /* wire.data is the block base */
+}
+
+/* ---- queries ----------------------------------------------------------------------- */
+DartBytes dart_schema_wire(const DartSchema *s){
+    DartBytes b; if (s) return s->wire;
+    b.data = NULL; b.len = 0; return b;
+}
+uint64_t   dart_schema_hash(const DartSchema *s){ return s ? s->hash : 0; }
+DartString dart_schema_name(const DartSchema *s){
+    DartString n; if (s) return s->name;
+    n.data = NULL; n.len = 0; return n;
+}
+uint32_t dart_schema_size(const DartSchema *s){ return s ? s->size : 0; }
+uint16_t dart_schema_field_count(const DartSchema *s){ return s ? s->nfields : 0; }
+
+int dart_schema_field_at(const DartSchema *s, uint16_t i, DartSchemaFieldInfo *out){
+    const i_Field *f;
+    if (!s || i >= s->nfields) return 0;
+    f = &s->fields[i];
+    if (out){
+        out->name = f->name;
+        out->kind = f->kind; out->elem = f->elem;
+        out->cap = f->cap; out->offset = f->offset; out->size = f->size;
+    }
+    return 1;
+}
+
+int dart_schema_field_index(const DartSchema *s, const char *name){
+    uint16_t i; size_t n = 0;
+    if (!s || !name) return -1;
+    while (name[n]) n++;
+    for (i = 0; i < s->nfields; i++){
+        const i_Field *f = &s->fields[i];
+        if (f->name.len == n){
+            size_t j; int eq = 1;
+            for (j = 0; j < n; j++) if ((uint8_t)f->name.data[j] != (uint8_t)name[j]){ eq = 0; break; }
+            if (eq) return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* ---- read a message ---------------------------------------------------------------- */
+int dart_schema_validate(const DartSchema *s, DartBytes msg){
+    return s ? (msg.len == s->size) : 0;
+}
+
+/* Resolve a field and bounds-check it against the message; NULL if out of range or the
+ * message is too short. */
+static const i_Field *i_at(const DartSchema *s, DartBytes msg, uint16_t field){
+    const i_Field *f;
+    if (!s || field >= s->nfields) return NULL;
+    f = &s->fields[field];
+    if ((size_t)f->offset + f->size > msg.len) return NULL;
+    return f;
+}
+
+uint64_t dart_get_uint(DartBytes msg, const DartSchema *s, uint16_t field){
+    const i_Field *f = i_at(s, msg, field); const uint8_t *p;
+    if (!f) return 0;
+    p = msg.data + f->offset;
+    switch (f->kind){
+        case DART_U8: case DART_BOOL: return p[0];
+        case DART_U16: return dart_le_r16(p);
+        case DART_U32: return dart_le_r32(p);
+        case DART_U64: return dart_le_r64(p);
+        default: return 0;
+    }
+}
+
+int64_t dart_get_int(DartBytes msg, const DartSchema *s, uint16_t field){
+    const i_Field *f = i_at(s, msg, field); const uint8_t *p;
+    if (!f) return 0;
+    p = msg.data + f->offset;
+    switch (f->kind){
+        case DART_I8:  return (int8_t)p[0];
+        case DART_I16: return (int16_t)dart_le_r16(p);
+        case DART_I32: return (int32_t)dart_le_r32(p);
+        case DART_I64: return (int64_t)dart_le_r64(p);
+        default: return 0;
+    }
+}
+
+double dart_get_f64(DartBytes msg, const DartSchema *s, uint16_t field){
+    const i_Field *f = i_at(s, msg, field);
+    if (!f) return 0.0;
+    if (f->kind == DART_F64){ uint64_t b = dart_le_r64(msg.data + f->offset); double d; memcpy(&d, &b, 8); return d; }
+    if (f->kind == DART_F32){ uint32_t b = dart_le_r32(msg.data + f->offset); float  x; memcpy(&x, &b, 4); return (double)x; }
+    return 0.0;
+}
+
+float dart_get_f32(DartBytes msg, const DartSchema *s, uint16_t field){
+    const i_Field *f = i_at(s, msg, field);
+    if (!f || f->kind != DART_F32) return 0.0f;
+    { uint32_t b = dart_le_r32(msg.data + f->offset); float x; memcpy(&x, &b, 4); return x; }
+}
+
+DartBytes dart_get_fix(DartBytes msg, const DartSchema *s, uint16_t field){
+    DartBytes out; const i_Field *f = i_at(s, msg, field);
+    out.data = NULL; out.len = 0;
+    if (!f || f->kind != DART_FIX) return out;
+    out.data = msg.data + f->offset; out.len = f->size;
+    return out;
+}
+
+DartBytes dart_get_caparr(DartBytes msg, const DartSchema *s, uint16_t field, uint16_t *count){
+    DartBytes out; const i_Field *f = i_at(s, msg, field); uint16_t n, esz;
+    out.data = NULL; out.len = 0; if (count) *count = 0;
+    if (!f || f->kind != DART_CAPARR) return out;
+    n = dart_le_r16(msg.data + f->offset);          /* used count, stored inline */
+    if (n > f->cap) n = f->cap;                       /* clamp to capacity */
+    esz = (uint16_t)dart_schema_scalar_size((DartSchemaTypeKind)f->elem);
+    if (count) *count = n;
+    out.data = msg.data + f->offset + 2;
+    out.len  = (size_t)n * esz;
+    return out;
+}
+#pragma endregion
 #pragma region shm/core.c
 /* dart_shm: the portable segment-mapping + chunk module behind dart_shm.h. Pure
  * over dart_plat (shm mapping, host uuid, the generation atomic); no transport or
@@ -5668,7 +6223,7 @@ int dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
 #endif
 #include <string.h>    /* heap access goes through dart_plat_realloc (no <stdlib.h> here) */
 
-struct DartChannel { DartNode *n; uint16_t index; };
+struct DartChannel { DartNode *n; uint16_t index; DartSchema *schema; };   /* schema: node-owned copy */
 
 struct DartNode {
     DartTransportState     *transport;
@@ -6177,7 +6732,7 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
 }
 
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
-                                      const DartChannelOpts *opts){
+                                      const DartSchema *schema, const DartChannelOpts *opts){
     DartChannelDef def; DartChannel *h; uint16_t idx;
     if (!n || !name) return NULL;
     if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
@@ -6187,11 +6742,20 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     idx = n->n_created;
     h = (DartChannel*)dart__node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
     if (!h) return NULL;
+    h->schema = NULL;
+    if (schema){   /* copy into node memory so the caller's schema need not outlive the channel */
+        DartBytes w = dart_schema_wire(schema);
+        h->schema = dart_schema_parse(w.data, w.len, dart__node_alloc, n);
+        if (!h->schema){ dart__node_alloc(n, h, 0); return NULL; }
+    }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
     if (opts) def.qos = opts->qos;
-    if (dart_channel_define(n->transport, idx, &def) != 0){ dart__node_alloc(n, h, 0); return NULL; }
-    h->n = n; h->index = idx;
+    if (dart_channel_define(n->transport, idx, &def) != 0){
+        if (h->schema) dart_schema_free(h->schema, dart__node_alloc, n);
+        dart__node_alloc(n, h, 0); return NULL;
+    }
+    h->n = n; h->index = idx;   /* schema is the node-owned copy (advertised via discovery later) */
     /* re-advertise our interest so peers match the new channel as the blob arrives, and
        replay known peers' interest so this channel matches what they already advertised */
     dart_node_core_build_meta(n->core);
@@ -6369,6 +6933,8 @@ int dart_channel_set_role(DartChannel *ch, DartRole role){
 
 uint16_t dart_channel_index(const DartChannel *ch){ return ch ? ch->index : 0; }
 
+const DartSchema *dart_channel_schema(const DartChannel *ch){ return ch ? ch->schema : NULL; }
+
 DartChannel *dart_node_channel(DartNode *n, uint16_t index){
     if (!n || index >= n->n_created) return NULL;
     return n->handles[index];
@@ -6447,7 +7013,10 @@ void dart_node_close(DartNode *n, int send_bye){
         if (n->shm_scratch) dart__node_alloc(n, n->shm_scratch, 0);
     }
 #endif
-    {   uint16_t i; for (i=0;i<n->n_created;i++) if (n->handles[i]) dart__node_alloc(n, n->handles[i], 0); }
+    {   uint16_t i; for (i=0;i<n->n_created;i++) if (n->handles[i]){
+            if (n->handles[i]->schema) dart_schema_free(n->handles[i]->schema, dart__node_alloc, n);
+            dart__node_alloc(n, n->handles[i], 0);
+    } }
     dart_plat_cleanup();
     if (owns){ dart_plat_realloc(arena, 0); dart_plat_realloc(n, 0); }   /* touch nothing after */
 }

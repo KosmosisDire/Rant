@@ -473,7 +473,7 @@ int main(int argc, char **argv){
     for (i = 0; i < g_n_topics; i++){
         DartChannelOpts co; memset(&co, 0, sizeof co);
         co.qos = qos;
-        if (!dart_node_create_channel(n, g_topics[i], is_pub ? DART_PUB_ONLY : DART_SUB_ONLY, &co)){
+        if (!dart_node_create_channel(n, g_topics[i], is_pub ? DART_PUB_ONLY : DART_SUB_ONLY, NULL, &co)){
             fprintf(stderr, "create channel '%s' failed\n", g_topics[i]);
             dart_node_close(n, 0); return 1;
         }

@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>   /* realloc/free: the schema's allocation hook */
 
 /* tiny cross-platform thread + mutex + sleep shim (Windows / POSIX) */
 #ifdef _WIN32
@@ -51,9 +52,19 @@ static void   thread_join(Thread t){ pthread_join(t, NULL); }
 
 #define MAX_TOPICS 32
 
+/* A ChatMsg schema { u64 ts; u8 text[<= CHAT_TEXT_CAP] } (the string is a capped array),
+ * shared by every channel. Defined here; not yet used to encode the messages. */
+#define CHAT_TEXT_CAP 256
+static DartSchema *g_schema;
+
 static Mutex        g_lock;            /* guards every dart_* node call */
 static volatile int g_running = 1;     /* cleared on EOF to stop the poll thread */
 static int          g_verbose = 0;     /* --verbose: print discovery/transport events */
+
+/* the schema's memory hook: a realloc-backed DartAllocFn (this demo runs on a desktop) */
+static void *chat_alloc(void *user, void *ptr, size_t size){
+    (void)user; if (size == 0){ free(ptr); return NULL; } return realloc(ptr, size);
+}
 
 /* One topic the user has touched. We track the pub/sub bits locally because the
  * transport role enum has no getter, and we keep the handle to send/re-role it.
@@ -89,7 +100,7 @@ static Topic *get_topic(DartNode *n, const char *name){
     if (g_n_topics == MAX_TOPICS){ printf("  (topic table full, max %d)\n", MAX_TOPICS); return NULL; }
     if (strlen(name) > DART_TOPIC_NAME_MAX){ printf("  (topic name too long)\n"); return NULL; }
 
-    DartChannel *ch = dart_node_create_channel(n, name, DART_INACTIVE, NULL);
+    DartChannel *ch = dart_node_create_channel(n, name, DART_INACTIVE, g_schema, NULL);
     if (!ch){ printf("  (create channel failed for '%s')\n", name); return NULL; }
 
     t = &g_topics[g_n_topics++];
@@ -159,6 +170,15 @@ int main(int argc, char **argv){
         else if ((strcmp(argv[i], "--if") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) ifc = argv[++i];
         else if (!name) name = argv[i];
     }
+    /* build the shared ChatMsg schema; each channel is created with it and owns its own copy,
+     * so it is freed at exit */
+    {   DartSchemaBuilder sb = dart_schema_begin(chat_alloc, NULL, "ChatMsg");
+        dart_schema_field(&sb, "ts", DART_U64);
+        dart_schema_field_caparr(&sb, "text", DART_U8, CHAT_TEXT_CAP);
+        g_schema = dart_schema_finish(&sb);
+    }
+    if (!g_schema){ fprintf(stderr, "schema build failed\n"); return 1; }
+
     DartAllocator mem = dart_allocator_dynamic(1 << 20);
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS,
@@ -191,5 +211,6 @@ int main(int argc, char **argv){
     g_running = 0;                                     /* EOF: stop the poll thread and exit */
     thread_join(poller);
     dart_node_close(n, 1);
+    dart_schema_free(g_schema, chat_alloc, NULL);
     return 0;
 }

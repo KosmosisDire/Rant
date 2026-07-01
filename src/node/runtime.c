@@ -13,7 +13,7 @@
 #include "../common/arena.h"
 #include <string.h>    /* heap access goes through dart_plat_realloc (no <stdlib.h> here) */
 
-struct DartChannel { DartNode *n; uint16_t index; };
+struct DartChannel { DartNode *n; uint16_t index; DartSchema *schema; };   /* schema: node-owned copy */
 
 struct DartNode {
     DartTransportState     *transport;
@@ -522,7 +522,7 @@ static int dart__node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max
 }
 
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
-                                      const DartChannelOpts *opts){
+                                      const DartSchema *schema, const DartChannelOpts *opts){
     DartChannelDef def; DartChannel *h; uint16_t idx;
     if (!n || !name) return NULL;
     if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
@@ -532,11 +532,20 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     idx = n->n_created;
     h = (DartChannel*)dart__node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
     if (!h) return NULL;
+    h->schema = NULL;
+    if (schema){   /* copy into node memory so the caller's schema need not outlive the channel */
+        DartBytes w = dart_schema_wire(schema);
+        h->schema = dart_schema_parse(w.data, w.len, dart__node_alloc, n);
+        if (!h->schema){ dart__node_alloc(n, h, 0); return NULL; }
+    }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
     if (opts) def.qos = opts->qos;
-    if (dart_channel_define(n->transport, idx, &def) != 0){ dart__node_alloc(n, h, 0); return NULL; }
-    h->n = n; h->index = idx;
+    if (dart_channel_define(n->transport, idx, &def) != 0){
+        if (h->schema) dart_schema_free(h->schema, dart__node_alloc, n);
+        dart__node_alloc(n, h, 0); return NULL;
+    }
+    h->n = n; h->index = idx;   /* schema is the node-owned copy (advertised via discovery later) */
     /* re-advertise our interest so peers match the new channel as the blob arrives, and
        replay known peers' interest so this channel matches what they already advertised */
     dart_node_core_build_meta(n->core);
@@ -714,6 +723,8 @@ int dart_channel_set_role(DartChannel *ch, DartRole role){
 
 uint16_t dart_channel_index(const DartChannel *ch){ return ch ? ch->index : 0; }
 
+const DartSchema *dart_channel_schema(const DartChannel *ch){ return ch ? ch->schema : NULL; }
+
 DartChannel *dart_node_channel(DartNode *n, uint16_t index){
     if (!n || index >= n->n_created) return NULL;
     return n->handles[index];
@@ -792,7 +803,10 @@ void dart_node_close(DartNode *n, int send_bye){
         if (n->shm_scratch) dart__node_alloc(n, n->shm_scratch, 0);
     }
 #endif
-    {   uint16_t i; for (i=0;i<n->n_created;i++) if (n->handles[i]) dart__node_alloc(n, n->handles[i], 0); }
+    {   uint16_t i; for (i=0;i<n->n_created;i++) if (n->handles[i]){
+            if (n->handles[i]->schema) dart_schema_free(n->handles[i]->schema, dart__node_alloc, n);
+            dart__node_alloc(n, n->handles[i], 0);
+    } }
     dart_plat_cleanup();
     if (owns){ dart_plat_realloc(arena, 0); dart_plat_realloc(n, 0); }   /* touch nothing after */
 }
