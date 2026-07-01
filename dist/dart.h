@@ -605,14 +605,197 @@ uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 #pragma region common/alloc.h
 /* The allocation hook: a realloc-style callback a memory-taking core calls for growable
  * buffers (ptr NULL = alloc, size 0 = free, else resize). A runtime supplies one derived
- * from its DartAllocator (static bump or dynamic heap), so the core stays memory-policy
- * agnostic. Shared by the transport core and the serializer. */
+ * from its DartAllocator (below), so the core stays memory-policy agnostic. Shared by the
+ * transport core and the serializer. */
 #ifndef DART_ALLOC_H
 #define DART_ALLOC_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>   /* memcpy on a freeable grow */
 
 typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
+
+/* ===========================================================================
+ * DartAllocator2: a paged region allocator (transitional name; replaces the old
+ * DartAllocator). Two modes and two allocation intents.
+ *
+ * Modes (set by the constructor):
+ *   static  - one caller buffer, no growth. Overflow returns NULL. For embedded.
+ *   dynamic - bump within pages; a new page is malloc'd (via an injected backing)
+ *             when the current one is full. It does not touch the platform itself,
+ *             so common/ stays portable and each subsystem runs standalone.
+ *
+ * Intents (chosen per allocation, not by size):
+ *   fixed    - dart_alloc2_fixed: bump into a shared page, cheapest, never freed
+ *              individually. For allocate-once, live-until-reset data.
+ *   freeable - dart_alloc2_alloc (a DartAllocFn): its own reclaimable block, so free
+ *              and resize work. For anything that grows or is released early.
+ *
+ * dart_alloc2_reset frees EVERYTHING (both intents), so no per-allocation free is ever
+ * required; free a freeable block only to reclaim it mid-run. In static mode there are no
+ * pages, so both intents just bump the buffer, free is a no-op, and reset rewinds. All
+ * static-inline: like arena.h, the amalgamator emits it once and a layer that does not use
+ * it pays nothing. */
+
+#ifndef DART_ALLOC2_PAGE
+#define DART_ALLOC2_PAGE (64u * 1024u)   /* default shared-page size (dynamic mode) */
+#endif
+
+/* Page backing (dynamic only): allocate/grow/free whole pages, ptr NULL = alloc, size 0 =
+ * free. The runtime injects dart_plat_realloc; a test injects stdlib realloc. */
+typedef void *(*DartPageFn)(void *ptr, size_t size);
+
+/* Header at the front of every page: a shared bump page, or a freeable one-allocation page. */
+typedef struct i_DartPage {
+    struct i_DartPage *next, *prev;
+    size_t cap;    /* usable payload bytes after this header */
+    size_t used;   /* shared: bump cursor; freeable: the allocation's size */
+} i_DartPage;
+
+typedef struct {
+    DartPageFn  page_realloc;   /* NULL => static (one buffer, no new pages) */
+    i_DartPage *shared;         /* shared bump pages (head = current); static: the buffer */
+    i_DartPage *owned;          /* freeable one-allocation pages (dynamic only) */
+    uint32_t    page_size;
+    size_t      max_bytes;      /* dynamic runaway guard (0 = unlimited) */
+    size_t      in_use, peak;
+    uint64_t    alloc_calls, pages_live;
+} DartAllocator2;
+
+static inline size_t i_a2_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
+static inline size_t i_a2_pow2(size_t n){                 /* round up to a power of two, >= 16 */
+    size_t p = 16u;
+    while (p < n){ if (p > (SIZE_MAX >> 1)) return n; p <<= 1; }
+    return p;
+}
+/* dynamic runaway guard: 1 if `need` more bytes would breach max_bytes */
+static inline int i_a2_over(const DartAllocator2 *a, size_t need){
+    return a->max_bytes && a->in_use + need > a->max_bytes;
+}
+
+static inline DartAllocator2 dart_alloc2_static(void *buffer, size_t size){
+    DartAllocator2 a;
+    uint8_t *b = (uint8_t *)buffer;
+    uintptr_t aligned = ((uintptr_t)b + 15u) & ~(uintptr_t)15u;   /* 16-align the buffer front */
+    size_t head = (size_t)(aligned - (uintptr_t)b);
+    memset(&a, 0, sizeof a);
+    if (b && size >= head + sizeof(i_DartPage)){
+        i_DartPage *pg = (i_DartPage *)(b + head);
+        pg->next = pg->prev = NULL;
+        pg->cap = size - head - sizeof(i_DartPage);
+        pg->used = 0;
+        a.shared = pg; a.pages_live = 1;
+    }
+    return a;   /* page_realloc NULL => static */
+}
+
+static inline DartAllocator2 dart_alloc2_dynamic(DartPageFn page_realloc, uint32_t page_size){
+    DartAllocator2 a; memset(&a, 0, sizeof a);
+    a.page_realloc = page_realloc;
+    a.page_size = page_size ? page_size : DART_ALLOC2_PAGE;
+    return a;
+}
+
+/* bump `need` bytes (16-aligned) from a shared page, adding one on overflow (dynamic). */
+static inline void *i_a2_bump(DartAllocator2 *a, size_t need){
+    i_DartPage *pg = a->shared;
+    need = i_a2_align(need);
+    if (!pg || i_a2_align(pg->used) + need > pg->cap){
+        size_t psz; i_DartPage *np;
+        if (!a->page_realloc || i_a2_over(a, need)) return NULL;   /* static full, or over the guard */
+        psz = a->page_size;
+        if (need + sizeof(i_DartPage) > psz) psz = need + sizeof(i_DartPage);   /* oversized page */
+        np = (i_DartPage *)a->page_realloc(NULL, psz);
+        if (!np) return NULL;
+        np->prev = NULL; np->next = a->shared; if (a->shared) a->shared->prev = np;
+        np->cap = psz - sizeof(i_DartPage); np->used = 0;
+        a->shared = np; a->pages_live++;
+        pg = np;
+    }
+    pg->used = i_a2_align(pg->used);
+    { void *out = (uint8_t *)(pg + 1) + pg->used; pg->used += need; return out; }
+}
+
+static inline void *dart_alloc2_fixed(DartAllocator2 *a, size_t size){
+    void *p;
+    if (!a || size == 0) return NULL;
+    p = i_a2_bump(a, size);
+    if (p){ a->alloc_calls++; a->in_use += i_a2_align(size);
+            if (a->in_use > a->peak) a->peak = a->in_use; }
+    return p;
+}
+
+/* a freeable block of `cap` payload bytes: its own page (dynamic) or a header+payload bumped
+ * from the buffer (static, where free is a no-op). */
+static inline void *i_a2_new_owned(DartAllocator2 *a, size_t cap){
+    i_DartPage *pg;
+    if (a->page_realloc){
+        if (i_a2_over(a, cap)) return NULL;
+        pg = (i_DartPage *)a->page_realloc(NULL, sizeof(i_DartPage) + cap);
+        if (!pg) return NULL;
+        pg->prev = NULL; pg->next = a->owned; if (a->owned) a->owned->prev = pg;
+        a->owned = pg; a->pages_live++;
+    } else {
+        pg = (i_DartPage *)i_a2_bump(a, sizeof(i_DartPage) + cap);
+        if (!pg) return NULL;
+        pg->prev = pg->next = NULL;   /* not linked; reset rewinds the buffer */
+    }
+    pg->cap = cap; pg->used = cap;
+    a->alloc_calls++; a->in_use += cap; if (a->in_use > a->peak) a->peak = a->in_use;
+    return (void *)(pg + 1);
+}
+
+static inline void i_a2_free_owned(DartAllocator2 *a, void *ptr){
+    i_DartPage *pg = (i_DartPage *)ptr - 1;
+    a->in_use -= pg->cap;
+    if (a->page_realloc){                              /* dynamic: unlink + free the page */
+        if (pg->prev) pg->prev->next = pg->next; else a->owned = pg->next;
+        if (pg->next) pg->next->prev = pg->prev;
+        a->page_realloc(pg, 0); a->pages_live--;
+    }                                                  /* static: no-op (reset reclaims it) */
+}
+
+/* The freeable allocator function: a DartAllocFn (pass &allocator as `user`).
+ *   ptr NULL -> allocate    size 0 -> free (reclaims iff dynamic)    else -> resize. */
+static inline void *dart_alloc2_alloc(void *alloc, void *ptr, size_t size){
+    DartAllocator2 *a = (DartAllocator2 *)alloc; size_t cap;
+    if (!a) return NULL;
+    if (size == 0){ if (ptr) i_a2_free_owned(a, ptr); return NULL; }
+    cap = a->page_realloc ? i_a2_pow2(size) : i_a2_align(size);   /* pow2 dynamic, tight static */
+    if (!ptr) return i_a2_new_owned(a, cap);
+    {   i_DartPage *pg = (i_DartPage *)ptr - 1;
+        if (cap <= pg->cap) return ptr;                          /* still fits: keep it */
+        {   void *np = i_a2_new_owned(a, cap);                   /* grow: new + copy + free old */
+            if (!np) return NULL;                                /* old left intact */
+            memcpy(np, ptr, pg->cap);
+            i_a2_free_owned(a, ptr);
+            return np;
+        }
+    }
+}
+
+/* Free everything (both intents). Static: rewind the buffer (keeps it). */
+static inline void dart_alloc2_reset(DartAllocator2 *a){
+    if (!a) return;
+    if (a->page_realloc){
+        i_DartPage *pg, *nx;
+        for (pg = a->owned;  pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
+        for (pg = a->shared; pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
+        a->owned = a->shared = NULL; a->pages_live = 0;
+    } else if (a->shared){
+        a->shared->used = 0; a->pages_live = 1;
+    }
+    a->in_use = 0;
+}
+
+static inline void dart_alloc2_stats(const DartAllocator2 *a, size_t *in_use, size_t *peak,
+                                     uint64_t *alloc_calls){
+    if (!a) return;
+    if (in_use)      *in_use      = a->in_use;
+    if (peak)        *peak        = a->peak;
+    if (alloc_calls) *alloc_calls = a->alloc_calls;
+}
 
 #endif /* DART_ALLOC_H */
 #pragma endregion
@@ -6249,14 +6432,12 @@ struct DartNode {
     void          *user_data;
     void          *arena;      /* the memory block; freed at close iff we own it */
     int            owns_arena;
-    /* message-buffer allocation behind dart__node_alloc: static bumps from the arena
-       tail [static_pos,static_end); dynamic uses dart_plat_realloc, bounded by mem_cap */
+    /* message-buffer / schema / handle allocation behind dart__node_alloc: a paged region
+       allocator (common/alloc.h), dynamic pages from dart_plat_realloc or a static buffer. */
+    DartAllocator2 pool;
     uint8_t        alloc_dynamic;
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
-    uint8_t       *static_pos, *static_end;
-    size_t         mem_cap, mem_used, mem_peak;
-    uint64_t       mem_alloc_calls;  /* message-buffer (re)allocations: ~0 in steady state */
     /* channel handles. handles is a pointer array in the arena; each DartChannel struct
        is a separate stable allocation, so a grow that relocates the arena never moves a
        handle the user holds. */
@@ -6279,49 +6460,11 @@ struct DartNode {
 #endif
 };
 
-/* The node's message-buffer allocator, handed to the transport as its realloc hook
- * (u is the node). Every block carries a DART_ALLOC_HDR-byte header storing its
- * payload size so realloc/free know the old size: the static path needs it to copy
- * on grow, the dynamic path to maintain the memory cap. The header keeps the
- * returned pointer 16-aligned. Static: bump from the arena tail, free is a no-op
- * (the whole arena is reclaimed at node close). Dynamic: dart_plat_realloc, refused
- * past mem_cap. */
-#define DART_ALLOC_HDR 16u
+/* The node's message-buffer allocator, handed to the transport as its realloc hook and used
+ * for schemas and channel handles (u is the node). It delegates to the node's paged region
+ * allocator: one freeable allocation per call, so free/resize work and reset reclaims all. */
 static void *dart__node_alloc(void *u, void *ptr, size_t size){
-    DartNode *n = (DartNode*)u;
-    uint8_t *base = ptr ? (uint8_t*)ptr - DART_ALLOC_HDR : NULL;
-    size_t   old  = base ? *(size_t*)base : 0;
-
-    if (size == 0){                                   /* free */
-        if (base && n->alloc_dynamic){
-            n->mem_used -= old + DART_ALLOC_HDR;
-            dart_plat_realloc(base, 0);
-        }
-        return NULL;
-    }
-    if (n->alloc_dynamic){
-        size_t newtot = size + DART_ALLOC_HDR, used = n->mem_used;
-        uint8_t *nb;
-        if (base) used -= old + DART_ALLOC_HDR;
-        if (used + newtot > n->mem_cap) return NULL;   /* runaway guard */
-        nb = (uint8_t*)dart_plat_realloc(base, newtot);
-        if (!nb) return NULL;
-        n->mem_used = used + newtot;
-        if (n->mem_used > n->mem_peak) n->mem_peak = n->mem_used;
-        n->mem_alloc_calls++;                          /* a real heap (re)alloc -- cold in steady state */
-        *(size_t*)nb = size;
-        return nb + DART_ALLOC_HDR;
-    } else {                                           /* static: bump from the arena tail */
-        size_t need = DART_ALLOC_HDR + ((size + 15u) & ~(size_t)15u);
-        uint8_t *nb;
-        if (base && old >= size) return ptr;           /* fits in place: no re-bump */
-        if ((size_t)(n->static_end - n->static_pos) < need) return NULL;
-        n->mem_alloc_calls++;
-        nb = n->static_pos; n->static_pos += need;
-        *(size_t*)nb = size;
-        if (base) memcpy(nb + DART_ALLOC_HDR, ptr, old);
-        return nb + DART_ALLOC_HDR;
-    }
+    return dart_alloc2_alloc(&((DartNode*)u)->pool, ptr, size);
 }
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
@@ -6557,11 +6700,10 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     n->arena = arena; n->owns_arena = owns;
     n->alloc_dynamic = mem->dynamic;
     if (mem->dynamic){
-        n->mem_cap = mem->max_bytes ? mem->max_bytes : DART_MEM_DEFAULT_MAX;
-        n->static_pos = n->static_end = NULL;
+        n->pool = dart_alloc2_dynamic(dart_plat_realloc, 0);
+        n->pool.max_bytes = mem->max_bytes ? mem->max_bytes : DART_MEM_DEFAULT_MAX;
     } else {
-        n->static_pos = base + ctrl_end;     /* message buffers bump from the arena tail */
-        n->static_end = base + ctrl_cap;
+        n->pool = dart_alloc2_static(base + ctrl_end, ctrl_cap - ctrl_end);   /* message buffers from the arena tail */
     }
     n->handles = (DartChannel**)blocks.handles;
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
@@ -6954,9 +7096,7 @@ void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *wa
 
 void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
     if (!n) return;
-    if (in_use)      *in_use      = n->mem_used;        /* live message-buffer bytes (dynamic) */
-    if (peak)        *peak        = n->mem_peak;        /* high-water of the above */
-    if (alloc_calls) *alloc_calls = n->mem_alloc_calls; /* (re)allocations so far; flat in steady state */
+    dart_alloc2_stats(&n->pool, in_use, peak, alloc_calls);   /* live bytes, high-water, (re)allocs */
 }
 
 void dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out){

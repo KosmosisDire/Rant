@@ -39,14 +39,12 @@ struct DartNode {
     void          *user_data;
     void          *arena;      /* the memory block; freed at close iff we own it */
     int            owns_arena;
-    /* message-buffer allocation behind dart__node_alloc: static bumps from the arena
-       tail [static_pos,static_end); dynamic uses dart_plat_realloc, bounded by mem_cap */
+    /* message-buffer / schema / handle allocation behind dart__node_alloc: a paged region
+       allocator (common/alloc.h), dynamic pages from dart_plat_realloc or a static buffer. */
+    DartAllocator2 pool;
     uint8_t        alloc_dynamic;
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
-    uint8_t       *static_pos, *static_end;
-    size_t         mem_cap, mem_used, mem_peak;
-    uint64_t       mem_alloc_calls;  /* message-buffer (re)allocations: ~0 in steady state */
     /* channel handles. handles is a pointer array in the arena; each DartChannel struct
        is a separate stable allocation, so a grow that relocates the arena never moves a
        handle the user holds. */
@@ -69,49 +67,11 @@ struct DartNode {
 #endif
 };
 
-/* The node's message-buffer allocator, handed to the transport as its realloc hook
- * (u is the node). Every block carries a DART_ALLOC_HDR-byte header storing its
- * payload size so realloc/free know the old size: the static path needs it to copy
- * on grow, the dynamic path to maintain the memory cap. The header keeps the
- * returned pointer 16-aligned. Static: bump from the arena tail, free is a no-op
- * (the whole arena is reclaimed at node close). Dynamic: dart_plat_realloc, refused
- * past mem_cap. */
-#define DART_ALLOC_HDR 16u
+/* The node's message-buffer allocator, handed to the transport as its realloc hook and used
+ * for schemas and channel handles (u is the node). It delegates to the node's paged region
+ * allocator: one freeable allocation per call, so free/resize work and reset reclaims all. */
 static void *dart__node_alloc(void *u, void *ptr, size_t size){
-    DartNode *n = (DartNode*)u;
-    uint8_t *base = ptr ? (uint8_t*)ptr - DART_ALLOC_HDR : NULL;
-    size_t   old  = base ? *(size_t*)base : 0;
-
-    if (size == 0){                                   /* free */
-        if (base && n->alloc_dynamic){
-            n->mem_used -= old + DART_ALLOC_HDR;
-            dart_plat_realloc(base, 0);
-        }
-        return NULL;
-    }
-    if (n->alloc_dynamic){
-        size_t newtot = size + DART_ALLOC_HDR, used = n->mem_used;
-        uint8_t *nb;
-        if (base) used -= old + DART_ALLOC_HDR;
-        if (used + newtot > n->mem_cap) return NULL;   /* runaway guard */
-        nb = (uint8_t*)dart_plat_realloc(base, newtot);
-        if (!nb) return NULL;
-        n->mem_used = used + newtot;
-        if (n->mem_used > n->mem_peak) n->mem_peak = n->mem_used;
-        n->mem_alloc_calls++;                          /* a real heap (re)alloc -- cold in steady state */
-        *(size_t*)nb = size;
-        return nb + DART_ALLOC_HDR;
-    } else {                                           /* static: bump from the arena tail */
-        size_t need = DART_ALLOC_HDR + ((size + 15u) & ~(size_t)15u);
-        uint8_t *nb;
-        if (base && old >= size) return ptr;           /* fits in place: no re-bump */
-        if ((size_t)(n->static_end - n->static_pos) < need) return NULL;
-        n->mem_alloc_calls++;
-        nb = n->static_pos; n->static_pos += need;
-        *(size_t*)nb = size;
-        if (base) memcpy(nb + DART_ALLOC_HDR, ptr, old);
-        return nb + DART_ALLOC_HDR;
-    }
+    return dart_alloc2_alloc(&((DartNode*)u)->pool, ptr, size);
 }
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
@@ -347,11 +307,10 @@ DartNode *dart_node_open(DartAllocator *mem, const char *name, DartMsgFn on_mess
     n->arena = arena; n->owns_arena = owns;
     n->alloc_dynamic = mem->dynamic;
     if (mem->dynamic){
-        n->mem_cap = mem->max_bytes ? mem->max_bytes : DART_MEM_DEFAULT_MAX;
-        n->static_pos = n->static_end = NULL;
+        n->pool = dart_alloc2_dynamic(dart_plat_realloc, 0);
+        n->pool.max_bytes = mem->max_bytes ? mem->max_bytes : DART_MEM_DEFAULT_MAX;
     } else {
-        n->static_pos = base + ctrl_end;     /* message buffers bump from the arena tail */
-        n->static_end = base + ctrl_cap;
+        n->pool = dart_alloc2_static(base + ctrl_end, ctrl_cap - ctrl_end);   /* message buffers from the arena tail */
     }
     n->handles = (DartChannel**)blocks.handles;
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
@@ -744,9 +703,7 @@ void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *wa
 
 void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
     if (!n) return;
-    if (in_use)      *in_use      = n->mem_used;        /* live message-buffer bytes (dynamic) */
-    if (peak)        *peak        = n->mem_peak;        /* high-water of the above */
-    if (alloc_calls) *alloc_calls = n->mem_alloc_calls; /* (re)allocations so far; flat in steady state */
+    dart_alloc2_stats(&n->pool, in_use, peak, alloc_calls);   /* live bytes, high-water, (re)allocs */
 }
 
 void dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out){
