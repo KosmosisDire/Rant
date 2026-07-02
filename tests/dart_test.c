@@ -1440,36 +1440,55 @@ static void schema_dsl_checks(void){
     if (txt){
         DartSchemaFieldInfo fi;
         ST_CHECK(dart_schema_size(txt) == 8+8+8+16+1+8, "schema-dsl: size %u", dart_schema_size(txt));
-        ST_CHECK(dart_schema_field_count(txt) == 6, "schema-dsl: 6 fields");
-        ST_CHECK(dart_schema_field_index(txt, "tagCount") == 4, "schema-dsl: index by name");
+        ST_CHECK(dart_schema_field_count(txt) == 8, "schema-dsl: 8 flat fields (6 top + 2 nested)");
+        ST_CHECK(dart_schema_field_index(txt, "tagCount") == 4
+              && dart_schema_field_index(txt, "velocity.dx") == 6
+              && dart_schema_field_index(txt, "dx") == -1,      /* nested needs its path */
+                 "schema-dsl: index by name incl. dotted paths");
         ST_CHECK(dart_schema_field_at(txt, 3, &fi) && fi.kind == DART_ARR
                  && fi.elem == DART_U8 && fi.count == 16 && fi.offset == 24 && fi.size == 16,
                  "schema-dsl: array field info (off=%u size=%u count=%u)", fi.offset, fi.size, fi.count);
-        ST_CHECK(dart_schema_field_at(txt, 5, &fi) && fi.kind == DART_STRUCT && fi.size == 8 && fi.offset == 41,
-                 "schema-dsl: nested struct field info (off=%u size=%u)", fi.offset, fi.size);
+        ST_CHECK(dart_schema_field_at(txt, 5, &fi) && fi.kind == DART_STRUCT && fi.size == 8
+                 && fi.offset == 41 && fi.depth == 0,
+                 "schema-dsl: struct field info (off=%u size=%u)", fi.offset, fi.size);
+        ST_CHECK(dart_schema_field_at(txt, 7, &fi) && fi.kind == DART_F32
+                 && fi.offset == 45 && fi.depth == 1,
+                 "schema-dsl: nested member is flattened (off=%u depth=%u)", fi.offset, fi.depth);
     }
-    if (txt){   /* setters: build a message, read it back through the getters */
+    if (txt){   /* setters: build a message BY NAME, read it back through the getters */
         uint8_t m[49], uuid[16]; int i, ok;
         memset(m, 0xAA, sizeof m);                  /* dirty: the set fields must fully determine it */
         for (i = 0; i < 16; i++) uuid[i] = (uint8_t)i;
-        ok  = dart_set_uint (m, sizeof m, txt, 0, 42);
-        ok &= dart_set_f64  (m, sizeof m, txt, 1, 1.5);
-        ok &= dart_set_f64  (m, sizeof m, txt, 2, -2.5);
-        ok &= dart_set_array(m, sizeof m, txt, 3, dart_bytes(uuid, 5));   /* short write */
-        ok &= dart_set_uint (m, sizeof m, txt, 4, 300);                   /* narrows like a cast */
-        ST_CHECK(ok, "schema-dsl: setters accept");
-        ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), txt, 0) == 42
-              && dart_get_f64 (dart_bytes(m,sizeof m), txt, 2) == -2.5
-              && dart_get_uint(dart_bytes(m,sizeof m), txt, 4) == (300u & 0xFF),
-                 "schema-dsl: getters read the setters back");
-        {   DartBytes a = dart_get_array(dart_bytes(m,sizeof m), txt, 3);
+        ok  = dart_set_uint (m, sizeof m, txt, "stamp", 42);
+        ok &= dart_set_f64  (m, sizeof m, txt, "x", 1.5);
+        ok &= dart_set_f64  (m, sizeof m, txt, "y", -2.5);
+        ok &= dart_set_array(m, sizeof m, txt, "uuid", dart_bytes(uuid, 5));   /* short write */
+        ok &= dart_set_uint (m, sizeof m, txt, "tagCount", 300);               /* narrows like a cast */
+        ok &= dart_set_f32  (m, sizeof m, txt, "velocity.dy", 7.5f);           /* nested by path */
+        ST_CHECK(ok, "schema-dsl: setters accept (incl. nested path)");
+        ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), txt, "stamp") == 42
+              && dart_get_f64 (dart_bytes(m,sizeof m), txt, "y") == -2.5
+              && dart_get_uint(dart_bytes(m,sizeof m), txt, "tagCount") == (300u & 0xFF)
+              && dart_get_f32 (dart_bytes(m,sizeof m), txt, "velocity.dy") == 7.5f,
+                 "schema-dsl: getters read the setters back (incl. nested path)");
+        {   DartBytes a = dart_get_array(dart_bytes(m,sizeof m), txt, "uuid");
             ST_CHECK(a.len == 16 && a.data[4] == 4 && a.data[5] == 0 && a.data[15] == 0,
                      "schema-dsl: short array write zero-fills the tail");
         }
-        ST_CHECK(!dart_set_uint (m, sizeof m, txt, 1, 1)                     /* f64 field: wrong family */
-              && !dart_set_f64  (m, sizeof m, txt, 5, 0.0)                   /* struct field: no setter */
-              && !dart_set_array(m, sizeof m, txt, 3, dart_bytes(uuid, 17))  /* overflow: refused */
-              && !dart_set_uint (m, 8, txt, 1, 1),                           /* short buffer */
+        {   DartValue v;                            /* reflection access by flat index */
+            ST_CHECK(dart_get_value(dart_bytes(m,sizeof m), txt, 7, &v)
+                     && v.kind == DART_F32 && v.v.f == 7.5,
+                     "schema-dsl: dart_get_value reads the nested member");
+            v.v.u = 9;
+            ST_CHECK(dart_set_value(m, sizeof m, txt, 4, &v)
+                     && dart_get_uint(dart_bytes(m,sizeof m), txt, "tagCount") == 9,
+                     "schema-dsl: dart_set_value writes by index");
+        }
+        ST_CHECK(!dart_set_uint (m, sizeof m, txt, "x", 1)                        /* f64: wrong family */
+              && !dart_set_f64  (m, sizeof m, txt, "velocity", 0.0)               /* struct: no setter */
+              && !dart_set_array(m, sizeof m, txt, "uuid", dart_bytes(uuid, 17))  /* overflow: refused */
+              && !dart_set_uint (m, 8, txt, "x", 1)                               /* short buffer */
+              && !dart_set_uint (m, sizeof m, txt, "nope", 1),                    /* unknown field */
                  "schema-dsl: bad sets refused");
     }
     {   /* errors: NULL + err points into the text at the offending spot */
@@ -1607,8 +1626,8 @@ static void sb_on_message(const DartMsg *msg){
     sb_recv++;
     if (!msg->schema) return;
     sb_schema_ok = (dart_schema_size(msg->schema) == 25 && dart_schema_field_count(msg->schema) == 2);
-    sb_y     = dart_get_f64 (msg->data, msg->schema, 0);   /* reader order: y first */
-    sb_stamp = dart_get_uint(msg->data, msg->schema, 1);
+    sb_y     = dart_get_f64 (msg->data, msg->schema, "y");
+    sb_stamp = dart_get_uint(msg->data, msg->schema, "stamp");
 }
 static void sb_on_event(const DartEvent *ev){
     if (ev->kind == DART_SCHEMA_MISMATCH) sb_mismatch_n++;

@@ -44,13 +44,17 @@ uint32_t dart_schema_scalar_size(DartSchemaTypeKind kind);
  * it with dart_schema_free. */
 typedef struct DartSchema DartSchema;
 
-/* Read-only view of one top-level field, filled by dart_schema_field_at. */
+/* Read-only view of one field, filled by dart_schema_field_at. The compiled schema
+ * flattens EVERY field at every depth into one depth-first table (a struct's members
+ * directly follow it, one level deeper), so reflection walks nested structures without
+ * recursion and offsets are always message-absolute. */
 typedef struct {
-    DartString name;      /* field name (into the schema's wire bytes) */
+    DartString name;      /* field's own name (into the schema's wire bytes) */
     uint8_t    kind;      /* DartSchemaTypeKind */
     uint8_t    elem;      /* ARR element kind, else 0 */
     uint16_t   count;     /* ARR element count, else 0 */
-    uint32_t   offset;    /* byte offset of this field in a message */
+    uint16_t   depth;     /* 0 = top level; n = member of the struct n levels up */
+    uint32_t   offset;    /* absolute byte offset of this field in a message */
     uint32_t   size;      /* byte size of this field */
 } DartSchemaFieldInfo;
 
@@ -125,9 +129,14 @@ DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (ad
 uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */
 DartString  dart_schema_name(const DartSchema *s);        /* root type name */
 uint32_t    dart_schema_size(const DartSchema *s);        /* exact message size in bytes */
+/* Fields in the flattened depth-first table (EVERY depth; a field's index is its order
+ * of appearance in the schema text, nested members included). */
 uint16_t    dart_schema_field_count(const DartSchema *s);
 int         dart_schema_field_at(const DartSchema *s, uint16_t i, DartSchemaFieldInfo *out); /* 1 + fills out, else 0 */
-int         dart_schema_field_index(const DartSchema *s, const char *name);  /* index, or -1 */
+/* Resolve a field by name; nested members by dotted path ("velocity.dx"). Returns the
+ * flat index, or -1. Fields are addressed by NAME everywhere (the getters/setters take
+ * the same paths); resolve once and use dart_get/set_value if a hot path measures it. */
+int         dart_schema_field_index(const DartSchema *s, const char *path);
 
 int       dart_schema_validate(const DartSchema *s, DartBytes msg); /* 1 if msg.len == schema size */
 
@@ -143,28 +152,49 @@ int dart_schema_subset(const DartSchema *sub, const DartSchema *pub);
 DartSchema *dart_schema_rebase(const DartSchema *sub, const DartSchema *pub,
                                DartAllocFn alloc, void *user);
 
-/* Scalar getters: read the field by index, widened. Pick the family matching its kind; a
- * mismatch or out-of-range field yields 0. Read in place, no copy. */
-uint64_t  dart_get_uint(DartBytes msg, const DartSchema *s, uint16_t field);  /* U8..U64, BOOL */
-int64_t   dart_get_int (DartBytes msg, const DartSchema *s, uint16_t field);  /* I8..I64        */
-double    dart_get_f64 (DartBytes msg, const DartSchema *s, uint16_t field);  /* F64 (or F32)   */
-float     dart_get_f32 (DartBytes msg, const DartSchema *s, uint16_t field);  /* F32            */
+/* Scalar getters: read a field BY NAME (nested members by dotted path: "velocity.dx"),
+ * widened. Pick the family matching its kind; a mismatch or unknown field yields 0.
+ * Read in place, no copy. */
+uint64_t  dart_get_uint(DartBytes msg, const DartSchema *s, const char *field);  /* U8..U64, BOOL */
+int64_t   dart_get_int (DartBytes msg, const DartSchema *s, const char *field);  /* I8..I64        */
+double    dart_get_f64 (DartBytes msg, const DartSchema *s, const char *field);  /* F64 (or F32)   */
+float     dart_get_f32 (DartBytes msg, const DartSchema *s, const char *field);  /* F32            */
 /* ARR: a zero-copy view of the whole array (count * element size bytes); {NULL,0} on
  * mismatch. Element kind/count via dart_schema_field_at. */
-DartBytes dart_get_array(DartBytes msg, const DartSchema *s, uint16_t field);
+DartBytes dart_get_array(DartBytes msg, const DartSchema *s, const char *field);
 
-/* Setters (the writer mirror of the getters): write one field of a message being built
- * in buf[0..cap); cap must cover the field, so a buffer of dart_schema_size bytes always
- * works. Values narrow like a C cast. Zero the buffer first unless you set every field
- * (dart_set_array zero-fills its own tail), so the bytes are canonical. Returns 1; 0 on
- * a kind mismatch, out-of-range field, or short buffer. */
-int dart_set_uint(void *buf, size_t cap, const DartSchema *s, uint16_t field, uint64_t v); /* U8..U64, BOOL */
-int dart_set_int (void *buf, size_t cap, const DartSchema *s, uint16_t field, int64_t v);  /* I8..I64        */
-int dart_set_f64 (void *buf, size_t cap, const DartSchema *s, uint16_t field, double v);   /* F64 (or F32)   */
-int dart_set_f32 (void *buf, size_t cap, const DartSchema *s, uint16_t field, float v);    /* F32            */
+/* The canonical default message: every field is zero (numeric 0, false, zeroed arrays
+ * and structs). Writes exactly dart_schema_size bytes into buf; 1, or 0 if cap is too
+ * small. Start a message from this, then set the fields you care about. */
+int dart_schema_message_default(const DartSchema *s, void *buf, size_t cap);
+
+/* Setters (the writer mirror of the getters): write one field BY NAME (dotted paths for
+ * nested members) of a message being built in buf[0..cap); cap must cover the field, so
+ * a buffer of dart_schema_size bytes always works. Values narrow like a C cast. Zero the
+ * buffer first (dart_schema_message_default) unless you set every field (dart_set_array
+ * zero-fills its own tail), so the bytes are canonical. Returns 1; 0 on a kind mismatch,
+ * unknown field, or short buffer. */
+int dart_set_uint(void *buf, size_t cap, const DartSchema *s, const char *field, uint64_t v); /* U8..U64, BOOL */
+int dart_set_int (void *buf, size_t cap, const DartSchema *s, const char *field, int64_t v);  /* I8..I64        */
+int dart_set_f64 (void *buf, size_t cap, const DartSchema *s, const char *field, double v);   /* F64 (or F32)   */
+int dart_set_f32 (void *buf, size_t cap, const DartSchema *s, const char *field, float v);    /* F32            */
 /* ARR: copy elems over the front of the array and zero the rest. elems.len is bytes, must
  * be a multiple of the element size and fit the field (never silently truncated). */
-int dart_set_array(void *buf, size_t cap, const DartSchema *s, uint16_t field, DartBytes elems);
+int dart_set_array(void *buf, size_t cap, const DartSchema *s, const char *field, DartBytes elems);
+
+/* Reflection access by flat index (tools walking a schema they've never seen: the
+ * explorer, loggers, bridges). One tagged value covers every kind; the typed name-based
+ * getters/setters above stay the API for code that knows its fields. */
+typedef struct {
+    uint8_t  kind;        /* DartSchemaTypeKind */
+    uint8_t  elem;        /* ARR element kind */
+    uint16_t count;       /* ARR element count */
+    union { uint64_t u; int64_t i; double f; } v;   /* scalar value (BOOL in u as 0/1) */
+    DartBytes bytes;      /* ARR/STRUCT raw bytes (get: view into msg; set: source, may be
+                             shorter than the field: the rest is zeroed) */
+} DartValue;
+int dart_get_value(DartBytes msg, const DartSchema *s, uint16_t field, DartValue *out);
+int dart_set_value(void *buf, size_t cap, const DartSchema *s, uint16_t field, const DartValue *val);
 
 #ifdef __cplusplus
 }

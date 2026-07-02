@@ -23,6 +23,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>   /* rand: the demo message's filler fields */
 
 /* tiny cross-platform thread + mutex + sleep shim (Windows / POSIX) */
 #ifdef _WIN32
@@ -52,21 +53,62 @@ static void   thread_join(Thread t){ pthread_join(t, NULL); }
 
 #define MAX_TOPICS 32
 
-/* The ChatMsg schema, in the DSL every program using the topic pastes verbatim (the
- * text length rides as its own field; the array is fixed-size). Every line typed is
- * encoded through it on send and decoded from DartMsg.schema on delivery. A field's
- * index is its order in the text. */
+/* The ChatMsg schema, in the DSL every program using the topic pastes verbatim. It
+ * deliberately exercises every serialization kind (all eleven scalars, arrays of both
+ * flavors, a nested struct): the typed line is the text field, everything else is
+ * random filler so the explorer has structure to show. Every line typed is encoded
+ * through it on send and decoded from DartMsg.schema on delivery; fields are accessed
+ * by name (nested members by dotted path: "vel.dx"). */
 static const char CHAT_SCHEMA[] =
     "ChatMsg"
     "{"
     "    ts:      u64,"
+    "    seq:     u32,"
+    "    ttl:     u16,"
+    "    hops:    u8,"
+    "    mood:    i8,"
+    "    delta:   i16,"
+    "    score:   i32,"
+    "    drift:   i64,"
+    "    ratio:   f32,"
+    "    weight:  f64,"
+    "    urgent:  bool,"
+    "    pos:     f64[3],"
+    "    vel:     { dx: f32, dy: f32 },"
     "    textLen: u16,"
     "    text:    u8[256]"
     "}";
-enum { CHAT_TS, CHAT_TEXTLEN, CHAT_TEXT };
 #define CHAT_TEXT_CAP 256
-#define CHAT_MSG_SIZE (8 + 2 + CHAT_TEXT_CAP)   /* == dart_schema_size(g_schema) */
 static DartSchema *g_schema;
+
+/* pack one ChatMsg: the typed line plus every other kind, filled with random values.
+ * Start from the canonical default (all zero), then set what we care about, all BY
+ * NAME (nested struct members by dotted path). */
+static void chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
+    static uint32_t seq;
+    uint8_t pos_wire[24]; uint64_t bits; double p; int k;
+    dart_schema_message_default(g_schema, buf, cap);
+    dart_set_uint(buf, cap, g_schema, "ts",     i_dart_plat_now_us());
+    dart_set_uint(buf, cap, g_schema, "seq",    ++seq);
+    dart_set_uint(buf, cap, g_schema, "ttl",    (uint64_t)(rand() & 0xFFFF));
+    dart_set_uint(buf, cap, g_schema, "hops",   (uint64_t)(rand() & 0xFF));
+    dart_set_int (buf, cap, g_schema, "mood",   (int64_t)(rand() % 201 - 100));
+    dart_set_int (buf, cap, g_schema, "delta",  (int64_t)(rand() % 20001 - 10000));
+    dart_set_int (buf, cap, g_schema, "score",  (int64_t)rand() - RAND_MAX / 2);
+    dart_set_int (buf, cap, g_schema, "drift",  ((int64_t)rand() << 20) - ((int64_t)RAND_MAX << 19));
+    dart_set_f32 (buf, cap, g_schema, "ratio",  (float)rand() / (float)RAND_MAX);
+    dart_set_f64 (buf, cap, g_schema, "weight", 100.0 * (double)rand() / (double)RAND_MAX);
+    dart_set_uint(buf, cap, g_schema, "urgent", (uint64_t)(rand() & 1));
+    for (k = 0; k < 3; k++){                             /* f64 array: LE element bytes */
+        p = (double)(rand() % 2001 - 1000) / 10.0;
+        memcpy(&bits, &p, 8); i_dart_le_w64(pos_wire + 8 * k, bits);
+    }
+    dart_set_array(buf, cap, g_schema, "pos", dart_bytes(pos_wire, sizeof pos_wire));
+    dart_set_f32 (buf, cap, g_schema, "vel.dx", (float)(rand() % 100) / 10.0f);
+    dart_set_f32 (buf, cap, g_schema, "vel.dy", (float)(rand() % 100) / 10.0f);
+    dart_set_uint (buf, cap, g_schema, "textLen", (uint64_t)len);
+    dart_set_array(buf, cap, g_schema, "text", dart_bytes(line, len));
+}
 
 static Mutex        g_lock;            /* guards every dart_* node call */
 static volatile int g_running = 1;     /* cleared on EOF to stop the poll thread */
@@ -134,14 +176,16 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
  * just reflects clock skew. A schema-less message (a raw publisher) prints as-is. */
 static void on_message(const DartMsg *msg){
     if (msg->schema){
-        uint64_t  ts   = dart_get_uint(msg->data, msg->schema, CHAT_TS);
-        uint64_t  n    = dart_get_uint(msg->data, msg->schema, CHAT_TEXTLEN);
-        DartBytes text = dart_get_array(msg->data, msg->schema, CHAT_TEXT);
+        uint64_t  ts   = dart_get_uint(msg->data, msg->schema, "ts");
+        uint64_t  seq  = dart_get_uint(msg->data, msg->schema, "seq");
+        uint64_t  n    = dart_get_uint(msg->data, msg->schema, "textLen");
+        DartBytes text = dart_get_array(msg->data, msg->schema, "text");
         if (n > text.len) n = text.len;
-        printf("[%.*s] %.*s > %.*s  (+%.1f ms)\n",
+        printf("[%.*s] %.*s > %.*s  (#%llu, +%.2f ms)\n",
                (int)msg->sender_name.len, msg->sender_name.data,
                (int)msg->channel_name.len, msg->channel_name.data,
                (int)n, (const char *)text.data,
+               (unsigned long long)seq,
                (double)(i_dart_plat_now_us() - ts) / 1000.0);
     } else {
         printf("[%.*s] %.*s > %.*s\n", (int)msg->sender_name.len, msg->sender_name.data,
@@ -170,15 +214,16 @@ static int handle_command(DartNode *n, char *line){
 }
 
 /* Background thread: drive discovery and the socket while the main thread blocks on
- * stdin. Each tick is a non-blocking poll under the lock, then a short sleep so the
- * input thread can take the lock to send. */
+ * stdin. Each tick blocks in the socket wait (so an arriving datagram is handled the
+ * moment it lands, not a sleep later) with a 1 ms cap so the input thread only ever
+ * waits that long for the lock. */
 static THREAD_RET poll_thread(void *arg){
     DartNode *n = (DartNode *)arg;
     while (g_running){
         mutex_lock(&g_lock);
-        dart_node_poll(n, 0);          /* non-blocking: drain RX, service timers/TX */
+        dart_node_poll(n, 1);          /* wakes instantly on RX; 1 ms cap for timers/TX */
         mutex_unlock(&g_lock);
-        sleep_ms(1);
+        sleep_ms(0);                   /* yield: give the input thread a fair shot at the lock */
     }
     return 0;
 }
@@ -197,7 +242,8 @@ int main(int argc, char **argv){
      * dart_node_close frees it: no explicit dart_schema_free. */
     DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     g_schema = dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, NULL);
-    if (!g_schema){ fprintf(stderr, "schema compile failed\n"); return 1; }
+    if (!g_schema || dart_schema_size(g_schema) > 512){ fprintf(stderr, "schema compile failed\n"); return 1; }
+    srand((unsigned)i_dart_plat_now_us());   /* the filler fields are random per message */
 
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS,
@@ -219,15 +265,14 @@ int main(int argc, char **argv){
         if (handle_command(n, line)) continue;
 
         /* plain chat: encode a ChatMsg and publish it to every topic we publish on */
-        uint8_t buf[CHAT_MSG_SIZE];
+        uint8_t buf[512];   /* >= dart_schema_size(g_schema), checked at startup */
         int sent = 0;
         if (len > CHAT_TEXT_CAP) len = CHAT_TEXT_CAP;
-        dart_set_uint (buf, sizeof buf, g_schema, CHAT_TS, i_dart_plat_now_us());
-        dart_set_uint (buf, sizeof buf, g_schema, CHAT_TEXTLEN, (uint64_t)len);
-        dart_set_array(buf, sizeof buf, g_schema, CHAT_TEXT, dart_bytes(line, len));
+        chat_encode(buf, sizeof buf, line, len);
         mutex_lock(&g_lock);
         for (int i = 0; i < g_n_topics; i++)
-            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(buf, sizeof buf)); sent++; }
+            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(buf, dart_schema_size(g_schema))); sent++; }
+        if (sent) dart_node_poll(n, 0);   /* flush TX now instead of on the poll thread's next tick */
         mutex_unlock(&g_lock);
         if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }
