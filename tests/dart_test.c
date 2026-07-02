@@ -1448,6 +1448,30 @@ static void schema_dsl_checks(void){
         ST_CHECK(dart_schema_field_at(txt, 5, &fi) && fi.kind == DART_STRUCT && fi.size == 8 && fi.offset == 41,
                  "schema-dsl: nested struct field info (off=%u size=%u)", fi.offset, fi.size);
     }
+    if (txt){   /* setters: build a message, read it back through the getters */
+        uint8_t m[49], uuid[16]; int i, ok;
+        memset(m, 0xAA, sizeof m);                  /* dirty: the set fields must fully determine it */
+        for (i = 0; i < 16; i++) uuid[i] = (uint8_t)i;
+        ok  = dart_set_uint (m, sizeof m, txt, 0, 42);
+        ok &= dart_set_f64  (m, sizeof m, txt, 1, 1.5);
+        ok &= dart_set_f64  (m, sizeof m, txt, 2, -2.5);
+        ok &= dart_set_array(m, sizeof m, txt, 3, dart_bytes(uuid, 5));   /* short write */
+        ok &= dart_set_uint (m, sizeof m, txt, 4, 300);                   /* narrows like a cast */
+        ST_CHECK(ok, "schema-dsl: setters accept");
+        ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), txt, 0) == 42
+              && dart_get_f64 (dart_bytes(m,sizeof m), txt, 2) == -2.5
+              && dart_get_uint(dart_bytes(m,sizeof m), txt, 4) == (300u & 0xFF),
+                 "schema-dsl: getters read the setters back");
+        {   DartBytes a = dart_get_array(dart_bytes(m,sizeof m), txt, 3);
+            ST_CHECK(a.len == 16 && a.data[4] == 4 && a.data[5] == 0 && a.data[15] == 0,
+                     "schema-dsl: short array write zero-fills the tail");
+        }
+        ST_CHECK(!dart_set_uint (m, sizeof m, txt, 1, 1)                     /* f64 field: wrong family */
+              && !dart_set_f64  (m, sizeof m, txt, 5, 0.0)                   /* struct field: no setter */
+              && !dart_set_array(m, sizeof m, txt, 3, dart_bytes(uuid, 17))  /* overflow: refused */
+              && !dart_set_uint (m, 8, txt, 1, 1),                           /* short buffer */
+                 "schema-dsl: bad sets refused");
+    }
     {   /* errors: NULL + err points into the text at the offending spot */
         static const char *bad[] = {
             "Pose { x: f65 }",              /* unknown type */

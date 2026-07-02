@@ -3,7 +3,8 @@
  *   pub    <topic>   publish     (your typed lines get pushed to that topic)
  *   pubsub <topic>   do both
  *   drop   <topic>   stop pub and sub on that topic
- * Any other line is published to every topic you currently publish on.
+ * Any other line is encoded as a ChatMsg (the schema below) and published to every
+ * topic you currently publish on; deliveries decode through DartMsg.schema.
  * Run two copies (one host, or two on a LAN) and type in each; pass a node name
  * (e.g. ./node alice) to label who a message came from, --verbose to print
  * discovery/transport events, and --if <ip> to pin multicast to a given interface
@@ -52,8 +53,9 @@ static void   thread_join(Thread t){ pthread_join(t, NULL); }
 #define MAX_TOPICS 32
 
 /* The ChatMsg schema, in the DSL every program using the topic pastes verbatim (the
- * text length rides as its own field; the array is fixed-size). Defined here; not yet
- * used to encode the messages. */
+ * text length rides as its own field; the array is fixed-size). Every line typed is
+ * encoded through it on send and decoded from DartMsg.schema on delivery. A field's
+ * index is its order in the text. */
 static const char CHAT_SCHEMA[] =
     "ChatMsg"
     "{"
@@ -61,6 +63,9 @@ static const char CHAT_SCHEMA[] =
     "    textLen: u16,"
     "    text:    u8[256]"
     "}";
+enum { CHAT_TS, CHAT_TEXTLEN, CHAT_TEXT };
+#define CHAT_TEXT_CAP 256
+#define CHAT_MSG_SIZE (8 + 2 + CHAT_TEXT_CAP)   /* == dart_schema_size(g_schema) */
 static DartSchema *g_schema;
 
 static Mutex        g_lock;            /* guards every dart_* node call */
@@ -124,10 +129,25 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
     printf("  [%s] %s\n", s, name);
 }
 
+/* decode a ChatMsg through the schema the message arrived with (its length is already
+ * validated against it). The one-way age is meaningful on one host; across machines it
+ * just reflects clock skew. A schema-less message (a raw publisher) prints as-is. */
 static void on_message(const DartMsg *msg){
-    printf("[%.*s] %.*s > %.*s\n", (int)msg->sender_name.len, msg->sender_name.data,
-           (int)msg->channel_name.len, msg->channel_name.data,
-           (int)msg->data.len, (const char *)msg->data.data);
+    if (msg->schema){
+        uint64_t  ts   = dart_get_uint(msg->data, msg->schema, CHAT_TS);
+        uint64_t  n    = dart_get_uint(msg->data, msg->schema, CHAT_TEXTLEN);
+        DartBytes text = dart_get_array(msg->data, msg->schema, CHAT_TEXT);
+        if (n > text.len) n = text.len;
+        printf("[%.*s] %.*s > %.*s  (+%.1f ms)\n",
+               (int)msg->sender_name.len, msg->sender_name.data,
+               (int)msg->channel_name.len, msg->channel_name.data,
+               (int)n, (const char *)text.data,
+               (double)(i_dart_plat_now_us() - ts) / 1000.0);
+    } else {
+        printf("[%.*s] %.*s > %.*s\n", (int)msg->sender_name.len, msg->sender_name.data,
+               (int)msg->channel_name.len, msg->channel_name.data,
+               (int)msg->data.len, (const char *)msg->data.data);
+    }
 }
 
 static void on_event(const DartEvent *ev){
@@ -198,11 +218,16 @@ int main(int argc, char **argv){
         if (!len) continue;
         if (handle_command(n, line)) continue;
 
-        /* plain chat: publish to every topic we currently publish on */
+        /* plain chat: encode a ChatMsg and publish it to every topic we publish on */
+        uint8_t buf[CHAT_MSG_SIZE];
         int sent = 0;
+        if (len > CHAT_TEXT_CAP) len = CHAT_TEXT_CAP;
+        dart_set_uint (buf, sizeof buf, g_schema, CHAT_TS, i_dart_plat_now_us());
+        dart_set_uint (buf, sizeof buf, g_schema, CHAT_TEXTLEN, (uint64_t)len);
+        dart_set_array(buf, sizeof buf, g_schema, CHAT_TEXT, dart_bytes(line, len));
         mutex_lock(&g_lock);
         for (int i = 0; i < g_n_topics; i++)
-            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(line, len)); sent++; }
+            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(buf, sizeof buf)); sent++; }
         mutex_unlock(&g_lock);
         if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }

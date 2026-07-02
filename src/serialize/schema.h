@@ -153,6 +153,19 @@ float     dart_get_f32 (DartBytes msg, const DartSchema *s, uint16_t field);  /*
  * mismatch. Element kind/count via dart_schema_field_at. */
 DartBytes dart_get_array(DartBytes msg, const DartSchema *s, uint16_t field);
 
+/* Setters (the writer mirror of the getters): write one field of a message being built
+ * in buf[0..cap); cap must cover the field, so a buffer of dart_schema_size bytes always
+ * works. Values narrow like a C cast. Zero the buffer first unless you set every field
+ * (dart_set_array zero-fills its own tail), so the bytes are canonical. Returns 1; 0 on
+ * a kind mismatch, out-of-range field, or short buffer. */
+int dart_set_uint(void *buf, size_t cap, const DartSchema *s, uint16_t field, uint64_t v); /* U8..U64, BOOL */
+int dart_set_int (void *buf, size_t cap, const DartSchema *s, uint16_t field, int64_t v);  /* I8..I64        */
+int dart_set_f64 (void *buf, size_t cap, const DartSchema *s, uint16_t field, double v);   /* F64 (or F32)   */
+int dart_set_f32 (void *buf, size_t cap, const DartSchema *s, uint16_t field, float v);    /* F32            */
+/* ARR: copy elems over the front of the array and zero the rest. elems.len is bytes, must
+ * be a multiple of the element size and fit the field (never silently truncated). */
+int dart_set_array(void *buf, size_t cap, const DartSchema *s, uint16_t field, DartBytes elems);
+
 #ifdef __cplusplus
 }
 #endif

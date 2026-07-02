@@ -1545,6 +1545,19 @@ float     dart_get_f32 (DartBytes msg, const DartSchema *s, uint16_t field);  /*
  * mismatch. Element kind/count via dart_schema_field_at. */
 DartBytes dart_get_array(DartBytes msg, const DartSchema *s, uint16_t field);
 
+/* Setters (the writer mirror of the getters): write one field of a message being built
+ * in buf[0..cap); cap must cover the field, so a buffer of dart_schema_size bytes always
+ * works. Values narrow like a C cast. Zero the buffer first unless you set every field
+ * (dart_set_array zero-fills its own tail), so the bytes are canonical. Returns 1; 0 on
+ * a kind mismatch, out-of-range field, or short buffer. */
+int dart_set_uint(void *buf, size_t cap, const DartSchema *s, uint16_t field, uint64_t v); /* U8..U64, BOOL */
+int dart_set_int (void *buf, size_t cap, const DartSchema *s, uint16_t field, int64_t v);  /* I8..I64        */
+int dart_set_f64 (void *buf, size_t cap, const DartSchema *s, uint16_t field, double v);   /* F64 (or F32)   */
+int dart_set_f32 (void *buf, size_t cap, const DartSchema *s, uint16_t field, float v);    /* F32            */
+/* ARR: copy elems over the front of the array and zero the rest. elems.len is bytes, must
+ * be a multiple of the element size and fit the field (never silently truncated). */
+int dart_set_array(void *buf, size_t cap, const DartSchema *s, uint16_t field, DartBytes elems);
+
 #ifdef __cplusplus
 }
 #endif
@@ -6260,6 +6273,66 @@ DartBytes dart_get_array(DartBytes msg, const DartSchema *s, uint16_t field){
     if (!f || f->kind != DART_ARR) return out;
     out.data = msg.data + f->offset; out.len = f->size;
     return out;
+}
+
+/* ---- write a message ----------------------------------------------------------------- */
+static const i_Field *i_dart_schema_set_lookup(const DartSchema *s, const void *buf, size_t cap,
+                                               uint16_t field){
+    if (!buf) return NULL;
+    return i_dart_schema_field_lookup(s, dart_bytes(buf, cap), field);
+}
+
+int dart_set_uint(void *buf, size_t cap, const DartSchema *s, uint16_t field, uint64_t v){
+    const i_Field *f = i_dart_schema_set_lookup(s, buf, cap, field); uint8_t *p;
+    if (!f) return 0;
+    p = (uint8_t *)buf + f->offset;
+    switch (f->kind){
+        case DART_U8:   p[0] = (uint8_t)v;  return 1;
+        case DART_BOOL: p[0] = v ? 1u : 0u; return 1;
+        case DART_U16: i_dart_le_w16(p, (uint16_t)v); return 1;
+        case DART_U32: i_dart_le_w32(p, (uint32_t)v); return 1;
+        case DART_U64: i_dart_le_w64(p, v); return 1;
+        default: return 0;
+    }
+}
+
+int dart_set_int(void *buf, size_t cap, const DartSchema *s, uint16_t field, int64_t v){
+    const i_Field *f = i_dart_schema_set_lookup(s, buf, cap, field); uint8_t *p;
+    if (!f) return 0;
+    p = (uint8_t *)buf + f->offset;
+    switch (f->kind){
+        case DART_I8:  p[0] = (uint8_t)v; return 1;
+        case DART_I16: i_dart_le_w16(p, (uint16_t)v); return 1;
+        case DART_I32: i_dart_le_w32(p, (uint32_t)v); return 1;
+        case DART_I64: i_dart_le_w64(p, (uint64_t)v); return 1;
+        default: return 0;
+    }
+}
+
+int dart_set_f64(void *buf, size_t cap, const DartSchema *s, uint16_t field, double v){
+    const i_Field *f = i_dart_schema_set_lookup(s, buf, cap, field);
+    if (!f) return 0;
+    if (f->kind == DART_F64){ uint64_t b; memcpy(&b, &v, 8); i_dart_le_w64((uint8_t *)buf + f->offset, b); return 1; }
+    if (f->kind == DART_F32){ float x = (float)v; uint32_t b; memcpy(&b, &x, 4); i_dart_le_w32((uint8_t *)buf + f->offset, b); return 1; }
+    return 0;
+}
+
+int dart_set_f32(void *buf, size_t cap, const DartSchema *s, uint16_t field, float v){
+    const i_Field *f = i_dart_schema_set_lookup(s, buf, cap, field); uint32_t b;
+    if (!f || f->kind != DART_F32) return 0;
+    memcpy(&b, &v, 4); i_dart_le_w32((uint8_t *)buf + f->offset, b);
+    return 1;
+}
+
+int dart_set_array(void *buf, size_t cap, const DartSchema *s, uint16_t field, DartBytes elems){
+    const i_Field *f = i_dart_schema_set_lookup(s, buf, cap, field); uint32_t esz;
+    if (!f || f->kind != DART_ARR) return 0;
+    esz = dart_schema_scalar_size((DartSchemaTypeKind)f->elem);
+    if (elems.len > f->size || (esz && elems.len % esz != 0)) return 0;  /* never silently truncate */
+    if (elems.len && !elems.data) return 0;
+    if (elems.len) memcpy((uint8_t *)buf + f->offset, elems.data, elems.len);
+    memset((uint8_t *)buf + f->offset + elems.len, 0, f->size - elems.len);  /* zero the tail */
+    return 1;
 }
 
 /* ---- the schema DSL ------------------------------------------------------------------ */
