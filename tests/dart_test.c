@@ -1405,6 +1405,256 @@ static void beff_flow_checks(void){
     ST_CHECK(beff_would_evict(1)==1, "flow: reliable reader does apply backpressure");
 }
 
+/* (17c) the schema DSL: text compiles to the same wire bytes (hence hash) the builder
+   emits, layout comes out right, and malformed text fails with a useful position. */
+static void schema_dsl_checks(void){
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    static const char POSE[] =
+        "Pose\n"
+        "{\n"
+        "    stamp:    u64,\n"
+        "    x:        f64,\n"
+        "    y:        f64,\n"
+        "    uuid:     u8[16],   -- fixed array\n"
+        "    tagCount: u8,\n"
+        "    velocity: { dx: f32, dy: f32 }\n"
+        "}";
+    DartSchema *txt, *built;
+    txt = dart_schema_compile(dart_allocator_alloc, &ma, POSE, NULL);
+    ST_CHECK(txt != NULL, "schema-dsl: compiles");
+    {   DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &ma, "Pose");
+        dart_schema_field(&b, "stamp", DART_U64);
+        dart_schema_field(&b, "x", DART_F64);
+        dart_schema_field(&b, "y", DART_F64);
+        dart_schema_field_array(&b, "uuid", DART_U8, 16);
+        dart_schema_field(&b, "tagCount", DART_U8);
+        dart_schema_begin_struct(&b, "velocity");
+        dart_schema_field(&b, "dx", DART_F32);
+        dart_schema_field(&b, "dy", DART_F32);
+        dart_schema_end_struct(&b);
+        built = dart_schema_finish(&b);
+    }
+    ST_CHECK(built != NULL, "schema-dsl: builder twin builds");
+    ST_CHECK(txt && built && dart_schema_hash(txt) == dart_schema_hash(built),
+             "schema-dsl: text and builder produce the same wire (same hash)");
+    if (txt){
+        DartSchemaFieldInfo fi;
+        ST_CHECK(dart_schema_size(txt) == 8+8+8+16+1+8, "schema-dsl: size %u", dart_schema_size(txt));
+        ST_CHECK(dart_schema_field_count(txt) == 6, "schema-dsl: 6 fields");
+        ST_CHECK(dart_schema_field_index(txt, "tagCount") == 4, "schema-dsl: index by name");
+        ST_CHECK(dart_schema_field_at(txt, 3, &fi) && fi.kind == DART_ARR
+                 && fi.elem == DART_U8 && fi.count == 16 && fi.offset == 24 && fi.size == 16,
+                 "schema-dsl: array field info (off=%u size=%u count=%u)", fi.offset, fi.size, fi.count);
+        ST_CHECK(dart_schema_field_at(txt, 5, &fi) && fi.kind == DART_STRUCT && fi.size == 8 && fi.offset == 41,
+                 "schema-dsl: nested struct field info (off=%u size=%u)", fi.offset, fi.size);
+    }
+    {   /* errors: NULL + err points into the text at the offending spot */
+        static const char *bad[] = {
+            "Pose { x: f65 }",              /* unknown type */
+            "Pose { x f64 }",               /* missing ':' */
+            "Pose { x: f64 ",               /* missing '}' */
+            "Pose { x: u8[0] }",            /* zero count */
+            "Pose { x: u8[70000] }",        /* count > u16 */
+            "Pose { x: f64 } y",            /* trailing garbage */
+            "{ x: f64 }"                    /* missing root name */
+        };
+        unsigned i, ok = 1;
+        for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
+            const char *ep = NULL;
+            DartSchema *s = dart_schema_compile(dart_allocator_alloc, &ma, bad[i], &ep);
+            if (s || !ep || ep < bad[i] || ep > bad[i] + strlen(bad[i])) ok = 0;
+        }
+        ST_CHECK(ok, "schema-dsl: malformed text rejected with a position");
+    }
+    dart_allocator_reset(&ma);
+}
+
+/* (18) schema advertisement: a publisher's channel schema rides its discovery announce
+   (hash + inlined wire, publish channels only); the subscriber reads it back off the
+   peer view (dart_node_peers -> dart_node_peer_schema) and reparses it to the same
+   identity. A NULL-schema channel advertises nothing. */
+static void schema_advert_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);   /* the caller-side schema */
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc;
+    DartChannelOpts co; DartDiscoveryAddr seed; DartSchema *sch=NULL;
+    uint64_t want=0, got=0; DartBytes wire; int t, has_raw=0;
+    const DartDiscoveryPeer *peers; uint16_t n_peers=0, sch_alias=0xFFFF, raw_alias=0xFFFF;
+
+    {   DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &ma, "Pose");
+        dart_schema_field(&b, "x", DART_F64);
+        dart_schema_field(&b, "y", DART_F64);
+        dart_schema_field_array(&b, "tags", DART_U8, 16);
+        sch = dart_schema_finish(&b);
+    }
+    ST_CHECK(sch!=NULL, "schema-ad: schema builds");
+    if (!sch) return;
+    want = dart_schema_hash(sch);
+
+    memset(&co,0,sizeof co); co.qos.keep_last=4;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+8; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    P = dart_node_open(&pa, "sch-pub", NULL, NULL, &po);
+    S = dart_node_open(&sa, "sch-sub", NULL, NULL, &so);
+    ST_CHECK(P&&S, "schema-ad: nodes open");
+    if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); dart_allocator_reset(&ma); return; }
+    pc = dart_node_create_channel(P, "sch/pose", DART_PUB_ONLY, sch, &co);
+    dart_node_create_channel(P, "sch/raw",  DART_PUB_ONLY, NULL, &co);
+    dart_node_create_channel(S, "sch/pose", DART_SUB_ONLY, sch, &co);
+    ST_CHECK(pc!=NULL, "schema-ad: channels created");
+    dart_schema_free(sch, dart_allocator_alloc, &ma);   /* node owns its copy: caller's freed NOW */
+
+    for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_channel_match_count(pc)>0, "schema-ad: matched");
+
+    peers = dart_node_peers(S, &n_peers);   /* S's view of P */
+    ST_CHECK(peers && n_peers==1, "schema-ad: subscriber sees one peer (%u)", n_peers);
+    if (peers && n_peers==1){
+        DartInterestIter it; DartTopic tp;
+        memset(&it,0,sizeof it);
+        while (dart_node_peer_interest_next(&peers[0], &it, &tp)){
+            if (!tp.is_pub) continue;
+            if (tp.name.len==8 && !memcmp(tp.name.data,"sch/pose",8)) sch_alias = tp.alias;
+            if (tp.name.len==7 && !memcmp(tp.name.data,"sch/raw",7)){ raw_alias = tp.alias; has_raw=1; }
+        }
+        ST_CHECK(sch_alias!=0xFFFF && has_raw, "schema-ad: both pub topics advertised");
+        ST_CHECK(dart_node_peer_schema(&peers[0], sch_alias, &got, &wire)==1 && got==want,
+                 "schema-ad: hash rides the announce (%08lx%08lx)",
+                 (unsigned long)(got>>32), (unsigned long)got);
+        ST_CHECK(wire.data && wire.len>0, "schema-ad: wire inlined (%u bytes)", (unsigned)wire.len);
+        if (wire.data){
+            DartSchema *rt = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, &ma);
+            ST_CHECK(rt && dart_schema_hash(rt)==want && dart_schema_field_count(rt)==3,
+                     "schema-ad: peer schema reparses to the same identity");
+            if (rt) dart_schema_free(rt, dart_allocator_alloc, &ma);
+        }
+        ST_CHECK(dart_node_peer_schema(&peers[0], raw_alias, &got, &wire)==0,
+                 "schema-ad: raw channel advertises no schema");
+
+        /* the runtime-flip flow (the example's): a schema channel created INACTIVE
+           advertises nothing; flipping it to a publish role advertises the schema */
+        {   DartSchemaBuilder b2 = dart_schema_begin(dart_allocator_alloc, &ma, "Late");
+            DartSchema *late; DartChannel *lc; uint64_t lwant, lgot=0; uint16_t late_alias=0xFFFF;
+            dart_schema_field(&b2, "n", DART_U32);
+            late = dart_schema_finish(&b2);
+            lwant = dart_schema_hash(late);
+            lc = dart_node_create_channel(P, "sch/late", DART_INACTIVE, late, &co);
+            dart_schema_free(late, dart_allocator_alloc, &ma);
+            ST_CHECK(lc!=NULL, "schema-ad: inactive channel created");
+            for (t=0;t<200;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+            {   DartInterestIter it2; DartTopic tp2; int seen=0;
+                peers = dart_node_peers(S, &n_peers);
+                memset(&it2,0,sizeof it2);
+                while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
+                    if (tp2.is_pub && tp2.name.len==8 && !memcmp(tp2.name.data,"sch/late",8)) seen=1;
+                ST_CHECK(!seen, "schema-ad: inactive channel not advertised");
+            }
+            dart_channel_set_role(lc, DART_PUB_ONLY);
+            for (t=0;t<400;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+            {   DartInterestIter it2; DartTopic tp2;
+                peers = dart_node_peers(S, &n_peers);
+                memset(&it2,0,sizeof it2);
+                while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
+                    if (tp2.is_pub && tp2.name.len==8 && !memcmp(tp2.name.data,"sch/late",8)) late_alias=tp2.alias;
+                ST_CHECK(late_alias!=0xFFFF, "schema-ad: role flip advertises the topic");
+                ST_CHECK(late_alias!=0xFFFF && dart_node_peer_schema(&peers[0], late_alias, &lgot, &wire)==1
+                         && lgot==lwant && wire.data,
+                         "schema-ad: role flip advertises the schema (hash %08lx%08lx)",
+                         (unsigned long)(lgot>>32), (unsigned long)lgot);
+            }
+        }
+    }
+    dart_node_close(P,1); dart_node_close(S,1);
+    dart_allocator_reset(&ma);
+}
+
+/* (19) reader-side subset binding: a subscriber declaring a SUBSET of the publisher's
+   schema (by name, any order) matches; messages arrive with a rebased schema (the
+   reader's indices on the writer's layout) and a validated length. An incompatible
+   subscriber (same field, different kind) is refused on BOTH sides with
+   DART_SCHEMA_MISMATCH; a wrong-size message from a matched writer is dropped. */
+static int      sb_recv, sb_schema_ok;
+static uint64_t sb_stamp; static double sb_y;
+static unsigned long sb_mismatch_n;
+static void sb_on_message(const DartMsg *msg){
+    sb_recv++;
+    if (!msg->schema) return;
+    sb_schema_ok = (dart_schema_size(msg->schema) == 25 && dart_schema_field_count(msg->schema) == 2);
+    sb_y     = dart_get_f64 (msg->data, msg->schema, 0);   /* reader order: y first */
+    sb_stamp = dart_get_uint(msg->data, msg->schema, 1);
+}
+static void sb_on_event(const DartEvent *ev){
+    if (ev->kind == DART_SCHEMA_MISMATCH) sb_mismatch_n++;
+}
+static void schema_bind_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL;
+    DartChannel *pc, *pc_bad; DartChannelOpts co; DartDiscoveryAddr seed;
+    DartSchema *W, *R, *WB, *RB; int t;
+    /* writer: full Pose; reader: a reordered subset of it */
+    W  = dart_schema_compile(dart_allocator_alloc, &ma,
+             "Pose { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
+    R  = dart_schema_compile(dart_allocator_alloc, &ma,
+             "Pose { y: f64, stamp: u64 }", NULL);
+    WB = dart_schema_compile(dart_allocator_alloc, &ma, "Bad { v: u64 }", NULL);
+    RB = dart_schema_compile(dart_allocator_alloc, &ma, "Bad { v: f64 }", NULL);  /* kind conflict */
+    ST_CHECK(W && R && WB && RB, "schema-bind: schemas compile");
+    ST_CHECK(W && R && dart_schema_subset(R, W) && !dart_schema_subset(W, R),
+             "schema-bind: subset is one-way (reader within writer)");
+    if (!(W && R && WB && RB)){ dart_allocator_reset(&ma); return; }
+
+    memset(&co,0,sizeof co); co.qos.keep_last=4;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+9; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    sb_recv=0; sb_schema_ok=0; sb_stamp=0; sb_y=0.0; sb_mismatch_n=0;
+    P = dart_node_open(&pa, "sb-pub", NULL,          sb_on_event, &po);
+    S = dart_node_open(&sa, "sb-sub", sb_on_message, sb_on_event, &so);
+    ST_CHECK(P&&S, "schema-bind: nodes open");
+    if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); dart_allocator_reset(&ma); return; }
+    pc     = dart_node_create_channel(P, "sb/pose", DART_PUB_ONLY, W,  &co);
+    pc_bad = dart_node_create_channel(P, "sb/bad",  DART_PUB_ONLY, WB, &co);
+    dart_node_create_channel(S, "sb/pose", DART_SUB_ONLY, R,  &co);
+    dart_node_create_channel(S, "sb/bad",  DART_SUB_ONLY, RB, &co);
+    ST_CHECK(pc && pc_bad, "schema-bind: channels created");
+
+    for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_channel_match_count(pc)==1, "schema-bind: subset reader matched");
+    ST_CHECK(dart_channel_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
+    ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu DART_SCHEMA_MISMATCH)", sb_mismatch_n);
+
+    {   /* publish one Pose packed in the WRITER's layout; the reader decodes through
+           the rebased schema with its own indices */
+        uint8_t buf[25]; uint64_t bits; double x=1.5, y=-2.25;
+        i_dart_le_w64(buf, 0x1122334455667788ULL);              /* stamp @0 */
+        memcpy(&bits,&x,8); i_dart_le_w64(buf+8,  bits);        /* x     @8 */
+        memcpy(&bits,&y,8); i_dart_le_w64(buf+16, bits);        /* y     @16 */
+        buf[24]=7;                                              /* tag   @24 */
+        dart_channel_send(pc, dart_bytes(buf, sizeof buf));
+        for (t=0;t<400 && sb_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
+        ST_CHECK(sb_recv==1, "schema-bind: subset message delivered");
+        ST_CHECK(sb_schema_ok, "schema-bind: DartMsg.schema is the rebased view (writer size, reader fields)");
+        ST_CHECK(sb_y==-2.25 && sb_stamp==0x1122334455667788ULL,
+                 "schema-bind: reader indices read the writer's offsets (y=%.2f)", sb_y);
+    }
+    {   /* a message that does not fit the sender's schema is dropped + surfaced */
+        unsigned long before = sb_mismatch_n;
+        uint8_t junk[3] = {1,2,3};
+        dart_channel_send(pc, dart_bytes(junk, sizeof junk));
+        for (t=0;t<200 && sb_mismatch_n==before;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
+        ST_CHECK(sb_recv==1 && sb_mismatch_n>before,
+                 "schema-bind: wrong-size message dropped + surfaced (recv=%d)", sb_recv);
+    }
+    dart_node_close(P,1); dart_node_close(S,1);
+    dart_allocator_reset(&ma);
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1702,6 +1952,9 @@ static int selftest_main(void){
     dynamic_grow_checks();        /* 16. dynamic-mode grow: relocate mid-stream, lose nothing       */
     qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
     beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
+    schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
+    schema_advert_checks();       /* 18. channel schema rides the announce; peer reads it back */
+    schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;

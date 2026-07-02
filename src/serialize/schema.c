@@ -7,8 +7,7 @@
  *   schema := [u8 version][u8 root_namelen][root_name...][type]   ; root type is a STRUCT
  *   type   := [u8 kind] payload
  *     scalar (U8..BOOL)      : (none; size implied by kind)
- *     FIX                    : [u16 size]
- *     CAPARR                 : [u16 cap][type elem]               ; elem must be fixed
+ *     ARR                    : [u8 elem][u16 count]               ; elem must be a scalar
  *     STRUCT                 : [u8 nfields] ( [u8 namelen][name][type] )*nfields
  * Every type is fixed: a field's byte offset is the sum of the preceding field sizes. */
 
@@ -17,9 +16,11 @@ typedef struct {
     DartString name;      /* field name, a view into the wire bytes */
     uint32_t   offset;    /* byte offset in a message */
     uint32_t   size;      /* byte size */
-    uint16_t   cap;       /* CAPARR capacity, else 0 */
+    uint32_t   type_off;  /* wire offset of the field's type encoding (subset compare) */
+    uint32_t   type_len;  /* wire length of the type encoding */
+    uint16_t   count;     /* ARR element count, else 0 */
     uint8_t    kind;
-    uint8_t    elem;      /* CAPARR element kind, else 0 */
+    uint8_t    elem;      /* ARR element kind, else 0 */
 } i_Field;
 
 struct DartSchema {
@@ -56,11 +57,11 @@ static uint32_t i_dart_rd_type_size(i_Rd *r){
         case DART_U16: case DART_I16:               return 2;
         case DART_U32: case DART_I32: case DART_F32: return 4;
         case DART_U64: case DART_I64: case DART_F64: return 8;
-        case DART_FIX: return i_dart_rd_u16(r);
-        case DART_CAPARR: {
-            uint16_t cap = i_dart_rd_u16(r); uint32_t es = i_dart_rd_type_size(r);
-            if (r->fail || es == 0){ r->fail = 1; return 0; }    /* needs a fixed element */
-            return (uint32_t)2 + (uint32_t)cap * es;              /* [u16 count] + cap elements */
+        case DART_ARR: {
+            uint32_t es = dart_schema_scalar_size((DartSchemaTypeKind)i_dart_rd_u8(r));
+            uint16_t count = i_dart_rd_u16(r);
+            if (r->fail || es == 0){ r->fail = 1; return 0; }    /* elem must be a scalar */
+            return (uint32_t)count * es;
         }
         case DART_STRUCT: {
             uint8_t nf = i_dart_rd_u8(r); uint32_t sum = 0; uint16_t i;
@@ -119,13 +120,15 @@ static DartSchema *i_dart_schema_compile(uint8_t *buf, size_t wire_len, size_t c
         kpos = r.pos;
         f->name = dart_string(fn, fl);
         f->kind = (kpos < r.n) ? buf[kpos] : 0;
-        f->cap = 0; f->elem = 0;
+        f->count = 0; f->elem = 0;
         sz = i_dart_rd_type_size(&r);
         if (r.fail) return NULL;
-        if (f->kind == DART_CAPARR){                            /* capture cap/elem for readers */
+        f->type_off = (uint32_t)kpos;                           /* type extents: subset compare */
+        f->type_len = (uint32_t)(r.pos - kpos);
+        if (f->kind == DART_ARR){                               /* capture elem/count for readers */
             i_Rd q; q.w = buf; q.n = wire_len; q.pos = kpos + 1; q.fail = 0;
-            f->cap = i_dart_rd_u16(&q);
             f->elem = i_dart_rd_u8(&q);
+            f->count = i_dart_rd_u16(&q);
         }
         f->size = sz;
         f->offset = running;
@@ -206,17 +209,12 @@ void dart_schema_field(DartSchemaBuilder *b, const char *name, DartSchemaTypeKin
     i_dart_schema_builder_count(b); i_dart_schema_builder_put_name(b, name); i_dart_schema_builder_put(b, (uint8_t)kind);
 }
 
-void dart_schema_field_fix(DartSchemaBuilder *b, const char *name, uint16_t size){
+void dart_schema_field_array(DartSchemaBuilder *b, const char *name,
+                             DartSchemaTypeKind elem_scalar, uint16_t count){
     if (!b || b->err) return;
-    i_dart_schema_builder_count(b); i_dart_schema_builder_put_name(b, name); i_dart_schema_builder_put(b, (uint8_t)DART_FIX); i_dart_schema_builder_put_u16(b, size);
-}
-
-void dart_schema_field_caparr(DartSchemaBuilder *b, const char *name,
-                              DartSchemaTypeKind elem_scalar, uint16_t cap){
-    if (!b || b->err) return;
-    if (dart_schema_scalar_size(elem_scalar) == 0){ b->err = -6; return; }  /* fixed scalar elem */
+    if (dart_schema_scalar_size(elem_scalar) == 0){ b->err = -6; return; }  /* scalar elements only */
     i_dart_schema_builder_count(b); i_dart_schema_builder_put_name(b, name);
-    i_dart_schema_builder_put(b, (uint8_t)DART_CAPARR); i_dart_schema_builder_put_u16(b, cap); i_dart_schema_builder_put(b, (uint8_t)elem_scalar);
+    i_dart_schema_builder_put(b, (uint8_t)DART_ARR); i_dart_schema_builder_put(b, (uint8_t)elem_scalar); i_dart_schema_builder_put_u16(b, count);
 }
 
 void dart_schema_begin_struct(DartSchemaBuilder *b, const char *name){
@@ -298,7 +296,7 @@ int dart_schema_field_at(const DartSchema *s, uint16_t i, DartSchemaFieldInfo *o
     if (out){
         out->name = f->name;
         out->kind = f->kind; out->elem = f->elem;
-        out->cap = f->cap; out->offset = f->offset; out->size = f->size;
+        out->count = f->count; out->offset = f->offset; out->size = f->size;
     }
     return 1;
 }
@@ -316,6 +314,46 @@ int dart_schema_field_index(const DartSchema *s, const char *name){
         }
     }
     return -1;
+}
+
+/* ---- reader/writer compatibility ----------------------------------------------------- */
+static const i_Field *i_dart_schema_find(const DartSchema *s, DartString name){
+    uint16_t i;
+    for (i = 0; i < s->nfields; i++){
+        const i_Field *f = &s->fields[i];
+        if (f->name.len == name.len &&
+            (name.len == 0 || memcmp(f->name.data, name.data, name.len) == 0)) return f;
+    }
+    return NULL;
+}
+
+int dart_schema_subset(const DartSchema *sub, const DartSchema *pub){
+    uint16_t i;
+    if (!sub || !pub) return 0;
+    if (sub->name.len != pub->name.len ||
+        (sub->name.len && memcmp(sub->name.data, pub->name.data, sub->name.len) != 0)) return 0;
+    for (i = 0; i < sub->nfields; i++){
+        const i_Field *a = &sub->fields[i], *b = i_dart_schema_find(pub, a->name);
+        if (!b || a->kind != b->kind) return 0;
+        if (a->kind == DART_ARR && (a->elem != b->elem || a->count != b->count)) return 0;
+        if (a->kind == DART_STRUCT &&                         /* nested: exact type encoding */
+            (a->type_len != b->type_len ||
+             memcmp(sub->wire.data + a->type_off, pub->wire.data + b->type_off, a->type_len) != 0))
+            return 0;
+    }
+    return 1;
+}
+
+DartSchema *dart_schema_rebase(const DartSchema *sub, const DartSchema *pub,
+                               DartAllocFn alloc, void *user){
+    DartSchema *r; uint16_t i;
+    if (!alloc || !dart_schema_subset(sub, pub)) return NULL;
+    r = dart_schema_parse(sub->wire.data, sub->wire.len, alloc, user);
+    if (!r) return NULL;
+    for (i = 0; i < r->nfields; i++)                          /* the writer's layout... */
+        r->fields[i].offset = i_dart_schema_find(pub, r->fields[i].name)->offset;
+    r->size = pub->size;                                      /* ...and the writer's message size */
+    return r;
 }
 
 /* ---- read a message ---------------------------------------------------------------- */
@@ -373,23 +411,126 @@ float dart_get_f32(DartBytes msg, const DartSchema *s, uint16_t field){
     { uint32_t b = i_dart_le_r32(msg.data + f->offset); float x; memcpy(&x, &b, 4); return x; }
 }
 
-DartBytes dart_get_fix(DartBytes msg, const DartSchema *s, uint16_t field){
+DartBytes dart_get_array(DartBytes msg, const DartSchema *s, uint16_t field){
     DartBytes out; const i_Field *f = i_dart_schema_field_lookup(s, msg, field);
     out.data = NULL; out.len = 0;
-    if (!f || f->kind != DART_FIX) return out;
+    if (!f || f->kind != DART_ARR) return out;
     out.data = msg.data + f->offset; out.len = f->size;
     return out;
 }
 
-DartBytes dart_get_caparr(DartBytes msg, const DartSchema *s, uint16_t field, uint16_t *count){
-    DartBytes out; const i_Field *f = i_dart_schema_field_lookup(s, msg, field); uint16_t n, esz;
-    out.data = NULL; out.len = 0; if (count) *count = 0;
-    if (!f || f->kind != DART_CAPARR) return out;
-    n = i_dart_le_r16(msg.data + f->offset);          /* used count, stored inline */
-    if (n > f->cap) n = f->cap;                       /* clamp to capacity */
-    esz = (uint16_t)dart_schema_scalar_size((DartSchemaTypeKind)f->elem);
-    if (count) *count = n;
-    out.data = msg.data + f->offset + 2;
-    out.len  = (size_t)n * esz;
-    return out;
+/* ---- the schema DSL ------------------------------------------------------------------ */
+/* dart_schema_compile input (see schema.h for the full doc):
+ *   schema := name '{' fields '}'
+ *   field  := name ':' type  (',')?          fields self-delimit; commas optional
+ *   type   := scalar | scalar '[' count ']' | '{' fields '}'
+ * The parser is a thin front end over the builder, so all structural limits (name
+ * lengths, field counts, nesting depth) are the builder's. */
+typedef struct { const char *p; const char *err; } i_DartDsl;
+
+static void i_dart_dsl_ws(i_DartDsl *d){
+    for (;;){
+        while (*d->p==' ' || *d->p=='\t' || *d->p=='\r' || *d->p=='\n') d->p++;
+        if (d->p[0]=='-' && d->p[1]=='-'){ while (*d->p && *d->p!='\n') d->p++; continue; }
+        return;
+    }
+}
+static void i_dart_dsl_fail(i_DartDsl *d, const char *at){ if (!d->err) d->err = at; }
+/* identifier into out[256] (NUL-terminated); 0 + err on missing/overlong */
+static int i_dart_dsl_ident(i_DartDsl *d, char out[256]){
+    const char *q = d->p; size_t n;
+    if (!((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || *q=='_')){ i_dart_dsl_fail(d, q); return 0; }
+    while ((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || (*q>='0'&&*q<='9') || *q=='_') q++;
+    n = (size_t)(q - d->p);
+    if (n > 255){ i_dart_dsl_fail(d, d->p); return 0; }
+    memcpy(out, d->p, n); out[n] = '\0';
+    d->p = q;
+    return 1;
+}
+static int i_dart_dsl_expect(i_DartDsl *d, char c){
+    if (*d->p == c){ d->p++; return 1; }
+    i_dart_dsl_fail(d, d->p);
+    return 0;
+}
+/* decimal array count, 1..65535 */
+static int i_dart_dsl_count(i_DartDsl *d, uint16_t *out){
+    const char *at = d->p; uint32_t v = 0;
+    while (*d->p>='0' && *d->p<='9'){
+        v = v*10u + (uint32_t)(*d->p - '0');
+        if (v > 0xFFFFu){ i_dart_dsl_fail(d, at); return 0; }
+        d->p++;
+    }
+    if (d->p == at || v == 0){ i_dart_dsl_fail(d, at); return 0; }
+    *out = (uint16_t)v;
+    return 1;
+}
+static int i_dart_dsl_kind(const char *s, DartSchemaTypeKind *k){
+    static const struct { const char *word; uint8_t kind; } table[] = {
+        {"u8",DART_U8},{"u16",DART_U16},{"u32",DART_U32},{"u64",DART_U64},
+        {"i8",DART_I8},{"i16",DART_I16},{"i32",DART_I32},{"i64",DART_I64},
+        {"f32",DART_F32},{"f64",DART_F64},{"bool",DART_BOOL} };
+    size_t i;
+    for (i = 0; i < sizeof table / sizeof table[0]; i++)
+        if (strcmp(s, table[i].word) == 0){ *k = (DartSchemaTypeKind)table[i].kind; return 1; }
+    return 0;
+}
+
+/* fields of one struct body, up to (not consuming) the closing '}' */
+static void i_dart_dsl_fields(i_DartDsl *d, DartSchemaBuilder *b){
+    char name[256], tname[256];
+    for (;;){
+        i_dart_dsl_ws(d);
+        if (*d->p == '}' || *d->p == '\0' || d->err || b->err) return;
+        if (!i_dart_dsl_ident(d, name)) return;
+        i_dart_dsl_ws(d);
+        if (!i_dart_dsl_expect(d, ':')) return;
+        i_dart_dsl_ws(d);
+        if (*d->p == '{'){                                   /* nested struct */
+            d->p++;
+            dart_schema_begin_struct(b, name);
+            i_dart_dsl_fields(d, b);
+            if (!i_dart_dsl_expect(d, '}')) return;
+            dart_schema_end_struct(b);
+        } else {
+            const char *at = d->p; DartSchemaTypeKind k;
+            if (!i_dart_dsl_ident(d, tname)) return;
+            if (!i_dart_dsl_kind(tname, &k)){ i_dart_dsl_fail(d, at); return; }   /* unknown type */
+            i_dart_dsl_ws(d);
+            if (*d->p == '['){
+                uint16_t count;
+                d->p++;
+                i_dart_dsl_ws(d);
+                if (!i_dart_dsl_count(d, &count)) return;
+                i_dart_dsl_ws(d);
+                if (!i_dart_dsl_expect(d, ']')) return;
+                dart_schema_field_array(b, name, k, count);
+            } else {
+                dart_schema_field(b, name, k);
+            }
+        }
+        i_dart_dsl_ws(d);
+        if (*d->p == ',') d->p++;                            /* optional separator */
+    }
+}
+
+DartSchema *dart_schema_compile(DartAllocFn alloc, void *user, const char *text, const char **err){
+    i_DartDsl d; char root[256]; DartSchemaBuilder b; DartSchema *s;
+    if (err) *err = NULL;
+    if (!alloc || !text){ return NULL; }
+    d.p = text; d.err = NULL;
+    i_dart_dsl_ws(&d);
+    if (!i_dart_dsl_ident(&d, root)){ if (err) *err = d.err; return NULL; }
+    i_dart_dsl_ws(&d);
+    b = dart_schema_begin(alloc, user, root);
+    if (i_dart_dsl_expect(&d, '{')){
+        i_dart_dsl_fields(&d, &b);
+        if (i_dart_dsl_expect(&d, '}')){
+            i_dart_dsl_ws(&d);
+            if (*d.p) i_dart_dsl_fail(&d, d.p);              /* trailing garbage */
+        }
+    }
+    if (d.err && !b.err) b.err = -7;                         /* parse error: make finish fail */
+    s = dart_schema_finish(&b);                              /* frees everything on any error */
+    if (!s && err) *err = d.err ? d.err : d.p;
+    return s;
 }

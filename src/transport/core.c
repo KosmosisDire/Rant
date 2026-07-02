@@ -544,6 +544,15 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
                         st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
             continue;                                       /* refuse: no bit, no alias map */
         }
+        /* schema gate (RxO for types): both sides run the same check off the same two
+           advertised schemas, so a refused pair forms no proxy on either end (the writer
+           never streams to, or flow-controls on, a reader that will not decode it). */
+        if (st->cfg.schema_check &&
+            !st->cfg.schema_check(st->cfg.user, (uint16_t)channel_idx, alias, is_pub)){
+            i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, (uint16_t)channel_idx,
+                        st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
+            continue;                                       /* refuse: no bit, no alias map */
+        }
         i_dart_bit_set(bitmap,(uint32_t)channel_idx);
         if (rel_bitmap && (flags & DART_META_F_RELIABLE)) i_dart_bit_set(rel_bitmap,(uint32_t)channel_idx);
         if ((uint32_t)alias < st->alias_max)
@@ -643,30 +652,79 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
 #define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
 #ifdef DART_SHM
-#define DART__META_VER  7u                  /* what WE write */
+#define DART__META_VER  9u                  /* what WE write */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  6u
+#define DART__META_VER  8u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= 5 && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=6 && meta.data[2]<=7;
+        && meta.data[2]>=8 && meta.data[2]<=9;
 }
-/* base prefix through host[16], by version (odd v7 carries shm+host, even v6 doesn't). */
+/* base prefix through host[16], by version (odd v9 carries shm+host, even v8 doesn't). */
 static uint16_t i_dart_meta_base(const uint8_t *meta){
-    return (meta[2]==7) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
+    return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
+}
+/* upper bound on the schema section: every channel mapped, every wire distinct + inlined */
+static size_t i_dart_meta_schemas_max(uint16_t n_channels){
+    return 4u + (size_t)n_channels * (2u + 8u)
+              + (size_t)n_channels * (8u + 2u + DART_META_SCHEMA_INLINE_MAX);
 }
 uint16_t dart_meta_capacity(uint16_t n_channels){
-    size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_channels);  /* overlay: no name (it's discovery's) */
+    size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_channels)   /* overlay: no name (it's discovery's) */
+               + i_dart_meta_schemas_max(n_channels);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
+/* the schema section: map every advertising alias (any non-INACTIVE role: publishers
+ * offer their layout, subscribers their required subset) to its schema identity, then
+ * each distinct wire once (interned by hash), inlined only when it fits
+ * DART_META_SCHEMA_INLINE_MAX. Always present (two zero counts when there is nothing to
+ * advertise). Returns bytes written, or 0 if cap is too small (the caller then ships
+ * the overlay without the section). */
+static int i_dart_meta_schema_advertised(DartTransportState *st, const DartMetaSchema *schemas,
+                                         uint16_t c){
+    return schemas && schemas[c].hash != 0 && st->channels[c].role != DART_INACTIVE;
+}
+static size_t i_dart_meta_schemas_build(DartTransportState *st, uint8_t *out, size_t cap,
+                                        const DartMetaSchema *schemas){
+    uint8_t *p = out + 2, *end = out + cap, *wires;
+    uint16_t c, k, n_map = 0, n_wire = 0;
+    if (cap < 4) return 0;
+    for (c = 0; c < st->cfg.n_channels; c++){          /* alias -> hash map */
+        if (!i_dart_meta_schema_advertised(st, schemas, c)) continue;
+        if (p + 10 > end) return 0;
+        i_dart_le_w16(p, c); i_dart_le_w64(p + 2, schemas[c].hash);
+        p += 10; n_map++;
+    }
+    i_dart_le_w16(out, n_map);
+    wires = p; p += 2;
+    if (p > end) return 0;
+    for (c = 0; c < st->cfg.n_channels; c++){          /* distinct wires, inlined when small */
+        int seen = 0;
+        if (!i_dart_meta_schema_advertised(st, schemas, c)) continue;
+        if (!schemas[c].wire.data || schemas[c].wire.len == 0
+            || schemas[c].wire.len > DART_META_SCHEMA_INLINE_MAX) continue;
+        for (k = 0; k < c; k++)                        /* interned: emitted once per hash */
+            if (i_dart_meta_schema_advertised(st, schemas, k)
+                && schemas[k].hash == schemas[c].hash){ seen = 1; break; }
+        if (seen) continue;
+        if (p + 10 + schemas[c].wire.len > end) return 0;
+        i_dart_le_w64(p, schemas[c].hash); i_dart_le_w16(p + 8, (uint16_t)schemas[c].wire.len);
+        memcpy(p + 10, schemas[c].wire.data, schemas[c].wire.len);
+        p += 10 + schemas[c].wire.len; n_wire++;
+    }
+    i_dart_le_w16(wires, n_wire);
+    return (size_t)(p - out);
+}
+
 uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
-    size_t interest_len; uint16_t off = DART__META_BASE;
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                         const DartMetaSchema *schemas){
+    size_t interest_len, len; uint16_t off = DART__META_BASE;
     out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
 #ifdef DART_SHM
@@ -676,7 +734,10 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
     (void)shm_capable; (void)host;
 #endif
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
-    return (uint16_t)(off + interest_len);
+    len = (size_t)off + interest_len;
+    if (interest_len >= 4)   /* the section is located by walking the interest list, so it needs one */
+        len += i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
+    return (uint16_t)len;
 }
 
 uint16_t dart_meta_frag(DartBytes meta){
@@ -717,9 +778,55 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out
     return 1;
 }
 
+/* Offset of the schema section: the base prefix, then a bounds-checked walk over the
+ * (count-delimited) interest list. 0 = malformed/absent. */
+static uint32_t i_dart_meta_schemas_off(DartBytes meta){
+    uint32_t off, k, tot; uint16_t n_pub, n_sub;
+    if (!i_dart_meta_ok(meta)) return 0;
+    off = i_dart_meta_base(meta.data);
+    if ((size_t)off + 4u > meta.len) return 0;
+    n_pub = i_dart_le_r16(meta.data + off); n_sub = i_dart_le_r16(meta.data + off + 2);
+    off += 4u; tot = (uint32_t)n_pub + n_sub;
+    for (k = 0; k < tot; k++){
+        if ((size_t)off + 4u > meta.len) return 0;
+        off += 4u + (uint32_t)meta.data[off + 3];
+        if ((size_t)off > meta.len) return 0;
+    }
+    return off;
+}
+
+int dart_meta_schema(DartBytes meta, uint16_t alias, uint64_t *hash, DartBytes *wire){
+    uint32_t off = i_dart_meta_schemas_off(meta), k;
+    uint16_t n_map, n_wire; uint64_t h = 0; int found = 0;
+    if (hash) *hash = 0;
+    if (wire) *wire = dart_bytes(NULL, 0);
+    if (off == 0 || (size_t)off + 4u > meta.len) return 0;
+    n_map = i_dart_le_r16(meta.data + off); off += 2;
+    for (k = 0; k < n_map; k++, off += 10){            /* alias -> hash */
+        if ((size_t)off + 10u > meta.len) return 0;
+        if (i_dart_le_r16(meta.data + off) == alias){ h = i_dart_le_r64(meta.data + off + 2); found = 1; }
+    }
+    if (!found || h == 0) return 0;
+    if (hash) *hash = h;
+    if ((size_t)off + 2u > meta.len) return 1;         /* hash-only blob: no wire table */
+    n_wire = i_dart_le_r16(meta.data + off); off += 2;
+    for (k = 0; k < n_wire; k++){                      /* hash -> inlined wire */
+        uint16_t wlen;
+        if ((size_t)off + 10u > meta.len) return 1;
+        wlen = i_dart_le_r16(meta.data + off + 8);
+        if ((size_t)off + 10u + wlen > meta.len) return 1;
+        if (i_dart_le_r64(meta.data + off) == h){
+            if (wire) *wire = dart_bytes(meta.data + off + 10, wlen);
+            return 1;
+        }
+        off += 10u + wlen;
+    }
+    return 1;                                          /* advertised, but not inlined */
+}
+
 #ifdef DART_SHM
 int dart_meta_shm(DartBytes meta, uint8_t host[16]){
-    if (!i_dart_meta_ok(meta) || meta.data[2]!=7
+    if (!i_dart_meta_ok(meta) || meta.data[2]!=9
         || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
     return 1;

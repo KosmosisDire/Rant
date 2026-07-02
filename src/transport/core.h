@@ -116,7 +116,8 @@ typedef enum {
     DART_TRANSPORT_MSG_LOST,        /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
     DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
-    DART_TRANSPORT_QOS_INCOMPATIBLE /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_SCHEMA_MISMATCH  /* the schema_check hook refused a match (.channel, .peer); .detail = our channel name */
 } DartTransportEventKind;
 
 typedef struct {
@@ -157,6 +158,13 @@ typedef struct {
 #endif
     DartTransportEventFn  on_event;   /* optional: transport events (loss/too-big/collision/qos) */
     DartAllocFn           allocator;  /* optional: set => dynamic message sizing */
+    /* optional schema gate: called while a peer's interest is applied, once per would-be
+     * match, with the local channel and the peer's advertised alias (peer_is_pub: their
+     * entry is a publish). Return 1 to allow, 0 to refuse (no proxy either way, and the
+     * transport fires SCHEMA_MISMATCH). The transport knows nothing of schema contents;
+     * the node implements this over the serialize layer with the overlay it is applying. */
+    int                 (*schema_check)(void *user, uint16_t channel, uint16_t peer_alias,
+                                        int peer_is_pub);
     void                 *user;
 } DartConfig;
 
@@ -214,23 +222,47 @@ size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
- * interest list: the transport's OVERLAY, carried opaquely inside discovery's announce blob
- * (the node name lives in discovery's own section, not here). Layout:
- *   v6: ['D','N',6, frag_lo, frag_hi,                <interest>]
- *   v7: ['D','N',7, frag_lo, frag_hi, shm, host[16], <interest>]
- * frag sits at [3..4] in both; v7 adds the SHM byte + host. dart_transport_meta_build writes v7 when
- * DART_SHM is compiled, v6 otherwise. */
+ * payload wrapping this node's UDP fragment size, SHM capability + host uuid, its
+ * interest list, and its published channels' schemas: the transport's OVERLAY, carried
+ * opaquely inside discovery's announce blob (the node name lives in discovery's own
+ * section, not here). Layout:
+ *   v8: ['D','N',8, frag_lo, frag_hi,                <interest> <schemas>]
+ *   v9: ['D','N',9, frag_lo, frag_hi, shm, host[16], <interest> <schemas>]
+ * frag sits at [3..4] in both; v9 adds the SHM byte + host. dart_transport_meta_build writes v9 when
+ * DART_SHM is compiled, v8 otherwise. The schema section follows the (self-delimiting)
+ * interest list:
+ *   [u16 n_map]  ( [u16 alias][u64 hash] )*          advertised alias -> schema identity
+ *   [u16 n_wire] ( [u64 hash][u16 len][bytes] )*     distinct schema wires, inlined when small
+ * The wire bytes are OPAQUE here (serialize/schema.h builds and parses them); the
+ * transport just frames them, so it keeps no serialize dependency. */
 
-/* Bytes to reserve for the overlay: prefix + the largest interest list n_channels can
- * produce, capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_capacity. */
+/* Largest schema wire the overlay inlines (and reserves capacity for, per channel); a
+ * bigger schema is advertised by hash alone. Define before the include to raise it. */
+#ifndef DART_META_SCHEMA_INLINE_MAX
+#define DART_META_SCHEMA_INLINE_MAX 512u
+#endif
+
+/* One channel's schema advertisement, registered by the node: the 64-bit identity plus a
+ * view of the canonical wire bytes (valid for the channel's lifetime). hash 0 = none. */
+typedef struct {
+    uint64_t  hash;
+    DartBytes wire;
+} DartMetaSchema;
+
+/* Bytes to reserve for the overlay: prefix + the largest interest list and schema section
+ * n_channels can produce, capped to one (IP-fragmentable) UDP datagram. Sizes discovery's
+ * meta_capacity. */
 uint16_t  dart_meta_capacity(uint16_t n_channels);
 /* Build the overlay into out[cap] (cap >= dart_meta_capacity): the version prefix (frag_size,
- * plus shm_capable + host[16] when DART_SHM is compiled), then st's interest list. Returns
- * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
- * discovery's own section of the announce blob. */
+ * plus shm_capable + host[16] when DART_SHM is compiled), st's interest list, then the
+ * schema section. schemas is one entry per channel (index = channel index) or NULL; every
+ * non-INACTIVE channel with a nonzero hash is advertised (publishers offer their layout,
+ * subscribers their required subset), each distinct wire once. Returns total bytes; host
+ * may be NULL when !shm_capable. The node NAME is not here: it rides discovery's own
+ * section of the announce blob. */
 uint16_t  dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                       const DartMetaSchema *schemas);
 /* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
 uint16_t  dart_meta_frag(DartBytes meta);
 /* The interest sub-blob inside the overlay; {NULL, 0} if absent. */
@@ -262,6 +294,11 @@ typedef struct {
  *   DartInterestIter it = {0}; DartTopic t;
  *   while (dart_meta_interest_next(meta, &it, &t)) { ... } */
 int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out);
+/* An advertised alias's schema: returns 1 and fills *hash if the alias advertises one,
+ * else 0. *wire is the inlined canonical bytes (a view into the overlay, parse with
+ * dart_schema_parse), or {NULL,0} when the peer advertised the hash alone (schema too
+ * big to inline). hash/wire may be NULL. */
+int       dart_meta_schema(DartBytes meta, uint16_t alias, uint64_t *hash, DartBytes *wire);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */

@@ -22,7 +22,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>   /* realloc/free: the schema's allocation hook */
 
 /* tiny cross-platform thread + mutex + sleep shim (Windows / POSIX) */
 #ifdef _WIN32
@@ -52,19 +51,21 @@ static void   thread_join(Thread t){ pthread_join(t, NULL); }
 
 #define MAX_TOPICS 32
 
-/* A ChatMsg schema { u64 ts; u8 text[<= CHAT_TEXT_CAP] } (the string is a capped array),
- * shared by every channel. Defined here; not yet used to encode the messages. */
-#define CHAT_TEXT_CAP 256
+/* The ChatMsg schema, in the DSL every program using the topic pastes verbatim (the
+ * text length rides as its own field; the array is fixed-size). Defined here; not yet
+ * used to encode the messages. */
+static const char CHAT_SCHEMA[] =
+    "ChatMsg"
+    "{"
+    "    ts:      u64,"
+    "    textLen: u16,"
+    "    text:    u8[256]"
+    "}";
 static DartSchema *g_schema;
 
 static Mutex        g_lock;            /* guards every dart_* node call */
 static volatile int g_running = 1;     /* cleared on EOF to stop the poll thread */
 static int          g_verbose = 0;     /* --verbose: print discovery/transport events */
-
-/* the schema's memory hook: a realloc-backed DartAllocFn (this demo runs on a desktop) */
-static void *chat_alloc(void *user, void *ptr, size_t size){
-    (void)user; if (size == 0){ free(ptr); return NULL; } return realloc(ptr, size);
-}
 
 /* One topic the user has touched. We track the pub/sub bits locally because the
  * transport role enum has no getter, and we keep the handle to send/re-role it.
@@ -170,16 +171,14 @@ int main(int argc, char **argv){
         else if ((strcmp(argv[i], "--if") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) ifc = argv[++i];
         else if (!name) name = argv[i];
     }
-    /* build the shared ChatMsg schema; each channel is created with it and owns its own copy,
-     * so it is freed at exit */
-    {   DartSchemaBuilder sb = dart_schema_begin(chat_alloc, NULL, "ChatMsg");
-        dart_schema_field(&sb, "ts", DART_U64);
-        dart_schema_field_caparr(&sb, "text", DART_U8, CHAT_TEXT_CAP);
-        g_schema = dart_schema_finish(&sb);
-    }
-    if (!g_schema){ fprintf(stderr, "schema build failed\n"); return 1; }
-
+    /* compile the shared ChatMsg schema from the allocator the node is about to own
+     * (dart_allocator_alloc is a DartAllocFn; pass &mem as its user). The node copies mem
+     * by value at open, so the schema's page rides along and the pool reset in
+     * dart_node_close frees it: no explicit dart_schema_free. */
     DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    g_schema = dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, NULL);
+    if (!g_schema){ fprintf(stderr, "schema compile failed\n"); return 1; }
+
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS,
                                                   .net = { .multicast_interface = ifc } });
@@ -210,7 +209,6 @@ int main(int argc, char **argv){
 
     g_running = 0;                                     /* EOF: stop the poll thread and exit */
     thread_join(poller);
-    dart_node_close(n, 1);
-    dart_schema_free(g_schema, chat_alloc, NULL);
+    dart_node_close(n, 1);                             /* pool reset frees g_schema too */
     return 0;
 }

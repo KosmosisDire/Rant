@@ -75,9 +75,22 @@ static void *i_dart_node_alloc(void *u, void *ptr, size_t size){
 }
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
- * on the wire). Shared by the inline and SHM delivery paths. */
+ * on the wire). Shared by the inline and SHM delivery paths. A message that does not
+ * fit its sender's declared schema broke the sender's own contract: dropped + surfaced,
+ * never handed to the app to misdecode. */
 static void i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartBytes data){
     DartMsg m;
+    const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, ch);
+    if (schema && !dart_schema_validate(schema, data)){
+        if (n->on_event){
+            DartEvent e; memset(&e, 0, sizeof e);
+            e.kind = DART_SCHEMA_MISMATCH; e.user = n->user_data;
+            e.peer = from; e.channel = ch;
+            e.detail = "message does not fit the sender's schema";
+            n->on_event(&e);
+        }
+        return;
+    }
     if (!n->user_on_message) return;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
@@ -86,6 +99,7 @@ static void i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartByt
     if (!m.sender_name.data) m.sender_name = dart_cstr("unknown-peer"); /* .data never NULL on delivery */
     m.channel_name = dart_transport_channel_name(n->transport, ch);
     m.data = data;
+    m.schema = schema;
     n->user_on_message(&m);
 }
 static void i_dart_node_on_message(void *u, uint16_t ch, uint32_t from, DartBytes data){
@@ -103,6 +117,12 @@ static void i_dart_node_on_event(const DartEvent *ev){
     if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
 }
 
+/* the transport's schema gate (DartConfig.schema_check): the node core answers it over
+ * the serialize layer, using the overlay it is currently applying. u is the node. */
+static int i_dart_node_schema_check(void *u, uint16_t channel, uint16_t alias, int peer_is_pub){
+    return i_dart_node_core_schema_check(((DartNode*)u)->core, channel, alias, peer_is_pub);
+}
+
 /* transport events arrive as a DartTransportEvent; the node maps them onto its app
  * DartEvent union and hands them on. This is the node combining the two lower layers'
  * events into one app callback (peer events come via the node core, above). */
@@ -116,6 +136,7 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     case DART_TRANSPORT_MSG_TOO_BIG:     e.kind = DART_MSG_TOO_BIG; break;
     case DART_TRANSPORT_NAME_COLLISION:  e.kind = DART_NAME_COLLISION; break;
     case DART_TRANSPORT_QOS_INCOMPATIBLE:e.kind = DART_QOS_INCOMPATIBLE; break;
+    case DART_TRANSPORT_SCHEMA_MISMATCH: e.kind = DART_SCHEMA_MISMATCH; break;
     default: return;
     }
     e.detail = tev->detail; e.user = n->user_data; e.peer = tev->peer; e.channel = tev->channel;
@@ -306,6 +327,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 
     tc.on_message = i_dart_node_on_message;     /* wrap so on_message receives a DartMsg */
     tc.on_event   = i_dart_node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
+    tc.schema_check = i_dart_node_schema_check; /* the schema gate, answered by the node core */
     tc.user       = n;
 #ifdef DART_SHM
     n->shm_capable = (uint8_t)(n->alloc_dynamic && !o.disable_shm);   /* static mode never uses SHM */
@@ -342,6 +364,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
         cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
         cc.on_event = i_dart_node_on_event; cc.user = n;
+        cc.alloc = i_dart_node_alloc; cc.alloc_user = n;   /* backs interned/rebased peer schemas */
 #ifdef DART_SHM
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif
@@ -490,7 +513,9 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
         if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
         i_dart_node_alloc(n, h, 0); return NULL;
     }
-    h->n = n; h->index = idx;   /* schema is the node-owned copy (advertised via discovery later) */
+    h->n = n; h->index = idx;
+    if (h->schema)   /* advertise + gate matches with it (any non-INACTIVE role) */
+        i_dart_node_core_set_channel_schema(n->core, idx, h->schema);
     /* re-advertise our interest so peers match the new channel as the blob arrives, and
        replay known peers' interest so this channel matches what they already advertised */
     i_dart_node_core_build_meta(n->core);

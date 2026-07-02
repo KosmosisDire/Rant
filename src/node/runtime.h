@@ -81,6 +81,11 @@ typedef struct {
                                         for the callback's duration. */
     DartString     channel_name;     /* topic name (not NUL-terminated; use .data/.len), or {NULL,0} */
     DartBytes      data;             /* the message payload (data.data, data.len) */
+    const DartSchema *schema;        /* the schema data decodes with: this channel's fields bound
+                                        to the sender's layout (a typed channel), or the sender's
+                                        own schema (a NULL-schema channel; may still be NULL if
+                                        the sender advertised none). Non-NULL means data.len was
+                                        validated against it before delivery. */
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
