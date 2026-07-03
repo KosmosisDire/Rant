@@ -605,10 +605,13 @@ int dart_node_poll(DartNode *n, int timeout_ms){
 /* publish on a channel index: bounded backpressure pump, then SHM fast path, then UDP */
 static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
     size_t len = data.len;
+    /* one O(1) count gates the per-send fast paths: a channel no peer subscribes to skips
+       backpressure and the SHM eligibility scan here, and the copy+commit in the core. */
+    int matched = dart_transport_writer_match_count(n->transport, channel);
     /* bounded backpressure: pump the loop (on_message/on_event may fire here) until
        a slow reader acks or qos.backpressure_wait_us elapses, then send anyway */
     const DartQos *q = dart_transport_channel_qos(n->transport, channel);
-    if (q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
+    if (matched && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
         uint64_t t0 = i_dart_plat_now_us(), deadline = t0 + q->backpressure_wait_us;
         /* in-pump diagnostic: the publisher is blocked here for the whole wait, so its
            normal per-message print sees nothing within it. When a probe is set, sample
@@ -645,7 +648,7 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
         n->backpressure_wait_count++;
     }
 #ifdef DART_SHM
-    if (n->shm_capable && len>0 && channel < n->shm_n_channels && dart_transport_writer_shm_eligible(n->transport, channel)){
+    if (n->shm_capable && len>0 && channel < n->shm_n_channels && matched && dart_transport_writer_shm_eligible(n->transport, channel)){
         uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
         /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
            same-sized traffic reuses a single prefix-sized segment; without it each message

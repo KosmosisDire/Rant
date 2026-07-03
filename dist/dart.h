@@ -4013,6 +4013,9 @@ typedef struct {
     uint64_t  next_seqno;
     uint64_t  first_seqno;  /* lowest seqno still cached */
     uint8_t   have_first;
+    uint32_t  matched_writers; /* count of used writer proxies (matched subscribers, dormant
+                                  included); kept exact at writer match/unmatch so the send path
+                                  can skip the copy+commit for a publisher no one subscribes to */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -4077,6 +4080,14 @@ static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ ret
    active-lane queue, not a timer), so it is ignored here. */
 static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
+}
+
+/* Does a late joiner ever receive samples published before it matched? Only a reliable
+ * channel with catch_up>0 replays cached history (i_dart_channel_unicast_join_seqno reaches
+ * back); every other channel joins at next_seqno. So when no subscriber is matched, history
+ * on any other channel is dead weight and the send can be skipped outright. */
+static inline int i_dart_channel_retains_history(const i_DartChannel *ch){
+    return ch->qos.reliability==DART_RELIABLE && ch->qos.catch_up>0;
 }
 
 /* writer/reader proxy for a (channel,peer) lane. The proxies are
@@ -4363,16 +4374,22 @@ int dart_transport_send(DartTransportState *st, uint16_t channel, DartBytes data
     ch = i_dart_channel_at(st, channel, &channel_idx);                /* rejects the internal meta channel */
     if (!ch) return DART_ERR_NO_CHANNEL;
     if (ch->dynamic){
+        if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
+    } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
+    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
+    /* Nobody subscribes and nothing durable to keep: the sample would land in the ring and
+       be orphaned (a fresh match joins at next_seqno unless reliable+catch_up), so skip the
+       grow, the copy, and the commit sweep entirely. The many-idle-publishers fast path. */
+    if (ch->matched_writers == 0 && !i_dart_channel_retains_history(ch)) return DART_OK;
+    if (ch->dynamic){
         i_DartWriterSample *slot = &ch->history[ch->history_head];
         size_t need = len ? len : 1u;
-        if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
-        if ((size_t)slot->cap < need){                    /* grow the slot to fit */
+        if ((size_t)slot->cap < need){                    /* grow the slot to fit (size checked above) */
             uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);
             if (!new_buf) return DART_ERR_OOM;                 /* out of memory */
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
-    } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
-    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
+    }
     if (len) memcpy(ch->history[ch->history_head].buf, data.data, len);
 #ifdef DART_SHM
     ch->history[ch->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
@@ -4433,12 +4450,8 @@ int dart_transport_send_drained(DartTransportState *st, uint16_t channel){
 
 
 int dart_transport_writer_match_count(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers, p; int cnt = 0;
-    if (!ch) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++) if (i_dart_writer_proxy_at(st,channel_idx,p)->used) cnt++;  /* matched readers */
-    return cnt;
+    i_DartChannel *ch = i_dart_channel_at(st, channel, NULL);
+    return ch ? (int)ch->matched_writers : 0;   /* cached at match/unmatch, so O(1) */
 }
 
 
@@ -5287,6 +5300,7 @@ static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t pee
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
     memset(w,0,sizeof(*w));
     w->used=1;
+    ch->matched_writers++;   /* only reached on a genuine 0->1 (rematch guards on !used) */
     /* only a reader that advertised RELIABLE acks; a best-effort reader stays out of
        flow control so it can't stall this writer (it gets new data, never repairs/HB) */
     w->reader_reliable = i_dart_bit_get(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], c) ? 1u : 0u;
@@ -5299,6 +5313,7 @@ static void i_dart_writer_unmatch(DartTransportState *st, uint16_t c, uint16_t p
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
     if (!w->used) return;
     w->used=0;
+    st->channels[c].matched_writers--;   /* guarded on used above: exactly one 1->0 per unmatch */
 }
 
 static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t peer_slot){
@@ -7916,10 +7931,13 @@ int dart_node_poll(DartNode *n, int timeout_ms){
 /* publish on a channel index: bounded backpressure pump, then SHM fast path, then UDP */
 static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
     size_t len = data.len;
+    /* one O(1) count gates the per-send fast paths: a channel no peer subscribes to skips
+       backpressure and the SHM eligibility scan here, and the copy+commit in the core. */
+    int matched = dart_transport_writer_match_count(n->transport, channel);
     /* bounded backpressure: pump the loop (on_message/on_event may fire here) until
        a slow reader acks or qos.backpressure_wait_us elapses, then send anyway */
     const DartQos *q = dart_transport_channel_qos(n->transport, channel);
-    if (q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
+    if (matched && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
         uint64_t t0 = i_dart_plat_now_us(), deadline = t0 + q->backpressure_wait_us;
         /* in-pump diagnostic: the publisher is blocked here for the whole wait, so its
            normal per-message print sees nothing within it. When a probe is set, sample
@@ -7956,7 +7974,7 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
         n->backpressure_wait_count++;
     }
 #ifdef DART_SHM
-    if (n->shm_capable && len>0 && channel < n->shm_n_channels && dart_transport_writer_shm_eligible(n->transport, channel)){
+    if (n->shm_capable && len>0 && channel < n->shm_n_channels && matched && dart_transport_writer_shm_eligible(n->transport, channel)){
         uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
         /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
            same-sized traffic reuses a single prefix-sized segment; without it each message

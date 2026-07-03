@@ -45,16 +45,22 @@ int dart_transport_send(DartTransportState *st, uint16_t channel, DartBytes data
     ch = i_dart_channel_at(st, channel, &channel_idx);                /* rejects the internal meta channel */
     if (!ch) return DART_ERR_NO_CHANNEL;
     if (ch->dynamic){
+        if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
+    } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
+    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
+    /* Nobody subscribes and nothing durable to keep: the sample would land in the ring and
+       be orphaned (a fresh match joins at next_seqno unless reliable+catch_up), so skip the
+       grow, the copy, and the commit sweep entirely. The many-idle-publishers fast path. */
+    if (ch->matched_writers == 0 && !i_dart_channel_retains_history(ch)) return DART_OK;
+    if (ch->dynamic){
         i_DartWriterSample *slot = &ch->history[ch->history_head];
         size_t need = len ? len : 1u;
-        if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
-        if ((size_t)slot->cap < need){                    /* grow the slot to fit */
+        if ((size_t)slot->cap < need){                    /* grow the slot to fit (size checked above) */
             uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);
             if (!new_buf) return DART_ERR_OOM;                 /* out of memory */
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
-    } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
-    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
+    }
     if (len) memcpy(ch->history[ch->history_head].buf, data.data, len);
 #ifdef DART_SHM
     ch->history[ch->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
@@ -115,12 +121,8 @@ int dart_transport_send_drained(DartTransportState *st, uint16_t channel){
 
 
 int dart_transport_writer_match_count(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers, p; int cnt = 0;
-    if (!ch) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++) if (i_dart_writer_proxy_at(st,channel_idx,p)->used) cnt++;  /* matched readers */
-    return cnt;
+    i_DartChannel *ch = i_dart_channel_at(st, channel, NULL);
+    return ch ? (int)ch->matched_writers : 0;   /* cached at match/unmatch, so O(1) */
 }
 
 

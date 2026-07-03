@@ -140,6 +140,9 @@ typedef struct {
     uint64_t  next_seqno;
     uint64_t  first_seqno;  /* lowest seqno still cached */
     uint8_t   have_first;
+    uint32_t  matched_writers; /* count of used writer proxies (matched subscribers, dormant
+                                  included); kept exact at writer match/unmatch so the send path
+                                  can skip the copy+commit for a publisher no one subscribes to */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -204,6 +207,14 @@ static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ ret
    active-lane queue, not a timer), so it is ignored here. */
 static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
+}
+
+/* Does a late joiner ever receive samples published before it matched? Only a reliable
+ * channel with catch_up>0 replays cached history (i_dart_channel_unicast_join_seqno reaches
+ * back); every other channel joins at next_seqno. So when no subscriber is matched, history
+ * on any other channel is dead weight and the send can be skipped outright. */
+static inline int i_dart_channel_retains_history(const i_DartChannel *ch){
+    return ch->qos.reliability==DART_RELIABLE && ch->qos.catch_up>0;
 }
 
 /* writer/reader proxy for a (channel,peer) lane. The proxies are

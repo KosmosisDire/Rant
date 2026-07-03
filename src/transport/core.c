@@ -339,6 +339,7 @@ static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t pee
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
     memset(w,0,sizeof(*w));
     w->used=1;
+    ch->matched_writers++;   /* only reached on a genuine 0->1 (rematch guards on !used) */
     /* only a reader that advertised RELIABLE acks; a best-effort reader stays out of
        flow control so it can't stall this writer (it gets new data, never repairs/HB) */
     w->reader_reliable = i_dart_bit_get(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], c) ? 1u : 0u;
@@ -351,6 +352,7 @@ static void i_dart_writer_unmatch(DartTransportState *st, uint16_t c, uint16_t p
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
     if (!w->used) return;
     w->used=0;
+    st->channels[c].matched_writers--;   /* guarded on used above: exactly one 1->0 per unmatch */
 }
 
 static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t peer_slot){
