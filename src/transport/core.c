@@ -363,6 +363,7 @@ static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t pee
     r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap; r->assembly_cap=assembly_cap; r->bitmap_cap=bitmap_cap;
     r->epoch=st->reader_epoch_counter++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
+    st->channels[c].matched_readers++;   /* only reached on a genuine 0->1 (rematch guards on !used) */
     /* announce this incarnation once so a caught-up (idle, non-pinging) writer
        re-joins and replays. A genuine discovery blip keeps its position through
        dart_transport_peer_dormant/resume and never lands here, so a single ACKNACK suffices. */
@@ -374,6 +375,7 @@ static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t pee
 
 static void i_dart_reader_unmatch(DartTransportState *st, uint16_t c, uint16_t peer_slot){
     i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,peer_slot);
+    if (r->used) st->channels[c].matched_readers--;   /* peer_remove calls this unconditionally */
     r->used=0; r->assembly_active=0;
 }
 

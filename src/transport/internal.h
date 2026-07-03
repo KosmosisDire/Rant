@@ -143,6 +143,8 @@ typedef struct {
     uint32_t  matched_writers; /* count of used writer proxies (matched subscribers, dormant
                                   included); kept exact at writer match/unmatch so the send path
                                   can skip the copy+commit for a publisher no one subscribes to */
+    uint32_t  matched_readers; /* same, for reader proxies; with matched_writers it lets the
+                                  timer sweep skip a whole channel row that owes no timer work */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -215,6 +217,15 @@ static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_
  * on any other channel is dead weight and the send can be skipped outright. */
 static inline int i_dart_channel_retains_history(const i_DartChannel *ch){
     return ch->qos.reliability==DART_RELIABLE && ch->qos.catch_up>0;
+}
+
+/* Does a channel owe the timer sweep any work? Writer heartbeats and reader acks both
+ * require a reliable channel with a used proxy, so a best-effort channel (the common
+ * high-rate case) or a reliable one no peer has matched owes nothing: the sweep skips its
+ * whole peer row. Reliability is fixed at define and the counts are exact, so this never
+ * skips a lane that has a live HB/ack timer. */
+static inline int i_dart_channel_needs_sweep(const i_DartChannel *ch){
+    return ch->qos.reliability==DART_RELIABLE && (ch->matched_writers || ch->matched_readers);
 }
 
 /* writer/reader proxy for a (channel,peer) lane. The proxies are

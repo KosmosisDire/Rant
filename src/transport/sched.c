@@ -74,10 +74,21 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
         uint32_t lane=st->sweep, peer_slot=lane%max_peers;
         uint16_t channel_idx=(uint16_t)(lane/max_peers);
         i_DartChannel *ch=&st->channels[channel_idx];
+        if (!i_dart_channel_needs_sweep(ch)){
+            /* best-effort, or reliable with no matched lane: the whole row owes no timer
+               work. Jump the cursor to the next channel in one step instead of paying a
+               per-lane visit, capped to the poll's remaining budget so a full table pass
+               still takes DART_HB_SWEEP_US (never faster). This is what makes the sweep
+               scale with matched reliable lanes, not with n_channels*max_peers. */
+            uint32_t skip = max_peers - peer_slot, room = due - k;
+            if (skip > room) skip = room;
+            st->sweep += skip; if (st->sweep >= total) st->sweep -= total;
+            k += skip - 1;                       /* + the loop's k++ = skip lanes covered */
+            continue;
+        }
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
         /* gate writer heartbeats on next_seqno, never the reader ack: a sub-only
            node's data channels never advance next_seqno but still owe acks */
-        if (ch->qos.reliability!=DART_RELIABLE) continue;
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
         { i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
           i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);

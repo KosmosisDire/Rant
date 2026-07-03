@@ -4016,6 +4016,8 @@ typedef struct {
     uint32_t  matched_writers; /* count of used writer proxies (matched subscribers, dormant
                                   included); kept exact at writer match/unmatch so the send path
                                   can skip the copy+commit for a publisher no one subscribes to */
+    uint32_t  matched_readers; /* same, for reader proxies; with matched_writers it lets the
+                                  timer sweep skip a whole channel row that owes no timer work */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -4088,6 +4090,15 @@ static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_
  * on any other channel is dead weight and the send can be skipped outright. */
 static inline int i_dart_channel_retains_history(const i_DartChannel *ch){
     return ch->qos.reliability==DART_RELIABLE && ch->qos.catch_up>0;
+}
+
+/* Does a channel owe the timer sweep any work? Writer heartbeats and reader acks both
+ * require a reliable channel with a used proxy, so a best-effort channel (the common
+ * high-rate case) or a reliable one no peer has matched owes nothing: the sweep skips its
+ * whole peer row. Reliability is fixed at define and the counts are exact, so this never
+ * skips a lane that has a live HB/ack timer. */
+static inline int i_dart_channel_needs_sweep(const i_DartChannel *ch){
+    return ch->qos.reliability==DART_RELIABLE && (ch->matched_writers || ch->matched_readers);
 }
 
 /* writer/reader proxy for a (channel,peer) lane. The proxies are
@@ -4254,10 +4265,21 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
         uint32_t lane=st->sweep, peer_slot=lane%max_peers;
         uint16_t channel_idx=(uint16_t)(lane/max_peers);
         i_DartChannel *ch=&st->channels[channel_idx];
+        if (!i_dart_channel_needs_sweep(ch)){
+            /* best-effort, or reliable with no matched lane: the whole row owes no timer
+               work. Jump the cursor to the next channel in one step instead of paying a
+               per-lane visit, capped to the poll's remaining budget so a full table pass
+               still takes DART_HB_SWEEP_US (never faster). This is what makes the sweep
+               scale with matched reliable lanes, not with n_channels*max_peers. */
+            uint32_t skip = max_peers - peer_slot, room = due - k;
+            if (skip > room) skip = room;
+            st->sweep += skip; if (st->sweep >= total) st->sweep -= total;
+            k += skip - 1;                       /* + the loop's k++ = skip lanes covered */
+            continue;
+        }
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
         /* gate writer heartbeats on next_seqno, never the reader ack: a sub-only
            node's data channels never advance next_seqno but still owe acks */
-        if (ch->qos.reliability!=DART_RELIABLE) continue;
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
         { i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
           i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
@@ -5324,6 +5346,7 @@ static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t pee
     r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap; r->assembly_cap=assembly_cap; r->bitmap_cap=bitmap_cap;
     r->epoch=st->reader_epoch_counter++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
+    st->channels[c].matched_readers++;   /* only reached on a genuine 0->1 (rematch guards on !used) */
     /* announce this incarnation once so a caught-up (idle, non-pinging) writer
        re-joins and replays. A genuine discovery blip keeps its position through
        dart_transport_peer_dormant/resume and never lands here, so a single ACKNACK suffices. */
@@ -5335,6 +5358,7 @@ static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t pee
 
 static void i_dart_reader_unmatch(DartTransportState *st, uint16_t c, uint16_t peer_slot){
     i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,peer_slot);
+    if (r->used) st->channels[c].matched_readers--;   /* peer_remove calls this unconditionally */
     r->used=0; r->assembly_active=0;
 }
 
