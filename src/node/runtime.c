@@ -26,6 +26,11 @@ struct DartNode {
     uint8_t       tx_hold[DART_DGRAM_MAX];
     size_t        tx_hold_len;
     uint32_t      tx_hold_peer;
+    /* data-socket RX buffer (in the arena): unicast discovery announces land on the data
+       port too (solicit replies carry the full blob), so it is sized for the larger of a
+       transport datagram and the biggest discovery datagram this node accepts. */
+    uint8_t      *rx_buf;
+    size_t        rx_buf_bytes;
     /* backpressure accumulators, read via dart_node_backpressure_stats */
     uint64_t      backpressure_total_us;
     uint32_t      backpressure_wait_count;
@@ -137,6 +142,8 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     case DART_TRANSPORT_NAME_COLLISION:  e.kind = DART_NAME_COLLISION; break;
     case DART_TRANSPORT_QOS_INCOMPATIBLE:e.kind = DART_QOS_INCOMPATIBLE; break;
     case DART_TRANSPORT_SCHEMA_MISMATCH: e.kind = DART_SCHEMA_MISMATCH; break;
+    case DART_TRANSPORT_INTEREST_OVERFLOW: e.kind = DART_INTEREST_OVERFLOW; break;
+    case DART_TRANSPORT_META_TRUNCATED:  e.kind = DART_META_TRUNCATED; break;
     default: return;
     }
     e.detail = tev->detail; e.user = n->user_data; e.peer = tev->peer; e.channel = tev->channel;
@@ -158,11 +165,11 @@ static uint16_t i_dart_node_shm_reader_max(uint16_t max_peers, uint16_t n_channe
  * NULL, read bump.offset) and the build pass (read the pointers) run the same i_dart_bump_take
  * sequence and can never drift. */
 typedef struct {
-    uint8_t   *handles, *node_core, *transport, *discovery;
+    uint8_t   *handles, *node_core, *transport, *discovery, *rx_buf;
 #ifdef DART_SHM
     uint8_t   *shm_pool, *shm_pool_mem, *shm_reader_segments, *shm_reader_pool;
 #endif
-    size_t     node_core_bytes, transport_bytes, discovery_bytes;
+    size_t     node_core_bytes, transport_bytes, discovery_bytes, rx_buf_bytes;
 } i_DartNodeBlocks;
 
 static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_channels,
@@ -185,6 +192,12 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_c
 #endif
     o->discovery_bytes = dart_discovery_placement_memory(discovery_rt_cfg);
     o->discovery = (uint8_t*)i_dart_bump_take(b, o->discovery_bytes, 16);
+    /* data-socket RX buffer: sized so a unicast announce carrying the largest blob this
+       node accepts fits (recvfrom drops an oversized datagram, which would leave a late
+       joiner unable to ever fetch a big peer blob: its only path is this socket) */
+    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_capacity);
+    if (o->rx_buf_bytes < DART_DGRAM_MAX) o->rx_buf_bytes = DART_DGRAM_MAX;
+    o->rx_buf = (uint8_t*)i_dart_bump_take(b, o->rx_buf_bytes, 16);
 }
 
 /* send one datagram to a peer; returns 1 when done with it, 0 only on a would-block
@@ -322,6 +335,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->arena = arena;
     n->handles = (DartChannel**)blocks.handles;
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
+    n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_channels = max_channels;
     n->max_peers = max_peers;
 
@@ -483,6 +497,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
 
     n->transport=nt; n->core=ncore; n->discovery=ndisc;
     n->handles=(DartChannel**)nb.handles;
+    n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_channels=new_max_channels; n->max_peers=new_max_peers;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
@@ -535,10 +550,10 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
 /* drain one socket's RX queue into the transport until empty or past deadline
  * (full drain avoids NACK storms). Distinct from public dart_channel_drain. */
 static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
-    uint8_t buf[DART_DGRAM_MAX];
+    uint8_t *buf = n->rx_buf;
     for (;;){
         uint8_t src_ip[4]; uint16_t src_port;
-        int r = i_dart_plat_recv(fd, buf, sizeof buf, src_ip, &src_port);
+        int r = i_dart_plat_recv(fd, buf, n->rx_buf_bytes, src_ip, &src_port);
         if (r<0){
             if (i_dart_plat_would_block()) break;        /* queue empty */
             continue;   /* per-datagram error (e.g. bounced send); keep draining */

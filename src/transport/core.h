@@ -117,7 +117,13 @@ typedef enum {
     DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
     DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
-    DART_TRANSPORT_SCHEMA_MISMATCH  /* the schema_check hook refused a match (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases beyond our alias table
+                                        (.peer, .lost_count = entry count): their data can never demux
+                                        here. Raise DART_META_MAX_IDS. */
+    DART_TRANSPORT_META_TRUNCATED   /* our own announce overlay overflowed its buffer: a section was
+                                       dropped (.detail names it), so peers see partial interest or
+                                       schemas. Fewer channels, or shorter names/schemas. */
 } DartTransportEventKind;
 
 typedef struct {

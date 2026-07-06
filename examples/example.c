@@ -7,10 +7,12 @@
  * topic you currently publish on; deliveries decode through DartMsg.schema.
  * Run two copies (one host, or two on a LAN) and type in each; pass a node name
  * (e.g. ./node alice) to label who a message came from, --verbose to print
- * discovery/transport events, and --if <ip> to pin multicast to a given interface
+ * discovery/transport events, --if <ip> to pin multicast to a given interface
  * (rarely needed: the interface is auto-detected, but pin it on a multihomed host
- * where the wrong NIC is chosen). All defaults:
- * best-effort, domain 0, unicast data, multicast discovery.
+ * where the wrong NIC is chosen), and --peer <ip> to seed discovery with a known
+ * peer's address over unicast (bootstraps a connection even where multicast is
+ * blocked; the peer only needs the IP, discovery replies with its data port). All
+ * defaults: best-effort, domain 0, unicast data, multicast discovery.
  *
  * DART runs on its own thread so the main thread can read stdin with a normal
  * blocking fgets. The node is not internally locked, so a mutex guards every node
@@ -228,13 +230,31 @@ static THREAD_RET poll_thread(void *arg){
     return 0;
 }
 
+/* parse a dotted-quad IPv4 address into 4 bytes; no dependency on platform socket
+ * headers just for this. Returns 1 on success, 0 if malformed. */
+static int parse_ipv4(const char *s, uint8_t out[4]){
+    int a, b, c, d, n;
+    if (sscanf(s, "%d.%d.%d.%d%n", &a, &b, &c, &d, &n) != 4 || s[n] != '\0') return 0;
+    if (a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255 || d < 0 || d > 255) return 0;
+    out[0] = (uint8_t)a; out[1] = (uint8_t)b; out[2] = (uint8_t)c; out[3] = (uint8_t)d;
+    return 1;
+}
+
 int main(int argc, char **argv){
     const char *name = NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
     const char *ifc  = NULL;   /* --if <ip>: pin multicast to this interface (multihomed hosts) */
+    const char *peer = NULL;   /* --peer <ip>: seed discovery with this address over unicast */
     for (int i = 1; i < argc; i++){
         if      (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) g_verbose = 1;
-        else if ((strcmp(argv[i], "--if") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) ifc = argv[++i];
+        else if ((strcmp(argv[i], "--if")   == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) ifc  = argv[++i];
+        else if ((strcmp(argv[i], "--peer") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) peer = argv[++i];
         else if (!name) name = argv[i];
+    }
+    DartDiscoveryAddr seed;
+    if (peer){
+        memset(&seed, 0, sizeof seed);
+        seed.ip_len = 4;   /* port 0 = discovery_port */
+        if (!parse_ipv4(peer, seed.ip)){ fprintf(stderr, "--peer: bad address '%s'\n", peer); return 1; }
     }
     /* compile the shared ChatMsg schema from the allocator the node is about to own
      * (dart_allocator_alloc is a DartAllocFn; pass &mem as its user). The node copies mem
@@ -247,7 +267,9 @@ int main(int argc, char **argv){
 
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
                                  &(DartNodeOpts){ .max_channels = MAX_TOPICS,
-                                                  .net = { .multicast_interface = ifc } });
+                                                  .net = { .multicast_interface = ifc,
+                                                           .seed_peers   = peer ? &seed : NULL,
+                                                           .n_seed_peers = peer ? 1 : 0 } });
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
     printf("commands: sub <topic> | pub <topic> | pubsub <topic> | drop <topic>\n"

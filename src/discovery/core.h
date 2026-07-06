@@ -54,7 +54,12 @@ typedef enum {
 typedef enum {
     DART_DISCOVERY_PEER_UP,
     DART_DISCOVERY_PEER_DOWN,
-    DART_DISCOVERY_PEER_REFUSED
+    DART_DISCOVERY_PEER_REFUSED,
+    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds our per-peer overlay buffer, so
+                                     the whole announce was dropped and its metadata is unfetchable
+                                     by us: .addr = its advertised locator, .peer = its id (0 if not
+                                     yet in the table), .meta = the oversized overlay (view, len =
+                                     what it wanted to send). Raise this side's capacity. */
 } DartDiscoveryEventKind;
 
 typedef struct {

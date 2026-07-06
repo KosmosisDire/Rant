@@ -35,7 +35,13 @@ typedef enum {
     DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
     DART_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not
                               fit its sender's schema was dropped (.channel, .peer; .detail = our channel name) */
-    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
+    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
+    DART_INTEREST_OVERFLOW, /* a peer's matched topics exceed our alias table (.peer, .lost_count =
+                               entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
+    DART_META_TRUNCATED,    /* our announce overlay overflowed its buffer: a section was dropped
+                               (.detail names it), so peers see partial interest/schemas */
+    DART_PEER_META_TOO_BIG  /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
+                               admitted, .too_big_bytes, .ip/.port): its metadata is refused entirely */
 } DartEventKind;
 
 typedef struct {

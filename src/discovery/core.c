@@ -82,6 +82,16 @@ static void i_dart_discovery_fire_refused(DartDiscoveryState *st, const DartDisc
     if (addr) ev.addr = *addr;
     st->cfg.on_event(&ev);
 }
+static void i_dart_discovery_fire_meta_too_big(DartDiscoveryState *st, uint32_t id,
+                                     const DartDiscoveryAddr *addr, DartBytes overlay){
+    DartDiscoveryEvent ev;
+    if (!st->cfg.on_event) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = DART_DISCOVERY_META_TOO_BIG; ev.user = st->cfg.user; ev.peer = id;
+    if (addr) ev.addr = *addr;
+    ev.meta = overlay;
+    st->cfg.on_event(&ev);
+}
 
 static uint32_t i_dart_discovery_fnv(const uint8_t *d, size_t n){
     uint32_t h = 2166136261u; size_t i;
@@ -355,7 +365,15 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         {   uint8_t dnl = *b++;
             if (dnl){ if (b + dnl > bend) return; disc_name = dart_string((const char*)b, dnl); b += dnl; } }
         overlay = dart_bytes(b, (size_t)(bend - b));
-        if (overlay.len > st->meta_capacity) return;       /* overlay must fit the per-peer buffer */
+        if (overlay.len > st->meta_capacity){   /* overlay must fit the per-peer buffer: this side
+                                                   can NEVER hold that peer's metadata, so say so */
+            DartDiscoveryAddr a; int at = i_dart_discovery_find(st, uuid);
+            memset(&a, 0, sizeof a);
+            if (disc_ip_len){ memcpy(a.ip, disc_ip, disc_ip_len); a.ip_len = disc_ip_len; }
+            a.port = disc_port;
+            i_dart_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a, overlay);
+            return;
+        }
         have_disc = 1;
     }
 

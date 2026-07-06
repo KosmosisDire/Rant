@@ -525,7 +525,8 @@ static int i_dart_meta_name_eq(const i_DartChannel *ch, const uint8_t *name, siz
  * (sub list only, else NULL): records which subscribed channels the peer requested RELIABLE,
  * so the writer can keep best-effort readers out of flow control. */
 static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, const uint8_t *p,
-                                      uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap){
+                                      uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap,
+                                      uint32_t *overflowed){
     uint32_t k;
     for (k=0;k<count;k++){
         uint16_t alias=i_dart_le_r16(p); uint8_t flags=p[2]; uint32_t nlen=p[3];
@@ -561,6 +562,8 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
         if (rel_bitmap && (flags & DART_META_F_RELIABLE)) i_dart_bit_set(rel_bitmap,(uint32_t)channel_idx);
         if ((uint32_t)alias < st->alias_max)
             st->alias_to_channel[(size_t)peer_slot*st->alias_max + alias] = (uint16_t)channel_idx;
+        else if (is_pub && overflowed)
+            (*overflowed)++;   /* matched, but its data carries an alias we cannot demux */
     }
     return p;
 }
@@ -620,9 +623,14 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     memset(peer_pub_bitmap,0,st->bitmap_len); memset(peer_sub_bitmap,0,st->bitmap_len);
     memset(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len],0,st->bitmap_len);
     memset(&st->alias_to_channel[(size_t)peer_slot*st->alias_max],0xFF,(size_t)st->alias_max*sizeof(uint16_t));
-    p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL);   /* pub list: offered QoS */
-    p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,         /* sub list: requested QoS */
-                        &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len]);
+    {   uint32_t overflow = 0;
+        p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL, &overflow);  /* pub list: offered QoS */
+        p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,                    /* sub list: requested QoS */
+                            &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], NULL);
+        if (overflow)   /* never silent: those topics look matched but will not deliver */
+            i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, overflow,
+                        "peer topics beyond our alias table (raise DART_META_MAX_IDS)");
+    }
     for (c=0;c<st->cfg.n_channels;c++) i_dart_channel_rematch(st,c,(uint16_t)peer_slot);
 }
 
@@ -739,8 +747,23 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
 #endif
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     len = (size_t)off + interest_len;
-    if (interest_len >= 4)   /* the section is located by walking the interest list, so it needs one */
-        len += i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
+    if (interest_len == 0){   /* did not fit (returns >= 4 even with zero channels): never silent */
+        i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED, 0, 0, 0, 0,
+                    "interest list dropped (announce overlay full)");
+    } else {   /* the schema section is located by walking the interest list, so it needs one */
+        size_t s = i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
+        if (s){
+            len += s;
+        } else {   /* 0 = did not fit; report only if there was something to advertise */
+            uint16_t c;
+            for (c = 0; c < st->cfg.n_channels; c++)
+                if (i_dart_meta_schema_advertised(st, schemas, c)){
+                    i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED, 0, 0, 0, 0,
+                                "schema section dropped (announce overlay full)");
+                    break;
+                }
+        }
+    }
     return (uint16_t)len;
 }
 

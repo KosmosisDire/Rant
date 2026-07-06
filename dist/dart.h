@@ -137,7 +137,12 @@ typedef enum {
 typedef enum {
     DART_DISCOVERY_PEER_UP,
     DART_DISCOVERY_PEER_DOWN,
-    DART_DISCOVERY_PEER_REFUSED
+    DART_DISCOVERY_PEER_REFUSED,
+    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds our per-peer overlay buffer, so
+                                     the whole announce was dropped and its metadata is unfetchable
+                                     by us: .addr = its advertised locator, .peer = its id (0 if not
+                                     yet in the table), .meta = the oversized overlay (view, len =
+                                     what it wanted to send). Raise this side's capacity. */
 } DartDiscoveryEventKind;
 
 typedef struct {
@@ -1062,7 +1067,13 @@ typedef enum {
     DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
     DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
-    DART_TRANSPORT_SCHEMA_MISMATCH  /* the schema_check hook refused a match (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases beyond our alias table
+                                        (.peer, .lost_count = entry count): their data can never demux
+                                        here. Raise DART_META_MAX_IDS. */
+    DART_TRANSPORT_META_TRUNCATED   /* our own announce overlay overflowed its buffer: a section was
+                                       dropped (.detail names it), so peers see partial interest or
+                                       schemas. Fewer channels, or shorter names/schemas. */
 } DartTransportEventKind;
 
 typedef struct {
@@ -1628,7 +1639,13 @@ typedef enum {
     DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
     DART_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not
                               fit its sender's schema was dropped (.channel, .peer; .detail = our channel name) */
-    DART_PEER_REFUSED    /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
+    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
+    DART_INTEREST_OVERFLOW, /* a peer's matched topics exceed our alias table (.peer, .lost_count =
+                               entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
+    DART_META_TRUNCATED,    /* our announce overlay overflowed its buffer: a section was dropped
+                               (.detail names it), so peers see partial interest/schemas */
+    DART_PEER_META_TOO_BIG  /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
+                               admitted, .too_big_bytes, .ip/.port): its metadata is refused entirely */
 } DartEventKind;
 
 typedef struct {
@@ -2312,6 +2329,16 @@ static void i_dart_discovery_fire_refused(DartDiscoveryState *st, const DartDisc
     if (addr) ev.addr = *addr;
     st->cfg.on_event(&ev);
 }
+static void i_dart_discovery_fire_meta_too_big(DartDiscoveryState *st, uint32_t id,
+                                     const DartDiscoveryAddr *addr, DartBytes overlay){
+    DartDiscoveryEvent ev;
+    if (!st->cfg.on_event) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = DART_DISCOVERY_META_TOO_BIG; ev.user = st->cfg.user; ev.peer = id;
+    if (addr) ev.addr = *addr;
+    ev.meta = overlay;
+    st->cfg.on_event(&ev);
+}
 
 static uint32_t i_dart_discovery_fnv(const uint8_t *d, size_t n){
     uint32_t h = 2166136261u; size_t i;
@@ -2585,7 +2612,15 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         {   uint8_t dnl = *b++;
             if (dnl){ if (b + dnl > bend) return; disc_name = dart_string((const char*)b, dnl); b += dnl; } }
         overlay = dart_bytes(b, (size_t)(bend - b));
-        if (overlay.len > st->meta_capacity) return;       /* overlay must fit the per-peer buffer */
+        if (overlay.len > st->meta_capacity){   /* overlay must fit the per-peer buffer: this side
+                                                   can NEVER hold that peer's metadata, so say so */
+            DartDiscoveryAddr a; int at = i_dart_discovery_find(st, uuid);
+            memset(&a, 0, sizeof a);
+            if (disc_ip_len){ memcpy(a.ip, disc_ip, disc_ip_len); a.ip_len = disc_ip_len; }
+            a.port = disc_port;
+            i_dart_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a, overlay);
+            return;
+        }
         have_disc = 1;
     }
 
@@ -5508,7 +5543,8 @@ static int i_dart_meta_name_eq(const i_DartChannel *ch, const uint8_t *name, siz
  * (sub list only, else NULL): records which subscribed channels the peer requested RELIABLE,
  * so the writer can keep best-effort readers out of flow control. */
 static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, const uint8_t *p,
-                                      uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap){
+                                      uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap,
+                                      uint32_t *overflowed){
     uint32_t k;
     for (k=0;k<count;k++){
         uint16_t alias=i_dart_le_r16(p); uint8_t flags=p[2]; uint32_t nlen=p[3];
@@ -5544,6 +5580,8 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
         if (rel_bitmap && (flags & DART_META_F_RELIABLE)) i_dart_bit_set(rel_bitmap,(uint32_t)channel_idx);
         if ((uint32_t)alias < st->alias_max)
             st->alias_to_channel[(size_t)peer_slot*st->alias_max + alias] = (uint16_t)channel_idx;
+        else if (is_pub && overflowed)
+            (*overflowed)++;   /* matched, but its data carries an alias we cannot demux */
     }
     return p;
 }
@@ -5603,9 +5641,14 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     memset(peer_pub_bitmap,0,st->bitmap_len); memset(peer_sub_bitmap,0,st->bitmap_len);
     memset(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len],0,st->bitmap_len);
     memset(&st->alias_to_channel[(size_t)peer_slot*st->alias_max],0xFF,(size_t)st->alias_max*sizeof(uint16_t));
-    p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL);   /* pub list: offered QoS */
-    p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,         /* sub list: requested QoS */
-                        &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len]);
+    {   uint32_t overflow = 0;
+        p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL, &overflow);  /* pub list: offered QoS */
+        p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,                    /* sub list: requested QoS */
+                            &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], NULL);
+        if (overflow)   /* never silent: those topics look matched but will not deliver */
+            i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, overflow,
+                        "peer topics beyond our alias table (raise DART_META_MAX_IDS)");
+    }
     for (c=0;c<st->cfg.n_channels;c++) i_dart_channel_rematch(st,c,(uint16_t)peer_slot);
 }
 
@@ -5722,8 +5765,23 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
 #endif
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     len = (size_t)off + interest_len;
-    if (interest_len >= 4)   /* the section is located by walking the interest list, so it needs one */
-        len += i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
+    if (interest_len == 0){   /* did not fit (returns >= 4 even with zero channels): never silent */
+        i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED, 0, 0, 0, 0,
+                    "interest list dropped (announce overlay full)");
+    } else {   /* the schema section is located by walking the interest list, so it needs one */
+        size_t s = i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
+        if (s){
+            len += s;
+        } else {   /* 0 = did not fit; report only if there was something to advertise */
+            uint16_t c;
+            for (c = 0; c < st->cfg.n_channels; c++)
+                if (i_dart_meta_schema_advertised(st, schemas, c)){
+                    i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED, 0, 0, 0, 0,
+                                "schema section dropped (announce overlay full)");
+                    break;
+                }
+        }
+    }
     return (uint16_t)len;
 }
 
@@ -6909,6 +6967,20 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_dart_event_append_str(p,end," ("); p = i_dart_event_append_u64(p,end,ev->too_big_bytes);
         p = i_dart_event_append_str(p,end," bytes), skipped");
         break;
+    case DART_INTEREST_OVERFLOW:
+        p = i_dart_event_append_str(p,end,"interest-overflow peer id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        p = i_dart_event_append_str(p,end,": "); p = i_dart_event_append_u64(p,end,ev->lost_count);
+        p = i_dart_event_append_str(p,end," matched topics beyond our alias table, their data cannot deliver (raise DART_META_MAX_IDS)");
+        break;
+    case DART_META_TRUNCATED:
+        p = i_dart_event_append_str(p,end,"meta-truncated: "); p = i_dart_event_append_str(p,end,ev->detail);
+        break;
+    case DART_PEER_META_TOO_BIG:
+        p = i_dart_event_append_str(p,end,"peer-meta-too-big id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        if (ev->ip_len == 4){ p = i_dart_event_append_str(p,end," at "); p = i_dart_event_append_addr(p,end,ev); }
+        p = i_dart_event_append_str(p,end,": "); p = i_dart_event_append_u64(p,end,ev->too_big_bytes);
+        p = i_dart_event_append_str(p,end," byte blob exceeds our capacity, its metadata is refused");
+        break;
     }
     *p = '\0';                                     /* p <= end = buf+cap-1, in range */
     return buf;
@@ -7295,6 +7367,17 @@ void i_dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
         case DART_DISCOVERY_PEER_REFUSED:
             i_dart_node_core_peer_refused(c, &ev->addr);
             break;
+        case DART_DISCOVERY_META_TOO_BIG:
+            if (c->on_event){
+                DartEvent e;
+                memset(&e, 0, sizeof e);
+                e.kind = DART_PEER_META_TOO_BIG; e.peer = ev->peer; e.user = c->user;
+                e.too_big_bytes = ev->meta.len;
+                e.detail = "peer announce blob exceeds our capacity";
+                memcpy(e.ip, ev->addr.ip, 16); e.ip_len = ev->addr.ip_len; e.port = ev->addr.port;
+                c->on_event(&e);
+            }
+            break;
         default: break;
     }
 }
@@ -7376,6 +7459,11 @@ struct DartNode {
     uint8_t       tx_hold[DART_DGRAM_MAX];
     size_t        tx_hold_len;
     uint32_t      tx_hold_peer;
+    /* data-socket RX buffer (in the arena): unicast discovery announces land on the data
+       port too (solicit replies carry the full blob), so it is sized for the larger of a
+       transport datagram and the biggest discovery datagram this node accepts. */
+    uint8_t      *rx_buf;
+    size_t        rx_buf_bytes;
     /* backpressure accumulators, read via dart_node_backpressure_stats */
     uint64_t      backpressure_total_us;
     uint32_t      backpressure_wait_count;
@@ -7487,6 +7575,8 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     case DART_TRANSPORT_NAME_COLLISION:  e.kind = DART_NAME_COLLISION; break;
     case DART_TRANSPORT_QOS_INCOMPATIBLE:e.kind = DART_QOS_INCOMPATIBLE; break;
     case DART_TRANSPORT_SCHEMA_MISMATCH: e.kind = DART_SCHEMA_MISMATCH; break;
+    case DART_TRANSPORT_INTEREST_OVERFLOW: e.kind = DART_INTEREST_OVERFLOW; break;
+    case DART_TRANSPORT_META_TRUNCATED:  e.kind = DART_META_TRUNCATED; break;
     default: return;
     }
     e.detail = tev->detail; e.user = n->user_data; e.peer = tev->peer; e.channel = tev->channel;
@@ -7508,11 +7598,11 @@ static uint16_t i_dart_node_shm_reader_max(uint16_t max_peers, uint16_t n_channe
  * NULL, read bump.offset) and the build pass (read the pointers) run the same i_dart_bump_take
  * sequence and can never drift. */
 typedef struct {
-    uint8_t   *handles, *node_core, *transport, *discovery;
+    uint8_t   *handles, *node_core, *transport, *discovery, *rx_buf;
 #ifdef DART_SHM
     uint8_t   *shm_pool, *shm_pool_mem, *shm_reader_segments, *shm_reader_pool;
 #endif
-    size_t     node_core_bytes, transport_bytes, discovery_bytes;
+    size_t     node_core_bytes, transport_bytes, discovery_bytes, rx_buf_bytes;
 } i_DartNodeBlocks;
 
 static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_channels,
@@ -7535,6 +7625,12 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_c
 #endif
     o->discovery_bytes = dart_discovery_placement_memory(discovery_rt_cfg);
     o->discovery = (uint8_t*)i_dart_bump_take(b, o->discovery_bytes, 16);
+    /* data-socket RX buffer: sized so a unicast announce carrying the largest blob this
+       node accepts fits (recvfrom drops an oversized datagram, which would leave a late
+       joiner unable to ever fetch a big peer blob: its only path is this socket) */
+    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_capacity);
+    if (o->rx_buf_bytes < DART_DGRAM_MAX) o->rx_buf_bytes = DART_DGRAM_MAX;
+    o->rx_buf = (uint8_t*)i_dart_bump_take(b, o->rx_buf_bytes, 16);
 }
 
 /* send one datagram to a peer; returns 1 when done with it, 0 only on a would-block
@@ -7672,6 +7768,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->arena = arena;
     n->handles = (DartChannel**)blocks.handles;
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
+    n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_channels = max_channels;
     n->max_peers = max_peers;
 
@@ -7833,6 +7930,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
 
     n->transport=nt; n->core=ncore; n->discovery=ndisc;
     n->handles=(DartChannel**)nb.handles;
+    n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_channels=new_max_channels; n->max_peers=new_max_peers;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
@@ -7885,10 +7983,10 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
 /* drain one socket's RX queue into the transport until empty or past deadline
  * (full drain avoids NACK storms). Distinct from public dart_channel_drain. */
 static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
-    uint8_t buf[DART_DGRAM_MAX];
+    uint8_t *buf = n->rx_buf;
     for (;;){
         uint8_t src_ip[4]; uint16_t src_port;
-        int r = i_dart_plat_recv(fd, buf, sizeof buf, src_ip, &src_port);
+        int r = i_dart_plat_recv(fd, buf, n->rx_buf_bytes, src_ip, &src_port);
         if (r<0){
             if (i_dart_plat_would_block()) break;        /* queue empty */
             continue;   /* per-datagram error (e.g. bounced send); keep draining */

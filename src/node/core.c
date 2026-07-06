@@ -85,6 +85,20 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_dart_event_append_str(p,end," ("); p = i_dart_event_append_u64(p,end,ev->too_big_bytes);
         p = i_dart_event_append_str(p,end," bytes), skipped");
         break;
+    case DART_INTEREST_OVERFLOW:
+        p = i_dart_event_append_str(p,end,"interest-overflow peer id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        p = i_dart_event_append_str(p,end,": "); p = i_dart_event_append_u64(p,end,ev->lost_count);
+        p = i_dart_event_append_str(p,end," matched topics beyond our alias table, their data cannot deliver (raise DART_META_MAX_IDS)");
+        break;
+    case DART_META_TRUNCATED:
+        p = i_dart_event_append_str(p,end,"meta-truncated: "); p = i_dart_event_append_str(p,end,ev->detail);
+        break;
+    case DART_PEER_META_TOO_BIG:
+        p = i_dart_event_append_str(p,end,"peer-meta-too-big id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        if (ev->ip_len == 4){ p = i_dart_event_append_str(p,end," at "); p = i_dart_event_append_addr(p,end,ev); }
+        p = i_dart_event_append_str(p,end,": "); p = i_dart_event_append_u64(p,end,ev->too_big_bytes);
+        p = i_dart_event_append_str(p,end," byte blob exceeds our capacity, its metadata is refused");
+        break;
     }
     *p = '\0';                                     /* p <= end = buf+cap-1, in range */
     return buf;
@@ -470,6 +484,17 @@ void i_dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
             break;
         case DART_DISCOVERY_PEER_REFUSED:
             i_dart_node_core_peer_refused(c, &ev->addr);
+            break;
+        case DART_DISCOVERY_META_TOO_BIG:
+            if (c->on_event){
+                DartEvent e;
+                memset(&e, 0, sizeof e);
+                e.kind = DART_PEER_META_TOO_BIG; e.peer = ev->peer; e.user = c->user;
+                e.too_big_bytes = ev->meta.len;
+                e.detail = "peer announce blob exceeds our capacity";
+                memcpy(e.ip, ev->addr.ip, 16); e.ip_len = ev->addr.ip_len; e.port = ev->addr.port;
+                c->on_event(&e);
+            }
             break;
         default: break;
     }
