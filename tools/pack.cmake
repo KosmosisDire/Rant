@@ -238,8 +238,28 @@ function(build_cpp f dart_h)
   message(STATUS "wrote ${f}")
 endfunction()
 
+# dart.py: the Python wrapper (python/dart.py.in) with dist/dart.h embedded as a
+# Python string in place of its single @DART_EMBED@ marker, so the shipped file is
+# one self-contained module that compiles the embedded C on first import. The C is
+# escaped into a string literal (backslash, quote, then newline -> \n) so any C
+# content is safe; the segment stays on one logical line.
+function(build_py f dart_h)
+  set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../python/dart.py.in")
+  file(READ "${dart_h}" dh)
+  string(REGEX REPLACE "\r" "" dh "${dh}")   # normalize CRLF -> LF first
+  string(REPLACE "\\" "\\\\" dh "${dh}")      # escape backslashes
+  string(REPLACE "\"" "\\\"" dh "${dh}")      # escape double quotes
+  string(REPLACE "\n" "\\n"  dh "${dh}")      # newlines -> \n (keep it one line)
+  file(READ "${tmpl}" py)
+  string(REGEX REPLACE "\r" "" py "${py}")
+  string(REPLACE "@DART_EMBED@" "${dh}" py "${py}")
+  file(WRITE "${f}" "${py}")
+  message(STATUS "wrote ${f}")
+endfunction()
+
 build_discovery("${OUT}/dart_discovery.h")
 build_transport("${OUT}/dart_transport.h")
 build_combined("${OUT}/dart.h")
 build_cpp("${OUT}/dart.hpp" "${OUT}/dart.h")
+build_py("${OUT}/dart.py" "${OUT}/dart.h")
 message(STATUS "pack: done (${SRC} -> ${OUT})")

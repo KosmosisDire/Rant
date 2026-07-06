@@ -1,0 +1,1248 @@
+"""DART Python wrapper: one self-contained file, compiled on first import.
+
+DART = Discovery And Realtime Transport, a dependency-free C99 middleware.
+This module embeds the DART C amalgamation and, on first use, compiles it into a
+cached shared library with your system C compiler (cc / clang / gcc, or clang-cl /
+cl on Windows), then binds it via ctypes. Later imports load the cached library.
+Drop this single file into your project; no pip install, no sibling library.
+
+The API mirrors the C++ wrapper (cpp/dart.hpp) in naming and shape, but is
+Pythonic: memory/allocator control is hidden, config is keyword args or the Qos /
+NodeOptions dataclasses, and payloads are plain `bytes`. Typed messages are
+defined by reflection over a decorated class:
+
+    import dart
+
+    @dart.schema
+    class Pose:
+        stamp: dart.u64
+        x:     dart.f64
+        y:     dart.f64
+        cov:   dart.f64[9]
+
+    node = dart.Node.open("robot1", domain=7)
+    ch = node.create_channel("pose", dart.Role.PUBSUB, Pose,
+                             qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
+    node.on_message(lambda m: print(m.value))     # m.value is a decoded Pose
+    node.start()
+    ch.send(Pose(stamp=1, x=1.0, y=2.0, cov=[0]*9))
+
+Requires a C compiler on the machine at first use only. Override which one with
+the DART_CC environment variable. Do NOT call node/channel methods from inside
+on_message/on_event (the poll thread is mid-callback and holds the node lock).
+"""
+
+import ctypes
+import dataclasses
+import enum
+import hashlib
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import traceback
+from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
+                    sizeof, string_at, c_char_p, c_void_p, c_int, c_int64,
+                    c_uint8, c_uint16, c_uint32, c_uint64, c_size_t, c_double,
+                    c_float, c_ubyte)
+
+_WRAPPER_VERSION = "2"   # bump to force a recompile when this file's ABI view changes
+
+# ---------------------------------------------------------------------------
+# Embedded C source. The packer (tools/pack.cmake) replaces the single marker
+# below with the escaped contents of dist/dart.h. In-tree (unpacked) the marker
+# is left intact and _source() falls back to reading dist/dart.h from disk.
+# ---------------------------------------------------------------------------
+_DART_C_SOURCE = "@DART_EMBED@"
+_EMBED_MARKER = "@DART_" + "EMBED@"   # split so the packer never rewrites this copy
+
+
+def _source():
+    if _DART_C_SOURCE != _EMBED_MARKER:
+        return _DART_C_SOURCE
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "dart.h"),
+                 os.path.join(here, "..", "dist", "dart.h")):
+        if os.path.exists(cand):
+            with open(cand, "r", encoding="utf-8", newline="") as f:
+                return f.read()
+    raise RuntimeError("dart: no embedded C source and no dist/dart.h found "
+                       "(run the packer, or keep dart.py next to dist/dart.h)")
+
+
+# ---------------------------------------------------------------------------
+# Compile-on-import: find a compiler, build a shared lib from the embedded
+# source once, cache it by content hash, and load it via ctypes.
+# ---------------------------------------------------------------------------
+
+# Symbols the wrapper binds. MSVC-style compilers export nothing from a DLL by
+# default, so we hand them this list as a .def; GNU compilers auto-export.
+_EXPORTS = [
+    "i_dart_plat_realloc",
+    "dart_node_open", "dart_node_poll", "dart_node_close",
+    "dart_node_create_channel", "dart_node_channel",
+    "dart_channel_send", "dart_channel_set_role", "dart_channel_index",
+    "dart_channel_match_count", "dart_channel_drain",
+    "dart_node_mem_stats", "dart_node_backpressure_stats", "dart_event_str",
+    "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
+    "dart_schema_hash", "dart_schema_name", "dart_schema_size",
+    "dart_schema_field_count", "dart_schema_field_at", "dart_schema_field_index",
+    "dart_schema_message_default", "dart_schema_scalar_size",
+    "dart_set_uint", "dart_set_int", "dart_set_f64", "dart_set_f32", "dart_set_array",
+    "dart_get_uint", "dart_get_int", "dart_get_f64", "dart_get_f32", "dart_get_array",
+    "dart_get_value", "dart_set_value",
+]
+
+
+def _lib_ext():
+    if sys.platform == "win32":
+        return ".dll"
+    if sys.platform == "darwin":
+        return ".dylib"
+    return ".so"
+
+
+def _cache_dir():
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Caches")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    d = os.path.join(base, "dart-python")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _find_compiler():
+    """Return (path, family) where family is 'gnu' or 'msvc'."""
+    override = os.environ.get("DART_CC")
+    if override:
+        path = override if os.path.sep in override else shutil.which(override)
+        if not path:
+            raise RuntimeError("dart: DART_CC=%r not found" % override)
+        return path, _family(path)
+    names = (["clang-cl", "gcc", "clang", "cl"] if sys.platform == "win32"
+             else ["cc", "clang", "gcc"])
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path, _family(path)
+    raise RuntimeError("dart: no C compiler found (looked for %s). Install one "
+                       "or set DART_CC." % ", ".join(names))
+
+
+def _family(path):
+    base = os.path.basename(path).lower()
+    if base.startswith("cl.") or base == "cl" or "clang-cl" in base:
+        return "msvc"
+    return "gnu"
+
+
+def _compiler_id(path):
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, timeout=20).stdout
+    except Exception:
+        out = b""
+    return hashlib.sha256(path.encode("utf-8", "replace") + b"\0" + out).hexdigest()[:12]
+
+
+def _compile(src, path, family, out_lib):
+    tmp = tempfile.mkdtemp(prefix="dart-build-")
+    try:
+        cfile = os.path.join(tmp, "dart_impl.c")
+        with open(cfile, "w", encoding="utf-8", newline="\n") as f:
+            f.write("#define DART_IMPLEMENTATION\n")
+            f.write(src)
+        staged = os.path.join(tmp, "dart" + _lib_ext())
+        if family == "msvc":
+            deffile = os.path.join(tmp, "dart.def")
+            with open(deffile, "w") as f:
+                f.write("EXPORTS\n")
+                f.writelines(name + "\n" for name in _EXPORTS)
+            cmd = [path, "/nologo", "/O2", "/LD", "/TC", "/DDART_IMPLEMENTATION",
+                   "/D_CRT_SECURE_NO_WARNINGS", cfile, "/Fe:" + staged,
+                   "/link", "/DEF:" + deffile,
+                   "ws2_32.lib", "bcrypt.lib", "winmm.lib"]
+        else:
+            cmd = [path, "-O2", "-std=c99", "-shared", "-DDART_IMPLEMENTATION",
+                   cfile, "-o", staged]
+            if sys.platform != "win32":
+                cmd.insert(1, "-fPIC")
+            if sys.platform.startswith("linux"):
+                cmd += ["-lrt"]
+            if sys.platform == "win32":
+                cmd += ["-lws2_32", "-lbcrypt", "-lwinmm", "-static-libgcc"]
+        proc = subprocess.run(cmd, capture_output=True, cwd=tmp)
+        if proc.returncode != 0 or not os.path.exists(staged):
+            raise RuntimeError(
+                "dart: compile failed (%s)\n%s\n%s"
+                % (" ".join(cmd),
+                   proc.stdout.decode("utf-8", "replace"),
+                   proc.stderr.decode("utf-8", "replace")))
+        os.replace(staged, out_lib)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _ensure_library():
+    src = _source()
+    path, family = _find_compiler()
+    key = hashlib.sha256(
+        ("\0".join([_WRAPPER_VERSION, sys.platform, str(sizeof(c_void_p)),
+                    _compiler_id(path)]) + "\0").encode("utf-8")
+        + src.encode("utf-8")).hexdigest()[:16]
+    out_lib = os.path.join(_cache_dir(), "dart-%s%s" % (key, _lib_ext()))
+    if not os.path.exists(out_lib):
+        _compile(src, path, family, out_lib)
+    return out_lib
+
+
+# ---------------------------------------------------------------------------
+# ctypes type layouts (must mirror the C structs exactly).
+# ---------------------------------------------------------------------------
+
+class DartBytes(Structure):
+    _fields_ = [("data", c_void_p), ("len", c_size_t)]
+
+
+class DartString(Structure):
+    _fields_ = [("data", c_void_p), ("len", c_size_t)]
+
+
+class DartQos(Structure):
+    _fields_ = [
+        ("reliability", c_int),
+        ("keep_last", c_uint16),
+        ("catch_up", c_uint16),
+        ("max_message_bytes", c_uint32),
+        ("heartbeat_us", c_uint32),
+        ("repair_delay_us", c_uint32),
+        ("backpressure_wait_us", c_uint32),
+        ("shm_max_bytes", c_uint32),
+    ]
+
+
+class DartChannelOpts(Structure):
+    _fields_ = [("qos", DartQos)]
+
+
+class DartNodeNet(Structure):
+    _fields_ = [
+        ("data_port", c_uint16),
+        ("discovery_group", c_char_p),
+        ("discovery_port", c_uint16),
+        ("multicast_interface", c_char_p),
+        ("multicast_ttl", c_uint8),
+        ("seed_peers", c_void_p),
+        ("n_seed_peers", c_uint16),
+        ("recv_buffer_bytes", c_uint32),
+        ("send_buffer_bytes", c_uint32),
+        ("fragment_size", c_uint16),
+    ]
+
+
+class DartNodeDiscovery(Structure):
+    _fields_ = [
+        ("announce_interval_us", c_uint32),
+        ("peer_timeout_us", c_uint32),
+        ("max_peers", c_uint16),
+    ]
+
+
+class DartNodeOpts(Structure):
+    _fields_ = [
+        ("domain", c_uint16),
+        ("max_channels", c_uint16),
+        ("user_data", c_void_p),
+        ("disable_shm", c_uint8),
+        ("net", DartNodeNet),
+        ("discovery", DartNodeDiscovery),
+    ]
+
+
+class DartMsg(Structure):
+    _fields_ = [
+        ("node", c_void_p),
+        ("user", c_void_p),
+        ("channel_id", c_uint16),
+        ("sender_id", c_uint32),
+        ("sender_name", DartString),
+        ("channel_name", DartString),
+        ("data", DartBytes),
+        ("schema", c_void_p),
+    ]
+
+
+class DartEvent(Structure):
+    _fields_ = [
+        ("kind", c_int),
+        ("detail", c_char_p),
+        ("user", c_void_p),
+        ("peer", c_uint32),
+        ("channel", c_uint16),
+        ("ip", c_uint8 * 16),
+        ("ip_len", c_uint8),
+        ("port", c_uint16),
+        ("lost_first", c_uint64),
+        ("lost_count", c_uint64),
+        ("too_big_bytes", c_uint64),
+        ("identity", c_uint64),
+        ("publish_topics", c_uint16),
+        ("receive_topics", c_uint16),
+    ]
+
+
+class DartAllocator(Structure):
+    _fields_ = [
+        ("page_realloc", c_void_p),
+        ("shared", c_void_p),
+        ("owned", c_void_p),
+        ("page_size", c_uint32),
+        ("max_bytes", c_size_t),
+        ("in_use", c_size_t),
+        ("peak", c_size_t),
+        ("alloc_calls", c_uint64),
+        ("pages_live", c_uint64),
+    ]
+
+
+class DartSchemaFieldInfo(Structure):
+    _fields_ = [
+        ("name", DartString),
+        ("kind", c_uint8),
+        ("elem", c_uint8),
+        ("count", c_uint16),
+        ("depth", c_uint16),
+        ("offset", c_uint32),
+        ("size", c_uint32),
+    ]
+
+
+class _DartValueV(Union):
+    _fields_ = [("u", c_uint64), ("i", c_int64), ("f", c_double)]
+
+
+class DartValue(Structure):
+    _fields_ = [
+        ("kind", c_uint8),
+        ("elem", c_uint8),
+        ("count", c_uint16),
+        ("v", _DartValueV),
+        ("bytes", DartBytes),
+    ]
+
+
+_DART_ALLOCATOR_PAGE = 64 * 1024   # DART_ALLOCATOR_PAGE default
+
+_MsgFn = CFUNCTYPE(None, POINTER(DartMsg))
+_EvtFn = CFUNCTYPE(None, POINTER(DartEvent))
+_AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
+
+
+def _bind(lib):
+    F = lambda fn, args, ret: (setattr(getattr(lib, fn), "argtypes", args),
+                               setattr(getattr(lib, fn), "restype", ret))
+    F("dart_node_open", [POINTER(DartAllocator), c_char_p, _MsgFn, _EvtFn,
+                         POINTER(DartNodeOpts)], c_void_p)
+    F("dart_node_poll", [c_void_p, c_int], c_int)
+    F("dart_node_close", [c_void_p, c_int], None)
+    F("dart_node_create_channel", [c_void_p, c_char_p, c_int, c_void_p,
+                                   POINTER(DartChannelOpts)], c_void_p)
+    F("dart_node_channel", [c_void_p, c_uint16], c_void_p)
+    F("dart_channel_send", [c_void_p, DartBytes], c_int)
+    F("dart_channel_set_role", [c_void_p, c_int], c_int)
+    F("dart_channel_index", [c_void_p], c_uint16)
+    F("dart_channel_match_count", [c_void_p], c_int)
+    F("dart_channel_drain", [c_void_p, c_int], c_int)
+    F("dart_node_mem_stats", [c_void_p, POINTER(c_size_t), POINTER(c_size_t),
+                              POINTER(c_uint64)], None)
+    F("dart_node_backpressure_stats", [c_void_p, POINTER(c_uint64),
+                                       POINTER(c_uint32)], None)
+    F("dart_event_str", [POINTER(DartEvent), c_char_p, c_size_t], c_char_p)
+    # serialize / schema
+    F("dart_schema_compile", [_AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
+    F("dart_schema_free", [c_void_p, _AllocFn, c_void_p], None)
+    F("dart_schema_wire", [c_void_p], DartBytes)
+    F("dart_schema_hash", [c_void_p], c_uint64)
+    F("dart_schema_name", [c_void_p], DartString)
+    F("dart_schema_size", [c_void_p], c_uint32)
+    F("dart_schema_field_count", [c_void_p], c_uint16)
+    F("dart_schema_field_at", [c_void_p, c_uint16, POINTER(DartSchemaFieldInfo)], c_int)
+    F("dart_schema_field_index", [c_void_p, c_char_p], c_int)
+    F("dart_schema_message_default", [c_void_p, c_void_p, c_size_t], c_int)
+    F("dart_schema_scalar_size", [c_int], c_uint32)
+    F("dart_set_uint", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint64], c_int)
+    F("dart_set_int", [c_void_p, c_size_t, c_void_p, c_char_p, c_int64], c_int)
+    F("dart_set_f64", [c_void_p, c_size_t, c_void_p, c_char_p, c_double], c_int)
+    F("dart_set_f32", [c_void_p, c_size_t, c_void_p, c_char_p, c_float], c_int)
+    F("dart_set_array", [c_void_p, c_size_t, c_void_p, c_char_p, DartBytes], c_int)
+    F("dart_get_uint", [DartBytes, c_void_p, c_char_p], c_uint64)
+    F("dart_get_int", [DartBytes, c_void_p, c_char_p], c_int64)
+    F("dart_get_f64", [DartBytes, c_void_p, c_char_p], c_double)
+    F("dart_get_f32", [DartBytes, c_void_p, c_char_p], c_float)
+    F("dart_get_array", [DartBytes, c_void_p, c_char_p], DartBytes)
+    F("dart_get_value", [DartBytes, c_void_p, c_uint16, POINTER(DartValue)], c_int)
+    F("dart_set_value", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(DartValue)], c_int)
+
+
+_LIB = None
+_LIB_LOCK = threading.Lock()
+
+
+def _load():
+    global _LIB
+    if _LIB is not None:
+        return _LIB
+    with _LIB_LOCK:
+        if _LIB is None:
+            lib = ctypes.CDLL(_ensure_library())
+            _bind(lib)
+            _LIB = lib
+    return _LIB
+
+
+# The schema layer needs a realloc-style hook (DartAllocFn). The natural one,
+# dart_allocator_alloc, is static-inline (not exported), so we back it with the C
+# runtime's realloc/free. Every schema alloc/free routes through this one hook, so
+# it never mixes allocators with DART itself.
+_CRT = None
+
+
+def _crt():
+    global _CRT
+    if _CRT is None:
+        crt = ctypes.CDLL("msvcrt") if sys.platform == "win32" else ctypes.CDLL(None)
+        crt.realloc.restype = c_void_p
+        crt.realloc.argtypes = [c_void_p, c_size_t]
+        crt.free.restype = None
+        crt.free.argtypes = [c_void_p]
+        _CRT = crt
+    return _CRT
+
+
+@_AllocFn
+def _schema_alloc(user, ptr, size):
+    crt = _crt()
+    if size == 0:
+        if ptr:
+            crt.free(ptr)
+        return None
+    return crt.realloc(ptr, size)
+
+
+# ---------------------------------------------------------------------------
+# Enums (values match the C wire; names mirror the C++ wrapper).
+# ---------------------------------------------------------------------------
+
+class Reliability(enum.IntEnum):
+    BEST_EFFORT = 0
+    RELIABLE = 1
+
+
+class Role(enum.IntEnum):
+    PUBSUB = 0
+    PUB_ONLY = 1
+    SUB_ONLY = 2
+    INACTIVE = 3
+
+
+class SendStatus(enum.IntEnum):
+    OK = 0
+    NO_CHANNEL = -1
+    TOO_BIG = -2
+    BAD_ROLE = -3
+    OUT_OF_MEMORY = -4
+
+
+class EventKind(enum.IntEnum):
+    PEER_UP = 0
+    PEER_DOWN = 1
+    PEER_INTEREST = 2
+    MSG_LOST = 3
+    MSG_TOO_BIG = 4
+    NAME_COLLISION = 5
+    QOS_INCOMPATIBLE = 6
+    SCHEMA_MISMATCH = 7
+    PEER_REFUSED = 8
+    INTEREST_OVERFLOW = 9
+    META_TRUNCATED = 10
+    PEER_META_TOO_BIG = 11
+
+
+class FieldType(enum.IntEnum):
+    U8 = 0
+    U16 = 1
+    U32 = 2
+    U64 = 3
+    I8 = 4
+    I16 = 5
+    I32 = 6
+    I64 = 7
+    F32 = 8
+    F64 = 9
+    BOOL = 10
+    ARRAY = 11
+    STRUCT = 12
+
+
+# raw kind bytes (== FieldType, kept short for the codec below)
+_U8, _U16, _U32, _U64 = 0, 1, 2, 3
+_I8, _I16, _I32, _I64 = 4, 5, 6, 7
+_F32, _F64, _BOOL, _ARR, _STRUCT = 8, 9, 10, 11, 12
+_SIGNED = frozenset((_I8, _I16, _I32, _I64))
+_FLOATK = frozenset((_F32, _F64))
+_FMT = {_U8: "B", _U16: "H", _U32: "I", _U64: "Q", _I8: "b", _I16: "h",
+        _I32: "i", _I64: "q", _F32: "f", _F64: "d", _BOOL: "B"}
+_SCALAR_SIZE = {_U8: 1, _U16: 2, _U32: 4, _U64: 8, _I8: 1, _I16: 2, _I32: 4,
+                _I64: 8, _F32: 4, _F64: 8, _BOOL: 1}
+_TOKEN = {_U8: "u8", _U16: "u16", _U32: "u32", _U64: "u64", _I8: "i8", _I16: "i16",
+          _I32: "i32", _I64: "i64", _F32: "f32", _F64: "f64", _BOOL: "bool"}
+
+
+class SchemaError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Config + value dataclasses (mirror the C++ structs; zero = default).
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class Qos:
+    reliability: Reliability = Reliability.BEST_EFFORT
+    keep_last: int = 0
+    catch_up: int = 0
+    max_message_bytes: int = 0
+    heartbeat_us: int = 0
+    repair_delay_us: int = 0
+    backpressure_wait_us: int = 0
+    shm_max_bytes: int = 0
+
+
+@dataclasses.dataclass
+class NodeOptions:
+    domain: int = 0
+    max_channels: int = 0
+    disable_shm: bool = False
+    data_port: int = 0
+    discovery_group: str = ""
+    discovery_port: int = 0
+    multicast_interface: str = ""
+    multicast_ttl: int = 0
+    fragment_size: int = 0
+    announce_interval_us: int = 0
+    peer_timeout_us: int = 0
+    max_peers: int = 0
+
+
+@dataclasses.dataclass
+class Field:
+    name: str
+    kind: FieldType
+    elem: FieldType
+    count: int
+    depth: int
+    offset: int
+    size: int
+
+
+# ---------------------------------------------------------------------------
+# Reflection: field-type markers and the @schema decorator.
+# ---------------------------------------------------------------------------
+
+class _Type:
+    """A DART scalar field-type marker (dart.u8 ... dart.f64, dart.bool_)."""
+    def __init__(self, kind, token):
+        self.kind = kind
+        self.token = token
+
+    def __getitem__(self, count):
+        if not isinstance(count, int) or count <= 0:
+            raise TypeError("array size must be a positive int, e.g. dart.f64[9]")
+        return _Array(self, count)
+
+    def __repr__(self):
+        return "dart." + self.token
+
+
+class _Array:
+    def __init__(self, elem, count):
+        self.elem = elem
+        self.count = count
+
+    def __repr__(self):
+        return "dart.%s[%d]" % (self.elem.token, self.count)
+
+
+u8 = _Type(_U8, "u8")
+u16 = _Type(_U16, "u16")
+u32 = _Type(_U32, "u32")
+u64 = _Type(_U64, "u64")
+i8 = _Type(_I8, "i8")
+i16 = _Type(_I16, "i16")
+i32 = _Type(_I32, "i32")
+i64 = _Type(_I64, "i64")
+f32 = _Type(_F32, "f32")
+f64 = _Type(_F64, "f64")
+bool_ = _Type(_BOOL, "bool")
+
+
+class _FieldSpec:
+    __slots__ = ("name", "kind", "elem", "count", "token", "nested")
+
+    def __init__(self, name, kind, elem=0, count=0, token=None, nested=None):
+        self.name = name
+        self.kind = kind
+        self.elem = elem
+        self.count = count
+        self.token = token
+        self.nested = nested
+
+
+class _Spec:
+    """Reflected schema description of a decorated class."""
+    __slots__ = ("name", "fields", "cls", "_schema")
+
+    def __init__(self, name, fields, cls):
+        self.name = name
+        self.fields = fields
+        self.cls = cls
+        self._schema = None   # lazily compiled Schema
+
+
+def _resolve(ann, g):
+    return eval(ann, g, {}) if isinstance(ann, str) else ann   # future-annotation strings
+
+
+def _field_spec(name, ann, g):
+    ann = _resolve(ann, g)
+    if isinstance(ann, _Type):
+        return _FieldSpec(name, ann.kind, token=ann.token)
+    if isinstance(ann, _Array):
+        return _FieldSpec(name, _ARR, elem=ann.elem.kind, count=ann.count, token=ann.elem.token)
+    if hasattr(ann, "__dart_spec__"):
+        return _FieldSpec(name, _STRUCT, nested=ann.__dart_spec__)
+    if ann is int:
+        return _FieldSpec(name, _I64, token="i64")
+    if ann is float:
+        return _FieldSpec(name, _F64, token="f64")
+    if ann is bool:
+        return _FieldSpec(name, _BOOL, token="bool")
+    raise TypeError("dart.schema: field %r has unsupported type %r "
+                    "(use dart.u8..f64, dart.f64[N], a @dart.schema class, or "
+                    "int/float/bool)" % (name, ann))
+
+
+def _build_spec(cls):
+    mod = sys.modules.get(cls.__module__)
+    g = getattr(mod, "__dict__", {})
+    anns = getattr(cls, "__annotations__", {})
+    if not anns:
+        raise TypeError("dart.schema: %s has no annotated fields" % cls.__name__)
+    return _Spec(cls.__name__, [_field_spec(n, a, g) for n, a in anns.items()], cls)
+
+
+def schema(cls):
+    """Class decorator: derive a DART schema from a class's annotated fields, and
+    make it a dataclass so instances are easy to build. Fields are annotated with
+    dart.u8..dart.f64 / dart.bool_, dart.<scalar>[N] for a fixed array, another
+    @dart.schema class for a nested struct, or plain int/float/bool."""
+    spec = _build_spec(cls)
+    if not dataclasses.is_dataclass(cls):
+        cls = dataclasses.dataclass(cls)
+    spec.cls = cls
+    cls.__dart_spec__ = spec
+    cls.__dart_dsl__ = _spec_text(spec)   # the DSL text this class compiles to
+    return cls
+
+
+def _spec_text(spec):
+    def line(f):
+        if f.kind == _STRUCT:
+            return "%s: { %s }" % (f.name, ", ".join(line(g) for g in f.nested.fields))
+        if f.kind == _ARR:
+            return "%s: %s[%d]" % (f.name, f.token, f.count)
+        return "%s: %s" % (f.name, f.token)
+    return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
+
+
+def _schema_dsl(lib, s):
+    """Reconstruct the DSL text from ANY compiled schema (reflected, text-compiled,
+    or wire-parsed from a peer) by walking its flattened depth-first field table."""
+    root = []
+    stack = [root]                       # stack[d] = the field list at depth d
+    info = DartSchemaFieldInfo()
+    for i in range(lib.dart_schema_field_count(s)):
+        lib.dart_schema_field_at(s, i, byref(info))
+        node = [_dstr(info.name), info.kind, info.elem, info.count, None]
+        d = info.depth
+        stack[d].append(node)
+        if info.kind == _STRUCT:
+            node[4] = []
+            while len(stack) <= d + 1:
+                stack.append(None)
+            stack[d + 1] = node[4]
+
+    def line(f):
+        name, kind, elem, count, children = f
+        if kind == _STRUCT:
+            return "%s: { %s }" % (name, ", ".join(line(c) for c in children))
+        if kind == _ARR:
+            return "%s: %s[%d]" % (name, _TOKEN[elem], count)
+        return "%s: %s" % (name, _TOKEN[kind])
+    return (_dstr(lib.dart_schema_name(s)) + "\n{\n"
+            + ",\n".join("    " + line(f) for f in root) + "\n}\n")
+
+
+# ---------------------------------------------------------------------------
+# Schema: an owned, compiled message schema + encode/decode.
+# ---------------------------------------------------------------------------
+
+def _dstr(s):
+    return string_at(s.data, s.len).decode("utf-8", "replace") if s.data and s.len else ""
+
+
+class Schema:
+    """A compiled DART message schema. Build with Schema.compile(text) or via the
+    @dart.schema reflection decorator (create_channel accepts either)."""
+
+    def __init__(self, ptr, spec=None):
+        self._s = ptr
+        self._spec = spec
+
+    @classmethod
+    def compile(cls, text):
+        lib = _load()
+        err = c_char_p()
+        s = lib.dart_schema_compile(_schema_alloc, None, text.encode("utf-8"), byref(err))
+        if not s:
+            near = err.value.decode("utf-8", "replace") if err.value else "?"
+            raise SchemaError("schema compile failed near: " + near)
+        return cls(s)
+
+    @property
+    def name(self):
+        return _dstr(_load().dart_schema_name(self._s))
+
+    @property
+    def size(self):
+        return _load().dart_schema_size(self._s)
+
+    @property
+    def hash(self):
+        return _load().dart_schema_hash(self._s)
+
+    @property
+    def wire(self):
+        b = _load().dart_schema_wire(self._s)
+        return string_at(b.data, b.len) if b.data and b.len else b""
+
+    @property
+    def dsl(self):
+        """The schema's DSL text, reconstructed from the compiled form. Paste this
+        into a C/C++ node's dart_schema_compile for interop, or just print it."""
+        return _schema_dsl(_load(), self._s)
+
+    @property
+    def field_count(self):
+        return _load().dart_schema_field_count(self._s)
+
+    def fields(self):
+        lib = _load()
+        out = []
+        info = DartSchemaFieldInfo()
+        for i in range(lib.dart_schema_field_count(self._s)):
+            if lib.dart_schema_field_at(self._s, i, byref(info)):
+                out.append(Field(_dstr(info.name), FieldType(info.kind),
+                                 FieldType(info.elem), info.count, info.depth,
+                                 info.offset, info.size))
+        return out
+
+    def encode(self, value):
+        """Encode a mapping or an object (attributes by field name) to message bytes."""
+        return _encode(_load(), self._s, value)
+
+    def decode(self, data):
+        """Decode message bytes to a nested dict (any schema), or a typed instance
+        if this schema came from an @dart.schema class."""
+        d = _decode(_load(), self._s, bytes(data))
+        return _to_obj(self._spec, d) if self._spec else d
+
+    def __del__(self):
+        try:
+            if self._s:
+                _load().dart_schema_free(self._s, _schema_alloc, None)
+                self._s = None
+        except Exception:
+            pass
+
+
+def _spec_schema(spec):
+    if spec._schema is None:
+        s = Schema.compile(_spec_text(spec))
+        s._spec = spec
+        spec._schema = s
+    return spec._schema
+
+
+def _as_schema(schema_arg):
+    if schema_arg is None:
+        return None
+    if isinstance(schema_arg, Schema):
+        return schema_arg
+    if isinstance(schema_arg, str):
+        return Schema.compile(schema_arg)
+    if hasattr(schema_arg, "__dart_spec__"):
+        return _spec_schema(schema_arg.__dart_spec__)
+    raise TypeError("schema must be a Schema, an @dart.schema class, DSL text, or None")
+
+
+def dsl(x):
+    """The DSL text for a schema source: an @dart.schema class (no lib load needed),
+    a compiled Schema, or DSL text (returned as-is). Use it to display a schema or
+    hand it to a C/C++ node for interop."""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, Schema):
+        return x.dsl
+    dsl_text = getattr(x, "__dart_dsl__", None)
+    if dsl_text is not None:
+        return dsl_text
+    if hasattr(x, "__dart_spec__"):
+        return _spec_text(x.__dart_spec__)
+    raise TypeError("dsl() expects an @dart.schema class, a Schema, or DSL text")
+
+
+def _get(container, name):
+    if isinstance(container, dict):
+        return container[name]
+    return getattr(container, name)
+
+
+def _pack_array(elem_kind, val):
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        return bytes(val)
+    fmt = _FMT[elem_kind]
+    if elem_kind in _FLOATK:
+        return struct.pack("<%d%s" % (len(val), fmt), *(float(x) for x in val))
+    return struct.pack("<%d%s" % (len(val), fmt), *(int(x) for x in val))
+
+
+def _encode(lib, s, src):
+    size = lib.dart_schema_size(s)
+    buf = (c_ubyte * size)()
+    lib.dart_schema_message_default(s, buf, size)
+    names, srcs, keep = [], [src], []
+    for i in range(lib.dart_schema_field_count(s)):
+        info = DartSchemaFieldInfo()
+        lib.dart_schema_field_at(s, i, byref(info))
+        name = _dstr(info.name)
+        d = info.depth
+        while len(names) <= d:
+            names.append(None)
+        names[d] = name
+        path = ".".join(names[:d + 1]).encode("utf-8")
+        parent = srcs[d]
+        val = _get(parent, name)
+        if info.kind == _STRUCT:
+            while len(srcs) <= d + 1:
+                srcs.append(None)
+            srcs[d + 1] = val
+        elif info.kind == _ARR:
+            data = _pack_array(info.elem, val)
+            keep.append(data)
+            b = DartBytes(cast(c_char_p(data), c_void_p) if data else None, len(data))
+            lib.dart_set_array(buf, size, s, path, b)
+        elif info.kind == _F32:
+            lib.dart_set_f32(buf, size, s, path, float(val))
+        elif info.kind == _F64:
+            lib.dart_set_f64(buf, size, s, path, float(val))
+        elif info.kind in _SIGNED:
+            lib.dart_set_int(buf, size, s, path, int(val))
+        elif info.kind == _BOOL:
+            lib.dart_set_uint(buf, size, s, path, 1 if val else 0)
+        else:
+            lib.dart_set_uint(buf, size, s, path, int(val))
+    return bytes(buf)
+
+
+def _value_to_py(val):
+    k = val.kind
+    if k == _ARR:
+        raw = string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
+        if val.elem in (_U8, _I8):
+            return raw
+        esz = _SCALAR_SIZE[val.elem]
+        return list(struct.unpack("<%d%s" % (len(raw) // esz, _FMT[val.elem]), raw)) if raw else []
+    if k in _FLOATK:
+        return val.v.f
+    if k in _SIGNED:
+        return val.v.i
+    if k == _BOOL:
+        return bool(val.v.u)
+    return val.v.u
+
+
+def _decode(lib, s, msg):
+    mb = DartBytes(cast(c_char_p(msg), c_void_p) if msg else None, len(msg))
+    root = {}
+    dests = [root]
+    for i in range(lib.dart_schema_field_count(s)):
+        info = DartSchemaFieldInfo()
+        lib.dart_schema_field_at(s, i, byref(info))
+        name = _dstr(info.name)
+        d = info.depth
+        parent = dests[d]
+        if info.kind == _STRUCT:
+            child = {}
+            parent[name] = child
+            while len(dests) <= d + 1:
+                dests.append(None)
+            dests[d + 1] = child
+        else:
+            val = DartValue()
+            lib.dart_get_value(mb, s, i, byref(val))
+            parent[name] = _value_to_py(val)
+    return root
+
+
+def _to_obj(spec, d):
+    kwargs = {}
+    for f in spec.fields:
+        v = d.get(f.name)
+        kwargs[f.name] = _to_obj(f.nested, v) if (f.kind == _STRUCT and v is not None) else v
+    return spec.cls(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Public runtime API.
+# ---------------------------------------------------------------------------
+
+class Message:
+    """A delivered message. Views are copied out, so it outlives the callback.
+    For a typed channel, `.value` is the decoded object and `.fields` the dict."""
+    __slots__ = ("channel_id", "sender_id", "sender_name", "channel_name",
+                 "data", "fields", "value")
+
+    @classmethod
+    def _from_c(cls, m, spec):
+        self = cls.__new__(cls)
+        self.channel_id = m.channel_id
+        self.sender_id = m.sender_id
+        self.sender_name = _dstr(m.sender_name)
+        self.channel_name = _dstr(m.channel_name)
+        self.data = string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
+        self.fields = None
+        self.value = None
+        if m.schema:
+            try:
+                self.fields = _decode(_load(), m.schema, self.data)
+                self.value = _to_obj(spec, self.fields) if spec else self.fields
+            except Exception:
+                traceback.print_exc()
+        return self
+
+    @property
+    def text(self):
+        return self.data.decode("utf-8", "replace")
+
+    def __repr__(self):
+        return "Message(channel=%r, from=%r, %d bytes)" % (
+            self.channel_name, self.sender_name, len(self.data))
+
+
+class Event:
+    """A peer / loss / QoS notification."""
+    __slots__ = ("kind", "detail", "peer", "channel", "lost_first", "lost_count",
+                 "too_big_bytes", "identity", "publish_topics", "receive_topics", "_line")
+
+    @classmethod
+    def _from_c(cls, e):
+        self = cls.__new__(cls)
+        self.kind = EventKind(e.kind) if e.kind in EventKind._value2member_map_ else e.kind
+        self.detail = e.detail.decode("utf-8", "replace") if e.detail else ""
+        self.peer = e.peer
+        self.channel = e.channel
+        self.lost_first = e.lost_first
+        self.lost_count = e.lost_count
+        self.too_big_bytes = e.too_big_bytes
+        self.identity = e.identity
+        self.publish_topics = e.publish_topics
+        self.receive_topics = e.receive_topics
+        buf = ctypes.create_string_buffer(192)
+        _load().dart_event_str(byref(e), buf, len(buf))
+        self._line = buf.value.decode("utf-8", "replace")
+        return self
+
+    def __str__(self):
+        return self._line
+
+    def __repr__(self):
+        return "Event(%s)" % self._line
+
+
+class Channel:
+    """A topic handle (owned by the Node, stable for its life)."""
+    __slots__ = ("_node", "_h", "_schema")
+
+    def __init__(self, node, handle, schema):
+        self._node = node
+        self._h = handle
+        self._schema = schema
+
+    def send(self, data):
+        """Publish. `data` may be bytes/str (raw), or a mapping/object for a typed
+        channel (encoded via its schema). Returns a SendStatus."""
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            payload = bytes(data)
+        elif isinstance(data, str):
+            payload = data.encode("utf-8")
+        else:
+            if self._schema is None:
+                raise TypeError("channel has no schema; send bytes/str, or create the "
+                                "channel with a schema to send objects/dicts")
+            payload = self._schema.encode(data)
+        b = DartBytes()
+        buf = None
+        if payload:
+            buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
+            b.data = cast(buf, c_void_p)
+            b.len = len(payload)
+        with self._node._lock:
+            r = self._node._lib.dart_channel_send(self._h, b)
+        del buf
+        return SendStatus(r) if r in SendStatus._value2member_map_ else r
+
+    def set_role(self, role):
+        with self._node._lock:
+            return self._node._lib.dart_channel_set_role(self._h, int(role))
+
+    @property
+    def index(self):
+        return self._node._lib.dart_channel_index(self._h)
+
+    def match_count(self):
+        with self._node._lock:
+            return self._node._lib.dart_channel_match_count(self._h)
+
+    def drain(self, timeout_ms):
+        """Pump until every reader has acked, or timeout. Call before close."""
+        with self._node._lock:
+            return self._node._lib.dart_channel_drain(self._h, timeout_ms) == 1
+
+    @property
+    def schema(self):
+        return self._schema
+
+
+class Node:
+    """A DART node: owns sockets, discovery, and channels. Open with Node.open."""
+
+    __slots__ = ("_lib", "_h", "_id", "_alloc", "_lock", "_on_msg", "_on_evt",
+                 "_running", "_thread", "_chan_specs")
+
+    @classmethod
+    def open(cls, name=None, options=None, *, on_message=None, on_event=None, **opts):
+        """Open a node. Pass config as keyword args (domain=7, max_peers=32, ...) or
+        as options=NodeOptions(...). name is a human-readable label synced via
+        discovery (None => an auto "node-XXXXXXXX")."""
+        if options is None:
+            options = NodeOptions(**opts)
+        elif opts:
+            raise TypeError("pass either options= or keyword options, not both")
+        lib = _load()
+
+        self = cls.__new__(cls)
+        self._lib = lib
+        self._h = None
+        self._alloc = None
+        self._lock = threading.Lock()
+        self._on_msg = on_message
+        self._on_evt = on_event
+        self._running = False
+        self._thread = None
+        self._chan_specs = {}
+
+        with _REG_LOCK:
+            global _NEXT_ID
+            self._id = _NEXT_ID
+            _NEXT_ID += 1
+            _NODES[self._id] = self
+
+        co = DartNodeOpts()
+        memset(byref(co), 0, sizeof(co))
+        co.domain = options.domain
+        co.max_channels = options.max_channels
+        co.disable_shm = 1 if options.disable_shm else 0
+        co.user_data = c_void_p(self._id)
+        co.net.data_port = options.data_port
+        co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None
+        co.net.discovery_port = options.discovery_port
+        co.net.multicast_interface = (options.multicast_interface.encode()
+                                      if options.multicast_interface else None)
+        co.net.multicast_ttl = options.multicast_ttl
+        co.net.fragment_size = options.fragment_size
+        co.discovery.announce_interval_us = options.announce_interval_us
+        co.discovery.peer_timeout_us = options.peer_timeout_us
+        co.discovery.max_peers = options.max_peers
+
+        alloc = DartAllocator()
+        memset(byref(alloc), 0, sizeof(alloc))
+        alloc.page_realloc = cast(lib.i_dart_plat_realloc, c_void_p)
+        alloc.page_size = _DART_ALLOCATOR_PAGE
+        self._alloc = alloc
+
+        cname = name.encode("utf-8") if name else None
+        h = lib.dart_node_open(byref(alloc), cname, _on_message, _on_event, byref(co))
+        if not h:
+            with _REG_LOCK:
+                _NODES.pop(self._id, None)
+            raise RuntimeError("dart_node_open failed (bad options, or out of memory)")
+        self._h = h
+        return self
+
+    def on_message(self, fn):
+        self._on_msg = fn
+        return self
+
+    def on_event(self, fn):
+        self._on_evt = fn
+        return self
+
+    def create_channel(self, name, role=Role.PUBSUB, schema=None, qos=None, **qos_kwargs):
+        """Create a topic. schema may be a Schema, an @dart.schema class, DSL text, or
+        None (raw bytes). Pass QoS as qos=Qos(...) or as keyword args."""
+        if qos is None:
+            qos = Qos(**qos_kwargs)
+        elif qos_kwargs:
+            raise TypeError("pass either qos= or keyword qos options, not both")
+        sch = _as_schema(schema)
+        co = DartChannelOpts()
+        memset(byref(co), 0, sizeof(co))
+        co.qos.reliability = int(qos.reliability)
+        co.qos.keep_last = qos.keep_last
+        co.qos.catch_up = qos.catch_up
+        co.qos.max_message_bytes = qos.max_message_bytes
+        co.qos.heartbeat_us = qos.heartbeat_us
+        co.qos.repair_delay_us = qos.repair_delay_us
+        co.qos.backpressure_wait_us = qos.backpressure_wait_us
+        co.qos.shm_max_bytes = qos.shm_max_bytes
+        with self._lock:
+            h = self._lib.dart_node_create_channel(
+                self._h, name.encode("utf-8"), int(role),
+                sch._s if sch else None, byref(co))
+            if not h:
+                raise RuntimeError("create_channel failed (reserve full, bad name, or OOM)")
+            idx = self._lib.dart_channel_index(h)
+        self._chan_specs[idx] = sch._spec if sch else None
+        return Channel(self, h, sch)
+
+    def channel(self, index):
+        h = self._lib.dart_node_channel(self._h, index)
+        return Channel(self, h, None) if h else None
+
+    def poll(self, timeout_ms=0):
+        """One loop tick (discovery, RX, timers, TX). Not needed if start() is used."""
+        with self._lock:
+            return self._lib.dart_node_poll(self._h, timeout_ms)
+
+    def start(self, poll_interval_ms=1):
+        """Run poll() on a background daemon thread until stop()/close()."""
+        if self._running:
+            return
+        self._running = True
+
+        def loop():
+            while self._running:
+                with self._lock:
+                    if not self._h:
+                        break
+                    self._lib.dart_node_poll(self._h, poll_interval_ms)
+
+        self._thread = threading.Thread(target=loop, name="dart-poll", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if not self._running:
+            return
+        self._running = False
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join()
+        self._thread = None
+
+    def running(self):
+        return self._running
+
+    def memory_stats(self):
+        """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the
+        hot path is allocation-free."""
+        in_use, peak, calls = c_size_t(), c_size_t(), c_uint64()
+        with self._lock:
+            self._lib.dart_node_mem_stats(self._h, byref(in_use), byref(peak), byref(calls))
+        return in_use.value, peak.value, calls.value
+
+    def backpressure_stats(self):
+        """(waited_us, waited_sends) since open."""
+        us, n = c_uint64(), c_uint32()
+        with self._lock:
+            self._lib.dart_node_backpressure_stats(self._h, byref(us), byref(n))
+        return us.value, n.value
+
+    def close(self, send_bye=True):
+        self.stop()
+        with self._lock:
+            if self._h:
+                self._lib.dart_node_close(self._h, 1 if send_bye else 0)
+                self._h = None
+        with _REG_LOCK:
+            _NODES.pop(self._id, None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Callback dispatch. DartMsgFn/DartEventFn carry no user pointer, but every
+# DartMsg/DartEvent carries .user (== the node id we stashed). One trampoline
+# per module serves all nodes.
+# ---------------------------------------------------------------------------
+_NODES = {}
+_REG_LOCK = threading.Lock()
+_NEXT_ID = 1
+
+
+@_MsgFn
+def _on_message(msg_ptr):
+    try:
+        m = msg_ptr.contents
+        node = _NODES.get(m.user)
+        if node is not None and node._on_msg is not None:
+            spec = node._chan_specs.get(m.channel_id)
+            node._on_msg(Message._from_c(m, spec))
+    except Exception:
+        traceback.print_exc()
+
+
+@_EvtFn
+def _on_event(ev_ptr):
+    try:
+        e = ev_ptr.contents
+        node = _NODES.get(e.user)
+        if node is not None and node._on_evt is not None:
+            node._on_evt(Event._from_c(e))
+    except Exception:
+        traceback.print_exc()
