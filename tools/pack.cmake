@@ -222,7 +222,24 @@ function(build_combined f)
   message(STATUS "wrote ${f}")
 endfunction()
 
+# dart.hpp: the C++ wrapper (cpp/dart.hpp) with dist/dart.h spliced in place of
+# its single @DART_EMBED@ marker include, so the shipped C++ header is one
+# self-contained file (no sibling dart.h needed). The wrapper picks C-vs-C++ at
+# compile time, so the same embedded copy serves both the namespaced C++
+# declarations and the C implementation TU.
+function(build_cpp f dart_h)
+  set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../cpp/dart.hpp")
+  file(READ "${tmpl}" hpp)
+  string(REGEX REPLACE "\r" "" hpp "${hpp}")   # normalize CRLF -> LF, deterministic output
+  file(READ "${dart_h}" dh)
+  string(REGEX REPLACE "\r" "" dh "${dh}")
+  string(REPLACE "#include \"dart.h\"   /* @DART_EMBED@ */" "${dh}" hpp "${hpp}")
+  file(WRITE "${f}" "${hpp}")
+  message(STATUS "wrote ${f}")
+endfunction()
+
 build_discovery("${OUT}/dart_discovery.h")
 build_transport("${OUT}/dart_transport.h")
 build_combined("${OUT}/dart.h")
+build_cpp("${OUT}/dart.hpp" "${OUT}/dart.h")
 message(STATUS "pack: done (${SRC} -> ${OUT})")

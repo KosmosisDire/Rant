@@ -39,7 +39,8 @@ file(GLOB_RECURSE DART_SRC CONFIGURE_DEPENDS
 set(DART_DIST
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart_discovery.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart_transport.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.hpp")   # C++ wrapper with dart.h embedded
 
 add_custom_command(
   OUTPUT  ${DART_DIST}
@@ -48,6 +49,7 @@ add_custom_command(
           -D "OUT=${CMAKE_CURRENT_SOURCE_DIR}/dist"
           -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
   DEPENDS ${DART_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
+          "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dart.hpp"
   COMMENT "DART: amalgamating src/ -> dist/ single-headers"
   VERBATIM)
 
