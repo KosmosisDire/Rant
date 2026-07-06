@@ -105,3 +105,10 @@ option(DART_BUILD_EXPLORER "Build the DART Explorer GUI (fetches SDL3)" ON)
 if(DART_BUILD_EXPLORER)
   add_subdirectory(explore)
 endif()
+
+# The DART WebSocket bridge (bridge/): one WS connection = one node on the mesh.
+# It fetches IXWebSocket + nlohmann/json and needs a C++17 compiler.
+option(DART_BUILD_BRIDGE "Build the DART WebSocket bridge (fetches IXWebSocket)" ON)
+if(DART_BUILD_BRIDGE)
+  add_subdirectory(bridge)
+endif()
