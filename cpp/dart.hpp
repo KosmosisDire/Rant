@@ -26,8 +26,7 @@
  *     });
  *     auto ch = node->create_channel("chat", dart::Role::PubSub, nullptr,
  *                                    { .reliability = dart::Reliability::Reliable });
- *     node->start();                 // opt-in background poll thread
- *     ch.send("hello");
+ *     for (;;) { node->poll(1); ch.send("hello"); }   // drive it yourself (single-threaded)
  */
 #ifndef DART_HPP_INCLUDED
 #define DART_HPP_INCLUDED
@@ -60,14 +59,12 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include <atomic>
 #include <functional>
 #include <iterator>
-#include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <type_traits>
 #include <vector>
 #if defined(__has_include) && __has_include(<span>)
@@ -401,46 +398,39 @@ public:
 
     SendStatus send(Bytes data) {
         if (!ch_) return SendStatus::NoChannel;
-        std::lock_guard<std::mutex> g(*lock_);
         return static_cast<SendStatus>(
             detail::dart_channel_send(ch_, detail::dart_bytes(data.data(), data.size())));
     }
     void set_role(Role r) {
         if (!ch_) return;
-        std::lock_guard<std::mutex> g(*lock_);
         detail::dart_channel_set_role(ch_, static_cast<detail::DartRole>(r));
     }
     uint16_t index() const {
         if (!ch_) return 0xffff;
-        std::lock_guard<std::mutex> g(*lock_);
         return detail::dart_channel_index(ch_);
     }
     int match_count() const {
         if (!ch_) return 0;
-        std::lock_guard<std::mutex> g(*lock_);
         return detail::dart_channel_match_count(ch_);
     }
     /* Pump until every reader has acked, or timeout_ms elapses. Call before
      * closing so a final burst is not cut off by the BYE. */
     bool drain(int timeout_ms) {
         if (!ch_) return true;
-        std::lock_guard<std::mutex> g(*lock_);
         return detail::dart_channel_drain(ch_, timeout_ms) == 1;
     }
 
 private:
-    Channel(detail::DartChannel* c, std::mutex* l) : ch_(c), lock_(l) {}
-    detail::DartChannel* ch_   = nullptr;
-    std::mutex*          lock_ = nullptr;
+    explicit Channel(detail::DartChannel* c) : ch_(c) {}
+    detail::DartChannel* ch_ = nullptr;
     friend class Node;
 };
 
 /* Node: owns the DartNode, its memory, and the user callbacks.
  *
- * Threading: by default you drive poll() yourself (thin, like the C API).
- * Call start() to spawn a guarded background poll thread; every Node/Channel
- * call then serializes on an internal mutex, so you may create/send from any
- * thread. As with the C API, do NOT call back into the node from a handler. */
+ * Single-threaded: drive poll() yourself in a loop (background threading was
+ * removed for now). Call poll, send, create_channel, and the handlers all on one
+ * thread; as with the C API, do NOT call back into the node from a handler. */
 class Node {
 public:
     using MessageHandler = std::function<void(const MessageIn&)>;
@@ -501,7 +491,6 @@ public:
      * into the node, so the Schema need not outlive the channel). */
     Channel create_channel(std::string_view name, Role role = Role::PubSub,
                            const Schema* schema = nullptr, const Qos& qos = {}) {
-        std::lock_guard<std::mutex> g(impl_->lock);
         std::string nm(name);
         detail::DartChannelOpts co;
         std::memset(&co, 0, sizeof co);
@@ -509,47 +498,23 @@ public:
         detail::DartChannel* ch = detail::dart_node_create_channel(
             impl_->node, nm.c_str(), static_cast<detail::DartRole>(role),
             schema ? schema->raw() : nullptr, &co);
-        return Channel(ch, &impl_->lock);
+        return Channel(ch);
     }
 
     /* Recover an already-created channel handle by its creation index. */
     Channel channel(uint16_t index) const {
-        std::lock_guard<std::mutex> g(impl_->lock);
-        return Channel(detail::dart_node_channel(impl_->node, index), &impl_->lock);
+        return Channel(detail::dart_node_channel(impl_->node, index));
     }
 
-    /* One loop tick: drives discovery, RX, timers, and flushes queued TX.
-     * Blocks up to timeout_ms in the socket wait (wakes early on RX). */
+    /* One loop tick: drives discovery, RX, timers, and flushes queued TX. Blocks
+     * up to timeout_ms in the socket wait (wakes early on RX; 0 = non-blocking).
+     * Drive this yourself in a loop -- a node is single-threaded. */
     int poll(int timeout_ms = 0) {
-        std::lock_guard<std::mutex> g(impl_->lock);
         return detail::dart_node_poll(impl_->node, timeout_ms);
     }
 
-    /* Opt-in: run poll() on a background thread until stop(). Once started,
-     * every Node/Channel call is serialized, so you can send/create from any
-     * thread and never call poll() yourself. */
-    void start(int poll_interval_ms = 1) {
-        if (impl_->running.exchange(true)) return;
-        Impl* impl = impl_.get();
-        impl->poll_interval_ms = poll_interval_ms;
-        impl->poller = std::thread([impl] {
-            while (impl->running.load(std::memory_order_relaxed)) {
-                {
-                    std::lock_guard<std::mutex> g(impl->lock);
-                    detail::dart_node_poll(impl->node, impl->poll_interval_ms);
-                }
-                std::this_thread::yield();
-            }
-        });
-    }
-    void stop() {
-        if (impl_) impl_->stop_poller();
-    }
-    bool running() const { return impl_ && impl_->running.load(); }
-
     /* A copied snapshot of the live peer table (safe to keep after the poll). */
     std::vector<Peer> peers() const {
-        std::lock_guard<std::mutex> g(impl_->lock);
         std::vector<Peer> out;
         uint16_t count = 0;
         const detail::DartDiscoveryPeer* ps = detail::dart_node_peers(impl_->node, &count);
@@ -573,14 +538,12 @@ public:
 
     struct MemoryStats { size_t in_use = 0, peak = 0; uint64_t alloc_calls = 0; };
     MemoryStats memory_stats() const {
-        std::lock_guard<std::mutex> g(impl_->lock);
         MemoryStats s;
         detail::dart_node_mem_stats(impl_->node, &s.in_use, &s.peak, &s.alloc_calls);
         return s;
     }
     struct BackpressureStats { uint64_t waited_us = 0; uint32_t waited_sends = 0; };
     BackpressureStats backpressure_stats() const {
-        std::lock_guard<std::mutex> g(impl_->lock);
         BackpressureStats b;
         detail::dart_node_backpressure_stats(impl_->node, &b.waited_us, &b.waited_sends);
         return b;
@@ -591,20 +554,11 @@ private:
         detail::DartNode*        node = nullptr;
         MessageHandler           on_msg;
         EventHandler             on_event;
-        std::mutex               lock;
-        std::thread              poller;
-        std::atomic<bool>        running{false};
-        int                      poll_interval_ms = 1;
         std::string              disc_group;
         std::string              mcast_if;
         std::vector<detail::DartDiscoveryAddr> seeds;
 
-        void stop_poller() {
-            if (!running.exchange(false)) return;
-            if (poller.joinable()) poller.join();
-        }
         ~Impl() {
-            stop_poller();
             if (node) detail::dart_node_close(node, /*send_bye=*/1);
         }
     };

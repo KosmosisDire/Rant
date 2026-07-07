@@ -1,4 +1,4 @@
-/* Two-node smoke test for dart.hpp: node A publishes a typed message, node B
+/* Two-node test for dart.hpp: node A publishes a typed message, node B
  * receives and decodes it. Single process, discovery pinned to loopback.
  * Exit 0 = PASS. */
 #include "dart.hpp"
