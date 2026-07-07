@@ -1,0 +1,9 @@
+{
+  "name": "com.rant.dart",
+  "version": "0.1.0",
+  "displayName": "DART Middleware",
+  "description": "Discovery And Realtime Transport: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Desktop standalone (Windows / macOS / Linux) and the Editor.",
+  "unity": "2021.3",
+  "keywords": ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "dart", "rant"],
+  "author": { "name": "RANT" }
+}

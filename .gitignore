@@ -1,6 +1,7 @@
 old
 *.exe
 /build/
+/Debug/
 # cross-compiled / native binaries (no extension), repo-root only so they do not
 # also match source dirs like src/node/
 /dart_test
@@ -17,3 +18,18 @@ old
 /_ref/
 /explore/build/
 *.pdb
+# C# / .NET wrapper build output (csharp/*/{bin,obj}); the wrapper source is csharp/Dart.cs
+[Bb]in/
+[Oo]bj/
+# NuGet pack output
+/nupkg/
+# Prebuilt native binaries: built by csharp/native/build.{ps1,sh} (or CI) into these
+# folders, bundled into the .nupkg / Unity package. Never committed.
+/csharp/runtimes/
+/csharp/unity/Runtime/Plugins/
+# The Unity package's Dart.cs is a copy of csharp/Dart.cs made by unity/pack.{ps1,sh}
+# (one source of truth, no committed duplicate).
+/csharp/unity/Runtime/Dart.cs
+# Python build/cache artifacts (pip build, bytecode)
+__pycache__/
+*.egg-info/

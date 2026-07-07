@@ -42,6 +42,7 @@ set(DART_DIST
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.hpp"     # C++ wrapper with dart.h embedded
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.py")     # Python wrapper with dart.h embedded
+    # (the C# wrapper csharp/Dart.cs is hand-written over the prebuilt native lib, not generated)
 
 add_custom_command(
   OUTPUT  ${DART_DIST}

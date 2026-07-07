@@ -257,6 +257,9 @@ function(build_py f dart_h)
   message(STATUS "wrote ${f}")
 endfunction()
 
+# The C# wrapper (csharp/Dart.cs) is a hand-written thin P/Invoke layer over the
+# prebuilt native library, so it is NOT generated here (no embedded C).
+
 build_discovery("${OUT}/dart_discovery.h")
 build_transport("${OUT}/dart_transport.h")
 build_combined("${OUT}/dart.h")
