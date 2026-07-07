@@ -1,4 +1,4 @@
-# Dart.Middleware
+# Dart
 
 C# wrapper for **DART** (Discovery And Realtime Transport): peer discovery over UDP
 multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
@@ -39,7 +39,7 @@ Put the `.nupkg` in a folder, point a local NuGet source at it, and add the pack
 
 ```sh
 dotnet nuget add source ./path/to/nupkg -n dart-local
-dotnet add package Dart.Middleware
+dotnet add package Dart
 ```
 
 (Or attach the `.nupkg` to a GitHub Release and download it — release assets need no key.)

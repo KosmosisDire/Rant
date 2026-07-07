@@ -13,7 +13,7 @@
     <RootNamespace>Dart</RootNamespace>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
 
-    <PackageId>Dart.Middleware</PackageId>
+    <PackageId>Dart</PackageId>
     <Version>0.1.0</Version>
     <Description>DART (Discovery And Realtime Transport): peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64).</Description>
     <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;dart;rant</PackageTags>
