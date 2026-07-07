@@ -97,9 +97,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           pkg="$RUNNER_TEMP/upm"
-          rm -rf "$pkg" && mkdir -p "$pkg/Runtime"
-          cp csharp/unity/package.json csharp/unity/README.md "$pkg/"
-          cp -r csharp/unity/Runtime/. "$pkg/Runtime/"
+          sh csharp/unity/mk-upm.sh "$pkg"   # tree + a .meta per file/folder (immutable pkg cache needs them)
           cd "$pkg"
           git init -q -b upm
           git config user.name  "github-actions[bot]"
