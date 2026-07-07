@@ -1,10 +1,10 @@
-"""DART Python smoke test: two nodes, reliable typed pub/sub, on one host.
+"""DART Python test: two nodes, reliable typed pub/sub, on one host.
 
 Exercises the compile-on-import path, discovery/match, and schema reflection
 (encode a Python object on one node, decode it back on the other). Exit 0 = the
 message crossed and decoded to the expected values.
 
-    python python/smoke.py
+    python python/test.py
 """
 import os
 import sys
@@ -59,17 +59,14 @@ def main():
     sub.create_channel("pose", dart.Role.SUB_ONLY, Pose, qos=qos)
     pubch = pub.create_channel("pose", dart.Role.PUB_ONLY, Pose, qos=qos)
 
-    sub.start()
-    pub.start()
-
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04", vel=Twist(dx=0.5, dy=0.25))
 
+    # Single-threaded: drive both nodes by polling them in the loop (no start()).
     deadline = time.time() + 8.0
     while time.time() < deadline and not got.is_set():
-        st = pubch.send(sent)
-        if st != dart.SendStatus.OK:
-            print("send status:", st)
-        got.wait(0.2)
+        pubch.send(sent)
+        pub.poll(1)
+        sub.poll(1)
 
     ok = got.is_set()
     if ok:

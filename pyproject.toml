@@ -1,0 +1,19 @@
+# Lets DART's Python wrapper be pip-installed straight from GitHub:
+#   pip install "git+https://github.com/OWNER/REPO.git"
+# It installs the single generated module dist/dart.py as `dart` (which embeds the C
+# and compiles it on first import). The C library itself is built with CMake, not pip.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dart-middleware"
+version = "0.1.0"
+description = "DART (Discovery And Realtime Transport) Python wrapper: one file, compiles the embedded C99 core on first import."
+requires-python = ">=3.8"
+
+[tool.setuptools]
+py-modules = ["dart"]
+
+[tool.setuptools.package-dir]
+"" = "dist"

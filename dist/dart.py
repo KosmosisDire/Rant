@@ -24,12 +24,14 @@ defined by reflection over a decorated class:
     ch = node.create_channel("pose", dart.Role.PUBSUB, Pose,
                              qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
     node.on_message(lambda m: print(m.value))     # m.value is a decoded Pose
-    node.start()
-    ch.send(Pose(stamp=1, x=1.0, y=2.0, cov=[0]*9))
+    while True:                                    # drive it yourself (single-threaded)
+        node.poll(1)                               # discovery, RX+delivery, timers, TX flush
+        ch.send(Pose(stamp=1, x=1.0, y=2.0, cov=[0]*9))
 
 Requires a C compiler on the machine at first use only. Override which one with
-the DART_CC environment variable. Do NOT call node/channel methods from inside
-on_message/on_event (the poll thread is mid-callback and holds the node lock).
+the DART_CC environment variable. A node is single-threaded (background threading
+was removed for now): call poll, send, and the handlers all on one thread, and do
+NOT call node/channel methods from inside on_message/on_event.
 """
 
 import ctypes
@@ -1012,27 +1014,23 @@ class Channel:
             buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
             b.data = cast(buf, c_void_p)
             b.len = len(payload)
-        with self._node._lock:
-            r = self._node._lib.dart_channel_send(self._h, b)
+        r = self._node._lib.dart_channel_send(self._h, b)
         del buf
         return SendStatus(r) if r in SendStatus._value2member_map_ else r
 
     def set_role(self, role):
-        with self._node._lock:
-            return self._node._lib.dart_channel_set_role(self._h, int(role))
+        return self._node._lib.dart_channel_set_role(self._h, int(role))
 
     @property
     def index(self):
         return self._node._lib.dart_channel_index(self._h)
 
     def match_count(self):
-        with self._node._lock:
-            return self._node._lib.dart_channel_match_count(self._h)
+        return self._node._lib.dart_channel_match_count(self._h)
 
     def drain(self, timeout_ms):
         """Pump until every reader has acked, or timeout. Call before close."""
-        with self._node._lock:
-            return self._node._lib.dart_channel_drain(self._h, timeout_ms) == 1
+        return self._node._lib.dart_channel_drain(self._h, timeout_ms) == 1
 
     @property
     def schema(self):
@@ -1042,8 +1040,7 @@ class Channel:
 class Node:
     """A DART node: owns sockets, discovery, and channels. Open with Node.open."""
 
-    __slots__ = ("_lib", "_h", "_id", "_alloc", "_lock", "_on_msg", "_on_evt",
-                 "_running", "_thread", "_chan_specs")
+    __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt", "_chan_specs")
 
     @classmethod
     def open(cls, name=None, options=None, *, on_message=None, on_event=None, **opts):
@@ -1060,11 +1057,8 @@ class Node:
         self._lib = lib
         self._h = None
         self._alloc = None
-        self._lock = threading.Lock()
         self._on_msg = on_message
         self._on_evt = on_event
-        self._running = False
-        self._thread = None
         self._chan_specs = {}
 
         with _REG_LOCK:
@@ -1131,13 +1125,12 @@ class Node:
         co.qos.repair_delay_us = qos.repair_delay_us
         co.qos.backpressure_wait_us = qos.backpressure_wait_us
         co.qos.shm_max_bytes = qos.shm_max_bytes
-        with self._lock:
-            h = self._lib.dart_node_create_channel(
-                self._h, name.encode("utf-8"), int(role),
-                sch._s if sch else None, byref(co))
-            if not h:
-                raise RuntimeError("create_channel failed (reserve full, bad name, or OOM)")
-            idx = self._lib.dart_channel_index(h)
+        h = self._lib.dart_node_create_channel(
+            self._h, name.encode("utf-8"), int(role),
+            sch._s if sch else None, byref(co))
+        if not h:
+            raise RuntimeError("create_channel failed (reserve full, bad name, or OOM)")
+        idx = self._lib.dart_channel_index(h)
         self._chan_specs[idx] = sch._spec if sch else None
         return Channel(self, h, sch)
 
@@ -1146,59 +1139,29 @@ class Node:
         return Channel(self, h, None) if h else None
 
     def poll(self, timeout_ms=0):
-        """One loop tick (discovery, RX, timers, TX). Not needed if start() is used."""
-        with self._lock:
-            return self._lib.dart_node_poll(self._h, timeout_ms)
-
-    def start(self, poll_interval_ms=1):
-        """Run poll() on a background daemon thread until stop()/close()."""
-        if self._running:
-            return
-        self._running = True
-
-        def loop():
-            while self._running:
-                with self._lock:
-                    if not self._h:
-                        break
-                    self._lib.dart_node_poll(self._h, poll_interval_ms)
-
-        self._thread = threading.Thread(target=loop, name="dart-poll", daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        if not self._running:
-            return
-        self._running = False
-        t = self._thread
-        if t is not None and t is not threading.current_thread():
-            t.join()
-        self._thread = None
-
-    def running(self):
-        return self._running
+        """One loop tick: drives discovery, RX, timers, and flushes queued TX.
+        timeout_ms blocks up to that long in the socket wait (0 = non-blocking). Drive
+        this from your own loop: background threading was removed for now, so a node is
+        single-threaded -- call poll, send, and the handlers all on one thread."""
+        return self._lib.dart_node_poll(self._h, timeout_ms)
 
     def memory_stats(self):
         """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the
         hot path is allocation-free."""
         in_use, peak, calls = c_size_t(), c_size_t(), c_uint64()
-        with self._lock:
-            self._lib.dart_node_mem_stats(self._h, byref(in_use), byref(peak), byref(calls))
+        self._lib.dart_node_mem_stats(self._h, byref(in_use), byref(peak), byref(calls))
         return in_use.value, peak.value, calls.value
 
     def backpressure_stats(self):
         """(waited_us, waited_sends) since open."""
         us, n = c_uint64(), c_uint32()
-        with self._lock:
-            self._lib.dart_node_backpressure_stats(self._h, byref(us), byref(n))
+        self._lib.dart_node_backpressure_stats(self._h, byref(us), byref(n))
         return us.value, n.value
 
     def close(self, send_bye=True):
-        self.stop()
-        with self._lock:
-            if self._h:
-                self._lib.dart_node_close(self._h, 1 if send_bye else 0)
-                self._h = None
+        if self._h:
+            self._lib.dart_node_close(self._h, 1 if send_bye else 0)
+            self._h = None
         with _REG_LOCK:
             _NODES.pop(self._id, None)
 
