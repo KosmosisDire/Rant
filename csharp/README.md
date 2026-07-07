@@ -42,7 +42,7 @@ dotnet nuget add source ./path/to/nupkg -n dart-local
 dotnet add package Dart
 ```
 
-(Or attach the `.nupkg` to a GitHub Release and download it — release assets need no key.)
+(Or attach the `.nupkg` to a GitHub Release and download it: release assets need no key.)
 
 ## Use
 

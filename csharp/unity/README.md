@@ -4,7 +4,7 @@ Discovery And Realtime Transport in Unity: peer discovery + reliable realtime UD
 pub/sub with typed messages. Desktop standalone (Windows / Linux x86_64) and the Editor.
 
 This is the **same `Dart.cs`** as the NuGet wrapper (one source, in `csharp/Dart.cs`) plus
-a **prebuilt native plugin** — Unity cannot compile the C at build time, so a native
+a **prebuilt native plugin**. Unity cannot compile the C at build time, so a native
 library is required. To keep one copy of the code and no binaries in git, the package's
 `Runtime/Dart.cs` and `Runtime/Plugins/` are **assembled by a script** (both gitignored).
 

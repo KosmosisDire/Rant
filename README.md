@@ -1,28 +1,60 @@
 # DART: Discovery And Realtime Transport
 
-A small, dependency-free C99 pub-pub middleware:
+A small, dependency-free C99 pub-sub middleware:
 - automatic peer discovery over multicast
 - realtime optionally-reliable UDP transport
-- High throughput shared memory communication on localhost
+- high-throughput shared-memory communication on localhost
 
-# Usage
+Wrappers for C, C++, Python, C# / .NET, and Unity share one core.
 
-To use the library:
-1. drop the `dist/dart.h` header into your own project.
-2. Include it in a single location with:
+## Install
+
+Grab the file(s) for your language from the latest
+[GitHub Release](https://github.com/KosmosisDire/DART/releases).
+
+### C (`dart.h`)
+Drop `dart.h` into your project and define the implementation in **one** `.c` file:
 ```c
 #define DART_IMPLEMENTATION
 #include "dart.h"
 ```
+Link the platform libraries: `-lws2_32 -lbcrypt -lwinmm` (Windows) or `-lrt` (Linux).
 
-## Building
+### C++ (`dart.hpp`)
+Drop `dart.hpp` into your project and define the implementation in **one** `.cpp` file:
+```cpp
+#define DART_IMPLEMENTATION
+#include "dart.hpp"
+```
+Compile as C++17, and link the same platform libraries as C.
 
-Needs CMake 3.15+ and a C99 compiler.
+### Python (`dart.py`)
+Drop `dart.py` next to your code and import it (it compiles the embedded C into a cached
+native library on first import, so a C compiler is needed once):
+```python
+import dart
+```
+
+### C# / .NET
+Put the `.nupkg` in a folder, register it as a local NuGet source, and add the package:
+```sh
+dotnet nuget add source /path/to/that/folder -n dart
+dotnet add package Dart
+```
+
+### Unity
+In the Editor: **Assets → Import Package → Custom Package…** and select the file
+(it imports into `Assets/Dart/`, native plugins included).
+
+## Building from source
+
+Needs CMake 3.15+ and a C99 compiler. This packs `src/` into the `dist/` single-headers
+and builds the tools, tests and examples into the repo root:
 
 ```sh
 cmake -S . -B build
 cmake --build build
 ```
 
-This packs `src/` into the `dist/` single-headers and builds the tools,
-tests and examples into the repo root. Pass `-DDART_BUILD_TOOLS=OFF` to skip the host programs.
+Pass `-DDART_BUILD_TOOLS=OFF` to skip the host programs. To build the C# / Unity native
+libraries and packages yourself, see [csharp/README.md](csharp/README.md).
