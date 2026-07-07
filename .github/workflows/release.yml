@@ -1,0 +1,88 @@
+# Build every DART distributable and attach them to a GitHub Release when a tag is pushed.
+# Single-file distributables (C headers, C++ header, Python module, the NuGet .nupkg) are
+# uploaded as-is; anything made of multiple files (the Unity package) is zipped.
+#
+# Assets:
+#   dart.h  dart_discovery.h  dart_transport.h   (C single-headers)
+#   dart.hpp                                      (C++ wrapper)
+#   dart.py                                       (Python wrapper)
+#   Dart.Middleware.<version>.nupkg               (C# NuGet: managed + win-x64 + linux-x64 native)
+#   dart-unity-<version>.zip                      (Unity package: Dart.cs + native plugins)
+name: release
+
+on:
+  push:
+    tags: ['*']            # any tag you push cuts a release
+
+permissions:
+  contents: write          # create the release + upload assets (uses GITHUB_TOKEN, no PAT)
+
+jobs:
+  # ---- native libraries (one per platform, run in parallel) -------------------
+  native-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build linux-x64 native lib
+        run: sh csharp/native/build.sh          # -> csharp/runtimes/linux-x64/native/libdart.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux
+          path: csharp/runtimes/linux-x64/native/libdart.so
+
+  native-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1            # MSVC env so clang-cl finds the toolchain
+      - name: Build win-x64 native lib
+        shell: pwsh
+        run: |
+          $env:Path = "C:\Program Files\LLVM\bin;$env:Path"   # clang-cl from the runner's LLVM
+          ./csharp/native/build.ps1             # -> csharp/runtimes/win-x64/native/dart.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-windows
+          path: csharp/runtimes/win-x64/native/dart.dll
+
+  # ---- pack everything + publish the release ----------------------------------
+  release:
+    needs: [native-linux, native-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download native libs
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Place native libs
+        run: |
+          mkdir -p csharp/runtimes/win-x64/native csharp/runtimes/linux-x64/native
+          cp artifacts/native-windows/dart.dll   csharp/runtimes/win-x64/native/dart.dll
+          cp artifacts/native-linux/libdart.so   csharp/runtimes/linux-x64/native/libdart.so
+
+      - name: Pack NuGet (managed + both native RIDs)
+        run: dotnet pack csharp/Dart.csproj -c Release -o nupkg -p:Version="${GITHUB_REF_NAME#v}"
+
+      - name: Assemble Unity package
+        run: sh csharp/unity/pack.sh            # copies Dart.cs + native libs into csharp/unity/Runtime/
+
+      - name: Stage release assets
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.hpp dist/dart.py release/
+          cp nupkg/Dart.Middleware.*.nupkg release/
+          ( cd csharp && zip -r "$GITHUB_WORKSPACE/release/dart-unity-$VERSION.zip" unity -x 'unity/pack.*' )
+          ls -la release/
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

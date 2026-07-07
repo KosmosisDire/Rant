@@ -21,8 +21,9 @@ old
 # C# / .NET wrapper build output (csharp/*/{bin,obj}); the wrapper source is csharp/Dart.cs
 [Bb]in/
 [Oo]bj/
-# NuGet pack output
+# NuGet pack output + CI release staging
 /nupkg/
+/release/
 # Prebuilt native binaries: built by csharp/native/build.{ps1,sh} (or CI) into these
 # folders, bundled into the .nupkg / Unity package. Never committed.
 /csharp/runtimes/
