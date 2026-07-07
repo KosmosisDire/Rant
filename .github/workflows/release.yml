@@ -86,3 +86,24 @@ jobs:
         with:
           files: release/*
           generate_release_notes: true
+
+      # Publish the assembled Unity package (Dart.cs + native plugins at the branch root)
+      # to a dedicated `upm` branch so it can be added via a UPM git URL:
+      #   https://github.com/OWNER/REPO.git#upm
+      # main stays binary-free; only this generated branch carries the compiled libs.
+      - name: Publish upm branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          pkg="$RUNNER_TEMP/upm"
+          rm -rf "$pkg" && mkdir -p "$pkg/Runtime"
+          cp csharp/unity/package.json csharp/unity/README.md "$pkg/"
+          cp -r csharp/unity/Runtime/. "$pkg/Runtime/"
+          cd "$pkg"
+          git init -q -b upm
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "upm $VERSION"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" upm

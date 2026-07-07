@@ -43,8 +43,12 @@ dotnet add package Dart
 ```
 
 ### Unity
-In the Editor: **Assets → Import Package → Custom Package…** and select the file
-(it imports into `Assets/Dart/`, native plugins included).
+Add it in the Package Manager (`+`, then "Add package from git URL"):
+```
+https://github.com/KosmosisDire/DART.git#upm
+```
+Or download `dart-<version>.unitypackage` from the release and use `Assets > Import Package
+> Custom Package` (it imports into `Assets/Dart/`, native plugins included).
 
 ## Building from source
 

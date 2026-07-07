@@ -8,7 +8,20 @@ a **prebuilt native plugin**. Unity cannot compile the C at build time, so a nat
 library is required. To keep one copy of the code and no binaries in git, the package's
 `Runtime/Dart.cs` and `Runtime/Plugins/` are **assembled by a script** (both gitignored).
 
-## Build the package
+## Install
+
+Add it in the Package Manager (`+`, then "Add package from git URL"):
+```
+https://github.com/KosmosisDire/DART.git#upm
+```
+The `upm` branch is published by CI on each release: it carries the assembled `Dart.cs` +
+native plugins (`main` stays binary-free). Or download `dart-<version>.unitypackage` from
+the release and import it via `Assets > Import Package > Custom Package`.
+
+## Building the package locally (maintainers)
+
+`Runtime/Dart.cs` and `Runtime/Plugins/` are gitignored and assembled by a script, so `main`
+keeps one copy of the code and no binaries:
 
 ```sh
 # 1. build the native lib(s) on each target OS (or in CI)
@@ -16,14 +29,11 @@ powershell -File ../native/build.ps1     # -> csharp/runtimes/win-x64/native/dar
 sh          ../native/build.sh           # -> csharp/runtimes/linux-x64/native/libdart.so
 # 2. assemble Runtime/ (copies Dart.cs + the built libs in)
 powershell -File pack.ps1                # or: sh pack.sh
+# 3. (optional) build a .unitypackage
+sh mk-unitypackage.sh dart.unitypackage
 ```
 
-Then use it in Unity one of these ways:
-- **Add package from disk:** Package Manager -> `+` -> "Add package from disk" -> pick
-  `csharp/unity/package.json`.
-- **Tarball / .unitypackage:** zip the assembled `Runtime/` for distribution (a downloadable
-  `.tgz` added via "Add package from tarball", or a `.unitypackage`). No account/keys needed.
-
+Then add it locally via Package Manager `+` -> "Add package from disk" -> `package.json`.
 In the plugin import settings, set each native lib to its platform + CPU (Unity usually
 auto-detects Standalone by extension: `.dll` -> Windows, `.so` -> Linux).
 
