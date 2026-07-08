@@ -210,7 +210,8 @@ typedef struct {
  * transient blip instead of tearing it down on every silence timeout. */
 typedef enum {
     DART_DISCOVERY_DROP = 0,  /* fell silent past peer_timeout_us: same UUID may return, keep state */
-    DART_DISCOVERY_GONE = 1   /* said BYE, or its slot was reclaimed for a new peer: free state */
+    DART_DISCOVERY_GONE = 1   /* said BYE, stayed silent past the gone timeout, or its slot was
+                                 reclaimed for a new peer: free state */
 } DartDiscoveryDownReason;
 
 /* Discovery's own event, delivered through one on_event. Discovery is generic: it
@@ -281,6 +282,10 @@ typedef struct {
     uint8_t  self_ip_len;   /* 0, 4, or 16 */
     uint32_t announce_interval_us;   /* re-announce interval */
     uint32_t peer_timeout_us;    /* drop peer after this much silence */
+    uint32_t gone_timeout_us;    /* promote a DROPPED (silent) peer to GONE this long after it dropped:
+                                    its transport state is freed and the slot reclaimed, so a long-dead
+                                    peer can't hold a slot indefinitely. 0 = never promote (linger for
+                                    resume until the slot is needed for a new peer). */
     uint16_t max_peers;     /* table capacity */
     DartString name;        /* advertised peer name (goes in the blob's discovery section);
                                {NULL,0} = none. Copied at init, so it need not outlive the call. */
@@ -298,9 +303,10 @@ typedef struct {
 typedef struct DartDiscoveryState DartDiscoveryState;
 
 /* Fill any zero (unset) timing/size field with its default: announce_interval_us
- * (1s), peer_timeout_us (3.5x the interval), max_peers (32). dart_discovery_init
- * REQUIRES these non-zero (it rejects a zero), so an IO layer applies this once before
- * both sizing and init so the two always agree. Idempotent. */
+ * (1s), peer_timeout_us (3.5x the interval), gone_timeout_us (60s), max_peers (32).
+ * dart_discovery_init REQUIRES announce_interval_us + peer_timeout_us non-zero (it rejects
+ * a zero); gone_timeout_us may stay 0 (never promote a dropped peer). An IO layer applies
+ * this once before both sizing and init so the two always agree. Idempotent. */
 void         dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg);
 
 /* Bytes an IO layer must allocate for one rx/tx datagram scratch buffer: the fixed
@@ -2710,6 +2716,7 @@ void dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg){
     if (!cfg) return;
     if (cfg->announce_interval_us == 0) cfg->announce_interval_us = 1000000u;
     if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = cfg->announce_interval_us * 7u / 2u;
+    if (cfg->gone_timeout_us == 0)      cfg->gone_timeout_us = 60000000u;   /* 1 min dropped -> GONE */
     if (cfg->max_peers == 0)            cfg->max_peers = 32u;
 }
 
@@ -3055,7 +3062,18 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
         st->want_solicit = 1;   /* solicit on startup */
     }
     for (i=0;i<st->cap_peers;i++){
-        if (!st->peers[i].used || st->peers[i].dropped) continue;
+        if (!st->peers[i].used) continue;
+        if (st->peers[i].dropped){
+            /* dropped and still silent past the gone timeout: a same-UUID return is no longer
+               expected, so promote to GONE -- free the transport state and reclaim the slot
+               (fire before free so the handler can still read it). 0 = never promote. */
+            if (st->cfg.gone_timeout_us &&
+                now - st->peers[i].last_heard_us > (uint64_t)st->cfg.peer_timeout_us + st->cfg.gone_timeout_us){
+                i_dart_discovery_fire_down(st, st->peers[i].local_id, DART_DISCOVERY_GONE);
+                st->peers[i].used = 0;
+            }
+            continue;
+        }
         if (now - st->peers[i].last_heard_us > st->cfg.peer_timeout_us){
             /* fell silent: DEMOTE (keep the entry + local_id) so a same-UUID return
                resumes; the IO layer keeps its transport state on a DROP reason */

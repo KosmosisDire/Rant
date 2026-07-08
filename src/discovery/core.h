@@ -36,7 +36,8 @@ typedef struct {
  * transient blip instead of tearing it down on every silence timeout. */
 typedef enum {
     DART_DISCOVERY_DROP = 0,  /* fell silent past peer_timeout_us: same UUID may return, keep state */
-    DART_DISCOVERY_GONE = 1   /* said BYE, or its slot was reclaimed for a new peer: free state */
+    DART_DISCOVERY_GONE = 1   /* said BYE, stayed silent past the gone timeout, or its slot was
+                                 reclaimed for a new peer: free state */
 } DartDiscoveryDownReason;
 
 /* Discovery's own event, delivered through one on_event. Discovery is generic: it
@@ -107,6 +108,10 @@ typedef struct {
     uint8_t  self_ip_len;   /* 0, 4, or 16 */
     uint32_t announce_interval_us;   /* re-announce interval */
     uint32_t peer_timeout_us;    /* drop peer after this much silence */
+    uint32_t gone_timeout_us;    /* promote a DROPPED (silent) peer to GONE this long after it dropped:
+                                    its transport state is freed and the slot reclaimed, so a long-dead
+                                    peer can't hold a slot indefinitely. 0 = never promote (linger for
+                                    resume until the slot is needed for a new peer). */
     uint16_t max_peers;     /* table capacity */
     DartString name;        /* advertised peer name (goes in the blob's discovery section);
                                {NULL,0} = none. Copied at init, so it need not outlive the call. */
@@ -124,9 +129,10 @@ typedef struct {
 typedef struct DartDiscoveryState DartDiscoveryState;
 
 /* Fill any zero (unset) timing/size field with its default: announce_interval_us
- * (1s), peer_timeout_us (3.5x the interval), max_peers (32). dart_discovery_init
- * REQUIRES these non-zero (it rejects a zero), so an IO layer applies this once before
- * both sizing and init so the two always agree. Idempotent. */
+ * (1s), peer_timeout_us (3.5x the interval), gone_timeout_us (60s), max_peers (32).
+ * dart_discovery_init REQUIRES announce_interval_us + peer_timeout_us non-zero (it rejects
+ * a zero); gone_timeout_us may stay 0 (never promote a dropped peer). An IO layer applies
+ * this once before both sizing and init so the two always agree. Idempotent. */
 void         dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg);
 
 /* Bytes an IO layer must allocate for one rx/tx datagram scratch buffer: the fixed

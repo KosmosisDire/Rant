@@ -128,6 +128,7 @@ void dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg){
     if (!cfg) return;
     if (cfg->announce_interval_us == 0) cfg->announce_interval_us = 1000000u;
     if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = cfg->announce_interval_us * 7u / 2u;
+    if (cfg->gone_timeout_us == 0)      cfg->gone_timeout_us = 60000000u;   /* 1 min dropped -> GONE */
     if (cfg->max_peers == 0)            cfg->max_peers = 32u;
 }
 
@@ -473,7 +474,18 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
         st->want_solicit = 1;   /* solicit on startup */
     }
     for (i=0;i<st->cap_peers;i++){
-        if (!st->peers[i].used || st->peers[i].dropped) continue;
+        if (!st->peers[i].used) continue;
+        if (st->peers[i].dropped){
+            /* dropped and still silent past the gone timeout: a same-UUID return is no longer
+               expected, so promote to GONE -- free the transport state and reclaim the slot
+               (fire before free so the handler can still read it). 0 = never promote. */
+            if (st->cfg.gone_timeout_us &&
+                now - st->peers[i].last_heard_us > (uint64_t)st->cfg.peer_timeout_us + st->cfg.gone_timeout_us){
+                i_dart_discovery_fire_down(st, st->peers[i].local_id, DART_DISCOVERY_GONE);
+                st->peers[i].used = 0;
+            }
+            continue;
+        }
         if (now - st->peers[i].last_heard_us > st->cfg.peer_timeout_us){
             /* fell silent: DEMOTE (keep the entry + local_id) so a same-UUID return
                resumes; the IO layer keeps its transport state on a DROP reason */

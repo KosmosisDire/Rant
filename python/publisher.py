@@ -55,7 +55,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.close()
+        # node.close()
+        pass
 
 
 if __name__ == "__main__":
