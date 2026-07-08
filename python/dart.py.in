@@ -90,7 +90,7 @@ _EXPORTS = [
     "i_dart_plat_realloc",
     "dart_node_open", "dart_node_poll", "dart_node_close",
     "dart_node_start", "dart_node_stop", "dart_node_is_started",
-    "dart_node_evicted_unsent",
+    "dart_node_evicted_unsent", "dart_last_error",
     "dart_node_create_channel", "dart_node_channel",
     "dart_channel_send", "dart_channel_set_role", "dart_channel_index",
     "dart_channel_match_count", "dart_channel_drain",
@@ -288,10 +288,12 @@ class DartMsg(Structure):
 class DartEvent(Structure):
     _fields_ = [
         ("kind", c_int),
-        ("detail", c_char_p),
+        ("error", c_int),
+        ("channel_name", c_char_p),
         ("user", c_void_p),
         ("peer", c_uint32),
         ("channel", c_uint16),
+        ("os_error", c_int),
         ("ip", c_uint8 * 16),
         ("ip_len", c_uint8),
         ("port", c_uint16),
@@ -356,6 +358,7 @@ def _bind(lib):
                                setattr(getattr(lib, fn), "restype", ret))
     F("dart_node_open", [POINTER(DartAllocator), c_char_p, _MsgFn, _EvtFn,
                          POINTER(DartNodeOpts)], c_void_p)
+    F("dart_last_error", [c_void_p], DartEvent)
     F("dart_node_poll", [c_void_p, c_int], c_int)
     F("dart_node_close", [c_void_p, c_int], c_int)
     F("dart_node_start", [c_void_p], c_int)
@@ -477,15 +480,31 @@ class EventKind(enum.IntEnum):
     PEER_DOWN = 1
     PEER_INTEREST = 2
     MSG_LOST = 3
-    MSG_TOO_BIG = 4
-    NAME_COLLISION = 5
-    QOS_INCOMPATIBLE = 6
-    SCHEMA_MISMATCH = 7
-    PEER_REFUSED = 8
-    INTEREST_OVERFLOW = 9
-    META_TRUNCATED = 10
-    PEER_META_TOO_BIG = 11
-    EVICTED_UNSENT = 12
+    ERROR = 4       # something went wrong; read Event.error (an ErrorKind)
+
+
+class ErrorKind(enum.IntEnum):
+    """The specific error carried by an EventKind.ERROR event (mirrors DartErrorKind)."""
+    NONE = 0
+    NAME_COLLISION = 1
+    QOS_INCOMPATIBLE = 2
+    SCHEMA_MISMATCH = 3
+    INTEREST_OVERFLOW = 4
+    META_TRUNCATED_INTEREST = 5
+    META_TRUNCATED_SCHEMA = 6
+    PEER_META_TOO_BIG = 7
+    MSG_TOO_BIG = 8
+    PEER_REFUSED = 9
+    EVICTED_UNSENT = 10
+    OOM = 11
+    PLATFORM = 12
+    SOCKET = 13
+    BIND = 14
+    MCAST_JOIN = 15
+    SEND = 16
+    RECV = 17
+    POLL = 18
+    WAKER = 19
 
 
 class FieldType(enum.IntEnum):
@@ -971,17 +990,22 @@ class Message:
 
 
 class Event:
-    """A peer / loss / QoS notification."""
-    __slots__ = ("kind", "detail", "peer", "channel", "lost_first", "lost_count",
-                 "too_big_bytes", "identity", "publish_topics", "receive_topics", "_line")
+    """A peer / message-loss / error notification. Everything that went wrong arrives as
+    kind == EventKind.ERROR with .error set to the specific ErrorKind; str(event) is the
+    human-readable message either way."""
+    __slots__ = ("kind", "error", "channel_name", "peer", "channel", "os_error",
+                 "lost_first", "lost_count", "too_big_bytes", "identity",
+                 "publish_topics", "receive_topics", "_line")
 
     @classmethod
     def _from_c(cls, e):
         self = cls.__new__(cls)
         self.kind = EventKind(e.kind) if e.kind in EventKind._value2member_map_ else e.kind
-        self.detail = e.detail.decode("utf-8", "replace") if e.detail else ""
+        self.error = ErrorKind(e.error) if e.error in ErrorKind._value2member_map_ else e.error
+        self.channel_name = e.channel_name.decode("utf-8", "replace") if e.channel_name else None
         self.peer = e.peer
         self.channel = e.channel
+        self.os_error = e.os_error
         self.lost_first = e.lost_first
         self.lost_count = e.lost_count
         self.too_big_bytes = e.too_big_bytes
@@ -992,6 +1016,11 @@ class Event:
         _load().dart_event_str(byref(e), buf, len(buf))
         self._line = buf.value.decode("utf-8", "replace")
         return self
+
+    @property
+    def is_error(self):
+        """True if this event reports a failure (kind == EventKind.ERROR)."""
+        return self.kind == EventKind.ERROR
 
     def __str__(self):
         return self._line
@@ -1108,7 +1137,9 @@ class Node:
         if not h:
             with _REG_LOCK:
                 _NODES.pop(self._id, None)
-            raise RuntimeError("dart_node_open failed (bad options, or out of memory)")
+            # no handle on failure: read the reason from the process-global slot
+            err = Event._from_c(lib.dart_last_error(None))
+            raise RuntimeError("dart_node_open failed: %s" % err)
         self._h = h
         return self
 
@@ -1175,8 +1206,13 @@ class Node:
 
     def evicted_unsent(self):
         """Sends that evicted never-sent history after the bounded wait (the
-        EVICTED_UNSENT event count): the send-burst/overload indicator."""
+        EVICTED_UNSENT error count): the send-burst/overload indicator."""
         return self._lib.dart_node_evicted_unsent(self._h)
+
+    def last_error(self):
+        """The most recent error this node reported, as an Event (also delivered via
+        on_event). kind is PEER_UP with error == ErrorKind.NONE if none has occurred."""
+        return Event._from_c(self._lib.dart_last_error(self._h))
 
     def memory_stats(self):
         """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the

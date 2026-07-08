@@ -125,6 +125,10 @@ int  i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
 int  i_dart_plat_would_block(void);
 /* poll up to n fds for timeout_ms; >0 ready, 0 timeout, <0 error. */
 int  i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms);
+/* The OS's last socket error for the calling thread (WSAGetLastError on Windows,
+ * errno elsewhere), for diagnostics after a failed socket call. Just reads the OS;
+ * keeps no state. */
+int  i_dart_plat_last_socket_error(void);
 
 /* --- address helpers (uint32_t naddr is network byte order) --- */
 uint32_t i_dart_plat_parse_ip(const char *dotted);          /* "1.2.3.4" -> naddr */

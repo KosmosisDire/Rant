@@ -218,38 +218,16 @@ static void send_event(Conn *c, const DartEvent &ev){
         e["event"] = "msg_lost"; e["channel"] = ev.channel; e["peer"] = ev.peer;
         e["first"] = ev.lost_first; e["count"] = ev.lost_count;
         break;
-    case DART_MSG_TOO_BIG:
-        e["event"] = "msg_too_big"; e["bytes"] = ev.too_big_bytes;
-        break;
-    case DART_NAME_COLLISION:
-        e["event"] = "name_collision"; e["identity"] = hex64(ev.identity);
-        if (ev.detail) e["detail"] = ev.detail;
-        break;
-    case DART_QOS_INCOMPATIBLE:
-        e["event"] = "qos_incompatible"; e["channel"] = ev.channel; e["peer"] = ev.peer;
-        if (ev.detail) e["detail"] = ev.detail;
-        break;
-    case DART_SCHEMA_MISMATCH:
-        e["event"] = "schema_mismatch"; e["channel"] = ev.channel; e["peer"] = ev.peer;
-        if (ev.detail) e["detail"] = ev.detail;
-        break;
-    case DART_PEER_REFUSED:
-        e["event"] = "peer_refused"; e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
-        break;
-    case DART_INTEREST_OVERFLOW:
-        e["event"] = "interest_overflow"; e["peer"] = ev.peer; e["count"] = ev.lost_count;
-        break;
-    case DART_META_TRUNCATED:
-        e["event"] = "meta_truncated";
-        if (ev.detail) e["detail"] = ev.detail;
-        break;
-    case DART_PEER_META_TOO_BIG:
-        e["event"] = "peer_meta_too_big"; e["peer"] = ev.peer; e["bytes"] = ev.too_big_bytes;
-        e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
-        break;
-    case DART_EVICTED_UNSENT:
-        e["event"] = "evicted_unsent"; e["channel"] = ev.channel;
-        e["first"] = ev.lost_first; e["count"] = ev.lost_count;
+    case DART_ERROR:   /* one catch-all: "text" carries the message, "error" the code */
+        e["event"] = "error"; e["error"] = (int)ev.error;
+        if (ev.channel_name)  e["channel_name"] = ev.channel_name;
+        if (ev.channel)       e["channel"]      = ev.channel;
+        if (ev.peer)          e["peer"]         = ev.peer;
+        if (ev.os_error)      e["os_error"]     = ev.os_error;
+        if (ev.ip_len)        e["addr"]         = addr_str(ev.ip, ev.ip_len, ev.port);
+        if (ev.too_big_bytes) e["bytes"]        = ev.too_big_bytes;
+        if (ev.lost_count){   e["first"] = ev.lost_first; e["count"] = ev.lost_count; }
+        if (ev.identity)      e["identity"]     = hex64(ev.identity);
         break;
     default:
         e["event"] = "unknown";

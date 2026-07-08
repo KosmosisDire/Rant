@@ -103,9 +103,17 @@ enum class SendStatus  { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutO
                          State = -5, NoSys = -6 };
 
 enum class EventKind {
-    PeerUp = 0, PeerDown, PeerInterest, MessageLost, MessageTooBig, NameCollision,
-    QosIncompatible, SchemaMismatch, PeerRefused, InterestOverflow,
-    MetaTruncated, PeerMetaTooBig, EvictedUnsent
+    PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
+};
+
+/* The specific error carried by an EventKind::Error event (Event::error()); mirrors
+   DartErrorKind. Everything that goes wrong is EventKind::Error + one of these. */
+enum class ErrorKind {
+    None = 0,
+    NameCollision, QosIncompatible, SchemaMismatch, InterestOverflow,
+    MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
+    PeerRefused, EvictedUnsent,
+    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
 };
 
 /* Schema field kinds for reflection (Schema::Field); values match the C wire. */
@@ -116,7 +124,8 @@ enum class FieldType : uint8_t {
 static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
 static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
-static_assert((int)EventKind::EvictedUnsent == detail::DART_EVICTED_UNSENT, "event enum drift");
+static_assert((int)EventKind::Error == detail::DART_ERROR, "event enum drift");
+static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 
 /* forward decls */
@@ -353,13 +362,18 @@ private:
     friend class Node;
 };
 
-/* Event: a peer / loss / QoS notification. */
+/* Event: a peer / message-loss / error notification. Everything that goes wrong arrives
+   as kind() == EventKind::Error with error() set; to_string() formats any of them. */
 class Event {
 public:
     EventKind        kind()           const { return static_cast<EventKind>(ev_->kind); }
+    ErrorKind        error()          const { return static_cast<ErrorKind>(ev_->error); }
+    bool             is_error()       const { return ev_->kind == detail::DART_ERROR; }
     uint32_t         peer()           const { return ev_->peer; }
     uint16_t         channel()        const { return ev_->channel; }
-    std::string_view detail()         const { return ev_->detail ? std::string_view(ev_->detail) : std::string_view{}; }
+    /* our channel name for channel-scoped events, else empty */
+    std::string_view channel_name()   const { return ev_->channel_name ? std::string_view(ev_->channel_name) : std::string_view{}; }
+    int              os_error()       const { return ev_->os_error; }
     uint64_t         lost_first()     const { return ev_->lost_first; }
     uint64_t         lost_count()     const { return ev_->lost_count; }
     uint64_t         too_big_bytes()  const { return ev_->too_big_bytes; }
@@ -483,6 +497,16 @@ public:
         return Node(std::move(impl));
     }
 
+    /* Why the most recent open() returned std::nullopt (there is no Node to query on
+       failure): the formatted one-line reason, and its machine-readable ErrorKind. */
+    static std::string last_open_error() {
+        detail::DartEvent e = detail::dart_last_error(nullptr);
+        char b[192]; return detail::dart_event_str(&e, b, sizeof b);
+    }
+    static ErrorKind last_open_error_kind() {
+        return static_cast<ErrorKind>(detail::dart_last_error(nullptr).error);
+    }
+
     Node(Node&&) noexcept = default;
     Node& operator=(Node&&) noexcept = default;
     Node(const Node&) = delete;
@@ -570,8 +594,18 @@ public:
         return b;
     }
     /* Sends that evicted never-sent history after the bounded wait (the
-     * EventKind::EvictedUnsent count): the send-burst/overload indicator. */
+     * ErrorKind::EvictedUnsent count): the send-burst/overload indicator. */
     uint32_t evicted_unsent() const { return detail::dart_node_evicted_unsent(impl_->node); }
+
+    /* The most recent error this node reported (also delivered via on_event): the
+     * formatted one-line message, and its machine-readable ErrorKind. */
+    std::string last_error() const {
+        detail::DartEvent e = detail::dart_last_error(impl_->node);
+        char b[192]; return detail::dart_event_str(&e, b, sizeof b);
+    }
+    ErrorKind last_error_kind() const {
+        return static_cast<ErrorKind>(detail::dart_last_error(impl_->node).error);
+    }
 
 private:
     struct Impl {

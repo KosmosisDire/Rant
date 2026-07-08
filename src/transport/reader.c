@@ -46,7 +46,7 @@ static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int
         }
         if (r->started){                                         /* best-effort / first contact: adopt */
             i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                        r->deliver_upto, base - r->deliver_upto, "message(s) lost");
+                        r->deliver_upto, base - r->deliver_upto);
             ch->repair_stats.msgs_skipped += base - r->deliver_upto;
         }
         r->deliver_upto = base;
@@ -92,7 +92,7 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
         }
         if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
             i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                        base, count, "SHM descriptor unresolvable (check DART_SHM_* build constants)");
+                        base, count);
             ch->repair_stats.msgs_skipped += count;
             r->shm_fail = 0;
             r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
@@ -148,7 +148,7 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
       } else if (sample_len > ch->qos.max_message_bytes) too_big = 1;
       if (too_big){
           i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                      0, sample_len, "message exceeds max_message_bytes");
+                      0, sample_len);
           r->deliver_upto = base + count; r->assembly_active = 0;
           if (reliable){
               i_dart_reader_arm(ch,r,0); r->ack_pending = 1; r->ack_due_us = 0; r->ack_force = 1;
@@ -223,7 +223,7 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
     if (r->started && first > r->deliver_upto &&
         (!r->assembly_active || first >= r->deliver_upto + r->assembly_count)){
         i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
-                    r->deliver_upto, first - r->deliver_upto, "message(s) lost");
+                    r->deliver_upto, first - r->deliver_upto);
         ch->repair_stats.msgs_skipped += first - r->deliver_upto;
         r->deliver_upto=first; r->assembly_active=0;
 #ifdef DART_SHM

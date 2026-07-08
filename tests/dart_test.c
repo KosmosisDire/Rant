@@ -753,7 +753,7 @@ static unsigned long st_collisions;
 static void st_on_event(const DartEvent *ev){
     if (ev->kind == DART_MSG_LOST){
         if (ev->channel < 8){ st_gap_calls[ev->channel]++; st_gap_tus[ev->channel] += (unsigned long)ev->lost_count; }
-    } else if (ev->kind == DART_NAME_COLLISION){
+    } else if (ev->kind == DART_ERROR && ev->error == DART_E_NAME_COLLISION){
         st_collisions++;
     }
 }
@@ -874,7 +874,7 @@ static uint32_t nc_up_n, nc_down_n, nc_refused_n, nc_up_id, nc_down_id;
 static void nc_event(const DartEvent *ev){
     if      (ev->kind==DART_PEER_UP)     { nc_up_n++;   nc_up_id=ev->peer; }
     else if (ev->kind==DART_PEER_DOWN)   { nc_down_n++; nc_down_id=ev->peer; }
-    else if (ev->kind==DART_PEER_REFUSED){ nc_refused_n++; }
+    else if (ev->kind==DART_ERROR && ev->error==DART_E_PEER_REFUSED){ nc_refused_n++; }
 }
 /* feed the node core through a REAL (sans-IO) discovery core: build an announce datagram
    (discovery section [u16 port][u8 self_ip_len=0][u8 name_len][name], no overlay) so
@@ -1211,9 +1211,14 @@ static void unit_checks(void){
  * different stage each time so a distinct label runs, assert the open returns NULL,
  * then confirm a normal open still works -- proving cleanup left the platform balanced
  * (a missed i_dart_plat_cleanup unbalances the refcount; a missed close leaks the socket). */
+/* open-failure event sink: capture the DART_ERROR kind fired during a failing open */
+static int of_seen_error;
+static void of_on_event(const DartEvent *ev){ if (ev->kind == DART_ERROR) of_seen_error = (int)ev->error; }
+
 static void open_fail_checks(void){
     static uint8_t mem[1<<20];
     DartNode *n;
+    of_seen_error = DART_E_NONE;
 
     /* create-fail: an over-long topic name is rejected by dart_node_create_channel; the
        node opened fine and stays usable (validation moved from init to channel create) */
@@ -1228,29 +1233,50 @@ static void open_fail_checks(void){
     }
 
     /* a non-multicast discovery group makes discovery's IGMP join fail, so
-       dart_discovery_place returns NULL and the node unwinds through fail_sock */
+       dart_discovery_place returns NULL and the node unwinds through fail_sock.
+       dart_last_error(NULL) then names the step (MCAST_JOIN) with no handle to query. */
     {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
+        DartEvent err; char line[160];
         n = dart_node_open(&a, NULL, NULL, NULL,
             &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .discovery_group="1.2.3.4" } });
         ST_CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL");
+        err = dart_last_error(NULL);
+        ST_CHECK(err.kind == DART_ERROR && err.error == DART_E_MCAST_JOIN,
+                 "open-fail: last_error is DART_E_MCAST_JOIN (%s)", dart_event_str(&err, line, sizeof line));
         if (n) dart_node_close(n, 0);
     }
 
     /* fail_sock: occupy an ephemeral port, then aim the node's data socket at it; the
-       unicast data bind takes no reuse, so it collides and unwinds through fail_sock */
+       unicast data bind takes no reuse, so it collides and unwinds through fail_sock.
+       last_error names DART_E_BIND and carries the offending port + OS errno. */
     {   i_DartSock occupy;
         i_dart_plat_startup();
         occupy = i_dart_plat_udp_open();
         if (occupy != DART_SOCK_BAD && i_dart_plat_bind(occupy, 0, 0, 0)){
             uint16_t port = i_dart_plat_local_port(occupy);
             DartAllocator a = dart_allocator_static(mem, sizeof mem);
+            DartEvent err; char line[160];
             n = dart_node_open(&a, NULL, NULL, NULL,
                 &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .data_port=port } });
             ST_CHECK(n == NULL, "open-fail: data-port collision -> NULL (fail_sock)");
+            err = dart_last_error(NULL);
+            ST_CHECK(err.kind == DART_ERROR && err.error == DART_E_BIND && err.port == port,
+                     "open-fail: last_error is DART_E_BIND port=%u (%s)", port, dart_event_str(&err, line, sizeof line));
             if (n) dart_node_close(n, 0);
         }
         if (occupy != DART_SOCK_BAD) i_dart_plat_close(occupy);
         i_dart_plat_cleanup();
+    }
+
+    /* an on_event handler also receives the open failure directly (no handle needed): the
+       node fires it on the passed-in callback before returning NULL. */
+    {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
+        n = dart_node_open(&a, NULL, NULL, of_on_event,
+            &(DartNodeOpts){ .domain=ST_DOMAIN, .net={ .discovery_group="1.2.3.4" } });
+        ST_CHECK(n == NULL, "open-fail: open still returns NULL with on_event set");
+        ST_CHECK(of_seen_error == DART_E_MCAST_JOIN,
+                 "open-fail: on_event received the failure (error=%d)", of_seen_error);
+        if (n) dart_node_close(n, 0);
     }
 
     /* after the failed opens a normal open must still succeed (cleanup balanced) */
@@ -1270,7 +1296,7 @@ static void open_fail_checks(void){
  * user_data, drive a topic-hash collision, and assert on_event saw the sentinel. */
 static void *evu_user; static int evu_collisions;
 static void evu_on_event(const DartEvent *ev){
-    if (ev->kind == DART_NAME_COLLISION){ evu_user = ev->user; evu_collisions++; }
+    if (ev->kind == DART_ERROR && ev->error == DART_E_NAME_COLLISION){ evu_user = ev->user; evu_collisions++; }
 }
 static void event_user_checks(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
@@ -1642,7 +1668,7 @@ static void sb_on_message(const DartMsg *msg){
     sb_stamp = dart_get_uint(msg->data, msg->schema, "stamp");
 }
 static void sb_on_event(const DartEvent *ev){
-    if (ev->kind == DART_SCHEMA_MISMATCH) sb_mismatch_n++;
+    if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sb_mismatch_n++;
 }
 static void schema_bind_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -1682,7 +1708,7 @@ static void schema_bind_checks(void){
     for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(dart_channel_match_count(pc)==1, "schema-bind: subset reader matched");
     ST_CHECK(dart_channel_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
-    ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu DART_SCHEMA_MISMATCH)", sb_mismatch_n);
+    ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu DART_E_SCHEMA_MISMATCH)", sb_mismatch_n);
 
     {   /* publish one Pose packed in the WRITER's layout; the reader decodes through
            the rebased schema with its own indices */
@@ -1750,7 +1776,7 @@ static void th_on_message(const DartMsg *m){
 }
 static void th_on_event(const DartEvent *ev){
     if (ev->kind == DART_MSG_LOST) th_lost += (unsigned long)ev->lost_count;
-    else if (ev->kind == DART_EVICTED_UNSENT) th_evicted_evt++;
+    else if (ev->kind == DART_ERROR && ev->error == DART_E_EVICTED_UNSENT) th_evicted_evt++;
 }
 
 typedef struct { DartChannel *ch; uint32_t id; } th_sender_arg;
@@ -1896,7 +1922,7 @@ static void threaded_checks(void){
             g_tx_block_data = 1;
             for (i=0;i<64;i++) dart_node_send(w, 0, payload, sizeof payload);
             evicted = dart_node_evicted_unsent(w) - e0;
-            ST_CHECK(evicted >= 1, "hostile: blocked TX surfaces DART_EVICTED_UNSENT (%u)", evicted);
+            ST_CHECK(evicted >= 1, "hostile: blocked TX surfaces DART_E_EVICTED_UNSENT (%u)", evicted);
             g_tx_block_data = 0;
             /* the service retries the held datagram + drains the ring on its next
                pass; announce cadence bounds it, so give it time */
@@ -2275,7 +2301,7 @@ static int selftest_main(void){
       ST_CHECK(w3 && r3, "collision: nodes open");
       if (w3 && r3){
           for (i=0;i<60;i++){ dart_node_send(w3,0,payload,16); dart_node_poll(w3,0); dart_node_poll(r3,20); }
-          ST_CHECK(st_collisions >= 1, "collision: detected (DART_NAME_COLLISION fired %lu)", st_collisions);
+          ST_CHECK(st_collisions >= 1, "collision: detected (DART_E_NAME_COLLISION fired %lu)", st_collisions);
           ST_CHECK(st_samples[0] == 0, "collision: match refused, no cross-wire (%lu)", st_samples[0]);
           dart_node_close(r3,1); dart_node_close(w3,1);
       }

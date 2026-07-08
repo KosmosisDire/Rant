@@ -293,6 +293,14 @@ int i_dart_plat_would_block(void){
 #endif
 }
 
+int i_dart_plat_last_socket_error(void){
+#ifdef _WIN32
+    return WSAGetLastError();   /* winsock keeps its error off errno */
+#else
+    return errno;
+#endif
+}
+
 int i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
     /* callers poll one or two sockets; cap the on-stack translation buffer */
 #ifdef _WIN32

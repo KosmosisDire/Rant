@@ -34,7 +34,7 @@ struct DartNode {
     /* backpressure accumulators, read via dart_node_backpressure_stats */
     uint64_t      backpressure_total_us;
     uint32_t      backpressure_wait_count;
-    uint32_t      evicted_unsent;  /* DART_EVICTED_UNSENT count (dart_node_evicted_unsent) */
+    uint32_t      evicted_unsent;  /* DART_E_EVICTED_UNSENT count (dart_node_evicted_unsent) */
 #ifdef DART_THREADS
     /* thread safety + the optional service thread (runtime.h "Threading"). The lock is
        never held across a blocking wait: the poller drops it around the socket poll and
@@ -62,6 +62,7 @@ struct DartNode {
     DartMsgFn    user_on_message;
     DartEventFn  on_event;
     void          *user_data;
+    DartEvent     last_error;  /* most recent DART_ERROR (dart_last_error(n)); DART_E_NONE until one fires */
     void          *arena;      /* control-structs block (a freeable pool allocation); relocated on grow */
     /* the node's paged region allocator (common/alloc.h): backs the node struct, arena, message
        buffers, schemas, and handles. COPIED from the caller's allocator at open (so the caller's
@@ -152,6 +153,45 @@ static void i_dart_node_unlock(DartNode *n, int acquired){ (void)n; (void)acquir
 static void i_dart_node_kick(DartNode *n){ (void)n; }
 #endif /* DART_THREADS */
 
+/* --- error reporting --------------------------------------------------------------
+ * One path for every runtime-side event: stamp the app's user_data, capture a DART_ERROR
+ * into the node's last-error slot (so dart_last_error(n) can report it even with no
+ * on_event set), then hand it to on_event. Zero cost on the success path: only errors and
+ * the (already rare) lifecycle events ever reach here. */
+static void i_dart_node_emit(DartNode *n, DartEvent *e){
+    e->user = n->user_data;
+    if (e->kind == DART_ERROR) n->last_error = *e;
+    if (n->on_event) n->on_event(e);
+}
+
+/* our channel's name as a C string (the name pool is NUL-terminated), or NULL if the
+ * channel is undefined: the channel_name view carried on channel-scoped events. */
+static const char *i_dart_node_ch_name(DartNode *n, uint16_t ch){
+    DartString s = dart_transport_channel_name(n->transport, ch);
+    return (const char*)s.data;
+}
+
+/* The process-global last-error slot, for failures during dart_node_open where the node
+ * does not exist yet (or is half-built). Best-effort: a plain global with no lock,
+ * meaningful right after a failed open on the calling thread (open is rare; runtime
+ * errors live in the per-node slot and never touch this). */
+static DartEvent g_last_error;
+
+/* Report an open-time failure: fill a DART_ERROR event, store it in the global slot, and
+ * fire the caller's on_event directly (the node handle does not exist yet). Returns NULL
+ * so a failing open can `return i_dart_node_open_fail(...)`. */
+static DartNode *i_dart_node_open_fail(DartEventFn on_event, void *user, DartErrorKind err,
+                            int os_error, uint16_t port, uint64_t need){
+    DartEvent e; memset(&e, 0, sizeof e);
+    e.kind = DART_ERROR; e.error = err; e.user = user;
+    e.os_error = os_error; e.port = port; e.too_big_bytes = need;
+    g_last_error = e;
+    if (on_event) on_event(&e);
+    return NULL;
+}
+
+DartEvent dart_last_error(DartNode *n){ return n ? n->last_error : g_last_error; }
+
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. A message that does not
  * fit its sender's declared schema broke the sender's own contract: dropped + surfaced,
@@ -160,13 +200,10 @@ static void i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartByt
     DartMsg m;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, ch);
     if (schema && !dart_schema_validate(schema, data)){
-        if (n->on_event){
-            DartEvent e; memset(&e, 0, sizeof e);
-            e.kind = DART_SCHEMA_MISMATCH; e.user = n->user_data;
-            e.peer = from; e.channel = ch;
-            e.detail = "message does not fit the sender's schema";
-            n->on_event(&e);
-        }
+        DartEvent e; memset(&e, 0, sizeof e);
+        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
+        e.peer = from; e.channel = ch; e.channel_name = i_dart_node_ch_name(n, ch);
+        i_dart_node_emit(n, &e);
         return;
     }
     if (!n->user_on_message) return;
@@ -190,9 +227,11 @@ static void i_dart_node_on_event(const DartEvent *ev){
     DartNode *n = (DartNode*)ev->user;
     /* dynamic mode has no peer cap: a refusal means grow the table (deferred to the next
        poll, out of this callback); the peer re-announces and is admitted, so the app is
-       never told it was refused. Static mode keeps the cap and surfaces the event. */
-    if (n->alloc_dynamic && ev->kind == DART_PEER_REFUSED){ n->grow_pending = 1; return; }
-    if (n->on_event){ DartEvent e = *ev; e.user = n->user_data; n->on_event(&e); }
+       never told it was refused. Static mode keeps the cap and surfaces the error. */
+    if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_REFUSED){
+        n->grow_pending = 1; return;
+    }
+    { DartEvent e = *ev; i_dart_node_emit(n, &e); }
 }
 
 /* the transport's schema gate (DartConfig.schema_check): the node core answers it over
@@ -207,22 +246,33 @@ static int i_dart_node_schema_check(void *u, uint16_t channel, uint16_t alias, i
 static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     DartNode *n = (DartNode*)tev->user;
     DartEvent e;
-    if (!n->on_event) return;
     memset(&e, 0, sizeof e);
-    switch (tev->kind){
-    case DART_TRANSPORT_MSG_LOST:        e.kind = DART_MSG_LOST; break;
-    case DART_TRANSPORT_MSG_TOO_BIG:     e.kind = DART_MSG_TOO_BIG; break;
-    case DART_TRANSPORT_NAME_COLLISION:  e.kind = DART_NAME_COLLISION; break;
-    case DART_TRANSPORT_QOS_INCOMPATIBLE:e.kind = DART_QOS_INCOMPATIBLE; break;
-    case DART_TRANSPORT_SCHEMA_MISMATCH: e.kind = DART_SCHEMA_MISMATCH; break;
-    case DART_TRANSPORT_INTEREST_OVERFLOW: e.kind = DART_INTEREST_OVERFLOW; break;
-    case DART_TRANSPORT_META_TRUNCATED:  e.kind = DART_META_TRUNCATED; break;
-    default: return;
-    }
-    e.detail = tev->detail; e.user = n->user_data; e.peer = tev->peer; e.channel = tev->channel;
+    e.peer = tev->peer; e.channel = tev->channel;
     e.lost_first = tev->lost_first; e.lost_count = tev->lost_count;
     e.too_big_bytes = tev->too_big_bytes; e.identity = tev->identity;
-    n->on_event(&e);
+    /* MSG_LOST is a top-level info kind (best-effort loss is expected); everything else
+       is a DART_ERROR carrying its specific DartErrorKind. Channel-scoped kinds get our
+       channel name for the message string. */
+    switch (tev->kind){
+    case DART_TRANSPORT_MSG_LOST:
+        e.kind = DART_MSG_LOST; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+    case DART_TRANSPORT_MSG_TOO_BIG:
+        e.kind = DART_ERROR; e.error = DART_E_MSG_TOO_BIG; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+    case DART_TRANSPORT_NAME_COLLISION:
+        e.kind = DART_ERROR; e.error = DART_E_NAME_COLLISION; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+    case DART_TRANSPORT_QOS_INCOMPATIBLE:
+        e.kind = DART_ERROR; e.error = DART_E_QOS_INCOMPATIBLE; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+    case DART_TRANSPORT_SCHEMA_MISMATCH:
+        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+    case DART_TRANSPORT_INTEREST_OVERFLOW:
+        e.kind = DART_ERROR; e.error = DART_E_INTEREST_OVERFLOW; break;
+    case DART_TRANSPORT_META_TRUNCATED_INTEREST:
+        e.kind = DART_ERROR; e.error = DART_E_META_TRUNCATED_INTEREST; break;
+    case DART_TRANSPORT_META_TRUNCATED_SCHEMA:
+        e.kind = DART_ERROR; e.error = DART_E_META_TRUNCATED_SCHEMA; break;
+    default: return;
+    }
+    i_dart_node_emit(n, &e);
 }
 
 #ifdef DART_SHM
@@ -278,8 +328,15 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_c
 static int i_dart_node_tx(DartNode *n, uint32_t to, const uint8_t *buf, size_t len){
     i_DartNodeDest d;
     if (!i_dart_node_core_resolve(n->core, to, &d)) return 1;   /* peer vanished */
-    if (i_dart_plat_send(n->fd, buf, len, d.ip, d.port) < 0 && i_dart_plat_would_block())
-        return 0;
+    if (i_dart_plat_send(n->fd, buf, len, d.ip, d.port) < 0){
+        if (i_dart_plat_would_block()) return 0;                /* TX full: retry this datagram next tick */
+        {   /* hard send failure: report it and drop the datagram (reliable data is repaired) */
+            DartEvent e; memset(&e, 0, sizeof e);
+            e.kind = DART_ERROR; e.error = DART_E_SEND; e.peer = to;
+            e.os_error = i_dart_plat_last_socket_error();
+            i_dart_node_emit(n, &e);
+        }
+    }
     return 1;
 }
 
@@ -384,12 +441,13 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
        holds only what the node allocated), then returns. */
     pool = *alloc;
     n = (DartNode*)dart_allocator_alloc(&pool, NULL, sizeof *n);
-    if (!n) return NULL;
+    if (!n) return i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, sizeof *n);
     memset(n, 0, sizeof *n);
     n->pool = pool;                                  /* the node owns the pool now; allocate via &n->pool */
     n->alloc_dynamic = (alloc->page_realloc != NULL);
     arena = dart_allocator_alloc(&n->pool, NULL, need);
-    if (!arena){ DartAllocator p = n->pool; dart_allocator_reset(&p); return NULL; }
+    if (!arena){ DartAllocator p = n->pool; dart_allocator_reset(&p);
+                 return i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, need); }
     base = (uint8_t*)(((uintptr_t)arena+15u)&~(uintptr_t)15u);
     {   i_DartBump b; memset(&b,0,sizeof b);
         b.base = base; b.cap = need - (size_t)(base - (uint8_t*)arena);
@@ -397,10 +455,12 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 
     if (!i_dart_plat_startup()){
         DartAllocator p = n->pool; dart_allocator_reset(&p);
-        return NULL;
+        return i_dart_node_open_fail(on_event, o.user_data, DART_E_PLATFORM, 0, 0, 0);
     }
 
     n->fd = DART_SOCK_BAD;
+    n->user_data = o.user_data;      /* set early so i_dart_node_emit can stamp it on any open-time error */
+    n->on_event = on_event;
 #ifdef DART_THREADS
     i_dart_plat_mutex_init(&n->mu);
     i_dart_plat_cond_init(&n->cv);
@@ -408,13 +468,16 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
        dart_node_poll blocked in its wait when another thread sends. A platform
        whose loopback cannot carry it (exotic lwIP configs) DEGRADES rather than
        failing the open: the fd stays DART_SOCK_BAD, kick becomes a no-op, and
-       cross-thread mutations are serviced at the next timer-capped tick. */
-    (void)i_dart_plat_waker_open(&n->waker);
+       cross-thread mutations are serviced at the next timer-capped tick (reported once). */
+    if (!i_dart_plat_waker_open(&n->waker)){
+        DartEvent e; memset(&e, 0, sizeof e);
+        e.kind = DART_ERROR; e.error = DART_E_WAKER;
+        i_dart_node_emit(n, &e);
+    }
 #endif
     n->domain = o.domain;
     n->net = o.net;
-    n->user_on_message = on_message; n->on_event = on_event;
-    n->user_data = o.user_data;
+    n->user_on_message = on_message;   /* on_event + user_data were set early (open-time error reporting) */
     n->arena = arena;
     n->handles = (DartChannel**)blocks.handles;
     memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
@@ -439,7 +502,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 #endif
 
     n->transport = dart_transport_init(blocks.transport, blocks.transport_bytes, &tc);
-    if (!n->transport) goto fail_threads;
+    if (!n->transport){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, 0); goto fail_threads; }
 #ifdef DART_SHM
     {   uint32_t n_segments = (uint32_t)max_channels * DART_SHM_N_CLASSES;
         uint16_t reader_max = i_dart_node_shm_reader_max(max_peers, max_channels); uint32_t i;
@@ -466,18 +529,18 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif
         n->core = i_dart_node_core_init(blocks.node_core, blocks.node_core_bytes, &cc);
-        if (!n->core) goto fail_threads;
+        if (!n->core){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, 0); goto fail_threads; }
     }
 
     /* Bind the data socket before opening discovery so we can advertise its real
        port (0 => OS ephemeral, read back via getsockname). No reuse: a unicast
        endpoint owns its port, so a collision fails loudly here. */
     fd = i_dart_plat_udp_open();
-    if (fd==DART_SOCK_BAD) goto fail_threads;
+    if (fd==DART_SOCK_BAD){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_SOCKET, i_dart_plat_last_socket_error(), 0, 0); goto fail_threads; }
     n->fd=fd;                       /* owned now: fail_sock closes it */
-    if (!i_dart_plat_bind(fd, 0, o.net.data_port, 0)) goto fail_sock;
+    if (!i_dart_plat_bind(fd, 0, o.net.data_port, 0)){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_BIND, i_dart_plat_last_socket_error(), o.net.data_port, 0); goto fail_sock; }
     local_port = i_dart_plat_local_port(fd);
-    if (local_port==0) goto fail_sock;
+    if (local_port==0){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_SOCKET, 0, 0, 0); goto fail_sock; }
     i_dart_plat_set_nonblock(fd);   /* never block in recv/send; poll drains the queue */
     i_dart_plat_suppress_connreset(fd);  /* suppress WSAECONNRESET from a bounced send */
     if (o.net.recv_buffer_bytes) i_dart_plat_set_rcvbuf(fd, (int)o.net.recv_buffer_bytes);
@@ -492,7 +555,19 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     i_dart_node_core_build_meta(n->core);
     dc.discovery.meta = i_dart_node_core_meta(n->core);
     n->discovery = dart_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
-    if (!n->discovery) goto fail_sock;
+    if (!n->discovery){
+        DartErrorKind err;   /* translate discovery's setup-failure reason into our vocabulary */
+        switch (dart_discovery_last_error()){
+        case DART_DISCOVERY_E_PLATFORM:   err = DART_E_PLATFORM;   break;
+        case DART_DISCOVERY_E_SOCKET:     err = DART_E_SOCKET;     break;
+        case DART_DISCOVERY_E_BIND:       err = DART_E_BIND;       break;
+        case DART_DISCOVERY_E_MCAST_JOIN: err = DART_E_MCAST_JOIN; break;
+        default:                          err = DART_E_OOM;        break;
+        }
+        (void)i_dart_node_open_fail(on_event, o.user_data, err, dart_discovery_last_os_error(),
+                                    o.net.discovery_port, 0);
+        goto fail_sock;
+    }
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
     i_dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
 
@@ -653,7 +728,13 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
         int r = i_dart_plat_recv(fd, buf, n->rx_buf_bytes, src_ip, &src_port);
         if (r<0){
             if (i_dart_plat_would_block()) break;        /* queue empty */
-            continue;   /* per-datagram error (e.g. bounced send); keep draining */
+            {   /* a hard recv error (rare: connreset is suppressed on the data socket).
+                   report it and stop draining this tick so we never spin on a wedged socket. */
+                DartEvent e; memset(&e, 0, sizeof e);
+                e.kind = DART_ERROR; e.error = DART_E_RECV; e.os_error = i_dart_plat_last_socket_error();
+                i_dart_node_emit(n, &e);
+            }
+            break;
         }
         if (r>0){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
@@ -670,7 +751,7 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
 }
 
 /* threaded mode: the longest a send waits for a poller to hand unsent head history
- * to the wire before overwriting it (KEEP_LAST + DART_EVICTED_UNSENT after). One
+ * to the wire before overwriting it (KEEP_LAST + DART_E_EVICTED_UNSENT after). One
  * waker-kicked work pass normally clears it in microseconds; the bound only gates
  * a genuinely wedged socket. */
 #ifndef DART_UNSENT_WAIT_US
@@ -701,7 +782,7 @@ static int i_dart_node_wait_ms(DartNode *n, int timeout_ms){
  * the waker); the pump's nested call passes 0 and keeps the lock across its wait. */
 static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
-    i_DartPollfd pfd[5]; int nfds = 0, wait_ms;
+    i_DartPollfd pfd[5]; int nfds = 0, wait_ms, poll_rc;
 #ifdef DART_THREADS
     int waker_slot = -1;
 #endif
@@ -739,11 +820,11 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
            (a counter, not a flag: several threads may poll the same node) */
         n->pollers_sleeping++;
         i_dart_node_unlock_raw(n);
-        i_dart_plat_poll(pfd, nfds, wait_ms);
+        poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
         i_dart_node_lock_raw(n);
         n->pollers_sleeping--;
     } else {
-        i_dart_plat_poll(pfd, nfds, wait_ms);
+        poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
     }
     if (waker_slot >= 0){
         i_dart_plat_waker_drain(&n->waker);
@@ -751,8 +832,13 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     }
 #else
     (void)outer;
-    i_dart_plat_poll(pfd, nfds, wait_ms);
+    poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
 #endif
+    if (poll_rc < 0){   /* the wait itself failed (a real fault, e.g. a bad fd; would-block is not it) */
+        DartEvent e; memset(&e, 0, sizeof e);
+        e.kind = DART_ERROR; e.error = DART_E_POLL; e.os_error = i_dart_plat_last_socket_error();
+        i_dart_node_emit(n, &e);
+    }
 
     if (pfd[0].revents & DART_POLLIN)
         i_dart_node_rx_drain(n, n->fd, i_dart_plat_now_us() + DART_RX_BUDGET_US);
@@ -943,15 +1029,12 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
 committed:
 #endif
         if (r == DART_OK && will_evict){
+            DartEvent e; memset(&e, 0, sizeof e);
             n->evicted_unsent++;
-            if (n->on_event){
-                DartEvent e; memset(&e, 0, sizeof e);
-                e.kind = DART_EVICTED_UNSENT; e.user = n->user_data;
-                e.channel = channel;
-                e.lost_first = evict_base; e.lost_count = evict_count;
-                e.detail = "send outran the TX drain";
-                n->on_event(&e);
-            }
+            e.kind = DART_ERROR; e.error = DART_E_EVICTED_UNSENT;
+            e.channel = channel; e.channel_name = i_dart_node_ch_name(n, channel);
+            e.lost_first = evict_base; e.lost_count = evict_count;
+            i_dart_node_emit(n, &e);
         }
         return r;
     }
@@ -1016,7 +1099,7 @@ void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *wa
     i_dart_node_unlock(n, acquired);
 }
 
-/* Sends that evicted never-emitted history after the bounded wait (the DART_EVICTED_UNSENT
+/* Sends that evicted never-emitted history after the bounded wait (the DART_E_EVICTED_UNSENT
  * count) since open: the burst/overload indicator. */
 uint32_t dart_node_evicted_unsent(DartNode *n){
     uint32_t v; int acquired;

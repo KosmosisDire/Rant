@@ -20,46 +20,77 @@
 extern "C" {
 #endif
 
-/* The node's app-facing event: the union the user receives via DartNodeOpts.on_event.
- * The node maps discovery's DartDiscoveryEvent (the peer kinds) and the transport's
- * DartTransportEvent (the message/QoS kinds) into this one type, and adds its own
- * (PEER_INTEREST). Flat and self-describing: read only the fields named for the .kind.
- * dart_event_str formats any of them as a one-line message. */
+/* The node's app-facing event: what the user receives via DartNodeOpts.on_event. Four
+ * lifecycle/info kinds plus ONE catch-all DART_ERROR: everything that went wrong (a
+ * refused match, an overflow, a socket/setup failure) arrives as DART_ERROR, and
+ * ev->error (a DartErrorKind) says which. So "handle every error the same" is just
+ * `case DART_ERROR:` (print dart_event_str), and `switch (ev->error)` drills in when you
+ * care. The node maps discovery's DartDiscoveryEvent and the transport's
+ * DartTransportEvent into this one type. Flat and self-describing: read only the fields
+ * named for the .kind / .error. dart_event_str formats any of them as a one-line message. */
 typedef enum {
     DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port */
     DART_PEER_DOWN,      /* peer lost or fell silent: .peer */
     DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics, .receive_topics */
-    DART_MSG_LOST,       /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
-    DART_MSG_TOO_BIG,    /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
-    DART_NAME_COLLISION, /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
-    DART_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
-    DART_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not
-                              fit its sender's schema was dropped (.channel, .peer; .detail = our channel name) */
-    DART_PEER_REFUSED,   /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port) */
-    DART_INTEREST_OVERFLOW, /* a peer's matched topics exceed our alias table (.peer, .lost_count =
-                               entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
-    DART_META_TRUNCATED,    /* our announce overlay overflowed its buffer: a section was dropped
-                               (.detail names it), so peers see partial interest/schemas */
-    DART_PEER_META_TOO_BIG, /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
-                               admitted, .too_big_bytes, .ip/.port): its metadata is refused entirely */
-    DART_EVICTED_UNSENT     /* a send overwrote history never handed to the wire for some matched
-                               reader, after the bounded wait (.channel, .lost_first = evicted base
-                               seqno, .lost_count = its fragment count): the send burst outran the
-                               TX drain or the socket. KEEP_LAST semantics kept, never silent. */
+    DART_MSG_LOST,       /* messages skipped (best-effort loss / unrecoverable gap): .channel, .peer,
+                            .lost_first .. +.lost_count-1. Not an error: expected under best-effort. */
+    DART_ERROR           /* something went wrong: read .error (a DartErrorKind) and dart_event_str */
 } DartEventKind;
+
+/* The specific error carried by a DART_ERROR event (and returned by dart_last_error).
+ * It IS the error code: switch on it, or feed the whole event to dart_event_str for text.
+ * Named DART_E_* to stay distinct from the DartResult return codes (DART_ERR_*). */
+typedef enum {
+    DART_E_NONE = 0,
+    /* ---- match / config (a match was refused, or advertised data cannot flow) ---- */
+    DART_E_NAME_COLLISION,   /* a peer's topic name hashes to ours but differs (.identity, .channel,
+                                .channel_name): the match is refused, never silently cross-wired */
+    DART_E_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer,
+                                .channel_name): no silent downgrade; forms if the publisher upgrades */
+    DART_E_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not fit
+                                its sender's schema was dropped (.channel, .peer, .channel_name) */
+    DART_E_INTEREST_OVERFLOW,/* a peer's matched topics exceed our alias table (.peer, .lost_count =
+                                entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
+    DART_E_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was dropped,
+                                       so peers see none of our topics. Fewer / shorter topic names. */
+    DART_E_META_TRUNCATED_SCHEMA,   /* our announce overlay overflowed: the schema section was dropped,
+                                       so peers see partial schemas. Fewer / smaller schemas. */
+    DART_E_PEER_META_TOO_BIG,/* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
+                                admitted, .too_big_bytes, .ip/.port): its metadata is refused entirely */
+    DART_E_MSG_TOO_BIG,      /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_E_PEER_REFUSED,     /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port).
+                                Raise discovery.max_peers (dynamic mode grows automatically). */
+    DART_E_EVICTED_UNSENT,   /* a send overwrote history never handed to the wire for some matched reader,
+                                after the bounded wait (.channel, .lost_first = evicted base seqno,
+                                .lost_count = fragment count): the send burst outran the TX drain. */
+    /* ---- low-level IO / setup (mostly at dart_node_open; .os_error carries errno) ---- */
+    DART_E_OOM,              /* allocator returned NULL / static buffer too small (.too_big_bytes = bytes needed) */
+    DART_E_PLATFORM,         /* platform net init failed (WSAStartup) */
+    DART_E_SOCKET,           /* opening a UDP socket failed (.os_error) */
+    DART_E_BIND,             /* bind failed, port in use? (.port, .os_error) */
+    DART_E_MCAST_JOIN,       /* joining the discovery multicast group failed, bad interface? (.os_error) */
+    DART_E_SEND,             /* a datagram send hard-failed (.peer, .os_error); reliable data is repaired */
+    DART_E_RECV,             /* a socket receive hard-failed (.os_error) */
+    DART_E_POLL,             /* the socket poll/wait failed (.os_error) */
+    DART_E_WAKER             /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
+                                only at the next timer tick (still works, just less snappy) */
+} DartErrorKind;
 
 typedef struct {
     DartEventKind kind;
-    const char *detail;        /* short human-readable label (NAME_COLLISION / QOS_INCOMPATIBLE: our channel name) */
+    DartErrorKind error;       /* DART_ERROR: which error (DART_E_NONE otherwise) */
+    const char *channel_name;  /* channel-scoped events: our channel's name (a view into node state,
+                                  valid for the callback; NULL when not channel-scoped) */
     void       *user;          /* your DartNodeOpts.user_data (mirrors DartMsg.user) */
     uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
     uint16_t   channel;        /* local channel handle, where applicable */
-    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED: peer address (network order) */
-    uint8_t    ip_len;         /* PEER_UP / PEER_REFUSED: 4 or 16; else 0 */
-    uint16_t   port;           /* PEER_UP / PEER_REFUSED: peer data port */
-    uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
-    uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
-    uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
+    int        os_error;       /* SOCKET/BIND/MCAST_JOIN/SEND/RECV/POLL: OS errno / WSAGetLastError (0 = n/a) */
+    uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED / PEER_META_TOO_BIG: peer address (network order) */
+    uint8_t    ip_len;         /* 4 or 16; else 0 */
+    uint16_t   port;           /* peer data port, where applicable */
+    uint64_t   lost_first;     /* MSG_LOST / EVICTED_UNSENT: first skipped/evicted seqno */
+    uint64_t   lost_count;     /* MSG_LOST / EVICTED_UNSENT: count; INTEREST_OVERFLOW: entry count */
+    uint64_t   too_big_bytes;  /* MSG_TOO_BIG / PEER_META_TOO_BIG: size; OOM: bytes needed */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
@@ -67,7 +98,9 @@ typedef struct {
 typedef void (*DartEventFn)(const DartEvent *ev);
 
 /* Format ev as a one-line human-readable message into buf (always NUL-terminated,
- * truncated to cap). Returns buf. */
+ * truncated to cap). Returns buf. Covers every kind incl. DART_ERROR (per .error).
+ * Under DART_NO_DIAG the descriptive text is compiled out for size and this yields a
+ * terse "error N" for DART_ERROR (the numeric fields still print). */
 const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
 
 /* Everything the core needs from the runtime, set once at init. The peer table itself

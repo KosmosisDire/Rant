@@ -409,6 +409,10 @@ int  i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
 int  i_dart_plat_would_block(void);
 /* poll up to n fds for timeout_ms; >0 ready, 0 timeout, <0 error. */
 int  i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms);
+/* The OS's last socket error for the calling thread (WSAGetLastError on Windows,
+ * errno elsewhere), for diagnostics after a failed socket call. Just reads the OS;
+ * keeps no state. */
+int  i_dart_plat_last_socket_error(void);
 
 /* --- address helpers (uint32_t naddr is network byte order) --- */
 uint32_t i_dart_plat_parse_ip(const char *dotted);          /* "1.2.3.4" -> naddr */
@@ -780,8 +784,24 @@ typedef struct {
 size_t     dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg);
 /* Place a runtime in caller memory (mem[0..mem_size)): open the socket, join the group,
  * init core state. NULL on failure. The caller owns mem (dart_discovery_close frees only
- * the socket, not mem). */
+ * the socket, not mem). On NULL, dart_discovery_last_error names the failed step. */
 DartDiscovery   *dart_discovery_place(void *mem, size_t mem_size, const DartDiscoveryNetConfig *cfg);
+
+/* Why the most recent dart_discovery_open / dart_discovery_place returned NULL, so a
+ * caller (or the node, translating to its own DART_ERROR event) can report the step.
+ * Best-effort: a process-global with no lock, meaningful right after a NULL return. */
+typedef enum {
+    DART_DISCOVERY_OK = 0,
+    DART_DISCOVERY_E_MEMORY,      /* the allocator/buffer was too small for the core */
+    DART_DISCOVERY_E_PLATFORM,    /* platform net startup failed (WSAStartup) */
+    DART_DISCOVERY_E_SOCKET,      /* udp socket open failed */
+    DART_DISCOVERY_E_BIND,        /* bind to the discovery port failed (in use?) */
+    DART_DISCOVERY_E_MCAST_JOIN   /* joining the multicast group failed (bad interface?) */
+} DartDiscoveryPlaceError;
+DartDiscoveryPlaceError dart_discovery_last_error(void);
+/* The OS socket errno captured alongside the last SOCKET/BIND/MCAST_JOIN failure (0 if
+ * none / not applicable). */
+int        dart_discovery_last_os_error(void);
 /* Relocate a placed runtime into a bigger block at grown counts, preserving the live
  * socket, UUID and peer table. self_meta = the new announce-blob address. Caller frees
  * the old block afterward. Placement (caller-owned) path only. */
@@ -1818,6 +1838,14 @@ int i_dart_plat_would_block(void){
 #endif
 }
 
+int i_dart_plat_last_socket_error(void){
+#ifdef _WIN32
+    return WSAGetLastError();   /* winsock keeps its error off errno */
+#else
+    return errno;
+#endif
+}
+
 int i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
     /* callers poll one or two sockets; cap the on-stack translation buffer */
 #ifdef _WIN32
@@ -2402,6 +2430,17 @@ size_t dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg){
     return b.offset + 16u;     /* slack to align the caller's mem up to base */
 }
 
+/* Why the most recent open/place returned NULL (best-effort process-globals, no lock:
+   meaningful right after a NULL return). The node reads these to build its DART_ERROR. */
+static DartDiscoveryPlaceError g_place_error = DART_DISCOVERY_OK;
+static int                     g_place_os_error = 0;
+static DartDiscovery *i_dart_discovery_fail(DartDiscoveryPlaceError e, int os_error){
+    g_place_error = e; g_place_os_error = os_error;
+    return NULL;
+}
+DartDiscoveryPlaceError dart_discovery_last_error(void){ return g_place_error; }
+int                     dart_discovery_last_os_error(void){ return g_place_os_error; }
+
 DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNetConfig *cfg){
     DartDiscoveryNetConfig c;
     DartDiscovery *d;
@@ -2415,6 +2454,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     const char *group;
 
     if (!mem || !cfg) return NULL;
+    g_place_error = DART_DISCOVERY_OK; g_place_os_error = 0;
     c = *cfg;
     dart_discovery_config_defaults(&c.discovery);
     group     = c.group     ? c.group     : "239.255.0.7";
@@ -2422,7 +2462,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     ttl  = c.ttl ? c.ttl : 1;
 
     need = dart_discovery_placement_memory(&c);
-    if (cap < need) return NULL;
+    if (cap < need) return i_dart_discovery_fail(DART_DISCOVERY_E_MEMORY, 0);
 
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     {   i_DartBump b; memset(&b, 0, sizeof b);
@@ -2439,22 +2479,23 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     /* auto-generate a UUID if the caller left it zero */
     for (i=0;i<16;i++) if (c.discovery.uuid[i]) { allzero = 0; break; }
 
-    if (!i_dart_plat_startup()) return NULL;
+    if (!i_dart_plat_startup()) return i_dart_discovery_fail(DART_DISCOVERY_E_PLATFORM, 0);
     if (allzero) i_dart_discovery_auto_uuid(c.discovery.uuid);
 
     d->core = dart_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c.discovery);
-    if (!d->core){ i_dart_plat_cleanup(); return NULL; }
+    if (!d->core){ i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_MEMORY, 0); }
 
     fd = i_dart_plat_udp_open();
-    if (fd == DART_SOCK_BAD){ i_dart_plat_cleanup(); return NULL; }
-    if (!i_dart_plat_bind(fd, 0, c.discovery_port, 1)){ i_dart_plat_close(fd); i_dart_plat_cleanup(); return NULL; }
+    if (fd == DART_SOCK_BAD){ int e=i_dart_plat_last_socket_error(); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_SOCKET, e); }
+    if (!i_dart_plat_bind(fd, 0, c.discovery_port, 1)){ int e=i_dart_plat_last_socket_error(); i_dart_plat_close(fd); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_BIND, e); }
 
     /* pin join and egress to one deterministic interface */
     group_naddr = i_dart_plat_parse_ip(group);
     interface_ip = c.multicast_interface ? i_dart_plat_parse_ip(c.multicast_interface)
                       : dart_discovery_mcast_if_for(group_naddr, c.discovery_port);
     if (!i_dart_plat_mcast_join(fd, group_naddr, interface_ip)){
-        i_dart_plat_close(fd); i_dart_plat_cleanup(); return NULL;
+        int e=i_dart_plat_last_socket_error();
+        i_dart_plat_close(fd); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_MCAST_JOIN, e);
     }
     i_dart_plat_mcast_setif(fd, interface_ip);
     i_dart_plat_mcast_ttl(fd, ttl);
@@ -2531,7 +2572,7 @@ DartDiscovery *dart_discovery_open(DartAllocator *alloc, const char *name, const
     need = dart_discovery_placement_memory(&nc);
     pool = *alloc;                                 /* copied: the caller's allocator may be a temporary */
     block = dart_allocator_alloc(&pool, NULL, need);
-    if (!block) return NULL;
+    if (!block) return i_dart_discovery_fail(DART_DISCOVERY_E_MEMORY, 0);
     d = dart_discovery_place(block, need, &nc);
     if (!d){ DartAllocator p = pool; dart_allocator_reset(&p); return NULL; }
     d->pool = pool;                                /* the block lives in this pool; close resets it */

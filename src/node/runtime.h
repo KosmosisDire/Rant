@@ -100,6 +100,13 @@ typedef void (*DartMsgFn)(const DartMsg *msg);
  * be NULL for all defaults. Returns NULL on failure (incl. a static buffer too small). */
 DartNode    *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message,
                             DartEventFn on_event, const DartNodeOpts *opts);
+/* The most recent error as a DartEvent (kind DART_ERROR; read .error / dart_event_str).
+ * n == NULL returns the process-global slot: the reason a dart_node_open just returned
+ * NULL (there is no handle then), so `if (!dart_node_open(...)) e = dart_last_error(NULL);`.
+ * A non-NULL n returns that node's most recent runtime error. .kind is DART_PEER_UP (0)
+ * with .error == DART_E_NONE if none has occurred. The global slot is best-effort under
+ * threads (open is rare); a node's slot is only written from its own poll/callbacks. */
+DartEvent    dart_last_error(DartNode *n);
 /* One loop tick: discovery, RX + delivery, timers, TX flush; blocks up to timeout_ms
  * waiting for traffic (capped to the next internal timer; negative is treated as 0,
  * there is no infinite wait). Returns 0, or DART_ERR_STATE if a service thread is
@@ -131,7 +138,7 @@ int          dart_node_close(DartNode *n, int send_bye);
  * a send that would overwrite reliable history not yet acked waits (condvar, bounded
  * by qos.backpressure_wait_us), and one that would overwrite history NEVER YET SENT
  * to a matched reader waits for one TX pass (bounded by DART_UNSENT_WAIT_US); if it
- * still must evict, it proceeds KEEP_LAST-style and fires DART_EVICTED_UNSENT, never
+ * still must evict, it proceeds KEEP_LAST-style and fires DART_E_EVICTED_UNSENT, never
  * silently. All of this exists only under DART_THREADS, auto-detected where the
  * platform layer provides threads (Windows; POSIX with pthreads) and off elsewhere:
  * single-threaded contract, start returns DART_ERR_NOSYS. DART_NO_THREADS forces it
@@ -155,7 +162,7 @@ int          dart_node_is_started(DartNode *n);
  * compiled out. */
 void         dart_node_lock(DartNode *n);
 void         dart_node_unlock(DartNode *n);
-/* Sends that evicted never-sent history after the bounded wait (the DART_EVICTED_UNSENT
+/* Sends that evicted never-sent history after the bounded wait (the DART_E_EVICTED_UNSENT
  * count) since open: the send-burst/overload indicator. The guard runs when a service
  * thread drives the node (and for the reliable backpressure path when it does not);
  * classic poll-it-yourself best-effort keeps plain KEEP_LAST overwrite semantics. */

@@ -126,20 +126,23 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
 typedef enum {
     DART_TRANSPORT_MSG_LOST,        /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
     DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
-    DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .detail = our name), refused */
-    DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer); .detail = our channel name */
-    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer); .detail = our channel name */
+    DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .channel), refused */
+    DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer) */
+    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer) */
     DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases beyond our alias table
                                         (.peer, .lost_count = entry count): their data can never demux
                                         here. Raise DART_META_MAX_IDS. */
-    DART_TRANSPORT_META_TRUNCATED   /* our own announce overlay overflowed its buffer: a section was
-                                       dropped (.detail names it), so peers see partial interest or
-                                       schemas. Fewer channels, or shorter names/schemas. */
+    DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
+                                               dropped, so peers see none of our topics. Fewer/shorter names. */
+    DART_TRANSPORT_META_TRUNCATED_SCHEMA    /* our announce overlay overflowed: the schema section was
+                                               dropped, so peers see partial schemas. Fewer/smaller schemas. */
 } DartTransportEventKind;
 
+/* The channel name for a channel-scoped event is not carried here: read it with
+ * dart_transport_channel_name(st, ev->channel). Flat and self-describing: read only
+ * the fields named for the .kind. */
 typedef struct {
     DartTransportEventKind kind;
-    const char *detail;        /* short human label (NAME_COLLISION / QOS_INCOMPATIBLE: our channel name) */
     void       *user;          /* DartConfig.user */
     uint32_t   peer;           /* peer id (0 = n/a) */
     uint16_t   channel;        /* local channel handle */

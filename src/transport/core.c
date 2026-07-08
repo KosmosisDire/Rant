@@ -293,14 +293,15 @@ static i_DartChannel *i_dart_channel_by_identity(DartTransportState *st, uint64_
 }
 
 
-/* fire one DartTransportEvent (no-op if no on_event). Transport emits MSG_LOST/TOO_BIG/
- * COLLISION/QOS. first/count are the kind's two numeric slots; route them to named fields. */
+/* fire one DartTransportEvent (no-op if no on_event). first/count are the kind's two
+ * numeric slots; route them to named fields. A channel name is not carried: a consumer
+ * reads it with dart_transport_channel_name(st, ev.channel). */
 void i_dart_transport_fire_event(DartTransportState *st, DartTransportEventKind kind, uint16_t channel,
-                        uint32_t peer, uint64_t first, uint64_t count, const char *detail){
+                        uint32_t peer, uint64_t first, uint64_t count){
     DartTransportEvent ev;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind=kind; ev.channel=channel; ev.peer=peer; ev.detail=detail; ev.user=st->cfg.user;
+    ev.kind=kind; ev.channel=channel; ev.peer=peer; ev.user=st->cfg.user;
     switch (kind){
     case DART_TRANSPORT_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
     case DART_TRANSPORT_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
@@ -537,7 +538,7 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
         if (!ch) continue;                                  /* not ours */
         if (!i_dart_meta_name_eq(ch,name,nlen)){
             i_dart_transport_fire_event(st, DART_TRANSPORT_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                        id, 0, ch->name ? ch->name : "");
+                        id, 0);
             continue;
         }
         /* RxO QoS: a reliable subscriber refuses a best-effort publisher (no silent
@@ -546,7 +547,7 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
         if (is_pub && (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) &&
             ch->qos.reliability==DART_RELIABLE && !(flags & DART_META_F_RELIABLE)){
             i_dart_transport_fire_event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
-                        st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
+                        st->peer_ids[peer_slot], 0, 0);
             continue;                                       /* refuse: no bit, no alias map */
         }
         /* schema gate (RxO for types): both sides run the same check off the same two
@@ -555,7 +556,7 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
         if (st->cfg.schema_check &&
             !st->cfg.schema_check(st->cfg.user, (uint16_t)channel_idx, alias, is_pub)){
             i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, (uint16_t)channel_idx,
-                        st->peer_ids[peer_slot], 0, 0, ch->name ? ch->name : "");
+                        st->peer_ids[peer_slot], 0, 0);
             continue;                                       /* refuse: no bit, no alias map */
         }
         i_dart_bit_set(bitmap,(uint32_t)channel_idx);
@@ -628,8 +629,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
         p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,                    /* sub list: requested QoS */
                             &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], NULL);
         if (overflow)   /* never silent: those topics look matched but will not deliver */
-            i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, overflow,
-                        "peer topics beyond our alias table (raise DART_META_MAX_IDS)");
+            i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, overflow);
     }
     for (c=0;c<st->cfg.n_channels;c++) i_dart_channel_rematch(st,c,(uint16_t)peer_slot);
 }
@@ -748,8 +748,7 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     len = (size_t)off + interest_len;
     if (interest_len == 0){   /* did not fit (returns >= 4 even with zero channels): never silent */
-        i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED, 0, 0, 0, 0,
-                    "interest list dropped (announce overlay full)");
+        i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
     } else {   /* the schema section is located by walking the interest list, so it needs one */
         size_t s = i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
         if (s){
@@ -758,8 +757,7 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
             uint16_t c;
             for (c = 0; c < st->cfg.n_channels; c++)
                 if (i_dart_meta_schema_advertised(st, schemas, c)){
-                    i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED, 0, 0, 0, 0,
-                                "schema section dropped (announce overlay full)");
+                    i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED_SCHEMA, 0, 0, 0, 0);
                     break;
                 }
         }

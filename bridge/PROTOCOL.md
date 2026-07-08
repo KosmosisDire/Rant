@@ -179,15 +179,15 @@ are per event:
 | `peer_down`        | `peer`, `name`                                  |
 | `peer_interest`    | `peer`, `publishes`, `receives` (matched counts)|
 | `msg_lost`         | `channel`, `peer`, `first`, `count`             |
-| `msg_too_big`      | `bytes`                                         |
-| `name_collision`   | `identity` (hex), `detail`                      |
-| `qos_incompatible` | `channel`, `peer`, `detail`                     |
-| `schema_mismatch`  | `channel`, `peer`, `detail`                     |
-| `peer_refused`     | `addr`                                          |
-| `interest_overflow`| `peer`, `count` (matched topics that cannot deliver: alias table too small) |
-| `meta_truncated`   | `detail` (a section of our announce was dropped: overlay full) |
-| `peer_meta_too_big`| `peer`, `bytes`, `addr` (a peer's blob exceeds what this node accepts) |
+| `error`            | `error` (numeric code) + whichever of `channel_name`, `channel`, `peer`, `os_error`, `addr`, `bytes`, `first`/`count`, `identity` apply |
 | `send_error`       | `channel`, `code`, `error` (a failed publish)   |
+
+Everything that goes wrong is one `error` event: `text` carries the human-readable
+message and `error` the numeric code (a `DartErrorKind`: 1 name-collision,
+2 qos-incompatible, 3 schema-mismatch, 4 interest-overflow, 5/6 meta-truncated
+interest/schema, 7 peer-meta-too-big, 8 msg-too-big, 9 peer-refused, 10 evicted-unsent,
+11 oom, 12 platform, 13 socket, 14 bind, 15 mcast-join, 16 send, 17 recv, 18 poll,
+19 waker). A client that only prints `text` needs no per-code handling.
 
 `peer_up` fires again on a dormant peer's resume; a client keying names on
 `peer` ids stays correct across blips for free.

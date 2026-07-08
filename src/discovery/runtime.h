@@ -88,8 +88,24 @@ typedef struct {
 size_t     dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg);
 /* Place a runtime in caller memory (mem[0..mem_size)): open the socket, join the group,
  * init core state. NULL on failure. The caller owns mem (dart_discovery_close frees only
- * the socket, not mem). */
+ * the socket, not mem). On NULL, dart_discovery_last_error names the failed step. */
 DartDiscovery   *dart_discovery_place(void *mem, size_t mem_size, const DartDiscoveryNetConfig *cfg);
+
+/* Why the most recent dart_discovery_open / dart_discovery_place returned NULL, so a
+ * caller (or the node, translating to its own DART_ERROR event) can report the step.
+ * Best-effort: a process-global with no lock, meaningful right after a NULL return. */
+typedef enum {
+    DART_DISCOVERY_OK = 0,
+    DART_DISCOVERY_E_MEMORY,      /* the allocator/buffer was too small for the core */
+    DART_DISCOVERY_E_PLATFORM,    /* platform net startup failed (WSAStartup) */
+    DART_DISCOVERY_E_SOCKET,      /* udp socket open failed */
+    DART_DISCOVERY_E_BIND,        /* bind to the discovery port failed (in use?) */
+    DART_DISCOVERY_E_MCAST_JOIN   /* joining the multicast group failed (bad interface?) */
+} DartDiscoveryPlaceError;
+DartDiscoveryPlaceError dart_discovery_last_error(void);
+/* The OS socket errno captured alongside the last SOCKET/BIND/MCAST_JOIN failure (0 if
+ * none / not applicable). */
+int        dart_discovery_last_os_error(void);
 /* Relocate a placed runtime into a bigger block at grown counts, preserving the live
  * socket, UUID and peer table. self_meta = the new announce-blob address. Caller frees
  * the old block afterward. Placement (caller-owned) path only. */

@@ -60,9 +60,18 @@ namespace Dart
 
     public enum EventKind
     {
-        PeerUp = 0, PeerDown, PeerInterest, MessageLost, MessageTooBig, NameCollision,
-        QosIncompatible, SchemaMismatch, PeerRefused, InterestOverflow, MetaTruncated,
-        PeerMetaTooBig, EvictedUnsent
+        PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
+    }
+
+    // The specific error carried by an EventKind.Error event (Event.Error / Node.LastError).
+    // Mirrors DartErrorKind in node/core.h.
+    public enum ErrorKind
+    {
+        None = 0,
+        NameCollision, QosIncompatible, SchemaMismatch, InterestOverflow,
+        MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
+        PeerRefused, EvictedUnsent,
+        Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
     }
 
     public enum FieldType : byte
@@ -145,10 +154,12 @@ namespace Dart
     internal struct DartEvent
     {
         public int kind;
-        public IntPtr detail;                  // const char*
+        public int error;                      // DartErrorKind (Error events)
+        public IntPtr channel_name;            // const char* (channel-scoped events; else null)
         public IntPtr user;
         public uint peer;
         public ushort channel;
+        public int os_error;                   // errno / WSAGetLastError (socket failures)
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
         public byte ip_len;
         public ushort port;
@@ -221,6 +232,8 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern IntPtr dart_node_open(ref DartAllocator alloc, byte[] name,
             DartMsgFn on_message, DartEventFn on_event, ref DartNodeOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern DartEvent dart_last_error(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_node_poll(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
@@ -450,12 +463,27 @@ namespace Dart
     public sealed class Event
     {
         public EventKind Kind;
-        public string Detail;
+        public ErrorKind Error;         // the specific error when Kind == EventKind.Error, else None
+        public string ChannelName;      // our channel's name for channel-scoped events, else null
         public uint Peer;
         public ushort Channel;
+        public int OsError;             // errno / WSAGetLastError for socket failures, else 0
         public ulong LostFirst;
         public ulong LostCount;
+        public ulong TooBigBytes;
         private string _line;
+
+        /// <summary>True if this event reports something going wrong (Kind == EventKind.Error).</summary>
+        public bool IsError => Kind == EventKind.Error;
+
+        // format an event returned BY VALUE (dart_last_error): dart_event_str wants a
+        // pointer, so briefly marshal the struct to unmanaged memory.
+        internal static Event FromValue(DartEvent e)
+        {
+            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<DartEvent>());
+            try { Marshal.StructureToPtr(e, p, false); return FromNative(p, ref e); }
+            finally { Marshal.FreeHGlobal(p); }
+        }
 
         internal static Event FromNative(IntPtr evPtr, ref DartEvent e)
         {
@@ -464,11 +492,14 @@ namespace Dart
             return new Event
             {
                 Kind = (EventKind)e.kind,
-                Detail = e.detail != IntPtr.Zero ? Codec.PtrToStr(e.detail) : "",
+                Error = (ErrorKind)e.error,
+                ChannelName = e.channel_name != IntPtr.Zero ? Codec.PtrToStr(e.channel_name) : null,
                 Peer = e.peer,
                 Channel = e.channel,
+                OsError = e.os_error,
                 LostFirst = e.lost_first,
                 LostCount = e.lost_count,
+                TooBigBytes = e.too_big_bytes,
                 _line = Codec.CBufStr(buf),
             };
         }
@@ -602,7 +633,9 @@ namespace Dart
             {
                 lock (s_reg) s_nodes.Remove(node._id);
                 Codec.FreeCStr(node._discGroup); Codec.FreeCStr(node._mcastIf);
-                throw new InvalidOperationException("dart_node_open failed (bad options or OOM)");
+                // the node does not exist, so read the reason from the process-global slot
+                Event err = Node.LastOpenError();
+                throw new InvalidOperationException("dart_node_open failed: " + err);
             }
             node._handle = h;
             return node;
@@ -672,6 +705,14 @@ namespace Dart
 
         public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
 
+        /// <summary>The most recent error this node reported (also delivered via OnEvent).
+        /// Event.Kind is PeerUp with Error == None if none has occurred yet.</summary>
+        public Event LastError => Event.FromValue(Native.dart_last_error(_handle));
+
+        /// <summary>Why the most recent Node.Open failed, from the process-global slot
+        /// (there is no node handle on failure). Open already throws with this message.</summary>
+        public static Event LastOpenError() => Event.FromValue(Native.dart_last_error(IntPtr.Zero));
+
         /// <summary>Invoke queued handlers on the calling thread (Start(queueCallbacks:
         /// true) mode; Unity: call from Update()). Returns how many were dispatched.
         /// The queue is unbounded: drain it regularly, or unread messages accumulate.</summary>
@@ -693,7 +734,7 @@ namespace Dart
         }
 
         /// <summary>Sends that evicted never-sent history after the bounded wait (the
-        /// EventKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
+        /// ErrorKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
         public uint EvictedUnsent => Native.dart_node_evicted_unsent(_handle);
 
         public (ulong inUse, ulong peak, ulong allocCalls) MemoryStats()
