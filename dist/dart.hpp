@@ -3947,6 +3947,9 @@ void i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
 
 #include <string.h>
 
+#define DART_DISCOVERY_BYE_SENDS 3   /* a graceful BYE is one-shot UDP: resend a few (idempotent,
+                                        deduped by uuid) so one lands even under loss on exit */
+
 struct DartDiscovery {
     DartDiscoveryState *core;
     i_DartSock            fd;
@@ -4388,7 +4391,8 @@ void dart_discovery_close(DartDiscovery *d, int send_bye){
     pool = d->pool;                          /* copy out: the reset below frees the block (incl d) */
     if (send_bye){
         size_t n_bytes = dart_discovery_leave(d->core, d->txbuf, d->wire_max);
-        if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes);
+        int k;
+        for (k = 0; n_bytes && k < DART_DISCOVERY_BYE_SENDS; k++) i_dart_discovery_tx(d, d->txbuf, n_bytes);
     }
     i_dart_plat_close(d->fd);
     if (d->unicast_fd != DART_SOCK_BAD) i_dart_plat_close(d->unicast_fd);
