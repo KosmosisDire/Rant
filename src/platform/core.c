@@ -45,10 +45,18 @@
     #include <net/if.h>          /* IFF_UP / IFF_LOOPBACK */
   #endif
   #include <unistd.h>
-  #include <poll.h>
+  #if defined(ESP_PLATFORM)
+    #include <sys/poll.h>       /* the ESP (xtensa/riscv) newlib has no <poll.h>; poll() rides the VFS */
+  #else
+    #include <poll.h>
+  #endif
   #include <time.h>
   #ifdef DART_THREADS
     #include <pthread.h>
+    #if defined(ESP_PLATFORM)
+      #include <freertos/FreeRTOS.h>
+      #include <freertos/task.h>   /* xTaskGetCurrentTaskHandle: a task id valid on ANY task */
+    #endif
   #endif
   #include <fcntl.h>
   #include <errno.h>
@@ -56,6 +64,7 @@
   #include <stdlib.h>           /* arc4random_buf on macOS/BSD */
   #if defined(ESP_PLATFORM)
     #include <esp_random.h>     /* esp_fill_random (HW RNG) */
+    #include <esp_netif.h>      /* esp_netif_get_ip_info: the interface-IP enumeration */
   #elif defined(__linux__)
     #include <sys/random.h>     /* getrandom(2) */
   #endif
@@ -370,7 +379,23 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
     return n;
 }
 #elif defined(ESP_PLATFORM)
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){ (void)out; (void)max; return 0; }
+/* lwIP connect() does not assign a local source address, so the route probes in
+ * dart_discovery_mcast_if_for come back empty on the ESP. This backstop hands the
+ * multicast join a concrete interface (the STA / Ethernet / SoftAP IP) from
+ * esp_netif; without it the join lands on INADDR_ANY, which lwIP refuses, and
+ * dart_node_open fails. Requires WiFi/Ethernet already up (the node opens after). */
+int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+    static const char *const keys[] = { "WIFI_STA_DEF", "ETH_DEF", "WIFI_AP_DEF" };
+    int n = 0; unsigned i;
+    if (!out || max <= 0) return 0;
+    for (i = 0; i < sizeof keys / sizeof keys[0] && n < max; i++){
+        esp_netif_t *nif = esp_netif_get_handle_from_ifkey(keys[i]);
+        esp_netif_ip_info_t info;
+        if (nif && esp_netif_get_ip_info(nif, &info) == ESP_OK && info.ip.addr != 0)
+            out[n++] = info.ip.addr;   /* esp_ip4_addr is network-order: our naddr convention */
+    }
+    return n;
+}
 #else
 int i_dart_plat_local_ipv4s(uint32_t *out, int max){
     struct ifaddrs *ifs = NULL, *p;
@@ -460,7 +485,16 @@ int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
 void i_dart_plat_thread_join(i_DartThread *t){
     pthread_join(((i_DartThreadImpl *)t)->t, NULL);
 }
-uint64_t i_dart_plat_thread_id(void){ return (uint64_t)(uintptr_t)pthread_self(); }
+uint64_t i_dart_plat_thread_id(void){
+#if defined(ESP_PLATFORM)
+    /* pthread_self() ABORTS on ESP-IDF when called from a task not created by
+       pthread_create (e.g. the Arduino loopTask that drives poll). The task
+       handle is a unique per-task id valid on both native tasks and pthreads. */
+    return (uint64_t)(uintptr_t)xTaskGetCurrentTaskHandle();
+#else
+    return (uint64_t)(uintptr_t)pthread_self();
+#endif
+}
 
 void i_dart_plat_mutex_init   (i_DartMutex *m){ pthread_mutex_init((pthread_mutex_t *)m, NULL); }
 void i_dart_plat_mutex_destroy(i_DartMutex *m){ pthread_mutex_destroy((pthread_mutex_t *)m); }
