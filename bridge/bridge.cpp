@@ -4,25 +4,24 @@
  * plus the raw payload). The protocol is specified in PROTOCOL.md.
  *
  * Threading: IXWebSocket runs each accepted connection on its own thread, which fits
- * the one-node-per-connection model directly. Per connection there are two threads
- * touching the node: the connection thread (control ops + publishes) and a poll thread
- * (drives discovery, RX, timers). The node is not internally locked, so a mutex guards
- * every dart_* call, same as examples/example.c. Deliveries and events go out through
- * IXWebSocket's send, which is itself thread-safe. */
+ * the one-node-per-connection model directly. The node itself is thread-safe (a
+ * node-level lock in the C core serializes every dart_* call) and runs its own
+ * background service thread via dart_node_start, so the bridge holds no lock and no
+ * poll thread of its own: the connection thread does control ops + publishes, the
+ * node's service thread delivers messages/events straight out of its callbacks
+ * (IXWebSocket's send is itself thread-safe). */
 #include "dart.h"   /* declarations only; the C99 implementation is dart_impl.c */
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <nlohmann/json.hpp>
 
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -33,18 +32,14 @@ static const uint8_t  kOpData       = 0x01;      /* the one binary op, both dire
 static size_t         g_max_buffered = 8u << 20; /* drop a client that buffers past this */
 static int            g_verbose      = 0;
 
-/* One WebSocket connection = one node. `lock` guards every dart_* call; `pending`
- * collects events fired from inside those calls (the callback must not call back into
- * dart_*), flushed to the socket right after the call returns, still under the lock,
- * where peer-name lookups are legal again. */
+/* One WebSocket connection = one node. node/ws/name are written only by the
+ * connection's own thread (IXWebSocket delivers one connection's messages on one
+ * thread); the node's service thread reads them from inside the dart callbacks,
+ * which dart_node_close fences (it joins the service thread before returning). */
 struct Conn {
-    std::mutex             lock;
-    DartNode              *node = nullptr;
-    ix::WebSocket         *ws   = nullptr;
-    std::thread            poller;
-    std::atomic<bool>      running{false};
-    std::vector<DartEvent> pending;
-    std::string            name;   /* the node name (bridge-generated when the client omits it) */
+    DartNode      *node = nullptr;
+    ix::WebSocket *ws   = nullptr;
+    std::string    name;   /* the node name (bridge-generated when the client omits it) */
 };
 
 static std::mutex g_conns_lock;
@@ -140,20 +135,25 @@ static json peer_topics_json(const DartDiscoveryPeer &p){
  * can join a typed topic it never declared (the explorer's adopt pattern). */
 static DartSchema *adopt_schema(Conn *c, const std::string &name, DartAllocator *scratch){
     uint16_t count = 0;
+    DartSchema *found = nullptr;
+    /* the peer view is zero-copy: hold the node lock across the walk so the node's
+       service thread cannot mutate it mid-read */
+    dart_node_lock(c->node);
     const DartDiscoveryPeer *peers = dart_node_peers(c->node, &count);
-    for (uint16_t i = 0; peers && i < count; i++){
+    for (uint16_t i = 0; !found && peers && i < count; i++){
         DartInterestIter it = {}; DartTopic t;
         while (dart_node_peer_interest_next(&peers[i], &it, &t)){
             if (!t.is_pub || t.name.len != name.size() ||
                 memcmp(t.name.data, name.data(), name.size()) != 0) continue;
             uint64_t hash; DartBytes wire;
             if (dart_node_peer_schema(&peers[i], t.alias, &hash, &wire) && wire.data){
-                DartSchema *s = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, scratch);
-                if (s) return s;
+                found = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, scratch);
+                if (found) break;
             }
         }
     }
-    return nullptr;
+    dart_node_unlock(c->node);
+    return found;
 }
 
 static int role_from(const std::string &s, DartRole *out){
@@ -184,7 +184,8 @@ static void send_error_event(Conn *c, uint16_t channel, int code){
                    {"channel", channel}, {"code", code}, {"error", result_str(code)} });
 }
 
-/* Peer name lookup off the live table (caller holds the lock, outside any dart callback). */
+/* Peer name lookup off the live table. Called from inside a dart callback, where
+ * read-only queries are legal and the table is stable for the callback's duration. */
 static std::string peer_name(Conn *c, uint32_t id){
     uint16_t count = 0;
     const DartDiscoveryPeer *peers = dart_node_peers(c->node, &count);
@@ -194,69 +195,70 @@ static std::string peer_name(Conn *c, uint32_t id){
     return "";
 }
 
-/* Drain the events queued during the last dart_* call. Still under the lock: the peer
- * table is stable and the callback that queued them has returned. */
-static void flush_events_locked(Conn *c){
-    for (const DartEvent &ev : c->pending){
-        char text[192];
-        json e = { {"op", "event"}, {"text", dart_event_str(&ev, text, sizeof text)} };
-        switch (ev.kind){
-        case DART_PEER_UP:
-            e["event"] = "peer_up"; e["peer"] = ev.peer;
-            e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
-            e["name"] = peer_name(c, ev.peer);
-            break;
-        case DART_PEER_DOWN:
-            e["event"] = "peer_down"; e["peer"] = ev.peer;
-            e["name"] = peer_name(c, ev.peer);
-            break;
-        case DART_PEER_INTEREST:
-            e["event"] = "peer_interest"; e["peer"] = ev.peer;
-            e["publishes"] = ev.publish_topics; e["receives"] = ev.receive_topics;
-            break;
-        case DART_MSG_LOST:
-            e["event"] = "msg_lost"; e["channel"] = ev.channel; e["peer"] = ev.peer;
-            e["first"] = ev.lost_first; e["count"] = ev.lost_count;
-            break;
-        case DART_MSG_TOO_BIG:
-            e["event"] = "msg_too_big"; e["bytes"] = ev.too_big_bytes;
-            break;
-        case DART_NAME_COLLISION:
-            e["event"] = "name_collision"; e["identity"] = hex64(ev.identity);
-            if (ev.detail) e["detail"] = ev.detail;
-            break;
-        case DART_QOS_INCOMPATIBLE:
-            e["event"] = "qos_incompatible"; e["channel"] = ev.channel; e["peer"] = ev.peer;
-            if (ev.detail) e["detail"] = ev.detail;
-            break;
-        case DART_SCHEMA_MISMATCH:
-            e["event"] = "schema_mismatch"; e["channel"] = ev.channel; e["peer"] = ev.peer;
-            if (ev.detail) e["detail"] = ev.detail;
-            break;
-        case DART_PEER_REFUSED:
-            e["event"] = "peer_refused"; e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
-            break;
-        case DART_INTEREST_OVERFLOW:
-            e["event"] = "interest_overflow"; e["peer"] = ev.peer; e["count"] = ev.lost_count;
-            break;
-        case DART_META_TRUNCATED:
-            e["event"] = "meta_truncated";
-            if (ev.detail) e["detail"] = ev.detail;
-            break;
-        case DART_PEER_META_TOO_BIG:
-            e["event"] = "peer_meta_too_big"; e["peer"] = ev.peer; e["bytes"] = ev.too_big_bytes;
-            e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
-            break;
-        default:
-            e["event"] = "unknown";
-            break;
-        }
-        send_json(c, e);
+/* Format one event as JSON and send it. Runs inside the dart callback (on the node's
+ * service thread, or on the connection thread for events a control op triggered). */
+static void send_event(Conn *c, const DartEvent &ev){
+    char text[192];
+    json e = { {"op", "event"}, {"text", dart_event_str(&ev, text, sizeof text)} };
+    switch (ev.kind){
+    case DART_PEER_UP:
+        e["event"] = "peer_up"; e["peer"] = ev.peer;
+        e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
+        e["name"] = peer_name(c, ev.peer);
+        break;
+    case DART_PEER_DOWN:
+        e["event"] = "peer_down"; e["peer"] = ev.peer;
+        e["name"] = peer_name(c, ev.peer);
+        break;
+    case DART_PEER_INTEREST:
+        e["event"] = "peer_interest"; e["peer"] = ev.peer;
+        e["publishes"] = ev.publish_topics; e["receives"] = ev.receive_topics;
+        break;
+    case DART_MSG_LOST:
+        e["event"] = "msg_lost"; e["channel"] = ev.channel; e["peer"] = ev.peer;
+        e["first"] = ev.lost_first; e["count"] = ev.lost_count;
+        break;
+    case DART_MSG_TOO_BIG:
+        e["event"] = "msg_too_big"; e["bytes"] = ev.too_big_bytes;
+        break;
+    case DART_NAME_COLLISION:
+        e["event"] = "name_collision"; e["identity"] = hex64(ev.identity);
+        if (ev.detail) e["detail"] = ev.detail;
+        break;
+    case DART_QOS_INCOMPATIBLE:
+        e["event"] = "qos_incompatible"; e["channel"] = ev.channel; e["peer"] = ev.peer;
+        if (ev.detail) e["detail"] = ev.detail;
+        break;
+    case DART_SCHEMA_MISMATCH:
+        e["event"] = "schema_mismatch"; e["channel"] = ev.channel; e["peer"] = ev.peer;
+        if (ev.detail) e["detail"] = ev.detail;
+        break;
+    case DART_PEER_REFUSED:
+        e["event"] = "peer_refused"; e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
+        break;
+    case DART_INTEREST_OVERFLOW:
+        e["event"] = "interest_overflow"; e["peer"] = ev.peer; e["count"] = ev.lost_count;
+        break;
+    case DART_META_TRUNCATED:
+        e["event"] = "meta_truncated";
+        if (ev.detail) e["detail"] = ev.detail;
+        break;
+    case DART_PEER_META_TOO_BIG:
+        e["event"] = "peer_meta_too_big"; e["peer"] = ev.peer; e["bytes"] = ev.too_big_bytes;
+        e["addr"] = addr_str(ev.ip, ev.ip_len, ev.port);
+        break;
+    case DART_EVICTED_UNSENT:
+        e["event"] = "evicted_unsent"; e["channel"] = ev.channel;
+        e["first"] = ev.lost_first; e["count"] = ev.lost_count;
+        break;
+    default:
+        e["event"] = "unknown";
+        break;
     }
-    c->pending.clear();
+    send_json(c, e);
 }
 
-/* ---- node callbacks (fire inside dart_* calls; no dart_* calls allowed here) ------- */
+/* ---- node callbacks (send and read-only dart_* queries are legal here) ------------- */
 
 static void on_dart_msg(const DartMsg *m){
     Conn *c = (Conn *)m->user;
@@ -278,22 +280,7 @@ static void on_dart_msg(const DartMsg *m){
 
 static void on_dart_event(const DartEvent *ev){
     Conn *c = (Conn *)ev->user;
-    c->pending.push_back(*ev);   /* formatted + sent by flush_events_locked after the call */
-}
-
-/* ---- the poll thread: drives discovery, RX and timers for this connection's node --- */
-
-static void poll_loop(Conn *c){
-    while (c->running.load(std::memory_order_relaxed)){
-        {
-            std::lock_guard<std::mutex> g(c->lock);
-            if (c->node){
-                dart_node_poll(c->node, 1);   /* wakes instantly on RX; 1 ms cap for timers */
-                flush_events_locked(c);
-            }
-        }
-        std::this_thread::yield();            /* let the connection thread grab the lock */
-    }
+    if (c->ws) send_event(c, *ev);
 }
 
 /* ---- control plane ---------------------------------------------------------------- */
@@ -341,10 +328,8 @@ static void op_open(Conn *c, const json &req, const json &seq){
 
     c->node = dart_node_open(&mem, name.c_str(), on_dart_msg, on_dart_event, &o);
     if (!c->node){ reply_err(c, seq, "dart_node_open failed"); return; }
-    c->name    = name;
-    c->running = true;
-    c->poller  = std::thread(poll_loop, c);
-    flush_events_locked(c);
+    c->name = name;
+    dart_node_start(c->node);   /* the node's own service thread drives everything */
     reply_ok(c, seq, { {"proto", kProtoVersion}, {"name", name} });
     if (g_verbose) printf("[bridge] node '%s' opened\n", name.c_str());
 }
@@ -410,6 +395,7 @@ static void op_role(Conn *c, const json &req, const json &seq){
 static void op_peers(Conn *c, const json &, const json &seq){
     json list = json::array();
     uint16_t count = 0;
+    dart_node_lock(c->node);   /* zero-copy view: fence out the node's service thread */
     const DartDiscoveryPeer *peers = dart_node_peers(c->node, &count);
     for (uint16_t i = 0; peers && i < count; i++){
         const DartDiscoveryPeer &p = peers[i];
@@ -420,6 +406,7 @@ static void op_peers(Conn *c, const json &, const json &seq){
                          {"frag", dart_node_peer_frag(&p)},
                          {"topics", peer_topics_json(p)} });
     }
+    dart_node_unlock(c->node);
     reply_ok(c, seq, { {"peers", list} });
 }
 
@@ -453,7 +440,6 @@ static void on_text(Conn *c, const std::string &raw){
     json seq = req.value("seq", json(0));
     std::string op = req.value("op", "");
 
-    std::lock_guard<std::mutex> g(c->lock);
     if (op == "open"){ op_open(c, req, seq); return; }
     if (!c->node){ reply_err(c, seq, "send open first"); return; }
     if      (op == "channel") op_channel(c, req, seq);
@@ -462,7 +448,6 @@ static void on_text(Conn *c, const std::string &raw){
     else if (op == "drain")   op_drain(c, req, seq);
     else if (op == "stats")   op_stats(c, req, seq);
     else reply_err(c, seq, "unknown op: " + op);
-    flush_events_locked(c);
 }
 
 /* ---- data plane: [u8 op][u16 channel][payload] ------------------------------------ */
@@ -471,23 +456,20 @@ static void on_binary(Conn *c, const std::string &frame){
     if (frame.size() < 3 || (uint8_t)frame[0] != kOpData) return;   /* reserved ops: drop */
     uint16_t id = (uint16_t)((uint8_t)frame[1] | ((uint8_t)frame[2] << 8));
 
-    std::lock_guard<std::mutex> g(c->lock);
     if (!c->node){ send_error_event(c, id, DART_ERR_NO_CHANNEL); return; }
     DartChannel *ch = dart_node_channel(c->node, id);
     if (!ch){ send_error_event(c, id, DART_ERR_NO_CHANNEL); return; }
     int rc = dart_channel_send(ch, dart_bytes(frame.data() + 3, frame.size() - 3));
     if (rc < 0) send_error_event(c, id, rc);
-    else        dart_node_poll(c->node, 0);   /* flush TX now, not on the poller's next tick */
-    flush_events_locked(c);
+    /* no explicit flush: the send kicks the node's service thread awake */
 }
 
 /* ---- connection lifecycle --------------------------------------------------------- */
 
 static void conn_close(const std::shared_ptr<Conn> &c){
-    c->running = false;
-    if (c->poller.joinable()) c->poller.join();
-    std::lock_guard<std::mutex> g(c->lock);
     if (c->node){
+        /* close stops + joins the node's service thread first, so no callback can be
+           mid-flight (touching c->ws) once it returns */
         dart_node_close(c->node, 1);   /* BYE + the allocator reset frees everything */
         c->node = nullptr;
         if (g_verbose) printf("[bridge] node '%s' closed\n", c->name.c_str());

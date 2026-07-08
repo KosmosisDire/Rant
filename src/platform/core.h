@@ -1,6 +1,8 @@
 /* dart_plat: the one platform layer. Every OS dependency the runtimes need lives
- * behind this contract: a monotonic clock, UDP sockets, multicast, entropy, and
- * the source-address route probe. The layers above (discovery_rt, node) speak
+ * behind this contract: a monotonic clock, UDP sockets, multicast, entropy,
+ * the source-address route probe, and threads (thread/mutex/condvar/waker,
+ * auto-detected as DART_THREADS; DART_NO_THREADS opts out). The layers above
+ * (discovery_rt, node) speak
  * only dart_plat_* and never touch a sockaddr, winsock, or a platform #ifdef, so
  * a new platform is one new implementation of this header. A platform that
  * already has BSD sockets needs no new code: the bundled implementation covers
@@ -29,6 +31,28 @@ extern "C" {
 #define DART_SHM
 #endif
 
+/* Threading (the node lock + optional service thread) follows the same flag shape:
+ * DART_THREADS is AUTO-DETECTED on where the bundled platform layer provides it
+ * (Windows; POSIX with pthreads: Linux/macOS/BSD/ESP-IDF, plus any other libc that
+ * advertises <pthread.h>), off elsewhere, and DART_NO_THREADS always wins. A NEW
+ * platform implementation that provides the thread/mutex/cond/waker contract below
+ * declares support by defining DART_THREADS itself (in its build flags or before
+ * this header), which turns the threaded node on with no other change. */
+#if !defined(DART_THREADS) && !defined(DART_NO_THREADS)
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__) || defined(ESP_PLATFORM)
+    #define DART_THREADS
+  #elif defined(__has_include)
+    #if __has_include(<pthread.h>)
+      #define DART_THREADS   /* unknown POSIX with pthreads: the bundled layer covers it */
+    #endif
+  #endif
+#endif
+#if defined(DART_THREADS) && defined(DART_NO_THREADS)
+  #undef DART_THREADS        /* both set: the opt-out wins */
+#endif
+
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
 typedef intptr_t i_DartSock;
 #define DART_SOCK_BAD ((i_DartSock)-1)
@@ -38,7 +62,8 @@ typedef intptr_t i_DartSock;
 typedef struct { i_DartSock fd; short events; short revents; } i_DartPollfd;
 
 /* Process-wide net init/teardown (WSAStartup/WSACleanup; no-op elsewhere).
- * Refcounted, so a node and its discovery opening/closing in turn pair safely.
+ * The OS refcounts matched calls per process, so a node and its discovery
+ * opening/closing in turn pair safely from any thread.
  * startup returns 1 on success, 0 on failure. */
 int  i_dart_plat_startup(void);
 void i_dart_plat_cleanup(void);
@@ -103,6 +128,49 @@ uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
  * if the platform offers no enumeration). Backs the auto interface-pin fallback when
  * a route probe can't name a real LAN interface. */
 int      i_dart_plat_local_ipv4s(uint32_t *out, int max);
+
+/* --- threads (present only under DART_THREADS; see the detection above) -------
+ * What the node runtime's thread safety and background service thread need: a
+ * thread, a mutex, a condvar, and a waker that can interrupt i_dart_plat_poll
+ * from another thread. Opaque aligned blobs keep OS headers out of this header;
+ * core.c static-asserts the real types fit. Off (undetected platform or
+ * DART_NO_THREADS) the node reverts to the single-threaded contract; a new
+ * platform layer implements this contract and defines DART_THREADS.
+ * POSIX: link -lpthread (older toolchains). */
+#ifdef DART_THREADS
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_DartMutex;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_DartCond;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[32]; } i_DartThread;
+
+/* start runs fn(arg) on a new thread; 1 on success. join blocks until fn returns. */
+int      i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg);
+void     i_dart_plat_thread_join (i_DartThread *t);
+/* Nonzero id of the calling thread (compared, never dereferenced). */
+uint64_t i_dart_plat_thread_id   (void);
+
+void i_dart_plat_mutex_init   (i_DartMutex *m);
+void i_dart_plat_mutex_destroy(i_DartMutex *m);
+void i_dart_plat_mutex_lock   (i_DartMutex *m);
+void i_dart_plat_mutex_unlock (i_DartMutex *m);
+
+void i_dart_plat_cond_init     (i_DartCond *c);
+void i_dart_plat_cond_destroy  (i_DartCond *c);
+/* Wait up to timeout_us with m held; m is reacquired before returning. May wake
+ * early or spuriously: callers loop on a predicate plus a monotonic deadline. */
+void i_dart_plat_cond_wait     (i_DartCond *c, i_DartMutex *m, uint32_t timeout_us);
+void i_dart_plat_cond_broadcast(i_DartCond *c);
+
+/* Waker: a self-pipe whose fd sits in a normal i_dart_plat_poll set, so another
+ * thread can cut a blocking wait short. A nonblocking UDP socket bound to
+ * 127.0.0.1:ephemeral and connected to itself: connect filters foreign
+ * datagrams, repeat signals coalesce in the socket buffer, and it is the one
+ * mechanism that is pollable on both Windows and POSIX with no new poll API. */
+typedef struct { i_DartSock fd; } i_DartWaker;
+int  i_dart_plat_waker_open  (i_DartWaker *w);   /* 1 on success */
+int  i_dart_plat_waker_signal(i_DartWaker *w);   /* 1 = the signal went out */
+void i_dart_plat_waker_drain (i_DartWaker *w);
+void i_dart_plat_waker_close (i_DartWaker *w);
+#endif /* DART_THREADS */
 
 /* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
  * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target

@@ -211,6 +211,12 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                DartBytes datagram, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
+/* The next monotonic time dart_discovery_update wants to run its timers (announce due;
+ * 0 = immediately, e.g. a pending solicit or a just-advertised blob). Lets a driving
+ * loop sleep exactly until due instead of ticking. Peer-timeout sweeps ride the same
+ * cadence, so detection lags by at most one announce interval (well inside the
+ * default peer timeout). */
+uint64_t     dart_discovery_next_due_us(const DartDiscoveryState *st);
 size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(DartDiscoveryState *st);
@@ -277,8 +283,10 @@ void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_
 #ifndef DART_DISCOVERY_SANS_IO
 #pragma region platform/core.h
 /* dart_plat: the one platform layer. Every OS dependency the runtimes need lives
- * behind this contract: a monotonic clock, UDP sockets, multicast, entropy, and
- * the source-address route probe. The layers above (discovery_rt, node) speak
+ * behind this contract: a monotonic clock, UDP sockets, multicast, entropy,
+ * the source-address route probe, and threads (thread/mutex/condvar/waker,
+ * auto-detected as DART_THREADS; DART_NO_THREADS opts out). The layers above
+ * (discovery_rt, node) speak
  * only dart_plat_* and never touch a sockaddr, winsock, or a platform #ifdef, so
  * a new platform is one new implementation of this header. A platform that
  * already has BSD sockets needs no new code: the bundled implementation covers
@@ -307,6 +315,28 @@ extern "C" {
 #define DART_SHM
 #endif
 
+/* Threading (the node lock + optional service thread) follows the same flag shape:
+ * DART_THREADS is AUTO-DETECTED on where the bundled platform layer provides it
+ * (Windows; POSIX with pthreads: Linux/macOS/BSD/ESP-IDF, plus any other libc that
+ * advertises <pthread.h>), off elsewhere, and DART_NO_THREADS always wins. A NEW
+ * platform implementation that provides the thread/mutex/cond/waker contract below
+ * declares support by defining DART_THREADS itself (in its build flags or before
+ * this header), which turns the threaded node on with no other change. */
+#if !defined(DART_THREADS) && !defined(DART_NO_THREADS)
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__) || defined(ESP_PLATFORM)
+    #define DART_THREADS
+  #elif defined(__has_include)
+    #if __has_include(<pthread.h>)
+      #define DART_THREADS   /* unknown POSIX with pthreads: the bundled layer covers it */
+    #endif
+  #endif
+#endif
+#if defined(DART_THREADS) && defined(DART_NO_THREADS)
+  #undef DART_THREADS        /* both set: the opt-out wins */
+#endif
+
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
 typedef intptr_t i_DartSock;
 #define DART_SOCK_BAD ((i_DartSock)-1)
@@ -316,7 +346,8 @@ typedef intptr_t i_DartSock;
 typedef struct { i_DartSock fd; short events; short revents; } i_DartPollfd;
 
 /* Process-wide net init/teardown (WSAStartup/WSACleanup; no-op elsewhere).
- * Refcounted, so a node and its discovery opening/closing in turn pair safely.
+ * The OS refcounts matched calls per process, so a node and its discovery
+ * opening/closing in turn pair safely from any thread.
  * startup returns 1 on success, 0 on failure. */
 int  i_dart_plat_startup(void);
 void i_dart_plat_cleanup(void);
@@ -381,6 +412,49 @@ uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
  * if the platform offers no enumeration). Backs the auto interface-pin fallback when
  * a route probe can't name a real LAN interface. */
 int      i_dart_plat_local_ipv4s(uint32_t *out, int max);
+
+/* --- threads (present only under DART_THREADS; see the detection above) -------
+ * What the node runtime's thread safety and background service thread need: a
+ * thread, a mutex, a condvar, and a waker that can interrupt i_dart_plat_poll
+ * from another thread. Opaque aligned blobs keep OS headers out of this header;
+ * core.c static-asserts the real types fit. Off (undetected platform or
+ * DART_NO_THREADS) the node reverts to the single-threaded contract; a new
+ * platform layer implements this contract and defines DART_THREADS.
+ * POSIX: link -lpthread (older toolchains). */
+#ifdef DART_THREADS
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_DartMutex;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_DartCond;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[32]; } i_DartThread;
+
+/* start runs fn(arg) on a new thread; 1 on success. join blocks until fn returns. */
+int      i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg);
+void     i_dart_plat_thread_join (i_DartThread *t);
+/* Nonzero id of the calling thread (compared, never dereferenced). */
+uint64_t i_dart_plat_thread_id   (void);
+
+void i_dart_plat_mutex_init   (i_DartMutex *m);
+void i_dart_plat_mutex_destroy(i_DartMutex *m);
+void i_dart_plat_mutex_lock   (i_DartMutex *m);
+void i_dart_plat_mutex_unlock (i_DartMutex *m);
+
+void i_dart_plat_cond_init     (i_DartCond *c);
+void i_dart_plat_cond_destroy  (i_DartCond *c);
+/* Wait up to timeout_us with m held; m is reacquired before returning. May wake
+ * early or spuriously: callers loop on a predicate plus a monotonic deadline. */
+void i_dart_plat_cond_wait     (i_DartCond *c, i_DartMutex *m, uint32_t timeout_us);
+void i_dart_plat_cond_broadcast(i_DartCond *c);
+
+/* Waker: a self-pipe whose fd sits in a normal i_dart_plat_poll set, so another
+ * thread can cut a blocking wait short. A nonblocking UDP socket bound to
+ * 127.0.0.1:ephemeral and connected to itself: connect filters foreign
+ * datagrams, repeat signals coalesce in the socket buffer, and it is the one
+ * mechanism that is pollable on both Windows and POSIX with no new poll API. */
+typedef struct { i_DartSock fd; } i_DartWaker;
+int  i_dart_plat_waker_open  (i_DartWaker *w);   /* 1 on success */
+int  i_dart_plat_waker_signal(i_DartWaker *w);   /* 1 = the signal went out */
+void i_dart_plat_waker_drain (i_DartWaker *w);
+void i_dart_plat_waker_close (i_DartWaker *w);
+#endif /* DART_THREADS */
 
 /* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
  * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
@@ -713,6 +787,10 @@ void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
  * added local channel matches interest peers advertised before it existed. */
 void       dart_discovery_replay(DartDiscovery *d);
+/* This runtime's receive sockets (the multicast group fd, plus the own unicast RX fd
+ * when one exists), for a caller embedding discovery in its own blocking wait. Fills
+ * out[0..1] and returns the count (1 or 2). The fds are stable across a migrate. */
+int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
 
 /* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
@@ -1283,6 +1361,11 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
     return 0;
 }
 
+uint64_t dart_discovery_next_due_us(const DartDiscoveryState *st){
+    if (!st || !st->started || st->want_solicit) return 0;
+    return st->next_announce_us;   /* 0 after an advertise = announce the change now */
+}
+
 void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
     if (!st || meta.len > st->meta_capacity) return;   /* the node sizes meta_capacity to fit */
     st->self_meta         = meta;
@@ -1476,6 +1559,9 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #include <unistd.h>
   #include <poll.h>
   #include <time.h>
+  #ifdef DART_THREADS
+    #include <pthread.h>
+  #endif
   #include <fcntl.h>
   #include <errno.h>
   #include <stdio.h>
@@ -1491,25 +1577,24 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
 
 /* ----------------------------------------------------------------- lifecycle */
 #ifdef _WIN32
-static int i_dart_plat_wsa_refs = 0;
+static LARGE_INTEGER i_dart_plat_qpc_freq;   /* set once in startup; lazy fallback */
 int i_dart_plat_startup(void){
     WSADATA w;
-    if (i_dart_plat_wsa_refs == 0){
-        if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
+    /* WSAStartup and timeBeginPeriod are both refcounted by the OS per process,
+       so unconditional matched calls are safe from any thread (a hand-rolled
+       counter here would be the one racy global in DART). */
+    if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
   #ifndef DART_NO_HIGHRES_TIMER
-        timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
+    timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
   #endif
-    }
-    i_dart_plat_wsa_refs++;
+    QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     return 1;
 }
 void i_dart_plat_cleanup(void){
-    if (i_dart_plat_wsa_refs > 0 && --i_dart_plat_wsa_refs == 0){
   #ifndef DART_NO_HIGHRES_TIMER
-        timeEndPeriod(1);
+    timeEndPeriod(1);
   #endif
-        WSACleanup();
-    }
+    WSACleanup();
 }
 #else
 int  i_dart_plat_startup(void){ return 1; }
@@ -1519,10 +1604,10 @@ void i_dart_plat_cleanup(void){}
 /* --------------------------------------------------------------------- clock */
 uint64_t i_dart_plat_now_us(void){
 #ifdef _WIN32
-    static LARGE_INTEGER f; LARGE_INTEGER c;
-    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER c;
+    if (!i_dart_plat_qpc_freq.QuadPart) QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     QueryPerformanceCounter(&c);
-    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)f.QuadPart);
+    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)i_dart_plat_qpc_freq.QuadPart);
 #else
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
@@ -1815,6 +1900,157 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
 }
 #endif
 
+/* ------------------------------------------------------------------- threads */
+#ifdef DART_THREADS
+
+/* The opaque header blobs must fit the real OS types (C99: no _Static_assert). */
+#define DART__FITS(name, real, blob) \
+    typedef char name[(sizeof(real) <= sizeof(blob)) ? 1 : -1]
+
+#ifdef _WIN32
+
+typedef struct { HANDLE h; void (*fn)(void *); void *arg; } i_DartThreadImpl;
+DART__FITS(i_dart_plat_mutex_fits,  SRWLOCK,            i_DartMutex);
+DART__FITS(i_dart_plat_cond_fits,   CONDITION_VARIABLE, i_DartCond);
+DART__FITS(i_dart_plat_thread_fits, i_DartThreadImpl,   i_DartThread);
+
+static DWORD WINAPI i_dart_plat_thread_tramp(LPVOID p){
+    i_DartThreadImpl *t = (i_DartThreadImpl *)p;
+    t->fn(t->arg);
+    return 0;
+}
+int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    ti->fn = fn; ti->arg = arg;
+    ti->h = CreateThread(NULL, 0, i_dart_plat_thread_tramp, ti, 0, NULL);
+    return ti->h != NULL;
+}
+void i_dart_plat_thread_join(i_DartThread *t){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    if (!ti->h) return;
+    WaitForSingleObject(ti->h, INFINITE);
+    CloseHandle(ti->h);
+    ti->h = NULL;
+}
+uint64_t i_dart_plat_thread_id(void){ return (uint64_t)GetCurrentThreadId(); }
+
+/* SRWLOCK over CRITICAL_SECTION: pointer-sized, pairs with condvars, and
+   deliberately non-recursive (the condvar contract requires it; the node's
+   reentrancy is an owner-id check above this layer). */
+void i_dart_plat_mutex_init   (i_DartMutex *m){ InitializeSRWLock((PSRWLOCK)m); }
+void i_dart_plat_mutex_destroy(i_DartMutex *m){ (void)m; }
+void i_dart_plat_mutex_lock   (i_DartMutex *m){ AcquireSRWLockExclusive((PSRWLOCK)m); }
+void i_dart_plat_mutex_unlock (i_DartMutex *m){ ReleaseSRWLockExclusive((PSRWLOCK)m); }
+
+void i_dart_plat_cond_init   (i_DartCond *c){ InitializeConditionVariable((PCONDITION_VARIABLE)c); }
+void i_dart_plat_cond_destroy(i_DartCond *c){ (void)c; }
+void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
+    /* 64-bit round-up: (0xFFFFFFFF + 999) would wrap in 32 bits and turn the
+       longest waits into 1 ms spins */
+    DWORD ms = (DWORD)(((uint64_t)timeout_us + 999u) / 1000u);
+    SleepConditionVariableSRW((PCONDITION_VARIABLE)c, (PSRWLOCK)m, ms ? ms : 1, 0);
+}
+void i_dart_plat_cond_broadcast(i_DartCond *c){ WakeAllConditionVariable((PCONDITION_VARIABLE)c); }
+
+#else /* POSIX */
+
+typedef struct { pthread_t t; void (*fn)(void *); void *arg; } i_DartThreadImpl;
+DART__FITS(i_dart_plat_mutex_fits,  pthread_mutex_t,  i_DartMutex);
+DART__FITS(i_dart_plat_cond_fits,   pthread_cond_t,   i_DartCond);
+DART__FITS(i_dart_plat_thread_fits, i_DartThreadImpl, i_DartThread);
+
+static void *i_dart_plat_thread_tramp(void *p){
+    i_DartThreadImpl *t = (i_DartThreadImpl *)p;
+    t->fn(t->arg);
+    return NULL;
+}
+int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    ti->fn = fn; ti->arg = arg;
+    return pthread_create(&ti->t, NULL, i_dart_plat_thread_tramp, ti) == 0;
+}
+void i_dart_plat_thread_join(i_DartThread *t){
+    pthread_join(((i_DartThreadImpl *)t)->t, NULL);
+}
+uint64_t i_dart_plat_thread_id(void){ return (uint64_t)(uintptr_t)pthread_self(); }
+
+void i_dart_plat_mutex_init   (i_DartMutex *m){ pthread_mutex_init((pthread_mutex_t *)m, NULL); }
+void i_dart_plat_mutex_destroy(i_DartMutex *m){ pthread_mutex_destroy((pthread_mutex_t *)m); }
+void i_dart_plat_mutex_lock   (i_DartMutex *m){ pthread_mutex_lock((pthread_mutex_t *)m); }
+void i_dart_plat_mutex_unlock (i_DartMutex *m){ pthread_mutex_unlock((pthread_mutex_t *)m); }
+
+void i_dart_plat_cond_init(i_DartCond *c){
+#if defined(__linux__)
+    /* wait on the monotonic clock so a wall-clock step cannot stretch a timeout */
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+    pthread_cond_init((pthread_cond_t *)c, &a);
+    pthread_condattr_destroy(&a);
+#else
+    pthread_cond_init((pthread_cond_t *)c, NULL);
+#endif
+}
+void i_dart_plat_cond_destroy(i_DartCond *c){ pthread_cond_destroy((pthread_cond_t *)c); }
+void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
+#if defined(__APPLE__)
+    struct timespec rel;
+    rel.tv_sec  = (time_t)(timeout_us / 1000000u);
+    rel.tv_nsec = (long)(timeout_us % 1000000u) * 1000L;
+    pthread_cond_timedwait_relative_np((pthread_cond_t *)c, (pthread_mutex_t *)m, &rel);
+#else
+    /* Linux: monotonic (set at init). Elsewhere: realtime; a wall-clock jump can
+       cut the wait short, which the caller's predicate-plus-deadline loop absorbs. */
+    struct timespec ts;
+  #if defined(__linux__)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+  #else
+    clock_gettime(CLOCK_REALTIME, &ts);
+  #endif
+    ts.tv_sec  += (time_t)(timeout_us / 1000000u);
+    ts.tv_nsec += (long)(timeout_us % 1000000u) * 1000L;
+    if (ts.tv_nsec >= 1000000000L){ ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    pthread_cond_timedwait((pthread_cond_t *)c, (pthread_mutex_t *)m, &ts);
+#endif
+}
+void i_dart_plat_cond_broadcast(i_DartCond *c){ pthread_cond_broadcast((pthread_cond_t *)c); }
+
+#endif /* _WIN32 */
+
+/* Waker: platform-neutral over the socket helpers above. Bound to loopback and
+   connected to itself, so only its own 1-byte signals ever arrive. */
+int i_dart_plat_waker_open(i_DartWaker *w){
+    struct sockaddr_in a; i_DartSocklen al = sizeof a;
+    w->fd = i_dart_plat_udp_open();
+    if (w->fd == DART_SOCK_BAD) return 0;
+    memset(&a, 0, sizeof a);
+    if (!i_dart_plat_bind(w->fd, i_dart_plat_ipv4(127, 0, 0, 1), 0, 0)) goto fail;
+    if (getsockname(DART__FD(w->fd), (struct sockaddr *)&a, &al) != 0) goto fail;
+    if (connect(DART__FD(w->fd), (struct sockaddr *)&a, sizeof a) != 0) goto fail;
+    i_dart_plat_set_nonblock(w->fd);
+    return 1;
+fail:
+    i_dart_plat_close(w->fd);
+    w->fd = DART_SOCK_BAD;
+    return 0;
+}
+int i_dart_plat_waker_signal(i_DartWaker *w){
+    char b = 1;
+    if (w->fd == DART_SOCK_BAD) return 0;
+    return (int)send(DART__FD(w->fd), &b, 1, 0) == 1;
+}
+void i_dart_plat_waker_drain(i_DartWaker *w){
+    char b[64];
+    if (w->fd == DART_SOCK_BAD) return;
+    while (recv(DART__FD(w->fd), b, sizeof b, 0) > 0) {}
+}
+void i_dart_plat_waker_close(i_DartWaker *w){
+    i_dart_plat_close(w->fd);
+    w->fd = DART_SOCK_BAD;
+}
+
+#endif /* DART_THREADS */
+
 /* ------------------------------------------------------------- shared memory */
 #ifdef DART_SHM
 #ifndef _WIN32
@@ -2000,6 +2236,14 @@ void dart_discovery_advertise(DartDiscovery *d, DartBytes meta){
 
 void dart_discovery_replay(DartDiscovery *d){
     if (d) dart_discovery_replay_peers(d->core);
+}
+
+int dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]){
+    int n = 0;
+    if (!d) return 0;
+    out[n++] = d->fd;
+    if (d->unicast_fd != DART_SOCK_BAD) out[n++] = d->unicast_fd;
+    return n;
 }
 
 /* A loopback (127/8) or unspecified address is never a usable multicast egress. */

@@ -47,22 +47,26 @@ using Dart;
     [DartArray(4)] public byte[] Uuid;
 }
 
-// A node is single-threaded: poll it from Update() (or a dedicated loop). OnMessage
-// fires on the thread that calls Poll, so from Update() you can touch the Unity API.
+// The node runs a C-level background service thread (Start). Handlers would fire on
+// that thread, so pass queueCallbacks: true and drain them from Update(): they then
+// run on the main thread, where the Unity API is legal.
 Dart.Node _node;
 Dart.Channel _ch;
 void Start() {
     _node = Node.Open("player1", new NodeOptions { Domain = 7 },
                       onMessage: m => transform.position = ToVec(m.As<Pose>()));
     _ch = _node.CreateChannel("pose", Role.PubSub, typeof(Pose));
+    _node.Start(queueCallbacks: true);
 }
-void Update()      { _node.Poll(0); /* discovery/RX/TX; delivers messages inline */ }
+void Update()      { _node.DispatchCallbacks(); /* queued messages/events, main thread */ }
 void OnDestroy()   { _node.Close(); }
+// (Alternative: skip Start() and call _node.Poll(0) from Update(): handlers then fire
+// inline on the main thread, at frame-rate latency.)
 ```
 
 Wire field names are the C# field names (override with `[DartField("stamp")]`) and must
-match on every node for a topic. Do NOT call `Node`/`Channel` methods from inside the
-message handler.
+match on every node for a topic. Sends are thread-safe from any thread; from inside a
+handler, `Channel.Send` and read-only queries are allowed, other node calls are not.
 
 ## IL2CPP / AOT
 

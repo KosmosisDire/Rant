@@ -50,6 +50,10 @@
 
 static unsigned long long g_tx_calls, g_tx_wouldblock, g_tx_reset, g_tx_err, g_tx_ticks;
 static unsigned long long g_rx_calls, g_rx_would,      g_rx_reset, g_rx_err, g_rx_ticks;
+/* selftest fault injection: force transport datagrams (submessage type byte 1..4) to
+ * would-block, so the threaded phases can prove eviction is surfaced, never silent.
+ * Discovery datagrams ('uDSC') pass. Windows only (the wrappers are absent on POSIX). */
+static volatile int g_tx_block_data;
 static unsigned long long g_tx_type[5], g_rx_type[5];   /* [0]=other/disc, 1=DATA 2=HB 3=NACK 4=GAP */
 static unsigned long long g_tx_data_ch[4], g_rx_data_ch[4];
 static int g_trace = 0, g_trace_left = 24;
@@ -86,6 +90,14 @@ static void diag_classify(const char *b, int len, unsigned long long *types,
 static int diag_sendto(SOCKET s, const char *buf, int len, int flags,
                        const struct sockaddr *to, int tolen){
     LARGE_INTEGER a, b; int r;
+    /* byte 0 is type|flags: DATA/HB/NACK are types 1..3 in the low bits ('uDSC'
+       discovery datagrams land on 5 and pass through) */
+    if (g_tx_block_data && len >= 1 && ((unsigned char)buf[0] & 0x07u) >= 1
+                                    && ((unsigned char)buf[0] & 0x07u) <= 3){
+        WSASetLastError(WSAEWOULDBLOCK);
+        g_tx_calls++; g_tx_wouldblock++;
+        return -1;
+    }
     QueryPerformanceCounter(&a);
     r = sendto(s, buf, len, flags, to, tolen);
     QueryPerformanceCounter(&b);
@@ -1698,6 +1710,292 @@ static void schema_bind_checks(void){
     dart_allocator_reset(&ma);
 }
 
+/* ============ threaded: service thread, condvar flow control, waker ======== *
+ * 20. RELIABLE   : both nodes on service threads, 3 sender threads x 1000 reliable
+ *                  messages; exactly-once, per-thread ordered, no loss, no unsent
+ *                  eviction, drain completes. No dart_node_poll anywhere.
+ * 21. BURST      : best-effort keep_last 4; 64 back-to-back sends from one thread
+ *                  must ALL reach the wire (the unsent guard closes the burst-
+ *                  between-ticks overwrite race).
+ * 21b HOSTILE    : (Windows) TX forced to would-block; the guard must surface
+ *                  DART_EVICTED_UNSENT instead of silence, and every send is either
+ *                  delivered or accounted an eviction.
+ * 22. WAKER      : an idle started pair delivers a single send within ms, not at
+ *                  the next announce-capped wakeup.
+ * 23. REENTRANT  : a callback send (echo) works; create_channel/set_role from a
+ *                  callback and poll from a foreign thread are refused loudly.
+ * 24. STOP-UNDER-LOAD: stop with hammer threads mid-send and senders parked in the
+ *                  backpressure wait; everything unblocks, close never hangs. */
+#ifdef DART_THREADS
+
+static void sw_sleep_ms(int ms);   /* defined with the sweep helpers below */
+
+#define TH_SENDERS 3
+#define TH_MSGS    1000u
+
+static volatile unsigned long th_recv, th_order_bad, th_lost, th_evicted_evt;
+static unsigned long th_next_seq[TH_SENDERS];   /* only the sub's service thread writes */
+
+static void th_on_message(const DartMsg *m){
+    if (m->data.len >= 8){
+        const uint8_t *p = (const uint8_t*)m->data.data;
+        uint32_t tid = (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+        uint32_t seq = (uint32_t)p[4] | ((uint32_t)p[5]<<8) | ((uint32_t)p[6]<<16) | ((uint32_t)p[7]<<24);
+        if (tid < TH_SENDERS){
+            if (seq != th_next_seq[tid]) th_order_bad++;
+            th_next_seq[tid] = seq + 1;
+        }
+        th_recv++;
+    }
+}
+static void th_on_event(const DartEvent *ev){
+    if (ev->kind == DART_MSG_LOST) th_lost += (unsigned long)ev->lost_count;
+    else if (ev->kind == DART_EVICTED_UNSENT) th_evicted_evt++;
+}
+
+typedef struct { DartChannel *ch; uint32_t id; } th_sender_arg;
+static void th_sender(void *arg){
+    th_sender_arg *a = (th_sender_arg*)arg;
+    uint8_t buf[8]; uint32_t i;
+    for (i=0;i<TH_MSGS;i++){
+        buf[0]=(uint8_t)a->id; buf[1]=(uint8_t)(a->id>>8); buf[2]=(uint8_t)(a->id>>16); buf[3]=(uint8_t)(a->id>>24);
+        buf[4]=(uint8_t)i; buf[5]=(uint8_t)(i>>8); buf[6]=(uint8_t)(i>>16); buf[7]=(uint8_t)(i>>24);
+        dart_channel_send(a->ch, dart_bytes(buf, sizeof buf));
+    }
+}
+
+/* phase 23 state: node B echoes every request onto its reply channel from the
+ * callback, and probes the forbidden reentrant calls exactly once */
+static DartNode *th_echo_b;
+static DartChannel *th_echo_rep;
+static volatile unsigned long th_echo_replies;
+static volatile int th_cb_send_rc = -100, th_cb_create_refused = -1, th_cb_setrole_rc = -100;
+static void th_echo_b_on_msg(const DartMsg *m){
+    th_cb_send_rc = dart_channel_send(th_echo_rep, m->data);
+    if (th_cb_create_refused < 0){
+        th_cb_create_refused = (dart_node_create_channel(th_echo_b, "th/na", DART_PUBSUB, NULL, NULL) == NULL);
+        th_cb_setrole_rc = dart_channel_set_role(th_echo_rep, DART_PUB_ONLY);
+    }
+}
+static void th_echo_a_on_msg(const DartMsg *m){ (void)m; th_echo_replies++; }
+
+/* phase 24: hammer a reliable channel until told to stop */
+static volatile int th_hammer_stop;
+static void th_hammer(void *arg){
+    uint8_t buf[8]; memset(buf, 0x77, sizeof buf);
+    while (!th_hammer_stop) dart_channel_send((DartChannel*)arg, dart_bytes(buf, sizeof buf));
+}
+
+static void threaded_checks(void){
+    static uint8_t dummy[1];
+    uint8_t payload[16]; unsigned i;
+    memset(payload, 0x33, sizeof payload);
+
+    /* 20. RELIABLE: exactly-once ordered delivery under multithreaded send */
+    { DartChannelDef cd[1]; DartNodeOpts o; DartNode *w, *r;
+      memset(cd, 0, sizeof cd);
+      cd[0].name = "th/rel"; cd[0].role = DART_PUB_ONLY;
+      cd[0].qos.reliability = DART_RELIABLE; cd[0].qos.keep_last = 8;
+      cd[0].qos.max_message_bytes = 32; cd[0].qos.heartbeat_us = 50000;
+      cd[0].qos.backpressure_wait_us = 500000;
+      memset(&o, 0, sizeof o);
+      o.domain = ST_DOMAIN+4; o.disable_shm = 1; o.discovery.max_peers = 4;
+      w = test_node_open(dummy, 0, "th-pub", NULL, th_on_event, o, cd, 1);
+      cd[0].role = DART_SUB_ONLY;
+      r = test_node_open(dummy, 0, "th-sub", th_on_message, th_on_event, o, cd, 1);
+      ST_CHECK(w && r, "threaded: nodes open");
+      if (w && r){
+          th_recv = th_order_bad = th_lost = th_evicted_evt = 0;
+          memset(th_next_seq, 0, sizeof th_next_seq);
+          /* ST_CHECK evaluates its condition twice: keep side effects out of it */
+          { int s1 = dart_node_start(w), s2 = dart_node_start(r), again, poll_rc;
+            again = dart_node_start(w);
+            poll_rc = dart_node_poll(w, 0);
+            ST_CHECK(s1 == DART_OK && s2 == DART_OK, "threaded: service threads start");
+            ST_CHECK(again == DART_ERR_STATE, "threaded: double start refused");
+            ST_CHECK(poll_rc == DART_ERR_STATE, "threaded: foreign poll refused while started");
+            ST_CHECK(dart_node_is_started(w) == 1, "threaded: is_started");
+          }
+          /* the service threads own discovery + matching: no polling from here on */
+          { uint64_t end = i_dart_plat_now_us() + 5000000u;
+            while (dart_node_writer_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
+                sw_sleep_ms(5); }
+          ST_CHECK(dart_node_writer_match_count(w, 0) == 1, "threaded: match formed by the services");
+          {   i_DartThread th[TH_SENDERS]; th_sender_arg ta[TH_SENDERS]; uint32_t t;
+              for (t=0;t<TH_SENDERS;t++){
+                  ta[t].ch = dart_node_channel(w, 0); ta[t].id = t;
+                  i_dart_plat_thread_start(&th[t], th_sender, &ta[t]);
+              }
+              for (t=0;t<TH_SENDERS;t++) i_dart_plat_thread_join(&th[t]);
+          }
+          { int drained = dart_node_drain(w, 0, 10000);
+            ST_CHECK(drained == 1, "threaded: drain completes"); }
+          { uint64_t end = i_dart_plat_now_us() + 3000000u;    /* delivered before acked; settle */
+            while (th_recv < (unsigned long)TH_SENDERS*TH_MSGS && i_dart_plat_now_us() < end)
+                sw_sleep_ms(5); }
+          dart_node_stop(r); dart_node_stop(w);                /* join: counters now settled */
+          ST_CHECK(th_recv == (unsigned long)TH_SENDERS*TH_MSGS,
+                   "threaded: exactly-once delivery (%lu, want %lu)",
+                   th_recv, (unsigned long)TH_SENDERS*TH_MSGS);
+          ST_CHECK(th_order_bad == 0, "threaded: per-thread order kept (bad=%lu)", th_order_bad);
+          ST_CHECK(th_lost == 0, "threaded: no loss (lost=%lu)", th_lost);
+          ST_CHECK(th_evicted_evt == 0 && dart_node_evicted_unsent(w) == 0,
+                   "threaded: no unsent eviction (evt=%lu cnt=%u)",
+                   th_evicted_evt, dart_node_evicted_unsent(w));
+          dart_node_close(r, 1); dart_node_close(w, 1);
+      }
+    }
+
+    /* 21 + 21b + 22. BURST / HOSTILE / WAKER on one best-effort pair */
+    { DartChannelDef cd[1]; DartNodeOpts o; DartNode *w, *r;
+      memset(cd, 0, sizeof cd);
+      cd[0].name = "th/burst"; cd[0].role = DART_PUB_ONLY;
+      cd[0].qos.keep_last = 4;   /* best-effort */
+      cd[0].qos.max_message_bytes = 32; cd[0].qos.heartbeat_us = 50000;
+      memset(&o, 0, sizeof o);
+      o.domain = ST_DOMAIN+5; o.disable_shm = 1; o.discovery.max_peers = 4;
+      w = test_node_open(dummy, 0, "th-bpub", NULL, th_on_event, o, cd, 1);
+      cd[0].role = DART_SUB_ONLY;
+      r = test_node_open(dummy, 0, "th-bsub", th_on_message, th_on_event, o, cd, 1);
+      ST_CHECK(w && r, "burst: nodes open");
+      if (w && r){
+          th_recv = th_lost = th_evicted_evt = 0;
+          dart_node_start(w); dart_node_start(r);
+          { uint64_t end = i_dart_plat_now_us() + 5000000u;
+            while (dart_node_writer_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
+                sw_sleep_ms(5); }
+
+          /* 21. 64 back-to-back sends, keep_last 4: the unsent guard must let every
+             one reach the wire (each send waits at most one kicked TX pass) */
+          for (i=0;i<64;i++) dart_node_send(w, 0, payload, sizeof payload);
+          { uint64_t end = i_dart_plat_now_us() + 3000000u;
+            while (th_recv < 64 && i_dart_plat_now_us() < end) sw_sleep_ms(5); }
+          ST_CHECK(th_recv == 64, "burst: all 64 delivered past a depth-4 ring (%lu)", th_recv);
+          ST_CHECK(dart_node_evicted_unsent(w) == 0, "burst: nothing evicted unsent (%u)",
+                   dart_node_evicted_unsent(w));
+
+          /* 22. WAKER: quiesce, then one send must land well inside the ~1s
+             announce-capped sleep (only the waker explains that). Typical is
+             sub-ms; the margin absorbs a loaded CI box losing the CPU. */
+          sw_sleep_ms(300);
+          { unsigned long r0 = th_recv; uint64_t t0 = i_dart_plat_now_us(), dt;
+            dart_node_send(w, 0, payload, sizeof payload);
+            while (th_recv == r0 && i_dart_plat_now_us() - t0 < 1000000u) { /* spin */ }
+            dt = i_dart_plat_now_us() - t0;
+            ST_CHECK(th_recv == r0+1 && dt < 400000u,
+                     "waker: idle-node send delivered in %.1f ms", dt/1000.0);
+          }
+
+#ifdef _WIN32
+          /* 21b. HOSTILE: transport TX forced to would-block. The first emit pass
+             parks one datagram in tx_hold (a safe copy, delivered later); past that
+             the burst overwrites truly unsent history, which must surface as
+             DART_EVICTED_UNSENT, and every send is delivered or accounted evicted. */
+          { unsigned long r0 = th_recv; uint32_t e0 = dart_node_evicted_unsent(w);
+            uint32_t evicted;
+            g_tx_block_data = 1;
+            for (i=0;i<64;i++) dart_node_send(w, 0, payload, sizeof payload);
+            evicted = dart_node_evicted_unsent(w) - e0;
+            ST_CHECK(evicted >= 1, "hostile: blocked TX surfaces DART_EVICTED_UNSENT (%u)", evicted);
+            g_tx_block_data = 0;
+            /* the service retries the held datagram + drains the ring on its next
+               pass; announce cadence bounds it, so give it time */
+            { uint64_t end = i_dart_plat_now_us() + 3000000u;
+              while (th_recv - r0 + evicted < 64 && i_dart_plat_now_us() < end) sw_sleep_ms(10); }
+            ST_CHECK(th_recv - r0 + (unsigned long)evicted == 64,
+                     "hostile: every send delivered or accounted (recv=%lu evicted=%u)",
+                     th_recv - r0, evicted);
+          }
+#endif
+          /* lock/unlock smoke: bracket a peer-view read while the services run */
+          { uint16_t cnt = 0;
+            dart_node_lock(w);
+            (void)dart_node_peers(w, &cnt);
+            dart_node_unlock(w);
+            ST_CHECK(cnt >= 1, "lock: bracketed peer view reads (%u peers)", cnt);
+          }
+          dart_node_close(r, 1); dart_node_close(w, 1);
+      }
+    }
+
+    /* 23. REENTRANT: echo from the callback; forbidden calls refuse loudly.
+       The ring must be deeper than the request burst: a reentrant send can never
+       wait (it runs inside the service pass), so if all 10 requests batch into one
+       RX drain the 10 replies commit with no TX pass between them, and a shallower
+       ring would (correctly, counted) evict the overflow. */
+    { DartChannelDef ca[2], cb[2]; DartNodeOpts o; DartNode *a, *b;
+      memset(ca, 0, sizeof ca);
+      ca[0].name = "th/req"; ca[0].role = DART_PUB_ONLY;
+      ca[0].qos.reliability = DART_RELIABLE; ca[0].qos.keep_last = 16;
+      ca[0].qos.max_message_bytes = 32; ca[0].qos.heartbeat_us = 50000;
+      ca[1] = ca[0]; ca[1].name = "th/rep"; ca[1].role = DART_SUB_ONLY;
+      memcpy(cb, ca, sizeof ca);
+      cb[0].role = DART_SUB_ONLY; cb[1].role = DART_PUB_ONLY;
+      memset(&o, 0, sizeof o);
+      o.domain = ST_DOMAIN+6; o.disable_shm = 1; o.discovery.max_peers = 4;
+      a = test_node_open(dummy, 0, "th-echo-a", th_echo_a_on_msg, NULL, o, ca, 2);
+      b = test_node_open(dummy, 0, "th-echo-b", th_echo_b_on_msg, NULL, o, cb, 2);
+      ST_CHECK(a && b, "reentrant: nodes open");
+      if (a && b){
+          th_echo_b = b; th_echo_rep = dart_node_channel(b, 1);
+          th_echo_replies = 0; th_cb_send_rc = -100; th_cb_create_refused = -1; th_cb_setrole_rc = -100;
+          dart_node_start(a); dart_node_start(b);
+          { uint64_t end = i_dart_plat_now_us() + 5000000u;
+            while ((dart_node_writer_match_count(a, 0) == 0 || dart_node_writer_match_count(b, 1) == 0)
+                   && i_dart_plat_now_us() < end)
+                sw_sleep_ms(5); }
+          for (i=0;i<10;i++) dart_node_send(a, 0, payload, sizeof payload);
+          { uint64_t end = i_dart_plat_now_us() + 3000000u;
+            while (th_echo_replies < 10 && i_dart_plat_now_us() < end) sw_sleep_ms(5); }
+          dart_node_stop(b); dart_node_stop(a);
+          ST_CHECK(th_echo_replies == 10, "reentrant: callback send echoes (%lu/10)", th_echo_replies);
+          ST_CHECK(th_cb_send_rc == DART_OK, "reentrant: callback send returns DART_OK (%d)", th_cb_send_rc);
+          ST_CHECK(th_cb_create_refused == 1, "reentrant: callback create_channel refused");
+          ST_CHECK(th_cb_setrole_rc == DART_ERR_STATE, "reentrant: callback set_role refused (%d)", th_cb_setrole_rc);
+          dart_node_close(b, 1); dart_node_close(a, 1);
+      }
+    }
+
+    /* 24. STOP-UNDER-LOAD: hammer threads parked in the backpressure wait (a
+       matched reader that never acks) while stop broadcasts them loose; repeat.
+       The whole phase under a watchdog: a hang here is the deadlock detector. */
+    { uint64_t phase_t0 = i_dart_plat_now_us(); int iter;
+      for (iter=0; iter<3; iter++){
+          DartChannelDef cd[1]; DartNodeOpts o; DartNode *w, *r;
+          i_DartThread h1, h2;
+          memset(cd, 0, sizeof cd);
+          cd[0].name = "th/stop"; cd[0].role = DART_PUB_ONLY;
+          cd[0].qos.reliability = DART_RELIABLE; cd[0].qos.keep_last = 4;
+          cd[0].qos.max_message_bytes = 32; cd[0].qos.heartbeat_us = 50000;
+          cd[0].qos.backpressure_wait_us = 300000;
+          memset(&o, 0, sizeof o);
+          o.domain = (uint16_t)(ST_DOMAIN+7+iter); o.disable_shm = 1; o.discovery.max_peers = 4;
+          w = test_node_open(dummy, 0, "th-hpub", NULL, NULL, o, cd, 1);
+          cd[0].role = DART_SUB_ONLY;
+          r = test_node_open(dummy, 0, "th-hsub", NULL, NULL, o, cd, 1);
+          if (!w || !r){ ST_CHECK(0, "stop-load: nodes open (iter %d)", iter); break; }
+          { uint64_t end = i_dart_plat_now_us() + 5000000u;   /* match, then silence the reader */
+            while (dart_node_writer_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
+                st_pump(w, r, 10); }
+          dart_node_start(w);                    /* reader stays unpolled: never acks */
+          th_hammer_stop = 0;
+          i_dart_plat_thread_start(&h1, th_hammer, dart_node_channel(w, 0));
+          i_dart_plat_thread_start(&h2, th_hammer, dart_node_channel(w, 0));
+          sw_sleep_ms(50);                       /* hammers now parked in the wait */
+          dart_node_stop(w);                     /* broadcasts the waiters loose */
+          th_hammer_stop = 1;
+          i_dart_plat_thread_join(&h1);
+          i_dart_plat_thread_join(&h2);
+          dart_node_close(r, 0);
+          dart_node_close(w, 0);
+      }
+      ST_CHECK(i_dart_plat_now_us() - phase_t0 < 30000000u,
+               "stop-load: 3 stop-under-fire cycles, no hang (%.1f s)",
+               (i_dart_plat_now_us() - phase_t0)/1e6);
+    }
+}
+#endif /* DART_THREADS */
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -1998,6 +2296,9 @@ static int selftest_main(void){
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. channel schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
+#ifdef DART_THREADS
+    threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */
+#endif
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
@@ -2698,9 +2999,160 @@ static int memscale_main(void){
     return 0;
 }
 
+/* ============ threadbench: threaded send-path cost + drain backpressure ===== *
+ * One started pub node, one started sub node, one sender thread (this one). For
+ * each target rate (0 = flat out) send paced 32B best-effort messages for 2s and
+ * report: achieved rate, how many sends slept in the drain/backpressure wait, the
+ * time those waits ate (absolute + % of wall), unsent evictions, and delivery.
+ * keep_last 64 so the drain guard (not ack flow control) is what engages. Runs
+ * the UDP path (and the SHM path when compiled in), then a naive single-threaded
+ * send+poll(0) baseline for comparison. Backpressure only ever engages flat-out:
+ * paced rates should show wait% ~0 and delivery 100. */
+#ifdef DART_THREADS
+
+static volatile unsigned long g_tb_recv;
+static void tb_on_message(const DartMsg *m){ (void)m; g_tb_recv++; }
+
+static DartNode *tb_open(const char *name, int sub, int disable_shm){
+    DartAllocator a = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts o;
+    memset(&o, 0, sizeof o);
+    o.domain = 51;
+    o.disable_shm = (uint8_t)disable_shm;
+    o.net.multicast_interface = "127.0.0.1";
+    return dart_node_open(&a, name, sub ? tb_on_message : NULL, NULL, &o);
+}
+
+static DartChannel *tb_channel(DartNode *n, int sub){
+    DartChannelOpts co;
+    memset(&co, 0, sizeof co);
+    co.qos.keep_last = 64;               /* best-effort: isolates the unsent drain guard */
+    co.qos.max_message_bytes = 64;
+    co.qos.heartbeat_us = 50000;
+    return dart_node_create_channel(n, "tb/bench", sub ? DART_SUB_ONLY : DART_PUB_ONLY, NULL, &co);
+}
+
+static void tb_run_rate(DartNode *w, DartChannel *ch, unsigned rate_hz, double dur_s){
+    uint8_t payload[32];
+    uint64_t t0, t_end, next = 0, wait_us0, wait_us1;
+    uint32_t wait_n0, wait_n1, ev0, ev1;
+    unsigned long sent = 0, recv0 = g_tb_recv;
+    double wall;
+    char label[16];
+
+    memset(payload, 0x42, sizeof payload);
+    dart_node_backpressure_stats(w, &wait_us0, &wait_n0);
+    ev0 = dart_node_evicted_unsent(w);
+
+    t0 = i_dart_plat_now_us();
+    t_end = t0 + (uint64_t)(dur_s * 1e6);
+    if (rate_hz) next = t0;
+    while (i_dart_plat_now_us() < t_end){
+        if (rate_hz){
+            uint64_t now = i_dart_plat_now_us();
+            if (now < next) continue;                /* busy-wait pacing */
+            next += 1000000u / rate_hz;
+            if (next < now) next = now;              /* fell behind: no burst catch-up */
+        }
+        dart_channel_send(ch, dart_bytes(payload, sizeof payload));
+        sent++;
+    }
+    wall = (i_dart_plat_now_us() - t0) / 1e6;
+
+    sw_sleep_ms(300);                                /* let deliveries settle */
+    dart_node_backpressure_stats(w, &wait_us1, &wait_n1);
+    ev1 = dart_node_evicted_unsent(w);
+
+    if (rate_hz) sprintf(label, "%u", rate_hz);
+    else         sprintf(label, "flat-out");
+    printf("%9s  %10.0f  %8.1f%%  %10.3f  %7.2f%%  %7u  %8.2f%%\n",
+           label,
+           sent / wall,
+           100.0 * (double)(wait_n1 - wait_n0) / (sent ? sent : 1),
+           (wait_us1 - wait_us0) / 1e3,
+           100.0 * (wait_us1 - wait_us0) / (wall * 1e6),
+           ev1 - ev0,
+           100.0 * (double)(g_tb_recv - recv0) / (sent ? sent : 1));
+}
+
+static int tb_mode(const char *title, int disable_shm){
+    static const unsigned rates[] = { 10000, 50000, 100000, 200000, 500000, 0 };
+    DartNode *w = tb_open("tb-pub", 0, disable_shm);
+    DartNode *r = tb_open("tb-sub", 1, disable_shm);
+    DartChannel *cw, *cr;
+    unsigned k;
+    if (!w || !r){ fprintf(stderr, "threadbench: open failed\n"); return 1; }
+    cw = tb_channel(w, 0); cr = tb_channel(r, 1); (void)cr;
+    dart_node_start(w); dart_node_start(r);
+    { uint64_t end = i_dart_plat_now_us() + 5000000u;
+      while (dart_channel_match_count(cw) == 0 && i_dart_plat_now_us() < end) sw_sleep_ms(2); }
+    if (dart_channel_match_count(cw) != 1){ fprintf(stderr, "threadbench: no match\n"); return 1; }
+
+    printf("\n== %s ==\n", title);
+    printf("%9s  %10s  %9s  %10s  %8s  %7s  %9s\n",
+           "target", "sent/s", "waited", "wait ms", "wait%", "evicted", "delivered");
+    for (k = 0; k < sizeof rates / sizeof rates[0]; k++)
+        tb_run_rate(w, cw, rates[k], 2.0);
+    dart_node_close(r, 1);
+    dart_node_close(w, 1);
+    return 0;
+}
+
+static int threadbench_main(void){
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("DART threaded send-path bench (32B best-effort, keep_last 64, loopback, one sender)\n"
+           "waited = sends that slept in the drain/backpressure wait; wait%% = of sender wall time\n");
+    if (tb_mode("threaded, UDP loopback (shm off)", 1)) return 1;
+#ifdef DART_SHM
+    if (tb_mode("threaded, SHM same-host path", 0)) return 1;
+#endif
+
+    /* single-threaded flat-out baseline: the naive send + poll(0) + poll(0) loop */
+    {
+        DartNode *w = tb_open("tb-base-pub", 0, 1);
+        DartNode *r = tb_open("tb-base-sub", 1, 1);
+        DartChannel *cw = tb_channel(w, 0), *cr = tb_channel(r, 1);
+        uint8_t payload[32]; unsigned long sent = 0, recv0;
+        uint64_t t0, t_end; double wall;
+        (void)cr;
+        if (!w || !r || !cw){ fprintf(stderr, "threadbench: baseline open failed\n"); return 1; }
+        memset(payload, 0x42, sizeof payload);
+        { uint64_t end = i_dart_plat_now_us() + 5000000u;
+          while (dart_channel_match_count(cw) == 0 && i_dart_plat_now_us() < end){
+              dart_node_poll(w, 1); dart_node_poll(r, 0);
+          } }
+        recv0 = g_tb_recv;
+        t0 = i_dart_plat_now_us(); t_end = t0 + 2000000u;
+        while (i_dart_plat_now_us() < t_end){
+            dart_channel_send(cw, dart_bytes(payload, sizeof payload));
+            dart_node_poll(w, 0);
+            dart_node_poll(r, 0);
+            sent++;
+        }
+        wall = (i_dart_plat_now_us() - t0) / 1e6;
+        { uint64_t settle = i_dart_plat_now_us() + 300000u;
+          while (i_dart_plat_now_us() < settle){ dart_node_poll(w, 0); dart_node_poll(r, 0); } }
+        printf("\n== single-threaded baseline: send+poll(0)+poll(0) flat-out, UDP ==\n");
+        printf("  %10.0f send/s   delivered %.2f%%\n",
+               sent / wall, sent ? 100.0 * (double)(g_tb_recv - recv0) / sent : 0.0);
+        dart_node_close(r, 1);
+        dart_node_close(w, 1);
+    }
+    return 0;
+}
+#endif /* DART_THREADS */
+
 int main(int argc, char **argv){
     if (argc >= 2 && strcmp(argv[1], "memscale") == 0)
         return memscale_main();
+    if (argc >= 2 && strcmp(argv[1], "threadbench") == 0){
+#ifdef DART_THREADS
+        return threadbench_main();
+#else
+        fprintf(stderr, "threadbench needs threads (DART_THREADS off: undetected platform or DART_NO_THREADS)\n");
+        return 1;
+#endif
+    }
     if (argc >= 2 && strcmp(argv[1], "node") == 0)
         return node_main(argc-1, argv+1);
     if (argc >= 2 && strcmp(argv[1], "selftest") == 0)
@@ -2748,6 +3200,9 @@ int main(int argc, char **argv){
         "        Machines must share a subnet (discovery TTL is 1)\n"
         "  sendbench\n"
         "        UDP send-cost microbench on loopback (Windows)\n"
+        "  threadbench\n"
+        "        threaded send-path bench: paced rates + flat-out through a started\n"
+        "        node pair; reports the time eaten by the drain/backpressure wait\n"
         "  selftest\n"
         "        on_gap, backpressure, dynamic-interest functional test (exit 0 = pass)\n");
     return 2;

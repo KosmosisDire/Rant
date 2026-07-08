@@ -10,6 +10,7 @@
 
 #include "core.h"
 #include "../common/alloc.h"        /* DartAllocator (shared with the node runtime) */
+#include "../platform/core.h"       /* i_DartSock (dart_discovery_pollfds) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -107,6 +108,10 @@ void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
  * added local channel matches interest peers advertised before it existed. */
 void       dart_discovery_replay(DartDiscovery *d);
+/* This runtime's receive sockets (the multicast group fd, plus the own unicast RX fd
+ * when one exists), for a caller embedding discovery in its own blocking wait. Fills
+ * out[0..1] and returns the count (1 or 2). The fds are stable across a migrate. */
+int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
 
 /* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */

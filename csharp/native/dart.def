@@ -3,6 +3,12 @@ i_dart_plat_realloc
 dart_node_open
 dart_node_poll
 dart_node_close
+dart_node_start
+dart_node_stop
+dart_node_is_started
+dart_node_evicted_unsent
+dart_node_lock
+dart_node_unlock
 dart_node_create_channel
 dart_node_channel
 dart_channel_send

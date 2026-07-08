@@ -333,7 +333,10 @@ typedef enum {
     DART_ERR_NO_CHANNEL = -1,  /* channel index out of range */
     DART_ERR_TOO_BIG    = -2,  /* exceeds max_message_bytes or the wire fragment cap */
     DART_ERR_ROLE       = -3,  /* channel is SUB_ONLY or INACTIVE: cannot publish */
-    DART_ERR_OOM        = -4   /* dynamic allocator returned NULL */
+    DART_ERR_OOM        = -4,  /* dynamic allocator returned NULL */
+    DART_ERR_STATE      = -5,  /* wrong state: poll while a service thread runs, start while
+                                  started, or a call not allowed from inside a callback */
+    DART_ERR_NOSYS      = -6   /* not compiled in (dart_node_start with DART_THREADS off) */
 } DartResult;
 
 /* Publish a message to all peers. Returns DART_OK, or a negative DartResult. */
@@ -363,6 +366,15 @@ const DartQos *dart_transport_channel_qos(DartTransportState *st, uint16_t chann
 /* 1 if appending here would overwrite history not yet acked by every reader. A
  * writer pumps while this is 1, then sends anyway after qos.backpressure_wait_us. */
 int       dart_transport_send_would_evict(DartTransportState *st, uint16_t channel);
+
+/* 1 if appending here would overwrite history some matched, live reader was never
+ * HANDED TO THE WIRE (committed but not yet emitted by poll_send). Unlike
+ * would_evict this applies to best-effort lanes too: it detects a send burst
+ * outrunning the TX drain, not slow-reader flow control. The node waits on it so
+ * a send cannot silently vaporize data that never left the process. On 1, the
+ * evicted sample's base seqno / fragment count are written to the (NULLable) outs. */
+int       dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
+                                                 uint64_t *evict_base, uint32_t *evict_count);
 
 /* 1 if every live reader has acked all messages on this reliable channel (so a
  * writer may close without truncating). Best-effort/unknown return 1. Wrapped as

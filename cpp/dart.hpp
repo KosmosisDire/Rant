@@ -26,7 +26,8 @@
  *     });
  *     auto ch = node->create_channel("chat", dart::Role::PubSub, nullptr,
  *                                    { .reliability = dart::Reliability::Reliable });
- *     for (;;) { node->poll(1); ch.send("hello"); }   // drive it yourself (single-threaded)
+ *     node->start();                         // background service thread owns the loop
+ *     for (;;) ch.send("hello");             // thread-safe; or skip start() and poll(1) yourself
  */
 #ifndef DART_HPP_INCLUDED
 #define DART_HPP_INCLUDED
@@ -98,12 +99,13 @@ enum class Reliability { BestEffort = 0, Reliable = 1 };
 enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
 /* dart_channel_send / create result. Ok is 0; the rest mirror DartResult. */
-enum class SendStatus  { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4 };
+enum class SendStatus  { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
+                         State = -5, NoSys = -6 };
 
 enum class EventKind {
     PeerUp = 0, PeerDown, PeerInterest, MessageLost, MessageTooBig, NameCollision,
     QosIncompatible, SchemaMismatch, PeerRefused, InterestOverflow,
-    MetaTruncated, PeerMetaTooBig
+    MetaTruncated, PeerMetaTooBig, EvictedUnsent
 };
 
 /* Schema field kinds for reflection (Schema::Field); values match the C wire. */
@@ -113,8 +115,8 @@ enum class FieldType : uint8_t {
 
 static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
-static_assert((int)SendStatus::OutOfMemory == detail::DART_ERR_OOM, "result enum drift");
-static_assert((int)EventKind::PeerMetaTooBig == detail::DART_PEER_META_TOO_BIG, "event enum drift");
+static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
+static_assert((int)EventKind::EvictedUnsent == detail::DART_EVICTED_UNSENT, "event enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 
 /* forward decls */
@@ -428,9 +430,12 @@ private:
 
 /* Node: owns the DartNode, its memory, and the user callbacks.
  *
- * Single-threaded: drive poll() yourself in a loop (background threading was
- * removed for now). Call poll, send, create_channel, and the handlers all on one
- * thread; as with the C API, do NOT call back into the node from a handler. */
+ * Thread-safe: every call is serialized by a node-level lock inside the C core.
+ * Drive it either by calling poll() from your own loop, or via start(): a C-level
+ * background service thread owns the loop and handlers then fire on it (never two
+ * at once for one node). From inside a handler, send() and read-only queries are
+ * allowed; poll/create_channel/set_role/drain/stop are refused (SendStatus::State
+ * / no-op), never corrupting. */
 class Node {
 public:
     using MessageHandler = std::function<void(const MessageIn&)>;
@@ -507,16 +512,32 @@ public:
     }
 
     /* One loop tick: drives discovery, RX, timers, and flushes queued TX. Blocks
-     * up to timeout_ms in the socket wait (wakes early on RX; 0 = non-blocking).
-     * Drive this yourself in a loop -- a node is single-threaded. */
+     * up to timeout_ms in the socket wait (wakes early on RX or a send from another
+     * thread; 0 = non-blocking). Not needed (and refused) while start() runs. */
     int poll(int timeout_ms = 0) {
         return detail::dart_node_poll(impl_->node, timeout_ms);
     }
+
+    /* Run the C-level background service thread: it owns the loop and fires the
+     * handlers; every Node/Channel call stays safe from any thread, and a send is
+     * flushed immediately (a waker cuts the service's socket wait short). */
+    bool start() { return detail::dart_node_start(impl_->node) == 0; }
+    /* Stop and join the service thread (idempotent; implied by node teardown). */
+    void stop()  { detail::dart_node_stop(impl_->node); }
+    bool is_started() const { return detail::dart_node_is_started(impl_->node) == 1; }
 
     /* A copied snapshot of the live peer table (safe to keep after the poll). */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
         uint16_t count = 0;
+        /* the C view is zero-copy: hold the node lock across the copy so a poller
+           on another thread cannot mutate it mid-read (no-op if we are that thread).
+           RAII so a bad_alloc mid-copy cannot leak the lock and stall the node. */
+        struct LockGuard {
+            detail::DartNode* n;
+            explicit LockGuard(detail::DartNode* node) : n(node) { detail::dart_node_lock(n); }
+            ~LockGuard() { detail::dart_node_unlock(n); }
+        } guard(impl_->node);
         const detail::DartDiscoveryPeer* ps = detail::dart_node_peers(impl_->node, &count);
         for (uint16_t i = 0; ps && i < count; i++) {
             const detail::DartDiscoveryPeer& p = ps[i];
@@ -548,6 +569,9 @@ public:
         detail::dart_node_backpressure_stats(impl_->node, &b.waited_us, &b.waited_sends);
         return b;
     }
+    /* Sends that evicted never-sent history after the bounded wait (the
+     * EventKind::EvictedUnsent count): the send-burst/overload indicator. */
+    uint32_t evicted_unsent() const { return detail::dart_node_evicted_unsent(impl_->node); }
 
 private:
     struct Impl {

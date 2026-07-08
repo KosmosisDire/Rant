@@ -68,7 +68,10 @@ typedef struct DartNode    DartNode;
 typedef struct DartChannel DartChannel;   /* opaque channel handle (stable for the node's life) */
 
 /* A delivered message: all of its properties in one place. channel_name is a local
- * lookup (never on the wire). Do not call back into dart_* from the callback. */
+ * lookup (never on the wire). From the callback, dart_channel_send and read-only
+ * queries on the SAME node are allowed; poll/create_channel/set_role/drain/start/
+ * stop/close are not (refused with DART_ERR_STATE / NULL / 0; under DART_NO_THREADS
+ * the guards are gone, so simply do not call back in). See "threading" below. */
 typedef struct {
     DartNode      *node;
     void          *user;             /* DartNodeOpts.user_data */
@@ -97,8 +100,66 @@ typedef void (*DartMsgFn)(const DartMsg *msg);
  * be NULL for all defaults. Returns NULL on failure (incl. a static buffer too small). */
 DartNode    *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message,
                             DartEventFn on_event, const DartNodeOpts *opts);
-int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
-void         dart_node_close(DartNode *n, int send_bye);
+/* One loop tick: discovery, RX + delivery, timers, TX flush; blocks up to timeout_ms
+ * waiting for traffic (capped to the next internal timer; negative is treated as 0,
+ * there is no infinite wait). Returns 0, or DART_ERR_STATE if a service thread is
+ * running (dart_node_start owns the loop then) or when called from inside a callback. */
+int          dart_node_poll(DartNode *n, int timeout_ms);
+/* Stops the service thread if one runs, then tears the node down. Returns DART_OK, or
+ * DART_ERR_STATE when called from inside a callback (refused: the node keeps running
+ * and the handle stays valid, so close it from another thread). No other thread may be
+ * inside (or later enter) any dart_* call on this node once close begins. */
+int          dart_node_close(DartNode *n, int send_bye);
+
+/* ---- threading --------------------------------------------------------------------
+ * Every dart_node_* / dart_channel_* call is thread-safe: a node-level lock serializes
+ * them, and it is never held across a blocking wait (a poller drops it around the
+ * socket wait; mutating calls wake the poller through a loopback waker, so a send hits
+ * the wire in microseconds, not at the next tick). Two ways to drive a node:
+ *   - call dart_node_poll yourself (from one thread or several; sends from other
+ *     threads interleave safely and wake a blocked poll), or
+ *   - dart_node_start: a background SERVICE THREAD owns the loop; dart_node_poll then
+ *     returns DART_ERR_STATE. Callbacks fire on the service thread (events triggered
+ *     directly by one of your calls fire on that calling thread), and never two at
+ *     once for one node.
+ * From inside on_message/on_event: dart_channel_send and the read-only queries are
+ * allowed ON THE SAME NODE; dart_node_poll / create_channel / set_role / drain /
+ * start / stop / close are refused with DART_ERR_STATE (or NULL/0). Do NOT call into
+ * a DIFFERENT in-process node from a callback: its lock is a plain acquisition, so
+ * two nodes whose callbacks each send to the other deadlock (relay between in-process
+ * nodes by queueing to your own thread instead). Flow control without a poll cadence:
+ * a send that would overwrite reliable history not yet acked waits (condvar, bounded
+ * by qos.backpressure_wait_us), and one that would overwrite history NEVER YET SENT
+ * to a matched reader waits for one TX pass (bounded by DART_UNSENT_WAIT_US); if it
+ * still must evict, it proceeds KEEP_LAST-style and fires DART_EVICTED_UNSENT, never
+ * silently. All of this exists only under DART_THREADS, auto-detected where the
+ * platform layer provides threads (Windows; POSIX with pthreads) and off elsewhere:
+ * single-threaded contract, start returns DART_ERR_NOSYS. DART_NO_THREADS forces it
+ * off; a new platform layer defines DART_THREADS to declare support (platform/core.h). */
+/* Run the background service thread. DART_OK; DART_ERR_STATE if already running or
+ * called from a callback; DART_ERR_NOSYS when threads are compiled out (DART_THREADS
+ * off) or if the thread could not be created. */
+int          dart_node_start(DartNode *n);
+/* Stop and join the service thread (idempotent and safe to race: concurrent stoppers
+ * elect one joiner; implied by dart_node_close). Senders blocked in a flow-control
+ * wait wake and proceed (KEEP_LAST + the unsent guard, no pumping). */
+int          dart_node_stop(DartNode *n);
+/* 1 while the service thread runs. */
+int          dart_node_is_started(DartNode *n);
+/* Hold / release the node lock from a NON-callback thread around reads of a zero-copy
+ * view (dart_node_peers) while a poller runs elsewhere. Hold it briefly: the node makes
+ * no progress meanwhile, and while this thread holds it the node treats its calls like
+ * callback calls (sends commit without waiting; poll/create_channel/set_role/drain/
+ * start/stop/close refuse). Not recursion-counted: one lock pairs with one unlock.
+ * No-ops from inside a callback (the lock is already held) and when threads are
+ * compiled out. */
+void         dart_node_lock(DartNode *n);
+void         dart_node_unlock(DartNode *n);
+/* Sends that evicted never-sent history after the bounded wait (the DART_EVICTED_UNSENT
+ * count) since open: the send-burst/overload indicator. The guard runs when a service
+ * thread drives the node (and for the reliable backpressure path when it does not);
+ * classic poll-it-yourself best-effort keeps plain KEEP_LAST overwrite semantics. */
+uint32_t     dart_node_evicted_unsent(DartNode *n);
 
 /* Create a channel (topic). name is the cross-peer identity (same on every node, copied
  * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. schema is this
@@ -166,8 +227,10 @@ void     dart_node_set_pump_probe(DartNode *n, DartPumpProbeFn fn, uint64_t inte
  * `have` rising across calls = repair crawling; flat = wedged. Any pointer may be NULL. */
 int      dart_channel_reader_progress(DartChannel *ch, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
-/* Pump until every reader has acked all messages on this channel, or timeout_ms elapses.
- * Returns 1 if drained, 0 on timeout. Call before close so a burst isn't cut by the BYE. */
+/* Wait until every reader has acked all messages on this channel, or timeout_ms
+ * elapses: with a service thread it sleeps on its progress, otherwise it pumps the
+ * loop. Returns 1 if drained, 0 on timeout (or when called from a callback). Call
+ * before close so a burst isn't cut by the BYE. */
 int      dart_channel_drain(DartChannel *ch, int timeout_ms);
 /* Subscribers matched on this channel now; a one-shot publisher polls it before sending. */
 int      dart_channel_match_count(DartChannel *ch);

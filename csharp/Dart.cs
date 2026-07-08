@@ -14,12 +14,20 @@
 //   var ch = node.CreateChannel("pose", Dart.Role.PubSub, typeof(Pose),
 //                               new Dart.Qos { Reliability = Dart.Reliability.Reliable });
 //   node.OnMessage(m => Console.WriteLine(m.Value));   // decoded Pose for a typed channel
-//   while (true) { node.Poll(1); /* send/receive */ }  // single-threaded: drive poll yourself
+//   node.Start();                                      // C-level service thread owns the loop
+//   ch.Send(new Pose { X = 1 });                       // thread-safe from any thread
 //
-// Do NOT call node/channel methods from inside OnMessage/OnEvent (the poll loop is
-// mid-callback).
+// Threading: every Node/Channel call is thread-safe (a node-level lock in the C
+// core serializes them). Drive a node either with Start() (a C background service
+// thread runs the loop; handlers fire on it, never two at once) or by calling
+// Poll() from your own loop. Unity: Start(queueCallbacks: true) defers handlers
+// to a queue you drain with DispatchCallbacks() from Update(), keeping them on
+// the main thread. From inside OnMessage/OnEvent, Channel.Send and read-only
+// queries are allowed; Poll/CreateChannel/SetRole/Drain/Start/Stop/Close are
+// refused (SendStatus.State / exception), never corrupting.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -43,13 +51,18 @@ namespace Dart
 
     public enum Reliability { BestEffort = 0, Reliable = 1 }
     public enum Role { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 }
-    public enum SendStatus { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4 }
+    public enum SendStatus
+    {
+        Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
+        State = -5,   // wrong state: Poll while started, or a call a handler may not make
+        NoSys = -6    // not compiled in (Start under DART_NO_THREADS)
+    }
 
     public enum EventKind
     {
         PeerUp = 0, PeerDown, PeerInterest, MessageLost, MessageTooBig, NameCollision,
         QosIncompatible, SchemaMismatch, PeerRefused, InterestOverflow, MetaTruncated,
-        PeerMetaTooBig
+        PeerMetaTooBig, EvictedUnsent
     }
 
     public enum FieldType : byte
@@ -211,7 +224,15 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_node_poll(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_node_close(IntPtr node, int send_bye);
+        internal static extern int dart_node_close(IntPtr node, int send_bye);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_node_start(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_node_stop(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_node_is_started(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern uint dart_node_evicted_unsent(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern IntPtr dart_node_create_channel(IntPtr node, byte[] name, int role,
             IntPtr schema, ref DartChannelOpts opts);
@@ -530,6 +551,11 @@ namespace Dart
         private Action<Event> _onEvt;
         private readonly Dictionary<ushort, Type> _channelTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
+        // Start(queueCallbacks: true): handlers are deferred here (Message/Event are
+        // fully copied managed objects) and drained by DispatchCallbacks on a thread
+        // of the app's choosing (Unity: the main thread, from Update()).
+        private volatile bool _queueCallbacks;
+        private readonly ConcurrentQueue<object> _pending = new ConcurrentQueue<object>();
 
         // rooted so the GC never collects the trampolines handed to native code.
         private static readonly DartMsgFn s_onMsg = OnMessageTramp;
@@ -620,13 +646,55 @@ namespace Dart
         }
 
         /// <summary>One loop tick: drives discovery, RX, timers, and flushes queued TX.
-        /// timeoutMs blocks up to that long in the socket wait (0 = non-blocking). Drive
-        /// this from your own loop -- background threading was removed for now, so a node
-        /// is single-threaded: call Poll, send, and handlers all on one thread.</summary>
+        /// timeoutMs blocks up to that long in the socket wait (0 = non-blocking; a send
+        /// from another thread wakes it early). Returns SendStatus.State (as int) while
+        /// Start() runs -- the service thread owns the loop then.</summary>
         public int Poll(int timeoutMs = 0)
         {
             return Native.dart_node_poll(_handle, timeoutMs);
         }
+
+        /// <summary>Run the C-level background service thread: it owns the loop and fires
+        /// the handlers (never two at once for one node); every Node/Channel call stays
+        /// safe from any thread, and a send is flushed immediately. queueCallbacks defers
+        /// handlers into a queue drained by DispatchCallbacks() instead of invoking them
+        /// on the service thread -- Unity apps use this to keep handlers on the main
+        /// thread. Returns false if already started or threads are compiled out.</summary>
+        public bool Start(bool queueCallbacks = false)
+        {
+            if (Native.dart_node_start(_handle) != 0) return false;
+            _queueCallbacks = queueCallbacks;   // only flip the dispatch mode on success
+            return true;
+        }
+
+        /// <summary>Stop and join the service thread (idempotent; implied by Close).</summary>
+        public void Stop() => Native.dart_node_stop(_handle);
+
+        public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
+
+        /// <summary>Invoke queued handlers on the calling thread (Start(queueCallbacks:
+        /// true) mode; Unity: call from Update()). Returns how many were dispatched.
+        /// The queue is unbounded: drain it regularly, or unread messages accumulate.</summary>
+        public int DispatchCallbacks(int max = int.MaxValue)
+        {
+            int n = 0;
+            object item;
+            while (n < max && _pending.TryDequeue(out item))
+            {
+                try
+                {
+                    if (item is Message m) _onMsg?.Invoke(m);
+                    else if (item is Event e) _onEvt?.Invoke(e);
+                }
+                catch (Exception ex) { Console.Error.WriteLine("dart dispatch: " + ex); }
+                n++;
+            }
+            return n;
+        }
+
+        /// <summary>Sends that evicted never-sent history after the bounded wait (the
+        /// EventKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
+        public uint EvictedUnsent => Native.dart_node_evicted_unsent(_handle);
 
         public (ulong inUse, ulong peak, ulong allocCalls) MemoryStats()
         {
@@ -642,11 +710,14 @@ namespace Dart
             return (us, n);
         }
 
-        public void Close(bool sendBye = true)
+        /// <summary>Stop the service thread (if running) and tear the node down. Returns
+        /// false when refused from inside a handler (the node and this wrapper stay
+        /// fully live): close from another thread instead.</summary>
+        public bool Close(bool sendBye = true)
         {
             if (_handle != IntPtr.Zero)
             {
-                Native.dart_node_close(_handle, sendBye ? 1 : 0);
+                if (Native.dart_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
                 _handle = IntPtr.Zero;
             }
             lock (s_reg) s_nodes.Remove(_id);
@@ -654,6 +725,7 @@ namespace Dart
             _schemas.Clear();
             Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
             Codec.FreeCStr(_mcastIf); _mcastIf = IntPtr.Zero;
+            return true;
         }
 
         public void Dispose() { Close(); GC.SuppressFinalize(this); }
@@ -669,7 +741,9 @@ namespace Dart
                 lock (s_reg) s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null || node._onMsg == null) return;
                 node._channelTypes.TryGetValue(m.channel_id, out clr);
-                node._onMsg(Message.FromNative(ref m, clr));
+                var msg = Message.FromNative(ref m, clr);   // fully copied: safe past the callback
+                if (node._queueCallbacks) node._pending.Enqueue(msg);
+                else node._onMsg(msg);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_message: " + e); }
         }
@@ -683,7 +757,9 @@ namespace Dart
                 Node node;
                 lock (s_reg) s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                node._onEvt(Event.FromNative(evPtr, ref e));
+                var ev = Event.FromNative(evPtr, ref e);    // fully copied: safe past the callback
+                if (node._queueCallbacks) node._pending.Enqueue(ev);
+                else node._onEvt(ev);
             }
             catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
         }

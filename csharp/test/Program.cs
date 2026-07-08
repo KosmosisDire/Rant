@@ -80,6 +80,25 @@ static class Program
             Console.WriteLine("FAIL: no message delivered within timeout");
         }
 
+        // Threaded: both nodes on their C-level service threads; send from this thread,
+        // delivery arrives with no Poll() anywhere.
+        if (ok)
+        {
+            if (!pub.Start() || !sub.Start()) { Console.WriteLine("FAIL: Start"); ok = false; }
+            else if (pub.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused while started"); ok = false; }
+            else
+            {
+                Got.Reset();
+                sent.Stamp = 8;
+                pubch.Send(sent);
+                ok = Got.Wait(3000) && Received.As<Pose>().Stamp == 8;
+                Console.WriteLine(ok ? $"PASS: threaded delivery via Start() (evictedUnsent={pub.EvictedUnsent})"
+                                     : "FAIL: threaded delivery");
+                pub.Stop();
+                sub.Stop();
+            }
+        }
+
         pub.Close();
         sub.Close();
         return ok ? 0 : 1;

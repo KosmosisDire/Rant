@@ -40,8 +40,12 @@ typedef enum {
                                entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
     DART_META_TRUNCATED,    /* our announce overlay overflowed its buffer: a section was dropped
                                (.detail names it), so peers see partial interest/schemas */
-    DART_PEER_META_TOO_BIG  /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
+    DART_PEER_META_TOO_BIG, /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
                                admitted, .too_big_bytes, .ip/.port): its metadata is refused entirely */
+    DART_EVICTED_UNSENT     /* a send overwrote history never handed to the wire for some matched
+                               reader, after the bounded wait (.channel, .lost_first = evicted base
+                               seqno, .lost_count = its fragment count): the send burst outran the
+                               TX drain or the socket. KEEP_LAST semantics kept, never silent. */
 } DartEventKind;
 
 typedef struct {

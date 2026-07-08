@@ -4,8 +4,9 @@ C# wrapper for **DART** (Discovery And Realtime Transport): peer discovery over 
 multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
 
 `Dart.cs` is a thin P/Invoke layer over a **prebuilt native library** (`dart`), bundled
-per-platform (win-x64, linux-x64). A node is **single-threaded**: you drive `Poll()` in
-your own loop.
+per-platform (win-x64, linux-x64). Every call is **thread-safe** (a node-level lock in
+the C core): drive a node with `Start()` (a C background service thread runs the loop
+and fires handlers) or by calling `Poll()` from your own loop.
 
 ## Layout
 
@@ -59,12 +60,15 @@ var node = Node.Open("robot1", new NodeOptions { Domain = 7 },
                      onMessage: m => Console.WriteLine(m.As<Pose>()));
 var ch = node.CreateChannel("pose", Role.PubSub, typeof(Pose),
                             new Qos { Reliability = Reliability.Reliable });
-while (true) {                                  // single-threaded: drive poll yourself
-    node.Poll(1);                               // discovery, RX+delivery, timers, TX flush
-    ch.Send(new Pose { Stamp = 1, X = 1, Y = 2 });
-}
+node.Start();                                    // C-level service thread owns the loop
+ch.Send(new Pose { Stamp = 1, X = 1, Y = 2 });   // thread-safe from any thread
+// (or skip Start() and drive node.Poll(1) in your own loop)
 ```
 
 Wire field names are the C# field names (override with `[DartField("stamp")]`) and must
 match on every node for a topic. `Schema.FromType(typeof(Pose)).Dsl` prints the DSL for
-pasting into a C/C++ node. Do NOT call `Node`/`Channel` methods from inside a handler.
+pasting into a C/C++ node. Handlers fire on the service thread (never two at once for
+one node); from inside a handler, `Channel.Send` and read-only queries are allowed,
+Poll/CreateChannel/SetRole/Drain/Start/Stop/Close are not. Unity:
+`Start(queueCallbacks: true)` defers handlers to a queue you drain with
+`node.DispatchCallbacks()` from `Update()`, keeping them on the main thread.

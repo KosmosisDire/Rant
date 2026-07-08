@@ -99,6 +99,12 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_dart_event_append_str(p,end,": "); p = i_dart_event_append_u64(p,end,ev->too_big_bytes);
         p = i_dart_event_append_str(p,end," byte blob exceeds our capacity, its metadata is refused");
         break;
+    case DART_EVICTED_UNSENT:
+        p = i_dart_event_append_str(p,end,"evicted-unsent ch="); p = i_dart_event_append_u64(p,end,ev->channel);
+        p = i_dart_event_append_str(p,end," seqno "); p = i_dart_event_append_u64(p,end,ev->lost_first);
+        p = i_dart_event_append_str(p,end,".."); p = i_dart_event_append_u64(p,end,ev->lost_first + ev->lost_count - 1);
+        p = i_dart_event_append_str(p,end,": send burst outran the TX drain, history overwritten before emission");
+        break;
     }
     *p = '\0';                                     /* p <= end = buf+cap-1, in range */
     return buf;

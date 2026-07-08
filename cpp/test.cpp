@@ -69,5 +69,24 @@ int main() {
         std::printf("  id=%u name='%s' addr=%s active=%d frag=%u topics=%zu\n",
                     p.id, p.name.c_str(), p.address.c_str(), p.active, p.fragment_size, p.topics.size());
     }
+
+    /* threaded mode: both nodes on their C-level service threads, sends from this
+       thread, delivery without any poll() from us */
+    if (!a->start() || !b->start()) { std::printf("FAIL: start\n"); return 3; }
+    if (a->poll(0) != (int)dart::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
+    received = false;
+    {
+        dart::MessageOut s(*schema);
+        const char* line = "hello threaded";
+        s.set_uint("seq", ++seq).set_uint("textLen", 14).set_array("text", dart::Bytes(line, 14));
+        if (pub.send(s) != dart::SendStatus::Ok) { std::printf("FAIL: threaded send\n"); return 3; }
+    }
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    if (!received || got_text != "hello threaded") { std::printf("FAIL: threaded delivery\n"); return 3; }
+    a->stop(); b->stop();
+    std::printf("PASS: threaded delivery via start() (evicted_unsent=%u)\n", a->evicted_unsent());
+
     return ok ? 0 : 2;
 }

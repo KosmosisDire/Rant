@@ -24,14 +24,18 @@ defined by reflection over a decorated class:
     ch = node.create_channel("pose", dart.Role.PUBSUB, Pose,
                              qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
     node.on_message(lambda m: print(m.value))     # m.value is a decoded Pose
-    while True:                                    # drive it yourself (single-threaded)
-        node.poll(1)                               # discovery, RX+delivery, timers, TX flush
-        ch.send(Pose(stamp=1, x=1.0, y=2.0, cov=[0]*9))
+    node.start()                                   # C-level service thread owns the loop
+    ch.send(Pose(stamp=1, x=1.0, y=2.0, cov=[0]*9))   # thread-safe from any thread
+    ...                                            # or skip start() and drive node.poll(1) yourself
 
 Requires a C compiler on the machine at first use only. Override which one with
-the DART_CC environment variable. A node is single-threaded (background threading
-was removed for now): call poll, send, and the handlers all on one thread, and do
-NOT call node/channel methods from inside on_message/on_event.
+the DART_CC environment variable. Every node/channel call is thread-safe (a
+node-level lock inside the C core serializes them). Drive a node either with
+node.start() (a C background service thread runs the loop; handlers fire on it,
+never two at once) or by calling node.poll() from your own loop. From inside
+on_message/on_event, channel.send and read-only queries are allowed; poll,
+create_channel, set_role, drain, start, stop, and close are refused
+(SendStatus.STATE / None / False), never corrupting.
 """
 
 import ctypes
@@ -85,6 +89,8 @@ def _source():
 _EXPORTS = [
     "i_dart_plat_realloc",
     "dart_node_open", "dart_node_poll", "dart_node_close",
+    "dart_node_start", "dart_node_stop", "dart_node_is_started",
+    "dart_node_evicted_unsent",
     "dart_node_create_channel", "dart_node_channel",
     "dart_channel_send", "dart_channel_set_role", "dart_channel_index",
     "dart_channel_match_count", "dart_channel_drain",
@@ -351,7 +357,11 @@ def _bind(lib):
     F("dart_node_open", [POINTER(DartAllocator), c_char_p, _MsgFn, _EvtFn,
                          POINTER(DartNodeOpts)], c_void_p)
     F("dart_node_poll", [c_void_p, c_int], c_int)
-    F("dart_node_close", [c_void_p, c_int], None)
+    F("dart_node_close", [c_void_p, c_int], c_int)
+    F("dart_node_start", [c_void_p], c_int)
+    F("dart_node_stop", [c_void_p], c_int)
+    F("dart_node_is_started", [c_void_p], c_int)
+    F("dart_node_evicted_unsent", [c_void_p], c_uint32)
     F("dart_node_create_channel", [c_void_p, c_char_p, c_int, c_void_p,
                                    POINTER(DartChannelOpts)], c_void_p)
     F("dart_node_channel", [c_void_p, c_uint16], c_void_p)
@@ -458,6 +468,8 @@ class SendStatus(enum.IntEnum):
     TOO_BIG = -2
     BAD_ROLE = -3
     OUT_OF_MEMORY = -4
+    STATE = -5       # wrong state: poll while started, or a call a callback may not make
+    NOSYS = -6       # not compiled in (start() under DART_NO_THREADS)
 
 
 class EventKind(enum.IntEnum):
@@ -473,6 +485,7 @@ class EventKind(enum.IntEnum):
     INTEREST_OVERFLOW = 9
     META_TRUNCATED = 10
     PEER_META_TOO_BIG = 11
+    EVICTED_UNSENT = 12
 
 
 class FieldType(enum.IntEnum):
@@ -1140,10 +1153,30 @@ class Node:
 
     def poll(self, timeout_ms=0):
         """One loop tick: drives discovery, RX, timers, and flushes queued TX.
-        timeout_ms blocks up to that long in the socket wait (0 = non-blocking). Drive
-        this from your own loop: background threading was removed for now, so a node is
-        single-threaded -- call poll, send, and the handlers all on one thread."""
+        timeout_ms blocks up to that long in the socket wait (0 = non-blocking; a send
+        from another thread wakes it early). Returns SendStatus.STATE while start()
+        runs (the service thread owns the loop then)."""
         return self._lib.dart_node_poll(self._h, timeout_ms)
+
+    def start(self):
+        """Run the C-level background service thread: it owns the loop and fires the
+        handlers (ctypes re-acquires the GIL for them; never two at once for one
+        node). Every node/channel call stays safe from any thread, and a send is
+        flushed immediately (a waker cuts the service's socket wait short).
+        Returns True on success."""
+        return self._lib.dart_node_start(self._h) == 0
+
+    def stop(self):
+        """Stop and join the service thread (idempotent; implied by close)."""
+        self._lib.dart_node_stop(self._h)
+
+    def is_started(self):
+        return self._lib.dart_node_is_started(self._h) == 1
+
+    def evicted_unsent(self):
+        """Sends that evicted never-sent history after the bounded wait (the
+        EVICTED_UNSENT event count): the send-burst/overload indicator."""
+        return self._lib.dart_node_evicted_unsent(self._h)
 
     def memory_stats(self):
         """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the
@@ -1159,11 +1192,16 @@ class Node:
         return us.value, n.value
 
     def close(self, send_bye=True):
+        """Stop the service thread (if running) and tear the node down. Returns True.
+        Refused from inside a handler (returns False, node and handle stay live):
+        close from another thread instead."""
         if self._h:
-            self._lib.dart_node_close(self._h, 1 if send_bye else 0)
+            if self._lib.dart_node_close(self._h, 1 if send_bye else 0) != 0:
+                return False
             self._h = None
         with _REG_LOCK:
             _NODES.pop(self._id, None)
+        return True
 
     def __enter__(self):
         return self

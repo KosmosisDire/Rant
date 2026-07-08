@@ -47,6 +47,9 @@
   #include <unistd.h>
   #include <poll.h>
   #include <time.h>
+  #ifdef DART_THREADS
+    #include <pthread.h>
+  #endif
   #include <fcntl.h>
   #include <errno.h>
   #include <stdio.h>
@@ -62,25 +65,24 @@
 
 /* ----------------------------------------------------------------- lifecycle */
 #ifdef _WIN32
-static int i_dart_plat_wsa_refs = 0;
+static LARGE_INTEGER i_dart_plat_qpc_freq;   /* set once in startup; lazy fallback */
 int i_dart_plat_startup(void){
     WSADATA w;
-    if (i_dart_plat_wsa_refs == 0){
-        if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
+    /* WSAStartup and timeBeginPeriod are both refcounted by the OS per process,
+       so unconditional matched calls are safe from any thread (a hand-rolled
+       counter here would be the one racy global in DART). */
+    if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
   #ifndef DART_NO_HIGHRES_TIMER
-        timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
+    timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
   #endif
-    }
-    i_dart_plat_wsa_refs++;
+    QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     return 1;
 }
 void i_dart_plat_cleanup(void){
-    if (i_dart_plat_wsa_refs > 0 && --i_dart_plat_wsa_refs == 0){
   #ifndef DART_NO_HIGHRES_TIMER
-        timeEndPeriod(1);
+    timeEndPeriod(1);
   #endif
-        WSACleanup();
-    }
+    WSACleanup();
 }
 #else
 int  i_dart_plat_startup(void){ return 1; }
@@ -90,10 +92,10 @@ void i_dart_plat_cleanup(void){}
 /* --------------------------------------------------------------------- clock */
 uint64_t i_dart_plat_now_us(void){
 #ifdef _WIN32
-    static LARGE_INTEGER f; LARGE_INTEGER c;
-    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER c;
+    if (!i_dart_plat_qpc_freq.QuadPart) QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     QueryPerformanceCounter(&c);
-    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)f.QuadPart);
+    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)i_dart_plat_qpc_freq.QuadPart);
 #else
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
@@ -385,6 +387,157 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
     return n;
 }
 #endif
+
+/* ------------------------------------------------------------------- threads */
+#ifdef DART_THREADS
+
+/* The opaque header blobs must fit the real OS types (C99: no _Static_assert). */
+#define DART__FITS(name, real, blob) \
+    typedef char name[(sizeof(real) <= sizeof(blob)) ? 1 : -1]
+
+#ifdef _WIN32
+
+typedef struct { HANDLE h; void (*fn)(void *); void *arg; } i_DartThreadImpl;
+DART__FITS(i_dart_plat_mutex_fits,  SRWLOCK,            i_DartMutex);
+DART__FITS(i_dart_plat_cond_fits,   CONDITION_VARIABLE, i_DartCond);
+DART__FITS(i_dart_plat_thread_fits, i_DartThreadImpl,   i_DartThread);
+
+static DWORD WINAPI i_dart_plat_thread_tramp(LPVOID p){
+    i_DartThreadImpl *t = (i_DartThreadImpl *)p;
+    t->fn(t->arg);
+    return 0;
+}
+int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    ti->fn = fn; ti->arg = arg;
+    ti->h = CreateThread(NULL, 0, i_dart_plat_thread_tramp, ti, 0, NULL);
+    return ti->h != NULL;
+}
+void i_dart_plat_thread_join(i_DartThread *t){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    if (!ti->h) return;
+    WaitForSingleObject(ti->h, INFINITE);
+    CloseHandle(ti->h);
+    ti->h = NULL;
+}
+uint64_t i_dart_plat_thread_id(void){ return (uint64_t)GetCurrentThreadId(); }
+
+/* SRWLOCK over CRITICAL_SECTION: pointer-sized, pairs with condvars, and
+   deliberately non-recursive (the condvar contract requires it; the node's
+   reentrancy is an owner-id check above this layer). */
+void i_dart_plat_mutex_init   (i_DartMutex *m){ InitializeSRWLock((PSRWLOCK)m); }
+void i_dart_plat_mutex_destroy(i_DartMutex *m){ (void)m; }
+void i_dart_plat_mutex_lock   (i_DartMutex *m){ AcquireSRWLockExclusive((PSRWLOCK)m); }
+void i_dart_plat_mutex_unlock (i_DartMutex *m){ ReleaseSRWLockExclusive((PSRWLOCK)m); }
+
+void i_dart_plat_cond_init   (i_DartCond *c){ InitializeConditionVariable((PCONDITION_VARIABLE)c); }
+void i_dart_plat_cond_destroy(i_DartCond *c){ (void)c; }
+void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
+    /* 64-bit round-up: (0xFFFFFFFF + 999) would wrap in 32 bits and turn the
+       longest waits into 1 ms spins */
+    DWORD ms = (DWORD)(((uint64_t)timeout_us + 999u) / 1000u);
+    SleepConditionVariableSRW((PCONDITION_VARIABLE)c, (PSRWLOCK)m, ms ? ms : 1, 0);
+}
+void i_dart_plat_cond_broadcast(i_DartCond *c){ WakeAllConditionVariable((PCONDITION_VARIABLE)c); }
+
+#else /* POSIX */
+
+typedef struct { pthread_t t; void (*fn)(void *); void *arg; } i_DartThreadImpl;
+DART__FITS(i_dart_plat_mutex_fits,  pthread_mutex_t,  i_DartMutex);
+DART__FITS(i_dart_plat_cond_fits,   pthread_cond_t,   i_DartCond);
+DART__FITS(i_dart_plat_thread_fits, i_DartThreadImpl, i_DartThread);
+
+static void *i_dart_plat_thread_tramp(void *p){
+    i_DartThreadImpl *t = (i_DartThreadImpl *)p;
+    t->fn(t->arg);
+    return NULL;
+}
+int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    ti->fn = fn; ti->arg = arg;
+    return pthread_create(&ti->t, NULL, i_dart_plat_thread_tramp, ti) == 0;
+}
+void i_dart_plat_thread_join(i_DartThread *t){
+    pthread_join(((i_DartThreadImpl *)t)->t, NULL);
+}
+uint64_t i_dart_plat_thread_id(void){ return (uint64_t)(uintptr_t)pthread_self(); }
+
+void i_dart_plat_mutex_init   (i_DartMutex *m){ pthread_mutex_init((pthread_mutex_t *)m, NULL); }
+void i_dart_plat_mutex_destroy(i_DartMutex *m){ pthread_mutex_destroy((pthread_mutex_t *)m); }
+void i_dart_plat_mutex_lock   (i_DartMutex *m){ pthread_mutex_lock((pthread_mutex_t *)m); }
+void i_dart_plat_mutex_unlock (i_DartMutex *m){ pthread_mutex_unlock((pthread_mutex_t *)m); }
+
+void i_dart_plat_cond_init(i_DartCond *c){
+#if defined(__linux__)
+    /* wait on the monotonic clock so a wall-clock step cannot stretch a timeout */
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+    pthread_cond_init((pthread_cond_t *)c, &a);
+    pthread_condattr_destroy(&a);
+#else
+    pthread_cond_init((pthread_cond_t *)c, NULL);
+#endif
+}
+void i_dart_plat_cond_destroy(i_DartCond *c){ pthread_cond_destroy((pthread_cond_t *)c); }
+void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
+#if defined(__APPLE__)
+    struct timespec rel;
+    rel.tv_sec  = (time_t)(timeout_us / 1000000u);
+    rel.tv_nsec = (long)(timeout_us % 1000000u) * 1000L;
+    pthread_cond_timedwait_relative_np((pthread_cond_t *)c, (pthread_mutex_t *)m, &rel);
+#else
+    /* Linux: monotonic (set at init). Elsewhere: realtime; a wall-clock jump can
+       cut the wait short, which the caller's predicate-plus-deadline loop absorbs. */
+    struct timespec ts;
+  #if defined(__linux__)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+  #else
+    clock_gettime(CLOCK_REALTIME, &ts);
+  #endif
+    ts.tv_sec  += (time_t)(timeout_us / 1000000u);
+    ts.tv_nsec += (long)(timeout_us % 1000000u) * 1000L;
+    if (ts.tv_nsec >= 1000000000L){ ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    pthread_cond_timedwait((pthread_cond_t *)c, (pthread_mutex_t *)m, &ts);
+#endif
+}
+void i_dart_plat_cond_broadcast(i_DartCond *c){ pthread_cond_broadcast((pthread_cond_t *)c); }
+
+#endif /* _WIN32 */
+
+/* Waker: platform-neutral over the socket helpers above. Bound to loopback and
+   connected to itself, so only its own 1-byte signals ever arrive. */
+int i_dart_plat_waker_open(i_DartWaker *w){
+    struct sockaddr_in a; i_DartSocklen al = sizeof a;
+    w->fd = i_dart_plat_udp_open();
+    if (w->fd == DART_SOCK_BAD) return 0;
+    memset(&a, 0, sizeof a);
+    if (!i_dart_plat_bind(w->fd, i_dart_plat_ipv4(127, 0, 0, 1), 0, 0)) goto fail;
+    if (getsockname(DART__FD(w->fd), (struct sockaddr *)&a, &al) != 0) goto fail;
+    if (connect(DART__FD(w->fd), (struct sockaddr *)&a, sizeof a) != 0) goto fail;
+    i_dart_plat_set_nonblock(w->fd);
+    return 1;
+fail:
+    i_dart_plat_close(w->fd);
+    w->fd = DART_SOCK_BAD;
+    return 0;
+}
+int i_dart_plat_waker_signal(i_DartWaker *w){
+    char b = 1;
+    if (w->fd == DART_SOCK_BAD) return 0;
+    return (int)send(DART__FD(w->fd), &b, 1, 0) == 1;
+}
+void i_dart_plat_waker_drain(i_DartWaker *w){
+    char b[64];
+    if (w->fd == DART_SOCK_BAD) return;
+    while (recv(DART__FD(w->fd), b, sizeof b, 0) > 0) {}
+}
+void i_dart_plat_waker_close(i_DartWaker *w){
+    i_dart_plat_close(w->fd);
+    w->fd = DART_SOCK_BAD;
+}
+
+#endif /* DART_THREADS */
 
 /* ------------------------------------------------------------- shared memory */
 #ifdef DART_SHM

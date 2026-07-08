@@ -26,7 +26,8 @@
  *     });
  *     auto ch = node->create_channel("chat", dart::Role::PubSub, nullptr,
  *                                    { .reliability = dart::Reliability::Reliable });
- *     for (;;) { node->poll(1); ch.send("hello"); }   // drive it yourself (single-threaded)
+ *     node->start();                         // background service thread owns the loop
+ *     for (;;) ch.send("hello");             // thread-safe; or skip start() and poll(1) yourself
  */
 #ifndef DART_HPP_INCLUDED
 #define DART_HPP_INCLUDED
@@ -318,6 +319,12 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                DartBytes datagram, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
+/* The next monotonic time dart_discovery_update wants to run its timers (announce due;
+ * 0 = immediately, e.g. a pending solicit or a just-advertised blob). Lets a driving
+ * loop sleep exactly until due instead of ticking. Peer-timeout sweeps ride the same
+ * cadence, so detection lags by at most one announce interval (well inside the
+ * default peer timeout). */
+uint64_t     dart_discovery_next_due_us(const DartDiscoveryState *st);
 size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(DartDiscoveryState *st);
@@ -384,8 +391,10 @@ void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_
 #ifndef DART_DISCOVERY_SANS_IO
 #pragma region platform/core.h
 /* dart_plat: the one platform layer. Every OS dependency the runtimes need lives
- * behind this contract: a monotonic clock, UDP sockets, multicast, entropy, and
- * the source-address route probe. The layers above (discovery_rt, node) speak
+ * behind this contract: a monotonic clock, UDP sockets, multicast, entropy,
+ * the source-address route probe, and threads (thread/mutex/condvar/waker,
+ * auto-detected as DART_THREADS; DART_NO_THREADS opts out). The layers above
+ * (discovery_rt, node) speak
  * only dart_plat_* and never touch a sockaddr, winsock, or a platform #ifdef, so
  * a new platform is one new implementation of this header. A platform that
  * already has BSD sockets needs no new code: the bundled implementation covers
@@ -414,6 +423,28 @@ extern "C" {
 #define DART_SHM
 #endif
 
+/* Threading (the node lock + optional service thread) follows the same flag shape:
+ * DART_THREADS is AUTO-DETECTED on where the bundled platform layer provides it
+ * (Windows; POSIX with pthreads: Linux/macOS/BSD/ESP-IDF, plus any other libc that
+ * advertises <pthread.h>), off elsewhere, and DART_NO_THREADS always wins. A NEW
+ * platform implementation that provides the thread/mutex/cond/waker contract below
+ * declares support by defining DART_THREADS itself (in its build flags or before
+ * this header), which turns the threaded node on with no other change. */
+#if !defined(DART_THREADS) && !defined(DART_NO_THREADS)
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__) || defined(ESP_PLATFORM)
+    #define DART_THREADS
+  #elif defined(__has_include)
+    #if __has_include(<pthread.h>)
+      #define DART_THREADS   /* unknown POSIX with pthreads: the bundled layer covers it */
+    #endif
+  #endif
+#endif
+#if defined(DART_THREADS) && defined(DART_NO_THREADS)
+  #undef DART_THREADS        /* both set: the opt-out wins */
+#endif
+
 /* Opaque socket handle: a POSIX fd or a Windows SOCKET, both fit in intptr_t. */
 typedef intptr_t i_DartSock;
 #define DART_SOCK_BAD ((i_DartSock)-1)
@@ -423,7 +454,8 @@ typedef intptr_t i_DartSock;
 typedef struct { i_DartSock fd; short events; short revents; } i_DartPollfd;
 
 /* Process-wide net init/teardown (WSAStartup/WSACleanup; no-op elsewhere).
- * Refcounted, so a node and its discovery opening/closing in turn pair safely.
+ * The OS refcounts matched calls per process, so a node and its discovery
+ * opening/closing in turn pair safely from any thread.
  * startup returns 1 on success, 0 on failure. */
 int  i_dart_plat_startup(void);
 void i_dart_plat_cleanup(void);
@@ -488,6 +520,49 @@ uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
  * if the platform offers no enumeration). Backs the auto interface-pin fallback when
  * a route probe can't name a real LAN interface. */
 int      i_dart_plat_local_ipv4s(uint32_t *out, int max);
+
+/* --- threads (present only under DART_THREADS; see the detection above) -------
+ * What the node runtime's thread safety and background service thread need: a
+ * thread, a mutex, a condvar, and a waker that can interrupt i_dart_plat_poll
+ * from another thread. Opaque aligned blobs keep OS headers out of this header;
+ * core.c static-asserts the real types fit. Off (undetected platform or
+ * DART_NO_THREADS) the node reverts to the single-threaded contract; a new
+ * platform layer implements this contract and defines DART_THREADS.
+ * POSIX: link -lpthread (older toolchains). */
+#ifdef DART_THREADS
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_DartMutex;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_DartCond;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[32]; } i_DartThread;
+
+/* start runs fn(arg) on a new thread; 1 on success. join blocks until fn returns. */
+int      i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg);
+void     i_dart_plat_thread_join (i_DartThread *t);
+/* Nonzero id of the calling thread (compared, never dereferenced). */
+uint64_t i_dart_plat_thread_id   (void);
+
+void i_dart_plat_mutex_init   (i_DartMutex *m);
+void i_dart_plat_mutex_destroy(i_DartMutex *m);
+void i_dart_plat_mutex_lock   (i_DartMutex *m);
+void i_dart_plat_mutex_unlock (i_DartMutex *m);
+
+void i_dart_plat_cond_init     (i_DartCond *c);
+void i_dart_plat_cond_destroy  (i_DartCond *c);
+/* Wait up to timeout_us with m held; m is reacquired before returning. May wake
+ * early or spuriously: callers loop on a predicate plus a monotonic deadline. */
+void i_dart_plat_cond_wait     (i_DartCond *c, i_DartMutex *m, uint32_t timeout_us);
+void i_dart_plat_cond_broadcast(i_DartCond *c);
+
+/* Waker: a self-pipe whose fd sits in a normal i_dart_plat_poll set, so another
+ * thread can cut a blocking wait short. A nonblocking UDP socket bound to
+ * 127.0.0.1:ephemeral and connected to itself: connect filters foreign
+ * datagrams, repeat signals coalesce in the socket buffer, and it is the one
+ * mechanism that is pollable on both Windows and POSIX with no new poll API. */
+typedef struct { i_DartSock fd; } i_DartWaker;
+int  i_dart_plat_waker_open  (i_DartWaker *w);   /* 1 on success */
+int  i_dart_plat_waker_signal(i_DartWaker *w);   /* 1 = the signal went out */
+void i_dart_plat_waker_drain (i_DartWaker *w);
+void i_dart_plat_waker_close (i_DartWaker *w);
+#endif /* DART_THREADS */
 
 /* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
  * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
@@ -820,6 +895,10 @@ void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
  * added local channel matches interest peers advertised before it existed. */
 void       dart_discovery_replay(DartDiscovery *d);
+/* This runtime's receive sockets (the multicast group fd, plus the own unicast RX fd
+ * when one exists), for a caller embedding discovery in its own blocking wait. Fills
+ * out[0..1] and returns the count (1 or 2). The fds are stable across a migrate. */
+int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
 
 /* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
@@ -1373,7 +1452,10 @@ typedef enum {
     DART_ERR_NO_CHANNEL = -1,  /* channel index out of range */
     DART_ERR_TOO_BIG    = -2,  /* exceeds max_message_bytes or the wire fragment cap */
     DART_ERR_ROLE       = -3,  /* channel is SUB_ONLY or INACTIVE: cannot publish */
-    DART_ERR_OOM        = -4   /* dynamic allocator returned NULL */
+    DART_ERR_OOM        = -4,  /* dynamic allocator returned NULL */
+    DART_ERR_STATE      = -5,  /* wrong state: poll while a service thread runs, start while
+                                  started, or a call not allowed from inside a callback */
+    DART_ERR_NOSYS      = -6   /* not compiled in (dart_node_start with DART_THREADS off) */
 } DartResult;
 
 /* Publish a message to all peers. Returns DART_OK, or a negative DartResult. */
@@ -1403,6 +1485,15 @@ const DartQos *dart_transport_channel_qos(DartTransportState *st, uint16_t chann
 /* 1 if appending here would overwrite history not yet acked by every reader. A
  * writer pumps while this is 1, then sends anyway after qos.backpressure_wait_us. */
 int       dart_transport_send_would_evict(DartTransportState *st, uint16_t channel);
+
+/* 1 if appending here would overwrite history some matched, live reader was never
+ * HANDED TO THE WIRE (committed but not yet emitted by poll_send). Unlike
+ * would_evict this applies to best-effort lanes too: it detects a send burst
+ * outrunning the TX drain, not slow-reader flow control. The node waits on it so
+ * a send cannot silently vaporize data that never left the process. On 1, the
+ * evicted sample's base seqno / fragment count are written to the (NULLable) outs. */
+int       dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
+                                                 uint64_t *evict_base, uint32_t *evict_count);
 
 /* 1 if every live reader has acked all messages on this reliable channel (so a
  * writer may close without truncating). Best-effort/unknown return 1. Wrapped as
@@ -1734,8 +1825,12 @@ typedef enum {
                                entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
     DART_META_TRUNCATED,    /* our announce overlay overflowed its buffer: a section was dropped
                                (.detail names it), so peers see partial interest/schemas */
-    DART_PEER_META_TOO_BIG  /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
+    DART_PEER_META_TOO_BIG, /* a peer's announce blob exceeds our per-peer buffer (.peer 0 if not yet
                                admitted, .too_big_bytes, .ip/.port): its metadata is refused entirely */
+    DART_EVICTED_UNSENT     /* a send overwrote history never handed to the wire for some matched
+                               reader, after the bounded wait (.channel, .lost_first = evicted base
+                               seqno, .lost_count = its fragment count): the send burst outran the
+                               TX drain or the socket. KEEP_LAST semantics kept, never silent. */
 } DartEventKind;
 
 typedef struct {
@@ -1946,7 +2041,10 @@ typedef struct DartNode    DartNode;
 typedef struct DartChannel DartChannel;   /* opaque channel handle (stable for the node's life) */
 
 /* A delivered message: all of its properties in one place. channel_name is a local
- * lookup (never on the wire). Do not call back into dart_* from the callback. */
+ * lookup (never on the wire). From the callback, dart_channel_send and read-only
+ * queries on the SAME node are allowed; poll/create_channel/set_role/drain/start/
+ * stop/close are not (refused with DART_ERR_STATE / NULL / 0; under DART_NO_THREADS
+ * the guards are gone, so simply do not call back in). See "threading" below. */
 typedef struct {
     DartNode      *node;
     void          *user;             /* DartNodeOpts.user_data */
@@ -1975,8 +2073,66 @@ typedef void (*DartMsgFn)(const DartMsg *msg);
  * be NULL for all defaults. Returns NULL on failure (incl. a static buffer too small). */
 DartNode    *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message,
                             DartEventFn on_event, const DartNodeOpts *opts);
-int          dart_node_poll(DartNode *n, int timeout_ms);          /* one loop tick */
-void         dart_node_close(DartNode *n, int send_bye);
+/* One loop tick: discovery, RX + delivery, timers, TX flush; blocks up to timeout_ms
+ * waiting for traffic (capped to the next internal timer; negative is treated as 0,
+ * there is no infinite wait). Returns 0, or DART_ERR_STATE if a service thread is
+ * running (dart_node_start owns the loop then) or when called from inside a callback. */
+int          dart_node_poll(DartNode *n, int timeout_ms);
+/* Stops the service thread if one runs, then tears the node down. Returns DART_OK, or
+ * DART_ERR_STATE when called from inside a callback (refused: the node keeps running
+ * and the handle stays valid, so close it from another thread). No other thread may be
+ * inside (or later enter) any dart_* call on this node once close begins. */
+int          dart_node_close(DartNode *n, int send_bye);
+
+/* ---- threading --------------------------------------------------------------------
+ * Every dart_node_* / dart_channel_* call is thread-safe: a node-level lock serializes
+ * them, and it is never held across a blocking wait (a poller drops it around the
+ * socket wait; mutating calls wake the poller through a loopback waker, so a send hits
+ * the wire in microseconds, not at the next tick). Two ways to drive a node:
+ *   - call dart_node_poll yourself (from one thread or several; sends from other
+ *     threads interleave safely and wake a blocked poll), or
+ *   - dart_node_start: a background SERVICE THREAD owns the loop; dart_node_poll then
+ *     returns DART_ERR_STATE. Callbacks fire on the service thread (events triggered
+ *     directly by one of your calls fire on that calling thread), and never two at
+ *     once for one node.
+ * From inside on_message/on_event: dart_channel_send and the read-only queries are
+ * allowed ON THE SAME NODE; dart_node_poll / create_channel / set_role / drain /
+ * start / stop / close are refused with DART_ERR_STATE (or NULL/0). Do NOT call into
+ * a DIFFERENT in-process node from a callback: its lock is a plain acquisition, so
+ * two nodes whose callbacks each send to the other deadlock (relay between in-process
+ * nodes by queueing to your own thread instead). Flow control without a poll cadence:
+ * a send that would overwrite reliable history not yet acked waits (condvar, bounded
+ * by qos.backpressure_wait_us), and one that would overwrite history NEVER YET SENT
+ * to a matched reader waits for one TX pass (bounded by DART_UNSENT_WAIT_US); if it
+ * still must evict, it proceeds KEEP_LAST-style and fires DART_EVICTED_UNSENT, never
+ * silently. All of this exists only under DART_THREADS, auto-detected where the
+ * platform layer provides threads (Windows; POSIX with pthreads) and off elsewhere:
+ * single-threaded contract, start returns DART_ERR_NOSYS. DART_NO_THREADS forces it
+ * off; a new platform layer defines DART_THREADS to declare support (platform/core.h). */
+/* Run the background service thread. DART_OK; DART_ERR_STATE if already running or
+ * called from a callback; DART_ERR_NOSYS when threads are compiled out (DART_THREADS
+ * off) or if the thread could not be created. */
+int          dart_node_start(DartNode *n);
+/* Stop and join the service thread (idempotent and safe to race: concurrent stoppers
+ * elect one joiner; implied by dart_node_close). Senders blocked in a flow-control
+ * wait wake and proceed (KEEP_LAST + the unsent guard, no pumping). */
+int          dart_node_stop(DartNode *n);
+/* 1 while the service thread runs. */
+int          dart_node_is_started(DartNode *n);
+/* Hold / release the node lock from a NON-callback thread around reads of a zero-copy
+ * view (dart_node_peers) while a poller runs elsewhere. Hold it briefly: the node makes
+ * no progress meanwhile, and while this thread holds it the node treats its calls like
+ * callback calls (sends commit without waiting; poll/create_channel/set_role/drain/
+ * start/stop/close refuse). Not recursion-counted: one lock pairs with one unlock.
+ * No-ops from inside a callback (the lock is already held) and when threads are
+ * compiled out. */
+void         dart_node_lock(DartNode *n);
+void         dart_node_unlock(DartNode *n);
+/* Sends that evicted never-sent history after the bounded wait (the DART_EVICTED_UNSENT
+ * count) since open: the send-burst/overload indicator. The guard runs when a service
+ * thread drives the node (and for the reliable backpressure path when it does not);
+ * classic poll-it-yourself best-effort keeps plain KEEP_LAST overwrite semantics. */
+uint32_t     dart_node_evicted_unsent(DartNode *n);
 
 /* Create a channel (topic). name is the cross-peer identity (same on every node, copied
  * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. schema is this
@@ -2044,8 +2200,10 @@ void     dart_node_set_pump_probe(DartNode *n, DartPumpProbeFn fn, uint64_t inte
  * `have` rising across calls = repair crawling; flat = wedged. Any pointer may be NULL. */
 int      dart_channel_reader_progress(DartChannel *ch, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
-/* Pump until every reader has acked all messages on this channel, or timeout_ms elapses.
- * Returns 1 if drained, 0 on timeout. Call before close so a burst isn't cut by the BYE. */
+/* Wait until every reader has acked all messages on this channel, or timeout_ms
+ * elapses: with a service thread it sleeps on its progress, otherwise it pumps the
+ * loop. Returns 1 if drained, 0 on timeout (or when called from a callback). Call
+ * before close so a burst isn't cut by the BYE. */
 int      dart_channel_drain(DartChannel *ch, int timeout_ms);
 /* Subscribers matched on this channel now; a one-shot publisher polls it before sending. */
 int      dart_channel_match_count(DartChannel *ch);
@@ -2831,6 +2989,11 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
     return 0;
 }
 
+uint64_t dart_discovery_next_due_us(const DartDiscoveryState *st){
+    if (!st || !st->started || st->want_solicit) return 0;
+    return st->next_announce_us;   /* 0 after an advertise = announce the change now */
+}
+
 void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
     if (!st || meta.len > st->meta_capacity) return;   /* the node sizes meta_capacity to fit */
     st->self_meta         = meta;
@@ -3024,6 +3187,9 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #include <unistd.h>
   #include <poll.h>
   #include <time.h>
+  #ifdef DART_THREADS
+    #include <pthread.h>
+  #endif
   #include <fcntl.h>
   #include <errno.h>
   #include <stdio.h>
@@ -3039,25 +3205,24 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
 
 /* ----------------------------------------------------------------- lifecycle */
 #ifdef _WIN32
-static int i_dart_plat_wsa_refs = 0;
+static LARGE_INTEGER i_dart_plat_qpc_freq;   /* set once in startup; lazy fallback */
 int i_dart_plat_startup(void){
     WSADATA w;
-    if (i_dart_plat_wsa_refs == 0){
-        if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
+    /* WSAStartup and timeBeginPeriod are both refcounted by the OS per process,
+       so unconditional matched calls are safe from any thread (a hand-rolled
+       counter here would be the one racy global in DART). */
+    if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
   #ifndef DART_NO_HIGHRES_TIMER
-        timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
+    timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
   #endif
-    }
-    i_dart_plat_wsa_refs++;
+    QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     return 1;
 }
 void i_dart_plat_cleanup(void){
-    if (i_dart_plat_wsa_refs > 0 && --i_dart_plat_wsa_refs == 0){
   #ifndef DART_NO_HIGHRES_TIMER
-        timeEndPeriod(1);
+    timeEndPeriod(1);
   #endif
-        WSACleanup();
-    }
+    WSACleanup();
 }
 #else
 int  i_dart_plat_startup(void){ return 1; }
@@ -3067,10 +3232,10 @@ void i_dart_plat_cleanup(void){}
 /* --------------------------------------------------------------------- clock */
 uint64_t i_dart_plat_now_us(void){
 #ifdef _WIN32
-    static LARGE_INTEGER f; LARGE_INTEGER c;
-    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER c;
+    if (!i_dart_plat_qpc_freq.QuadPart) QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     QueryPerformanceCounter(&c);
-    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)f.QuadPart);
+    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)i_dart_plat_qpc_freq.QuadPart);
 #else
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
@@ -3363,6 +3528,157 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
 }
 #endif
 
+/* ------------------------------------------------------------------- threads */
+#ifdef DART_THREADS
+
+/* The opaque header blobs must fit the real OS types (C99: no _Static_assert). */
+#define DART__FITS(name, real, blob) \
+    typedef char name[(sizeof(real) <= sizeof(blob)) ? 1 : -1]
+
+#ifdef _WIN32
+
+typedef struct { HANDLE h; void (*fn)(void *); void *arg; } i_DartThreadImpl;
+DART__FITS(i_dart_plat_mutex_fits,  SRWLOCK,            i_DartMutex);
+DART__FITS(i_dart_plat_cond_fits,   CONDITION_VARIABLE, i_DartCond);
+DART__FITS(i_dart_plat_thread_fits, i_DartThreadImpl,   i_DartThread);
+
+static DWORD WINAPI i_dart_plat_thread_tramp(LPVOID p){
+    i_DartThreadImpl *t = (i_DartThreadImpl *)p;
+    t->fn(t->arg);
+    return 0;
+}
+int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    ti->fn = fn; ti->arg = arg;
+    ti->h = CreateThread(NULL, 0, i_dart_plat_thread_tramp, ti, 0, NULL);
+    return ti->h != NULL;
+}
+void i_dart_plat_thread_join(i_DartThread *t){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    if (!ti->h) return;
+    WaitForSingleObject(ti->h, INFINITE);
+    CloseHandle(ti->h);
+    ti->h = NULL;
+}
+uint64_t i_dart_plat_thread_id(void){ return (uint64_t)GetCurrentThreadId(); }
+
+/* SRWLOCK over CRITICAL_SECTION: pointer-sized, pairs with condvars, and
+   deliberately non-recursive (the condvar contract requires it; the node's
+   reentrancy is an owner-id check above this layer). */
+void i_dart_plat_mutex_init   (i_DartMutex *m){ InitializeSRWLock((PSRWLOCK)m); }
+void i_dart_plat_mutex_destroy(i_DartMutex *m){ (void)m; }
+void i_dart_plat_mutex_lock   (i_DartMutex *m){ AcquireSRWLockExclusive((PSRWLOCK)m); }
+void i_dart_plat_mutex_unlock (i_DartMutex *m){ ReleaseSRWLockExclusive((PSRWLOCK)m); }
+
+void i_dart_plat_cond_init   (i_DartCond *c){ InitializeConditionVariable((PCONDITION_VARIABLE)c); }
+void i_dart_plat_cond_destroy(i_DartCond *c){ (void)c; }
+void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
+    /* 64-bit round-up: (0xFFFFFFFF + 999) would wrap in 32 bits and turn the
+       longest waits into 1 ms spins */
+    DWORD ms = (DWORD)(((uint64_t)timeout_us + 999u) / 1000u);
+    SleepConditionVariableSRW((PCONDITION_VARIABLE)c, (PSRWLOCK)m, ms ? ms : 1, 0);
+}
+void i_dart_plat_cond_broadcast(i_DartCond *c){ WakeAllConditionVariable((PCONDITION_VARIABLE)c); }
+
+#else /* POSIX */
+
+typedef struct { pthread_t t; void (*fn)(void *); void *arg; } i_DartThreadImpl;
+DART__FITS(i_dart_plat_mutex_fits,  pthread_mutex_t,  i_DartMutex);
+DART__FITS(i_dart_plat_cond_fits,   pthread_cond_t,   i_DartCond);
+DART__FITS(i_dart_plat_thread_fits, i_DartThreadImpl, i_DartThread);
+
+static void *i_dart_plat_thread_tramp(void *p){
+    i_DartThreadImpl *t = (i_DartThreadImpl *)p;
+    t->fn(t->arg);
+    return NULL;
+}
+int i_dart_plat_thread_start(i_DartThread *t, void (*fn)(void *), void *arg){
+    i_DartThreadImpl *ti = (i_DartThreadImpl *)t;
+    ti->fn = fn; ti->arg = arg;
+    return pthread_create(&ti->t, NULL, i_dart_plat_thread_tramp, ti) == 0;
+}
+void i_dart_plat_thread_join(i_DartThread *t){
+    pthread_join(((i_DartThreadImpl *)t)->t, NULL);
+}
+uint64_t i_dart_plat_thread_id(void){ return (uint64_t)(uintptr_t)pthread_self(); }
+
+void i_dart_plat_mutex_init   (i_DartMutex *m){ pthread_mutex_init((pthread_mutex_t *)m, NULL); }
+void i_dart_plat_mutex_destroy(i_DartMutex *m){ pthread_mutex_destroy((pthread_mutex_t *)m); }
+void i_dart_plat_mutex_lock   (i_DartMutex *m){ pthread_mutex_lock((pthread_mutex_t *)m); }
+void i_dart_plat_mutex_unlock (i_DartMutex *m){ pthread_mutex_unlock((pthread_mutex_t *)m); }
+
+void i_dart_plat_cond_init(i_DartCond *c){
+#if defined(__linux__)
+    /* wait on the monotonic clock so a wall-clock step cannot stretch a timeout */
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+    pthread_cond_init((pthread_cond_t *)c, &a);
+    pthread_condattr_destroy(&a);
+#else
+    pthread_cond_init((pthread_cond_t *)c, NULL);
+#endif
+}
+void i_dart_plat_cond_destroy(i_DartCond *c){ pthread_cond_destroy((pthread_cond_t *)c); }
+void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
+#if defined(__APPLE__)
+    struct timespec rel;
+    rel.tv_sec  = (time_t)(timeout_us / 1000000u);
+    rel.tv_nsec = (long)(timeout_us % 1000000u) * 1000L;
+    pthread_cond_timedwait_relative_np((pthread_cond_t *)c, (pthread_mutex_t *)m, &rel);
+#else
+    /* Linux: monotonic (set at init). Elsewhere: realtime; a wall-clock jump can
+       cut the wait short, which the caller's predicate-plus-deadline loop absorbs. */
+    struct timespec ts;
+  #if defined(__linux__)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+  #else
+    clock_gettime(CLOCK_REALTIME, &ts);
+  #endif
+    ts.tv_sec  += (time_t)(timeout_us / 1000000u);
+    ts.tv_nsec += (long)(timeout_us % 1000000u) * 1000L;
+    if (ts.tv_nsec >= 1000000000L){ ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    pthread_cond_timedwait((pthread_cond_t *)c, (pthread_mutex_t *)m, &ts);
+#endif
+}
+void i_dart_plat_cond_broadcast(i_DartCond *c){ pthread_cond_broadcast((pthread_cond_t *)c); }
+
+#endif /* _WIN32 */
+
+/* Waker: platform-neutral over the socket helpers above. Bound to loopback and
+   connected to itself, so only its own 1-byte signals ever arrive. */
+int i_dart_plat_waker_open(i_DartWaker *w){
+    struct sockaddr_in a; i_DartSocklen al = sizeof a;
+    w->fd = i_dart_plat_udp_open();
+    if (w->fd == DART_SOCK_BAD) return 0;
+    memset(&a, 0, sizeof a);
+    if (!i_dart_plat_bind(w->fd, i_dart_plat_ipv4(127, 0, 0, 1), 0, 0)) goto fail;
+    if (getsockname(DART__FD(w->fd), (struct sockaddr *)&a, &al) != 0) goto fail;
+    if (connect(DART__FD(w->fd), (struct sockaddr *)&a, sizeof a) != 0) goto fail;
+    i_dart_plat_set_nonblock(w->fd);
+    return 1;
+fail:
+    i_dart_plat_close(w->fd);
+    w->fd = DART_SOCK_BAD;
+    return 0;
+}
+int i_dart_plat_waker_signal(i_DartWaker *w){
+    char b = 1;
+    if (w->fd == DART_SOCK_BAD) return 0;
+    return (int)send(DART__FD(w->fd), &b, 1, 0) == 1;
+}
+void i_dart_plat_waker_drain(i_DartWaker *w){
+    char b[64];
+    if (w->fd == DART_SOCK_BAD) return;
+    while (recv(DART__FD(w->fd), b, sizeof b, 0) > 0) {}
+}
+void i_dart_plat_waker_close(i_DartWaker *w){
+    i_dart_plat_close(w->fd);
+    w->fd = DART_SOCK_BAD;
+}
+
+#endif /* DART_THREADS */
+
 /* ------------------------------------------------------------- shared memory */
 #ifdef DART_SHM
 #ifndef _WIN32
@@ -3548,6 +3864,14 @@ void dart_discovery_advertise(DartDiscovery *d, DartBytes meta){
 
 void dart_discovery_replay(DartDiscovery *d){
     if (d) dart_discovery_replay_peers(d->core);
+}
+
+int dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]){
+    int n = 0;
+    if (!d) return 0;
+    out[n++] = d->fd;
+    if (d->unicast_fd != DART_SOCK_BAD) out[n++] = d->unicast_fd;
+    return n;
 }
 
 /* A loopback (127/8) or unspecified address is never a usable multicast egress. */
@@ -4578,6 +4902,26 @@ int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
     for (p=0;p<(uint16_t)max_peers;p++){
         i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
         if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
+    }
+    return 0;
+}
+
+
+int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
+                                            uint64_t *evict_base, uint32_t *evict_count){
+    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
+    if (!ch) return 0;
+    slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
+    if (!slot->valid) return 0;
+    max_peers = st->cfg.max_peers;
+    for (p=0;p<(uint16_t)max_peers;p++){
+        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
+        if (w->used && !st->peer_dormant[p] && w->sent_upto < slot->base + slot->count){
+            if (evict_base)  *evict_base  = slot->base;
+            if (evict_count) *evict_count = slot->count;
+            return 1;
+        }
     }
     return 0;
 }
@@ -7071,6 +7415,12 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_dart_event_append_str(p,end,": "); p = i_dart_event_append_u64(p,end,ev->too_big_bytes);
         p = i_dart_event_append_str(p,end," byte blob exceeds our capacity, its metadata is refused");
         break;
+    case DART_EVICTED_UNSENT:
+        p = i_dart_event_append_str(p,end,"evicted-unsent ch="); p = i_dart_event_append_u64(p,end,ev->channel);
+        p = i_dart_event_append_str(p,end," seqno "); p = i_dart_event_append_u64(p,end,ev->lost_first);
+        p = i_dart_event_append_str(p,end,".."); p = i_dart_event_append_u64(p,end,ev->lost_first + ev->lost_count - 1);
+        p = i_dart_event_append_str(p,end,": send burst outran the TX drain, history overwritten before emission");
+        break;
     }
     *p = '\0';                                     /* p <= end = buf+cap-1, in range */
     return buf;
@@ -7557,6 +7907,26 @@ struct DartNode {
     /* backpressure accumulators, read via dart_node_backpressure_stats */
     uint64_t      backpressure_total_us;
     uint32_t      backpressure_wait_count;
+    uint32_t      evicted_unsent;  /* DART_EVICTED_UNSENT count (dart_node_evicted_unsent) */
+#ifdef DART_THREADS
+    /* thread safety + the optional service thread (runtime.h "Threading"). The lock is
+       never held across a blocking wait: the poller drops it around the socket poll and
+       any thread that mutates state kicks the waker so the change is serviced now. */
+    i_DartMutex   mu;             /* THE node lock: every public entry point takes it */
+    i_DartCond    cv;             /* senders/drainers waiting on the poller's progress */
+    uint32_t      cv_waiters;     /* under mu; broadcast skipped when 0 */
+    i_DartWaker   waker;          /* interrupts the unlocked socket wait */
+    i_DartThread  svc;
+    volatile uint8_t svc_running; /* a service thread is alive (dart_node_start) */
+    volatile uint8_t svc_stop;    /* stop requested; the service loop exits on it */
+    uint8_t       svc_joining;    /* under mu: one stopper owns the join; others wait on cv */
+    uint32_t      pollers_sleeping; /* under mu: pollers in (or headed into) the unlocked wait */
+    uint8_t       wake_signaled;  /* under mu: coalesce a burst into one waker datagram */
+    uint8_t       user_locked;    /* the public dart_node_lock is held (pairs its unlock) */
+    uint64_t      work_seq;       /* completed work passes (the unsent-wait predicate) */
+    volatile uint8_t  lock_held;  /* owner-reentrancy check: only the owner thread ever */
+    volatile uint64_t lock_owner; /* stores its own id, and zeroes it before releasing */
+#endif
     /* diagnostic: in-pump probe sampled inside the backpressure wait (dart_channel_send) */
     DartPumpProbeFn pump_probe;
     void          *pump_probe_user;
@@ -7601,6 +7971,59 @@ struct DartNode {
 static void *i_dart_node_alloc(void *u, void *ptr, size_t size){
     return dart_allocator_alloc(&((DartNode*)u)->pool, ptr, size);
 }
+
+#ifdef DART_THREADS
+/* Raw lock ops that keep the owner-id bookkeeping consistent. lock_owner is zeroed
+   BEFORE the release so a non-owner reading the pair unlocked can never observe
+   lock_held with its own id (it is the only thread that ever writes that id). */
+static void i_dart_node_lock_raw(DartNode *n){
+    i_dart_plat_mutex_lock(&n->mu);
+    n->lock_owner = i_dart_plat_thread_id();
+    n->lock_held = 1;
+}
+static void i_dart_node_unlock_raw(DartNode *n){
+    n->lock_owner = 0;
+    n->lock_held = 0;
+    i_dart_plat_mutex_unlock(&n->mu);
+}
+/* Reentrant-aware entry lock: 1 = this call acquired mu (unlock releases it), 0 = the
+   calling thread already held it (a callback calling back in, or the pump's nested
+   poll). Reentrant callers proceed without waiting anywhere. */
+static int i_dart_node_lock(DartNode *n){
+    if (n->lock_held && n->lock_owner == i_dart_plat_thread_id()) return 0;
+    i_dart_node_lock_raw(n);
+    return 1;
+}
+static void i_dart_node_unlock(DartNode *n, int acquired){
+    if (acquired) i_dart_node_unlock_raw(n);
+}
+/* With mu held, before unlocking: cut the pollers' blocking waits short so the state
+   change (a queued send, a new advertisement, a stop) is serviced now, not at the
+   next tick. One datagram wakes every sleeping poller (they all poll the same waker
+   fd; the first to re-lock drains it), and the burst coalesces to one datagram per
+   sleep. Armed only when the signal actually went out, so a failed loopback send
+   can never wedge the coalescing. */
+static void i_dart_node_kick(DartNode *n){
+    if (n->pollers_sleeping && !n->wake_signaled && i_dart_plat_waker_signal(&n->waker))
+        n->wake_signaled = 1;
+}
+/* Condvar wait that keeps the owner bookkeeping honest: mu is released inside the
+   wait (another thread will take it and zero/claim the fields), so re-stamp ownership
+   after it is reacquired. Anything cached from inside the node across this call is
+   invalid: the poller may have grown/relocated the arena while we slept. */
+static void i_dart_node_cv_wait(DartNode *n, uint64_t timeout_us){
+    n->lock_owner = 0;
+    n->lock_held = 0;
+    i_dart_plat_cond_wait(&n->cv, &n->mu,
+                          timeout_us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)timeout_us);
+    n->lock_owner = i_dart_plat_thread_id();
+    n->lock_held = 1;
+}
+#else
+static int  i_dart_node_lock(DartNode *n){ (void)n; return 1; }
+static void i_dart_node_unlock(DartNode *n, int acquired){ (void)n; (void)acquired; }
+static void i_dart_node_kick(DartNode *n){ (void)n; }
+#endif /* DART_THREADS */
 
 /* build a DartMsg and hand it to the app (the channel name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. A message that does not
@@ -7851,6 +8274,16 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     }
 
     n->fd = DART_SOCK_BAD;
+#ifdef DART_THREADS
+    i_dart_plat_mutex_init(&n->mu);
+    i_dart_plat_cond_init(&n->cv);
+    /* opened for every node (not just started ones): it also wakes a plain
+       dart_node_poll blocked in its wait when another thread sends. A platform
+       whose loopback cannot carry it (exotic lwIP configs) DEGRADES rather than
+       failing the open: the fd stays DART_SOCK_BAD, kick becomes a no-op, and
+       cross-thread mutations are serviced at the next timer-capped tick. */
+    (void)i_dart_plat_waker_open(&n->waker);
+#endif
     n->domain = o.domain;
     n->net = o.net;
     n->user_on_message = on_message; n->on_event = on_event;
@@ -7879,7 +8312,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 #endif
 
     n->transport = dart_transport_init(blocks.transport, blocks.transport_bytes, &tc);
-    if (!n->transport) goto fail_startup;
+    if (!n->transport) goto fail_threads;
 #ifdef DART_SHM
     {   uint32_t n_segments = (uint32_t)max_channels * DART_SHM_N_CLASSES;
         uint16_t reader_max = i_dart_node_shm_reader_max(max_peers, max_channels); uint32_t i;
@@ -7906,14 +8339,14 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif
         n->core = i_dart_node_core_init(blocks.node_core, blocks.node_core_bytes, &cc);
-        if (!n->core) goto fail_startup;
+        if (!n->core) goto fail_threads;
     }
 
     /* Bind the data socket before opening discovery so we can advertise its real
        port (0 => OS ephemeral, read back via getsockname). No reuse: a unicast
        endpoint owns its port, so a collision fails loudly here. */
     fd = i_dart_plat_udp_open();
-    if (fd==DART_SOCK_BAD) goto fail_startup;
+    if (fd==DART_SOCK_BAD) goto fail_threads;
     n->fd=fd;                       /* owned now: fail_sock closes it */
     if (!i_dart_plat_bind(fd, 0, o.net.data_port, 0)) goto fail_sock;
     local_port = i_dart_plat_local_port(fd);
@@ -7941,7 +8374,12 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 fail_sock:
     if (n->fd != DART_SOCK_BAD) i_dart_plat_close(n->fd);
     n->fd = DART_SOCK_BAD;
-fail_startup:
+fail_threads:
+#ifdef DART_THREADS
+    if (n->waker.fd != DART_SOCK_BAD) i_dart_plat_waker_close(&n->waker);
+    i_dart_plat_cond_destroy(&n->cv);
+    i_dart_plat_mutex_destroy(&n->mu);
+#endif
     i_dart_plat_cleanup();
     { DartAllocator p = n->pool; dart_allocator_reset(&p); }   /* frees the node struct + arena */
     return NULL;
@@ -8029,27 +8467,34 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
 
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
                                       const DartSchema *schema, const DartChannelOpts *opts){
-    DartChannelDef def; DartChannel *h; uint16_t idx;
+    DartChannelDef def; DartChannel *h; uint16_t idx; int acquired;
     if (!n || !name) return NULL;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return NULL;   /* from a callback: a grow here would relocate the arena mid-delivery */
     if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
         uint16_t want = n->max_channels < 0x8000u ? (uint16_t)(n->max_channels*2u) : 0xFFFFu;
-        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want)) return NULL;
+        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want)){
+            i_dart_node_unlock(n, acquired);
+            return NULL;
+        }
     }
     idx = n->n_created;
     h = (DartChannel*)i_dart_node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
-    if (!h) return NULL;
+    if (!h){ i_dart_node_unlock(n, acquired); return NULL; }
     h->schema = NULL;
     if (schema){   /* copy into node memory so the caller's schema need not outlive the channel */
         DartBytes w = dart_schema_wire(schema);
         h->schema = dart_schema_parse(w.data, w.len, i_dart_node_alloc, n);
-        if (!h->schema){ i_dart_node_alloc(n, h, 0); return NULL; }
+        if (!h->schema){ i_dart_node_alloc(n, h, 0); i_dart_node_unlock(n, acquired); return NULL; }
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
     if (opts) def.qos = opts->qos;
     if (dart_transport_channel_define(n->transport, idx, &def) != 0){
         if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
-        i_dart_node_alloc(n, h, 0); return NULL;
+        i_dart_node_alloc(n, h, 0);
+        i_dart_node_unlock(n, acquired);
+        return NULL;
     }
     h->n = n; h->index = idx;
     if (h->schema)   /* advertise + gate matches with it (any non-INACTIVE role) */
@@ -8061,6 +8506,8 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
     n->n_created++;
+    i_dart_node_kick(n);                       /* announce the new channel now */
+    i_dart_node_unlock(n, acquired);
     return h;
 }
 
@@ -8095,9 +8542,42 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
     }
 }
 
-int dart_node_poll(DartNode *n, int timeout_ms){
+/* threaded mode: the longest a send waits for a poller to hand unsent head history
+ * to the wire before overwriting it (KEEP_LAST + DART_EVICTED_UNSENT after). One
+ * waker-kicked work pass normally clears it in microseconds; the bound only gates
+ * a genuinely wedged socket. */
+#ifndef DART_UNSENT_WAIT_US
+#define DART_UNSENT_WAIT_US 20000u
+#endif
+
+/* Cap a wait at the transport's next timer (ack/NACK/heartbeat) and discovery's next
+ * announce, so both fire on time with no traffic to wake us. Lock held; pure compute. */
+static int i_dart_node_wait_ms(DartNode *n, int timeout_ms){
+    uint64_t next = dart_transport_next_deadline_us(n->transport);
+    uint64_t due  = dart_discovery_next_due_us(dart_discovery_state(n->discovery));
+    if (timeout_ms < 0) timeout_ms = 0;
+    if (!next || due < next) next = due;   /* due is a real time (0 = now); next 0 = none */
+    if (next){
+        uint64_t t0 = i_dart_plat_now_us();
+        uint64_t us = (next > t0) ? next - t0 : 0;
+        int ms = (us >= (uint64_t)timeout_ms*1000u) ? timeout_ms
+                                                    : (int)((us + 999u)/1000u);   /* round up: no busy-spin */
+        if (ms < timeout_ms) timeout_ms = ms;
+    } else timeout_ms = 0;                 /* something is due right now */
+    return timeout_ms;
+}
+
+/* One poll tick with the node lock held: deferred grow + discovery tick, the blocking
+ * wait, then RX drain + TX flush. The ONE poll body: dart_node_poll, the service loop,
+ * and the backpressure pump all run it. outer=1 means this thread's own acquisition
+ * wraps the call, so the wait may drop the lock (other threads send into it and kick
+ * the waker); the pump's nested call passes 0 and keeps the lock across its wait. */
+static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
-    i_DartPollfd pfd[1];
+    i_DartPollfd pfd[5]; int nfds = 0, wait_ms;
+#ifdef DART_THREADS
+    int waker_slot = -1;
+#endif
 
     /* a peer was refused last tick for lack of slots: grow the table now, between ticks
        (safe: not inside any layer's processing), then the peer's next announce is admitted */
@@ -8109,20 +8589,46 @@ int dart_node_poll(DartNode *n, int timeout_ms){
 
     dart_discovery_poll(n->discovery, 0);                 /* discovery tick (non-blocking) */
 
-    memset(pfd,0,sizeof pfd);
-    pfd[0].fd=n->fd; pfd[0].events=DART_POLLIN;
-    /* cap the wait at the next internal timer so a due ack/NACK/heartbeat fires on
-       time, not after the full quantum (no traffic to wake us when a writer stalls) */
-    { uint64_t next_deadline = dart_transport_next_deadline_us(n->transport);
-      if (next_deadline){ uint64_t t0 = i_dart_plat_now_us();
-               uint64_t us = (next_deadline > t0) ? next_deadline - t0 : 0;          /* until the timer */
-               int ms = (us >= (uint64_t)timeout_ms*1000u) ? timeout_ms
-                                                           : (int)((us + 999u)/1000u);
-               if (ms < timeout_ms) timeout_ms = ms; } }       /* round up: no busy-spin */
-    if (i_dart_plat_poll(pfd,1,timeout_ms) > 0){
-        uint64_t rx_deadline = i_dart_plat_now_us() + DART_RX_BUDGET_US;
-        if (pfd[0].revents & DART_POLLIN) i_dart_node_rx_drain(n, n->fd, rx_deadline);
+    wait_ms = i_dart_node_wait_ms(n, timeout_ms);
+    memset(pfd, 0, sizeof pfd);
+    pfd[nfds].fd = n->fd; pfd[nfds].events = DART_POLLIN; nfds++;
+#ifdef DART_THREADS
+    if (n->waker.fd != DART_SOCK_BAD){
+        waker_slot = nfds;
+        pfd[nfds].fd = n->waker.fd; pfd[nfds].events = DART_POLLIN; nfds++;
     }
+#endif
+    {   /* discovery's sockets join the wait so an inbound announce cuts a long sleep
+           short (drained by the next tick's discovery poll). The fds are stable by
+           value: a grow while the lock is dropped relocates structs, never sockets. */
+        i_DartSock dfds[2]; int i, dn = dart_discovery_pollfds(n->discovery, dfds);
+        for (i = 0; i < dn; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = DART_POLLIN; nfds++; }
+    }
+
+#ifdef DART_THREADS
+    if (outer){
+        /* the wait runs UNLOCKED so a sender on another thread is never blocked behind
+           it; pollers_sleeping tells such a sender to kick the waker on a state change
+           (a counter, not a flag: several threads may poll the same node) */
+        n->pollers_sleeping++;
+        i_dart_node_unlock_raw(n);
+        i_dart_plat_poll(pfd, nfds, wait_ms);
+        i_dart_node_lock_raw(n);
+        n->pollers_sleeping--;
+    } else {
+        i_dart_plat_poll(pfd, nfds, wait_ms);
+    }
+    if (waker_slot >= 0){
+        i_dart_plat_waker_drain(&n->waker);
+        n->wake_signaled = 0;
+    }
+#else
+    (void)outer;
+    i_dart_plat_poll(pfd, nfds, wait_ms);
+#endif
+
+    if (pfd[0].revents & DART_POLLIN)
+        i_dart_node_rx_drain(n, n->fd, i_dart_plat_now_us() + DART_RX_BUDGET_US);
 
     now=i_dart_plat_now_us();
     /* the core already consumed any held datagram, so retry it before pulling new */
@@ -8137,19 +8643,96 @@ int dart_node_poll(DartNode *n, int timeout_ms){
             }
             now=i_dart_plat_now_us();
         }
+
+#ifdef DART_THREADS
+    n->work_seq++;
+    if (n->cv_waiters) i_dart_plat_cond_broadcast(&n->cv);   /* acks/TX may have progressed */
+#endif
+}
+
+int dart_node_poll(DartNode *n, int timeout_ms){
+    int acquired;
+    if (!n) return DART_ERR_STATE;
+    acquired = i_dart_node_lock(n);
+#ifdef DART_THREADS
+    if (!acquired || n->svc_running){
+        /* called from inside a callback, or a service thread owns the loop: refuse
+           loudly rather than double-drive the node */
+        i_dart_node_unlock(n, acquired);
+        return DART_ERR_STATE;
+    }
+#endif
+    i_dart_node_poll_locked(n, timeout_ms, acquired);
+    i_dart_node_unlock(n, acquired);
     return 0;
 }
 
-/* publish on a channel index: bounded backpressure pump, then SHM fast path, then UDP */
-static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
+/* publish on a channel index: flow-control wait (condvar under a service thread, the
+ * nested pump otherwise), then SHM fast path, then UDP. may_wait=0 is a reentrant send
+ * (from a callback): it can never block or run the loop, so it commits KEEP_LAST-style
+ * and only the unsent guard below applies. */
+static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, int may_wait){
     size_t len = data.len;
     /* one O(1) count gates the per-send fast paths: a channel no peer subscribes to skips
        backpressure and the SHM eligibility scan here, and the copy+commit in the core. */
     int matched = dart_transport_writer_match_count(n->transport, channel);
-    /* bounded backpressure: pump the loop (on_message/on_event may fire here) until
-       a slow reader acks or qos.backpressure_wait_us elapses, then send anyway */
     const DartQos *q = dart_transport_channel_qos(n->transport, channel);
-    if (matched && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
+    int guarded = 0;   /* the unsent-eviction check runs after the wait */
+
+#ifdef DART_THREADS
+    if (matched && n->svc_running){
+        guarded = 1;
+        /* Threaded: wait on the condvar for the poller's progress instead of pumping the
+           loop ourselves. Two predicates: unacked reliable history (bounded by
+           qos.backpressure_wait_us, as the pump always was) and UNSENT history on any
+           lane (bounded by DART_UNSENT_WAIT_US; one kicked work pass normally clears it,
+           so bursts block for microseconds, not the bound). */
+        if (may_wait){
+            uint64_t now = i_dart_plat_now_us(), t0 = now;
+            uint64_t rel_deadline = (q && q->backpressure_wait_us) ? now + q->backpressure_wait_us : 0;
+            uint64_t unsent_deadline = now + DART_UNSENT_WAIT_US;
+            uint64_t seq0 = n->work_seq;
+            int waited = 0;
+            n->cv_waiters++;
+            for (;;){
+                int evict_unacked = rel_deadline && dart_transport_send_would_evict(n->transport, channel);
+                int evict_unsent  = dart_transport_send_would_evict_unsent(n->transport, channel, NULL, NULL);
+                uint64_t deadline;
+                if (!evict_unacked && !evict_unsent) break;
+                /* unsent-only after a completed work pass: a pass either empties the TX
+                   queue or parks a datagram in tx_hold on a socket would-block. Held
+                   datagram = the SOCKET is the bottleneck, so KEEP_LAST drop-oldest
+                   applies; no hold = another sender refilled the ring meanwhile
+                   (contention), so re-arm and keep waiting (the deadline still bounds it) */
+                if (!evict_unacked && n->work_seq != seq0){
+                    if (n->tx_hold_len) break;
+                    seq0 = n->work_seq;
+                }
+                now = i_dart_plat_now_us();
+                deadline = evict_unacked
+                         ? (rel_deadline > unsent_deadline ? rel_deadline : unsent_deadline)
+                         : unsent_deadline;
+                if (now >= deadline) break;
+                waited = 1;
+                i_dart_node_kick(n);
+                i_dart_node_cv_wait(n, deadline - now);   /* mu drops: nothing cached survives */
+                if (!n->svc_running) break;               /* stopped under us */
+            }
+            n->cv_waiters--;
+            if (waited){
+                n->backpressure_total_us += i_dart_plat_now_us() - t0;
+                n->backpressure_wait_count++;
+            }
+            /* the poller may have grown/relocated the arena while we slept */
+            q = dart_transport_channel_qos(n->transport, channel);
+            matched = dart_transport_writer_match_count(n->transport, channel);
+        }
+    } else
+#endif
+    /* No service thread: bounded backpressure pump. Run the loop (on_message/on_event
+       fire here) until a slow reader acks or qos.backpressure_wait_us elapses, then
+       send anyway. */
+    if (matched && may_wait && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
         uint64_t t0 = i_dart_plat_now_us(), deadline = t0 + q->backpressure_wait_us;
         /* in-pump diagnostic: the publisher is blocked here for the whole wait, so its
            normal per-message print sees nothing within it. When a probe is set, sample
@@ -8160,8 +8743,9 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
         uint64_t interval = n->pump_probe_interval_us ? n->pump_probe_interval_us : 200000u;
         DartRepairStats sample_prev;
         if (n->pump_probe) dart_transport_repair_stats(n->transport, channel, &sample_prev);
+        guarded = 1;
         do {
-            dart_node_poll(n, 1);
+            i_dart_node_poll_locked(n, 1, 0);   /* nested tick: the lock stays held */
             if (n->pump_probe){
                 uint64_t now = i_dart_plat_now_us();
                 sample_polls++;
@@ -8184,51 +8768,95 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data){
         } while (i_dart_plat_now_us() < deadline);
         n->backpressure_total_us += i_dart_plat_now_us() - t0;
         n->backpressure_wait_count++;
+        /* a mid-pump grow relocates the arena: re-derive the cached pointers */
+        q = dart_transport_channel_qos(n->transport, channel);
+        matched = dart_transport_writer_match_count(n->transport, channel);
     }
+
+    /* Never-silent: a send that evicts history never handed to the wire (the wait
+       above timed out, the socket is wedged, or a reentrant send cannot wait) is
+       surfaced. The would-evict state is read here (before the commit changes it),
+       but the event fires only if the send actually commits, below: a send the
+       transport then rejects (TOO_BIG / ROLE / OOM) overwrote nothing. */
+    {
+        uint64_t evict_base = 0; uint32_t evict_count = 0;
+        int will_evict = guarded &&
+            dart_transport_send_would_evict_unsent(n->transport, channel, &evict_base, &evict_count);
+        int r;
 #ifdef DART_SHM
-    if (n->shm_capable && len>0 && channel < n->shm_n_channels && matched && dart_transport_writer_shm_eligible(n->transport, channel)){
-        uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
-        /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
-           same-sized traffic reuses a single prefix-sized segment; without it each message
-           uses its own size class's segment, created on demand. Per channel either way. */
-        uint32_t hint = q ? (q->shm_max_bytes ? q->shm_max_bytes : q->max_message_bytes) : 0u;
-        uint32_t k = i_dart_shm_class_for(hint ? hint : (uint32_t)len);
-        /* fits its class (with a hint, the hinted class) -> publish via SHM; chunk index =
-           the history slot this send will occupy, so chunk i binds slot i (no free list) */
-        if (k < DART_SHM_N_CLASSES && (uint32_t)len <= i_dart_shm_class_bytes(k)){
-            i_DartShmPool *pool = i_dart_node_shm_channel_pool(n, channel, k, keep_last);
-            uint16_t slot = dart_transport_channel_hist_head(n->transport, channel);
-            void *chunk_ptr = pool ? i_dart_shm_chunk(pool, slot, NULL) : NULL;
-            if (chunk_ptr){
-                i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
-                memcpy(chunk_ptr, data.data, len);                  /* one-copy write into shm */
-                i_dart_shm_stamp(pool, slot, (uint32_t)len, &d);
-                i_dart_shm_desc_encode(&d, desc);
-                if (dart_transport_send_shm(n->transport, channel, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
-                    n->shm_tx++;
-                    return 0;
+        if (n->shm_capable && len>0 && channel < n->shm_n_channels && matched && dart_transport_writer_shm_eligible(n->transport, channel)){
+            uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
+            /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
+               same-sized traffic reuses a single prefix-sized segment; without it each message
+               uses its own size class's segment, created on demand. Per channel either way. */
+            uint32_t hint = q ? (q->shm_max_bytes ? q->shm_max_bytes : q->max_message_bytes) : 0u;
+            uint32_t k = i_dart_shm_class_for(hint ? hint : (uint32_t)len);
+            /* fits its class (with a hint, the hinted class) -> publish via SHM; chunk index =
+               the history slot this send will occupy, so chunk i binds slot i (no free list) */
+            if (k < DART_SHM_N_CLASSES && (uint32_t)len <= i_dart_shm_class_bytes(k)){
+                i_DartShmPool *pool = i_dart_node_shm_channel_pool(n, channel, k, keep_last);
+                uint16_t slot = dart_transport_channel_hist_head(n->transport, channel);
+                void *chunk_ptr = pool ? i_dart_shm_chunk(pool, slot, NULL) : NULL;
+                if (chunk_ptr){
+                    i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
+                    memcpy(chunk_ptr, data.data, len);                  /* one-copy write into shm */
+                    i_dart_shm_stamp(pool, slot, (uint32_t)len, &d);
+                    i_dart_shm_desc_encode(&d, desc);
+                    if (dart_transport_send_shm(n->transport, channel, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
+                        n->shm_tx++;
+                        r = DART_OK;
+                        goto committed;
+                    }
                 }
             }
         }
-    }
 #endif
-    return dart_transport_send(n->transport, channel, data, i_dart_plat_now_us());
+        r = dart_transport_send(n->transport, channel, data, i_dart_plat_now_us());
+#ifdef DART_SHM
+committed:
+#endif
+        if (r == DART_OK && will_evict){
+            n->evicted_unsent++;
+            if (n->on_event){
+                DartEvent e; memset(&e, 0, sizeof e);
+                e.kind = DART_EVICTED_UNSENT; e.user = n->user_data;
+                e.channel = channel;
+                e.lost_first = evict_base; e.lost_count = evict_count;
+                e.detail = "send outran the TX drain";
+                n->on_event(&e);
+            }
+        }
+        return r;
+    }
 }
 
 int dart_channel_send(DartChannel *ch, DartBytes data){
+    int acquired, r;
     if (!ch) return DART_ERR_NO_CHANNEL;
-    return i_dart_node_do_send(ch->n, ch->index, data);
+    acquired = i_dart_node_lock(ch->n);
+    r = i_dart_node_do_send(ch->n, ch->index, data, acquired);
+    i_dart_node_kick(ch->n);              /* flush the commit now, not at the next tick */
+    i_dart_node_unlock(ch->n, acquired);
+    return r;
 }
 
 int dart_channel_set_role(DartChannel *ch, DartRole role){
-    int r;
+    int r, acquired;
     if (!ch) return -1;
+    acquired = i_dart_node_lock(ch->n);
+    if (!acquired){
+        /* from a callback: the discovery replay would rematch/reset the very reader
+           proxy mid-delivery, so refuse loudly */
+        return DART_ERR_STATE;
+    }
     r = dart_transport_set_role(ch->n->transport, ch->index, (uint8_t)role);
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
         i_dart_node_core_build_meta(ch->n->core);
         dart_discovery_advertise(ch->n->discovery, i_dart_node_core_meta(ch->n->core));
         dart_discovery_replay(ch->n->discovery);   /* re-apply peers' interest to our new role */
+        i_dart_node_kick(ch->n);                   /* announce the change now */
     }
+    i_dart_node_unlock(ch->n, acquired);
     return r;
 }
 
@@ -8237,67 +8865,236 @@ uint16_t dart_channel_index(const DartChannel *ch){ return ch ? ch->index : 0; }
 const DartSchema *dart_channel_schema(const DartChannel *ch){ return ch ? ch->schema : NULL; }
 
 DartChannel *dart_node_channel(DartNode *n, uint16_t index){
-    if (!n || index >= n->n_created) return NULL;
-    return n->handles[index];
+    DartChannel *h; int acquired;
+    if (!n) return NULL;
+    acquired = i_dart_node_lock(n);
+    h = (index < n->n_created) ? n->handles[index] : NULL;
+    i_dart_node_unlock(n, acquired);
+    return h;
 }
 
 /* Read-only peer view: discovery already packs its peer table into a zero-copy array, and a
  * node peer IS a discovery peer (it adds only the decoded overlay, read on demand via
- * dart_node_peer_frag / dart_node_peer_interest_next). So this just forwards. */
+ * dart_node_peer_frag / dart_node_peer_interest_next). So this just forwards. With a poller
+ * on another thread, bracket the CALL AND THE USE with dart_node_lock/dart_node_unlock
+ * (from inside a callback the view is already safe for the callback's duration). */
 const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count){
     return dart_discovery_peers(n ? n->discovery : NULL, count);
 }
 
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){
+    int acquired = i_dart_node_lock(n);
     if (waited_us)    *waited_us    = n->backpressure_total_us;
     if (waited_sends) *waited_sends = n->backpressure_wait_count;
+    i_dart_node_unlock(n, acquired);
+}
+
+/* Sends that evicted never-emitted history after the bounded wait (the DART_EVICTED_UNSENT
+ * count) since open: the burst/overload indicator. */
+uint32_t dart_node_evicted_unsent(DartNode *n){
+    uint32_t v; int acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    v = n->evicted_unsent;
+    i_dart_node_unlock(n, acquired);
+    return v;
 }
 
 void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
+    int acquired;
     if (!n) return;
+    acquired = i_dart_node_lock(n);
     dart_allocator_stats(&n->pool, in_use, peak, alloc_calls);   /* live bytes, high-water, (re)allocs */
+    i_dart_node_unlock(n, acquired);
 }
 
 void dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out){
-    if (ch) dart_transport_repair_stats(ch->n->transport, ch->index, out);
-    else if (out) memset(out, 0, sizeof *out);
+    if (ch){
+        int acquired = i_dart_node_lock(ch->n);
+        dart_transport_repair_stats(ch->n->transport, ch->index, out);
+        i_dart_node_unlock(ch->n, acquired);
+    } else if (out) memset(out, 0, sizeof *out);
 }
 
 void dart_node_set_pump_probe(DartNode *n, DartPumpProbeFn fn, uint64_t interval_us, void *user){
+    int acquired = i_dart_node_lock(n);
     n->pump_probe = fn; n->pump_probe_interval_us = interval_us; n->pump_probe_user = user;
+    i_dart_node_unlock(n, acquired);
 }
 
 int dart_channel_reader_progress(DartChannel *ch, uint32_t peer,
                                  uint64_t *base_seqno, uint32_t *have, uint32_t *total){
-    return ch ? dart_transport_reader_progress(ch->n->transport, ch->index, peer, base_seqno, have, total) : 0;
+    int r, acquired;
+    if (!ch) return 0;
+    acquired = i_dart_node_lock(ch->n);
+    r = dart_transport_reader_progress(ch->n->transport, ch->index, peer, base_seqno, have, total);
+    i_dart_node_unlock(ch->n, acquired);
+    return r;
 }
 
 #ifdef DART_SHM
 void dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv){
+    int acquired = i_dart_node_lock(n);
     if (sent) *sent = n->shm_tx;
     if (recv) *recv = n->shm_rx;
+    i_dart_node_unlock(n, acquired);
 }
 #endif
 
 int dart_channel_drain(DartChannel *ch, int timeout_ms){
-    DartNode *n; uint64_t deadline;
+    DartNode *n; uint64_t deadline; int acquired, drained = 1;
     if (!ch) return 0;
     n = ch->n;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return 0;   /* from a callback: can neither pump nor wait */
     deadline = i_dart_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
-    while (!dart_transport_send_drained(n->transport, ch->index)){
-        if (i_dart_plat_now_us() >= deadline) return 0;
-        dart_node_poll(n, 1);
+#ifdef DART_THREADS
+    if (n->svc_running){
+        n->cv_waiters++;
+        while (!dart_transport_send_drained(n->transport, ch->index)){
+            uint64_t now = i_dart_plat_now_us();
+            if (now >= deadline){ drained = 0; break; }
+            i_dart_node_kick(n);
+            i_dart_node_cv_wait(n, deadline - now);
+            if (!n->svc_running) break;   /* stopped under us: finish with the pump below */
+        }
+        n->cv_waiters--;
+        if (n->svc_running || !drained){
+            i_dart_node_unlock(n, acquired);
+            return drained;
+        }
     }
-    return 1;
+#endif
+    while (!dart_transport_send_drained(n->transport, ch->index)){
+        if (i_dart_plat_now_us() >= deadline){ drained = 0; break; }
+        i_dart_node_poll_locked(n, 1, 0);
+    }
+    i_dart_node_unlock(n, acquired);
+    return drained;
 }
 
 int dart_channel_match_count(DartChannel *ch){
-    return ch ? dart_transport_writer_match_count(ch->n->transport, ch->index) : 0;
+    int r, acquired;
+    if (!ch) return 0;
+    acquired = i_dart_node_lock(ch->n);
+    r = dart_transport_writer_match_count(ch->n->transport, ch->index);
+    i_dart_node_unlock(ch->n, acquired);
+    return r;
 }
 
-void dart_node_close(DartNode *n, int send_bye){
-    DartAllocator pool;
+#ifdef DART_THREADS
+/* the service thread: the same poll body in a loop, sleeping exactly until the next
+ * timer (or a waker kick). It holds the lock for every work pass and drops it inside
+ * poll_locked's blocking wait, so user threads only ever contend with bounded work. */
+static void i_dart_node_service(void *arg){
+    DartNode *n = (DartNode *)arg;
+    i_dart_node_lock_raw(n);
+    while (!n->svc_stop)
+        i_dart_node_poll_locked(n, 3600000, 1);   /* cap is moot: timers/kicks wake it */
+    i_dart_node_unlock_raw(n);
+}
+#endif
+
+int dart_node_start(DartNode *n){
+#ifndef DART_THREADS
+    (void)n;
+    return DART_ERR_NOSYS;
+#else
+    int acquired;
+    if (!n) return DART_ERR_STATE;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return DART_ERR_STATE;               /* from a callback */
+    if (n->svc_running){ i_dart_node_unlock(n, acquired); return DART_ERR_STATE; }
+    n->svc_stop = 0;
+    n->svc_running = 1;
+    if (!i_dart_plat_thread_start(&n->svc, i_dart_node_service, n)){
+        n->svc_running = 0;
+        i_dart_node_unlock(n, acquired);
+        return DART_ERR_NOSYS;
+    }
+    i_dart_node_unlock(n, acquired);                    /* the service takes the lock now */
+    return DART_OK;
+#endif
+}
+
+int dart_node_stop(DartNode *n){
+#ifndef DART_THREADS
+    (void)n;
+    return DART_OK;                                     /* nothing to stop; idempotent */
+#else
+    int acquired;
+    if (!n) return DART_ERR_STATE;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return DART_ERR_STATE;               /* from a callback (it IS the service) */
+    if (n->svc_joining){
+        /* another thread owns the join: wait for it to finish rather than joining
+           the same thread twice (UB). Counted as a cv waiter so its broadcasts land. */
+        n->cv_waiters++;
+        while (n->svc_running) i_dart_node_cv_wait(n, 100000u);
+        n->cv_waiters--;
+        i_dart_node_unlock(n, acquired);
+        return DART_OK;
+    }
+    if (!n->svc_running){ i_dart_node_unlock(n, acquired); return DART_OK; }
+    n->svc_joining = 1;
+    n->svc_stop = 1;
+    i_dart_node_kick(n);
+    i_dart_node_unlock(n, acquired);
+    i_dart_plat_thread_join(&n->svc);                   /* NEVER joined holding the lock */
+    acquired = i_dart_node_lock(n);
+    n->svc_running = 0;
+    n->svc_stop = 0;
+    n->svc_joining = 0;
+    /* free every waiter: blocked senders see svc_running == 0 and proceed unwaited,
+       and any concurrent stopper parked above returns */
+    if (n->cv_waiters) i_dart_plat_cond_broadcast(&n->cv);
+    i_dart_node_unlock(n, acquired);
+    return DART_OK;
+#endif
+}
+
+int dart_node_is_started(DartNode *n){
+#ifndef DART_THREADS
+    (void)n;
+    return 0;
+#else
+    return (n && n->svc_running) ? 1 : 0;
+#endif
+}
+
+void dart_node_lock(DartNode *n){
+#ifndef DART_THREADS
+    (void)n;
+#else
     if (!n) return;
+    if (n->lock_held && n->lock_owner == i_dart_plat_thread_id()) return;  /* already ours (a callback) */
+    i_dart_node_lock_raw(n);
+    n->user_locked = 1;
+#endif
+}
+
+void dart_node_unlock(DartNode *n){
+#ifndef DART_THREADS
+    (void)n;
+#else
+    if (!n || !n->user_locked) return;   /* only releases what dart_node_lock took */
+    if (!(n->lock_held && n->lock_owner == i_dart_plat_thread_id())) return;
+    n->user_locked = 0;
+    i_dart_node_unlock_raw(n);
+#endif
+}
+
+int dart_node_close(DartNode *n, int send_bye){
+    DartAllocator pool;
+    if (!n) return DART_OK;
+#ifdef DART_THREADS
+    /* from a callback: refuse LOUDLY (the return code lets a binding keep its handle
+       alive instead of stranding a running node it can never close again) */
+    if (n->lock_held && n->lock_owner == i_dart_plat_thread_id()) return DART_ERR_STATE;
+    dart_node_stop(n);
+    /* from here the contract holds: no other thread is inside, or may enter, any
+       dart_* call on this node, so the teardown runs truly single-threaded */
+#endif
     pool = n->pool;                                   /* copy out: the reset below frees n itself */
     if (n->discovery) dart_discovery_close(n->discovery, send_bye);
     if (n->fd != DART_SOCK_BAD) i_dart_plat_close(n->fd);
@@ -8310,8 +9107,14 @@ void dart_node_close(DartNode *n, int send_bye){
             if (n->shm_reader_segments[i]) i_dart_shm_detach((i_DartShmPool*)(n->shm_reader_pool_mem + (size_t)i*state_bytes));
     }
 #endif
+#ifdef DART_THREADS
+    if (n->waker.fd != DART_SOCK_BAD) i_dart_plat_waker_close(&n->waker);
+    i_dart_plat_cond_destroy(&n->cv);
+    i_dart_plat_mutex_destroy(&n->mu);
+#endif
     i_dart_plat_cleanup();
     dart_allocator_reset(&pool);   /* frees the node struct, arena, message buffers, schemas, handles */
+    return DART_OK;
 }
 #pragma endregion
 #endif /* !DART_TRANSPORT_SANS_IO */
@@ -8326,12 +9129,13 @@ enum class Reliability { BestEffort = 0, Reliable = 1 };
 enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
 /* dart_channel_send / create result. Ok is 0; the rest mirror DartResult. */
-enum class SendStatus  { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4 };
+enum class SendStatus  { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
+                         State = -5, NoSys = -6 };
 
 enum class EventKind {
     PeerUp = 0, PeerDown, PeerInterest, MessageLost, MessageTooBig, NameCollision,
     QosIncompatible, SchemaMismatch, PeerRefused, InterestOverflow,
-    MetaTruncated, PeerMetaTooBig
+    MetaTruncated, PeerMetaTooBig, EvictedUnsent
 };
 
 /* Schema field kinds for reflection (Schema::Field); values match the C wire. */
@@ -8341,8 +9145,8 @@ enum class FieldType : uint8_t {
 
 static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
-static_assert((int)SendStatus::OutOfMemory == detail::DART_ERR_OOM, "result enum drift");
-static_assert((int)EventKind::PeerMetaTooBig == detail::DART_PEER_META_TOO_BIG, "event enum drift");
+static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
+static_assert((int)EventKind::EvictedUnsent == detail::DART_EVICTED_UNSENT, "event enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 
 /* forward decls */
@@ -8656,9 +9460,12 @@ private:
 
 /* Node: owns the DartNode, its memory, and the user callbacks.
  *
- * Single-threaded: drive poll() yourself in a loop (background threading was
- * removed for now). Call poll, send, create_channel, and the handlers all on one
- * thread; as with the C API, do NOT call back into the node from a handler. */
+ * Thread-safe: every call is serialized by a node-level lock inside the C core.
+ * Drive it either by calling poll() from your own loop, or via start(): a C-level
+ * background service thread owns the loop and handlers then fire on it (never two
+ * at once for one node). From inside a handler, send() and read-only queries are
+ * allowed; poll/create_channel/set_role/drain/stop are refused (SendStatus::State
+ * / no-op), never corrupting. */
 class Node {
 public:
     using MessageHandler = std::function<void(const MessageIn&)>;
@@ -8735,16 +9542,32 @@ public:
     }
 
     /* One loop tick: drives discovery, RX, timers, and flushes queued TX. Blocks
-     * up to timeout_ms in the socket wait (wakes early on RX; 0 = non-blocking).
-     * Drive this yourself in a loop -- a node is single-threaded. */
+     * up to timeout_ms in the socket wait (wakes early on RX or a send from another
+     * thread; 0 = non-blocking). Not needed (and refused) while start() runs. */
     int poll(int timeout_ms = 0) {
         return detail::dart_node_poll(impl_->node, timeout_ms);
     }
+
+    /* Run the C-level background service thread: it owns the loop and fires the
+     * handlers; every Node/Channel call stays safe from any thread, and a send is
+     * flushed immediately (a waker cuts the service's socket wait short). */
+    bool start() { return detail::dart_node_start(impl_->node) == 0; }
+    /* Stop and join the service thread (idempotent; implied by node teardown). */
+    void stop()  { detail::dart_node_stop(impl_->node); }
+    bool is_started() const { return detail::dart_node_is_started(impl_->node) == 1; }
 
     /* A copied snapshot of the live peer table (safe to keep after the poll). */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
         uint16_t count = 0;
+        /* the C view is zero-copy: hold the node lock across the copy so a poller
+           on another thread cannot mutate it mid-read (no-op if we are that thread).
+           RAII so a bad_alloc mid-copy cannot leak the lock and stall the node. */
+        struct LockGuard {
+            detail::DartNode* n;
+            explicit LockGuard(detail::DartNode* node) : n(node) { detail::dart_node_lock(n); }
+            ~LockGuard() { detail::dart_node_unlock(n); }
+        } guard(impl_->node);
         const detail::DartDiscoveryPeer* ps = detail::dart_node_peers(impl_->node, &count);
         for (uint16_t i = 0; ps && i < count; i++) {
             const detail::DartDiscoveryPeer& p = ps[i];
@@ -8776,6 +9599,9 @@ public:
         detail::dart_node_backpressure_stats(impl_->node, &b.waited_us, &b.waited_sends);
         return b;
     }
+    /* Sends that evicted never-sent history after the bounded wait (the
+     * EventKind::EvictedUnsent count): the send-burst/overload indicator. */
+    uint32_t evicted_unsent() const { return detail::dart_node_evicted_unsent(impl_->node); }
 
 private:
     struct Impl {

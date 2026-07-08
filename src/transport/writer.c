@@ -107,6 +107,26 @@ int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
 }
 
 
+int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
+                                            uint64_t *evict_base, uint32_t *evict_count){
+    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
+    if (!ch) return 0;
+    slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
+    if (!slot->valid) return 0;
+    max_peers = st->cfg.max_peers;
+    for (p=0;p<(uint16_t)max_peers;p++){
+        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
+        if (w->used && !st->peer_dormant[p] && w->sent_upto < slot->base + slot->count){
+            if (evict_base)  *evict_base  = slot->base;
+            if (evict_count) *evict_count = slot->count;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
 int dart_transport_send_drained(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
     uint32_t max_peers; uint16_t p;

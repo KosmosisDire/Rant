@@ -145,6 +145,12 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                DartBytes datagram, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
+/* The next monotonic time dart_discovery_update wants to run its timers (announce due;
+ * 0 = immediately, e.g. a pending solicit or a just-advertised blob). Lets a driving
+ * loop sleep exactly until due instead of ticking. Peer-timeout sweeps ride the same
+ * cadence, so detection lags by at most one announce interval (well inside the
+ * default peer timeout). */
+uint64_t     dart_discovery_next_due_us(const DartDiscoveryState *st);
 size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queue a one-shot solicit: the next update asks peers to announce now (sent once at startup). */
 void         dart_discovery_solicit(DartDiscoveryState *st);

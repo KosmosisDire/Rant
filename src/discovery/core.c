@@ -494,6 +494,11 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
     return 0;
 }
 
+uint64_t dart_discovery_next_due_us(const DartDiscoveryState *st){
+    if (!st || !st->started || st->want_solicit) return 0;
+    return st->next_announce_us;   /* 0 after an advertise = announce the change now */
+}
+
 void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
     if (!st || meta.len > st->meta_capacity) return;   /* the node sizes meta_capacity to fit */
     st->self_meta         = meta;

@@ -72,6 +72,14 @@ void dart_discovery_replay(DartDiscovery *d){
     if (d) dart_discovery_replay_peers(d->core);
 }
 
+int dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]){
+    int n = 0;
+    if (!d) return 0;
+    out[n++] = d->fd;
+    if (d->unicast_fd != DART_SOCK_BAD) out[n++] = d->unicast_fd;
+    return n;
+}
+
 /* A loopback (127/8) or unspecified address is never a usable multicast egress. */
 static int i_dart_discovery_if_routable(uint32_t naddr){
     uint8_t ip[4];
