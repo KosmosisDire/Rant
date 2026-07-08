@@ -14,12 +14,23 @@
 extern "C" {
 #endif
 
-/* The zero-fragment same-host shared-memory path is ON by default. Opt out with
- * DART_NO_SHM for a slimmer build or a target without shm_open/mmap (on POSIX, link
- * -lrt on older glibc). It is used only between same-host nodes that set an allocator;
- * a node with no local SHM peer creates no segment and pays nothing at runtime. */
+/* The zero-fragment same-host shared-memory path: DART_SHM is AUTO-DETECTED on where
+ * the platform layer provides it (Windows file mappings; shm_open/mmap on Linux/
+ * macOS/BSD, -lrt on older glibc), off elsewhere, and DART_NO_SHM always wins (strip
+ * it explicitly, e.g. for a slimmer build). A new platform layer that implements the
+ * i_dart_plat_shm_* contract declares support by defining DART_SHM itself. It is used
+ * only between same-host nodes that set an allocator; a node with no local SHM peer
+ * creates no segment and pays nothing at runtime. This block mirrors platform/core.h
+ * EXACTLY so every TU agrees whichever header it saw first. */
 #if !defined(DART_SHM) && !defined(DART_NO_SHM)
-#define DART_SHM
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__)
+    #define DART_SHM
+  #endif
+#endif
+#if defined(DART_SHM) && defined(DART_NO_SHM)
+  #undef DART_SHM              /* both set: the opt-out wins */
 #endif
 
 #ifndef DART_FRAG_PAYLOAD

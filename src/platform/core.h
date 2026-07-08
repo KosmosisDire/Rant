@@ -25,10 +25,22 @@
 extern "C" {
 #endif
 
-/* SHM (the zero-fragment same-host path) is ON by default; DART_NO_SHM strips it.
- * Mirrors dart_transport.h so every TU agrees whether or not it includes that header. */
+/* SHM (the zero-fragment same-host path): DART_SHM is AUTO-DETECTED on where the
+ * bundled platform layer provides it (Windows file mappings; shm_open/mmap on
+ * Linux/macOS/BSD), off elsewhere (ESP-IDF and unknown targets have no shm_open),
+ * and DART_NO_SHM always wins (strip it explicitly, e.g. to drop the Linux -lrt).
+ * A new platform layer that implements the i_dart_plat_shm_* contract declares
+ * support by defining DART_SHM itself. This block mirrors dart_transport.h
+ * EXACTLY so every TU agrees whichever header it saw first. */
 #if !defined(DART_SHM) && !defined(DART_NO_SHM)
-#define DART_SHM
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__)
+    #define DART_SHM
+  #endif
+#endif
+#if defined(DART_SHM) && defined(DART_NO_SHM)
+  #undef DART_SHM              /* both set: the opt-out wins */
 #endif
 
 /* Threading (the node lock + optional service thread) follows the same flag shape:
@@ -172,10 +184,11 @@ void i_dart_plat_waker_drain (i_DartWaker *w);
 void i_dart_plat_waker_close (i_DartWaker *w);
 #endif /* DART_THREADS */
 
-/* --- shared memory (only under DART_SHM; the zero-copy same-host path) --------
- * The few primitives src/dart_shm.h needs. Absent without DART_SHM, so a target
- * lacking shm support builds and links without them. (POSIX: shm_open may want
- * -lrt on older glibc.) */
+/* --- shared memory (only under DART_SHM; see the detection above) -------------
+ * The few primitives src/dart_shm.h needs. Absent when DART_SHM is off (undetected
+ * platform or DART_NO_SHM), so a target lacking shm support builds and links
+ * without them; a new platform layer implements this contract and defines
+ * DART_SHM. (POSIX: shm_open may want -lrt on older glibc.) */
 #ifdef DART_SHM
 /* create maps a FRESH named segment of `bytes` RW (zero-filled). attach maps an
  * EXISTING one WHOLE: the reader needn't know its size, it discovers it from the OS
