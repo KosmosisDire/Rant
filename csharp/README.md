@@ -56,8 +56,10 @@ using Dart;
     [DartArray(4)] public byte[] Uuid; public Twist Vel;
 }
 
-var node = Node.Open("robot1", new NodeOptions { Domain = 7 },
-                     onMessage: m => Console.WriteLine(m.As<Pose>()));
+var node = Node.Open("robot1",
+                     onMessage: m => Console.WriteLine(m.As<Pose>()),
+                     onEvent: e => Console.Error.WriteLine(e),
+                     options: new NodeOptions { Domain = 7 });
 var ch = node.CreateChannel("pose", Role.PubSub, typeof(Pose),
                             new Qos { Reliability = Reliability.Reliable });
 node.Start();                                    // C-level service thread owns the loop

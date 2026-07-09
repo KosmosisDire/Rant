@@ -45,15 +45,16 @@ def on_message(m):
     got.set()
 
 
-def on_event(e):
-    print("event(sub):", e)
+def on_event(tag):
+    return lambda e: print("event(%s):" % tag, e)
 
 
 def main():
     print("opening nodes (first run compiles the embedded C, please wait)...")
     sub = dart.Node.open("sub", domain=DOMAIN, multicast_interface=IFACE,
-                         on_message=on_message, on_event=on_event)
-    pub = dart.Node.open("pub", domain=DOMAIN, multicast_interface=IFACE)
+                         on_message=on_message, on_event=on_event("sub"))
+    pub = dart.Node.open("pub", domain=DOMAIN, multicast_interface=IFACE,
+                         on_message=None, on_event=on_event("pub"))
 
     qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=8)
     sub.create_channel("pose", dart.Role.SUB_ONLY, Pose, qos=qos)

@@ -20,10 +20,11 @@ defined by reflection over a decorated class:
         y:     dart.f64
         cov:   dart.f64[9]
 
-    node = dart.Node.open("robot1", domain=7)
+    node = dart.Node.open("robot1", domain=7,
+                          on_message=lambda m: print(m.value),      # m.value is a decoded Pose
+                          on_event=lambda e: print("event:", e))    # wired up before open() even returns
     ch = node.create_channel("pose", dart.Role.PUBSUB, Pose,
                              qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
-    node.on_message(lambda m: print(m.value))     # m.value is a decoded Pose
     node.start()                                   # C-level service thread owns the loop
     ch.send(Pose(stamp=1, x=1.0, y=2.0, cov=[0]*9))   # thread-safe from any thread
     ...                                            # or skip start() and drive node.poll(1) yourself
@@ -311,9 +312,11 @@ class DartAllocator(Structure):
         ("page_realloc", c_void_p),
         ("shared", c_void_p),
         ("owned", c_void_p),
+        ("free_pool", c_void_p),
         ("page_size", c_uint32),
         ("max_bytes", c_size_t),
         ("in_use", c_size_t),
+        ("pooled", c_size_t),
         ("peak", c_size_t),
         ("alloc_calls", c_uint64),
         ("pages_live", c_uint64),
@@ -1085,10 +1088,14 @@ class Node:
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt", "_chan_specs")
 
     @classmethod
-    def open(cls, name=None, options=None, *, on_message=None, on_event=None, **opts):
-        """Open a node. Pass config as keyword args (domain=7, max_peers=32, ...) or
-        as options=NodeOptions(...). name is a human-readable label synced via
-        discovery (None => an auto "node-XXXXXXXX")."""
+    def open(cls, name=None, *, on_message, on_event, options=None, **opts):
+        """Open a node. on_message/on_event are required (pass None for either if truly
+        not needed) so they are wired in before open() even returns -- no early
+        peer/error event is ever missed waiting for a deferred on_message()/on_event()
+        call. on_message()/on_event() below can still rebind them later. Pass other
+        config as keyword args (domain=7, max_peers=32, ...) or as options=NodeOptions(...).
+        name is a human-readable label synced via discovery (None => an auto
+        "node-XXXXXXXX")."""
         if options is None:
             options = NodeOptions(**opts)
         elif opts:
@@ -1144,10 +1151,14 @@ class Node:
         return self
 
     def on_message(self, fn):
+        """Rebind the message handler set at open(). Rarely needed: open() already
+        requires an initial one."""
         self._on_msg = fn
         return self
 
     def on_event(self, fn):
+        """Rebind the event handler set at open(). Rarely needed: open() already
+        requires an initial one."""
         self._on_evt = fn
         return self
 

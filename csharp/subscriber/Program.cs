@@ -26,7 +26,8 @@ static class Program
         var opts = new NodeOptions();
         if (iface != null) opts.MulticastInterface = iface;
 
-        var node = Node.Open("cs-subscriber", opts, onMessage: _ => _count++);
+        var node = Node.Open("cs-subscriber", _ => _count++,
+            e => Console.Error.WriteLine("event: " + e), opts);
         node.CreateChannel("tick", Role.SubOnly, typeof(Tick));
         Console.WriteLine("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)");
 

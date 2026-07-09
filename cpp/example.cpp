@@ -61,11 +61,8 @@ int main(int argc, char** argv) {
     auto schema = dart::Schema::compile(CHAT_SCHEMA, &err);
     if (!schema) { std::fprintf(stderr, "schema: %s\n", err.c_str()); return 1; }
 
-    auto node = dart::Node::open(name ? name : std::string_view{});
+    auto node = dart::Node::open(name ? name : std::string_view{}, handle_message, handle_event);
     if (!node) { std::fprintf(stderr, "dart_node_open failed\n"); return 1; }
-
-    node->on_message(handle_message);
-    node->on_event(handle_event);
 
     auto chat = node->create_channel("chat", dart::Role::PubSub, &*schema,
                                      { dart::Reliability::Reliable });

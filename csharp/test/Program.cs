@@ -31,16 +31,18 @@ static class Program
         Console.WriteLine("opening nodes (first run compiles the embedded C, please wait)...");
         var netOpts = new NodeOptions { Domain = 42, MulticastInterface = "127.0.0.1" };
 
-        var sub = Node.Open("sub", netOpts,
+        var sub = Node.Open("sub",
             onMessage: m =>
             {
                 Received = m;
                 Console.WriteLine($"recv: [{m.ChannelName}] from {m.SenderName} -> {m.As<Pose>()}");
                 Got.Set();
             },
-            onEvent: e => Console.WriteLine("event(sub): " + e));
+            onEvent: e => Console.WriteLine("event(sub): " + e),
+            options: netOpts);
 
-        var pub = Node.Open("pub", new NodeOptions { Domain = 42, MulticastInterface = "127.0.0.1" });
+        var pub = Node.Open("pub", null, e => Console.WriteLine("event(pub): " + e),
+            new NodeOptions { Domain = 42, MulticastInterface = "127.0.0.1" });
 
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
         sub.CreateChannel("pose", Role.SubOnly, typeof(Pose), qos);

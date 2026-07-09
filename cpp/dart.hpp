@@ -17,13 +17,15 @@
  * #includes "dart.hpp" is auto-treated as the anchor). The anchor emits only
  * the implementation; use the wrapper from your other TUs.
  *
- *     auto node = dart::Node::open("robot1", { .domain = 7 });   // std::optional
+ *     auto node = dart::Node::open("robot1",
+ *         [](const dart::MessageIn& m){
+ *             std::printf("%.*s > %.*s\n",
+ *                 (int)m.sender_name().size(), m.sender_name().data(),
+ *                 (int)m.text().size(),        m.text().data());
+ *         },
+ *         [](const dart::Event& e){ std::fprintf(stderr, "event: %s\n", e.to_string().c_str()); },
+ *         { .domain = 7 });                  // std::optional
  *     if (!node) return 1;
- *     node->on_message([](const dart::MessageIn& m){
- *         std::printf("%.*s > %.*s\n",
- *             (int)m.sender_name().size(), m.sender_name().data(),
- *             (int)m.text().size(),        m.text().data());
- *     });
  *     auto ch = node->create_channel("chat", dart::Role::PubSub, nullptr,
  *                                    { .reliability = dart::Reliability::Reliable });
  *     node->start();                         // background service thread owns the loop
@@ -456,9 +458,16 @@ public:
     using EventHandler   = std::function<void(const Event&)>;
 
     /* Open a node. name = a human-readable label synced via discovery (empty =>
-     * an auto "node-XXXXXXXX"). Returns nullopt on failure. */
-    static std::optional<Node> open(std::string_view name = {}, const NodeOptions& o = {}) {
+     * an auto "node-XXXXXXXX"). on_message/on_event are required (pass {} / nullptr
+     * for either if truly not needed) so they are wired in before open() even
+     * returns -- no early peer/error event is ever missed waiting for a deferred
+     * on_message()/on_event() call; those below can still rebind them later.
+     * Returns nullopt on failure. */
+    static std::optional<Node> open(std::string_view name, MessageHandler on_message,
+                                    EventHandler on_event, const NodeOptions& o = {}) {
         std::unique_ptr<Impl> impl(new Impl());
+        impl->on_msg   = std::move(on_message);
+        impl->on_event = std::move(on_event);
         /* The node retains the net string/seed pointers, so own that storage. */
         impl->disc_group = o.discovery_group;
         impl->mcast_if   = o.multicast_interface;
@@ -513,6 +522,7 @@ public:
     Node& operator=(const Node&) = delete;
     ~Node() = default;   /* teardown lives in Impl::~Impl (so a move-assign tears down correctly too) */
 
+    /* Rebind a handler set at open(). Rarely needed: open() already requires initial ones. */
     Node& on_message(MessageHandler h) { impl_->on_msg = std::move(h);   return *this; }
     Node& on_event  (EventHandler   h) { impl_->on_event = std::move(h); return *this; }
 

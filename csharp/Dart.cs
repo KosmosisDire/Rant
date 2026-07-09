@@ -10,10 +10,12 @@
 //   - Unity (UNITY_5_3_OR_NEWER): the same native library, placed in Assets/Plugins;
 //     the only Unity-specific bit is [MonoPInvokeCallback] on the callbacks (AOT).
 //
-//   var node = Dart.Node.Open("robot1", new Dart.NodeOptions { Domain = 7 });
+//   var node = Dart.Node.Open("robot1",
+//                             onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed channel
+//                             onEvent: e => Console.Error.WriteLine(e),    // wired up before Open even returns
+//                             options: new Dart.NodeOptions { Domain = 7 });
 //   var ch = node.CreateChannel("pose", Dart.Role.PubSub, typeof(Pose),
 //                               new Dart.Qos { Reliability = Dart.Reliability.Reliable });
-//   node.OnMessage(m => Console.WriteLine(m.Value));   // decoded Pose for a typed channel
 //   node.Start();                                      // C-level service thread owns the loop
 //   ch.Send(new Pose { X = 1 });                       // thread-safe from any thread
 //
@@ -177,9 +179,11 @@ namespace Dart
         public IntPtr page_realloc;
         public IntPtr shared;
         public IntPtr owned;
+        public IntPtr free_pool;
         public uint page_size;
         public UIntPtr max_bytes;
         public UIntPtr in_use;
+        public UIntPtr pooled;
         public UIntPtr peak;
         public ulong alloc_calls;
         public ulong pages_live;
@@ -597,8 +601,12 @@ namespace Dart
 
         private Node() { }
 
-        public static Node Open(string name = null, NodeOptions options = null,
-                                Action<Message> onMessage = null, Action<Event> onEvent = null)
+        /// <summary>Open a node. onMessage/onEvent are required (pass null for either if
+        /// truly not needed) so they are wired in before Open even returns -- no early
+        /// peer/error event is ever missed waiting for a deferred OnMessage/OnEvent call.
+        /// OnMessage/OnEvent below can still rebind them later.</summary>
+        public static Node Open(string name, Action<Message> onMessage, Action<Event> onEvent,
+                                NodeOptions options = null)
         {
             options = options ?? new NodeOptions();
             var node = new Node { _onMsg = onMessage, _onEvt = onEvent };
@@ -641,7 +649,11 @@ namespace Dart
             return node;
         }
 
+        /// <summary>Rebind the message handler set at Open(). Rarely needed: Open already
+        /// requires an initial one.</summary>
         public Node OnMessage(Action<Message> fn) { _onMsg = fn; return this; }
+        /// <summary>Rebind the event handler set at Open(). Rarely needed: Open already
+        /// requires an initial one.</summary>
         public Node OnEvent(Action<Event> fn) { _onEvt = fn; return this; }
 
         /// <summary>Create a topic. schema may be null (raw), a Schema, a [DartSchema]

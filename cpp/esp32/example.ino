@@ -25,21 +25,21 @@ void setup() {
     opts.max_channels = 4;
     opts.max_peers    = 8;
 
-    g_node = dart::Node::open("esp32", opts);
+    g_node = dart::Node::open("esp32",
+        [](const dart::MessageIn &m) {
+            Serial.printf("[%.*s] %.*s > %.*s\n",
+                          (int)m.sender_name().size(),  m.sender_name().data(),
+                          (int)m.channel_name().size(), m.channel_name().data(),
+                          (int)m.text().size(),         m.text().data());
+        },
+        [](const dart::Event &e) {
+            Serial.printf("  <event> %s\n", e.to_string().c_str());
+        },
+        opts);
     if (!g_node) {
         Serial.println("dart_node_open failed");
         while (true) delay(1000);
     }
-
-    g_node->on_message([](const dart::MessageIn &m) {
-        Serial.printf("[%.*s] %.*s > %.*s\n",
-                      (int)m.sender_name().size(),  m.sender_name().data(),
-                      (int)m.channel_name().size(), m.channel_name().data(),
-                      (int)m.text().size(),         m.text().data());
-    });
-    g_node->on_event([](const dart::Event &e) {
-        Serial.printf("  <event> %s\n", e.to_string().c_str());
-    });
 
     dart::Qos qos;
     qos.backpressure_wait_us = 1000000; // wait for up to 1s

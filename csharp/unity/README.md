@@ -53,8 +53,10 @@ using Dart;
 Dart.Node _node;
 Dart.Channel _ch;
 void Start() {
-    _node = Node.Open("player1", new NodeOptions { Domain = 7 },
-                      onMessage: m => transform.position = ToVec(m.As<Pose>()));
+    _node = Node.Open("player1",
+                      onMessage: m => transform.position = ToVec(m.As<Pose>()),
+                      onEvent: e => Debug.LogWarning(e),
+                      options: new NodeOptions { Domain = 7 });
     _ch = _node.CreateChannel("pose", Role.PubSub, typeof(Pose));
     _node.Start(queueCallbacks: true);
 }

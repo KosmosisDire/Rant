@@ -19,14 +19,10 @@ int main() {
     opts.domain = 42;
     opts.multicast_interface = "127.0.0.1";   /* single-host discovery */
 
-    auto a = dart::Node::open("A", opts);
-    auto b = dart::Node::open("B", opts);
-    if (!a || !b) { std::printf("FAIL: open\n"); return 1; }
-
     std::string got_sender, got_text;
     uint32_t    got_seq = 0;
     bool        received = false;
-    b->on_message([&](const dart::MessageIn& m) {
+    auto on_msg = [&](const dart::MessageIn& m) {
         got_sender = std::string(m.sender_name());
         got_seq    = (uint32_t)m.get_uint("seq");
         auto n     = m.get_uint("textLen");
@@ -34,7 +30,14 @@ int main() {
         if (n > t.size()) n = t.size();
         got_text.assign(reinterpret_cast<const char*>(t.data()), (size_t)n);
         received   = true;
-    });
+    };
+    auto on_evt = [](const char* tag) {
+        return [tag](const dart::Event& e) { std::printf("event(%s): %s\n", tag, e.to_string().c_str()); };
+    };
+
+    auto a = dart::Node::open("A", nullptr, on_evt("A"), opts);
+    auto b = dart::Node::open("B", on_msg, on_evt("B"), opts);
+    if (!a || !b) { std::printf("FAIL: open\n"); return 1; }
 
     auto pub = a->create_channel("t", dart::Role::PubOnly, &*schema, { dart::Reliability::Reliable });
     auto sub = b->create_channel("t", dart::Role::SubOnly, &*schema, { dart::Reliability::Reliable });

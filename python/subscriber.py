@@ -29,7 +29,8 @@ def on_message(_):
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = dart.Node.open("py-subscriber", multicast_interface=iface, on_message=on_message)
+    node = dart.Node.open("py-subscriber", multicast_interface=iface, on_message=on_message,
+                          on_event=lambda e: print("event:", e, file=sys.stderr))
     node.create_channel("tick", dart.Role.SUB_ONLY, Tick)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 

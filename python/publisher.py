@@ -27,7 +27,9 @@ class Tick:
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0   # 0 => run forever
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = dart.Node.open("py-publisher", multicast_interface=iface)   # default iface, domain 0
+    node = dart.Node.open("py-publisher", multicast_interface=iface,   # default iface, domain 0
+                          on_message=None,
+                          on_event=lambda e: print("event:", e, file=sys.stderr))
     # keep_last deep enough that a small per-loop burst is not evicted before it flushes.
     ch = node.create_channel("tick", dart.Role.PUB_ONLY, Tick, qos=dart.Qos(keep_last=64))
     print("publishing 'tick' at %d Hz on the default interface, domain 0 (Ctrl+C to stop)" % HZ)
