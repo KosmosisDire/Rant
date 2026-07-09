@@ -1736,6 +1736,252 @@ static void schema_bind_checks(void){
     dart_allocator_reset(&ma);
 }
 
+/* (19b) pairwise detail codec ('uDTL', sans-IO): request build + header accessors, the
+   stateless responder (advertised aliases answered, INACTIVE/unknown skipped), schema
+   wire inlined ONLY on hash mismatch, entry-boundary truncation (the paging seam), and
+   wholesale rejection of malformed input. No sockets: the codec is called directly. */
+static void detail_codec_checks(void){
+    static uint8_t tmem[1<<18];
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartConfig tc; DartTransportState *tr; DartChannelDef ch[3];
+    DartMetaSchema schemas[3]; DartSchema *S;
+    DartDetailWant wants[4];
+    uint8_t req[256], resp[1024], out2[1024];
+    size_t rl, need, len;
+
+    S = dart_schema_compile(dart_allocator_alloc, &ma, "Pose { stamp: u64, x: f64 }", NULL);
+    memset(ch,0,sizeof ch);
+    ch[0].name="dt/typed"; ch[1].name="dt/raw";
+    ch[2].name="dt/off"; ch[2].role=DART_INACTIVE;
+    memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=3; tc.max_peers=2;
+    tr = dart_transport_init(tmem, sizeof tmem, &tc);
+    ST_CHECK(tr!=NULL && S!=NULL, "detail: transport + schema ready");
+    if (!tr || !S){ dart_allocator_reset(&ma); return; }
+    memset(schemas,0,sizeof schemas);
+    schemas[0].hash = dart_schema_hash(S); schemas[0].wire = dart_schema_wire(S);
+
+    /* request four aliases: typed (requester untyped: hash 0), raw, INACTIVE, unknown */
+    wants[0].alias=0; wants[0].schema_hash=0;
+    wants[1].alias=1; wants[1].schema_hash=0;
+    wants[2].alias=2; wants[2].schema_hash=0;
+    wants[3].alias=9; wants[3].schema_hash=0;
+    rl = dart_detail_req_build(77, 5, wants, 4, req, sizeof req);
+    ST_CHECK(rl == 14u+4u*10u, "detail: req builds (%u bytes)", (unsigned)rl);
+    ST_CHECK(dart_detail_kind(dart_bytes(req,rl))==DART_DETAIL_REQ
+          && dart_detail_domain(dart_bytes(req,rl))==77
+          && dart_detail_meta_version(dart_bytes(req,rl))==5,
+             "detail: req header round-trips (kind/domain/version)");
+    ST_CHECK(dart_detail_req_build(77,5,wants,4,req,20)==0, "detail: req refuses a short buffer");
+
+    need = dart_transport_detail_resp_size(tr, schemas, dart_bytes(req,rl));
+    len  = dart_transport_detail_respond(tr, schemas, 9, dart_bytes(req,rl), resp, sizeof resp);
+    ST_CHECK(need==len && len>14u, "detail: resp_size == respond, byte for byte (%u)", (unsigned)len);
+    ST_CHECK(dart_detail_kind(dart_bytes(resp,len))==DART_DETAIL_RESP
+          && dart_detail_domain(dart_bytes(resp,len))==77
+          && dart_detail_meta_version(dart_bytes(resp,len))==9,
+             "detail: resp header carries the responder version");
+    {   DartDetailIter it; DartDetail d; int n=0, ok_typed=0, ok_raw=0;
+        DartBytes wire = dart_bytes(NULL, 0);
+        memset(&it,0,sizeof it);
+        while (dart_detail_next(dart_bytes(resp,len), &it, &d)){
+            n++;
+            if (d.alias==0){
+                ok_typed = d.name.len==8 && memcmp(d.name.data,"dt/typed",8)==0
+                        && d.schema_hash==dart_schema_hash(S)
+                        && d.schema_wire.len==dart_schema_wire(S).len;
+                wire = d.schema_wire;
+            }
+            if (d.alias==1)
+                ok_raw = d.name.len==6 && memcmp(d.name.data,"dt/raw",6)==0
+                      && d.schema_hash==0 && d.schema_wire.len==0;
+        }
+        ST_CHECK(n==2, "detail: advertised aliases answered, INACTIVE + unknown skipped (n=%d)", n);
+        ST_CHECK(ok_typed, "detail: typed entry carries name + hash + inlined wire");
+        ST_CHECK(ok_raw, "detail: raw entry carries name, no schema");
+        {   DartSchema *P2 = wire.len ? dart_schema_parse(wire.data, wire.len,
+                                                          dart_allocator_alloc, &ma) : NULL;
+            ST_CHECK(P2 && dart_schema_hash(P2)==dart_schema_hash(S),
+                     "detail: inlined wire parses back to the same identity");
+        }
+    }
+
+    /* identical hash: hash-only entry, zero wire bytes (identical wire is implied) */
+    wants[0].schema_hash = dart_schema_hash(S);
+    rl  = dart_detail_req_build(77, 5, wants, 2, req, sizeof req);
+    len = dart_transport_detail_respond(tr, schemas, 9, dart_bytes(req,rl), resp, sizeof resp);
+    {   DartDetailIter it; DartDetail d; int hash_only=0; memset(&it,0,sizeof it);
+        while (dart_detail_next(dart_bytes(resp,len), &it, &d))
+            if (d.alias==0) hash_only = d.schema_wire.len==0 && d.schema_hash==dart_schema_hash(S);
+        ST_CHECK(hash_only, "detail: identical hash rides hash-only (no wire)");
+    }
+
+    /* a cap one byte short of full truncates at an entry boundary: still parseable,
+       holding exactly the leading entries that fit (the requester re-asks for the rest) */
+    wants[0].schema_hash = 0;
+    rl = dart_detail_req_build(77, 5, wants, 2, req, sizeof req);
+    {   size_t full = dart_transport_detail_resp_size(tr, schemas, dart_bytes(req,rl));
+        size_t cut  = dart_transport_detail_respond(tr, schemas, 9, dart_bytes(req,rl), out2, full-1);
+        DartDetailIter it; DartDetail d; int n=0; uint16_t first=0xFFFF;
+        memset(&it,0,sizeof it);
+        while (dart_detail_next(dart_bytes(out2,cut), &it, &d)){ if (!n) first=d.alias; n++; }
+        ST_CHECK(cut>0 && cut<full && n==1 && first==0,
+                 "detail: truncation stops at an entry boundary (paging: %d/%d entries)", n, 2);
+    }
+
+    /* malformed input is rejected wholesale, never partially trusted */
+    ST_CHECK(dart_transport_detail_respond(tr, schemas, 9, dart_bytes(req, rl-1), out2, sizeof out2)==0,
+             "detail: truncated req rejected");
+    ST_CHECK(dart_transport_detail_respond(tr, schemas, 9, dart_bytes(resp, len), out2, sizeof out2)==0,
+             "detail: a RESP fed to the responder is refused (kind gate)");
+    {   uint8_t junk[32]; memset(junk, 0x5A, sizeof junk);
+        ST_CHECK(dart_detail_kind(dart_bytes(junk, sizeof junk))==0
+              && dart_detail_kind(dart_bytes(req, 4))==0,
+                 "detail: non-detail bytes yield kind 0");
+    }
+    dart_allocator_reset(&ma);
+}
+
+/* (19c) live 'uDTL' routing: a DETAIL_REQ at a node's data socket is answered to the
+   request's SOURCE address even though the requester is a bare socket, never a peer
+   (the stateless-responder contract the explorer will rely on). The peer's v9 announce
+   blob, read from a second node's peer view, is the oracle the response must match.
+   Duplicate requests are idempotent; wrong-domain and garbage uDTL datagrams are
+   ignored without wedging the node. */
+static void detail_live_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannelOpts co; DartDiscoveryAddr seed;
+    DartSchema *W; DartChannel *pc;
+    i_DartSock q = DART_SOCK_BAD;
+    uint8_t pip[4]={0,0,0,0}; uint16_t pport=0; uint32_t pversion=0;
+    /* the oracle, copied out of the peer view BEFORE any further poll invalidates it */
+    uint16_t oalias[4]; char oname[4][64]; uint8_t onlen[4]; uint64_t ohash[4]; uint16_t nw=0;
+    uint16_t dom = ST_DOMAIN+10;
+    int t;
+
+    W = dart_schema_compile(dart_allocator_alloc, &ma, "Pose { stamp: u64, x: f64 }", NULL);
+    memset(&co,0,sizeof co); co.qos.keep_last=2;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=dom; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    P = dart_node_open(&pa, "dt-pub", NULL, NULL, &po);
+    S = dart_node_open(&sa, "dt-sub", st_on_message, NULL, &so);
+    ST_CHECK(P && S && W, "detail-live: nodes open");
+    if (!(P && S && W)){
+        if (P) dart_node_close(P,0); if (S) dart_node_close(S,0);
+        dart_allocator_reset(&ma); return;
+    }
+    pc = dart_node_create_channel(P, "dt/pose",  DART_PUB_ONLY, W,    &co);
+    dart_node_create_channel(P, "dt/plain", DART_PUB_ONLY, NULL, &co);
+    dart_node_create_channel(S, "dt/pose",  DART_SUB_ONLY, W,    &co);
+    for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(pc && dart_channel_match_count(pc)==1, "detail-live: matched");
+
+    /* the oracle: the publisher's locator, version, and advertised topics as its v9
+       blob (held by the subscriber) states them */
+    {   uint16_t cnt=0, k; const DartDiscoveryPeer *ps = dart_node_peers(S, &cnt);
+        const DartDiscoveryPeer *pp = NULL;
+        for (k=0;k<cnt;k++) if (ps[k].name.len==6 && memcmp(ps[k].name.data,"dt-pub",6)==0) pp=&ps[k];
+        ST_CHECK(pp!=NULL, "detail-live: publisher in the peer view");
+        if (pp){
+            DartInterestIter it; DartTopic tp;
+            memcpy(pip, pp->addr.ip, 4); pport = pp->addr.port; pversion = pp->meta_version;
+            memset(&it,0,sizeof it);
+            while (nw<4 && dart_node_peer_interest_next(pp, &it, &tp)){
+                if (!tp.is_pub) continue;
+                oalias[nw] = tp.alias;
+                onlen[nw]  = (uint8_t)(tp.name.len < 64 ? tp.name.len : 63);
+                memcpy(oname[nw], tp.name.data, onlen[nw]);
+                ohash[nw] = 0;
+                dart_node_peer_schema(pp, tp.alias, &ohash[nw], NULL);
+                nw++;
+            }
+        }
+    }
+    ST_CHECK(nw==2 && pport!=0, "detail-live: oracle holds both pub topics (nw=%u)", nw);
+
+    q = i_dart_plat_udp_open();
+    if (q != DART_SOCK_BAD){ if (!i_dart_plat_bind(q, 0, 0, 0)){ i_dart_plat_close(q); q = DART_SOCK_BAD; } }
+    ST_CHECK(q != DART_SOCK_BAD, "detail-live: raw requester socket");
+    if (q != DART_SOCK_BAD && nw==2 && pport){
+        uint8_t req[128], r1[2048], r2[2048]; size_t rl; int n1=-1, n2=-1;
+        DartDetailWant wants[4]; uint16_t k;
+        i_dart_plat_set_nonblock(q);
+        for (k=0;k<nw;k++){ wants[k].alias=oalias[k]; wants[k].schema_hash=0; }
+        rl = dart_detail_req_build(dom, pversion, wants, nw, req, sizeof req);
+
+        /* a wrong-domain request is ignored (the node core's domain gate) */
+        {   uint8_t bad[128]; size_t bl = dart_detail_req_build((uint16_t)(dom+1), pversion,
+                                                                wants, nw, bad, sizeof bad);
+            i_dart_plat_send(q, bad, bl, pip, pport);
+            for (t=0;t<50;t++){ dart_node_poll(P,1); dart_node_poll(S,1);
+                                if (i_dart_plat_recv(q, r1, sizeof r1, NULL, NULL) > 0){ n1=1; break; } }
+            ST_CHECK(n1<0, "detail-live: wrong-domain request ignored");
+        }
+
+        /* the real request, re-sent like a real requester until answered */
+        n1 = -1;
+        for (t=0;t<400 && n1<=0;t++){
+            if ((t & 63)==0) i_dart_plat_send(q, req, rl, pip, pport);
+            dart_node_poll(P,2); dart_node_poll(S,1);
+            n1 = i_dart_plat_recv(q, r1, sizeof r1, NULL, NULL);
+        }
+        ST_CHECK(n1>0, "detail-live: response reached the request's source socket");
+        if (n1>0){
+            DartBytes rb = dart_bytes(r1, (size_t)n1);
+            DartDetailIter it; DartDetail d; int n=0, names_ok=1, hashes_ok=1, wire_ok=0;
+            ST_CHECK(dart_detail_kind(rb)==DART_DETAIL_RESP && dart_detail_domain(rb)==dom
+                  && dart_detail_meta_version(rb)==pversion,
+                     "detail-live: header matches the announced version (%u)", pversion);
+            memset(&it,0,sizeof it);
+            while (dart_detail_next(rb, &it, &d)){
+                for (k=0;k<nw;k++) if (oalias[k]==d.alias) break;
+                if (k==nw){ names_ok=0; continue; }
+                if (d.name.len!=onlen[k] || memcmp(d.name.data, oname[k], onlen[k])!=0) names_ok=0;
+                if (d.schema_hash != ohash[k]) hashes_ok=0;
+                if (ohash[k] && d.schema_wire.len){
+                    DartSchema *ps2 = dart_schema_parse(d.schema_wire.data, d.schema_wire.len,
+                                                        dart_allocator_alloc, &ma);
+                    if (ps2 && dart_schema_hash(ps2)==ohash[k]) wire_ok=1;
+                }
+                n++;
+            }
+            ST_CHECK(n==(int)nw && names_ok, "detail-live: names match the announce blob (n=%d)", n);
+            ST_CHECK(hashes_ok, "detail-live: schema hashes match the announce blob");
+            ST_CHECK(wire_ok, "detail-live: typed topic's wire inlined and parses to the advertised hash");
+        }
+
+        /* duplicates are idempotent: two more asks, two byte-identical answers */
+        {   int got=0; n1=n2=-1;
+            for (t=0;t<400 && got<2;t++){
+                if ((t & 63)==0) i_dart_plat_send(q, req, rl, pip, pport);
+                dart_node_poll(P,2); dart_node_poll(S,1);
+                {   int r = i_dart_plat_recv(q, got==0?r1:r2, sizeof r1, NULL, NULL);
+                    if (r>0){ if (got==0) n1=r; else n2=r; got++; } }
+            }
+            ST_CHECK(n1>0 && n1==n2 && memcmp(r1,r2,(size_t)n1)==0,
+                     "detail-live: duplicate requests answer byte-identically");
+        }
+
+        /* a RESP and garbage 'uDTL' bytes at the node are ignored; it still answers */
+        if (n1>0) i_dart_plat_send(q, r1, (size_t)n1, pip, pport);
+        {   uint8_t junk[6]={'u','D','T','L',0x7F,0x00};
+            i_dart_plat_send(q, junk, sizeof junk, pip, pport); }
+        n2 = -1;
+        for (t=0;t<400 && n2<=0;t++){
+            if ((t & 63)==0) i_dart_plat_send(q, req, rl, pip, pport);
+            dart_node_poll(P,2); dart_node_poll(S,1);
+            n2 = i_dart_plat_recv(q, r2, sizeof r2, NULL, NULL);
+        }
+        ST_CHECK(n2>0, "detail-live: node still answers after RESP/garbage datagrams");
+    }
+    if (q != DART_SOCK_BAD) i_dart_plat_close(q);
+    dart_node_close(P,1); dart_node_close(S,1);
+    dart_allocator_reset(&ma);
+}
+
 /* ============ threaded: service thread, condvar flow control, waker ======== *
  * 20. RELIABLE   : both nodes on service threads, 3 sender threads x 1000 reliable
  *                  messages; exactly-once, per-thread ordered, no loss, no unsent
@@ -2322,6 +2568,8 @@ static int selftest_main(void){
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. channel schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
+    detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
+    detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
 #ifdef DART_THREADS
     threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */
 #endif

@@ -568,6 +568,10 @@ void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
     st->next_announce_us  = 0;   /* announce the change now, don't wait for the timer */
 }
 
+uint32_t dart_discovery_meta_version(const DartDiscoveryState *st){
+    return st ? st->self_meta_version : 0;
+}
+
 void dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port){
     if (!st || st->cfg.data_port == port) return;
     st->cfg.data_port = port;            /* the port now rides the blob's discovery section, so */

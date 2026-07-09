@@ -329,6 +329,80 @@ int       dart_meta_schema(DartBytes meta, uint16_t alias, uint64_t *hash, DartB
 int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
 #endif
 
+/* Pairwise detail exchange (sans-IO codec for the 'uDTL' datagram family). A requester
+ * asks a peer for the full details of specific advertised topics (by alias): the topic
+ * NAME (collision check), the SCHEMA hash, and the schema wire where the two hashes
+ * differ. The responder is STATELESS: a response is a read-only answer built from the
+ * request's alias list and sent back to the request's source address, so duplicates are
+ * harmless and nobody stores requests; a lost response heals by the requester re-asking.
+ * The node runtime routes these on its unicast data socket next to the transport
+ * datagrams; sans-IO callers run the codec over their own pipe. Layout (LE):
+ *   ['u','D','T','L'][kind][fam ver=1][u16 domain][u32 meta_version][u16 n][entries]
+ *   REQ  entry: [u16 alias][u64 schema_hash]     the REQUESTER's hash for its matching
+ *               channel (0 = none), so the responder inlines the wire only on mismatch
+ *   RESP entry: [u16 alias][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ * meta_version: on a REQ, the responder announce version the aliases were read from; on
+ * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
+ * the requested aliases the responder currently advertises, truncated at an entry
+ * boundary when it cannot fit the cap: the requester re-requests what it still lacks. */
+#define DART_DETAIL_REQ  1
+#define DART_DETAIL_RESP 2
+
+/* One requested topic: the peer's alias + our schema hash for it (0 = untyped/none). */
+typedef struct {
+    uint16_t alias;
+    uint64_t schema_hash;
+} DartDetailWant;
+
+/* Header accessors, safe on any buffer: kind returns DART_DETAIL_REQ/RESP, or 0 when the
+ * datagram is not a well-formed detail header (wrong magic/version/too short). */
+int       dart_detail_kind(DartBytes dgram);
+uint16_t  dart_detail_domain(DartBytes dgram);
+uint32_t  dart_detail_meta_version(DartBytes dgram);
+
+/* Build a DETAIL_REQ for n_wants topics. Returns bytes written, or 0 if cap is too
+ * small for all of them (14 + 10 per want): batch per peer, split only if huge. */
+size_t    dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
+                       const DartDetailWant *wants, uint16_t n_wants,
+                       void *out, size_t cap);
+
+/* Exact bytes a full (untruncated) response to req takes, for sizing the buffer; 0 if
+ * req is malformed. Same walk as dart_transport_detail_respond, byte for byte. */
+size_t    dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
+                       DartBytes req);
+/* Answer req into out[cap]: one entry per requested alias this st currently advertises
+ * (unknown/INACTIVE aliases are skipped), the schema wire inlined only where the
+ * request's hash differs from ours. schemas is the same per-channel array
+ * dart_transport_meta_build takes (or NULL). meta_version stamps the response (pass the
+ * current announce version). Fills what fits, truncating at an entry boundary (the
+ * requester re-requests the rest). Returns bytes written; 0 = malformed req or cap
+ * cannot hold the header. Does NOT check the domain: that is the caller's. */
+size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,
+                       uint32_t meta_version, DartBytes req, void *out, size_t cap);
+
+/* One topic's details, as decoded by dart_detail_next. name/schema_wire point into the
+ * source response (NOT NUL-terminated / not owned), so keep that buffer alive. */
+typedef struct {
+    uint16_t   alias;       /* the responder's local channel index */
+    DartString name;        /* topic name (not NUL-terminated) */
+    uint64_t   schema_hash; /* the responder's schema identity (0 = untyped) */
+    DartBytes  schema_wire; /* canonical wire bytes, only when the request's hash differed
+                               ({NULL,0} otherwise: identical hash means identical wire) */
+} DartDetail;
+
+/* Iterator state for dart_detail_next: zero-initialize, then call until it returns 0.
+ * The fields are internal walk state, not for direct use. */
+typedef struct {
+    uint32_t off;      /* byte offset of the next entry */
+    uint16_t left;     /* entries still to yield */
+    uint8_t  started;  /* 0 until the first call parses the header */
+} DartDetailIter;
+
+/* Walk a DETAIL_RESP one topic at a time. Pass the same response each call with a zeroed
+ * DartDetailIter; returns 1 and fills *out, or 0 at the end (or on a malformed/truncated
+ * response: it stops rather than reading past the end). */
+int       dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out);
+
 /* Change a channel's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_transport_set_role(DartTransportState *st, uint16_t channel, uint8_t role);

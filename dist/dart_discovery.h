@@ -496,6 +496,9 @@ void         dart_discovery_replay_peers(DartDiscoveryState *st);
  * blob rides the next few announces, then announces carry the version only; a peer
  * that fell behind re-fetches via a targeted solicit. meta must stay valid. */
 void         dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta);
+/* The version our announces currently advertise (bumped by each set_meta; 0 = none
+ * set). A consumer stamps data derived from the blob with it (e.g. detail responses). */
+uint32_t     dart_discovery_meta_version(const DartDiscoveryState *st);
 /* Set the unicast locator port advertised in announces (the header data_port). The IO
  * runtime calls this when it binds its own same-host unicast RX socket, so peers reply
  * to a port unique to THIS process instead of the shared discovery port (which the OS
@@ -1536,6 +1539,10 @@ void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
     st->self_meta_version++;
     st->self_blob_resend  = DART_DISCOVERY_BLOB_RESEND;
     st->next_announce_us  = 0;   /* announce the change now, don't wait for the timer */
+}
+
+uint32_t dart_discovery_meta_version(const DartDiscoveryState *st){
+    return st ? st->self_meta_version : 0;
 }
 
 void dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port){

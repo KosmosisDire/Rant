@@ -768,6 +768,16 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
                 /* unicast announce aimed at our data port: hand it to discovery */
                 dart_discovery_feed(n->discovery, src_ip, 4, dart_bytes(buf, (size_t)r));
+            } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
+                /* pairwise detail exchange: answer a request to its SOURCE (stateless, so
+                   any requester works, peer or not: the explorer, a not-yet-added node).
+                   A failed/refused send is just dropped: the requester re-asks on the
+                   responder's next announce. A RESP has no consumer here yet. */
+                if (buf[4]==DART_DETAIL_REQ){
+                    DartBytes resp = i_dart_node_core_detail_respond(n->core, n->domain,
+                                                                     dart_bytes(buf, (size_t)r));
+                    if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                }
             } else {
                 uint32_t from;
                 if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))

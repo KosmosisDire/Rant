@@ -154,6 +154,14 @@ DartBytes       i_dart_node_core_meta(i_DartNodeCore *c);
 void            i_dart_node_core_set_channel_schema(i_DartNodeCore *c, uint16_t channel,
                                                     const DartSchema *schema);
 
+/* Answer a peer's DETAIL_REQ ('uDTL', see the detail codec in transport/core.h): validate
+ * kind + domain, build the response in the core's own grown buffer, and return it for the
+ * runtime to send to the request's SOURCE address ({NULL,0} = not answerable: malformed,
+ * wrong domain, or OOM; the requester re-asks). Stateless and idempotent: nothing is
+ * recorded, so duplicate or crossing requests are harmless. The returned view is valid
+ * until the next call. */
+DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
+
 /* The transport's DartConfig.schema_check, node-style (see transport/core.h): decide a
  * would-be match against the overlay currently being applied (peer_up stashes it).
  * Typed vs typed matches iff same root name and the reader's fields are a subset of the

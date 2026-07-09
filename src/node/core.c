@@ -184,6 +184,9 @@ struct i_DartNodeCore {
     void                 *alloc_user;
     DartBytes             applying_meta; /* overlay being applied right now (schema-gate context) */
     uint32_t              applying_peer;
+    uint8_t              *detail_buf;    /* detail-response scratch, hook-allocated + grown on
+                                            demand (stable across a migrate; pool reset frees it) */
+    uint32_t              detail_cap;
     i_DartNodeSchemaIntern *interned;     uint32_t n_interned,     cap_interned;
     i_DartNodeSchemaBind   *binds;        uint32_t n_binds,        cap_binds;
     i_DartNodePeerSchema   *peer_schemas; uint32_t n_peer_schemas, cap_peer_schemas;
@@ -434,6 +437,33 @@ uint16_t i_dart_node_core_build_meta(i_DartNodeCore *c){
 
 DartBytes i_dart_node_core_meta(i_DartNodeCore *c){
     return dart_bytes(c->meta_buf, c->meta_len);
+}
+
+/* Answer a peer's DETAIL_REQ: validate kind + domain, then build the response (the codec
+   is dart_transport_detail_* in the transport core) into the core's grown scratch buffer.
+   Stateless: a pure read of channel + schema state, idempotent under duplicate requests.
+   Returns the response bytes to send to the request's source, or {NULL,0} when not
+   answerable (malformed, wrong domain, no alloc hook, or OOM: the requester just
+   re-asks). An all-skipped response (header only) is still sent: it tells the requester
+   those aliases are not advertised at our current version. */
+DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req){
+    size_t need, len;
+    if (!c || !c->alloc || !c->discovery) return dart_bytes(NULL, 0);
+    if (dart_detail_kind(req) != DART_DETAIL_REQ || dart_detail_domain(req) != domain)
+        return dart_bytes(NULL, 0);
+    need = dart_transport_detail_resp_size(c->transport, c->chan_schemas, req);
+    if (!need) return dart_bytes(NULL, 0);
+    if (need > 65000u) need = 65000u;   /* one datagram: the build truncates at an entry
+                                           boundary and the requester re-requests the rest */
+    if (need > c->detail_cap){
+        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
+        if (!nb) return dart_bytes(NULL, 0);
+        c->detail_buf = nb; c->detail_cap = (uint32_t)need;
+    }
+    len = dart_transport_detail_respond(c->transport, c->chan_schemas,
+                                        dart_discovery_meta_version(c->discovery), req,
+                                        c->detail_buf, need);
+    return dart_bytes(c->detail_buf, len);
 }
 
 #ifdef DART_SHM

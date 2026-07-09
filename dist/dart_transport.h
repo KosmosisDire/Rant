@@ -646,6 +646,80 @@ int       dart_meta_schema(DartBytes meta, uint16_t alias, uint64_t *hash, DartB
 int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
 #endif
 
+/* Pairwise detail exchange (sans-IO codec for the 'uDTL' datagram family). A requester
+ * asks a peer for the full details of specific advertised topics (by alias): the topic
+ * NAME (collision check), the SCHEMA hash, and the schema wire where the two hashes
+ * differ. The responder is STATELESS: a response is a read-only answer built from the
+ * request's alias list and sent back to the request's source address, so duplicates are
+ * harmless and nobody stores requests; a lost response heals by the requester re-asking.
+ * The node runtime routes these on its unicast data socket next to the transport
+ * datagrams; sans-IO callers run the codec over their own pipe. Layout (LE):
+ *   ['u','D','T','L'][kind][fam ver=1][u16 domain][u32 meta_version][u16 n][entries]
+ *   REQ  entry: [u16 alias][u64 schema_hash]     the REQUESTER's hash for its matching
+ *               channel (0 = none), so the responder inlines the wire only on mismatch
+ *   RESP entry: [u16 alias][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ * meta_version: on a REQ, the responder announce version the aliases were read from; on
+ * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
+ * the requested aliases the responder currently advertises, truncated at an entry
+ * boundary when it cannot fit the cap: the requester re-requests what it still lacks. */
+#define DART_DETAIL_REQ  1
+#define DART_DETAIL_RESP 2
+
+/* One requested topic: the peer's alias + our schema hash for it (0 = untyped/none). */
+typedef struct {
+    uint16_t alias;
+    uint64_t schema_hash;
+} DartDetailWant;
+
+/* Header accessors, safe on any buffer: kind returns DART_DETAIL_REQ/RESP, or 0 when the
+ * datagram is not a well-formed detail header (wrong magic/version/too short). */
+int       dart_detail_kind(DartBytes dgram);
+uint16_t  dart_detail_domain(DartBytes dgram);
+uint32_t  dart_detail_meta_version(DartBytes dgram);
+
+/* Build a DETAIL_REQ for n_wants topics. Returns bytes written, or 0 if cap is too
+ * small for all of them (14 + 10 per want): batch per peer, split only if huge. */
+size_t    dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
+                       const DartDetailWant *wants, uint16_t n_wants,
+                       void *out, size_t cap);
+
+/* Exact bytes a full (untruncated) response to req takes, for sizing the buffer; 0 if
+ * req is malformed. Same walk as dart_transport_detail_respond, byte for byte. */
+size_t    dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
+                       DartBytes req);
+/* Answer req into out[cap]: one entry per requested alias this st currently advertises
+ * (unknown/INACTIVE aliases are skipped), the schema wire inlined only where the
+ * request's hash differs from ours. schemas is the same per-channel array
+ * dart_transport_meta_build takes (or NULL). meta_version stamps the response (pass the
+ * current announce version). Fills what fits, truncating at an entry boundary (the
+ * requester re-requests the rest). Returns bytes written; 0 = malformed req or cap
+ * cannot hold the header. Does NOT check the domain: that is the caller's. */
+size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,
+                       uint32_t meta_version, DartBytes req, void *out, size_t cap);
+
+/* One topic's details, as decoded by dart_detail_next. name/schema_wire point into the
+ * source response (NOT NUL-terminated / not owned), so keep that buffer alive. */
+typedef struct {
+    uint16_t   alias;       /* the responder's local channel index */
+    DartString name;        /* topic name (not NUL-terminated) */
+    uint64_t   schema_hash; /* the responder's schema identity (0 = untyped) */
+    DartBytes  schema_wire; /* canonical wire bytes, only when the request's hash differed
+                               ({NULL,0} otherwise: identical hash means identical wire) */
+} DartDetail;
+
+/* Iterator state for dart_detail_next: zero-initialize, then call until it returns 0.
+ * The fields are internal walk state, not for direct use. */
+typedef struct {
+    uint32_t off;      /* byte offset of the next entry */
+    uint16_t left;     /* entries still to yield */
+    uint8_t  started;  /* 0 until the first call parses the header */
+} DartDetailIter;
+
+/* Walk a DETAIL_RESP one topic at a time. Pass the same response each call with a zeroed
+ * DartDetailIter; returns 1 and fills *out, or 0 at the end (or on a malformed/truncated
+ * response: it stops rather than reading past the end). */
+int       dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out);
+
 /* Change a channel's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_transport_set_role(DartTransportState *st, uint16_t channel, uint8_t role);
@@ -1154,6 +1228,14 @@ DartBytes       i_dart_node_core_meta(i_DartNodeCore *c);
  * non-INACTIVE channels are advertised, so a role flip just rebuilds. */
 void            i_dart_node_core_set_channel_schema(i_DartNodeCore *c, uint16_t channel,
                                                     const DartSchema *schema);
+
+/* Answer a peer's DETAIL_REQ ('uDTL', see the detail codec in transport/core.h): validate
+ * kind + domain, build the response in the core's own grown buffer, and return it for the
+ * runtime to send to the request's SOURCE address ({NULL,0} = not answerable: malformed,
+ * wrong domain, or OOM; the requester re-asks). Stateless and idempotent: nothing is
+ * recorded, so duplicate or crossing requests are harmless. The returned view is valid
+ * until the next call. */
+DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
 
 /* The transport's DartConfig.schema_check, node-style (see transport/core.h): decide a
  * would-be match against the overlay currently being applied (peer_up stashes it).
@@ -4034,6 +4116,137 @@ int dart_meta_shm(DartBytes meta, uint8_t host[16]){
 #endif
 
 
+/* Pairwise detail exchange codec ('uDTL', see core.h for the layout and contract).
+   Parsing is fully bounds-checked: a malformed request or response is dropped wholesale,
+   never trusted. The responder side is a pure read of channel + schema state. */
+#define DART__DETAIL_HDR 14u   /* magic(4) kind(1) ver(1) domain(2) meta_version(4) n(2) */
+#define DART__DETAIL_VER 1u
+
+static int i_dart_detail_hdr_ok(DartBytes d){
+    return d.data && d.len >= DART__DETAIL_HDR
+        && d.data[0]=='u' && d.data[1]=='D' && d.data[2]=='T' && d.data[3]=='L'
+        && d.data[5]==DART__DETAIL_VER;
+}
+
+int dart_detail_kind(DartBytes dgram){
+    if (!i_dart_detail_hdr_ok(dgram)) return 0;
+    return (dgram.data[4]==DART_DETAIL_REQ || dgram.data[4]==DART_DETAIL_RESP)
+         ? dgram.data[4] : 0;
+}
+uint16_t dart_detail_domain(DartBytes dgram){
+    return i_dart_detail_hdr_ok(dgram) ? i_dart_le_r16(dgram.data+6) : 0;
+}
+uint32_t dart_detail_meta_version(DartBytes dgram){
+    return i_dart_detail_hdr_ok(dgram) ? i_dart_le_r32(dgram.data+8) : 0;
+}
+
+static void i_dart_detail_hdr_write(uint8_t *o, uint8_t kind, uint16_t domain,
+                                    uint32_t meta_version, uint16_t n){
+    o[0]='u'; o[1]='D'; o[2]='T'; o[3]='L';
+    o[4]=kind; o[5]=(uint8_t)DART__DETAIL_VER;
+    i_dart_le_w16(o+6, domain);
+    i_dart_le_w32(o+8, meta_version);
+    i_dart_le_w16(o+12, n);
+}
+
+size_t dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
+                             const DartDetailWant *wants, uint16_t n_wants,
+                             void *out, size_t cap){
+    uint8_t *o=(uint8_t*)out; uint16_t k;
+    size_t need = (size_t)DART__DETAIL_HDR + (size_t)n_wants*10u;
+    if (!o || (n_wants && !wants) || cap < need) return 0;
+    i_dart_detail_hdr_write(o, DART_DETAIL_REQ, domain, peer_meta_version, n_wants);
+    for (k=0;k<n_wants;k++){
+        uint8_t *e = o + DART__DETAIL_HDR + (size_t)k*10u;
+        i_dart_le_w16(e, wants[k].alias);
+        i_dart_le_w64(e+2, wants[k].schema_hash);
+    }
+    return need;
+}
+
+/* One walk serves size and build (out NULL = measure), so the two agree byte for byte.
+   A truncated build stops at an entry boundary: the response stays parseable and the
+   requester re-requests the aliases it still lacks (the paging seam). */
+static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema *schemas,
+                                   uint32_t meta_version, DartBytes req,
+                                   uint8_t *out, size_t cap){
+    const uint8_t *r; uint16_t n_req, k, n_out=0;
+    size_t len = DART__DETAIL_HDR;
+    if (!st || dart_detail_kind(req) != DART_DETAIL_REQ) return 0;
+    n_req = i_dart_le_r16(req.data+12);
+    if (req.len < (size_t)DART__DETAIL_HDR + (size_t)n_req*10u) return 0;   /* truncated: reject */
+    if (out){
+        if (cap < DART__DETAIL_HDR) return 0;
+        i_dart_detail_hdr_write(out, DART_DETAIL_RESP, dart_detail_domain(req), meta_version, 0);
+    }
+    r = req.data + DART__DETAIL_HDR;
+    for (k=0;k<n_req;k++,r+=10){
+        uint16_t alias    = i_dart_le_r16(r);
+        uint64_t req_hash = i_dart_le_r64(r+2);
+        const i_DartChannel *ch;
+        uint64_t hash; DartBytes wire; size_t need;
+        if (alias >= st->cfg.n_channels) continue;             /* unknown: not advertised */
+        ch = &st->channels[alias];
+        if (ch->role == DART_INACTIVE || ch->name_len == 0) continue;
+        hash = schemas ? schemas[alias].hash : 0;
+        wire = dart_bytes(NULL, 0);
+        if (hash && hash != req_hash && schemas[alias].wire.len <= 0xFFFFu)
+            wire = schemas[alias].wire;    /* differs: inline for the subset check */
+        need = 2u + 1u + ch->name_len + 8u + 2u + wire.len;
+        if (out){
+            uint8_t *e = out + len;
+            if (len + need > cap) break;
+            i_dart_le_w16(e, alias);
+            e[2] = ch->name_len;
+            memcpy(e+3, ch->name, ch->name_len);
+            i_dart_le_w64(e+3+ch->name_len, hash);
+            i_dart_le_w16(e+3+ch->name_len+8, (uint16_t)wire.len);
+            if (wire.len) memcpy(e+3+ch->name_len+10, wire.data, wire.len);
+        }
+        len += need;
+        n_out++;
+    }
+    if (out) i_dart_le_w16(out+12, n_out);
+    return len;
+}
+
+size_t dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
+                                       DartBytes req){
+    return i_dart_detail_answer(st, schemas, 0, req, NULL, 0);
+}
+
+size_t dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,
+                                     uint32_t meta_version, DartBytes req,
+                                     void *out, size_t cap){
+    return i_dart_detail_answer(st, schemas, meta_version, req, (uint8_t*)out, cap);
+}
+
+int dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out){
+    uint32_t off; uint8_t nlen; uint16_t wlen;
+    if (!it || !out) return 0;
+    if (!it->started){
+        it->started = 1; it->left = 0; it->off = DART__DETAIL_HDR;
+        if (dart_detail_kind(resp) != DART_DETAIL_RESP) return 0;
+        it->left = i_dart_le_r16(resp.data+12);
+    }
+    if (!it->left) return 0;
+    off = it->off;
+    if ((size_t)off + 3u > resp.len){ it->left = 0; return 0; }        /* truncated: stop */
+    nlen = resp.data[off+2];
+    if ((size_t)off + 3u + nlen + 10u > resp.len){ it->left = 0; return 0; }
+    wlen = i_dart_le_r16(resp.data + off + 3u + nlen + 8u);
+    if ((size_t)off + 3u + nlen + 10u + wlen > resp.len){ it->left = 0; return 0; }
+    out->alias       = i_dart_le_r16(resp.data + off);
+    out->name        = dart_string((const char*)(resp.data + off + 3u), nlen);
+    out->schema_hash = i_dart_le_r64(resp.data + off + 3u + nlen);
+    out->schema_wire = wlen ? dart_bytes(resp.data + off + 3u + nlen + 10u, wlen)
+                            : dart_bytes(NULL, 0);
+    it->off = off + 3u + nlen + 10u + wlen;
+    it->left--;
+    return 1;
+}
+
+
 int dart_transport_set_role(DartTransportState *st, uint16_t channel, uint8_t role){
     int channel_idx; i_DartChannel *ch; uint16_t p;
     if (role > DART_INACTIVE) return -1;
@@ -5221,6 +5434,9 @@ struct i_DartNodeCore {
     void                 *alloc_user;
     DartBytes             applying_meta; /* overlay being applied right now (schema-gate context) */
     uint32_t              applying_peer;
+    uint8_t              *detail_buf;    /* detail-response scratch, hook-allocated + grown on
+                                            demand (stable across a migrate; pool reset frees it) */
+    uint32_t              detail_cap;
     i_DartNodeSchemaIntern *interned;     uint32_t n_interned,     cap_interned;
     i_DartNodeSchemaBind   *binds;        uint32_t n_binds,        cap_binds;
     i_DartNodePeerSchema   *peer_schemas; uint32_t n_peer_schemas, cap_peer_schemas;
@@ -5471,6 +5687,33 @@ uint16_t i_dart_node_core_build_meta(i_DartNodeCore *c){
 
 DartBytes i_dart_node_core_meta(i_DartNodeCore *c){
     return dart_bytes(c->meta_buf, c->meta_len);
+}
+
+/* Answer a peer's DETAIL_REQ: validate kind + domain, then build the response (the codec
+   is dart_transport_detail_* in the transport core) into the core's grown scratch buffer.
+   Stateless: a pure read of channel + schema state, idempotent under duplicate requests.
+   Returns the response bytes to send to the request's source, or {NULL,0} when not
+   answerable (malformed, wrong domain, no alloc hook, or OOM: the requester just
+   re-asks). An all-skipped response (header only) is still sent: it tells the requester
+   those aliases are not advertised at our current version. */
+DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req){
+    size_t need, len;
+    if (!c || !c->alloc || !c->discovery) return dart_bytes(NULL, 0);
+    if (dart_detail_kind(req) != DART_DETAIL_REQ || dart_detail_domain(req) != domain)
+        return dart_bytes(NULL, 0);
+    need = dart_transport_detail_resp_size(c->transport, c->chan_schemas, req);
+    if (!need) return dart_bytes(NULL, 0);
+    if (need > 65000u) need = 65000u;   /* one datagram: the build truncates at an entry
+                                           boundary and the requester re-requests the rest */
+    if (need > c->detail_cap){
+        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
+        if (!nb) return dart_bytes(NULL, 0);
+        c->detail_buf = nb; c->detail_cap = (uint32_t)need;
+    }
+    len = dart_transport_detail_respond(c->transport, c->chan_schemas,
+                                        dart_discovery_meta_version(c->discovery), req,
+                                        c->detail_buf, need);
+    return dart_bytes(c->detail_buf, len);
 }
 
 #ifdef DART_SHM
@@ -6419,6 +6662,16 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
                 /* unicast announce aimed at our data port: hand it to discovery */
                 dart_discovery_feed(n->discovery, src_ip, 4, dart_bytes(buf, (size_t)r));
+            } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
+                /* pairwise detail exchange: answer a request to its SOURCE (stateless, so
+                   any requester works, peer or not: the explorer, a not-yet-added node).
+                   A failed/refused send is just dropped: the requester re-asks on the
+                   responder's next announce. A RESP has no consumer here yet. */
+                if (buf[4]==DART_DETAIL_REQ){
+                    DartBytes resp = i_dart_node_core_detail_respond(n->core, n->domain,
+                                                                     dart_bytes(buf, (size_t)r));
+                    if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                }
             } else {
                 uint32_t from;
                 if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
