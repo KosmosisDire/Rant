@@ -98,8 +98,11 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
          peer's advertised size, fixed pre-slices a dense meta_ids-stride pool (as before) */
       uint16_t **peer_alias    = (uint16_t**)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint16_t*), 8);
       uint32_t *peer_alias_len = (uint32_t*) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
+      uint8_t **peer_astate    = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
       uint16_t *alias_pool     = dyn ? NULL
                                : (uint16_t*)i_dart_bump_take(b, (size_t)max_peers*meta_ids*sizeof(uint16_t), 2);
+      uint8_t  *astate_pool    = dyn ? NULL
+                               : (uint8_t*) i_dart_bump_take(b, (size_t)max_peers*meta_ids, 1);
       name_pool = (char*)i_dart_bump_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
@@ -113,6 +116,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->lane_index=lane_index;
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->peer_alias=peer_alias; st->peer_alias_len=peer_alias_len; st->alias_max=meta_ids;
+          st->peer_astate=peer_astate;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
 #ifdef DART_SHM
@@ -121,12 +125,15 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           if (dyn){
               memset(peer_alias, 0, (size_t)max_peers*sizeof(uint16_t*));
               memset(peer_alias_len, 0, (size_t)max_peers*sizeof(uint32_t));
+              memset(peer_astate, 0, (size_t)max_peers*sizeof(uint8_t*));
           } else {
               uint32_t k;
               memset(alias_pool,0xFF,(size_t)max_peers*meta_ids*sizeof(uint16_t));   /* all unmapped */
+              memset(astate_pool,0,(size_t)max_peers*meta_ids);                      /* no verdicts */
               for (k=0;k<max_peers;k++){
                   peer_alias[k] = alias_pool + (size_t)k*meta_ids;
                   peer_alias_len[k] = meta_ids;
+                  peer_astate[k] = astate_pool + (size_t)k*meta_ids;
               }
           }
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
@@ -290,6 +297,7 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
                old->peer_sub_reliable + (size_t)p*old->bitmap_len, old->bitmap_len);
         nw->peer_alias[p]     = old->peer_alias[p];   /* hook allocations: stable across the move */
         nw->peer_alias_len[p] = old->peer_alias_len[p];
+        nw->peer_astate[p]    = old->peer_astate[p];
     }
     /* scheduler is fresh/empty: re-enqueue every used lane, then force a full sweep
        next poll so timers re-arm and next_deadline is recomputed exactly */
@@ -524,8 +532,10 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
     memset(&st->peer_pub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_reliable[(size_t)free*st->bitmap_len],0,st->bitmap_len);
-    if (st->peer_alias[free] && st->peer_alias_len[free])   /* slot reuse: no stale mappings */
+    if (st->peer_alias[free] && st->peer_alias_len[free]){   /* slot reuse: no stale mappings/verdicts */
         memset(st->peer_alias[free],0xFF,(size_t)st->peer_alias_len[free]*sizeof(uint16_t));
+        if (st->peer_astate[free]) memset(st->peer_astate[free],0,st->peer_alias_len[free]);
+    }
     /* nothing matches until dart_transport_apply_peer_interest feeds the peer's interest
        list (carried in its discovery announce) */
 }
@@ -543,9 +553,10 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
            gone peer keeps no per-lane memory at all */
         i_dart_lane_release(st,c,(uint32_t)s);
     }
-    if (st->cfg.allocator && st->peer_alias[s]){   /* dynamic: the alias map goes too */
+    if (st->cfg.allocator && st->peer_alias[s]){   /* dynamic: the alias + verdict maps go too */
         st->cfg.allocator(st->cfg.user, st->peer_alias[s], 0);
-        st->peer_alias[s]=NULL; st->peer_alias_len[s]=0;
+        if (st->peer_astate[s]) st->cfg.allocator(st->cfg.user, st->peer_astate[s], 0);
+        st->peer_alias[s]=NULL; st->peer_astate[s]=NULL; st->peer_alias_len[s]=0;
     }
     st->peer_used[s]=0; st->peer_dormant[s]=0;
 #ifdef DART_SHM
@@ -623,175 +634,163 @@ void dart_transport_destroy(DartTransportState *st){
         st->cfg.allocator(st->cfg.user, st->lanes, 0);
         st->lanes=NULL; st->lane_cap=0; st->lane_free=DART__NIL;
     }
-    {   uint32_t p;                              /* per-peer alias maps (hook allocations) */
-        for (p=0;p<st->cfg.max_peers;p++)
+    {   uint32_t p;                              /* per-peer alias + verdict maps (hook allocations) */
+        for (p=0;p<st->cfg.max_peers;p++){
             if (st->peer_alias[p]){
                 st->cfg.allocator(st->cfg.user, st->peer_alias[p], 0);
                 st->peer_alias[p]=NULL; st->peer_alias_len[p]=0;
             }
+            if (st->peer_astate[p]){
+                st->cfg.allocator(st->cfg.user, st->peer_astate[p], 0);
+                st->peer_astate[p]=NULL;
+            }
+        }
     }
 }
 
 
-/* per-entry flags byte (interest is sent rarely, so a whole byte, not a stolen bit) */
-#define DART_META_F_RELIABLE 0x01u   /* advertiser offers reliable delivery on this topic */
-
-/* one interest entry: [u16 alias][u8 flags][u8 namelen][name]. The name rides along so
- * a hash collision is detected (not cross-wired); the identity is recomputed from it. */
-static uint8_t *i_dart_meta_put(uint8_t *p, uint16_t alias, const i_DartChannel *ch){
-    size_t lane = ch->name_len;
-    i_dart_le_w16(p, alias); p += 2;
-    *p++ = (uint8_t)(ch->qos.reliability==DART_RELIABLE ? DART_META_F_RELIABLE : 0u);
-    *p++ = (uint8_t)lane;
-    if (lane){ memcpy(p, ch->name, lane); p += lane; }
-    return p;
-}
-
-static int i_dart_meta_name_eq(const i_DartChannel *ch, const uint8_t *name, size_t nlen){
-    size_t ours = ch->name_len;
-    if (nlen != ours) return 0;
-    return nlen==0 ? 1 : (memcmp(ch->name, name, nlen)==0);
-}
-
-/* The peer's alias map, guaranteed to cover `need` entries: the existing map, a grown/new
- * hook allocation (dynamic; the new tail starts unmapped), or NULL when it cannot grow
- * (fixed-mode arena slice too small, or OOM) -- the caller then counts the entry as
- * unmappable. Called only for MATCHED entries and sized to the peer's highest ADVERTISED
- * alias, so a peer we share nothing with allocates nothing, and a later local subscribe
- * (interest replay) finds every advertised alias already covered. */
+/* The peer's alias + verdict maps, guaranteed to cover `need` entries: the existing
+ * maps, grown/new hook allocations (dynamic; the grown tail starts unmapped, verdicts
+ * cleared), or NULL when they cannot grow (fixed-mode arena slice too small, or OOM):
+ * the caller then counts the entries as unmappable. Sized once per apply to the peer's
+ * whole positional list, so any advertised alias is covered. */
 static uint16_t *i_dart_peer_alias_ensure(DartTransportState *st, int peer_slot, uint32_t need){
     uint32_t have = st->peer_alias_len[peer_slot];
-    uint16_t *nm;
+    uint16_t *nm; uint8_t *ns;
     if (need <= have) return st->peer_alias[peer_slot];
     if (!st->cfg.allocator) return NULL;                /* fixed: the arena slice is the limit */
     nm = (uint16_t*)st->cfg.allocator(st->cfg.user, st->peer_alias[peer_slot], (size_t)need*sizeof(uint16_t));
     if (!nm) return NULL;
+    st->peer_alias[peer_slot] = nm;                     /* len not yet raised: retryable on OOM below */
+    ns = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_astate[peer_slot], (size_t)need);
+    if (!ns) return NULL;
     memset(nm + have, 0xFF, (size_t)(need-have)*sizeof(uint16_t));   /* grown tail: unmapped */
-    st->peer_alias[peer_slot] = nm; st->peer_alias_len[peer_slot] = need;
+    memset(ns + have, 0, (size_t)(need-have));                       /* ...no verdicts */
+    st->peer_astate[peer_slot] = ns; st->peer_alias_len[peer_slot] = need;
     return nm;
 }
 
-/* match count entries to local channels by identity (recomputed from each name),
- * recording the alias map. Same-identity-different-name is a collision: refused.
- * is_pub: the peer's publish list, so each entry's flags carry its OFFERED QoS, which
- * the RxO check uses to refuse a reliable subscriber a best-effort publisher. rel_bitmap
- * (sub list only, else NULL): records which subscribed channels the peer requested RELIABLE,
- * so the writer can keep best-effort readers out of flow control. alias_need: highest
- * advertised alias + 1 (the size a map must be to cover this peer's whole list). */
-static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, const uint8_t *p,
-                                      uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap,
-                                      uint32_t alias_need, uint32_t *overflowed){
-    uint32_t k;
-    for (k=0;k<count;k++){
-        uint16_t alias=i_dart_le_r16(p); uint8_t flags=p[2]; uint32_t nlen=p[3];
-        const uint8_t *name=p+4; int channel_idx;
-        uint64_t id=i_dart_identity_hash(name,nlen);
-        i_DartChannel *ch=i_dart_channel_by_identity(st,id,&channel_idx);
-        p = name + nlen;
-        if (!ch) continue;                                  /* not ours */
-        if (!i_dart_meta_name_eq(ch,name,nlen)){
-            i_dart_transport_fire_event(st, DART_TRANSPORT_NAME_COLLISION, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                        id, 0);
+/* Candidate channels for a 32-bit interest hash: the count of local channels whose
+ * identity's low 32 bits match, and the preferred one (non-INACTIVE first, mirroring
+ * i_dart_channel_by_identity). Same linear resolution the identity lookup pays. */
+static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx_out){
+    uint16_t i; int first=-1, live=-1, n=0;
+    for (i=0;i<st->cfg.n_channels;i++){
+        if (st->channels[i].name_len==0 || (uint32_t)st->channels[i].identity != h) continue;
+        n++;
+        if (first<0) first=(int)i;
+        if (live<0 && st->channels[i].role!=DART_INACTIVE) live=(int)i;
+    }
+    if (idx_out) *idx_out = live>=0 ? live : first;
+    return n;
+}
+
+
+/* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
+ * one positional [u32 hash][u8 flags] entry per channel slot. */
+size_t dart_interest_max(uint16_t n_channels){
+    return 2u + 5u * (size_t)n_channels;
+}
+
+
+/* Serialize our interest into out: [u16 n], then one [u32 hash][u8 flags] entry per
+ * channel IN INDEX ORDER up to the highest defined slot (position = alias; an undefined
+ * reserve slot rides as an INACTIVE hole so later aliases stay stable). Returns bytes
+ * written, or 0 if cap is too small; size out via dart_interest_max. */
+size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
+    uint8_t *o=(uint8_t*)out;
+    uint16_t c, n=0;
+    for (c=0;c<st->cfg.n_channels;c++) if (st->channels[c].name_len) n=(uint16_t)(c+1u);
+    if (cap < 2u + 5u*(size_t)n) return 0;
+    i_dart_le_w16(o, n);
+    for (c=0;c<n;c++){
+        const i_DartChannel *ch = &st->channels[c];
+        uint8_t *e = o + 2u + 5u*(size_t)c;
+        uint8_t role = ch->name_len ? ch->role : (uint8_t)DART_INACTIVE;
+        i_dart_le_w32(e, ch->name_len ? (uint32_t)ch->identity : 0u);
+        e[4] = (uint8_t)((role & DART__INT_ROLE_MASK)
+             | (ch->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u));
+    }
+    return 2u + 5u*(size_t)n;
+}
+
+
+/* A peer's interest list arrived (from its discovery announce): re-derive its bits from
+ * the cached per-alias VERDICTS + the entry's current flags, then rematch every channel.
+ * Idempotent. An entry without a verdict stays PENDING (no bit, no proxy, no demux):
+ * dart_transport_detail_wants names it and the verdict arrives via
+ * dart_transport_apply_peer_details, after which the caller re-runs this. The gates
+ * mirror the old inline scan: RxO reliability (a reliable subscriber refuses a
+ * best-effort publisher, never silently downgraded; the match forms automatically if
+ * the publisher upgrades and re-advertises) and the cached schema verdict per
+ * direction, each refusal fired as its event on every apply that would have used it. */
+void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
+    const uint8_t *d=blob.data;
+    uint16_t n, c; uint32_t a; int peer_slot=i_dart_peer_slot(st,peer_id);
+    uint8_t *peer_pub_bitmap, *peer_sub_bitmap, *peer_sub_reliable;
+    uint16_t *amap; uint8_t *astate;
+    uint32_t unmappable = 0;
+    if (peer_slot<0 || !d || blob.len<2) return;
+    n = i_dart_le_r16(d);
+    if (blob.len < 2u + 5u*(uint32_t)n) return;        /* truncated: reject wholesale */
+    peer_pub_bitmap  =&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
+    peer_sub_bitmap  =&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
+    peer_sub_reliable=&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len];
+    memset(peer_pub_bitmap,0,st->bitmap_len); memset(peer_sub_bitmap,0,st->bitmap_len);
+    memset(peer_sub_reliable,0,st->bitmap_len);
+    amap   = n ? i_dart_peer_alias_ensure(st, peer_slot, n) : NULL;
+    astate = amap ? st->peer_astate[peer_slot] : NULL;
+    for (a=0;a<n;a++){
+        const uint8_t *e = d + 2u + 5u*a;
+        uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
+        int their_pub, their_sub, rel;
+        uint16_t cidx; i_DartChannel *ch;
+        if (role == DART_INACTIVE) continue;
+        if (!astate || a >= st->peer_alias_len[peer_slot]){
+            /* no verdict storage (fixed-mode table too small, or map OOM): this entry
+               can never verify or demux here; count it if it would have been a candidate */
+            if (i_dart_hash32_candidates(st, i_dart_le_r32(e), NULL)) unmappable++;
             continue;
         }
-        /* RxO QoS: a reliable subscriber refuses a best-effort publisher (no silent
-           downgrade). We keep requesting reliable, so the match forms automatically if
-           the publisher later upgrades and re-advertises. */
-        if (is_pub && (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) &&
-            ch->qos.reliability==DART_RELIABLE && !(flags & DART_META_F_RELIABLE)){
-            i_dart_transport_fire_event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, (uint16_t)channel_idx,
-                        st->peer_ids[peer_slot], 0, 0);
-            continue;                                       /* refuse: no bit, no alias map */
+        if (!(astate[a] & DART__AST_DETAILED) || !(astate[a] & DART__AST_NAME_OK))
+            continue;                     /* PENDING (details on their way) or a verified non-match */
+        cidx = amap[a];
+        if (cidx >= st->cfg.n_channels) continue;      /* defensive: stale map */
+        ch = &st->channels[cidx];
+        if (ch->role == DART_INACTIVE){
+            /* dual same-identity channels switched by role: the verdict (incl. its schema
+               gates) bound the then-live twin, so re-verify against the one live now */
+            int t = (int)cidx;
+            i_dart_channel_by_identity(st, ch->identity, &t);
+            if ((uint16_t)t != cidx){
+                astate[a] = 0; amap[a] = 0xFFFFu;      /* pending again; wants() re-asks */
+                continue;
+            }
         }
-        /* schema gate (RxO for types): both sides run the same check off the same two
-           advertised schemas, so a refused pair forms no proxy on either end (the writer
-           never streams to, or flow-controls on, a reader that will not decode it). */
-        if (st->cfg.schema_check &&
-            !st->cfg.schema_check(st->cfg.user, (uint16_t)channel_idx, alias, is_pub)){
-            i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, (uint16_t)channel_idx,
-                        st->peer_ids[peer_slot], 0, 0);
-            continue;                                       /* refuse: no bit, no alias map */
+        their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
+        their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        rel       = (flags & DART__INT_RELIABLE) != 0;
+        if (their_pub){                                /* their offered QoS vs our subscription */
+            int ours_sub = (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY);
+            if (ours_sub && ch->qos.reliability==DART_RELIABLE && !rel){
+                i_dart_transport_fire_event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
+            } else if (!(astate[a] & DART__AST_READ_OK)){
+                i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
+            } else {
+                i_dart_bit_set(peer_pub_bitmap,(uint32_t)cidx);
+            }
         }
-        i_dart_bit_set(bitmap,(uint32_t)channel_idx);
-        if (rel_bitmap && (flags & DART_META_F_RELIABLE)) i_dart_bit_set(rel_bitmap,(uint32_t)channel_idx);
-        {   uint16_t *map = i_dart_peer_alias_ensure(st, peer_slot, alias_need);
-            if (map && (uint32_t)alias < st->peer_alias_len[peer_slot])
-                map[alias] = (uint16_t)channel_idx;
-            else if (is_pub && overflowed)
-                (*overflowed)++;   /* matched, but its data carries an alias we cannot demux
-                                      (fixed-mode table too small, or map OOM) */
-        }
-    }
-    return p;
-}
-
-
-/* Upper bound on dart_transport_build_interest output, for sizing the announce buffer: a
- * PUBSUB channel appears in both lists, so 2*n_channels max-length entries. */
-size_t dart_interest_max(uint16_t n_channels){
-    return 4u + (size_t)(2u+1u+1u+DART_TOPIC_NAME_MAX) * 2u * (size_t)n_channels;  /* alias+flags+namelen+name */
-}
-
-
-/* Serialize our interest into out: [u16 npub][u16 nsub][pub..][sub..], each entry
- * [u16 alias][u8 namelen][name]. Returns bytes written, or 0 if cap is too small.
- * The node carries this in its discovery announce; size out via dart_interest_max. */
-size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
-    uint8_t *o=(uint8_t*)out, *p, *end=o+cap;
-    uint16_t c; uint32_t n_pub=0, n_sub=0;
-    if (cap < 4) return 0;
-    p=o+4;
-    for (c=0;c<st->cfg.n_channels;c++){
-        uint8_t d=st->channels[c].role;
-        if (d==DART_PUBSUB || d==DART_PUB_ONLY){
-            if (p + 4u + st->channels[c].name_len > end) return 0;
-            p=i_dart_meta_put(p,c,&st->channels[c]); n_pub++;
+        if (their_sub){                                /* their requested QoS, for our writer */
+            if (!(astate[a] & DART__AST_WRITE_OK)){
+                i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
+            } else {
+                i_dart_bit_set(peer_sub_bitmap,(uint32_t)cidx);
+                if (rel) i_dart_bit_set(peer_sub_reliable,(uint32_t)cidx);
+            }
         }
     }
-    for (c=0;c<st->cfg.n_channels;c++){
-        uint8_t d=st->channels[c].role;
-        if (d==DART_PUBSUB || d==DART_SUB_ONLY){
-            if (p + 4u + st->channels[c].name_len > end) return 0;
-            p=i_dart_meta_put(p,c,&st->channels[c]); n_sub++;
-        }
-    }
-    i_dart_le_w16(o,(uint16_t)n_pub); i_dart_le_w16(o+2,(uint16_t)n_sub);
-    return (size_t)(p - o);
-}
-
-
-/* A peer's interest list arrived (from its discovery announce): refresh its bits
- * and rematch every channel. Idempotent; re-applying re-derives all matches. */
-void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
-    const uint8_t *d=blob.data, *p, *end=d+blob.len;
-    uint16_t n_pub, n_sub, c; int peer_slot=i_dart_peer_slot(st,peer_id);
-    uint8_t *peer_pub_bitmap, *peer_sub_bitmap;
-    uint32_t alias_need = 0;
-    if (peer_slot<0 || blob.len<4) return;
-    peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
-    peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
-    n_pub=i_dart_le_r16(d); n_sub=i_dart_le_r16(d+2);
-    /* validate the whole variable-length list first (a truncated blob must not drop a
-       match), and learn the highest advertised alias: the size a lazily-made alias map
-       must be to cover the peer's whole list */
-    { uint32_t k, tot=(uint32_t)n_pub+n_sub; p=d+4;
-      for (k=0;k<tot;k++){
-          if (p+4 > end) return;
-          { uint32_t a = (uint32_t)i_dart_le_r16(p) + 1u; if (a > alias_need) alias_need = a; }
-          p += 4u + (uint32_t)p[3];
-          if (p > end) return;
-      } }
-    memset(peer_pub_bitmap,0,st->bitmap_len); memset(peer_sub_bitmap,0,st->bitmap_len);
-    memset(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len],0,st->bitmap_len);
-    if (st->peer_alias[peer_slot] && st->peer_alias_len[peer_slot])   /* re-apply: clear old mappings */
-        memset(st->peer_alias[peer_slot],0xFF,(size_t)st->peer_alias_len[peer_slot]*sizeof(uint16_t));
-    {   uint32_t overflow = 0;
-        p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL, alias_need, &overflow);  /* pub list: offered QoS */
-        p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,                    /* sub list: requested QoS */
-                            &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], alias_need, NULL);
-        if (overflow)   /* never silent: those topics look matched but will not deliver */
-            i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, overflow);
-    }
+    if (unmappable)   /* never silent: those topics can never deliver here */
+        i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     for (c=0;c<st->cfg.n_channels;c++) i_dart_channel_rematch(st,c,(uint16_t)peer_slot);
 }
 
@@ -818,114 +817,50 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 
 
 /* Discovery-announce meta blob codec (see dart_meta_* in core.h for the layout). The
-   interest list is wrapped in a prefix carrying frag size, (odd ver) SHM info, and the
-   node name. No back-compat: the version byte just tags the one current format, and a
-   blob whose magic/version we don't expect is rejected, not reinterpreted. An interest
-   entry is [u16 alias][u8 flags][u8 namelen][name]; flags bit 0 = offered reliability.
-   Parsing is fully bounds-checked (see dart_transport_apply_peer_interest), so a malformed or
-   foreign blob is dropped wholesale, never trusted. */
+   hash-only interest list is wrapped in a prefix carrying frag size and (odd ver) SHM
+   info. No back-compat: the version byte just tags the one current format, and a blob
+   whose magic/version we don't expect is rejected, not reinterpreted. Parsing is fully
+   bounds-checked (see dart_transport_apply_peer_interest), so a malformed or foreign
+   blob is dropped wholesale, never trusted. Names and schemas are NOT here: they ride
+   the pairwise detail exchange below. */
 #define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
 #define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
 #ifdef DART_SHM
-#define DART__META_VER  9u                  /* what WE write */
+#define DART__META_VER  11u                 /* what WE write */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  8u
+#define DART__META_VER  10u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= 5 && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=8 && meta.data[2]<=9;
+        && meta.data[2]>=10 && meta.data[2]<=11;
 }
-/* base prefix through host[16], by version (odd v9 carries shm+host, even v8 doesn't). */
+/* base prefix through host[16], by version (odd v11 carries shm+host, even v10 doesn't). */
 static uint16_t i_dart_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
-/* upper bound on the schema section: every channel mapped, every wire distinct + inlined */
-static size_t i_dart_meta_schemas_max(uint16_t n_channels){
-    return 4u + (size_t)n_channels * (2u + 8u)
-              + (size_t)n_channels * (8u + 2u + DART_META_SCHEMA_INLINE_MAX);
-}
 uint16_t dart_meta_capacity(uint16_t n_channels){
-    size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_channels)   /* overlay: no name (it's discovery's) */
-               + i_dart_meta_schemas_max(n_channels);
+    size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_channels);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
-/* the schema section: map every advertising alias (any non-INACTIVE role: publishers
- * offer their layout, subscribers their required subset) to its schema identity, then
- * each distinct wire once (interned by hash), inlined only when it fits
- * DART_META_SCHEMA_INLINE_MAX. Always present (two zero counts when there is nothing to
- * advertise). Returns bytes written, or 0 if cap is too small (the caller then ships
- * the overlay without the section). */
-static int i_dart_meta_schema_advertised(DartTransportState *st, const DartMetaSchema *schemas,
-                                         uint16_t c){
-    return schemas && schemas[c].hash != 0 && st->channels[c].role != DART_INACTIVE;
-}
-static size_t i_dart_meta_schemas_build(DartTransportState *st, uint8_t *out, size_t cap,
-                                        const DartMetaSchema *schemas){
-    uint8_t *p = out + 2, *end = out + cap, *wires;
-    uint16_t c, k, n_map = 0, n_wire = 0;
-    if (cap < 4) return 0;
-    for (c = 0; c < st->cfg.n_channels; c++){          /* alias -> hash map */
-        if (!i_dart_meta_schema_advertised(st, schemas, c)) continue;
-        if (p + 10 > end) return 0;
-        i_dart_le_w16(p, c); i_dart_le_w64(p + 2, schemas[c].hash);
-        p += 10; n_map++;
-    }
-    i_dart_le_w16(out, n_map);
-    wires = p; p += 2;
-    if (p > end) return 0;
-    for (c = 0; c < st->cfg.n_channels; c++){          /* distinct wires, inlined when small */
-        int seen = 0;
-        if (!i_dart_meta_schema_advertised(st, schemas, c)) continue;
-        if (!schemas[c].wire.data || schemas[c].wire.len == 0
-            || schemas[c].wire.len > DART_META_SCHEMA_INLINE_MAX) continue;
-        for (k = 0; k < c; k++)                        /* interned: emitted once per hash */
-            if (i_dart_meta_schema_advertised(st, schemas, k)
-                && schemas[k].hash == schemas[c].hash){ seen = 1; break; }
-        if (seen) continue;
-        if (p + 10 + schemas[c].wire.len > end) return 0;
-        i_dart_le_w64(p, schemas[c].hash); i_dart_le_w16(p + 8, (uint16_t)schemas[c].wire.len);
-        memcpy(p + 10, schemas[c].wire.data, schemas[c].wire.len);
-        p += 10 + schemas[c].wire.len; n_wire++;
-    }
-    i_dart_le_w16(wires, n_wire);
-    return (size_t)(p - out);
-}
-
-/* Exact overlay size the next dart_transport_meta_build will emit for the current channel +
- * schema state (the same walks, byte for byte), so a caller can size the buffer to the
- * actual content instead of dart_meta_capacity's every-channel-has-a-max-schema worst case. */
-uint16_t dart_transport_meta_size(DartTransportState *st, const DartMetaSchema *schemas){
-    size_t len = (size_t)DART__META_BASE + 4u;   /* base prefix + [npub][nsub] */
-    uint16_t c, k;
-    for (c=0;c<st->cfg.n_channels;c++){
-        uint8_t d=st->channels[c].role;
-        if (d==DART_PUBSUB || d==DART_PUB_ONLY) len += 4u + st->channels[c].name_len;
-        if (d==DART_PUBSUB || d==DART_SUB_ONLY) len += 4u + st->channels[c].name_len;
-    }
-    len += 4u;                                   /* schema section: [n_map][n_wire] */
-    for (c=0;c<st->cfg.n_channels;c++){
-        int seen = 0;
-        if (!i_dart_meta_schema_advertised(st, schemas, c)) continue;
-        len += 10u;                              /* alias -> hash map entry */
-        if (!schemas[c].wire.data || schemas[c].wire.len == 0
-            || schemas[c].wire.len > DART_META_SCHEMA_INLINE_MAX) continue;
-        for (k = 0; k < c; k++)                  /* interned: counted once per hash */
-            if (i_dart_meta_schema_advertised(st, schemas, k)
-                && schemas[k].hash == schemas[c].hash){ seen = 1; break; }
-        if (!seen) len += 10u + schemas[c].wire.len;
-    }
+/* Exact overlay size the next dart_transport_meta_build will emit for the current
+ * channel state (the same walk, byte for byte), so a caller can size the buffer to the
+ * actual content instead of dart_meta_capacity's full-reserve worst case. */
+uint16_t dart_transport_meta_size(DartTransportState *st){
+    uint16_t c, n=0;
+    size_t len;
+    for (c=0;c<st->cfg.n_channels;c++) if (st->channels[c].name_len) n=(uint16_t)(c+1u);
+    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n;
     if (len > 65000u) len = 65000u;              /* the dart_meta_capacity ceiling; past it the build truncates */
     return (uint16_t)len;
 }
 
 uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
-                         const DartMetaSchema *schemas){
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
     size_t interest_len, len; uint16_t off = DART__META_BASE;
     out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
@@ -937,21 +872,8 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
 #endif
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     len = (size_t)off + interest_len;
-    if (interest_len == 0){   /* did not fit (returns >= 4 even with zero channels): never silent */
+    if (interest_len == 0)    /* did not fit (returns >= 2 even with zero channels): never silent */
         i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
-    } else {   /* the schema section is located by walking the interest list, so it needs one */
-        size_t s = i_dart_meta_schemas_build(st, out + len, cap - len, schemas);
-        if (s){
-            len += s;
-        } else {   /* 0 = did not fit; report only if there was something to advertise */
-            uint16_t c;
-            for (c = 0; c < st->cfg.n_channels; c++)
-                if (i_dart_meta_schema_advertised(st, schemas, c)){
-                    i_dart_transport_fire_event(st, DART_TRANSPORT_META_TRUNCATED_SCHEMA, 0, 0, 0, 0);
-                    break;
-                }
-        }
-    }
     return (uint16_t)len;
 }
 
@@ -969,79 +891,43 @@ DartBytes dart_meta_interest(DartBytes meta){
 }
 
 int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out){
-    uint32_t off; uint8_t nlen;
     if (!it || !out) return 0;
-    if (!it->started){                    /* first call: parse the [npub][nsub] header */
+    if (!it->started){                    /* first call: parse the [u16 n] header */
         DartBytes in = dart_meta_interest(meta);
-        it->started = 1; it->pub_left = it->sub_left = 0; it->off = 0;
-        if (!in.data || in.len < 4) return 0;      /* no/short interest list: nothing to yield */
-        it->pub_left = (uint16_t)(in.data[0] | ((uint16_t)in.data[1] << 8));
-        it->sub_left = (uint16_t)(in.data[2] | ((uint16_t)in.data[3] << 8));
-        it->off = (uint32_t)(in.data - meta.data) + 4u;   /* first entry, past npub/nsub */
+        it->started = 1; it->left = 0; it->alias = 0; it->phase = 0; it->off = 0;
+        if (!in.data || in.len < 2) return 0;      /* no/short interest list: nothing to yield */
+        it->left = (uint16_t)(in.data[0] | ((uint16_t)in.data[1] << 8));
+        it->off  = (uint32_t)(in.data - meta.data) + 2u;   /* first entry, past n */
     }
-    if (it->pub_left == 0 && it->sub_left == 0) return 0;
-    off = it->off;
-    if (off + 4u > meta.len){ it->pub_left = it->sub_left = 0; return 0; }   /* truncated: stop */
-    nlen = meta.data[off + 3];
-    if (off + 4u + nlen > meta.len){ it->pub_left = it->sub_left = 0; return 0; }
-    out->alias    = (uint16_t)(meta.data[off] | ((uint16_t)meta.data[off + 1] << 8));
-    out->reliable = (uint8_t)(meta.data[off + 2] & DART_META_F_RELIABLE);
-    out->is_pub   = (uint8_t)(it->pub_left > 0);   /* pub list first, then sub */
-    out->name     = dart_string((const char *)(meta.data + off + 4u), nlen);
-    it->off = off + 4u + nlen;
-    if (it->pub_left > 0) it->pub_left--; else it->sub_left--;
-    return 1;
-}
-
-/* Offset of the schema section: the base prefix, then a bounds-checked walk over the
- * (count-delimited) interest list. 0 = malformed/absent. */
-static uint32_t i_dart_meta_schemas_off(DartBytes meta){
-    uint32_t off, k, tot; uint16_t n_pub, n_sub;
-    if (!i_dart_meta_ok(meta)) return 0;
-    off = i_dart_meta_base(meta.data);
-    if ((size_t)off + 4u > meta.len) return 0;
-    n_pub = i_dart_le_r16(meta.data + off); n_sub = i_dart_le_r16(meta.data + off + 2);
-    off += 4u; tot = (uint32_t)n_pub + n_sub;
-    for (k = 0; k < tot; k++){
-        if ((size_t)off + 4u > meta.len) return 0;
-        off += 4u + (uint32_t)meta.data[off + 3];
-        if ((size_t)off > meta.len) return 0;
-    }
-    return off;
-}
-
-int dart_meta_schema(DartBytes meta, uint16_t alias, uint64_t *hash, DartBytes *wire){
-    uint32_t off = i_dart_meta_schemas_off(meta), k;
-    uint16_t n_map, n_wire; uint64_t h = 0; int found = 0;
-    if (hash) *hash = 0;
-    if (wire) *wire = dart_bytes(NULL, 0);
-    if (off == 0 || (size_t)off + 4u > meta.len) return 0;
-    n_map = i_dart_le_r16(meta.data + off); off += 2;
-    for (k = 0; k < n_map; k++, off += 10){            /* alias -> hash */
-        if ((size_t)off + 10u > meta.len) return 0;
-        if (i_dart_le_r16(meta.data + off) == alias){ h = i_dart_le_r64(meta.data + off + 2); found = 1; }
-    }
-    if (!found || h == 0) return 0;
-    if (hash) *hash = h;
-    if ((size_t)off + 2u > meta.len) return 1;         /* hash-only blob: no wire table */
-    n_wire = i_dart_le_r16(meta.data + off); off += 2;
-    for (k = 0; k < n_wire; k++){                      /* hash -> inlined wire */
-        uint16_t wlen;
-        if ((size_t)off + 10u > meta.len) return 1;
-        wlen = i_dart_le_r16(meta.data + off + 8);
-        if ((size_t)off + 10u + wlen > meta.len) return 1;
-        if (i_dart_le_r64(meta.data + off) == h){
-            if (wire) *wire = dart_bytes(meta.data + off + 10, wlen);
+    while (it->left){
+        uint32_t off = it->off;
+        uint8_t flags, role;
+        if ((size_t)off + 5u > meta.len){ it->left = 0; return 0; }   /* truncated: stop */
+        flags = meta.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
+        if (role == DART_INACTIVE){       /* declared-but-off / undefined hole: not advertised */
+            it->left--; it->alias++; it->off = off + 5u; it->phase = 0;
+            continue;
+        }
+        out->alias    = it->alias;
+        out->role     = role;
+        out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
+        out->hash     = i_dart_le_r32(meta.data + off);
+        if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
+            out->is_pub = 1;
+            if (role==DART_PUBSUB){ it->phase = 1; return 1; }   /* sub direction next call */
+            it->left--; it->alias++; it->off = off + 5u;
             return 1;
         }
-        off += 10u + wlen;
+        out->is_pub = 0;                  /* SUB_ONLY, or the second yield of a PUBSUB entry */
+        it->phase = 0; it->left--; it->alias++; it->off = off + 5u;
+        return 1;
     }
-    return 1;                                          /* advertised, but not inlined */
+    return 0;
 }
 
 #ifdef DART_SHM
 int dart_meta_shm(DartBytes meta, uint8_t host[16]){
-    if (!i_dart_meta_ok(meta) || meta.data[2]!=9
+    if (!i_dart_meta_ok(meta) || meta.data[2]!=11
         || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
     return 1;
@@ -1177,6 +1063,90 @@ int dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out){
     it->off = off + 3u + nlen + 10u + wlen;
     it->left--;
     return 1;
+}
+
+/* The aliases still PENDING for a peer: candidates (32-bit hash overlap + role overlap)
+ * without a cached verdict. See core.h for the request-on-every-announce retry contract. */
+uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchema *schemas,
+                                     uint32_t peer_id, DartBytes interest,
+                                     DartDetailWant *out, uint16_t max_wants){
+    const uint8_t *d=interest.data;
+    uint16_t n, cnt=0; uint32_t a; int slot;
+    uint8_t *astate; uint32_t alen;
+    if (!st || !d || interest.len < 2) return 0;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return 0;
+    n = i_dart_le_r16(d);
+    if (interest.len < 2u + 5u*(uint32_t)n) return 0;
+    astate = st->peer_astate[slot]; alen = st->peer_alias_len[slot];
+    for (a=0;a<n;a++){
+        const uint8_t *e = d + 2u + 5u*a;
+        uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
+        int cidx = -1, nc;
+        i_DartChannel *ch;
+        int their_pub, their_sub, ours_pub, ours_sub;
+        if (role == DART_INACTIVE) continue;
+        if (astate && a < alen && (astate[a] & DART__AST_DETAILED)) continue;   /* decided */
+        nc = i_dart_hash32_candidates(st, i_dart_le_r32(e), &cidx);
+        if (!nc) continue;                                 /* no local channel: not a candidate */
+        ch = &st->channels[cidx];
+        their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
+        their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        ours_pub  = (ch->role==DART_PUBSUB || ch->role==DART_PUB_ONLY);
+        ours_sub  = (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY);
+        if (!((their_pub && ours_sub) || (their_sub && ours_pub))) continue;   /* roles never meet */
+        if (out){
+            if (cnt >= max_wants) break;
+            out[cnt].alias = (uint16_t)a;
+            /* several local channels behind one 32-bit hash: send hash 0 to force the
+               wire inline, so whichever channel the name binds to can still verify */
+            out[cnt].schema_hash = (nc == 1 && schemas) ? schemas[cidx].hash : 0;
+        }
+        cnt++;
+    }
+    return cnt;
+}
+
+/* Ingest a DETAIL_RESP: verify each entry (full identity from the name; the schema gate
+ * per direction) and cache the verdict. Returns newly decided aliases; the caller then
+ * re-applies the peer's interest so the verdicts form their matches. Idempotent: decided
+ * aliases are skipped, so duplicate/crossing responses are harmless. */
+uint16_t dart_transport_apply_peer_details(DartTransportState *st, uint32_t peer_id, DartBytes resp){
+    DartDetailIter it; DartDetail dd;
+    int slot; uint16_t fresh = 0;
+    if (!st) return 0;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return 0;
+    memset(&it, 0, sizeof it);
+    while (dart_detail_next(resp, &it, &dd)){
+        uint16_t *amap = st->peer_alias[slot]; uint8_t *astate = st->peer_astate[slot];
+        uint64_t id64; i_DartChannel *ch; int cidx = -1;
+        if (!amap || !astate || (uint32_t)dd.alias >= st->peer_alias_len[slot])
+            continue;   /* maps are sized at interest apply; an alias we never saw is ignored
+                           (a response that raced ahead of the announce re-resolves later) */
+        if (astate[dd.alias] & DART__AST_DETAILED) continue;
+        if (dd.name.len == 0){ astate[dd.alias] = DART__AST_DETAILED; fresh++; continue; }
+        id64 = i_dart_identity_hash((const uint8_t*)dd.name.data, dd.name.len);
+        ch = i_dart_channel_by_identity(st, id64, &cidx);
+        if (!ch){                              /* the 32-bit nomination was a false positive */
+            astate[dd.alias] = DART__AST_DETAILED;
+            fresh++; continue;
+        }
+        if (ch->name_len != dd.name.len || memcmp(ch->name, dd.name.data, dd.name.len) != 0){
+            astate[dd.alias] = DART__AST_DETAILED;   /* same 64-bit id, different name: refused */
+            i_dart_transport_fire_event(st, DART_TRANSPORT_NAME_COLLISION, (uint16_t)cidx,
+                        peer_id, id64, 0);
+            fresh++; continue;
+        }
+        amap[dd.alias] = (uint16_t)cidx;
+        astate[dd.alias] = (uint8_t)(DART__AST_DETAILED | DART__AST_NAME_OK
+            | ((!st->cfg.schema_check || st->cfg.schema_check(st->cfg.user, peer_id, (uint16_t)cidx,
+                    1, dd.schema_hash, dd.schema_wire)) ? DART__AST_READ_OK : 0u)
+            | ((!st->cfg.schema_check || st->cfg.schema_check(st->cfg.user, peer_id, (uint16_t)cidx,
+                    0, dd.schema_hash, dd.schema_wire)) ? DART__AST_WRITE_OK : 0u));
+        fresh++;
+    }
+    return fresh;
 }
 
 

@@ -133,9 +133,10 @@ typedef enum {
                                         .lost_count = entry count): their data can never demux here.
                                         Fixed mode: raise DART_META_MAX_IDS; dynamic: map alloc failed. */
     DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
-                                               dropped, so peers see none of our topics. Fewer/shorter names. */
-    DART_TRANSPORT_META_TRUNCATED_SCHEMA    /* our announce overlay overflowed: the schema section was
-                                               dropped, so peers see partial schemas. Fewer/smaller schemas. */
+                                               dropped, so peers see none of our topics (needs ~13k topics
+                                               at 5 B/entry against the one-datagram ceiling). */
+    DART_TRANSPORT_META_TRUNCATED_SCHEMA    /* RETIRED (schemas left the announce for the detail
+                                               exchange); value kept so binding enums stay aligned. */
 } DartTransportEventKind;
 
 /* The channel name for a channel-scoped event is not carried here: read it with
@@ -178,13 +179,18 @@ typedef struct {
 #endif
     DartTransportEventFn  on_event;   /* optional: transport events (loss/too-big/collision/qos) */
     DartAllocFn           allocator;  /* optional: set => dynamic message sizing */
-    /* optional schema gate: called while a peer's interest is applied, once per would-be
-     * match, with the local channel and the peer's advertised alias (peer_is_pub: their
-     * entry is a publish). Return 1 to allow, 0 to refuse (no proxy either way, and the
-     * transport fires SCHEMA_MISMATCH). The transport knows nothing of schema contents;
-     * the node implements this over the serialize layer with the overlay it is applying. */
-    int                 (*schema_check)(void *user, uint16_t channel, uint16_t peer_alias,
-                                        int peer_is_pub);
+    /* optional schema gate: called at DETAIL INTAKE (dart_transport_apply_peer_details),
+     * once per direction of a name-verified topic, with the peer's advertised schema
+     * identity + canonical wire (hash 0 = untyped; wire {NULL,0} = not inlined, identical
+     * or already known). peer_is_pub = 1 gates the read side (their publish, we would
+     * decode), 0 the write side. Return 1 to allow, 0 to refuse. Both verdicts are cached
+     * per (peer, alias) for the peer's lifetime (schemas are immutable per incarnation);
+     * a refused direction forms no proxy and fires SCHEMA_MISMATCH when a later interest
+     * apply would have used it. The transport knows nothing of schema contents; the node
+     * implements this over the serialize layer. */
+    int                 (*schema_check)(void *user, uint32_t peer, uint16_t channel,
+                                        int peer_is_pub, uint64_t schema_hash,
+                                        DartBytes schema_wire);
     void                 *user;
 } DartConfig;
 
@@ -232,97 +238,96 @@ void      dart_transport_peer_resume (DartTransportState *st, uint32_t peer_id);
 void      dart_transport_peer_set_frag(DartTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 
 /* Interest exchange (the node carries these in discovery announces; sans-IO callers
- * disseminate them however they like). dart_transport_build_interest serializes OUR pub/sub
- * set into out ([u16 npub][u16 nsub] then [u16 alias][u8 namelen][name] entries),
- * returning bytes written or 0 if cap is too small; size out via dart_interest_max.
- * dart_transport_apply_peer_interest applies a peer's serialized set, (re)matching channels;
- * it is idempotent. Re-build + re-disseminate after dart_transport_set_role. */
+ * disseminate them however they like). The interest list is HASH-ONLY (no names, no
+ * schemas): [u16 n] then one [u32 name-hash][u8 flags] entry per channel IN CHANNEL-INDEX
+ * ORDER, so the entry's position IS the advertiser's alias (an INACTIVE/undefined slot
+ * still occupies its position, keeping later aliases stable across role changes). The
+ * hash is the low 32 bits of the 64-bit name identity; flags = role (bits 0-1, a
+ * DartRole) | offered/requested reliability (bit 2).
+ *
+ * A 32-bit hash overlap only NOMINATES a candidate match, it never matches: names and
+ * schemas are fetched pairwise via the detail exchange below, and the verified verdicts
+ * (name equality, schema compatibility per direction) are cached per (peer, alias) for
+ * the peer's lifetime. dart_transport_apply_peer_interest then derives the actual matches
+ * from verdicts + the CURRENT flags on every apply, so a role/QoS change rematches
+ * instantly with no round trip, while an unverified candidate stays PENDING (no proxy,
+ * no data) until its details arrive. Aliases are append-only and their name/schema
+ * immutable per peer incarnation: that is what makes the verdict cache sound.
+ * dart_transport_build_interest serializes OUR set into out, returning bytes written or
+ * 0 if cap is too small; size out via dart_interest_max. apply is idempotent. Re-build +
+ * re-disseminate after dart_transport_set_role. */
 size_t    dart_interest_max(uint16_t n_channels);
 size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_t cap);
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, SHM capability + host uuid, its
- * interest list, and its published channels' schemas: the transport's OVERLAY, carried
- * opaquely inside discovery's announce blob (the node name lives in discovery's own
- * section, not here). Layout:
- *   v8: ['D','N',8, frag_lo, frag_hi,                <interest> <schemas>]
- *   v9: ['D','N',9, frag_lo, frag_hi, shm, host[16], <interest> <schemas>]
- * frag sits at [3..4] in both; v9 adds the SHM byte + host. dart_transport_meta_build writes v9 when
- * DART_SHM is compiled, v8 otherwise. The schema section follows the (self-delimiting)
- * interest list:
- *   [u16 n_map]  ( [u16 alias][u64 hash] )*          advertised alias -> schema identity
- *   [u16 n_wire] ( [u64 hash][u16 len][bytes] )*     distinct schema wires, inlined when small
- * The wire bytes are OPAQUE here (serialize/schema.h builds and parses them); the
- * transport just frames them, so it keeps no serialize dependency. */
-
-/* Largest schema wire the overlay inlines (and reserves capacity for, per channel); a
- * bigger schema is advertised by hash alone. Define before the include to raise it. */
-#ifndef DART_META_SCHEMA_INLINE_MAX
-#define DART_META_SCHEMA_INLINE_MAX 512u
-#endif
+ * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
+ * hash-only interest list: the transport's OVERLAY, carried opaquely inside discovery's
+ * announce blob (the node name lives in discovery's own section, not here). Layout:
+ *   v10: ['D','N',10, frag_lo, frag_hi,                <interest>]
+ *   v11: ['D','N',11, frag_lo, frag_hi, shm, host[16], <interest>]
+ * frag sits at [3..4] in both; v11 adds the SHM byte + host. dart_transport_meta_build
+ * writes v11 when DART_SHM is compiled, v10 otherwise. NO topic names and NO schemas ride
+ * the announce: those are fetched pairwise via the detail exchange ('uDTL' below), so a
+ * 2000-topic announce is ~10 kB instead of overflowing the one-datagram ceiling. */
 
 /* One channel's schema advertisement, registered by the node: the 64-bit identity plus a
- * view of the canonical wire bytes (valid for the channel's lifetime). hash 0 = none. */
+ * view of the canonical wire bytes (valid for the channel's lifetime). hash 0 = none.
+ * Served to peers by the detail responder (never in the announce). */
 typedef struct {
     uint64_t  hash;
     DartBytes wire;
 } DartMetaSchema;
 
-/* Bytes to reserve for the overlay: prefix + the largest interest list and schema section
- * n_channels can produce, capped to one (IP-fragmentable) UDP datagram. Sizes discovery's
- * meta_capacity. */
+/* Bytes to reserve for the overlay: prefix + the interest list at n_channels entries,
+ * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_capacity. */
 uint16_t  dart_meta_capacity(uint16_t n_channels);
-/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT channel + schema
- * state, so a growable caller sizes its buffer to actual content; dart_meta_capacity stays
- * the fixed-buffer worst case (and the accept bound for peers' overlays). */
-uint16_t  dart_transport_meta_size(DartTransportState *st, const DartMetaSchema *schemas);
-/* Build the overlay into out[cap] (cap >= dart_meta_capacity): the version prefix (frag_size,
- * plus shm_capable + host[16] when DART_SHM is compiled), st's interest list, then the
- * schema section. schemas is one entry per channel (index = channel index) or NULL; every
- * non-INACTIVE channel with a nonzero hash is advertised (publishers offer their layout,
- * subscribers their required subset), each distinct wire once. Returns total bytes; host
- * may be NULL when !shm_capable. The node NAME is not here: it rides discovery's own
- * section of the announce blob. */
+/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT channel state,
+ * so a growable caller sizes its buffer to actual content; dart_meta_capacity stays the
+ * fixed-buffer worst case (and the accept bound for peers' overlays). */
+uint16_t  dart_transport_meta_size(DartTransportState *st);
+/* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix
+ * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), then st's interest
+ * list (one positional entry per channel slot up to the highest defined one). Returns
+ * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
+ * discovery's own section of the announce blob. */
 uint16_t  dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
-                       const DartMetaSchema *schemas);
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
 /* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
 uint16_t  dart_meta_frag(DartBytes meta);
 /* The interest sub-blob inside the overlay; {NULL, 0} if absent. */
 DartBytes dart_meta_interest(DartBytes meta);
 
-/* One advertised topic, as decoded by dart_meta_interest_next. name points into the
- * source overlay (NOT NUL-terminated), so keep that blob alive while reading it. */
+/* One advertised topic, as decoded by dart_meta_interest_next. The announce carries no
+ * topic name: only the 32-bit hash rides here. Fetch the name (and schema) via the
+ * detail exchange below. */
 typedef struct {
-    uint16_t    alias;      /* the advertiser's local channel index (opaque to us) */
-    uint8_t     reliable;   /* flags bit 0: offered (pub) / requested (sub) reliability */
-    uint8_t     is_pub;     /* 1 = a publish entry, 0 = a subscribe entry */
-    DartString  name;       /* topic name in the source blob (not NUL-terminated) */
+    uint16_t    alias;      /* the advertiser's channel index (== the entry's position) */
+    uint8_t     role;       /* the advertiser's DartRole for this topic */
+    uint8_t     is_pub;     /* this yield: 1 = publish direction, 0 = subscribe (a PUBSUB
+                               topic yields twice, pub first, mirroring the old two-list walk) */
+    uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
+    uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
 } DartTopic;
 
 /* Iterator state for dart_meta_interest_next: zero-initialize, then call until it
  * returns 0. The fields are internal walk state, not for direct use. */
 typedef struct {
-    uint16_t pub_left;   /* publish entries still to yield */
-    uint16_t sub_left;   /* subscribe entries still to yield */
     uint32_t off;        /* byte offset of the next entry within the overlay */
-    uint8_t  started;    /* 0 until the first call parses the [npub][nsub] header */
+    uint16_t left;       /* entries still to walk */
+    uint16_t alias;      /* position of the next entry */
+    uint8_t  phase;      /* 1 = the current entry's pub direction was yielded */
+    uint8_t  started;    /* 0 until the first call parses the [u16 n] header */
 } DartInterestIter;
 
-/* Walk a peer's interest list (the publish entries, then the subscribe entries) one
- * topic at a time, so consumers stop re-implementing the [u16 npub][u16 nsub] +
- * [u16 alias][u8 flags][u8 namelen][name] format. Pass the same overlay/len each call
- * with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at the end (or on a
- * malformed/truncated blob: it stops rather than reading past the end). Usage:
+/* Walk a peer's interest list one advertised DIRECTION at a time (a PUBSUB topic yields
+ * a pub entry then a sub entry; INACTIVE/undefined slots are skipped). Pass the same
+ * overlay each call with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at
+ * the end (or on a malformed/truncated blob: it stops rather than reading past the end).
+ * Usage:
  *   DartInterestIter it = {0}; DartTopic t;
  *   while (dart_meta_interest_next(meta, &it, &t)) { ... } */
 int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out);
-/* An advertised alias's schema: returns 1 and fills *hash if the alias advertises one,
- * else 0. *wire is the inlined canonical bytes (a view into the overlay, parse with
- * dart_schema_parse), or {NULL,0} when the peer advertised the hash alone (schema too
- * big to inline). hash/wire may be NULL. */
-int       dart_meta_schema(DartBytes meta, uint16_t alias, uint64_t *hash, DartBytes *wire);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
@@ -402,6 +407,26 @@ typedef struct {
  * DartDetailIter; returns 1 and fills *out, or 0 at the end (or on a malformed/truncated
  * response: it stops rather than reading past the end). */
 int       dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out);
+
+/* The requester side of the pending-match cycle. detail_wants scans a peer's interest
+ * list (its announce overlay's interest section) for CANDIDATES: entries whose 32-bit
+ * hash matches a local channel, whose roles overlap ours, and whose verdict is not yet
+ * cached. It fills up to max_wants request entries (each carrying OUR schema hash for
+ * the responder's inline-on-mismatch rule) and returns the count: 0 means nothing is
+ * pending for this peer (converged). out may be NULL to just count. Re-run it on every
+ * announce from the peer while it returns nonzero (lost datagrams heal by re-asking).
+ *
+ * apply_peer_details ingests a DETAIL_RESP: each entry is verified (full 64-bit identity
+ * recomputed from the name; a same-hash different-name peer fires NAME_COLLISION and is
+ * refused; the schema_check hook gates both directions) and the verdict cached. Returns
+ * the number of newly decided aliases; when nonzero, re-run
+ * dart_transport_apply_peer_interest with the peer's current interest so the new verdicts
+ * form their matches (proxies, catch-up replay) exactly as a fresh announce would. */
+uint16_t  dart_transport_detail_wants(DartTransportState *st, const DartMetaSchema *schemas,
+                       uint32_t peer_id, DartBytes interest,
+                       DartDetailWant *out, uint16_t max_wants);
+uint16_t  dart_transport_apply_peer_details(DartTransportState *st, uint32_t peer_id,
+                       DartBytes resp);
 
 /* Change a channel's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */

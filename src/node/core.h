@@ -163,13 +163,14 @@ void            i_dart_node_core_set_channel_schema(i_DartNodeCore *c, uint16_t 
 DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
 
 /* The transport's DartConfig.schema_check, node-style (see transport/core.h): decide a
- * would-be match against the overlay currently being applied (peer_up stashes it).
- * Typed vs typed matches iff same root name and the reader's fields are a subset of the
- * writer's (dart_schema_subset); a typed reader refuses an untyped or unverifiable
- * writer; an untyped (generic) reader accepts anything. On an allowed read-side match
- * this also interns the peer's schema and records the reader view for delivery. */
-int i_dart_node_core_schema_check(i_DartNodeCore *c, uint16_t channel, uint16_t alias,
-                                  int peer_is_pub);
+ * would-be match from the peer's advertised schema identity + wire, delivered by its
+ * detail response. Typed vs typed matches iff same root name and the reader's fields are
+ * a subset of the writer's (dart_schema_subset); a typed reader refuses an untyped or
+ * unverifiable writer; an untyped (generic) reader accepts anything. On an allowed
+ * read-side check this also interns the peer's schema and records the reader view for
+ * delivery, keyed by the peer id. */
+int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                  int peer_is_pub, uint64_t hash, DartBytes wire);
 
 /* The schema to decode a delivered message with: the channel's own schema when the
  * sender's is identical, a rebased view of the sender's layout when it is a superset,
@@ -198,6 +199,19 @@ typedef struct {
 int  i_dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  i_dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 
+/* The requester side of the detail cycle (the announce nominates by hash; details verify
+ * and match). apply_details ingests a peer's DETAIL_RESP off the data socket. detail_any
+ * says a DETAIL_REQ is queued somewhere; the runtime then loops detail_req_next (build
+ * request + destination, send each) until it returns 0. detail_rearm re-queues every
+ * ACTIVE peer: the runtime's periodic retry sweep, cheap once converged (each peer costs
+ * one wants() walk and sends nothing). */
+void   i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
+                                      DartBytes resp);
+int    i_dart_node_core_detail_any(i_DartNodeCore *c);
+void   i_dart_node_core_detail_rearm(i_DartNodeCore *c);
+size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
+                                        void *out, size_t cap, i_DartNodeDest *to);
+
 /* A peer's human-readable name, learned from its announce blob: a DartString viewing the
  * peer-table slot (not NUL-terminated; stable until the peer is evicted). Non-empty for any
  * known peer ("unknown-peer" if its announce carried none); .data is NULL only when id is
@@ -216,17 +230,12 @@ int      i_dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id
  * fragment size + interest off a DartDiscoveryPeer (from dart_node_peers) without ever
  * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
 uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
-/* Walk a peer's interest list one topic at a time (publishes, then subscribes): zero a
- * DartInterestIter, then call until it returns 0. Fills *out (out->name points into the
- * peer's overlay, NOT NUL-terminated). 0 when the peer carries no overlay or at the end. */
+/* Walk a peer's interest list one advertised direction at a time: zero a
+ * DartInterestIter, then call until it returns 0. Fills *out with alias/role/hash only:
+ * the announce carries no topic names or schemas (fetch those via the detail exchange,
+ * transport/core.h). 0 when the peer carries no overlay or at the end. */
 int      dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
                               DartInterestIter *it, DartTopic *out);
-/* A peer's advertised schema for one of its publish topics (alias = the DartTopic.alias
- * from the interest walk): 1 + fills *hash if the topic advertises one, else 0. *wire is
- * the schema's canonical bytes when the peer inlined them (a view into the overlay,
- * decode with dart_schema_parse), or {NULL,0} when only the hash was advertised. */
-int      dart_node_peer_schema(const DartDiscoveryPeer *peer, uint16_t alias,
-                              uint64_t *hash, DartBytes *wire);
 
 #ifdef __cplusplus
 }

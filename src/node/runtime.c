@@ -22,6 +22,12 @@ struct DartNode {
     i_DartSock       fd;       /* unicast data socket */
     uint16_t      domain;
     DartNodeNet  net;         /* copy of opts.net: socket buffers + discovery addressing */
+    /* detail-exchange retry cadence: while any peer holds unverified candidates, the
+       queued requests drain each poll and a periodic rearm sweep (one announce interval)
+       re-asks, so a lost datagram heals; once converged the sweep sends nothing and the
+       timer disarms until new candidates appear. */
+    uint32_t      announce_us;     /* resolved discovery announce interval */
+    uint64_t      next_detail_us;  /* next retry sweep; 0 = disarmed */
     /* datagram the socket refused; retried first next poll so it is never lost */
     uint8_t       tx_hold[DART_DGRAM_MAX];
     size_t        tx_hold_len;
@@ -260,9 +266,12 @@ static void i_dart_node_on_event(const DartEvent *ev){
 }
 
 /* the transport's schema gate (DartConfig.schema_check): the node core answers it over
- * the serialize layer, using the overlay it is currently applying. u is the node. */
-static int i_dart_node_schema_check(void *u, uint16_t channel, uint16_t alias, int peer_is_pub){
-    return i_dart_node_core_schema_check(((DartNode*)u)->core, channel, alias, peer_is_pub);
+ * the serialize layer, from the peer's schema as its detail response advertised it.
+ * u is the node. */
+static int i_dart_node_schema_check(void *u, uint32_t peer, uint16_t channel,
+                                    int peer_is_pub, uint64_t hash, DartBytes wire){
+    return i_dart_node_core_schema_check(((DartNode*)u)->core, peer, channel,
+                                         peer_is_pub, hash, wire);
 }
 
 /* transport events arrive as a DartTransportEvent; the node maps them onto its app
@@ -507,6 +516,8 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 #endif
     n->domain = o.domain;
     n->net = o.net;
+    n->announce_us = o.discovery.announce_interval_us ? o.discovery.announce_interval_us
+                                                      : 1000000u;   /* discovery's default */
     n->user_on_message = on_message;   /* on_event + user_data were set early (open-time error reporting) */
     n->arena = arena;
     n->handles = (DartChannel**)blocks.handles;
@@ -772,11 +783,17 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                 /* pairwise detail exchange: answer a request to its SOURCE (stateless, so
                    any requester works, peer or not: the explorer, a not-yet-added node).
                    A failed/refused send is just dropped: the requester re-asks on the
-                   responder's next announce. A RESP has no consumer here yet. */
+                   responder's next announce. A response feeds the pending-match cycle:
+                   verdicts cached, interest re-applied, matches form. */
                 if (buf[4]==DART_DETAIL_REQ){
                     DartBytes resp = i_dart_node_core_detail_respond(n->core, n->domain,
                                                                      dart_bytes(buf, (size_t)r));
                     if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                } else if (buf[4]==DART_DETAIL_RESP){
+                    uint32_t from;
+                    if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                        i_dart_node_core_apply_details(n->core, n->domain, from,
+                                                       dart_bytes(buf, (size_t)r));
                 }
             } else {
                 uint32_t from;
@@ -897,6 +914,20 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
         i_dart_node_rx_drain(n, n->fd, i_dart_plat_now_us() + DART_RX_BUDGET_US);
 
     now=i_dart_plat_now_us();
+    /* detail-exchange requester: drain queued DETAIL_REQs (new candidates from an
+       announce, or a paged response's remainder), and rearm every active peer once per
+       announce interval while any request went out (the lost-datagram retry). Converged
+       = a sweep that sends nothing: the timer disarms until candidates reappear. */
+    if (i_dart_node_core_detail_any(n->core) || (n->next_detail_us && now >= n->next_detail_us)){
+        i_DartNodeDest dst; size_t len; int sent = 0;
+        if (n->next_detail_us && now >= n->next_detail_us)
+            i_dart_node_core_detail_rearm(n->core);
+        while ((len = i_dart_node_core_detail_req_next(n->core, n->domain, buf, sizeof buf, &dst)) != 0){
+            i_dart_plat_send(n->fd, buf, len, dst.ip, dst.port);   /* best-effort: retries heal */
+            sent = 1;
+        }
+        n->next_detail_us = sent ? now + n->announce_us : 0;
+    }
     /* the core already consumed any held datagram, so retry it before pulling new */
     if (n->tx_hold_len && i_dart_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
         n->tx_hold_len = 0;

@@ -584,8 +584,13 @@ public:
             detail::DartInterestIter it;
             std::memset(&it, 0, sizeof it);
             detail::DartTopic t;
-            while (detail::dart_node_peer_interest_next(&p, &it, &t))
-                peer.topics.push_back({ std::string(t.name.data, t.name.len), t.is_pub != 0, t.reliable != 0 });
+            while (detail::dart_node_peer_interest_next(&p, &it, &t)) {
+                /* v10 announces carry the 32-bit topic hash only; names ride the
+                   pairwise detail exchange (not yet fetched here) */
+                char hx[16];
+                std::snprintf(hx, sizeof hx, "0x%08x", (unsigned)t.hash);
+                peer.topics.push_back({ std::string(hx), t.is_pub != 0, t.reliable != 0 });
+            }
             out.push_back(std::move(peer));
         }
         return out;

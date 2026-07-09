@@ -223,8 +223,13 @@ int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
  *   peer_user  -> pointer to the peer's opaque scratch (cfg.peer_user_bytes), or NULL.
  *   addr_of_id -> 1 + fills *out with the advertised locator, else 0.
  *   peer_name  -> advertised name as a DartString (into discovery state; {NULL,0} if unknown).
+ *   peer_meta  -> the opaque overlay blob we hold for the peer ({NULL,0} if none) and, via
+ *                 *version (optional), the version it is at. A view into discovery state,
+ *                 valid until the next poll.
  *   id_for_addr-> reverse map an (ip, port) back to a peer id: 1 + *id on a hit, else 0. */
 void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
+DartBytes    dart_discovery_peer_meta(const DartDiscoveryState *st, uint32_t id,
+                             uint32_t *version);
 int          dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id,
                              DartDiscoveryAddr *out);
 DartString   dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id);

@@ -27,6 +27,16 @@
 #endif
 
 #define DART__NO_DEADLINE ((uint64_t)-1)  /* next_deadline_us: nothing armed */
+
+/* per-(peer, alias) detail-verdict bits (peer_astate maps; see DartTransportState) */
+#define DART__AST_DETAILED 0x01u  /* details received and judged (else PENDING/none) */
+#define DART__AST_NAME_OK  0x02u  /* full identity + name verified: peer_alias[a] is our channel */
+#define DART__AST_READ_OK  0x04u  /* schema gate passed, read side (their pub -> our sub) */
+#define DART__AST_WRITE_OK 0x08u  /* schema gate passed, write side (their sub -> our pub) */
+
+/* per-entry interest flags (the announce's hash list; see core.h "Interest exchange") */
+#define DART__INT_ROLE_MASK 0x03u /* bits 0-1: the advertiser's DartRole */
+#define DART__INT_RELIABLE  0x04u /* bit 2: offered (pub) / requested (sub) reliability */
 #ifdef DART_SHM
 #ifndef DART_SHM_MAX_RETRY
 #define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
@@ -202,6 +212,14 @@ struct DartTransportState {
     uint16_t   **peer_alias;      /* [max_peers] -> alias map (0xFFFF = unmapped) */
     uint32_t    *peer_alias_len;  /* [max_peers] entries in each map */
     uint32_t     alias_max;       /* fixed-mode stride = effective DART_META_MAX_IDS */
+    /* per-(peer, alias) detail verdicts, parallel to peer_alias (same length/lifetime).
+       An announce entry only NOMINATES by 32-bit hash; a verdict is written once at
+       detail intake (name verified against the full identity, schema gated per
+       direction) and holds for the peer's incarnation: aliases are append-only and
+       their name/schema immutable, so re-applying interest derives matches from
+       verdict + current flags with no round trip. 0 = no details yet (PENDING if a
+       candidate). */
+    uint8_t    **peer_astate;     /* [max_peers] -> verdict map (DART__AST_* bits) */
     i_DartChannel  *channels;     /* [n_channels] */
     /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
        grown by doubling, records allocated per real match, lane_index maps (channel,peer)

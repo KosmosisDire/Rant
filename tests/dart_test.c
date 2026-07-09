@@ -763,6 +763,23 @@ static void st_pump(DartNode *a, DartNode *b, int ms){     /* run both nodes */
     while (i_dart_plat_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
 }
 
+/* v10 one-way link between RAW transports: hand src's interest to dst (which knows src
+   as peer src_id) and run the pairwise detail exchange by hand, exactly as the two
+   runtimes would. The announce only NOMINATES (32-bit hashes); the details verify; the
+   re-apply forms the matches. */
+static void st_apply_verified(DartTransportState *dst, uint32_t src_id, DartTransportState *src){
+    uint8_t ib[512], rq[512], rp[2048]; size_t il, rl, pl; uint16_t nw;
+    DartDetailWant wl[16];
+    il = dart_transport_build_interest(src, ib, sizeof ib);
+    dart_transport_apply_peer_interest(dst, src_id, dart_bytes(ib, il));
+    nw = dart_transport_detail_wants(dst, NULL, src_id, dart_bytes(ib, il), wl, 16);
+    if (!nw) return;                       /* nothing shared (or already verified) */
+    rl = dart_detail_req_build(0, 0, wl, nw, rq, sizeof rq);
+    pl = dart_transport_detail_respond(src, NULL, 0, dart_bytes(rq, rl), rp, sizeof rp);
+    dart_transport_apply_peer_details(dst, src_id, dart_bytes(rp, pl));
+    dart_transport_apply_peer_interest(dst, src_id, dart_bytes(ib, il));
+}
+
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
@@ -1061,7 +1078,7 @@ static void shml_send(void){
     memset(desc,0,sizeof desc); dart_transport_send_shm(shml_W, 0, dart_bytes(chunk, 1000), desc, shml_now);
 }
 static void shm_loss_checks(void){
-    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; uint8_t blob[256]; size_t bl;
+    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
     q.heartbeat_us=50000; q.repair_delay_us=20000;
     memset(&cw,0,sizeof cw); cw.name="shmloss"; cw.qos=q; cw.role=DART_PUB_ONLY;
@@ -1073,8 +1090,8 @@ static void shm_loss_checks(void){
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); shml_R=dart_transport_init(mr,nr,&rc);
     shml_now=1000000;
     dart_transport_peer_add(shml_W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(shml_R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_transport_build_interest(shml_W,blob,sizeof blob); dart_transport_apply_peer_interest(shml_R,1u,dart_bytes(blob,bl));
-    bl=dart_transport_build_interest(shml_R,blob,sizeof blob); dart_transport_apply_peer_interest(shml_W,2u,dart_bytes(blob,bl));
+    st_apply_verified(shml_R, 1u, shml_W);
+    st_apply_verified(shml_W, 2u, shml_R);
     dart_transport_peer_set_shm(shml_W,2u,1);
     ST_CHECK(dart_transport_writer_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
     shml_ok=1; shml_recv=0; shml_lost=0; shml_drop=0; shml_send(); shml_pump(5);
@@ -1386,7 +1403,7 @@ static unsigned long qos_incompat_n;
 static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANSPORT_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    DartTransportState *W, *R; uint8_t blob[128]; size_t bl; uint16_t pub=0, recv=0;
+    DartTransportState *W, *R; uint16_t pub=0, recv=0;
     memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=wrel?DART_RELIABLE:DART_BEST_EFFORT; cw.qos.keep_last=4;
     memset(&cr,0,sizeof cr); cr.name="qostopic"; cr.role=DART_SUB_ONLY;
@@ -1397,7 +1414,7 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
     dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
     qos_incompat_n=0;
-    bl=dart_transport_build_interest(W,blob,sizeof blob); dart_transport_apply_peer_interest(R,1u,dart_bytes(blob,bl));
+    st_apply_verified(R, 1u, W);
     dart_transport_peer_match_counts(R,1u,&pub,&recv);
     if (recv_out) *recv_out=recv;
     if (evt_out)  *evt_out=qos_incompat_n;
@@ -1421,7 +1438,7 @@ static void qos_match_checks(void){
    reader; fill the history ring past keep_last with no acks, return would-evict. */
 static int beff_would_evict(int rrel){
     DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    DartTransportState *W, *R; uint8_t blob[128], payload[8]; size_t bl; int i, evict;
+    DartTransportState *W, *R; uint8_t payload[8]; int i, evict;
     memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2; cw.qos.max_message_bytes=8;
     memset(&cr,0,sizeof cr); cr.name="beff"; cr.role=DART_SUB_ONLY;
@@ -1431,7 +1448,7 @@ static int beff_would_evict(int rrel){
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
     dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
-    bl=dart_transport_build_interest(R,blob,sizeof blob); dart_transport_apply_peer_interest(W,2u,dart_bytes(blob,bl));  /* W learns R subscribes */
+    st_apply_verified(W, 2u, R);   /* W learns (and verifies) that R subscribes */
     memset(payload,0x5A,sizeof payload);
     for (i=0;i<5;i++) dart_transport_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
     evict = dart_transport_send_would_evict(W,0);
@@ -1550,18 +1567,23 @@ static void schema_dsl_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (18) schema advertisement: a publisher's channel schema rides its discovery announce
-   (hash + inlined wire, publish channels only); the subscriber reads it back off the
-   peer view (dart_node_peers -> dart_node_peer_schema) and reparses it to the same
-   identity. A NULL-schema channel advertises nothing. */
+/* (18) announce interest (v10): the blob carries one positional [u32 hash][u8 flags]
+   entry per channel slot, no names or schemas. The subscriber's peer view yields each
+   advertised direction with the right alias (= the publisher's channel index) and the
+   low 32 bits of the topic identity; an INACTIVE channel is not yielded but HOLDS ITS
+   POSITION, so a later role flip advertises the same alias. A typed match forming at
+   all proves the schema now travels via the detail exchange. */
 static void schema_advert_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);   /* the caller-side schema */
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc;
     DartChannelOpts co; DartDiscoveryAddr seed; DartSchema *sch=NULL;
-    uint64_t want=0, got=0; DartBytes wire; int t, has_raw=0;
-    const DartDiscoveryPeer *peers; uint16_t n_peers=0, sch_alias=0xFFFF, raw_alias=0xFFFF;
+    uint32_t pose_h = (uint32_t)dart_topic_id("sch/pose");
+    uint32_t raw_h  = (uint32_t)dart_topic_id("sch/raw");
+    uint32_t late_h = (uint32_t)dart_topic_id("sch/late");
+    int t, pose_ok=0, raw_ok=0;
+    const DartDiscoveryPeer *peers; uint16_t n_peers=0;
 
     {   DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &ma, "Pose");
         dart_schema_field(&b, "x", DART_F64);
@@ -1569,9 +1591,8 @@ static void schema_advert_checks(void){
         dart_schema_field_array(&b, "tags", DART_U8, 16);
         sch = dart_schema_finish(&b);
     }
-    ST_CHECK(sch!=NULL, "schema-ad: schema builds");
+    ST_CHECK(sch!=NULL, "announce: schema builds");
     if (!sch) return;
-    want = dart_schema_hash(sch);
 
     memset(&co,0,sizeof co); co.qos.keep_last=4;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -1580,71 +1601,51 @@ static void schema_advert_checks(void){
     so=po;
     P = dart_node_open(&pa, "sch-pub", NULL, NULL, &po);
     S = dart_node_open(&sa, "sch-sub", NULL, NULL, &so);
-    ST_CHECK(P&&S, "schema-ad: nodes open");
+    ST_CHECK(P&&S, "announce: nodes open");
     if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); dart_allocator_reset(&ma); return; }
-    pc = dart_node_create_channel(P, "sch/pose", DART_PUB_ONLY, sch, &co);
-    dart_node_create_channel(P, "sch/raw",  DART_PUB_ONLY, NULL, &co);
+    pc = dart_node_create_channel(P, "sch/pose", DART_PUB_ONLY, sch, &co);   /* alias 0, typed */
+    dart_node_create_channel(P, "sch/raw",  DART_PUB_ONLY, NULL, &co);       /* alias 1, raw */
     dart_node_create_channel(S, "sch/pose", DART_SUB_ONLY, sch, &co);
-    ST_CHECK(pc!=NULL, "schema-ad: channels created");
+    ST_CHECK(pc!=NULL, "announce: channels created");
     dart_schema_free(sch, dart_allocator_alloc, &ma);   /* node owns its copy: caller's freed NOW */
 
+    /* a typed-typed match through hash nomination + detail verification */
     for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-    ST_CHECK(dart_channel_match_count(pc)>0, "schema-ad: matched");
+    ST_CHECK(dart_channel_match_count(pc)>0, "announce: typed match formed via detail exchange");
 
     peers = dart_node_peers(S, &n_peers);   /* S's view of P */
-    ST_CHECK(peers && n_peers==1, "schema-ad: subscriber sees one peer (%u)", n_peers);
+    ST_CHECK(peers && n_peers==1, "announce: subscriber sees one peer (%u)", n_peers);
     if (peers && n_peers==1){
         DartInterestIter it; DartTopic tp;
         memset(&it,0,sizeof it);
         while (dart_node_peer_interest_next(&peers[0], &it, &tp)){
             if (!tp.is_pub) continue;
-            if (tp.name.len==8 && !memcmp(tp.name.data,"sch/pose",8)) sch_alias = tp.alias;
-            if (tp.name.len==7 && !memcmp(tp.name.data,"sch/raw",7)){ raw_alias = tp.alias; has_raw=1; }
+            if (tp.alias==0 && tp.hash==pose_h && tp.role==DART_PUB_ONLY) pose_ok=1;
+            if (tp.alias==1 && tp.hash==raw_h  && tp.role==DART_PUB_ONLY) raw_ok=1;
         }
-        ST_CHECK(sch_alias!=0xFFFF && has_raw, "schema-ad: both pub topics advertised");
-        ST_CHECK(dart_node_peer_schema(&peers[0], sch_alias, &got, &wire)==1 && got==want,
-                 "schema-ad: hash rides the announce (%08lx%08lx)",
-                 (unsigned long)(got>>32), (unsigned long)got);
-        ST_CHECK(wire.data && wire.len>0, "schema-ad: wire inlined (%u bytes)", (unsigned)wire.len);
-        if (wire.data){
-            DartSchema *rt = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, &ma);
-            ST_CHECK(rt && dart_schema_hash(rt)==want && dart_schema_field_count(rt)==3,
-                     "schema-ad: peer schema reparses to the same identity");
-            if (rt) dart_schema_free(rt, dart_allocator_alloc, &ma);
-        }
-        ST_CHECK(dart_node_peer_schema(&peers[0], raw_alias, &got, &wire)==0,
-                 "schema-ad: raw channel advertises no schema");
+        ST_CHECK(pose_ok && raw_ok, "announce: positional aliases carry the 32-bit hashes");
 
-        /* the runtime-flip flow (the example's): a schema channel created INACTIVE
-           advertises nothing; flipping it to a publish role advertises the schema */
-        {   DartSchemaBuilder b2 = dart_schema_begin(dart_allocator_alloc, &ma, "Late");
-            DartSchema *late; DartChannel *lc; uint64_t lwant, lgot=0; uint16_t late_alias=0xFFFF;
-            dart_schema_field(&b2, "n", DART_U32);
-            late = dart_schema_finish(&b2);
-            lwant = dart_schema_hash(late);
-            lc = dart_node_create_channel(P, "sch/late", DART_INACTIVE, late, &co);
-            dart_schema_free(late, dart_allocator_alloc, &ma);
-            ST_CHECK(lc!=NULL, "schema-ad: inactive channel created");
+        /* the runtime-flip flow (the example's): an INACTIVE channel holds its position
+           but is not yielded; flipping it to publish advertises the SAME alias */
+        {   DartChannel *lc = dart_node_create_channel(P, "sch/late", DART_INACTIVE, NULL, &co);
+            ST_CHECK(lc!=NULL, "announce: inactive channel created");
             for (t=0;t<200;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
             {   DartInterestIter it2; DartTopic tp2; int seen=0;
                 peers = dart_node_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
                 while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
-                    if (tp2.is_pub && tp2.name.len==8 && !memcmp(tp2.name.data,"sch/late",8)) seen=1;
-                ST_CHECK(!seen, "schema-ad: inactive channel not advertised");
+                    if (tp2.hash==late_h) seen=1;
+                ST_CHECK(!seen, "announce: inactive channel not advertised");
             }
             dart_channel_set_role(lc, DART_PUB_ONLY);
             for (t=0;t<400;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-            {   DartInterestIter it2; DartTopic tp2;
+            {   DartInterestIter it2; DartTopic tp2; uint16_t late_alias=0xFFFF;
                 peers = dart_node_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
                 while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
-                    if (tp2.is_pub && tp2.name.len==8 && !memcmp(tp2.name.data,"sch/late",8)) late_alias=tp2.alias;
-                ST_CHECK(late_alias!=0xFFFF, "schema-ad: role flip advertises the topic");
-                ST_CHECK(late_alias!=0xFFFF && dart_node_peer_schema(&peers[0], late_alias, &lgot, &wire)==1
-                         && lgot==lwant && wire.data,
-                         "schema-ad: role flip advertises the schema (hash %08lx%08lx)",
-                         (unsigned long)(lgot>>32), (unsigned long)lgot);
+                    if (tp2.is_pub && tp2.hash==late_h) late_alias=tp2.alias;
+                ST_CHECK(late_alias==2, "announce: role flip advertises the held position (alias %u)",
+                         late_alias);
             }
         }
     }
@@ -1889,13 +1890,16 @@ static void detail_live_checks(void){
             DartInterestIter it; DartTopic tp;
             memcpy(pip, pp->addr.ip, 4); pport = pp->addr.port; pversion = pp->meta_version;
             memset(&it,0,sizeof it);
+            /* v10 entries carry 32-bit hashes only: bind each announced entry to the
+               channel we created on P by hash, and expect the RESP to fill in the rest */
             while (nw<4 && dart_node_peer_interest_next(pp, &it, &tp)){
                 if (!tp.is_pub) continue;
                 oalias[nw] = tp.alias;
-                onlen[nw]  = (uint8_t)(tp.name.len < 64 ? tp.name.len : 63);
-                memcpy(oname[nw], tp.name.data, onlen[nw]);
-                ohash[nw] = 0;
-                dart_node_peer_schema(pp, tp.alias, &ohash[nw], NULL);
+                if (tp.hash == (uint32_t)dart_topic_id("dt/pose")){
+                    onlen[nw]=7; memcpy(oname[nw],"dt/pose",7);  ohash[nw]=dart_schema_hash(W);
+                } else if (tp.hash == (uint32_t)dart_topic_id("dt/plain")){
+                    onlen[nw]=8; memcpy(oname[nw],"dt/plain",8); ohash[nw]=0;
+                } else continue;
                 nw++;
             }
         }
@@ -2415,6 +2419,18 @@ static int selftest_main(void){
         dart_transport_peer_add(r->transport, wid,DART_FRAG_PAYLOAD);
         il = dart_transport_build_interest(w->transport, ib, sizeof ib);
         dart_transport_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
+        /* v10: the apply only NOMINATES (peer_remove dropped the cached verdicts with
+           the rest of the peer state); run the sans-IO detail exchange by hand, exactly
+           as a runtime would, so the flapped reader re-verifies and rematches */
+        {   DartDetailWant wl[8]; uint8_t rq[256], rp[1024]; uint16_t nw2, verified; size_t rl2, pl2;
+            nw2 = dart_transport_detail_wants(r->transport, NULL, wid, dart_bytes(ib, il), wl, 8);
+            ST_CHECK(nw2 > 0, "flap: re-added peer nominates pending candidates (%u)", nw2);
+            rl2 = dart_detail_req_build(ST_DOMAIN, 0, wl, nw2, rq, sizeof rq);
+            pl2 = dart_transport_detail_respond(w->transport, NULL, 0, dart_bytes(rq, rl2), rp, sizeof rp);
+            verified = dart_transport_apply_peer_details(r->transport, wid, dart_bytes(rp, pl2));
+            ST_CHECK(verified == nw2, "flap: details verify every candidate (%u/%u)", verified, nw2);
+            dart_transport_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
+        }
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
                  "flap: writer re-joins new reader incarnation, replays ring (%lu, want %lu)",

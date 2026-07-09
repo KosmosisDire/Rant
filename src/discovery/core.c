@@ -671,6 +671,13 @@ int dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id, DartDis
     return 1;
 }
 
+DartBytes dart_discovery_peer_meta(const DartDiscoveryState *st, uint32_t id, uint32_t *version){
+    i_DartDiscoveryPeer *p = i_dart_discovery_by_id(st, id);
+    if (version) *version = p ? p->meta_version : 0;
+    if (!p || !p->meta_len) return dart_bytes(NULL, 0);
+    return dart_bytes(p->meta, p->meta_len);
+}
+
 DartString dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id){
     i_DartDiscoveryPeer *p = i_dart_discovery_by_id(st, id);
     if (!p) return dart_string(NULL, 0);                 /* unknown peer: .data NULL */

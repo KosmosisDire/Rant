@@ -106,54 +106,29 @@ static json fields_json(const DartSchema *s){
 }
 
 /* A peer's advertised interest list (its topics), decoded off the announce overlay:
- * one row per entry (a pub and a sub entry for a pubsub topic), with the schema field
- * table inlined for publish entries that advertise one, so a client can decode (and,
- * via adopt, publish) topics it never declared. */
+ * one row per direction (a pub and a sub row for a pubsub topic). v10 announces carry
+ * only 32-bit topic hashes: names and schemas ride the pairwise detail exchange, so
+ * until the bridge requests details (greedy-requester conversion) a topic shows as its
+ * hash and no field table is inlined. */
 static json peer_topics_json(const DartDiscoveryPeer &p){
     json topics = json::array();
     DartInterestIter it = {}; DartTopic t;
-    DartAllocator scratch = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     while (dart_node_peer_interest_next(&p, &it, &t)){
-        json row = { {"name", std::string(t.name.data, t.name.len)},
-                     {"role", t.is_pub ? "pub" : "sub"},
-                     {"reliable", t.reliable != 0} };
-        uint64_t hash = 0; DartBytes wire = {};
-        if (t.is_pub && dart_node_peer_schema(&p, t.alias, &hash, &wire)){
-            row["hash"] = hex64(hash);
-            if (wire.data){
-                DartSchema *s = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, &scratch);
-                if (s){ row["size"] = dart_schema_size(s); row["fields"] = fields_json(s); }
-            }
-        }
-        topics.push_back(row);
+        char hx[16];
+        snprintf(hx, sizeof hx, "0x%08x", (unsigned)t.hash);
+        topics.push_back({ {"name", hx},
+                           {"role", t.is_pub ? "pub" : "sub"},
+                           {"reliable", t.reliable != 0} });
     }
-    dart_allocator_reset(&scratch);
     return topics;
 }
 
-/* adopt: parse the schema a live peer advertises for publishing `name`, so a client
- * can join a typed topic it never declared (the explorer's adopt pattern). */
+/* adopt: parse the schema a live peer advertises for publishing `name`. v10 blobs no
+ * longer inline schemas, so adopt yields nothing until the bridge fetches details via
+ * the pairwise exchange; a client can still join generically (schema NULL). */
 static DartSchema *adopt_schema(Conn *c, const std::string &name, DartAllocator *scratch){
-    uint16_t count = 0;
-    DartSchema *found = nullptr;
-    /* the peer view is zero-copy: hold the node lock across the walk so the node's
-       service thread cannot mutate it mid-read */
-    dart_node_lock(c->node);
-    const DartDiscoveryPeer *peers = dart_node_peers(c->node, &count);
-    for (uint16_t i = 0; !found && peers && i < count; i++){
-        DartInterestIter it = {}; DartTopic t;
-        while (dart_node_peer_interest_next(&peers[i], &it, &t)){
-            if (!t.is_pub || t.name.len != name.size() ||
-                memcmp(t.name.data, name.data(), name.size()) != 0) continue;
-            uint64_t hash; DartBytes wire;
-            if (dart_node_peer_schema(&peers[i], t.alias, &hash, &wire) && wire.data){
-                found = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, scratch);
-                if (found) break;
-            }
-        }
-    }
-    dart_node_unlock(c->node);
-    return found;
+    (void)c; (void)name; (void)scratch;
+    return nullptr;
 }
 
 static int role_from(const std::string &s, DartRole *out){
