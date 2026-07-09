@@ -194,9 +194,14 @@ struct DartTransportState {
                                        at match time into i_DartWriterProxy.reader_reliable */
     uint16_t     bitmap_len;       /* ceil(n_channels / 8) */
     /* per-peer wire alias -> our channel index; the data path carries the 2-byte
-       alias instead of the topic name */
-    uint16_t    *alias_to_channel;    /* [max_peers * alias_max]; 0xFFFF = unmapped */
-    uint32_t     alias_max;        /* alias-table stride = effective meta_max_ids */
+       alias instead of the topic name. Dynamic mode: each map is a hook allocation
+       sized to that peer's highest ADVERTISED alias, made on its first matched topic
+       (an irrelevant peer costs nothing; a later local subscribe re-applies interest
+       and the map already covers every advertised alias). Fixed mode: every map is a
+       fixed arena slice of alias_max entries, exactly the old dense table. */
+    uint16_t   **peer_alias;      /* [max_peers] -> alias map (0xFFFF = unmapped) */
+    uint32_t    *peer_alias_len;  /* [max_peers] entries in each map */
+    uint32_t     alias_max;       /* fixed-mode stride = effective DART_META_MAX_IDS */
     i_DartChannel  *channels;     /* [n_channels] */
     /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
        grown by doubling, records allocated per real match, lane_index maps (channel,peer)

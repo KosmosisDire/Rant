@@ -477,11 +477,13 @@ typedef enum {
     DART_DISCOVERY_PEER_UP,
     DART_DISCOVERY_PEER_DOWN,
     DART_DISCOVERY_PEER_REFUSED,
-    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds our per-peer overlay buffer, so
-                                     the whole announce was dropped and its metadata is unfetchable
-                                     by us: .addr = its advertised locator, .peer = its id (0 if not
-                                     yet in the table), .meta = the oversized overlay (view, len =
-                                     what it wanted to send). Raise this side's capacity. */
+    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds what this side can hold or even
+                                     receive, so the whole announce was dropped: .addr = its locator
+                                     (or the datagram source), .peer = its id (0 if not yet in the
+                                     table), .meta.len = the bytes it wanted to send (.meta.data is
+                                     the oversized overlay when the datagram arrived whole, NULL when
+                                     the OS truncated it to our RX buffer). An IO layer that can grow
+                                     raises its capacity and re-solicits; otherwise raise capacity. */
 } DartDiscoveryEventKind;
 
 typedef struct {
@@ -1091,9 +1093,9 @@ extern "C" {
 #define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
 #endif
 
-/* Max pub+sub topic count accepted in a peer's interest list; sizes the per-peer
- * alias table. Auto-raised to 2*n_channels; raise (a compile bound) only to accept
- * a peer with more topics. */
+/* FIXED (no-allocator) mode only: sizes the static per-peer alias tables, bounding the
+ * highest peer alias that can demux. Auto-raised to 2*n_channels. Dynamic mode ignores
+ * it: each peer's alias map is allocated at that peer's actual advertised size. */
 #ifndef DART_META_MAX_IDS
 #define DART_META_MAX_IDS 256u
 #endif
@@ -1155,9 +1157,9 @@ typedef enum {
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .channel), refused */
     DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer) */
     DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer) */
-    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases beyond our alias table
-                                        (.peer, .lost_count = entry count): their data can never demux
-                                        here. Raise DART_META_MAX_IDS. */
+    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases we cannot map (.peer,
+                                        .lost_count = entry count): their data can never demux here.
+                                        Fixed mode: raise DART_META_MAX_IDS; dynamic: map alloc failed. */
     DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
                                                dropped, so peers see none of our topics. Fewer/shorter names. */
     DART_TRANSPORT_META_TRUNCATED_SCHEMA    /* our announce overlay overflowed: the schema section was
@@ -2829,13 +2831,24 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
     if (p[4]!=(uint8_t)DART_DISCOVERY_PROTO_VERSION) return;
     if (i_dart_le_r16(p+6) != st->cfg.domain_id) return;
-    meta_version = i_dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
-    meta_len = i_dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
-    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len) return;
-    blob = p + DART_DISCOVERY_META_OFF;
-
     uuid = p+8;
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
+    meta_version = i_dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
+    meta_len = i_dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
+    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len){
+        /* the OS truncated the datagram to our RX buffer: the fixed header (always
+           intact) says the blob is meta_len bytes, so this peer's metadata exceeds what
+           this side can currently receive. Same never-silent signal as the capacity
+           refuse below, with .meta = {NULL, needed bytes}: an IO layer that can grow
+           does so and re-solicits; one that cannot surfaces it. */
+        DartDiscoveryAddr a; int at = i_dart_discovery_find(st, uuid);
+        memset(&a, 0, sizeof a);
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
+        i_dart_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a,
+                                           dart_bytes(NULL, meta_len));
+        return;
+    }
+    blob = p + DART_DISCOVERY_META_OFF;
     flags = p[5];
 
     /* parse the blob's discovery section (locator + name); the remainder is the opaque
@@ -3436,6 +3449,13 @@ int i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
     memset(&src, 0, sizeof src);
     n = (int)recvfrom(DART__FD(s), (char*)buf, (int)cap, 0,
                       (struct sockaddr*)&src, &sl);
+#ifdef _WIN32
+    /* an oversized datagram: Windows fills the buffer, then fails with WSAEMSGSIZE;
+       POSIX silently delivers the prefix. Deliver the prefix here too: discovery reads
+       the intact fixed header (which carries the blob's true length) and turns the
+       truncation into a grow-and-refetch instead of a hard recv error. */
+    if (n < 0 && WSAGetLastError() == WSAEMSGSIZE) n = (int)cap;
+#endif
     if (n > 0){
         if (src_ip)   memcpy(src_ip, &src.sin_addr.s_addr, 4);
         if (src_port) *src_port = ntohs(src.sin_port);
@@ -4596,9 +4616,14 @@ struct DartTransportState {
                                        at match time into i_DartWriterProxy.reader_reliable */
     uint16_t     bitmap_len;       /* ceil(n_channels / 8) */
     /* per-peer wire alias -> our channel index; the data path carries the 2-byte
-       alias instead of the topic name */
-    uint16_t    *alias_to_channel;    /* [max_peers * alias_max]; 0xFFFF = unmapped */
-    uint32_t     alias_max;        /* alias-table stride = effective meta_max_ids */
+       alias instead of the topic name. Dynamic mode: each map is a hook allocation
+       sized to that peer's highest ADVERTISED alias, made on its first matched topic
+       (an irrelevant peer costs nothing; a later local subscribe re-applies interest
+       and the map already covers every advertised alias). Fixed mode: every map is a
+       fixed arena slice of alias_max entries, exactly the old dense table. */
+    uint16_t   **peer_alias;      /* [max_peers] -> alias map (0xFFFF = unmapped) */
+    uint32_t    *peer_alias_len;  /* [max_peers] entries in each map */
+    uint32_t     alias_max;       /* fixed-mode stride = effective DART_META_MAX_IDS */
     i_DartChannel  *channels;     /* [n_channels] */
     /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
        grown by doubling, records allocated per real match, lane_index maps (channel,peer)
@@ -5692,7 +5717,12 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint32_t *dest_tail = (uint32_t*)i_dart_bump_take(b, (size_t)ndest*sizeof(uint32_t), 8);
       uint8_t  *dest_queued = (uint8_t*) i_dart_bump_take(b, (size_t)ndest, 1);
       uint32_t *dest_queue = (uint32_t*)i_dart_bump_take(b, (size_t)ndest*sizeof(uint32_t), 8);
-      uint16_t *alias_to_channel = (uint16_t*)i_dart_bump_take(b, (size_t)max_peers*meta_ids*sizeof(uint16_t), 2);
+      /* alias maps: per-peer pointer + length; dynamic allocates each map on demand at the
+         peer's advertised size, fixed pre-slices a dense meta_ids-stride pool (as before) */
+      uint16_t **peer_alias    = (uint16_t**)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint16_t*), 8);
+      uint32_t *peer_alias_len = (uint32_t*) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
+      uint16_t *alias_pool     = dyn ? NULL
+                               : (uint16_t*)i_dart_bump_take(b, (size_t)max_peers*meta_ids*sizeof(uint16_t), 2);
       name_pool = (char*)i_dart_bump_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
@@ -5705,13 +5735,23 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->lanes=lanes; st->lane_cap = dyn ? 0u : nlanes; st->lane_free=DART__NIL;
           st->lane_index=lane_index;
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
-          st->alias_to_channel=alias_to_channel; st->alias_max=meta_ids;
+          st->peer_alias=peer_alias; st->peer_alias_len=peer_alias_len; st->alias_max=meta_ids;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
 #ifdef DART_SHM
           st->peer_shm=peer_shm; memset(peer_shm,0,max_peers);
 #endif
-          memset(alias_to_channel,0xFF,(size_t)max_peers*meta_ids*sizeof(uint16_t));   /* all unmapped */
+          if (dyn){
+              memset(peer_alias, 0, (size_t)max_peers*sizeof(uint16_t*));
+              memset(peer_alias_len, 0, (size_t)max_peers*sizeof(uint32_t));
+          } else {
+              uint32_t k;
+              memset(alias_pool,0xFF,(size_t)max_peers*meta_ids*sizeof(uint16_t));   /* all unmapped */
+              for (k=0;k<max_peers;k++){
+                  peer_alias[k] = alias_pool + (size_t)k*meta_ids;
+                  peer_alias_len[k] = meta_ids;
+              }
+          }
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
           if (dyn) memset(lane_index,0xFF,(size_t)nlanes*sizeof(uint16_t));   /* all unmatched */
@@ -5871,9 +5911,8 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
                old->peer_sub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
         memcpy(nw->peer_sub_reliable + (size_t)p*nw->bitmap_len,
                old->peer_sub_reliable + (size_t)p*old->bitmap_len, old->bitmap_len);
-        memcpy(nw->alias_to_channel + (size_t)p*nw->alias_max,
-               old->alias_to_channel + (size_t)p*old->alias_max,
-               (size_t)old->alias_max*sizeof(uint16_t));
+        nw->peer_alias[p]     = old->peer_alias[p];   /* hook allocations: stable across the move */
+        nw->peer_alias_len[p] = old->peer_alias_len[p];
     }
     /* scheduler is fresh/empty: re-enqueue every used lane, then force a full sweep
        next poll so timers re-arm and next_deadline is recomputed exactly */
@@ -6108,7 +6147,8 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
     memset(&st->peer_pub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_reliable[(size_t)free*st->bitmap_len],0,st->bitmap_len);
-    memset(&st->alias_to_channel[(size_t)free*st->alias_max],0xFF,(size_t)st->alias_max*sizeof(uint16_t));
+    if (st->peer_alias[free] && st->peer_alias_len[free])   /* slot reuse: no stale mappings */
+        memset(st->peer_alias[free],0xFF,(size_t)st->peer_alias_len[free]*sizeof(uint16_t));
     /* nothing matches until dart_transport_apply_peer_interest feeds the peer's interest
        list (carried in its discovery announce) */
 }
@@ -6125,6 +6165,10 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
         /* release recycles the record AND frees the lane's grown reassembly buffers, so a
            gone peer keeps no per-lane memory at all */
         i_dart_lane_release(st,c,(uint32_t)s);
+    }
+    if (st->cfg.allocator && st->peer_alias[s]){   /* dynamic: the alias map goes too */
+        st->cfg.allocator(st->cfg.user, st->peer_alias[s], 0);
+        st->peer_alias[s]=NULL; st->peer_alias_len[s]=0;
     }
     st->peer_used[s]=0; st->peer_dormant[s]=0;
 #ifdef DART_SHM
@@ -6202,6 +6246,13 @@ void dart_transport_destroy(DartTransportState *st){
         st->cfg.allocator(st->cfg.user, st->lanes, 0);
         st->lanes=NULL; st->lane_cap=0; st->lane_free=DART__NIL;
     }
+    {   uint32_t p;                              /* per-peer alias maps (hook allocations) */
+        for (p=0;p<st->cfg.max_peers;p++)
+            if (st->peer_alias[p]){
+                st->cfg.allocator(st->cfg.user, st->peer_alias[p], 0);
+                st->peer_alias[p]=NULL; st->peer_alias_len[p]=0;
+            }
+    }
 }
 
 
@@ -6225,15 +6276,34 @@ static int i_dart_meta_name_eq(const i_DartChannel *ch, const uint8_t *name, siz
     return nlen==0 ? 1 : (memcmp(ch->name, name, nlen)==0);
 }
 
+/* The peer's alias map, guaranteed to cover `need` entries: the existing map, a grown/new
+ * hook allocation (dynamic; the new tail starts unmapped), or NULL when it cannot grow
+ * (fixed-mode arena slice too small, or OOM) -- the caller then counts the entry as
+ * unmappable. Called only for MATCHED entries and sized to the peer's highest ADVERTISED
+ * alias, so a peer we share nothing with allocates nothing, and a later local subscribe
+ * (interest replay) finds every advertised alias already covered. */
+static uint16_t *i_dart_peer_alias_ensure(DartTransportState *st, int peer_slot, uint32_t need){
+    uint32_t have = st->peer_alias_len[peer_slot];
+    uint16_t *nm;
+    if (need <= have) return st->peer_alias[peer_slot];
+    if (!st->cfg.allocator) return NULL;                /* fixed: the arena slice is the limit */
+    nm = (uint16_t*)st->cfg.allocator(st->cfg.user, st->peer_alias[peer_slot], (size_t)need*sizeof(uint16_t));
+    if (!nm) return NULL;
+    memset(nm + have, 0xFF, (size_t)(need-have)*sizeof(uint16_t));   /* grown tail: unmapped */
+    st->peer_alias[peer_slot] = nm; st->peer_alias_len[peer_slot] = need;
+    return nm;
+}
+
 /* match count entries to local channels by identity (recomputed from each name),
  * recording the alias map. Same-identity-different-name is a collision: refused.
  * is_pub: the peer's publish list, so each entry's flags carry its OFFERED QoS, which
  * the RxO check uses to refuse a reliable subscriber a best-effort publisher. rel_bitmap
  * (sub list only, else NULL): records which subscribed channels the peer requested RELIABLE,
- * so the writer can keep best-effort readers out of flow control. */
+ * so the writer can keep best-effort readers out of flow control. alias_need: highest
+ * advertised alias + 1 (the size a map must be to cover this peer's whole list). */
 static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, const uint8_t *p,
                                       uint32_t count, uint8_t *bitmap, int is_pub, uint8_t *rel_bitmap,
-                                      uint32_t *overflowed){
+                                      uint32_t alias_need, uint32_t *overflowed){
     uint32_t k;
     for (k=0;k<count;k++){
         uint16_t alias=i_dart_le_r16(p); uint8_t flags=p[2]; uint32_t nlen=p[3];
@@ -6267,10 +6337,13 @@ static const uint8_t *i_dart_meta_scan(DartTransportState *st, int peer_slot, co
         }
         i_dart_bit_set(bitmap,(uint32_t)channel_idx);
         if (rel_bitmap && (flags & DART_META_F_RELIABLE)) i_dart_bit_set(rel_bitmap,(uint32_t)channel_idx);
-        if ((uint32_t)alias < st->alias_max)
-            st->alias_to_channel[(size_t)peer_slot*st->alias_max + alias] = (uint16_t)channel_idx;
-        else if (is_pub && overflowed)
-            (*overflowed)++;   /* matched, but its data carries an alias we cannot demux */
+        {   uint16_t *map = i_dart_peer_alias_ensure(st, peer_slot, alias_need);
+            if (map && (uint32_t)alias < st->peer_alias_len[peer_slot])
+                map[alias] = (uint16_t)channel_idx;
+            else if (is_pub && overflowed)
+                (*overflowed)++;   /* matched, but its data carries an alias we cannot demux
+                                      (fixed-mode table too small, or map OOM) */
+        }
     }
     return p;
 }
@@ -6316,24 +6389,29 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     const uint8_t *d=blob.data, *p, *end=d+blob.len;
     uint16_t n_pub, n_sub, c; int peer_slot=i_dart_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap;
+    uint32_t alias_need = 0;
     if (peer_slot<0 || blob.len<4) return;
     peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     n_pub=i_dart_le_r16(d); n_sub=i_dart_le_r16(d+2);
-    /* validate the whole variable-length list first: a truncated blob must not drop a match */
+    /* validate the whole variable-length list first (a truncated blob must not drop a
+       match), and learn the highest advertised alias: the size a lazily-made alias map
+       must be to cover the peer's whole list */
     { uint32_t k, tot=(uint32_t)n_pub+n_sub; p=d+4;
       for (k=0;k<tot;k++){
           if (p+4 > end) return;
+          { uint32_t a = (uint32_t)i_dart_le_r16(p) + 1u; if (a > alias_need) alias_need = a; }
           p += 4u + (uint32_t)p[3];
           if (p > end) return;
       } }
     memset(peer_pub_bitmap,0,st->bitmap_len); memset(peer_sub_bitmap,0,st->bitmap_len);
     memset(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len],0,st->bitmap_len);
-    memset(&st->alias_to_channel[(size_t)peer_slot*st->alias_max],0xFF,(size_t)st->alias_max*sizeof(uint16_t));
+    if (st->peer_alias[peer_slot] && st->peer_alias_len[peer_slot])   /* re-apply: clear old mappings */
+        memset(st->peer_alias[peer_slot],0xFF,(size_t)st->peer_alias_len[peer_slot]*sizeof(uint16_t));
     {   uint32_t overflow = 0;
-        p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL, &overflow);  /* pub list: offered QoS */
+        p = i_dart_meta_scan(st, peer_slot, d+4, n_pub, peer_pub_bitmap, 1, NULL, alias_need, &overflow);  /* pub list: offered QoS */
         p = i_dart_meta_scan(st, peer_slot, p,   n_sub, peer_sub_bitmap, 0,                    /* sub list: requested QoS */
-                            &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], NULL);
+                            &st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], alias_need, NULL);
         if (overflow)   /* never silent: those topics look matched but will not deliver */
             i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, overflow);
     }
@@ -6678,8 +6756,8 @@ void dart_transport_on_datagram(DartTransportState *st, uint32_t from, DartBytes
         }
         if (sub>rem) return;             /* truncated/malformed */
         alias = i_dart_le_r16(p+DART_OFFSET_ALIAS);
-        if ((uint32_t)alias < st->alias_max){
-            uint16_t m=st->alias_to_channel[(size_t)peer_slot*st->alias_max+alias]; channel_idx=(m==0xFFFFu)?-1:(int)m;
+        if ((uint32_t)alias < st->peer_alias_len[peer_slot]){
+            uint16_t m=st->peer_alias[peer_slot][alias]; channel_idx=(m==0xFFFFu)?-1:(int)m;
         } else channel_idx=-1;
         if (channel_idx>=0){
             switch(type){
@@ -8282,6 +8360,16 @@ struct DartNode {
     uint8_t        alloc_dynamic;
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
+    /* the metadata accept bound (largest peer announce blob we store/receive). Starts at
+       dart_meta_capacity(max_channels) and SELF-HEALS: a peer whose blob exceeds it fires
+       META_TOO_BIG with the needed size, we grow the bound + RX buffers at the next poll
+       and solicit a re-announce, so a big-topology peer and a default node interoperate
+       with no configuration. meta_grow_need is the pending request; meta_grow_failed
+       remembers a size that would not allocate, so the retry loop surfaces instead of
+       silently spinning. */
+    uint16_t       meta_capacity;
+    uint16_t       meta_grow_need;
+    uint16_t       meta_grow_failed;
     /* channel handles. handles is a pointer array in the arena; each DartChannel struct
        is a separate stable allocation, so a grow that relocates the arena never moves a
        handle the user holds. */
@@ -8445,6 +8533,17 @@ static void i_dart_node_on_event(const DartEvent *ev){
        never told it was refused. Static mode keeps the cap and surfaces the error. */
     if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_REFUSED){
         n->grow_pending = 1; return;
+    }
+    /* same treatment for the accept bound: a peer's blob we cannot hold (or even receive:
+       the OS truncated the datagram, but the header carried its true size) is a growth
+       signal, not a verdict. Grow at the next poll, then solicit the re-announce. Sizes
+       past the wire ceiling, and a size that already failed to allocate, surface. */
+    if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_META_TOO_BIG){
+        uint64_t need = ev->too_big_bytes;
+        if (need > n->meta_capacity && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
+            n->meta_grow_need = (uint16_t)need;
+            return;
+        }
     }
     { DartEvent e = *ev; i_dart_node_emit(n, &e); }
 }
@@ -8704,6 +8803,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_channels = max_channels;
     n->max_peers = max_peers;
+    n->meta_capacity = dc.discovery.meta_capacity;   /* the initial accept bound (self-heals up) */
 
     tc.on_message = i_dart_node_on_message;     /* wrap so on_message receives a DartMsg */
     tc.on_event   = i_dart_node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
@@ -8810,15 +8910,21 @@ fail_threads:
  * writer segments stay put (only their owning control structures move); the user-held
  * DartNode and DartChannel handles live outside the arena, so they survive. Returns 1 with n
  * now on the new arena, or 0 if the bigger arena couldn't be allocated (n left unchanged). */
-static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels){
+static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels,
+                            uint16_t want_meta_cap){
     DartConfig tc; DartDiscoveryNetConfig dc; i_DartNodeBlocks nb; i_DartBump b;
     DartTransportState *nt; i_DartNodeCore *ncore; DartDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
-    uint16_t old_max_channels = n->max_channels, new_meta_cap = dart_meta_capacity(new_max_channels);
+    uint16_t old_max_channels = n->max_channels;
+    /* the accept bound never shrinks: channel-derived, previously grown, or requested */
+    uint16_t new_meta_cap = dart_meta_capacity(new_max_channels);
+    if (n->meta_capacity > new_meta_cap) new_meta_cap = n->meta_capacity;
+    if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
     if (!n->alloc_dynamic) return 0;
-    if (new_max_peers <= n->max_peers && new_max_channels <= n->max_channels) return 0;
+    if (new_max_peers <= n->max_peers && new_max_channels <= n->max_channels
+        && new_meta_cap <= n->meta_capacity) return 0;
 
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
     tc.channels=NULL; tc.n_channels=new_max_channels; tc.max_peers=new_max_peers;
@@ -8872,6 +8978,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     n->handles=(DartChannel**)nb.handles;
     n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_channels=new_max_channels; n->max_peers=new_max_peers;
+    n->meta_capacity=new_meta_cap;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
     return 1;
@@ -8885,7 +8992,7 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     if (!acquired) return NULL;   /* from a callback: a grow here would relocate the arena mid-delivery */
     if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
         uint16_t want = n->max_channels < 0x8000u ? (uint16_t)(n->max_channels*2u) : 0xFFFFu;
-        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want)){
+        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want, 0)){
             i_dart_node_unlock(n, acquired);
             return NULL;
         }
@@ -9002,7 +9109,22 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     if (n->grow_pending){
         uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
         n->grow_pending = 0;
-        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_channels);
+        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_channels, 0);
+    }
+    /* a peer's announce blob exceeded the accept bound last tick: raise the bound (grows
+       the RX buffers + discovery capacity with it), then solicit so the peer re-sends its
+       blob to buffers that now fit. A failed grow is remembered so the retry loop surfaces
+       through the normal event path instead of silently spinning. */
+    if (n->meta_grow_need){
+        uint16_t want = n->meta_grow_need;
+        n->meta_grow_need = 0;
+        if (want > n->meta_capacity){
+            if (i_dart_node_grow(n, n->max_peers, n->max_channels, want)){
+                n->meta_grow_failed = 0;
+                dart_discovery_solicit(dart_discovery_state(n->discovery));
+            } else
+                n->meta_grow_failed = want;
+        }
     }
 
     dart_discovery_poll(n->discovery, 0);                 /* discovery tick (non-blocking) */

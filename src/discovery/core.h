@@ -57,11 +57,13 @@ typedef enum {
     DART_DISCOVERY_PEER_UP,
     DART_DISCOVERY_PEER_DOWN,
     DART_DISCOVERY_PEER_REFUSED,
-    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds our per-peer overlay buffer, so
-                                     the whole announce was dropped and its metadata is unfetchable
-                                     by us: .addr = its advertised locator, .peer = its id (0 if not
-                                     yet in the table), .meta = the oversized overlay (view, len =
-                                     what it wanted to send). Raise this side's capacity. */
+    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds what this side can hold or even
+                                     receive, so the whole announce was dropped: .addr = its locator
+                                     (or the datagram source), .peer = its id (0 if not yet in the
+                                     table), .meta.len = the bytes it wanted to send (.meta.data is
+                                     the oversized overlay when the datagram arrived whole, NULL when
+                                     the OS truncated it to our RX buffer). An IO layer that can grow
+                                     raises its capacity and re-solicits; otherwise raise capacity. */
 } DartDiscoveryEventKind;
 
 typedef struct {

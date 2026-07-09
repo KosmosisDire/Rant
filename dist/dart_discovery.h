@@ -367,11 +367,13 @@ typedef enum {
     DART_DISCOVERY_PEER_UP,
     DART_DISCOVERY_PEER_DOWN,
     DART_DISCOVERY_PEER_REFUSED,
-    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds our per-peer overlay buffer, so
-                                     the whole announce was dropped and its metadata is unfetchable
-                                     by us: .addr = its advertised locator, .peer = its id (0 if not
-                                     yet in the table), .meta = the oversized overlay (view, len =
-                                     what it wanted to send). Raise this side's capacity. */
+    DART_DISCOVERY_META_TOO_BIG   /* a peer's announce blob exceeds what this side can hold or even
+                                     receive, so the whole announce was dropped: .addr = its locator
+                                     (or the datagram source), .peer = its id (0 if not yet in the
+                                     table), .meta.len = the bytes it wanted to send (.meta.data is
+                                     the oversized overlay when the datagram arrived whole, NULL when
+                                     the OS truncated it to our RX buffer). An IO layer that can grow
+                                     raises its capacity and re-solicits; otherwise raise capacity. */
 } DartDiscoveryEventKind;
 
 typedef struct {
@@ -1335,13 +1337,24 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
     if (p[4]!=(uint8_t)DART_DISCOVERY_PROTO_VERSION) return;
     if (i_dart_le_r16(p+6) != st->cfg.domain_id) return;
-    meta_version = i_dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
-    meta_len = i_dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
-    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len) return;
-    blob = p + DART_DISCOVERY_META_OFF;
-
     uuid = p+8;
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
+    meta_version = i_dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
+    meta_len = i_dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
+    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len){
+        /* the OS truncated the datagram to our RX buffer: the fixed header (always
+           intact) says the blob is meta_len bytes, so this peer's metadata exceeds what
+           this side can currently receive. Same never-silent signal as the capacity
+           refuse below, with .meta = {NULL, needed bytes}: an IO layer that can grow
+           does so and re-solicits; one that cannot surfaces it. */
+        DartDiscoveryAddr a; int at = i_dart_discovery_find(st, uuid);
+        memset(&a, 0, sizeof a);
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
+        i_dart_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a,
+                                           dart_bytes(NULL, meta_len));
+        return;
+    }
+    blob = p + DART_DISCOVERY_META_OFF;
     flags = p[5];
 
     /* parse the blob's discovery section (locator + name); the remainder is the opaque
@@ -1942,6 +1955,13 @@ int i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
     memset(&src, 0, sizeof src);
     n = (int)recvfrom(DART__FD(s), (char*)buf, (int)cap, 0,
                       (struct sockaddr*)&src, &sl);
+#ifdef _WIN32
+    /* an oversized datagram: Windows fills the buffer, then fails with WSAEMSGSIZE;
+       POSIX silently delivers the prefix. Deliver the prefix here too: discovery reads
+       the intact fixed header (which carries the blob's true length) and turns the
+       truncation into a grow-and-refetch instead of a hard recv error. */
+    if (n < 0 && WSAGetLastError() == WSAEMSGSIZE) n = (int)cap;
+#endif
     if (n > 0){
         if (src_ip)   memcpy(src_ip, &src.sin_addr.s_addr, 4);
         if (src_port) *src_port = ntohs(src.sin_port);

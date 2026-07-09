@@ -278,6 +278,13 @@ int i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
     memset(&src, 0, sizeof src);
     n = (int)recvfrom(DART__FD(s), (char*)buf, (int)cap, 0,
                       (struct sockaddr*)&src, &sl);
+#ifdef _WIN32
+    /* an oversized datagram: Windows fills the buffer, then fails with WSAEMSGSIZE;
+       POSIX silently delivers the prefix. Deliver the prefix here too: discovery reads
+       the intact fixed header (which carries the blob's true length) and turns the
+       truncation into a grow-and-refetch instead of a hard recv error. */
+    if (n < 0 && WSAGetLastError() == WSAEMSGSIZE) n = (int)cap;
+#endif
     if (n > 0){
         if (src_ip)   memcpy(src_ip, &src.sin_addr.s_addr, 4);
         if (src_port) *src_port = ntohs(src.sin_port);

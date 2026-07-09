@@ -71,6 +71,16 @@ struct DartNode {
     uint8_t        alloc_dynamic;
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
+    /* the metadata accept bound (largest peer announce blob we store/receive). Starts at
+       dart_meta_capacity(max_channels) and SELF-HEALS: a peer whose blob exceeds it fires
+       META_TOO_BIG with the needed size, we grow the bound + RX buffers at the next poll
+       and solicit a re-announce, so a big-topology peer and a default node interoperate
+       with no configuration. meta_grow_need is the pending request; meta_grow_failed
+       remembers a size that would not allocate, so the retry loop surfaces instead of
+       silently spinning. */
+    uint16_t       meta_capacity;
+    uint16_t       meta_grow_need;
+    uint16_t       meta_grow_failed;
     /* channel handles. handles is a pointer array in the arena; each DartChannel struct
        is a separate stable allocation, so a grow that relocates the arena never moves a
        handle the user holds. */
@@ -234,6 +244,17 @@ static void i_dart_node_on_event(const DartEvent *ev){
        never told it was refused. Static mode keeps the cap and surfaces the error. */
     if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_REFUSED){
         n->grow_pending = 1; return;
+    }
+    /* same treatment for the accept bound: a peer's blob we cannot hold (or even receive:
+       the OS truncated the datagram, but the header carried its true size) is a growth
+       signal, not a verdict. Grow at the next poll, then solicit the re-announce. Sizes
+       past the wire ceiling, and a size that already failed to allocate, surface. */
+    if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_META_TOO_BIG){
+        uint64_t need = ev->too_big_bytes;
+        if (need > n->meta_capacity && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
+            n->meta_grow_need = (uint16_t)need;
+            return;
+        }
     }
     { DartEvent e = *ev; i_dart_node_emit(n, &e); }
 }
@@ -493,6 +514,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_channels = max_channels;
     n->max_peers = max_peers;
+    n->meta_capacity = dc.discovery.meta_capacity;   /* the initial accept bound (self-heals up) */
 
     tc.on_message = i_dart_node_on_message;     /* wrap so on_message receives a DartMsg */
     tc.on_event   = i_dart_node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
@@ -599,15 +621,21 @@ fail_threads:
  * writer segments stay put (only their owning control structures move); the user-held
  * DartNode and DartChannel handles live outside the arena, so they survive. Returns 1 with n
  * now on the new arena, or 0 if the bigger arena couldn't be allocated (n left unchanged). */
-static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels){
+static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels,
+                            uint16_t want_meta_cap){
     DartConfig tc; DartDiscoveryNetConfig dc; i_DartNodeBlocks nb; i_DartBump b;
     DartTransportState *nt; i_DartNodeCore *ncore; DartDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
-    uint16_t old_max_channels = n->max_channels, new_meta_cap = dart_meta_capacity(new_max_channels);
+    uint16_t old_max_channels = n->max_channels;
+    /* the accept bound never shrinks: channel-derived, previously grown, or requested */
+    uint16_t new_meta_cap = dart_meta_capacity(new_max_channels);
+    if (n->meta_capacity > new_meta_cap) new_meta_cap = n->meta_capacity;
+    if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
     if (!n->alloc_dynamic) return 0;
-    if (new_max_peers <= n->max_peers && new_max_channels <= n->max_channels) return 0;
+    if (new_max_peers <= n->max_peers && new_max_channels <= n->max_channels
+        && new_meta_cap <= n->meta_capacity) return 0;
 
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
     tc.channels=NULL; tc.n_channels=new_max_channels; tc.max_peers=new_max_peers;
@@ -661,6 +689,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     n->handles=(DartChannel**)nb.handles;
     n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_channels=new_max_channels; n->max_peers=new_max_peers;
+    n->meta_capacity=new_meta_cap;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
     return 1;
@@ -674,7 +703,7 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     if (!acquired) return NULL;   /* from a callback: a grow here would relocate the arena mid-delivery */
     if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
         uint16_t want = n->max_channels < 0x8000u ? (uint16_t)(n->max_channels*2u) : 0xFFFFu;
-        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want)){
+        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want, 0)){
             i_dart_node_unlock(n, acquired);
             return NULL;
         }
@@ -791,7 +820,22 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     if (n->grow_pending){
         uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
         n->grow_pending = 0;
-        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_channels);
+        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_channels, 0);
+    }
+    /* a peer's announce blob exceeded the accept bound last tick: raise the bound (grows
+       the RX buffers + discovery capacity with it), then solicit so the peer re-sends its
+       blob to buffers that now fit. A failed grow is remembered so the retry loop surfaces
+       through the normal event path instead of silently spinning. */
+    if (n->meta_grow_need){
+        uint16_t want = n->meta_grow_need;
+        n->meta_grow_need = 0;
+        if (want > n->meta_capacity){
+            if (i_dart_node_grow(n, n->max_peers, n->max_channels, want)){
+                n->meta_grow_failed = 0;
+                dart_discovery_solicit(dart_discovery_state(n->discovery));
+            } else
+                n->meta_grow_failed = want;
+        }
     }
 
     dart_discovery_poll(n->discovery, 0);                 /* discovery tick (non-blocking) */

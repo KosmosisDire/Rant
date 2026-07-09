@@ -65,9 +65,9 @@ extern "C" {
 #define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
 #endif
 
-/* Max pub+sub topic count accepted in a peer's interest list; sizes the per-peer
- * alias table. Auto-raised to 2*n_channels; raise (a compile bound) only to accept
- * a peer with more topics. */
+/* FIXED (no-allocator) mode only: sizes the static per-peer alias tables, bounding the
+ * highest peer alias that can demux. Auto-raised to 2*n_channels. Dynamic mode ignores
+ * it: each peer's alias map is allocated at that peer's actual advertised size. */
 #ifndef DART_META_MAX_IDS
 #define DART_META_MAX_IDS 256u
 #endif
@@ -129,9 +129,9 @@ typedef enum {
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .channel), refused */
     DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer) */
     DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer) */
-    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases beyond our alias table
-                                        (.peer, .lost_count = entry count): their data can never demux
-                                        here. Raise DART_META_MAX_IDS. */
+    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases we cannot map (.peer,
+                                        .lost_count = entry count): their data can never demux here.
+                                        Fixed mode: raise DART_META_MAX_IDS; dynamic: map alloc failed. */
     DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
                                                dropped, so peers see none of our topics. Fewer/shorter names. */
     DART_TRANSPORT_META_TRUNCATED_SCHEMA    /* our announce overlay overflowed: the schema section was

@@ -367,13 +367,24 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
     if (p[4]!=(uint8_t)DART_DISCOVERY_PROTO_VERSION) return;
     if (i_dart_le_r16(p+6) != st->cfg.domain_id) return;
-    meta_version = i_dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
-    meta_len = i_dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
-    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len) return;
-    blob = p + DART_DISCOVERY_META_OFF;
-
     uuid = p+8;
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
+    meta_version = i_dart_le_r32(p+DART_DISCOVERY_HDR_LEN);
+    meta_len = i_dart_le_r16(p+DART_DISCOVERY_HDR_LEN+4);
+    if ((size_t)DART_DISCOVERY_META_OFF + meta_len > len){
+        /* the OS truncated the datagram to our RX buffer: the fixed header (always
+           intact) says the blob is meta_len bytes, so this peer's metadata exceeds what
+           this side can currently receive. Same never-silent signal as the capacity
+           refuse below, with .meta = {NULL, needed bytes}: an IO layer that can grow
+           does so and re-solicits; one that cannot surfaces it. */
+        DartDiscoveryAddr a; int at = i_dart_discovery_find(st, uuid);
+        memset(&a, 0, sizeof a);
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
+        i_dart_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a,
+                                           dart_bytes(NULL, meta_len));
+        return;
+    }
+    blob = p + DART_DISCOVERY_META_OFF;
     flags = p[5];
 
     /* parse the blob's discovery section (locator + name); the remainder is the opaque
