@@ -10,7 +10,7 @@ int dart_transport_reader_progress(DartTransportState *st, uint16_t channel, uin
     peer_slot = i_dart_peer_slot(st, peer);
     if (peer_slot < 0) return 0;
     r = i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-    if (!r->used || !r->assembly_active) return 0;            /* no message mid-reassembly */
+    if (!r || !r->used || !r->assembly_active) return 0;      /* no message mid-reassembly */
     if (base_seqno) *base_seqno = r->deliver_upto;       /* HOL message starts here */
     if (total)      *total      = r->assembly_count;
     if (have){
@@ -68,7 +68,7 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
     uint64_t base = i_dart_le_r64(p+DART_OFFSET_SEQNO);
     uint16_t count = i_dart_le_r16(p+DART_OFFSET_SHM_COUNT);
     const uint8_t *desc = p+DART_OFFSET_SHM_DESC;          /* DART_SHM_DESC_BYTES */
-    if (!r->used || count==0) return;
+    if (!r || !r->used || count==0) return;
     {   i_DartReaderOrder ord = i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, base+count-1);
         if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
@@ -124,7 +124,7 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
     }
     base = seqno - frag;
 
-    if (!r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
+    if (!r || !r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
     if (count==0 || frag>=count){ ch->repair_stats.frags_malformed++; return; }  /* malformed */
     switch (i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, seqno)){
         case DART_ORDER_OLD:     ch->repair_stats.frags_old++;   return;   /* already delivered/skipped */
@@ -210,7 +210,7 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
     uint64_t first=i_dart_le_r64(p+DART_OFFSET_SEQNO), last=i_dart_le_r64(p+DART_OFFSET_HB_LAST);
-    if (!r->used) return;
+    if (!r || !r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
     /* un-started readers adopt no position from heartbeats (a one-sided flap's
        advertised first may be a dead predecessor's); the ack below carries our epoch.
@@ -258,7 +258,7 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;
     uint16_t alias = i_dart_alias_of(st, channel_idx);
     int due, holes=0, repair=0, force;
-    if (!r->used || st->peer_dormant[peer_slot]) return 0;   /* dormant: don't ack a silent writer */
+    if (!r || !r->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: don't ack */
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
     if (cap<DART_HEADER_NACK) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;

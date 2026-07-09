@@ -32,9 +32,12 @@ static void i_dart_writer_commit(DartTransportState *st, uint16_t channel_idx, s
     ch->first_seqno = ch->history[ch->history_head].valid ? ch->history[ch->history_head].base
                                                     : ch->history[0].base;
     ch->have_first  = 1;
-    { uint32_t max_peers=st->cfg.max_peers, p;
-      for (p=0;p<max_peers;p++)
-          if (i_dart_writer_proxy_at(st,channel_idx,p)->used && !st->peer_dormant[p]) i_dart_lane_wake(st, channel_idx, p);
+    { uint32_t li = ch->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
+      while (li != DART__NIL){
+          i_DartLane *l = &st->lanes[li];
+          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enq_idx(st, li);
+          li = l->ch_next;
+      }
     }
 }
 
@@ -94,14 +97,14 @@ int dart_transport_send_shm(DartTransportState *st, uint16_t channel, DartBytes 
 
 int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
+    i_DartWriterSample *slot; uint32_t li;
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 0;
     slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<(uint16_t)max_peers;p++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
-        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
+            && l->w.acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
 }
@@ -110,14 +113,13 @@ int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
 int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
                                             uint64_t *evict_base, uint32_t *evict_count){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
+    i_DartWriterSample *slot; uint32_t li;
     if (!ch) return 0;
     slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<(uint16_t)max_peers;p++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->sent_upto < slot->base + slot->count){
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && !st->peer_dormant[l->peer_slot] && l->w.sent_upto < slot->base + slot->count){
             if (evict_base)  *evict_base  = slot->base;
             if (evict_count) *evict_count = slot->count;
             return 1;
@@ -129,12 +131,12 @@ int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t chan
 
 int dart_transport_send_drained(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers; uint16_t p;
+    uint32_t li;
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<(uint16_t)max_peers;p++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
-        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
+            && l->w.acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
     }
     return 1;
 }
@@ -148,10 +150,12 @@ int dart_transport_writer_match_count(DartTransportState *st, uint16_t channel){
 
 int dart_transport_repair_pending(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers, p; int cnt = 0;
+    uint32_t li; int cnt = 0;
     if (!ch) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++){ i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->w.has_nack) cnt++;
+    }
     return cnt;   /* writer lanes with a NACK to service; 0 = nothing to resend right now */
 }
 
@@ -162,12 +166,12 @@ int dart_transport_repair_pending(DartTransportState *st, uint16_t channel){
  * reader forces inline UDP for the whole message. */
 int dart_transport_writer_shm_eligible(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers, p; int any=0;
+    uint32_t li; int any=0;
     if (!ch) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++){
-        if (!i_dart_writer_proxy_at(st,channel_idx,p)->used || st->peer_dormant[p]) continue;
-        if (!st->peer_shm[p]) return 0;
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (!l->w.used || st->peer_dormant[l->peer_slot]) continue;
+        if (!st->peer_shm[l->peer_slot]) return 0;
         any = 1;
     }
     return any;
@@ -204,7 +208,7 @@ void i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, 
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
     uint64_t base=i_dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=i_dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=i_dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
     uint32_t epoch=i_dart_le_r32(p+DART_OFFSET_NACK_EPOCH); uint8_t flags=p[0];
-    if (!w->used) return;
+    if (!w || !w->used) return;
     if (w->reader_epoch != epoch){
         if (w->reader_epoch){
             /* reader is a new incarnation (one-sided flap): our positions describe its
@@ -244,7 +248,7 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
     int reliable=(ch->qos.reliability==DART_RELIABLE);
     uint16_t alias = i_dart_alias_of(st, channel_idx);
-    if (!w->used || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
+    if (!w || !w->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: nothing to emit */
 
     /* 1. repair (reliable only) */
     if (reliable && w->has_nack){

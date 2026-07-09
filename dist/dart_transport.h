@@ -1913,6 +1913,24 @@ typedef struct {        /* reader-side, per (channel,peer) */
 #endif
 } i_DartReaderProxy;
 
+/* One matched lane: both direction proxies plus the scheduler's chain fields. In dynamic
+ * mode records are pool-allocated only while the (channel,peer) pair actually matches, so
+ * lane memory scales with real matches, not channels x peers; fixed mode (no allocator)
+ * keeps the dense identity layout with per-record buffers pre-bound at init. Records move
+ * when the pool grows, so nothing holds an i_DartLane* across a call that can allocate:
+ * durable references are pool INDICES. */
+typedef struct {
+    i_DartWriterProxy w;
+    i_DartReaderProxy r;
+    uint16_t channel;     /* backref: the lane this record serves */
+    uint16_t peer_slot;
+    uint32_t sched_next;  /* next record on its dest's active list (DART__NIL);
+                             doubles as the free-list link while not in_use */
+    uint32_t ch_next;     /* next matched lane of the same channel (DART__NIL) */
+    uint8_t  queued;      /* on its dest's active list */
+    uint8_t  in_use;      /* dynamic: allocated to a lane (0 = free-list); fixed: always 1 */
+} i_DartLane;
+
 typedef struct {
     DartQos    qos;
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
@@ -1934,6 +1952,8 @@ typedef struct {
                                   can skip the copy+commit for a publisher no one subscribes to */
     uint32_t  matched_readers; /* same, for reader proxies; with matched_writers it lets the
                                   timer sweep skip a whole channel row that owes no timer work */
+    uint32_t  lane_head;       /* first matched lane record of this channel (DART__NIL = none);
+                                  the send path walks this chain instead of scanning peer slots */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -1962,14 +1982,19 @@ struct DartTransportState {
     uint16_t    *alias_to_channel;    /* [max_peers * alias_max]; 0xFFFF = unmapped */
     uint32_t     alias_max;        /* alias-table stride = effective meta_max_ids */
     i_DartChannel  *channels;     /* [n_channels] */
-    i_DartWriterProxy   *writer_proxies;     /* [n_channels*max_peers] */
-    i_DartReaderProxy   *reader_proxies;     /* [n_channels*max_peers] */
+    /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
+       grown by doubling, records allocated per real match, lane_index maps (channel,peer)
+       -> record. Fixed mode: a dense arena array in identity order (record c*max_peers+p),
+       lane_index NULL, buffers pre-bound at init. */
+    i_DartLane  *lanes;       /* [lane_cap] */
+    uint32_t     lane_cap;
+    uint32_t     lane_free;   /* free-list head (dynamic), DART__NIL when empty */
+    uint16_t    *lane_index;  /* [n_channels*max_peers] record idx, 0xFFFF = unmatched;
+                                 NULL = fixed mode (identity mapping, no table) */
     /* active-lane scheduler: a lane is one (channel,peer) pair. The event that gives a
        lane work enqueues it, so poll_send pays for work done, not idle lanes. Timer work
-       is found by an amortized clock-driven sweep. */
-    uint32_t    *lane_next;   /* [n_channels*max_peers] next in dest list */
-    uint8_t     *lane_queued;    /* [n_channels*max_peers] queued flag */
-    uint32_t    *dest_head;   /* [max_peers] lane list per dest */
+       is found by an amortized clock-driven sweep over the record pool. */
+    uint32_t    *dest_head;   /* [max_peers] record-index list per dest */
     uint32_t    *dest_tail;
     uint8_t     *dest_queued;
     uint32_t    *dest_queue;       /* ring of active destinations */
@@ -2017,14 +2042,29 @@ static inline int i_dart_channel_needs_sweep(const i_DartChannel *ch){
     return ch->qos.reliability==DART_RELIABLE && (ch->matched_writers || ch->matched_readers);
 }
 
-/* writer/reader proxy for a (channel,peer) lane. The proxies are
-   [n_channels][max_peers] row-major; centralizing the index math here keeps a
-   transposed channel/peer from silently corrupting a neighbor lane. */
+/* lane record for a (channel,peer) pair: pool index, or DART__NIL when the lane has
+   never matched (dynamic mode; fixed mode maps every lane by identity). Centralizing
+   the index math here keeps a transposed channel/peer from silently corrupting a
+   neighbor lane. */
+static inline uint32_t i_dart_lane_id(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
+    size_t k = (size_t)channel_idx*st->cfg.max_peers + peer_slot;
+    uint16_t t;
+    if (!st->lane_index) return (uint32_t)k;          /* fixed: identity */
+    t = st->lane_index[k];
+    return t == 0xFFFFu ? DART__NIL : (uint32_t)t;
+}
+static inline i_DartLane *i_dart_lane_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
+    uint32_t li = i_dart_lane_id(st, channel_idx, peer_slot);
+    return li == DART__NIL ? NULL : &st->lanes[li];
+}
+/* NULL when the lane is unmatched (no record): every caller treats that as !used. */
 static inline i_DartWriterProxy *i_dart_writer_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    return &st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
+    i_DartLane *l = i_dart_lane_at(st, channel_idx, peer_slot);
+    return l ? &l->w : NULL;
 }
 static inline i_DartReaderProxy *i_dart_reader_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
+    i_DartLane *l = i_dart_lane_at(st, channel_idx, peer_slot);
+    return l ? &l->r : NULL;
 }
 /* wire alias for a local channel: its own index (the advertiser's handle). The
  * peer mapped this alias to its matching channel from our interest list. */
@@ -2040,6 +2080,8 @@ size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t co
 size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt);
 size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
 void   i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot);
+void   i_dart_lane_enq_idx(DartTransportState *st, uint32_t rec);   /* enqueue by record index */
+void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
 size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 void   i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p);
 void   i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
@@ -2109,7 +2151,7 @@ size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t n
 /* Transport active-lane scheduler and the outgoing poll. */
 
 
-/* scheduler: lane index = channel_idx*max_peers + peer_slot; destination = peer slot */
+/* scheduler: work is queued as lane-RECORD indices; destination = the record's peer slot */
 static void i_dart_dest_push(DartTransportState *st, uint32_t d){
     uint32_t ndest = st->cfg.max_peers, t;
     if (st->dest_queued[d]) return;
@@ -2120,93 +2162,107 @@ static void i_dart_dest_push(DartTransportState *st, uint32_t d){
 }
 
 
-/* enqueue a lane that just got sendable work; idempotent while queued */
-static void i_dart_lane_enq(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    uint32_t max_peers=st->cfg.max_peers;
-    uint32_t lane=(uint32_t)channel_idx*max_peers+peer_slot;
-    uint32_t d=peer_slot;
-    if (st->lane_queued[lane]) return;
-    st->lane_queued[lane]=1; st->lane_next[lane]=DART__NIL;
-    if (st->dest_head[d]==DART__NIL) st->dest_head[d]=lane;
-    else st->lane_next[st->dest_tail[d]]=lane;
-    st->dest_tail[d]=lane;
+/* enqueue a lane record that just got sendable work; idempotent while queued */
+void i_dart_lane_enq_idx(DartTransportState *st, uint32_t li){
+    i_DartLane *l=&st->lanes[li];
+    uint32_t d=l->peer_slot;
+    if (l->queued) return;
+    l->queued=1; l->sched_next=DART__NIL;
+    if (st->dest_head[d]==DART__NIL) st->dest_head[d]=li;
+    else st->lanes[st->dest_tail[d]].sched_next=li;
+    st->dest_tail[d]=li;
     i_dart_dest_push(st, d);
+}
+
+
+/* remove a record from its dest list (a record being recycled must never linger on a
+ * list: reallocated to another peer's lane, it would misroute that lane's submessages
+ * into a datagram addressed to the OLD peer). Unmatch-time only; lists are short. */
+void i_dart_sched_drop(DartTransportState *st, uint32_t li){
+    i_DartLane *l=&st->lanes[li];
+    uint32_t d, cur, prev;
+    if (!l->queued) return;
+    d = l->peer_slot;
+    prev = DART__NIL; cur = st->dest_head[d];
+    while (cur!=DART__NIL && cur!=li){ prev=cur; cur=st->lanes[cur].sched_next; }
+    if (cur==li){
+        if (prev==DART__NIL) st->dest_head[d]=l->sched_next;
+        else st->lanes[prev].sched_next=l->sched_next;
+        if (st->dest_tail[d]==li) st->dest_tail[d]=prev;
+    }
+    l->queued=0; l->sched_next=DART__NIL;
 }
 
 
 /* enqueue, and track a freshly-armed reader ack/NACK deadline for the poll cap. Used
  * by the arm sites (ack_due_us is future or 0); the sweep enqueues due lanes with
- * i_dart_lane_enq instead, since it recomputes next_deadline itself. */
+ * i_dart_lane_enq_idx instead, since it recomputes next_deadline itself. */
 void i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-    if (r->used && r->ack_pending) i_dart_transport_arm_deadline(st, r->ack_due_us);
-    i_dart_lane_enq(st, channel_idx, peer_slot);
+    uint32_t li=i_dart_lane_id(st,channel_idx,peer_slot);
+    i_DartLane *l;
+    if (li==DART__NIL) return;                     /* unmatched lane: nothing to schedule */
+    l=&st->lanes[li];
+    if (l->r.used && l->r.ack_pending) i_dart_transport_arm_deadline(st, l->r.ack_due_us);
+    i_dart_lane_enq_idx(st, li);
 }
 
 
-/* sendable work a popped lane still owes now (timer-armed work is the sweep's job) */
-static int i_dart_lane_work(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot, uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
+/* sendable work a popped record still owes now (timer-armed work is the sweep's job) */
+static int i_dart_lane_work(DartTransportState *st, const i_DartLane *l, uint64_t now){
+    i_DartChannel *ch=&st->channels[l->channel];
+    uint32_t peer_slot=l->peer_slot;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
-    { i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
-      i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-      if (w->used && w->has_nack) return 1;
-      if (w->used && w->sent_upto < ch->next_seqno) return 1;
-      if (r->used && ch->qos.reliability==DART_RELIABLE
-          && r->ack_pending && now >= r->ack_due_us) return 1;
-    }
+    if (l->w.used && l->w.has_nack) return 1;
+    if (l->w.used && l->w.sent_upto < ch->next_seqno) return 1;
+    if (l->r.used && ch->qos.reliability==DART_RELIABLE
+        && l->r.ack_pending && now >= l->r.ack_due_us) return 1;
     return 0;
 }
 
 
-/* clock-driven counterpart of the wake calls: a cursor walks the lane table waking
+/* clock-driven counterpart of the wake calls: a cursor walks the record POOL waking
  * lanes whose timers came due. Two triggers: the amortized backstop (full coverage
  * every DART_HB_SWEEP_US) and a forced full pass when next_deadline_us comes due, so
  * a deadline-capped poll that wakes for a timer actually services it. A full pass
  * also recomputes next_deadline_us exactly (the global min of not-yet-due timers).
- * Read-only; cost is bounded by table size. */
+ * Read-only; cost is bounded by the pool (i.e. by matched lanes, not channels x peers:
+ * an idle channel has no records to visit at all in dynamic mode). */
 static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
-    uint32_t max_peers=st->cfg.max_peers;
-    uint32_t total=(uint32_t)st->cfg.n_channels*max_peers, due, k;
+    uint32_t total=st->lane_cap, due, k;
     uint64_t span = now - st->sweep_time_us;
     int forced = (now >= st->next_deadline_us);    /* a tracked timer is due */
     int full;
     uint64_t mind = DART__NO_DEADLINE;             /* earliest not-yet-due timer seen */
+    if (total==0){                                 /* no lanes have ever matched */
+        if (forced) st->next_deadline_us = DART__NO_DEADLINE;
+        st->sweep_time_us = now;
+        return;
+    }
     due = (forced || span >= DART_HB_SWEEP_US) ? total
         : (uint32_t)(span * total / DART_HB_SWEEP_US);
     if (!due) return;              /* sweep_time_us advances only when lanes are paid */
-    full = (due >= total);         /* covered every lane -> mind is the global minimum */
+    full = (due >= total);         /* covered every record -> mind is the global minimum */
     st->sweep_time_us = now;
     for (k=0;k<due;k++){
-        uint32_t lane=st->sweep, peer_slot=lane%max_peers;
-        uint16_t channel_idx=(uint16_t)(lane/max_peers);
-        i_DartChannel *ch=&st->channels[channel_idx];
-        if (!i_dart_channel_needs_sweep(ch)){
-            /* best-effort, or reliable with no matched lane: the whole row owes no timer
-               work. Jump the cursor to the next channel in one step instead of paying a
-               per-lane visit, capped to the poll's remaining budget so a full table pass
-               still takes DART_HB_SWEEP_US (never faster). This is what makes the sweep
-               scale with matched reliable lanes, not with n_channels*max_peers. */
-            uint32_t skip = max_peers - peer_slot, room = due - k;
-            if (skip > room) skip = room;
-            st->sweep += skip; if (st->sweep >= total) st->sweep -= total;
-            k += skip - 1;                       /* + the loop's k++ = skip lanes covered */
-            continue;
-        }
+        uint32_t li=st->sweep;
+        i_DartLane *l=&st->lanes[li];
+        i_DartChannel *ch;
+        uint32_t peer_slot;
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
+        if (!l->in_use) continue;                  /* free pool slot */
+        ch=&st->channels[l->channel];
+        if (!i_dart_channel_needs_sweep(ch)) continue;   /* best-effort, or nothing matched */
+        peer_slot=l->peer_slot;
         /* gate writer heartbeats on next_seqno, never the reader ack: a sub-only
            node's data channels never advance next_seqno but still owe acks */
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
-        { i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
-          i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-          if (w->used && w->reader_reliable && w->acked_upto < ch->next_seqno){
-              if (now>=w->hb_next_us) i_dart_lane_enq(st,channel_idx,peer_slot);
-              else if (w->hb_next_us < mind) mind = w->hb_next_us;
-          }
-          if (r->used && r->ack_pending){
-              if (now>=r->ack_due_us) i_dart_lane_enq(st,channel_idx,peer_slot);
-              else if (r->ack_due_us < mind) mind = r->ack_due_us;
-          }
+        if (l->w.used && l->w.reader_reliable && l->w.acked_upto < ch->next_seqno){
+            if (now>=l->w.hb_next_us) i_dart_lane_enq_idx(st,li);
+            else if (l->w.hb_next_us < mind) mind = l->w.hb_next_us;
+        }
+        if (l->r.used && l->r.ack_pending){
+            if (now>=l->r.ack_due_us) i_dart_lane_enq_idx(st,li);
+            else if (l->r.ack_due_us < mind) mind = l->r.ack_due_us;
         }
     }
     /* a full pass saw every timer: mind is the exact next deadline. Lanes woken above
@@ -2216,7 +2272,7 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
 
 
 int dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
-    uint32_t max_peers=st->cfg.max_peers, ndest=max_peers;
+    uint32_t ndest=st->cfg.max_peers;
     i_dart_hb_sweep(st, now);
     while (st->dest_queue_count){
         uint32_t d; size_t offset=0;
@@ -2225,8 +2281,9 @@ int dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, void *ou
         st->dest_queue_count--; st->dest_queued[d]=0;
         /* drain this destination's lanes into one datagram */
         while (st->dest_head[d]!=DART__NIL){
-            uint32_t lane=st->dest_head[d], peer_slot=lane%max_peers;
-            uint16_t channel_idx=(uint16_t)(lane/max_peers);
+            uint32_t li=st->dest_head[d];
+            i_DartLane *l=&st->lanes[li];
+            uint16_t channel_idx=l->channel; uint32_t peer_slot=l->peer_slot;
             size_t n;
             do {
                 /* acks first: small, one-shot, and carry the NACKs that drive
@@ -2235,18 +2292,18 @@ int dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, void *ou
                 if (!n) n=i_dart_writer_emit(st,(int)channel_idx,(int)peer_slot,(uint8_t*)out+offset,cap-offset,now);
                 offset+=n;
             } while (n && offset<cap);
-            st->dest_head[d]=st->lane_next[lane];
-            if (i_dart_lane_work(st,channel_idx,peer_slot,now)){
+            st->dest_head[d]=l->sched_next;
+            if (i_dart_lane_work(st,l,now)){
                 /* datagram full mid-lane: rotate the lane to the back so siblings get the next */
-                if (st->dest_head[d]==DART__NIL) st->dest_head[d]=lane;
+                if (st->dest_head[d]==DART__NIL) st->dest_head[d]=li;
                 else {
-                    st->lane_next[lane]=DART__NIL;
-                    st->lane_next[st->dest_tail[d]]=lane;
-                    st->dest_tail[d]=lane;
+                    l->sched_next=DART__NIL;
+                    st->lanes[st->dest_tail[d]].sched_next=li;
+                    st->dest_tail[d]=li;
                 }
                 break;
             }
-            st->lane_queued[lane]=0;     /* lane drained */
+            l->queued=0;     /* lane drained */
         }
         if (st->dest_head[d]!=DART__NIL) i_dart_dest_push(st,d);  /* fair: re-queue at tail */
         if (offset){
@@ -2299,9 +2356,12 @@ static void i_dart_writer_commit(DartTransportState *st, uint16_t channel_idx, s
     ch->first_seqno = ch->history[ch->history_head].valid ? ch->history[ch->history_head].base
                                                     : ch->history[0].base;
     ch->have_first  = 1;
-    { uint32_t max_peers=st->cfg.max_peers, p;
-      for (p=0;p<max_peers;p++)
-          if (i_dart_writer_proxy_at(st,channel_idx,p)->used && !st->peer_dormant[p]) i_dart_lane_wake(st, channel_idx, p);
+    { uint32_t li = ch->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
+      while (li != DART__NIL){
+          i_DartLane *l = &st->lanes[li];
+          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enq_idx(st, li);
+          li = l->ch_next;
+      }
     }
 }
 
@@ -2361,14 +2421,14 @@ int dart_transport_send_shm(DartTransportState *st, uint16_t channel, DartBytes 
 
 int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
+    i_DartWriterSample *slot; uint32_t li;
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 0;
     slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<(uint16_t)max_peers;p++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
-        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < slot->base + slot->count) return 1;
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
+            && l->w.acked_upto < slot->base + slot->count) return 1;
     }
     return 0;
 }
@@ -2377,14 +2437,13 @@ int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
 int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
                                             uint64_t *evict_base, uint32_t *evict_count){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    i_DartWriterSample *slot; uint32_t max_peers; uint16_t p;
+    i_DartWriterSample *slot; uint32_t li;
     if (!ch) return 0;
     slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<(uint16_t)max_peers;p++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
-        if (w->used && !st->peer_dormant[p] && w->sent_upto < slot->base + slot->count){
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && !st->peer_dormant[l->peer_slot] && l->w.sent_upto < slot->base + slot->count){
             if (evict_base)  *evict_base  = slot->base;
             if (evict_count) *evict_count = slot->count;
             return 1;
@@ -2396,12 +2455,12 @@ int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t chan
 
 int dart_transport_send_drained(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers; uint16_t p;
+    uint32_t li;
     if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<(uint16_t)max_peers;p++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p);
-        if (w->used && w->reader_reliable && !st->peer_dormant[p] && w->acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
+            && l->w.acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
     }
     return 1;
 }
@@ -2415,10 +2474,12 @@ int dart_transport_writer_match_count(DartTransportState *st, uint16_t channel){
 
 int dart_transport_repair_pending(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers, p; int cnt = 0;
+    uint32_t li; int cnt = 0;
     if (!ch) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++){ i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,p); if (w->used && w->has_nack) cnt++; }
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->w.has_nack) cnt++;
+    }
     return cnt;   /* writer lanes with a NACK to service; 0 = nothing to resend right now */
 }
 
@@ -2429,12 +2490,12 @@ int dart_transport_repair_pending(DartTransportState *st, uint16_t channel){
  * reader forces inline UDP for the whole message. */
 int dart_transport_writer_shm_eligible(DartTransportState *st, uint16_t channel){
     int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    uint32_t max_peers, p; int any=0;
+    uint32_t li; int any=0;
     if (!ch) return 0;
-    max_peers = st->cfg.max_peers;
-    for (p=0;p<max_peers;p++){
-        if (!i_dart_writer_proxy_at(st,channel_idx,p)->used || st->peer_dormant[p]) continue;
-        if (!st->peer_shm[p]) return 0;
+    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+        i_DartLane *l=&st->lanes[li];
+        if (!l->w.used || st->peer_dormant[l->peer_slot]) continue;
+        if (!st->peer_shm[l->peer_slot]) return 0;
         any = 1;
     }
     return any;
@@ -2471,7 +2532,7 @@ void i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, 
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
     uint64_t base=i_dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=i_dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=i_dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
     uint32_t epoch=i_dart_le_r32(p+DART_OFFSET_NACK_EPOCH); uint8_t flags=p[0];
-    if (!w->used) return;
+    if (!w || !w->used) return;
     if (w->reader_epoch != epoch){
         if (w->reader_epoch){
             /* reader is a new incarnation (one-sided flap): our positions describe its
@@ -2511,7 +2572,7 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
     int reliable=(ch->qos.reliability==DART_RELIABLE);
     uint16_t alias = i_dart_alias_of(st, channel_idx);
-    if (!w->used || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
+    if (!w || !w->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: nothing to emit */
 
     /* 1. repair (reliable only) */
     if (reliable && w->has_nack){
@@ -2618,7 +2679,7 @@ int dart_transport_reader_progress(DartTransportState *st, uint16_t channel, uin
     peer_slot = i_dart_peer_slot(st, peer);
     if (peer_slot < 0) return 0;
     r = i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-    if (!r->used || !r->assembly_active) return 0;            /* no message mid-reassembly */
+    if (!r || !r->used || !r->assembly_active) return 0;      /* no message mid-reassembly */
     if (base_seqno) *base_seqno = r->deliver_upto;       /* HOL message starts here */
     if (total)      *total      = r->assembly_count;
     if (have){
@@ -2676,7 +2737,7 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
     uint64_t base = i_dart_le_r64(p+DART_OFFSET_SEQNO);
     uint16_t count = i_dart_le_r16(p+DART_OFFSET_SHM_COUNT);
     const uint8_t *desc = p+DART_OFFSET_SHM_DESC;          /* DART_SHM_DESC_BYTES */
-    if (!r->used || count==0) return;
+    if (!r || !r->used || count==0) return;
     {   i_DartReaderOrder ord = i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, base+count-1);
         if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
@@ -2732,7 +2793,7 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
     }
     base = seqno - frag;
 
-    if (!r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
+    if (!r || !r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
     if (count==0 || frag>=count){ ch->repair_stats.frags_malformed++; return; }  /* malformed */
     switch (i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, seqno)){
         case DART_ORDER_OLD:     ch->repair_stats.frags_old++;   return;   /* already delivered/skipped */
@@ -2818,7 +2879,7 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
     i_DartChannel *ch=&st->channels[channel_idx];
     i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
     uint64_t first=i_dart_le_r64(p+DART_OFFSET_SEQNO), last=i_dart_le_r64(p+DART_OFFSET_HB_LAST);
-    if (!r->used) return;
+    if (!r || !r->used) return;
     if (ch->qos.reliability!=DART_RELIABLE) return;
     /* un-started readers adopt no position from heartbeats (a one-sided flap's
        advertised first may be a dead predecessor's); the ack below carries our epoch.
@@ -2866,7 +2927,7 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;
     uint16_t alias = i_dart_alias_of(st, channel_idx);
     int due, holes=0, repair=0, force;
-    if (!r->used || st->peer_dormant[peer_slot]) return 0;   /* dormant: don't ack a silent writer */
+    if (!r || !r->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: don't ack */
     if (ch->qos.reliability!=DART_RELIABLE) return 0;
     if (cap<DART_HEADER_NACK) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
@@ -2992,6 +3053,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
     if (meta_ids < 2u*n_channels) meta_ids = 2u*n_channels;     /* our own interest list must always fit */
 
     { uint32_t nlanes = n_channels*max_peers, ndest = max_peers;
+      int dyn = (cfg->allocator != NULL);
       uint32_t *peer_ids = (uint32_t*)i_dart_bump_take(b, max_peers*sizeof(uint32_t), 8);
       uint8_t  *peer_used = (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
       uint8_t  *peer_dormant= (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
@@ -3003,10 +3065,11 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint8_t  *peer_sub_bitmap = (uint8_t*) i_dart_bump_take(b, (size_t)max_peers*bitmap_len, 1);
       uint8_t  *peer_sub_reliable = (uint8_t*) i_dart_bump_take(b, (size_t)max_peers*bitmap_len, 1);
       i_DartChannel *ch = (i_DartChannel*)i_dart_bump_take(b, n_channels*sizeof(i_DartChannel), 16);
-      i_DartWriterProxy *writer_proxies = (i_DartWriterProxy*)i_dart_bump_take(b, (size_t)n_channels*max_peers*sizeof(i_DartWriterProxy), 16);
-      i_DartReaderProxy *reader_proxies = (i_DartReaderProxy*)i_dart_bump_take(b, (size_t)n_channels*max_peers*sizeof(i_DartReaderProxy), 16);
-      uint32_t *lane_next = (uint32_t*)i_dart_bump_take(b, (size_t)nlanes*sizeof(uint32_t), 8);
-      uint8_t  *lane_queued = (uint8_t*) i_dart_bump_take(b, (size_t)nlanes, 1);
+      /* lanes: dynamic keeps only the u16 ticket table (records are pool-allocated per real
+         match, so memory scales with matches); fixed embeds the dense record array, whose
+         reassembly buffers are pre-bound per channel below */
+      uint16_t   *lane_index = dyn ? (uint16_t*)i_dart_bump_take(b, (size_t)nlanes*sizeof(uint16_t), 2) : NULL;
+      i_DartLane *lanes      = dyn ? NULL : (i_DartLane*)i_dart_bump_take(b, (size_t)nlanes*sizeof(i_DartLane), 16);
       uint32_t *dest_head = (uint32_t*)i_dart_bump_take(b, (size_t)ndest*sizeof(uint32_t), 8);
       uint32_t *dest_tail = (uint32_t*)i_dart_bump_take(b, (size_t)ndest*sizeof(uint32_t), 8);
       uint8_t  *dest_queued = (uint8_t*) i_dart_bump_take(b, (size_t)ndest, 1);
@@ -3019,9 +3082,10 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->frag = dart_clamp_frag(cfg->frag_payload);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
           st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
-          st->channels=ch; st->writer_proxies=writer_proxies; st->reader_proxies=reader_proxies; st->reader_epoch_counter=1;
+          st->channels=ch; st->reader_epoch_counter=1;
           st->next_deadline_us=DART__NO_DEADLINE;
-          st->lane_next=lane_next; st->lane_queued=lane_queued;
+          st->lanes=lanes; st->lane_cap = dyn ? 0u : nlanes; st->lane_free=DART__NIL;
+          st->lane_index=lane_index;
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->alias_to_channel=alias_to_channel; st->alias_max=meta_ids;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
@@ -3032,9 +3096,18 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           memset(alias_to_channel,0xFF,(size_t)max_peers*meta_ids*sizeof(uint16_t));   /* all unmapped */
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
-          memset(writer_proxies,0,(size_t)n_channels*max_peers*sizeof(i_DartWriterProxy));
-          memset(reader_proxies,0,(size_t)n_channels*max_peers*sizeof(i_DartReaderProxy));
-          memset(lane_queued,0,nlanes); memset(dest_queued,0,ndest);
+          if (dyn) memset(lane_index,0xFF,(size_t)nlanes*sizeof(uint16_t));   /* all unmatched */
+          else {
+              uint32_t li;
+              memset(lanes,0,(size_t)nlanes*sizeof(i_DartLane));
+              for (li=0;li<nlanes;li++){          /* fixed: identity records, permanent */
+                  lanes[li].channel   = (uint16_t)(li / max_peers);
+                  lanes[li].peer_slot = (uint16_t)(li % max_peers);
+                  lanes[li].sched_next = DART__NIL; lanes[li].ch_next = DART__NIL;
+                  lanes[li].in_use = 1;
+              }
+          }
+          memset(dest_queued,0,ndest);
           memset(dest_head,0xFF,(size_t)ndest*sizeof(uint32_t));   /* all DART__NIL */
       }
     }
@@ -3046,6 +3119,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
             i_DartChannel *ch = &st->channels[c];
             memset(ch,0,sizeof(*ch));
             ch->role = DART_INACTIVE;
+            ch->lane_head = DART__NIL;
             ch->name = name_pool + (size_t)c*(DART_TOPIC_NAME_MAX + 1u);
             ((char*)ch->name)[0] = '\0';
         }
@@ -3075,15 +3149,17 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                 if (st && b->base){ st->channels[c].history[d].buf = buf;
                                     st->channels[c].history[d].cap = dyn ? 0u : q.max_message_bytes; }
             }
-            /* reader asm buffers + frag bitmaps, per peer (skipped when dynamic) */
-            for (p=0;p<max_peers;p++){
-                uint8_t *assembly_buf = dyn ? NULL : (uint8_t*)i_dart_bump_take(b, q.max_message_bytes, 8);
-                uint8_t *frag_bitmap  = dyn ? NULL : (uint8_t*)i_dart_bump_take(b, (max_fragments+7u)/8u, 1);
+            /* reader asm buffers + frag bitmaps, per peer. Fixed mode only: it binds into
+               the permanent identity records; a dynamic record starts empty and grows via
+               the hook (and does not exist yet here). */
+            if (!dyn) for (p=0;p<max_peers;p++){
+                uint8_t *assembly_buf = (uint8_t*)i_dart_bump_take(b, q.max_message_bytes, 8);
+                uint8_t *frag_bitmap  = (uint8_t*)i_dart_bump_take(b, (max_fragments+7u)/8u, 1);
                 if (st && b->base){
                     i_DartReaderProxy *r = i_dart_reader_proxy_at(st,c,p);
                     r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
-                    r->assembly_cap = dyn ? 0u : q.max_message_bytes;
-                    r->bitmap_cap  = dyn ? 0u : (uint32_t)((max_fragments+7u)/8u);
+                    r->assembly_cap = q.max_message_bytes;
+                    r->bitmap_cap  = (uint32_t)((max_fragments+7u)/8u);
                 }
             }
         }
@@ -3157,10 +3233,17 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
         if (l) memcpy(nm, old->channels[c].name, l);
         nm[l] = '\0';
     }
-    /* per-(channel,peer) proxies: re-stride into the new max_peers (heap bufs ride along) */
-    for (c=0;c<onc;c++) for (p=0;p<omp;p++){
-        *i_dart_writer_proxy_at(nw,c,p) = *i_dart_writer_proxy_at(old,c,p);
-        *i_dart_reader_proxy_at(nw,c,p) = *i_dart_reader_proxy_at(old,c,p);
+    /* lane records: the pool is ONE hook allocation outside both arenas, so adopt it
+       wholesale (record backrefs use channel indices + peer slots, both preserved; the
+       channels' lane_head chains were carried by the struct copies above). Only the
+       ticket table is arena memory: re-stride it into the new max_peers. */
+    nw->lanes = old->lanes; nw->lane_cap = old->lane_cap; nw->lane_free = old->lane_free;
+    for (c=0;c<onc;c++) for (p=0;p<omp;p++)
+        nw->lane_index[(size_t)c*new_max_peers+p] = old->lane_index[(size_t)c*omp+p];
+    {   uint32_t li;   /* the old scheduler dies with the old arena: clear per-record state
+                          (free-list records keep sched_next: it is their free link) */
+        for (li=0; li<nw->lane_cap; li++)
+            if (nw->lanes[li].in_use){ nw->lanes[li].queued=0; nw->lanes[li].sched_next=DART__NIL; }
     }
     /* per-peer interest bitmaps (stride grows with n_channels) + alias table */
     for (p=0;p<omp;p++){
@@ -3253,10 +3336,68 @@ uint64_t i_dart_channel_unicast_join_seqno(const i_DartChannel *ch){
 }
 
 
-/* match one (channel,peer) proxy: the per-peer lane carries new data, repairs, acks/HB */
-static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t peer_slot){
+/* Get-or-allocate the lane record for (c,peer_slot). Dynamic mode grows the pool by
+ * doubling through the hook; records MOVE on growth, so callers re-derive any lane
+ * pointer after this call. Returns NULL on OOM or a full u16 ticket space: the match is
+ * refused for now (the peer's next announce re-applies and retries). Fixed mode always
+ * succeeds (the identity record is permanent). */
+static i_DartLane *i_dart_lane_ensure(DartTransportState *st, uint16_t c, uint32_t peer_slot){
+    size_t k = (size_t)c*st->cfg.max_peers + peer_slot;
+    uint32_t li;
+    if (!st->lane_index) return &st->lanes[k];        /* fixed: identity */
+    li = st->lane_index[k]==0xFFFFu ? DART__NIL : (uint32_t)st->lane_index[k];
+    if (li != DART__NIL) return &st->lanes[li];
+    if (st->lane_free == DART__NIL){                  /* pool dry: grow it */
+        uint32_t ncap = st->lane_cap ? st->lane_cap*2u : 8u, i;
+        i_DartLane *nl;
+        if (ncap > 0xFFFFu) ncap = 0xFFFFu;           /* the u16 ticket space */
+        if (ncap <= st->lane_cap) return NULL;        /* 65535 live matches: refuse */
+        nl = (i_DartLane*)st->cfg.allocator(st->cfg.user, st->lanes, (size_t)ncap*sizeof(i_DartLane));
+        if (!nl) return NULL;
+        st->lanes = nl;
+        for (i=ncap; i>st->lane_cap; i--){            /* thread the new slots onto the free list */
+            nl[i-1].in_use = 0;
+            nl[i-1].sched_next = st->lane_free;
+            st->lane_free = i-1;
+        }
+        st->lane_cap = ncap;
+    }
+    li = st->lane_free; st->lane_free = st->lanes[li].sched_next;
+    memset(&st->lanes[li], 0, sizeof(i_DartLane));
+    st->lanes[li].channel = c; st->lanes[li].peer_slot = (uint16_t)peer_slot;
+    st->lanes[li].sched_next = DART__NIL; st->lanes[li].ch_next = DART__NIL;
+    st->lanes[li].in_use = 1;
+    st->lane_index[k] = (uint16_t)li;
+    return &st->lanes[li];
+}
+
+/* A lane with neither side matched leaves the channel chain; dynamic mode also frees its
+ * grown reassembly buffers, drops any scheduler entry (a recycled record must never sit
+ * on another peer's dest list), and recycles the record. No-op while a side is matched. */
+static void i_dart_lane_release(DartTransportState *st, uint16_t c, uint32_t peer_slot){
+    uint32_t li = i_dart_lane_id(st, c, peer_slot);
+    i_DartLane *l;
+    if (li == DART__NIL) return;
+    l = &st->lanes[li];
+    if (l->w.used || l->r.used) return;
+    {   uint32_t *pp = &st->channels[c].lane_head;    /* unlink from the channel chain */
+        while (*pp != DART__NIL && *pp != li) pp = &st->lanes[*pp].ch_next;
+        if (*pp == li) *pp = l->ch_next;
+    }
+    l->ch_next = DART__NIL;
+    if (!st->lane_index) return;                      /* fixed: the record itself is permanent */
+    if (l->r.assembly_buf){ st->cfg.allocator(st->cfg.user, l->r.assembly_buf, 0); l->r.assembly_buf=NULL; l->r.assembly_cap=0; }
+    if (l->r.frag_bitmap){ st->cfg.allocator(st->cfg.user, l->r.frag_bitmap, 0); l->r.frag_bitmap=NULL; l->r.bitmap_cap=0; }
+    i_dart_sched_drop(st, li);
+    l->in_use = 0;
+    l->sched_next = st->lane_free; st->lane_free = li;
+    st->lane_index[(size_t)c*st->cfg.max_peers + peer_slot] = 0xFFFF;
+}
+
+/* match one (channel,peer) lane side: it carries new data, repairs, acks/HB */
+static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t peer_slot, i_DartLane *l){
     i_DartChannel *ch=&st->channels[c];
-    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
+    i_DartWriterProxy *w=&l->w;
     memset(w,0,sizeof(*w));
     w->used=1;
     ch->matched_writers++;   /* only reached on a genuine 0->1 (rematch guards on !used) */
@@ -3268,15 +3409,14 @@ static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t pee
     i_dart_lane_wake(st, c, peer_slot);   /* lane primed for new data + ack/hb */
 }
 
-static void i_dart_writer_unmatch(DartTransportState *st, uint16_t c, uint16_t peer_slot){
-    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
-    if (!w->used) return;
-    w->used=0;
+static void i_dart_writer_unmatch(DartTransportState *st, uint16_t c, i_DartLane *l){
+    if (!l->w.used) return;
+    l->w.used=0;
     st->channels[c].matched_writers--;   /* guarded on used above: exactly one 1->0 per unmatch */
 }
 
-static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t peer_slot){
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,peer_slot);
+static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t peer_slot, i_DartLane *l){
+    i_DartReaderProxy *r=&l->r;
     uint8_t *assembly_buf=r->assembly_buf, *frag_bitmap=r->frag_bitmap;
     uint32_t assembly_cap=r->assembly_cap, bitmap_cap=r->bitmap_cap;   /* keep grown buffers across rematch */
     memset(r,0,sizeof(*r));
@@ -3293,26 +3433,46 @@ static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t pee
     }
 }
 
-static void i_dart_reader_unmatch(DartTransportState *st, uint16_t c, uint16_t peer_slot){
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,peer_slot);
-    if (r->used) st->channels[c].matched_readers--;   /* peer_remove calls this unconditionally */
-    r->used=0; r->assembly_active=0;
+static void i_dart_reader_unmatch(DartTransportState *st, uint16_t c, i_DartLane *l){
+    if (l->r.used) st->channels[c].matched_readers--;   /* peer_remove calls this unconditionally */
+    l->r.used=0; l->r.assembly_active=0;
 }
 
 
-/* recompute one (channel,peer) match from our role and the peer's interest bits */
+/* recompute one (channel,peer) match from our role and the peer's interest bits.
+ * Lane records exist only while a side is matched: the unmatched->matched edge allocates
+ * (and links the channel chain), the matched->unmatched edge releases. Idempotent
+ * re-application never touches a lane whose match state did not change, so reader
+ * positions survive it exactly as before. */
 static void i_dart_channel_rematch(DartTransportState *st, uint16_t c, uint16_t peer_slot){
     i_DartChannel *ch=&st->channels[c];
     const uint8_t *peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     int wuse = (ch->role==DART_PUBSUB || ch->role==DART_PUB_ONLY) && i_dart_bit_get(peer_sub_bitmap,c);
     int ruse = (ch->role==DART_PUBSUB || ch->role==DART_SUB_ONLY) && i_dart_bit_get(peer_pub_bitmap,c);
-    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,peer_slot);
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,peer_slot);
-    if (wuse && !w->used) i_dart_writer_match(st,c,peer_slot);
-    else if (!wuse && w->used) i_dart_writer_unmatch(st,c,peer_slot);
-    if (ruse && !r->used) i_dart_reader_match(st,c,peer_slot);
-    else if (!ruse && r->used) i_dart_reader_unmatch(st,c,peer_slot);
+    i_DartLane *l = i_dart_lane_at(st,c,peer_slot);
+    int had = l && (l->w.used || l->r.used);
+    if (!wuse && !ruse){
+        if (!had) return;
+        i_dart_writer_unmatch(st,c,l);
+        i_dart_reader_unmatch(st,c,l);
+        i_dart_lane_release(st,c,peer_slot);
+        return;
+    }
+    if (!l){
+        l = i_dart_lane_ensure(st,c,peer_slot);   /* may relocate the pool: l is fresh */
+        if (!l) return;                           /* OOM: refused; the peer's next announce retries */
+    }
+    if (wuse && !l->w.used) i_dart_writer_match(st,c,peer_slot,l);
+    else if (!wuse && l->w.used) i_dart_writer_unmatch(st,c,l);
+    if (ruse && !l->r.used) i_dart_reader_match(st,c,peer_slot,l);
+    else if (!ruse && l->r.used) i_dart_reader_unmatch(st,c,l);
+    if (!had && (l->w.used || l->r.used)){        /* first match on this lane: onto the channel chain */
+        l->ch_next = ch->lane_head;
+        ch->lane_head = i_dart_lane_id(st,c,peer_slot);
+    } else if (had && !(l->w.used || l->r.used)){
+        i_dart_lane_release(st,c,peer_slot);
+    }
 }
 
 
@@ -3340,15 +3500,13 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
     int s = i_dart_peer_slot(st,id); uint16_t c;
     if (s<0) return;
     for (c=0;c<st->cfg.n_channels;c++){
-        i_dart_writer_unmatch(st,c,(uint16_t)s);
-        i_dart_reader_unmatch(st,c,(uint16_t)s);
-        if (st->channels[c].dynamic){
-            /* release the lane's grown reassembly buffers: without this every lane holds
-               the largest message any past slot occupant ever sent, forever */
-            i_DartReaderProxy *r = i_dart_reader_proxy_at(st,c,(uint32_t)s);
-            if (r->assembly_buf){ st->cfg.allocator(st->cfg.user, r->assembly_buf, 0); r->assembly_buf=NULL; r->assembly_cap=0; }
-            if (r->frag_bitmap){ st->cfg.allocator(st->cfg.user, r->frag_bitmap, 0); r->frag_bitmap=NULL; r->bitmap_cap=0; }
-        }
+        i_DartLane *l = i_dart_lane_at(st,c,(uint32_t)s);
+        if (!l) continue;
+        i_dart_writer_unmatch(st,c,l);
+        i_dart_reader_unmatch(st,c,l);
+        /* release recycles the record AND frees the lane's grown reassembly buffers, so a
+           gone peer keeps no per-lane memory at all */
+        i_dart_lane_release(st,c,(uint32_t)s);
     }
     st->peer_used[s]=0; st->peer_dormant[s]=0;
 #ifdef DART_SHM
@@ -3376,11 +3534,11 @@ void dart_transport_peer_resume(DartTransportState *st, uint32_t id){
     if (s<0) return;
     st->peer_dormant[s]=0;
     for (c=0;c<st->cfg.n_channels;c++){
-        i_DartWriterProxy *w=i_dart_writer_proxy_at(st,c,s);
-        i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,s);
+        i_DartLane *l=i_dart_lane_at(st,c,(uint32_t)s);
+        if (!l) continue;
         if (st->channels[c].qos.reliability!=DART_RELIABLE) continue;
-        if (r->used){ r->ack_pending=1; r->ack_due_us=0; r->ack_force=1; }  /* report our position now */
-        if (w->used || r->used) i_dart_lane_wake(st,c,(uint16_t)s);
+        if (l->r.used){ l->r.ack_pending=1; l->r.ack_due_us=0; l->r.ack_force=1; }  /* report our position now */
+        if (l->w.used || l->r.used) i_dart_lane_wake(st,c,(uint16_t)s);
     }
 }
 
@@ -3401,9 +3559,8 @@ void dart_transport_peer_set_shm(DartTransportState *st, uint32_t id, int is_shm
 
 
 void dart_transport_destroy(DartTransportState *st){
-    uint16_t c; uint32_t p, max_peers;
+    uint16_t c; uint32_t li;
     if (!st || !st->cfg.allocator) return;     /* fixed mode: nothing hook-allocated */
-    max_peers = st->cfg.max_peers;
     for (c=0;c<st->cfg.n_channels;c++){
         i_DartChannel *ch=&st->channels[c];
         uint16_t depth, d;
@@ -3412,15 +3569,20 @@ void dart_transport_destroy(DartTransportState *st){
         for (d=0; d<depth; d++)
             if (ch->history[d].buf){ st->cfg.allocator(st->cfg.user, ch->history[d].buf, 0);
                                   ch->history[d].buf=NULL; ch->history[d].cap=0; }
-        for (p=0;p<max_peers;p++){
-            i_DartReaderProxy *r=i_dart_reader_proxy_at(st,c,p);
-            if (r->assembly_buf){ st->cfg.allocator(st->cfg.user, r->assembly_buf, 0); r->assembly_buf=NULL; r->assembly_cap=0; }
-            if (r->frag_bitmap){ st->cfg.allocator(st->cfg.user, r->frag_bitmap, 0); r->frag_bitmap=NULL; r->bitmap_cap=0; }
-        }
         if (ch->history_owned && ch->history){   /* ring allocated by dart_transport_channel_define */
             st->cfg.allocator(st->cfg.user, ch->history, 0);
             ch->history=NULL; ch->history_owned=0;
         }
+    }
+    for (li=0; li<st->lane_cap; li++){           /* live records' grown reassembly buffers */
+        i_DartLane *l=&st->lanes[li];
+        if (!l->in_use) continue;
+        if (l->r.assembly_buf){ st->cfg.allocator(st->cfg.user, l->r.assembly_buf, 0); l->r.assembly_buf=NULL; l->r.assembly_cap=0; }
+        if (l->r.frag_bitmap){ st->cfg.allocator(st->cfg.user, l->r.frag_bitmap, 0); l->r.frag_bitmap=NULL; l->r.bitmap_cap=0; }
+    }
+    if (st->lane_index && st->lanes){            /* the record pool itself (one hook allocation) */
+        st->cfg.allocator(st->cfg.user, st->lanes, 0);
+        st->lanes=NULL; st->lane_cap=0; st->lane_free=DART__NIL;
     }
 }
 
@@ -3572,8 +3734,10 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
     s = i_dart_peer_slot(st, peer_id);
     if (s < 0) return;
     for (c=0;c<st->cfg.n_channels;c++){
-        if (i_dart_writer_proxy_at(st,c,(uint32_t)s)->used) w++;
-        if (i_dart_reader_proxy_at(st,c,(uint32_t)s)->used) r++;
+        i_DartLane *l = i_dart_lane_at(st,c,(uint32_t)s);
+        if (!l) continue;
+        if (l->w.used) w++;
+        if (l->r.used) r++;
     }
     if (publish_to)   *publish_to   = w;
     if (receive_from) *receive_from = r;

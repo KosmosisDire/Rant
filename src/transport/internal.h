@@ -129,6 +129,24 @@ typedef struct {        /* reader-side, per (channel,peer) */
 #endif
 } i_DartReaderProxy;
 
+/* One matched lane: both direction proxies plus the scheduler's chain fields. In dynamic
+ * mode records are pool-allocated only while the (channel,peer) pair actually matches, so
+ * lane memory scales with real matches, not channels x peers; fixed mode (no allocator)
+ * keeps the dense identity layout with per-record buffers pre-bound at init. Records move
+ * when the pool grows, so nothing holds an i_DartLane* across a call that can allocate:
+ * durable references are pool INDICES. */
+typedef struct {
+    i_DartWriterProxy w;
+    i_DartReaderProxy r;
+    uint16_t channel;     /* backref: the lane this record serves */
+    uint16_t peer_slot;
+    uint32_t sched_next;  /* next record on its dest's active list (DART__NIL);
+                             doubles as the free-list link while not in_use */
+    uint32_t ch_next;     /* next matched lane of the same channel (DART__NIL) */
+    uint8_t  queued;      /* on its dest's active list */
+    uint8_t  in_use;      /* dynamic: allocated to a lane (0 = free-list); fixed: always 1 */
+} i_DartLane;
+
 typedef struct {
     DartQos    qos;
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
@@ -150,6 +168,8 @@ typedef struct {
                                   can skip the copy+commit for a publisher no one subscribes to */
     uint32_t  matched_readers; /* same, for reader proxies; with matched_writers it lets the
                                   timer sweep skip a whole channel row that owes no timer work */
+    uint32_t  lane_head;       /* first matched lane record of this channel (DART__NIL = none);
+                                  the send path walks this chain instead of scanning peer slots */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
 } i_DartChannel;
@@ -178,14 +198,19 @@ struct DartTransportState {
     uint16_t    *alias_to_channel;    /* [max_peers * alias_max]; 0xFFFF = unmapped */
     uint32_t     alias_max;        /* alias-table stride = effective meta_max_ids */
     i_DartChannel  *channels;     /* [n_channels] */
-    i_DartWriterProxy   *writer_proxies;     /* [n_channels*max_peers] */
-    i_DartReaderProxy   *reader_proxies;     /* [n_channels*max_peers] */
+    /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
+       grown by doubling, records allocated per real match, lane_index maps (channel,peer)
+       -> record. Fixed mode: a dense arena array in identity order (record c*max_peers+p),
+       lane_index NULL, buffers pre-bound at init. */
+    i_DartLane  *lanes;       /* [lane_cap] */
+    uint32_t     lane_cap;
+    uint32_t     lane_free;   /* free-list head (dynamic), DART__NIL when empty */
+    uint16_t    *lane_index;  /* [n_channels*max_peers] record idx, 0xFFFF = unmatched;
+                                 NULL = fixed mode (identity mapping, no table) */
     /* active-lane scheduler: a lane is one (channel,peer) pair. The event that gives a
        lane work enqueues it, so poll_send pays for work done, not idle lanes. Timer work
-       is found by an amortized clock-driven sweep. */
-    uint32_t    *lane_next;   /* [n_channels*max_peers] next in dest list */
-    uint8_t     *lane_queued;    /* [n_channels*max_peers] queued flag */
-    uint32_t    *dest_head;   /* [max_peers] lane list per dest */
+       is found by an amortized clock-driven sweep over the record pool. */
+    uint32_t    *dest_head;   /* [max_peers] record-index list per dest */
     uint32_t    *dest_tail;
     uint8_t     *dest_queued;
     uint32_t    *dest_queue;       /* ring of active destinations */
@@ -233,14 +258,29 @@ static inline int i_dart_channel_needs_sweep(const i_DartChannel *ch){
     return ch->qos.reliability==DART_RELIABLE && (ch->matched_writers || ch->matched_readers);
 }
 
-/* writer/reader proxy for a (channel,peer) lane. The proxies are
-   [n_channels][max_peers] row-major; centralizing the index math here keeps a
-   transposed channel/peer from silently corrupting a neighbor lane. */
+/* lane record for a (channel,peer) pair: pool index, or DART__NIL when the lane has
+   never matched (dynamic mode; fixed mode maps every lane by identity). Centralizing
+   the index math here keeps a transposed channel/peer from silently corrupting a
+   neighbor lane. */
+static inline uint32_t i_dart_lane_id(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
+    size_t k = (size_t)channel_idx*st->cfg.max_peers + peer_slot;
+    uint16_t t;
+    if (!st->lane_index) return (uint32_t)k;          /* fixed: identity */
+    t = st->lane_index[k];
+    return t == 0xFFFFu ? DART__NIL : (uint32_t)t;
+}
+static inline i_DartLane *i_dart_lane_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
+    uint32_t li = i_dart_lane_id(st, channel_idx, peer_slot);
+    return li == DART__NIL ? NULL : &st->lanes[li];
+}
+/* NULL when the lane is unmatched (no record): every caller treats that as !used. */
 static inline i_DartWriterProxy *i_dart_writer_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    return &st->writer_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
+    i_DartLane *l = i_dart_lane_at(st, channel_idx, peer_slot);
+    return l ? &l->w : NULL;
 }
 static inline i_DartReaderProxy *i_dart_reader_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    return &st->reader_proxies[(size_t)channel_idx*st->cfg.max_peers + peer_slot];
+    i_DartLane *l = i_dart_lane_at(st, channel_idx, peer_slot);
+    return l ? &l->r : NULL;
 }
 /* wire alias for a local channel: its own index (the advertiser's handle). The
  * peer mapped this alias to its matching channel from our interest list. */
@@ -256,6 +296,8 @@ size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t co
 size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt);
 size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
 void   i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot);
+void   i_dart_lane_enq_idx(DartTransportState *st, uint32_t rec);   /* enqueue by record index */
+void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
 size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 void   i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p);
 void   i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
