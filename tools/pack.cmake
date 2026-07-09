@@ -13,6 +13,12 @@
 # header, maps onto both):
 #   <P>_IMPLEMENTATION   emit the implementation (define in exactly one TU)
 #   <P>_SANS_IO          strip the socket/runtime layer, leaving the core only
+#   DART_PLAT_CUSTOM     suppress ONLY the bundled platform/core.c implementation
+#                        (the i_dart_plat_* definitions), keeping the rest of the
+#                        runtime layer and platform/core.h's declarations, so a
+#                        caller can link in its own i_dart_plat_* implementation
+#                        without a duplicate-symbol clash or an unsupported OS
+#                        branch compiling in (e.g. a truncated embedded SDK)
 
 cmake_minimum_required(VERSION 3.15)
 
@@ -124,7 +130,9 @@ function(build_discovery f)
   dart_emit("${f}" common/arena.h)
   dart_emit("${f}" discovery/core.c)
   file(APPEND "${f}" "\n#ifndef DART_DISCOVERY_SANS_IO\n")
+  file(APPEND "${f}" "#ifndef DART_PLAT_CUSTOM\n")
   dart_emit("${f}" platform/core.c)
+  file(APPEND "${f}" "#endif /* !DART_PLAT_CUSTOM */\n")
   dart_emit("${f}" discovery/runtime.c)
   file(APPEND "${f}" "#endif /* !DART_DISCOVERY_SANS_IO */\n")
   file(APPEND "${f}" "#endif /* DART_DISCOVERY_IMPLEMENTATION */\n")
@@ -197,7 +205,9 @@ function(build_combined f)
   dart_emit("${f}" common/arena.h)
   dart_emit("${f}" discovery/core.c)
   file(APPEND "${f}" "\n#ifndef DART_DISCOVERY_SANS_IO\n")
+  file(APPEND "${f}" "#ifndef DART_PLAT_CUSTOM\n")
   dart_emit("${f}" platform/core.c)
+  file(APPEND "${f}" "#endif /* !DART_PLAT_CUSTOM */\n")
   dart_emit("${f}" discovery/runtime.c)
   file(APPEND "${f}" "#endif /* !DART_DISCOVERY_SANS_IO */\n")
   file(APPEND "${f}" "#endif /* DART_DISCOVERY_IMPLEMENTATION */\n")

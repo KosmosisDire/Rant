@@ -3243,6 +3243,7 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
 #pragma endregion
 
 #ifndef DART_DISCOVERY_SANS_IO
+#ifndef DART_PLAT_CUSTOM
 #pragma region platform/core.c
 /* dart_plat: the Windows + POSIX implementation of the platform contract. This
  * is the only file in DART carrying an OS #ifdef. Port to a new platform by
@@ -3941,6 +3942,7 @@ void i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
 #endif /* _WIN32 */
 #endif /* DART_SHM */
 #pragma endregion
+#endif /* !DART_PLAT_CUSTOM */
 #pragma region discovery/runtime.c
 /* peer-discovery runtime: the one-tick loop over the dart_discovery core, plus
  * UUID generation. All OS access goes through dart_plat. See discovery/runtime.h. */
