@@ -423,6 +423,13 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
     for (c=0;c<st->cfg.n_channels;c++){
         i_dart_writer_unmatch(st,c,(uint16_t)s);
         i_dart_reader_unmatch(st,c,(uint16_t)s);
+        if (st->channels[c].dynamic){
+            /* release the lane's grown reassembly buffers: without this every lane holds
+               the largest message any past slot occupant ever sent, forever */
+            i_DartReaderProxy *r = i_dart_reader_proxy_at(st,c,(uint32_t)s);
+            if (r->assembly_buf){ st->cfg.allocator(st->cfg.user, r->assembly_buf, 0); r->assembly_buf=NULL; r->assembly_cap=0; }
+            if (r->frag_bitmap){ st->cfg.allocator(st->cfg.user, r->frag_bitmap, 0); r->frag_bitmap=NULL; r->bitmap_cap=0; }
+        }
     }
     st->peer_used[s]=0; st->peer_dormant[s]=0;
 #ifdef DART_SHM
@@ -731,6 +738,33 @@ static size_t i_dart_meta_schemas_build(DartTransportState *st, uint8_t *out, si
     }
     i_dart_le_w16(wires, n_wire);
     return (size_t)(p - out);
+}
+
+/* Exact overlay size the next dart_transport_meta_build will emit for the current channel +
+ * schema state (the same walks, byte for byte), so a caller can size the buffer to the
+ * actual content instead of dart_meta_capacity's every-channel-has-a-max-schema worst case. */
+uint16_t dart_transport_meta_size(DartTransportState *st, const DartMetaSchema *schemas){
+    size_t len = (size_t)DART__META_BASE + 4u;   /* base prefix + [npub][nsub] */
+    uint16_t c, k;
+    for (c=0;c<st->cfg.n_channels;c++){
+        uint8_t d=st->channels[c].role;
+        if (d==DART_PUBSUB || d==DART_PUB_ONLY) len += 4u + st->channels[c].name_len;
+        if (d==DART_PUBSUB || d==DART_SUB_ONLY) len += 4u + st->channels[c].name_len;
+    }
+    len += 4u;                                   /* schema section: [n_map][n_wire] */
+    for (c=0;c<st->cfg.n_channels;c++){
+        int seen = 0;
+        if (!i_dart_meta_schema_advertised(st, schemas, c)) continue;
+        len += 10u;                              /* alias -> hash map entry */
+        if (!schemas[c].wire.data || schemas[c].wire.len == 0
+            || schemas[c].wire.len > DART_META_SCHEMA_INLINE_MAX) continue;
+        for (k = 0; k < c; k++)                  /* interned: counted once per hash */
+            if (i_dart_meta_schema_advertised(st, schemas, k)
+                && schemas[k].hash == schemas[c].hash){ seen = 1; break; }
+        if (!seen) len += 10u + schemas[c].wire.len;
+    }
+    if (len > 65000u) len = 65000u;              /* the dart_meta_capacity ceiling; past it the build truncates */
+    return (uint16_t)len;
 }
 
 uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,

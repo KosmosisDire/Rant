@@ -63,51 +63,44 @@
 #define DART_SHM_DATA_BYTES (DART_OFFSET_SHM_DESC + DART_SHM_DESC_BYTES)
 #endif
 
+/* The three per-lane/per-slot structs below are laid out widest-field-first (u64s,
+ * pointers, u32s, u16s, then u8s) so they carry no padding holes: they are allocated
+ * n_channels*max_peers (proxies) and keep_last (samples) times, so padding multiplies. */
 typedef struct {
-    uint8_t  valid;
     uint64_t base;       /* seqno of frag 0 */
-    uint16_t count;      /* frag count */
-    uint32_t len;        /* message bytes */
     uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
+#ifdef DART_SHM
+    const uint8_t *shm_buf;            /* external chunk payload (remote peers fragment from it) */
+#endif
+    uint32_t len;        /* message bytes */
     uint32_t cap;        /* allocated bytes of buf (dynamic grows it) */
+    uint16_t count;      /* frag count */
+    uint8_t  valid;
 #ifdef DART_SHM
     uint8_t  shm;        /* 1 = SHM-backed: bytes live in shm_buf, desc set, buf unused */
-    const uint8_t *shm_buf;            /* external chunk payload (remote peers fragment from it) */
     uint8_t  desc[DART_SHM_DESC_BYTES];/* descriptor sent to SHM peers as one SHM-DATA */
 #endif
 } i_DartWriterSample;
 
 typedef struct {        /* writer-side, per (channel,peer) */
+    uint64_t sent_upto;  /* next seqno to push as new data */
+    uint64_t acked_upto; /* peer received all TUs < this */
+    uint64_t nack_base;
+    uint64_t hb_next_us; /* heartbeat timer */
+    uint32_t nack_bits;
+    uint32_t hb_count;
+    uint32_t reader_epoch; /* reader incarnation from last ACKNACK (0 = none); a change
+                              means the peer rebuilt state, so the lane re-joins */
     uint8_t  used;
     uint8_t  reader_reliable; /* the matched reader requested RELIABLE: only then does this
                                  lane impose backpressure + heartbeats. A best-effort reader
                                  never acks, so it must stay out of flow control (fire-and-
                                  forget), else it stalls a reliable writer forever. */
-    uint32_t reader_epoch; /* reader incarnation from last ACKNACK (0 = none); a change
-                              means the peer rebuilt state, so the lane re-joins */
-    uint64_t sent_upto;  /* next seqno to push as new data */
-    uint64_t acked_upto; /* peer received all TUs < this */
     uint8_t  has_nack;   /* pending repair request from ACKNACK */
-    uint64_t nack_base;
-    uint32_t nack_bits;
-    uint64_t hb_next_us; /* heartbeat timer */
-    uint32_t hb_count;
 } i_DartWriterProxy;
 
 typedef struct {        /* reader-side, per (channel,peer) */
-    uint8_t  used;
-    uint8_t  started;       /* accepted any DATA from this writer yet */
-    uint32_t epoch;         /* this incarnation's id, sent in every ACKNACK */
     uint64_t deliver_upto;  /* base of current sample; all below delivered/skipped */
-    uint8_t  assembly_active;    /* received >=1 frag of current sample */
-    uint16_t assembly_count;
-    uint16_t assembly_low;        /* lowest still-missing frag index of current sample (its
-                               contiguous-received front); deliver_upto+assembly_low = first hole */
-    uint32_t assembly_len;
-    uint8_t *assembly_buf;       /* >= assembly_len; arena (fixed) or hook-malloc'd (dynamic) */
-    uint8_t *frag_bitmap;       /* ceil(assembly_count/8) */
-    uint32_t assembly_cap;       /* allocated bytes of assembly_buf (dynamic grows it) */
-    uint32_t bitmap_cap;        /* allocated bytes of frag_bitmap */
     uint64_t hb_last;       /* highest seqno the writer CLAIMS to hold (heartbeat only) */
     uint64_t received_high;      /* highest seqno we have actually RECEIVED a frag for. UDP is
                                assumed in-order, so a hole below this is real loss to repair
@@ -115,10 +108,22 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint64_t nack_high;       /* highest seqno already requested this episode; refills ask only
                                (nack_high, top] so in-flight repairs are not re-requested */
     uint64_t nack_retransmit_us;  /* earliest time to re-request a stalled floor (lost-repair backstop) */
+    uint64_t ack_due_us;
+    uint8_t *assembly_buf;       /* >= assembly_len; arena (fixed) or hook-malloc'd (dynamic) */
+    uint8_t *frag_bitmap;       /* ceil(assembly_count/8) */
+    uint32_t epoch;         /* this incarnation's id, sent in every ACKNACK */
+    uint32_t assembly_len;
+    uint32_t assembly_cap;       /* allocated bytes of assembly_buf (dynamic grows it) */
+    uint32_t bitmap_cap;        /* allocated bytes of frag_bitmap */
+    uint16_t assembly_count;
+    uint16_t assembly_low;        /* lowest still-missing frag index of current sample (its
+                               contiguous-received front); deliver_upto+assembly_low = first hole */
+    uint8_t  used;
+    uint8_t  started;       /* accepted any DATA from this writer yet */
+    uint8_t  assembly_active;    /* received >=1 frag of current sample */
     uint8_t  ack_force;     /* a delivery/skip/HB/(re)match owes the writer an ACKNACK even if
                                the repair floor did not move (avoids a stuck cumulative ack) */
     uint8_t  ack_pending;
-    uint64_t ack_due_us;
 #ifdef DART_SHM
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
 #endif

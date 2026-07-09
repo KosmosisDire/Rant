@@ -64,6 +64,251 @@ static inline int dart_string_eq(DartString a, DartString b){
 
 #endif /* DART_STRING_H */
 #pragma endregion
+#pragma region common/alloc.h
+/* The allocation hook: a realloc-style callback a memory-taking core calls for growable
+ * buffers (ptr NULL = alloc, size 0 = free, else resize). A runtime supplies one derived
+ * from its DartAllocator (below), so the core stays memory-policy agnostic. Shared by the
+ * transport core and the serializer. */
+#ifndef DART_ALLOC_H
+#define DART_ALLOC_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>   /* memcpy on a freeable grow */
+
+typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
+
+/* ===========================================================================
+ * DartAllocator: a paged region allocator. Two modes and two allocation intents.
+ *
+ * Modes (set by the constructor):
+ *   static  - one caller buffer, no growth. Overflow returns NULL. For embedded.
+ *   dynamic - bump within pages; a new page is malloc'd (via an injected backing)
+ *             when the current one is full. It does not touch the platform itself,
+ *             so common/ stays portable and each subsystem runs standalone.
+ *
+ * Intents (chosen per allocation, not by size):
+ *   fixed    - dart_allocator_fixed: bump into a shared page, cheapest, never freed
+ *              individually. For allocate-once, live-until-reset data.
+ *   freeable - dart_allocator_alloc (a DartAllocFn): its own reclaimable block, so free
+ *              and resize work. For anything that grows or is released early.
+ *
+ * A freed freeable block is POOLED, not returned to the backing: the next fitting
+ * allocation reuses it. So after a long-running node reaches its high-water mark, churn
+ * (peers joining/leaving, buffers regrowing) cycles through the pool and the system heap
+ * sees no steady-state malloc/free at all -- it cannot fragment from us. Freeable sizes
+ * are rounded to quarter-pow2 classes ({1, 1.25, 1.5, 1.75} x 2^k, waste <= 25%) so the
+ * same few sizes recur and pooled blocks actually get reused.
+ *
+ * dart_allocator_reset frees EVERYTHING (both intents plus the pool), so no per-allocation
+ * free is ever required; free a freeable block only to reclaim it mid-run. In static mode
+ * there are no pages, so both intents just bump the buffer, a freed block goes to the same
+ * reuse pool, and reset rewinds. All static-inline: like arena.h, the amalgamator emits it
+ * once and a layer that does not use it pays nothing. */
+
+#ifndef DART_ALLOCATOR_PAGE
+#define DART_ALLOCATOR_PAGE (64u * 1024u)   /* default shared-page size (dynamic mode) */
+#endif
+
+/* Page backing (dynamic only): allocate/grow/free whole pages, ptr NULL = alloc, size 0 =
+ * free. The runtime injects i_dart_plat_realloc; a test injects stdlib realloc. */
+typedef void *(*DartPageFn)(void *ptr, size_t size);
+
+/* Header at the front of every page: a shared bump page, or a freeable one-allocation page. */
+typedef struct i_DartPage {
+    struct i_DartPage *next, *prev;
+    size_t cap;    /* usable payload bytes after this header */
+    size_t used;   /* shared: bump cursor; freeable: the allocation's size */
+} i_DartPage;
+
+typedef struct {
+    DartPageFn  page_realloc;   /* NULL => static (one buffer, no new pages) */
+    i_DartPage *shared;         /* shared bump pages (head = current); static: the buffer */
+    i_DartPage *owned;          /* freeable one-allocation pages (dynamic only) */
+    i_DartPage *free_pool;      /* freed freeable blocks kept for reuse (both modes) */
+    uint32_t    page_size;
+    size_t      max_bytes;      /* dynamic runaway guard (0 = unlimited) */
+    size_t      in_use, pooled, peak;
+    uint64_t    alloc_calls, pages_live;
+} DartAllocator;
+
+static inline size_t i_dart_allocator_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
+/* freeable size class: the next {1, 1.25, 1.5, 1.75} x 2^k >= n, min 16. Waste is
+ * bounded at 25% (pow2 wastes up to 100%) while sizes still land on a few recurring
+ * classes, so the free pool gets exact-class hits. */
+static inline size_t i_dart_allocator_class(size_t n){
+    size_t p = 16u, q;
+    if (n <= 16u) return 16u;
+    while ((p << 1) <= n){ if (p > (SIZE_MAX >> 2)) return n; p <<= 1; }
+    q = p >> 2;                               /* n in [p, 2p): round up to a quarter step */
+    return p + ((n - p + q - 1u) / q) * q;
+}
+/* dynamic runaway guard: 1 if `need` more BACKING bytes would breach max_bytes (the
+ * pool is held memory, so it counts; a pool reuse allocates nothing and skips this). */
+static inline int i_dart_allocator_over(const DartAllocator *a, size_t need){
+    return a->max_bytes && a->in_use + a->pooled + need > a->max_bytes;
+}
+
+static inline DartAllocator dart_allocator_static(void *buffer, size_t size){
+    DartAllocator a;
+    uint8_t *b = (uint8_t *)buffer;
+    uintptr_t aligned = ((uintptr_t)b + 15u) & ~(uintptr_t)15u;   /* 16-align the buffer front */
+    size_t head = (size_t)(aligned - (uintptr_t)b);
+    memset(&a, 0, sizeof a);
+    if (b && size >= head + sizeof(i_DartPage)){
+        i_DartPage *pg = (i_DartPage *)(b + head);
+        pg->next = pg->prev = NULL;
+        pg->cap = size - head - sizeof(i_DartPage);
+        pg->used = 0;
+        a.shared = pg; a.pages_live = 1;
+    }
+    return a;   /* page_realloc NULL => static */
+}
+
+static inline DartAllocator dart_allocator_dynamic(DartPageFn page_realloc, uint32_t page_size){
+    DartAllocator a; memset(&a, 0, sizeof a);
+    a.page_realloc = page_realloc;
+    a.page_size = page_size ? page_size : DART_ALLOCATOR_PAGE;
+    return a;
+}
+
+/* bump `need` bytes (16-aligned) from a shared page, adding one on overflow (dynamic). */
+static inline void *i_dart_allocator_bump(DartAllocator *a, size_t need){
+    i_DartPage *pg = a->shared;
+    need = i_dart_allocator_align(need);
+    if (!pg || i_dart_allocator_align(pg->used) + need > pg->cap){
+        size_t psz, floor_sz; i_DartPage *np;
+        if (!a->page_realloc || i_dart_allocator_over(a, need)) return NULL;   /* static full, or over the guard */
+        psz = a->page_size;
+        floor_sz = need + sizeof(i_DartPage);
+        if (floor_sz > psz) psz = floor_sz;
+        np = (i_DartPage *)a->page_realloc(NULL, psz);
+        while (!np && psz > floor_sz){
+            /* a fragmented backing heap (e.g. an ESP32 after WiFi init) may have the bytes
+               only in shreds: halve the page until one fits, before giving up */
+            psz >>= 1;
+            if (psz < floor_sz) psz = floor_sz;
+            np = (i_DartPage *)a->page_realloc(NULL, psz);
+        }
+        if (!np) return NULL;
+        np->prev = NULL; np->next = a->shared; if (a->shared) a->shared->prev = np;
+        np->cap = psz - sizeof(i_DartPage); np->used = 0;
+        a->shared = np; a->pages_live++;
+        pg = np;
+    }
+    pg->used = i_dart_allocator_align(pg->used);
+    { void *out = (uint8_t *)(pg + 1) + pg->used; pg->used += need; return out; }
+}
+
+static inline void *dart_allocator_fixed(DartAllocator *a, size_t size){
+    void *p;
+    if (!a || size == 0) return NULL;
+    p = i_dart_allocator_bump(a, size);
+    if (p){ a->alloc_calls++; a->in_use += i_dart_allocator_align(size);
+            if (a->in_use > a->peak) a->peak = a->in_use; }
+    return p;
+}
+
+/* a freeable block of >= `cap` payload bytes: a pooled freed block when one fits, else its
+ * own page (dynamic) or a header+payload bumped from the buffer (static). */
+static inline void *i_dart_allocator_new_owned(DartAllocator *a, size_t cap){
+    i_DartPage *pg;
+    {   /* pool first: the smallest fitting freed block, within 2x so a giant block is
+           not burned on a small ask. A pool hit touches no backing memory at all. */
+        i_DartPage *it, *best = NULL;
+        for (it = a->free_pool; it; it = it->next)
+            if (it->cap >= cap && (!best || it->cap < best->cap)) best = it;
+        if (best && best->cap - cap <= cap){
+            if (best->prev) best->prev->next = best->next; else a->free_pool = best->next;
+            if (best->next) best->next->prev = best->prev;
+            a->pooled -= best->cap;
+            if (a->page_realloc){
+                best->prev = NULL; best->next = a->owned;
+                if (a->owned) a->owned->prev = best;
+                a->owned = best;
+            } else best->prev = best->next = NULL;
+            best->used = best->cap;
+            a->alloc_calls++; a->in_use += best->cap;
+            if (a->in_use > a->peak) a->peak = a->in_use;
+            return (void *)(best + 1);
+        }
+    }
+    if (a->page_realloc){
+        if (i_dart_allocator_over(a, cap)) return NULL;
+        pg = (i_DartPage *)a->page_realloc(NULL, sizeof(i_DartPage) + cap);
+        if (!pg) return NULL;
+        pg->prev = NULL; pg->next = a->owned; if (a->owned) a->owned->prev = pg;
+        a->owned = pg; a->pages_live++;
+    } else {
+        pg = (i_DartPage *)i_dart_allocator_bump(a, sizeof(i_DartPage) + cap);
+        if (!pg) return NULL;
+        pg->prev = pg->next = NULL;   /* not linked; reset rewinds the buffer */
+    }
+    pg->cap = cap; pg->used = cap;
+    a->alloc_calls++; a->in_use += cap; if (a->in_use > a->peak) a->peak = a->in_use;
+    return (void *)(pg + 1);
+}
+
+/* free = move to the reuse pool (both modes), never back to the backing heap: churn
+ * recycles these, so a long run makes no steady-state system malloc/free. reset reclaims. */
+static inline void i_dart_allocator_free_owned(DartAllocator *a, void *ptr){
+    i_DartPage *pg = (i_DartPage *)ptr - 1;
+    a->in_use -= pg->cap;
+    if (a->page_realloc){                              /* dynamic: unlink from owned */
+        if (pg->prev) pg->prev->next = pg->next; else a->owned = pg->next;
+        if (pg->next) pg->next->prev = pg->prev;
+    }
+    pg->prev = NULL; pg->next = a->free_pool;
+    if (a->free_pool) a->free_pool->prev = pg;
+    a->free_pool = pg;
+    a->pooled += pg->cap;
+}
+
+/* The freeable allocator function: a DartAllocFn (pass &allocator as `user`).
+ *   ptr NULL -> allocate    size 0 -> free (to the reuse pool)    else -> resize. */
+static inline void *dart_allocator_alloc(void *alloc, void *ptr, size_t size){
+    DartAllocator *a = (DartAllocator *)alloc; size_t cap;
+    if (!a) return NULL;
+    if (size == 0){ if (ptr) i_dart_allocator_free_owned(a, ptr); return NULL; }
+    cap = a->page_realloc ? i_dart_allocator_class(size) : i_dart_allocator_align(size);   /* classed dynamic, tight static */
+    if (!ptr) return i_dart_allocator_new_owned(a, cap);
+    {   i_DartPage *pg = (i_DartPage *)ptr - 1;
+        if (cap <= pg->cap) return ptr;                          /* still fits: keep it */
+        {   void *np = i_dart_allocator_new_owned(a, cap);                   /* grow: new + copy + free old */
+            if (!np) return NULL;                                /* old left intact */
+            memcpy(np, ptr, pg->cap);
+            i_dart_allocator_free_owned(a, ptr);
+            return np;
+        }
+    }
+}
+
+/* Free everything (both intents + the pool). Static: rewind the buffer (keeps it). */
+static inline void dart_allocator_reset(DartAllocator *a){
+    if (!a) return;
+    if (a->page_realloc){
+        i_DartPage *pg, *nx;
+        for (pg = a->owned;     pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
+        for (pg = a->free_pool; pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
+        for (pg = a->shared;    pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
+        a->owned = a->free_pool = a->shared = NULL; a->pages_live = 0;
+    } else if (a->shared){
+        a->shared->used = 0; a->pages_live = 1;
+        a->free_pool = NULL;
+    }
+    a->in_use = 0; a->pooled = 0;
+}
+
+static inline void dart_allocator_stats(const DartAllocator *a, size_t *in_use, size_t *peak,
+                                     uint64_t *alloc_calls){
+    if (!a) return;
+    if (in_use)      *in_use      = a->in_use;
+    if (peak)        *peak        = a->peak;
+    if (alloc_calls) *alloc_calls = a->alloc_calls;
+}
+
+#endif /* DART_ALLOC_H */
+#pragma endregion
 #pragma region discovery/core.h
 /* sans-IO peer-discovery core: no socket, clock, or heap. Feed it datagrams +
  * now_us; it returns datagrams to send and fires peer up/down callbacks. For an
@@ -190,6 +435,15 @@ typedef struct {
                                     Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
+    /* Optional allocation hook. When set, per-peer overlay blobs are allocated on demand
+     * at each blob's ACTUAL length (grown per peer as bigger blobs arrive) instead of a
+     * fixed max_peers x meta_capacity arena pool -- typically a >90% cut, since real blobs
+     * are far smaller than the worst-case capacity. meta_capacity stays the accept bound
+     * (META_TOO_BIG above it) either way. NULL (embedded default) keeps the fixed pool.
+     * Pair with dart_discovery_destroy unless the hook's owner reclaims everything itself
+     * (the node's allocator reset does). */
+    DartAllocFn alloc;
+    void       *alloc_user;
 } DartDiscoveryCoreConfig;
 
 typedef struct DartDiscoveryState DartDiscoveryState;
@@ -208,6 +462,10 @@ uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
 
 size_t       dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg);
 DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryCoreConfig *cfg);
+/* Free the hook-allocated per-peer blobs (cfg.alloc mode only; no-op otherwise). The
+ * arena stays the caller's. Skippable when the hook's owner reclaims wholesale (the
+ * node resets its allocator instead). */
+void         dart_discovery_destroy(DartDiscoveryState *st);
 /* Relocate a live core into a bigger block at grown counts, preserving UUID, blob version,
  * local-id counter and the peer table (NOT a re-init). self_meta = the announce blob's new
  * address (the node core moved). Caller frees the old block afterward. Dynamic growth only. */
@@ -506,202 +764,6 @@ void     i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
 #endif
 #endif /* DART_PLAT_H */
 #pragma endregion
-#pragma region common/alloc.h
-/* The allocation hook: a realloc-style callback a memory-taking core calls for growable
- * buffers (ptr NULL = alloc, size 0 = free, else resize). A runtime supplies one derived
- * from its DartAllocator (below), so the core stays memory-policy agnostic. Shared by the
- * transport core and the serializer. */
-#ifndef DART_ALLOC_H
-#define DART_ALLOC_H
-
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>   /* memcpy on a freeable grow */
-
-typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
-
-/* ===========================================================================
- * DartAllocator: a paged region allocator. Two modes and two allocation intents.
- *
- * Modes (set by the constructor):
- *   static  - one caller buffer, no growth. Overflow returns NULL. For embedded.
- *   dynamic - bump within pages; a new page is malloc'd (via an injected backing)
- *             when the current one is full. It does not touch the platform itself,
- *             so common/ stays portable and each subsystem runs standalone.
- *
- * Intents (chosen per allocation, not by size):
- *   fixed    - dart_allocator_fixed: bump into a shared page, cheapest, never freed
- *              individually. For allocate-once, live-until-reset data.
- *   freeable - dart_allocator_alloc (a DartAllocFn): its own reclaimable block, so free
- *              and resize work. For anything that grows or is released early.
- *
- * dart_allocator_reset frees EVERYTHING (both intents), so no per-allocation free is ever
- * required; free a freeable block only to reclaim it mid-run. In static mode there are no
- * pages, so both intents just bump the buffer, free is a no-op, and reset rewinds. All
- * static-inline: like arena.h, the amalgamator emits it once and a layer that does not use
- * it pays nothing. */
-
-#ifndef DART_ALLOCATOR_PAGE
-#define DART_ALLOCATOR_PAGE (64u * 1024u)   /* default shared-page size (dynamic mode) */
-#endif
-
-/* Page backing (dynamic only): allocate/grow/free whole pages, ptr NULL = alloc, size 0 =
- * free. The runtime injects i_dart_plat_realloc; a test injects stdlib realloc. */
-typedef void *(*DartPageFn)(void *ptr, size_t size);
-
-/* Header at the front of every page: a shared bump page, or a freeable one-allocation page. */
-typedef struct i_DartPage {
-    struct i_DartPage *next, *prev;
-    size_t cap;    /* usable payload bytes after this header */
-    size_t used;   /* shared: bump cursor; freeable: the allocation's size */
-} i_DartPage;
-
-typedef struct {
-    DartPageFn  page_realloc;   /* NULL => static (one buffer, no new pages) */
-    i_DartPage *shared;         /* shared bump pages (head = current); static: the buffer */
-    i_DartPage *owned;          /* freeable one-allocation pages (dynamic only) */
-    uint32_t    page_size;
-    size_t      max_bytes;      /* dynamic runaway guard (0 = unlimited) */
-    size_t      in_use, peak;
-    uint64_t    alloc_calls, pages_live;
-} DartAllocator;
-
-static inline size_t i_dart_allocator_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
-static inline size_t i_dart_allocator_pow2(size_t n){                 /* round up to a power of two, >= 16 */
-    size_t p = 16u;
-    while (p < n){ if (p > (SIZE_MAX >> 1)) return n; p <<= 1; }
-    return p;
-}
-/* dynamic runaway guard: 1 if `need` more bytes would breach max_bytes */
-static inline int i_dart_allocator_over(const DartAllocator *a, size_t need){
-    return a->max_bytes && a->in_use + need > a->max_bytes;
-}
-
-static inline DartAllocator dart_allocator_static(void *buffer, size_t size){
-    DartAllocator a;
-    uint8_t *b = (uint8_t *)buffer;
-    uintptr_t aligned = ((uintptr_t)b + 15u) & ~(uintptr_t)15u;   /* 16-align the buffer front */
-    size_t head = (size_t)(aligned - (uintptr_t)b);
-    memset(&a, 0, sizeof a);
-    if (b && size >= head + sizeof(i_DartPage)){
-        i_DartPage *pg = (i_DartPage *)(b + head);
-        pg->next = pg->prev = NULL;
-        pg->cap = size - head - sizeof(i_DartPage);
-        pg->used = 0;
-        a.shared = pg; a.pages_live = 1;
-    }
-    return a;   /* page_realloc NULL => static */
-}
-
-static inline DartAllocator dart_allocator_dynamic(DartPageFn page_realloc, uint32_t page_size){
-    DartAllocator a; memset(&a, 0, sizeof a);
-    a.page_realloc = page_realloc;
-    a.page_size = page_size ? page_size : DART_ALLOCATOR_PAGE;
-    return a;
-}
-
-/* bump `need` bytes (16-aligned) from a shared page, adding one on overflow (dynamic). */
-static inline void *i_dart_allocator_bump(DartAllocator *a, size_t need){
-    i_DartPage *pg = a->shared;
-    need = i_dart_allocator_align(need);
-    if (!pg || i_dart_allocator_align(pg->used) + need > pg->cap){
-        size_t psz; i_DartPage *np;
-        if (!a->page_realloc || i_dart_allocator_over(a, need)) return NULL;   /* static full, or over the guard */
-        psz = a->page_size;
-        if (need + sizeof(i_DartPage) > psz) psz = need + sizeof(i_DartPage);   /* oversized page */
-        np = (i_DartPage *)a->page_realloc(NULL, psz);
-        if (!np) return NULL;
-        np->prev = NULL; np->next = a->shared; if (a->shared) a->shared->prev = np;
-        np->cap = psz - sizeof(i_DartPage); np->used = 0;
-        a->shared = np; a->pages_live++;
-        pg = np;
-    }
-    pg->used = i_dart_allocator_align(pg->used);
-    { void *out = (uint8_t *)(pg + 1) + pg->used; pg->used += need; return out; }
-}
-
-static inline void *dart_allocator_fixed(DartAllocator *a, size_t size){
-    void *p;
-    if (!a || size == 0) return NULL;
-    p = i_dart_allocator_bump(a, size);
-    if (p){ a->alloc_calls++; a->in_use += i_dart_allocator_align(size);
-            if (a->in_use > a->peak) a->peak = a->in_use; }
-    return p;
-}
-
-/* a freeable block of `cap` payload bytes: its own page (dynamic) or a header+payload bumped
- * from the buffer (static, where free is a no-op). */
-static inline void *i_dart_allocator_new_owned(DartAllocator *a, size_t cap){
-    i_DartPage *pg;
-    if (a->page_realloc){
-        if (i_dart_allocator_over(a, cap)) return NULL;
-        pg = (i_DartPage *)a->page_realloc(NULL, sizeof(i_DartPage) + cap);
-        if (!pg) return NULL;
-        pg->prev = NULL; pg->next = a->owned; if (a->owned) a->owned->prev = pg;
-        a->owned = pg; a->pages_live++;
-    } else {
-        pg = (i_DartPage *)i_dart_allocator_bump(a, sizeof(i_DartPage) + cap);
-        if (!pg) return NULL;
-        pg->prev = pg->next = NULL;   /* not linked; reset rewinds the buffer */
-    }
-    pg->cap = cap; pg->used = cap;
-    a->alloc_calls++; a->in_use += cap; if (a->in_use > a->peak) a->peak = a->in_use;
-    return (void *)(pg + 1);
-}
-
-static inline void i_dart_allocator_free_owned(DartAllocator *a, void *ptr){
-    i_DartPage *pg = (i_DartPage *)ptr - 1;
-    a->in_use -= pg->cap;
-    if (a->page_realloc){                              /* dynamic: unlink + free the page */
-        if (pg->prev) pg->prev->next = pg->next; else a->owned = pg->next;
-        if (pg->next) pg->next->prev = pg->prev;
-        a->page_realloc(pg, 0); a->pages_live--;
-    }                                                  /* static: no-op (reset reclaims it) */
-}
-
-/* The freeable allocator function: a DartAllocFn (pass &allocator as `user`).
- *   ptr NULL -> allocate    size 0 -> free (reclaims iff dynamic)    else -> resize. */
-static inline void *dart_allocator_alloc(void *alloc, void *ptr, size_t size){
-    DartAllocator *a = (DartAllocator *)alloc; size_t cap;
-    if (!a) return NULL;
-    if (size == 0){ if (ptr) i_dart_allocator_free_owned(a, ptr); return NULL; }
-    cap = a->page_realloc ? i_dart_allocator_pow2(size) : i_dart_allocator_align(size);   /* pow2 dynamic, tight static */
-    if (!ptr) return i_dart_allocator_new_owned(a, cap);
-    {   i_DartPage *pg = (i_DartPage *)ptr - 1;
-        if (cap <= pg->cap) return ptr;                          /* still fits: keep it */
-        {   void *np = i_dart_allocator_new_owned(a, cap);                   /* grow: new + copy + free old */
-            if (!np) return NULL;                                /* old left intact */
-            memcpy(np, ptr, pg->cap);
-            i_dart_allocator_free_owned(a, ptr);
-            return np;
-        }
-    }
-}
-
-/* Free everything (both intents). Static: rewind the buffer (keeps it). */
-static inline void dart_allocator_reset(DartAllocator *a){
-    if (!a) return;
-    if (a->page_realloc){
-        i_DartPage *pg, *nx;
-        for (pg = a->owned;  pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
-        for (pg = a->shared; pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
-        a->owned = a->shared = NULL; a->pages_live = 0;
-    } else if (a->shared){
-        a->shared->used = 0; a->pages_live = 1;
-    }
-    a->in_use = 0;
-}
-
-static inline void dart_allocator_stats(const DartAllocator *a, size_t *in_use, size_t *peak,
-                                     uint64_t *alloc_calls){
-    if (!a) return;
-    if (in_use)      *in_use      = a->in_use;
-    if (peak)        *peak        = a->peak;
-    if (alloc_calls) *alloc_calls = a->alloc_calls;
-}
-
-#endif /* DART_ALLOC_H */
-#pragma endregion
 #pragma region discovery/runtime.h
 /* peer-discovery runtime: UDP multicast, clock, UUID, and a one-tick loop over the
  * dart_discovery core. Two ways to construct one DartDiscovery:
@@ -926,7 +988,9 @@ struct i_DartDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
-    uint8_t *meta;          /* -> meta_pool slot (the OVERLAY only), capacity st->meta_capacity */
+    uint8_t *meta;          /* the OVERLAY only: a meta_pool slot (capacity st->meta_capacity),
+                               or a hook allocation grown to the largest blob this slot has held */
+    uint16_t meta_cap;      /* allocated capacity of this slot's meta buffer */
     uint16_t meta_len;
     uint32_t meta_version;  /* version of the blob we hold (0 = none yet) */
     uint32_t adv_version;   /* highest version the peer has advertised (> meta_version => we hold a stale blob) */
@@ -946,7 +1010,8 @@ struct DartDiscoveryState {
     uint8_t       want_solicit;   /* a multicast solicit (REQ) is queued for the next update */
     uint16_t      cap_peers;
     uint16_t      meta_capacity;       /* per-peer meta buffer capacity */
-    uint8_t      *meta_pool;      /* [cap_peers * meta_capacity] */
+    uint8_t      *meta_pool;      /* [cap_peers * meta_capacity]; NULL in hook mode (per-peer
+                                     blobs are then cfg.alloc allocations at actual size) */
     uint16_t      user_stride;         /* per-peer user-scratch bytes, 8-aligned (0 = none) */
     uint8_t      *user_pool;      /* [cap_peers * user_stride] opaque consumer scratch */
     /* our outgoing blob + monotonic version */
@@ -1053,7 +1118,10 @@ static void i_dart_discovery_layout(i_DartBump *b, const DartDiscoveryCoreConfig
     uint16_t user_stride   = i_dart_discovery_user_stride(cfg);
     o->st        = (DartDiscoveryState*)i_dart_bump_take(b, sizeof(struct DartDiscoveryState), 8);
     o->peers     = (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * sizeof(i_DartDiscoveryPeer), 8);
-    o->meta_pool = (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
+    /* hook mode allocates each peer's blob on demand at its actual size; only the
+       no-hook (embedded) path reserves the worst-case max_peers x meta_capacity pool */
+    o->meta_pool = cfg->alloc ? NULL
+                 : (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
     o->user_pool = user_stride ? (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * user_stride, 8) : NULL;
 }
 
@@ -1093,7 +1161,8 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     memset(st->peers, 0, (size_t)st->cap_peers * sizeof(i_DartDiscoveryPeer));
     if (st->user_pool) memset(st->user_pool, 0, (size_t)st->cap_peers * st->user_stride);
     for (i=0;i<st->cap_peers;i++){
-        st->peers[i].meta = st->meta_pool + (size_t)i * meta_capacity;
+        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * meta_capacity : NULL;
+        st->peers[i].meta_cap = st->meta_pool ? meta_capacity : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     st->self_meta         = cfg->meta;
@@ -1135,21 +1204,37 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
     st->self_meta.data    = self_meta;     /* re-point our blob (len preserved via *st=*old); version NOT bumped */
     memset(st->peers, 0, (size_t)new_max_peers * sizeof(i_DartDiscoveryPeer));
     for (i=0;i<new_max_peers;i++){
-        st->peers[i].meta = st->meta_pool + (size_t)i * new_meta_capacity;
+        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * new_meta_capacity : NULL;
+        st->peers[i].meta_cap = st->meta_pool ? new_meta_capacity : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     if (st->user_pool) memset(st->user_pool, 0, (size_t)new_max_peers * st->user_stride);
     omp = old->cap_peers;
     for (i=0;i<omp;i++){
         uint8_t *nmeta = st->peers[i].meta, *nuser = st->peers[i].user;
+        uint16_t ncap  = st->peers[i].meta_cap;
         st->peers[i] = old->peers[i];      /* carries old meta/user ptrs + everything */
-        st->peers[i].meta = nmeta;
+        if (st->meta_pool){                /* pool mode: re-point into the new pool + copy the
+                                              bytes. Hook mode: the blob allocation is stable
+                                              (outside the arena), so the struct copy carried it. */
+            st->peers[i].meta = nmeta; st->peers[i].meta_cap = ncap;
+            if (old->peers[i].meta_len) memcpy(nmeta, old->peers[i].meta, old->peers[i].meta_len);
+        }
         st->peers[i].user = nuser;         /* re-point into the new user pool */
-        if (old->peers[i].meta_len) memcpy(nmeta, old->peers[i].meta, old->peers[i].meta_len);
         if (st->user_stride && nuser && old->peers[i].user)
             memcpy(nuser, old->peers[i].user, st->user_stride);   /* preserve consumer scratch */
     }
     return st;
+}
+
+void dart_discovery_destroy(DartDiscoveryState *st){
+    uint16_t i;
+    if (!st || !st->cfg.alloc) return;   /* pool mode: nothing hook-allocated */
+    for (i=0;i<st->cap_peers;i++)
+        if (st->peers[i].meta){
+            st->cfg.alloc(st->cfg.alloc_user, st->peers[i].meta, 0);
+            st->peers[i].meta = NULL; st->peers[i].meta_cap = 0; st->peers[i].meta_len = 0;
+        }
 }
 
 /* find by UUID, including DROPPED entries: a same-UUID return reuses the slot (and
@@ -1313,7 +1398,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     } else return;
 
     if (idx < 0){
-        uint8_t *keep_meta, *keep_user;
+        uint8_t *keep_meta, *keep_user; uint16_t keep_cap;
         /* new uuid from an address we already hold => the endpoint's process restarted;
            evict the dead predecessor (frees its slot for reuse) so it can't shadow us */
         i_dart_discovery_evict_endpoint(st, &addr);
@@ -1322,10 +1407,14 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
             i_dart_discovery_fire_refused(st, &addr);
             return;
         }
-        keep_meta = st->peers[idx].meta;            /* preserve the pool pointers across reset */
+        keep_meta = st->peers[idx].meta;            /* preserve the blob buffer across reset: the
+                                                       pool slot, or the previous occupant's grown
+                                                       hook allocation (reused, not freed) */
+        keep_cap  = st->peers[idx].meta_cap;
         keep_user = st->peers[idx].user;
         memset(&st->peers[idx], 0, sizeof(i_DartDiscoveryPeer));
         st->peers[idx].meta     = keep_meta;
+        st->peers[idx].meta_cap = keep_cap;
         st->peers[idx].user     = keep_user;
         if (keep_user) memset(keep_user, 0, st->user_stride);   /* fresh consumer scratch for the new peer */
         st->peers[idx].used     = 1;
@@ -1354,11 +1443,22 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (have_disc){
         if (meta_version > peer->meta_version){
             uint8_t nl = disc_name.len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : (uint8_t)disc_name.len;
-            if (overlay.len) memcpy(peer->meta, overlay.data, overlay.len);
-            peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
-            if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
-            peer->name[nl] = '\0'; peer->name_len = nl;
-            blob_changed = 1;
+            int fits = 1;
+            if (overlay.len > peer->meta_cap){   /* hook mode: (re)size to the actual blob;
+                                                    pool-mode slots are pre-sized (checked above) */
+                uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, peer->meta, overlay.len)
+                                            : NULL;
+                if (nb){ peer->meta = nb; peer->meta_cap = (uint16_t)overlay.len; }
+                else fits = 0;                   /* OOM: keep the stale blob + version; adv_version
+                                                    stays ahead, so the re-fetch path retries */
+            }
+            if (fits){
+                if (overlay.len) memcpy(peer->meta, overlay.data, overlay.len);
+                peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
+                if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
+                peer->name[nl] = '\0'; peer->name_len = nl;
+                blob_changed = 1;
+            }
         }
         peer->solicit_due = 0;
     } else if (meta_version > peer->meta_version){
@@ -2708,15 +2808,17 @@ const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count)
 void dart_discovery_close(DartDiscovery *d, int send_bye){
     DartAllocator pool;
     if (!d) return;
-    pool = d->pool;                          /* copy out: the reset below frees the block (incl d) */
     if (send_bye){
         size_t n_bytes = dart_discovery_leave(d->core, d->txbuf, d->wire_max);
         int k;
         for (k = 0; n_bytes && k < DART_DISCOVERY_BYE_SENDS; k++) i_dart_discovery_tx(d, d->txbuf, n_bytes);
     }
+    dart_discovery_destroy(d->core);   /* hook-allocated peer blobs (no-op without a hook); may
+                                          mutate the pool, so it must run before the copy-out */
     i_dart_plat_close(d->fd);
     if (d->unicast_fd != DART_SOCK_BAD) i_dart_plat_close(d->unicast_fd);
     i_dart_plat_cleanup();
+    pool = d->pool;                /* copy out LAST: the reset below frees the block (incl d) */
     dart_allocator_reset(&pool);   /* open path: frees the block; place path: empty pool, no-op */
 }
 #pragma endregion

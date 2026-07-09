@@ -124,7 +124,9 @@ typedef struct {
 
 typedef struct i_DartNodeCore i_DartNodeCore;
 
-size_t          i_dart_node_core_required_memory(uint16_t n_channels);
+/* dynamic_meta = an alloc hook will be set: the announce blob is then hook-allocated at
+ * actual size, so no arena reservation for it (must match the init cfg's alloc). */
+size_t          i_dart_node_core_required_memory(uint16_t n_channels, int dynamic_meta);
 i_DartNodeCore *i_dart_node_core_init(void *mem, size_t mem_size, const i_DartNodeCoreConfig *cfg);
 /* Relocate the sans-IO core into a bigger block at grown counts. The transport, discovery,
  * and announce-blob pointers are re-pointed by the caller after those move. Dynamic growth. */

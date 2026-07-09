@@ -206,14 +206,16 @@ static int i_dart_node_core_array_reserve(i_DartNodeCore *c, void **arr, uint32_
 uint16_t i_dart_node_core_peer_user_bytes(void){ return (uint16_t)sizeof(i_DartNodePeerExtra); }
 void i_dart_node_core_bind_discovery(i_DartNodeCore *c, DartDiscoveryState *discovery){ c->discovery = discovery; }
 
-/* arena layout: the core struct, the announce-blob buffer, then the per-channel schema
-   registry (no peer table -- that lives in the discovery core). One sequence so measure
-   and build agree. */
-static void i_dart_node_core_layout(i_DartBump *b, uint16_t n_channels,
+/* arena layout: the core struct, the announce-blob buffer (fixed mode only: with an alloc
+   hook the blob is hook-allocated at its ACTUAL size and grown at build time, instead of
+   reserving dart_meta_capacity's worst case), then the per-channel schema registry (no peer
+   table -- that lives in the discovery core). One sequence so measure and build agree. */
+static void i_dart_node_core_layout(i_DartBump *b, uint16_t n_channels, int dynamic_meta,
                               i_DartNodeCore **out_c, uint8_t **out_meta,
                               DartMetaSchema **out_schemas, const DartSchema ***out_compiled){
     i_DartNodeCore *c       = (i_DartNodeCore*)i_dart_bump_take(b, sizeof(struct i_DartNodeCore), 16);
-    uint8_t *meta           = (uint8_t*)       i_dart_bump_take(b, dart_meta_capacity(n_channels), 16);
+    uint8_t *meta           = dynamic_meta ? NULL
+                            : (uint8_t*)   i_dart_bump_take(b, dart_meta_capacity(n_channels), 16);
     DartMetaSchema *schemas = (DartMetaSchema*)i_dart_bump_take(b, (size_t)n_channels*sizeof(DartMetaSchema), 16);
     const DartSchema **compiled = (const DartSchema**)i_dart_bump_take(b, (size_t)n_channels*sizeof(DartSchema*), 16);
     if (out_c)        *out_c        = c;
@@ -222,9 +224,9 @@ static void i_dart_node_core_layout(i_DartBump *b, uint16_t n_channels,
     if (out_compiled) *out_compiled = compiled;
 }
 
-size_t i_dart_node_core_required_memory(uint16_t n_channels){
+size_t i_dart_node_core_required_memory(uint16_t n_channels, int dynamic_meta){
     i_DartBump b; memset(&b, 0, sizeof b);
-    i_dart_node_core_layout(&b, n_channels, NULL, NULL, NULL, NULL);
+    i_dart_node_core_layout(&b, n_channels, dynamic_meta, NULL, NULL, NULL, NULL);
     return b.offset + 16u;   /* slack to align the caller's mem up to base */
 }
 
@@ -232,10 +234,10 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
     i_DartBump b; i_DartNodeCore *c; uint8_t *base, *meta;
     DartMetaSchema *schemas; const DartSchema **compiled;
     if (!mem || !cfg || !cfg->transport) return NULL;
-    if (cap < i_dart_node_core_required_memory(cfg->n_channels)) return NULL;
+    if (cap < i_dart_node_core_required_memory(cfg->n_channels, cfg->alloc != NULL)) return NULL;
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     memset(&b, 0, sizeof b); b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
-    i_dart_node_core_layout(&b, cfg->n_channels, &c, &meta, &schemas, &compiled);
+    i_dart_node_core_layout(&b, cfg->n_channels, cfg->alloc != NULL, &c, &meta, &schemas, &compiled);
 
     memset(c, 0, sizeof *c);
     c->transport     = cfg->transport;
@@ -244,8 +246,8 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
     c->alloc         = cfg->alloc;         c->alloc_user = cfg->alloc_user;
     c->oob_capable   = cfg->oob_capable;
     memcpy(c->oob_host, cfg->oob_host, 16);
-    c->meta_buf      = meta;
-    c->meta_cap      = dart_meta_capacity(cfg->n_channels);
+    c->meta_buf      = meta;                                            /* dynamic: NULL until the first build */
+    c->meta_cap      = meta ? dart_meta_capacity(cfg->n_channels) : 0;
     c->frag_size     = cfg->frag_size;
     c->chan_schemas  = schemas;
     c->chan_compiled = compiled;
@@ -264,14 +266,17 @@ i_DartNodeCore *i_dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, siz
     DartMetaSchema *schemas; const DartSchema **compiled;
     uint16_t keep;
     if (!old) return NULL;
-    if (new_cap < i_dart_node_core_required_memory(new_n_channels)) return NULL;
+    if (new_cap < i_dart_node_core_required_memory(new_n_channels, old->alloc != NULL)) return NULL;
     base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
     memset(&b, 0, sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
-    i_dart_node_core_layout(&b, new_n_channels, &c, &meta, &schemas, &compiled);
+    i_dart_node_core_layout(&b, new_n_channels, old->alloc != NULL, &c, &meta, &schemas, &compiled);
     *c = *old;                          /* scalars + transport/discovery ptrs (caller re-points);
                                            the hook-allocated schema arrays ride along untouched */
-    c->meta_buf  = meta;                /* caller rebuilds the blob into it */
-    c->meta_cap  = dart_meta_capacity(new_n_channels);
+    if (meta){                          /* fixed mode: caller rebuilds the blob into the new slot */
+        c->meta_buf = meta;
+        c->meta_cap = dart_meta_capacity(new_n_channels);
+    }                                   /* dynamic: the hook-allocated blob is stable, carried by *c = *old
+                                           (the caller's rebuild grows it if the new counts need more) */
     keep = old->n_channels < new_n_channels ? old->n_channels : new_n_channels;
     memset(schemas, 0, (size_t)new_n_channels * sizeof *schemas);
     memcpy(schemas, old->chan_schemas, (size_t)keep * sizeof *schemas);   /* wire views stay valid: the
@@ -413,6 +418,14 @@ int i_dart_node_core_schema_check(i_DartNodeCore *c, uint16_t channel, uint16_t 
    current fields. The codec lives in the transport core; the OOB fields default to 0 in a
    non-SHM build. The node NAME is not here: the runtime hands it to discovery directly. */
 uint16_t i_dart_node_core_build_meta(i_DartNodeCore *c){
+    if (c->alloc){   /* dynamic: (re)size the blob buffer to the exact content first */
+        uint16_t need = dart_transport_meta_size(c->transport, c->chan_schemas);
+        if (need > c->meta_cap){
+            uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->meta_buf, need);
+            if (!nb) return c->meta_len;   /* OOM: keep the previous blob (stale but consistent) */
+            c->meta_buf = nb; c->meta_cap = need;
+        }
+    }
     c->meta_len = dart_transport_meta_build(c->transport, c->meta_buf, c->meta_cap,
                                   c->frag_size, c->oob_capable, c->oob_host,
                                   c->chan_schemas);

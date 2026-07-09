@@ -447,14 +447,16 @@ const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count)
 void dart_discovery_close(DartDiscovery *d, int send_bye){
     DartAllocator pool;
     if (!d) return;
-    pool = d->pool;                          /* copy out: the reset below frees the block (incl d) */
     if (send_bye){
         size_t n_bytes = dart_discovery_leave(d->core, d->txbuf, d->wire_max);
         int k;
         for (k = 0; n_bytes && k < DART_DISCOVERY_BYE_SENDS; k++) i_dart_discovery_tx(d, d->txbuf, n_bytes);
     }
+    dart_discovery_destroy(d->core);   /* hook-allocated peer blobs (no-op without a hook); may
+                                          mutate the pool, so it must run before the copy-out */
     i_dart_plat_close(d->fd);
     if (d->unicast_fd != DART_SOCK_BAD) i_dart_plat_close(d->unicast_fd);
     i_dart_plat_cleanup();
+    pool = d->pool;                /* copy out LAST: the reset below frees the block (incl d) */
     dart_allocator_reset(&pool);   /* open path: frees the block; place path: empty pool, no-op */
 }

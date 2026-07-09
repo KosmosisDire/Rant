@@ -83,12 +83,16 @@ struct DartNode {
     uint8_t        shm_host[16];  /* our host uuid (advertised; same-host check) */
     uint64_t       shm_base;      /* per-node segment id base; low 19 bits = (channel<<3)|class */
     void          *shm_scratch; uint32_t shm_scratch_cap;   /* one-copy receive scratch */
-    void         **shm_pool;      /* [nchan*N_CLASSES] our (channel,class) segments (NULL = not created) */
-    uint8_t       *shm_pool_mem;  /* arena: nchan * N_CLASSES * i_dart_shm_state_bytes */
+    void         **shm_pool;      /* [nchan*N_CLASSES] our (channel,class) segments (NULL = not
+                                     created); each created segment's state is a stable hook
+                                     allocation, made when the segment is (lazily) created */
     uint16_t       shm_n_channels;
-    uint64_t      *shm_reader_segments;      /* [reader_max] attached reader-segment ids (0 = empty) */
-    uint8_t       *shm_reader_pool_mem; /* [reader_max * i_dart_shm_state_bytes] */
-    uint16_t       shm_reader_max;
+    /* reader-side attach cache, hook-allocated and grown on demand: sized by segments
+       actually attached (same-host peers x their publishing channels), not the worst-case
+       peers x channels x classes. A node with no same-host peer allocates none of it. */
+    uint64_t      *shm_reader_segments;  /* [shm_reader_cap] attached segment ids */
+    void         **shm_reader_states;    /* [shm_reader_cap] their pool states (stable allocations) */
+    uint16_t       shm_reader_cap, shm_reader_count;
     uint32_t       shm_tx, shm_rx;/* messages published / delivered via SHM (observability) */
 #endif
 };
@@ -275,22 +279,13 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     i_dart_node_emit(n, &e);
 }
 
-#ifdef DART_SHM
-/* reader-pool cache capacity: a same-host peer publishes on its channels, one segment
- * each, so size to peers x channels (clamped to the u16 the cache index uses) */
-static uint16_t i_dart_node_shm_reader_max(uint16_t max_peers, uint16_t n_channels){
-    uint32_t r = (uint32_t)max_peers * (n_channels ? n_channels : 1u) * DART_SHM_N_CLASSES;
-    return (uint16_t)(r > 0xFFFFu ? 0xFFFFu : r);
-}
-#endif
-
 /* The node arena's sub-blocks, laid out in ONE place so the measure pass (bump.base
  * NULL, read bump.offset) and the build pass (read the pointers) run the same i_dart_bump_take
  * sequence and can never drift. */
 typedef struct {
     uint8_t   *handles, *node_core, *transport, *discovery, *rx_buf;
 #ifdef DART_SHM
-    uint8_t   *shm_pool, *shm_pool_mem, *shm_reader_segments, *shm_reader_pool;
+    uint8_t   *shm_pool;
 #endif
     size_t     node_core_bytes, transport_bytes, discovery_bytes, rx_buf_bytes;
 } i_DartNodeBlocks;
@@ -299,19 +294,16 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_c
                               const DartConfig *transport_cfg,
                               const DartDiscoveryNetConfig *discovery_rt_cfg, i_DartNodeBlocks *o){
     o->handles       = (uint8_t*)i_dart_bump_take(b, (size_t)max_channels * sizeof(DartChannel*), 16);
-    o->node_core_bytes = i_dart_node_core_required_memory(max_channels);   /* peers live in discovery now */
+    o->node_core_bytes = i_dart_node_core_required_memory(max_channels, 1);   /* peers live in discovery; the
+                                                                                 node always has an alloc hook,
+                                                                                 so the blob is dynamic */
     o->node_core = (uint8_t*)i_dart_bump_take(b, o->node_core_bytes, 16);
     o->transport_bytes = dart_transport_required_memory(transport_cfg);
     o->transport = (uint8_t*)i_dart_bump_take(b, o->transport_bytes, 16);
 #ifdef DART_SHM
-    {   size_t state_bytes  = i_dart_shm_state_bytes();
-        uint32_t n_segments = (uint32_t)max_channels * DART_SHM_N_CLASSES;
-        uint16_t reader_max = i_dart_node_shm_reader_max(max_peers, max_channels);
-        o->shm_pool            = (uint8_t*)i_dart_bump_take(b, (size_t)n_segments * sizeof(void*), 16);
-        o->shm_pool_mem        = (uint8_t*)i_dart_bump_take(b, (size_t)n_segments * state_bytes, 16);
-        o->shm_reader_segments = (uint8_t*)i_dart_bump_take(b, (size_t)reader_max * 8u, 16);
-        o->shm_reader_pool     = (uint8_t*)i_dart_bump_take(b, (size_t)reader_max * state_bytes, 16);
-    }
+    /* only the (channel,class) -> segment pointer table lives in the arena; segment state
+       and the reader attach cache are lazy hook allocations, made when SHM is actually used */
+    o->shm_pool = (uint8_t*)i_dart_bump_take(b, (size_t)max_channels * DART_SHM_N_CLASSES * sizeof(void*), 16);
 #endif
     o->discovery_bytes = dart_discovery_placement_memory(discovery_rt_cfg);
     o->discovery = (uint8_t*)i_dart_bump_take(b, o->discovery_bytes, 16);
@@ -354,24 +346,38 @@ static i_DartShmPool *i_dart_node_shm_channel_pool(DartNode *n, uint16_t ch, uin
     i_dart_shm_seg_name(c.name, seg);
     c.chunk_bytes = i_dart_shm_class_bytes(k);
     c.n_chunks = keep_last ? keep_last : 1u;
-    mem = n->shm_pool_mem + idx * i_dart_shm_state_bytes();
+    mem = (uint8_t*)i_dart_node_alloc(n, NULL, i_dart_shm_state_bytes());   /* stable: survives arena grows */
+    if (!mem) return NULL;
     n->shm_pool[idx] = i_dart_shm_create(mem, &c);
+    if (!n->shm_pool[idx]) i_dart_node_alloc(n, mem, 0);
     return (i_DartShmPool*)n->shm_pool[idx];
 }
-/* lazily attach a peer's segment by id (class is in the low bits); cache it. */
+/* lazily attach a peer's segment by id (class is in the low bits); cache it. The cache
+ * grows with segments actually attached, so a node with no same-host peer holds none. */
 static i_DartShmPool *i_dart_node_shm_reader_pool(DartNode *n, uint64_t seg){
-    uint16_t i, slot = 0xFFFF; i_DartShmConfig c; uint8_t *mem; size_t state_bytes;
-    state_bytes = i_dart_shm_state_bytes();
-    for (i=0;i<n->shm_reader_max;i++){
-        if (n->shm_reader_segments[i]==seg) return (i_DartShmPool*)(n->shm_reader_pool_mem + (size_t)i*state_bytes);
-        if (n->shm_reader_segments[i]==0 && slot==0xFFFF) slot = i;
+    uint16_t i; i_DartShmConfig c; uint8_t *mem;
+    for (i=0;i<n->shm_reader_count;i++)
+        if (n->shm_reader_segments[i]==seg) return (i_DartShmPool*)n->shm_reader_states[i];
+    if (n->shm_reader_count == n->shm_reader_cap){        /* grow the id + state-ptr arrays */
+        uint16_t ncap = n->shm_reader_cap ? (uint16_t)(n->shm_reader_cap*2u) : 8u;
+        uint64_t *nseg; void **nst;
+        if (ncap <= n->shm_reader_cap) return NULL;       /* u16 wrap: an absurd segment count */
+        nseg = (uint64_t*)i_dart_node_alloc(n, n->shm_reader_segments, (size_t)ncap*sizeof(uint64_t));
+        if (!nseg) return NULL;
+        n->shm_reader_segments = nseg;
+        nst = (void**)i_dart_node_alloc(n, n->shm_reader_states, (size_t)ncap*sizeof(void*));
+        if (!nst) return NULL;
+        n->shm_reader_states = nst;
+        n->shm_reader_cap = ncap;
     }
-    if (slot==0xFFFF) return NULL;                         /* cache full */
     memset(&c, 0, sizeof c);
     c.segment_id = seg; i_dart_shm_seg_name(c.name, seg);     /* attach maps whole + reads geometry */
-    mem = n->shm_reader_pool_mem + (size_t)slot*state_bytes;
-    if (!i_dart_shm_attach(mem, &c)) return NULL;
-    n->shm_reader_segments[slot] = seg;
+    mem = (uint8_t*)i_dart_node_alloc(n, NULL, i_dart_shm_state_bytes());
+    if (!mem) return NULL;
+    if (!i_dart_shm_attach(mem, &c)){ i_dart_node_alloc(n, mem, 0); return NULL; }
+    n->shm_reader_segments[n->shm_reader_count] = seg;
+    n->shm_reader_states[n->shm_reader_count] = mem;
+    n->shm_reader_count++;
     return (i_DartShmPool*)mem;
 }
 static int i_dart_node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
@@ -417,6 +423,9 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.discovery.max_peers   = max_peers;
     dc.discovery.meta_capacity = dart_meta_capacity(max_channels);
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* node-core lifecycle state per peer */
+    dc.discovery.alloc = i_dart_node_alloc;   /* per-peer blobs at actual size, not the worst-case pool
+                                                 (set before sizing so measure and place agree; the
+                                                 alloc_user is patched to n below, once it exists) */
     dc.group                 = o.net.discovery_group;
     dc.discovery_port        = o.net.discovery_port;
     dc.ttl                   = o.net.multicast_ttl;
@@ -504,15 +513,12 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->transport = dart_transport_init(blocks.transport, blocks.transport_bytes, &tc);
     if (!n->transport){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, 0); goto fail_threads; }
 #ifdef DART_SHM
-    {   uint32_t n_segments = (uint32_t)max_channels * DART_SHM_N_CLASSES;
-        uint16_t reader_max = i_dart_node_shm_reader_max(max_peers, max_channels); uint32_t i;
-        n->shm_n_channels = max_channels; n->shm_reader_max = reader_max;
-        n->shm_pool            = (void**)blocks.shm_pool;
-        n->shm_pool_mem        = blocks.shm_pool_mem;
-        n->shm_reader_segments = (uint64_t*)blocks.shm_reader_segments;
-        n->shm_reader_pool_mem = blocks.shm_reader_pool;
+    {   uint32_t n_segments = (uint32_t)max_channels * DART_SHM_N_CLASSES; uint32_t i;
+        n->shm_n_channels = max_channels;
+        n->shm_pool = (void**)blocks.shm_pool;
         for (i=0;i<n_segments;i++) n->shm_pool[i]=NULL;
-        for (i=0;i<reader_max;i++) n->shm_reader_segments[i]=0;
+        n->shm_reader_segments = NULL; n->shm_reader_states = NULL;   /* lazy: first attach allocates */
+        n->shm_reader_cap = 0; n->shm_reader_count = 0;
     }
 #endif
 
@@ -549,6 +555,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 
     dc.discovery.on_event = i_dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;
+    dc.discovery.alloc_user = n;               /* the blob hook allocates from the node's pool */
     dc.discovery.name     = dart_string(node_name, node_name_len);   /* discovery-owned (its own blob section) */
     /* the core builds our OVERLAY (frag size + OOB host + interest); discovery wraps it in
        its blob (after the locator + name) so peers reassemble and match from discovery */
@@ -607,6 +614,8 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     tc.allocator=i_dart_node_alloc; tc.frag_payload=n->net.fragment_size;
     dc.discovery.max_peers=new_max_peers; dc.discovery.meta_capacity=new_meta_cap;
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* size discovery's scratch to match */
+    dc.discovery.alloc = i_dart_node_alloc; dc.discovery.alloc_user = n; /* sizing must match the live core's
+                                                                            hook mode (no arena blob pool) */
 
     memset(&b,0,sizeof b);
     i_dart_node_layout(&b, new_max_peers, new_max_channels, &tc, &dc, &nb);
@@ -637,24 +646,14 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
 
 #ifdef DART_SHM
     if (n->shm_capable){
-        size_t sb = i_dart_shm_state_bytes();
         uint32_t old_segs=(uint32_t)n->shm_n_channels*DART_SHM_N_CLASSES;
         uint32_t new_segs=(uint32_t)new_max_channels*DART_SHM_N_CLASSES, i;
-        uint16_t new_reader_max = i_dart_node_shm_reader_max(new_max_peers, new_max_channels);
         void **np = (void**)nb.shm_pool;
         for (i=0;i<new_segs;i++) np[i]=NULL;
-        for (i=0;i<old_segs;i++)        /* writer pool: keep segments mapped, relocate the state */
-            if (n->shm_pool[i]){
-                memcpy(nb.shm_pool_mem + (size_t)i*sb, n->shm_pool[i], sb);
-                np[i] = nb.shm_pool_mem + (size_t)i*sb;
-            }
-        for (i=0;i<n->shm_reader_max;i++)  /* reader pool: detach + reset (re-attaches lazily) */
-            if (n->shm_reader_segments[i]) i_dart_shm_detach((i_DartShmPool*)(n->shm_reader_pool_mem+(size_t)i*sb));
-        n->shm_pool=np; n->shm_pool_mem=nb.shm_pool_mem;
-        n->shm_reader_segments=(uint64_t*)nb.shm_reader_segments;
-        n->shm_reader_pool_mem=nb.shm_reader_pool;
-        for (i=0;i<new_reader_max;i++) n->shm_reader_segments[i]=0;
-        n->shm_reader_max=new_reader_max; n->shm_n_channels=new_max_channels;
+        for (i=0;i<old_segs;i++) np[i]=n->shm_pool[i];   /* segment states are stable hook
+                                                            allocations: only the pointer table moves */
+        n->shm_pool=np; n->shm_n_channels=new_max_channels;
+        /* the reader attach cache is hook-allocated too: attachments survive the grow */
     }
 #endif
 
@@ -1305,16 +1304,17 @@ int dart_node_close(DartNode *n, int send_bye){
     /* from here the contract holds: no other thread is inside, or may enter, any
        dart_* call on this node, so the teardown runs truly single-threaded */
 #endif
-    pool = n->pool;                                   /* copy out: the reset below frees n itself */
-    if (n->discovery) dart_discovery_close(n->discovery, send_bye);
+    if (n->discovery) dart_discovery_close(n->discovery, send_bye);   /* frees peer blobs via our
+                                                                         hook, so it must run BEFORE
+                                                                         the pool is copied out */
     if (n->fd != DART_SOCK_BAD) i_dart_plat_close(n->fd);
 #ifdef DART_SHM
     if (n->shm_capable){                              /* unmap OS segments; the pool reset frees only pool memory */
-        size_t state_bytes = i_dart_shm_state_bytes(); uint32_t i, n_segments = (uint32_t)n->shm_n_channels * DART_SHM_N_CLASSES;
+        uint32_t i, n_segments = (uint32_t)n->shm_n_channels * DART_SHM_N_CLASSES;
         for (i=0;i<n_segments;i++)
             if (n->shm_pool[i]) i_dart_shm_detach((i_DartShmPool*)n->shm_pool[i]);   /* unlinks ours */
-        for (i=0;i<n->shm_reader_max;i++)
-            if (n->shm_reader_segments[i]) i_dart_shm_detach((i_DartShmPool*)(n->shm_reader_pool_mem + (size_t)i*state_bytes));
+        for (i=0;i<n->shm_reader_count;i++)
+            if (n->shm_reader_states[i]) i_dart_shm_detach((i_DartShmPool*)n->shm_reader_states[i]);
     }
 #endif
 #ifdef DART_THREADS
@@ -1323,6 +1323,7 @@ int dart_node_close(DartNode *n, int send_bye){
     i_dart_plat_mutex_destroy(&n->mu);
 #endif
     i_dart_plat_cleanup();
+    pool = n->pool;                /* copy out LAST (no hook frees may follow): the reset frees n itself */
     dart_allocator_reset(&pool);   /* frees the node struct, arena, message buffers, schemas, handles */
     return DART_OK;
 }

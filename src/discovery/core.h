@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../common/string.h"   /* DartBytes (the opaque meta/overlay blob, datagrams) */
+#include "../common/alloc.h"    /* DartAllocFn (the optional per-peer blob hook) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -124,6 +125,15 @@ typedef struct {
                                     Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
+    /* Optional allocation hook. When set, per-peer overlay blobs are allocated on demand
+     * at each blob's ACTUAL length (grown per peer as bigger blobs arrive) instead of a
+     * fixed max_peers x meta_capacity arena pool -- typically a >90% cut, since real blobs
+     * are far smaller than the worst-case capacity. meta_capacity stays the accept bound
+     * (META_TOO_BIG above it) either way. NULL (embedded default) keeps the fixed pool.
+     * Pair with dart_discovery_destroy unless the hook's owner reclaims everything itself
+     * (the node's allocator reset does). */
+    DartAllocFn alloc;
+    void       *alloc_user;
 } DartDiscoveryCoreConfig;
 
 typedef struct DartDiscoveryState DartDiscoveryState;
@@ -142,6 +152,10 @@ uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
 
 size_t       dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg);
 DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryCoreConfig *cfg);
+/* Free the hook-allocated per-peer blobs (cfg.alloc mode only; no-op otherwise). The
+ * arena stays the caller's. Skippable when the hook's owner reclaims wholesale (the
+ * node resets its allocator instead). */
+void         dart_discovery_destroy(DartDiscoveryState *st);
 /* Relocate a live core into a bigger block at grown counts, preserving UUID, blob version,
  * local-id counter and the peer table (NOT a re-init). self_meta = the announce blob's new
  * address (the node core moved). Caller frees the old block afterward. Dynamic growth only. */

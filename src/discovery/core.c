@@ -20,7 +20,9 @@ struct i_DartDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
-    uint8_t *meta;          /* -> meta_pool slot (the OVERLAY only), capacity st->meta_capacity */
+    uint8_t *meta;          /* the OVERLAY only: a meta_pool slot (capacity st->meta_capacity),
+                               or a hook allocation grown to the largest blob this slot has held */
+    uint16_t meta_cap;      /* allocated capacity of this slot's meta buffer */
     uint16_t meta_len;
     uint32_t meta_version;  /* version of the blob we hold (0 = none yet) */
     uint32_t adv_version;   /* highest version the peer has advertised (> meta_version => we hold a stale blob) */
@@ -40,7 +42,8 @@ struct DartDiscoveryState {
     uint8_t       want_solicit;   /* a multicast solicit (REQ) is queued for the next update */
     uint16_t      cap_peers;
     uint16_t      meta_capacity;       /* per-peer meta buffer capacity */
-    uint8_t      *meta_pool;      /* [cap_peers * meta_capacity] */
+    uint8_t      *meta_pool;      /* [cap_peers * meta_capacity]; NULL in hook mode (per-peer
+                                     blobs are then cfg.alloc allocations at actual size) */
     uint16_t      user_stride;         /* per-peer user-scratch bytes, 8-aligned (0 = none) */
     uint8_t      *user_pool;      /* [cap_peers * user_stride] opaque consumer scratch */
     /* our outgoing blob + monotonic version */
@@ -147,7 +150,10 @@ static void i_dart_discovery_layout(i_DartBump *b, const DartDiscoveryCoreConfig
     uint16_t user_stride   = i_dart_discovery_user_stride(cfg);
     o->st        = (DartDiscoveryState*)i_dart_bump_take(b, sizeof(struct DartDiscoveryState), 8);
     o->peers     = (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * sizeof(i_DartDiscoveryPeer), 8);
-    o->meta_pool = (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
+    /* hook mode allocates each peer's blob on demand at its actual size; only the
+       no-hook (embedded) path reserves the worst-case max_peers x meta_capacity pool */
+    o->meta_pool = cfg->alloc ? NULL
+                 : (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
     o->user_pool = user_stride ? (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * user_stride, 8) : NULL;
 }
 
@@ -187,7 +193,8 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     memset(st->peers, 0, (size_t)st->cap_peers * sizeof(i_DartDiscoveryPeer));
     if (st->user_pool) memset(st->user_pool, 0, (size_t)st->cap_peers * st->user_stride);
     for (i=0;i<st->cap_peers;i++){
-        st->peers[i].meta = st->meta_pool + (size_t)i * meta_capacity;
+        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * meta_capacity : NULL;
+        st->peers[i].meta_cap = st->meta_pool ? meta_capacity : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     st->self_meta         = cfg->meta;
@@ -229,21 +236,37 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
     st->self_meta.data    = self_meta;     /* re-point our blob (len preserved via *st=*old); version NOT bumped */
     memset(st->peers, 0, (size_t)new_max_peers * sizeof(i_DartDiscoveryPeer));
     for (i=0;i<new_max_peers;i++){
-        st->peers[i].meta = st->meta_pool + (size_t)i * new_meta_capacity;
+        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * new_meta_capacity : NULL;
+        st->peers[i].meta_cap = st->meta_pool ? new_meta_capacity : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     if (st->user_pool) memset(st->user_pool, 0, (size_t)new_max_peers * st->user_stride);
     omp = old->cap_peers;
     for (i=0;i<omp;i++){
         uint8_t *nmeta = st->peers[i].meta, *nuser = st->peers[i].user;
+        uint16_t ncap  = st->peers[i].meta_cap;
         st->peers[i] = old->peers[i];      /* carries old meta/user ptrs + everything */
-        st->peers[i].meta = nmeta;
+        if (st->meta_pool){                /* pool mode: re-point into the new pool + copy the
+                                              bytes. Hook mode: the blob allocation is stable
+                                              (outside the arena), so the struct copy carried it. */
+            st->peers[i].meta = nmeta; st->peers[i].meta_cap = ncap;
+            if (old->peers[i].meta_len) memcpy(nmeta, old->peers[i].meta, old->peers[i].meta_len);
+        }
         st->peers[i].user = nuser;         /* re-point into the new user pool */
-        if (old->peers[i].meta_len) memcpy(nmeta, old->peers[i].meta, old->peers[i].meta_len);
         if (st->user_stride && nuser && old->peers[i].user)
             memcpy(nuser, old->peers[i].user, st->user_stride);   /* preserve consumer scratch */
     }
     return st;
+}
+
+void dart_discovery_destroy(DartDiscoveryState *st){
+    uint16_t i;
+    if (!st || !st->cfg.alloc) return;   /* pool mode: nothing hook-allocated */
+    for (i=0;i<st->cap_peers;i++)
+        if (st->peers[i].meta){
+            st->cfg.alloc(st->cfg.alloc_user, st->peers[i].meta, 0);
+            st->peers[i].meta = NULL; st->peers[i].meta_cap = 0; st->peers[i].meta_len = 0;
+        }
 }
 
 /* find by UUID, including DROPPED entries: a same-UUID return reuses the slot (and
@@ -407,7 +430,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     } else return;
 
     if (idx < 0){
-        uint8_t *keep_meta, *keep_user;
+        uint8_t *keep_meta, *keep_user; uint16_t keep_cap;
         /* new uuid from an address we already hold => the endpoint's process restarted;
            evict the dead predecessor (frees its slot for reuse) so it can't shadow us */
         i_dart_discovery_evict_endpoint(st, &addr);
@@ -416,10 +439,14 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
             i_dart_discovery_fire_refused(st, &addr);
             return;
         }
-        keep_meta = st->peers[idx].meta;            /* preserve the pool pointers across reset */
+        keep_meta = st->peers[idx].meta;            /* preserve the blob buffer across reset: the
+                                                       pool slot, or the previous occupant's grown
+                                                       hook allocation (reused, not freed) */
+        keep_cap  = st->peers[idx].meta_cap;
         keep_user = st->peers[idx].user;
         memset(&st->peers[idx], 0, sizeof(i_DartDiscoveryPeer));
         st->peers[idx].meta     = keep_meta;
+        st->peers[idx].meta_cap = keep_cap;
         st->peers[idx].user     = keep_user;
         if (keep_user) memset(keep_user, 0, st->user_stride);   /* fresh consumer scratch for the new peer */
         st->peers[idx].used     = 1;
@@ -448,11 +475,22 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (have_disc){
         if (meta_version > peer->meta_version){
             uint8_t nl = disc_name.len > DART_DISCOVERY_NAME_MAX ? DART_DISCOVERY_NAME_MAX : (uint8_t)disc_name.len;
-            if (overlay.len) memcpy(peer->meta, overlay.data, overlay.len);
-            peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
-            if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
-            peer->name[nl] = '\0'; peer->name_len = nl;
-            blob_changed = 1;
+            int fits = 1;
+            if (overlay.len > peer->meta_cap){   /* hook mode: (re)size to the actual blob;
+                                                    pool-mode slots are pre-sized (checked above) */
+                uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, peer->meta, overlay.len)
+                                            : NULL;
+                if (nb){ peer->meta = nb; peer->meta_cap = (uint16_t)overlay.len; }
+                else fits = 0;                   /* OOM: keep the stale blob + version; adv_version
+                                                    stays ahead, so the re-fetch path retries */
+            }
+            if (fits){
+                if (overlay.len) memcpy(peer->meta, overlay.data, overlay.len);
+                peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
+                if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
+                peer->name[nl] = '\0'; peer->name_len = nl;
+                blob_changed = 1;
+            }
         }
         peer->solicit_due = 0;
     } else if (meta_version > peer->meta_version){

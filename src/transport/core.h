@@ -273,6 +273,10 @@ typedef struct {
  * n_channels can produce, capped to one (IP-fragmentable) UDP datagram. Sizes discovery's
  * meta_capacity. */
 uint16_t  dart_meta_capacity(uint16_t n_channels);
+/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT channel + schema
+ * state, so a growable caller sizes its buffer to actual content; dart_meta_capacity stays
+ * the fixed-buffer worst case (and the accept bound for peers' overlays). */
+uint16_t  dart_transport_meta_size(DartTransportState *st, const DartMetaSchema *schemas);
 /* Build the overlay into out[cap] (cap >= dart_meta_capacity): the version prefix (frag_size,
  * plus shm_capable + host[16] when DART_SHM is compiled), st's interest list, then the
  * schema section. schemas is one entry per channel (index = channel index) or NULL; every
