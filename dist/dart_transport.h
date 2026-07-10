@@ -398,12 +398,12 @@ typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
  * just { .reliability = DART_RELIABLE }. */
 typedef struct {
     DartReliability reliability;
-    uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1 */
+    uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1, or 10 on a reliable channel */
     uint16_t catch_up;           /* recent messages a new subscriber gets at once. 0 = future
                                     only, 1 = latest value. Keep small (bursts at startup) */
     uint32_t max_message_bytes;  /* biggest message. 0 = one fragment, or grow-to-fit with an allocator */
-    uint32_t heartbeat_us;       /* reliable: idle-writer ping (repairs a lost final message). 0 = 100ms */
-    uint32_t repair_delay_us;    /* reliable: reader's delay before requesting a resend. 0 = 20ms */
+    uint32_t heartbeat_us;       /* reliable: idle-writer ping (repairs a lost final message). 0 = 250ms */
+    uint32_t repair_delay_us;    /* reliable: reader's delay before requesting a resend. 0 = 50ms */
     uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow reader before
                                     evicting un-acked history. 0 = none (pure KEEP_LAST) */
     uint32_t shm_max_bytes;      /* same-host SHM: pin this channel to one size class big enough for
@@ -1972,9 +1972,10 @@ static inline uint64_t i_dart_fnv1a64_str(const char *s){
 #endif
 #endif
 
-#define DART_QOS_DEF_KEEP_LAST    1u
-#define DART_QOS_DEF_HEARTBEAT_US 100000u   /* 100 ms idle writer heartbeat */
-#define DART_QOS_DEF_REPAIR_US    20000u    /* 20 ms reader repair-request delay */
+#define DART_QOS_DEF_KEEP_LAST     1u
+#define DART_QOS_DEF_KEEP_LAST_REL 10u   /* reliable: room for repair before overwrite */
+#define DART_QOS_DEF_HEARTBEAT_US 250000u   /* 250 ms idle writer heartbeat */
+#define DART_QOS_DEF_REPAIR_US    50000u    /* 50 ms reader repair-request delay */
 
 /* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = alias, then the body.
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one
@@ -3188,7 +3189,9 @@ static uint16_t i_dart_max_fragments(uint32_t max_message_bytes){
 /* zero-means-default for the tunable QoS fields, applied once at init so the
  * stored qos is authoritative */
 static void i_dart_qos_defaults(DartQos *q, int dynamic){
-    if (q->keep_last == 0)        q->keep_last       = DART_QOS_DEF_KEEP_LAST;
+    if (q->keep_last == 0)        q->keep_last       = q->reliability==DART_RELIABLE
+                                                     ? DART_QOS_DEF_KEEP_LAST_REL
+                                                     : DART_QOS_DEF_KEEP_LAST;
     if (q->heartbeat_us == 0)     q->heartbeat_us    = DART_QOS_DEF_HEARTBEAT_US;
     if (q->repair_delay_us == 0)  q->repair_delay_us = DART_QOS_DEF_REPAIR_US;
     /* fixed mode only: a dynamic channel keeps 0 = grow-to-fit via allocator */

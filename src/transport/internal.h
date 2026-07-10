@@ -43,9 +43,10 @@
 #endif
 #endif
 
-#define DART_QOS_DEF_KEEP_LAST    1u
-#define DART_QOS_DEF_HEARTBEAT_US 100000u   /* 100 ms idle writer heartbeat */
-#define DART_QOS_DEF_REPAIR_US    20000u    /* 20 ms reader repair-request delay */
+#define DART_QOS_DEF_KEEP_LAST     1u
+#define DART_QOS_DEF_KEEP_LAST_REL 10u   /* reliable: room for repair before overwrite */
+#define DART_QOS_DEF_HEARTBEAT_US 250000u   /* 250 ms idle writer heartbeat */
+#define DART_QOS_DEF_REPAIR_US    50000u    /* 50 ms reader repair-request delay */
 
 /* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = alias, then the body.
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one

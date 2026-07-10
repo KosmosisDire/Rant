@@ -40,7 +40,9 @@ static uint16_t i_dart_max_fragments(uint32_t max_message_bytes){
 /* zero-means-default for the tunable QoS fields, applied once at init so the
  * stored qos is authoritative */
 static void i_dart_qos_defaults(DartQos *q, int dynamic){
-    if (q->keep_last == 0)        q->keep_last       = DART_QOS_DEF_KEEP_LAST;
+    if (q->keep_last == 0)        q->keep_last       = q->reliability==DART_RELIABLE
+                                                     ? DART_QOS_DEF_KEEP_LAST_REL
+                                                     : DART_QOS_DEF_KEEP_LAST;
     if (q->heartbeat_us == 0)     q->heartbeat_us    = DART_QOS_DEF_HEARTBEAT_US;
     if (q->repair_delay_us == 0)  q->repair_delay_us = DART_QOS_DEF_REPAIR_US;
     /* fixed mode only: a dynamic channel keeps 0 = grow-to-fit via allocator */

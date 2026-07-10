@@ -130,8 +130,8 @@ static uint16_t i_dart_discovery_user_stride(const DartDiscoveryCoreConfig *cfg)
 void dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg){
     if (!cfg) return;
     if (cfg->announce_interval_us == 0) cfg->announce_interval_us = 1000000u;
-    if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = cfg->announce_interval_us * 7u / 2u;
-    if (cfg->gone_timeout_us == 0)      cfg->gone_timeout_us = 60000000u;   /* 1 min dropped -> GONE */
+    if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = 1000000u * 6u; // 6 sec silence => drop
+    if (cfg->gone_timeout_us == 0)      cfg->gone_timeout_us = 60000000u * 2u;   /* 2 min dropped -> GONE */
     if (cfg->max_peers == 0)            cfg->max_peers = 32u;
 }
 

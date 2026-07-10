@@ -81,12 +81,12 @@ typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
  * just { .reliability = DART_RELIABLE }. */
 typedef struct {
     DartReliability reliability;
-    uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1 */
+    uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1, or 10 on a reliable channel */
     uint16_t catch_up;           /* recent messages a new subscriber gets at once. 0 = future
                                     only, 1 = latest value. Keep small (bursts at startup) */
     uint32_t max_message_bytes;  /* biggest message. 0 = one fragment, or grow-to-fit with an allocator */
-    uint32_t heartbeat_us;       /* reliable: idle-writer ping (repairs a lost final message). 0 = 100ms */
-    uint32_t repair_delay_us;    /* reliable: reader's delay before requesting a resend. 0 = 20ms */
+    uint32_t heartbeat_us;       /* reliable: idle-writer ping (repairs a lost final message). 0 = 250ms */
+    uint32_t repair_delay_us;    /* reliable: reader's delay before requesting a resend. 0 = 50ms */
     uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow reader before
                                     evicting un-acked history. 0 = none (pure KEEP_LAST) */
     uint32_t shm_max_bytes;      /* same-host SHM: pin this channel to one size class big enough for
