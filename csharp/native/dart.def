@@ -40,5 +40,9 @@ dart_get_int
 dart_get_f64
 dart_get_f32
 dart_get_array
+dart_get_string
+dart_get_string_at
+dart_set_string
+dart_set_string_at
 dart_get_value
 dart_set_value

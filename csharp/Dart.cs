@@ -198,6 +198,7 @@ namespace Dart
         public byte elem;
         public ushort count;
         public ushort depth;
+        public ushort str_cap;
         public uint offset;
         public uint size;
     }
@@ -216,6 +217,7 @@ namespace Dart
         public byte kind;
         public byte elem;
         public ushort count;
+        public ushort str_cap;
         public DartValueUnion v;
         public DartBytes bytes;
     }

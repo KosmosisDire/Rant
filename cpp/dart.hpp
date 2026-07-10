@@ -120,7 +120,7 @@ enum class ErrorKind {
 
 /* Schema field kinds for reflection (Schema::Field); values match the C wire. */
 enum class FieldType : uint8_t {
-    U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct
+    U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String
 };
 
 static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
@@ -129,6 +129,7 @@ static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum dri
 static_assert((int)EventKind::Error == detail::DART_ERROR, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
+static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
 
 /* forward decls */
 class Node;
@@ -280,6 +281,7 @@ public:
         FieldType kind;          /* the field's type */
         FieldType elem;          /* array element type (only when kind == Array) */
         uint16_t  count, depth;
+        uint16_t  str_cap;       /* string capacity (String fields and String-element arrays) */
         uint32_t  offset, size;
     };
     bool field_at(uint16_t i, Field& out) const {
@@ -289,6 +291,7 @@ public:
         out.kind   = static_cast<FieldType>(f.kind);
         out.elem   = static_cast<FieldType>(f.elem);
         out.count  = f.count; out.depth = f.depth;
+        out.str_cap = f.str_cap;
         out.offset = f.offset; out.size = f.size;
         return true;
     }

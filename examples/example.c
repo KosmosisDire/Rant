@@ -30,11 +30,11 @@
 #define MAX_TOPICS 32
 
 /* The ChatMsg schema, in the DSL every program using the topic pastes verbatim. It
- * deliberately exercises every serialization kind (all eleven scalars, arrays of both
- * flavors, a nested struct): the typed line is the text field, everything else is
- * random filler so the explorer has structure to show. Every line typed is encoded
- * through it on send and decoded from DartMsg.schema on delivery; fields are accessed
- * by name (nested members by dotted path: "vel.dx"). */
+ * deliberately exercises every serialization kind (all eleven scalars, a scalar array,
+ * a string, a string array, a nested struct): the typed line is the text field,
+ * everything else is random filler so the explorer has structure to show. Every line
+ * typed is encoded through it on send and decoded from DartMsg.schema on delivery;
+ * fields are accessed by name (nested members by dotted path: "vel.dx"). */
 static const char CHAT_SCHEMA[] =
     "ChatMsg"
     "{"
@@ -51,8 +51,8 @@ static const char CHAT_SCHEMA[] =
     "    urgent:  bool,"
     "    pos:     f64[3],"
     "    vel:     { dx: f32, dy: f32 },"
-    "    textLen: u16,"
-    "    text:    u8[256]"
+    "    tags:    string<8>[2],"
+    "    text:    string<256>"
     "}";
 #define CHAT_TEXT_CAP 256
 static DartSchema *g_schema;
@@ -82,8 +82,9 @@ static void chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
     dart_set_array(buf, cap, g_schema, "pos", dart_bytes(pos_wire, sizeof pos_wire));
     dart_set_f32 (buf, cap, g_schema, "vel.dx", (float)(rand() % 100) / 10.0f);
     dart_set_f32 (buf, cap, g_schema, "vel.dy", (float)(rand() % 100) / 10.0f);
-    dart_set_uint (buf, cap, g_schema, "textLen", (uint64_t)len);
-    dart_set_array(buf, cap, g_schema, "text", dart_bytes(line, len));
+    dart_set_string_at(buf, cap, g_schema, "tags", 0, dart_cstr((rand() & 1) ? "loud" : "quiet"));
+    dart_set_string_at(buf, cap, g_schema, "tags", 1, dart_cstr((rand() & 1) ? "red" : "blue"));
+    dart_set_string(buf, cap, g_schema, "text", dart_string(line, len));
 }
 
 static int g_verbose = 0;     /* --verbose: print discovery/transport events */
@@ -145,15 +146,13 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
  * just reflects clock skew. A schema-less message (a raw publisher) prints as-is. */
 static void on_message(const DartMsg *msg){
     if (msg->schema){
-        uint64_t  ts   = dart_get_uint(msg->data, msg->schema, "ts");
-        uint64_t  seq  = dart_get_uint(msg->data, msg->schema, "seq");
-        uint64_t  n    = dart_get_uint(msg->data, msg->schema, "textLen");
-        DartBytes text = dart_get_array(msg->data, msg->schema, "text");
-        if (n > text.len) n = text.len;
+        uint64_t   ts   = dart_get_uint(msg->data, msg->schema, "ts");
+        uint64_t   seq  = dart_get_uint(msg->data, msg->schema, "seq");
+        DartString text = dart_get_string(msg->data, msg->schema, "text");
         printf("[%.*s] %.*s > %.*s  (#%llu, +%.2f ms)\n",
                (int)msg->sender_name.len, msg->sender_name.data,
                (int)msg->channel_name.len, msg->channel_name.data,
-               (int)n, (const char *)text.data,
+               (int)text.len, text.data ? text.data : "",
                (unsigned long long)seq,
                (double)(i_dart_plat_now_us() - ts) / 1000.0);
     } else {

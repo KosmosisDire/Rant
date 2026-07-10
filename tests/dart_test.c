@@ -1546,6 +1546,80 @@ static void schema_dsl_checks(void){
               && !dart_set_uint (m, sizeof m, txt, "nope", 1),                    /* unknown field */
                  "schema-dsl: bad sets refused");
     }
+    {   /* strings: string<cap> and string<cap>[N] are fixed slots of [u16 len][cap bytes] */
+        static const char TAGGED[] =
+            "Tagged { id: u32, name: string<12>, labels: string<8>[3], meta: { note: string<4> } }";
+        DartSchema *ts, *twin;
+        ts = dart_schema_compile(dart_allocator_alloc, &ma, TAGGED, NULL);
+        ST_CHECK(ts != NULL, "schema-dsl: strings compile");
+        {   DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &ma, "Tagged");
+            dart_schema_field(&b, "id", DART_U32);
+            dart_schema_field_string(&b, "name", 12);
+            dart_schema_field_string_array(&b, "labels", 8, 3);
+            dart_schema_begin_struct(&b, "meta");
+            dart_schema_field_string(&b, "note", 4);
+            dart_schema_end_struct(&b);
+            twin = dart_schema_finish(&b);
+        }
+        ST_CHECK(twin && ts && dart_schema_hash(ts) == dart_schema_hash(twin),
+                 "schema-dsl: string text and builder produce the same wire (same hash)");
+        if (ts){
+            DartSchemaFieldInfo fi;
+            ST_CHECK(dart_schema_size(ts) == 4 + (2+12) + 3*(2+8) + (2+4),
+                     "schema-dsl: string sizes (%u)", dart_schema_size(ts));
+            ST_CHECK(dart_schema_field_at(ts, 1, &fi) && fi.kind == DART_STR
+                     && fi.str_cap == 12 && fi.offset == 4 && fi.size == 14,
+                     "schema-dsl: string field info (off=%u size=%u cap=%u)",
+                     fi.offset, fi.size, fi.str_cap);
+            ST_CHECK(dart_schema_field_at(ts, 2, &fi) && fi.kind == DART_ARR && fi.elem == DART_STR
+                     && fi.count == 3 && fi.str_cap == 8 && fi.size == 30,
+                     "schema-dsl: string array field info (size=%u cap=%u)", fi.size, fi.str_cap);
+        }
+        if (ts){
+            uint8_t m[54]; DartString v; int ok;
+            ok  = dart_schema_message_default(ts, m, sizeof m);
+            ok &= dart_set_uint  (m, sizeof m, ts, "id", 7);
+            ok &= dart_set_string(m, sizeof m, ts, "name", dart_string("robot-1", 7));
+            ok &= dart_set_string_at(m, sizeof m, ts, "labels", 0, dart_string("fast", 4));
+            ok &= dart_set_string_at(m, sizeof m, ts, "labels", 2, dart_string("red", 3));
+            ok &= dart_set_string(m, sizeof m, ts, "meta.note", dart_string("ok", 2));  /* nested by path */
+            ST_CHECK(ok, "schema-dsl: string setters accept (incl. nested + indexed)");
+            v = dart_get_string(dart_bytes(m,sizeof m), ts, "name");
+            ST_CHECK(v.len == 7 && memcmp(v.data, "robot-1", 7) == 0,
+                     "schema-dsl: string round-trips");
+            v = dart_get_string_at(dart_bytes(m,sizeof m), ts, "labels", 2);
+            ST_CHECK(v.len == 3 && memcmp(v.data, "red", 3) == 0,
+                     "schema-dsl: string array element round-trips");
+            v = dart_get_string_at(dart_bytes(m,sizeof m), ts, "labels", 1);
+            ST_CHECK(v.len == 0 && v.data != NULL, "schema-dsl: unset string element is empty");
+            v = dart_get_string(dart_bytes(m,sizeof m), ts, "meta.note");
+            ST_CHECK(v.len == 2 && memcmp(v.data, "ok", 2) == 0,
+                     "schema-dsl: nested string round-trips");
+            {   DartValue dv;   /* reflection sees the live bytes + the cap */
+                ST_CHECK(dart_get_value(dart_bytes(m,sizeof m), ts, 1, &dv)
+                         && dv.kind == DART_STR && dv.str_cap == 12
+                         && dv.bytes.len == 7 && memcmp(dv.bytes.data, "robot-1", 7) == 0,
+                         "schema-dsl: dart_get_value yields the live string");
+            }
+            ST_CHECK(!dart_set_string(m, sizeof m, ts, "name", dart_string("a-name-too-long", 15)) /* > cap: refused */
+                  && !dart_set_string(m, sizeof m, ts, "id", dart_string("x", 1))                  /* not a string */
+                  && !dart_set_string_at(m, sizeof m, ts, "labels", 3, dart_string("x", 1)),       /* index >= count */
+                     "schema-dsl: bad string sets refused");
+            {   /* a hostile length prefix reads back clamped to the cap */
+                DartSchemaFieldInfo fi;
+                dart_schema_field_at(ts, 1, &fi);
+                m[fi.offset] = 0xFF; m[fi.offset + 1] = 0xFF;          /* len = 65535 */
+                v = dart_get_string(dart_bytes(m,sizeof m), ts, "name");
+                ST_CHECK(v.len == 12, "schema-dsl: hostile string length clamps to cap (%u)",
+                         (unsigned)v.len);
+            }
+        }
+        {   DartSchema *r_ok  = dart_schema_compile(dart_allocator_alloc, &ma, "Tagged { name: string<12> }", NULL);
+            DartSchema *r_bad = dart_schema_compile(dart_allocator_alloc, &ma, "Tagged { name: string<10> }", NULL);
+            ST_CHECK(r_ok && r_bad && ts && dart_schema_subset(r_ok, ts) && !dart_schema_subset(r_bad, ts),
+                     "schema-dsl: string subset needs the same cap");
+        }
+    }
     {   /* errors: NULL + err points into the text at the offending spot */
         static const char *bad[] = {
             "Pose { x: f65 }",              /* unknown type */
@@ -1554,7 +1628,10 @@ static void schema_dsl_checks(void){
             "Pose { x: u8[0] }",            /* zero count */
             "Pose { x: u8[70000] }",        /* count > u16 */
             "Pose { x: f64 } y",            /* trailing garbage */
-            "{ x: f64 }"                    /* missing root name */
+            "{ x: f64 }",                   /* missing root name */
+            "Pose { x: string }",           /* string needs its <cap> */
+            "Pose { x: string<0> }",        /* zero cap */
+            "Pose { x: string<12 }"         /* missing '>' */
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){

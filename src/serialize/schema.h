@@ -1,10 +1,11 @@
 /* DART serialize: a standalone schema + (de)serialization layer. Both ends share the
  * schema, so the wire carries no type tags or field names; a value's meaning is its
- * position in the byte stream. Every schema is fully FIXED for now (variable-length and
- * map types are deferred), so a message has an exact size and every field a static offset:
- * reads are O(1), zero-copy, zero-allocation. Building and parsing a schema take a
- * DartAllocFn hook (common/alloc.h); pass a node's and you inherit its static/dynamic
- * memory. Depends only on common/, so it is usable on its own. */
+ * position in the byte stream. Every schema is fully FIXED (unbounded/variable-length and
+ * map types are deferred; a string is capped, so its footprint is fixed too), so a message
+ * has an exact size and every field a static offset: reads are O(1), zero-copy,
+ * zero-allocation. Building and parsing a schema take a DartAllocFn hook (common/alloc.h);
+ * pass a node's and you inherit its static/dynamic memory. Depends only on common/, so it
+ * is usable on its own. */
 #ifndef DART_SCHEMA_H
 #define DART_SCHEMA_H
 
@@ -18,7 +19,7 @@ extern "C" {
 #endif
 
 #ifndef DART_SCHEMA_WIRE_VERSION
-#define DART_SCHEMA_WIRE_VERSION 2u    /* bumped on any schema wire-format change */
+#define DART_SCHEMA_WIRE_VERSION 3u    /* bumped on any schema wire-format change */
 #endif
 #ifndef DART_SCHEMA_MAX_DEPTH
 #define DART_SCHEMA_MAX_DEPTH 8u        /* struct nesting the builder accepts */
@@ -26,14 +27,17 @@ extern "C" {
 
 /* The type kinds; the enum value is the kind byte on the wire. All fixed: scalars are
  * little-endian with no padding, so a field's offset is the sum of the preceding sizes.
- * An array is exactly-N scalars with no hidden framing; a live count, if wanted, is just
- * another field the schema declares (variable-length strings/arrays are deferred). */
+ * An array is exactly-N elements with no hidden framing; a live count, if wanted, is just
+ * another field the schema declares. A string is CAPPED (`string<10>`): a fixed slot of
+ * [u16 live-length][cap bytes], so it carries its own length yet keeps a static footprint
+ * of 2 + cap bytes (unbounded strings/arrays are deferred). */
 typedef enum {
     DART_U8 = 0, DART_U16 = 1, DART_U32 = 2, DART_U64 = 3,
     DART_I8 = 4, DART_I16 = 5, DART_I32 = 6, DART_I64 = 7,
     DART_F32 = 8, DART_F64 = 9, DART_BOOL = 10,   /* 0..10: fixed scalars */
-    DART_ARR    = 11,   /* fixed array of a scalar (uuid u8[16], cov f64[36]): [u8 elem][u16 count] */
-    DART_STRUCT = 12    /* [u8 nfields] ( [u8 namelen][name][type] )*                               */
+    DART_ARR    = 11,   /* fixed array of a scalar or string: [u8 elem][u16 count] (+[u16 cap] if elem is STR) */
+    DART_STRUCT = 12,   /* [u8 nfields] ( [u8 namelen][name][type] )*                                          */
+    DART_STR    = 13    /* capped string: [u16 cap]; in a message, [u16 len][cap bytes]                        */
 } DartSchemaTypeKind;
 
 /* Bytes of a fixed scalar kind (U8..BOOL); 0 otherwise. */
@@ -54,6 +58,7 @@ typedef struct {
     uint8_t    elem;      /* ARR element kind, else 0 */
     uint16_t   count;     /* ARR element count, else 0 */
     uint16_t   depth;     /* 0 = top level; n = member of the struct n levels up */
+    uint16_t   str_cap;   /* string capacity (STR fields and STR-element arrays), else 0 */
     uint32_t   offset;    /* absolute byte offset of this field in a message */
     uint32_t   size;      /* byte size of this field */
 } DartSchemaFieldInfo;
@@ -92,15 +97,18 @@ typedef struct {
  *   "    uuid:     u8[16],                  -- fixed array: exactly 16 bytes\n"
  *   "    tags:     u8[8],\n"
  *   "    tagCount: u8,                      -- a live count is just another field\n"
+ *   "    frame:    string<24>,              -- capped string: up to 24 bytes, live length\n"
+ *   "    labels:   string<16>[4],           -- array of 4 capped strings\n"
  *   "    velocity: { dx: f32, dy: f32 }     -- nested struct\n"
  *   "}"
  *
  * Scalars: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 bool. `name: elem[N]` is a fixed
- * array of exactly N scalars; `name: { ... }` nests a struct. Commas between fields
- * are optional (fields self-delimit), whitespace is free, `--` comments run to end of
- * line (so C string literals using comments need their `\n`s, as above). Types are
- * structural: there are no named type references, because a peer's schema can only be
- * trusted by its shape (variable-length `string` is deferred).
+ * array of exactly N elements; `name: string<C>` is a capped string (up to C bytes,
+ * carrying its live length; `string<C>[N]` an array of them); `name: { ... }` nests a
+ * struct. Commas between fields are optional (fields self-delimit), whitespace is free,
+ * `--` comments run to end of line (so C string literals using comments need their
+ * `\n`s, as above). Types are structural: there are no named type references, because
+ * a peer's schema can only be trusted by its shape.
  * A field's index is its order in the text. Identical text compiles to identical wire
  * bytes, hence the same hash on both ends. Free with dart_schema_free. On any error
  * returns NULL and points *err (optional, may be NULL) at the offending character. */
@@ -112,6 +120,11 @@ void        dart_schema_field(DartSchemaBuilder *b, const char *name, DartSchema
 /* Fixed array of exactly `count` scalar elements. */
 void        dart_schema_field_array(DartSchemaBuilder *b, const char *name,
                                     DartSchemaTypeKind elem_scalar, uint16_t count);
+/* Capped string: up to `cap` bytes plus a live length (`string<cap>`; cap >= 1). */
+void        dart_schema_field_string(DartSchemaBuilder *b, const char *name, uint16_t cap);
+/* Fixed array of exactly `count` capped strings (`string<cap>[count]`). */
+void        dart_schema_field_string_array(DartSchemaBuilder *b, const char *name,
+                                           uint16_t cap, uint16_t count);
 /* Nested struct field: open it, add its fields, close it. */
 void        dart_schema_begin_struct(DartSchemaBuilder *b, const char *name);
 void        dart_schema_end_struct(DartSchemaBuilder *b);
@@ -162,6 +175,12 @@ float     dart_get_f32 (DartBytes msg, const DartSchema *s, const char *field); 
 /* ARR: a zero-copy view of the whole array (count * element size bytes); {NULL,0} on
  * mismatch. Element kind/count via dart_schema_field_at. */
 DartBytes dart_get_array(DartBytes msg, const DartSchema *s, const char *field);
+/* STR: a zero-copy view of the live bytes (the slot's length prefix, clamped to the
+ * cap so a hostile message can never over-read); {NULL,0} on mismatch. */
+DartString dart_get_string(DartBytes msg, const DartSchema *s, const char *field);
+/* One element of a string array (ARR of STR); {NULL,0} on mismatch or index >= count. */
+DartString dart_get_string_at(DartBytes msg, const DartSchema *s, const char *field,
+                              uint16_t index);
 
 /* The canonical default message: every field is zero (numeric 0, false, zeroed arrays
  * and structs). Writes exactly dart_schema_size bytes into buf; 1, or 0 if cap is too
@@ -179,8 +198,15 @@ int dart_set_int (void *buf, size_t cap, const DartSchema *s, const char *field,
 int dart_set_f64 (void *buf, size_t cap, const DartSchema *s, const char *field, double v);   /* F64 (or F32)   */
 int dart_set_f32 (void *buf, size_t cap, const DartSchema *s, const char *field, float v);    /* F32            */
 /* ARR: copy elems over the front of the array and zero the rest. elems.len is bytes, must
- * be a multiple of the element size and fit the field (never silently truncated). */
+ * be a multiple of the element size and fit the field (never silently truncated). For a
+ * string array, elems is whole raw slots ([u16 len][cap bytes] each, len <= cap). */
 int dart_set_array(void *buf, size_t cap, const DartSchema *s, const char *field, DartBytes elems);
+/* STR: write the live length and bytes, zeroing the slot's unused tail. v.len must fit
+ * the field's cap (never silently truncated). */
+int dart_set_string(void *buf, size_t cap, const DartSchema *s, const char *field, DartString v);
+/* One element of a string array (ARR of STR). */
+int dart_set_string_at(void *buf, size_t cap, const DartSchema *s, const char *field,
+                       uint16_t index, DartString v);
 
 /* Reflection access by flat index (tools walking a schema they've never seen: the
  * explorer, loggers, bridges). One tagged value covers every kind; the typed name-based
@@ -189,9 +215,11 @@ typedef struct {
     uint8_t  kind;        /* DartSchemaTypeKind */
     uint8_t  elem;        /* ARR element kind */
     uint16_t count;       /* ARR element count */
+    uint16_t str_cap;     /* string capacity (STR fields and STR-element arrays) */
     union { uint64_t u; int64_t i; double f; } v;   /* scalar value (BOOL in u as 0/1) */
     DartBytes bytes;      /* ARR/STRUCT raw bytes (get: view into msg; set: source, may be
-                             shorter than the field: the rest is zeroed) */
+                             shorter than the field: the rest is zeroed). STR: the LIVE
+                             string bytes (get: clamped view; set: content, len <= cap) */
 } DartValue;
 int dart_get_value(DartBytes msg, const DartSchema *s, uint16_t field, DartValue *out);
 int dart_set_value(void *buf, size_t cap, const DartSchema *s, uint16_t field, const DartValue *val);
