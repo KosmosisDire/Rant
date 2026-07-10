@@ -135,6 +135,7 @@ namespace Dart
         public ushort max_channels;
         public IntPtr user_data;
         public byte disable_shm;
+        public byte fetch_details;
         public DartNodeNet net;
         public DartNodeDiscovery discovery;
     }
@@ -327,6 +328,9 @@ namespace Dart
         public ushort Domain = 0;
         public ushort MaxChannels = 0;
         public bool DisableShm = false;
+        /// <summary>Greedily fetch every peer topic's name + schema (observer/debugger
+        /// UIs); costs memory in proportion to the peers' topic counts.</summary>
+        public bool FetchDetails = false;
         public ushort DataPort = 0;
         public string DiscoveryGroup = null;
         public ushort DiscoveryPort = 0;
@@ -617,6 +621,7 @@ namespace Dart
                 domain = options.Domain,
                 max_channels = options.MaxChannels,
                 disable_shm = (byte)(options.DisableShm ? 1 : 0),
+                fetch_details = (byte)(options.FetchDetails ? 1 : 0),
                 user_data = (IntPtr)node._id,
             };
             // The node retains these pointers for its lifetime, so keep them alive

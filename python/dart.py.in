@@ -268,6 +268,7 @@ class DartNodeOpts(Structure):
         ("max_channels", c_uint16),
         ("user_data", c_void_p),
         ("disable_shm", c_uint8),
+        ("fetch_details", c_uint8),
         ("net", DartNodeNet),
         ("discovery", DartNodeDiscovery),
     ]
@@ -565,6 +566,7 @@ class NodeOptions:
     domain: int = 0
     max_channels: int = 0
     disable_shm: bool = False
+    fetch_details: bool = False   # greedily fetch every peer topic's name + schema (observer UIs)
     data_port: int = 0
     discovery_group: str = ""
     discovery_port: int = 0
@@ -1121,6 +1123,7 @@ class Node:
         co.domain = options.domain
         co.max_channels = options.max_channels
         co.disable_shm = 1 if options.disable_shm else 0
+        co.fetch_details = 1 if options.fetch_details else 0
         co.user_data = c_void_p(self._id)
         co.net.data_port = options.data_port
         co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None

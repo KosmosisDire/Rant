@@ -209,8 +209,8 @@ const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count);
  * peer id and the alias from the interest walk. topic_name returns {NULL,0} until the
  * peer's detail response arrives (the announce carries only hashes; show the hash until
  * then). topic_schema returns the parsed, node-owned schema the peer advertises (NULL =
- * untyped or not yet fetched; do NOT free) and fills *schema_hash (0 = untyped) when
- * non-NULL. Views into node state: with a poller on another thread bracket call + use
+ * untyped or not yet fetched; do NOT free) and fills the optional schema_hash out-param
+ * (0 = untyped). Views into node state: with a poller on another thread bracket call + use
  * with dart_node_lock/dart_node_unlock, like dart_node_peers. */
 DartString        dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t alias);
 const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t alias,
