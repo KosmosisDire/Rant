@@ -47,6 +47,12 @@
 #define DART_QOS_DEF_KEEP_LAST_REL 10u   /* reliable: room for repair before overwrite */
 #define DART_QOS_DEF_HEARTBEAT_US 250000u   /* 250 ms idle writer heartbeat */
 #define DART_QOS_DEF_REPAIR_US    50000u    /* 50 ms reader repair-request delay */
+#ifndef DART_HB_TAIL_US
+#define DART_HB_TAIL_US 20000u   /* tail heartbeat: when a lane's send queue drains, the next HB
+                                    comes this soon (not heartbeat_us) so a lost FINAL message is
+                                    detected fast. The reader's immediate ack normally clears
+                                    acked_upto first, suppressing it: no wire cost without loss. */
+#endif
 
 /* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = alias, then the body.
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one

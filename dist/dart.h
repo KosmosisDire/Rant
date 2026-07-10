@@ -4541,6 +4541,12 @@ static inline uint64_t i_dart_fnv1a64_str(const char *s){
 #define DART_QOS_DEF_KEEP_LAST_REL 10u   /* reliable: room for repair before overwrite */
 #define DART_QOS_DEF_HEARTBEAT_US 250000u   /* 250 ms idle writer heartbeat */
 #define DART_QOS_DEF_REPAIR_US    50000u    /* 50 ms reader repair-request delay */
+#ifndef DART_HB_TAIL_US
+#define DART_HB_TAIL_US 20000u   /* tail heartbeat: when a lane's send queue drains, the next HB
+                                    comes this soon (not heartbeat_us) so a lost FINAL message is
+                                    detected fast. The reader's immediate ack normally clears
+                                    acked_upto first, suppressing it: no wire cost without loss. */
+#endif
 
 /* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = alias, then the body.
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one
@@ -5260,6 +5266,19 @@ static size_t i_dart_writer_hb(DartTransportState *st, i_DartChannel *ch, i_Dart
 }
 
 
+/* The lane's send queue just drained: clamp the next HB into (now, now + DART_HB_TAIL_US]
+ * so a lost final message is detected in ~one tail window, not a full heartbeat_us. Fired
+ * on a later poll pass, it rides its OWN datagram and never shares the last DATA's fate
+ * (a past hb_next_us is replaced too: it would fire in this same drain, coalesced). The
+ * reader's immediate ack normally raises acked_upto before the window elapses, which
+ * suppresses the HB at step 3, so healthy traffic sends nothing extra. */
+static void i_dart_writer_arm_tail(DartTransportState *st, i_DartWriterProxy *w, uint64_t now){
+    uint64_t tail = now + DART_HB_TAIL_US;
+    if (w->hb_next_us <= now || w->hb_next_us > tail) w->hb_next_us = tail;
+    i_dart_transport_arm_deadline(st, w->hb_next_us);
+}
+
+
 /* writer side: handle ACKNACK */
 void i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p){
     i_DartChannel *ch=&st->channels[channel_idx];
@@ -5371,6 +5390,8 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
             if (st->peer_shm[peer_slot] && s->shm){
                 if (cap < DART_SHM_DATA_BYTES) return 0;
                 w->sent_upto = s->base + s->count;
+                if (reliable && w->reader_reliable && w->sent_upto >= ch->next_seqno)
+                    i_dart_writer_arm_tail(st, w, now);
                 return i_dart_wire_mk_shm(out,alias,s->base,s->count,s->desc);
             }
 #endif
@@ -5381,6 +5402,8 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
             if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             w->sent_upto++;
             ch->repair_stats.frags_sent++;                       /* new data (unicast lane) */
+            if (reliable && w->reader_reliable && w->sent_upto >= ch->next_seqno)
+                i_dart_writer_arm_tail(st, w, now);              /* queue drained: fast tail HB */
             return i_dart_wire_mk_data(out,alias,seqno,s,frag_idx,i_dart_sample_buf(s)+offset,payload_len);
             }
         } else {
