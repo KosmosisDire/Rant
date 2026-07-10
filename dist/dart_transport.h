@@ -4334,6 +4334,18 @@ int dart_transport_channel_define(DartTransportState *st, uint16_t channel, cons
     memcpy((char*)ch->name, def->name, lane); ((char*)ch->name)[lane] = '\0';
     ch->name_len = (uint8_t)lane;
     ch->history_head = 0; ch->next_seqno = 0; ch->have_first = 0;
+    /* A DISSOLVED verdict (details arrived, no local channel matched) is only as durable
+       as the channel set it was judged against, and that set just grew: send those
+       verdicts back to PENDING so the next interest apply re-requests and re-verifies
+       them against the new identity. A NAME_OK verdict is bound to an immutable name and
+       stays. Without this, an observer that fetched details before subscribing (the
+       explorer's flow) could never match a topic it learned about first. */
+    for (p=0;p<st->cfg.max_peers;p++){
+        uint8_t *as = st->peer_astate[p]; uint32_t a, alen = st->peer_alias_len[p];
+        if (!st->peer_used[p] || !as) continue;
+        for (a=0;a<alen;a++)
+            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)) as[a] = 0;
+    }
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active channel to known peers */
         if (st->peer_used[p]) i_dart_channel_rematch(st, channel, p);
     return 0;

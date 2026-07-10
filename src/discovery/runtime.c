@@ -100,23 +100,24 @@ static int i_dart_discovery_if_apipa(uint32_t naddr){
 
 /* Every multicast send and join should pin to this one interface. Auto path (no
  * explicit --if): route-probe the group, which is correct on POSIX. But Windows
- * source-address selection for a multicast destination can resolve to loopback, which
- * would strand all traffic on 127.0.0.1; so when the group probe isn't a routable
- * address, probe the default route via a reserved global-unicast destination (connect()
- * on UDP sends nothing) to get the LAN interface, then finally enumerate and prefer a
- * real (non-APIPA) LAN address. Returns 0 only if nothing usable was found (the OS then
- * picks the default interface). */
+ * source-address selection for a multicast destination can resolve to loopback (stranding
+ * all traffic on 127.0.0.1) or to a low-metric VPN adapter's 169.254 link-local (Tailscale
+ * pins its metric at 5, below any real NIC); so when the group probe isn't a routable
+ * non-APIPA address, probe the default route via a reserved global-unicast destination
+ * (connect() on UDP sends nothing) to get the LAN interface, then finally enumerate and
+ * prefer a real (non-APIPA) LAN address. Returns 0 only if nothing usable was found (the
+ * OS then picks the default interface). */
 uint32_t dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port){
     uint32_t ip, ifs[16];
     int n, i, apipa = -1;
 
     ip = i_dart_plat_route_src(group_naddr, port);
-    if (i_dart_discovery_if_routable(ip)) return ip;
+    if (i_dart_discovery_if_routable(ip) && !i_dart_discovery_if_apipa(ip)) return ip;
 
     /* 192.0.2.1 is TEST-NET-1 (RFC 5737): never a real host, so this resolves only the
      * default-route source interface; no datagram is transmitted. */
     ip = i_dart_plat_route_src(i_dart_plat_ipv4(192u, 0u, 2u, 1u), port);
-    if (i_dart_discovery_if_routable(ip)) return ip;
+    if (i_dart_discovery_if_routable(ip) && !i_dart_discovery_if_apipa(ip)) return ip;
 
     n = i_dart_plat_local_ipv4s(ifs, (int)(sizeof ifs / sizeof ifs[0]));
     for (i = 0; i < n; i++){

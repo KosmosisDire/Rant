@@ -1911,7 +1911,7 @@ static void detail_live_checks(void){
     {   DartAllocator oa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
         DartNodeOpts oo = po; DartNode *O;
         oo.fetch_details = 1;
-        O = dart_node_open(&oa, "dt-obs", NULL, NULL, &oo);
+        O = dart_node_open(&oa, "dt-obs", st_on_message, NULL, &oo);
         ST_CHECK(O != NULL, "detail-obs: observer node opens");
         if (O){
             uint32_t pid = 0;
@@ -1937,6 +1937,27 @@ static void detail_live_checks(void){
                 ST_CHECK(s0 && h0==dart_schema_hash(W) && dart_schema_hash(s0)==h0,
                          "detail-obs: typed topic's schema cached parsed (hash matches)");
                 ST_CHECK(!s1 && h1==0, "detail-obs: raw topic cached untyped");
+            }
+            /* observe THEN subscribe (the explorer's flow): the greedy fetch dissolved
+               these aliases against a channel-less node, so creating the channel must
+               send them back to pending, re-verify, and form the match */
+            {   DartChannel *osub = dart_node_create_channel(O, "dt/pose", DART_SUB_ONLY, W, &co);
+                unsigned long a0 = st_any;
+                ST_CHECK(osub != NULL, "detail-obs: late subscribe channel created");
+                for (t=0;t<800 && dart_channel_match_count(pc)<2;t++){
+                    dart_node_poll(O,2); dart_node_poll(P,1); dart_node_poll(S,1);
+                }
+                ST_CHECK(dart_channel_match_count(pc)==2,
+                         "detail-obs: observe-then-subscribe re-verifies and matches (%u readers)",
+                         dart_channel_match_count(pc));
+                {   uint8_t pose[16]; memset(pose, 0x33, sizeof pose);   /* stamp + x */
+                    dart_channel_send(pc, dart_bytes(pose, sizeof pose));
+                    for (t=0;t<400 && st_any < a0+2;t++){
+                        dart_node_poll(P,1); dart_node_poll(S,1); dart_node_poll(O,2);
+                    }
+                    ST_CHECK(st_any >= a0+2, "detail-obs: late subscriber receives (got %lu new)",
+                             st_any - a0);
+                }
             }
             dart_node_close(O, 1);
         }
