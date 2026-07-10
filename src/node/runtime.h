@@ -52,6 +52,12 @@ typedef struct {
     uint8_t               disable_shm;   /* 1 = never use the same-host shared-memory fast path
                                             (force on-wire UDP even to a same-host peer; dynamic
                                             mode only, the static path never uses SHM) */
+    uint8_t               fetch_details; /* 1 = greedily fetch full topic details (name + schema)
+                                            for EVERY topic every peer advertises, not just topics
+                                            this node shares, and cache them for the
+                                            dart_node_peer_topic_* queries. For observer/debugger
+                                            UIs (the explorer, the bridge); costs memory in
+                                            proportion to the peers' topic counts. */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;
@@ -197,6 +203,18 @@ DartChannel *dart_node_channel(DartNode *n, uint16_t index);
  * / dart_node_peer_interest_next (node/core.h), so a caller never touches dart_meta_*.
  * Returns the packed array + *count (used peers, ACTIVE or DROPPED); NULL if n is NULL. */
 const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count);
+
+/* A peer topic's full details from the greedy cache (opts.fetch_details; without it only
+ * topics this node shares are ever fetched, so most queries yield nothing). Key by the
+ * peer id and the alias from the interest walk. topic_name returns {NULL,0} until the
+ * peer's detail response arrives (the announce carries only hashes; show the hash until
+ * then). topic_schema returns the parsed, node-owned schema the peer advertises (NULL =
+ * untyped or not yet fetched; do NOT free) and fills *schema_hash (0 = untyped) when
+ * non-NULL. Views into node state: with a poller on another thread bracket call + use
+ * with dart_node_lock/dart_node_unlock, like dart_node_peers. */
+DartString        dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t alias);
+const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t alias,
+                                              uint64_t *schema_hash);
 
 /* Cumulative backpressure since open: us waited on slow readers and how many sends
  * waited. Either out-pointer may be NULL. */

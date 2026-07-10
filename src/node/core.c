@@ -166,6 +166,10 @@ typedef struct { uint8_t added; uint8_t dormant; uint8_t detail_due; } i_DartNod
 typedef struct { uint64_t hash; DartSchema *parsed; } i_DartNodeSchemaIntern;
 typedef struct { uint64_t hash; uint16_t channel; DartSchema *rebased; } i_DartNodeSchemaBind;
 typedef struct { uint32_t peer; uint16_t channel; const DartSchema *schema; } i_DartNodePeerSchema;
+/* the greedy detail cache (cfg.fetch_details): one fetched topic of one peer. The name
+   is a hook allocation owned here; the schema is interned (lives until close). */
+typedef struct { uint32_t peer; uint16_t alias; uint8_t name_len; char *name;
+                 uint64_t schema_hash; const DartSchema *schema; } i_DartNodeTopicDetail;
 
 struct i_DartNodeCore {
     DartTransportState           *transport;
@@ -191,6 +195,8 @@ struct i_DartNodeCore {
     i_DartNodeSchemaIntern *interned;     uint32_t n_interned,     cap_interned;
     i_DartNodeSchemaBind   *binds;        uint32_t n_binds,        cap_binds;
     i_DartNodePeerSchema   *peer_schemas; uint32_t n_peer_schemas, cap_peer_schemas;
+    uint8_t                 fetch_details; /* observer mode: fetch + cache every alias */
+    i_DartNodeTopicDetail  *topic_details; uint32_t n_topic_details, cap_topic_details;
 };
 
 /* grow one of the flat schema arrays through the hook; 1 + *arr/cap updated, or 0 */
@@ -249,6 +255,7 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
     c->on_event      = cfg->on_event;      c->user = cfg->user;
     c->alloc         = cfg->alloc;         c->alloc_user = cfg->alloc_user;
     c->oob_capable   = cfg->oob_capable;
+    c->fetch_details = cfg->fetch_details;
     memcpy(c->oob_host, cfg->oob_host, 16);
     c->meta_buf      = meta;                                            /* dynamic: NULL until the first build */
     c->meta_cap      = meta ? dart_meta_capacity(cfg->n_channels) : 0;
@@ -381,6 +388,85 @@ const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, 
         if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].channel == channel)
             return c->peer_schemas[i].schema;
     return NULL;
+}
+
+/* ---- the greedy detail cache (cfg.fetch_details) -------------------------------------- */
+
+static i_DartNodeTopicDetail *i_dart_node_core_topic_find(i_DartNodeCore *c, uint32_t peer,
+                                                          uint16_t alias){
+    uint32_t i;
+    for (i = 0; i < c->n_topic_details; i++)
+        if (c->topic_details[i].peer == peer && c->topic_details[i].alias == alias)
+            return &c->topic_details[i];
+    return NULL;
+}
+
+/* cache one fetched topic (idempotent; an OOM just leaves it for the retry sweep) */
+static void i_dart_node_core_topic_set(i_DartNodeCore *c, uint32_t peer, const DartDetail *d){
+    i_DartNodeTopicDetail *e; char *nm;
+    if (!c->alloc || d->name.len == 0) return;
+    if (i_dart_node_core_topic_find(c, peer, d->alias)) return;
+    nm = (char*)c->alloc(c->alloc_user, NULL, d->name.len);
+    if (!nm) return;
+    memcpy(nm, d->name.data, d->name.len);
+    if (!i_dart_node_core_array_reserve(c, (void**)&c->topic_details, &c->cap_topic_details,
+                                        c->n_topic_details + 1u, sizeof *c->topic_details)){
+        c->alloc(c->alloc_user, nm, 0);
+        return;
+    }
+    e = &c->topic_details[c->n_topic_details++];
+    e->peer = peer; e->alias = d->alias;
+    e->name = nm; e->name_len = (uint8_t)d->name.len;
+    e->schema_hash = d->schema_hash;
+    e->schema = d->schema_hash
+              ? i_dart_node_core_intern(c, d->schema_hash, d->schema_wire) : NULL;
+}
+
+/* drop a peer's cached topics (GONE, or its id recycled onto a new peer) */
+static void i_dart_node_core_topic_details_clear(i_DartNodeCore *c, uint32_t peer){
+    uint32_t i = 0;
+    while (i < c->n_topic_details){
+        if (c->topic_details[i].peer == peer){
+            if (c->alloc && c->topic_details[i].name)
+                c->alloc(c->alloc_user, c->topic_details[i].name, 0);
+            c->topic_details[i] = c->topic_details[--c->n_topic_details];   /* swap-remove */
+        } else i++;
+    }
+}
+
+int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t alias,
+                                  DartString *name, const DartSchema **schema,
+                                  uint64_t *schema_hash){
+    i_DartNodeTopicDetail *e = c ? i_dart_node_core_topic_find(c, peer, alias) : NULL;
+    if (name)        *name        = e ? dart_string(e->name, e->name_len) : dart_string(NULL, 0);
+    if (schema)      *schema      = e ? e->schema : NULL;
+    if (schema_hash) *schema_hash = e ? e->schema_hash : 0;
+    return e != NULL;
+}
+
+/* Observer mode: append every advertised-but-uncached alias to the want list (the
+ * greedy superset of the transport's candidate wants). INACTIVE entries are skipped:
+ * the responder would not answer them, which would re-request forever. Pass max_wants
+ * n+1 with a scratch slot to just probe whether anything is missing. */
+static uint16_t i_dart_node_core_greedy_extend(i_DartNodeCore *c, uint32_t peer,
+                            DartBytes interest, DartDetailWant *wants, uint16_t n,
+                            uint16_t max_wants){
+    const uint8_t *d = interest.data;
+    uint16_t total, k; uint32_t a;
+    if (!d || interest.len < 2) return n;
+    total = (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
+    if (interest.len < 2u + 5u*(uint32_t)total) return n;
+    for (a = 0; a < total && n < max_wants; a++){
+        uint8_t role = (uint8_t)(d[2u + 5u*a + 4u] & 3u);   /* flags bits 0-1 (DartRole) */
+        if (role == DART_INACTIVE) continue;
+        if (i_dart_node_core_topic_find(c, peer, (uint16_t)a)) continue;
+        for (k = 0; k < n; k++) if (wants[k].alias == (uint16_t)a) break;
+        if (k < n) continue;
+        wants[n].alias = (uint16_t)a;
+        wants[n].schema_hash = 0;   /* force the wire inline: we may not hold that schema */
+        n++;
+    }
+    return n;
 }
 
 int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
@@ -525,8 +611,11 @@ static i_DartNodePeerExtra *i_dart_node_core_peer_extra(i_DartNodeCore *c, uint3
    the pending state itself is the retry state. */
 static void i_dart_node_core_detail_check(i_DartNodeCore *c, i_DartNodePeerExtra *ex,
                             uint32_t id, DartBytes interest){
+    DartDetailWant probe;
     if (!interest.data) return;
-    if (dart_transport_detail_wants(c->transport, c->chan_schemas, id, interest, NULL, 0)){
+    if (dart_transport_detail_wants(c->transport, c->chan_schemas, id, interest, NULL, 0)
+        || (c->fetch_details
+            && i_dart_node_core_greedy_extend(c, id, interest, &probe, 0, 1))){
         ex->detail_due = 1;
         c->detail_due_any = 1;
     }
@@ -540,6 +629,7 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
     if (!ex) return;                                  /* discovery not bound / no scratch */
     if (!ex->added){                                  /* brand-new peer: wire it into the transport */
         i_dart_node_core_peer_schema_clear(c, id);    /* its id may be recycled: no stale bindings */
+        i_dart_node_core_topic_details_clear(c, id);
         dart_transport_peer_add(c->transport, id, frag);          /* blob carries frag + pub/sub interest */
         ex->added = 1; ex->dormant = 0; ex->detail_due = 0;
         i_dart_node_core_set_peer_oob(c, id, meta);
@@ -574,6 +664,11 @@ void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t
         return;
     ex = i_dart_node_core_peer_extra(c, peer);
     if (!ex || !ex->added) return;
+    if (c->fetch_details){   /* observer mode: cache every fetched topic for the queries */
+        DartDetailIter it; DartDetail dd;
+        memset(&it, 0, sizeof it);
+        while (dart_detail_next(resp, &it, &dd)) i_dart_node_core_topic_set(c, peer, &dd);
+    }
     if (!dart_transport_apply_peer_details(c->transport, peer, resp)) return;   /* nothing new */
     meta = dart_discovery_peer_meta(c->discovery, peer, NULL);
     interest = dart_meta_interest(meta);
@@ -625,6 +720,8 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
         if (maxw > 128u) maxw = 128u;
         nw = dart_transport_detail_wants(c->transport, c->chan_schemas, v.id, interest,
                                          wants, maxw);
+        if (c->fetch_details)
+            nw = i_dart_node_core_greedy_extend(c, v.id, interest, wants, nw, maxw);
         if (!nw) continue;
         if (!i_dart_node_core_resolve(c, v.id, to)) continue;
         {   size_t len = dart_detail_req_build(domain, v.meta_version, wants, nw, out, cap);
@@ -649,6 +746,7 @@ static void i_dart_node_core_peer_down(i_DartNodeCore *c, uint32_t id, DartDisco
         int notify = (ex && ex->added && !ex->dormant);   /* active->gone: app not yet told */
         dart_transport_peer_remove(c->transport, id);   /* discovery zeroes the scratch on slot reuse */
         i_dart_node_core_peer_schema_clear(c, id);      /* the id may be reassigned */
+        i_dart_node_core_topic_details_clear(c, id);
         if (notify) i_dart_node_core_fire(c, DART_PEER_DOWN, id, NULL);
     }
 }

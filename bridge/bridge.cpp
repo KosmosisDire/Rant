@@ -105,30 +105,63 @@ static json fields_json(const DartSchema *s){
     return fields;
 }
 
-/* A peer's advertised interest list (its topics), decoded off the announce overlay:
- * one row per direction (a pub and a sub row for a pubsub topic). v10 announces carry
- * only 32-bit topic hashes: names and schemas ride the pairwise detail exchange, so
- * until the bridge requests details (greedy-requester conversion) a topic shows as its
- * hash and no field table is inlined. */
-static json peer_topics_json(const DartDiscoveryPeer &p){
+/* A peer's advertised interest list (its topics): one row per direction (a pub and a
+ * sub row for a pubsub topic). The announce carries only 32-bit hashes; names and
+ * schemas come from the node's greedy detail cache (opts.fetch_details), which fills
+ * within an RTT of a peer appearing, so a just-seen topic may briefly show as its hash
+ * with no field table. */
+static json peer_topics_json(DartNode *node, const DartDiscoveryPeer &p){
     json topics = json::array();
     DartInterestIter it = {}; DartTopic t;
     while (dart_node_peer_interest_next(&p, &it, &t)){
-        char hx[16];
-        snprintf(hx, sizeof hx, "0x%08x", (unsigned)t.hash);
-        topics.push_back({ {"name", hx},
-                           {"role", t.is_pub ? "pub" : "sub"},
-                           {"reliable", t.reliable != 0} });
+        DartString nm = dart_node_peer_topic_name(node, p.id, t.alias);
+        json row;
+        if (nm.data) row["name"] = std::string(nm.data, nm.len);
+        else {
+            char hx[16];
+            snprintf(hx, sizeof hx, "0x%08x", (unsigned)t.hash);
+            row["name"] = hx;
+        }
+        row["role"]     = t.is_pub ? "pub" : "sub";
+        row["reliable"] = t.reliable != 0;
+        if (t.is_pub){
+            uint64_t hash = 0;
+            const DartSchema *s = dart_node_peer_topic_schema(node, p.id, t.alias, &hash);
+            if (hash) row["hash"] = hex64(hash);
+            if (s){ row["size"] = dart_schema_size(s); row["fields"] = fields_json(s); }
+        }
+        topics.push_back(row);
     }
     return topics;
 }
 
-/* adopt: parse the schema a live peer advertises for publishing `name`. v10 blobs no
- * longer inline schemas, so adopt yields nothing until the bridge fetches details via
- * the pairwise exchange; a client can still join generically (schema NULL). */
+/* adopt: parse the schema a live peer advertises for publishing `name`, so a client
+ * can join a typed topic it never declared (the explorer's adopt pattern). Reads the
+ * greedy detail cache; the returned copy is the caller's (parsed into scratch). */
 static DartSchema *adopt_schema(Conn *c, const std::string &name, DartAllocator *scratch){
-    (void)c; (void)name; (void)scratch;
-    return nullptr;
+    uint16_t count = 0;
+    DartSchema *found = nullptr;
+    /* the peer view is zero-copy: hold the node lock across the walk so the node's
+       service thread cannot mutate it mid-read */
+    dart_node_lock(c->node);
+    const DartDiscoveryPeer *peers = dart_node_peers(c->node, &count);
+    for (uint16_t i = 0; !found && peers && i < count; i++){
+        DartInterestIter it = {}; DartTopic t;
+        while (dart_node_peer_interest_next(&peers[i], &it, &t)){
+            DartString nm; const DartSchema *s;
+            if (!t.is_pub) continue;
+            nm = dart_node_peer_topic_name(c->node, peers[i].id, t.alias);
+            if (nm.len != name.size() || memcmp(nm.data, name.data(), name.size()) != 0) continue;
+            s = dart_node_peer_topic_schema(c->node, peers[i].id, t.alias, nullptr);
+            if (!s) continue;
+            {   DartBytes wire = dart_schema_wire(s);
+                found = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, scratch);
+                if (found) break;
+            }
+        }
+    }
+    dart_node_unlock(c->node);
+    return found;
 }
 
 static int role_from(const std::string &s, DartRole *out){
@@ -273,6 +306,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.discovery.announce_interval_us = (uint32_t)req.value("announce_interval_ms", 0) * 1000u;
     o.discovery.peer_timeout_us      = (uint32_t)req.value("peer_timeout_ms", 0) * 1000u;
     o.discovery.max_peers            = (uint16_t)req.value("max_peers", 0);
+    o.fetch_details = 1;   /* the protocol exposes peer topics + schemas: fetch them all */
 
     /* The node copies the allocator by value at open and resets it on close, so a local
      * is enough; "memory" is the dynamic heap cap (0 = the default runaway guard). */
@@ -357,7 +391,7 @@ static void op_peers(Conn *c, const json &, const json &seq){
                          {"addr", addr_str(p.addr.ip, p.addr.ip_len, p.addr.port)},
                          {"active", p.liveness == DART_PEER_ACTIVE},
                          {"frag", dart_node_peer_frag(&p)},
-                         {"topics", peer_topics_json(p)} });
+                         {"topics", peer_topics_json(c->node, p)} });
     }
     dart_node_unlock(c->node);
     reply_ok(c, seq, { {"peers", list} });

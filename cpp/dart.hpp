@@ -207,6 +207,9 @@ struct NodeOptions {
     uint16_t                 domain               = 0;   /* logical-network selector */
     uint16_t                 max_channels         = 8;   /* how many channels may be created */
     bool                     disable_shm          = false;
+    bool                     fetch_details        = false; /* greedily fetch every peer topic's
+                                                              name + schema (observer UIs): fills
+                                                              Peer::topics names via the cache */
     /* networking (all optional) */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
@@ -479,9 +482,10 @@ public:
 
         detail::DartNodeOpts co;
         std::memset(&co, 0, sizeof co);
-        co.domain       = o.domain;
-        co.max_channels = o.max_channels;
-        co.disable_shm  = o.disable_shm ? 1 : 0;
+        co.domain        = o.domain;
+        co.max_channels  = o.max_channels;
+        co.disable_shm   = o.disable_shm ? 1 : 0;
+        co.fetch_details = o.fetch_details ? 1 : 0;
         co.user_data    = impl.get();
         co.net.data_port           = o.data_port;
         co.net.discovery_group     = impl->disc_group.empty() ? nullptr : impl->disc_group.c_str();
@@ -585,11 +589,17 @@ public:
             std::memset(&it, 0, sizeof it);
             detail::DartTopic t;
             while (detail::dart_node_peer_interest_next(&p, &it, &t)) {
-                /* v10 announces carry the 32-bit topic hash only; names ride the
-                   pairwise detail exchange (not yet fetched here) */
-                char hx[16];
-                std::snprintf(hx, sizeof hx, "0x%08x", (unsigned)t.hash);
-                peer.topics.push_back({ std::string(hx), t.is_pub != 0, t.reliable != 0 });
+                /* the fetched name (NodeOptions::fetch_details fills the cache within an
+                   RTT); the announce's 32-bit hash as a placeholder until it lands */
+                detail::DartString nm = detail::dart_node_peer_topic_name(impl_->node, p.id, t.alias);
+                std::string name;
+                if (nm.data) name.assign(nm.data, nm.len);
+                else {
+                    char hx[16];
+                    std::snprintf(hx, sizeof hx, "0x%08x", (unsigned)t.hash);
+                    name = hx;
+                }
+                peer.topics.push_back({ std::move(name), t.is_pub != 0, t.reliable != 0 });
             }
             out.push_back(std::move(peer));
         }

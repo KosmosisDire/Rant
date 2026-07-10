@@ -564,6 +564,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
         cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
         cc.on_event = i_dart_node_on_event; cc.user = n;
         cc.alloc = i_dart_node_alloc; cc.alloc_user = n;   /* backs interned/rebased peer schemas */
+        cc.fetch_details = o.fetch_details;   /* observer mode: fetch + cache every peer topic */
 #ifdef DART_SHM
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif
@@ -1174,6 +1175,28 @@ DartChannel *dart_node_channel(DartNode *n, uint16_t index){
  * (from inside a callback the view is already safe for the callback's duration). */
 const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count){
     return dart_discovery_peers(n ? n->discovery : NULL, count);
+}
+
+/* Greedy detail-cache queries (opts.fetch_details): a peer topic's fetched name and
+ * parsed schema by (peer id, alias). Same view rules as dart_node_peers. */
+DartString dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t alias){
+    DartString s = dart_string(NULL, 0); int acquired;
+    if (!n) return s;
+    acquired = i_dart_node_lock(n);
+    i_dart_node_core_topic_detail(n->core, peer, alias, &s, NULL, NULL);
+    i_dart_node_unlock(n, acquired);
+    return s;
+}
+
+const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t alias,
+                                              uint64_t *schema_hash){
+    const DartSchema *sch = NULL; int acquired;
+    if (schema_hash) *schema_hash = 0;
+    if (!n) return NULL;
+    acquired = i_dart_node_lock(n);
+    i_dart_node_core_topic_detail(n->core, peer, alias, NULL, &sch, schema_hash);
+    i_dart_node_unlock(n, acquired);
+    return sch;
 }
 
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){

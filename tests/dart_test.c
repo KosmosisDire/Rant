@@ -1906,6 +1906,42 @@ static void detail_live_checks(void){
     }
     ST_CHECK(nw==2 && pport!=0, "detail-live: oracle holds both pub topics (nw=%u)", nw);
 
+    /* observer mode (opts.fetch_details): a channel-less node greedily fetches every
+       peer topic's name + schema and serves the dart_node_peer_topic_* queries */
+    {   DartAllocator oa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+        DartNodeOpts oo = po; DartNode *O;
+        oo.fetch_details = 1;
+        O = dart_node_open(&oa, "dt-obs", NULL, NULL, &oo);
+        ST_CHECK(O != NULL, "detail-obs: observer node opens");
+        if (O){
+            uint32_t pid = 0;
+            DartString n0 = dart_string(NULL,0), n1 = dart_string(NULL,0);
+            for (t=0;t<800;t++){
+                uint16_t cnt=0, k; const DartDiscoveryPeer *ops;
+                dart_node_poll(O,2); dart_node_poll(P,1); dart_node_poll(S,1);
+                ops = dart_node_peers(O, &cnt);
+                pid = 0;
+                for (k=0;k<cnt;k++)
+                    if (ops[k].name.len==6 && memcmp(ops[k].name.data,"dt-pub",6)==0) pid = ops[k].id;
+                if (!pid) continue;
+                n0 = dart_node_peer_topic_name(O, pid, 0);
+                n1 = dart_node_peer_topic_name(O, pid, 1);
+                if (n0.data && n1.data) break;
+            }
+            ST_CHECK(n0.data && n0.len==7 && memcmp(n0.data,"dt/pose",7)==0
+                  && n1.data && n1.len==8 && memcmp(n1.data,"dt/plain",8)==0,
+                     "detail-obs: greedy cache resolves both topic names");
+            {   uint64_t h0=0, h1=1;
+                const DartSchema *s0 = dart_node_peer_topic_schema(O, pid, 0, &h0);
+                const DartSchema *s1 = dart_node_peer_topic_schema(O, pid, 1, &h1);
+                ST_CHECK(s0 && h0==dart_schema_hash(W) && dart_schema_hash(s0)==h0,
+                         "detail-obs: typed topic's schema cached parsed (hash matches)");
+                ST_CHECK(!s1 && h1==0, "detail-obs: raw topic cached untyped");
+            }
+            dart_node_close(O, 1);
+        }
+    }
+
     q = i_dart_plat_udp_open();
     if (q != DART_SOCK_BAD){ if (!i_dart_plat_bind(q, 0, 0, 0)){ i_dart_plat_close(q); q = DART_SOCK_BAD; } }
     ST_CHECK(q != DART_SOCK_BAD, "detail-live: raw requester socket");

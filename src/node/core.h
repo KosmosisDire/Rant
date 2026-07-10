@@ -120,6 +120,9 @@ typedef struct {
     void                 *alloc_user;
     int                   oob_capable;   /* 1 = we can deliver out-of-band (SHM) payloads */
     uint8_t               oob_host[16];  /* our host id; a peer is OOB-reachable iff it matches */
+    uint8_t               fetch_details; /* 1 = the detail cycle requests EVERY advertised alias
+                                            (observer mode) and caches name + schema per
+                                            (peer, alias) for i_dart_node_core_topic_detail */
 } i_DartNodeCoreConfig;
 
 typedef struct i_DartNodeCore i_DartNodeCore;
@@ -211,6 +214,14 @@ int    i_dart_node_core_detail_any(i_DartNodeCore *c);
 void   i_dart_node_core_detail_rearm(i_DartNodeCore *c);
 size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
                                         void *out, size_t cap, i_DartNodeDest *to);
+
+/* The greedy detail cache (cfg.fetch_details): a peer topic's fetched name + parsed
+ * schema by (peer id, alias). name is a view of the cache's copy ({NULL,0} = not
+ * fetched yet); *schema/*schema_hash (either may be NULL) get the interned parsed
+ * schema and its identity (NULL/0 = untyped). Returns 1 on a cache hit. */
+int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t alias,
+                                  DartString *name, const DartSchema **schema,
+                                  uint64_t *schema_hash);
 
 /* A peer's human-readable name, learned from its announce blob: a DartString viewing the
  * peer-table slot (not NUL-terminated; stable until the peer is evicted). Non-empty for any
