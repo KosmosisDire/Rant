@@ -128,7 +128,8 @@ typedef enum {
     DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .channel), refused */
     DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer) */
-    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer) */
+    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer,
+                                       .peer_is_pub = the refused direction) */
     DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases we cannot map (.peer,
                                         .lost_count = entry count): their data can never demux here.
                                         Fixed mode: raise DART_META_MAX_IDS; dynamic: map alloc failed. */
@@ -151,6 +152,8 @@ typedef struct {
     uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
     uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
+    uint8_t    peer_is_pub;    /* SCHEMA_MISMATCH: the refused direction, as in the
+                                  schema_check hook (1 = their writer, our read side) */
 } DartTransportEvent;
 typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 

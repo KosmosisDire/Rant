@@ -94,6 +94,9 @@ typedef struct {
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
+    const char *schema_detail; /* SCHEMA_MISMATCH: what exactly was incompatible, one line (a
+                                  view into node state, valid for the callback; NULL when
+                                  unknown, or under DART_NO_DIAG) */
 } DartEvent;
 typedef void (*DartEventFn)(const DartEvent *ev);
 
@@ -174,6 +177,18 @@ DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, Da
  * delivery, keyed by the peer id. */
 int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
                                   int peer_is_pub, uint64_t hash, DartBytes wire);
+
+/* Why the schema gate refused (peer, channel) in the given direction (peer_is_pub as in
+ * schema_check): the reason recorded at detail intake, feeding DartEvent.schema_detail
+ * when the transport fires SCHEMA_MISMATCH at interest apply. A view into node state,
+ * valid until the verdict changes or the peer is removed; NULL when unknown (fixed
+ * mode, or DART_NO_DIAG). */
+const char *i_dart_node_core_schema_why(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                        int peer_is_pub);
+/* Record + return the reason for a delivery-length mismatch (a message that did not fit
+ * its sender's schema), same storage/lifetime as schema_why. NULL under DART_NO_DIAG. */
+const char *i_dart_node_core_note_size_mismatch(i_DartNodeCore *c, uint32_t peer,
+                                        uint16_t channel, uint64_t got_len, uint64_t want_len);
 
 /* The schema to decode a delivered message with: the channel's own schema when the
  * sender's is identical, a rebased view of the sender's layout when it is a superset,

@@ -158,6 +158,12 @@ int       dart_schema_validate(const DartSchema *s, DartBytes msg); /* 1 if msg.
  * under the same name with the same type (a nested struct field must match exactly).
  * The subset applies at the top level: field order and extra pub fields are free. */
 int dart_schema_subset(const DartSchema *sub, const DartSchema *pub);
+/* dart_schema_subset with a reason: on refusal (returns 0) writes the first
+ * incompatibility into buf as one line, e.g. "field 'position': reader f32[8],
+ * writer f64[8]" (always NUL-terminated, truncated to cap; buf may be NULL to skip
+ * the text). Returns 1 with buf untouched when sub can read pub. */
+int dart_schema_subset_why(const DartSchema *sub, const DartSchema *pub,
+                           char *buf, size_t cap);
 /* The reader's view of a publisher's layout: sub's fields (names, order, indices) with
  * pub's offsets, and pub's message size (so dart_schema_validate matches the
  * publisher's messages). Requires dart_schema_subset(sub, pub); NULL otherwise or on

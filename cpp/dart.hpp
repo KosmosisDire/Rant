@@ -388,6 +388,8 @@ public:
     uint64_t         identity()       const { return ev_->identity; }
     uint16_t         publish_topics() const { return ev_->publish_topics; }
     uint16_t         receive_topics() const { return ev_->receive_topics; }
+    /* SchemaMismatch: what exactly was incompatible (empty when unknown). */
+    std::string      schema_detail()  const { return ev_->schema_detail ? ev_->schema_detail : ""; }
 
     /* A one-line human-readable rendering (uses the C formatter). */
     std::string to_string() const { char b[192]; return detail::dart_event_str(ev_, b, sizeof b); }

@@ -352,6 +352,7 @@ void i_dart_transport_fire_event(DartTransportState *st, DartTransportEventKind 
     case DART_TRANSPORT_MSG_LOST:       ev.lost_first = first; ev.lost_count = count; break;
     case DART_TRANSPORT_MSG_TOO_BIG:    ev.too_big_bytes = count; break;
     case DART_TRANSPORT_NAME_COLLISION: ev.identity = first; break;
+    case DART_TRANSPORT_SCHEMA_MISMATCH: ev.peer_is_pub = (uint8_t)first; break;
     default: break;
     }
     st->cfg.on_event(&ev);
@@ -777,7 +778,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
             if (ours_sub && ch->qos.reliability==DART_RELIABLE && !rel){
                 i_dart_transport_fire_event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & DART__AST_READ_OK)){
-                i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
+                i_dart_transport_fire_event(st, DART_TRANSPORT_SCHEMA_MISMATCH, cidx, peer_id, 1, 0);
             } else {
                 i_dart_bit_set(peer_pub_bitmap,(uint32_t)cidx);
             }

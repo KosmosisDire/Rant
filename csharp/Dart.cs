@@ -172,6 +172,7 @@ namespace Dart
         public ulong identity;
         public ushort publish_topics;
         public ushort receive_topics;
+        public IntPtr schema_detail;           // const char* (SchemaMismatch: what was incompatible; else null)
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -481,6 +482,7 @@ namespace Dart
         public ulong LostFirst;
         public ulong LostCount;
         public ulong TooBigBytes;
+        public string SchemaDetail;     // SchemaMismatch: what exactly was incompatible, else null
         private string _line;
 
         /// <summary>True if this event reports something going wrong (Kind == EventKind.Error).</summary>
@@ -510,6 +512,7 @@ namespace Dart
                 LostFirst = e.lost_first,
                 LostCount = e.lost_count,
                 TooBigBytes = e.too_big_bytes,
+                SchemaDetail = e.schema_detail != IntPtr.Zero ? Codec.PtrToStr(e.schema_detail) : null,
                 _line = Codec.CBufStr(buf),
             };
         }

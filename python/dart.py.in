@@ -305,6 +305,7 @@ class DartEvent(Structure):
         ("identity", c_uint64),
         ("publish_topics", c_uint16),
         ("receive_topics", c_uint16),
+        ("schema_detail", c_char_p),
     ]
 
 
@@ -1002,7 +1003,7 @@ class Event:
     human-readable message either way."""
     __slots__ = ("kind", "error", "channel_name", "peer", "channel", "os_error",
                  "lost_first", "lost_count", "too_big_bytes", "identity",
-                 "publish_topics", "receive_topics", "_line")
+                 "publish_topics", "receive_topics", "schema_detail", "_line")
 
     @classmethod
     def _from_c(cls, e):
@@ -1019,6 +1020,8 @@ class Event:
         self.identity = e.identity
         self.publish_topics = e.publish_topics
         self.receive_topics = e.receive_topics
+        self.schema_detail = (e.schema_detail.decode("utf-8", "replace")
+                              if e.schema_detail else None)
         buf = ctypes.create_string_buffer(192)
         _load().dart_event_str(byref(e), buf, len(buf))
         self._line = buf.value.decode("utf-8", "replace")

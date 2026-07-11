@@ -415,25 +415,100 @@ static const i_Field *i_dart_schema_find(const DartSchema *s, DartString name){
     return NULL;
 }
 
-int dart_schema_subset(const DartSchema *sub, const DartSchema *pub){
+/* bounded appenders for the subset-why text (no stdio; a NULL buffer skips all text) */
+static char *i_dart_why_str(char *p, char *end, const char *s){
+    if (!p) return NULL;
+    while (*s && p < end) *p++ = *s++;
+    return p;
+}
+static char *i_dart_why_view(char *p, char *end, DartString s){
+    size_t i;
+    if (!p) return NULL;
+    for (i = 0; i < s.len && p < end; i++) *p++ = s.data[i];
+    return p;
+}
+static char *i_dart_why_u(char *p, char *end, uint32_t v){
+    char tmp[10]; int n = 0;
+    if (!p) return NULL;
+    do { tmp[n++] = (char)('0' + v % 10u); v /= 10u; } while (v);
+    while (n && p < end) *p++ = tmp[--n];
+    return p;
+}
+static const char *i_dart_why_kind(uint8_t k){
+    switch (k){
+        case DART_U8:  return "u8";  case DART_U16: return "u16";
+        case DART_U32: return "u32"; case DART_U64: return "u64";
+        case DART_I8:  return "i8";  case DART_I16: return "i16";
+        case DART_I32: return "i32"; case DART_I64: return "i64";
+        case DART_F32: return "f32"; case DART_F64: return "f64";
+        case DART_BOOL: return "bool"; case DART_STRUCT: return "struct";
+        default: return "?";
+    }
+}
+/* a field's type in DSL form: "f32[8]", "string<33>", "string<16>[4]", "struct" */
+static char *i_dart_why_type(char *p, char *end, const i_Field *f){
+    uint8_t elem = f->kind == DART_ARR ? f->elem : f->kind;
+    if (elem == DART_STR){
+        p = i_dart_why_str(p, end, "string<");
+        p = i_dart_why_u(p, end, f->str_cap);
+        p = i_dart_why_str(p, end, ">");
+    } else {
+        p = i_dart_why_str(p, end, i_dart_why_kind(elem));
+    }
+    if (f->kind == DART_ARR){
+        p = i_dart_why_str(p, end, "[");
+        p = i_dart_why_u(p, end, f->count);
+        p = i_dart_why_str(p, end, "]");
+    }
+    return p;
+}
+static int i_dart_why_done(char *buf, char *p){   /* NUL-terminate the reason, refuse */
+    if (buf) *p = '\0';
+    return 0;
+}
+
+int dart_schema_subset_why(const DartSchema *sub, const DartSchema *pub,
+                           char *buf, size_t cap){
     uint16_t i;
-    if (!sub || !pub) return 0;
+    char *p = (buf && cap) ? buf : NULL, *end = p ? buf + cap - 1 : NULL;
+    if (p) *p = '\0';
+    if (!sub || !pub)
+        return i_dart_why_done(p, i_dart_why_str(p, end, "schema missing"));
     if (sub->name.len != pub->name.len ||
-        (sub->name.len && memcmp(sub->name.data, pub->name.data, sub->name.len) != 0)) return 0;
+        (sub->name.len && memcmp(sub->name.data, pub->name.data, sub->name.len) != 0)){
+        p = i_dart_why_str(p, end, "reader type '"); p = i_dart_why_view(p, end, sub->name);
+        p = i_dart_why_str(p, end, "' != writer type '"); p = i_dart_why_view(p, end, pub->name);
+        return i_dart_why_done(buf, i_dart_why_str(p, end, "'"));
+    }
     for (i = 0; i < sub->nfields; i++){
         const i_Field *a = &sub->fields[i], *b;
         if (a->depth != 0) continue;                          /* members ride their struct */
         b = i_dart_schema_find(pub, a->name);
-        if (!b || a->kind != b->kind) return 0;
-        if (a->kind == DART_ARR &&
-            (a->elem != b->elem || a->count != b->count || a->str_cap != b->str_cap)) return 0;
-        if (a->kind == DART_STR && a->str_cap != b->str_cap) return 0;
+        if (!b){
+            p = i_dart_why_str(p, end, "field '"); p = i_dart_why_view(p, end, a->name);
+            return i_dart_why_done(buf, i_dart_why_str(p, end, "' missing from writer"));
+        }
+        if (a->kind != b->kind ||
+            (a->kind == DART_ARR &&
+             (a->elem != b->elem || a->count != b->count || a->str_cap != b->str_cap)) ||
+            (a->kind == DART_STR && a->str_cap != b->str_cap)){
+            p = i_dart_why_str(p, end, "field '"); p = i_dart_why_view(p, end, a->name);
+            p = i_dart_why_str(p, end, "': reader "); p = i_dart_why_type(p, end, a);
+            p = i_dart_why_str(p, end, ", writer ");
+            return i_dart_why_done(buf, i_dart_why_type(p, end, b));
+        }
         if (a->kind == DART_STRUCT &&                         /* nested: exact type encoding */
             (a->type_len != b->type_len ||
-             memcmp(sub->wire.data + a->type_off, pub->wire.data + b->type_off, a->type_len) != 0))
-            return 0;
+             memcmp(sub->wire.data + a->type_off, pub->wire.data + b->type_off, a->type_len) != 0)){
+            p = i_dart_why_str(p, end, "field '"); p = i_dart_why_view(p, end, a->name);
+            return i_dart_why_done(buf, i_dart_why_str(p, end, "': nested struct layout differs"));
+        }
     }
     return 1;
+}
+
+int dart_schema_subset(const DartSchema *sub, const DartSchema *pub){
+    return dart_schema_subset_why(sub, pub, NULL, 0);
 }
 
 DartSchema *dart_schema_rebase(const DartSchema *sub, const DartSchema *pub,

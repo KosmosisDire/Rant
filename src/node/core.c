@@ -61,7 +61,9 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     case DART_E_SCHEMA_MISMATCH:
         p=i_dart_event_append_str(p,end,"schema-mismatch "); p=i_dart_event_append_ch(p,end,ev);
         p=i_dart_event_append_str(p,end," peer id="); p=i_dart_event_append_u64(p,end,ev->peer);
-        p=i_dart_event_append_str(p,end,": incompatible schemas, refused"); break;
+        p=i_dart_event_append_str(p,end,": ");
+        p=i_dart_event_append_str(p,end, ev->schema_detail && ev->schema_detail[0]
+                                  ? ev->schema_detail : "incompatible schemas, refused"); break;
     case DART_E_INTEREST_OVERFLOW:
         p=i_dart_event_append_str(p,end,"interest-overflow peer id="); p=i_dart_event_append_u64(p,end,ev->peer);
         p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->lost_count);
@@ -170,6 +172,14 @@ typedef struct { uint32_t peer; uint16_t channel; const DartSchema *schema; } i_
    is a hook allocation owned here; the schema is interned (lives until close). */
 typedef struct { uint32_t peer; uint16_t alias; uint8_t name_len; char *name;
                  uint64_t schema_hash; const DartSchema *schema; } i_DartNodeTopicDetail;
+#ifndef DART_NO_DIAG
+/* why the schema gate refused (peer, channel, direction): recorded at detail intake so
+   the SCHEMA_MISMATCH event (fired later, at every interest apply) can say what was
+   incompatible. Refusals are rare, so a flat scanned array; stripped by DART_NO_DIAG. */
+#define DART__SCHEMA_WHY_MAX 128
+typedef struct { uint32_t peer; uint16_t channel; uint8_t peer_is_pub;
+                 char text[DART__SCHEMA_WHY_MAX]; } i_DartNodeSchemaWhy;
+#endif
 
 struct i_DartNodeCore {
     DartTransportState           *transport;
@@ -197,6 +207,9 @@ struct i_DartNodeCore {
     i_DartNodePeerSchema   *peer_schemas; uint32_t n_peer_schemas, cap_peer_schemas;
     uint8_t                 fetch_details; /* observer mode: fetch + cache every alias */
     i_DartNodeTopicDetail  *topic_details; uint32_t n_topic_details, cap_topic_details;
+#ifndef DART_NO_DIAG
+    i_DartNodeSchemaWhy    *schema_whys;   uint32_t n_schema_whys,   cap_schema_whys;
+#endif
 };
 
 /* grow one of the flat schema arrays through the hook; 1 + *arr/cap updated, or 0 */
@@ -381,6 +394,80 @@ static void i_dart_node_core_peer_schema_clear(i_DartNodeCore *c, uint32_t peer)
     }
 }
 
+/* ---- why a schema gate refused (feeds DartEvent.schema_detail) ------------------------ */
+
+#ifndef DART_NO_DIAG
+static void i_dart_node_core_schema_why_set(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                            int peer_is_pub, const char *text){
+    uint32_t i; i_DartNodeSchemaWhy *w = NULL; size_t n;
+    for (i = 0; i < c->n_schema_whys; i++)
+        if (c->schema_whys[i].peer == peer && c->schema_whys[i].channel == channel &&
+            c->schema_whys[i].peer_is_pub == (uint8_t)peer_is_pub){ w = &c->schema_whys[i]; break; }
+    if (!w){
+        if (!i_dart_node_core_array_reserve(c, (void**)&c->schema_whys, &c->cap_schema_whys,
+                                            c->n_schema_whys + 1u, sizeof *c->schema_whys)) return;
+        w = &c->schema_whys[c->n_schema_whys++];
+        w->peer = peer; w->channel = channel; w->peer_is_pub = (uint8_t)peer_is_pub;
+    }
+    n = 0;
+    while (text[n] && n < DART__SCHEMA_WHY_MAX - 1u){ w->text[n] = text[n]; n++; }
+    w->text[n] = '\0';
+}
+static void i_dart_node_core_schema_why_drop(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                             int peer_is_pub){
+    uint32_t i = 0;
+    while (i < c->n_schema_whys){
+        if (c->schema_whys[i].peer == peer && c->schema_whys[i].channel == channel &&
+            c->schema_whys[i].peer_is_pub == (uint8_t)peer_is_pub)
+            c->schema_whys[i] = c->schema_whys[--c->n_schema_whys];   /* swap-remove */
+        else i++;
+    }
+}
+static void i_dart_node_core_schema_why_clear(i_DartNodeCore *c, uint32_t peer){
+    uint32_t i = 0;
+    while (i < c->n_schema_whys){
+        if (c->schema_whys[i].peer == peer)
+            c->schema_whys[i] = c->schema_whys[--c->n_schema_whys];
+        else i++;
+    }
+}
+const char *i_dart_node_core_schema_why(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                        int peer_is_pub){
+    uint32_t i;
+    if (!c) return NULL;
+    for (i = 0; i < c->n_schema_whys; i++)
+        if (c->schema_whys[i].peer == peer && c->schema_whys[i].channel == channel &&
+            c->schema_whys[i].peer_is_pub == (uint8_t)peer_is_pub)
+            return c->schema_whys[i].text;
+    return NULL;
+}
+const char *i_dart_node_core_note_size_mismatch(i_DartNodeCore *c, uint32_t peer,
+                                        uint16_t channel, uint64_t got_len, uint64_t want_len){
+    char text[DART__SCHEMA_WHY_MAX];
+    char *p = text, *end = text + sizeof text - 1;
+    if (!c) return NULL;
+    p = i_dart_event_append_str(p, end, "message is ");
+    p = i_dart_event_append_u64(p, end, got_len);
+    p = i_dart_event_append_str(p, end, " bytes, the sender's schema says ");
+    p = i_dart_event_append_u64(p, end, want_len);
+    *p = '\0';
+    i_dart_node_core_schema_why_set(c, peer, channel, 1, text);
+    return i_dart_node_core_schema_why(c, peer, channel, 1);
+}
+#else
+static void i_dart_node_core_schema_why_clear(i_DartNodeCore *c, uint32_t peer){
+    (void)c; (void)peer;
+}
+const char *i_dart_node_core_schema_why(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                        int peer_is_pub){
+    (void)c; (void)peer; (void)channel; (void)peer_is_pub; return NULL;
+}
+const char *i_dart_node_core_note_size_mismatch(i_DartNodeCore *c, uint32_t peer,
+                                        uint16_t channel, uint64_t got_len, uint64_t want_len){
+    (void)c; (void)peer; (void)channel; (void)got_len; (void)want_len; return NULL;
+}
+#endif
+
 const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, uint16_t channel){
     uint32_t i;
     if (!c) return NULL;
@@ -469,8 +556,24 @@ static uint16_t i_dart_node_core_greedy_extend(i_DartNodeCore *c, uint32_t peer,
     return n;
 }
 
-int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
-                                  int peer_is_pub, uint64_t hash, DartBytes wire){
+/* why i_dart_node_core_intern returned NULL, as text (shared by both directions) */
+static char *i_dart_node_core_intern_why(i_DartNodeCore *c, DartBytes wire, char *p, char *end){
+    if (!c->alloc)
+        return i_dart_event_append_str(p, end, "no allocator here to parse peer schemas");
+    if (!wire.data || wire.len == 0)
+        return i_dart_event_append_str(p, end,
+            "their schema wire is unavailable (not inlined in the detail response)");
+    p = i_dart_event_append_str(p, end, "their schema wire was rejected: malformed, "
+            "hash-mismatched, or a different DART schema wire version than ours (v");
+    p = i_dart_event_append_u64(p, end, DART_SCHEMA_WIRE_VERSION);
+    return i_dart_event_append_str(p, end, ")");
+}
+
+/* the verdict itself; a refusal writes its reason into [p, end] (end = last writable
+ * byte; pass p == end for no text). The wrapper below records/clears the reason. */
+static int i_dart_node_core_schema_verdict(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                           int peer_is_pub, uint64_t hash, DartBytes wire,
+                                           char *p, char *end){
     const DartSchema *ours = (channel < c->n_channels) ? c->chan_compiled[channel] : NULL;
     int peer_has = hash != 0;   /* the peer's schema, from its detail response */
     if (peer_is_pub){                                   /* their publish side: we would read */
@@ -479,27 +582,61 @@ int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t cha
                 peer_has ? i_dart_node_core_intern(c, hash, wire) : NULL);
             return 1;
         }
-        if (!peer_has) return 0;                        /* typed reader refuses an untyped writer */
+        if (!peer_has){                                 /* typed reader refuses an untyped writer */
+            p = i_dart_event_append_str(p, end, "their writer has no schema, our typed reader refuses");
+            *p = '\0'; return 0;
+        }
         if (hash == dart_schema_hash(ours)){            /* identical schema: our own view works */
             i_dart_node_core_peer_schema_set(c, peer, channel, ours);
             return 1;
         }
         {   DartSchema *pub = i_dart_node_core_intern(c, hash, wire);   /* need the wire to verify */
             DartSchema *view;
-            if (!pub || !dart_schema_subset(ours, pub)) return 0;
+            if (!pub){
+                p = i_dart_node_core_intern_why(c, wire, p, end);
+                *p = '\0'; return 0;
+            }
+            if (!dart_schema_subset_why(ours, pub, p, (size_t)(end - p) + 1u)) return 0;
             view = i_dart_node_core_bind(c, hash, channel, ours, pub);
-            if (!view) return 0;                        /* OOM: refuse rather than misdecode */
+            if (!view){                                 /* OOM: refuse rather than misdecode */
+                p = i_dart_event_append_str(p, end, "out of memory binding the reader view");
+                *p = '\0'; return 0;
+            }
             i_dart_node_core_peer_schema_set(c, peer, channel, view);
             return 1;
         }
     } else {                                            /* their subscribe side: we would write */
         if (!peer_has) return 1;                        /* a generic reader takes anything */
-        if (!ours) return 0;                            /* typed reader refuses our raw channel */
+        if (!ours){                                     /* typed reader refuses our raw channel */
+            p = i_dart_event_append_str(p, end, "their reader is typed, our channel has no schema");
+            *p = '\0'; return 0;
+        }
         if (hash == dart_schema_hash(ours)) return 1;
         {   DartSchema *sub = i_dart_node_core_intern(c, hash, wire);
-            return sub != NULL && dart_schema_subset(sub, ours);
+            if (!sub){
+                p = i_dart_node_core_intern_why(c, wire, p, end);
+                *p = '\0'; return 0;
+            }
+            return dart_schema_subset_why(sub, ours, p, (size_t)(end - p) + 1u);
         }
     }
+}
+
+int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+                                  int peer_is_pub, uint64_t hash, DartBytes wire){
+#ifndef DART_NO_DIAG
+    char why[DART__SCHEMA_WHY_MAX];
+    int ok;
+    why[0] = '\0';
+    ok = i_dart_node_core_schema_verdict(c, peer, channel, peer_is_pub, hash, wire,
+                                         why, why + sizeof why - 1);
+    if (ok) i_dart_node_core_schema_why_drop(c, peer, channel, peer_is_pub);
+    else    i_dart_node_core_schema_why_set (c, peer, channel, peer_is_pub, why);
+    return ok;
+#else
+    char why[1];
+    return i_dart_node_core_schema_verdict(c, peer, channel, peer_is_pub, hash, wire, why, why);
+#endif
 }
 
 /* (Re)build our discovery OVERLAY (frag size + OOB host + interest) from the core's
@@ -630,6 +767,7 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
     if (!ex->added){                                  /* brand-new peer: wire it into the transport */
         i_dart_node_core_peer_schema_clear(c, id);    /* its id may be recycled: no stale bindings */
         i_dart_node_core_topic_details_clear(c, id);
+        i_dart_node_core_schema_why_clear(c, id);
         dart_transport_peer_add(c->transport, id, frag);          /* blob carries frag + pub/sub interest */
         ex->added = 1; ex->dormant = 0; ex->detail_due = 0;
         i_dart_node_core_set_peer_oob(c, id, meta);
@@ -747,6 +885,7 @@ static void i_dart_node_core_peer_down(i_DartNodeCore *c, uint32_t id, DartDisco
         dart_transport_peer_remove(c->transport, id);   /* discovery zeroes the scratch on slot reuse */
         i_dart_node_core_peer_schema_clear(c, id);      /* the id may be reassigned */
         i_dart_node_core_topic_details_clear(c, id);
+        i_dart_node_core_schema_why_clear(c, id);
         if (notify) i_dart_node_core_fire(c, DART_PEER_DOWN, id, NULL);
     }
 }

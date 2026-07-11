@@ -223,6 +223,8 @@ static void i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartByt
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
         e.peer = from; e.channel = ch; e.channel_name = i_dart_node_ch_name(n, ch);
+        e.schema_detail = i_dart_node_core_note_size_mismatch(n->core, from, ch,
+                                            data.len, dart_schema_size(schema));
         i_dart_node_emit(n, &e);
         return;
     }
@@ -297,7 +299,9 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     case DART_TRANSPORT_QOS_INCOMPATIBLE:
         e.kind = DART_ERROR; e.error = DART_E_QOS_INCOMPATIBLE; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
     case DART_TRANSPORT_SCHEMA_MISMATCH:
-        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.channel_name = i_dart_node_ch_name(n, tev->channel);
+        e.schema_detail = i_dart_node_core_schema_why(n->core, tev->peer, tev->channel,
+                                                      tev->peer_is_pub); break;
     case DART_TRANSPORT_INTEREST_OVERFLOW:
         e.kind = DART_ERROR; e.error = DART_E_INTEREST_OVERFLOW; break;
     case DART_TRANSPORT_META_TRUNCATED_INTEREST:
