@@ -10,7 +10,6 @@ using System.Diagnostics;
 using System.Threading;
 using Dart;
 
-[DartSchema]
 struct Tick
 {
     [DartField("seq")]   public ulong Seq;
@@ -28,11 +27,11 @@ static class Program
         string iface = args.Length > 1 ? args[1] : null;                 // optional: pin the interface
         var opts = new NodeOptions();
         if (iface != null) opts.MulticastInterface = iface;
-        var node = Node.Open("cs-publisher", null, e => Console.Error.WriteLine("event: " + e), opts);
+        var node = new Node("cs-publisher", null, e => Console.Error.WriteLine("event: " + e), opts);
         // keep_last deep enough that a small per-loop burst is not evicted before it flushes.
-        var ch = node.CreateChannel("tick", Role.PubOnly, typeof(Tick), new Qos { KeepLast = 64 });
+        var ch = new Channel<Tick>(node, "tick", Role.PubOnly, new Qos { KeepLast = 64 });
         Console.WriteLine($"publishing 'tick' at {Hz} Hz on the default interface, domain 0 (Ctrl+C to stop)");
-        using (var s = Schema.FromType(typeof(Tick)))
+        using (var s = new Schema(typeof(Tick)))
             Console.WriteLine("schema: " + string.Join(" ", s.Dsl.Split((char[])null, StringSplitOptions.RemoveEmptyEntries)));
 
         bool stop = false;

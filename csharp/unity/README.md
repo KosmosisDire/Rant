@@ -42,33 +42,35 @@ auto-detects Standalone by extension: `.dll` -> Windows, `.so` -> Linux).
 ```csharp
 using Dart;
 
-[DartSchema] public struct Pose {
+public struct Pose {
     public ulong Stamp; public double X; public double Y;
     [DartArray(4)] public byte[] Uuid;
+    [DartString(16)] public string Frame;
 }
 
-// The node runs a C-level background service thread (Start). Handlers would fire on
-// that thread, so pass queueCallbacks: true and drain them from Update(): they then
-// run on the main thread, where the Unity API is legal.
+// Drive the node by polling from Update(): handlers fire inline on the main thread,
+// where the Unity API is legal.
 Dart.Node _node;
-Dart.Channel _ch;
+Dart.Channel<Pose> _ch;
 void Start() {
-    _node = Node.Open("player1",
-                      onMessage: m => transform.position = ToVec(m.As<Pose>()),
-                      onEvent: e => Debug.LogWarning(e),
-                      options: new NodeOptions { Domain = 7 });
-    _ch = _node.CreateChannel("pose", Role.PubSub, typeof(Pose));
-    _node.Start(queueCallbacks: true);
+    _node = new Node("player1",
+                     onMessage: m => transform.position = ToVec(m.As<Pose>()),
+                     onEvent: e => Debug.LogWarning(e),
+                     new NodeOptions { Domain = 7 });
+    _ch = new Channel<Pose>(_node, "pose");
 }
-void Update()      { _node.DispatchCallbacks(); /* queued messages/events, main thread */ }
+void Update()      { _node.Poll(0); /* non-blocking: RX + handlers, main thread */ }
 void OnDestroy()   { _node.Close(); }
-// (Alternative: skip Start() and call _node.Poll(0) from Update(): handlers then fire
-// inline on the main thread, at frame-rate latency.)
+// (Alternative: _node.Start() runs a C-level background service thread with no Poll()
+// anywhere, but handlers then fire on that thread, where the Unity API is NOT legal --
+// marshal to the main thread yourself before touching Unity objects.)
 ```
 
-Wire field names are the C# field names (override with `[DartField("stamp")]`) and must
-match on every node for a topic. Sends are thread-safe from any thread; from inside a
-handler, `Channel.Send` and read-only queries are allowed, other node calls are not.
+Any struct/class with public fields is a message type. Wire field names are the C#
+field names (override with `[DartField("stamp")]`; `[DartString(cap)]` is required on
+string fields) and must match on every node for a topic. Sends are thread-safe from any
+thread; from inside a handler, `Channel.Send` and read-only queries are allowed, other
+node calls are not.
 
 ## IL2CPP / AOT
 

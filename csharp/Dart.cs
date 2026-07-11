@@ -10,26 +10,31 @@
 //   - Unity (UNITY_5_3_OR_NEWER): the same native library, placed in Assets/Plugins;
 //     the only Unity-specific bit is [MonoPInvokeCallback] on the callbacks (AOT).
 //
-//   var node = Dart.Node.Open("robot1",
-//                             onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed channel
-//                             onEvent: e => Console.Error.WriteLine(e),    // wired up before Open even returns
-//                             options: new Dart.NodeOptions { Domain = 7 });
-//   var ch = node.CreateChannel("pose", Dart.Role.PubSub, typeof(Pose),
-//                               new Dart.Qos { Reliability = Dart.Reliability.Reliable });
+//   struct Pose { public double X; [DartString(16)] public string Frame; }
+//
+//   var node = new Dart.Node("robot1",
+//                            onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed channel
+//                            onEvent: e => Console.Error.WriteLine(e));   // wired up before the ctor returns
+//   var ch = new Dart.Channel<Pose>(node, "pose",
+//                                   qos: new Dart.Qos { Reliability = Dart.Reliability.Reliable });
 //   node.Start();                                      // C-level service thread owns the loop
-//   ch.Send(new Pose { X = 1 });                       // thread-safe from any thread
+//   ch.Send(new Pose { X = 1, Frame = "map" });        // thread-safe from any thread
+//
+// Schemas come straight from the type: public fields become the wire fields, in
+// declaration order. [DartArray(n)] fixes an array's element count, [DartString(cap)]
+// fixes a string's byte capacity, [DartField("name")] overrides a wire name, and
+// [DartSchema("Name")] optionally overrides the wire type name (the class name by
+// default). Nested structs/classes just work.
 //
 // Threading: every Node/Channel call is thread-safe (a node-level lock in the C
 // core serializes them). Drive a node either with Start() (a C background service
 // thread runs the loop; handlers fire on it, never two at once) or by calling
-// Poll() from your own loop. Unity: Start(queueCallbacks: true) defers handlers
-// to a queue you drain with DispatchCallbacks() from Update(), keeping them on
-// the main thread. From inside OnMessage/OnEvent, Channel.Send and read-only
-// queries are allowed; Poll/CreateChannel/SetRole/Drain/Start/Stop/Close are
+// Poll() from your own loop (Unity: Poll(0) from Update() keeps handlers on the
+// main thread). From inside OnMessage/OnEvent, Channel.Send and read-only
+// queries are allowed; Poll/channel create/SetRole/Drain/Start/Stop/Close are
 // refused (SendStatus.State / exception), never corrupting.
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -78,7 +83,7 @@ namespace Dart
 
     public enum FieldType : byte
     {
-        U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct
+        U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String
     }
 
     // ---- native struct layouts (mirror the C exactly) ---------------------------
@@ -86,8 +91,10 @@ namespace Dart
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartBytes { public IntPtr data; public UIntPtr len; }
 
+    // the C DartString (a non-NUL length-carrying view); named *View here so the
+    // [DartString] attribute owns the public name
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartString { public IntPtr data; public UIntPtr len; }
+    internal struct DartStringView { public IntPtr data; public UIntPtr len; }
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartQos
@@ -147,8 +154,8 @@ namespace Dart
         public IntPtr user;
         public ushort channel_id;
         public uint sender_id;
-        public DartString sender_name;
-        public DartString channel_name;
+        public DartStringView sender_name;
+        public DartStringView channel_name;
         public DartBytes data;
         public IntPtr schema;
     }
@@ -194,7 +201,7 @@ namespace Dart
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartSchemaFieldInfo
     {
-        public DartString name;
+        public DartStringView name;
         public byte kind;
         public byte elem;
         public ushort count;
@@ -289,7 +296,7 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern ulong dart_schema_hash(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern DartString dart_schema_name(IntPtr s);
+        internal static extern DartStringView dart_schema_name(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint dart_schema_size(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
@@ -308,6 +315,11 @@ namespace Dart
         internal static extern int dart_set_f32(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, float v);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_set_array(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, DartBytes elems);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_set_string(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, DartStringView v);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_set_string_at(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field,
+            ushort index, DartStringView v);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_get_value(DartBytes msg, IntPtr s, ushort field, out DartValue outv);
     }
@@ -345,11 +357,13 @@ namespace Dart
         public ushort MaxPeers = 0;
     }
 
-    /// <summary>Mark a struct/class as a DART message: its fields become the schema.</summary>
+    /// <summary>Optional: override the wire type name of a message struct/class
+    /// (defaults to the class name). Any struct/class with public fields works as
+    /// a message type; this attribute is never required.</summary>
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
     public sealed class DartSchemaAttribute : Attribute
     {
-        public string Name;   // wire type name; defaults to the class name
+        public string Name;
         public DartSchemaAttribute(string name = null) { Name = name; }
     }
 
@@ -359,6 +373,15 @@ namespace Dart
     {
         public int Count;
         public DartArrayAttribute(int count) { Count = count; }
+    }
+
+    /// <summary>A capped string field: the max UTF-8 byte length on the wire.
+    /// Required on every string field; on a string[] combine with [DartArray].</summary>
+    [AttributeUsage(AttributeTargets.Field)]
+    public sealed class DartStringAttribute : Attribute
+    {
+        public int Cap;
+        public DartStringAttribute(int cap) { Cap = cap; }
     }
 
     /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
@@ -381,24 +404,19 @@ namespace Dart
         internal IntPtr Handle;
         internal Type ClrType;   // set for reflection-built schemas (decode target)
 
-        private Schema(IntPtr h) { Handle = h; }
-
-        public static Schema Compile(string text)
+        /// <summary>Compile schema DSL text (e.g. "Pose { x: f32, frame: string&lt;16&gt; }").</summary>
+        public Schema(string text)
         {
             IntPtr err;
             IntPtr h = Native.dart_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
             if (h == IntPtr.Zero)
                 throw new SchemaException("schema compile failed near: " + Codec.PtrToStr(err));
-            return new Schema(h);
+            Handle = h;
         }
 
-        /// <summary>Reflect a [DartSchema] type into a compiled schema (class -> DSL -> compile).</summary>
-        public static Schema FromType(Type t)
-        {
-            var s = Compile(Codec.TypeDsl(t));
-            s.ClrType = t;
-            return s;
-        }
+        /// <summary>Reflect a type into a compiled schema: public fields become the
+        /// wire fields (class -> DSL -> compile).</summary>
+        public Schema(Type t) : this(Codec.TypeDsl(t)) { ClrType = t; }
 
         public string Name => Codec.Str(Native.dart_schema_name(Handle));
         public uint Size => Native.dart_schema_size(Handle);
@@ -522,18 +540,27 @@ namespace Dart
 
     // ---- channel ----------------------------------------------------------------
 
-    public sealed class Channel
+    public class Channel
     {
         private readonly Node _node;
         private readonly IntPtr _handle;
         internal readonly Schema Schema;
 
-        internal Channel(Node node, IntPtr handle, Schema schema)
+        /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
+        /// UTF-8 strings.</summary>
+        public Channel(Node node, string name, Role role = Role.PubSub, Qos qos = null)
+            : this(node, name, (Schema)null, role, qos) { }
+
+        /// <summary>Create a typed topic with an explicit Schema (compiled from DSL or
+        /// reflected). Channel&lt;T&gt; is the shorthand for the reflected case.</summary>
+        public Channel(Node node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
         {
-            _node = node; _handle = handle; Schema = schema;
+            _node = node;
+            Schema = schema;
+            _handle = node.CreateNativeChannel(name, role, schema, qos);
         }
 
-        /// <summary>Publish bytes/string (raw) or a [DartSchema] object (encoded via the
+        /// <summary>Publish bytes/string (raw) or a message object (encoded via the
         /// channel schema). Returns a SendStatus.</summary>
         public SendStatus Send(byte[] data)
         {
@@ -582,6 +609,17 @@ namespace Dart
         }
     }
 
+    /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
+    /// [DartString] / [DartField] refine them). Delivered messages decode to T
+    /// (Message.Value / Message.As&lt;T&gt;()).</summary>
+    public sealed class Channel<T> : Channel
+    {
+        public Channel(Node node, string name, Role role = Role.PubSub, Qos qos = null)
+            : base(node, name, new Schema(typeof(T)), role, qos) { }
+
+        public SendStatus Send(T value) => Send((object)value);
+    }
+
     // ---- node -------------------------------------------------------------------
 
     public sealed class Node : IDisposable
@@ -595,11 +633,6 @@ namespace Dart
         private Action<Event> _onEvt;
         private readonly Dictionary<ushort, Type> _channelTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
-        // Start(queueCallbacks: true): handlers are deferred here (Message/Event are
-        // fully copied managed objects) and drained by DispatchCallbacks on a thread
-        // of the app's choosing (Unity: the main thread, from Update()).
-        private volatile bool _queueCallbacks;
-        private readonly ConcurrentQueue<object> _pending = new ConcurrentQueue<object>();
 
         // rooted so the GC never collects the trampolines handed to native code.
         private static readonly DartMsgFn s_onMsg = OnMessageTramp;
@@ -608,18 +641,17 @@ namespace Dart
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
-        private Node() { }
-
         /// <summary>Open a node. onMessage/onEvent are required (pass null for either if
-        /// truly not needed) so they are wired in before Open even returns -- no early
-        /// peer/error event is ever missed waiting for a deferred OnMessage/OnEvent call.
-        /// OnMessage/OnEvent below can still rebind them later.</summary>
-        public static Node Open(string name, Action<Message> onMessage, Action<Event> onEvent,
-                                NodeOptions options = null)
+        /// truly not needed) so they are wired in before the constructor even returns --
+        /// no early peer/error event is ever missed. OnMessage/OnEvent below can still
+        /// rebind them later.</summary>
+        public Node(string name, Action<Message> onMessage, Action<Event> onEvent,
+                    NodeOptions options = null)
         {
             options = options ?? new NodeOptions();
-            var node = new Node { _onMsg = onMessage, _onEvt = onEvent };
-            lock (s_reg) { node._id = s_nextId++; s_nodes[node._id] = node; }
+            _onMsg = onMessage;
+            _onEvt = onEvent;
+            lock (s_reg) { _id = s_nextId++; s_nodes[_id] = this; }
 
             var co = new DartNodeOpts
             {
@@ -627,51 +659,49 @@ namespace Dart
                 max_channels = options.MaxChannels,
                 disable_shm = (byte)(options.DisableShm ? 1 : 0),
                 fetch_details = (byte)(options.FetchDetails ? 1 : 0),
-                user_data = (IntPtr)node._id,
+                user_data = (IntPtr)_id,
             };
             // The node retains these pointers for its lifetime, so keep them alive
             // (freed in Close), matching the C++ wrapper.
-            node._discGroup = Codec.CStrPtr(options.DiscoveryGroup);
-            node._mcastIf = Codec.CStrPtr(options.MulticastInterface);
+            _discGroup = Codec.CStrPtr(options.DiscoveryGroup);
+            _mcastIf = Codec.CStrPtr(options.MulticastInterface);
             co.net.data_port = options.DataPort;
-            co.net.discovery_group = node._discGroup;
+            co.net.discovery_group = _discGroup;
             co.net.discovery_port = options.DiscoveryPort;
-            co.net.multicast_interface = node._mcastIf;
+            co.net.multicast_interface = _mcastIf;
             co.net.multicast_ttl = options.MulticastTtl;
             co.net.fragment_size = options.FragmentSize;
             co.discovery.announce_interval_us = options.AnnounceIntervalUs;
             co.discovery.peer_timeout_us = options.PeerTimeoutUs;
             co.discovery.max_peers = options.MaxPeers;
 
-            node._alloc = Codec.DefaultAllocator();
+            _alloc = Codec.DefaultAllocator();
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
-            IntPtr h = Native.dart_node_open(ref node._alloc, cname, s_onMsg, s_onEvt, ref co);
+            IntPtr h = Native.dart_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
 
             if (h == IntPtr.Zero)
             {
-                lock (s_reg) s_nodes.Remove(node._id);
-                Codec.FreeCStr(node._discGroup); Codec.FreeCStr(node._mcastIf);
+                lock (s_reg) s_nodes.Remove(_id);
+                Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
-                Event err = Node.LastOpenError();
+                Event err = LastOpenError();
                 throw new InvalidOperationException("dart_node_open failed: " + err);
             }
-            node._handle = h;
-            return node;
+            _handle = h;
         }
 
-        /// <summary>Rebind the message handler set at Open(). Rarely needed: Open already
-        /// requires an initial one.</summary>
+        /// <summary>Rebind the message handler set at construction. Rarely needed: the
+        /// constructor already requires an initial one.</summary>
         public Node OnMessage(Action<Message> fn) { _onMsg = fn; return this; }
-        /// <summary>Rebind the event handler set at Open(). Rarely needed: Open already
-        /// requires an initial one.</summary>
+        /// <summary>Rebind the event handler set at construction. Rarely needed: the
+        /// constructor already requires an initial one.</summary>
         public Node OnEvent(Action<Event> fn) { _onEvt = fn; return this; }
 
-        /// <summary>Create a topic. schema may be null (raw), a Schema, a [DartSchema]
-        /// Type, or DSL text.</summary>
-        public Channel CreateChannel(string name, Role role = Role.PubSub, object schema = null, Qos qos = null)
+        // the native create behind the Channel constructors: makes the handle and
+        // registers the schema/decode type against the channel index.
+        internal IntPtr CreateNativeChannel(string name, Role role, Schema schema, Qos qos)
         {
             qos = qos ?? new Qos();
-            Schema sch = AsSchema(schema);
             var co = new DartChannelOpts();
             co.qos.reliability = (int)qos.Reliability;
             co.qos.keep_last = qos.KeepLast;
@@ -683,21 +713,12 @@ namespace Dart
             co.qos.shm_max_bytes = qos.ShmMaxBytes;
 
             IntPtr h = Native.dart_node_create_channel(_handle, Codec.CStr(name), (int)role,
-                sch != null ? sch.Handle : IntPtr.Zero, ref co);
+                schema != null ? schema.Handle : IntPtr.Zero, ref co);
             if (h == IntPtr.Zero)
-                throw new InvalidOperationException("create_channel failed (reserve full, bad name, or OOM)");
+                throw new InvalidOperationException("channel create failed (reserve full, bad name, or OOM)");
             ushort idx = Native.dart_channel_index(h);
-            if (sch != null) { _schemas.Add(sch); _channelTypes[idx] = sch.ClrType; }
-            return new Channel(this, h, sch);
-        }
-
-        private Schema AsSchema(object schema)
-        {
-            if (schema == null) return null;
-            if (schema is Schema s) return s;
-            if (schema is Type t) return Schema.FromType(t);
-            if (schema is string text) return Schema.Compile(text);
-            throw new ArgumentException("schema must be null, a Schema, a [DartSchema] Type, or DSL text");
+            if (schema != null) { _schemas.Add(schema); _channelTypes[idx] = schema.ClrType; }
+            return h;
         }
 
         /// <summary>One loop tick: drives discovery, RX, timers, and flushes queued TX.
@@ -711,15 +732,13 @@ namespace Dart
 
         /// <summary>Run the C-level background service thread: it owns the loop and fires
         /// the handlers (never two at once for one node); every Node/Channel call stays
-        /// safe from any thread, and a send is flushed immediately. queueCallbacks defers
-        /// handlers into a queue drained by DispatchCallbacks() instead of invoking them
-        /// on the service thread -- Unity apps use this to keep handlers on the main
-        /// thread. Returns false if already started or threads are compiled out.</summary>
-        public bool Start(bool queueCallbacks = false)
+        /// safe from any thread, and a send is flushed immediately. Handlers run on the
+        /// service thread -- to keep them on a specific thread (Unity: the main thread),
+        /// skip Start() and call Poll() from that thread instead. Returns false if
+        /// already started or threads are compiled out.</summary>
+        public bool Start()
         {
-            if (Native.dart_node_start(_handle) != 0) return false;
-            _queueCallbacks = queueCallbacks;   // only flip the dispatch mode on success
-            return true;
+            return Native.dart_node_start(_handle) == 0;
         }
 
         /// <summary>Stop and join the service thread (idempotent; implied by Close).</summary>
@@ -731,29 +750,10 @@ namespace Dart
         /// Event.Kind is PeerUp with Error == None if none has occurred yet.</summary>
         public Event LastError => Event.FromValue(Native.dart_last_error(_handle));
 
-        /// <summary>Why the most recent Node.Open failed, from the process-global slot
-        /// (there is no node handle on failure). Open already throws with this message.</summary>
+        /// <summary>Why the most recent node open failed, from the process-global slot
+        /// (there is no node handle on failure). The constructor already throws with
+        /// this message.</summary>
         public static Event LastOpenError() => Event.FromValue(Native.dart_last_error(IntPtr.Zero));
-
-        /// <summary>Invoke queued handlers on the calling thread (Start(queueCallbacks:
-        /// true) mode; Unity: call from Update()). Returns how many were dispatched.
-        /// The queue is unbounded: drain it regularly, or unread messages accumulate.</summary>
-        public int DispatchCallbacks(int max = int.MaxValue)
-        {
-            int n = 0;
-            object item;
-            while (n < max && _pending.TryDequeue(out item))
-            {
-                try
-                {
-                    if (item is Message m) _onMsg?.Invoke(m);
-                    else if (item is Event e) _onEvt?.Invoke(e);
-                }
-                catch (Exception ex) { Console.Error.WriteLine("dart dispatch: " + ex); }
-                n++;
-            }
-            return n;
-        }
 
         /// <summary>Sends that evicted never-sent history after the bounded wait (the
         /// ErrorKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
@@ -804,9 +804,7 @@ namespace Dart
                 lock (s_reg) s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null || node._onMsg == null) return;
                 node._channelTypes.TryGetValue(m.channel_id, out clr);
-                var msg = Message.FromNative(ref m, clr);   // fully copied: safe past the callback
-                if (node._queueCallbacks) node._pending.Enqueue(msg);
-                else node._onMsg(msg);
+                node._onMsg(Message.FromNative(ref m, clr));   // fully copied: safe past the callback
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_message: " + e); }
         }
@@ -820,9 +818,7 @@ namespace Dart
                 Node node;
                 lock (s_reg) s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                var ev = Event.FromNative(evPtr, ref e);    // fully copied: safe past the callback
-                if (node._queueCallbacks) node._pending.Enqueue(ev);
-                else node._onEvt(ev);
+                node._onEvt(Event.FromNative(evPtr, ref e));    // fully copied: safe past the callback
             }
             catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
         }
@@ -836,7 +832,7 @@ namespace Dart
     internal static class Codec
     {
         internal const byte U8 = 0, U16 = 1, U32 = 2, U64 = 3, I8 = 4, I16 = 5, I32 = 6,
-            I64 = 7, F32 = 8, F64 = 9, BOOL = 10, ARR = 11, STRUCT = 12;
+            I64 = 7, F32 = 8, F64 = 9, BOOL = 10, ARR = 11, STRUCT = 12, STR = 13;
 
         private static readonly string[] Token = { "u8", "u16", "u32", "u64", "i8", "i16",
             "i32", "i64", "f32", "f64", "bool" };
@@ -900,7 +896,7 @@ namespace Dart
 
         internal static void FreeCStr(IntPtr p) { if (p != IntPtr.Zero) Marshal.FreeHGlobal(p); }
 
-        internal static string Str(DartString s)
+        internal static string Str(DartStringView s)
         {
             if (s.data == IntPtr.Zero || (ulong)s.len == 0) return "";
             int n = (int)(ulong)s.len;
@@ -935,7 +931,7 @@ namespace Dart
             return Encoding.UTF8.GetString(buf, 0, n);
         }
 
-        // --- reflection: [DartSchema] type -> field plan -> DSL ---
+        // --- reflection: message type -> field plan -> DSL ---
         private sealed class FieldPlan
         {
             public FieldInfo Field;
@@ -943,10 +939,15 @@ namespace Dart
             public byte Kind;
             public byte Elem;
             public int Count;
+            public int StrCap;
             public Type Nested;
         }
         private sealed class TypeSpec { public string Name; public List<FieldPlan> Fields; }
         private static readonly Dictionary<Type, TypeSpec> s_specs = new Dictionary<Type, TypeSpec>();
+
+        private static bool StructLike(Type t)
+            => t != typeof(string) && !t.IsArray && !t.IsPrimitive && !t.IsEnum
+               && (t.IsValueType || t.IsClass);
 
         private static TypeSpec Spec(Type t)
         {
@@ -955,8 +956,7 @@ namespace Dart
                 TypeSpec cached;
                 if (s_specs.TryGetValue(t, out cached)) return cached;
                 var attr = (DartSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(DartSchemaAttribute));
-                if (attr == null) throw new SchemaException(t.Name + " is missing [DartSchema]");
-                string name = string.IsNullOrEmpty(attr.Name) ? t.Name : attr.Name;
+                string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : t.Name;
                 FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
                 Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));  // declaration order
                 var plans = new List<FieldPlan>();
@@ -964,22 +964,39 @@ namespace Dart
                 {
                     var fa = (DartFieldAttribute)Attribute.GetCustomAttribute(f, typeof(DartFieldAttribute));
                     var arr = (DartArrayAttribute)Attribute.GetCustomAttribute(f, typeof(DartArrayAttribute));
+                    var str = (DartStringAttribute)Attribute.GetCustomAttribute(f, typeof(DartStringAttribute));
                     var plan = new FieldPlan { Field = f, WireName = fa != null ? fa.Name : f.Name };
                     byte k;
                     if (arr != null)
                     {
                         Type et = f.FieldType.GetElementType();
-                        if (et == null || !ScalarKind.TryGetValue(et, out k))
-                            throw new SchemaException("array field " + f.Name + " element must be a scalar");
-                        plan.Kind = ARR; plan.Elem = k; plan.Count = arr.Count;
+                        if (et == typeof(string))
+                        {
+                            if (str == null)
+                                throw new SchemaException("string array field " + f.Name
+                                    + " needs [DartString(cap)] for its element capacity");
+                            plan.Kind = ARR; plan.Elem = STR; plan.Count = arr.Count; plan.StrCap = str.Cap;
+                        }
+                        else if (et != null && ScalarKind.TryGetValue(et, out k))
+                        { plan.Kind = ARR; plan.Elem = k; plan.Count = arr.Count; }
+                        else throw new SchemaException("array field " + f.Name
+                            + " element must be a scalar or a [DartString] string");
+                    }
+                    else if (f.FieldType == typeof(string))
+                    {
+                        if (str == null)
+                            throw new SchemaException("string field " + f.Name
+                                + " needs [DartString(cap)] for its wire capacity");
+                        plan.Kind = STR; plan.StrCap = str.Cap;
                     }
                     else if (ScalarKind.TryGetValue(f.FieldType, out k)) { plan.Kind = k; }
-                    else if (Attribute.GetCustomAttribute(f.FieldType, typeof(DartSchemaAttribute)) != null)
-                    { plan.Kind = STRUCT; plan.Nested = f.FieldType; }
+                    else if (StructLike(f.FieldType)) { plan.Kind = STRUCT; plan.Nested = f.FieldType; }
                     else throw new SchemaException("unsupported field type " + f.FieldType + " on " + f.Name
-                        + " (use scalars, [DartArray] arrays, or nested [DartSchema] types)");
+                        + " (use scalars, [DartString] strings, [DartArray] arrays, or nested structs)");
                     plans.Add(plan);
                 }
+                if (plans.Count == 0)
+                    throw new SchemaException(t.Name + " has no public instance fields to map");
                 cached = new TypeSpec { Name = name, Fields = plans };
                 s_specs[t] = cached;
                 return cached;
@@ -1009,9 +1026,14 @@ namespace Dart
                 foreach (var g in nested) parts.Add(FieldLine(g));
                 return f.WireName + ": { " + string.Join(", ", parts) + " }";
             }
-            if (f.Kind == ARR) return f.WireName + ": " + Token[f.Elem] + "[" + f.Count + "]";
+            if (f.Kind == ARR)
+                return f.WireName + ": " + ElemToken(f.Elem, f.StrCap) + "[" + f.Count + "]";
+            if (f.Kind == STR) return f.WireName + ": string<" + f.StrCap + ">";
             return f.WireName + ": " + Token[f.Kind];
         }
+
+        private static string ElemToken(byte elem, int strCap)
+            => elem == STR ? "string<" + strCap + ">" : Token[elem];
 
         // --- DSL reconstruction from ANY compiled schema (flat depth-first table) ---
         internal static string SchemaDsl(IntPtr s)
@@ -1023,13 +1045,14 @@ namespace Dart
             {
                 DartSchemaFieldInfo info;
                 Native.dart_schema_field_at(s, i, out info);
-                var node = new object[] { Str(info.name), info.kind, info.elem, (int)info.count, null };
+                var node = new object[] { Str(info.name), info.kind, info.elem, (int)info.count,
+                                          (int)info.str_cap, null };
                 int d = info.depth;
                 stack[d].Add(node);
                 if (info.kind == STRUCT)
                 {
                     var ch = new List<object[]>();
-                    node[4] = ch;
+                    node[5] = ch;
                     while (stack.Count <= d + 1) stack.Add(null);
                     stack[d + 1] = ch;
                 }
@@ -1054,15 +1077,16 @@ namespace Dart
         {
             string name = (string)node[0];
             byte kind = (byte)node[1], elem = (byte)node[2];
-            int count = (int)node[3];
-            var children = (List<object[]>)node[4];
+            int count = (int)node[3], strCap = (int)node[4];
+            var children = (List<object[]>)node[5];
             if (kind == STRUCT)
             {
                 var parts = new List<string>();
                 foreach (var c in children) parts.Add(NodeLine(c));
                 return name + ": { " + string.Join(", ", parts) + " }";
             }
-            if (kind == ARR) return name + ": " + Token[elem] + "[" + count + "]";
+            if (kind == ARR) return name + ": " + ElemToken(elem, strCap) + "[" + count + "]";
+            if (kind == STR) return name + ": string<" + strCap + ">";
             return name + ": " + Token[kind];
         }
 
@@ -1087,9 +1111,23 @@ namespace Dart
             foreach (var fp in spec.Fields)
             {
                 object val = fp.Field.GetValue(obj);
+                if (val == null) continue;   // keep the zeroed default from message_default
                 string path = prefix + fp.WireName;
                 byte[] cpath = CStr(path);
                 if (fp.Kind == STRUCT) { EncodeInto(s, buf, cap, Spec(fp.Nested), val, path + "."); }
+                else if (fp.Kind == STR)
+                {
+                    if (!SetString(s, buf, cap, cpath, (string)val))
+                        throw new SchemaException("string too long for " + path + " (cap " + fp.StrCap + ")");
+                }
+                else if (fp.Kind == ARR && fp.Elem == STR)
+                {
+                    var strs = (string[])val;
+                    for (ushort i = 0; strs != null && i < strs.Length && i < fp.Count; i++)
+                        if (!SetStringAt(s, buf, cap, cpath, i, strs[i]))
+                            throw new SchemaException("string too long for " + path + "[" + i
+                                + "] (cap " + fp.StrCap + ")");
+                }
                 else if (fp.Kind == ARR)
                 {
                     byte[] packed = PackArray(fp.Elem, val);
@@ -1111,6 +1149,30 @@ namespace Dart
                 else if (fp.Kind == BOOL) Native.dart_set_uint(buf, cap, s, cpath, (bool)val ? 1UL : 0UL);
                 else Native.dart_set_uint(buf, cap, s, cpath, Convert.ToUInt64(val));
             }
+        }
+
+        private static bool SetString(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, string v)
+        {
+            byte[] b = Encoding.UTF8.GetBytes(v ?? "");
+            GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
+            try
+            {
+                var ds = new DartStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
+                return Native.dart_set_string(buf, cap, s, cpath, ds) != 0;
+            }
+            finally { gh.Free(); }
+        }
+
+        private static bool SetStringAt(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, ushort index, string v)
+        {
+            byte[] b = Encoding.UTF8.GetBytes(v ?? "");
+            GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
+            try
+            {
+                var ds = new DartStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
+                return Native.dart_set_string_at(buf, cap, s, cpath, index, ds) != 0;
+            }
+            finally { gh.Free(); }
         }
 
         private static byte[] PackArray(byte elem, object val)
@@ -1165,16 +1227,37 @@ namespace Dart
 
         private static object ValueToObj(DartValue v)
         {
+            if (v.kind == STR)
+                return Encoding.UTF8.GetString(Bytes(v.bytes));
             if (v.kind == ARR)
             {
                 byte[] raw = v.bytes.data != IntPtr.Zero && (ulong)v.bytes.len > 0
                     ? Bytes(v.bytes) : Array.Empty<byte>();
+                if (v.elem == STR) return UnpackStringArray(raw, v.count, v.str_cap);
                 return UnpackArray(v.elem, raw);
             }
             if (v.kind == F32 || v.kind == F64) return v.v.f;
             if (v.kind >= I8 && v.kind <= I64) return v.v.i;
             if (v.kind == BOOL) return v.v.u != 0;
             return v.v.u;
+        }
+
+        // string-array slots are [u16 len][cap bytes] each; clamp len like the C reader
+        // so a hostile message can never over-read
+        private static string[] UnpackStringArray(byte[] raw, int count, int cap)
+        {
+            var strs = new string[count];
+            int slot = 2 + cap;
+            for (int i = 0; i < count; i++)
+            {
+                int off = i * slot;
+                if (off + 2 > raw.Length) { strs[i] = ""; continue; }
+                int len = raw[off] | (raw[off + 1] << 8);
+                if (len > cap) len = cap;
+                if (off + 2 + len > raw.Length) len = raw.Length - off - 2;
+                strs[i] = Encoding.UTF8.GetString(raw, off + 2, len);
+            }
+            return strs;
         }
 
         private static object UnpackArray(byte elem, byte[] raw)
@@ -1211,7 +1294,7 @@ namespace Dart
                 if (!dict.TryGetValue(fp.WireName, out val) || val == null) continue;
                 object set;
                 if (fp.Kind == STRUCT) set = ToObject(fp.Nested, (Dictionary<string, object>)val);
-                else if (fp.Kind == ARR) set = val;                       // already the element-typed array
+                else if (fp.Kind == ARR || fp.Kind == STR) set = val;   // already string / element-typed array
                 else set = Convert.ChangeType(val, fp.Field.FieldType);
                 fp.Field.SetValue(obj, set);
             }

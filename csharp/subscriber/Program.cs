@@ -7,7 +7,6 @@ using System;
 using System.Diagnostics;
 using Dart;
 
-[DartSchema]
 struct Tick
 {
     [DartField("seq")]   public ulong Seq;
@@ -26,9 +25,9 @@ static class Program
         var opts = new NodeOptions();
         if (iface != null) opts.MulticastInterface = iface;
 
-        var node = Node.Open("cs-subscriber", _ => _count++,
+        var node = new Node("cs-subscriber", _ => _count++,
             e => Console.Error.WriteLine("event: " + e), opts);
-        node.CreateChannel("tick", Role.SubOnly, typeof(Tick));
+        new Channel<Tick>(node, "tick", Role.SubOnly);
         Console.WriteLine("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)");
 
         bool stop = false;

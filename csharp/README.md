@@ -50,27 +50,32 @@ dotnet add package Dart
 ```csharp
 using Dart;
 
-[DartSchema] public struct Twist { public float Dx; public float Dy; }
-[DartSchema] public struct Pose  {
+public struct Twist { public float Dx; public float Dy; }
+public struct Pose  {
     public ulong Stamp; public double X; public double Y;
-    [DartArray(4)] public byte[] Uuid; public Twist Vel;
+    [DartArray(4)] public byte[] Uuid;
+    [DartString(16)] public string Frame;
+    public Twist Vel;
 }
 
-var node = Node.Open("robot1",
-                     onMessage: m => Console.WriteLine(m.As<Pose>()),
-                     onEvent: e => Console.Error.WriteLine(e),
-                     options: new NodeOptions { Domain = 7 });
-var ch = node.CreateChannel("pose", Role.PubSub, typeof(Pose),
-                            new Qos { Reliability = Reliability.Reliable });
+var node = new Node("robot1",
+                    onMessage: m => Console.WriteLine(m.As<Pose>()),
+                    onEvent: e => Console.Error.WriteLine(e),
+                    new NodeOptions { Domain = 7 });
+var ch = new Channel<Pose>(node, "pose",
+                           qos: new Qos { Reliability = Reliability.Reliable });
 node.Start();                                    // C-level service thread owns the loop
-ch.Send(new Pose { Stamp = 1, X = 1, Y = 2 });   // thread-safe from any thread
+ch.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
 // (or skip Start() and drive node.Poll(1) in your own loop)
 ```
 
-Wire field names are the C# field names (override with `[DartField("stamp")]`) and must
-match on every node for a topic. `Schema.FromType(typeof(Pose)).Dsl` prints the DSL for
-pasting into a C/C++ node. Handlers fire on the service thread (never two at once for
-one node); from inside a handler, `Channel.Send` and read-only queries are allowed,
-Poll/CreateChannel/SetRole/Drain/Start/Stop/Close are not. Unity:
-`Start(queueCallbacks: true)` defers handlers to a queue you drain with
-`node.DispatchCallbacks()` from `Update()`, keeping them on the main thread.
+Any struct/class with public fields is a message type: the fields become the schema in
+declaration order. `[DartArray(n)]` fixes an array's element count, `[DartString(cap)]`
+fixes a string's UTF-8 byte capacity (required on every string; combine both for a
+`string[]`), `[DartField("stamp")]` overrides a wire field name, and `[DartSchema("Name")]`
+optionally overrides the wire type name. Wire names must match on every node for a
+topic. `new Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
+Handlers fire on the service thread (never two at once for one node); from inside a
+handler, `Channel.Send` and read-only queries are allowed, Poll/channel
+create/SetRole/Drain/Start/Stop/Close are not. To keep handlers on one thread (e.g.
+Unity's main thread), skip `Start()` and call `Poll()` from that thread.
