@@ -2015,6 +2015,24 @@ static void detail_live_checks(void){
                          "detail-obs: typed topic's schema cached parsed (hash matches)");
                 ST_CHECK(!s1 && h1==0, "detail-obs: raw topic cached untyped");
             }
+            /* the SUBSCRIBER is authoritative about ITS schema too: the observer fetches a
+               SUB_ONLY channel's schema exactly like a publisher's (v10 detail exchange is
+               role-agnostic). A subscriber-in-charge topic must show its schema. */
+            {   uint32_t sid = 0; const DartSchema *ss = NULL; uint64_t hs = 0;
+                for (t=0;t<800;t++){
+                    uint16_t cnt=0, k; const DartDiscoveryPeer *ops;
+                    dart_node_poll(O,2); dart_node_poll(P,1); dart_node_poll(S,1);
+                    ops = dart_node_peers(O, &cnt);
+                    sid = 0;
+                    for (k=0;k<cnt;k++)
+                        if (ops[k].name.len==6 && memcmp(ops[k].name.data,"dt-sub",6)==0) sid = ops[k].id;
+                    if (!sid) continue;
+                    ss = dart_node_peer_topic_schema(O, sid, 0, &hs);
+                    if (ss) break;
+                }
+                ST_CHECK(ss && hs==dart_schema_hash(W) && dart_schema_hash(ss)==hs,
+                         "detail-obs: subscriber-only topic's schema fetched (subscriber authoritative)");
+            }
             /* observe THEN subscribe (the explorer's flow): the greedy fetch dissolved
                these aliases against a channel-less node, so creating the channel must
                send them back to pending, re-verify, and form the match */
