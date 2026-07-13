@@ -298,6 +298,7 @@ class DartMsg(Structure):
         ("channel_name", DartStringView),
         ("data", DartBytes),
         ("schema", c_void_p),
+        ("recv_us", c_uint64),
     ]
 
 
@@ -1091,9 +1092,12 @@ def _to_obj(spec, d):
 
 class Message:
     """A delivered message. Views are copied out, so it outlives the callback.
-    For a typed channel, `.value` is the decoded object and `.fields` the dict."""
+    For a typed channel, `.value` is the decoded object and `.fields` the dict.
+    recv_us is the node's monotonic clock (microseconds) when the poll RECEIVED the
+    message (queued channels stamp at enqueue), so a paced consumer measures true
+    arrival times, never its own cadence."""
     __slots__ = ("channel_id", "sender_id", "sender_name", "channel_name",
-                 "data", "fields", "value")
+                 "data", "recv_us", "fields", "value")
 
     @classmethod
     def _from_c(cls, m, spec):
@@ -1102,6 +1106,7 @@ class Message:
         self.sender_id = m.sender_id
         self.sender_name = _dstr(m.sender_name)
         self.channel_name = _dstr(m.channel_name)
+        self.recv_us = m.recv_us
         self.data = string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
         self.fields = None
         self.value = None

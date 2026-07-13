@@ -95,6 +95,11 @@ typedef struct {
                                         own schema (a NULL-schema channel; may still be NULL if
                                         the sender advertised none). Non-NULL means data.len was
                                         validated against it before delivery. */
+    uint64_t       recv_us;          /* the node's monotonic clock when the POLL received this
+                                        message (for a queued channel: when it was enqueued, not
+                                        when it was taken), so rates and inter-arrival jitter
+                                        measured by a frame-paced consumer reflect true arrival
+                                        times, never the consumer's own cadence. */
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 

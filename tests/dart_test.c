@@ -2492,6 +2492,7 @@ static void queue_checks(void){
           }
       } }
     ST_CHECK(got==5, "queue: take drains 5 in order via its own pump (%d)", got);
+    ST_CHECK(m.recv_us != 0, "queue: taken msg carries the poll-side arrival stamp");
     ST_CHECK(m.channel_name.len==6 && !memcmp(m.channel_name.data,"q/lazy",6),
              "queue: taken msg carries the channel name");
     ST_CHECK(m.sender_name.len==7 && !memcmp(m.sender_name.data,"qa-node",7),
@@ -3720,11 +3721,131 @@ static int threadbench_main(void){
     }
     return 0;
 }
+
+/* ============ queuebench: consumer-queue cost vs inline callbacks ============ *
+ * One started pub node + one started sub node on loopback, per payload size and
+ * mode. Flat-out RELIABLE stream (keep_last 64, backpressure-paced: lossless, so
+ * the number IS the sustainable end-to-end goodput), 2s per run:
+ *   inline : the pre-queue model; the sub's on_message counts deliveries on its
+ *            SERVICE thread (zero-copy view, no ring).
+ *   queued : the sub channel owns a 4 MB consumer queue; THIS thread drains it
+ *            with dart_channel_take (adds the one ring memcpy per message).
+ * The shm_rx column verifies which path carried the payload (SHM section: it must
+ * track delivered; UDP section: 0). */
+static volatile unsigned long g_qb_recv;
+static void qb_on_message(const DartMsg *m){ (void)m; g_qb_recv++; }
+
+static volatile int g_qb_stop;
+static uint32_t     g_qb_len;
+static void qb_sender(void *arg){
+    static uint8_t payload[1u << 20];
+    DartChannel *ch = (DartChannel *)arg;
+    memset(payload, 0x42, g_qb_len);
+    while (!g_qb_stop)
+        dart_channel_send(ch, dart_bytes(payload, g_qb_len));
+}
+
+static void qb_run(uint32_t size, int queued, int disable_shm){
+    DartAllocator aw = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ar = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts o; DartChannelOpts co;
+    DartNode *w, *r; DartChannel *cw, *cr;
+    i_DartThread th;
+    uint64_t t0, t_end;
+    unsigned long recv = 0;
+    double wall, rate;
+    uint32_t shm_rx0 = 0, shm_rx1 = 0;
+
+    memset(&o, 0, sizeof o);
+    o.domain = 52; o.disable_shm = (uint8_t)disable_shm;
+    o.net.multicast_interface = "127.0.0.1";
+    w = dart_node_open(&aw, "qb-pub", NULL, NULL, &o);
+    r = dart_node_open(&ar, "qb-sub", queued ? NULL : qb_on_message, NULL, &o);
+    if (!w || !r){ fprintf(stderr, "queuebench: open failed\n"); exit(1); }
+    memset(&co, 0, sizeof co);
+    co.qos.reliability = DART_RELIABLE;
+    co.qos.keep_last = (uint16_t)(size >= 262144u ? 8 : 64);   /* realistic: shallow history for huge messages */
+    co.qos.backpressure_wait_us = 200000;   /* lossless: the sender paces to the consumer */
+    co.qos.heartbeat_us = 20000;
+    co.qos.repair_delay_us = 5000;
+    co.qos.shm_max_bytes = size;            /* pin one SHM size class per run */
+    cw = dart_node_create_channel(w, "qb/t", DART_PUB_ONLY, NULL, &co);
+    /* the queue must cover the writer's in-flight burst (keep_last x size), else the
+       reader PARKS while the writer keeps bursting and the overrun heals through the
+       paced repair path -- a sizing bug, not steady-state cost. 2x burst, min 4 MB. */
+    {   uint32_t qb = 2u * co.qos.keep_last * size;
+        if (qb < (4u << 20)) qb = 4u << 20;
+        co.qos.queue_bytes = queued ? qb : 0;
+    }
+    cr = dart_node_create_channel(r, "qb/t", DART_SUB_ONLY, NULL, &co);
+    if (!cw || !cr){ fprintf(stderr, "queuebench: channel create failed\n"); exit(1); }
+    dart_node_start(w); dart_node_start(r);
+    {   uint64_t end = i_dart_plat_now_us() + 5000000u;
+        while (dart_channel_match_count(cw) == 0 && i_dart_plat_now_us() < end) sw_sleep_ms(2); }
+    if (dart_channel_match_count(cw) != 1){ fprintf(stderr, "queuebench: no match\n"); exit(1); }
+
+#ifdef DART_SHM
+    dart_node_shm_stats(r, NULL, &shm_rx0);
+#endif
+    g_qb_len = size; g_qb_stop = 0; g_qb_recv = 0;
+    if (!i_dart_plat_thread_start(&th, qb_sender, cw)){ fprintf(stderr, "queuebench: thread\n"); exit(1); }
+    t0 = i_dart_plat_now_us(); t_end = t0 + 2000000u;
+    if (queued){
+        DartMsg m;
+        while (i_dart_plat_now_us() < t_end)
+            if (dart_channel_take(cr, &m, 5) == 1) recv++;
+    } else {
+        while (i_dart_plat_now_us() < t_end) sw_sleep_ms(5);
+        recv = g_qb_recv;
+    }
+    wall = (double)(i_dart_plat_now_us() - t0) / 1e6;
+    g_qb_stop = 1;
+    i_dart_plat_thread_join(&th);
+#ifdef DART_SHM
+    dart_node_shm_stats(r, NULL, &shm_rx1);
+#endif
+    rate = wall > 0.0 ? recv / wall : 0.0;
+    printf("%9u  %-7s  %12.0f  %10.1f  %11lu  %9u\n",
+           size, queued ? "queued" : "inline", rate, rate * size / 1e6, recv, shm_rx1 - shm_rx0);
+    dart_node_close(r, 1);
+    dart_node_close(w, 1);
+}
+
+static int queuebench_main(void){
+    static const uint32_t sizes[] = { 1024, 16384, 65536, 262144, 1048576 };
+    unsigned k;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("DART consumer-queue throughput: inline callback (service thread) vs queued take\n"
+           "(flat-out reliable, keep_last 64, backpressure-paced = lossless goodput, loopback, 2s/run)\n");
+#ifdef DART_SHM
+    printf("\n== SHM same-host path ==\n");
+    printf("%9s  %-7s  %12s  %10s  %11s  %9s\n", "payload", "mode", "msg/s", "MB/s", "delivered", "shm_rx");
+    for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++){
+        qb_run(sizes[k], 0, 0);
+        qb_run(sizes[k], 1, 0);
+    }
+#endif
+    printf("\n== UDP loopback path (shm off) ==\n");
+    printf("%9s  %-7s  %12s  %10s  %11s  %9s\n", "payload", "mode", "msg/s", "MB/s", "delivered", "shm_rx");
+    for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++){
+        qb_run(sizes[k], 0, 1);
+        qb_run(sizes[k], 1, 1);
+    }
+    return 0;
+}
 #endif /* DART_THREADS */
 
 int main(int argc, char **argv){
     if (argc >= 2 && strcmp(argv[1], "memscale") == 0)
         return memscale_main();
+    if (argc >= 2 && strcmp(argv[1], "queuebench") == 0){
+#ifdef DART_THREADS
+        return queuebench_main();
+#else
+        fprintf(stderr, "queuebench needs threads (DART_THREADS off)\n");
+        return 1;
+#endif
+    }
     if (argc >= 2 && strcmp(argv[1], "threadbench") == 0){
 #ifdef DART_THREADS
         return threadbench_main();
@@ -3780,6 +3901,9 @@ int main(int argc, char **argv){
         "        Machines must share a subnet (discovery TTL is 1)\n"
         "  sendbench\n"
         "        UDP send-cost microbench on loopback (Windows)\n"
+        "  queuebench\n"
+        "        consumer-queue throughput: inline callback vs queued take, per\n"
+        "        payload size, on the SHM and UDP loopback paths\n"
         "  threadbench\n"
         "        threaded send-path bench: paced rates + flat-out through a started\n"
         "        node pair; reports the time eaten by the drain/backpressure wait\n"

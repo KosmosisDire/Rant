@@ -159,6 +159,7 @@ namespace Dart
         public DartStringView channel_name;
         public DartBytes data;
         public IntPtr schema;
+        public ulong recv_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -470,6 +471,10 @@ namespace Dart
         public string SenderName;
         public string ChannelName;
         public byte[] Data;
+        /// <summary>Node monotonic clock (microseconds) when the poll RECEIVED the message
+        /// (a queued channel stamps at enqueue), so a frame-paced consumer measures true
+        /// arrival times, never its own cadence.</summary>
+        public ulong RecvUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
         public object Value;                          // typed instance for a typed channel, else Fields
 
@@ -485,6 +490,7 @@ namespace Dart
                 SenderName = Codec.Str(m.sender_name),
                 ChannelName = Codec.Str(m.channel_name),
                 Data = Codec.Bytes(m.data),
+                RecvUs = m.recv_us,
             };
             if (m.schema != IntPtr.Zero)
             {

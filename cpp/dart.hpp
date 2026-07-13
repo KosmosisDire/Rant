@@ -357,6 +357,9 @@ public:
     Bytes            data()         const { return { msg_->data.data, msg_->data.len }; }
     std::string_view text()         const { return { reinterpret_cast<const char*>(msg_->data.data), msg_->data.len }; }
     bool             has_schema()   const { return msg_->schema != nullptr; }
+    /* node monotonic us when the poll RECEIVED it (queued: at enqueue), so paced
+     * consumers measure true arrival times, never their own cadence */
+    uint64_t         recv_us()      const { return msg_->recv_us; }
 
     /* Typed field reads (only meaningful when has_schema()); by name / dotted path. */
     uint64_t get_uint (const char* field) const { return detail::dart_get_uint (msg_->data, msg_->schema, field); }
@@ -471,6 +474,7 @@ public:
         Bytes            data()         const { return { m_.data.data, m_.data.len }; }
         std::string_view text()         const { return { reinterpret_cast<const char*>(m_.data.data), m_.data.len }; }
         bool             has_schema()   const { return m_.schema != nullptr; }
+        uint64_t         recv_us()      const { return m_.recv_us; }   /* arrival stamp (see MessageIn) */
         uint64_t get_uint (const char* field) const { return detail::dart_get_uint (m_.data, m_.schema, field); }
         int64_t  get_int  (const char* field) const { return detail::dart_get_int  (m_.data, m_.schema, field); }
         double   get_f64  (const char* field) const { return detail::dart_get_f64  (m_.data, m_.schema, field); }

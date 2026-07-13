@@ -17,8 +17,10 @@
  * 8-aligned offset. Records never wrap: a tail-end too small for the next record holds a
  * DART__QWRAP sentinel (or nothing, if smaller than a header) and the record starts at 0. */
 typedef struct {
-    uint32_t rec_bytes;    /* whole record, 8-aligned; DART__QWRAP = wrap sentinel */
+    uint32_t rec_bytes;    /* whole record, 8-aligned; DART__QWRAP = wrap sentinel. FIRST:
+                              the ring reads it at offset 0 for the sentinel test */
     uint32_t data_len;
+    uint64_t t_recv_us;    /* poll-side arrival stamp, surfaced as DartMsg.recv_us */
     uint32_t sender_id;
     uint8_t  name_len;     /* sender name copied inline (discovery views die with the peer) */
     uint8_t  pad[3];
@@ -328,6 +330,7 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t ch, i_DartMsgQueue *q,
     }
     {   i_DartQRec *rec = (i_DartQRec*)(q->buf + at);
         rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
+        rec->t_recv_us = i_dart_plat_now_us();
         rec->sender_id = from; rec->name_len = (uint8_t)name_len;
         rec->pad[0] = rec->pad[1] = rec->pad[2] = 0;
         if (name_len) memcpy((uint8_t*)rec + sizeof *rec, name.data, name_len);
@@ -354,6 +357,7 @@ static void i_dart_node_queue_msg(DartNode *n, DartChannel *h, const i_DartQRec 
     m->data = dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
                          rec->data_len);
     m->schema = i_dart_node_core_msg_schema(n->core, rec->sender_id, h->index);
+    m->recv_us = rec->t_recv_us;
 }
 
 /* create the queue (qos.queue_bytes at channel create, or lazily on first take/dispatch).
@@ -442,6 +446,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartByte
     m.channel_name = dart_transport_channel_name(n->transport, ch);
     m.data = data;
     m.schema = schema;
+    m.recv_us = i_dart_plat_now_us();
     n->user_on_message(&m);
     return 0;
 }
