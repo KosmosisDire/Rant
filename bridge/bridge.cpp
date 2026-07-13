@@ -70,6 +70,8 @@ static const char *kind_str(uint8_t kind){
     case DART_BOOL: return "bool";
     case DART_ARR: return "arr"; case DART_STRUCT: return "struct";
     case DART_STR: return "string";
+    case DART_VSTR: return "vstring"; case DART_VARR: return "varr";
+    case DART_MAP: return "map";
     default: return "?";
     }
 }
@@ -100,7 +102,8 @@ static json fields_json(const DartSchema *s){
         json row = { {"path", path}, {"kind", kind_str(f.kind)},
                      {"offset", f.offset}, {"size", f.size} };
         if (f.kind == DART_ARR){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
-        if (f.kind == DART_STR || (f.kind == DART_ARR && f.elem == DART_STR)) row["cap"] = f.str_cap;
+        if (f.kind == DART_VARR) row["elem"] = kind_str(f.elem);   /* live count, no bound */
+        if (f.str_cap) row["cap"] = f.str_cap;                     /* STR + STR-element arrays */
         fields.push_back(row);
         if (f.kind == DART_STRUCT) parents.push_back(std::string(f.name.data, f.name.len));
     }

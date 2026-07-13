@@ -31,7 +31,8 @@
 
 /* The ChatMsg schema, in the DSL every program using the topic pastes verbatim. It
  * deliberately exercises every serialization kind (all eleven scalars, a scalar array,
- * a string, a string array, a nested struct): the typed line is the text field,
+ * a capped string + string array, a nested struct, and the variable kinds: an unbounded
+ * string, a variable array, a self-describing map): the typed line is the text field,
  * everything else is random filler so the explorer has structure to show. Every line
  * typed is encoded through it on send and decoded from DartMsg.schema on delivery;
  * fields are accessed by name (nested members by dotted path: "vel.dx"). */
@@ -52,17 +53,20 @@ static const char CHAT_SCHEMA[] =
     "    pos:     f64[3],"
     "    vel:     { dx: f32, dy: f32 },"
     "    tags:    string<8>[2],"
-    "    text:    string<256>"
+    "    path:    f32[],"                /* variable array: a live element count */
+    "    text:    string,"               /* variable string: the typed line, unbounded */
+    "    extras:  map"                   /* self-describing tagged values */
     "}";
-#define CHAT_TEXT_CAP 256
 static DartSchema *g_schema;
 
 /* pack one ChatMsg: the typed line plus every other kind, filled with random values.
- * Start from the canonical default (all zero), then set what we care about, all BY
- * NAME (nested struct members by dotted path). */
-static void chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
+ * Start from the canonical default (all zero, empty frames), then set what we care
+ * about, all BY NAME (nested struct members by dotted path). Returns the live length
+ * to send (variable fields make it per-message). */
+static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
     static uint32_t seq;
-    uint8_t pos_wire[24]; uint64_t bits; double p; int k;
+    uint8_t pos_wire[24], path_wire[16], extras[64]; uint64_t bits; uint32_t fbits;
+    double p; int k, n; float pf; DartMapWriter w;
     dart_schema_message_default(g_schema, buf, cap);
     dart_set_uint(buf, cap, g_schema, "ts",     i_dart_plat_now_us());
     dart_set_uint(buf, cap, g_schema, "seq",    ++seq);
@@ -84,7 +88,18 @@ static void chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
     dart_set_f32 (buf, cap, g_schema, "vel.dy", (float)(rand() % 100) / 10.0f);
     dart_set_string_at(buf, cap, g_schema, "tags", 0, dart_cstr((rand() & 1) ? "loud" : "quiet"));
     dart_set_string_at(buf, cap, g_schema, "tags", 1, dart_cstr((rand() & 1) ? "red" : "blue"));
+    n = rand() % 4;                                      /* variable array: 0..3 live f32 */
+    for (k = 0; k < n; k++){
+        pf = (float)(rand() % 1000) / 10.0f;
+        memcpy(&fbits, &pf, 4); i_dart_le_w32(path_wire + 4 * k, fbits);
+    }
+    dart_set_array(buf, cap, g_schema, "path", dart_bytes(path_wire, (size_t)n * 4));
     dart_set_string(buf, cap, g_schema, "text", dart_string(line, len));
+    w = dart_map_begin(extras, sizeof extras);           /* the schema escape hatch */
+    dart_map_put_uint(&w, "battery", (uint64_t)(rand() % 101));
+    dart_map_put_string(&w, "state", dart_cstr((rand() & 1) ? "docked" : "roaming"));
+    dart_set_map(buf, cap, g_schema, "extras", dart_bytes(extras, dart_map_finish(&w)));
+    return dart_schema_msg_len(g_schema, buf, cap);
 }
 
 static int g_verbose = 0;     /* --verbose: print discovery/transport events */
@@ -213,7 +228,7 @@ int main(int argc, char **argv){
      * dart_node_close frees it: no explicit dart_schema_free. */
     DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     g_schema = dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, NULL);
-    if (!g_schema || dart_schema_size(g_schema) > 512){ fprintf(stderr, "schema compile failed\n"); return 1; }
+    if (!g_schema || dart_schema_msg_min(g_schema) > 128){ fprintf(stderr, "schema compile failed\n"); return 1; }
     srand((unsigned)i_dart_plat_now_us());   /* the filler fields are random per message */
 
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
@@ -238,12 +253,11 @@ int main(int argc, char **argv){
 
         /* plain chat: encode a ChatMsg and publish it to every topic we publish on
            (thread-safe; each send wakes the service thread, so TX flushes now) */
-        uint8_t buf[512];   /* >= dart_schema_size(g_schema), checked at startup */
+        uint8_t buf[512];   /* >= msg_min + this line's variable content, checked at startup */
         int sent = 0;
-        if (len > CHAT_TEXT_CAP) len = CHAT_TEXT_CAP;
-        chat_encode(buf, sizeof buf, line, len);
+        uint32_t msg_len = chat_encode(buf, sizeof buf, line, len);
         for (int i = 0; i < g_n_topics; i++)
-            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(buf, dart_schema_size(g_schema))); sent++; }
+            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(buf, msg_len)); sent++; }
         if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }
 

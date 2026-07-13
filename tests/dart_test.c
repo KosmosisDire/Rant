@@ -1620,6 +1620,162 @@ static void schema_dsl_checks(void){
                      "schema-dsl: string subset needs the same cap");
         }
     }
+    {   /* variable fields: `string` / `elem[]` / `string<cap>[]` / `map` ride the tail
+           as [u32 len] frames in schema order; fixed offsets are unaffected */
+        static const char VDSL[] =
+            "Var { id: u32, note: string, samples: f32[], labels: string<6>[], extras: map, tail: u8 }";
+        DartSchema *vs, *twin;
+        vs = dart_schema_compile(dart_allocator_alloc, &ma, VDSL, NULL);
+        ST_CHECK(vs != NULL, "schema-var: compiles");
+        {   DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &ma, "Var");
+            dart_schema_field(&b, "id", DART_U32);
+            dart_schema_field_var_string(&b, "note");
+            dart_schema_field_var_array(&b, "samples", DART_F32);
+            dart_schema_field_var_string_array(&b, "labels", 6);
+            dart_schema_field_map(&b, "extras");
+            dart_schema_field(&b, "tail", DART_U8);
+            twin = dart_schema_finish(&b);
+        }
+        ST_CHECK(twin && vs && dart_schema_hash(vs) == dart_schema_hash(twin),
+                 "schema-var: text and builder produce the same wire (same hash)");
+        if (vs){
+            DartSchemaFieldInfo fi;
+            ST_CHECK(dart_schema_size(vs) == 5 && dart_schema_msg_min(vs) == 5 + 4*4,
+                     "schema-var: fixed size %u, msg_min %u",
+                     dart_schema_size(vs), dart_schema_msg_min(vs));
+            ST_CHECK(dart_schema_field_at(vs, 5, &fi) && fi.kind == DART_U8 && fi.offset == 4,
+                     "schema-var: fixed fields pack around the variable ones (off=%u)", fi.offset);
+            ST_CHECK(dart_schema_field_at(vs, 1, &fi) && fi.kind == DART_VSTR
+                     && fi.offset == 0 && fi.size == 0,
+                     "schema-var: variable field reports no static offset");
+            ST_CHECK(dart_schema_field_at(vs, 3, &fi) && fi.kind == DART_VARR
+                     && fi.elem == DART_STR && fi.str_cap == 6 && fi.count == 0,
+                     "schema-var: string<6>[] field info (cap=%u)", fi.str_cap);
+        }
+        if (vs){
+            uint8_t m[256], smp[8], slots[16], tmp[128], big[250];
+            uint32_t blen, len; int ok; DartString v; DartBytes a, mb;
+            {   int i; for (i = 0; i < 8; i++) smp[i] = (uint8_t)(i + 1); }
+            memset(slots, 0, sizeof slots);              /* two empty string<6> slots */
+            memset(big, 'x', sizeof big);
+
+            ok = dart_schema_message_default(vs, m, sizeof m);
+            ST_CHECK(ok && dart_schema_msg_len(vs, m, sizeof m) == dart_schema_msg_min(vs)
+                     && dart_schema_validate(vs, dart_bytes(m, dart_schema_msg_min(vs))),
+                     "schema-var: the default message is all empty frames and validates");
+            ok  = dart_set_uint(m, sizeof m, vs, "id", 7);
+            ok &= dart_set_uint(m, sizeof m, vs, "tail", 9);
+            ok &= dart_set_array(m, sizeof m, vs, "samples", dart_bytes(smp, 8));  /* 2 live f32 */
+            ok &= dart_set_string(m, sizeof m, vs, "note", dart_string("hello, tail", 11));
+            ok &= dart_set_array(m, sizeof m, vs, "labels", dart_bytes(slots, 16));
+            ok &= dart_set_string_at(m, sizeof m, vs, "labels", 1, dart_string("red", 3));
+            ST_CHECK(ok, "schema-var: variable setters accept (out of schema order)");
+            ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), vs, "id") == 7
+                  && dart_get_uint(dart_bytes(m,sizeof m), vs, "tail") == 9,
+                     "schema-var: fixed fields intact after tail resizes");
+            v = dart_get_string(dart_bytes(m,sizeof m), vs, "note");
+            ST_CHECK(v.len == 11 && memcmp(v.data, "hello, tail", 11) == 0,
+                     "schema-var: variable string round-trips");
+            a = dart_get_array(dart_bytes(m,sizeof m), vs, "samples");
+            ST_CHECK(a.len == 8 && memcmp(a.data, smp, 8) == 0,
+                     "schema-var: variable array survives an earlier frame's resize");
+            v = dart_get_string_at(dart_bytes(m,sizeof m), vs, "labels", 1);
+            ST_CHECK(v.len == 3 && memcmp(v.data, "red", 3) == 0,
+                     "schema-var: variable string-array element round-trips");
+            ST_CHECK(!dart_set_string_at(m, sizeof m, vs, "labels", 2, dart_string("x", 1)),
+                     "schema-var: index past the live count refused");
+            {   DartValue dv;                      /* reflection sees the live extent */
+                ST_CHECK(dart_get_value(dart_bytes(m,sizeof m), vs, 2, &dv)
+                         && dv.kind == DART_VARR && dv.elem == DART_F32
+                         && dv.count == 2 && dv.bytes.len == 8,
+                         "schema-var: dart_get_value yields the live element count");
+            }
+
+            {   DartMapWriter w = dart_map_begin(tmp, sizeof tmp);   /* the escape hatch */
+                dart_map_put_uint(&w, "battery", 87);
+                dart_map_put_string(&w, "state", dart_string("docked", 6));
+                dart_map_open_array(&w, "temps");
+                dart_map_put_f64(&w, NULL, 36.5);
+                dart_map_put_int(&w, NULL, -3);
+                dart_map_close(&w);
+                dart_map_open_map(&w, "pose");
+                dart_map_put_f64(&w, "x", 1.5);
+                dart_map_close(&w);
+                blen = dart_map_finish(&w);
+            }
+            ST_CHECK(blen > 0 && dart_set_map(m, sizeof m, vs, "extras", dart_bytes(tmp, blen)),
+                     "schema-var: map writes and installs");
+            mb = dart_get_map(dart_bytes(m,sizeof m), vs, "extras");
+            ST_CHECK(mb.data && mb.len == blen && dart_map_count(mb) == 4,
+                     "schema-var: map body round-trips (%u entries)", dart_map_count(mb));
+            {   DartValue dv, e0, e1;
+                ST_CHECK(dart_map_get(mb, "battery", &dv) && dv.kind == DART_U8 && dv.v.u == 87,
+                         "schema-var: map uint stores in the smallest kind");
+                ST_CHECK(dart_map_get(mb, "state", &dv) && dv.kind == DART_VSTR
+                         && dv.bytes.len == 6 && memcmp(dv.bytes.data, "docked", 6) == 0,
+                         "schema-var: map string");
+                ST_CHECK(dart_map_get(mb, "temps", &dv) && dv.kind == DART_VARR && dv.count == 2
+                      && dart_map_array_at(dv.bytes, 0, &e0) && e0.kind == DART_F64 && e0.v.f == 36.5
+                      && dart_map_array_at(dv.bytes, 1, &e1) && e1.kind == DART_I8 && e1.v.i == -3,
+                         "schema-var: map array elements (heterogeneous)");
+                ST_CHECK(dart_map_get(mb, "pose", &dv) && dv.kind == DART_MAP
+                      && dart_map_count(dv.bytes) == 1
+                      && dart_map_get(dv.bytes, "x", &e0) && e0.v.f == 1.5,
+                         "schema-var: nested map recurses");
+                ST_CHECK(!dart_map_get(mb, "nope", &dv), "schema-var: missing key misses");
+            }
+            ST_CHECK(!dart_map_valid(dart_bytes(tmp, blen - 1))
+                  && !dart_set_map(m, sizeof m, vs, "extras", dart_bytes(tmp, blen - 1)),
+                     "schema-var: truncated map body refused");
+
+            len = dart_schema_msg_len(vs, m, sizeof m);
+            ST_CHECK(len == 5u + (4+11) + (4+8) + (4+16) + (4+blen),
+                     "schema-var: live length (%u)", len);
+            ST_CHECK(dart_schema_validate(vs, dart_bytes(m, len))
+                  && !dart_schema_validate(vs, dart_bytes(m, len - 1))
+                  && !dart_schema_validate(vs, dart_bytes(m, len + 1)),
+                     "schema-var: frames must consume the message exactly");
+            ST_CHECK(!dart_set_string(m, sizeof m, vs, "note", dart_string((char *)big, 250)),
+                     "schema-var: a frame that would exceed the buffer is refused");
+            v = dart_get_string(dart_bytes(m,sizeof m), vs, "note");
+            ST_CHECK(v.len == 11, "schema-var: refused set leaves the message untouched");
+            ok = dart_set_string(m, sizeof m, vs, "note", dart_string("hi", 2));
+            a = dart_get_array(dart_bytes(m,sizeof m), vs, "samples");
+            ST_CHECK(ok && a.len == 8 && memcmp(a.data, smp, 8) == 0
+                     && dart_get_uint(dart_bytes(m,sizeof m), vs, "tail") == 9,
+                     "schema-var: shrinking a frame memmoves the tail intact");
+
+            {   /* subset + rebase: the reader skips frames it does not declare */
+                DartSchema *sub = dart_schema_compile(dart_allocator_alloc, &ma,
+                    "Var { tail: u8, samples: f32[], extras: map }", NULL);
+                DartSchema *bad1 = dart_schema_compile(dart_allocator_alloc, &ma,
+                    "Var { note: string<8> }", NULL);     /* capped vs variable */
+                DartSchema *bad2 = dart_schema_compile(dart_allocator_alloc, &ma,
+                    "Var { samples: f64[] }", NULL);      /* element kind differs */
+                ST_CHECK(sub && dart_schema_subset(sub, vs), "schema-var: variable subset matches");
+                ST_CHECK(bad1 && !dart_schema_subset(bad1, vs)
+                      && bad2 && !dart_schema_subset(bad2, vs),
+                         "schema-var: capped-vs-variable and element mismatches refused");
+                {   DartSchema *rb = dart_schema_rebase(sub, vs, dart_allocator_alloc, &ma);
+                    ST_CHECK(rb != NULL, "schema-var: rebase");
+                    if (rb){
+                        uint32_t rlen = dart_schema_msg_len(rb, m, sizeof m);
+                        ST_CHECK(rlen == dart_schema_msg_len(vs, m, sizeof m)
+                              && dart_schema_validate(rb, dart_bytes(m, rlen)),
+                                 "schema-var: rebased schema walks the writer's frames");
+                        ST_CHECK(dart_get_uint(dart_bytes(m, rlen), rb, "tail") == 9,
+                                 "schema-var: rebased fixed offset");
+                        a = dart_get_array(dart_bytes(m, rlen), rb, "samples");
+                        ST_CHECK(a.len == 8 && memcmp(a.data, smp, 8) == 0,
+                                 "schema-var: rebased variable ordinal finds the right frame");
+                        mb = dart_get_map(dart_bytes(m, rlen), rb, "extras");
+                        ST_CHECK(mb.data && dart_map_count(mb) == 4,
+                                 "schema-var: rebased map field reads");
+                    }
+                }
+            }
+        }
+    }
     {   /* errors: NULL + err points into the text at the offending spot */
         static const char *bad[] = {
             "Pose { x: f65 }",              /* unknown type */
@@ -1629,9 +1785,12 @@ static void schema_dsl_checks(void){
             "Pose { x: u8[70000] }",        /* count > u16 */
             "Pose { x: f64 } y",            /* trailing garbage */
             "{ x: f64 }",                   /* missing root name */
-            "Pose { x: string }",           /* string needs its <cap> */
+            "Pose { x: string[] }",         /* ragged: an array of unbounded strings is a map's job */
+            "Pose { x: string[4] }",        /* a fixed string array needs its <cap> */
             "Pose { x: string<0> }",        /* zero cap */
-            "Pose { x: string<12 }"         /* missing '>' */
+            "Pose { x: string<12 }",        /* missing '>' */
+            "Pose { v: { y: u8[] } }",      /* variable field inside a nested struct */
+            "Pose { m: map[3] }"            /* a map has no element form */
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){

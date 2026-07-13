@@ -430,7 +430,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartByte
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
         e.peer = from; e.channel = ch; e.channel_name = i_dart_node_ch_name(n, ch);
         e.schema_detail = i_dart_node_core_note_size_mismatch(n->core, from, ch,
-                                            data.len, dart_schema_size(schema));
+                                            data.len, dart_schema_msg_min(schema));
         i_dart_node_emit(n, &e);
         return 0;
     }
