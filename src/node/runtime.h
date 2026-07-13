@@ -182,6 +182,55 @@ uint32_t     dart_node_evicted_unsent(DartNode *n);
  * full, the name is bad/too long, or out of memory. */
 DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
                                       const DartSchema *schema, const DartChannelOpts *opts);
+
+/* ---- consumer queues (take / dispatch) ----------------------------------------------
+ * By default a channel's messages fire on_message on whichever thread polls, and a heavy
+ * handler lags the whole node. A channel becomes QUEUED on its first dart_channel_take /
+ * dart_channel_dispatch (or from creation when qos.queue_bytes is set): from then on the
+ * poll thread only memcpys its messages into a per-channel ring, and any thread YOU
+ * choose consumes them. One consumer thread per channel (the ring is single-consumer);
+ * different channels can go to different threads. The ring starts small and grows on
+ * demand to qos.queue_bytes (0 = DART_QUEUE_CAP, 1 MB), like the message buffers do; a
+ * single message larger than the cap still fits (the cap yields to it). At the cap:
+ *   best-effort: the oldest queued message is overwritten (KEEP_LAST) and DART_MSG_LOST
+ *                fires -- never silent, never a stalled poll.
+ *   reliable:    delivery PARKS in the transport instead: no ack reaches the writer, its
+ *                history fills, and the publisher's send blocks on the existing flow
+ *                control (bounded by qos.backpressure_wait_us) -- backpressure end to
+ *                end, no new loss mode. Draining the queue resumes delivery.
+ * Waiting: when a service thread (or another poller) drives the node, take/dispatch
+ * sleep on its progress; otherwise they drive the poll loop THEMSELVES, so they work
+ * with dart_node_start, with a manual poll thread, single-threaded, and under
+ * DART_NO_THREADS (where a wait that cannot be serviced by anyone else simply pumps).
+ * From inside a callback they cannot wait or run the loop: timeout behaves as 0. */
+#ifndef DART_QUEUE_CAP
+#define DART_QUEUE_CAP (1u << 20)   /* default consumer-queue growth cap, bytes per channel */
+#endif
+/* Pop the next queued message into *out. The views in *out (data + names) point into the
+ * channel's ring and stay valid until the NEXT take/dispatch on this channel (hold them
+ * briefly: an outstanding view pins the oldest ring slot). timeout_ms: 0 = just check,
+ * >0 = wait up to that long for a message, negative = wait indefinitely. Returns 1 (got
+ * one), 0 (empty at timeout), or a negative DartResult (DART_ERR_STATE = called while a
+ * dispatch on this channel runs its callback; DART_ERR_OOM = the ring could not be
+ * allocated). First use switches the channel to queued delivery. */
+int dart_channel_take(DartChannel *ch, DartMsg *out, int timeout_ms);
+/* Drain the queue by running the node's on_message on the CALLING thread, oldest first:
+ * up to max_msgs of the messages queued at entry (0 = all of them), first waiting up to
+ * timeout_ms like take. Returns messages dispatched or a negative DartResult. The
+ * callbacks run WITHOUT the node lock, so unlike poll-thread callbacks they may use the
+ * whole API (create_channel, set_role, ...) -- except take/dispatch on THIS channel
+ * (refused with DART_ERR_STATE). */
+int dart_channel_dispatch(DartChannel *ch, int max_msgs, int timeout_ms);
+/* Dispatch across every already-queued channel, oldest first per channel: the one-liner
+ * for a frame-paced consumer that owns all queues (the Unity Update() / a UI frame).
+ * Waits up to timeout_ms for ANY queued channel to hold data; does NOT switch channels
+ * to queued delivery. max_msgs bounds the total (0 = all queued at entry). */
+int dart_node_dispatch(DartNode *n, int max_msgs, int timeout_ms);
+/* Queue observability: messages waiting (an un-released take view counts), ring bytes
+ * used / current capacity, and messages dropped (best-effort overwrite or refusal) since
+ * open. Any out-pointer may be NULL; all zeros for a channel that is not queued. */
+void dart_channel_queue_stats(DartChannel *ch, uint32_t *msgs, uint32_t *bytes,
+                              uint32_t *capacity, uint32_t *dropped);
 /* Publish to all matched subscribers. Returns DART_OK or a negative DartResult. */
 int          dart_channel_send(DartChannel *ch, DartBytes data);
 /* Flip a channel's role at runtime (re-advertises interest). Returns 0 ok, <0 on error. */

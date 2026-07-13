@@ -16,6 +16,10 @@ dart_channel_set_role
 dart_channel_index
 dart_channel_match_count
 dart_channel_drain
+dart_channel_take
+dart_channel_dispatch
+dart_node_dispatch
+dart_channel_queue_stats
 dart_node_mem_stats
 dart_node_backpressure_stats
 dart_event_str

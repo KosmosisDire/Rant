@@ -103,6 +103,8 @@ _EXPORTS = [
     "dart_node_create_channel", "dart_node_channel",
     "dart_channel_send", "dart_channel_set_role", "dart_channel_index",
     "dart_channel_match_count", "dart_channel_drain",
+    "dart_channel_take", "dart_channel_dispatch", "dart_node_dispatch",
+    "dart_channel_queue_stats",
     "dart_node_mem_stats", "dart_node_backpressure_stats", "dart_event_str",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size",
@@ -243,6 +245,7 @@ class DartQos(Structure):
         ("repair_delay_us", c_uint32),
         ("backpressure_wait_us", c_uint32),
         ("shm_max_bytes", c_uint32),
+        ("queue_bytes", c_uint32),
     ]
 
 
@@ -391,6 +394,11 @@ def _bind(lib):
     F("dart_channel_index", [c_void_p], c_uint16)
     F("dart_channel_match_count", [c_void_p], c_int)
     F("dart_channel_drain", [c_void_p, c_int], c_int)
+    F("dart_channel_take", [c_void_p, POINTER(DartMsg), c_int], c_int)
+    F("dart_channel_dispatch", [c_void_p, c_int, c_int], c_int)
+    F("dart_node_dispatch", [c_void_p, c_int, c_int], c_int)
+    F("dart_channel_queue_stats", [c_void_p, POINTER(c_uint32), POINTER(c_uint32),
+                                   POINTER(c_uint32), POINTER(c_uint32)], None)
     F("dart_node_mem_stats", [c_void_p, POINTER(c_size_t), POINTER(c_size_t),
                               POINTER(c_uint64)], None)
     F("dart_node_backpressure_stats", [c_void_p, POINTER(c_uint64),
@@ -577,6 +585,7 @@ class Qos:
     repair_delay_us: int = 0
     backpressure_wait_us: int = 0
     shm_max_bytes: int = 0
+    queue_bytes: int = 0   # consumer-queue cap for take()/dispatch(); 0 = lazy, 1 MB cap
 
 
 @dataclasses.dataclass
@@ -1222,6 +1231,40 @@ class Channel:
         """Pump until every reader has acked, or timeout. Call before close."""
         return self._node._lib.dart_channel_drain(self._h, timeout_ms) == 1
 
+    def take(self, timeout_ms=0):
+        """Pop the next queued message as a Message (copied out), or None if nothing
+        arrived within timeout_ms (0 = just check, negative = wait indefinitely).
+        The FIRST take/dispatch switches this channel to QUEUED delivery: messages
+        then queue here instead of firing on_message on the poll thread, so exactly
+        one thread of your choosing consumes them (per channel). The queue grows on
+        demand to qos queue_bytes (0 = 1 MB); at the cap best-effort overwrites
+        oldest (an EventKind.MSG_LOST fires), reliable backpressures the publisher.
+        The wait sleeps beside a running service thread and drives the poll loop
+        itself otherwise."""
+        m = DartMsg()
+        r = self._node._lib.dart_channel_take(self._h, byref(m), timeout_ms)
+        if r < 0:
+            raise RuntimeError("take failed (%s)" % (SendStatus(r)
+                               if r in SendStatus._value2member_map_ else r))
+        if r != 1:
+            return None
+        return Message._from_c(m, self._node._chan_specs.get(m.channel_id))
+
+    def dispatch(self, max_msgs=0, timeout_ms=0):
+        """Drain the queue by running on_message on the CALLING thread, oldest first:
+        up to max_msgs of those queued at entry (0 = all), waiting up to timeout_ms
+        for the first like take. Returns the number dispatched. Unlike poll-thread
+        callbacks these run without the node lock, so they may use the whole API."""
+        return self._node._lib.dart_channel_dispatch(self._h, max_msgs, timeout_ms)
+
+    def queue_stats(self):
+        """(messages, bytes, capacity, dropped) of the consumer queue; zeros when
+        the channel is not queued."""
+        m, b, c, d = c_uint32(), c_uint32(), c_uint32(), c_uint32()
+        self._node._lib.dart_channel_queue_stats(self._h, byref(m), byref(b),
+                                                 byref(c), byref(d))
+        return m.value, b.value, c.value, d.value
+
     @property
     def schema(self):
         return self._schema
@@ -1330,6 +1373,7 @@ class Node:
         co.qos.repair_delay_us = qos.repair_delay_us
         co.qos.backpressure_wait_us = qos.backpressure_wait_us
         co.qos.shm_max_bytes = qos.shm_max_bytes
+        co.qos.queue_bytes = qos.queue_bytes
         h = self._lib.dart_node_create_channel(
             self._h, name.encode("utf-8"), int(role),
             sch._s if sch else None, byref(co))
@@ -1362,6 +1406,12 @@ class Node:
 
     def is_started(self):
         return self._lib.dart_node_is_started(self._h) == 1
+
+    def dispatch(self, max_msgs=0, timeout_ms=0):
+        """Dispatch every already-queued channel on the calling thread (see
+        Channel.take/dispatch): the one-liner for a frame-paced consumer that owns
+        all the queues. Waits up to timeout_ms for any queued channel to hold data."""
+        return self._lib.dart_node_dispatch(self._h, max_msgs, timeout_ms)
 
     def evicted_unsent(self):
         """Sends that evicted never-sent history after the bounded wait (the

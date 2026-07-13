@@ -2424,6 +2424,143 @@ static void threaded_checks(void){
 }
 #endif /* DART_THREADS */
 
+/* ===================== consumer queues: take / dispatch ==================
+ * One manually-pumped pair (pub-only A, sub-only B). Q1 proves lazy enablement
+ * and that a timeout-take drives the poll loop itself; Q2 the best-effort
+ * overwrite-oldest policy at a hard cap (DART_MSG_LOST, newest survive); Q3 the
+ * reliable park: a full queue withholds acks (writer not drained), yet a slow
+ * take loop receives every message in order with zero skips; Q4 dispatch runs
+ * the node callback on the calling thread; Q5 (threads) the cv-wait take path
+ * alongside service threads. */
+static unsigned long qc_dispatched;
+static void qc_on_message(const DartMsg *msg){ (void)msg; qc_dispatched++; }
+
+static void queue_checks(void){
+    static uint8_t mem_a[1], mem_b[1];
+    uint8_t payload[512];
+    DartChannelDef ca[4], cb[4];
+    DartNodeOpts ao, bo;
+    DartNode *a, *b;
+    DartChannel *lazy, *be, *rel, *disp;
+    DartMsg m;
+    int i, r, got;
+    memset(ca, 0, sizeof ca); memset(payload, 0, sizeof payload); memset(&m, 0, sizeof m);
+    ca[0].name="q/lazy"; ca[0].role=DART_PUB_ONLY;
+    ca[0].qos.reliability=DART_RELIABLE; ca[0].qos.keep_last=8; ca[0].qos.heartbeat_us=20000;
+    ca[1].name="q/be";   ca[1].role=DART_PUB_ONLY;                  /* best-effort */
+    ca[1].qos.keep_last=8;
+    ca[2].name="q/rel";  ca[2].role=DART_PUB_ONLY;
+    ca[2].qos.reliability=DART_RELIABLE; ca[2].qos.keep_last=16;    /* holds the whole burst */
+    ca[2].qos.heartbeat_us=20000; ca[2].qos.repair_delay_us=5000;
+    ca[3].name="q/disp"; ca[3].role=DART_PUB_ONLY;
+    ca[3].qos.reliability=DART_RELIABLE; ca[3].qos.keep_last=8; ca[3].qos.heartbeat_us=20000;
+    memcpy(cb, ca, sizeof ca);
+    for (i=0;i<4;i++) cb[i].role=DART_SUB_ONLY;
+    cb[1].qos.queue_bytes=4096;    /* hard consumer cap: forces overwrite-oldest */
+    cb[2].qos.queue_bytes=2048;    /* holds ~4 of the 400 B messages: forces parking */
+    cb[3].qos.queue_bytes=65536;   /* queued from creation: the dispatch tests */
+    ao = (DartNodeOpts){ .domain=ST_DOMAIN+4, .discovery={ .max_peers=4 } };
+    bo = ao;
+    st_gap_calls[0]=st_gap_calls[1]=st_gap_calls[2]=st_gap_calls[3]=0;
+    a = test_node_open(mem_a, sizeof mem_a, "qa-node", NULL, NULL, ao, ca, 4);
+    b = test_node_open(mem_b, sizeof mem_b, "qb-node", qc_on_message, st_on_event, bo, cb, 4);
+    ST_CHECK(a && b, "queue: nodes open");
+    if (!a || !b){ if (a) dart_node_close(a,0); if (b) dart_node_close(b,0); return; }
+    lazy = dart_node_channel(b, 0); be   = dart_node_channel(b, 1);
+    rel  = dart_node_channel(b, 2); disp = dart_node_channel(b, 3);
+
+    { uint64_t end = i_dart_plat_now_us()+5000000u;    /* all four matches first */
+      while (i_dart_plat_now_us()<end &&
+             (dart_node_writer_match_count(a,0)<1 || dart_node_writer_match_count(a,1)<1 ||
+              dart_node_writer_match_count(a,2)<1 || dart_node_writer_match_count(a,3)<1))
+          st_pump(a,b,10); }
+    ST_CHECK(dart_node_writer_match_count(a,0)==1 && dart_node_writer_match_count(a,2)==1,
+             "queue: matches formed");
+
+    /* Q1: the first take enables the queue; a timeout-take pumps the loop itself */
+    r = dart_channel_take(lazy, &m, 0);
+    ST_CHECK(r == 0, "queue: first take is empty (rc=%d) and enables queued delivery", r);
+    qc_dispatched = 0;
+    for (i=0;i<5;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 0, payload, 64); }
+    got = 0;
+    { uint64_t end = i_dart_plat_now_us()+5000000u;
+      while (got<5 && i_dart_plat_now_us()<end){
+          dart_node_poll(a, 0);
+          if (dart_channel_take(lazy, &m, 50) == 1){    /* waits by pumping b's own loop */
+              if ((int)get32(m.data.data) != got || m.data.len != 64) break;
+              got++;
+          }
+      } }
+    ST_CHECK(got==5, "queue: take drains 5 in order via its own pump (%d)", got);
+    ST_CHECK(m.channel_name.len==6 && !memcmp(m.channel_name.data,"q/lazy",6),
+             "queue: taken msg carries the channel name");
+    ST_CHECK(m.sender_name.len==7 && !memcmp(m.sender_name.data,"qa-node",7),
+             "queue: taken msg carries the sender name");
+    ST_CHECK(qc_dispatched==0, "queue: no inline callback once queued (%lu)", qc_dispatched);
+
+    /* Q2: best-effort at a hard cap overwrites oldest, fires DART_MSG_LOST, keeps newest */
+    { uint32_t msgs=0, bytes=0, cap=0, dropped=0, last=0;
+      for (i=0;i<60;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 1, payload, 256); st_pump(a,b,1); }
+      st_pump(a,b,50);
+      dart_channel_queue_stats(be, &msgs, &bytes, &cap, &dropped);
+      ST_CHECK(cap==4096 && dropped>0 && msgs>0,
+               "queue: BE cap held, oldest dropped (cap=%u msgs=%u dropped=%u)", cap, msgs, dropped);
+      got=0;
+      while (dart_channel_take(be, &m, 0)==1){ last=get32(m.data.data); got++; }
+      ST_CHECK(got>0 && last==59u, "queue: newest survive a BE overflow (got=%d last=%u)", got, last);
+      ST_CHECK(st_gap_calls[1]>0, "queue: BE queue loss fired DART_MSG_LOST (%lu)", st_gap_calls[1]);
+    }
+
+    /* Q3: reliable + tiny queue parks (no acks) instead of losing; a slow take loop
+       still receives everything in order via unpark + the normal repair machinery */
+    got=0;
+    for (i=0;i<12;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 2, payload, 400); st_pump(a,b,2); }
+    st_pump(a,b,30);
+    ST_CHECK(dart_node_drain(a, 2, 0)==0, "queue: parked reader withholds acks (writer not drained)");
+    { uint64_t end=i_dart_plat_now_us()+8000000u;
+      while (got<12 && i_dart_plat_now_us()<end){
+          if (dart_channel_take(rel, &m, 20)==1){
+              if ((int)get32(m.data.data)!=got) break;
+              got++;
+          }
+          dart_node_poll(a, 0);
+      } }
+    ST_CHECK(got==12, "queue: reliable park loses nothing, in order (%d/12)", got);
+    { DartRepairStats rs; dart_node_repair_stats(b, 2, &rs);
+      ST_CHECK(rs.msgs_skipped==0 && st_gap_calls[2]==0,
+               "queue: no skip during park (skipped=%llu lost_events=%lu)",
+               (unsigned long long)rs.msgs_skipped, st_gap_calls[2]); }
+    st_pump(a,b,50);
+    ST_CHECK(dart_node_drain(a, 2, 2000)==1, "queue: writer fully acked once drained");
+
+    /* Q4: dispatch runs the node's on_message on the calling thread */
+    qc_dispatched=0;
+    for (i=0;i<3;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 3, payload, 64); }
+    { uint64_t end=i_dart_plat_now_us()+5000000u; uint32_t msgs=0;
+      while (msgs<3 && i_dart_plat_now_us()<end){ st_pump(a,b,10); dart_channel_queue_stats(disp,&msgs,NULL,NULL,NULL); } }
+    r = dart_channel_dispatch(disp, 0, 0);
+    ST_CHECK(r==3 && qc_dispatched==3, "queue: dispatch runs the callback here (r=%d cb=%lu)", r, qc_dispatched);
+    r = dart_node_dispatch(b, 0, 0);
+    ST_CHECK(r==0, "queue: node dispatch finds nothing left (%d)", r);
+
+#ifdef DART_THREADS
+    /* Q5: take alongside service threads (the cv-wait path). ST_CHECK evaluates its
+       condition twice, so the side-effecting starts run outside it. */
+    r = (dart_node_start(a)==DART_OK && dart_node_start(b)==DART_OK);
+    ST_CHECK(r, "queue: services start");
+    for (i=0;i<40;i++){
+        put32(payload,(uint32_t)i);
+        dart_node_send(a, 3, payload, 64);
+        if (dart_channel_take(disp, &m, 2000)!=1 || (int)get32(m.data.data)!=i) break;
+    }
+    ST_CHECK(i==40, "queue: threaded take (cv wait) delivers 40 in order (%d)", i);
+    dart_node_stop(b); dart_node_stop(a);
+#endif
+
+    dart_node_close(b, 1);
+    dart_node_close(a, 1);
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -2738,6 +2875,7 @@ static int selftest_main(void){
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
+    queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
 #ifdef DART_THREADS
     threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */
 #endif

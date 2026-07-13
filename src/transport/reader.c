@@ -69,6 +69,8 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
     uint16_t count = i_dart_le_r16(p+DART_OFFSET_SHM_COUNT);
     const uint8_t *desc = p+DART_OFFSET_SHM_DESC;          /* DART_SHM_DESC_BYTES */
     if (!r || !r->used || count==0) return;
+    if (r->parked){ ch->repair_stats.frags_ahead++; return; }   /* held sample blocks the line:
+                                                                   retry is deliver_parked's job */
     {   i_DartReaderOrder ord = i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, base+count-1);
         if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
@@ -79,9 +81,9 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
        it (writer HB, sample evicted). A persistently unresolvable descriptor (mis-
        configured SHM constants) would loop, so after DART_SHM_MAX_RETRY tries we skip
        it loudly instead of wedging. */
-    {   int ok = st->cfg.on_shm &&
-                 st->cfg.on_shm(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot], desc);
-        if (ok){
+    {   int ok = st->cfg.on_shm ?
+                 st->cfg.on_shm(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot], desc) : 0;
+        if (ok > 0){
             r->shm_fail = 0;
             r->deliver_upto = base + count;
             if (reliable){                  /* ack now, AFTER delivery (zero-copy invariant) */
@@ -89,6 +91,26 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
                 i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
             }
             return;
+        }
+        if (ok < 0){                        /* refused downstream (consumer queue full) */
+            if (!reliable){                 /* best-effort: KEEP_LAST drop */
+                r->deliver_upto = base + count;
+                return;
+            }
+            /* park the DESCRIPTOR (p is the shared RX buffer: it must be copied). Held in
+               assembly_buf; the chunk itself stays valid while unacked (the writer's flow
+               control pins its history slot). An alloc failure falls through to the
+               resolve-fail repair path: the writer re-sends and we retry. */
+            if (r->assembly_cap < DART_SHM_DESC_BYTES && st->cfg.allocator){
+                uint8_t *nb = (uint8_t*)st->cfg.allocator(st->cfg.user, r->assembly_buf, DART_SHM_DESC_BYTES);
+                if (nb){ r->assembly_buf = nb; r->assembly_cap = DART_SHM_DESC_BYTES; }
+            }
+            if (r->assembly_cap >= DART_SHM_DESC_BYTES){
+                memcpy(r->assembly_buf, desc, DART_SHM_DESC_BYTES);
+                r->assembly_count = count;             /* seqnos the held sample spans */
+                r->parked = 1; r->parked_shm = 1;      /* silent: no ack, no NACK, no advance */
+                return;
+            }
         }
         if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
             i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
@@ -126,6 +148,8 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
 
     if (!r || !r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
     if (count==0 || frag>=count){ ch->repair_stats.frags_malformed++; return; }  /* malformed */
+    if (r->parked){ ch->repair_stats.frags_ahead++; return; }   /* held sample blocks the line:
+                                                                   retry is deliver_parked's job */
     switch (i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, seqno)){
         case DART_ORDER_OLD:     ch->repair_stats.frags_old++;   return;   /* already delivered/skipped */
         case DART_ORDER_GAP:     ch->repair_stats.frags_ahead++; return;   /* future frag; repair armed */
@@ -187,9 +211,17 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
     { int done = (r->assembly_low == count);
       int hole = r->assembly_active && (r->deliver_upto + r->assembly_low <= r->received_high);
       if (done){
-          if (st->cfg.on_message)
+          if (st->cfg.on_message &&
               st->cfg.on_message(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot],
-                                 dart_bytes(r->assembly_buf, r->assembly_len));
+                                 dart_bytes(r->assembly_buf, r->assembly_len)) != 0 && reliable){
+              /* refused downstream (consumer queue full): PARK the assembled sample.
+                 No advance, no ack, no repair traffic -- our silence keeps the writer's
+                 acked_upto put, so its own flow control backpressures the publisher.
+                 deliver_parked retries; a writer floor past us (HB) gives up + skips.
+                 A best-effort refusal falls through: KEEP_LAST drop. */
+              r->parked = 1;
+              return;
+          }
           r->deliver_upto = base + count;
           r->assembly_active=0;
       }
@@ -220,16 +252,22 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
        sample: ignore a `first` that lands in our current partial (it is just our own
        mid-message ack echoed back), else we would skip past frags we are repairing and
        reject every resend as old. */
+    /* a PARKED hold occupies [deliver_upto, deliver_upto+assembly_count) exactly like a
+       partial assembly, so the same mid-sample guard protects it from our own ack echo */
     if (r->started && first > r->deliver_upto &&
-        (!r->assembly_active || first >= r->deliver_upto + r->assembly_count)){
+        (!(r->assembly_active || r->parked) || first >= r->deliver_upto + r->assembly_count)){
         i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto);
         ch->repair_stats.msgs_skipped += first - r->deliver_upto;
         r->deliver_upto=first; r->assembly_active=0;
+        r->parked=0;            /* the writer moved past the held sample: give it up */
 #ifdef DART_SHM
+        r->parked_shm=0;
         r->shm_fail=0;          /* skipped past the stuck descriptor: fresh count */
 #endif
     }
+    if (r->parked) return;      /* still parked: stay silent (no ack) -- the writer's
+                                   flow control is the backpressure */
     /* hb_last is the writer's CLAIM (it may exceed what we've received). It is the only
        way to learn of tail loss -- frags past received_high that no later arrival will reveal --
        so emit lets the slow retransmit backstop chase up to it, never the fast gap path.
@@ -263,6 +301,8 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
     if (cap<DART_HEADER_NACK) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
     r->ack_pending=0; force=r->ack_force; r->ack_force=0;
+    if (r->parked) return 0;    /* parked: silent (no ack, no NACK). Consuming ack_pending
+                                   above keeps the drained lane off the scheduler. */
 
     if (!r->started)                                     /* no position yet: F_UNPOS announces our epoch */
         return i_dart_wire_mk_nack(out,alias,r->deliver_upto,0,0,r->epoch,(uint8_t)DART_F_UNPOS);
@@ -311,4 +351,64 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
        a bare re-ack at an unchanged floor would be pure noise. */
     if (!repair && !force) return 0;
     return i_dart_wire_mk_nack(out,alias,first_missing,nbits,bitmap,r->epoch,0);
+}
+
+
+/* Retry every parked lane of a channel (see i_DartReaderProxy.parked). The callbacks may
+ * re-enter the transport (a send from an event handler grows buffers), so lane pointers
+ * are re-derived after each call; the held buffer itself is a stable heap allocation. */
+uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t channel, uint64_t now){
+    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+    uint32_t li, still = 0;
+    (void)now;
+    if (!ch) return 0;
+    li = ch->lane_head;
+    while (li != DART__NIL){
+        uint32_t next = st->lanes[li].ch_next;
+        if (st->lanes[li].r.used && st->lanes[li].r.parked){
+            uint32_t peer_slot = st->lanes[li].peer_slot;
+            uint32_t peer_id   = st->peer_ids[peer_slot];
+            const uint8_t *held = st->lanes[li].r.assembly_buf;
+            uint32_t held_len   = st->lanes[li].r.assembly_len;
+            i_DartReaderProxy *r;
+            int accepted;
+#ifdef DART_SHM
+            if (st->lanes[li].r.parked_shm){
+                int ok = st->cfg.on_shm ?
+                         st->cfg.on_shm(st->cfg.user, channel, peer_id, held) : 0;
+                r = &st->lanes[li].r;                  /* the callback may have re-entered */
+                if (ok == 0){
+                    /* chunk gone (the writer moved on after its backpressure bound):
+                       un-park, leave the gap, and let the normal repair path re-fetch
+                       or skip it (re-sent descriptor / writer HB floor) */
+                    r->parked = 0; r->parked_shm = 0; r->assembly_active = 0;
+                    i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
+                    i_dart_lane_wake(st,(uint16_t)channel_idx,peer_slot);
+                    li = next; continue;
+                }
+                accepted = (ok > 0);
+            } else
+#endif
+            {
+                accepted = !st->cfg.on_message ||
+                           st->cfg.on_message(st->cfg.user, channel, peer_id,
+                                              dart_bytes(held, held_len)) == 0;
+                r = &st->lanes[li].r;                  /* the callback may have re-entered */
+            }
+            if (accepted){
+                r->deliver_upto += r->assembly_count;
+                r->assembly_active = 0;
+                r->parked = 0;
+#ifdef DART_SHM
+                r->parked_shm = 0; r->shm_fail = 0;
+#endif
+                if (ch->qos.reliability==DART_RELIABLE){   /* ack now, AFTER delivery */
+                    i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+                    i_dart_lane_wake(st,(uint16_t)channel_idx,peer_slot);
+                }
+            } else still++;
+        }
+        li = next;
+    }
+    return still;
 }

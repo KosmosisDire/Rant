@@ -93,6 +93,13 @@ typedef struct {
                                     this many bytes, so same-sized traffic reuses one pre-sized
                                     segment (a larger message falls back to UDP). 0 = each message
                                     uses its own size class's segment, created on demand. */
+    uint32_t queue_bytes;        /* NODE-level consumer queue capacity (dart_channel_take /
+                                    dart_channel_dispatch): the byte bound on how far a consumer
+                                    may fall behind the poll. Setting it makes the channel queued
+                                    from creation; 0 = the queue appears lazily on the first take/
+                                    dispatch, capped at DART_QUEUE_CAP. The ring starts small and
+                                    grows on demand to the cap, like the message buffers. The
+                                    transport core itself ignores this field. */
 } DartQos;
 
 /* A channel (topic). Cross-peer identity is the name (64-bit hash); the LOCAL
@@ -105,16 +112,24 @@ typedef struct {
 
 /* dart_transport_poll_send destination: a peer id. Data is unicast point-to-point per matched reader. */
 
-/* A complete message; channel is the local handle. Do not call back into dart_*. */
-typedef void (*DartMessageFn)(void *user, uint16_t channel, uint32_t from_peer, DartBytes data);
+/* A complete message; channel is the local handle. Do not call back into dart_*.
+ * Return 0 = delivered. Nonzero = REFUSED (downstream has nowhere to put it, e.g. the
+ * node's consumer queue is full): on a reliable channel the reader PARKS the assembled
+ * sample -- no advance, no ack, no repair traffic -- so the writer's own flow control
+ * carries the backpressure to the publisher; retry with dart_transport_deliver_parked.
+ * On a best-effort channel a refusal is a drop (KEEP_LAST semantics). Callers with
+ * nothing to refuse just return 0. */
+typedef int (*DartMessageFn)(void *user, uint16_t channel, uint32_t from_peer, DartBytes data);
 
 #ifdef DART_SHM
 /* SHM delivery: the transport reassembled nothing -- it hands the node the
  * DART_SHM_DESC_BYTES descriptor from an SHM-DATA submessage and the node resolves it
- * to bytes and calls the user's on_message. Returns 1 if delivered, 0 if it could not
+ * to bytes and calls the user's on_message. Returns 1 if delivered; 0 if it could not
  * resolve the chunk (recycled / unattachable) -- then the reader leaves the gap so the
- * reliability layer repairs or skips it. Internal (transport->node); the user's
- * on_message is unchanged and never sees this. */
+ * reliability layer repairs or skips it; -1 if delivery was REFUSED downstream (consumer
+ * queue full) -- then a reliable reader parks the descriptor exactly like a refused
+ * inline sample (see DartMessageFn). Internal (transport->node); the user's on_message
+ * is unchanged and never sees this. */
 typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
                              const uint8_t *desc);
 #endif
@@ -562,6 +577,13 @@ int       dart_transport_repair_pending(DartTransportState *st, uint16_t channel
  * out-pointer may be NULL. Wrapped as dart_channel_reader_progress. */
 int       dart_transport_reader_progress(DartTransportState *st, uint16_t channel, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
+
+/* Retry delivery of samples PARKED after a refused on_message/on_shm (see DartMessageFn):
+ * re-attempts each parked lane of the channel, advancing + arming the ack for every sample
+ * now accepted. Call it when downstream capacity frees (the node calls it as its consumer
+ * queue drains), then flush poll_send so the acks reach the writer. Returns the number of
+ * lanes still parked (0 = fully drained). */
+uint32_t  dart_transport_deliver_parked(DartTransportState *st, uint16_t channel, uint64_t now_us);
 
 /* Feed a received datagram, tagged with the peer it came from. */
 void      dart_transport_on_datagram(DartTransportState *st, uint32_t from_peer, DartBytes datagram,

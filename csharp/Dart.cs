@@ -107,6 +107,7 @@ namespace Dart
         public uint repair_delay_us;
         public uint backpressure_wait_us;
         public uint shm_max_bytes;
+        public uint queue_bytes;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -277,6 +278,15 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_channel_drain(IntPtr ch, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_channel_take(IntPtr ch, ref DartMsg msg, int timeout_ms);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_channel_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void dart_channel_queue_stats(IntPtr ch, out uint msgs,
+            out uint bytes, out uint capacity, out uint dropped);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_node_mem_stats(IntPtr node, out UIntPtr in_use,
             out UIntPtr peak, out ulong alloc_calls);
         [DllImport(LIB, CallingConvention = CC)]
@@ -336,6 +346,9 @@ namespace Dart
         public uint RepairDelayUs = 0;
         public uint BackpressureWaitUs = 0;
         public uint ShmMaxBytes = 0;
+        /// <summary>Consumer-queue cap in bytes for TryTake/Dispatch; 0 = the queue
+        /// appears lazily on first use and grows on demand to 1 MB.</summary>
+        public uint QueueBytes = 0;
     }
 
     public sealed class NodeOptions
@@ -607,6 +620,39 @@ namespace Dart
         {
             return Native.dart_channel_drain(_handle, timeoutMs) == 1;
         }
+
+        /// <summary>Pop the next queued message, fully copied out. The FIRST
+        /// TryTake/Dispatch switches this channel to QUEUED delivery: its messages then
+        /// queue instead of firing the node handler on the poll thread, and exactly one
+        /// thread of your choosing consumes them here (per channel). The queue grows on
+        /// demand to Qos.QueueBytes (0 = 1 MB); at the cap a best-effort channel
+        /// overwrites oldest (EventKind.MsgLost fires), a reliable one backpressures the
+        /// publisher. timeoutMs: 0 = just check, &gt;0 = wait up to that long, negative =
+        /// wait indefinitely (the wait sleeps beside a running service thread and drives
+        /// the poll loop itself otherwise).</summary>
+        public bool TryTake(out Message message, int timeoutMs = 0)
+        {
+            message = null;
+            var m = new DartMsg();
+            if (Native.dart_channel_take(_handle, ref m, timeoutMs) != 1) return false;
+            message = Message.FromNative(ref m, _node.ClrTypeOf(m.channel_id));
+            return true;
+        }
+
+        /// <summary>Drain the queue by running the node's OnMessage handler on the
+        /// CALLING thread, oldest first: up to maxMsgs of those queued at entry (0 =
+        /// all), first waiting up to timeoutMs like TryTake. Returns the number
+        /// dispatched. Unlike poll-thread callbacks these run without the node lock,
+        /// so they may use the whole API.</summary>
+        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
+            => Native.dart_channel_dispatch(_handle, maxMsgs, timeoutMs);
+
+        /// <summary>Consumer-queue observability; all zeros when not queued.</summary>
+        public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
+        {
+            Native.dart_channel_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
+            return (m, b, c, d);
+        }
     }
 
     /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
@@ -618,6 +664,16 @@ namespace Dart
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
         public SendStatus Send(T value) => Send((object)value);
+
+        /// <summary>Typed take: decodes straight from the queue.</summary>
+        public bool TryTake(out T value, int timeoutMs = 0)
+        {
+            value = default(T);
+            Message m;
+            if (!TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
+            value = (T)m.Value;
+            return true;
+        }
     }
 
     // ---- node -------------------------------------------------------------------
@@ -726,6 +782,7 @@ namespace Dart
             co.qos.repair_delay_us = qos.RepairDelayUs;
             co.qos.backpressure_wait_us = qos.BackpressureWaitUs;
             co.qos.shm_max_bytes = qos.ShmMaxBytes;
+            co.qos.queue_bytes = qos.QueueBytes;
 
             IntPtr h = Native.dart_node_create_channel(_handle, Codec.CStr(name), (int)role,
                 schema != null ? schema.Handle : IntPtr.Zero, ref co);
@@ -760,6 +817,21 @@ namespace Dart
         public void Stop() => Native.dart_node_stop(_handle);
 
         public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
+
+        /// <summary>Dispatch every already-queued channel on the calling thread (see
+        /// Channel.TryTake/Dispatch): with Start() running, this in a Unity Update() (or
+        /// any UI frame) keeps every queued handler on that thread while the service
+        /// thread owns the network. Waits up to timeoutMs for any queued channel to hold
+        /// data; returns the number of messages dispatched.</summary>
+        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
+            => Native.dart_node_dispatch(_handle, maxMsgs, timeoutMs);
+
+        internal Type ClrTypeOf(ushort index)
+        {
+            Type t;
+            _channelTypes.TryGetValue(index, out t);
+            return t;
+        }
 
         /// <summary>The most recent error this node reported (also delivered via OnEvent).
         /// Event.Kind is PeerUp with Error == None if none has occurred yet.</summary>

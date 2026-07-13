@@ -202,6 +202,8 @@ struct Qos {
     uint32_t    repair_delay_us      = 0;   /* reliable reader's resend delay (0 = 20ms) */
     uint32_t    backpressure_wait_us = 0;   /* reliable: send pause for a slow reader (0 = none) */
     uint32_t    shm_max_bytes        = 0;   /* pin channel to one same-host SHM size class */
+    uint32_t    queue_bytes          = 0;   /* consumer-queue cap for take()/dispatch(); 0 = the
+                                               queue appears lazily on first use, 1 MB cap */
 };
 
 struct NodeOptions {
@@ -446,6 +448,65 @@ public:
         return detail::dart_channel_drain(ch_, timeout_ms) == 1;
     }
 
+    /* ---- consumer queue (take / dispatch) ------------------------------------------
+     * The first take()/dispatch() switches this channel to QUEUED delivery: its
+     * messages then queue instead of firing the node handler on the poll thread, and
+     * exactly one thread of your choosing consumes them here (per channel). The queue
+     * grows on demand to Qos::queue_bytes (0 = 1 MB); at the cap a best-effort channel
+     * overwrites oldest (Event MsgLost), a reliable one backpressures the publisher.
+     * Waiting works everywhere: alongside start()/a poller it sleeps, otherwise it
+     * drives the poll loop itself. */
+
+    /* A taken message: owns the DartMsg struct by value; the views inside point into
+     * the channel's ring and stay valid until the NEXT take/dispatch on the channel. */
+    class Taken {
+    public:
+        Taken() = default;
+        bool valid() const noexcept { return ok_; }
+        explicit operator bool() const noexcept { return ok_; }
+        std::string_view sender_name()  const { return { m_.sender_name.data,  m_.sender_name.len  }; }
+        uint32_t         sender_id()    const { return m_.sender_id; }
+        std::string_view channel_name() const { return { m_.channel_name.data, m_.channel_name.len }; }
+        uint16_t         channel_id()   const { return m_.channel_id; }
+        Bytes            data()         const { return { m_.data.data, m_.data.len }; }
+        std::string_view text()         const { return { reinterpret_cast<const char*>(m_.data.data), m_.data.len }; }
+        bool             has_schema()   const { return m_.schema != nullptr; }
+        uint64_t get_uint (const char* field) const { return detail::dart_get_uint (m_.data, m_.schema, field); }
+        int64_t  get_int  (const char* field) const { return detail::dart_get_int  (m_.data, m_.schema, field); }
+        double   get_f64  (const char* field) const { return detail::dart_get_f64  (m_.data, m_.schema, field); }
+        float    get_f32  (const char* field) const { return detail::dart_get_f32  (m_.data, m_.schema, field); }
+        bool     get_bool (const char* field) const { return detail::dart_get_uint (m_.data, m_.schema, field) != 0; }
+        Bytes    get_array(const char* field) const { auto a = detail::dart_get_array(m_.data, m_.schema, field); return { a.data, a.len }; }
+    private:
+        detail::DartMsg m_{};
+        bool ok_ = false;
+        friend class Channel;
+    };
+
+    /* Pop the next queued message. timeout_ms: 0 = just check, >0 = wait up to that
+     * long, negative = wait indefinitely. Empty optional = nothing arrived in time.
+     *     while (auto msg = scan.take()) render(msg->data()); */
+    std::optional<Taken> take(int timeout_ms = 0) {
+        Taken t;
+        if (!ch_ || detail::dart_channel_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
+        t.ok_ = true;
+        return t;
+    }
+    /* Drain the queue by running the node's message handler on the CALLING thread,
+     * oldest first: up to max_msgs of those queued at entry (0 = all), waiting up to
+     * timeout_ms for the first like take. Returns messages dispatched. Unlike
+     * poll-thread handlers, these run without the node lock and may use the full API. */
+    int dispatch(int max_msgs = 0, int timeout_ms = 0) {
+        if (!ch_) return 0;
+        return detail::dart_channel_dispatch(ch_, max_msgs, timeout_ms);
+    }
+    struct QueueStats { uint32_t messages = 0, bytes = 0, capacity = 0, dropped = 0; };
+    QueueStats queue_stats() const {
+        QueueStats s;
+        if (ch_) detail::dart_channel_queue_stats(ch_, &s.messages, &s.bytes, &s.capacity, &s.dropped);
+        return s;
+    }
+
 private:
     explicit Channel(detail::DartChannel* c) : ch_(c) {}
     detail::DartChannel* ch_ = nullptr;
@@ -569,6 +630,13 @@ public:
     void stop()  { detail::dart_node_stop(impl_->node); }
     bool is_started() const { return detail::dart_node_is_started(impl_->node) == 1; }
 
+    /* Dispatch every already-queued channel on the calling thread (see Channel::take/
+     * dispatch): the one-liner for a frame-paced consumer that owns all the queues.
+     * Waits up to timeout_ms for any queued channel to hold data. */
+    int dispatch(int max_msgs = 0, int timeout_ms = 0) {
+        return detail::dart_node_dispatch(impl_->node, max_msgs, timeout_ms);
+    }
+
     /* A copied snapshot of the live peer table (safe to keep after the poll). */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
@@ -674,6 +742,7 @@ private:
         c.repair_delay_us      = q.repair_delay_us;
         c.backpressure_wait_us = q.backpressure_wait_us;
         c.shm_max_bytes        = q.shm_max_bytes;
+        c.queue_bytes          = q.queue_bytes;
         return c;
     }
 

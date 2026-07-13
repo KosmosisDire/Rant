@@ -141,7 +141,13 @@ typedef struct {        /* reader-side, per (channel,peer) */
     uint8_t  ack_force;     /* a delivery/skip/HB/(re)match owes the writer an ACKNACK even if
                                the repair floor did not move (avoids a stuck cumulative ack) */
     uint8_t  ack_pending;
+    uint8_t  parked;        /* on_message/on_shm REFUSED the head sample: it is held (inline:
+                               assembled in assembly_buf; SHM: the descriptor copied there), with no
+                               advance, no ack and no repair traffic, so the writer's flow control
+                               backpressures the publisher. dart_transport_deliver_parked retries;
+                               a writer floor past it (HB) gives up and skips (bounded loss). */
 #ifdef DART_SHM
+    uint8_t  parked_shm;    /* the parked hold is a descriptor, not an assembled sample */
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
 #endif
 } i_DartReaderProxy;
