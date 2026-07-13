@@ -6,16 +6,17 @@ Pair with python/publisher.py or csharp/publisher. Single-threaded manual poll.
 import os
 import sys
 import time
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist"))
 import dart  # noqa: E402
 
 
-@dart.schema
+@dataclass
 class Tick:
-    seq: dart.u64
-    t_us: dart.u64
-    value: dart.f64
+    seq: dart.u64 = 0
+    t_us: dart.u64 = 0
+    value: dart.f64 = 0.0
 
 
 count = 0
@@ -29,9 +30,10 @@ def on_message(_):
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = dart.Node.open("py-subscriber", multicast_interface=iface, on_message=on_message,
-                          on_event=lambda e: print("event:", e, file=sys.stderr))
-    node.create_channel("tick", dart.Role.SUB_ONLY, Tick)
+    node = dart.Node("py-subscriber", on_message,
+                     lambda e: print("event:", e, file=sys.stderr),
+                     multicast_interface=iface)
+    dart.Channel[Tick](node, "tick", dart.Role.SUB_ONLY)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 
     start = time.perf_counter()

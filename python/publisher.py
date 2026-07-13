@@ -1,8 +1,7 @@
 """DART Python publisher: streams a typed 'tick' message at 1000 Hz on the DEFAULT
 interface and domain (0), so any subscriber on the LAN (any language) can receive it.
-Single-threaded: it drives the node with a manual poll in the send loop (the wrapper
-has no background thread). Uses the same schema/topic as csharp/publisher, so the two
-interoperate.
+Single-threaded: it drives the node with a manual poll in the send loop (no background
+thread). Uses the same schema/topic as csharp/publisher, so the two interoperate.
 
     python python/publisher.py [seconds] [interface]   # seconds/interface optional
 """
@@ -10,6 +9,7 @@ import math
 import os
 import sys
 import time
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist"))
 import dart  # noqa: E402
@@ -17,23 +17,23 @@ import dart  # noqa: E402
 HZ = 1000
 
 
-@dart.schema
+@dataclass
 class Tick:
-    seq: dart.u64
-    t_us: dart.u64
-    value: dart.f64
+    seq: dart.u64 = 0
+    t_us: dart.u64 = 0
+    value: dart.f64 = 0.0
 
 
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0   # 0 => run forever
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = dart.Node.open("py-publisher", multicast_interface=iface,   # default iface, domain 0
-                          on_message=None,
-                          on_event=lambda e: print("event:", e, file=sys.stderr))
+    node = dart.Node("py-publisher", None,                       # default iface, domain 0
+                     lambda e: print("event:", e, file=sys.stderr),
+                     multicast_interface=iface)
     # keep_last deep enough that a small per-loop burst is not evicted before it flushes.
-    ch = node.create_channel("tick", dart.Role.PUB_ONLY, Tick, qos=dart.Qos(keep_last=64))
+    ch = dart.Channel[Tick](node, "tick", dart.Role.PUB_ONLY, dart.Qos(keep_last=64))
     print("publishing 'tick' at %d Hz on the default interface, domain 0 (Ctrl+C to stop)" % HZ)
-    print("schema: " + " ".join(Tick.__dart_dsl__.split()))
+    print("schema: " + " ".join(dart.dsl(Tick).split()))
 
     period = 1.0 / HZ
     start = time.perf_counter()
@@ -57,8 +57,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        # node.close()
-        pass
+        node.close()
 
 
 if __name__ == "__main__":
