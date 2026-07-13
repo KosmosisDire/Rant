@@ -697,6 +697,21 @@ namespace Dart
         /// constructor already requires an initial one.</summary>
         public Node OnEvent(Action<Event> fn) { _onEvt = fn; return this; }
 
+        /// <summary>Convenience helper: construct and return a raw (schemaless) Channel
+        /// on this node -- exactly new Channel(this, name, role, qos).</summary>
+        public Channel CreateChannel(string name, Role role = Role.PubSub, Qos qos = null)
+            => new Channel(this, name, role, qos);
+
+        /// <summary>Convenience helper: construct and return a typed Channel with an
+        /// explicit Schema -- exactly new Channel(this, name, schema, role, qos).</summary>
+        public Channel CreateChannel(string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+            => new Channel(this, name, schema, role, qos);
+
+        /// <summary>Convenience helper: construct and return a typed Channel&lt;T&gt; on
+        /// this node -- exactly new Channel&lt;T&gt;(this, name, role, qos).</summary>
+        public Channel<T> CreateChannel<T>(string name, Role role = Role.PubSub, Qos qos = null)
+            => new Channel<T>(this, name, role, qos);
+
         // the native create behind the Channel constructors: makes the handle and
         // registers the schema/decode type against the channel index.
         internal IntPtr CreateNativeChannel(string name, Role role, Schema schema, Qos qos)
