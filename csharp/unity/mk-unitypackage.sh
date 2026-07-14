@@ -27,6 +27,7 @@ add_entry() {
 add_entry "Assets/Dart" "" "$folder_meta"
 add_entry "Assets/Dart/Dart.cs" "$rt/Dart.cs" "$cs_meta"
 add_entry "Assets/Dart/DartUnity.cs" "$rt/DartUnity.cs" "$cs_meta"
+add_entry "Assets/Dart/DartNode.cs" "$rt/DartNode.cs" "$cs_meta"
 [ -f "$rt/Dart.asmdef" ] && add_entry "Assets/Dart/Dart.asmdef" "$rt/Dart.asmdef" "$asmdef_meta"
 add_entry "Assets/Dart/Plugins" "" "$folder_meta"
 for lib in "$rt"/Plugins/x86_64/*; do
