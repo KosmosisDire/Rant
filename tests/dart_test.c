@@ -1460,6 +1460,20 @@ static void beff_flow_checks(void){
     ST_CHECK(beff_would_evict(1)==1, "flow: reliable reader does apply backpressure");
 }
 
+/* dart_schema_print is the inverse of compile: print a schema back to DSL, recompile that
+   text, and assert an exact wire round-trip plus that the (NULL,0) measure matches. */
+static void schema_print_roundtrip(DartAllocator *ma, DartSchema *s, const char *label){
+    char buf[1024]; uint32_t need; DartSchema *back;
+    if (!s) return;
+    need = dart_schema_print(s, NULL, 0);                 /* snprintf-style measure */
+    dart_schema_print(s, buf, sizeof buf);
+    ST_CHECK(need > 0 && need < sizeof buf && strlen(buf) == (size_t)need,
+             "schema-print: %s measures (%u) and matches the written length", label, need);
+    back = dart_schema_compile(dart_allocator_alloc, ma, buf, NULL);
+    ST_CHECK(back && dart_schema_hash(back) == dart_schema_hash(s),
+             "schema-print: %s DSL recompiles to the same wire (hash)", label);
+}
+
 /* (17c) the schema DSL: text compiles to the same wire bytes (hence hash) the builder
    emits, layout comes out right, and malformed text fails with a useful position. */
 static void schema_dsl_checks(void){
@@ -1492,6 +1506,7 @@ static void schema_dsl_checks(void){
     ST_CHECK(built != NULL, "schema-dsl: builder twin builds");
     ST_CHECK(txt && built && dart_schema_hash(txt) == dart_schema_hash(built),
              "schema-dsl: text and builder produce the same wire (same hash)");
+    schema_print_roundtrip(&ma, txt, "Pose (nested struct + array)");
     if (txt){
         DartSchemaFieldInfo fi;
         ST_CHECK(dart_schema_size(txt) == 8+8+8+16+1+8, "schema-dsl: size %u", dart_schema_size(txt));
@@ -1563,6 +1578,7 @@ static void schema_dsl_checks(void){
         }
         ST_CHECK(twin && ts && dart_schema_hash(ts) == dart_schema_hash(twin),
                  "schema-dsl: string text and builder produce the same wire (same hash)");
+        schema_print_roundtrip(&ma, ts, "Tagged (capped strings + string array)");
         if (ts){
             DartSchemaFieldInfo fi;
             ST_CHECK(dart_schema_size(ts) == 4 + (2+12) + 3*(2+8) + (2+4),
@@ -1638,6 +1654,7 @@ static void schema_dsl_checks(void){
         }
         ST_CHECK(twin && vs && dart_schema_hash(vs) == dart_schema_hash(twin),
                  "schema-var: text and builder produce the same wire (same hash)");
+        schema_print_roundtrip(&ma, vs, "Var (variable string/array/map)");
         if (vs){
             DartSchemaFieldInfo fi;
             ST_CHECK(dart_schema_size(vs) == 5 && dart_schema_msg_min(vs) == 5 + 4*4,
@@ -1775,6 +1792,11 @@ static void schema_dsl_checks(void){
                 }
             }
         }
+    }
+    {   /* schema-print: two struct levels deep, and a struct followed by more top-level fields */
+        DartSchema *deep = dart_schema_compile(dart_allocator_alloc, &ma,
+            "Deep { a: u32, g: { b: u16, inner: { c: i8, d: f64 }, e: u8 }, z: string<5>, arr: i32[3] }", NULL);
+        schema_print_roundtrip(&ma, deep, "Deep (two nesting levels)");
     }
     {   /* errors: NULL + err points into the text at the offending spot */
         static const char *bad[] = {

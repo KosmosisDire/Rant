@@ -1815,6 +1815,11 @@ void        dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user);
 DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (advertise these) */
 uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */
 DartString  dart_schema_name(const DartSchema *s);        /* root type name */
+/* Spell the schema back as compile-ready DSL text (the inverse of dart_schema_compile):
+ * "Name {\n  field: type,\n  nested: {\n    ...\n  }\n}\n". Recompiles to the same wire
+ * (hence hash). Writes up to cap bytes, always NUL-terminated when cap > 0, and returns the
+ * FULL length excluding the NUL, so dart_schema_print(s, NULL, 0) measures for sizing. */
+uint32_t    dart_schema_print(const DartSchema *s, char *buf, size_t cap);
 /* Fixed-section size: the exact message size when the schema has no variable fields,
  * otherwise where the variable tail starts. */
 uint32_t    dart_schema_size(const DartSchema *s);
@@ -8004,6 +8009,60 @@ static int i_dart_why_done(char *buf, char *p){   /* NUL-terminate the reason, r
     return 0;
 }
 
+/* ---- schema -> DSL text (dart_schema_print) ------------------------------------------ */
+/* A counting text sink: appends into [p,end) but always tallies the full length in n, so a
+   NULL/short buffer still measures (snprintf semantics). */
+typedef struct { char *p, *end; uint32_t n; } i_DartTextOut;
+static void i_dart_out_raw(i_DartTextOut *o, const char *s, size_t len){
+    size_t i;
+    o->n += (uint32_t)len;
+    for (i = 0; i < len && o->p < o->end; i++) *o->p++ = s[i];
+}
+static void i_dart_out_str(i_DartTextOut *o, const char *s){ i_dart_out_raw(o, s, strlen(s)); }
+static void i_dart_out_view(i_DartTextOut *o, DartString v){ if (v.data) i_dart_out_raw(o, v.data, v.len); }
+static void i_dart_out_indent(i_DartTextOut *o, int levels){ while (levels-- > 0) i_dart_out_raw(o, "  ", 2); }
+
+uint32_t dart_schema_print(const DartSchema *s, char *buf, size_t cap){
+    i_DartTextOut o;
+    uint16_t i;
+    int open = 0;                         /* nested-struct braces currently open */
+    o.p   = (buf && cap) ? buf : NULL;
+    o.end = o.p ? buf + cap - 1 : NULL;   /* reserve one byte for the NUL */
+    o.n   = 0;
+    if (!s){ if (buf && cap) buf[0] = '\0'; return 0; }
+    i_dart_out_view(&o, s->name);
+    i_dart_out_str(&o, " {\n");
+    for (i = 0; i < s->nfields; i++){
+        const i_Field *f = &s->fields[i];
+        while (open > (int)f->depth){      /* close every struct this field falls out of */
+            open--;
+            i_dart_out_indent(&o, open + 1);
+            i_dart_out_str(&o, "}\n");
+        }
+        i_dart_out_indent(&o, (int)f->depth + 1);
+        i_dart_out_view(&o, f->name);
+        if (f->kind == DART_STRUCT){        /* a struct opens a nested body */
+            i_dart_out_str(&o, ": {\n");
+            open++;
+        } else {                           /* scalar/array/string/map: `name: type,` */
+            char ty[32], *e = i_dart_why_type(ty, ty + sizeof ty - 1, f);
+            *e = '\0';
+            i_dart_out_str(&o, ": ");
+            i_dart_out_str(&o, ty);
+            i_dart_out_str(&o, ",\n");
+        }
+    }
+    while (open > 0){                       /* close any structs left open at the end */
+        open--;
+        i_dart_out_indent(&o, open + 1);
+        i_dart_out_str(&o, "}\n");
+    }
+    i_dart_out_str(&o, "}\n");
+    if (o.p) *o.p = '\0';                   /* o.p <= end, the reserved byte */
+    else if (buf && cap) buf[0] = '\0';
+    return o.n;
+}
+
 int dart_schema_subset_why(const DartSchema *sub, const DartSchema *pub,
                            char *buf, size_t cap){
     uint16_t i;
@@ -12029,29 +12088,146 @@ private:
     const detail::DartSchema* raw() const { return schema_; }
 };
 
+/* ---- map: the self-describing tagged value tree (a `map` field's content) ------
+ * Thin OOP over the C map codec (the real DartMapWriter / dart_map_* live in the
+ * embedded library, so this wraps them directly -- no reimplementation). Write a
+ * body with MapWriter, hand it to MessageOut::set_map; read one from
+ * MessageIn::get_map as a MapReader. */
+class MapReader;
+
+/* Builds a map body into a fixed internal buffer (grow via the ctor arg). Key order
+ * is yours; array elements are keyless (pass nullptr). finish() returns the body bytes
+ * (empty if the buffer overflowed -- check ok()). */
+class MapWriter {
+public:
+    explicit MapWriter(size_t capacity = 512) : buf_(capacity ? capacity : 1) {
+        w_ = detail::dart_map_begin(buf_.data(), buf_.size());
+    }
+    MapWriter(const MapWriter&) = delete;             /* holds a raw buffer pointer */
+    MapWriter& operator=(const MapWriter&) = delete;
+
+    MapWriter& put_uint  (const char* key, uint64_t v)         { detail::dart_map_put_uint  (&w_, key, v); return *this; }
+    MapWriter& put_int   (const char* key, int64_t  v)         { detail::dart_map_put_int   (&w_, key, v); return *this; }
+    MapWriter& put_f64   (const char* key, double   v)         { detail::dart_map_put_f64   (&w_, key, v); return *this; }
+    MapWriter& put_f32   (const char* key, float    v)         { detail::dart_map_put_f32   (&w_, key, v); return *this; }
+    MapWriter& put_bool  (const char* key, bool     v)         { detail::dart_map_put_bool  (&w_, key, v ? 1 : 0); return *this; }
+    MapWriter& put_string(const char* key, std::string_view v) { detail::dart_map_put_string(&w_, key, detail::dart_string(v.data(), v.size())); return *this; }
+    /* nested map / array: open, write members (array members pass key = nullptr), close */
+    MapWriter& open_map  (const char* key) { detail::dart_map_open_map  (&w_, key); return *this; }
+    MapWriter& open_array(const char* key) { detail::dart_map_open_array(&w_, key); return *this; }
+    MapWriter& close()                     { detail::dart_map_close     (&w_);      return *this; }
+
+    bool  ok() const { return w_.err == 0; }
+    Bytes finish() { uint32_t n = detail::dart_map_finish(&w_); return { buf_.data(), n }; }
+
+private:
+    std::vector<uint8_t>  buf_;
+    detail::DartMapWriter w_{};
+};
+
+/* One value read from a map: a scalar, a string, a nested map, or an array. */
+class MapValue {
+public:
+    FieldType        kind()      const { return static_cast<FieldType>(v_.kind); }
+    uint64_t         as_uint()   const { return v_.v.u; }
+    int64_t          as_int()    const { return v_.v.i; }
+    double           as_f64()    const { return v_.v.f; }
+    bool             as_bool()   const { return v_.v.u != 0; }
+    std::string_view as_string() const { return { reinterpret_cast<const char*>(v_.bytes.data), v_.bytes.len }; }
+    Bytes            raw()       const { return { v_.bytes.data, v_.bytes.len }; }
+    MapReader        as_map()    const;   /* kind() == FieldType::Map */
+    /* array value (kind() == FieldType::VArray): element count + element by index */
+    uint16_t array_count()          const { return detail::dart_map_array_count(v_.bytes); }
+    MapValue array_at(uint16_t i)   const { MapValue o; detail::dart_map_array_at(v_.bytes, i, &o.v_); return o; }
+
+private:
+    detail::DartValue v_{};
+    friend class MapReader;
+    friend class MessageIn;
+    friend class Channel;
+};
+
+/* Reads a map body: by key, or iterate by index. Every walk is bounds-checked in the
+ * C core. The body is a view into the message, so read it inside the handler. */
+class MapReader {
+public:
+    MapReader() = default;
+    explicit MapReader(Bytes body) : body_(detail::dart_bytes(body.data(), body.size())) {}
+    uint16_t count() const { return detail::dart_map_count(body_); }
+    bool get(const char* key, MapValue& out) const { return detail::dart_map_get(body_, key, &out.v_) != 0; }
+    bool at(uint16_t i, std::string_view& key, MapValue& out) const {
+        detail::DartString k;
+        if (!detail::dart_map_at(body_, i, &k, &out.v_)) return false;
+        key = { k.data, k.len };
+        return true;
+    }
+    Bytes body() const { return { body_.data, body_.len }; }
+
+private:
+    detail::DartBytes body_{};
+};
+
+inline MapReader MapValue::as_map() const { return MapReader(Bytes{ v_.bytes.data, v_.bytes.len }); }
+
 /* MessageOut: a mutable message buffer bound to a Schema, for typed encoding.
  * Set fields by name (nested members by dotted path, e.g. "vel.dx"), then
- * pass it straight to Channel::send (it converts to Bytes). */
+ * pass it straight to Channel::send (it converts to Bytes). Variable-length fields
+ * (`string`, `elem[]`, `map`) grow the buffer as needed; over-cap on a capped field
+ * is refused and flips ok() to false (never a silent truncation). */
 class MessageOut {
 public:
-    explicit MessageOut(const Schema& s) : schema_(s.raw()), buf_(detail::dart_schema_size(s.raw())) {
+    explicit MessageOut(const Schema& s) : schema_(s.raw()), buf_(detail::dart_schema_msg_min(s.raw())) {
         detail::dart_schema_message_default(schema_, buf_.data(), buf_.size());
     }
-    MessageOut& set_uint (const char* field, uint64_t v) { detail::dart_set_uint (buf_.data(), buf_.size(), schema_, field, v); return *this; }
-    MessageOut& set_int  (const char* field, int64_t  v) { detail::dart_set_int  (buf_.data(), buf_.size(), schema_, field, v); return *this; }
-    MessageOut& set_f64  (const char* field, double   v) { detail::dart_set_f64  (buf_.data(), buf_.size(), schema_, field, v); return *this; }
-    MessageOut& set_f32  (const char* field, float    v) { detail::dart_set_f32  (buf_.data(), buf_.size(), schema_, field, v); return *this; }
-    MessageOut& set_bool (const char* field, bool     v) { detail::dart_set_uint (buf_.data(), buf_.size(), schema_, field, v ? 1u : 0u); return *this; }
-    MessageOut& set_array(const char* field, Bytes elems) {
-        detail::dart_set_array(buf_.data(), buf_.size(), schema_, field, detail::dart_bytes(elems.data(), elems.size()));
+    MessageOut& set_uint (const char* field, uint64_t v) { ok_ &= detail::dart_set_uint (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageOut& set_int  (const char* field, int64_t  v) { ok_ &= detail::dart_set_int  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageOut& set_f64  (const char* field, double   v) { ok_ &= detail::dart_set_f64  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageOut& set_f32  (const char* field, float    v) { ok_ &= detail::dart_set_f32  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageOut& set_bool (const char* field, bool     v) { ok_ &= detail::dart_set_uint (buf_.data(), buf_.size(), schema_, field, v ? 1u : 0u) != 0; return *this; }
+    /* a capped OR variable string (dart_set_string handles both) */
+    MessageOut& set_string(const char* field, std::string_view v) {
+        grow_for(v.size());
+        ok_ &= detail::dart_set_string(buf_.data(), buf_.size(), schema_, field, detail::dart_string(v.data(), v.size())) != 0;
         return *this;
     }
-    Bytes bytes() const { return { buf_.data(), buf_.size() }; }
+    /* one element of a string array (a variable string array must be grown first with
+       a set_array of empty slots, per the C API) */
+    MessageOut& set_string_at(const char* field, uint16_t index, std::string_view v) {
+        grow_for(v.size() + 2);
+        ok_ &= detail::dart_set_string_at(buf_.data(), buf_.size(), schema_, field, index, detail::dart_string(v.data(), v.size())) != 0;
+        return *this;
+    }
+    /* a fixed OR variable array (raw element bytes; for a string array, whole
+       [u16 len][cap] slots) */
+    MessageOut& set_array(const char* field, Bytes elems) {
+        grow_for(elems.size());
+        ok_ &= detail::dart_set_array(buf_.data(), buf_.size(), schema_, field, detail::dart_bytes(elems.data(), elems.size())) != 0;
+        return *this;
+    }
+    /* a `map` field, from a finished map body */
+    MessageOut& set_map(const char* field, Bytes map_body) {
+        grow_for(map_body.size());
+        ok_ &= detail::dart_set_map(buf_.data(), buf_.size(), schema_, field, detail::dart_bytes(map_body.data(), map_body.size())) != 0;
+        return *this;
+    }
+    MessageOut& set_map(const char* field, MapWriter& w) { return set_map(field, w.finish()); }
+
+    /* false if any setter was refused (over-cap string, unknown field, short buffer) */
+    bool ok() const { return ok_; }
+    /* the live message bytes (fixed section + its variable tail) */
+    Bytes bytes() const { return { buf_.data(), detail::dart_schema_msg_len(schema_, buf_.data(), buf_.size()) }; }
     operator Bytes() const { return bytes(); }
 
 private:
+    /* ensure room for a variable frame to grow: the new content can add at most its
+       own length past the current live length. resize preserves the live prefix. */
+    void grow_for(size_t extra) {
+        size_t used = detail::dart_schema_msg_len(schema_, buf_.data(), buf_.size());
+        if (buf_.size() < used + extra) buf_.resize(used + extra);
+    }
     const detail::DartSchema* schema_;
     std::vector<uint8_t>      buf_;
+    bool                      ok_ = true;
 };
 
 /* MessageIn: a delivered message. Non-owning; valid only inside the handler. */
@@ -12075,6 +12251,11 @@ public:
     float    get_f32  (const char* field) const { return detail::dart_get_f32  (msg_->data, msg_->schema, field); }
     bool     get_bool (const char* field) const { return detail::dart_get_uint (msg_->data, msg_->schema, field) != 0; }
     Bytes    get_array(const char* field) const { auto a = detail::dart_get_array(msg_->data, msg_->schema, field); return { a.data, a.len }; }
+    /* capped OR variable string; empty view on a mismatch */
+    std::string_view get_string(const char* field) const { auto s = detail::dart_get_string(msg_->data, msg_->schema, field); return { s.data, s.len }; }
+    std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::dart_get_string_at(msg_->data, msg_->schema, field, index); return { s.data, s.len }; }
+    /* a `map` field, as a reader over its body (valid for the handler) */
+    MapReader get_map(const char* field) const { auto b = detail::dart_get_map(msg_->data, msg_->schema, field); return MapReader(Bytes{ b.data, b.len }); }
 
 private:
     explicit MessageIn(const detail::DartMsg* m) : msg_(m) {}
@@ -12189,6 +12370,9 @@ public:
         float    get_f32  (const char* field) const { return detail::dart_get_f32  (m_.data, m_.schema, field); }
         bool     get_bool (const char* field) const { return detail::dart_get_uint (m_.data, m_.schema, field) != 0; }
         Bytes    get_array(const char* field) const { auto a = detail::dart_get_array(m_.data, m_.schema, field); return { a.data, a.len }; }
+        std::string_view get_string(const char* field) const { auto s = detail::dart_get_string(m_.data, m_.schema, field); return { s.data, s.len }; }
+        std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::dart_get_string_at(m_.data, m_.schema, field, index); return { s.data, s.len }; }
+        MapReader get_map(const char* field) const { auto b = detail::dart_get_map(m_.data, m_.schema, field); return MapReader(Bytes{ b.data, b.len }); }
     private:
         detail::DartMsg m_{};
         bool ok_ = false;

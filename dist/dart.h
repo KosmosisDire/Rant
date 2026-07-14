@@ -1722,6 +1722,11 @@ void        dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user);
 DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (advertise these) */
 uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */
 DartString  dart_schema_name(const DartSchema *s);        /* root type name */
+/* Spell the schema back as compile-ready DSL text (the inverse of dart_schema_compile):
+ * "Name {\n  field: type,\n  nested: {\n    ...\n  }\n}\n". Recompiles to the same wire
+ * (hence hash). Writes up to cap bytes, always NUL-terminated when cap > 0, and returns the
+ * FULL length excluding the NUL, so dart_schema_print(s, NULL, 0) measures for sizing. */
+uint32_t    dart_schema_print(const DartSchema *s, char *buf, size_t cap);
 /* Fixed-section size: the exact message size when the schema has no variable fields,
  * otherwise where the variable tail starts. */
 uint32_t    dart_schema_size(const DartSchema *s);
@@ -7909,6 +7914,60 @@ static char *i_dart_why_type(char *p, char *end, const i_Field *f){
 static int i_dart_why_done(char *buf, char *p){   /* NUL-terminate the reason, refuse */
     if (buf) *p = '\0';
     return 0;
+}
+
+/* ---- schema -> DSL text (dart_schema_print) ------------------------------------------ */
+/* A counting text sink: appends into [p,end) but always tallies the full length in n, so a
+   NULL/short buffer still measures (snprintf semantics). */
+typedef struct { char *p, *end; uint32_t n; } i_DartTextOut;
+static void i_dart_out_raw(i_DartTextOut *o, const char *s, size_t len){
+    size_t i;
+    o->n += (uint32_t)len;
+    for (i = 0; i < len && o->p < o->end; i++) *o->p++ = s[i];
+}
+static void i_dart_out_str(i_DartTextOut *o, const char *s){ i_dart_out_raw(o, s, strlen(s)); }
+static void i_dart_out_view(i_DartTextOut *o, DartString v){ if (v.data) i_dart_out_raw(o, v.data, v.len); }
+static void i_dart_out_indent(i_DartTextOut *o, int levels){ while (levels-- > 0) i_dart_out_raw(o, "  ", 2); }
+
+uint32_t dart_schema_print(const DartSchema *s, char *buf, size_t cap){
+    i_DartTextOut o;
+    uint16_t i;
+    int open = 0;                         /* nested-struct braces currently open */
+    o.p   = (buf && cap) ? buf : NULL;
+    o.end = o.p ? buf + cap - 1 : NULL;   /* reserve one byte for the NUL */
+    o.n   = 0;
+    if (!s){ if (buf && cap) buf[0] = '\0'; return 0; }
+    i_dart_out_view(&o, s->name);
+    i_dart_out_str(&o, " {\n");
+    for (i = 0; i < s->nfields; i++){
+        const i_Field *f = &s->fields[i];
+        while (open > (int)f->depth){      /* close every struct this field falls out of */
+            open--;
+            i_dart_out_indent(&o, open + 1);
+            i_dart_out_str(&o, "}\n");
+        }
+        i_dart_out_indent(&o, (int)f->depth + 1);
+        i_dart_out_view(&o, f->name);
+        if (f->kind == DART_STRUCT){        /* a struct opens a nested body */
+            i_dart_out_str(&o, ": {\n");
+            open++;
+        } else {                           /* scalar/array/string/map: `name: type,` */
+            char ty[32], *e = i_dart_why_type(ty, ty + sizeof ty - 1, f);
+            *e = '\0';
+            i_dart_out_str(&o, ": ");
+            i_dart_out_str(&o, ty);
+            i_dart_out_str(&o, ",\n");
+        }
+    }
+    while (open > 0){                       /* close any structs left open at the end */
+        open--;
+        i_dart_out_indent(&o, open + 1);
+        i_dart_out_str(&o, "}\n");
+    }
+    i_dart_out_str(&o, "}\n");
+    if (o.p) *o.p = '\0';                   /* o.p <= end, the reserved byte */
+    else if (buf && cap) buf[0] = '\0';
+    return o.n;
 }
 
 int dart_schema_subset_why(const DartSchema *sub, const DartSchema *pub,

@@ -172,6 +172,11 @@ void        dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user);
 DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (advertise these) */
 uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */
 DartString  dart_schema_name(const DartSchema *s);        /* root type name */
+/* Spell the schema back as compile-ready DSL text (the inverse of dart_schema_compile):
+ * "Name {\n  field: type,\n  nested: {\n    ...\n  }\n}\n". Recompiles to the same wire
+ * (hence hash). Writes up to cap bytes, always NUL-terminated when cap > 0, and returns the
+ * FULL length excluding the NUL, so dart_schema_print(s, NULL, 0) measures for sizing. */
+uint32_t    dart_schema_print(const DartSchema *s, char *buf, size_t cap);
 /* Fixed-section size: the exact message size when the schema has no variable fields,
  * otherwise where the variable tail starts. */
 uint32_t    dart_schema_size(const DartSchema *s);
