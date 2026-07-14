@@ -1,12 +1,89 @@
 /* Two-node test for dart.hpp: node A publishes a typed message, node B
- * receives and decodes it. Single process, discovery pinned to loopback.
- * Exit 0 = PASS. */
+ * receives and decodes it. Exercises the v4 variable kinds (capped + variable
+ * string, variable scalar array, and a map). Single process, discovery pinned to
+ * loopback. Exit 0 = PASS. */
 #include "dart.hpp"
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <thread>
 
-static const char SCHEMA[] = "Ping{ seq: u32, textLen: u16, text: u8[64] }";
+static const char SCHEMA[] =
+    "Sensor{ seq: u32, name: string<16>, note: string, samples: f32[], extras: map }";
+
+static const char NOTE[]    = "a long unbounded note well over sixteen bytes";
+static const float SAMPLES[] = { 1.5f, -2.25f, 3.75f };
+
+/* build + send one message; returns false if a setter was refused or the send failed */
+static bool send_one(dart::Channel& pub, const dart::Schema& schema, uint32_t seq) {
+    dart::MessageOut s(schema);
+    dart::MapWriter mw;
+    mw.put_uint("battery", 87).put_int("signed", -5)
+      .put_string("state", "docked").put_bool("ok", true);
+    mw.open_array("temps"); mw.put_f64(nullptr, 36.2).put_f64(nullptr, 34.9); mw.close();
+    mw.open_map("meta");    mw.put_string("fw", "1.2.3").put_uint("rev", 7);   mw.close();
+
+    s.set_uint("seq", seq)
+     .set_string("name", "lidar")
+     .set_string("note", NOTE)
+     .set_array("samples", dart::Bytes(SAMPLES, sizeof SAMPLES))
+     .set_map("extras", mw);
+    if (!s.ok() || !mw.ok()) { std::printf("FAIL: encode (ok=%d mw=%d)\n", s.ok(), mw.ok()); return false; }
+    return pub.send(s) == dart::SendStatus::Ok;
+}
+
+/* decoded snapshot filled by the subscriber's handler */
+struct Got {
+    bool received = false;
+    std::string name, note, state, meta_fw;
+    uint32_t seq = 0;
+    uint64_t battery = 0, meta_rev = 0;
+    int64_t sgn = 0;
+    bool ok_flag = false;
+    size_t n_samples = 0, n_temps = 0;
+    float  samples[3] = {0,0,0};
+    double temp0 = 0;
+} g;
+
+static void decode(const dart::MessageIn& m) {
+    g.seq  = (uint32_t)m.get_uint("seq");
+    g.name = std::string(m.get_string("name"));
+    g.note = std::string(m.get_string("note"));
+    auto sm = m.get_array("samples");
+    g.n_samples = sm.size() / sizeof(float);
+    if (g.n_samples > 3) g.n_samples = 3;
+    std::memcpy(g.samples, sm.data(), g.n_samples * sizeof(float));
+    auto map = m.get_map("extras");
+    dart::MapValue v;
+    if (map.get("battery", v)) g.battery = v.as_uint();
+    if (map.get("signed",  v)) g.sgn     = v.as_int();
+    if (map.get("ok",      v)) g.ok_flag = v.as_bool();
+    if (map.get("state",   v)) g.state   = std::string(v.as_string());
+    if (map.get("temps",   v)) { g.n_temps = v.array_count(); if (g.n_temps) g.temp0 = v.array_at(0).as_f64(); }
+    if (map.get("meta",    v)) {
+        auto meta = v.as_map();
+        dart::MapValue mv;
+        if (meta.get("fw",  mv)) g.meta_fw  = std::string(mv.as_string());
+        if (meta.get("rev", mv)) g.meta_rev = mv.as_uint();
+    }
+    g.received = true;
+}
+
+static bool verify() {
+    bool ok = true;
+    auto chk = [&](const char* n, bool c){ std::printf("  %s  %s\n", c ? "ok " : "FAIL", n); ok &= c; };
+    chk("name (capped)", g.name == "lidar");
+    chk("note (vstr)",   g.note == NOTE);
+    chk("samples (varr f32)", g.n_samples == 3 && g.samples[0] == 1.5f
+        && g.samples[1] == -2.25f && g.samples[2] == 3.75f);
+    chk("map battery",   g.battery == 87);
+    chk("map signed",    g.sgn == -5);
+    chk("map ok",        g.ok_flag);
+    chk("map state",     g.state == "docked");
+    chk("map array",     g.n_temps == 2 && g.temp0 > 36.1 && g.temp0 < 36.3);
+    chk("map nested",    g.meta_fw == "1.2.3" && g.meta_rev == 7);
+    return ok;
+}
 
 int main() {
     std::string err;
@@ -19,18 +96,7 @@ int main() {
     opts.domain = 42;
     opts.multicast_interface = "127.0.0.1";   /* single-host discovery */
 
-    std::string got_sender, got_text;
-    uint32_t    got_seq = 0;
-    bool        received = false;
-    auto on_msg = [&](const dart::MessageIn& m) {
-        got_sender = std::string(m.sender_name());
-        got_seq    = (uint32_t)m.get_uint("seq");
-        auto n     = m.get_uint("textLen");
-        auto t     = m.get_array("text");
-        if (n > t.size()) n = t.size();
-        got_text.assign(reinterpret_cast<const char*>(t.data()), (size_t)n);
-        received   = true;
-    };
+    auto on_msg = [](const dart::MessageIn& m) { decode(m); };
     auto on_evt = [](const char* tag) {
         return [tag](const dart::Event& e) { std::printf("event(%s): %s\n", tag, e.to_string().c_str()); };
     };
@@ -43,51 +109,29 @@ int main() {
     auto sub = b->create_channel("t", dart::Role::SubOnly, &*schema, { dart::Reliability::Reliable });
     (void)sub;
 
-    /* pump both nodes until the match forms and a message lands, or we time out */
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     uint32_t seq = 0;
-    while (!received && std::chrono::steady_clock::now() < deadline) {
-        if (pub.match_count() > 0) {
-            dart::MessageOut s(*schema);
-            const char* line = "hello from A";
-            s.set_uint("seq", ++seq)
-             .set_uint("textLen", 12)
-             .set_array("text", dart::Bytes(line, 12));
-            if (pub.send(s) != dart::SendStatus::Ok) { std::printf("FAIL: send\n"); return 1; }
-        }
+    while (!g.received && std::chrono::steady_clock::now() < deadline) {
+        if (pub.match_count() > 0 && !send_one(pub, *schema, ++seq)) return 1;
         a->poll(1);
         b->poll(1);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    if (!g.received) { std::printf("FAIL: no message within timeout (match_count=%d)\n", pub.match_count()); return 1; }
 
-    if (!received) { std::printf("FAIL: no message within timeout (match_count=%d)\n", pub.match_count()); return 1; }
+    std::printf("B received seq=%u, checking fields:\n", g.seq);
+    bool ok = verify();
+    std::printf("%s\n", ok ? "PASS: variable kinds crossed and decoded" : "FAIL: decoded value mismatch");
 
-    std::printf("PASS: B received seq=%u sender='%s' text='%s'\n",
-                got_seq, got_sender.c_str(), got_text.c_str());
-    bool ok = (got_sender == "A") && (got_text == "hello from A");
-
-    auto peers = b->peers();
-    std::printf("B sees %zu peer(s):\n", peers.size());
-    for (const auto& p : peers) {
-        std::printf("  id=%u name='%s' addr=%s active=%d frag=%u topics=%zu\n",
-                    p.id, p.name.c_str(), p.address.c_str(), p.active, p.fragment_size, p.topics.size());
-    }
-
-    /* threaded mode: both nodes on their C-level service threads, sends from this
-       thread, delivery without any poll() from us */
+    /* threaded mode: both nodes on their service threads; send without any poll() from us */
     if (!a->start() || !b->start()) { std::printf("FAIL: start\n"); return 3; }
     if (a->poll(0) != (int)dart::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
-    received = false;
-    {
-        dart::MessageOut s(*schema);
-        const char* line = "hello threaded";
-        s.set_uint("seq", ++seq).set_uint("textLen", 14).set_array("text", dart::Bytes(line, 14));
-        if (pub.send(s) != dart::SendStatus::Ok) { std::printf("FAIL: threaded send\n"); return 3; }
-    }
+    g.received = false;
+    if (!send_one(pub, *schema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!received && std::chrono::steady_clock::now() < deadline)
+    while (!g.received && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    if (!received || got_text != "hello threaded") { std::printf("FAIL: threaded delivery\n"); return 3; }
+    if (!g.received || g.note != NOTE) { std::printf("FAIL: threaded delivery\n"); return 3; }
     a->stop(); b->stop();
     std::printf("PASS: threaded delivery via start() (evicted_unsent=%u)\n", a->evicted_unsent());
 

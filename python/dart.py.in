@@ -114,6 +114,7 @@ _EXPORTS = [
     "dart_set_string", "dart_set_string_at",
     "dart_get_uint", "dart_get_int", "dart_get_f64", "dart_get_f32", "dart_get_array",
     "dart_get_value", "dart_set_value",
+    "dart_schema_msg_min", "dart_schema_msg_len", "dart_set_map",
 ]
 
 
@@ -432,6 +433,9 @@ def _bind(lib):
     F("dart_get_array", [DartBytes, c_void_p, c_char_p], DartBytes)
     F("dart_get_value", [DartBytes, c_void_p, c_uint16, POINTER(DartValue)], c_int)
     F("dart_set_value", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(DartValue)], c_int)
+    F("dart_schema_msg_min", [c_void_p], c_uint32)
+    F("dart_schema_msg_len", [c_void_p, c_void_p, c_size_t], c_uint32)
+    F("dart_set_map", [c_void_p, c_size_t, c_void_p, c_char_p, DartBytes], c_int)
 
 
 _LIB = None
@@ -552,12 +556,16 @@ class FieldType(enum.IntEnum):
     ARRAY = 11
     STRUCT = 12
     STRING = 13
+    VSTRING = 14   # variable string (`string`): rides the message tail
+    VARRAY = 15    # variable array (`elem[]` / `string<C>[]`): live element count
+    MAP = 16       # self-describing tagged map (`map`)
 
 
 # raw kind bytes (== FieldType, kept short for the codec below)
 _U8, _U16, _U32, _U64 = 0, 1, 2, 3
 _I8, _I16, _I32, _I64 = 4, 5, 6, 7
 _F32, _F64, _BOOL, _ARR, _STRUCT, _STR = 8, 9, 10, 11, 12, 13
+_VSTR, _VARR, _MAP = 14, 15, 16    # the variable kinds (ride the message tail)
 _SIGNED = frozenset((_I8, _I16, _I32, _I64))
 _FLOATK = frozenset((_F32, _F64))
 _FMT = {_U8: "B", _U16: "H", _U32: "I", _U64: "Q", _I8: "b", _I16: "h",
@@ -725,6 +733,23 @@ def _resolve(ann, g):
     return eval(ann, g, {}) if isinstance(ann, str) else ann   # future-annotation strings
 
 
+def _var_array_spec(name, elem):
+    """A VARR field spec from a list[...] element annotation (dart.<t>, dart.string(N),
+    or int/float/bool). elem is the message tail's live element count, so no count here."""
+    if isinstance(elem, _String):
+        return _FieldSpec(name, _VARR, elem=_STR, str_cap=elem.cap)
+    if isinstance(elem, _Type):
+        return _FieldSpec(name, _VARR, elem=elem.kind, token=elem.token)
+    if elem is int:
+        return _FieldSpec(name, _VARR, elem=_I64, token="i64")
+    if elem is float:
+        return _FieldSpec(name, _VARR, elem=_F64, token="f64")
+    if elem is bool:
+        return _FieldSpec(name, _VARR, elem=_BOOL, token="bool")
+    raise SchemaError("dart schema: variable array %r element must be dart.<t>, "
+                      "dart.string(N), or int/float/bool (got %r)" % (name, elem))
+
+
 def _field_spec(name, ann, g):
     ann = _resolve(ann, g)
     if isinstance(ann, _Type):
@@ -735,20 +760,25 @@ def _field_spec(name, ann, g):
         if isinstance(ann.elem, _String):
             return _FieldSpec(name, _ARR, elem=_STR, count=ann.count, str_cap=ann.elem.cap)
         return _FieldSpec(name, _ARR, elem=ann.elem.kind, count=ann.count, token=ann.elem.token)
+    origin = getattr(ann, "__origin__", None)   # list[...] / dict[...] generic aliases
+    if origin is list or origin is tuple:
+        args = getattr(ann, "__args__", ())
+        return _var_array_spec(name, args[0] if args else None)
+    if ann is dict or origin is dict:
+        return _FieldSpec(name, _MAP)           # self-describing tagged map
+    if ann is str:
+        return _FieldSpec(name, _VSTR)          # variable (unbounded) string
     if ann is int:
         return _FieldSpec(name, _I64, token="i64")
     if ann is float:
         return _FieldSpec(name, _F64, token="f64")
     if ann is bool:
         return _FieldSpec(name, _BOOL, token="bool")
-    if ann is str:
-        raise SchemaError("dart schema: string field %r needs a capacity, e.g. "
-                          "dart.string(16)" % name)
     if isinstance(ann, type):
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann))   # a nested schema class
     raise SchemaError("dart schema: field %r has unsupported type %r (use dart.u8..f64, "
-                      "dart.bool_, dart.string(N), dart.<t>[N], a nested schema class, or "
-                      "int/float/bool)" % (name, ann))
+                      "dart.bool_, dart.string(N), dart.<t>[N], str, list[dart.<t>], dict, "
+                      "a nested schema class, or int/float/bool)" % (name, ann))
 
 
 def _build_spec(cls):
@@ -772,8 +802,14 @@ def _spec_text(spec):
             return "%s: { %s }" % (f.name, ", ".join(line(g) for g in f.nested.fields))
         if f.kind == _ARR:
             return "%s: %s[%d]" % (f.name, _elem_token(f.elem, f.str_cap), f.count)
+        if f.kind == _VARR:
+            return "%s: %s[]" % (f.name, _elem_token(f.elem, f.str_cap))
         if f.kind == _STR:
             return "%s: string<%d>" % (f.name, f.str_cap)
+        if f.kind == _VSTR:
+            return "%s: string" % f.name
+        if f.kind == _MAP:
+            return "%s: map" % f.name
         return "%s: %s" % (f.name, f.token)
     return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
 
@@ -801,8 +837,14 @@ def _schema_dsl(lib, s):
             return "%s: { %s }" % (name, ", ".join(line(c) for c in children))
         if kind == _ARR:
             return "%s: %s[%d]" % (name, _elem_token(elem, str_cap), count)
+        if kind == _VARR:
+            return "%s: %s[]" % (name, _elem_token(elem, str_cap))
         if kind == _STR:
             return "%s: string<%d>" % (name, str_cap)
+        if kind == _VSTR:
+            return "%s: string" % name
+        if kind == _MAP:
+            return "%s: map" % name
         return "%s: %s" % (name, _TOKEN[kind])
     return (_dstr(lib.dart_schema_name(s)) + "\n{\n"
             + ",\n".join("    " + line(f) for f in root) + "\n}\n")
@@ -952,11 +994,80 @@ def _str_view(val, keep):
     return DartStringView(cast(c_char_p(sb), c_void_p) if sb else None, len(sb))
 
 
+def _bytes_view(b, keep):
+    keep.append(b)    # keep the buffer alive across the setter call
+    return DartBytes(cast(c_char_p(b), c_void_p) if b else None, len(b))
+
+
+def _pack_string_slots(strings, cap):
+    """A variable string array's frame: whole [u16 len][cap bytes] slots (the same
+    layout _unpack_string_array reads back), one per element, live count = element count."""
+    out = bytearray()
+    for item in strings:
+        sb = item.encode("utf-8") if isinstance(item, str) else bytes(item)
+        if len(sb) > cap:
+            raise SchemaError("string too long (cap %d): %r" % (cap, item))
+        out += struct.pack("<H", len(sb)) + sb + b"\x00" * (cap - len(sb))
+    return bytes(out)
+
+
+# ---- map: the self-describing tagged value tree (`map` fields) -----------------
+# Body wire (little-endian): [u16 n] entry*n; entry := [u8 keylen][key] value;
+# value := [u8 kind] payload -- scalars store their raw bytes, VSTR is [u16 len][bytes],
+# VARR is [u16 n] value*n, MAP is a nested body. Built/parsed here (managed) rather
+# than mirroring the C DartMapWriter struct; dart_set_map validates the body we build.
+
+def _map_int_bytes(v):
+    if v < 0:
+        if -0x80 <= v <= 0x7f:               k, fmt = _I8, "<b"
+        elif -0x8000 <= v <= 0x7fff:         k, fmt = _I16, "<h"
+        elif -0x80000000 <= v <= 0x7fffffff: k, fmt = _I32, "<i"
+        else:                                k, fmt = _I64, "<q"
+    else:
+        if v <= 0xff:                        k, fmt = _U8, "<B"
+        elif v <= 0xffff:                    k, fmt = _U16, "<H"
+        elif v <= 0xffffffff:                k, fmt = _U32, "<I"
+        else:                                k, fmt = _U64, "<Q"
+    return bytes((k,)) + struct.pack(fmt, v)
+
+
+def _encode_map_value(v):
+    if isinstance(v, bool):
+        return bytes((_BOOL, 1 if v else 0))
+    if isinstance(v, int):
+        return _map_int_bytes(v)
+    if isinstance(v, float):
+        return bytes((_F64,)) + struct.pack("<d", v)
+    if isinstance(v, str):
+        sb = v.encode("utf-8")
+        return bytes((_VSTR,)) + struct.pack("<H", len(sb)) + sb
+    if isinstance(v, dict):
+        return bytes((_MAP,)) + _encode_map_body(v)
+    if isinstance(v, (list, tuple)):
+        return bytes((_VARR,)) + struct.pack("<H", len(v)) + b"".join(_encode_map_value(x) for x in v)
+    raise SchemaError("dart map: unsupported value type %r (use int/float/bool/str/dict/list)"
+                      % type(v).__name__)
+
+
+def _encode_map_body(d):
+    if not isinstance(d, dict):
+        raise SchemaError("dart map field expects a dict, got %r" % type(d).__name__)
+    parts = []
+    for key, val in d.items():
+        if val is None:
+            continue                    # a map has no null kind; omit the key
+        kb = str(key).encode("utf-8")
+        if len(kb) > 255:
+            raise SchemaError("dart map: key too long (max 255 bytes): %r" % key)
+        parts.append(bytes((len(kb),)) + kb + _encode_map_value(val))
+    return struct.pack("<H", len(parts)) + b"".join(parts)
+
+
 def _encode(lib, s, src):
-    size = lib.dart_schema_size(s)
-    buf = (c_ubyte * size)()
-    lib.dart_schema_message_default(s, buf, size)
-    names, srcs, keep = [], [src], []
+    # One walk of the flattened field table: resolve each value, and pre-serialize the
+    # variable-field payloads so the tail can be sized before the buffer is allocated.
+    names, srcs, ops = [], [src], []
+    var_bytes = 0
     for i in range(lib.dart_schema_field_count(s)):
         info = DartSchemaFieldInfo()
         lib.dart_schema_field_at(s, i, byref(info))
@@ -965,7 +1076,6 @@ def _encode(lib, s, src):
         while len(names) <= d:
             names.append(None)
         names[d] = name
-        path = ".".join(names[:d + 1]).encode("utf-8")
         parent = srcs[d]
         val = None if parent is None else _get(parent, name)
         if info.kind == _STRUCT:
@@ -975,33 +1085,60 @@ def _encode(lib, s, src):
             continue
         if val is None:
             continue                     # null field: keep the zeroed default
-        if info.kind == _STR:
+        path = ".".join(names[:d + 1]).encode("utf-8")
+        kind, elem, count, cap = info.kind, info.elem, info.count, info.str_cap
+        if kind == _VSTR:
+            payload = val.encode("utf-8") if isinstance(val, str) else bytes(val)
+            var_bytes += len(payload)
+            ops.append((kind, elem, count, cap, path, payload))
+        elif kind == _VARR:
+            payload = _pack_string_slots(val, cap) if elem == _STR else _pack_array(elem, val)
+            var_bytes += len(payload)
+            ops.append((kind, elem, count, cap, path, payload))
+        elif kind == _MAP:
+            payload = _encode_map_body(val)
+            var_bytes += len(payload)
+            ops.append((kind, elem, count, cap, path, payload))
+        else:
+            ops.append((kind, elem, count, cap, path, val))
+
+    # msg_min is the fixed section plus one empty frame per variable field; each
+    # variable frame then grows by exactly its payload length.
+    size = lib.dart_schema_msg_min(s) + var_bytes
+    buf = (c_ubyte * (size or 1))()
+    lib.dart_schema_message_default(s, buf, size)
+    keep = []
+    for kind, elem, count, cap, path, val in ops:
+        if kind == _STR:
             if not lib.dart_set_string(buf, size, s, path, _str_view(val, keep)):
-                raise SchemaError("string too long for %s (cap %d)"
-                                  % (path.decode("utf-8"), info.str_cap))
-        elif info.kind == _ARR and info.elem == _STR:
+                raise SchemaError("string too long for %s (cap %d)" % (path.decode("utf-8"), cap))
+        elif kind == _VSTR:
+            lib.dart_set_string(buf, size, s, path, _str_view(val, keep))
+        elif kind == _ARR and elem == _STR:
             for j, item in enumerate(val):
-                if j >= info.count:
+                if j >= count:
                     break
                 if not lib.dart_set_string_at(buf, size, s, path, j, _str_view(item, keep)):
                     raise SchemaError("string too long for %s[%d] (cap %d)"
-                                      % (path.decode("utf-8"), j, info.str_cap))
-        elif info.kind == _ARR:
-            data = _pack_array(info.elem, val)
-            keep.append(data)
-            b = DartBytes(cast(c_char_p(data), c_void_p) if data else None, len(data))
-            lib.dart_set_array(buf, size, s, path, b)
-        elif info.kind == _F32:
+                                      % (path.decode("utf-8"), j, cap))
+        elif kind == _ARR:
+            lib.dart_set_array(buf, size, s, path, _bytes_view(_pack_array(elem, val), keep))
+        elif kind == _VARR:
+            lib.dart_set_array(buf, size, s, path, _bytes_view(val, keep))
+        elif kind == _MAP:
+            if not lib.dart_set_map(buf, size, s, path, _bytes_view(val, keep)):
+                raise SchemaError("invalid map for %s" % path.decode("utf-8"))
+        elif kind == _F32:
             lib.dart_set_f32(buf, size, s, path, float(val))
-        elif info.kind == _F64:
+        elif kind == _F64:
             lib.dart_set_f64(buf, size, s, path, float(val))
-        elif info.kind in _SIGNED:
+        elif kind in _SIGNED:
             lib.dart_set_int(buf, size, s, path, int(val))
-        elif info.kind == _BOOL:
+        elif kind == _BOOL:
             lib.dart_set_uint(buf, size, s, path, 1 if val else 0)
         else:
             lib.dart_set_uint(buf, size, s, path, int(val))
-    return bytes(buf)
+    return bytes(buf)[:lib.dart_schema_msg_len(s, buf, size)]
 
 
 # string-array slots are [u16 len][cap bytes] each; clamp len like the C reader so a
@@ -1023,12 +1160,70 @@ def _unpack_string_array(raw, count, cap):
     return out
 
 
+# Parse a map body (see _encode_map_body) back to a dict. Fully bounds-checked and
+# tolerant: a short/hostile body never over-reads, it just stops early.
+def _decode_map_value(buf, off, end, depth):
+    if off >= end:
+        return None, end
+    kind = buf[off]
+    off += 1
+    if kind == _BOOL:
+        return (bool(buf[off]), off + 1) if off < end else (False, end)
+    if kind in _SCALAR_SIZE:            # U8..F64 (BOOL handled above)
+        sz = _SCALAR_SIZE[kind]
+        if off + sz > end:
+            return 0, end
+        return struct.unpack_from("<" + _FMT[kind], buf, off)[0], off + sz
+    if kind == _VSTR:
+        if off + 2 > end:
+            return "", end
+        ln = buf[off] | (buf[off + 1] << 8)
+        off += 2
+        if off + ln > end:
+            ln = end - off
+        return buf[off:off + ln].decode("utf-8", "replace"), off + ln
+    if kind == _VARR:
+        if off + 2 > end:
+            return [], end
+        n = buf[off] | (buf[off + 1] << 8)
+        off += 2
+        out = []
+        for _ in range(n):
+            if off >= end:
+                break
+            v, off = _decode_map_value(buf, off, end, depth)
+            out.append(v)
+        return out, off
+    if kind == _MAP:
+        return _decode_map_body(buf, off, end, depth + 1)
+    return None, end                    # unknown kind: stop cleanly
+
+
+def _decode_map_body(buf, off, end, depth=1):
+    if depth > 8 or off + 2 > end:      # DART_SCHEMA_MAX_DEPTH
+        return {}, end
+    n = buf[off] | (buf[off + 1] << 8)
+    off += 2
+    out = {}
+    for _ in range(n):
+        if off >= end:
+            break
+        klen = buf[off]
+        off += 1
+        if off + klen > end:
+            break
+        key = buf[off:off + klen].decode("utf-8", "replace")
+        off += klen
+        out[key], off = _decode_map_value(buf, off, end, depth)
+    return out, off
+
+
 def _value_to_py(val):
     k = val.kind
-    if k == _STR:
+    if k == _STR or k == _VSTR:
         return (string_at(val.bytes.data, val.bytes.len).decode("utf-8", "replace")
                 if val.bytes.data and val.bytes.len else "")
-    if k == _ARR:
+    if k == _ARR or k == _VARR:
         raw = string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
         if val.elem == _STR:
             return _unpack_string_array(raw, val.count, val.str_cap)
@@ -1036,6 +1231,9 @@ def _value_to_py(val):
             return raw
         esz = _SCALAR_SIZE[val.elem]
         return list(struct.unpack("<%d%s" % (len(raw) // esz, _FMT[val.elem]), raw)) if raw else []
+    if k == _MAP:
+        raw = string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
+        return _decode_map_body(raw, 0, len(raw))[0]
     if k in _FLOATK:
         return val.v.f
     if k in _SIGNED:

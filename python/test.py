@@ -40,6 +40,59 @@ class Pose:
     vel:   Twist = field(default_factory=Twist)
 
 
+# The v4 variable-length kinds: a variable string, a variable scalar array, a
+# variable string array, and a self-describing map.
+@dataclass
+class Sensor:
+    id:      dart.u32 = 0
+    name:    dart.string(16) = ""                              # capped (fixed)
+    note:    str = ""                                          # variable string
+    samples: list[dart.f32] = field(default_factory=list)     # variable scalar array
+    labels:  list[dart.string(8)] = field(default_factory=list)  # variable string array
+    extras:  dict = field(default_factory=dict)               # self-describing map
+
+
+def round_trip():
+    """Encode -> decode round-trip of the variable kinds (no networking)."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    sch = dart.Schema(Sensor)
+    print("Sensor DSL:\n" + sch.dsl)
+    src = Sensor(id=42, name="lidar",
+                 note="a long unbounded note that exceeds sixteen bytes easily",
+                 samples=[1.5, -2.25, 3.75], labels=["front", "left", "rearmost"],
+                 extras={"battery": 87, "signed": -5, "mid": 40000, "neg32": -100000,
+                         "big": 5_000_000_000, "state": "docked", "ok": True,
+                         "temps": [36.2, 34.9, -1.0], "meta": {"fw": "1.2.3", "rev": 7}})
+    out = sch.decode(sch.encode(src))
+    check("note (vstr)", out.note == src.note)
+    check("samples (varr f32)", len(out.samples) == 3 and abs(out.samples[0] - 1.5) < 1e-6)
+    check("labels (varr string)", list(out.labels) == ["front", "left", "rearmost"])
+    e = out.extras
+    check("map scalars", e.get("battery") == 87 and e.get("signed") == -5
+          and e.get("mid") == 40000 and e.get("neg32") == -100000
+          and e.get("big") == 5_000_000_000 and e.get("state") == "docked" and e.get("ok") is True)
+    check("map array", isinstance(e.get("temps"), list) and abs(e["temps"][0] - 36.2) < 1e-9)
+    check("map nested", isinstance(e.get("meta"), dict) and e["meta"].get("fw") == "1.2.3"
+          and e["meta"].get("rev") == 7)
+    # empty variable fields round-trip to empty
+    e2 = sch.decode(sch.encode(Sensor(id=1)))
+    check("empty defaults", e2.note == "" and list(e2.samples) == []
+          and list(e2.labels) == [] and e2.extras == {})
+    try:
+        sch.encode(Sensor(labels=["toolongforcap"]))
+        check("over-cap raises", False)
+    except dart.SchemaError:
+        check("over-cap raises", True)
+    print("variable-kinds round-trip: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 got = threading.Event()
 received = []
 
@@ -55,6 +108,8 @@ def on_event(tag):
 
 
 def main():
+    if not round_trip():
+        return 1
     print("opening nodes (first run compiles the embedded C, please wait)...")
     sub = dart.Node("sub", on_message, on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE)
