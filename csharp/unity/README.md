@@ -39,38 +39,53 @@ auto-detects Standalone by extension: `.dll` -> Windows, `.so` -> Linux).
 
 ## Use
 
+Put one **DartNode** component in the scene (Add Component > DART > DART Node). It owns
+the shared node (name, domain, lifecycle) and every other script publishes/subscribes
+through it:
+
 ```csharp
 using Dart;
+using UnityEngine;
 
-public struct Pose {
-    public ulong Stamp; public double X; public double Y;
-    [DartArray(4)] public byte[] Uuid;
-    [DartString(16)] public string Frame;
+public struct Pose { public float X, Y, Z; }
+
+public class PoseSender : MonoBehaviour {
+    DartChannel<Pose> pose;
+    void Start()  { pose = DartNode.Channel<Pose>("player/pose"); }
+    void Update() { pose.Publish(new Pose { X = transform.position.x,
+                                            Y = transform.position.y,
+                                            Z = transform.position.z }); }
 }
 
-// Drive the node by polling from Update(): handlers fire inline on the main thread,
-// where the Unity API is legal.
-Dart.Node _node;
-Dart.Channel<Pose> _ch;
-void Start() {
-    _node = new Node("player1",
-                     onMessage: m => transform.position = ToVec(m.As<Pose>()),
-                     onEvent: e => Debug.LogWarning(e),
-                     new NodeOptions { Domain = 7 });
-    _ch = new Channel<Pose>(_node, "pose");
+public class PoseReceiver : MonoBehaviour {
+    void Start() { DartNode.Subscribe<Pose>("player/pose", this, OnPose); }
+    void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }  // main thread, always
 }
-void Update()      { _node.Poll(0); /* non-blocking: RX + handlers, main thread */ }
-void OnDestroy()   { _node.Close(); }
-// (Alternative: _node.Start() runs a C-level background service thread with no Poll()
-// anywhere, but handlers then fire on that thread, where the Unity API is NOT legal --
-// marshal to the main thread yourself before touching Unity objects.)
 ```
+
+- **Handlers always fire on the main thread.** The node runs the C service thread (the
+  wire never waits for a frame); every channel is queued and DartNode dispatches once
+  per frame, before other scripts' `Update()`.
+- **Channels are shared by name**: every script asking for `"player/pose"` gets the same
+  `DartChannel<Pose>`. Roles are automatic: created inactive, the first `Publish`
+  advertises pub, the first `Subscribe` advertises sub, the last unsubscribe withdraws it.
+- **Owner-bound subscriptions** (`Subscribe(name, this, handler)`) die with their
+  component and are skipped while it is disabled. The ownerless overload returns a
+  `DartSubscription`: dispose it yourself.
+- **Edit mode**: `DartNode` is `[ExecuteAlways]`; with Run In Edit Mode on (default) the
+  node is live in the editor outside play. Whether your publishers/subscribers run at
+  edit time is up to them; a channel acquired while the node is closed goes live when it
+  opens.
+- **Events** (peer up/down, message loss, errors) are logged to the Console (toggle on
+  the component) and observable via `DartNode.Events`, on the main thread.
+- **Escape hatch**: `DartNode.Main.Raw` is the underlying `Node`, `channel.Raw` the
+  underlying `Channel` (TryTake, Drain, QueueStats...). The low-level wrapper (`new
+  Node(...)` + `Poll()`/`Start()`) remains fully usable without the component.
 
 Any struct/class with public fields is a message type. Wire field names are the C#
 field names (override with `[DartField("stamp")]`; `[DartString(cap)]` is required on
-string fields) and must match on every node for a topic. Sends are thread-safe from any
-thread; from inside a handler, `Channel.Send` and read-only queries are allowed, other
-node calls are not.
+string fields, `[DartArray(n)]` on fixed arrays) and must match on every node for a
+topic. `Publish` is thread-safe from any thread.
 
 ## IL2CPP / AOT
 
