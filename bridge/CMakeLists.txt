@@ -50,8 +50,9 @@ FetchContent_Declare(nlohmann_json
 
 FetchContent_MakeAvailable(ixwebsocket nlohmann_json)
 
-# Two TUs: bridge.cpp is the C++ server, dart_impl.c compiles the C99 implementation.
-add_executable(dart_bridge bridge.cpp dart_impl.c)
+# Two C++ TUs: bridge.cpp is the server; dart.cpp is the DART implementation anchor
+# (it defines DART_IMPLEMENTATION; the C library compiles cleanly as C++).
+add_executable(dart_bridge bridge.cpp dart.cpp)
 target_link_libraries(dart_bridge PRIVATE dart ixwebsocket::ixwebsocket
                       nlohmann_json::nlohmann_json)
 

@@ -118,9 +118,12 @@ enum class ErrorKind {
     Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
 };
 
-/* Schema field kinds for reflection (Schema::Field); values match the C wire. */
+/* Schema field kinds for reflection (Schema::Field); values match the C wire.
+ * Array/String are FIXED (offset-based); VString/VArray/Map are the VARIABLE kinds
+ * that ride the message tail (offset/size report 0). */
 enum class FieldType : uint8_t {
-    U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String
+    U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
+    VString, VArray, Map
 };
 
 static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
@@ -130,6 +133,7 @@ static_assert((int)EventKind::Error == detail::DART_ERROR, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
+static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
 
 /* forward decls */
 class Node;
@@ -432,9 +436,10 @@ public:
         return static_cast<SendStatus>(
             detail::dart_channel_send(ch_, detail::dart_bytes(data.data(), data.size())));
     }
-    void set_role(Role r) {
-        if (!ch_) return;
-        detail::dart_channel_set_role(ch_, static_cast<detail::DartRole>(r));
+    SendStatus set_role(Role r) {
+        if (!ch_) return SendStatus::NoChannel;
+        return static_cast<SendStatus>(
+            detail::dart_channel_set_role(ch_, static_cast<detail::DartRole>(r)));
     }
     uint16_t index() const {
         if (!ch_) return 0xffff;
