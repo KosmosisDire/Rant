@@ -64,11 +64,13 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <variant>
 #include <vector>
 #if defined(__has_include) && __has_include(<span>)
 #include <span>
@@ -12092,8 +12094,12 @@ private:
  * Thin OOP over the C map codec (the real DartMapWriter / dart_map_* live in the
  * embedded library, so this wraps them directly -- no reimplementation). Write a
  * body with MapWriter, hand it to MessageOut::set_map; read one from
- * MessageIn::get_map as a MapReader. */
+ * MessageIn::get_map as a MapReader, or decode a whole map into an owning std::map
+ * (MapReader::to_map -> MapDict of MapItem) that outlives the handler. */
 class MapReader;
+class MapItem;
+using MapList = std::vector<MapItem>;             /* a decoded array value's elements */
+using MapDict = std::map<std::string, MapItem>;   /* a decoded map: the std::map readback */
 
 /* Builds a map body into a fixed internal buffer (grow via the ctor arg). Key order
  * is yours; array elements are keyless (pass nullptr). finish() returns the body bytes
@@ -12162,12 +12168,105 @@ public:
         return true;
     }
     Bytes body() const { return { body_.data, body_.len }; }
+    /* Decode the whole map (recursively) into an owning std::map<std::string, MapItem>,
+     * copied out of the message so it stays valid after the handler returns. Keys are
+     * sorted (std::map). Empty for a non-map / mismatched field. */
+    MapDict to_map() const;
 
 private:
     detail::DartBytes body_{};
 };
 
 inline MapReader MapValue::as_map() const { return MapReader(Bytes{ v_.bytes.data, v_.bytes.len }); }
+
+/* One node of a decoded map (MapReader::to_map): an owning scalar / string / array
+ * (MapList) / nested map (MapDict). Numeric getters coerce between uint/int/double, so a
+ * schema-less map -- where an integer arrives as whatever kind fit -- reads back cleanly.
+ * All accessors are no-throw: a type mismatch yields the zero value / empty container. */
+class MapItem {
+public:
+    using Value = std::variant<std::monostate, bool, uint64_t, int64_t, double,
+                               std::string, MapList, MapDict>;
+    Value value;
+
+    bool is_null()   const { return std::holds_alternative<std::monostate>(value); }
+    bool is_bool()   const { return std::holds_alternative<bool>(value); }
+    bool is_uint()   const { return std::holds_alternative<uint64_t>(value); }
+    bool is_int()    const { return std::holds_alternative<int64_t>(value); }
+    bool is_double() const { return std::holds_alternative<double>(value); }
+    bool is_string() const { return std::holds_alternative<std::string>(value); }
+    bool is_array()  const { return std::holds_alternative<MapList>(value); }
+    bool is_map()    const { return std::holds_alternative<MapDict>(value); }
+
+    bool     as_bool() const { auto p = std::get_if<bool>(&value); return p && *p; }
+    uint64_t as_uint() const {
+        if (auto p = std::get_if<uint64_t>(&value)) return *p;
+        if (auto p = std::get_if<int64_t>(&value))  return static_cast<uint64_t>(*p);
+        if (auto p = std::get_if<double>(&value))   return static_cast<uint64_t>(*p);
+        return 0;
+    }
+    int64_t as_int() const {
+        if (auto p = std::get_if<int64_t>(&value))  return *p;
+        if (auto p = std::get_if<uint64_t>(&value)) return static_cast<int64_t>(*p);
+        if (auto p = std::get_if<double>(&value))   return static_cast<int64_t>(*p);
+        return 0;
+    }
+    double as_f64() const {
+        if (auto p = std::get_if<double>(&value))   return *p;
+        if (auto p = std::get_if<uint64_t>(&value)) return static_cast<double>(*p);
+        if (auto p = std::get_if<int64_t>(&value))  return static_cast<double>(*p);
+        return 0.0;
+    }
+    const std::string& as_string() const {
+        if (auto p = std::get_if<std::string>(&value)) return *p;
+        static const std::string empty; return empty;
+    }
+    const MapList& as_array() const {
+        if (auto p = std::get_if<MapList>(&value)) return *p;
+        static const MapList empty; return empty;
+    }
+    const MapDict& as_map() const {
+        if (auto p = std::get_if<MapDict>(&value)) return *p;
+        static const MapDict empty; return empty;
+    }
+
+    /* Copy one cursor MapValue (a scalar / string / array / nested map) into an owning node. */
+    static MapItem from(const MapValue& v) {
+        MapItem m;
+        switch (v.kind()) {
+        case FieldType::Bool: m.value = v.as_bool(); break;
+        case FieldType::U8: case FieldType::U16: case FieldType::U32: case FieldType::U64:
+            m.value = v.as_uint(); break;
+        case FieldType::I8: case FieldType::I16: case FieldType::I32: case FieldType::I64:
+            m.value = v.as_int(); break;
+        case FieldType::F32: case FieldType::F64: m.value = v.as_f64(); break;
+        case FieldType::VString: m.value = std::string(v.as_string()); break;
+        case FieldType::VArray: {
+            MapList list;
+            uint16_t n = v.array_count();
+            list.reserve(n);
+            for (uint16_t i = 0; i < n; i++) list.push_back(from(v.array_at(i)));
+            m.value = std::move(list);
+            break;
+        }
+        case FieldType::Map: m.value = v.as_map().to_map(); break;
+        default: break;   /* leaves monostate (null) */
+        }
+        return m;
+    }
+};
+
+inline MapDict MapReader::to_map() const {
+    MapDict out;
+    uint16_t n = count();
+    for (uint16_t i = 0; i < n; i++) {
+        std::string_view key;
+        MapValue v;
+        if (!at(i, key, v)) break;
+        out.emplace(std::string(key), MapItem::from(v));
+    }
+    return out;
+}
 
 /* MessageOut: a mutable message buffer bound to a Schema, for typed encoding.
  * Set fields by name (nested members by dotted path, e.g. "vel.dx"), then

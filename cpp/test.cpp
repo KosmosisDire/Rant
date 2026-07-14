@@ -43,6 +43,10 @@ struct Got {
     size_t n_samples = 0, n_temps = 0;
     float  samples[3] = {0,0,0};
     double temp0 = 0;
+    /* the same map decoded via the owning std::map readback (MapReader::to_map) */
+    uint64_t    tm_battery = 0, tm_meta_rev = 0;
+    std::string tm_state;
+    double      tm_temp0 = 0;
 } g;
 
 static void decode(const dart::MessageIn& m) {
@@ -66,6 +70,16 @@ static void decode(const dart::MessageIn& m) {
         if (meta.get("fw",  mv)) g.meta_fw  = std::string(mv.as_string());
         if (meta.get("rev", mv)) g.meta_rev = mv.as_uint();
     }
+
+    /* std::map readback: decode the whole map into an owning tree that outlives the handler */
+    dart::MapDict d = m.get_map("extras").to_map();
+    if (d.count("battery")) g.tm_battery = d.at("battery").as_uint();
+    if (d.count("state"))   g.tm_state   = d.at("state").as_string();
+    if (d.count("temps") && d.at("temps").is_array() && !d.at("temps").as_array().empty())
+        g.tm_temp0 = d.at("temps").as_array()[0].as_f64();
+    if (d.count("meta") && d.at("meta").is_map() && d.at("meta").as_map().count("rev"))
+        g.tm_meta_rev = d.at("meta").as_map().at("rev").as_uint();
+
     g.received = true;
 }
 
@@ -82,6 +96,9 @@ static bool verify() {
     chk("map state",     g.state == "docked");
     chk("map array",     g.n_temps == 2 && g.temp0 > 36.1 && g.temp0 < 36.3);
     chk("map nested",    g.meta_fw == "1.2.3" && g.meta_rev == 7);
+    chk("to_map scalar/string", g.tm_battery == 87 && g.tm_state == "docked");
+    chk("to_map nested array",  g.tm_temp0 > 36.1 && g.tm_temp0 < 36.3);
+    chk("to_map nested map",    g.tm_meta_rev == 7);
     return ok;
 }
 
