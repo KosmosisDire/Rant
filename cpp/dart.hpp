@@ -608,6 +608,9 @@ public:
     ErrorKind        error()          const { return static_cast<ErrorKind>(ev_->error); }
     bool             is_error()       const { return ev_->kind == detail::DART_ERROR; }
     uint32_t         peer()           const { return ev_->peer; }
+    /* the peer's human-readable node name for peer-scoped events (empty when unknown);
+       prefer it over peer() in messages, an id means nothing to a human */
+    std::string_view peer_name()      const { return ev_->peer_name ? std::string_view(ev_->peer_name) : std::string_view{}; }
     uint16_t         channel()        const { return ev_->channel; }
     /* our channel name for channel-scoped events, else empty */
     std::string_view channel_name()   const { return ev_->channel_name ? std::string_view(ev_->channel_name) : std::string_view{}; }

@@ -29,6 +29,10 @@ static char *i_dart_event_append_ch(char *p, char *end, const DartEvent *ev){   
     if (ev->channel_name) return i_dart_event_append_str(p,end,ev->channel_name);
     return i_dart_event_append_u64(p,end,ev->channel);
 }
+static char *i_dart_event_append_peer(char *p, char *end, const DartEvent *ev){   /* the peer's node name, else id=<n> */
+    if (ev->peer_name && ev->peer_name[0]) return i_dart_event_append_str(p,end,ev->peer_name);
+    p = i_dart_event_append_str(p,end,"id="); return i_dart_event_append_u64(p,end,ev->peer);
+}
 #ifndef DART_NO_DIAG   /* only the verbose error body below uses these two */
 static char *i_dart_event_append_hex(char *p, char *end, uint64_t v){
     char tmp[16]; int n = 0;
@@ -52,20 +56,21 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     switch (ev->error){
     case DART_E_NAME_COLLISION:
         p=i_dart_event_append_str(p,end,"name-collision "); p=i_dart_event_append_ch(p,end,ev);
-        p=i_dart_event_append_str(p,end," id=0x"); p=i_dart_event_append_hex(p,end,ev->identity);
+        p=i_dart_event_append_str(p,end," peer "); p=i_dart_event_append_peer(p,end,ev);
+        p=i_dart_event_append_str(p,end," identity=0x"); p=i_dart_event_append_hex(p,end,ev->identity);
         p=i_dart_event_append_str(p,end,": match refused"); break;
     case DART_E_QOS_INCOMPATIBLE:
         p=i_dart_event_append_str(p,end,"qos-incompatible "); p=i_dart_event_append_ch(p,end,ev);
-        p=i_dart_event_append_str(p,end," from id="); p=i_dart_event_append_u64(p,end,ev->peer);
+        p=i_dart_event_append_str(p,end," from "); p=i_dart_event_append_peer(p,end,ev);
         p=i_dart_event_append_str(p,end,": reliable subscriber refused best-effort publisher"); break;
     case DART_E_SCHEMA_MISMATCH:
         p=i_dart_event_append_str(p,end,"schema-mismatch "); p=i_dart_event_append_ch(p,end,ev);
-        p=i_dart_event_append_str(p,end," peer id="); p=i_dart_event_append_u64(p,end,ev->peer);
+        p=i_dart_event_append_str(p,end," peer "); p=i_dart_event_append_peer(p,end,ev);
         p=i_dart_event_append_str(p,end,": ");
         p=i_dart_event_append_str(p,end, ev->schema_detail && ev->schema_detail[0]
                                   ? ev->schema_detail : "incompatible schemas, refused"); break;
     case DART_E_INTEREST_OVERFLOW:
-        p=i_dart_event_append_str(p,end,"interest-overflow peer id="); p=i_dart_event_append_u64(p,end,ev->peer);
+        p=i_dart_event_append_str(p,end,"interest-overflow peer "); p=i_dart_event_append_peer(p,end,ev);
         p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->lost_count);
         p=i_dart_event_append_str(p,end," matched topics beyond our alias table (raise DART_META_MAX_IDS)"); break;
     case DART_E_META_TRUNCATED_INTEREST:
@@ -73,13 +78,13 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     case DART_E_META_TRUNCATED_SCHEMA:
         p=i_dart_event_append_str(p,end,"meta-truncated: schema section dropped (announce overlay full)"); break;
     case DART_E_PEER_META_TOO_BIG:
-        p=i_dart_event_append_str(p,end,"peer-meta-too-big id="); p=i_dart_event_append_u64(p,end,ev->peer);
+        p=i_dart_event_append_str(p,end,"peer-meta-too-big "); p=i_dart_event_append_peer(p,end,ev);
         if (ev->ip_len==4){ p=i_dart_event_append_str(p,end," at "); p=i_dart_event_append_addr(p,end,ev); }
         p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
         p=i_dart_event_append_str(p,end," byte blob exceeds our capacity, refused"); break;
     case DART_E_MSG_TOO_BIG:
         p=i_dart_event_append_str(p,end,"msg-too-big "); p=i_dart_event_append_ch(p,end,ev);
-        p=i_dart_event_append_str(p,end," from id="); p=i_dart_event_append_u64(p,end,ev->peer);
+        p=i_dart_event_append_str(p,end," from "); p=i_dart_event_append_peer(p,end,ev);
         p=i_dart_event_append_str(p,end," ("); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
         p=i_dart_event_append_str(p,end," bytes), skipped"); break;
     case DART_E_PEER_REFUSED:
@@ -105,7 +110,7 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     case DART_E_MCAST_JOIN:
         p=i_dart_event_append_str(p,end,"multicast join failed"); p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_SEND:
-        p=i_dart_event_append_str(p,end,"send failed to id="); p=i_dart_event_append_u64(p,end,ev->peer);
+        p=i_dart_event_append_str(p,end,"send failed to "); p=i_dart_event_append_peer(p,end,ev);
         p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_RECV:
         p=i_dart_event_append_str(p,end,"recv failed"); p=i_dart_event_append_oserr(p,end,ev); break;
@@ -126,21 +131,21 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
     p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
     switch (ev->kind){
     case DART_PEER_UP:
-        p = i_dart_event_append_str(p,end,"peer-up id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        p = i_dart_event_append_str(p,end,"peer-up "); p = i_dart_event_append_peer(p,end,ev);
         if (ev->ip_len == 4){ p = i_dart_event_append_str(p,end," at "); p = i_dart_event_append_addr(p,end,ev); }
         break;
     case DART_PEER_DOWN:
-        p = i_dart_event_append_str(p,end,"peer-down id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        p = i_dart_event_append_str(p,end,"peer-down "); p = i_dart_event_append_peer(p,end,ev);
         break;
     case DART_PEER_INTEREST:
-        p = i_dart_event_append_str(p,end,"interest id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        p = i_dart_event_append_str(p,end,"interest from "); p = i_dart_event_append_peer(p,end,ev);
         p = i_dart_event_append_str(p,end," publish-to="); p = i_dart_event_append_u64(p,end,ev->publish_topics);
         p = i_dart_event_append_str(p,end," topics, receive-from="); p = i_dart_event_append_u64(p,end,ev->receive_topics);
         p = i_dart_event_append_str(p,end," topics");
         break;
     case DART_MSG_LOST:
         p = i_dart_event_append_str(p,end,"msg-lost "); p = i_dart_event_append_ch(p,end,ev);
-        p = i_dart_event_append_str(p,end," from id="); p = i_dart_event_append_u64(p,end,ev->peer);
+        p = i_dart_event_append_str(p,end," from "); p = i_dart_event_append_peer(p,end,ev);
         p = i_dart_event_append_str(p,end," seqno "); p = i_dart_event_append_u64(p,end,ev->lost_first);
         p = i_dart_event_append_str(p,end,".."); p = i_dart_event_append_u64(p,end,ev->lost_first + ev->lost_count - 1);
         break;

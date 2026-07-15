@@ -97,6 +97,10 @@ typedef struct {
     const char *schema_detail; /* SCHEMA_MISMATCH: what exactly was incompatible, one line (a
                                   view into node state, valid for the callback; NULL when
                                   unknown, or under DART_NO_DIAG) */
+    const char *peer_name;     /* peer-scoped events: the subject peer's human-readable node name
+                                  (a NUL-terminated view into discovery state, valid for the
+                                  callback; NULL when there is no peer or its name is unknown).
+                                  Prefer it over .peer in messages: an id means nothing to a human. */
 } DartEvent;
 typedef void (*DartEventFn)(const DartEvent *ev);
 

@@ -182,6 +182,7 @@ namespace Dart
         public ushort publish_topics;
         public ushort receive_topics;
         public IntPtr schema_detail;           // const char* (SchemaMismatch: what was incompatible; else null)
+        public IntPtr peer_name;               // const char* (peer-scoped events: the peer's node name; else null)
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -530,6 +531,7 @@ namespace Dart
         public ulong LostCount;
         public ulong TooBigBytes;
         public string SchemaDetail;     // SchemaMismatch: what exactly was incompatible, else null
+        public string PeerName;         // peer-scoped events: the peer's human-readable node name, else null
         private string _line;
 
         /// <summary>True if this event reports something going wrong (Kind == EventKind.Error).</summary>
@@ -560,6 +562,7 @@ namespace Dart
                 LostCount = e.lost_count,
                 TooBigBytes = e.too_big_bytes,
                 SchemaDetail = e.schema_detail != IntPtr.Zero ? Codec.PtrToStr(e.schema_detail) : null,
+                PeerName = e.peer_name != IntPtr.Zero ? Codec.PtrToStr(e.peer_name) : null,
                 _line = Codec.CBufStr(buf),
             };
         }

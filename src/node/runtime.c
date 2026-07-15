@@ -219,6 +219,11 @@ static void i_dart_node_kick(DartNode *n){ (void)n; }
  * the (already rare) lifecycle events ever reach here. */
 static void i_dart_node_emit(DartNode *n, DartEvent *e){
     e->user = n->user_data;
+    if (e->peer){    /* resolve the peer's node name once here, so every event message can print
+                        a human label instead of an opaque id (dart_event_str prefers it) */
+        DartString nm = i_dart_node_core_peer_name(n->core, e->peer);
+        e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
+    }
     if (e->kind == DART_ERROR) n->last_error = *e;
     if (n->on_event) n->on_event(e);
 }
