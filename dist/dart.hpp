@@ -12467,9 +12467,9 @@ public:
 
     /* A taken message: owns the DartMsg struct by value; the views inside point into
      * the channel's ring and stay valid until the NEXT take/dispatch on the channel. */
-    class Taken {
+    class TakenMessageIn {
     public:
-        Taken() = default;
+        TakenMessageIn() = default;
         bool valid() const noexcept { return ok_; }
         explicit operator bool() const noexcept { return ok_; }
         std::string_view sender_name()  const { return { m_.sender_name.data,  m_.sender_name.len  }; }
@@ -12498,8 +12498,8 @@ public:
     /* Pop the next queued message. timeout_ms: 0 = just check, >0 = wait up to that
      * long, negative = wait indefinitely. Empty optional = nothing arrived in time.
      *     while (auto msg = scan.take()) render(msg->data()); */
-    std::optional<Taken> take(int timeout_ms = 0) {
-        Taken t;
+    std::optional<TakenMessageIn> take(int timeout_ms = 0) {
+        TakenMessageIn t;
         if (!ch_ || detail::dart_channel_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
         t.ok_ = true;
         return t;
