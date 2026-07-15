@@ -17,7 +17,7 @@ struct DartDiscovery {
     uint32_t             group_naddr;   /* discovery multicast group, network order */
     uint16_t             discovery_port;
     uint16_t             max_peers;
-    uint32_t             wire_max;    /* scratch buffer size = META_OFF + meta_capacity */
+    uint32_t             wire_max;    /* scratch buffer size = META_OFF + meta_cap */
     uint8_t             *rxbuf;       /* arena, wire_max */
     uint8_t             *txbuf;       /* arena, wire_max */
     DartDiscoveryPeer   *peer_view;   /* arena, [max_peers]: zero-copy snapshot for dart_discovery_peers */
@@ -174,7 +174,7 @@ typedef struct {
 } i_DartRtBlocks;
 static void i_dart_discovery_rt_layout(i_DartBump *b, const DartDiscoveryCoreConfig *c, i_DartRtBlocks *o){
     uint16_t max_peers = c->max_peers ? c->max_peers : 32u;
-    o->wire_max   = dart_discovery_wire_size(c->meta_capacity);
+    o->wire_max   = dart_discovery_wire_size(c->meta_cap);
     o->d     = (DartDiscovery*)i_dart_bump_take(b, sizeof(struct DartDiscovery), 16);
     o->rxbuf = (uint8_t*)i_dart_bump_take(b, o->wire_max, 16);
     o->txbuf = (uint8_t*)i_dart_bump_take(b, o->wire_max, 16);
@@ -319,7 +319,7 @@ DartDiscovery *dart_discovery_open(DartAllocator *alloc, const char *name, const
     memset(&nc, 0, sizeof nc);
     nc.discovery.domain_id     = o.domain;
     nc.discovery.max_peers     = o.max_peers;          /* 0 => default applied in place */
-    nc.discovery.meta_capacity = o.meta_capacity;
+    nc.discovery.meta_cap = o.meta_cap;
     nc.discovery.peer_user_bytes = o.peer_user_bytes;
     nc.discovery.meta          = o.meta;
     nc.discovery.on_event      = o.on_event;
@@ -347,11 +347,11 @@ DartDiscovery *dart_discovery_open(DartAllocator *alloc, const char *name, const
  * seed list; the core is migrated (UUID/version/peers preserved) and self_meta re-pointed
  * to the node core's new announce-blob address. Caller frees the old block afterward. */
 DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t new_cap,
-        uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user){
+        uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user){
     DartDiscoveryCoreConfig dc; i_DartRtBlocks blk; i_DartBump b; DartDiscovery *d;
     DartDiscoveryState *nc; uint8_t *base; size_t need;
     if (!old) return NULL;
-    dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
+    dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_cap = new_meta_cap;
     {   i_DartBump mb; memset(&mb,0,sizeof mb); i_dart_discovery_rt_layout(&mb, &dc, &blk); need = mb.offset + 16u; }
     if (new_cap < need) return NULL;
     base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
@@ -364,7 +364,7 @@ DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t 
     d->peer_view = (DartDiscoveryPeer*)blk.peer_view;
     d->max_peers = new_max_peers;
     nc = dart_discovery_core_migrate(old->core, blk.core,
-             new_cap - (size_t)(blk.core - (uint8_t*)new_mem), new_max_peers, new_meta_capacity,
+             new_cap - (size_t)(blk.core - (uint8_t*)new_mem), new_max_peers, new_meta_cap,
              self_meta, peer_cb_user);
     if (!nc) return NULL;                /* old left intact; caller frees the new block */
     d->core = nc;

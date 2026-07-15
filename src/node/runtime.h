@@ -29,7 +29,7 @@ typedef struct {
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
-                                                0 = DART_FRAG_PAYLOAD. Advertised via discovery so
+                                                0 = DART_FRAG_SIZE. Advertised via discovery so
                                                 peers reassemble at our size. Clamp [MIN, MAX]; raise
                                                 MAX (compile) for jumbo frames. One size per node. */
 } DartNodeNet;

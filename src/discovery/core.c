@@ -20,7 +20,7 @@ struct i_DartDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
-    uint8_t *meta;          /* the OVERLAY only: a meta_pool slot (capacity st->meta_capacity),
+    uint8_t *meta;          /* the OVERLAY only: a meta_pool slot (capacity st->meta_cap),
                                or a hook allocation grown to the largest blob this slot has held */
     uint16_t meta_cap;      /* allocated capacity of this slot's meta buffer */
     uint16_t meta_len;
@@ -41,8 +41,8 @@ struct DartDiscoveryState {
     uint8_t       started;
     uint8_t       want_solicit;   /* a multicast solicit (REQ) is queued for the next update */
     uint16_t      cap_peers;
-    uint16_t      meta_capacity;       /* per-peer meta buffer capacity */
-    uint8_t      *meta_pool;      /* [cap_peers * meta_capacity]; NULL in hook mode (per-peer
+    uint16_t      meta_cap;       /* per-peer meta buffer capacity */
+    uint8_t      *meta_pool;      /* [cap_peers * meta_cap]; NULL in hook mode (per-peer
                                      blobs are then cfg.alloc allocations at actual size) */
     uint16_t      user_stride;         /* per-peer user-scratch bytes, 8-aligned (0 = none) */
     uint8_t      *user_pool;      /* [cap_peers * user_stride] opaque consumer scratch */
@@ -117,8 +117,8 @@ void dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t seed){
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x (RFC) */
 }
 
-static uint16_t i_dart_discovery_meta_capacity(const DartDiscoveryCoreConfig *cfg){
-    return cfg->meta_capacity ? cfg->meta_capacity : DART_DISCOVERY_META_MAX;
+static uint16_t i_dart_discovery_meta_cap(const DartDiscoveryCoreConfig *cfg){
+    return cfg->meta_cap ? cfg->meta_cap : DART_DISCOVERY_META_MAX;
 }
 
 /* per-peer user-scratch stride: the requested bytes rounded up to 8 so every slot is
@@ -135,8 +135,8 @@ void dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg){
     if (cfg->max_peers == 0)            cfg->max_peers = 32u;
 }
 
-uint32_t dart_discovery_wire_size(uint16_t meta_capacity){
-    uint32_t cap = meta_capacity ? meta_capacity : DART_DISCOVERY_META_MAX;
+uint32_t dart_discovery_wire_size(uint16_t meta_cap){
+    uint32_t cap = meta_cap ? meta_cap : DART_DISCOVERY_META_MAX;
     /* the wire blob = discovery section + overlay, so the scratch buffer must hold both */
     uint32_t w = (uint32_t)DART_DISCOVERY_META_OFF + DART_DISCOVERY_DISC_MAX + cap;
     return w < DART_DISCOVERY_WIRE_MAX ? DART_DISCOVERY_WIRE_MAX : w;
@@ -146,14 +146,14 @@ uint32_t dart_discovery_wire_size(uint16_t meta_capacity){
    measure (bump.base NULL) feeds required_memory; build feeds init -- one definition. */
 typedef struct { DartDiscoveryState *st; uint8_t *peers, *meta_pool, *user_pool; } i_DartDiscoveryBlocks;
 static void i_dart_discovery_layout(i_DartBump *b, const DartDiscoveryCoreConfig *cfg, i_DartDiscoveryBlocks *o){
-    uint16_t meta_capacity = i_dart_discovery_meta_capacity(cfg);
+    uint16_t meta_cap = i_dart_discovery_meta_cap(cfg);
     uint16_t user_stride   = i_dart_discovery_user_stride(cfg);
     o->st        = (DartDiscoveryState*)i_dart_bump_take(b, sizeof(struct DartDiscoveryState), 8);
     o->peers     = (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * sizeof(i_DartDiscoveryPeer), 8);
     /* hook mode allocates each peer's blob on demand at its actual size; only the
-       no-hook (embedded) path reserves the worst-case max_peers x meta_capacity pool */
+       no-hook (embedded) path reserves the worst-case max_peers x meta_cap pool */
     o->meta_pool = cfg->alloc ? NULL
-                 : (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * meta_capacity, 1);
+                 : (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * meta_cap, 1);
     o->user_pool = user_stride ? (uint8_t*)i_dart_bump_take(b, (size_t)cfg->max_peers * user_stride, 8) : NULL;
 }
 
@@ -166,11 +166,11 @@ size_t dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg){
 }
 
 DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscoveryCoreConfig *cfg){
-    i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; uint16_t i, meta_capacity;
+    i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; uint16_t i, meta_cap;
     if (!mem || !cfg || cfg->max_peers == 0) return NULL;
     if (cfg->announce_interval_us == 0 || cfg->peer_timeout_us == 0) return NULL;
-    meta_capacity = i_dart_discovery_meta_capacity(cfg);
-    if (cfg->meta.len > meta_capacity) return NULL;
+    meta_cap = i_dart_discovery_meta_cap(cfg);
+    if (cfg->meta.len > meta_cap) return NULL;
     if (cfg->meta.len && !cfg->meta.data) return NULL;
     if (cap < dart_discovery_required_memory(cfg)) return NULL;
 
@@ -183,7 +183,7 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     memset(st, 0, sizeof(*st));
     st->cfg           = *cfg;
     st->cap_peers     = cfg->max_peers;
-    st->meta_capacity      = meta_capacity;
+    st->meta_cap      = meta_cap;
     st->peers         = (i_DartDiscoveryPeer *)blk.peers;
     st->meta_pool     = blk.meta_pool;
     st->user_stride   = i_dart_discovery_user_stride(cfg);
@@ -193,8 +193,8 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
     memset(st->peers, 0, (size_t)st->cap_peers * sizeof(i_DartDiscoveryPeer));
     if (st->user_pool) memset(st->user_pool, 0, (size_t)st->cap_peers * st->user_stride);
     for (i=0;i<st->cap_peers;i++){
-        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * meta_capacity : NULL;
-        st->peers[i].meta_cap = st->meta_pool ? meta_capacity : 0;
+        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * meta_cap : NULL;
+        st->peers[i].meta_cap = st->meta_pool ? meta_cap : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     st->self_meta         = cfg->meta;
@@ -213,11 +213,11 @@ DartDiscoveryState *dart_discovery_init(void *mem, size_t cap, const DartDiscove
  * is an external pointer (our announce blob, in the node core); the caller passes its new
  * address. Each peer's meta is re-pointed into the new pool and its blob bytes copied. */
 DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
-        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
+        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
         const uint8_t *self_meta, void *peer_cb_user){
     i_DartBump b; i_DartDiscoveryBlocks blk; DartDiscoveryState *st; DartDiscoveryCoreConfig dc; uint16_t i, omp;
     if (!old) return NULL;
-    dc = old->cfg; dc.max_peers = new_max_peers; dc.meta_capacity = new_meta_capacity;
+    dc = old->cfg; dc.max_peers = new_max_peers; dc.meta_cap = new_meta_cap;
     if (new_cap < dart_discovery_required_memory(&dc)) return NULL;
     memset(&b,0,sizeof b);
     b.base = (uint8_t*)(((uintptr_t)new_mem + 7u) & ~(uintptr_t)7u);
@@ -226,18 +226,18 @@ DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *n
     st = blk.st;
     *st = *old;                            /* cfg (uuid!), counters, version, started, cursors */
     st->cfg.max_peers     = new_max_peers;
-    st->cfg.meta_capacity = new_meta_capacity;
+    st->cfg.meta_cap = new_meta_cap;
     st->cfg.user          = peer_cb_user;  /* peer callbacks fire on the relocated node core */
     st->cap_peers         = new_max_peers;
-    st->meta_capacity     = new_meta_capacity;
+    st->meta_cap     = new_meta_cap;
     st->peers             = (i_DartDiscoveryPeer*)blk.peers;
     st->meta_pool         = blk.meta_pool;
     st->user_pool         = blk.user_pool;     /* user_stride is unchanged (copied via *st = *old) */
     st->self_meta.data    = self_meta;     /* re-point our blob (len preserved via *st=*old); version NOT bumped */
     memset(st->peers, 0, (size_t)new_max_peers * sizeof(i_DartDiscoveryPeer));
     for (i=0;i<new_max_peers;i++){
-        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * new_meta_capacity : NULL;
-        st->peers[i].meta_cap = st->meta_pool ? new_meta_capacity : 0;
+        st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * new_meta_cap : NULL;
+        st->peers[i].meta_cap = st->meta_pool ? new_meta_cap : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
     }
     if (st->user_pool) memset(st->user_pool, 0, (size_t)new_max_peers * st->user_stride);
@@ -400,7 +400,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         {   uint8_t dnl = *b++;
             if (dnl){ if (b + dnl > bend) return; disc_name = dart_string((const char*)b, dnl); b += dnl; } }
         overlay = dart_bytes(b, (size_t)(bend - b));
-        if (overlay.len > st->meta_capacity){   /* overlay must fit the per-peer buffer: this side
+        if (overlay.len > st->meta_cap){   /* overlay must fit the per-peer buffer: this side
                                                    can NEVER hold that peer's metadata, so say so */
             DartDiscoveryAddr a; int at = i_dart_discovery_find(st, uuid);
             memset(&a, 0, sizeof a);
@@ -561,7 +561,7 @@ uint64_t dart_discovery_next_due_us(const DartDiscoveryState *st){
 }
 
 void dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta){
-    if (!st || meta.len > st->meta_capacity) return;   /* the node sizes meta_capacity to fit */
+    if (!st || meta.len > st->meta_cap) return;   /* the node sizes meta_cap to fit */
     st->self_meta         = meta;
     st->self_meta_version++;
     st->self_blob_resend  = DART_DISCOVERY_BLOB_RESEND;

@@ -1089,7 +1089,7 @@ static void shm_loss_checks(void){
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); shml_W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); shml_R=dart_transport_init(mr,nr,&rc);
     shml_now=1000000;
-    dart_transport_peer_add(shml_W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(shml_R,1u,DART_FRAG_PAYLOAD);
+    dart_transport_peer_add(shml_W,2u,DART_FRAG_SIZE); dart_transport_peer_add(shml_R,1u,DART_FRAG_SIZE);
     st_apply_verified(shml_R, 1u, shml_W);
     st_apply_verified(shml_W, 2u, shml_R);
     dart_transport_peer_set_shm(shml_W,2u,1);
@@ -1182,11 +1182,11 @@ static void shm_node_checks(void){
  * These need no sockets, so they run straight against the transport core. */
 static void unit_checks(void){
     /* dart_clamp_frag: 0 -> default, otherwise clamp into [MIN, MAX] */
-    ST_CHECK(dart_clamp_frag(0) == DART_FRAG_PAYLOAD,
+    ST_CHECK(dart_clamp_frag(0) == DART_FRAG_SIZE,
              "clamp: 0 -> default frag (%u)", (unsigned)dart_clamp_frag(0));
-    ST_CHECK(dart_clamp_frag(65535) == DART_FRAG_PAYLOAD_MAX,
+    ST_CHECK(dart_clamp_frag(65535) == DART_FRAG_SIZE_MAX,
              "clamp: above-max -> MAX (%u)", (unsigned)dart_clamp_frag(65535));
-    ST_CHECK(dart_clamp_frag(1) >= DART_FRAG_PAYLOAD_MIN,
+    ST_CHECK(dart_clamp_frag(1) >= DART_FRAG_SIZE_MIN,
              "clamp: tiny -> >= MIN (%u)", (unsigned)dart_clamp_frag(1));
 
     /* shared little-endian helpers: byte order + round-trip */
@@ -1417,7 +1417,7 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2; rc.on_event=qos_on_event;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
-    dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
+    dart_transport_peer_add(W,2u,DART_FRAG_SIZE); dart_transport_peer_add(R,1u,DART_FRAG_SIZE);
     qos_incompat_n=0;
     st_apply_verified(R, 1u, W);
     dart_transport_peer_match_counts(R,1u,&pub,&recv);
@@ -1452,7 +1452,7 @@ static int beff_would_evict(int rrel){
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
-    dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
+    dart_transport_peer_add(W,2u,DART_FRAG_SIZE); dart_transport_peer_add(R,1u,DART_FRAG_SIZE);
     st_apply_verified(W, 2u, R);   /* W learns (and verifies) that R subscribes */
     memset(payload,0x5A,sizeof payload);
     for (i=0;i<5;i++) dart_transport_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
@@ -2892,7 +2892,7 @@ static int selftest_main(void){
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
         for (k=0;k<i_dart_node_core_max_peers(r->core);k++) if (i_dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
         dart_transport_peer_remove(r->transport, wid);
-        dart_transport_peer_add(r->transport, wid,DART_FRAG_PAYLOAD);
+        dart_transport_peer_add(r->transport, wid,DART_FRAG_SIZE);
         il = dart_transport_build_interest(w->transport, ib, sizeof ib);
         dart_transport_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
         /* v10: the apply only NOMINATES (peer_remove dropped the cached verdicts with

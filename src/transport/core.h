@@ -33,25 +33,25 @@ extern "C" {
   #undef DART_SHM              /* both set: the opt-out wins */
 #endif
 
-#ifndef DART_FRAG_PAYLOAD
-#define DART_FRAG_PAYLOAD 1350u          /* default bytes of message data per fragment */
+#ifndef DART_FRAG_SIZE
+#define DART_FRAG_SIZE 1350u          /* default bytes of message data per fragment */
 #endif
-/* The UDP fragment size is set PER NODE at init (DartConfig.frag_payload) and
+/* The UDP fragment size is set PER NODE at init (DartConfig.frag_size) and
  * advertised via discovery, so a receiver reassembles each message at the SOURCE
  * node's size -- a publisher always fragments with one size, so its seqno line stays
  * self-consistent (no per-message field on the wire). These two compile bounds
  * frame the runtime range so fixed buffers can be sized; both default to
- * DART_FRAG_PAYLOAD, i.e. no change unless you opt in. MAX sizes the datagram
+ * DART_FRAG_SIZE, i.e. no change unless you opt in. MAX sizes the datagram
  * buffers (raise it for jumbo frames / a bigger same-LAN size); MIN sizes the
  * reassembly bitmaps (lower it only if some node uses a smaller size). Every
- * node's frag_payload must lie in [MIN, MAX]. */
-#ifndef DART_FRAG_PAYLOAD_MAX
-#define DART_FRAG_PAYLOAD_MAX DART_FRAG_PAYLOAD
+ * node's frag_size must lie in [MIN, MAX]. */
+#ifndef DART_FRAG_SIZE_MAX
+#define DART_FRAG_SIZE_MAX DART_FRAG_SIZE
 #endif
-#ifndef DART_FRAG_PAYLOAD_MIN
-#define DART_FRAG_PAYLOAD_MIN DART_FRAG_PAYLOAD
+#ifndef DART_FRAG_SIZE_MIN
+#define DART_FRAG_SIZE_MIN DART_FRAG_SIZE
 #endif
-#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD_MAX + 40u)   /* + largest header */
+#define DART_DGRAM_MAX (DART_FRAG_SIZE_MAX + 40u)   /* + largest header */
 
 #ifdef DART_SHM
 #define DART_SHM_DESC_BYTES 24u   /* opaque SHM descriptor on the wire; == dart_shm.h DART_SHM_DESC_WIRE */
@@ -173,7 +173,7 @@ typedef struct {
 typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
-#define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
+#define DART_MESSAGE_MAX (65535u * DART_FRAG_SIZE_MAX)
 
 /* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user topics grow to
  * fit (max_message_bytes may be 0); NULL (default, embedded) keeps fixed buffers and a
@@ -189,8 +189,8 @@ typedef struct {
     const DartTopicDef *topics;     /* NULL = reserve mode (see above) */
     uint16_t              n_topics;   /* defined count, or reserved capacity in reserve mode */
     uint16_t              max_peers;
-    uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
-                                           DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
+    uint16_t              frag_size; /* UDP fragment size this node sends with; 0 =
+                                           DART_FRAG_SIZE. Clamped to [MIN, MAX]. */
     DartMessageFn         on_message;
 #ifdef DART_SHM
     i_DartShmMsgFn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
@@ -231,9 +231,9 @@ void      dart_transport_destroy(DartTransportState *st);
 uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_topic_identity(const DartTopicDef *def);   /* = dart_topic_id(def->name) */
 
-/* Normalize a UDP fragment size: 0 -> DART_FRAG_PAYLOAD, then clamp to [MIN,MAX].
+/* Normalize a UDP fragment size: 0 -> DART_FRAG_SIZE, then clamp to [MIN,MAX].
  * The rule dart_transport_init and the node's announce blob both apply (single source). */
-uint16_t  dart_clamp_frag(uint16_t frag_payload);
+uint16_t  dart_clamp_frag(uint16_t frag_size);
 
 /* This node's own (clamped) UDP fragment size: a send whose payload exceeds it
  * fragments into 2+ datagrams. The node uses it as the SHM cutoff: a message that
@@ -243,7 +243,7 @@ uint16_t  dart_transport_frag(DartTransportState *st);
 
 /* A new peer matches nothing until dart_transport_apply_peer_interest feeds its interest
  * list (carried in its discovery announce). peer_frag: that peer's advertised UDP
- * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_PAYLOAD.
+ * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_SIZE.
  * Clamped to [MIN, MAX]. */
 void      dart_transport_peer_add   (DartTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 void      dart_transport_peer_remove(DartTransportState *st, uint32_t peer_id);
@@ -304,10 +304,10 @@ typedef struct {
 } DartMetaSchema;
 
 /* Bytes to reserve for the overlay: prefix + the interest list at n_topics entries,
- * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_capacity. */
-uint16_t  dart_meta_capacity(uint16_t n_topics);
+ * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_cap. */
+uint16_t  dart_meta_cap(uint16_t n_topics);
 /* Exact bytes the next dart_transport_meta_build will emit for the CURRENT topic state,
- * so a growable caller sizes its buffer to actual content; dart_meta_capacity stays the
+ * so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
  * fixed-buffer worst case (and the accept bound for peers' overlays). */
 uint16_t  dart_transport_meta_size(DartTransportState *st);
 /* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix

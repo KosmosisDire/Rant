@@ -175,7 +175,7 @@ typedef struct {
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
     const char *name;       /* our copy of the topic name (NUL-terminated storage) */
     uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
-    uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
+    uint16_t  max_frags;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
@@ -332,7 +332,7 @@ size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t index, uint64_t base, uint16_t co
 size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t index, uint64_t first, uint64_t last, uint32_t cnt);
 size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t index, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
 void   i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot);
-void   i_dart_lane_enq_idx(DartTransportState *st, uint32_t rec);   /* enqueue by record index */
+void   i_dart_lane_enqueue(DartTransportState *st, uint32_t li);   /* enqueue a lane record by index */
 void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
 size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p);

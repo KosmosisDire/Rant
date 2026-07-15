@@ -236,14 +236,14 @@ void i_dart_node_core_bind_discovery(i_DartNodeCore *c, DartDiscoveryState *disc
 
 /* arena layout: the core struct, the announce-blob buffer (fixed mode only: with an alloc
    hook the blob is hook-allocated at its ACTUAL size and grown at build time, instead of
-   reserving dart_meta_capacity's worst case), then the per-topic schema registry (no peer
+   reserving dart_meta_cap's worst case), then the per-topic schema registry (no peer
    table -- that lives in the discovery core). One sequence so measure and build agree. */
 static void i_dart_node_core_layout(i_DartBump *b, uint16_t n_topics, int dynamic_meta,
                               i_DartNodeCore **out_c, uint8_t **out_meta,
                               DartMetaSchema **out_schemas, const DartSchema ***out_compiled){
     i_DartNodeCore *c       = (i_DartNodeCore*)i_dart_bump_take(b, sizeof(struct i_DartNodeCore), 16);
     uint8_t *meta           = dynamic_meta ? NULL
-                            : (uint8_t*)   i_dart_bump_take(b, dart_meta_capacity(n_topics), 16);
+                            : (uint8_t*)   i_dart_bump_take(b, dart_meta_cap(n_topics), 16);
     DartMetaSchema *schemas = (DartMetaSchema*)i_dart_bump_take(b, (size_t)n_topics*sizeof(DartMetaSchema), 16);
     const DartSchema **compiled = (const DartSchema**)i_dart_bump_take(b, (size_t)n_topics*sizeof(DartSchema*), 16);
     if (out_c)        *out_c        = c;
@@ -276,7 +276,7 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
     c->fetch_details = cfg->fetch_details;
     memcpy(c->oob_host, cfg->oob_host, 16);
     c->meta_buf      = meta;                                            /* dynamic: NULL until the first build */
-    c->meta_cap      = meta ? dart_meta_capacity(cfg->n_topics) : 0;
+    c->meta_cap      = meta ? dart_meta_cap(cfg->n_topics) : 0;
     c->frag_size     = cfg->frag_size;
     c->chan_schemas  = schemas;
     c->chan_compiled = compiled;
@@ -303,7 +303,7 @@ i_DartNodeCore *i_dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, siz
                                            the hook-allocated schema arrays ride along untouched */
     if (meta){                          /* fixed mode: caller rebuilds the blob into the new slot */
         c->meta_buf = meta;
-        c->meta_cap = dart_meta_capacity(new_n_topics);
+        c->meta_cap = dart_meta_cap(new_n_topics);
     }                                   /* dynamic: the hook-allocated blob is stable, carried by *c = *old
                                            (the caller's rebuild grows it if the new counts need more) */
     keep = old->n_topics < new_n_topics ? old->n_topics : new_n_topics;

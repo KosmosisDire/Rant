@@ -14,7 +14,7 @@ static void i_dart_dest_push(DartTransportState *st, uint32_t d){
 
 
 /* enqueue a lane record that just got sendable work; idempotent while queued */
-void i_dart_lane_enq_idx(DartTransportState *st, uint32_t li){
+void i_dart_lane_enqueue(DartTransportState *st, uint32_t li){
     i_DartLane *l=&st->lanes[li];
     uint32_t d=l->peer_slot;
     if (l->queued) return;
@@ -47,14 +47,14 @@ void i_dart_sched_drop(DartTransportState *st, uint32_t li){
 
 /* enqueue, and track a freshly-armed reader ack/NACK deadline for the poll cap. Used
  * by the arm sites (ack_due_us is future or 0); the sweep enqueues due lanes with
- * i_dart_lane_enq_idx instead, since it recomputes next_deadline itself. */
+ * i_dart_lane_enqueue instead, since it recomputes next_deadline itself. */
 void i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     uint32_t li=i_dart_lane_id(st,topic_index,peer_slot);
     i_DartLane *l;
     if (li==DART__NIL) return;                     /* unmatched lane: nothing to schedule */
     l=&st->lanes[li];
     if (l->r.used && l->r.ack_pending) i_dart_transport_arm_deadline(st, l->r.ack_due_us);
-    i_dart_lane_enq_idx(st, li);
+    i_dart_lane_enqueue(st, li);
 }
 
 
@@ -108,11 +108,11 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
            node's data topics never advance next_seqno but still owe acks */
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
         if (l->w.used && l->w.reader_reliable && l->w.acked_upto < topic->next_seqno){
-            if (now>=l->w.hb_next_us) i_dart_lane_enq_idx(st,li);
+            if (now>=l->w.hb_next_us) i_dart_lane_enqueue(st,li);
             else if (l->w.hb_next_us < mind) mind = l->w.hb_next_us;
         }
         if (l->r.used && l->r.ack_pending){
-            if (now>=l->r.ack_due_us) i_dart_lane_enq_idx(st,li);
+            if (now>=l->r.ack_due_us) i_dart_lane_enqueue(st,li);
             else if (l->r.ack_due_us < mind) mind = l->r.ack_due_us;
         }
     }

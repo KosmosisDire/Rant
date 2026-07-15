@@ -350,25 +350,25 @@ extern "C" {
   #undef DART_SHM              /* both set: the opt-out wins */
 #endif
 
-#ifndef DART_FRAG_PAYLOAD
-#define DART_FRAG_PAYLOAD 1350u          /* default bytes of message data per fragment */
+#ifndef DART_FRAG_SIZE
+#define DART_FRAG_SIZE 1350u          /* default bytes of message data per fragment */
 #endif
-/* The UDP fragment size is set PER NODE at init (DartConfig.frag_payload) and
+/* The UDP fragment size is set PER NODE at init (DartConfig.frag_size) and
  * advertised via discovery, so a receiver reassembles each message at the SOURCE
  * node's size -- a publisher always fragments with one size, so its seqno line stays
  * self-consistent (no per-message field on the wire). These two compile bounds
  * frame the runtime range so fixed buffers can be sized; both default to
- * DART_FRAG_PAYLOAD, i.e. no change unless you opt in. MAX sizes the datagram
+ * DART_FRAG_SIZE, i.e. no change unless you opt in. MAX sizes the datagram
  * buffers (raise it for jumbo frames / a bigger same-LAN size); MIN sizes the
  * reassembly bitmaps (lower it only if some node uses a smaller size). Every
- * node's frag_payload must lie in [MIN, MAX]. */
-#ifndef DART_FRAG_PAYLOAD_MAX
-#define DART_FRAG_PAYLOAD_MAX DART_FRAG_PAYLOAD
+ * node's frag_size must lie in [MIN, MAX]. */
+#ifndef DART_FRAG_SIZE_MAX
+#define DART_FRAG_SIZE_MAX DART_FRAG_SIZE
 #endif
-#ifndef DART_FRAG_PAYLOAD_MIN
-#define DART_FRAG_PAYLOAD_MIN DART_FRAG_PAYLOAD
+#ifndef DART_FRAG_SIZE_MIN
+#define DART_FRAG_SIZE_MIN DART_FRAG_SIZE
 #endif
-#define DART_DGRAM_MAX (DART_FRAG_PAYLOAD_MAX + 40u)   /* + largest header */
+#define DART_DGRAM_MAX (DART_FRAG_SIZE_MAX + 40u)   /* + largest header */
 
 #ifdef DART_SHM
 #define DART_SHM_DESC_BYTES 24u   /* opaque SHM descriptor on the wire; == dart_shm.h DART_SHM_DESC_WIRE */
@@ -490,7 +490,7 @@ typedef struct {
 typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
-#define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
+#define DART_MESSAGE_MAX (65535u * DART_FRAG_SIZE_MAX)
 
 /* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user topics grow to
  * fit (max_message_bytes may be 0); NULL (default, embedded) keeps fixed buffers and a
@@ -506,8 +506,8 @@ typedef struct {
     const DartTopicDef *topics;     /* NULL = reserve mode (see above) */
     uint16_t              n_topics;   /* defined count, or reserved capacity in reserve mode */
     uint16_t              max_peers;
-    uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
-                                           DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
+    uint16_t              frag_size; /* UDP fragment size this node sends with; 0 =
+                                           DART_FRAG_SIZE. Clamped to [MIN, MAX]. */
     DartMessageFn         on_message;
 #ifdef DART_SHM
     i_DartShmMsgFn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
@@ -548,9 +548,9 @@ void      dart_transport_destroy(DartTransportState *st);
 uint64_t  dart_topic_id(const char *name);
 uint64_t  dart_topic_identity(const DartTopicDef *def);   /* = dart_topic_id(def->name) */
 
-/* Normalize a UDP fragment size: 0 -> DART_FRAG_PAYLOAD, then clamp to [MIN,MAX].
+/* Normalize a UDP fragment size: 0 -> DART_FRAG_SIZE, then clamp to [MIN,MAX].
  * The rule dart_transport_init and the node's announce blob both apply (single source). */
-uint16_t  dart_clamp_frag(uint16_t frag_payload);
+uint16_t  dart_clamp_frag(uint16_t frag_size);
 
 /* This node's own (clamped) UDP fragment size: a send whose payload exceeds it
  * fragments into 2+ datagrams. The node uses it as the SHM cutoff: a message that
@@ -560,7 +560,7 @@ uint16_t  dart_transport_frag(DartTransportState *st);
 
 /* A new peer matches nothing until dart_transport_apply_peer_interest feeds its interest
  * list (carried in its discovery announce). peer_frag: that peer's advertised UDP
- * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_PAYLOAD.
+ * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_SIZE.
  * Clamped to [MIN, MAX]. */
 void      dart_transport_peer_add   (DartTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 void      dart_transport_peer_remove(DartTransportState *st, uint32_t peer_id);
@@ -621,10 +621,10 @@ typedef struct {
 } DartMetaSchema;
 
 /* Bytes to reserve for the overlay: prefix + the interest list at n_topics entries,
- * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_capacity. */
-uint16_t  dart_meta_capacity(uint16_t n_topics);
+ * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_cap. */
+uint16_t  dart_meta_cap(uint16_t n_topics);
 /* Exact bytes the next dart_transport_meta_build will emit for the CURRENT topic state,
- * so a growable caller sizes its buffer to actual content; dart_meta_capacity stays the
+ * so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
  * fixed-buffer worst case (and the accept bound for peers' overlays). */
 uint16_t  dart_transport_meta_size(DartTransportState *st);
 /* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix
@@ -1584,7 +1584,7 @@ typedef struct {
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
-                                                0 = DART_FRAG_PAYLOAD. Advertised via discovery so
+                                                0 = DART_FRAG_SIZE. Advertised via discovery so
                                                 peers reassemble at our size. Clamp [MIN, MAX]; raise
                                                 MAX (compile) for jumbo frames. One size per node. */
 } DartNodeNet;
@@ -2362,7 +2362,7 @@ typedef struct {
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
     const char *name;       /* our copy of the topic name (NUL-terminated storage) */
     uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
-    uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
+    uint16_t  max_frags;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
@@ -2519,7 +2519,7 @@ size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t index, uint64_t base, uint16_t co
 size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t index, uint64_t first, uint64_t last, uint32_t cnt);
 size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t index, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
 void   i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot);
-void   i_dart_lane_enq_idx(DartTransportState *st, uint32_t rec);   /* enqueue by record index */
+void   i_dart_lane_enqueue(DartTransportState *st, uint32_t li);   /* enqueue a lane record by index */
 void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
 size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p);
@@ -2602,7 +2602,7 @@ static void i_dart_dest_push(DartTransportState *st, uint32_t d){
 
 
 /* enqueue a lane record that just got sendable work; idempotent while queued */
-void i_dart_lane_enq_idx(DartTransportState *st, uint32_t li){
+void i_dart_lane_enqueue(DartTransportState *st, uint32_t li){
     i_DartLane *l=&st->lanes[li];
     uint32_t d=l->peer_slot;
     if (l->queued) return;
@@ -2635,14 +2635,14 @@ void i_dart_sched_drop(DartTransportState *st, uint32_t li){
 
 /* enqueue, and track a freshly-armed reader ack/NACK deadline for the poll cap. Used
  * by the arm sites (ack_due_us is future or 0); the sweep enqueues due lanes with
- * i_dart_lane_enq_idx instead, since it recomputes next_deadline itself. */
+ * i_dart_lane_enqueue instead, since it recomputes next_deadline itself. */
 void i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     uint32_t li=i_dart_lane_id(st,topic_index,peer_slot);
     i_DartLane *l;
     if (li==DART__NIL) return;                     /* unmatched lane: nothing to schedule */
     l=&st->lanes[li];
     if (l->r.used && l->r.ack_pending) i_dart_transport_arm_deadline(st, l->r.ack_due_us);
-    i_dart_lane_enq_idx(st, li);
+    i_dart_lane_enqueue(st, li);
 }
 
 
@@ -2696,11 +2696,11 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
            node's data topics never advance next_seqno but still owe acks */
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
         if (l->w.used && l->w.reader_reliable && l->w.acked_upto < topic->next_seqno){
-            if (now>=l->w.hb_next_us) i_dart_lane_enq_idx(st,li);
+            if (now>=l->w.hb_next_us) i_dart_lane_enqueue(st,li);
             else if (l->w.hb_next_us < mind) mind = l->w.hb_next_us;
         }
         if (l->r.used && l->r.ack_pending){
-            if (now>=l->r.ack_due_us) i_dart_lane_enq_idx(st,li);
+            if (now>=l->r.ack_due_us) i_dart_lane_enqueue(st,li);
             else if (l->r.ack_due_us < mind) mind = l->r.ack_due_us;
         }
     }
@@ -2798,7 +2798,7 @@ static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, s
     { uint32_t li = topic->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
       while (li != DART__NIL){
           i_DartLane *l = &st->lanes[li];
-          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enq_idx(st, li);
+          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enqueue(st, li);
           li = l->topic_next;
       }
     }
@@ -3261,7 +3261,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
     i_DartTopic *topic=&st->topics[topic_index];
     i_DartReaderProxy *r=i_dart_reader_proxy_at(st,topic_index,peer_slot);
     int reliable = (topic->qos.reliability==DART_RELIABLE);
-    int new_fragment = 0;
+    int new_frag = 0;
     uint64_t seqno, base; uint16_t frag, count, payload_len; uint32_t sample_len; const uint8_t *payload;
     if (p[0] & DART_F_SINGLE){           /* single fragment: frag/count/len implied */
         seqno=i_dart_le_r64(p+DART_OFFSET_SEQNO); frag=0; count=1; payload_len=i_dart_le_r16(p+DART_OFFSET_PAYLOAD_LEN_SINGLE); sample_len=payload_len; payload=p+DART_HEADER_DATA_SINGLE;
@@ -3306,7 +3306,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           return;
       }
       buf_cap  = topic->dynamic ? r->assembly_cap : topic->qos.max_message_bytes;
-      bitmap_bytes = topic->dynamic ? bitmap_need     : (uint32_t)((topic->max_fragments+7u)/8u);
+      bitmap_bytes = topic->dynamic ? bitmap_need     : (uint32_t)((topic->max_frags+7u)/8u);
       /* base == deliver_upto: current sample */
       if (!r->assembly_active){
           r->assembly_active=1; r->assembly_count=count; r->assembly_len=sample_len; r->assembly_low=0;
@@ -3315,10 +3315,10 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
       }
       if (count!=r->assembly_count) return;                  /* inconsistent, ignore */
       topic->repair_stats.frags_recv++;                             /* every accepted DATA fragment, dups included */
-      new_fragment = !i_dart_bit_get(r->frag_bitmap,frag);
-      if (new_fragment){
+      new_frag = !i_dart_bit_get(r->frag_bitmap,frag);
+      if (new_frag){
           /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
-             a peer staying within [MIN, MAX] keeps count <= max_fragments, so the bitmap
+             a peer staying within [MIN, MAX] keeps count <= max_frags, so the bitmap
              can't overflow and the buf_cap guard catches any stray offset */
           uint32_t offset=(uint32_t)frag*st->peer_frag[peer_slot];
           if (offset+payload_len<=buf_cap) memcpy(r->assembly_buf+offset,payload,payload_len);
@@ -3354,7 +3354,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           if (done){
               i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
               i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
-          } else if (new_fragment && hole){           /* gap revealed, or repair advanced: request now */
+          } else if (new_frag && hole){           /* gap revealed, or repair advanced: request now */
               i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
               i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
           }
@@ -3565,9 +3565,9 @@ static size_t i_dart_name_len(const char *s){            /* capped strlen */
 
 
 /* Reader-side fragment-count bound: a peer may fragment at the smallest size in
- * the deployment, so size the reassembly bitmap by DART_FRAG_PAYLOAD_MIN. */
-static uint16_t i_dart_max_fragments(uint32_t max_message_bytes){
-    uint32_t f = (max_message_bytes + DART_FRAG_PAYLOAD_MIN - 1) / DART_FRAG_PAYLOAD_MIN;
+ * the deployment, so size the reassembly bitmap by DART_FRAG_SIZE_MIN. */
+static uint16_t i_dart_max_frags(uint32_t max_message_bytes){
+    uint32_t f = (max_message_bytes + DART_FRAG_SIZE_MIN - 1) / DART_FRAG_SIZE_MIN;
     if (f == 0) f = 1;
     return (uint16_t)f;
 }
@@ -3582,16 +3582,16 @@ static void i_dart_qos_defaults(DartQos *q, int dynamic){
     if (q->heartbeat_us == 0)     q->heartbeat_us    = DART_QOS_DEF_HEARTBEAT_US;
     if (q->repair_delay_us == 0)  q->repair_delay_us = DART_QOS_DEF_REPAIR_US;
     /* fixed mode only: a dynamic topic keeps 0 = grow-to-fit via allocator */
-    if (!dynamic && q->max_message_bytes == 0) q->max_message_bytes = DART_FRAG_PAYLOAD;
+    if (!dynamic && q->max_message_bytes == 0) q->max_message_bytes = DART_FRAG_SIZE;
 }
 
 
 /* Normalize a node/peer UDP fragment size: 0 -> default, then clamp to [MIN,MAX].
    Public so the transport (dart_transport_init) and the node (announce blob) clamp identically. */
-uint16_t dart_clamp_frag(uint16_t frag_payload){
-    uint16_t f = frag_payload ? frag_payload : DART_FRAG_PAYLOAD;
-    if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
-    if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
+uint16_t dart_clamp_frag(uint16_t frag_size){
+    uint16_t f = frag_size ? frag_size : DART_FRAG_SIZE;
+    if (f < DART_FRAG_SIZE_MIN) f = DART_FRAG_SIZE_MIN;
+    if (f > DART_FRAG_SIZE_MAX) f = DART_FRAG_SIZE_MAX;
     return f;
 }
 
@@ -3647,7 +3647,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
-          st->frag = dart_clamp_frag(cfg->frag_payload);
+          st->frag = dart_clamp_frag(cfg->frag_size);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
           st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
           st->topics=topic; st->reader_epoch_counter=1;
@@ -3658,7 +3658,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->peer_index=peer_index; st->peer_index_len=peer_index_len; st->index_max=meta_ids;
           st->peer_astate=peer_astate;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
-          { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
+          { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_SIZE; }  /* set per peer on add */
 #ifdef DART_SHM
           st->peer_shm=peer_shm; memset(peer_shm,0,max_peers);
 #endif
@@ -3710,15 +3710,15 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
             /* dynamic = an allocator is set: buffers grow via the hook, not the arena */
             int dyn = (cfg->allocator != NULL);
             DartQos q = def->qos;            /* local, normalized copy */
-            i_DartWriterSample *history; uint16_t depth, max_fragments, d;
+            i_DartWriterSample *history; uint16_t depth, max_frags, d;
             i_dart_qos_defaults(&q, dyn);
             depth = q.keep_last;
-            max_fragments = i_dart_max_fragments(q.max_message_bytes);
+            max_frags = i_dart_max_frags(q.max_message_bytes);
             history = (i_DartWriterSample*)i_dart_bump_take(b, depth*sizeof(i_DartWriterSample), 16);
             if (st && b->base){
                 i_DartTopic *topic = &st->topics[c];
                 size_t lane = i_dart_name_len(def->name);
-                topic->qos=q; topic->max_fragments=max_fragments;
+                topic->qos=q; topic->max_frags=max_frags;
                 topic->role=def->role; topic->dynamic=(uint8_t)dyn;
                 topic->identity = dart_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
@@ -3736,12 +3736,12 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                the hook (and does not exist yet here). */
             if (!dyn) for (p=0;p<max_peers;p++){
                 uint8_t *assembly_buf = (uint8_t*)i_dart_bump_take(b, q.max_message_bytes, 8);
-                uint8_t *frag_bitmap  = (uint8_t*)i_dart_bump_take(b, (max_fragments+7u)/8u, 1);
+                uint8_t *frag_bitmap  = (uint8_t*)i_dart_bump_take(b, (max_frags+7u)/8u, 1);
                 if (st && b->base){
                     i_DartReaderProxy *r = i_dart_reader_proxy_at(st,c,p);
                     r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
                     r->assembly_cap = q.max_message_bytes;
-                    r->bitmap_cap  = (uint32_t)((max_fragments+7u)/8u);
+                    r->bitmap_cap  = (uint32_t)((max_frags+7u)/8u);
                 }
             }
         }
@@ -4382,7 +4382,7 @@ static int i_dart_meta_ok(DartBytes meta){
 static uint16_t i_dart_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
-uint16_t dart_meta_capacity(uint16_t n_topics){
+uint16_t dart_meta_cap(uint16_t n_topics){
     size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_topics);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
@@ -4390,13 +4390,13 @@ uint16_t dart_meta_capacity(uint16_t n_topics){
 
 /* Exact overlay size the next dart_transport_meta_build will emit for the current
  * topic state (the same walk, byte for byte), so a caller can size the buffer to the
- * actual content instead of dart_meta_capacity's full-reserve worst case. */
+ * actual content instead of dart_meta_cap's full-reserve worst case. */
 uint16_t dart_transport_meta_size(DartTransportState *st){
     uint16_t c, n=0;
     size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
     len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n;
-    if (len > 65000u) len = 65000u;              /* the dart_meta_capacity ceiling; past it the build truncates */
+    if (len > 65000u) len = 65000u;              /* the dart_meta_cap ceiling; past it the build truncates */
     return (uint16_t)len;
 }
 
@@ -4721,7 +4721,7 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     if (!topic->history) return -4;                            /* OOM */
     memset(topic->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
     topic->history_owned = 1; topic->dynamic = 1;
-    topic->qos = q; topic->max_fragments = i_dart_max_fragments(q.max_message_bytes);
+    topic->qos = q; topic->max_frags = i_dart_max_frags(q.max_message_bytes);
     topic->role = def->role;
     topic->identity = dart_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
@@ -6684,14 +6684,14 @@ void i_dart_node_core_bind_discovery(i_DartNodeCore *c, DartDiscoveryState *disc
 
 /* arena layout: the core struct, the announce-blob buffer (fixed mode only: with an alloc
    hook the blob is hook-allocated at its ACTUAL size and grown at build time, instead of
-   reserving dart_meta_capacity's worst case), then the per-topic schema registry (no peer
+   reserving dart_meta_cap's worst case), then the per-topic schema registry (no peer
    table -- that lives in the discovery core). One sequence so measure and build agree. */
 static void i_dart_node_core_layout(i_DartBump *b, uint16_t n_topics, int dynamic_meta,
                               i_DartNodeCore **out_c, uint8_t **out_meta,
                               DartMetaSchema **out_schemas, const DartSchema ***out_compiled){
     i_DartNodeCore *c       = (i_DartNodeCore*)i_dart_bump_take(b, sizeof(struct i_DartNodeCore), 16);
     uint8_t *meta           = dynamic_meta ? NULL
-                            : (uint8_t*)   i_dart_bump_take(b, dart_meta_capacity(n_topics), 16);
+                            : (uint8_t*)   i_dart_bump_take(b, dart_meta_cap(n_topics), 16);
     DartMetaSchema *schemas = (DartMetaSchema*)i_dart_bump_take(b, (size_t)n_topics*sizeof(DartMetaSchema), 16);
     const DartSchema **compiled = (const DartSchema**)i_dart_bump_take(b, (size_t)n_topics*sizeof(DartSchema*), 16);
     if (out_c)        *out_c        = c;
@@ -6724,7 +6724,7 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
     c->fetch_details = cfg->fetch_details;
     memcpy(c->oob_host, cfg->oob_host, 16);
     c->meta_buf      = meta;                                            /* dynamic: NULL until the first build */
-    c->meta_cap      = meta ? dart_meta_capacity(cfg->n_topics) : 0;
+    c->meta_cap      = meta ? dart_meta_cap(cfg->n_topics) : 0;
     c->frag_size     = cfg->frag_size;
     c->chan_schemas  = schemas;
     c->chan_compiled = compiled;
@@ -6751,7 +6751,7 @@ i_DartNodeCore *i_dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, siz
                                            the hook-allocated schema arrays ride along untouched */
     if (meta){                          /* fixed mode: caller rebuilds the blob into the new slot */
         c->meta_buf = meta;
-        c->meta_cap = dart_meta_capacity(new_n_topics);
+        c->meta_cap = dart_meta_cap(new_n_topics);
     }                                   /* dynamic: the hook-allocated blob is stable, carried by *c = *old
                                            (the caller's rebuild grows it if the new counts need more) */
     keep = old->n_topics < new_n_topics ? old->n_topics : new_n_topics;
@@ -7526,13 +7526,13 @@ struct DartNode {
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
     /* the metadata accept bound (largest peer announce blob we store/receive). Starts at
-       dart_meta_capacity(max_topics) and SELF-HEALS: a peer whose blob exceeds it fires
+       dart_meta_cap(max_topics) and SELF-HEALS: a peer whose blob exceeds it fires
        META_TOO_BIG with the needed size, we grow the bound + RX buffers at the next poll
        and solicit a re-announce, so a big-topology peer and a default node interoperate
        with no configuration. meta_grow_need is the pending request; meta_grow_failed
        remembers a size that would not allocate, so the retry loop surfaces instead of
        silently spinning. */
-    uint16_t       meta_capacity;
+    uint16_t       meta_cap;
     uint16_t       meta_grow_need;
     uint16_t       meta_grow_failed;
     /* topic handles. handles is a pointer array in the arena; each DartTopic struct
@@ -7884,7 +7884,7 @@ static void i_dart_node_on_event(const DartEvent *ev){
        past the wire ceiling, and a size that already failed to allocate, surface. */
     if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_META_TOO_BIG){
         uint64_t need = ev->too_big_bytes;
-        if (need > n->meta_capacity && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
+        if (need > n->meta_cap && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
             n->meta_grow_need = (uint16_t)need;
             return;
         }
@@ -7969,7 +7969,7 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_t
     /* data-socket RX buffer: sized so a unicast announce carrying the largest blob this
        node accepts fits (recvfrom drops an oversized datagram, which would leave a late
        joiner unable to ever fetch a big peer blob: its only path is this socket) */
-    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_capacity);
+    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_cap);
     if (o->rx_buf_bytes < DART_DGRAM_MAX) o->rx_buf_bytes = DART_DGRAM_MAX;
     o->rx_buf = (uint8_t*)i_dart_bump_take(b, o->rx_buf_bytes, 16);
 }
@@ -8081,7 +8081,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.discovery.announce_interval_us = o.discovery.announce_interval_us;
     dc.discovery.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.discovery.max_peers   = max_peers;
-    dc.discovery.meta_capacity = dart_meta_capacity(max_topics);
+    dc.discovery.meta_cap = dart_meta_cap(max_topics);
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* node-core lifecycle state per peer */
     dc.discovery.alloc = i_dart_node_alloc;   /* per-peer blobs at actual size, not the worst-case pool
                                                  (set before sizing so measure and place agree; the
@@ -8095,7 +8095,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     tc.topics    = NULL;            /* reserve mode: topics created at runtime */
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
-    tc.frag_payload= o.net.fragment_size;
+    tc.frag_size= o.net.fragment_size;
     tc.allocator   = i_dart_node_alloc;   /* non-NULL => reserve/dynamic mode in dart_transport_init */
 
     {   i_DartBump b; memset(&b,0,sizeof b);
@@ -8155,7 +8155,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_topics = max_topics;
     n->max_peers = max_peers;
-    n->meta_capacity = dc.discovery.meta_capacity;   /* the initial accept bound (self-heals up) */
+    n->meta_cap = dc.discovery.meta_cap;   /* the initial accept bound (self-heals up) */
 
     tc.on_message = i_dart_node_on_message;     /* wrap so on_message receives a DartMsg */
     tc.on_event   = i_dart_node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
@@ -8271,18 +8271,18 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     uint8_t *nbase; size_t need;
     uint16_t old_max_topics = n->max_topics;
     /* the accept bound never shrinks: topic-derived, previously grown, or requested */
-    uint16_t new_meta_cap = dart_meta_capacity(new_max_topics);
-    if (n->meta_capacity > new_meta_cap) new_meta_cap = n->meta_capacity;
+    uint16_t new_meta_cap = dart_meta_cap(new_max_topics);
+    if (n->meta_cap > new_meta_cap) new_meta_cap = n->meta_cap;
     if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
     if (!n->alloc_dynamic) return 0;
     if (new_max_peers <= n->max_peers && new_max_topics <= n->max_topics
-        && new_meta_cap <= n->meta_capacity) return 0;
+        && new_meta_cap <= n->meta_cap) return 0;
 
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
     tc.topics=NULL; tc.n_topics=new_max_topics; tc.max_peers=new_max_peers;
-    tc.allocator=i_dart_node_alloc; tc.frag_payload=n->net.fragment_size;
-    dc.discovery.max_peers=new_max_peers; dc.discovery.meta_capacity=new_meta_cap;
+    tc.allocator=i_dart_node_alloc; tc.frag_size=n->net.fragment_size;
+    dc.discovery.max_peers=new_max_peers; dc.discovery.meta_cap=new_meta_cap;
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* size discovery's scratch to match */
     dc.discovery.alloc = i_dart_node_alloc; dc.discovery.alloc_user = n; /* sizing must match the live core's
                                                                             hook mode (no arena blob pool) */
@@ -8331,7 +8331,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     n->handles=(DartTopic**)nb.handles;
     n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_topics=new_max_topics; n->max_peers=new_max_peers;
-    n->meta_capacity=new_meta_cap;
+    n->meta_cap=new_meta_cap;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
     return 1;
@@ -8495,7 +8495,7 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     if (n->meta_grow_need){
         uint16_t want = n->meta_grow_need;
         n->meta_grow_need = 0;
-        if (want > n->meta_capacity){
+        if (want > n->meta_cap){
             if (i_dart_node_grow(n, n->max_peers, n->max_topics, want)){
                 n->meta_grow_failed = 0;
                 dart_discovery_solicit(dart_discovery_state(n->discovery));

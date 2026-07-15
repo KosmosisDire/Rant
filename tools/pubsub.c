@@ -175,7 +175,7 @@ static void usage(void){
         "  pubsub pub <topic> [text...] [opts]      (no text = read lines from stdin)\n"
         "opts: --domain N  --mcast (same-host: discovery on loopback)  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
         "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
-        "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_PAYLOAD_MAX>=N)\n");
+        "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_SIZE_MAX>=N)\n");
 }
 
 /* Wait for subscribers to match this topic, pumping the node throughout, so a
@@ -437,7 +437,7 @@ int main(int argc, char **argv){
       if (sb > (64u<<20)) sb = 64u<<20;
       opts.net.recv_buffer_bytes = (uint32_t)sb;
       opts.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
-    if (frag) opts.net.fragment_size = (uint16_t)frag;   /* needs -DDART_FRAG_PAYLOAD_MAX>=frag */
+    if (frag) opts.net.fragment_size = (uint16_t)frag;   /* needs -DDART_FRAG_SIZE_MAX>=frag */
     if (if_ip)      opts.net.multicast_interface = if_ip;          /* multihomed: pin it */
     else if (mcast) opts.net.multicast_interface = "127.0.0.1";    /* same-host: stay local */
 

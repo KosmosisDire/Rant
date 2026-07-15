@@ -17,14 +17,14 @@ extern "C" {
 #define DART_DISCOVERY_PROTO_VERSION 3     /* v3: versioned meta blob, u16 meta_len */
 #endif
 
-#define DART_DISCOVERY_META_MAX 64   /* default per-peer OVERLAY capacity (cfg.meta_capacity overrides) */
+#define DART_DISCOVERY_META_MAX 64   /* default per-peer OVERLAY capacity (cfg.meta_cap overrides) */
 #define DART_DISCOVERY_NAME_MAX 32   /* max advertised peer-name bytes (blob's discovery section) */
 /* Fixed header (magic, ver, flags, domain, uuid) is sent EVERY announce, then
  * [u32 meta_version][u16 meta_len][meta...]. The meta blob = [discovery section: locator +
  * name][opaque overlay]: the locator + name moved out of the per-announce header into the
  * on-change blob so steady-state announces stay small (cached on the other side). */
 #define DART_DISCOVERY_META_OFF 30   /* HDR_LEN(24) + 4 (version) + 2 (len) */
-/* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_capacity */
+/* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_cap */
 #define DART_DISCOVERY_WIRE_MAX 128
 
 typedef struct {
@@ -121,16 +121,16 @@ typedef struct {
     DartBytes meta;         /* opaque OVERLAY blob (the higher layer's data, e.g. transport
                                frag/interest); discovery carries it after its own section. The
                                INITIAL value (dart_discovery_set_meta updates it). Must stay
-                               valid. .len <= meta_capacity */
-    uint16_t meta_capacity;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
+                               valid. .len <= meta_cap */
+    uint16_t meta_cap;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* opaque scratch reserved per peer (0 = none); see dart_discovery_peer_user.
                                     Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
     /* Optional allocation hook. When set, per-peer overlay blobs are allocated on demand
      * at each blob's ACTUAL length (grown per peer as bigger blobs arrive) instead of a
-     * fixed max_peers x meta_capacity arena pool -- typically a >90% cut, since real blobs
-     * are far smaller than the worst-case capacity. meta_capacity stays the accept bound
+     * fixed max_peers x meta_cap arena pool -- typically a >90% cut, since real blobs
+     * are far smaller than the worst-case capacity. meta_cap stays the accept bound
      * (META_TOO_BIG above it) either way. NULL (embedded default) keeps the fixed pool.
      * Pair with dart_discovery_destroy unless the hook's owner reclaims everything itself
      * (the node's allocator reset does). */
@@ -148,9 +148,9 @@ typedef struct DartDiscoveryState DartDiscoveryState;
 void         dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg);
 
 /* Bytes an IO layer must allocate for one rx/tx datagram scratch buffer: the fixed
- * header + version + len + meta_capacity (0 => DART_DISCOVERY_META_MAX), floored at
+ * header + version + len + meta_cap (0 => DART_DISCOVERY_META_MAX), floored at
  * DART_DISCOVERY_WIRE_MAX. The core constants that size it live here, so it owns the math. */
-uint32_t     dart_discovery_wire_size(uint16_t meta_capacity);
+uint32_t     dart_discovery_wire_size(uint16_t meta_cap);
 
 size_t       dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg);
 DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryCoreConfig *cfg);
@@ -162,7 +162,7 @@ void         dart_discovery_destroy(DartDiscoveryState *st);
  * local-id counter and the peer table (NOT a re-init). self_meta = the announce blob's new
  * address (the node core moved). Caller frees the old block afterward. Dynamic growth only. */
 DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
-        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_capacity,
+        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
         const uint8_t *self_meta, void *peer_cb_user);
 void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                DartBytes datagram, uint64_t now_us);

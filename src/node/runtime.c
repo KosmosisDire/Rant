@@ -117,13 +117,13 @@ struct DartNode {
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
     /* the metadata accept bound (largest peer announce blob we store/receive). Starts at
-       dart_meta_capacity(max_topics) and SELF-HEALS: a peer whose blob exceeds it fires
+       dart_meta_cap(max_topics) and SELF-HEALS: a peer whose blob exceeds it fires
        META_TOO_BIG with the needed size, we grow the bound + RX buffers at the next poll
        and solicit a re-announce, so a big-topology peer and a default node interoperate
        with no configuration. meta_grow_need is the pending request; meta_grow_failed
        remembers a size that would not allocate, so the retry loop surfaces instead of
        silently spinning. */
-    uint16_t       meta_capacity;
+    uint16_t       meta_cap;
     uint16_t       meta_grow_need;
     uint16_t       meta_grow_failed;
     /* topic handles. handles is a pointer array in the arena; each DartTopic struct
@@ -475,7 +475,7 @@ static void i_dart_node_on_event(const DartEvent *ev){
        past the wire ceiling, and a size that already failed to allocate, surface. */
     if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_META_TOO_BIG){
         uint64_t need = ev->too_big_bytes;
-        if (need > n->meta_capacity && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
+        if (need > n->meta_cap && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
             n->meta_grow_need = (uint16_t)need;
             return;
         }
@@ -560,7 +560,7 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_t
     /* data-socket RX buffer: sized so a unicast announce carrying the largest blob this
        node accepts fits (recvfrom drops an oversized datagram, which would leave a late
        joiner unable to ever fetch a big peer blob: its only path is this socket) */
-    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_capacity);
+    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_cap);
     if (o->rx_buf_bytes < DART_DGRAM_MAX) o->rx_buf_bytes = DART_DGRAM_MAX;
     o->rx_buf = (uint8_t*)i_dart_bump_take(b, o->rx_buf_bytes, 16);
 }
@@ -672,7 +672,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.discovery.announce_interval_us = o.discovery.announce_interval_us;
     dc.discovery.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.discovery.max_peers   = max_peers;
-    dc.discovery.meta_capacity = dart_meta_capacity(max_topics);
+    dc.discovery.meta_cap = dart_meta_cap(max_topics);
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* node-core lifecycle state per peer */
     dc.discovery.alloc = i_dart_node_alloc;   /* per-peer blobs at actual size, not the worst-case pool
                                                  (set before sizing so measure and place agree; the
@@ -686,7 +686,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     tc.topics    = NULL;            /* reserve mode: topics created at runtime */
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
-    tc.frag_payload= o.net.fragment_size;
+    tc.frag_size= o.net.fragment_size;
     tc.allocator   = i_dart_node_alloc;   /* non-NULL => reserve/dynamic mode in dart_transport_init */
 
     {   i_DartBump b; memset(&b,0,sizeof b);
@@ -746,7 +746,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_topics = max_topics;
     n->max_peers = max_peers;
-    n->meta_capacity = dc.discovery.meta_capacity;   /* the initial accept bound (self-heals up) */
+    n->meta_cap = dc.discovery.meta_cap;   /* the initial accept bound (self-heals up) */
 
     tc.on_message = i_dart_node_on_message;     /* wrap so on_message receives a DartMsg */
     tc.on_event   = i_dart_node_on_transport_event;  /* map DartTransportEvent -> app DartEvent */
@@ -862,18 +862,18 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     uint8_t *nbase; size_t need;
     uint16_t old_max_topics = n->max_topics;
     /* the accept bound never shrinks: topic-derived, previously grown, or requested */
-    uint16_t new_meta_cap = dart_meta_capacity(new_max_topics);
-    if (n->meta_capacity > new_meta_cap) new_meta_cap = n->meta_capacity;
+    uint16_t new_meta_cap = dart_meta_cap(new_max_topics);
+    if (n->meta_cap > new_meta_cap) new_meta_cap = n->meta_cap;
     if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
     if (!n->alloc_dynamic) return 0;
     if (new_max_peers <= n->max_peers && new_max_topics <= n->max_topics
-        && new_meta_cap <= n->meta_capacity) return 0;
+        && new_meta_cap <= n->meta_cap) return 0;
 
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
     tc.topics=NULL; tc.n_topics=new_max_topics; tc.max_peers=new_max_peers;
-    tc.allocator=i_dart_node_alloc; tc.frag_payload=n->net.fragment_size;
-    dc.discovery.max_peers=new_max_peers; dc.discovery.meta_capacity=new_meta_cap;
+    tc.allocator=i_dart_node_alloc; tc.frag_size=n->net.fragment_size;
+    dc.discovery.max_peers=new_max_peers; dc.discovery.meta_cap=new_meta_cap;
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* size discovery's scratch to match */
     dc.discovery.alloc = i_dart_node_alloc; dc.discovery.alloc_user = n; /* sizing must match the live core's
                                                                             hook mode (no arena blob pool) */
@@ -922,7 +922,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     n->handles=(DartTopic**)nb.handles;
     n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_topics=new_max_topics; n->max_peers=new_max_peers;
-    n->meta_capacity=new_meta_cap;
+    n->meta_cap=new_meta_cap;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
     return 1;
@@ -1086,7 +1086,7 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     if (n->meta_grow_need){
         uint16_t want = n->meta_grow_need;
         n->meta_grow_need = 0;
-        if (want > n->meta_capacity){
+        if (want > n->meta_cap){
             if (i_dart_node_grow(n, n->max_peers, n->max_topics, want)){
                 n->meta_grow_failed = 0;
                 dart_discovery_solicit(dart_discovery_state(n->discovery));

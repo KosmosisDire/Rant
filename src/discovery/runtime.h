@@ -35,7 +35,7 @@ typedef struct {
     const DartDiscoveryAddr *seed_peers;        /* unicast seeds for multicast-filtered nets */
     uint16_t              n_seed_peers;
     DartBytes             meta;                 /* optional OPAQUE overlay to advertise; {NULL,0} = none */
-    uint16_t              meta_capacity;        /* per-peer INCOMING overlay buffer; 0 = default */
+    uint16_t              meta_cap;        /* per-peer INCOMING overlay buffer; 0 = default */
     uint16_t              peer_user_bytes;      /* opaque scratch reserved per peer; 0 = none
                                                    (see dart_discovery_peer_user) */
 } DartDiscoveryConfig;
@@ -110,7 +110,7 @@ int        dart_discovery_last_os_error(void);
  * socket, UUID and peer table. self_meta = the new announce-blob address. Caller frees
  * the old block afterward. Placement (caller-owned) path only. */
 DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t new_cap,
-        uint16_t new_max_peers, uint16_t new_meta_capacity, const uint8_t *self_meta, void *peer_cb_user);
+        uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user);
 
 /* ----------------------------------------------------------- node integration */
 /* Hand the core a discovery datagram that arrived on another socket (unicast announces

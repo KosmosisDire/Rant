@@ -136,7 +136,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
     i_DartTopic *topic=&st->topics[topic_index];
     i_DartReaderProxy *r=i_dart_reader_proxy_at(st,topic_index,peer_slot);
     int reliable = (topic->qos.reliability==DART_RELIABLE);
-    int new_fragment = 0;
+    int new_frag = 0;
     uint64_t seqno, base; uint16_t frag, count, payload_len; uint32_t sample_len; const uint8_t *payload;
     if (p[0] & DART_F_SINGLE){           /* single fragment: frag/count/len implied */
         seqno=i_dart_le_r64(p+DART_OFFSET_SEQNO); frag=0; count=1; payload_len=i_dart_le_r16(p+DART_OFFSET_PAYLOAD_LEN_SINGLE); sample_len=payload_len; payload=p+DART_HEADER_DATA_SINGLE;
@@ -181,7 +181,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           return;
       }
       buf_cap  = topic->dynamic ? r->assembly_cap : topic->qos.max_message_bytes;
-      bitmap_bytes = topic->dynamic ? bitmap_need     : (uint32_t)((topic->max_fragments+7u)/8u);
+      bitmap_bytes = topic->dynamic ? bitmap_need     : (uint32_t)((topic->max_frags+7u)/8u);
       /* base == deliver_upto: current sample */
       if (!r->assembly_active){
           r->assembly_active=1; r->assembly_count=count; r->assembly_len=sample_len; r->assembly_low=0;
@@ -190,10 +190,10 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
       }
       if (count!=r->assembly_count) return;                  /* inconsistent, ignore */
       topic->repair_stats.frags_recv++;                             /* every accepted DATA fragment, dups included */
-      new_fragment = !i_dart_bit_get(r->frag_bitmap,frag);
-      if (new_fragment){
+      new_frag = !i_dart_bit_get(r->frag_bitmap,frag);
+      if (new_frag){
           /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
-             a peer staying within [MIN, MAX] keeps count <= max_fragments, so the bitmap
+             a peer staying within [MIN, MAX] keeps count <= max_frags, so the bitmap
              can't overflow and the buf_cap guard catches any stray offset */
           uint32_t offset=(uint32_t)frag*st->peer_frag[peer_slot];
           if (offset+payload_len<=buf_cap) memcpy(r->assembly_buf+offset,payload,payload_len);
@@ -229,7 +229,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           if (done){
               i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
               i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
-          } else if (new_fragment && hole){           /* gap revealed, or repair advanced: request now */
+          } else if (new_frag && hole){           /* gap revealed, or repair advanced: request now */
               i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
               i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
           }

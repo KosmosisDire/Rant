@@ -29,9 +29,9 @@ static size_t i_dart_name_len(const char *s){            /* capped strlen */
 
 
 /* Reader-side fragment-count bound: a peer may fragment at the smallest size in
- * the deployment, so size the reassembly bitmap by DART_FRAG_PAYLOAD_MIN. */
-static uint16_t i_dart_max_fragments(uint32_t max_message_bytes){
-    uint32_t f = (max_message_bytes + DART_FRAG_PAYLOAD_MIN - 1) / DART_FRAG_PAYLOAD_MIN;
+ * the deployment, so size the reassembly bitmap by DART_FRAG_SIZE_MIN. */
+static uint16_t i_dart_max_frags(uint32_t max_message_bytes){
+    uint32_t f = (max_message_bytes + DART_FRAG_SIZE_MIN - 1) / DART_FRAG_SIZE_MIN;
     if (f == 0) f = 1;
     return (uint16_t)f;
 }
@@ -46,16 +46,16 @@ static void i_dart_qos_defaults(DartQos *q, int dynamic){
     if (q->heartbeat_us == 0)     q->heartbeat_us    = DART_QOS_DEF_HEARTBEAT_US;
     if (q->repair_delay_us == 0)  q->repair_delay_us = DART_QOS_DEF_REPAIR_US;
     /* fixed mode only: a dynamic topic keeps 0 = grow-to-fit via allocator */
-    if (!dynamic && q->max_message_bytes == 0) q->max_message_bytes = DART_FRAG_PAYLOAD;
+    if (!dynamic && q->max_message_bytes == 0) q->max_message_bytes = DART_FRAG_SIZE;
 }
 
 
 /* Normalize a node/peer UDP fragment size: 0 -> default, then clamp to [MIN,MAX].
    Public so the transport (dart_transport_init) and the node (announce blob) clamp identically. */
-uint16_t dart_clamp_frag(uint16_t frag_payload){
-    uint16_t f = frag_payload ? frag_payload : DART_FRAG_PAYLOAD;
-    if (f < DART_FRAG_PAYLOAD_MIN) f = DART_FRAG_PAYLOAD_MIN;
-    if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
+uint16_t dart_clamp_frag(uint16_t frag_size){
+    uint16_t f = frag_size ? frag_size : DART_FRAG_SIZE;
+    if (f < DART_FRAG_SIZE_MIN) f = DART_FRAG_SIZE_MIN;
+    if (f > DART_FRAG_SIZE_MAX) f = DART_FRAG_SIZE_MAX;
     return f;
 }
 
@@ -111,7 +111,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
-          st->frag = dart_clamp_frag(cfg->frag_payload);
+          st->frag = dart_clamp_frag(cfg->frag_size);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
           st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
           st->topics=topic; st->reader_epoch_counter=1;
@@ -122,7 +122,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->peer_index=peer_index; st->peer_index_len=peer_index_len; st->index_max=meta_ids;
           st->peer_astate=peer_astate;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
-          { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_PAYLOAD; }  /* set per peer on add */
+          { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_SIZE; }  /* set per peer on add */
 #ifdef DART_SHM
           st->peer_shm=peer_shm; memset(peer_shm,0,max_peers);
 #endif
@@ -174,15 +174,15 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
             /* dynamic = an allocator is set: buffers grow via the hook, not the arena */
             int dyn = (cfg->allocator != NULL);
             DartQos q = def->qos;            /* local, normalized copy */
-            i_DartWriterSample *history; uint16_t depth, max_fragments, d;
+            i_DartWriterSample *history; uint16_t depth, max_frags, d;
             i_dart_qos_defaults(&q, dyn);
             depth = q.keep_last;
-            max_fragments = i_dart_max_fragments(q.max_message_bytes);
+            max_frags = i_dart_max_frags(q.max_message_bytes);
             history = (i_DartWriterSample*)i_dart_bump_take(b, depth*sizeof(i_DartWriterSample), 16);
             if (st && b->base){
                 i_DartTopic *topic = &st->topics[c];
                 size_t lane = i_dart_name_len(def->name);
-                topic->qos=q; topic->max_fragments=max_fragments;
+                topic->qos=q; topic->max_frags=max_frags;
                 topic->role=def->role; topic->dynamic=(uint8_t)dyn;
                 topic->identity = dart_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
@@ -200,12 +200,12 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                the hook (and does not exist yet here). */
             if (!dyn) for (p=0;p<max_peers;p++){
                 uint8_t *assembly_buf = (uint8_t*)i_dart_bump_take(b, q.max_message_bytes, 8);
-                uint8_t *frag_bitmap  = (uint8_t*)i_dart_bump_take(b, (max_fragments+7u)/8u, 1);
+                uint8_t *frag_bitmap  = (uint8_t*)i_dart_bump_take(b, (max_frags+7u)/8u, 1);
                 if (st && b->base){
                     i_DartReaderProxy *r = i_dart_reader_proxy_at(st,c,p);
                     r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap;
                     r->assembly_cap = q.max_message_bytes;
-                    r->bitmap_cap  = (uint32_t)((max_fragments+7u)/8u);
+                    r->bitmap_cap  = (uint32_t)((max_frags+7u)/8u);
                 }
             }
         }
@@ -846,7 +846,7 @@ static int i_dart_meta_ok(DartBytes meta){
 static uint16_t i_dart_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
-uint16_t dart_meta_capacity(uint16_t n_topics){
+uint16_t dart_meta_cap(uint16_t n_topics){
     size_t cap = (size_t)DART__META_BASE + dart_interest_max(n_topics);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
@@ -854,13 +854,13 @@ uint16_t dart_meta_capacity(uint16_t n_topics){
 
 /* Exact overlay size the next dart_transport_meta_build will emit for the current
  * topic state (the same walk, byte for byte), so a caller can size the buffer to the
- * actual content instead of dart_meta_capacity's full-reserve worst case. */
+ * actual content instead of dart_meta_cap's full-reserve worst case. */
 uint16_t dart_transport_meta_size(DartTransportState *st){
     uint16_t c, n=0;
     size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
     len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n;
-    if (len > 65000u) len = 65000u;              /* the dart_meta_capacity ceiling; past it the build truncates */
+    if (len > 65000u) len = 65000u;              /* the dart_meta_cap ceiling; past it the build truncates */
     return (uint16_t)len;
 }
 
@@ -1185,7 +1185,7 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     if (!topic->history) return -4;                            /* OOM */
     memset(topic->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
     topic->history_owned = 1; topic->dynamic = 1;
-    topic->qos = q; topic->max_fragments = i_dart_max_fragments(q.max_message_bytes);
+    topic->qos = q; topic->max_frags = i_dart_max_frags(q.max_message_bytes);
     topic->role = def->role;
     topic->identity = dart_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';

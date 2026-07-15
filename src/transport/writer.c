@@ -35,7 +35,7 @@ static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, s
     { uint32_t li = topic->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
       while (li != DART__NIL){
           i_DartLane *l = &st->lanes[li];
-          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enq_idx(st, li);
+          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enqueue(st, li);
           li = l->topic_next;
       }
     }
