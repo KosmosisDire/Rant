@@ -3,13 +3,13 @@
 
 
 /* find cached sample containing seqno (newest-first, so pushing new data is O(1)) */
-static i_DartWriterSample *i_dart_sample_find(i_DartChannel *ch, uint64_t seqno){
-    uint16_t depth = ch->qos.keep_last, k;
-    uint16_t i = ch->history_head;
+static i_DartWriterSample *i_dart_sample_find(i_DartTopic *topic, uint64_t seqno){
+    uint16_t depth = topic->qos.keep_last, k;
+    uint16_t i = topic->history_head;
     for (k=0;k<depth;k++){
         i_DartWriterSample *s;
         i = (uint16_t)(i ? i-1 : depth-1);
-        s = &ch->history[i];
+        s = &topic->history[i];
         if (!s->valid) break;                  /* reached the unwritten tail */
         if (seqno >= s->base)
             return (seqno < s->base + s->count) ? s : NULL;
@@ -19,44 +19,44 @@ static i_DartWriterSample *i_dart_sample_find(i_DartChannel *ch, uint64_t seqno)
 
 
 /* append the filled head slot to history and wake the lanes that carry it */
-static void i_dart_writer_commit(DartTransportState *st, uint16_t channel_idx, size_t len){
-    i_DartChannel *ch = &st->channels[channel_idx];
-    uint16_t depth = ch->qos.keep_last;
+static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len){
+    i_DartTopic *topic = &st->topics[topic_index];
+    uint16_t depth = topic->qos.keep_last;
     uint16_t count = (uint16_t)((len + st->frag - 1) / st->frag);
-    i_DartWriterSample *slot = &ch->history[ch->history_head];
+    i_DartWriterSample *slot = &topic->history[topic->history_head];
     if (count==0) count=1;
-    slot->valid=1; slot->base=ch->next_seqno; slot->count=count; slot->len=(uint32_t)len;
-    ch->history_head = (uint16_t)((ch->history_head+1) % depth);
-    ch->next_seqno += count;
+    slot->valid=1; slot->base=topic->next_seqno; slot->count=count; slot->len=(uint32_t)len;
+    topic->history_head = (uint16_t)((topic->history_head+1) % depth);
+    topic->next_seqno += count;
     /* oldest cached: where the head points once wrapped, else slot 0 */
-    ch->first_seqno = ch->history[ch->history_head].valid ? ch->history[ch->history_head].base
-                                                    : ch->history[0].base;
-    ch->have_first  = 1;
-    { uint32_t li = ch->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
+    topic->first_seqno = topic->history[topic->history_head].valid ? topic->history[topic->history_head].base
+                                                    : topic->history[0].base;
+    topic->have_first  = 1;
+    { uint32_t li = topic->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
       while (li != DART__NIL){
           i_DartLane *l = &st->lanes[li];
           if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enq_idx(st, li);
-          li = l->ch_next;
+          li = l->topic_next;
       }
     }
 }
 
 
-int dart_transport_send(DartTransportState *st, uint16_t channel, DartBytes data, uint64_t now){
-    int channel_idx; i_DartChannel *ch; size_t len = data.len;
+int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
+    i_DartTopic *topic; size_t len = data.len;
     (void)now;
-    ch = i_dart_channel_at(st, channel, &channel_idx);                /* rejects the internal meta channel */
-    if (!ch) return DART_ERR_NO_CHANNEL;
-    if (ch->dynamic){
+    topic = i_dart_topic_at(st, topic_index, NULL);                /* rejects the internal meta topic */
+    if (!topic) return DART_ERR_NO_TOPIC;
+    if (topic->dynamic){
         if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
-    } else if (len > ch->qos.max_message_bytes) return DART_ERR_TOO_BIG;
-    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
+    } else if (len > topic->qos.max_message_bytes) return DART_ERR_TOO_BIG;
+    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
     /* Nobody subscribes and nothing durable to keep: the sample would land in the ring and
        be orphaned (a fresh match joins at next_seqno unless reliable+catch_up), so skip the
        grow, the copy, and the commit sweep entirely. The many-idle-publishers fast path. */
-    if (ch->matched_writers == 0 && !i_dart_channel_retains_history(ch)) return DART_OK;
-    if (ch->dynamic){
-        i_DartWriterSample *slot = &ch->history[ch->history_head];
+    if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
+    if (topic->dynamic){
+        i_DartWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
         if ((size_t)slot->cap < need){                    /* grow the slot to fit (size checked above) */
             uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);
@@ -64,11 +64,11 @@ int dart_transport_send(DartTransportState *st, uint16_t channel, DartBytes data
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
     }
-    if (len) memcpy(ch->history[ch->history_head].buf, data.data, len);
+    if (len) memcpy(topic->history[topic->history_head].buf, data.data, len);
 #ifdef DART_SHM
-    ch->history[ch->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
+    topic->history[topic->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
 #endif
-    i_dart_writer_commit(st, (uint16_t)channel_idx, len);
+    i_dart_writer_commit(st, (uint16_t)topic_index, len);
     return DART_OK;
 }
 
@@ -77,31 +77,31 @@ int dart_transport_send(DartTransportState *st, uint16_t channel, DartBytes data
 /* publish a sample whose bytes live in an external (shared-memory) chunk: store the
  * chunk pointer + descriptor on the history slot without copying. Remote peers
  * fragment from the chunk; SHM peers get the one-submessage descriptor. */
-int dart_transport_send_shm(DartTransportState *st, uint16_t channel, DartBytes chunk,
+int dart_transport_send_shm(DartTransportState *st, uint16_t topic_index, DartBytes chunk,
                   const uint8_t *desc, uint64_t now){
-    int channel_idx; i_DartChannel *ch; i_DartWriterSample *slot; size_t len = chunk.len;
+    i_DartTopic *topic; i_DartWriterSample *slot; size_t len = chunk.len;
     (void)now;
-    ch = i_dart_channel_at(st, channel, &channel_idx);
-    if (!ch) return DART_ERR_NO_CHANNEL;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic) return DART_ERR_NO_TOPIC;
     if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;      /* wire fragment-count cap */
-    if (ch->role == DART_SUB_ONLY || ch->role == DART_INACTIVE) return DART_ERR_ROLE;
-    slot = &ch->history[ch->history_head];
+    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
+    slot = &topic->history[topic->history_head];
     slot->shm = 1;
     slot->shm_buf = chunk.data;
     memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
-    i_dart_writer_commit(st, (uint16_t)channel_idx, len);
+    i_dart_writer_commit(st, (uint16_t)topic_index, len);
     return DART_OK;
 }
 #endif
 
 
-int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+int dart_transport_send_would_evict(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     i_DartWriterSample *slot; uint32_t li;
-    if (!ch || ch->qos.reliability != DART_RELIABLE) return 0;
-    slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
+    if (!topic || topic->qos.reliability != DART_RELIABLE) return 0;
+    slot = &topic->history[topic->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
-    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l=&st->lanes[li];
         if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
             && l->w.acked_upto < slot->base + slot->count) return 1;
@@ -110,14 +110,14 @@ int dart_transport_send_would_evict(DartTransportState *st, uint16_t channel){
 }
 
 
-int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
+int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t topic_index,
                                             uint64_t *evict_base, uint32_t *evict_count){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     i_DartWriterSample *slot; uint32_t li;
-    if (!ch) return 0;
-    slot = &ch->history[ch->history_head];        /* slot the next send overwrites */
+    if (!topic) return 0;
+    slot = &topic->history[topic->history_head];        /* slot the next send overwrites */
     if (!slot->valid) return 0;
-    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l=&st->lanes[li];
         if (l->w.used && !st->peer_dormant[l->peer_slot] && l->w.sent_upto < slot->base + slot->count){
             if (evict_base)  *evict_base  = slot->base;
@@ -129,30 +129,30 @@ int dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t chan
 }
 
 
-int dart_transport_send_drained(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+int dart_transport_send_drained(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     uint32_t li;
-    if (!ch || ch->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
-    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+    if (!topic || topic->qos.reliability != DART_RELIABLE) return 1;  /* no acks to await */
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l=&st->lanes[li];
         if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
-            && l->w.acked_upto < ch->next_seqno) return 0;  /* reliable reader still behind */
+            && l->w.acked_upto < topic->next_seqno) return 0;  /* reliable reader still behind */
     }
     return 1;
 }
 
 
-int dart_transport_writer_match_count(DartTransportState *st, uint16_t channel){
-    i_DartChannel *ch = i_dart_channel_at(st, channel, NULL);
-    return ch ? (int)ch->matched_writers : 0;   /* cached at match/unmatch, so O(1) */
+int dart_transport_publisher_match_count(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    return topic ? (int)topic->matched_writers : 0;   /* cached at match/unmatch, so O(1) */
 }
 
 
-int dart_transport_repair_pending(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+int dart_transport_repair_pending(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     uint32_t li; int cnt = 0;
-    if (!ch) return 0;
-    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+    if (!topic) return 0;
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l=&st->lanes[li];
         if (l->w.used && l->w.has_nack) cnt++;
     }
@@ -161,14 +161,14 @@ int dart_transport_repair_pending(DartTransportState *st, uint16_t channel){
 
 #ifdef DART_SHM
 
-/* 1 if the channel has >=1 matched reader and EVERY matched (non-dormant) reader is
+/* 1 if the topic has >=1 matched reader and EVERY matched (non-dormant) reader is
  * SHM-capable -> the node may publish this message via SHM. One non-SHM (remote)
  * reader forces inline UDP for the whole message. */
-int dart_transport_writer_shm_eligible(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+int dart_transport_publisher_shm_eligible(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     uint32_t li; int any=0;
-    if (!ch) return 0;
-    for (li=ch->lane_head; li!=DART__NIL; li=st->lanes[li].ch_next){
+    if (!topic) return 0;
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l=&st->lanes[li];
         if (!l->w.used || st->peer_dormant[l->peer_slot]) continue;
         if (!st->peer_shm[l->peer_slot]) return 0;
@@ -180,9 +180,9 @@ int dart_transport_writer_shm_eligible(DartTransportState *st, uint16_t channel)
 
 #ifdef DART_SHM
 /* the history slot the next publish will occupy (so the node binds a chunk to it) */
-uint16_t dart_transport_channel_hist_head(DartTransportState *st, uint16_t channel){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
-    return ch ? ch->history_head : 0;
+uint16_t dart_transport_topic_hist_head(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    return topic ? topic->history_head : 0;
 }
 #endif
 
@@ -190,15 +190,15 @@ uint16_t dart_transport_channel_hist_head(DartTransportState *st, uint16_t chann
  * hole" signal that replaces GAP: reader_hb advances deliver_upto to `first`, so a
  * superseded NACK or a ring-overrun push answers with an HB whose first = our floor.
  * Resets the idle-HB timer so we don't double-send. */
-static size_t i_dart_writer_hb(DartTransportState *st, i_DartChannel *ch, i_DartWriterProxy *w, uint16_t alias,
+static size_t i_dart_writer_hb(DartTransportState *st, i_DartTopic *topic, i_DartWriterProxy *w, uint16_t index,
                              uint8_t *out, size_t cap, uint64_t now){
-    uint64_t first = ch->have_first ? ch->first_seqno : 0;
+    uint64_t first = topic->have_first ? topic->first_seqno : 0;
     if (cap < DART_HEADER_HB) return 0;
     if (w->acked_upto > first) first = w->acked_upto;   /* fresh reader adopts join point */
-    w->hb_next_us = now + ch->qos.heartbeat_us;
+    w->hb_next_us = now + topic->qos.heartbeat_us;
     i_dart_transport_arm_deadline(st, w->hb_next_us);                  /* wake to send the next idle HB */
     w->hb_count++;
-    return i_dart_wire_mk_hb(out, alias, first, ch->next_seqno-1, w->hb_count);
+    return i_dart_wire_mk_hb(out, index, first, topic->next_seqno-1, w->hb_count);
 }
 
 
@@ -216,9 +216,9 @@ static void i_dart_writer_arm_tail(DartTransportState *st, i_DartWriterProxy *w,
 
 
 /* writer side: handle ACKNACK */
-void i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
+void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p){
+    i_DartTopic *topic=&st->topics[topic_index];
+    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,topic_index,peer_slot);
     uint64_t base=i_dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=i_dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=i_dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
     uint32_t epoch=i_dart_le_r32(p+DART_OFFSET_NACK_EPOCH); uint8_t flags=p[0];
     if (!w || !w->used) return;
@@ -226,11 +226,11 @@ void i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, 
         if (w->reader_epoch){
             /* reader is a new incarnation (one-sided flap): our positions describe its
                dead predecessor, so re-join the lane as if freshly matched */
-            w->sent_upto  = i_dart_channel_unicast_join_seqno(ch);
+            w->sent_upto  = i_dart_topic_unicast_join_seqno(topic);
             w->acked_upto = w->sent_upto;
             w->has_nack   = 0;
             w->hb_next_us = 0;
-            i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+            i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
             w->reader_epoch = epoch;
             return;
         }
@@ -241,26 +241,26 @@ void i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, 
            edge (the join window) so a push that raced ahead isn't lost */
         if (w->acked_upto < w->sent_upto){
             w->sent_upto = w->acked_upto;
-            i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+            i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
         }
         return;                    /* no position information to apply */
     }
     if (base > w->acked_upto) w->acked_upto=base;
     if (nbits>0 && bitmap!=0){
-        ch->repair_stats.nacks_recv++;                           /* a repair request, not a bare ack */
+        topic->repair_stats.nacks_recv++;                           /* a repair request, not a bare ack */
         w->has_nack=1; w->nack_base=base; w->nack_bits=bitmap;
-        i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+        i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
     }
 }
 
 
-/* produce one writer submessage for (channel_idx,peer_slot) if due and it fits cap; 0 if none.
+/* produce one writer submessage for (topic_index,peer_slot) if due and it fits cap; 0 if none.
  * On no-fit, state is untouched so the same submessage is produced next time. */
-size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,channel_idx,peer_slot);
-    int reliable=(ch->qos.reliability==DART_RELIABLE);
-    uint16_t alias = i_dart_alias_of(st, channel_idx);
+size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
+    i_DartTopic *topic=&st->topics[topic_index];
+    i_DartWriterProxy *w=i_dart_writer_proxy_at(st,topic_index,peer_slot);
+    int reliable=(topic->qos.reliability==DART_RELIABLE);
+    uint16_t index = i_dart_wire_index_of(st, topic_index);
     if (!w || !w->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: nothing to emit */
 
     /* 1. repair (reliable only) */
@@ -270,12 +270,12 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
             if (w->nack_bits & (1u<<i)){
                 uint64_t seqno=w->nack_base+i;
                 i_DartWriterSample *s;
-                if (seqno>=ch->next_seqno){                 /* nothing there */
+                if (seqno>=topic->next_seqno){                 /* nothing there */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
                     continue;
                 }
-                s=i_dart_sample_find(ch,seqno);
+                s=i_dart_sample_find(topic,seqno);
                 if (s){
 #ifdef DART_SHM
                     if (st->peer_shm[peer_slot] && s->shm){   /* re-send the whole message as one SHM-DATA */
@@ -286,29 +286,29 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
                             if (sq>=s->base && sq<s->base+s->count) w->nack_bits &= ~(1u<<j);
                         }
                         if (w->nack_bits==0) w->has_nack=0;
-                        return i_dart_wire_mk_shm(out,alias,s->base,s->count,s->desc);
+                        return i_dart_wire_mk_shm(out,index,s->base,s->count,s->desc);
                     }
 #endif
                     {
-                    uint16_t frag_idx=(uint16_t)(seqno - s->base);
-                    uint32_t offset=(uint32_t)frag_idx*st->frag;
+                    uint16_t frag_index=(uint16_t)(seqno - s->base);
+                    uint32_t offset=(uint32_t)frag_index*st->frag;
                     uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
                     if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;   /* bit stays set */
                     w->nack_bits &= ~(1u<<i);
                     if (w->nack_bits==0) w->has_nack=0;
-                    ch->repair_stats.frags_sent++; ch->repair_stats.frags_resent++;   /* retransmit to satisfy a NACK */
-                    return i_dart_wire_mk_data(out,alias,seqno,s,frag_idx,i_dart_sample_buf(s)+offset,payload_len);
+                    topic->repair_stats.frags_sent++; topic->repair_stats.frags_resent++;   /* retransmit to satisfy a NACK */
+                    return i_dart_wire_mk_data(out,index,seqno,s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
                     }
                 } else {
                     /* superseded: skip the reader past the dropped region with an HB
                        (its first = our floor); keep still-cached seqnos for later repair */
-                    uint64_t floor = (ch->have_first?ch->first_seqno:ch->next_seqno);
+                    uint64_t floor = (topic->have_first?topic->first_seqno:topic->next_seqno);
                     uint32_t j;
                     if (cap < DART_HEADER_HB) return 0;
                     for (j=0;j<DART_NACK_WINDOW;j++)
                         if (w->nack_base+j < floor) w->nack_bits &= ~(1u<<j);
                     if (w->nack_bits==0) w->has_nack=0;
-                    return i_dart_writer_hb(st,ch,w,alias,out,cap,now);
+                    return i_dart_writer_hb(st,topic,w,index,out,cap,now);
                 }
             }
         }
@@ -316,9 +316,9 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
     }
 
     /* 2. push new data */
-    if (w->sent_upto < ch->next_seqno){
+    if (w->sent_upto < topic->next_seqno){
         uint64_t seqno=w->sent_upto;
-        i_DartWriterSample *s=i_dart_sample_find(ch,seqno);
+        i_DartWriterSample *s=i_dart_sample_find(topic,seqno);
         if (s){
 #ifdef DART_SHM
             /* peer_shm is set at attach (before data flows), so sent_upto sits at a
@@ -326,28 +326,28 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
             if (st->peer_shm[peer_slot] && s->shm){
                 if (cap < DART_SHM_DATA_BYTES) return 0;
                 w->sent_upto = s->base + s->count;
-                if (reliable && w->reader_reliable && w->sent_upto >= ch->next_seqno)
+                if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
                     i_dart_writer_arm_tail(st, w, now);
-                return i_dart_wire_mk_shm(out,alias,s->base,s->count,s->desc);
+                return i_dart_wire_mk_shm(out,index,s->base,s->count,s->desc);
             }
 #endif
             {
-            uint16_t frag_idx=(uint16_t)(seqno - s->base);
-            uint32_t offset=(uint32_t)frag_idx*st->frag;
+            uint16_t frag_index=(uint16_t)(seqno - s->base);
+            uint32_t offset=(uint32_t)frag_index*st->frag;
             uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
             if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             w->sent_upto++;
-            ch->repair_stats.frags_sent++;                       /* new data (unicast lane) */
-            if (reliable && w->reader_reliable && w->sent_upto >= ch->next_seqno)
+            topic->repair_stats.frags_sent++;                       /* new data (unicast lane) */
+            if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
                 i_dart_writer_arm_tail(st, w, now);              /* queue drained: fast tail HB */
-            return i_dart_wire_mk_data(out,alias,seqno,s,frag_idx,i_dart_sample_buf(s)+offset,payload_len);
+            return i_dart_wire_mk_data(out,index,seqno,s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
             }
         } else {
             /* fell out of the ring before we sent it: skip the reader up to first
                cached with an HB (its first = our floor) */
             if (cap < DART_HEADER_HB) return 0;
-            w->sent_upto=(ch->have_first?ch->first_seqno:ch->next_seqno);
-            return i_dart_writer_hb(st,ch,w,alias,out,cap,now);
+            w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno);
+            return i_dart_writer_hb(st,topic,w,index,out,cap,now);
         }
     }
 
@@ -355,7 +355,7 @@ size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot
        acked everything (acked_upto == next_seqno) there's nothing to repair, so the
        lane goes silent until new data or a (re)subscribe drops acked_upto again. The
        HB advertises from acked_upto so a fresh reader adopts the join point. */
-    if (reliable && w->reader_reliable && now>=w->hb_next_us && w->acked_upto < ch->next_seqno)
-        return i_dart_writer_hb(st,ch,w,alias,out,cap,now);
+    if (reliable && w->reader_reliable && now>=w->hb_next_us && w->acked_upto < topic->next_seqno)
+        return i_dart_writer_hb(st,topic,w,index,out,cap,now);
     return 0;
 }

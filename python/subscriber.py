@@ -33,7 +33,7 @@ def main():
     node = dart.Node("py-subscriber", on_message,
                      lambda e: print("event:", e, file=sys.stderr),
                      multicast_interface=iface)
-    dart.Channel[Tick](node, "tick", dart.Role.SUB_ONLY)
+    dart.Topic[Tick](node, "tick", dart.Role.SUB_ONLY)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 
     start = time.perf_counter()

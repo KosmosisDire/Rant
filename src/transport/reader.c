@@ -2,14 +2,14 @@
 #include "internal.h"
 
 
-int dart_transport_reader_progress(DartTransportState *st, uint16_t channel, uint32_t peer,
+int dart_transport_subscriber_progress(DartTransportState *st, uint16_t topic_index, uint32_t peer,
                          uint64_t *base_seqno, uint32_t *have, uint32_t *total){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     int peer_slot; i_DartReaderProxy *r;
-    if (!ch) return 0;
+    if (!topic) return 0;
     peer_slot = i_dart_peer_slot(st, peer);
     if (peer_slot < 0) return 0;
-    r = i_dart_reader_proxy_at(st,channel_idx,peer_slot);
+    r = i_dart_reader_proxy_at(st,topic_index,peer_slot);
     if (!r || !r->used || !r->assembly_active) return 0;      /* no message mid-reassembly */
     if (base_seqno) *base_seqno = r->deliver_upto;       /* HOL message starts here */
     if (total)      *total      = r->assembly_count;
@@ -29,25 +29,25 @@ int dart_transport_reader_progress(DartTransportState *st, uint16_t channel, uin
  * tail-loss backstop). Read via dart_transport_repair_stats. (The self-clocked retransmit backstop
  * re-fires via nack_retransmit_us without a fresh arm, so it is not counted here. Resume/
  * position-report arms are control, not counted.) */
-static void i_dart_reader_arm(i_DartChannel *ch, i_DartReaderProxy *r, int is_hb){
-    if (!r->ack_pending){ if (is_hb) ch->repair_stats.arms_hb++; else ch->repair_stats.arms_data++; }
+static void i_dart_reader_arm(i_DartTopic *topic, i_DartReaderProxy *r, int is_hb){
+    if (!r->ack_pending){ if (is_hb) topic->repair_stats.arms_hb++; else topic->repair_stats.arms_data++; }
 }
 
-static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int channel_idx, int peer_slot,
+static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int topic_index, int peer_slot,
                                              i_DartReaderProxy *r, uint64_t base, uint64_t top){
-    i_DartChannel *ch=&st->channels[channel_idx];
+    i_DartTopic *topic=&st->topics[topic_index];
     if (base < r->deliver_upto) return DART_ORDER_OLD;
     if (top > r->received_high) r->received_high = top;          /* proof these seqnos exist */
     if (base > r->deliver_upto){
-        if (ch->qos.reliability==DART_RELIABLE && r->started){   /* gap: arm a repair NACK */
-            if (!r->ack_pending){ i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; }
-            i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+        if (topic->qos.reliability==DART_RELIABLE && r->started){   /* gap: arm a repair NACK */
+            if (!r->ack_pending){ i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; }
+            i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
             return DART_ORDER_GAP;
         }
         if (r->started){                                         /* best-effort / first contact: adopt */
-            i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],
                         r->deliver_upto, base - r->deliver_upto);
-            ch->repair_stats.msgs_skipped += base - r->deliver_upto;
+            topic->repair_stats.msgs_skipped += base - r->deliver_upto;
         }
         r->deliver_upto = base;
         return DART_ORDER_ADOPTED;
@@ -61,17 +61,17 @@ static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int
  * shot (payload is in shared memory), so there is no reassembly -- just ordering,
  * then hand the descriptor to on_shm (the node resolves + delivers + acks). The gap
  * case re-uses the normal NACK window (i_dart_reader_emit's !assembly_active branch). */
-void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-    int reliable = (ch->qos.reliability==DART_RELIABLE);
+void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
+    i_DartTopic *topic=&st->topics[topic_index];
+    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,topic_index,peer_slot);
+    int reliable = (topic->qos.reliability==DART_RELIABLE);
     uint64_t base = i_dart_le_r64(p+DART_OFFSET_SEQNO);
     uint16_t count = i_dart_le_r16(p+DART_OFFSET_SHM_COUNT);
     const uint8_t *desc = p+DART_OFFSET_SHM_DESC;          /* DART_SHM_DESC_BYTES */
     if (!r || !r->used || count==0) return;
-    if (r->parked){ ch->repair_stats.frags_ahead++; return; }   /* held sample blocks the line:
+    if (r->parked){ topic->repair_stats.frags_ahead++; return; }   /* held sample blocks the line:
                                                                    retry is deliver_parked's job */
-    {   i_DartReaderOrder ord = i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, base+count-1);
+    {   i_DartReaderOrder ord = i_dart_reader_order_arrival(st, topic_index, peer_slot, r, base, base+count-1);
         if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
     r->started = 1; r->assembly_active = 0;
@@ -82,13 +82,13 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
        configured SHM constants) would loop, so after DART_SHM_MAX_RETRY tries we skip
        it loudly instead of wedging. */
     {   int ok = st->cfg.on_shm ?
-                 st->cfg.on_shm(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot], desc) : 0;
+                 st->cfg.on_shm(st->cfg.user, (uint16_t)topic_index, st->peer_ids[peer_slot], desc) : 0;
         if (ok > 0){
             r->shm_fail = 0;
             r->deliver_upto = base + count;
             if (reliable){                  /* ack now, AFTER delivery (zero-copy invariant) */
-                i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-                i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+                i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+                i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
             }
             return;
         }
@@ -113,29 +113,29 @@ void i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, c
             }
         }
         if (reliable && ++r->shm_fail >= DART_SHM_MAX_RETRY){
-            i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+            i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],
                         base, count);
-            ch->repair_stats.msgs_skipped += count;
+            topic->repair_stats.msgs_skipped += count;
             r->shm_fail = 0;
             r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
-            i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+            i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
         } else if (reliable){                           /* leave the gap, NACK for a re-send */
-            i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
+            i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
         } else {
             r->deliver_upto = base + count;             /* best-effort: no repair, drop it */
         }
-        i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+        i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
     }
 }
 #endif
 
 
 /* reader side: handle DATA */
-void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p,
+void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p,
                            uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
-    int reliable = (ch->qos.reliability==DART_RELIABLE);
+    i_DartTopic *topic=&st->topics[topic_index];
+    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,topic_index,peer_slot);
+    int reliable = (topic->qos.reliability==DART_RELIABLE);
     int new_fragment = 0;
     uint64_t seqno, base; uint16_t frag, count, payload_len; uint32_t sample_len; const uint8_t *payload;
     if (p[0] & DART_F_SINGLE){           /* single fragment: frag/count/len implied */
@@ -146,21 +146,21 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
     }
     base = seqno - frag;
 
-    if (!r || !r->used){ ch->repair_stats.frags_malformed++; return; }     /* not subscribed */
-    if (count==0 || frag>=count){ ch->repair_stats.frags_malformed++; return; }  /* malformed */
-    if (r->parked){ ch->repair_stats.frags_ahead++; return; }   /* held sample blocks the line:
+    if (!r || !r->used){ topic->repair_stats.frags_malformed++; return; }     /* not subscribed */
+    if (count==0 || frag>=count){ topic->repair_stats.frags_malformed++; return; }  /* malformed */
+    if (r->parked){ topic->repair_stats.frags_ahead++; return; }   /* held sample blocks the line:
                                                                    retry is deliver_parked's job */
-    switch (i_dart_reader_order_arrival(st, channel_idx, peer_slot, r, base, seqno)){
-        case DART_ORDER_OLD:     ch->repair_stats.frags_old++;   return;   /* already delivered/skipped */
-        case DART_ORDER_GAP:     ch->repair_stats.frags_ahead++; return;   /* future frag; repair armed */
-        case DART_ORDER_ADOPTED: ch->repair_stats.frags_ahead++; r->assembly_active=0; break;  /* skipped past loss */
+    switch (i_dart_reader_order_arrival(st, topic_index, peer_slot, r, base, seqno)){
+        case DART_ORDER_OLD:     topic->repair_stats.frags_old++;   return;   /* already delivered/skipped */
+        case DART_ORDER_GAP:     topic->repair_stats.frags_ahead++; return;   /* future frag; repair armed */
+        case DART_ORDER_ADOPTED: topic->repair_stats.frags_ahead++; r->assembly_active=0; break;  /* skipped past loss */
         case DART_ORDER_INORDER: break;
     }
     r->started = 1;   /* writer engaged: position adopted */
     /* fit the reassembly buffers (dynamic grows via the hook, fixed is capped at
        max_message_bytes); "too big" skips the whole sample and reports it */
     { uint32_t bitmap_need = ((uint32_t)count + 7u) / 8u, buf_cap, bitmap_bytes; int too_big = 0;
-      if (ch->dynamic){
+      if (topic->dynamic){
           if (r->assembly_cap < sample_len){
               uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, r->assembly_buf, sample_len?sample_len:1u);
               if (!new_buf) too_big = 1; else { r->assembly_buf = new_buf; r->assembly_cap = sample_len?sample_len:1u; }
@@ -169,19 +169,19 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
               uint8_t *new_bitmap = (uint8_t*)st->cfg.allocator(st->cfg.user, r->frag_bitmap, bitmap_need?bitmap_need:1u);
               if (!new_bitmap) too_big = 1; else { r->frag_bitmap = new_bitmap; r->bitmap_cap = bitmap_need?bitmap_need:1u; }
           }
-      } else if (sample_len > ch->qos.max_message_bytes) too_big = 1;
+      } else if (sample_len > topic->qos.max_message_bytes) too_big = 1;
       if (too_big){
-          i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+          i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)topic_index, st->peer_ids[peer_slot],
                       0, sample_len);
           r->deliver_upto = base + count; r->assembly_active = 0;
           if (reliable){
-              i_dart_reader_arm(ch,r,0); r->ack_pending = 1; r->ack_due_us = 0; r->ack_force = 1;
-              i_dart_lane_wake(st, (uint16_t)channel_idx, (uint32_t)peer_slot);
+              i_dart_reader_arm(topic,r,0); r->ack_pending = 1; r->ack_due_us = 0; r->ack_force = 1;
+              i_dart_lane_wake(st, (uint16_t)topic_index, (uint32_t)peer_slot);
           }
           return;
       }
-      buf_cap  = ch->dynamic ? r->assembly_cap : ch->qos.max_message_bytes;
-      bitmap_bytes = ch->dynamic ? bitmap_need     : (uint32_t)((ch->max_fragments+7u)/8u);
+      buf_cap  = topic->dynamic ? r->assembly_cap : topic->qos.max_message_bytes;
+      bitmap_bytes = topic->dynamic ? bitmap_need     : (uint32_t)((topic->max_fragments+7u)/8u);
       /* base == deliver_upto: current sample */
       if (!r->assembly_active){
           r->assembly_active=1; r->assembly_count=count; r->assembly_len=sample_len; r->assembly_low=0;
@@ -189,7 +189,7 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
           memset(r->frag_bitmap,0,bitmap_bytes);
       }
       if (count!=r->assembly_count) return;                  /* inconsistent, ignore */
-      ch->repair_stats.frags_recv++;                             /* every accepted DATA fragment, dups included */
+      topic->repair_stats.frags_recv++;                             /* every accepted DATA fragment, dups included */
       new_fragment = !i_dart_bit_get(r->frag_bitmap,frag);
       if (new_fragment){
           /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
@@ -200,7 +200,7 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
           i_dart_bit_set(r->frag_bitmap,frag);
           if (frag==r->assembly_low)                          /* extended the contiguous-received front */
               while (r->assembly_low<count && i_dart_bit_get(r->frag_bitmap,r->assembly_low)) r->assembly_low++;
-      } else ch->repair_stats.frags_dup++;                        /* already held: repair overlap / waste */
+      } else topic->repair_stats.frags_dup++;                        /* already held: repair overlap / waste */
     }
     /* assembly_low is the contiguous front, so the sample is complete iff it reached the end.
        Deliver in order, advance, then arm the ACKNACK. A completed sample owes an immediate
@@ -212,7 +212,7 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
       int hole = r->assembly_active && (r->deliver_upto + r->assembly_low <= r->received_high);
       if (done){
           if (st->cfg.on_message &&
-              st->cfg.on_message(st->cfg.user, (uint16_t)channel_idx, st->peer_ids[peer_slot],
+              st->cfg.on_message(st->cfg.user, (uint16_t)topic_index, st->peer_ids[peer_slot],
                                  dart_bytes(r->assembly_buf, r->assembly_len)) != 0 && reliable){
               /* refused downstream (consumer queue full): PARK the assembled sample.
                  No advance, no ack, no repair traffic -- our silence keeps the writer's
@@ -227,23 +227,23 @@ void i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, 
       }
       if (reliable){
           if (done){
-              i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-              i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+              i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+              i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
           } else if (new_fragment && hole){           /* gap revealed, or repair advanced: request now */
-              i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
-              i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+              i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
+              i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
           }
       }
     }
 }
 
 
-void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
+void i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
+    i_DartTopic *topic=&st->topics[topic_index];
+    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,topic_index,peer_slot);
     uint64_t first=i_dart_le_r64(p+DART_OFFSET_SEQNO), last=i_dart_le_r64(p+DART_OFFSET_HB_LAST);
     if (!r || !r->used) return;
-    if (ch->qos.reliability!=DART_RELIABLE) return;
+    if (topic->qos.reliability!=DART_RELIABLE) return;
     /* un-started readers adopt no position from heartbeats (a one-sided flap's
        advertised first may be a dead predecessor's); the ack below carries our epoch.
        A writer raises its HB `first` to our acked_upto (the join-point trick), and our
@@ -256,9 +256,9 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
        partial assembly, so the same mid-sample guard protects it from our own ack echo */
     if (r->started && first > r->deliver_upto &&
         (!(r->assembly_active || r->parked) || first >= r->deliver_upto + r->assembly_count)){
-        i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)channel_idx, st->peer_ids[peer_slot],   /* superseded before repair */
+        i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],   /* superseded before repair */
                     r->deliver_upto, first - r->deliver_upto);
-        ch->repair_stats.msgs_skipped += first - r->deliver_upto;
+        topic->repair_stats.msgs_skipped += first - r->deliver_upto;
         r->deliver_upto=first; r->assembly_active=0;
         r->parked=0;            /* the writer moved past the held sample: give it up */
 #ifdef DART_SHM
@@ -273,12 +273,12 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
        so emit lets the slow retransmit backstop chase up to it, never the fast gap path.
        The HB always owes a cumulative ack so a writer that lost ours stops re-pinging. */
     r->hb_last=last;
-    i_dart_reader_arm(ch,r,1); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-    i_dart_lane_wake(st,(uint16_t)channel_idx,(uint32_t)peer_slot);
+    i_dart_reader_arm(topic,r,1); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+    i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
 }
 
 
-/* produce a reader ACKNACK for (channel_idx,peer_slot) if due; 0 if none.
+/* produce a reader ACKNACK for (topic_index,peer_slot) if due; 0 if none.
  *
  * The repair request is GAP-TRIGGERED and bounded by what we have actually RECEIVED.
  * UDP frags are assumed delivered in order, so a hole below received_high is real loss while
@@ -290,14 +290,14 @@ void i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, co
  * one path allowed to chase the writer's claim (hb_last) so tail loss still repairs.
  * Outstanding repair is therefore capped at one DART_NACK_WINDOW and clocked to delivery,
  * so it cannot scale into a flood with the gap size or the message size. */
-size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
-    i_DartChannel *ch=&st->channels[channel_idx];
-    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,channel_idx,peer_slot);
+size_t i_dart_reader_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
+    i_DartTopic *topic=&st->topics[topic_index];
+    i_DartReaderProxy *r=i_dart_reader_proxy_at(st,topic_index,peer_slot);
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;
-    uint16_t alias = i_dart_alias_of(st, channel_idx);
+    uint16_t index = i_dart_wire_index_of(st, topic_index);
     int due, holes=0, repair=0, force;
     if (!r || !r->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: don't ack */
-    if (ch->qos.reliability!=DART_RELIABLE) return 0;
+    if (topic->qos.reliability!=DART_RELIABLE) return 0;
     if (cap<DART_HEADER_NACK) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
     r->ack_pending=0; force=r->ack_force; r->ack_force=0;
@@ -305,7 +305,7 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
                                    above keeps the drained lane off the scheduler. */
 
     if (!r->started)                                     /* no position yet: F_UNPOS announces our epoch */
-        return i_dart_wire_mk_nack(out,alias,r->deliver_upto,0,0,r->epoch,(uint8_t)DART_F_UNPOS);
+        return i_dart_wire_mk_nack(out,index,r->deliver_upto,0,0,r->epoch,(uint8_t)DART_F_UNPOS);
 
     /* the cumulative-ack point and repair-window base: our contiguous-received front */
     first_missing = r->assembly_active ? r->deliver_upto + r->assembly_low : r->deliver_upto;
@@ -336,9 +336,9 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
             if (bitmap){
                 nbits = (uint16_t)(top - first_missing);
                 repair = 1;
-                ch->repair_stats.nacks_sent++;
+                topic->repair_stats.nacks_sent++;
                 if (top > r->nack_high) r->nack_high = top;
-                r->nack_retransmit_us = now + ch->qos.repair_delay_us;
+                r->nack_retransmit_us = now + topic->qos.repair_delay_us;
             }
         }
     } else r->nack_high = first_missing;                   /* caught up to received: end the episode */
@@ -350,21 +350,21 @@ size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot
     /* send only to carry a repair request or a delivery/skip/HB/(re)match cumulative ack;
        a bare re-ack at an unchanged floor would be pure noise. */
     if (!repair && !force) return 0;
-    return i_dart_wire_mk_nack(out,alias,first_missing,nbits,bitmap,r->epoch,0);
+    return i_dart_wire_mk_nack(out,index,first_missing,nbits,bitmap,r->epoch,0);
 }
 
 
-/* Retry every parked lane of a channel (see i_DartReaderProxy.parked). The callbacks may
+/* Retry every parked lane of a topic (see i_DartReaderProxy.parked). The callbacks may
  * re-enter the transport (a send from an event handler grows buffers), so lane pointers
  * are re-derived after each call; the held buffer itself is a stable heap allocation. */
-uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t channel, uint64_t now){
-    int channel_idx; i_DartChannel *ch = i_dart_channel_at(st, channel, &channel_idx);
+uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t topic_index, uint64_t now){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     uint32_t li, still = 0;
     (void)now;
-    if (!ch) return 0;
-    li = ch->lane_head;
+    if (!topic) return 0;
+    li = topic->lane_head;
     while (li != DART__NIL){
-        uint32_t next = st->lanes[li].ch_next;
+        uint32_t next = st->lanes[li].topic_next;
         if (st->lanes[li].r.used && st->lanes[li].r.parked){
             uint32_t peer_slot = st->lanes[li].peer_slot;
             uint32_t peer_id   = st->peer_ids[peer_slot];
@@ -375,15 +375,15 @@ uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t channel,
 #ifdef DART_SHM
             if (st->lanes[li].r.parked_shm){
                 int ok = st->cfg.on_shm ?
-                         st->cfg.on_shm(st->cfg.user, channel, peer_id, held) : 0;
+                         st->cfg.on_shm(st->cfg.user, topic_index, peer_id, held) : 0;
                 r = &st->lanes[li].r;                  /* the callback may have re-entered */
                 if (ok == 0){
                     /* chunk gone (the writer moved on after its backpressure bound):
                        un-park, leave the gap, and let the normal repair path re-fetch
                        or skip it (re-sent descriptor / writer HB floor) */
                     r->parked = 0; r->parked_shm = 0; r->assembly_active = 0;
-                    i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0;
-                    i_dart_lane_wake(st,(uint16_t)channel_idx,peer_slot);
+                    i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
+                    i_dart_lane_wake(st,(uint16_t)topic_index,peer_slot);
                     li = next; continue;
                 }
                 accepted = (ok > 0);
@@ -391,7 +391,7 @@ uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t channel,
 #endif
             {
                 accepted = !st->cfg.on_message ||
-                           st->cfg.on_message(st->cfg.user, channel, peer_id,
+                           st->cfg.on_message(st->cfg.user, topic_index, peer_id,
                                               dart_bytes(held, held_len)) == 0;
                 r = &st->lanes[li].r;                  /* the callback may have re-entered */
             }
@@ -402,9 +402,9 @@ uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t channel,
 #ifdef DART_SHM
                 r->parked_shm = 0; r->shm_fail = 0;
 #endif
-                if (ch->qos.reliability==DART_RELIABLE){   /* ack now, AFTER delivery */
-                    i_dart_reader_arm(ch,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-                    i_dart_lane_wake(st,(uint16_t)channel_idx,peer_slot);
+                if (topic->qos.reliability==DART_RELIABLE){   /* ack now, AFTER delivery */
+                    i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+                    i_dart_lane_wake(st,(uint16_t)topic_index,peer_slot);
                 }
             } else still++;
         }

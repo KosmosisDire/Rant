@@ -20,13 +20,13 @@
  *     auto node = dart::Node::open("robot1",
  *         [](const dart::MessageIn& m){
  *             std::printf("%.*s > %.*s\n",
- *                 (int)m.sender_name().size(), m.sender_name().data(),
+ *                 (int)m.publisher_name().size(), m.publisher_name().data(),
  *                 (int)m.text().size(),        m.text().data());
  *         },
  *         [](const dart::Event& e){ std::fprintf(stderr, "event: %s\n", e.to_string().c_str()); },
  *         { .domain = 7 });                  // std::optional
  *     if (!node) return 1;
- *     auto ch = node->create_channel("chat", dart::Role::PubSub, nullptr,
+ *     auto ch = node->create_topic("chat", dart::Role::PubSub, nullptr,
  *                                    { .reliability = dart::Reliability::Reliable });
  *     node->start();                         // background service thread owns the loop
  *     for (;;) ch.send("hello");             // thread-safe; or skip start() and poll(1) yourself
@@ -102,8 +102,8 @@ namespace detail {
 enum class Reliability { BestEffort = 0, Reliable = 1 };
 enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
-/* dart_channel_send / create result. Ok is 0; the rest mirror DartResult. */
-enum class SendStatus  { Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
+/* dart_topic_send / create result. Ok is 0; the rest mirror DartResult. */
+enum class SendStatus  { Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
                          State = -5, NoSys = -6 };
 
 enum class EventKind {
@@ -139,7 +139,7 @@ static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
 
 /* forward decls */
 class Node;
-class Channel;
+class Topic;
 class MessageIn;
 class Event;
 
@@ -207,14 +207,14 @@ struct Qos {
     uint32_t    heartbeat_us         = 0;   /* reliable idle-writer ping (0 = 100ms) */
     uint32_t    repair_delay_us      = 0;   /* reliable reader's resend delay (0 = 20ms) */
     uint32_t    backpressure_wait_us = 0;   /* reliable: send pause for a slow reader (0 = none) */
-    uint32_t    shm_max_bytes        = 0;   /* pin channel to one same-host SHM size class */
+    uint32_t    shm_max_bytes        = 0;   /* pin topic to one same-host SHM size class */
     uint32_t    queue_bytes          = 0;   /* consumer-queue cap for take()/dispatch(); 0 = the
                                                queue appears lazily on first use, 1 MB cap */
 };
 
 struct NodeOptions {
     uint16_t                 domain               = 0;   /* logical-network selector */
-    uint16_t                 max_channels         = 8;   /* how many channels may be created */
+    uint16_t                 max_topics         = 8;   /* how many topics may be created */
     bool                     disable_shm          = false;
     bool                     fetch_details        = false; /* greedily fetch every peer topic's
                                                               name + schema (observer UIs): fills
@@ -236,8 +236,8 @@ struct NodeOptions {
      * ALL its memory from there, with no heap and no growth (and the same-host
      * SHM fast path off, since it needs a growable allocator). The buffer must
      * outlive the node and be big enough for the configured max_peers /
-     * max_channels plus message buffers; open returns nullopt if it is too
-     * small. A typed channel copies its schema into this buffer, so pair it with
+     * max_topics plus message buffers; open returns nullopt if it is too
+     * small. A typed topic copies its schema into this buffer, so pair it with
      * Schema::compile(text, scratch, size) for a fully heap-free node. */
     void*                    memory      = nullptr;
     size_t                   memory_size = 0;
@@ -255,7 +255,7 @@ public:
     }
     /* Zero-heap variant: compile into your fixed `scratch` buffer instead of the
      * heap (for a static-memory deployment). The buffer must outlive this Schema;
-     * once create_channel has copied the schema into the node, the Schema and its
+     * once create_topic has copied the schema into the node, the Schema and its
      * scratch may be dropped or reused. Returns nullopt if the buffer is too small. */
     static std::optional<Schema> compile(std::string_view text, void* scratch, size_t scratch_size,
                                          std::string* err = nullptr) {
@@ -388,7 +388,7 @@ private:
     detail::DartValue v_{};
     friend class MapReader;
     friend class MessageIn;
-    friend class Channel;
+    friend class Topic;
 };
 
 /* Reads a map body: by key, or iterate by index. Every walk is bounds-checked in the
@@ -508,7 +508,7 @@ inline MapDict MapReader::to_map() const {
 
 /* MessageOut: a mutable message buffer bound to a Schema, for typed encoding.
  * Set fields by name (nested members by dotted path, e.g. "vel.dx"), then
- * pass it straight to Channel::send (it converts to Bytes). Variable-length fields
+ * pass it straight to Topic::send (it converts to Bytes). Variable-length fields
  * (`string`, `elem[]`, `map`) grow the buffer as needed; over-cap on a capped field
  * is refused and flips ok() to false (never a silent truncation). */
 class MessageOut {
@@ -570,10 +570,10 @@ private:
 /* MessageIn: a delivered message. Non-owning; valid only inside the handler. */
 class MessageIn {
 public:
-    std::string_view sender_name()  const { return { msg_->sender_name.data,  msg_->sender_name.len  }; }
-    uint32_t         sender_id()    const { return msg_->sender_id; }
-    std::string_view channel_name() const { return { msg_->channel_name.data, msg_->channel_name.len }; }
-    uint16_t         channel_id()   const { return msg_->channel_id; }
+    std::string_view publisher_name()  const { return { msg_->publisher_name.data,  msg_->publisher_name.len  }; }
+    uint32_t         publisher_id()    const { return msg_->publisher_id; }
+    std::string_view topic_name() const { return { msg_->topic_name.data, msg_->topic_name.len }; }
+    uint16_t         topic_index()   const { return msg_->topic_index; }
     Bytes            data()         const { return { msg_->data.data, msg_->data.len }; }
     std::string_view text()         const { return { reinterpret_cast<const char*>(msg_->data.data), msg_->data.len }; }
     bool             has_schema()   const { return msg_->schema != nullptr; }
@@ -611,9 +611,9 @@ public:
     /* the peer's human-readable node name for peer-scoped events (empty when unknown);
        prefer it over peer() in messages, an id means nothing to a human */
     std::string_view peer_name()      const { return ev_->peer_name ? std::string_view(ev_->peer_name) : std::string_view{}; }
-    uint16_t         channel()        const { return ev_->channel; }
-    /* our channel name for channel-scoped events, else empty */
-    std::string_view channel_name()   const { return ev_->channel_name ? std::string_view(ev_->channel_name) : std::string_view{}; }
+    uint16_t         topic()        const { return ev_->topic; }
+    /* our topic name for topic-scoped events, else empty */
+    std::string_view topic_name()   const { return ev_->topic_name ? std::string_view(ev_->topic_name) : std::string_view{}; }
     int              os_error()       const { return ev_->os_error; }
     uint64_t         lost_first()     const { return ev_->lost_first; }
     uint64_t         lost_count()     const { return ev_->lost_count; }
@@ -648,58 +648,58 @@ struct Peer {
     std::vector<PeerTopic> topics;
 };
 
-/* Channel: a lightweight handle (owned by the Node, stable for its life). */
-class Channel {
+/* Topic: a lightweight handle (owned by the Node, stable for its life). */
+class Topic {
 public:
-    Channel() = default;
+    Topic() = default;
     bool valid() const noexcept { return ch_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
     SendStatus send(Bytes data) {
-        if (!ch_) return SendStatus::NoChannel;
+        if (!ch_) return SendStatus::NoTopic;
         return static_cast<SendStatus>(
-            detail::dart_channel_send(ch_, detail::dart_bytes(data.data(), data.size())));
+            detail::dart_topic_send(ch_, detail::dart_bytes(data.data(), data.size())));
     }
     SendStatus set_role(Role r) {
-        if (!ch_) return SendStatus::NoChannel;
+        if (!ch_) return SendStatus::NoTopic;
         return static_cast<SendStatus>(
-            detail::dart_channel_set_role(ch_, static_cast<detail::DartRole>(r)));
+            detail::dart_topic_set_role(ch_, static_cast<detail::DartRole>(r)));
     }
     uint16_t index() const {
         if (!ch_) return 0xffff;
-        return detail::dart_channel_index(ch_);
+        return detail::dart_topic_index(ch_);
     }
     int match_count() const {
         if (!ch_) return 0;
-        return detail::dart_channel_match_count(ch_);
+        return detail::dart_topic_match_count(ch_);
     }
     /* Pump until every reader has acked, or timeout_ms elapses. Call before
      * closing so a final burst is not cut off by the BYE. */
     bool drain(int timeout_ms) {
         if (!ch_) return true;
-        return detail::dart_channel_drain(ch_, timeout_ms) == 1;
+        return detail::dart_topic_drain(ch_, timeout_ms) == 1;
     }
 
     /* ---- consumer queue (take / dispatch) ------------------------------------------
-     * The first take()/dispatch() switches this channel to QUEUED delivery: its
+     * The first take()/dispatch() switches this topic to QUEUED delivery: its
      * messages then queue instead of firing the node handler on the poll thread, and
-     * exactly one thread of your choosing consumes them here (per channel). The queue
-     * grows on demand to Qos::queue_bytes (0 = 1 MB); at the cap a best-effort channel
+     * exactly one thread of your choosing consumes them here (per topic). The queue
+     * grows on demand to Qos::queue_bytes (0 = 1 MB); at the cap a best-effort topic
      * overwrites oldest (Event MsgLost), a reliable one backpressures the publisher.
      * Waiting works everywhere: alongside start()/a poller it sleeps, otherwise it
      * drives the poll loop itself. */
 
     /* A taken message: owns the DartMsg struct by value; the views inside point into
-     * the channel's ring and stay valid until the NEXT take/dispatch on the channel. */
+     * the topic's ring and stay valid until the NEXT take/dispatch on the topic. */
     class TakenMessageIn {
     public:
         TakenMessageIn() = default;
         bool valid() const noexcept { return ok_; }
         explicit operator bool() const noexcept { return ok_; }
-        std::string_view sender_name()  const { return { m_.sender_name.data,  m_.sender_name.len  }; }
-        uint32_t         sender_id()    const { return m_.sender_id; }
-        std::string_view channel_name() const { return { m_.channel_name.data, m_.channel_name.len }; }
-        uint16_t         channel_id()   const { return m_.channel_id; }
+        std::string_view publisher_name()  const { return { m_.publisher_name.data,  m_.publisher_name.len  }; }
+        uint32_t         publisher_id()    const { return m_.publisher_id; }
+        std::string_view topic_name() const { return { m_.topic_name.data, m_.topic_name.len }; }
+        uint16_t         topic_index()   const { return m_.topic_index; }
         Bytes            data()         const { return { m_.data.data, m_.data.len }; }
         std::string_view text()         const { return { reinterpret_cast<const char*>(m_.data.data), m_.data.len }; }
         bool             has_schema()   const { return m_.schema != nullptr; }
@@ -716,7 +716,7 @@ public:
     private:
         detail::DartMsg m_{};
         bool ok_ = false;
-        friend class Channel;
+        friend class Topic;
     };
 
     /* Pop the next queued message. timeout_ms: 0 = just check, >0 = wait up to that
@@ -724,7 +724,7 @@ public:
      *     while (auto msg = scan.take()) render(msg->data()); */
     std::optional<TakenMessageIn> take(int timeout_ms = 0) {
         TakenMessageIn t;
-        if (!ch_ || detail::dart_channel_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
+        if (!ch_ || detail::dart_topic_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
         t.ok_ = true;
         return t;
     }
@@ -734,18 +734,18 @@ public:
      * poll-thread handlers, these run without the node lock and may use the full API. */
     int dispatch(int max_msgs = 0, int timeout_ms = 0) {
         if (!ch_) return 0;
-        return detail::dart_channel_dispatch(ch_, max_msgs, timeout_ms);
+        return detail::dart_topic_dispatch(ch_, max_msgs, timeout_ms);
     }
     struct QueueStats { uint32_t messages = 0, bytes = 0, capacity = 0, dropped = 0; };
     QueueStats queue_stats() const {
         QueueStats s;
-        if (ch_) detail::dart_channel_queue_stats(ch_, &s.messages, &s.bytes, &s.capacity, &s.dropped);
+        if (ch_) detail::dart_topic_queue_stats(ch_, &s.messages, &s.bytes, &s.capacity, &s.dropped);
         return s;
     }
 
 private:
-    explicit Channel(detail::DartChannel* c) : ch_(c) {}
-    detail::DartChannel* ch_ = nullptr;
+    explicit Topic(detail::DartTopic* c) : ch_(c) {}
+    detail::DartTopic* ch_ = nullptr;
     friend class Node;
 };
 
@@ -755,7 +755,7 @@ private:
  * Drive it either by calling poll() from your own loop, or via start(): a C-level
  * background service thread owns the loop and handlers then fire on it (never two
  * at once for one node). From inside a handler, send() and read-only queries are
- * allowed; poll/create_channel/set_role/drain/stop are refused (SendStatus::State
+ * allowed; poll/create_topic/set_role/drain/stop are refused (SendStatus::State
  * / no-op), never corrupting. */
 class Node {
 public:
@@ -785,7 +785,7 @@ public:
         detail::DartNodeOpts co;
         std::memset(&co, 0, sizeof co);
         co.domain        = o.domain;
-        co.max_channels  = o.max_channels;
+        co.max_topics  = o.max_topics;
         co.disable_shm   = o.disable_shm ? 1 : 0;
         co.fetch_details = o.fetch_details ? 1 : 0;
         co.user_data    = impl.get();
@@ -833,22 +833,22 @@ public:
     Node& on_event  (EventHandler   h) { impl_->on_event = std::move(h); return *this; }
 
     /* Create a topic. schema = an optional typed schema (its bytes are copied
-     * into the node, so the Schema need not outlive the channel). */
-    Channel create_channel(std::string_view name, Role role = Role::PubSub,
+     * into the node, so the Schema need not outlive the topic). */
+    Topic create_topic(std::string_view name, Role role = Role::PubSub,
                            const Schema* schema = nullptr, const Qos& qos = {}) {
         std::string nm(name);
-        detail::DartChannelOpts co;
+        detail::DartTopicOpts co;
         std::memset(&co, 0, sizeof co);
         co.qos = to_c(qos);
-        detail::DartChannel* ch = detail::dart_node_create_channel(
+        detail::DartTopic* ch = detail::dart_node_create_topic(
             impl_->node, nm.c_str(), static_cast<detail::DartRole>(role),
             schema ? schema->raw() : nullptr, &co);
-        return Channel(ch);
+        return Topic(ch);
     }
 
-    /* Recover an already-created channel handle by its creation index. */
-    Channel channel(uint16_t index) const {
-        return Channel(detail::dart_node_channel(impl_->node, index));
+    /* Recover an already-created topic handle by its creation index. */
+    Topic topic(uint16_t index) const {
+        return Topic(detail::dart_node_topic(impl_->node, index));
     }
 
     /* One loop tick: drives discovery, RX, timers, and flushes queued TX. Blocks
@@ -859,16 +859,16 @@ public:
     }
 
     /* Run the C-level background service thread: it owns the loop and fires the
-     * handlers; every Node/Channel call stays safe from any thread, and a send is
+     * handlers; every Node/Topic call stays safe from any thread, and a send is
      * flushed immediately (a waker cuts the service's socket wait short). */
     bool start() { return detail::dart_node_start(impl_->node) == 0; }
     /* Stop and join the service thread (idempotent; implied by node teardown). */
     void stop()  { detail::dart_node_stop(impl_->node); }
     bool is_started() const { return detail::dart_node_is_started(impl_->node) == 1; }
 
-    /* Dispatch every already-queued channel on the calling thread (see Channel::take/
+    /* Dispatch every already-queued topic on the calling thread (see Topic::take/
      * dispatch): the one-liner for a frame-paced consumer that owns all the queues.
-     * Waits up to timeout_ms for any queued channel to hold data. */
+     * Waits up to timeout_ms for any queued topic to hold data. */
     int dispatch(int max_msgs = 0, int timeout_ms = 0) {
         return detail::dart_node_dispatch(impl_->node, max_msgs, timeout_ms);
     }
@@ -896,11 +896,11 @@ public:
             peer.fragment_size = detail::dart_node_peer_frag(&p);
             detail::DartInterestIter it;
             std::memset(&it, 0, sizeof it);
-            detail::DartTopic t;
+            detail::DartTopicEntry t;
             while (detail::dart_node_peer_interest_next(&p, &it, &t)) {
                 /* the fetched name (NodeOptions::fetch_details fills the cache within an
                    RTT); the announce's 32-bit hash as a placeholder until it lands */
-                detail::DartString nm = detail::dart_node_peer_topic_name(impl_->node, p.id, t.alias);
+                detail::DartString nm = detail::dart_node_peer_topic_name(impl_->node, p.id, t.index);
                 std::string name;
                 if (nm.data) name.assign(nm.data, nm.len);
                 else {

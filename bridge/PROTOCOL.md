@@ -7,13 +7,13 @@ native node needs for **pub/sub** arrives over one socket, so a browser, a phone
 or any language with a WebSocket client is a first-class peer.
 
 This is a lean pub/sub proxy, **not** a mesh debugger: there is no peer-table
-snapshot and no way to see other nodes' schemas. A typed channel carries its own
+snapshot and no way to see other nodes' schemas. A typed topic carries its own
 declared schema (both ends paste the same DSL text), so a client encodes and
-decodes with the field table `channel` returns and never needs a peer's layout.
+decodes with the field table `topic` returns and never needs a peer's layout.
 
 Two planes, split by WebSocket frame type:
 
-- **Text frames = control plane, JSON.** Open the node, create channels, flip
+- **Text frames = control plane, JSON.** Open the node, create topics, flip
   roles, drain. Requests carry a `seq`; every request gets exactly one reply
   echoing it. The server also pushes unsolicited `event` messages.
 - **Binary frames = data plane.** Publish and delivery, with a fixed little-endian
@@ -29,12 +29,12 @@ back-compat).
 
 1. Client connects: `ws://host:7480/`.
 2. Client sends `open` (must be the first message). The bridge creates the node.
-3. Client creates channels, publishes, receives, at will.
+3. Client creates topics, publishes, receives, at will.
 4. Client closes the socket (or errors out): the bridge closes the node with a
    BYE and frees everything. There is no explicit close op.
 
 Any request before `open` (or a second `open`) gets an error reply. A binary
-frame before `open`, or on an unknown channel, is dropped and reported with a
+frame before `open`, or on an unknown topic, is dropped and reported with a
 `send_error` event (never a reply: publishes carry no seq).
 
 ## Control plane (text frames)
@@ -44,7 +44,7 @@ echo-correlated, so a client can key a promise map on it). Every reply is:
 
 ```json
 { "op": "reply", "seq": 3, "ok": true,  ...result fields }
-{ "op": "reply", "seq": 3, "ok": false, "error": "channel name too long" }
+{ "op": "reply", "seq": 3, "ok": false, "error": "topic name too long" }
 ```
 
 Unknown `op`, malformed JSON, or a missing field gets `ok:false` (with `seq: 0`
@@ -57,7 +57,7 @@ request, only for a broken WebSocket.
 { "op": "open", "seq": 1,
   "name": "dashboard",            // optional; omitted => auto "ws-XXXXXXXX"
   "domain": 0,                    // optional; every field below is optional too
-  "max_channels": 8,
+  "max_topics": 8,
   "max_peers": 16,
   "interface": "192.168.1.10",    // pin discovery multicast (multihomed hosts)
   "seed_peers": ["10.0.0.7", "10.0.0.8:7400"],  // unicast discovery seeds
@@ -70,14 +70,14 @@ request, only for a broken WebSocket.
 Reply: `{ "ok": true, "proto": 2, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
-### `channel` : create a channel (topic)
+### `topic` : create a topic (topic)
 
 ```json
-{ "op": "channel", "seq": 2,
+{ "op": "topic", "seq": 2,
   "name": "pose",                 // required: the cross-peer topic identity
   "role": "pubsub",               // "pubsub" | "pub" | "sub" | "inactive"
   "schema": "Pose { stamp: u64, x: f64, y: f64, vel: { dx: f32, dy: f32 } }",
-                                  // optional DSL text; omitted = raw-bytes channel
+                                  // optional DSL text; omitted = raw-bytes topic
   "reliable": false,              // QoS, all optional
   "keep_last": 16,
   "catch_up": 0,
@@ -85,7 +85,7 @@ so an auto-generated one is visible).
   "backpressure_wait_ms": 0 }
 ```
 
-Reply for a typed channel returns the compiled layout, which is everything a
+Reply for a typed topic returns the compiled layout, which is everything a
 client needs to encode and decode messages by itself (fixed fields at absolute
 offsets, little-endian, no padding):
 
@@ -100,9 +100,9 @@ offsets, little-endian, no padding):
     { "path": "vel.dy", "kind": "f32",    "offset": 28, "size": 4 } ] }
 ```
 
-`id` is the channel id used in binary frames (the node-local index, dense from
+`id` is the topic id used in binary frames (the node-local index, dense from
 0). `hash` is the 64-bit schema identity as hex (it exceeds JS safe integers). A
-raw channel replies just `{ "ok": true, "id": 0 }`.
+raw topic replies just `{ "ok": true, "id": 0 }`.
 
 **`size`** is the length of the **fixed section** — the exact message size when the
 schema has no variable fields, and where the variable tail begins when it does.
@@ -130,22 +130,22 @@ must be byte-identical across nodes for the identical-hash fast path, and
 structurally a subset to match a wider publisher (the normal DART rules; the
 bridge adds nothing).
 
-### `role` : flip a channel's role at runtime
+### `role` : flip a topic's role at runtime
 
 ```json
-{ "op": "role", "seq": 3, "channel": 0, "role": "sub" }
+{ "op": "role", "seq": 3, "topic": 0, "role": "sub" }
 ```
 
 Re-advertises immediately; peers rematch. `"inactive"` = declared but off.
 
-### `drain` : wait until every reader acked a channel
+### `drain` : wait until every reader acked a topic
 
 ```json
-{ "op": "drain", "seq": 5, "channel": 0, "timeout_ms": 1000 }
+{ "op": "drain", "seq": 5, "topic": 0, "timeout_ms": 1000 }
 ```
 
 Reply: `{ "ok": true, "drained": true }`. Call before closing when the last
-burst matters (reliable channels).
+burst matters (reliable topics).
 
 ## Events (server pushed, text frames)
 
@@ -161,9 +161,9 @@ are per event:
 | `peer_up`          | `peer`                                          |
 | `peer_down`        | `peer`                                          |
 | `peer_interest`    | `peer`, `publishes`, `receives` (matched counts)|
-| `msg_lost`         | `channel`, `peer`, `first`, `count`             |
-| `error`            | `error` (numeric code) + whichever of `channel_name`, `channel`, `peer`, `os_error` apply |
-| `send_error`       | `channel`, `code`, `error` (a failed publish)   |
+| `msg_lost`         | `topic`, `peer`, `first`, `count`             |
+| `error`            | `error` (numeric code) + whichever of `topic_name`, `topic`, `peer`, `os_error` apply |
+| `send_error`       | `topic`, `code`, `error` (a failed publish)   |
 
 Everything that goes wrong is one `error` event: `text` carries the human-readable
 message and `error` the numeric code (a `DartErrorKind`: 1 name-collision,
@@ -183,28 +183,28 @@ there are no length fields.
 **Publish, client to server** (3-byte header):
 
 ```
-[u8 op = 0x01] [u16 channel] [payload bytes ...]
+[u8 op = 0x01] [u16 topic] [payload bytes ...]
 ```
 
 **Delivery, server to client** (7-byte header):
 
 ```
-[u8 op = 0x01] [u16 channel] [u32 sender] [payload bytes ...]
+[u8 op = 0x01] [u16 topic] [u32 publisher] [payload bytes ...]
 ```
 
-`channel` is the id from the `channel` reply. `sender` is the peer id of the
-sending node. The payload is the DART message verbatim: for a typed channel it
-decodes with the `fields` table; for a raw channel it is whatever the publisher
-sent. On a typed channel the bridge's node has already length-validated the
-payload against the sender's schema before forwarding.
+`topic` is the id from the `topic` reply. `publisher` is the peer id of the
+sending node. The payload is the DART message verbatim: for a typed topic it
+decodes with the `fields` table; for a raw topic it is whatever the publisher
+sent. On a typed topic the bridge's node has already length-validated the
+payload against the publisher's schema before forwarding.
 
 Other `op` byte values are reserved and ignored (a client must not fail on an
 unknown op; the server drops unknown ops silently).
 
-Publishing is fire and forget: no ack (a reliable channel's guarantees run
+Publishing is fire and forget: no ack (a reliable topic's guarantees run
 between the bridge node and its peers, as usual). A publish that fails
 immediately (bad role, too big, out of memory) surfaces as a `send_error`
-event. A reliable channel under backpressure blocks the connection's receive
+event. A reliable topic under backpressure blocks the connection's receive
 thread, which backpressures the WebSocket via TCP: a fast publisher into a slow
 mesh slows down instead of buffering unboundedly.
 
@@ -225,12 +225,12 @@ import { DartClient } from "./dart.mjs";
 const node = await DartClient.connect("ws://localhost:7480", {
   name: "dashboard", domain: 0 });
 
-const pose = await node.channel("pose", "pubsub", {
+const pose = await node.topic("pose", "pubsub", {
   reliable: true,
   schema: "Pose { stamp: u64, x: f64, y: f64, vel: { dx: f32, dy: f32 } }" });
 
 pose.onMessage = (msg) => {
-  console.log(msg.sender, msg.get("x"), msg.get("vel.dx"));  // typed reads
+  console.log(msg.publisher, msg.get("x"), msg.get("vel.dx"));  // typed reads
   // msg.data is the raw Uint8Array view when you want the bytes
 };
 
@@ -257,8 +257,8 @@ buffer. u64/i64 fields surface as `bigint`; `string`/`vstring` as a JS string; a
   front for wss:// or auth.
 - **No JSON data path.** The data plane is bytes; a client that wants JSON
   converts at the edge with the fields table (the reference client shows how).
-- **No per-sender layout tables.** A typed delivery is validated against the
-  sender's schema by the node, but the client decodes with its own channel
+- **No per-publisher layout tables.** A typed delivery is validated against the
+  publisher's schema by the node, but the client decodes with its own topic
   layout. Byte-identical schema text end to end (the recommended deployment) is
   always exact.
 ```

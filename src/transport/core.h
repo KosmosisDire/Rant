@@ -38,7 +38,7 @@ extern "C" {
 #endif
 /* The UDP fragment size is set PER NODE at init (DartConfig.frag_payload) and
  * advertised via discovery, so a receiver reassembles each message at the SOURCE
- * node's size -- a writer always fragments with one size, so its seqno line stays
+ * node's size -- a publisher always fragments with one size, so its seqno line stays
  * self-consistent (no per-message field on the wire). These two compile bounds
  * frame the runtime range so fixed buffers can be sized; both default to
  * DART_FRAG_PAYLOAD, i.e. no change unless you opt in. MAX sizes the datagram
@@ -65,9 +65,9 @@ extern "C" {
 #define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
 #endif
 
-/* FIXED (no-allocator) mode only: sizes the static per-peer alias tables, bounding the
- * highest peer alias that can demux. Auto-raised to 2*n_channels. Dynamic mode ignores
- * it: each peer's alias map is allocated at that peer's actual advertised size. */
+/* FIXED (no-allocator) mode only: sizes the static per-peer index tables, bounding the
+ * highest peer index that can demux. Auto-raised to 2*n_topics. Dynamic mode ignores
+ * it: each peer's index map is allocated at that peer's actual advertised size. */
 #ifndef DART_META_MAX_IDS
 #define DART_META_MAX_IDS 256u
 #endif
@@ -77,60 +77,60 @@ typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
                DART_INACTIVE = 3 } DartRole;
 
-/* Every field except reliability is zero-means-default, so a reliable channel is
+/* Every field except reliability is zero-means-default, so a reliable topic is
  * just { .reliability = DART_RELIABLE }. */
 typedef struct {
     DartReliability reliability;
-    uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1, or 10 on a reliable channel */
+    uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1, or 10 on a reliable topic */
     uint16_t catch_up;           /* recent messages a new subscriber gets at once. 0 = future
                                     only, 1 = latest value. Keep small (bursts at startup) */
     uint32_t max_message_bytes;  /* biggest message. 0 = one fragment, or grow-to-fit with an allocator */
-    uint32_t heartbeat_us;       /* reliable: idle-writer ping (repairs a lost final message). 0 = 250ms */
-    uint32_t repair_delay_us;    /* reliable: reader's delay before requesting a resend. 0 = 50ms */
-    uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow reader before
+    uint32_t heartbeat_us;       /* reliable: idle-publisher ping (repairs a lost final message). 0 = 250ms */
+    uint32_t repair_delay_us;    /* reliable: subscriber's delay before requesting a resend. 0 = 50ms */
+    uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow subscriber before
                                     evicting un-acked history. 0 = none (pure KEEP_LAST) */
-    uint32_t shm_max_bytes;      /* same-host SHM: pin this channel to one size class big enough for
+    uint32_t shm_max_bytes;      /* same-host SHM: pin this topic to one size class big enough for
                                     this many bytes, so same-sized traffic reuses one pre-sized
                                     segment (a larger message falls back to UDP). 0 = each message
                                     uses its own size class's segment, created on demand. */
-    uint32_t queue_bytes;        /* NODE-level consumer queue capacity (dart_channel_take /
-                                    dart_channel_dispatch): the byte bound on how far a consumer
-                                    may fall behind the poll. Setting it makes the channel queued
+    uint32_t queue_bytes;        /* NODE-level consumer queue capacity (dart_topic_take /
+                                    dart_topic_dispatch): the byte bound on how far a consumer
+                                    may fall behind the poll. Setting it makes the topic queued
                                     from creation; 0 = the queue appears lazily on the first take/
                                     dispatch, capped at DART_QUEUE_CAP. The ring starts small and
                                     grows on demand to the cap, like the message buffers. The
                                     transport core itself ignores this field. */
 } DartQos;
 
-/* A channel (topic). Cross-peer identity is the name (64-bit hash); the LOCAL
- * handle for dart_transport_send / on_message is the channel's index in channels[]. */
+/* A topic. Cross-peer identity is the name (64-bit hash); the LOCAL
+ * handle for dart_transport_send / on_message is the topic's index in topics[]. */
 typedef struct {
     const char *name;  /* topic name = cross-peer identity. Required, same on every node, <= DART_TOPIC_NAME_MAX */
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
-} DartChannelDef;
+} DartTopicDef;
 
-/* dart_transport_poll_send destination: a peer id. Data is unicast point-to-point per matched reader. */
+/* dart_transport_poll_send destination: a peer id. Data is unicast point-to-point per matched subscriber. */
 
-/* A complete message; channel is the local handle. Do not call back into dart_*.
+/* A complete message; topic is the local handle. Do not call back into dart_*.
  * Return 0 = delivered. Nonzero = REFUSED (downstream has nowhere to put it, e.g. the
- * node's consumer queue is full): on a reliable channel the reader PARKS the assembled
- * sample -- no advance, no ack, no repair traffic -- so the writer's own flow control
+ * node's consumer queue is full): on a reliable topic the subscriber PARKS the assembled
+ * message -- no advance, no ack, no repair traffic -- so the publisher's own flow control
  * carries the backpressure to the publisher; retry with dart_transport_deliver_parked.
- * On a best-effort channel a refusal is a drop (KEEP_LAST semantics). Callers with
+ * On a best-effort topic a refusal is a drop (KEEP_LAST semantics). Callers with
  * nothing to refuse just return 0. */
-typedef int (*DartMessageFn)(void *user, uint16_t channel, uint32_t from_peer, DartBytes data);
+typedef int (*DartMessageFn)(void *user, uint16_t topic_index, uint32_t from_peer, DartBytes data);
 
 #ifdef DART_SHM
 /* SHM delivery: the transport reassembled nothing -- it hands the node the
  * DART_SHM_DESC_BYTES descriptor from an SHM-DATA submessage and the node resolves it
  * to bytes and calls the user's on_message. Returns 1 if delivered; 0 if it could not
- * resolve the chunk (recycled / unattachable) -- then the reader leaves the gap so the
+ * resolve the chunk (recycled / unattachable) -- then the subscriber leaves the gap so the
  * reliability layer repairs or skips it; -1 if delivery was REFUSED downstream (consumer
- * queue full) -- then a reliable reader parks the descriptor exactly like a refused
- * inline sample (see DartMessageFn). Internal (transport->node); the user's on_message
+ * queue full) -- then a reliable subscriber parks the descriptor exactly like a refused
+ * inline message (see DartMessageFn). Internal (transport->node); the user's on_message
  * is unchanged and never sees this. */
-typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
+typedef int (*i_DartShmMsgFn)(void *user, uint16_t topic_index, uint32_t from_peer,
                              const uint8_t *desc);
 #endif
 
@@ -139,13 +139,13 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t channel, uint32_t from_peer,
  * into its app-facing DartEvent (node/core.h); a sans-IO transport user handles them
  * directly. Flat and self-describing: read only the fields named for the .kind. */
 typedef enum {
-    DART_TRANSPORT_MSG_LOST,        /* messages skipped: .channel, .peer, .lost_first .. +.lost_count-1 */
+    DART_TRANSPORT_MSG_LOST,        /* messages skipped: .topic, .peer, .lost_first .. +.lost_count-1 */
     DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
-    DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .channel), refused */
-    DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.channel, .peer) */
-    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.channel, .peer,
+    DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .topic), refused */
+    DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.topic, .peer) */
+    DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.topic, .peer,
                                        .peer_is_pub = the refused direction) */
-    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry aliases we cannot map (.peer,
+    DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry indices we cannot map (.peer,
                                         .lost_count = entry count): their data can never demux here.
                                         Fixed mode: raise DART_META_MAX_IDS; dynamic: map alloc failed. */
     DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
@@ -155,39 +155,39 @@ typedef enum {
                                                exchange); value kept so binding enums stay aligned. */
 } DartTransportEventKind;
 
-/* The channel name for a channel-scoped event is not carried here: read it with
- * dart_transport_channel_name(st, ev->channel). Flat and self-describing: read only
+/* The topic name for a topic-scoped event is not carried here: read it with
+ * dart_transport_topic_name(st, ev->topic). Flat and self-describing: read only
  * the fields named for the .kind. */
 typedef struct {
     DartTransportEventKind kind;
     void       *user;          /* DartConfig.user */
     uint32_t   peer;           /* peer id (0 = n/a) */
-    uint16_t   channel;        /* local channel handle */
+    uint16_t   topic;        /* local topic handle */
     uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
     uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
     uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint8_t    peer_is_pub;    /* SCHEMA_MISMATCH: the refused direction, as in the
-                                  schema_check hook (1 = their writer, our read side) */
+                                  schema_check hook (1 = their publisher, our read side) */
 } DartTransportEvent;
 typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_PAYLOAD_MAX)
 
-/* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user channels grow to
+/* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user topics grow to
  * fit (max_message_bytes may be 0); NULL (default, embedded) keeps fixed buffers and a
  * bigger message is refused/skipped. Pair a set allocator with dart_transport_destroy to free it. */
 
-/* Two ways to populate the channel table:
- *   fixed/at-init : channels != NULL, n_channels = its length. Slots are defined now;
+/* Two ways to populate the topic table:
+ *   fixed/at-init : topics != NULL, n_topics = its length. Slots are defined now;
  *                   buffers come from the arena (or the allocator if one is set).
- *   reserve/lazy  : channels == NULL, n_channels = the reserved capacity, allocator set.
- *                   All slots start DART_INACTIVE; fill them later with dart_transport_channel_define
- *                   (this is how the node's runtime dart_node_create_channel works). */
+ *   reserve/lazy  : topics == NULL, n_topics = the reserved capacity, allocator set.
+ *                   All slots start DART_INACTIVE; fill them later with dart_transport_topic_define
+ *                   (this is how the node's runtime dart_node_create_topic works). */
 typedef struct {
-    const DartChannelDef *channels;     /* NULL = reserve mode (see above) */
-    uint16_t              n_channels;   /* defined count, or reserved capacity in reserve mode */
+    const DartTopicDef *topics;     /* NULL = reserve mode (see above) */
+    uint16_t              n_topics;   /* defined count, or reserved capacity in reserve mode */
     uint16_t              max_peers;
     uint16_t              frag_payload; /* UDP fragment size this node sends with; 0 =
                                            DART_FRAG_PAYLOAD. Clamped to [MIN, MAX]. */
@@ -202,11 +202,11 @@ typedef struct {
      * identity + canonical wire (hash 0 = untyped; wire {NULL,0} = not inlined, identical
      * or already known). peer_is_pub = 1 gates the read side (their publish, we would
      * decode), 0 the write side. Return 1 to allow, 0 to refuse. Both verdicts are cached
-     * per (peer, alias) for the peer's lifetime (schemas are immutable per incarnation);
+     * per (peer, index) for the peer's lifetime (schemas are immutable per incarnation);
      * a refused direction forms no proxy and fires SCHEMA_MISMATCH when a later interest
      * apply would have used it. The transport knows nothing of schema contents; the node
      * implements this over the serialize layer. */
-    int                 (*schema_check)(void *user, uint32_t peer, uint16_t channel,
+    int                 (*schema_check)(void *user, uint32_t peer, uint16_t topic_index,
                                         int peer_is_pub, uint64_t schema_hash,
                                         DartBytes schema_wire);
     void                 *user;
@@ -217,19 +217,19 @@ typedef struct DartTransportState DartTransportState;
 size_t    dart_transport_required_memory(const DartConfig *cfg);
 DartTransportState *dart_transport_init(void *mem, size_t mem_size, const DartConfig *cfg);
 /* Relocate a live transport into new_mem (>= dart_transport_required_memory at the grown counts),
- * re-striding its tables to new_max_peers/new_n_channels and carrying live reliability
+ * re-striding its tables to new_max_peers/new_n_topics and carrying live reliability
  * state (positions, history, in-flight repair) across. Heap buffers are not in the arena,
  * so the caller frees old's arena block afterward but must NOT dart_transport_destroy old. Returns
  * the new state, or NULL on failure (old is left intact). Dynamic-mode growth only. */
 DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_mem, size_t new_cap,
-                        uint16_t new_max_peers, uint16_t new_n_channels);
-/* Free allocator-allocated buffers (dynamic channels). No-op in fixed mode; the
+                        uint16_t new_max_peers, uint16_t new_n_topics);
+/* Free allocator-allocated buffers (dynamic topics). No-op in fixed mode; the
  * arena stays the caller's. The node calls it from close. */
 void      dart_transport_destroy(DartTransportState *st);
 
 /* 64-bit topic identity from a name (FNV-1a): matches topics across peers. */
 uint64_t  dart_topic_id(const char *name);
-uint64_t  dart_channel_identity(const DartChannelDef *def);   /* = dart_topic_id(def->name) */
+uint64_t  dart_topic_identity(const DartTopicDef *def);   /* = dart_topic_id(def->name) */
 
 /* Normalize a UDP fragment size: 0 -> DART_FRAG_PAYLOAD, then clamp to [MIN,MAX].
  * The rule dart_transport_init and the node's announce blob both apply (single source). */
@@ -249,11 +249,11 @@ void      dart_transport_peer_add   (DartTransportState *st, uint32_t peer_id, u
 void      dart_transport_peer_remove(DartTransportState *st, uint32_t peer_id);
 
 /* Discovery-blip lifecycle: a peer that fell silent (discovery timeout) is made
- * DORMANT instead of removed, so its reader position survives and a same-incarnation
- * return resumes losslessly. Dormant peers are dropped from flow control (the writer
- * stops heartbeating/draining them so a dead reader can't stall it; the reader stops
+ * DORMANT instead of removed, so its subscriber position survives and a same-incarnation
+ * return resumes losslessly. Dormant peers are dropped from flow control (the publisher
+ * stops heartbeating/draining them so a dead subscriber can't stall it; the subscriber stops
  * acking them), but their proxies and deliver position are preserved. dart_transport_peer_resume
- * re-includes the peer and re-reports reader positions so the writer fills any gap.
+ * re-includes the peer and re-reports subscriber positions so the publisher fills any gap.
  * Both no-op for an unknown peer; the node drives them off discovery DROP/return. */
 void      dart_transport_peer_dormant(DartTransportState *st, uint32_t peer_id);
 void      dart_transport_peer_resume (DartTransportState *st, uint32_t peer_id);
@@ -263,24 +263,24 @@ void      dart_transport_peer_set_frag(DartTransportState *st, uint32_t peer_id,
 
 /* Interest exchange (the node carries these in discovery announces; sans-IO callers
  * disseminate them however they like). The interest list is HASH-ONLY (no names, no
- * schemas): [u16 n] then one [u32 name-hash][u8 flags] entry per channel IN CHANNEL-INDEX
- * ORDER, so the entry's position IS the advertiser's alias (an INACTIVE/undefined slot
- * still occupies its position, keeping later aliases stable across role changes). The
+ * schemas): [u16 n] then one [u32 name-hash][u8 flags] entry per topic IN TOPIC-INDEX
+ * ORDER, so the entry's position IS the advertiser's index (an INACTIVE/undefined slot
+ * still occupies its position, keeping later indices stable across role changes). The
  * hash is the low 32 bits of the 64-bit name identity; flags = role (bits 0-1, a
  * DartRole) | offered/requested reliability (bit 2).
  *
  * A 32-bit hash overlap only NOMINATES a candidate match, it never matches: names and
  * schemas are fetched pairwise via the detail exchange below, and the verified verdicts
- * (name equality, schema compatibility per direction) are cached per (peer, alias) for
+ * (name equality, schema compatibility per direction) are cached per (peer, index) for
  * the peer's lifetime. dart_transport_apply_peer_interest then derives the actual matches
  * from verdicts + the CURRENT flags on every apply, so a role/QoS change rematches
  * instantly with no round trip, while an unverified candidate stays PENDING (no proxy,
- * no data) until its details arrive. Aliases are append-only and their name/schema
+ * no data) until its details arrive. Indices are append-only and their name/schema
  * immutable per peer incarnation: that is what makes the verdict cache sound.
  * dart_transport_build_interest serializes OUR set into out, returning bytes written or
  * 0 if cap is too small; size out via dart_interest_max. apply is idempotent. Re-build +
  * re-disseminate after dart_transport_set_role. */
-size_t    dart_interest_max(uint16_t n_channels);
+size_t    dart_interest_max(uint16_t n_topics);
 size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_t cap);
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
 
@@ -295,24 +295,24 @@ void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t pe
  * the announce: those are fetched pairwise via the detail exchange ('uDTL' below), so a
  * 2000-topic announce is ~10 kB instead of overflowing the one-datagram ceiling. */
 
-/* One channel's schema advertisement, registered by the node: the 64-bit identity plus a
- * view of the canonical wire bytes (valid for the channel's lifetime). hash 0 = none.
+/* One topic's schema advertisement, registered by the node: the 64-bit identity plus a
+ * view of the canonical wire bytes (valid for the topic's lifetime). hash 0 = none.
  * Served to peers by the detail responder (never in the announce). */
 typedef struct {
     uint64_t  hash;
     DartBytes wire;
 } DartMetaSchema;
 
-/* Bytes to reserve for the overlay: prefix + the interest list at n_channels entries,
+/* Bytes to reserve for the overlay: prefix + the interest list at n_topics entries,
  * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_capacity. */
-uint16_t  dart_meta_capacity(uint16_t n_channels);
-/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT channel state,
+uint16_t  dart_meta_capacity(uint16_t n_topics);
+/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT topic state,
  * so a growable caller sizes its buffer to actual content; dart_meta_capacity stays the
  * fixed-buffer worst case (and the accept bound for peers' overlays). */
 uint16_t  dart_transport_meta_size(DartTransportState *st);
 /* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix
  * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), then st's interest
- * list (one positional entry per channel slot up to the highest defined one). Returns
+ * list (one positional entry per topic slot up to the highest defined one). Returns
  * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
  * discovery's own section of the announce blob. */
 uint16_t  dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
@@ -326,20 +326,20 @@ DartBytes dart_meta_interest(DartBytes meta);
  * topic name: only the 32-bit hash rides here. Fetch the name (and schema) via the
  * detail exchange below. */
 typedef struct {
-    uint16_t    alias;      /* the advertiser's channel index (== the entry's position) */
+    uint16_t    index;      /* the advertiser's topic index (== the entry's position) */
     uint8_t     role;       /* the advertiser's DartRole for this topic */
     uint8_t     is_pub;     /* this yield: 1 = publish direction, 0 = subscribe (a PUBSUB
                                topic yields twice, pub first, mirroring the old two-list walk) */
     uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
     uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
-} DartTopic;
+} DartTopicEntry;
 
 /* Iterator state for dart_meta_interest_next: zero-initialize, then call until it
  * returns 0. The fields are internal walk state, not for direct use. */
 typedef struct {
     uint32_t off;        /* byte offset of the next entry within the overlay */
     uint16_t left;       /* entries still to walk */
-    uint16_t alias;      /* position of the next entry */
+    uint16_t index;      /* position of the next entry */
     uint8_t  phase;      /* 1 = the current entry's pub direction was yielded */
     uint8_t  started;    /* 0 until the first call parses the [u16 n] header */
 } DartInterestIter;
@@ -349,9 +349,9 @@ typedef struct {
  * overlay each call with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at
  * the end (or on a malformed/truncated blob: it stops rather than reading past the end).
  * Usage:
- *   DartInterestIter it = {0}; DartTopic t;
+ *   DartInterestIter it = {0}; DartTopicEntry t;
  *   while (dart_meta_interest_next(meta, &it, &t)) { ... } */
-int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopic *out);
+int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
@@ -359,27 +359,27 @@ int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
 #endif
 
 /* Pairwise detail exchange (sans-IO codec for the 'uDTL' datagram family). A requester
- * asks a peer for the full details of specific advertised topics (by alias): the topic
+ * asks a peer for the full details of specific advertised topics (by index): the topic
  * NAME (collision check), the SCHEMA hash, and the schema wire where the two hashes
  * differ. The responder is STATELESS: a response is a read-only answer built from the
- * request's alias list and sent back to the request's source address, so duplicates are
+ * request's index list and sent back to the request's source address, so duplicates are
  * harmless and nobody stores requests; a lost response heals by the requester re-asking.
  * The node runtime routes these on its unicast data socket next to the transport
  * datagrams; sans-IO callers run the codec over their own pipe. Layout (LE):
  *   ['u','D','T','L'][kind][fam ver=1][u16 domain][u32 meta_version][u16 n][entries]
- *   REQ  entry: [u16 alias][u64 schema_hash]     the REQUESTER's hash for its matching
- *               channel (0 = none), so the responder inlines the wire only on mismatch
- *   RESP entry: [u16 alias][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
- * meta_version: on a REQ, the responder announce version the aliases were read from; on
+ *   REQ  entry: [u16 index][u64 schema_hash]     the REQUESTER's hash for its matching
+ *               topic (0 = none), so the responder inlines the wire only on mismatch
+ *   RESP entry: [u16 index][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ * meta_version: on a REQ, the responder announce version the indices were read from; on
  * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
- * the requested aliases the responder currently advertises, truncated at an entry
+ * the requested indices the responder currently advertises, truncated at an entry
  * boundary when it cannot fit the cap: the requester re-requests what it still lacks. */
 #define DART_DETAIL_REQ  1
 #define DART_DETAIL_RESP 2
 
-/* One requested topic: the peer's alias + our schema hash for it (0 = untyped/none). */
+/* One requested topic: the peer's index + our schema hash for it (0 = untyped/none). */
 typedef struct {
-    uint16_t alias;
+    uint16_t index;
     uint64_t schema_hash;
 } DartDetailWant;
 
@@ -399,9 +399,9 @@ size_t    dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
  * req is malformed. Same walk as dart_transport_detail_respond, byte for byte. */
 size_t    dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
                        DartBytes req);
-/* Answer req into out[cap]: one entry per requested alias this st currently advertises
- * (unknown/INACTIVE aliases are skipped), the schema wire inlined only where the
- * request's hash differs from ours. schemas is the same per-channel array
+/* Answer req into out[cap]: one entry per requested index this st currently advertises
+ * (unknown/INACTIVE indices are skipped), the schema wire inlined only where the
+ * request's hash differs from ours. schemas is the same per-topic array
  * dart_transport_meta_build takes (or NULL). meta_version stamps the response (pass the
  * current announce version). Fills what fits, truncating at an entry boundary (the
  * requester re-requests the rest). Returns bytes written; 0 = malformed req or cap
@@ -412,7 +412,7 @@ size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSc
 /* One topic's details, as decoded by dart_detail_next. name/schema_wire point into the
  * source response (NOT NUL-terminated / not owned), so keep that buffer alive. */
 typedef struct {
-    uint16_t   alias;       /* the responder's local channel index */
+    uint16_t   index;       /* the responder's local topic index */
     DartString name;        /* topic name (not NUL-terminated) */
     uint64_t   schema_hash; /* the responder's schema identity (0 = untyped) */
     DartBytes  schema_wire; /* canonical wire bytes, only when the request's hash differed
@@ -434,7 +434,7 @@ int       dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out);
 
 /* The requester side of the pending-match cycle. detail_wants scans a peer's interest
  * list (its announce overlay's interest section) for CANDIDATES: entries whose 32-bit
- * hash matches a local channel, whose roles overlap ours, and whose verdict is not yet
+ * hash matches a local topic, whose roles overlap ours, and whose verdict is not yet
  * cached. It fills up to max_wants request entries (each carrying OUR schema hash for
  * the responder's inline-on-mismatch rule) and returns the count: 0 means nothing is
  * pending for this peer (converged). out may be NULL to just count. Re-run it on every
@@ -443,7 +443,7 @@ int       dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out);
  * apply_peer_details ingests a DETAIL_RESP: each entry is verified (full 64-bit identity
  * recomputed from the name; a same-hash different-name peer fires NAME_COLLISION and is
  * refused; the schema_check hook gates both directions) and the verdict cached. Returns
- * the number of newly decided aliases; when nonzero, re-run
+ * the number of newly decided indices; when nonzero, re-run
  * dart_transport_apply_peer_interest with the peer's current interest so the new verdicts
  * form their matches (proxies, catch-up replay) exactly as a fresh announce would. */
 uint16_t  dart_transport_detail_wants(DartTransportState *st, const DartMetaSchema *schemas,
@@ -452,28 +452,28 @@ uint16_t  dart_transport_detail_wants(DartTransportState *st, const DartMetaSche
 uint16_t  dart_transport_apply_peer_details(DartTransportState *st, uint32_t peer_id,
                        DartBytes resp);
 
-/* Change a channel's role at runtime (rematches peers locally; caller re-advertises
+/* Change a topic's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
-int       dart_transport_set_role(DartTransportState *st, uint16_t channel, uint8_t role);
+int       dart_transport_set_role(DartTransportState *st, uint16_t topic_index, uint8_t role);
 
-/* Define a reserved (currently inactive) channel slot at runtime: set its name/qos/
+/* Define a reserved (currently inactive) topic slot at runtime: set its name/qos/
  * role, allocate its history ring via the allocator, and rematch known peers.
  * Reserve mode only (an allocator is required). Returns 0 ok, or negative: -1 bad index/
  * name / slot already defined / no allocator, -4 out of memory. Re-advertise interest
  * after (the node bumps its discovery announce). */
-int       dart_transport_channel_define(DartTransportState *st, uint16_t channel, const DartChannelDef *def);
+int       dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, const DartTopicDef *def);
 
-/* The channel's topic name ({NULL,0} if undefined or out of range), for surfacing it on a
+/* The topic's topic name ({NULL,0} if undefined or out of range), for surfacing it on a
  * delivered message. Not NUL-terminated: use .data/.len. The name is a local lookup; it is
  * never on the data path. */
-DartString dart_transport_channel_name(DartTransportState *st, uint16_t channel);
+DartString dart_transport_topic_name(DartTransportState *st, uint16_t topic_index);
 
 /* dart_transport_send / dart_transport_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {
     DART_OK             =  0,
-    DART_ERR_NO_CHANNEL = -1,  /* channel index out of range */
+    DART_ERR_NO_TOPIC = -1,  /* topic index out of range */
     DART_ERR_TOO_BIG    = -2,  /* exceeds max_message_bytes or the wire fragment cap */
-    DART_ERR_ROLE       = -3,  /* channel is SUB_ONLY or INACTIVE: cannot publish */
+    DART_ERR_ROLE       = -3,  /* topic is SUB_ONLY or INACTIVE: cannot publish */
     DART_ERR_OOM        = -4,  /* dynamic allocator returned NULL */
     DART_ERR_STATE      = -5,  /* wrong state: poll while a service thread runs, start while
                                   started, or a call not allowed from inside a callback */
@@ -481,115 +481,115 @@ typedef enum {
 } DartResult;
 
 /* Publish a message to all peers. Returns DART_OK, or a negative DartResult. */
-int       dart_transport_send(DartTransportState *st, uint16_t channel, DartBytes data, uint64_t now_us);
+int       dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now_us);
 
 #ifdef DART_SHM
 /* Publish a message whose payload lives in an external shared-memory buffer: the
- * transport stores the sample referencing chunk (NOT copied) plus the descriptor,
+ * transport stores the message referencing chunk (NOT copied) plus the descriptor,
  * fragments from chunk for non-SHM peers, and sends ONE SHM-DATA (the descriptor) to
  * SHM-capable peers. desc is DART_SHM_DESC_BYTES. Same return as dart_transport_send. The chunk
- * must stay valid until the sample leaves history (acked / evicted). */
-int       dart_transport_send_shm(DartTransportState *st, uint16_t channel, DartBytes chunk,
+ * must stay valid until the message leaves history (acked / evicted). */
+int       dart_transport_send_shm(DartTransportState *st, uint16_t topic_index, DartBytes chunk,
                       const uint8_t *desc, uint64_t now_us);
 /* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).
  * Off by default; the node sets it on attach, clears it on dormant/remove. */
 void      dart_transport_peer_set_shm(DartTransportState *st, uint32_t peer_id, int is_shm);
-/* 1 if every matched reader of channel is SHM-capable, so a publish may go via SHM
+/* 1 if every matched subscriber of topic is SHM-capable, so a publish may go via SHM
  * (else inline). The node checks this per message. */
-int       dart_transport_writer_shm_eligible(DartTransportState *st, uint16_t channel);
-/* The history slot the next publish to channel will occupy (binds chunk<->slot). */
-uint16_t  dart_transport_channel_hist_head(DartTransportState *st, uint16_t channel);
+int       dart_transport_publisher_shm_eligible(DartTransportState *st, uint16_t topic_index);
+/* The history slot the next publish to topic will occupy (binds chunk<->slot). */
+uint16_t  dart_transport_topic_hist_head(DartTransportState *st, uint16_t topic_index);
 #endif
 
-/* The channel's qos as stored at init; NULL if unknown. */
-const DartQos *dart_transport_channel_qos(DartTransportState *st, uint16_t channel);
+/* The topic's qos as stored at init; NULL if unknown. */
+const DartQos *dart_transport_topic_qos(DartTransportState *st, uint16_t topic_index);
 
-/* 1 if appending here would overwrite history not yet acked by every reader. A
- * writer pumps while this is 1, then sends anyway after qos.backpressure_wait_us. */
-int       dart_transport_send_would_evict(DartTransportState *st, uint16_t channel);
+/* 1 if appending here would overwrite history not yet acked by every subscriber. A
+ * publisher pumps while this is 1, then sends anyway after qos.backpressure_wait_us. */
+int       dart_transport_send_would_evict(DartTransportState *st, uint16_t topic_index);
 
-/* 1 if appending here would overwrite history some matched, live reader was never
+/* 1 if appending here would overwrite history some matched, live subscriber was never
  * HANDED TO THE WIRE (committed but not yet emitted by poll_send). Unlike
  * would_evict this applies to best-effort lanes too: it detects a send burst
- * outrunning the TX drain, not slow-reader flow control. The node waits on it so
+ * outrunning the TX drain, not slow-subscriber flow control. The node waits on it so
  * a send cannot silently vaporize data that never left the process. On 1, the
- * evicted sample's base seqno / fragment count are written to the (NULLable) outs. */
-int       dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t channel,
+ * evicted message's base seqno / fragment count are written to the (NULLable) outs. */
+int       dart_transport_send_would_evict_unsent(DartTransportState *st, uint16_t topic_index,
                                                  uint64_t *evict_base, uint32_t *evict_count);
 
-/* 1 if every live reader has acked all messages on this reliable channel (so a
- * writer may close without truncating). Best-effort/unknown return 1. Wrapped as
- * dart_channel_drain. */
-int       dart_transport_send_drained(DartTransportState *st, uint16_t channel);
+/* 1 if every live subscriber has acked all messages on this reliable topic (so a
+ * publisher may close without truncating). Best-effort/unknown return 1. Wrapped as
+ * dart_topic_drain. */
+int       dart_transport_send_drained(DartTransportState *st, uint16_t topic_index);
 
-/* Peers currently matched as readers (subscribers) of this channel. 0 = a publish
+/* Peers currently matched as subscribers (subscribers) of this topic. 0 = a publish
  * goes nowhere; a one-shot publisher can poll this before sending. */
-int       dart_transport_writer_match_count(DartTransportState *st, uint16_t channel);
+int       dart_transport_publisher_match_count(DartTransportState *st, uint16_t topic_index);
 
-/* Per-peer match summary (diagnostic): how many channels we now PUBLISH to this peer
+/* Per-peer match summary (diagnostic): how many topics we now PUBLISH to this peer
  * (it subscribes and we publish) and how many we RECEIVE from it (it publishes and we
  * subscribe). Counts unicast lanes; either out-pointer may be NULL, both 0 for an
  * unknown peer. Surfaced on DART_PEER_INTEREST so a caller can watch a connection form. */
 void      dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
                                  uint16_t *publish_to, uint16_t *receive_from);
 
-/* Cumulative reliable-repair counters for a channel, summed over its peer/reader
- * proxies (writer side = this node publishing; reader side = subscribing). Always on;
+/* Cumulative reliable-repair counters for a topic, summed over its peer/subscriber
+ * proxies (publisher side = this node publishing; subscriber side = subscribing). Always on;
  * each field is a plain bump on a path that already runs. The per-second deltas of
- * frags_resent (writer) and non-dup frags_recv (reader) are repair throughput; a flat
- * HOL snapshot (dart_transport_reader_progress) with rising nacks_sent is a wedged stream. */
+ * frags_resent (publisher) and non-dup frags_recv (subscriber) are repair throughput; a flat
+ * HOL snapshot (dart_transport_subscriber_progress) with rising nacks_sent is a wedged stream. */
 typedef struct {
-    /* writer side (node as publisher) */
+    /* publisher side (node as publisher) */
     uint64_t nacks_recv;     /* ACKNACKs received that requested missing fragments (nbits>0) */
     uint64_t frags_resent;   /* DATA fragments retransmitted to satisfy a NACK */
     uint64_t frags_sent;     /* all DATA fragments sent (new + repair); repair fraction = resent/sent */
-    /* reader side (node as subscriber) */
+    /* subscriber side (node as subscriber) */
     uint64_t nacks_sent;     /* repair requests we emitted (ACKNACK with nbits>0) */
     uint64_t frags_recv;     /* all DATA fragments received, including duplicates */
     uint64_t frags_dup;      /* fragments received that we already held (repair overlap / waste) */
     uint64_t msgs_skipped;   /* messages given up on (sum of DART_MSG_LOST counts) */
-    /* repair-arm attribution (diagnostic): each counts a 0->1 arming of the reader's
+    /* repair-arm attribution (diagnostic): each counts a 0->1 arming of the subscriber's
        pending-ACK, by what triggered it. arms_data = a DATA/SHM-DATA arrival re-armed
        it; arms_hb = a heartbeat did. A stall where arms_hb ticks at the heartbeat rate
-       while arms_data is flat means the reader only re-asks on arrivals, not on a timer. */
+       while arms_data is flat means the subscriber only re-asks on arrivals, not on a timer. */
     uint64_t arms_data;
     uint64_t arms_hb;
     /* RX disposition of received DATA fragments (diagnostic): every DATA fragment that
-       reaches the reader is one of these. frags_recv counts ACCEPTED only (base ==
-       deliver_upto), so "recv 0" while the writer floods can mean the fragments are
+       reaches the subscriber is one of these. frags_recv counts ACCEPTED only (base ==
+       deliver_upto), so "recv 0" while the publisher floods can mean the fragments are
        landing but being rejected as old/ahead, not that they aren't arriving. */
     uint64_t frags_old;        /* base < deliver_upto: whole message already delivered/skipped */
     uint64_t frags_ahead;      /* base > deliver_upto: a future message (no out-of-order buffer) */
     uint64_t frags_malformed;  /* count==0 || frag>=count, or not subscribed */
 } DartRepairStats;
 
-/* Fill *out with the channel's cumulative repair counters (zeroed if channel is
- * out of range). Per-channel aggregate; a per-peer breakdown is a later extension. */
-void      dart_transport_repair_stats(DartTransportState *st, uint16_t channel, DartRepairStats *out);
+/* Fill *out with the topic's cumulative repair counters (zeroed if topic is
+ * out of range). Per-topic aggregate; a per-peer breakdown is a later extension. */
+void      dart_transport_repair_stats(DartTransportState *st, uint16_t topic_index, DartRepairStats *out);
 
-/* Writer-side: number of reader lanes on this channel with a pending repair NACK to
- * service. 0 => the writer has nothing to resend right now (idle for lack of NACKs).
+/* Publisher-side: number of subscriber lanes on this topic with a pending repair NACK to
+ * service. 0 => the publisher has nothing to resend right now (idle for lack of NACKs).
  * Diagnostic for the backpressure stall (distinguishes "no NACKs" from "resends
  * dropped"); sampled by the node's in-pump probe. */
-int       dart_transport_repair_pending(DartTransportState *st, uint16_t channel);
+int       dart_transport_repair_pending(DartTransportState *st, uint16_t topic_index);
 
 /* Head-of-line reassembly snapshot for the in-progress message from `peer` on
- * `channel` (the message at the reader's deliver_upto). Returns 1 and fills the
+ * `topic` (the message at the subscriber's deliver_upto). Returns 1 and fills the
  * out-params if a message is mid-reassembly, else 0.
- *   base_seqno : first seqno of the in-progress message (= reader deliver_upto)
+ *   base_seqno : first seqno of the in-progress message (= subscriber deliver_upto)
  *   have       : fragments received so far (popcount of the reassembly bitmap)
  *   total      : fragments the message needs
  * `have` rising across calls => repair is crawling forward; flat => wedged. Any
- * out-pointer may be NULL. Wrapped as dart_channel_reader_progress. */
-int       dart_transport_reader_progress(DartTransportState *st, uint16_t channel, uint32_t peer,
+ * out-pointer may be NULL. Wrapped as dart_topic_subscriber_progress. */
+int       dart_transport_subscriber_progress(DartTransportState *st, uint16_t topic_index, uint32_t peer,
                             uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 
 /* Retry delivery of samples PARKED after a refused on_message/on_shm (see DartMessageFn):
- * re-attempts each parked lane of the channel, advancing + arming the ack for every sample
+ * re-attempts each parked lane of the topic, advancing + arming the ack for every message
  * now accepted. Call it when downstream capacity frees (the node calls it as its consumer
- * queue drains), then flush poll_send so the acks reach the writer. Returns the number of
+ * queue drains), then flush poll_send so the acks reach the publisher. Returns the number of
  * lanes still parked (0 = fully drained). */
-uint32_t  dart_transport_deliver_parked(DartTransportState *st, uint16_t channel, uint64_t now_us);
+uint32_t  dart_transport_deliver_parked(DartTransportState *st, uint16_t topic_index, uint64_t now_us);
 
 /* Feed a received datagram, tagged with the peer it came from. */
 void      dart_transport_on_datagram(DartTransportState *st, uint32_t from_peer, DartBytes datagram,

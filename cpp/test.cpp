@@ -15,7 +15,7 @@ static const char NOTE[]    = "a long unbounded note well over sixteen bytes";
 static const float SAMPLES[] = { 1.5f, -2.25f, 3.75f };
 
 /* build + send one message; returns false if a setter was refused or the send failed */
-static bool send_one(dart::Channel& pub, const dart::Schema& schema, uint32_t seq) {
+static bool send_one(dart::Topic& pub, const dart::Schema& schema, uint32_t seq) {
     dart::MessageOut s(schema);
     dart::MapWriter mw;
     mw.put_uint("battery", 87).put_int("signed", -5)
@@ -122,8 +122,8 @@ int main() {
     auto b = dart::Node::open("B", on_msg, on_evt("B"), opts);
     if (!a || !b) { std::printf("FAIL: open\n"); return 1; }
 
-    auto pub = a->create_channel("t", dart::Role::PubOnly, &*schema, { dart::Reliability::Reliable });
-    auto sub = b->create_channel("t", dart::Role::SubOnly, &*schema, { dart::Reliability::Reliable });
+    auto pub = a->create_topic("t", dart::Role::PubOnly, &*schema, { dart::Reliability::Reliable });
+    auto sub = b->create_topic("t", dart::Role::SubOnly, &*schema, { dart::Reliability::Reliable });
     (void)sub;
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);

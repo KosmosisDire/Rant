@@ -27,7 +27,7 @@ static class Program
 
         var node = new Node("cs-subscriber", _ => _count++,
             e => Console.Error.WriteLine("event: " + e), opts);
-        new Channel<Tick>(node, "tick", Role.SubOnly);
+        new Topic<Tick>(node, "tick", Role.SubOnly);
         Console.WriteLine("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)");
 
         bool stop = false;

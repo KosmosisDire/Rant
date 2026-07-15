@@ -609,7 +609,7 @@ void dart_discovery_solicit(DartDiscoveryState *st){ if (st) st->want_solicit = 
 /* re-deliver every live peer's last-known announce to on_peer_up, so a caller that just
  * changed its own advertised data re-applies all peer interest against the new state. No
  * version change is involved: a peer's blob is unchanged, but the LOCAL side may now have
- * a channel that the blob's interest matches. */
+ * a topic that the blob's interest matches. */
 void dart_discovery_replay_peers(DartDiscoveryState *st){
     uint16_t i;
     if (!st || !st->cfg.on_event) return;

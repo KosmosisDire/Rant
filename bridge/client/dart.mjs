@@ -3,16 +3,16 @@
  * browsers, Node (>= 21), Deno and Bun off the global WebSocket. JSDoc-typed, so
  * TypeScript tooling gets full inference from the .mjs directly.
  *
- * Lean pub/sub only: create typed or raw channels, publish, receive. A typed channel
+ * Lean pub/sub only: create typed or raw topics, publish, receive. A typed topic
  * carries its own declared schema, so the client encodes/decodes with the field table
- * the `channel` reply returns (a DataView straight over the wire, no codegen). There is
+ * the `topic` reply returns (a DataView straight over the wire, no codegen). There is
  * no peer table or mesh introspection.
  *
  *   import { DartClient } from "./dart.mjs";
  *   const node = await DartClient.connect("ws://localhost:7480", { name: "dashboard" });
- *   const ch   = await node.channel("pose", "pubsub", {
+ *   const ch   = await node.topic("pose", "pubsub", {
  *       reliable: true, schema: "Pose { stamp: u64, x: f64, y: f64 }" });
- *   ch.onMessage = (m) => console.log(m.sender, m.get("x"));
+ *   ch.onMessage = (m) => console.log(m.publisher, m.get("x"));
  *   ch.send({ stamp: 1n, x: 1.5, y: 2.0 });
  */
 
@@ -181,13 +181,13 @@ function writeMapBody(sink, obj) {
 
 function encodeMap(obj) { const s = new ByteSink(); writeMapBody(s, obj); return s.bytes(); }
 
-/* A delivered message: raw bytes plus typed reads through the channel's field table. */
+/* A delivered message: raw bytes plus typed reads through the topic's field table. */
 export class DartMessage {
-    /** @param {DartChannel} channel @param {number} sender @param {Uint8Array} data */
-    constructor(channel, sender, data) {
-        this.channel = channel;
+    /** @param {DartTopic} topic @param {number} publisher @param {Uint8Array} data */
+    constructor(topic, publisher, data) {
+        this.topic = topic;
         /** @type {number} peer id of the sending node */
-        this.sender = sender;
+        this.publisher = publisher;
         /** @type {Uint8Array} the payload, verbatim */
         this.data = data;
         this._view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -199,11 +199,11 @@ export class DartMessage {
      *  Uint8Array view); structs return a Uint8Array view of their bytes.
      *  @param {string} path @returns {any} */
     get(path) {
-        const f = this.channel.fields.get(path);
+        const f = this.topic.fields.get(path);
         if (!f) throw new Error(`no field '${path}'`);
 
         if (VARIABLE.has(f.kind)) {
-            const fr = varFrame(this.data, this._view, this.channel.size, f.varOrdinal);
+            const fr = varFrame(this.data, this._view, this.topic.size, f.varOrdinal);
             if (!fr) return f.kind === "varr" ? [] : (f.kind === "map" ? {} : "");
             const frame = this.data.subarray(fr.off, fr.off + fr.len);
             if (f.kind === "vstring") return dec.decode(frame);
@@ -243,22 +243,22 @@ function decodeArray(f, data, view, off, len) {
     return out;
 }
 
-/* One channel (topic) on the node. Returned by DartClient.channel(). */
-export class DartChannel {
+/* One topic (topic) on the node. Returned by DartClient.topic(). */
+export class DartTopic {
     /** @param {DartClient} client @param {string} name
      *  @param {{id: number, size?: number, hash?: string, fields?: Field[]}} r */
     constructor(client, name, r) {
         this._client = client;
         /** @type {string} the topic name */
         this.name = name;
-        /** @type {number} channel id in binary frames */
+        /** @type {number} topic id in binary frames */
         this.id = r.id;
         /** @type {number|undefined} fixed-section size; where the variable tail begins */
         this.size = r.size;
         /** @type {string|undefined} 64-bit schema identity, hex */
         this.hash = r.hash;
         const list = r.fields ?? [];
-        /** @type {Map<string, Field>} dotted path -> field (typed channels) */
+        /** @type {Map<string, Field>} dotted path -> field (typed topics) */
         this.fields = new Map(list.map(f => [f.path, f]));
         /** @type {Field[]} variable fields in schema (tail) order */
         this.varFields = [];
@@ -282,7 +282,7 @@ export class DartChannel {
      *  accepts a string); an `arr`/`varr` as an Array/TypedArray; a `map` as a plain
      *  object. @param {Record<string, any>} values */
     send(values) {
-        if (this.size === undefined) throw new Error(`'${this.name}' is a raw channel: use sendRaw`);
+        if (this.size === undefined) throw new Error(`'${this.name}' is a raw topic: use sendRaw`);
         const fixed = new Uint8Array(this.size);
         const view = new DataView(fixed.buffer);
         for (const [path, v] of Object.entries(values)) {
@@ -303,12 +303,12 @@ export class DartChannel {
         this.sendRaw(buf);
     }
 
-    /** Flip this channel's role: "pubsub" | "pub" | "sub" | "inactive". */
-    setRole(role) { return this._client._request({ op: "role", channel: this.id, role }); }
+    /** Flip this topic's role: "pubsub" | "pub" | "sub" | "inactive". */
+    setRole(role) { return this._client._request({ op: "role", topic: this.id, role }); }
 
-    /** Wait until every reader acked everything (reliable channels, before close). */
+    /** Wait until every reader acked everything (reliable topics, before close). */
     async drain(timeout_ms = 1000) {
-        const r = await this._client._request({ op: "drain", channel: this.id, timeout_ms });
+        const r = await this._client._request({ op: "drain", topic: this.id, timeout_ms });
         return /** @type {boolean} */ (r.drained);
     }
 }
@@ -355,7 +355,7 @@ function encodeVarFrame(f, v) {
 export class DartClient {
     /** Connect to a bridge and open the node.
      *  @param {string} url e.g. "ws://localhost:7480"
-     *  @param {{ name?: string, domain?: number, max_channels?: number, max_peers?: number,
+     *  @param {{ name?: string, domain?: number, max_topics?: number, max_peers?: number,
      *            interface?: string, seed_peers?: string[], fragment_size?: number,
      *            announce_interval_ms?: number, peer_timeout_ms?: number,
      *            disable_shm?: boolean }} [opts]
@@ -379,8 +379,8 @@ export class DartClient {
         this._seq = 0;
         /** @type {Map<number, {resolve: Function, reject: Function}>} */
         this._pending = new Map();
-        /** @type {Map<number, DartChannel>} by channel id */
-        this._channels = new Map();
+        /** @type {Map<number, DartTopic>} by topic id */
+        this._topics = new Map();
         /** @type {string} this node's name (auto-generated if none was given) */
         this.name = "";
         /** @type {?(e: any) => void} every bridge event (errors, peer up/down, msg loss) */
@@ -424,22 +424,22 @@ export class DartClient {
         const b = new Uint8Array(buf);
         if (b.length < 7 || b[0] !== OP_DATA) return;   /* reserved ops: ignore */
         const id = b[1] | (b[2] << 8);
-        const sender = b[3] | (b[4] << 8) | (b[5] << 16) | ((b[6] << 24) >>> 0);
-        const ch = this._channels.get(id);
-        ch?.onMessage?.(new DartMessage(ch, sender, b.subarray(7)));
+        const publisher = b[3] | (b[4] << 8) | (b[5] << 16) | ((b[6] << 24) >>> 0);
+        const ch = this._topics.get(id);
+        ch?.onMessage?.(new DartMessage(ch, publisher, b.subarray(7)));
     }
 
-    /** Create a channel (topic) on the node. Pass `schema` (DSL text) for a typed
-     *  channel; omit it for a raw bytes channel.
+    /** Create a topic (topic) on the node. Pass `schema` (DSL text) for a typed
+     *  topic; omit it for a raw bytes topic.
      *  @param {string} name @param {"pubsub"|"pub"|"sub"|"inactive"} [role]
      *  @param {{ schema?: string, reliable?: boolean, keep_last?: number, catch_up?: number,
      *            max_message_bytes?: number, heartbeat_ms?: number, repair_delay_ms?: number,
      *            backpressure_wait_ms?: number, shm_max_bytes?: number }} [opts]
-     *  @returns {Promise<DartChannel>} */
-    async channel(name, role = "pubsub", opts = {}) {
-        const r = await this._request({ op: "channel", name, role, ...opts });
-        const ch = new DartChannel(this, name, r);
-        this._channels.set(ch.id, ch);
+     *  @returns {Promise<DartTopic>} */
+    async topic(name, role = "pubsub", opts = {}) {
+        const r = await this._request({ op: "topic", name, role, ...opts });
+        const ch = new DartTopic(this, name, r);
+        this._topics.set(ch.id, ch);
         return ch;
     }
 

@@ -50,8 +50,8 @@ using UnityEngine;
 public struct Pose { public float X, Y, Z; }
 
 public class PoseSender : MonoBehaviour {
-    DartChannel<Pose> pose;
-    void Start()  { pose = DartNode.Channel<Pose>("player/pose"); }
+    DartTopic<Pose> pose;
+    void Start()  { pose = DartNode.Topic<Pose>("player/pose"); }
     void Update() { pose.Publish(new Pose { X = transform.position.x,
                                             Y = transform.position.y,
                                             Z = transform.position.z }); }
@@ -64,22 +64,22 @@ public class PoseReceiver : MonoBehaviour {
 ```
 
 - **Handlers always fire on the main thread.** The node runs the C service thread (the
-  wire never waits for a frame); every channel is queued and DartNode dispatches once
+  wire never waits for a frame); every topic is queued and DartNode dispatches once
   per frame, before other scripts' `Update()`.
-- **Channels are shared by name**: every script asking for `"player/pose"` gets the same
-  `DartChannel<Pose>`. Roles are automatic: created inactive, the first `Publish`
+- **Topics are shared by name**: every script asking for `"player/pose"` gets the same
+  `DartTopic<Pose>`. Roles are automatic: created inactive, the first `Publish`
   advertises pub, the first `Subscribe` advertises sub, the last unsubscribe withdraws it.
 - **Owner-bound subscriptions** (`Subscribe(name, this, handler)`) die with their
   component and are skipped while it is disabled. The ownerless overload returns a
   `DartSubscription`: dispose it yourself.
 - **Edit mode**: `DartNode` is `[ExecuteAlways]`; with Run In Edit Mode on (default) the
   node is live in the editor outside play. Whether your publishers/subscribers run at
-  edit time is up to them; a channel acquired while the node is closed goes live when it
+  edit time is up to them; a topic acquired while the node is closed goes live when it
   opens.
 - **Events** (peer up/down, message loss, errors) are logged to the Console (toggle on
   the component) and observable via `DartNode.Events`, on the main thread.
-- **Escape hatch**: `DartNode.Main.Raw` is the underlying `Node`, `channel.Raw` the
-  underlying `Channel` (TryTake, Drain, QueueStats...). The low-level wrapper (`new
+- **Escape hatch**: `DartNode.Main.Raw` is the underlying `Node`, `topic.Raw` the
+  underlying `Topic` (TryTake, Drain, QueueStats...). The low-level wrapper (`new
   Node(...)` + `Poll()`/`Start()`) remains fully usable without the component.
 
 Any struct/class with public fields is a message type. Wire field names are the C#

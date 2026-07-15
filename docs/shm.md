@@ -15,7 +15,7 @@ The SHM-DATA submessage is a DATA submessage with the `DART_F_SHM` flag set.
 | field | bytes |
 |-------|-------|
 | type and flags | 1 |
-| alias | 2 |
+| index | 2 |
 | base seqno | 8 |
 | count | 2 |
 | descriptor | 24 |
@@ -60,7 +60,7 @@ from the class and attaches the segment on first use.
 ## Chunk lifecycle
 
 A chunk is the writer history slot. There is one chunk per keep_last slot per
-channel. A publish takes a chunk from its class pool, writes the payload, stamps a
+topic. A publish takes a chunk from its class pool, writes the payload, stamps a
 new generation, and sends the descriptor. The node frees the slot chunk when the
 transport reuses that slot. The transport reuses a slot only after the message is
 acked or evicted.
@@ -82,7 +82,7 @@ The reader acks after the copy. The writer holds the chunk until the ack.
 
 ## Loss and repair
 
-The descriptor still travels over UDP and can drop. Reliable channels repair it. The
+The descriptor still travels over UDP and can drop. Reliable topics repair it. The
 reader NACKs the gap and the writer re-sends the descriptor.
 
 A reader that cannot resolve a descriptor does not ack. A recycled chunk resolves to
@@ -91,7 +91,7 @@ re-send. A descriptor that stays unresolvable, such as mismatched `DART_SHM_*`
 constants between nodes, is skipped after `DART_SHM_MAX_RETRY` tries with a
 `DART_MSG_LOST` event. The reader does not wedge.
 
-Best effort channels do not repair. A reader that falls behind misses recycled
+Best effort topics do not repair. A reader that falls behind misses recycled
 messages, same as best effort over UDP.
 
 ## Not supported yet

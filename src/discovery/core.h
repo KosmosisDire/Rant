@@ -178,7 +178,7 @@ size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap)
 void         dart_discovery_solicit(DartDiscoveryState *st);
 /* Re-fire on_peer_up for every live (non-dropped) peer with the meta blob we already
  * hold, without any version change. A caller that just changed its OWN advertised data
- * (e.g. added a local channel / changed a role) uses this to re-apply every peer's
+ * (e.g. added a local topic / changed a role) uses this to re-apply every peer's
  * interest, so the new local state matches interest the peers advertised earlier --
  * which the peer would otherwise only re-send on its own next change. */
 void         dart_discovery_replay_peers(DartDiscoveryState *st);

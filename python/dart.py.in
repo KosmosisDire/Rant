@@ -7,7 +7,7 @@ cl on Windows), then binds it via ctypes. Later imports load the cached library.
 Drop this single file into your project; no pip install, no sibling library.
 
 The API mirrors the C# wrapper (csharp/Dart.cs): everything you create uses a
-constructor (Node / Channel / Schema), and a typed topic is Channel[T] over a
+constructor (Node / Topic / Schema), and a typed topic is Topic[T] over a
 plain annotated class -- no decorators. Config is keyword args or the Qos /
 NodeOptions dataclasses; payloads are plain bytes/str or typed objects.
 
@@ -25,7 +25,7 @@ NodeOptions dataclasses; payloads are plain bytes/str or typed objects.
                      on_message=lambda m: print(m.value),     # m.value is a decoded Pose
                      on_event=lambda e: print("event:", e),   # wired up before the ctor returns
                      domain=7)
-    ch = dart.Channel[Pose](node, "pose",
+    ch = dart.Topic[Pose](node, "pose",
                             qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
     node.start()                                    # C-level service thread owns the loop
     ch.send(Pose(stamp=1, x=1.0, y=2.0, frame="map"))   # thread-safe from any thread
@@ -39,10 +39,10 @@ __dart_name__ on the class to override the wire type name (defaults to the class
 name). A plain class works too; @dataclass just gives you a handy constructor.
 
 Requires a C compiler on the machine at first use only (override with DART_CC).
-Every node/channel call is thread-safe (a node-level lock in the C core
+Every node/topic call is thread-safe (a node-level lock in the C core
 serializes them). Drive a node either with node.start() (a C background service
 thread runs the loop; handlers fire on it, never two at once) or by calling
-node.poll() from your own loop. From inside on_message/on_event, channel.send and
+node.poll() from your own loop. From inside on_message/on_event, topic.send and
 read-only queries are allowed; poll, create, set_role, drain, start, stop, and
 close are refused (SendStatus.STATE / None / False), never corrupting.
 """
@@ -100,11 +100,11 @@ _EXPORTS = [
     "dart_node_open", "dart_node_poll", "dart_node_close",
     "dart_node_start", "dart_node_stop", "dart_node_is_started",
     "dart_node_evicted_unsent", "dart_last_error",
-    "dart_node_create_channel", "dart_node_channel",
-    "dart_channel_send", "dart_channel_set_role", "dart_channel_index",
-    "dart_channel_match_count", "dart_channel_drain",
-    "dart_channel_take", "dart_channel_dispatch", "dart_node_dispatch",
-    "dart_channel_queue_stats",
+    "dart_node_create_topic", "dart_node_topic",
+    "dart_topic_send", "dart_topic_set_role", "dart_topic_index",
+    "dart_topic_match_count", "dart_topic_drain",
+    "dart_topic_take", "dart_topic_dispatch", "dart_node_dispatch",
+    "dart_topic_queue_stats",
     "dart_node_mem_stats", "dart_node_backpressure_stats", "dart_event_str",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size",
@@ -250,7 +250,7 @@ class DartQos(Structure):
     ]
 
 
-class DartChannelOpts(Structure):
+class DartTopicOpts(Structure):
     _fields_ = [("qos", DartQos)]
 
 
@@ -280,7 +280,7 @@ class DartNodeDiscovery(Structure):
 class DartNodeOpts(Structure):
     _fields_ = [
         ("domain", c_uint16),
-        ("max_channels", c_uint16),
+        ("max_topics", c_uint16),
         ("user_data", c_void_p),
         ("disable_shm", c_uint8),
         ("fetch_details", c_uint8),
@@ -293,10 +293,10 @@ class DartMsg(Structure):
     _fields_ = [
         ("node", c_void_p),
         ("user", c_void_p),
-        ("channel_id", c_uint16),
-        ("sender_id", c_uint32),
-        ("sender_name", DartStringView),
-        ("channel_name", DartStringView),
+        ("topic_index", c_uint16),
+        ("publisher_id", c_uint32),
+        ("publisher_name", DartStringView),
+        ("topic_name", DartStringView),
         ("data", DartBytes),
         ("schema", c_void_p),
         ("recv_us", c_uint64),
@@ -307,10 +307,10 @@ class DartEvent(Structure):
     _fields_ = [
         ("kind", c_int),
         ("error", c_int),
-        ("channel_name", c_char_p),
+        ("topic_name", c_char_p),
         ("user", c_void_p),
         ("peer", c_uint32),
-        ("channel", c_uint16),
+        ("topic", c_uint16),
         ("os_error", c_int),
         ("ip", c_uint8 * 16),
         ("ip_len", c_uint8),
@@ -389,18 +389,18 @@ def _bind(lib):
     F("dart_node_stop", [c_void_p], c_int)
     F("dart_node_is_started", [c_void_p], c_int)
     F("dart_node_evicted_unsent", [c_void_p], c_uint32)
-    F("dart_node_create_channel", [c_void_p, c_char_p, c_int, c_void_p,
-                                   POINTER(DartChannelOpts)], c_void_p)
-    F("dart_node_channel", [c_void_p, c_uint16], c_void_p)
-    F("dart_channel_send", [c_void_p, DartBytes], c_int)
-    F("dart_channel_set_role", [c_void_p, c_int], c_int)
-    F("dart_channel_index", [c_void_p], c_uint16)
-    F("dart_channel_match_count", [c_void_p], c_int)
-    F("dart_channel_drain", [c_void_p, c_int], c_int)
-    F("dart_channel_take", [c_void_p, POINTER(DartMsg), c_int], c_int)
-    F("dart_channel_dispatch", [c_void_p, c_int, c_int], c_int)
+    F("dart_node_create_topic", [c_void_p, c_char_p, c_int, c_void_p,
+                                   POINTER(DartTopicOpts)], c_void_p)
+    F("dart_node_topic", [c_void_p, c_uint16], c_void_p)
+    F("dart_topic_send", [c_void_p, DartBytes], c_int)
+    F("dart_topic_set_role", [c_void_p, c_int], c_int)
+    F("dart_topic_index", [c_void_p], c_uint16)
+    F("dart_topic_match_count", [c_void_p], c_int)
+    F("dart_topic_drain", [c_void_p, c_int], c_int)
+    F("dart_topic_take", [c_void_p, POINTER(DartMsg), c_int], c_int)
+    F("dart_topic_dispatch", [c_void_p, c_int, c_int], c_int)
     F("dart_node_dispatch", [c_void_p, c_int, c_int], c_int)
-    F("dart_channel_queue_stats", [c_void_p, POINTER(c_uint32), POINTER(c_uint32),
+    F("dart_topic_queue_stats", [c_void_p, POINTER(c_uint32), POINTER(c_uint32),
                                    POINTER(c_uint32), POINTER(c_uint32)], None)
     F("dart_node_mem_stats", [c_void_p, POINTER(c_size_t), POINTER(c_size_t),
                               POINTER(c_uint64)], None)
@@ -502,7 +502,7 @@ class Role(enum.IntEnum):
 
 class SendStatus(enum.IntEnum):
     OK = 0
-    NO_CHANNEL = -1
+    NO_TOPIC = -1
     TOO_BIG = -2
     BAD_ROLE = -3
     OUT_OF_MEMORY = -4
@@ -601,7 +601,7 @@ class Qos:
 @dataclasses.dataclass
 class NodeOptions:
     domain: int = 0
-    max_channels: int = 0
+    max_topics: int = 0
     disable_shm: bool = False
     fetch_details: bool = False   # greedily fetch every peer topic's name + schema (observer UIs)
     data_port: int = 0
@@ -853,7 +853,7 @@ def _schema_dsl(lib, s):
 
 # ---------------------------------------------------------------------------
 # Schema: a compiled message schema + encode/decode. Build with Schema(text) or
-# Schema(cls); Channel[T] / Channel(node, name, T) build one for you.
+# Schema(cls); Topic[T] / Topic(node, name, T) build one for you.
 # ---------------------------------------------------------------------------
 
 def _dstr(s):
@@ -1291,20 +1291,20 @@ def _to_obj(spec, d):
 
 class Message:
     """A delivered message. Views are copied out, so it outlives the callback.
-    For a typed channel, `.value` is the decoded object and `.fields` the dict.
+    For a typed topic, `.value` is the decoded object and `.fields` the dict.
     recv_us is the node's monotonic clock (microseconds) when the poll RECEIVED the
-    message (queued channels stamp at enqueue), so a paced consumer measures true
+    message (queued topics stamp at enqueue), so a paced consumer measures true
     arrival times, never its own cadence."""
-    __slots__ = ("channel_id", "sender_id", "sender_name", "channel_name",
+    __slots__ = ("topic_index", "publisher_id", "publisher_name", "topic_name",
                  "data", "recv_us", "fields", "value")
 
     @classmethod
     def _from_c(cls, m, spec):
         self = cls.__new__(cls)
-        self.channel_id = m.channel_id
-        self.sender_id = m.sender_id
-        self.sender_name = _dstr(m.sender_name)
-        self.channel_name = _dstr(m.channel_name)
+        self.topic_index = m.topic_index
+        self.publisher_id = m.publisher_id
+        self.publisher_name = _dstr(m.publisher_name)
+        self.topic_name = _dstr(m.topic_name)
         self.recv_us = m.recv_us
         self.data = string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
         self.fields = None
@@ -1322,15 +1322,15 @@ class Message:
         return self.data.decode("utf-8", "replace")
 
     def __repr__(self):
-        return "Message(channel=%r, from=%r, %d bytes)" % (
-            self.channel_name, self.sender_name, len(self.data))
+        return "Message(topic=%r, from=%r, %d bytes)" % (
+            self.topic_name, self.publisher_name, len(self.data))
 
 
 class Event:
     """A peer / message-loss / error notification. Everything that went wrong arrives as
     kind == EventKind.ERROR with .error set to the specific ErrorKind; str(event) is the
     human-readable message either way."""
-    __slots__ = ("kind", "error", "channel_name", "peer", "channel", "os_error",
+    __slots__ = ("kind", "error", "topic_name", "peer", "topic", "os_error",
                  "lost_first", "lost_count", "too_big_bytes", "identity",
                  "publish_topics", "receive_topics", "schema_detail", "peer_name", "_line")
 
@@ -1339,9 +1339,9 @@ class Event:
         self = cls.__new__(cls)
         self.kind = EventKind(e.kind) if e.kind in EventKind._value2member_map_ else e.kind
         self.error = ErrorKind(e.error) if e.error in ErrorKind._value2member_map_ else e.error
-        self.channel_name = e.channel_name.decode("utf-8", "replace") if e.channel_name else None
+        self.topic_name = e.topic_name.decode("utf-8", "replace") if e.topic_name else None
         self.peer = e.peer
-        self.channel = e.channel
+        self.topic = e.topic
         self.os_error = e.os_error
         self.lost_first = e.lost_first
         self.lost_count = e.lost_count
@@ -1369,25 +1369,25 @@ class Event:
         return "Event(%s)" % self._line
 
 
-class _TypedChannel:
-    """The result of Channel[T]: a typed-channel factory bound to schema class T,
-    callable exactly like the Channel constructor minus the schema argument."""
+class _TypedTopic:
+    """The result of Topic[T]: a typed-topic factory bound to schema class T,
+    callable exactly like the Topic constructor minus the schema argument."""
     __slots__ = ("_type",)
 
     def __init__(self, cls_type):
         self._type = cls_type
 
     def __call__(self, node, name, role=Role.PUBSUB, qos=None, **qos_kwargs):
-        return Channel(node, name, self._type, role, qos, **qos_kwargs)
+        return Topic(node, name, self._type, role, qos, **qos_kwargs)
 
     def __repr__(self):
-        return "dart.Channel[%s]" % getattr(self._type, "__name__", self._type)
+        return "dart.Topic[%s]" % getattr(self._type, "__name__", self._type)
 
 
-class Channel:
+class Topic:
     """A topic handle (owned by the Node, stable for its life). Construct it directly:
-    Channel(node, name) is a raw bytes/str topic; pass a schema (a Schema, a schema
-    class, or DSL text) for a typed one; Channel[T](node, name, ...) is the typed
+    Topic(node, name) is a raw bytes/str topic; pass a schema (a Schema, a schema
+    class, or DSL text) for a typed one; Topic[T](node, name, ...) is the typed
     shorthand (schema reflected from class T)."""
     __slots__ = ("_node", "_h", "_schema")
 
@@ -1398,19 +1398,19 @@ class Channel:
         self._h = node._create_native(name, role, sch, qos, qos_kwargs)
 
     def __class_getitem__(cls, item):
-        return _TypedChannel(item)
+        return _TypedTopic(item)
 
     def send(self, data):
         """Publish. `data` may be bytes/str (raw), or a mapping/object for a typed
-        channel (encoded via its schema). Returns a SendStatus."""
+        topic (encoded via its schema). Returns a SendStatus."""
         if isinstance(data, (bytes, bytearray, memoryview)):
             payload = bytes(data)
         elif isinstance(data, str):
             payload = data.encode("utf-8")
         else:
             if self._schema is None:
-                raise TypeError("channel has no schema; send bytes/str, or create the "
-                                "channel with a schema to send objects/dicts")
+                raise TypeError("topic has no schema; send bytes/str, or create the "
+                                "topic with a schema to send objects/dicts")
             payload = self._schema.encode(data)
         b = DartBytes()
         buf = None
@@ -1418,55 +1418,55 @@ class Channel:
             buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
             b.data = cast(buf, c_void_p)
             b.len = len(payload)
-        r = self._node._lib.dart_channel_send(self._h, b)
+        r = self._node._lib.dart_topic_send(self._h, b)
         del buf
         return SendStatus(r) if r in SendStatus._value2member_map_ else r
 
     def set_role(self, role):
-        return self._node._lib.dart_channel_set_role(self._h, int(role))
+        return self._node._lib.dart_topic_set_role(self._h, int(role))
 
     @property
     def index(self):
-        return self._node._lib.dart_channel_index(self._h)
+        return self._node._lib.dart_topic_index(self._h)
 
     def match_count(self):
-        return self._node._lib.dart_channel_match_count(self._h)
+        return self._node._lib.dart_topic_match_count(self._h)
 
     def drain(self, timeout_ms):
         """Pump until every reader has acked, or timeout. Call before close."""
-        return self._node._lib.dart_channel_drain(self._h, timeout_ms) == 1
+        return self._node._lib.dart_topic_drain(self._h, timeout_ms) == 1
 
     def take(self, timeout_ms=0):
         """Pop the next queued message as a Message (copied out), or None if nothing
         arrived within timeout_ms (0 = just check, negative = wait indefinitely).
-        The FIRST take/dispatch switches this channel to QUEUED delivery: messages
+        The FIRST take/dispatch switches this topic to QUEUED delivery: messages
         then queue here instead of firing on_message on the poll thread, so exactly
-        one thread of your choosing consumes them (per channel). The queue grows on
+        one thread of your choosing consumes them (per topic). The queue grows on
         demand to qos queue_bytes (0 = 1 MB); at the cap best-effort overwrites
         oldest (an EventKind.MSG_LOST fires), reliable backpressures the publisher.
         The wait sleeps beside a running service thread and drives the poll loop
         itself otherwise."""
         m = DartMsg()
-        r = self._node._lib.dart_channel_take(self._h, byref(m), timeout_ms)
+        r = self._node._lib.dart_topic_take(self._h, byref(m), timeout_ms)
         if r < 0:
             raise RuntimeError("take failed (%s)" % (SendStatus(r)
                                if r in SendStatus._value2member_map_ else r))
         if r != 1:
             return None
-        return Message._from_c(m, self._node._chan_specs.get(m.channel_id))
+        return Message._from_c(m, self._node._topic_specs.get(m.topic_index))
 
     def dispatch(self, max_msgs=0, timeout_ms=0):
         """Drain the queue by running on_message on the CALLING thread, oldest first:
         up to max_msgs of those queued at entry (0 = all), waiting up to timeout_ms
         for the first like take. Returns the number dispatched. Unlike poll-thread
         callbacks these run without the node lock, so they may use the whole API."""
-        return self._node._lib.dart_channel_dispatch(self._h, max_msgs, timeout_ms)
+        return self._node._lib.dart_topic_dispatch(self._h, max_msgs, timeout_ms)
 
     def queue_stats(self):
         """(messages, bytes, capacity, dropped) of the consumer queue; zeros when
-        the channel is not queued."""
+        the topic is not queued."""
         m, b, c, d = c_uint32(), c_uint32(), c_uint32(), c_uint32()
-        self._node._lib.dart_channel_queue_stats(self._h, byref(m), byref(b),
+        self._node._lib.dart_topic_queue_stats(self._h, byref(m), byref(b),
                                                  byref(c), byref(d))
         return m.value, b.value, c.value, d.value
 
@@ -1476,11 +1476,11 @@ class Channel:
 
 
 class Node:
-    """A DART node: owns sockets, discovery, and channels. Construct it directly:
+    """A DART node: owns sockets, discovery, and topics. Construct it directly:
     Node(name, on_message, on_event, **opts)."""
 
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt",
-                 "_chan_specs", "_schemas")
+                 "_topic_specs", "_schemas")
 
     def __init__(self, name, on_message, on_event, options=None, **opts):
         """Open a node. name is a human-readable label synced via discovery (None or ""
@@ -1494,7 +1494,7 @@ class Node:
         self._alloc = None
         self._on_msg = on_message
         self._on_evt = on_event
-        self._chan_specs = {}
+        self._topic_specs = {}
         self._schemas = []       # compiled schemas kept alive for the node's life
         if options is None:
             options = NodeOptions(**opts)
@@ -1511,7 +1511,7 @@ class Node:
         co = DartNodeOpts()
         memset(byref(co), 0, sizeof(co))
         co.domain = options.domain
-        co.max_channels = options.max_channels
+        co.max_topics = options.max_topics
         co.disable_shm = 1 if options.disable_shm else 0
         co.fetch_details = 1 if options.fetch_details else 0
         co.user_data = c_void_p(self._id)
@@ -1554,21 +1554,21 @@ class Node:
         self._on_evt = fn
         return self
 
-    def create_channel(self, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
-        """Convenience helper: construct and return a Channel on this node. Exactly
-        dart.Channel(self, name, schema, role, qos) -- schema may be None (raw), a
-        Schema, a schema class, or DSL text. (dart.Channel[T](self, name, ...) is the
+    def create_topic(self, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
+        """Convenience helper: construct and return a Topic on this node. Exactly
+        dart.Topic(self, name, schema, role, qos) -- schema may be None (raw), a
+        Schema, a schema class, or DSL text. (dart.Topic[T](self, name, ...) is the
         typed shorthand.)"""
-        return Channel(self, name, schema, role, qos, **qos_kwargs)
+        return Topic(self, name, schema, role, qos, **qos_kwargs)
 
-    # the native create behind the Channel constructor: makes the handle and registers
-    # the schema (kept alive) + decode spec against the channel index.
+    # the native create behind the Topic constructor: makes the handle and registers
+    # the schema (kept alive) + decode spec against the topic index.
     def _create_native(self, name, role, sch, qos, qos_kwargs):
         if qos is None:
             qos = Qos(**qos_kwargs)
         elif qos_kwargs:
             raise TypeError("pass either qos= or keyword qos options, not both")
-        co = DartChannelOpts()
+        co = DartTopicOpts()
         memset(byref(co), 0, sizeof(co))
         co.qos.reliability = int(qos.reliability)
         co.qos.keep_last = qos.keep_last
@@ -1579,13 +1579,13 @@ class Node:
         co.qos.backpressure_wait_us = qos.backpressure_wait_us
         co.qos.shm_max_bytes = qos.shm_max_bytes
         co.qos.queue_bytes = qos.queue_bytes
-        h = self._lib.dart_node_create_channel(
+        h = self._lib.dart_node_create_topic(
             self._h, name.encode("utf-8"), int(role),
             sch._s if sch else None, byref(co))
         if not h:
-            raise RuntimeError("Channel(...) create failed (reserve full, bad name, or OOM)")
-        idx = self._lib.dart_channel_index(h)
-        self._chan_specs[idx] = sch._spec if sch else None
+            raise RuntimeError("Topic(...) create failed (reserve full, bad name, or OOM)")
+        idx = self._lib.dart_topic_index(h)
+        self._topic_specs[idx] = sch._spec if sch else None
         if sch is not None:
             self._schemas.append(sch)
         return h
@@ -1600,7 +1600,7 @@ class Node:
     def start(self):
         """Run the C-level background service thread: it owns the loop and fires the
         handlers (ctypes re-acquires the GIL for them; never two at once for one
-        node). Every node/channel call stays safe from any thread, and a send is
+        node). Every node/topic call stays safe from any thread, and a send is
         flushed immediately (a waker cuts the service's socket wait short).
         Returns True on success."""
         return self._lib.dart_node_start(self._h) == 0
@@ -1613,9 +1613,9 @@ class Node:
         return self._lib.dart_node_is_started(self._h) == 1
 
     def dispatch(self, max_msgs=0, timeout_ms=0):
-        """Dispatch every already-queued channel on the calling thread (see
-        Channel.take/dispatch): the one-liner for a frame-paced consumer that owns
-        all the queues. Waits up to timeout_ms for any queued channel to hold data."""
+        """Dispatch every already-queued topic on the calling thread (see
+        Topic.take/dispatch): the one-liner for a frame-paced consumer that owns
+        all the queues. Waits up to timeout_ms for any queued topic to hold data."""
         return self._lib.dart_node_dispatch(self._h, max_msgs, timeout_ms)
 
     def evicted_unsent(self):
@@ -1682,7 +1682,7 @@ def _on_message(msg_ptr):
         m = msg_ptr.contents
         node = _NODES.get(m.user)
         if node is not None and node._on_msg is not None:
-            spec = node._chan_specs.get(m.channel_id)
+            spec = node._topic_specs.get(m.topic_index)
             node._on_msg(Message._from_c(m, spec))
     except Exception:
         traceback.print_exc()

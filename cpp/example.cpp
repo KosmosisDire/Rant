@@ -37,14 +37,14 @@ static void handle_message(const dart::MessageIn& m) {
         uint64_t n = m.get_uint("textLen");
         if (n > text.size()) n = text.size();
         std::printf("[%.*s] %.*s > %.*s  (#%llu)\n",
-                    (int)m.sender_name().size(),  m.sender_name().data(),
-                    (int)m.channel_name().size(), m.channel_name().data(),
+                    (int)m.publisher_name().size(),  m.publisher_name().data(),
+                    (int)m.topic_name().size(), m.topic_name().data(),
                     (int)n, reinterpret_cast<const char*>(text.data()),
                     (unsigned long long)m.get_uint("seq"));
     } else {
         std::printf("[%.*s] %.*s > %.*s\n",
-                    (int)m.sender_name().size(),  m.sender_name().data(),
-                    (int)m.channel_name().size(), m.channel_name().data(),
+                    (int)m.publisher_name().size(),  m.publisher_name().data(),
+                    (int)m.topic_name().size(), m.topic_name().data(),
                     (int)m.text().size(),         m.text().data());
     }
 }
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     auto node = dart::Node::open(name ? name : std::string_view{}, handle_message, handle_event);
     if (!node) { std::fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
-    auto chat = node->create_channel("chat", dart::Role::PubSub, &*schema,
+    auto chat = node->create_topic("chat", dart::Role::PubSub, &*schema,
                                      { dart::Reliability::Reliable });
     node->start();   /* background poll thread; sends/creates are now thread-safe */
 

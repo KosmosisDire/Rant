@@ -1,7 +1,7 @@
 // DART C# wrapper: a thin P/Invoke layer over the prebuilt native library.
 //
 // DART = Discovery And Realtime Transport, a dependency-free C99 middleware.
-// The API mirrors the C++/Python wrappers (Node / Channel / Schema / Qos ...),
+// The API mirrors the C++/Python wrappers (Node / Topic / Schema / Qos ...),
 // is IL2CPP-safe (static callbacks dispatched by id, blittable structs), and
 // P/Invokes a native library named "dart" (dart.dll / libdart.so / libdart.dylib):
 //
@@ -13,9 +13,9 @@
 //   struct Pose { public double X; [DartString(16)] public string Frame; }
 //
 //   var node = new Dart.Node("robot1",
-//                            onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed channel
+//                            onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed topic
 //                            onEvent: e => Console.Error.WriteLine(e));   // wired up before the ctor returns
-//   var ch = new Dart.Channel<Pose>(node, "pose",
+//   var ch = new Dart.Topic<Pose>(node, "pose",
 //                                   qos: new Dart.Qos { Reliability = Dart.Reliability.Reliable });
 //   node.Start();                                      // C-level service thread owns the loop
 //   ch.Send(new Pose { X = 1, Frame = "map" });        // thread-safe from any thread
@@ -26,12 +26,12 @@
 // [DartSchema("Name")] optionally overrides the wire type name (the class name by
 // default). Nested structs/classes just work.
 //
-// Threading: every Node/Channel call is thread-safe (a node-level lock in the C
+// Threading: every Node/Topic call is thread-safe (a node-level lock in the C
 // core serializes them). Drive a node either with Start() (a C background service
 // thread runs the loop; handlers fire on it, never two at once) or by calling
 // Poll() from your own loop (Unity: Poll(0) from Update() keeps handlers on the
-// main thread). From inside OnMessage/OnEvent, Channel.Send and read-only
-// queries are allowed; Poll/channel create/SetRole/Drain/Start/Stop/Close are
+// main thread). From inside OnMessage/OnEvent, Topic.Send and read-only
+// queries are allowed; Poll/topic create/SetRole/Drain/Start/Stop/Close are
 // refused (SendStatus.State / exception), never corrupting.
 
 using System;
@@ -60,7 +60,7 @@ namespace Dart
     public enum Role { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 }
     public enum SendStatus
     {
-        Ok = 0, NoChannel = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
+        Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
         State = -5,   // wrong state: Poll while started, or a call a handler may not make
         NoSys = -6    // not compiled in (Start under DART_NO_THREADS)
     }
@@ -111,7 +111,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartChannelOpts { public DartQos qos; }
+    internal struct DartTopicOpts { public DartQos qos; }
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartNodeNet
@@ -140,7 +140,7 @@ namespace Dart
     internal struct DartNodeOpts
     {
         public ushort domain;
-        public ushort max_channels;
+        public ushort max_topics;
         public IntPtr user_data;
         public byte disable_shm;
         public byte fetch_details;
@@ -153,10 +153,10 @@ namespace Dart
     {
         public IntPtr node;
         public IntPtr user;
-        public ushort channel_id;
-        public uint sender_id;
-        public DartStringView sender_name;
-        public DartStringView channel_name;
+        public ushort topic_index;
+        public uint publisher_id;
+        public DartStringView publisher_name;
+        public DartStringView topic_name;
         public DartBytes data;
         public IntPtr schema;
         public ulong recv_us;
@@ -167,10 +167,10 @@ namespace Dart
     {
         public int kind;
         public int error;                      // DartErrorKind (Error events)
-        public IntPtr channel_name;            // const char* (channel-scoped events; else null)
+        public IntPtr topic_name;            // const char* (topic-scoped events; else null)
         public IntPtr user;
         public uint peer;
-        public ushort channel;
+        public ushort topic;
         public int os_error;                   // errno / WSAGetLastError (socket failures)
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
         public byte ip_len;
@@ -265,28 +265,28 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint dart_node_evicted_unsent(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_channel(IntPtr node, byte[] name, int role,
-            IntPtr schema, ref DartChannelOpts opts);
+        internal static extern IntPtr dart_node_create_topic(IntPtr node, byte[] name, int role,
+            IntPtr schema, ref DartTopicOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_channel(IntPtr node, ushort index);
+        internal static extern IntPtr dart_node_topic(IntPtr node, ushort index);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_channel_send(IntPtr ch, DartBytes data);
+        internal static extern int dart_topic_send(IntPtr ch, DartBytes data);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_channel_set_role(IntPtr ch, int role);
+        internal static extern int dart_topic_set_role(IntPtr ch, int role);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort dart_channel_index(IntPtr ch);
+        internal static extern ushort dart_topic_index(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_channel_match_count(IntPtr ch);
+        internal static extern int dart_topic_match_count(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_channel_drain(IntPtr ch, int timeout_ms);
+        internal static extern int dart_topic_drain(IntPtr ch, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_channel_take(IntPtr ch, ref DartMsg msg, int timeout_ms);
+        internal static extern int dart_topic_take(IntPtr ch, ref DartMsg msg, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_channel_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
+        internal static extern int dart_topic_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_channel_queue_stats(IntPtr ch, out uint msgs,
+        internal static extern void dart_topic_queue_stats(IntPtr ch, out uint msgs,
             out uint bytes, out uint capacity, out uint dropped);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_node_mem_stats(IntPtr node, out UIntPtr in_use,
@@ -362,7 +362,7 @@ namespace Dart
     public sealed class NodeOptions
     {
         public ushort Domain = 0;
-        public ushort MaxChannels = 0;
+        public ushort MaxTopics = 0;
         public bool DisableShm = false;
         /// <summary>Greedily fetch every peer topic's name + schema (observer/debugger
         /// UIs); costs memory in proportion to the peers' topic counts.</summary>
@@ -477,17 +477,17 @@ namespace Dart
 
     public sealed class Message
     {
-        public ushort ChannelId;
-        public uint SenderId;
-        public string SenderName;
-        public string ChannelName;
+        public ushort TopicIndex;
+        public uint PublisherId;
+        public string PublisherName;
+        public string TopicName;
         public byte[] Data;
         /// <summary>Node monotonic clock (microseconds) when the poll RECEIVED the message
-        /// (a queued channel stamps at enqueue), so a frame-paced consumer measures true
+        /// (a queued topic stamps at enqueue), so a frame-paced consumer measures true
         /// arrival times, never its own cadence.</summary>
         public ulong RecvUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
-        public object Value;                          // typed instance for a typed channel, else Fields
+        public object Value;                          // typed instance for a typed topic, else Fields
 
         public string Text => Encoding.UTF8.GetString(Data);
         public T As<T>() => (T)Value;
@@ -496,10 +496,10 @@ namespace Dart
         {
             var msg = new Message
             {
-                ChannelId = m.channel_id,
-                SenderId = m.sender_id,
-                SenderName = Codec.Str(m.sender_name),
-                ChannelName = Codec.Str(m.channel_name),
+                TopicIndex = m.topic_index,
+                PublisherId = m.publisher_id,
+                PublisherName = Codec.Str(m.publisher_name),
+                TopicName = Codec.Str(m.topic_name),
                 Data = Codec.Bytes(m.data),
                 RecvUs = m.recv_us,
             };
@@ -516,16 +516,16 @@ namespace Dart
         }
 
         public override string ToString()
-            => $"Message(channel={ChannelName}, from={SenderName}, {Data.Length} bytes)";
+            => $"Message(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
     }
 
     public sealed class Event
     {
         public EventKind Kind;
         public ErrorKind Error;         // the specific error when Kind == EventKind.Error, else None
-        public string ChannelName;      // our channel's name for channel-scoped events, else null
+        public string TopicName;      // our topic's name for topic-scoped events, else null
         public uint Peer;
-        public ushort Channel;
+        public ushort Topic;
         public int OsError;             // errno / WSAGetLastError for socket failures, else 0
         public ulong LostFirst;
         public ulong LostCount;
@@ -554,9 +554,9 @@ namespace Dart
             {
                 Kind = (EventKind)e.kind,
                 Error = (ErrorKind)e.error,
-                ChannelName = e.channel_name != IntPtr.Zero ? Codec.PtrToStr(e.channel_name) : null,
+                TopicName = e.topic_name != IntPtr.Zero ? Codec.PtrToStr(e.topic_name) : null,
                 Peer = e.peer,
-                Channel = e.channel,
+                Topic = e.topic,
                 OsError = e.os_error,
                 LostFirst = e.lost_first,
                 LostCount = e.lost_count,
@@ -570,9 +570,9 @@ namespace Dart
         public override string ToString() => _line;
     }
 
-    // ---- channel ----------------------------------------------------------------
+    // ---- topic ----------------------------------------------------------------
 
-    public class Channel
+    public class Topic
     {
         private readonly Node _node;
         private readonly IntPtr _handle;
@@ -580,20 +580,20 @@ namespace Dart
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
         /// UTF-8 strings.</summary>
-        public Channel(Node node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(Node node, string name, Role role = Role.PubSub, Qos qos = null)
             : this(node, name, (Schema)null, role, qos) { }
 
         /// <summary>Create a typed topic with an explicit Schema (compiled from DSL or
-        /// reflected). Channel&lt;T&gt; is the shorthand for the reflected case.</summary>
-        public Channel(Node node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+        /// reflected). Topic&lt;T&gt; is the shorthand for the reflected case.</summary>
+        public Topic(Node node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
         {
             _node = node;
             Schema = schema;
-            _handle = node.CreateNativeChannel(name, role, schema, qos);
+            _handle = node.CreateNativeTopic(name, role, schema, qos);
         }
 
         /// <summary>Publish bytes/string (raw) or a message object (encoded via the
-        /// channel schema). Returns a SendStatus.</summary>
+        /// topic schema). Returns a SendStatus.</summary>
         public SendStatus Send(byte[] data)
         {
             int r;
@@ -605,7 +605,7 @@ namespace Dart
                     data = data != null && data.Length > 0 ? h.AddrOfPinnedObject() : IntPtr.Zero,
                     len = (UIntPtr)(data?.Length ?? 0)
                 };
-                r = Native.dart_channel_send(_handle, b);
+                r = Native.dart_topic_send(_handle, b);
             }
             finally { h.Free(); }
             return (SendStatus)r;
@@ -619,32 +619,32 @@ namespace Dart
             if (value is string s) return Send(s);
             if (Schema == null)
                 throw new InvalidOperationException(
-                    "channel has no schema; send bytes/string, or create the channel with a schema");
+                    "topic has no schema; send bytes/string, or create the topic with a schema");
             return Send(Schema.Encode(value));
         }
 
         public SendStatus SetRole(Role role)
         {
-            return (SendStatus)Native.dart_channel_set_role(_handle, (int)role);
+            return (SendStatus)Native.dart_topic_set_role(_handle, (int)role);
         }
 
-        public ushort Index => Native.dart_channel_index(_handle);
+        public ushort Index => Native.dart_topic_index(_handle);
 
         public int MatchCount()
         {
-            return Native.dart_channel_match_count(_handle);
+            return Native.dart_topic_match_count(_handle);
         }
 
         public bool Drain(int timeoutMs)
         {
-            return Native.dart_channel_drain(_handle, timeoutMs) == 1;
+            return Native.dart_topic_drain(_handle, timeoutMs) == 1;
         }
 
         /// <summary>Pop the next queued message, fully copied out. The FIRST
-        /// TryTake/Dispatch switches this channel to QUEUED delivery: its messages then
+        /// TryTake/Dispatch switches this topic to QUEUED delivery: its messages then
         /// queue instead of firing the node handler on the poll thread, and exactly one
-        /// thread of your choosing consumes them here (per channel). The queue grows on
-        /// demand to Qos.QueueBytes (0 = 1 MB); at the cap a best-effort channel
+        /// thread of your choosing consumes them here (per topic). The queue grows on
+        /// demand to Qos.QueueBytes (0 = 1 MB); at the cap a best-effort topic
         /// overwrites oldest (EventKind.MsgLost fires), a reliable one backpressures the
         /// publisher. timeoutMs: 0 = just check, &gt;0 = wait up to that long, negative =
         /// wait indefinitely (the wait sleeps beside a running service thread and drives
@@ -653,8 +653,8 @@ namespace Dart
         {
             message = null;
             var m = new DartMsg();
-            if (Native.dart_channel_take(_handle, ref m, timeoutMs) != 1) return false;
-            message = Message.FromNative(ref m, _node.ClrTypeOf(m.channel_id));
+            if (Native.dart_topic_take(_handle, ref m, timeoutMs) != 1) return false;
+            message = Message.FromNative(ref m, _node.ClrTypeOf(m.topic_index));
             return true;
         }
 
@@ -664,12 +664,12 @@ namespace Dart
         /// dispatched. Unlike poll-thread callbacks these run without the node lock,
         /// so they may use the whole API.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
-            => Native.dart_channel_dispatch(_handle, maxMsgs, timeoutMs);
+            => Native.dart_topic_dispatch(_handle, maxMsgs, timeoutMs);
 
         /// <summary>Consumer-queue observability; all zeros when not queued.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
-            Native.dart_channel_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
+            Native.dart_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
             return (m, b, c, d);
         }
     }
@@ -677,9 +677,9 @@ namespace Dart
     /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
     /// [DartString] / [DartField] refine them). Delivered messages decode to T
     /// (Message.Value / Message.As&lt;T&gt;()).</summary>
-    public sealed class Channel<T> : Channel
+    public sealed class Topic<T> : Topic
     {
-        public Channel(Node node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(Node node, string name, Role role = Role.PubSub, Qos qos = null)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
         public SendStatus Send(T value) => Send((object)value);
@@ -706,7 +706,7 @@ namespace Dart
         private IntPtr _mcastIf;
         private Action<Message> _onMsg;
         private Action<Event> _onEvt;
-        private readonly Dictionary<ushort, Type> _channelTypes = new Dictionary<ushort, Type>();
+        private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
 
         // rooted so the GC never collects the trampolines handed to native code.
@@ -731,7 +731,7 @@ namespace Dart
             var co = new DartNodeOpts
             {
                 domain = options.Domain,
-                max_channels = options.MaxChannels,
+                max_topics = options.MaxTopics,
                 disable_shm = (byte)(options.DisableShm ? 1 : 0),
                 fetch_details = (byte)(options.FetchDetails ? 1 : 0),
                 user_data = (IntPtr)_id,
@@ -772,27 +772,27 @@ namespace Dart
         /// constructor already requires an initial one.</summary>
         public Node OnEvent(Action<Event> fn) { _onEvt = fn; return this; }
 
-        /// <summary>Convenience helper: construct and return a raw (schemaless) Channel
-        /// on this node -- exactly new Channel(this, name, role, qos).</summary>
-        public Channel CreateChannel(string name, Role role = Role.PubSub, Qos qos = null)
-            => new Channel(this, name, role, qos);
+        /// <summary>Convenience helper: construct and return a raw (schemaless) Topic
+        /// on this node -- exactly new Topic(this, name, role, qos).</summary>
+        public Topic CreateTopic(string name, Role role = Role.PubSub, Qos qos = null)
+            => new Topic(this, name, role, qos);
 
-        /// <summary>Convenience helper: construct and return a typed Channel with an
-        /// explicit Schema -- exactly new Channel(this, name, schema, role, qos).</summary>
-        public Channel CreateChannel(string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
-            => new Channel(this, name, schema, role, qos);
+        /// <summary>Convenience helper: construct and return a typed Topic with an
+        /// explicit Schema -- exactly new Topic(this, name, schema, role, qos).</summary>
+        public Topic CreateTopic(string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+            => new Topic(this, name, schema, role, qos);
 
-        /// <summary>Convenience helper: construct and return a typed Channel&lt;T&gt; on
-        /// this node -- exactly new Channel&lt;T&gt;(this, name, role, qos).</summary>
-        public Channel<T> CreateChannel<T>(string name, Role role = Role.PubSub, Qos qos = null)
-            => new Channel<T>(this, name, role, qos);
+        /// <summary>Convenience helper: construct and return a typed Topic&lt;T&gt; on
+        /// this node -- exactly new Topic&lt;T&gt;(this, name, role, qos).</summary>
+        public Topic<T> CreateTopic<T>(string name, Role role = Role.PubSub, Qos qos = null)
+            => new Topic<T>(this, name, role, qos);
 
-        // the native create behind the Channel constructors: makes the handle and
-        // registers the schema/decode type against the channel index.
-        internal IntPtr CreateNativeChannel(string name, Role role, Schema schema, Qos qos)
+        // the native create behind the Topic constructors: makes the handle and
+        // registers the schema/decode type against the topic index.
+        internal IntPtr CreateNativeTopic(string name, Role role, Schema schema, Qos qos)
         {
             qos = qos ?? new Qos();
-            var co = new DartChannelOpts();
+            var co = new DartTopicOpts();
             co.qos.reliability = (int)qos.Reliability;
             co.qos.keep_last = qos.KeepLast;
             co.qos.catch_up = qos.CatchUp;
@@ -803,12 +803,12 @@ namespace Dart
             co.qos.shm_max_bytes = qos.ShmMaxBytes;
             co.qos.queue_bytes = qos.QueueBytes;
 
-            IntPtr h = Native.dart_node_create_channel(_handle, Codec.CStr(name), (int)role,
+            IntPtr h = Native.dart_node_create_topic(_handle, Codec.CStr(name), (int)role,
                 schema != null ? schema.Handle : IntPtr.Zero, ref co);
             if (h == IntPtr.Zero)
-                throw new InvalidOperationException("channel create failed (reserve full, bad name, or OOM)");
-            ushort idx = Native.dart_channel_index(h);
-            if (schema != null) { _schemas.Add(schema); _channelTypes[idx] = schema.ClrType; }
+                throw new InvalidOperationException("topic create failed (reserve full, bad name, or OOM)");
+            ushort idx = Native.dart_topic_index(h);
+            if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
             return h;
         }
 
@@ -822,7 +822,7 @@ namespace Dart
         }
 
         /// <summary>Run the C-level background service thread: it owns the loop and fires
-        /// the handlers (never two at once for one node); every Node/Channel call stays
+        /// the handlers (never two at once for one node); every Node/Topic call stays
         /// safe from any thread, and a send is flushed immediately. Handlers run on the
         /// service thread -- to keep them on a specific thread (Unity: the main thread),
         /// skip Start() and call Poll() from that thread instead. Returns false if
@@ -837,10 +837,10 @@ namespace Dart
 
         public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
 
-        /// <summary>Dispatch every already-queued channel on the calling thread (see
-        /// Channel.TryTake/Dispatch): with Start() running, this in a Unity Update() (or
+        /// <summary>Dispatch every already-queued topic on the calling thread (see
+        /// Topic.TryTake/Dispatch): with Start() running, this in a Unity Update() (or
         /// any UI frame) keeps every queued handler on that thread while the service
-        /// thread owns the network. Waits up to timeoutMs for any queued channel to hold
+        /// thread owns the network. Waits up to timeoutMs for any queued topic to hold
         /// data; returns the number of messages dispatched.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
             => Native.dart_node_dispatch(_handle, maxMsgs, timeoutMs);
@@ -848,7 +848,7 @@ namespace Dart
         internal Type ClrTypeOf(ushort index)
         {
             Type t;
-            _channelTypes.TryGetValue(index, out t);
+            _topicTypes.TryGetValue(index, out t);
             return t;
         }
 
@@ -909,7 +909,7 @@ namespace Dart
                 Node node; Type clr = null;
                 lock (s_reg) s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null || node._onMsg == null) return;
-                node._channelTypes.TryGetValue(m.channel_id, out clr);
+                node._topicTypes.TryGetValue(m.topic_index, out clr);
                 node._onMsg(Message.FromNative(ref m, clr));   // fully copied: safe past the callback
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_message: " + e); }

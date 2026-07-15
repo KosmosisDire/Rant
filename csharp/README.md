@@ -62,7 +62,7 @@ var node = new Node("robot1",
                     onMessage: m => Console.WriteLine(m.As<Pose>()),
                     onEvent: e => Console.Error.WriteLine(e),
                     new NodeOptions { Domain = 7 });
-var ch = new Channel<Pose>(node, "pose",
+var ch = new Topic<Pose>(node, "pose",
                            qos: new Qos { Reliability = Reliability.Reliable });
 node.Start();                                    // C-level service thread owns the loop
 ch.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
@@ -76,6 +76,6 @@ fixes a string's UTF-8 byte capacity (required on every string; combine both for
 optionally overrides the wire type name. Wire names must match on every node for a
 topic. `new Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
 Handlers fire on the service thread (never two at once for one node); from inside a
-handler, `Channel.Send` and read-only queries are allowed, Poll/channel
+handler, `Topic.Send` and read-only queries are allowed, Poll/topic
 create/SetRole/Drain/Start/Stop/Close are not. To keep handlers on one thread (e.g.
 Unity's main thread), skip `Start()` and call `Poll()` from that thread.

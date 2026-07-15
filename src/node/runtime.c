@@ -1,7 +1,7 @@
 /* NODE runtime: owns the data sockets, drives discovery, and the clock; it wires
- * peers into the transport via the sans-IO node core (node/core.h). Channels are
+ * peers into the transport via the sans-IO node core (node/core.h). Topics are
  * created at runtime and handed back as opaque handles. All OS access goes through
- * dart_plat. See node/runtime.h for the public dart_node_* / dart_channel_* API. */
+ * dart_plat. See node/runtime.h for the public dart_node_* / dart_topic_* API. */
 
 #include "runtime.h"   /* public API + config structs */
 #include "core.h"      /* sans-IO node core: peer table + discovery->transport lifecycle */
@@ -13,7 +13,7 @@
 #include "../common/arena.h"
 #include <string.h>    /* heap access goes through i_dart_plat_realloc (no <stdlib.h> here) */
 
-/* Consumer-queue ring record: header, then the sender name, then the payload at an
+/* Consumer-queue ring record: header, then the publisher name, then the payload at an
  * 8-aligned offset. Records never wrap: a tail-end too small for the next record holds a
  * DART__QWRAP sentinel (or nothing, if smaller than a header) and the record starts at 0. */
 typedef struct {
@@ -21,14 +21,14 @@ typedef struct {
                               the ring reads it at offset 0 for the sentinel test */
     uint32_t data_len;
     uint64_t t_recv_us;    /* poll-side arrival stamp, surfaced as DartMsg.recv_us */
-    uint32_t sender_id;
-    uint8_t  name_len;     /* sender name copied inline (discovery views die with the peer) */
+    uint32_t publisher_id;
+    uint8_t  name_len;     /* publisher name copied inline (discovery views die with the peer) */
     uint8_t  pad[3];
 } i_DartQRec;
 #define DART__QWRAP 0xFFFFFFFFu
 #define DART__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
 
-/* One channel's consumer queue (runtime.h "consumer queues"): a byte ring filled by the
+/* One topic's consumer queue (runtime.h "consumer queues"): a byte ring filled by the
  * poll thread at delivery and drained by take/dispatch on the consumer's thread. All
  * access is under the node lock; the ring and this struct are stable pool allocations
  * (they survive arena grows and are freed by the close-time pool reset). */
@@ -43,10 +43,10 @@ typedef struct {
     uint8_t   viewing;     /* the record at tail is the consumer's live take view */
     uint8_t   busy;        /* inside dispatch's unlocked callback window (no reentry) */
     uint8_t   reliable;    /* full-queue policy: park (reliable) vs overwrite (BE) */
-    uint8_t   parked;      /* transport lanes parked on this channel: retry as we drain */
+    uint8_t   parked;      /* transport lanes parked on this topic: retry as we drain */
 } i_DartMsgQueue;
 
-struct DartChannel {   /* schema: node-owned copy */
+struct DartTopic {   /* schema: node-owned copy */
     DartNode *n; uint16_t index; DartSchema *schema;
     i_DartMsgQueue *q;                  /* consumer queue (NULL = inline callbacks) */
     uint8_t  name_len;                  /* stable topic-name copy: queued DartMsg views
@@ -99,7 +99,7 @@ struct DartNode {
     volatile uint8_t  lock_held;  /* owner-reentrancy check: only the owner thread ever */
     volatile uint64_t lock_owner; /* stores its own id, and zeroes it before releasing */
 #endif
-    /* diagnostic: in-pump probe sampled inside the backpressure wait (dart_channel_send) */
+    /* diagnostic: in-pump probe sampled inside the backpressure wait (dart_topic_send) */
     DartPumpProbeFn pump_probe;
     void          *pump_probe_user;
     uint64_t       pump_probe_interval_us;
@@ -117,7 +117,7 @@ struct DartNode {
     uint8_t        grow_pending;   /* a peer was refused for lack of slots; grow at next poll */
     uint16_t       max_peers;      /* current peer-table capacity (doubles on a dynamic grow) */
     /* the metadata accept bound (largest peer announce blob we store/receive). Starts at
-       dart_meta_capacity(max_channels) and SELF-HEALS: a peer whose blob exceeds it fires
+       dart_meta_capacity(max_topics) and SELF-HEALS: a peer whose blob exceeds it fires
        META_TOO_BIG with the needed size, we grow the bound + RX buffers at the next poll
        and solicit a re-announce, so a big-topology peer and a default node interoperate
        with no configuration. meta_grow_need is the pending request; meta_grow_failed
@@ -126,25 +126,25 @@ struct DartNode {
     uint16_t       meta_capacity;
     uint16_t       meta_grow_need;
     uint16_t       meta_grow_failed;
-    /* channel handles. handles is a pointer array in the arena; each DartChannel struct
+    /* topic handles. handles is a pointer array in the arena; each DartTopic struct
        is a separate stable allocation, so a grow that relocates the arena never moves a
        handle the user holds. */
-    DartChannel **handles;    /* [max_channels] -> stable per-channel structs */
-    uint16_t      max_channels;
+    DartTopic **handles;    /* [max_topics] -> stable per-topic structs */
+    uint16_t      max_topics;
     uint16_t      n_created;
 #ifdef DART_SHM
     /* zero-fragment same-host path: lazy per-size-class segments (see shm/core.h) */
     uint8_t        shm_capable;       /* always 1: the node always has an allocator */
     uint8_t        shm_host[16];  /* our host uuid (advertised; same-host check) */
-    uint64_t       shm_base;      /* per-node segment id base; low 19 bits = (channel<<3)|class */
+    uint64_t       shm_base;      /* per-node segment id base; low 19 bits = (topic<<3)|class */
     void          *shm_scratch; uint32_t shm_scratch_cap;   /* one-copy receive scratch */
-    void         **shm_pool;      /* [nchan*N_CLASSES] our (channel,class) segments (NULL = not
+    void         **shm_pool;      /* [n_topics*N_CLASSES] our (topic,class) segments (NULL = not
                                      created); each created segment's state is a stable hook
                                      allocation, made when the segment is (lazily) created */
-    uint16_t       shm_n_channels;
+    uint16_t       shm_n_topics;
     /* reader-side attach cache, hook-allocated and grown on demand: sized by segments
-       actually attached (same-host peers x their publishing channels), not the worst-case
-       peers x channels x classes. A node with no same-host peer allocates none of it. */
+       actually attached (same-host peers x their publishing topics), not the worst-case
+       peers x topics x classes. A node with no same-host peer allocates none of it. */
     uint64_t      *shm_reader_segments;  /* [shm_reader_cap] attached segment ids */
     void         **shm_reader_states;    /* [shm_reader_cap] their pool states (stable allocations) */
     uint16_t       shm_reader_cap, shm_reader_count;
@@ -153,7 +153,7 @@ struct DartNode {
 };
 
 /* The node's message-buffer allocator, handed to the transport as its realloc hook and used
- * for schemas and channel handles (u is the node). It delegates to the node's paged region
+ * for schemas and topic handles (u is the node). It delegates to the node's paged region
  * allocator: one freeable allocation per call, so free/resize work and reset reclaims all. */
 static void *i_dart_node_alloc(void *u, void *ptr, size_t size){
     return dart_allocator_alloc(&((DartNode*)u)->pool, ptr, size);
@@ -228,10 +228,10 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
     if (n->on_event) n->on_event(e);
 }
 
-/* our channel's name as a C string (the name pool is NUL-terminated), or NULL if the
- * channel is undefined: the channel_name view carried on channel-scoped events. */
-static const char *i_dart_node_ch_name(DartNode *n, uint16_t ch){
-    DartString s = dart_transport_channel_name(n->transport, ch);
+/* our topic's name as a C string (the name pool is NUL-terminated), or NULL if the
+ * topic is undefined: the topic_name view carried on topic-scoped events. */
+static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
+    DartString s = dart_transport_topic_name(n->transport, topic_index);
     return (const char*)s.data;
 }
 
@@ -286,14 +286,14 @@ static int i_dart_q_grow(DartNode *n, i_DartMsgQueue *q, uint32_t need_total, ui
     if (target <= q->cap) return 0;
     nb = (uint8_t*)i_dart_node_alloc(n, NULL, target);
     if (!nb) return 0;
-    {   uint32_t off = 0, i, t = q->tail;                        /* compact, oldest first */
+    {   uint32_t off = 0, i, src = q->tail;                        /* compact, oldest first */
         for (i = 0; i < q->count; i++){
             const i_DartQRec *rec;
-            if (q->cap - t < (uint32_t)sizeof(i_DartQRec) ||
-                ((const i_DartQRec*)(q->buf + t))->rec_bytes == DART__QWRAP) t = 0;
-            rec = (const i_DartQRec*)(q->buf + t);
+            if (q->cap - src < (uint32_t)sizeof(i_DartQRec) ||
+                ((const i_DartQRec*)(q->buf + src))->rec_bytes == DART__QWRAP) src = 0;
+            rec = (const i_DartQRec*)(q->buf + src);
             memcpy(nb + off, rec, rec->rec_bytes);
-            off += rec->rec_bytes; t += rec->rec_bytes;
+            off += rec->rec_bytes; src += rec->rec_bytes;
         }
         q->tail = 0; q->head = off;
     }
@@ -303,10 +303,10 @@ static int i_dart_q_grow(DartNode *n, i_DartMsgQueue *q, uint32_t need_total, ui
 }
 
 /* best-effort queue loss is loss like any other: DART_MSG_LOST, never silent */
-static void i_dart_node_queue_lost(DartNode *n, uint16_t ch, uint32_t from, uint32_t count){
+static void i_dart_node_queue_lost(DartNode *n, uint16_t topic_index, uint32_t from, uint32_t count){
     DartEvent e; memset(&e, 0, sizeof e);
-    e.kind = DART_MSG_LOST; e.channel = ch; e.peer = from;
-    e.channel_name = i_dart_node_ch_name(n, ch);
+    e.kind = DART_MSG_LOST; e.topic = topic_index; e.peer = from;
+    e.topic_name = i_dart_node_topic_name(n, topic_index);
     e.lost_count = count;
     i_dart_node_emit(n, &e);
 }
@@ -314,7 +314,7 @@ static void i_dart_node_queue_lost(DartNode *n, uint16_t ch, uint32_t from, uint
 /* enqueue one delivered message. 0 = accepted (stored, or dropped per the best-effort
  * contract), 1 = refused (reliable at cap: the transport parks and the writer's flow
  * control backpressures the publisher). */
-static int i_dart_node_queue_push(DartNode *n, uint16_t ch, i_DartMsgQueue *q,
+static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQueue *q,
                                   uint32_t from, DartBytes data){
     DartString name = i_dart_node_core_peer_name(n->core, from);
     uint32_t name_len = name.len > DART_NODE_NAME_MAX ? (uint32_t)DART_NODE_NAME_MAX
@@ -330,49 +330,49 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t ch, i_DartMsgQueue *q,
             i_dart_q_pop(q); q->dropped++; evicted++; continue;
         }
         q->dropped++;                     /* a live view pins the ring: drop the incoming */
-        i_dart_node_queue_lost(n, ch, from, evicted + 1u);
+        i_dart_node_queue_lost(n, topic_index, from, evicted + 1u);
         return 0;
     }
     {   i_DartQRec *rec = (i_DartQRec*)(q->buf + at);
         rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
         rec->t_recv_us = i_dart_plat_now_us();
-        rec->sender_id = from; rec->name_len = (uint8_t)name_len;
+        rec->publisher_id = from; rec->name_len = (uint8_t)name_len;
         rec->pad[0] = rec->pad[1] = rec->pad[2] = 0;
         if (name_len) memcpy((uint8_t*)rec + sizeof *rec, name.data, name_len);
         if (data.len) memcpy(q->buf + at + payload_off, data.data, data.len);
         q->head = at + need;
         q->bytes += need; q->count++;
     }
-    if (evicted) i_dart_node_queue_lost(n, ch, from, evicted);
+    if (evicted) i_dart_node_queue_lost(n, topic_index, from, evicted);
     return 0;
 }
 
 /* a queued DartMsg: every view points at stable memory (the ring record, the handle's
- * name copy), valid until the next take/dispatch on this channel. The decode schema is
+ * name copy), valid until the next take/dispatch on this topic. The decode schema is
  * re-resolved now rather than stored: the delivery map may repoint between queue and
  * take, and the record must never outlive a pointer into it. */
-static void i_dart_node_queue_msg(DartNode *n, DartChannel *h, const i_DartQRec *rec, DartMsg *m){
+static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *rec, DartMsg *m){
     memset(m, 0, sizeof *m);
     m->node = n; m->user = n->user_data;
-    m->channel_id = h->index;
-    m->sender_id = rec->sender_id;
-    m->sender_name = rec->name_len ? dart_string((const char*)(rec + 1), rec->name_len)
+    m->topic_index = h->index;
+    m->publisher_id = rec->publisher_id;
+    m->publisher_name = rec->name_len ? dart_string((const char*)(rec + 1), rec->name_len)
                                    : dart_cstr("unknown-peer");
-    m->channel_name = dart_string(h->name, h->name_len);
+    m->topic_name = dart_string(h->name, h->name_len);
     m->data = dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
                          rec->data_len);
-    m->schema = i_dart_node_core_msg_schema(n->core, rec->sender_id, h->index);
+    m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
     m->recv_us = rec->t_recv_us;
 }
 
-/* create the queue (qos.queue_bytes at channel create, or lazily on first take/dispatch).
+/* create the queue (qos.queue_bytes at topic create, or lazily on first take/dispatch).
  * An explicit queue_bytes allocates in full (deterministic); the lazy default starts at
  * one page and grows on demand toward DART_QUEUE_CAP. NULL on OOM. */
-static i_DartMsgQueue *i_dart_node_queue_ensure(DartNode *n, DartChannel *h, const DartQos *qos){
+static i_DartMsgQueue *i_dart_node_queue_ensure(DartNode *n, DartTopic *h, const DartQos *qos){
     i_DartMsgQueue *q = h->q;
     uint32_t limit, initial;
     if (q) return q;
-    if (!qos) qos = dart_transport_channel_qos(n->transport, h->index);
+    if (!qos) qos = dart_transport_topic_qos(n->transport, h->index);
     limit = DART__QALIGN((qos && qos->queue_bytes) ? qos->queue_bytes : DART_QUEUE_CAP);
     initial = (qos && qos->queue_bytes) ? limit : (limit < 4096u ? limit : 4096u);
     q = (i_DartMsgQueue*)i_dart_node_alloc(n, NULL, sizeof *q);
@@ -388,7 +388,7 @@ static i_DartMsgQueue *i_dart_node_queue_ensure(DartNode *n, DartChannel *h, con
 
 /* finish an outstanding take view, then retry any parked transport lanes into the space
  * it freed (their acks need a TX pass: kick the poller). Lock held. */
-static void i_dart_node_queue_release(DartNode *n, DartChannel *h, i_DartMsgQueue *q){
+static void i_dart_node_queue_release(DartNode *n, DartTopic *h, i_DartMsgQueue *q){
     if (q->viewing){
         q->viewing = 0;
         i_dart_q_pop(q);
@@ -422,41 +422,41 @@ static DartNode *i_dart_node_open_fail(DartEventFn on_event, void *user, DartErr
 DartEvent dart_last_error(DartNode *n){ return n ? n->last_error : g_last_error; }
 
 /* build a DartMsg and hand it to the app: inline on_message, or a copy into the
- * channel's consumer queue when one exists (the channel name is a local lookup, never
+ * topic's consumer queue when one exists (the topic name is a local lookup, never
  * on the wire). Shared by the inline and SHM delivery paths. Returns 0 = accepted,
- * nonzero = refused (reliable consumer queue at cap: the transport parks the sample).
- * A message that does not fit its sender's declared schema broke the sender's own
+ * nonzero = refused (reliable consumer queue at cap: the transport parks the message).
+ * A message that does not fit its publisher's declared schema broke the publisher's own
  * contract: dropped + surfaced (accepted), never handed to the app to misdecode. */
-static int i_dart_node_deliver(DartNode *n, uint16_t ch, uint32_t from, DartBytes data){
+static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from, DartBytes data){
     DartMsg m;
-    const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, ch);
+    const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
     if (schema && !dart_schema_validate(schema, data)){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
-        e.peer = from; e.channel = ch; e.channel_name = i_dart_node_ch_name(n, ch);
-        e.schema_detail = i_dart_node_core_note_size_mismatch(n->core, from, ch,
+        e.peer = from; e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
+        e.schema_detail = i_dart_node_core_note_size_mismatch(n->core, from, topic_index,
                                             data.len, dart_schema_msg_min(schema));
         i_dart_node_emit(n, &e);
         return 0;
     }
-    {   DartChannel *h = (ch < n->n_created) ? n->handles[ch] : NULL;
-        if (h && h->q) return i_dart_node_queue_push(n, ch, h->q, from, data);
+    {   DartTopic *h = (topic_index < n->n_created) ? n->handles[topic_index] : NULL;
+        if (h && h->q) return i_dart_node_queue_push(n, topic_index, h->q, from, data);
     }
     if (!n->user_on_message) return 0;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
-    m.channel_id = ch; m.sender_id = from;
-    m.sender_name = i_dart_node_core_peer_name(n->core, from);          /* view into discovery state */
-    if (!m.sender_name.data) m.sender_name = dart_cstr("unknown-peer"); /* .data never NULL on delivery */
-    m.channel_name = dart_transport_channel_name(n->transport, ch);
+    m.topic_index = topic_index; m.publisher_id = from;
+    m.publisher_name = i_dart_node_core_peer_name(n->core, from);          /* view into discovery state */
+    if (!m.publisher_name.data) m.publisher_name = dart_cstr("unknown-peer"); /* .data never NULL on delivery */
+    m.topic_name = dart_transport_topic_name(n->transport, topic_index);
     m.data = data;
     m.schema = schema;
     m.recv_us = i_dart_plat_now_us();
     n->user_on_message(&m);
     return 0;
 }
-static int i_dart_node_on_message(void *u, uint16_t ch, uint32_t from, DartBytes data){
-    return i_dart_node_deliver((DartNode*)u, ch, from, data);
+static int i_dart_node_on_message(void *u, uint16_t topic_index, uint32_t from, DartBytes data){
+    return i_dart_node_deliver((DartNode*)u, topic_index, from, data);
 }
 /* node-core events (the app DartEvent: PEER_UP/DOWN/INTEREST/REFUSED) funnel through
  * here; transport events arrive separately via i_dart_node_on_transport_event. The core
@@ -486,9 +486,9 @@ static void i_dart_node_on_event(const DartEvent *ev){
 /* the transport's schema gate (DartConfig.schema_check): the node core answers it over
  * the serialize layer, from the peer's schema as its detail response advertised it.
  * u is the node. */
-static int i_dart_node_schema_check(void *u, uint32_t peer, uint16_t channel,
+static int i_dart_node_schema_check(void *u, uint32_t peer, uint16_t topic_index,
                                     int peer_is_pub, uint64_t hash, DartBytes wire){
-    return i_dart_node_core_schema_check(((DartNode*)u)->core, peer, channel,
+    return i_dart_node_core_schema_check(((DartNode*)u)->core, peer, topic_index,
                                          peer_is_pub, hash, wire);
 }
 
@@ -499,24 +499,24 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
     DartNode *n = (DartNode*)tev->user;
     DartEvent e;
     memset(&e, 0, sizeof e);
-    e.peer = tev->peer; e.channel = tev->channel;
+    e.peer = tev->peer; e.topic = tev->topic;
     e.lost_first = tev->lost_first; e.lost_count = tev->lost_count;
     e.too_big_bytes = tev->too_big_bytes; e.identity = tev->identity;
     /* MSG_LOST is a top-level info kind (best-effort loss is expected); everything else
-       is a DART_ERROR carrying its specific DartErrorKind. Channel-scoped kinds get our
-       channel name for the message string. */
+       is a DART_ERROR carrying its specific DartErrorKind. Topic-scoped kinds get our
+       topic name for the message string. */
     switch (tev->kind){
     case DART_TRANSPORT_MSG_LOST:
-        e.kind = DART_MSG_LOST; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+        e.kind = DART_MSG_LOST; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
     case DART_TRANSPORT_MSG_TOO_BIG:
-        e.kind = DART_ERROR; e.error = DART_E_MSG_TOO_BIG; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+        e.kind = DART_ERROR; e.error = DART_E_MSG_TOO_BIG; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
     case DART_TRANSPORT_NAME_COLLISION:
-        e.kind = DART_ERROR; e.error = DART_E_NAME_COLLISION; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+        e.kind = DART_ERROR; e.error = DART_E_NAME_COLLISION; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
     case DART_TRANSPORT_QOS_INCOMPATIBLE:
-        e.kind = DART_ERROR; e.error = DART_E_QOS_INCOMPATIBLE; e.channel_name = i_dart_node_ch_name(n, tev->channel); break;
+        e.kind = DART_ERROR; e.error = DART_E_QOS_INCOMPATIBLE; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
     case DART_TRANSPORT_SCHEMA_MISMATCH:
-        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.channel_name = i_dart_node_ch_name(n, tev->channel);
-        e.schema_detail = i_dart_node_core_schema_why(n->core, tev->peer, tev->channel,
+        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.topic_name = i_dart_node_topic_name(n, tev->topic);
+        e.schema_detail = i_dart_node_core_schema_why(n->core, tev->peer, tev->topic,
                                                       tev->peer_is_pub); break;
     case DART_TRANSPORT_INTEREST_OVERFLOW:
         e.kind = DART_ERROR; e.error = DART_E_INTEREST_OVERFLOW; break;
@@ -540,20 +540,20 @@ typedef struct {
     size_t     node_core_bytes, transport_bytes, discovery_bytes, rx_buf_bytes;
 } i_DartNodeBlocks;
 
-static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_channels,
+static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_topics,
                               const DartConfig *transport_cfg,
                               const DartDiscoveryNetConfig *discovery_rt_cfg, i_DartNodeBlocks *o){
-    o->handles       = (uint8_t*)i_dart_bump_take(b, (size_t)max_channels * sizeof(DartChannel*), 16);
-    o->node_core_bytes = i_dart_node_core_required_memory(max_channels, 1);   /* peers live in discovery; the
+    o->handles       = (uint8_t*)i_dart_bump_take(b, (size_t)max_topics * sizeof(DartTopic*), 16);
+    o->node_core_bytes = i_dart_node_core_required_memory(max_topics, 1);   /* peers live in discovery; the
                                                                                  node always has an alloc hook,
                                                                                  so the blob is dynamic */
     o->node_core = (uint8_t*)i_dart_bump_take(b, o->node_core_bytes, 16);
     o->transport_bytes = dart_transport_required_memory(transport_cfg);
     o->transport = (uint8_t*)i_dart_bump_take(b, o->transport_bytes, 16);
 #ifdef DART_SHM
-    /* only the (channel,class) -> segment pointer table lives in the arena; segment state
+    /* only the (topic,class) -> segment pointer table lives in the arena; segment state
        and the reader attach cache are lazy hook allocations, made when SHM is actually used */
-    o->shm_pool = (uint8_t*)i_dart_bump_take(b, (size_t)max_channels * DART_SHM_N_CLASSES * sizeof(void*), 16);
+    o->shm_pool = (uint8_t*)i_dart_bump_take(b, (size_t)max_topics * DART_SHM_N_CLASSES * sizeof(void*), 16);
 #endif
     o->discovery_bytes = dart_discovery_placement_memory(discovery_rt_cfg);
     o->discovery = (uint8_t*)i_dart_bump_take(b, o->discovery_bytes, 16);
@@ -583,15 +583,15 @@ static int i_dart_node_tx(DartNode *n, uint32_t to, const uint8_t *buf, size_t l
 }
 
 #ifdef DART_SHM
-/* lazily create our per-channel segment: chunk_bytes = the channel's locked size class,
+/* lazily create our per-topic segment: chunk_bytes = the topic's locked size class,
  * n_chunks = its keep_last, so history slot i binds chunk i (no free list). NULL on fail. */
-static i_DartShmPool *i_dart_node_shm_channel_pool(DartNode *n, uint16_t ch, uint32_t k, uint16_t keep_last){
+static i_DartShmPool *i_dart_node_shm_topic_pool(DartNode *n, uint16_t topic_index, uint32_t k, uint16_t keep_last){
     i_DartShmConfig c; uint8_t *mem; uint64_t seg; size_t idx;
     if (k >= DART_SHM_N_CLASSES) return NULL;
-    idx = (size_t)ch * DART_SHM_N_CLASSES + k;
+    idx = (size_t)topic_index * DART_SHM_N_CLASSES + k;
     if (n->shm_pool[idx]) return (i_DartShmPool*)n->shm_pool[idx];
     memset(&c, 0, sizeof c);
-    seg = n->shm_base | ((uint64_t)ch << 3) | (uint64_t)k;   /* low 3 bits class, next 16 channel */
+    seg = n->shm_base | ((uint64_t)topic_index << 3) | (uint64_t)k;   /* low 3 bits class, next 16 topic */
     c.segment_id = seg;
     i_dart_shm_seg_name(c.name, seg);
     c.chunk_bytes = i_dart_shm_class_bytes(k);
@@ -630,7 +630,7 @@ static i_DartShmPool *i_dart_node_shm_reader_pool(DartNode *n, uint64_t seg){
     n->shm_reader_count++;
     return (i_DartShmPool*)mem;
 }
-static int i_dart_node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
+static int i_dart_node_on_shm(void *u, uint16_t topic_index, uint32_t from, const uint8_t *desc){
     DartNode *n = (DartNode*)u; i_DartShmDesc d; i_DartShmPool *reader_pool; const void *p; uint32_t len;
     if (!i_dart_shm_desc_decode(&d, desc, DART_SHM_DESC_WIRE)) return 0;
     reader_pool = i_dart_node_shm_reader_pool(n, d.segment_id);
@@ -645,7 +645,7 @@ static int i_dart_node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t
     }
     memcpy(n->shm_scratch, p, len);
     if (!i_dart_shm_verify(reader_pool, &d)) return 0;                /* seqlock tail: writer recycled mid-copy -> torn -> drop */
-    if (i_dart_node_deliver(n, ch, from, dart_bytes(n->shm_scratch, len)))
+    if (i_dart_node_deliver(n, topic_index, from, dart_bytes(n->shm_scratch, len)))
         return -1;                                         /* consumer queue full -> reader parks the descriptor */
     n->shm_rx++;
     return 1;
@@ -654,7 +654,7 @@ static int i_dart_node_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t
 
 DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message, DartEventFn on_event, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryNetConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
-    uint16_t max_peers, max_channels;
+    uint16_t max_peers, max_topics;
     uint8_t *base; void *arena; size_t need; DartAllocator pool;
     DartNode *n; i_DartSock fd; uint16_t local_port;
     char node_name[DART_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;   /* name is discovery-level */
@@ -662,7 +662,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     if (!alloc) return NULL;
     memset(&o, 0, sizeof o);
     if (opts) o = *opts;
-    max_channels = o.max_channels ? o.max_channels : 8;
+    max_topics = o.max_topics ? o.max_topics : 8;
     max_peers    = o.discovery.max_peers ? o.discovery.max_peers : 16;
 
     /* sub-configs (sizing only depends on counts; the callback wrappers are set later) */
@@ -672,7 +672,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.discovery.announce_interval_us = o.discovery.announce_interval_us;
     dc.discovery.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.discovery.max_peers   = max_peers;
-    dc.discovery.meta_capacity = dart_meta_capacity(max_channels);
+    dc.discovery.meta_capacity = dart_meta_capacity(max_topics);
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* node-core lifecycle state per peer */
     dc.discovery.alloc = i_dart_node_alloc;   /* per-peer blobs at actual size, not the worst-case pool
                                                  (set before sizing so measure and place agree; the
@@ -683,14 +683,14 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.multicast_interface   = o.net.multicast_interface;
     dc.seeds                 = o.net.seed_peers;
     dc.n_seeds               = o.net.n_seed_peers;
-    tc.channels    = NULL;            /* reserve mode: channels created at runtime */
-    tc.n_channels  = max_channels;
+    tc.topics    = NULL;            /* reserve mode: topics created at runtime */
+    tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
     tc.frag_payload= o.net.fragment_size;
     tc.allocator   = i_dart_node_alloc;   /* non-NULL => reserve/dynamic mode in dart_transport_init */
 
     {   i_DartBump b; memset(&b,0,sizeof b);
-        i_dart_node_layout(&b, max_peers, max_channels, &tc, &dc, &blocks);
+        i_dart_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks);
         need = b.offset + 32u; }
 
     /* The node COPIES the caller's allocator into its own pool (so the caller's may be a
@@ -711,7 +711,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     base = (uint8_t*)(((uintptr_t)arena+15u)&~(uintptr_t)15u);
     {   i_DartBump b; memset(&b,0,sizeof b);
         b.base = base; b.cap = need - (size_t)(base - (uint8_t*)arena);
-        i_dart_node_layout(&b, max_peers, max_channels, &tc, &dc, &blocks); }
+        i_dart_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks); }
 
     if (!i_dart_plat_startup()){
         DartAllocator p = n->pool; dart_allocator_reset(&p);
@@ -741,10 +741,10 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
                                                       : 1000000u;   /* discovery's default */
     n->user_on_message = on_message;   /* on_event + user_data were set early (open-time error reporting) */
     n->arena = arena;
-    n->handles = (DartChannel**)blocks.handles;
-    memset(n->handles, 0, (size_t)max_channels * sizeof(DartChannel*));
+    n->handles = (DartTopic**)blocks.handles;
+    memset(n->handles, 0, (size_t)max_topics * sizeof(DartTopic*));
     n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
-    n->max_channels = max_channels;
+    n->max_topics = max_topics;
     n->max_peers = max_peers;
     n->meta_capacity = dc.discovery.meta_capacity;   /* the initial accept bound (self-heals up) */
 
@@ -758,7 +758,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
         i_dart_plat_host_uuid(n->shm_host);
         if (!i_dart_plat_random(&n->shm_base, sizeof n->shm_base)) n->shm_base = i_dart_plat_pid();
         n->shm_base ^= (uint64_t)i_dart_plat_pid() << 32;    /* fold in pid for cross-process uniqueness */
-        n->shm_base &= ~(((uint64_t)1u << 19) - 1u);       /* low 19 bits: 3 class + 16 channel index */
+        n->shm_base &= ~(((uint64_t)1u << 19) - 1u);       /* low 19 bits: 3 class + 16 topic index */
         if (n->shm_base == 0) n->shm_base = (uint64_t)1u << 19;
     }
     tc.on_shm = i_dart_node_on_shm;
@@ -767,8 +767,8 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->transport = dart_transport_init(blocks.transport, blocks.transport_bytes, &tc);
     if (!n->transport){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, 0); goto fail_threads; }
 #ifdef DART_SHM
-    {   uint32_t n_segments = (uint32_t)max_channels * DART_SHM_N_CLASSES; uint32_t i;
-        n->shm_n_channels = max_channels;
+    {   uint32_t n_segments = (uint32_t)max_topics * DART_SHM_N_CLASSES; uint32_t i;
+        n->shm_n_topics = max_topics;
         n->shm_pool = (void**)blocks.shm_pool;
         for (i=0;i<n_segments;i++) n->shm_pool[i]=NULL;
         n->shm_reader_segments = NULL; n->shm_reader_states = NULL;   /* lazy: first attach allocates */
@@ -782,7 +782,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     {   i_DartNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
         cc.transport = n->transport;   /* cc.discovery bound after dart_discovery_place */
-        cc.n_channels = max_channels; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
+        cc.n_topics = max_topics; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
         cc.on_event = i_dart_node_on_event; cc.user = n;
         cc.alloc = i_dart_node_alloc; cc.alloc_user = n;   /* backs interned/rebased peer schemas */
         cc.fetch_details = o.fetch_details;   /* observer mode: fetch + cache every peer topic */
@@ -850,28 +850,28 @@ fail_threads:
 }
 
 /* Dynamic-mode growth: relocate the whole node into a bigger arena at the given counts so
- * a full peer table or channel reserve stops being a hard cap. Heap message buffers and SHM
+ * a full peer table or topic reserve stops being a hard cap. Heap message buffers and SHM
  * writer segments stay put (only their owning control structures move); the user-held
- * DartNode and DartChannel handles live outside the arena, so they survive. Returns 1 with n
+ * DartNode and DartTopic handles live outside the arena, so they survive. Returns 1 with n
  * now on the new arena, or 0 if the bigger arena couldn't be allocated (n left unchanged). */
-static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_channels,
+static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_topics,
                             uint16_t want_meta_cap){
     DartConfig tc; DartDiscoveryNetConfig dc; i_DartNodeBlocks nb; i_DartBump b;
     DartTransportState *nt; i_DartNodeCore *ncore; DartDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
-    uint16_t old_max_channels = n->max_channels;
-    /* the accept bound never shrinks: channel-derived, previously grown, or requested */
-    uint16_t new_meta_cap = dart_meta_capacity(new_max_channels);
+    uint16_t old_max_topics = n->max_topics;
+    /* the accept bound never shrinks: topic-derived, previously grown, or requested */
+    uint16_t new_meta_cap = dart_meta_capacity(new_max_topics);
     if (n->meta_capacity > new_meta_cap) new_meta_cap = n->meta_capacity;
     if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
     if (!n->alloc_dynamic) return 0;
-    if (new_max_peers <= n->max_peers && new_max_channels <= n->max_channels
+    if (new_max_peers <= n->max_peers && new_max_topics <= n->max_topics
         && new_meta_cap <= n->meta_capacity) return 0;
 
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
-    tc.channels=NULL; tc.n_channels=new_max_channels; tc.max_peers=new_max_peers;
+    tc.topics=NULL; tc.n_topics=new_max_topics; tc.max_peers=new_max_peers;
     tc.allocator=i_dart_node_alloc; tc.frag_payload=n->net.fragment_size;
     dc.discovery.max_peers=new_max_peers; dc.discovery.meta_capacity=new_meta_cap;
     dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* size discovery's scratch to match */
@@ -879,19 +879,19 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
                                                                             hook mode (no arena blob pool) */
 
     memset(&b,0,sizeof b);
-    i_dart_node_layout(&b, new_max_peers, new_max_channels, &tc, &dc, &nb);
+    i_dart_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
     need = b.offset + 32u;
     new_arena = dart_allocator_alloc(&n->pool, NULL, need);
     if (!new_arena) return 0;
     nbase = (uint8_t*)(((uintptr_t)new_arena+15u)&~(uintptr_t)15u);
     memset(&b,0,sizeof b); b.base=nbase; b.cap=need-(size_t)(nbase-(uint8_t*)new_arena);
-    i_dart_node_layout(&b, new_max_peers, new_max_channels, &tc, &dc, &nb);
+    i_dart_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
 
     /* migrate the three cores; each leaves the old intact, so a failure just frees the new
        arena and bails (the old node keeps running, only refusing the would-be growth) */
-    nt = dart_transport_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_channels);
+    nt = dart_transport_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_topics);
     if (!nt){ dart_allocator_alloc(&n->pool, new_arena, 0); return 0; }
-    ncore = i_dart_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_channels);
+    ncore = i_dart_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_topics);
     if (!ncore){ dart_allocator_alloc(&n->pool, new_arena, 0); return 0; }
     ncore->transport = nt;                         /* re-point cross-layer pointer */
     i_dart_node_core_build_meta(ncore);              /* rebuild the announce blob into the new buf */
@@ -901,51 +901,51 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     i_dart_node_core_bind_discovery(ncore, dart_discovery_state(ndisc));   /* re-point to the relocated table */
 
     /* handle pointer array (the handle structs themselves are stable, not moved) */
-    memcpy(nb.handles, n->handles, (size_t)old_max_channels*sizeof(DartChannel*));
-    memset((DartChannel**)nb.handles + old_max_channels, 0,
-           (size_t)(new_max_channels-old_max_channels)*sizeof(DartChannel*));
+    memcpy(nb.handles, n->handles, (size_t)old_max_topics*sizeof(DartTopic*));
+    memset((DartTopic**)nb.handles + old_max_topics, 0,
+           (size_t)(new_max_topics-old_max_topics)*sizeof(DartTopic*));
 
 #ifdef DART_SHM
     if (n->shm_capable){
-        uint32_t old_segs=(uint32_t)n->shm_n_channels*DART_SHM_N_CLASSES;
-        uint32_t new_segs=(uint32_t)new_max_channels*DART_SHM_N_CLASSES, i;
+        uint32_t old_segs=(uint32_t)n->shm_n_topics*DART_SHM_N_CLASSES;
+        uint32_t new_segs=(uint32_t)new_max_topics*DART_SHM_N_CLASSES, i;
         void **np = (void**)nb.shm_pool;
         for (i=0;i<new_segs;i++) np[i]=NULL;
         for (i=0;i<old_segs;i++) np[i]=n->shm_pool[i];   /* segment states are stable hook
                                                             allocations: only the pointer table moves */
-        n->shm_pool=np; n->shm_n_channels=new_max_channels;
+        n->shm_pool=np; n->shm_n_topics=new_max_topics;
         /* the reader attach cache is hook-allocated too: attachments survive the grow */
     }
 #endif
 
     n->transport=nt; n->core=ncore; n->discovery=ndisc;
-    n->handles=(DartChannel**)nb.handles;
+    n->handles=(DartTopic**)nb.handles;
     n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
-    n->max_channels=new_max_channels; n->max_peers=new_max_peers;
+    n->max_topics=new_max_topics; n->max_peers=new_max_peers;
     n->meta_capacity=new_meta_cap;
     dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only; heap bufs + segments moved by ref */
     n->arena=new_arena;
     return 1;
 }
 
-DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole role,
-                                      const DartSchema *schema, const DartChannelOpts *opts){
-    DartChannelDef def; DartChannel *h; uint16_t idx; int acquired;
+DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
+                                      const DartSchema *schema, const DartTopicOpts *opts){
+    DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
     if (!n || !name) return NULL;
     acquired = i_dart_node_lock(n);
     if (!acquired) return NULL;   /* from a callback: a grow here would relocate the arena mid-delivery */
-    if (n->n_created >= n->max_channels){       /* reserve full: grow (dynamic) or refuse (static) */
-        uint16_t want = n->max_channels < 0x8000u ? (uint16_t)(n->max_channels*2u) : 0xFFFFu;
-        if (want <= n->max_channels || !i_dart_node_grow(n, n->max_peers, want, 0)){
+    if (n->n_created >= n->max_topics){       /* reserve full: grow (dynamic) or refuse (static) */
+        uint16_t want = n->max_topics < 0x8000u ? (uint16_t)(n->max_topics*2u) : 0xFFFFu;
+        if (want <= n->max_topics || !i_dart_node_grow(n, n->max_peers, want, 0)){
             i_dart_node_unlock(n, acquired);
             return NULL;
         }
     }
     idx = n->n_created;
-    h = (DartChannel*)i_dart_node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
+    h = (DartTopic*)i_dart_node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
     if (!h){ i_dart_node_unlock(n, acquired); return NULL; }
     memset(h, 0, sizeof *h);
-    if (schema){   /* copy into node memory so the caller's schema need not outlive the channel */
+    if (schema){   /* copy into node memory so the caller's schema need not outlive the topic */
         DartBytes w = dart_schema_wire(schema);
         h->schema = dart_schema_parse(w.data, w.len, i_dart_node_alloc, n);
         if (!h->schema){ i_dart_node_alloc(n, h, 0); i_dart_node_unlock(n, acquired); return NULL; }
@@ -953,7 +953,7 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
     if (opts) def.qos = opts->qos;
-    if (dart_transport_channel_define(n->transport, idx, &def) != 0){
+    if (dart_transport_topic_define(n->transport, idx, &def) != 0){
         if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
         i_dart_node_alloc(n, h, 0);
         i_dart_node_unlock(n, acquired);
@@ -969,15 +969,15 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
     if (def.qos.queue_bytes)   /* queued from creation; best-effort on OOM (take retries) */
         (void)i_dart_node_queue_ensure(n, h, &def.qos);
     if (h->schema)   /* advertise + gate matches with it (any non-INACTIVE role) */
-        i_dart_node_core_set_channel_schema(n->core, idx, h->schema);
-    /* re-advertise our interest so peers match the new channel as the blob arrives, and
-       replay known peers' interest so this channel matches what they already advertised */
+        i_dart_node_core_set_topic_schema(n->core, idx, h->schema);
+    /* re-advertise our interest so peers match the new topic as the blob arrives, and
+       replay known peers' interest so this topic matches what they already advertised */
     i_dart_node_core_build_meta(n->core);
     dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
     dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
     n->n_created++;
-    i_dart_node_kick(n);                       /* announce the new channel now */
+    i_dart_node_kick(n);                       /* announce the new topic now */
     i_dart_node_unlock(n, acquired);
     return h;
 }
@@ -989,7 +989,7 @@ DartChannel *dart_node_create_channel(DartNode *n, const char *name, DartRole ro
 #endif
 
 /* drain one socket's RX queue into the transport until empty or past deadline
- * (full drain avoids NACK storms). Distinct from public dart_channel_drain. */
+ * (full drain avoids NACK storms). Distinct from public dart_topic_drain. */
 static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
     uint8_t *buf = n->rx_buf;
     for (;;){
@@ -1077,7 +1077,7 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     if (n->grow_pending){
         uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
         n->grow_pending = 0;
-        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_channels, 0);
+        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_topics, 0);
     }
     /* a peer's announce blob exceeded the accept bound last tick: raise the bound (grows
        the RX buffers + discovery capacity with it), then solicit so the peer re-sends its
@@ -1087,7 +1087,7 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
         uint16_t want = n->meta_grow_need;
         n->meta_grow_need = 0;
         if (want > n->meta_capacity){
-            if (i_dart_node_grow(n, n->max_peers, n->max_channels, want)){
+            if (i_dart_node_grow(n, n->max_peers, n->max_topics, want)){
                 n->meta_grow_failed = 0;
                 dart_discovery_solicit(dart_discovery_state(n->discovery));
             } else
@@ -1194,16 +1194,16 @@ int dart_node_poll(DartNode *n, int timeout_ms){
     return 0;
 }
 
-/* publish on a channel index: flow-control wait (condvar under a service thread, the
+/* publish on a topic index: flow-control wait (condvar under a service thread, the
  * nested pump otherwise), then SHM fast path, then UDP. may_wait=0 is a reentrant send
  * (from a callback): it can never block or run the loop, so it commits KEEP_LAST-style
  * and only the unsent guard below applies. */
-static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, int may_wait){
+static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data, int may_wait){
     size_t len = data.len;
-    /* one O(1) count gates the per-send fast paths: a channel no peer subscribes to skips
+    /* one O(1) count gates the per-send fast paths: a topic no peer subscribes to skips
        backpressure and the SHM eligibility scan here, and the copy+commit in the core. */
-    int matched = dart_transport_writer_match_count(n->transport, channel);
-    const DartQos *q = dart_transport_channel_qos(n->transport, channel);
+    int matched = dart_transport_publisher_match_count(n->transport, topic_index);
+    const DartQos *q = dart_transport_topic_qos(n->transport, topic_index);
     int guarded = 0;   /* the unsent-eviction check runs after the wait */
 
 #ifdef DART_THREADS
@@ -1222,8 +1222,8 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
             int waited = 0;
             n->cv_waiters++;
             for (;;){
-                int evict_unacked = rel_deadline && dart_transport_send_would_evict(n->transport, channel);
-                int evict_unsent  = dart_transport_send_would_evict_unsent(n->transport, channel, NULL, NULL);
+                int evict_unacked = rel_deadline && dart_transport_send_would_evict(n->transport, topic_index);
+                int evict_unsent  = dart_transport_send_would_evict_unsent(n->transport, topic_index, NULL, NULL);
                 uint64_t deadline;
                 if (!evict_unacked && !evict_unsent) break;
                 /* unsent-only after a completed work pass: a pass either empties the TX
@@ -1251,15 +1251,15 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
                 n->backpressure_wait_count++;
             }
             /* the poller may have grown/relocated the arena while we slept */
-            q = dart_transport_channel_qos(n->transport, channel);
-            matched = dart_transport_writer_match_count(n->transport, channel);
+            q = dart_transport_topic_qos(n->transport, topic_index);
+            matched = dart_transport_publisher_match_count(n->transport, topic_index);
         }
     } else
 #endif
     /* No service thread: bounded backpressure pump. Run the loop (on_message/on_event
        fire here) until a slow reader acks or qos.backpressure_wait_us elapses, then
        send anyway. */
-    if (matched && may_wait && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, channel)){
+    if (matched && may_wait && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, topic_index)){
         uint64_t t0 = i_dart_plat_now_us(), deadline = t0 + q->backpressure_wait_us;
         /* in-pump diagnostic: the publisher is blocked here for the whole wait, so its
            normal per-message print sees nothing within it. When a probe is set, sample
@@ -1269,18 +1269,18 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
         uint64_t sample_last = t0; uint32_t sample_polls = 0, sample_idle = 0;
         uint64_t interval = n->pump_probe_interval_us ? n->pump_probe_interval_us : 200000u;
         DartRepairStats sample_prev;
-        if (n->pump_probe) dart_transport_repair_stats(n->transport, channel, &sample_prev);
+        if (n->pump_probe) dart_transport_repair_stats(n->transport, topic_index, &sample_prev);
         guarded = 1;
         do {
             i_dart_node_poll_locked(n, 1, 0);   /* nested tick: the lock stays held */
             if (n->pump_probe){
                 uint64_t now = i_dart_plat_now_us();
                 sample_polls++;
-                if (dart_transport_repair_pending(n->transport, channel) == 0) sample_idle++;
+                if (dart_transport_repair_pending(n->transport, topic_index) == 0) sample_idle++;
                 if (now - sample_last >= interval){
                     DartRepairStats sample_now; DartPumpSample sample;
-                    dart_transport_repair_stats(n->transport, channel, &sample_now);
-                    sample.channel         = channel;
+                    dart_transport_repair_stats(n->transport, topic_index, &sample_now);
+                    sample.topic         = topic_index;
                     sample.wait_elapsed_us = now - t0;
                     sample.interval_us     = now - sample_last;
                     sample.frags_resent    = sample_now.frags_resent - sample_prev.frags_resent;
@@ -1291,13 +1291,13 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
                     sample_prev = sample_now; sample_last = now; sample_polls = 0; sample_idle = 0;
                 }
             }
-            if (!dart_transport_send_would_evict(n->transport, channel)) break;
+            if (!dart_transport_send_would_evict(n->transport, topic_index)) break;
         } while (i_dart_plat_now_us() < deadline);
         n->backpressure_total_us += i_dart_plat_now_us() - t0;
         n->backpressure_wait_count++;
         /* a mid-pump grow relocates the arena: re-derive the cached pointers */
-        q = dart_transport_channel_qos(n->transport, channel);
-        matched = dart_transport_writer_match_count(n->transport, channel);
+        q = dart_transport_topic_qos(n->transport, topic_index);
+        matched = dart_transport_publisher_match_count(n->transport, topic_index);
     }
 
     /* Never-silent: a send that evicts history never handed to the wire (the wait
@@ -1308,7 +1308,7 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
     {
         uint64_t evict_base = 0; uint32_t evict_count = 0;
         int will_evict = guarded &&
-            dart_transport_send_would_evict_unsent(n->transport, channel, &evict_base, &evict_count);
+            dart_transport_send_would_evict_unsent(n->transport, topic_index, &evict_base, &evict_count);
         int r;
 #ifdef DART_SHM
         /* Only messages that would FRAGMENT (len > our fragment size) gain from SHM:
@@ -1318,26 +1318,26 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
            writer-driven with our own one size (never the peer's), so this is the
            unambiguous cutoff even when several same-host peers match. */
         if (n->shm_capable && len > dart_transport_frag(n->transport)
-            && channel < n->shm_n_channels && matched
-            && dart_transport_writer_shm_eligible(n->transport, channel)){
+            && topic_index < n->shm_n_topics && matched
+            && dart_transport_publisher_shm_eligible(n->transport, topic_index)){
             uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
-            /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
+            /* a hint (shm_max_bytes / max_message_bytes) pins the topic to one class, so
                same-sized traffic reuses a single prefix-sized segment; without it each message
-               uses its own size class's segment, created on demand. Per channel either way. */
+               uses its own size class's segment, created on demand. Per topic either way. */
             uint32_t hint = q ? (q->shm_max_bytes ? q->shm_max_bytes : q->max_message_bytes) : 0u;
             uint32_t k = i_dart_shm_class_for(hint ? hint : (uint32_t)len);
             /* fits its class (with a hint, the hinted class) -> publish via SHM; chunk index =
                the history slot this send will occupy, so chunk i binds slot i (no free list) */
             if (k < DART_SHM_N_CLASSES && (uint32_t)len <= i_dart_shm_class_bytes(k)){
-                i_DartShmPool *pool = i_dart_node_shm_channel_pool(n, channel, k, keep_last);
-                uint16_t slot = dart_transport_channel_hist_head(n->transport, channel);
+                i_DartShmPool *pool = i_dart_node_shm_topic_pool(n, topic_index, k, keep_last);
+                uint16_t slot = dart_transport_topic_hist_head(n->transport, topic_index);
                 void *chunk_ptr = pool ? i_dart_shm_chunk(pool, slot, NULL) : NULL;
                 if (chunk_ptr){
                     i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
                     memcpy(chunk_ptr, data.data, len);                  /* one-copy write into shm */
                     i_dart_shm_stamp(pool, slot, (uint32_t)len, &d);
                     i_dart_shm_desc_encode(&d, desc);
-                    if (dart_transport_send_shm(n->transport, channel, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
+                    if (dart_transport_send_shm(n->transport, topic_index, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
                         n->shm_tx++;
                         r = DART_OK;
                         goto committed;
@@ -1346,7 +1346,7 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
             }
         }
 #endif
-        r = dart_transport_send(n->transport, channel, data, i_dart_plat_now_us());
+        r = dart_transport_send(n->transport, topic_index, data, i_dart_plat_now_us());
 #ifdef DART_SHM
 committed:
 #endif
@@ -1354,7 +1354,7 @@ committed:
             DartEvent e; memset(&e, 0, sizeof e);
             n->evicted_unsent++;
             e.kind = DART_ERROR; e.error = DART_E_EVICTED_UNSENT;
-            e.channel = channel; e.channel_name = i_dart_node_ch_name(n, channel);
+            e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
             e.lost_first = evict_base; e.lost_count = evict_count;
             i_dart_node_emit(n, &e);
         }
@@ -1362,42 +1362,42 @@ committed:
     }
 }
 
-int dart_channel_send(DartChannel *ch, DartBytes data){
+int dart_topic_send(DartTopic *topic, DartBytes data){
     int acquired, r;
-    if (!ch) return DART_ERR_NO_CHANNEL;
-    acquired = i_dart_node_lock(ch->n);
-    r = i_dart_node_do_send(ch->n, ch->index, data, acquired);
-    i_dart_node_kick(ch->n);              /* flush the commit now, not at the next tick */
-    i_dart_node_unlock(ch->n, acquired);
+    if (!topic) return DART_ERR_NO_TOPIC;
+    acquired = i_dart_node_lock(topic->n);
+    r = i_dart_node_do_send(topic->n, topic->index, data, acquired);
+    i_dart_node_kick(topic->n);              /* flush the commit now, not at the next tick */
+    i_dart_node_unlock(topic->n, acquired);
     return r;
 }
 
-int dart_channel_set_role(DartChannel *ch, DartRole role){
+int dart_topic_set_role(DartTopic *topic, DartRole role){
     int r, acquired;
-    if (!ch) return -1;
-    acquired = i_dart_node_lock(ch->n);
+    if (!topic) return -1;
+    acquired = i_dart_node_lock(topic->n);
     if (!acquired){
         /* from a callback: the discovery replay would rematch/reset the very reader
            proxy mid-delivery, so refuse loudly */
         return DART_ERR_STATE;
     }
-    r = dart_transport_set_role(ch->n->transport, ch->index, (uint8_t)role);
+    r = dart_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
-        i_dart_node_core_build_meta(ch->n->core);
-        dart_discovery_advertise(ch->n->discovery, i_dart_node_core_meta(ch->n->core));
-        dart_discovery_replay(ch->n->discovery);   /* re-apply peers' interest to our new role */
-        i_dart_node_kick(ch->n);                   /* announce the change now */
+        i_dart_node_core_build_meta(topic->n->core);
+        dart_discovery_advertise(topic->n->discovery, i_dart_node_core_meta(topic->n->core));
+        dart_discovery_replay(topic->n->discovery);   /* re-apply peers' interest to our new role */
+        i_dart_node_kick(topic->n);                   /* announce the change now */
     }
-    i_dart_node_unlock(ch->n, acquired);
+    i_dart_node_unlock(topic->n, acquired);
     return r;
 }
 
-uint16_t dart_channel_index(const DartChannel *ch){ return ch ? ch->index : 0; }
+uint16_t dart_topic_index(const DartTopic *topic){ return topic ? topic->index : 0; }
 
-const DartSchema *dart_channel_schema(const DartChannel *ch){ return ch ? ch->schema : NULL; }
+const DartSchema *dart_topic_schema(const DartTopic *topic){ return topic ? topic->schema : NULL; }
 
-DartChannel *dart_node_channel(DartNode *n, uint16_t index){
-    DartChannel *h; int acquired;
+DartTopic *dart_node_topic(DartNode *n, uint16_t index){
+    DartTopic *h; int acquired;
     if (!n) return NULL;
     acquired = i_dart_node_lock(n);
     h = (index < n->n_created) ? n->handles[index] : NULL;
@@ -1415,23 +1415,23 @@ const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count){
 }
 
 /* Greedy detail-cache queries (opts.fetch_details): a peer topic's fetched name and
- * parsed schema by (peer id, alias). Same view rules as dart_node_peers. */
-DartString dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t alias){
+ * parsed schema by (peer id, index). Same view rules as dart_node_peers. */
+DartString dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t index){
     DartString s = dart_string(NULL, 0); int acquired;
     if (!n) return s;
     acquired = i_dart_node_lock(n);
-    i_dart_node_core_topic_detail(n->core, peer, alias, &s, NULL, NULL);
+    i_dart_node_core_topic_detail(n->core, peer, index, &s, NULL, NULL);
     i_dart_node_unlock(n, acquired);
     return s;
 }
 
-const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t alias,
+const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t index,
                                               uint64_t *schema_hash){
     const DartSchema *sch = NULL; int acquired;
     if (schema_hash) *schema_hash = 0;
     if (!n) return NULL;
     acquired = i_dart_node_lock(n);
-    i_dart_node_core_topic_detail(n->core, peer, alias, NULL, &sch, schema_hash);
+    i_dart_node_core_topic_detail(n->core, peer, index, NULL, &sch, schema_hash);
     i_dart_node_unlock(n, acquired);
     return sch;
 }
@@ -1462,11 +1462,11 @@ void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *al
     i_dart_node_unlock(n, acquired);
 }
 
-void dart_channel_repair_stats(DartChannel *ch, DartRepairStats *out){
-    if (ch){
-        int acquired = i_dart_node_lock(ch->n);
-        dart_transport_repair_stats(ch->n->transport, ch->index, out);
-        i_dart_node_unlock(ch->n, acquired);
+void dart_topic_repair_stats(DartTopic *topic, DartRepairStats *out){
+    if (topic){
+        int acquired = i_dart_node_lock(topic->n);
+        dart_transport_repair_stats(topic->n->transport, topic->index, out);
+        i_dart_node_unlock(topic->n, acquired);
     } else if (out) memset(out, 0, sizeof *out);
 }
 
@@ -1476,13 +1476,13 @@ void dart_node_set_pump_probe(DartNode *n, DartPumpProbeFn fn, uint64_t interval
     i_dart_node_unlock(n, acquired);
 }
 
-int dart_channel_reader_progress(DartChannel *ch, uint32_t peer,
+int dart_topic_subscriber_progress(DartTopic *topic, uint32_t peer,
                                  uint64_t *base_seqno, uint32_t *have, uint32_t *total){
     int r, acquired;
-    if (!ch) return 0;
-    acquired = i_dart_node_lock(ch->n);
-    r = dart_transport_reader_progress(ch->n->transport, ch->index, peer, base_seqno, have, total);
-    i_dart_node_unlock(ch->n, acquired);
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_subscriber_progress(topic->n->transport, topic->index, peer, base_seqno, have, total);
+    i_dart_node_unlock(topic->n, acquired);
     return r;
 }
 
@@ -1495,17 +1495,17 @@ void dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv){
 }
 #endif
 
-int dart_channel_drain(DartChannel *ch, int timeout_ms){
+int dart_topic_drain(DartTopic *topic, int timeout_ms){
     DartNode *n; uint64_t deadline; int acquired, drained = 1;
-    if (!ch) return 0;
-    n = ch->n;
+    if (!topic) return 0;
+    n = topic->n;
     acquired = i_dart_node_lock(n);
     if (!acquired) return 0;   /* from a callback: can neither pump nor wait */
     deadline = i_dart_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
 #ifdef DART_THREADS
     if (n->svc_running){
         n->cv_waiters++;
-        while (!dart_transport_send_drained(n->transport, ch->index)){
+        while (!dart_transport_send_drained(n->transport, topic->index)){
             uint64_t now = i_dart_plat_now_us();
             if (now >= deadline){ drained = 0; break; }
             i_dart_node_kick(n);
@@ -1519,7 +1519,7 @@ int dart_channel_drain(DartChannel *ch, int timeout_ms){
         }
     }
 #endif
-    while (!dart_transport_send_drained(n->transport, ch->index)){
+    while (!dart_transport_send_drained(n->transport, topic->index)){
         if (i_dart_plat_now_us() >= deadline){ drained = 0; break; }
         i_dart_node_poll_locked(n, 1, 0);
     }
@@ -1527,12 +1527,12 @@ int dart_channel_drain(DartChannel *ch, int timeout_ms){
     return drained;
 }
 
-int dart_channel_match_count(DartChannel *ch){
+int dart_topic_match_count(DartTopic *topic){
     int r, acquired;
-    if (!ch) return 0;
-    acquired = i_dart_node_lock(ch->n);
-    r = dart_transport_writer_match_count(ch->n->transport, ch->index);
-    i_dart_node_unlock(ch->n, acquired);
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_publisher_match_count(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
     return r;
 }
 
@@ -1545,7 +1545,7 @@ static int i_dart_node_any_queued(DartNode *n){
     return 0;
 }
 
-/* Wait until data is queued: on q when given, else on ANY queued channel. Sleeps on the
+/* Wait until data is queued: on q when given, else on ANY queued topic. Sleeps on the
  * service thread's progress when one runs (its end-of-pass broadcast covers every queue
  * push); otherwise nobody else is obliged to fill the queue, so it drives the poll loop
  * itself (which is what makes take/dispatch work with a manual poll cadence, alongside
@@ -1577,7 +1577,7 @@ static void i_dart_node_queue_wait(DartNode *n, i_DartMsgQueue *q, int timeout_m
 /* dispatch up to max_msgs of the messages queued at entry, callbacks on the calling
  * thread and OUTSIDE the lock when this thread owns the acquisition (so they may use the
  * whole API); a reentrant caller (from a callback) keeps the lock, like any callback. */
-static int i_dart_channel_dispatch_locked(DartNode *n, DartChannel *h, int max_msgs, int acquired){
+static int i_dart_topic_dispatch_locked(DartNode *n, DartTopic *h, int max_msgs, int acquired){
     i_DartMsgQueue *q = h->q;
     int done = 0; uint32_t todo;
     if (!q || q->busy) return 0;
@@ -1608,20 +1608,20 @@ static int i_dart_channel_dispatch_locked(DartNode *n, DartChannel *h, int max_m
     return done;
 }
 
-int dart_channel_take(DartChannel *ch, DartMsg *out, int timeout_ms){
+int dart_topic_take(DartTopic *topic, DartMsg *out, int timeout_ms){
     DartNode *n; i_DartMsgQueue *q; int acquired, got = 0;
-    if (!ch || !out) return DART_ERR_NO_CHANNEL;
-    n = ch->n;
+    if (!topic || !out) return DART_ERR_NO_TOPIC;
+    n = topic->n;
     acquired = i_dart_node_lock(n);
-    q = i_dart_node_queue_ensure(n, ch, NULL);
+    q = i_dart_node_queue_ensure(n, topic, NULL);
     if (!q){ i_dart_node_unlock(n, acquired); return DART_ERR_OOM; }
     if (q->busy){ i_dart_node_unlock(n, acquired); return DART_ERR_STATE; }
-    i_dart_node_queue_release(n, ch, q);      /* finish the previous view first */
+    i_dart_node_queue_release(n, topic, q);      /* finish the previous view first */
     if (!q->count && timeout_ms != 0 && acquired)
         i_dart_node_queue_wait(n, q, timeout_ms);
     {   const i_DartQRec *rec = i_dart_q_peek(q);
         if (rec){
-            i_dart_node_queue_msg(n, ch, rec, out);
+            i_dart_node_queue_msg(n, topic, rec, out);
             q->viewing = 1;                   /* the view lives until the next take/dispatch */
             got = 1;
         }
@@ -1630,18 +1630,18 @@ int dart_channel_take(DartChannel *ch, DartMsg *out, int timeout_ms){
     return got;
 }
 
-int dart_channel_dispatch(DartChannel *ch, int max_msgs, int timeout_ms){
+int dart_topic_dispatch(DartTopic *topic, int max_msgs, int timeout_ms){
     DartNode *n; i_DartMsgQueue *q; int acquired, done;
-    if (!ch) return DART_ERR_NO_CHANNEL;
-    n = ch->n;
+    if (!topic) return DART_ERR_NO_TOPIC;
+    n = topic->n;
     acquired = i_dart_node_lock(n);
-    q = i_dart_node_queue_ensure(n, ch, NULL);
+    q = i_dart_node_queue_ensure(n, topic, NULL);
     if (!q){ i_dart_node_unlock(n, acquired); return DART_ERR_OOM; }
     if (q->busy){ i_dart_node_unlock(n, acquired); return DART_ERR_STATE; }
-    i_dart_node_queue_release(n, ch, q);
+    i_dart_node_queue_release(n, topic, q);
     if (!q->count && timeout_ms != 0 && acquired)
         i_dart_node_queue_wait(n, q, timeout_ms);
-    done = i_dart_channel_dispatch_locked(n, ch, max_msgs, acquired);
+    done = i_dart_topic_dispatch_locked(n, topic, max_msgs, acquired);
     i_dart_node_unlock(n, acquired);
     return done;
 }
@@ -1654,22 +1654,22 @@ int dart_node_dispatch(DartNode *n, int max_msgs, int timeout_ms){
     if (!i_dart_node_any_queued(n) && timeout_ms != 0 && acquired)
         i_dart_node_queue_wait(n, NULL, timeout_ms);
     for (i = 0; i < n->n_created; i++){
-        DartChannel *h = n->handles[i];
+        DartTopic *h = n->handles[i];
         if (!h || !h->q || !h->q->count) continue;
-        total += i_dart_channel_dispatch_locked(n, h, max_msgs > 0 ? max_msgs - total : 0, acquired);
+        total += i_dart_topic_dispatch_locked(n, h, max_msgs > 0 ? max_msgs - total : 0, acquired);
         if (max_msgs > 0 && total >= max_msgs) break;
     }
     i_dart_node_unlock(n, acquired);
     return total;
 }
 
-void dart_channel_queue_stats(DartChannel *ch, uint32_t *msgs, uint32_t *bytes,
+void dart_topic_queue_stats(DartTopic *topic, uint32_t *msgs, uint32_t *bytes,
                               uint32_t *capacity, uint32_t *dropped){
     uint32_t m = 0, b = 0, c = 0, d = 0;
-    if (ch && ch->q){
-        int acquired = i_dart_node_lock(ch->n);
-        m = ch->q->count; b = ch->q->bytes; c = ch->q->cap; d = ch->q->dropped;
-        i_dart_node_unlock(ch->n, acquired);
+    if (topic && topic->q){
+        int acquired = i_dart_node_lock(topic->n);
+        m = topic->q->count; b = topic->q->bytes; c = topic->q->cap; d = topic->q->dropped;
+        i_dart_node_unlock(topic->n, acquired);
     }
     if (msgs)     *msgs = m;
     if (bytes)    *bytes = b;
@@ -1796,7 +1796,7 @@ int dart_node_close(DartNode *n, int send_bye){
     if (n->fd != DART_SOCK_BAD) i_dart_plat_close(n->fd);
 #ifdef DART_SHM
     if (n->shm_capable){                              /* unmap OS segments; the pool reset frees only pool memory */
-        uint32_t i, n_segments = (uint32_t)n->shm_n_channels * DART_SHM_N_CLASSES;
+        uint32_t i, n_segments = (uint32_t)n->shm_n_topics * DART_SHM_N_CLASSES;
         for (i=0;i<n_segments;i++)
             if (n->shm_pool[i]) i_dart_shm_detach((i_DartShmPool*)n->shm_pool[i]);   /* unlinks ours */
         for (i=0;i<n->shm_reader_count;i++)

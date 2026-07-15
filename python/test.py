@@ -99,7 +99,7 @@ received = []
 
 def on_message(m):
     received.append(m)
-    print("recv: [%s] from %s -> %r" % (m.channel_name, m.sender_name, m.value))
+    print("recv: [%s] from %s -> %r" % (m.topic_name, m.publisher_name, m.value))
     got.set()
 
 
@@ -117,8 +117,8 @@ def main():
                     domain=DOMAIN, multicast_interface=IFACE)
 
     qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=8)
-    dart.Channel[Pose](sub, "pose", dart.Role.SUB_ONLY, qos)
-    pubch = dart.Channel[Pose](pub, "pose", dart.Role.PUB_ONLY, qos)
+    dart.Topic[Pose](sub, "pose", dart.Role.SUB_ONLY, qos)
+    pubch = dart.Topic[Pose](pub, "pose", dart.Role.PUB_ONLY, qos)
 
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
                 frame="map", tags=["fast", "ok"], vel=Twist(dx=0.5, dy=0.25))

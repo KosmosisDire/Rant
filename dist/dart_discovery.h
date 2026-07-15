@@ -488,7 +488,7 @@ size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap)
 void         dart_discovery_solicit(DartDiscoveryState *st);
 /* Re-fire on_peer_up for every live (non-dropped) peer with the meta blob we already
  * hold, without any version change. A caller that just changed its OWN advertised data
- * (e.g. added a local channel / changed a role) uses this to re-apply every peer's
+ * (e.g. added a local topic / changed a role) uses this to re-apply every peer's
  * interest, so the new local state matches interest the peers advertised earlier --
  * which the peer would otherwise only re-send on its own next change. */
 void         dart_discovery_replay_peers(DartDiscoveryState *st);
@@ -896,7 +896,7 @@ void       dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t 
 void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
 /* Re-apply every known peer's interest against our current local state (see
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
- * added local channel matches interest peers advertised before it existed. */
+ * added local topic matches interest peers advertised before it existed. */
 void       dart_discovery_replay(DartDiscovery *d);
 /* This runtime's receive sockets (the multicast group fd, plus the own unicast RX fd
  * when one exists), for a caller embedding discovery in its own blocking wait. Fills
@@ -1587,7 +1587,7 @@ void dart_discovery_solicit(DartDiscoveryState *st){ if (st) st->want_solicit = 
 /* re-deliver every live peer's last-known announce to on_peer_up, so a caller that just
  * changed its own advertised data re-applies all peer interest against the new state. No
  * version change is involved: a peer's blob is unchanged, but the LOCAL side may now have
- * a channel that the blob's interest matches. */
+ * a topic that the blob's interest matches. */
 void dart_discovery_replay_peers(DartDiscoveryState *st){
     uint16_t i;
     if (!st || !st->cfg.on_event) return;

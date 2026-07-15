@@ -109,7 +109,7 @@ static int g_verbose = 0;     /* --verbose: print discovery/transport events */
  * Only the input thread touches this table, so it needs no lock of its own. */
 typedef struct {
     char         name[DART_TOPIC_NAME_MAX + 1];
-    DartChannel *ch;
+    DartTopic *ch;
     int          pub;   /* 1 = we publish on this topic */
     int          sub;   /* 1 = we subscribe to this topic */
 } Topic;
@@ -137,8 +137,8 @@ static Topic *get_topic(DartNode *n, const char *name){
     if (g_n_topics == MAX_TOPICS){ printf("  (topic table full, max %d)\n", MAX_TOPICS); return NULL; }
     if (strlen(name) > DART_TOPIC_NAME_MAX){ printf("  (topic name too long)\n"); return NULL; }
 
-    DartChannel *ch = dart_node_create_channel(n, name, DART_INACTIVE, g_schema, NULL);
-    if (!ch){ printf("  (create channel failed for '%s')\n", name); return NULL; }
+    DartTopic *ch = dart_node_create_topic(n, name, DART_INACTIVE, g_schema, NULL);
+    if (!ch){ printf("  (create topic failed for '%s')\n", name); return NULL; }
 
     t = &g_topics[g_n_topics++];
     strcpy(t->name, name);
@@ -151,7 +151,7 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
     Topic *t = get_topic(n, name);
     if (!t) return;
     t->pub = pub; t->sub = sub;
-    dart_channel_set_role(t->ch, role_of(pub, sub));
+    dart_topic_set_role(t->ch, role_of(pub, sub));
     const char *s = pub && sub ? "pubsub" : pub ? "pub" : sub ? "sub" : "drop";
     printf("  [%s] %s\n", s, name);
 }
@@ -165,14 +165,14 @@ static void on_message(const DartMsg *msg){
         uint64_t   seq  = dart_get_uint(msg->data, msg->schema, "seq");
         DartString text = dart_get_string(msg->data, msg->schema, "text");
         printf("[%.*s] %.*s > %.*s  (#%llu, +%.2f ms)\n",
-               (int)msg->sender_name.len, msg->sender_name.data,
-               (int)msg->channel_name.len, msg->channel_name.data,
+               (int)msg->publisher_name.len, msg->publisher_name.data,
+               (int)msg->topic_name.len, msg->topic_name.data,
                (int)text.len, text.data ? text.data : "",
                (unsigned long long)seq,
                (double)(i_dart_plat_now_us() - ts) / 1000.0);
     } else {
-        printf("[%.*s] %.*s > %.*s\n", (int)msg->sender_name.len, msg->sender_name.data,
-               (int)msg->channel_name.len, msg->channel_name.data,
+        printf("[%.*s] %.*s > %.*s\n", (int)msg->publisher_name.len, msg->publisher_name.data,
+               (int)msg->topic_name.len, msg->topic_name.data,
                (int)msg->data.len, (const char *)msg->data.data);
     }
 }
@@ -232,7 +232,7 @@ int main(int argc, char **argv){
     srand((unsigned)i_dart_plat_now_us());   /* the filler fields are random per message */
 
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,
-                                 &(DartNodeOpts){ .max_channels = MAX_TOPICS,
+                                 &(DartNodeOpts){ .max_topics = MAX_TOPICS,
                                                   .net = { .multicast_interface = ifc,
                                                            .seed_peers   = peer ? &seed : NULL,
                                                            .n_seed_peers = peer ? 1 : 0 } });
@@ -257,7 +257,7 @@ int main(int argc, char **argv){
         int sent = 0;
         uint32_t msg_len = chat_encode(buf, sizeof buf, line, len);
         for (int i = 0; i < g_n_topics; i++)
-            if (g_topics[i].pub){ dart_channel_send(g_topics[i].ch, dart_bytes(buf, msg_len)); sent++; }
+            if (g_topics[i].pub){ dart_topic_send(g_topics[i].ch, dart_bytes(buf, msg_len)); sent++; }
         if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }
 

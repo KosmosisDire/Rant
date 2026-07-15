@@ -122,7 +122,7 @@ void       dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t 
 void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
 /* Re-apply every known peer's interest against our current local state (see
  * dart_discovery_replay_peers). Call after changing our own advertised meta so a newly
- * added local channel matches interest peers advertised before it existed. */
+ * added local topic matches interest peers advertised before it existed. */
 void       dart_discovery_replay(DartDiscovery *d);
 /* This runtime's receive sockets (the multicast group fd, plus the own unicast RX fd
  * when one exists), for a caller embedding discovery in its own blocking wait. Fills

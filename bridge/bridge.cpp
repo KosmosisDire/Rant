@@ -1,12 +1,12 @@
 /* DART WebSocket bridge: one WebSocket connection = one full DART node on the mesh.
- * Text frames are the JSON control plane (open the node, create channels, flip roles,
+ * Text frames are the JSON control plane (open the node, create topics, flip roles,
  * drain); binary frames are the data plane (a fixed 3/7-byte little-endian header plus
  * the raw payload). The protocol is specified in PROTOCOL.md.
  *
  * This is a LEAN pub/sub proxy, not a mesh debugger: it does not expose the peer table
- * or other nodes' schemas. A typed channel carries its own declared schema (both ends
+ * or other nodes' schemas. A typed topic carries its own declared schema (both ends
  * paste the same DSL), so the client encodes/decodes with the field table returned by
- * `channel` and never needs to see a peer's layout.
+ * `topic` and never needs to see a peer's layout.
  *
  * Built entirely on the C++ wrapper (dart.hpp): the Conn owns a dart::Node whose
  * handlers (captured lambdas) format deliveries/events straight onto the WebSocket.
@@ -79,9 +79,9 @@ static const char *kind_str(dart::FieldType kind){
 
 static const char *send_status_str(dart::SendStatus rc){
     switch (rc){
-    case dart::SendStatus::NoChannel:   return "no such channel";
+    case dart::SendStatus::NoTopic:   return "no such topic";
     case dart::SendStatus::TooBig:      return "message too big";
-    case dart::SendStatus::BadRole:     return "channel role cannot publish";
+    case dart::SendStatus::BadRole:     return "topic role cannot publish";
     case dart::SendStatus::OutOfMemory: return "out of memory";
     case dart::SendStatus::State:       return "wrong state";
     case dart::SendStatus::NoSys:       return "not supported";
@@ -138,9 +138,9 @@ static void reply_err(Conn *c, const json &seq, const std::string &error){
     send_json(c, { {"op", "reply"}, {"seq", seq}, {"ok", false}, {"error", error} });
 }
 
-static void send_error_event(Conn *c, uint16_t channel, dart::SendStatus rc){
+static void send_error_event(Conn *c, uint16_t topic, dart::SendStatus rc){
     send_json(c, { {"op", "event"}, {"event", "send_error"},
-                   {"channel", channel}, {"code", (int)rc}, {"error", send_status_str(rc)} });
+                   {"topic", topic}, {"code", (int)rc}, {"error", send_status_str(rc)} });
 }
 
 /* Format one event as JSON and send it. Runs inside the dart event handler (on the
@@ -161,13 +161,13 @@ static void send_event(Conn *c, const dart::Event &ev){
         e["publishes"] = ev.publish_topics(); e["receives"] = ev.receive_topics();
         break;
     case dart::EventKind::MessageLost:
-        e["event"] = "msg_lost"; e["channel"] = ev.channel(); e["peer"] = ev.peer();
+        e["event"] = "msg_lost"; e["topic"] = ev.topic(); e["peer"] = ev.peer();
         e["first"] = ev.lost_first(); e["count"] = ev.lost_count();
         break;
     case dart::EventKind::Error:   /* one catch-all: "text" carries the message, "error" the code */
         e["event"] = "error"; e["error"] = (int)ev.error();
-        if (!ev.channel_name().empty()) e["channel_name"] = std::string(ev.channel_name());
-        if (ev.channel())               e["channel"]      = ev.channel();
+        if (!ev.topic_name().empty()) e["topic_name"] = std::string(ev.topic_name());
+        if (ev.topic())               e["topic"]      = ev.topic();
         if (ev.peer())                  e["peer"]         = ev.peer();
         if (ev.os_error())              e["os_error"]     = ev.os_error();
         break;
@@ -178,7 +178,7 @@ static void send_event(Conn *c, const dart::Event &ev){
     send_json(c, e);
 }
 
-/* Delivery: one DART message -> one binary WebSocket frame [op][u16 channel][u32 sender]
+/* Delivery: one DART message -> one binary WebSocket frame [op][u16 topic][u32 publisher]
  * [payload]. Runs on the node's service thread; drops a client that cannot keep up. */
 static void deliver_message(Conn *c, const dart::MessageIn &m){
     if (!c->ws) return;
@@ -187,8 +187,8 @@ static void deliver_message(Conn *c, const dart::MessageIn &m){
         return;
     }
     dart::Bytes data = m.data();
-    uint16_t    ch   = m.channel_id();
-    uint32_t    from = m.sender_id();
+    uint16_t    ch   = m.topic_index();
+    uint32_t    from = m.publisher_id();
     std::string frame;
     frame.resize(7 + data.size());
     uint8_t *p = (uint8_t *)&frame[0];
@@ -214,7 +214,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
 
     dart::NodeOptions o;
     o.domain              = (uint16_t)req.value("domain", 0);
-    o.max_channels        = (uint16_t)req.value("max_channels", 0);
+    o.max_topics        = (uint16_t)req.value("max_topics", 0);
     o.disable_shm         = req.value("disable_shm", false);
     o.multicast_interface = req.value("interface", std::string());
     o.fragment_size       = (uint16_t)req.value("fragment_size", 0);
@@ -238,9 +238,9 @@ static void op_open(Conn *c, const json &req, const json &seq){
     if (g_verbose) printf("[bridge] node '%s' opened\n", name.c_str());
 }
 
-static void op_channel(Conn *c, const json &req, const json &seq){
+static void op_topic(Conn *c, const json &req, const json &seq){
     std::string name = req.value("name", "");
-    if (name.empty()){ reply_err(c, seq, "missing channel name"); return; }
+    if (name.empty()){ reply_err(c, seq, "missing topic name"); return; }
     dart::Role role;
     if (!role_from(req.value("role", "pubsub"), &role)){ reply_err(c, seq, "bad role"); return; }
 
@@ -255,8 +255,8 @@ static void op_channel(Conn *c, const json &req, const json &seq){
     qos.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
     qos.shm_max_bytes        = (uint32_t)req.value("shm_max_bytes", 0);
 
-    /* Optional typed schema. create_channel copies the schema into node memory, so the
-     * local one need not outlive the channel; we keep it just long enough to reply. */
+    /* Optional typed schema. create_topic copies the schema into node memory, so the
+     * local one need not outlive the topic; we keep it just long enough to reply. */
     std::optional<dart::Schema> schema;
     std::string text = req.value("schema", "");
     if (!text.empty()){
@@ -265,8 +265,8 @@ static void op_channel(Conn *c, const json &req, const json &seq){
         if (!schema){ reply_err(c, seq, "schema error: " + err); return; }
     }
 
-    dart::Channel ch = c->node->create_channel(name, role, schema ? &*schema : nullptr, qos);
-    if (!ch){ reply_err(c, seq, "create failed (channel reserve full, bad name, or OOM)"); return; }
+    dart::Topic ch = c->node->create_topic(name, role, schema ? &*schema : nullptr, qos);
+    if (!ch){ reply_err(c, seq, "create failed (topic reserve full, bad name, or OOM)"); return; }
 
     json r = { {"id", ch.index()} };
     if (schema){
@@ -280,15 +280,15 @@ static void op_channel(Conn *c, const json &req, const json &seq){
 static void op_role(Conn *c, const json &req, const json &seq){
     dart::Role role;
     if (!role_from(req.value("role", ""), &role)){ reply_err(c, seq, "bad role"); return; }
-    dart::Channel ch = c->node->channel((uint16_t)req.value("channel", 0xffff));
-    if (!ch){ reply_err(c, seq, "no such channel"); return; }
+    dart::Topic ch = c->node->topic((uint16_t)req.value("topic", 0xffff));
+    if (!ch){ reply_err(c, seq, "no such topic"); return; }
     if (ch.set_role(role) != dart::SendStatus::Ok){ reply_err(c, seq, "set_role failed"); return; }
     reply_ok(c, seq, {});
 }
 
 static void op_drain(Conn *c, const json &req, const json &seq){
-    dart::Channel ch = c->node->channel((uint16_t)req.value("channel", 0xffff));
-    if (!ch){ reply_err(c, seq, "no such channel"); return; }
+    dart::Topic ch = c->node->topic((uint16_t)req.value("topic", 0xffff));
+    if (!ch){ reply_err(c, seq, "no such topic"); return; }
     bool drained = ch.drain(req.value("timeout_ms", 1000));
     reply_ok(c, seq, { {"drained", drained} });
 }
@@ -304,21 +304,21 @@ static void on_text(Conn *c, const std::string &raw){
 
     if (op == "open"){ op_open(c, req, seq); return; }
     if (!c->node){ reply_err(c, seq, "send open first"); return; }
-    if      (op == "channel") op_channel(c, req, seq);
+    if      (op == "topic") op_topic(c, req, seq);
     else if (op == "role")    op_role(c, req, seq);
     else if (op == "drain")   op_drain(c, req, seq);
     else reply_err(c, seq, "unknown op: " + op);
 }
 
-/* ---- data plane: [u8 op][u16 channel][payload] ------------------------------------ */
+/* ---- data plane: [u8 op][u16 topic][payload] ------------------------------------ */
 
 static void on_binary(Conn *c, const std::string &frame){
     if (frame.size() < 3 || (uint8_t)frame[0] != kOpData) return;   /* reserved ops: drop */
     uint16_t id = (uint16_t)((uint8_t)frame[1] | ((uint8_t)frame[2] << 8));
 
-    if (!c->node){ send_error_event(c, id, dart::SendStatus::NoChannel); return; }
-    /* channel() yields an invalid handle for a bad id; send() then returns NoChannel */
-    dart::SendStatus rc = c->node->channel(id).send(dart::Bytes(frame.data() + 3, frame.size() - 3));
+    if (!c->node){ send_error_event(c, id, dart::SendStatus::NoTopic); return; }
+    /* topic() yields an invalid handle for a bad id; send() then returns NoTopic */
+    dart::SendStatus rc = c->node->topic(id).send(dart::Bytes(frame.data() + 3, frame.size() - 3));
     if (rc != dart::SendStatus::Ok) send_error_event(c, id, rc);
     /* no explicit flush: the send kicks the node's service thread awake */
 }

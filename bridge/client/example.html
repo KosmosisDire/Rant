@@ -72,9 +72,9 @@ function line(html) {
 const node = await DartClient.connect(`ws://${location.hostname || "localhost"}:7480`);
 status.textContent = `connected as node "${node.name}"`;
 
-/* A pubsub channel: this tab both publishes and receives. A node does not receive
+/* A pubsub topic: this tab both publishes and receives. A node does not receive
  * its own messages, so open a second tab (or run example.mjs) to see traffic. */
-const chat = await node.channel("chat", "pubsub", { schema: SCHEMA, reliable: true, keep_last: 32 });
+const chat = await node.topic("chat", "pubsub", { schema: SCHEMA, reliable: true, keep_last: 32 });
 
 chat.onMessage = (m) => {
   const from = m.get("from"), text = m.get("text");

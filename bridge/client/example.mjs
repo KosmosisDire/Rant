@@ -5,7 +5,7 @@
  *   node example.mjs                 (or: node example.mjs ws://host:7480)
  *
  * It opens two nodes on the mesh through the bridge -- a publisher and a
- * subscriber -- declares the same typed "telemetry" channel on each, publishes a
+ * subscriber -- declares the same typed "telemetry" topic on each, publishes a
  * few messages, and prints them as they arrive. One WebSocket connection = one
  * DART node, so this is exactly what two separate machines would do. */
 import { DartClient } from "./dart.mjs";
@@ -30,8 +30,8 @@ const publisher  = await DartClient.connect(url, { name: "publisher",  ...net })
 const subscriber = await DartClient.connect(url, { name: "subscriber", ...net });
 console.log(`connected to ${url}`);
 
-const out = await publisher.channel("telemetry", "pub", { schema: SCHEMA, reliable: true });
-const inn = await subscriber.channel("telemetry", "sub", { schema: SCHEMA, reliable: true });
+const out = await publisher.topic("telemetry", "pub", { schema: SCHEMA, reliable: true });
+const inn = await subscriber.topic("telemetry", "sub", { schema: SCHEMA, reliable: true });
 
 /* Typed reads by name (dotted path for nested fields); no per-message parsing. */
 let received = 0;

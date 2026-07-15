@@ -1,4 +1,4 @@
-// DART for Unity: shared, name-keyed channels handed out by the scene's DartNode
+// DART for Unity: shared, name-keyed topics handed out by the scene's DartNode
 // component (DartNode.cs: Unity only registers a MonoBehaviour whose class name
 // matches its file name, so the component lives there and this file holds the rest).
 //
@@ -9,8 +9,8 @@
 //   public struct Pose { public float X, Y, Z; }
 //
 //   // publish from any component
-//   DartChannel<Pose> pose;
-//   void Start()  { pose = DartNode.Channel<Pose>("player/pose"); }
+//   DartTopic<Pose> pose;
+//   void Start()  { pose = DartNode.Topic<Pose>("player/pose"); }
 //   void Update() { pose.Publish(new Pose { X = transform.position.x }); }
 //
 //   // subscribe from any other component: dies with the component, skipped while
@@ -18,24 +18,24 @@
 //   void Start() { DartNode.Subscribe<Pose>("player/pose", this, OnPose); }
 //   void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
 //
-// Channels are shared by name: every script asking for "player/pose" gets the same
-// DartChannel<Pose>, and its role is managed automatically (created inactive; the
+// Topics are shared by name: every script asking for "player/pose" gets the same
+// DartTopic<Pose>, and its role is managed automatically (created inactive; the
 // first Publish advertises pub, the first Subscribe advertises sub, the last
 // unsubscribe withdraws it).
 //
 // Threading: the node runs the C service thread, so the wire never waits for a
-// frame; every channel is queued from creation and DartNode dispatches once per
+// frame; every topic is queued from creation and DartNode dispatches once per
 // frame, so ALL handlers fire on the main thread, where the Unity API is legal.
 // Events (peer up/down, errors) reach the main thread the same way and are logged
 // to the Console by default (DartNode.Events to observe them).
 //
 // Edit mode: the component is [ExecuteAlways]; with Run In Edit Mode on (default)
 // the node is live in the editor outside play, pumped from EditorApplication.update.
-// Whether publishers/subscribers exist at edit time is up to them: a channel
+// Whether publishers/subscribers exist at edit time is up to them: a topic
 // acquired while the node is closed simply goes live when it opens.
 //
 // The low-level wrapper stays fully available: DartNode.Main.Raw is the Node, and a
-// DartChannel's Raw is its Channel (TryTake, Drain, QueueStats...).
+// DartTopic's Raw is the underlying Dart.Topic (TryTake, Drain, QueueStats...).
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
@@ -59,24 +59,24 @@ namespace Dart
     /// subscriptions dispose themselves when the owner is destroyed.</summary>
     public sealed class DartSubscription : IDisposable
     {
-        private DartChannelBase _channel;
-        private DartChannelBase.Sub _sub;
-        internal DartSubscription(DartChannelBase channel, DartChannelBase.Sub sub)
+        private DartTopicBase _topic;
+        private DartTopicBase.Sub _sub;
+        internal DartSubscription(DartTopicBase topic, DartTopicBase.Sub sub)
         {
-            _channel = channel; _sub = sub;
+            _topic = topic; _sub = sub;
         }
         public void Dispose()
         {
-            if (_channel == null) return;
-            _channel.RemoveSub(_sub);
-            _channel = null; _sub = null;
+            if (_topic == null) return;
+            _topic.RemoveSub(_sub);
+            _topic = null; _sub = null;
         }
     }
 
-    /// <summary>A shared, name-keyed channel on the scene's DartNode. One instance
+    /// <summary>A shared, name-keyed topic on the scene's DartNode. One instance
     /// exists per name; it survives the native node closing and reopening (edit
-    /// mode toggles, inspector changes) by re-creating its native channel lazily.</summary>
-    public abstract class DartChannelBase
+    /// mode toggles, inspector changes) by re-creating its native topic lazily.</summary>
+    public abstract class DartTopicBase
     {
         internal sealed class Sub
         {
@@ -90,29 +90,29 @@ namespace Dart
         private readonly string _name;
         private readonly Qos _qos;
         private readonly List<Sub> _subs = new List<Sub>();
-        private Channel _raw;
+        private Topic _raw;
         private Role _appliedRole = Role.Inactive;
         private int _live;          // subs not yet marked dead
         private bool _wantPub;
         private bool _warnedClosed;
 
-        internal DartChannelBase(DartNode owner, string name, Qos qos)
+        internal DartTopicBase(DartNode owner, string name, Qos qos)
         {
             _owner = owner; _name = name; _qos = qos;
         }
 
         public string Name => _name;
-        /// <summary>The underlying wrapper Channel; null while the node is closed.</summary>
-        public Channel Raw => _raw;
+        /// <summary>The underlying wrapper Topic; null while the node is closed.</summary>
+        public Topic Raw => _raw;
         /// <summary>Matched remote endpoints (0 while the node is closed).</summary>
         public int Matches => _raw != null ? _raw.MatchCount() : 0;
         /// <summary>Local handlers currently subscribed.</summary>
         public int SubscriberCount => _live;
 
-        internal abstract Channel CreateRaw(Node node, string name, Role role, Qos qos);
+        internal abstract Topic CreateRaw(Node node, string name, Role role, Qos qos);
 
         // The advertised role always mirrors actual local use: create the native
-        // channel on first use, flip the role on later changes (SetRole re-advertises
+        // topic on first use, flip the role on later changes (SetRole re-advertises
         // immediately and peers rematch from cached verdicts, so this is cheap).
         internal void ApplyRole()
         {
@@ -135,7 +135,7 @@ namespace Dart
         {
             _warnedClosed = false;
             try { ApplyRole(); }
-            catch (Exception e) { Debug.LogError("[DART] channel '" + _name + "' create failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[DART] topic '" + _name + "' create failed: " + e.Message); }
         }
 
         internal void OnNodeClosed()
@@ -144,7 +144,7 @@ namespace Dart
             _appliedRole = Role.Inactive;
         }
 
-        protected Channel PubRaw()
+        protected Topic PubRaw()
         {
             _wantPub = true;
             ApplyRole();
@@ -214,24 +214,24 @@ namespace Dart
         }
     }
 
-    /// <summary>A raw (schemaless) shared channel: bytes or UTF-8 strings.</summary>
-    public sealed class DartChannel : DartChannelBase
+    /// <summary>A raw (schemaless) shared topic: bytes or UTF-8 strings.</summary>
+    public sealed class DartTopic : DartTopicBase
     {
-        internal DartChannel(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
+        internal DartTopic(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Channel CreateRaw(Node node, string name, Role role, Qos qos)
-            => new Channel(node, name, role, qos);
+        internal override Topic CreateRaw(Node node, string name, Role role, Qos qos)
+            => new Topic(node, name, role, qos);
 
         public SendStatus Publish(byte[] data)
         {
-            Channel r = PubRaw();
-            return r != null ? r.Send(data) : SendStatus.NoChannel;
+            Topic r = PubRaw();
+            return r != null ? r.Send(data) : SendStatus.NoTopic;
         }
 
         public SendStatus Publish(string text)
         {
-            Channel r = PubRaw();
-            return r != null ? r.Send(text) : SendStatus.NoChannel;
+            Topic r = PubRaw();
+            return r != null ? r.Send(text) : SendStatus.NoTopic;
         }
 
         public DartSubscription Subscribe(Action<Message> handler)
@@ -250,19 +250,19 @@ namespace Dart
         }
     }
 
-    /// <summary>A typed shared channel: T's public fields are the schema, exactly as
-    /// in the core wrapper's Channel&lt;T&gt;.</summary>
-    public sealed class DartChannel<T> : DartChannelBase
+    /// <summary>A typed shared topic: T's public fields are the schema, exactly as
+    /// in the core wrapper's Topic&lt;T&gt;.</summary>
+    public sealed class DartTopic<T> : DartTopicBase
     {
-        internal DartChannel(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
+        internal DartTopic(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Channel CreateRaw(Node node, string name, Role role, Qos qos)
-            => new Channel<T>(node, name, role, qos);
+        internal override Topic CreateRaw(Node node, string name, Role role, Qos qos)
+            => new Topic<T>(node, name, role, qos);
 
         public SendStatus Publish(T message)
         {
-            Channel r = PubRaw();
-            return r != null ? ((Channel<T>)r).Send(message) : SendStatus.NoChannel;
+            Topic r = PubRaw();
+            return r != null ? ((Topic<T>)r).Send(message) : SendStatus.NoTopic;
         }
 
         public DartSubscription Subscribe(Action<T> handler)
@@ -274,7 +274,7 @@ namespace Dart
         public DartSubscription Subscribe(Action<T, MessageInfo> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v, new MessageInfo(m.SenderName, m.RecvUs)); },
+            return AddSub(m => { if (m.Value is T v) handler(v, new MessageInfo(m.PublisherName, m.RecvUs)); },
                           null, false);
         }
 
@@ -292,7 +292,7 @@ namespace Dart
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v, new MessageInfo(m.SenderName, m.RecvUs)); },
+            return AddSub(m => { if (m.Value is T v) handler(v, new MessageInfo(m.PublisherName, m.RecvUs)); },
                           owner, true);
         }
     }

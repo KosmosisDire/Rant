@@ -142,7 +142,7 @@ static class Program
             onMessage: m =>
             {
                 Received = m;
-                Console.WriteLine($"recv: [{m.ChannelName}] from {m.SenderName} -> {m.As<Pose>()}");
+                Console.WriteLine($"recv: [{m.TopicName}] from {m.PublisherName} -> {m.As<Pose>()}");
                 Got.Set();
             },
             onEvent: e => Console.WriteLine("event(sub): " + e),
@@ -152,8 +152,8 @@ static class Program
             new NodeOptions { Domain = 42, MulticastInterface = "127.0.0.1" });
 
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
-        new Channel<Pose>(sub, "pose", Role.SubOnly, qos);
-        var pubch = new Channel<Pose>(pub, "pose", Role.PubOnly, qos);
+        new Topic<Pose>(sub, "pose", Role.SubOnly, qos);
+        var pubch = new Topic<Pose>(pub, "pose", Role.PubOnly, qos);
 
         var sent = new Pose
         {

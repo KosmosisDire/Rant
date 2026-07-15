@@ -14,7 +14,7 @@
 
 #include "../transport/core.h"
 #include "../discovery/core.h"    /* DartDiscoveryAddr, DartDiscoveryDownReason */
-#include "../serialize/schema.h"  /* DartSchema: channel schemas + peer schema binding */
+#include "../serialize/schema.h"  /* DartSchema: topic schemas + peer schema binding */
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,7 +32,7 @@ typedef enum {
     DART_PEER_UP,        /* peer discovered or resumed: .peer, .ip/.ip_len/.port */
     DART_PEER_DOWN,      /* peer lost or fell silent: .peer */
     DART_PEER_INTEREST,  /* a peer's interest list was (re)applied: .peer, .publish_topics, .receive_topics */
-    DART_MSG_LOST,       /* messages skipped (best-effort loss / unrecoverable gap): .channel, .peer,
+    DART_MSG_LOST,       /* messages skipped (best-effort loss / unrecoverable gap): .topic, .peer,
                             .lost_first .. +.lost_count-1. Not an error: expected under best-effort. */
     DART_ERROR           /* something went wrong: read .error (a DartErrorKind) and dart_event_str */
 } DartEventKind;
@@ -43,13 +43,13 @@ typedef enum {
 typedef enum {
     DART_E_NONE = 0,
     /* ---- match / config (a match was refused, or advertised data cannot flow) ---- */
-    DART_E_NAME_COLLISION,   /* a peer's topic name hashes to ours but differs (.identity, .channel,
-                                .channel_name): the match is refused, never silently cross-wired */
-    DART_E_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.channel, .peer,
-                                .channel_name): no silent downgrade; forms if the publisher upgrades */
+    DART_E_NAME_COLLISION,   /* a peer's topic name hashes to ours but differs (.identity, .topic,
+                                .topic_name): the match is refused, never silently cross-wired */
+    DART_E_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.topic, .peer,
+                                .topic_name): no silent downgrade; forms if the publisher upgrades */
     DART_E_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not fit
-                                its sender's schema was dropped (.channel, .peer, .channel_name) */
-    DART_E_INTEREST_OVERFLOW,/* a peer's matched topics exceed our alias table (.peer, .lost_count =
+                                its publisher's schema was dropped (.topic, .peer, .topic_name) */
+    DART_E_INTEREST_OVERFLOW,/* a peer's matched topics exceed our index table (.peer, .lost_count =
                                 entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
     DART_E_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was dropped,
                                        so peers see none of our topics. Fewer / shorter topic names. */
@@ -60,8 +60,8 @@ typedef enum {
     DART_E_MSG_TOO_BIG,      /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
     DART_E_PEER_REFUSED,     /* peer table full of active peers: a new peer was refused (.ip/.ip_len/.port).
                                 Raise discovery.max_peers (dynamic mode grows automatically). */
-    DART_E_EVICTED_UNSENT,   /* a send overwrote history never handed to the wire for some matched reader,
-                                after the bounded wait (.channel, .lost_first = evicted base seqno,
+    DART_E_EVICTED_UNSENT,   /* a send overwrote history never handed to the wire for some matched subscriber,
+                                after the bounded wait (.topic, .lost_first = evicted base seqno,
                                 .lost_count = fragment count): the send burst outran the TX drain. */
     /* ---- low-level IO / setup (mostly at dart_node_open; .os_error carries errno) ---- */
     DART_E_OOM,              /* allocator returned NULL / static buffer too small (.too_big_bytes = bytes needed) */
@@ -79,11 +79,11 @@ typedef enum {
 typedef struct {
     DartEventKind kind;
     DartErrorKind error;       /* DART_ERROR: which error (DART_E_NONE otherwise) */
-    const char *channel_name;  /* channel-scoped events: our channel's name (a view into node state,
-                                  valid for the callback; NULL when not channel-scoped) */
+    const char *topic_name;  /* topic-scoped events: our topic's name (a view into node state,
+                                  valid for the callback; NULL when not topic-scoped) */
     void       *user;          /* your DartNodeOpts.user_data (mirrors DartMsg.user) */
     uint32_t   peer;           /* peer id, where applicable (0 = n/a) */
-    uint16_t   channel;        /* local channel handle, where applicable */
+    uint16_t   topic;        /* local topic handle, where applicable */
     int        os_error;       /* SOCKET/BIND/MCAST_JOIN/SEND/RECV/POLL: OS errno / WSAGetLastError (0 = n/a) */
     uint8_t    ip[16];         /* PEER_UP / PEER_REFUSED / PEER_META_TOO_BIG: peer address (network order) */
     uint8_t    ip_len;         /* 4 or 16; else 0 */
@@ -118,7 +118,7 @@ typedef struct {
     DartTransportState           *transport;    /* the peers are wired into this (sans-IO) */
     DartDiscoveryState  *discovery;    /* the peer table (id<->addr, name, user scratch); may be
                                           NULL at init, then bound via i_dart_node_core_bind_discovery */
-    uint16_t              n_channels;    /* sizes the announce-blob buffer */
+    uint16_t              n_topics;    /* sizes the announce-blob buffer */
     uint16_t              frag_size;     /* our UDP fragment size, baked into the overlay */
     DartEventFn         on_event;      /* PEER_UP/DOWN/REFUSED sink (optional) */
     void                 *user;          /* passed to on_event */
@@ -127,21 +127,21 @@ typedef struct {
     void                 *alloc_user;
     int                   oob_capable;   /* 1 = we can deliver out-of-band (SHM) payloads */
     uint8_t               oob_host[16];  /* our host id; a peer is OOB-reachable iff it matches */
-    uint8_t               fetch_details; /* 1 = the detail cycle requests EVERY advertised alias
+    uint8_t               fetch_details; /* 1 = the detail cycle requests EVERY advertised index
                                             (observer mode) and caches name + schema per
-                                            (peer, alias) for i_dart_node_core_topic_detail */
+                                            (peer, index) for i_dart_node_core_topic_detail */
 } i_DartNodeCoreConfig;
 
 typedef struct i_DartNodeCore i_DartNodeCore;
 
 /* dynamic_meta = an alloc hook will be set: the announce blob is then hook-allocated at
  * actual size, so no arena reservation for it (must match the init cfg's alloc). */
-size_t          i_dart_node_core_required_memory(uint16_t n_channels, int dynamic_meta);
+size_t          i_dart_node_core_required_memory(uint16_t n_topics, int dynamic_meta);
 i_DartNodeCore *i_dart_node_core_init(void *mem, size_t mem_size, const i_DartNodeCoreConfig *cfg);
 /* Relocate the sans-IO core into a bigger block at grown counts. The transport, discovery,
  * and announce-blob pointers are re-pointed by the caller after those move. Dynamic growth. */
 i_DartNodeCore *i_dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
-                                       uint16_t new_n_channels);
+                                       uint16_t new_n_topics);
 /* Bind (or rebind, after a migrate) the discovery core whose peer table this core delegates
  * to. The runtime calls it once discovery exists, and again after discovery relocates. */
 void            i_dart_node_core_bind_discovery(i_DartNodeCore *c, DartDiscoveryState *discovery);
@@ -157,11 +157,11 @@ uint16_t        i_dart_node_core_peer_user_bytes(void);
  * discovery. */
 uint16_t        i_dart_node_core_build_meta(i_DartNodeCore *c);
 DartBytes       i_dart_node_core_meta(i_DartNodeCore *c);
-/* Register (or clear: NULL) a channel's schema: advertised in the overlay, matched by
- * the schema gate, and the base of the reader's bound view. schema must outlive the
- * channel (it is the node-owned parsed copy). Rebuild the meta after; only
- * non-INACTIVE channels are advertised, so a role flip just rebuilds. */
-void            i_dart_node_core_set_channel_schema(i_DartNodeCore *c, uint16_t channel,
+/* Register (or clear: NULL) a topic's schema: advertised in the overlay, matched by
+ * the schema gate, and the base of the subscriber's bound view. schema must outlive the
+ * topic (it is the node-owned parsed copy). Rebuild the meta after; only
+ * non-INACTIVE topics are advertised, so a role flip just rebuilds. */
+void            i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t topic_index,
                                                     const DartSchema *schema);
 
 /* Answer a peer's DETAIL_REQ ('uDTL', see the detail codec in transport/core.h): validate
@@ -174,30 +174,30 @@ DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, Da
 
 /* The transport's DartConfig.schema_check, node-style (see transport/core.h): decide a
  * would-be match from the peer's advertised schema identity + wire, delivered by its
- * detail response. Typed vs typed matches iff same root name and the reader's fields are
- * a subset of the writer's (dart_schema_subset); a typed reader refuses an untyped or
- * unverifiable writer; an untyped (generic) reader accepts anything. On an allowed
- * read-side check this also interns the peer's schema and records the reader view for
+ * detail response. Typed vs typed matches iff same root name and the subscriber's fields are
+ * a subset of the publisher's (dart_schema_subset); a typed subscriber refuses an untyped or
+ * unverifiable publisher; an untyped (generic) subscriber accepts anything. On an allowed
+ * read-side check this also interns the peer's schema and records the subscriber view for
  * delivery, keyed by the peer id. */
-int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
                                   int peer_is_pub, uint64_t hash, DartBytes wire);
 
-/* Why the schema gate refused (peer, channel) in the given direction (peer_is_pub as in
+/* Why the schema gate refused (peer, topic) in the given direction (peer_is_pub as in
  * schema_check): the reason recorded at detail intake, feeding DartEvent.schema_detail
  * when the transport fires SCHEMA_MISMATCH at interest apply. A view into node state,
  * valid until the verdict changes or the peer is removed; NULL when unknown (fixed
  * mode, or DART_NO_DIAG). */
-const char *i_dart_node_core_schema_why(i_DartNodeCore *c, uint32_t peer, uint16_t channel,
+const char *i_dart_node_core_schema_why(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
                                         int peer_is_pub);
 /* Record + return the reason for a delivery-length mismatch (a message that did not fit
- * its sender's schema), same storage/lifetime as schema_why. NULL under DART_NO_DIAG. */
+ * its publisher's schema), same storage/lifetime as schema_why. NULL under DART_NO_DIAG. */
 const char *i_dart_node_core_note_size_mismatch(i_DartNodeCore *c, uint32_t peer,
-                                        uint16_t channel, uint64_t got_len, uint64_t want_len);
+                                        uint16_t topic_index, uint64_t got_len, uint64_t want_len);
 
-/* The schema to decode a delivered message with: the channel's own schema when the
- * sender's is identical, a rebased view of the sender's layout when it is a superset,
- * the sender's interned schema for a generic (schema-less) channel, or NULL (raw). */
-const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, uint16_t channel);
+/* The schema to decode a delivered message with: the topic's own schema when the
+ * publisher's is identical, a rebased view of the publisher's layout when it is a superset,
+ * the publisher's interned schema for a generic (schema-less) topic, or NULL (raw). */
+const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index);
 
 /* Discovery event sink: register as the discovery core's on_event (cfg.user = this
  * core). Demuxes the generic DartDiscoveryEvent (PEER_UP/DOWN/REFUSED), keeps the peer
@@ -235,10 +235,10 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
                                         void *out, size_t cap, i_DartNodeDest *to);
 
 /* The greedy detail cache (cfg.fetch_details): a peer topic's fetched name + parsed
- * schema by (peer id, alias). name is a view of the cache's copy ({NULL,0} = not
+ * schema by (peer id, index). name is a view of the cache's copy ({NULL,0} = not
  * fetched yet); *schema/*schema_hash (either may be NULL) get the interned parsed
  * schema and its identity (NULL/0 = untyped). Returns 1 on a cache hit. */
-int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t alias,
+int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t index,
                                   DartString *name, const DartSchema **schema,
                                   uint64_t *schema_hash);
 
@@ -261,11 +261,11 @@ int      i_dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id
  * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
 uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
 /* Walk a peer's interest list one advertised direction at a time: zero a
- * DartInterestIter, then call until it returns 0. Fills *out with alias/role/hash only:
+ * DartInterestIter, then call until it returns 0. Fills *out with index/role/hash only:
  * the announce carries no topic names or schemas (fetch those via the detail exchange,
  * transport/core.h). 0 when the peer carries no overlay or at the end. */
 int      dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
-                              DartInterestIter *it, DartTopic *out);
+                              DartInterestIter *it, DartTopicEntry *out);
 
 #ifdef __cplusplus
 }

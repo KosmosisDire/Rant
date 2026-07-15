@@ -28,9 +28,9 @@
 
 #define DART__NO_DEADLINE ((uint64_t)-1)  /* next_deadline_us: nothing armed */
 
-/* per-(peer, alias) detail-verdict bits (peer_astate maps; see DartTransportState) */
+/* per-(peer, index) detail-verdict bits (peer_astate maps; see DartTransportState) */
 #define DART__AST_DETAILED 0x01u  /* details received and judged (else PENDING/none) */
-#define DART__AST_NAME_OK  0x02u  /* full identity + name verified: peer_alias[a] is our channel */
+#define DART__AST_NAME_OK  0x02u  /* full identity + name verified: peer_index[a] is our topic */
 #define DART__AST_READ_OK  0x04u  /* schema gate passed, read side (their pub -> our sub) */
 #define DART__AST_WRITE_OK 0x08u  /* schema gate passed, write side (their sub -> our pub) */
 
@@ -54,11 +54,11 @@
                                     acked_upto first, suppressing it: no wire cost without loss. */
 #endif
 
-/* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = alias, then the body.
+/* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = index, then the body.
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one
  * edit, never a silent builder/parser drift. Several fields share an offset (distinct
  * names on purpose). Header sizes: DATA 13 (single)/21 (multi), HB 23, NACK 21. */
-#define DART_OFFSET_ALIAS      1u  /* u16, every submessage */
+#define DART_OFFSET_INDEX      1u  /* u16, every submessage */
 #define DART_OFFSET_SEQNO      3u  /* DATA seqno; also HB first, NACK base, SHM base (u64) */
 #define DART_OFFSET_PAYLOAD_LEN_SINGLE     11u  /* DATA single: u16 payload_len (payload at DART_HEADER_DATA_SINGLE) */
 #define DART_HEADER_DATA_SINGLE   13u  /* DATA single: header bytes */
@@ -82,7 +82,7 @@
 
 /* The three per-lane/per-slot structs below are laid out widest-field-first (u64s,
  * pointers, u32s, u16s, then u8s) so they carry no padding holes: they are allocated
- * n_channels*max_peers (proxies) and keep_last (samples) times, so padding multiplies. */
+ * n_topics*max_peers (proxies) and keep_last (samples) times, so padding multiplies. */
 typedef struct {
     uint64_t base;       /* seqno of frag 0 */
     uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
@@ -99,7 +99,7 @@ typedef struct {
 #endif
 } i_DartWriterSample;
 
-typedef struct {        /* writer-side, per (channel,peer) */
+typedef struct {        /* writer-side, per (topic,peer) */
     uint64_t sent_upto;  /* next seqno to push as new data */
     uint64_t acked_upto; /* peer received all TUs < this */
     uint64_t nack_base;
@@ -116,7 +116,7 @@ typedef struct {        /* writer-side, per (channel,peer) */
     uint8_t  has_nack;   /* pending repair request from ACKNACK */
 } i_DartWriterProxy;
 
-typedef struct {        /* reader-side, per (channel,peer) */
+typedef struct {        /* reader-side, per (topic,peer) */
     uint64_t deliver_upto;  /* base of current sample; all below delivered/skipped */
     uint64_t hb_last;       /* highest seqno the writer CLAIMS to hold (heartbeat only) */
     uint64_t received_high;      /* highest seqno we have actually RECEIVED a frag for. UDP is
@@ -153,19 +153,19 @@ typedef struct {        /* reader-side, per (channel,peer) */
 } i_DartReaderProxy;
 
 /* One matched lane: both direction proxies plus the scheduler's chain fields. In dynamic
- * mode records are pool-allocated only while the (channel,peer) pair actually matches, so
- * lane memory scales with real matches, not channels x peers; fixed mode (no allocator)
+ * mode records are pool-allocated only while the (topic,peer) pair actually matches, so
+ * lane memory scales with real matches, not topics x peers; fixed mode (no allocator)
  * keeps the dense identity layout with per-record buffers pre-bound at init. Records move
  * when the pool grows, so nothing holds an i_DartLane* across a call that can allocate:
  * durable references are pool INDICES. */
 typedef struct {
     i_DartWriterProxy w;
     i_DartReaderProxy r;
-    uint16_t channel;     /* backref: the lane this record serves */
+    uint16_t topic;     /* backref: the lane this record serves */
     uint16_t peer_slot;
     uint32_t sched_next;  /* next record on its dest's active list (DART__NIL);
                              doubles as the free-list link while not in_use */
-    uint32_t ch_next;     /* next matched lane of the same channel (DART__NIL) */
+    uint32_t topic_next;     /* next matched lane of the same topic (DART__NIL) */
     uint8_t  queued;      /* on its dest's active list */
     uint8_t  in_use;      /* dynamic: allocated to a lane (0 = free-list); fixed: always 1 */
 } i_DartLane;
@@ -174,12 +174,12 @@ typedef struct {
     DartQos    qos;
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
     const char *name;       /* our copy of the topic name (NUL-terminated storage) */
-    uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_channel_name is per-delivery) */
+    uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
     uint16_t  max_fragments;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
-                               dart_transport_channel_define), so dart_transport_destroy frees it */
+                               dart_transport_topic_define), so dart_transport_destroy frees it */
     /* writer */
     i_DartWriterSample *history;       /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
@@ -190,15 +190,15 @@ typedef struct {
                                   included); kept exact at writer match/unmatch so the send path
                                   can skip the copy+commit for a publisher no one subscribes to */
     uint32_t  matched_readers; /* same, for reader proxies; with matched_writers it lets the
-                                  timer sweep skip a whole channel row that owes no timer work */
-    uint32_t  lane_head;       /* first matched lane record of this channel (DART__NIL = none);
+                                  timer sweep skip a whole topic row that owes no timer work */
+    uint32_t  lane_head;       /* first matched lane record of this topic (DART__NIL = none);
                                   the send path walks this chain instead of scanning peer slots */
     /* cumulative repair counters, summed over proxies; read via dart_transport_repair_stats */
     DartRepairStats repair_stats;
-} i_DartChannel;
+} i_DartTopic;
 
 struct DartTransportState {
-    DartConfig    cfg;       /* n_channels = user channels (no internal channel) */
+    DartConfig    cfg;       /* n_topics = user topics (no internal topic) */
     uint32_t    *peer_ids;  /* [max_peers] */
     uint8_t     *peer_used; /* [max_peers] */
     uint8_t     *peer_dormant;/* [max_peers] 1 = silent (discovery DROP): out of flow control,
@@ -208,42 +208,42 @@ struct DartTransportState {
 #ifdef DART_SHM
     uint8_t     *peer_shm;  /* [max_peers] 1 = peer can receive SHM-DATA (same host, attached) */
 #endif
-    /* peer interest over OUR channel table, one bit per user channel; the proxies
+    /* peer interest over OUR topic table, one bit per user topic; the proxies
        plus these bits are the whole stored interest (full peer lists are not kept).
        Fed by dart_transport_apply_peer_interest from the peer's discovery announce. */
-    uint8_t     *peer_pub_bitmap; /* [max_peers][bitmap_len] peer publishes channel c */
-    uint8_t     *peer_sub_bitmap; /* [max_peers][bitmap_len] peer subscribes channel c */
+    uint8_t     *peer_pub_bitmap; /* [max_peers][bitmap_len] peer publishes topic c */
+    uint8_t     *peer_sub_bitmap; /* [max_peers][bitmap_len] peer subscribes topic c */
     uint8_t     *peer_sub_reliable; /* [max_peers][bitmap_len] ...and requested RELIABLE; sourced
                                        at match time into i_DartWriterProxy.reader_reliable */
-    uint16_t     bitmap_len;       /* ceil(n_channels / 8) */
-    /* per-peer wire alias -> our channel index; the data path carries the 2-byte
-       alias instead of the topic name. Dynamic mode: each map is a hook allocation
-       sized to that peer's highest ADVERTISED alias, made on its first matched topic
+    uint16_t     bitmap_len;       /* ceil(n_topics / 8) */
+    /* per-peer wire index -> our topic index; the data path carries the 2-byte
+       index instead of the topic name. Dynamic mode: each map is a hook allocation
+       sized to that peer's highest ADVERTISED index, made on its first matched topic
        (an irrelevant peer costs nothing; a later local subscribe re-applies interest
-       and the map already covers every advertised alias). Fixed mode: every map is a
-       fixed arena slice of alias_max entries, exactly the old dense table. */
-    uint16_t   **peer_alias;      /* [max_peers] -> alias map (0xFFFF = unmapped) */
-    uint32_t    *peer_alias_len;  /* [max_peers] entries in each map */
-    uint32_t     alias_max;       /* fixed-mode stride = effective DART_META_MAX_IDS */
-    /* per-(peer, alias) detail verdicts, parallel to peer_alias (same length/lifetime).
+       and the map already covers every advertised index). Fixed mode: every map is a
+       fixed arena slice of index_max entries, exactly the old dense table. */
+    uint16_t   **peer_index;      /* [max_peers] -> index map (0xFFFF = unmapped) */
+    uint32_t    *peer_index_len;  /* [max_peers] entries in each map */
+    uint32_t     index_max;       /* fixed-mode stride = effective DART_META_MAX_IDS */
+    /* per-(peer, index) detail verdicts, parallel to peer_index (same length/lifetime).
        An announce entry only NOMINATES by 32-bit hash; a verdict is written once at
        detail intake (name verified against the full identity, schema gated per
-       direction) and holds for the peer's incarnation: aliases are append-only and
+       direction) and holds for the peer's incarnation: indices are append-only and
        their name/schema immutable, so re-applying interest derives matches from
        verdict + current flags with no round trip. 0 = no details yet (PENDING if a
        candidate). */
     uint8_t    **peer_astate;     /* [max_peers] -> verdict map (DART__AST_* bits) */
-    i_DartChannel  *channels;     /* [n_channels] */
+    i_DartTopic  *topics;     /* [n_topics] */
     /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
-       grown by doubling, records allocated per real match, lane_index maps (channel,peer)
+       grown by doubling, records allocated per real match, lane_index maps (topic,peer)
        -> record. Fixed mode: a dense arena array in identity order (record c*max_peers+p),
        lane_index NULL, buffers pre-bound at init. */
     i_DartLane  *lanes;       /* [lane_cap] */
     uint32_t     lane_cap;
     uint32_t     lane_free;   /* free-list head (dynamic), DART__NIL when empty */
-    uint16_t    *lane_index;  /* [n_channels*max_peers] record idx, 0xFFFF = unmatched;
+    uint16_t    *lane_index;  /* [n_topics*max_peers] record idx, 0xFFFF = unmatched;
                                  NULL = fixed mode (identity mapping, no table) */
-    /* active-lane scheduler: a lane is one (channel,peer) pair. The event that gives a
+    /* active-lane scheduler: a lane is one (topic,peer) pair. The event that gives a
        lane work enqueues it, so poll_send pays for work done, not idle lanes. Timer work
        is found by an amortized clock-driven sweep over the record pool. */
     uint32_t    *dest_head;   /* [max_peers] record-index list per dest */
@@ -278,73 +278,73 @@ static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_
 }
 
 /* Does a late joiner ever receive samples published before it matched? Only a reliable
- * channel with catch_up>0 replays cached history (i_dart_channel_unicast_join_seqno reaches
- * back); every other channel joins at next_seqno. So when no subscriber is matched, history
- * on any other channel is dead weight and the send can be skipped outright. */
-static inline int i_dart_channel_retains_history(const i_DartChannel *ch){
-    return ch->qos.reliability==DART_RELIABLE && ch->qos.catch_up>0;
+ * topic with catch_up>0 replays cached history (i_dart_topic_unicast_join_seqno reaches
+ * back); every other topic joins at next_seqno. So when no subscriber is matched, history
+ * on any other topic is dead weight and the send can be skipped outright. */
+static inline int i_dart_topic_retains_history(const i_DartTopic *topic){
+    return topic->qos.reliability==DART_RELIABLE && topic->qos.catch_up>0;
 }
 
-/* Does a channel owe the timer sweep any work? Writer heartbeats and reader acks both
- * require a reliable channel with a used proxy, so a best-effort channel (the common
+/* Does a topic owe the timer sweep any work? Writer heartbeats and reader acks both
+ * require a reliable topic with a used proxy, so a best-effort topic (the common
  * high-rate case) or a reliable one no peer has matched owes nothing: the sweep skips its
  * whole peer row. Reliability is fixed at define and the counts are exact, so this never
  * skips a lane that has a live HB/ack timer. */
-static inline int i_dart_channel_needs_sweep(const i_DartChannel *ch){
-    return ch->qos.reliability==DART_RELIABLE && (ch->matched_writers || ch->matched_readers);
+static inline int i_dart_topic_needs_sweep(const i_DartTopic *topic){
+    return topic->qos.reliability==DART_RELIABLE && (topic->matched_writers || topic->matched_readers);
 }
 
-/* lane record for a (channel,peer) pair: pool index, or DART__NIL when the lane has
+/* lane record for a (topic,peer) pair: pool index, or DART__NIL when the lane has
    never matched (dynamic mode; fixed mode maps every lane by identity). Centralizing
-   the index math here keeps a transposed channel/peer from silently corrupting a
+   the index math here keeps a transposed topic/peer from silently corrupting a
    neighbor lane. */
-static inline uint32_t i_dart_lane_id(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    size_t k = (size_t)channel_idx*st->cfg.max_peers + peer_slot;
-    uint16_t t;
+static inline uint32_t i_dart_lane_id(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+    size_t k = (size_t)topic_index*st->cfg.max_peers + peer_slot;
+    uint16_t lane;
     if (!st->lane_index) return (uint32_t)k;          /* fixed: identity */
-    t = st->lane_index[k];
-    return t == 0xFFFFu ? DART__NIL : (uint32_t)t;
+    lane = st->lane_index[k];
+    return lane == 0xFFFFu ? DART__NIL : (uint32_t)lane;
 }
-static inline i_DartLane *i_dart_lane_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    uint32_t li = i_dart_lane_id(st, channel_idx, peer_slot);
+static inline i_DartLane *i_dart_lane_at(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+    uint32_t li = i_dart_lane_id(st, topic_index, peer_slot);
     return li == DART__NIL ? NULL : &st->lanes[li];
 }
 /* NULL when the lane is unmatched (no record): every caller treats that as !used. */
-static inline i_DartWriterProxy *i_dart_writer_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    i_DartLane *l = i_dart_lane_at(st, channel_idx, peer_slot);
+static inline i_DartWriterProxy *i_dart_writer_proxy_at(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+    i_DartLane *l = i_dart_lane_at(st, topic_index, peer_slot);
     return l ? &l->w : NULL;
 }
-static inline i_DartReaderProxy *i_dart_reader_proxy_at(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    i_DartLane *l = i_dart_lane_at(st, channel_idx, peer_slot);
+static inline i_DartReaderProxy *i_dart_reader_proxy_at(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+    i_DartLane *l = i_dart_lane_at(st, topic_index, peer_slot);
     return l ? &l->r : NULL;
 }
-/* wire alias for a local channel: its own index (the advertiser's handle). The
- * peer mapped this alias to its matching channel from our interest list. */
-static inline uint16_t i_dart_alias_of(DartTransportState *st, int channel_idx){
-    (void)st; return (uint16_t)channel_idx;
+/* wire index for a local topic: its own index (the advertiser's handle). The
+ * peer mapped this index to its matching topic from our interest list. */
+static inline uint16_t i_dart_wire_index_of(DartTransportState *st, int topic_index){
+    (void)st; return (uint16_t)topic_index;
 }
 
 /* cross-file helper prototypes (definitions in wire/sched/writer/reader.c + transport.c) */
-size_t i_dart_wire_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWriterSample *s, uint16_t frag, const uint8_t *payload, uint16_t payload_len);
+size_t i_dart_wire_mk_data(uint8_t *o, uint16_t index, uint64_t seqno, i_DartWriterSample *s, uint16_t frag, const uint8_t *payload, uint16_t payload_len);
 #ifdef DART_SHM
-size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count, const uint8_t *desc);
+size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t index, uint64_t base, uint16_t count, const uint8_t *desc);
 #endif
-size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt);
-size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
-void   i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot);
+size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t index, uint64_t first, uint64_t last, uint32_t cnt);
+size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t index, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
+void   i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot);
 void   i_dart_lane_enq_idx(DartTransportState *st, uint32_t rec);   /* enqueue by record index */
 void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
-size_t i_dart_writer_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-void   i_dart_writer_nack(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p);
-void   i_dart_reader_data(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p);
+void   i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef DART_SHM
-void   i_dart_reader_shm(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
+void   i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 #endif
-void   i_dart_reader_hb(DartTransportState *st, int channel_idx, int peer_slot, const uint8_t *p, uint64_t now);
-size_t i_dart_reader_emit(DartTransportState *st, int channel_idx, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-i_DartChannel *i_dart_channel_at(DartTransportState *st, uint16_t channel, int *idx_out);
+void   i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+size_t i_dart_reader_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+i_DartTopic *i_dart_topic_at(DartTransportState *st, uint16_t topic_index, int *idx_out);
 int    i_dart_peer_slot(DartTransportState *st, uint32_t id);
-void   i_dart_transport_fire_event(DartTransportState *st, DartTransportEventKind kind, uint16_t channel, uint32_t peer, uint64_t first, uint64_t count);
-uint64_t i_dart_channel_unicast_join_seqno(const i_DartChannel *ch);
+void   i_dart_transport_fire_event(DartTransportState *st, DartTransportEventKind kind, uint16_t topic_index, uint32_t peer, uint64_t first, uint64_t count);
+uint64_t i_dart_topic_unicast_join_seqno(const i_DartTopic *topic);
 
 #endif /* DART_TRANSPORT_INTERNAL_H */

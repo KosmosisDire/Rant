@@ -3,15 +3,15 @@
  * and need no shared-memory platform support. Speaks only dart_plat_* (shm mapping,
  * host uuid, an atomic for the generation stamp).
  *
- * Model (per-peer, inside the transport's reliable stream -- NOT a side channel).
- * A published message occupies count seqnos on the writer's per-channel line, as
+ * Model (per-peer, inside the transport's reliable stream -- NOT a side topic).
+ * A published message occupies count seqnos on the writer's per-topic line, as
  * today. The per-peer LANE picks the wire form:
  *   - remote peer  -> count DATA fragments, read from the message buffer (as now)
  *   - same-host peer-> ONE SHM-DATA submessage (a DATA flag) covering [base,count),
  *                      carrying a 24-byte descriptor (segment+chunk+gen+len); the
  *                      reader marks the whole range delivered and reads the chunk
  *                      in place (zero copy), then ACKs the range like any reader.
- * The shared seqno line is untouched, so a channel serves local and remote
+ * The shared seqno line is untouched, so a topic serves local and remote
  * subscribers at once (and multicast: group-multicast to remote, unicast SHM-DATA
  * to each local sub). Eligibility is automatic: a lane uses SHM iff that peer is
  * same-host and attached.
@@ -27,16 +27,16 @@
  *     timer -- a slow-but-alive reader applies backpressure instead of having its
  *     chunk yanked mid-read. That is the torn-free guarantee for RELIABLE SHM.
  *   - generation is the backstop: a straggler that reads a reused chunk sees a
- *     generation mismatch and counts the sample lost (repaired on reliable, dropped
+ *     generation mismatch and counts the message lost (repaired on reliable, dropped
  *     on best-effort) instead of delivering torn bytes. Best-effort SHM has no ACKs,
- *     so a too-slow reader misses lapped samples, exactly like best-effort UDP.
+ *     so a too-slow reader misses lapped messages, exactly like best-effort UDP.
  *   - contract: the on_message pointer is valid FOR THE CALL ONLY (already true for
  *     UDP); consume or copy it there. SHM just makes honoring it matter for safety.
  *
  * Zero copy both ways: the app loans a chunk and writes into it (dart_node_loan),
  * remote peers fragment straight from that chunk, local peers read it in place in
  * on_message (valid-for-the-call, the existing contract). One-copy fallback:
- * plain dart_channel_send memcpys into the chunk.
+ * plain dart_topic_send memcpys into the chunk.
  *
  * Read modes (a future toggle; ship the safe one first):
  *   - ONE-COPY SHM (default): the reader memcpys the chunk into its own assembly_buf, then
@@ -77,8 +77,8 @@ extern "C" {
 
 /* Size-class ladder (iceoryx-style): class k chunk payload = BASE << (k*SHIFT).
  * Defaults 64K,256K,1M,4M,16M,64M,256M (k=0..6) at SHIFT=2. The node lazily creates
- * one segment PER CHANNEL at that channel's size class (n_chunks = its keep_last), and
- * encodes the class in the low 3 bits of segment_id, the channel in the next 16. */
+ * one segment PER TOPIC at that topic's size class (n_chunks = its keep_last), and
+ * encodes the class in the low 3 bits of segment_id, the topic in the next 16. */
 #ifndef DART_SHM_CLASS_BASE
 #define DART_SHM_CLASS_BASE  (64u*1024u)
 #endif
@@ -100,7 +100,7 @@ void i_dart_shm_seg_name(char *buf, uint64_t segment_id);
 
 /* ----------------------------------------------------------------- descriptor
  * The SHM locator. Travels INSIDE an SHM-DATA submessage, whose framing supplies
- * the seqno base + count (the transport fills those from the history sample), so
+ * the seqno base + count (the transport fills those from the history message), so
  * the descriptor itself is just where-to-read. generation lets a straggling reader
  * detect a recycled chunk and fall back to reliable repair. */
 typedef struct {
@@ -195,9 +195,9 @@ int i_dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16
  *
  * transport (the per-peer lane + the new submessage; the only core change):
  *   - per-peer flag peer_shm[] (node sets it; like the existing peer_frag)
- *   - a history sample may be chunk-backed: a publish that hands in an external
+ *   - a history message may be chunk-backed: a publish that hands in an external
  *     buffer (the chunk) + its descriptor, so dart_transport_send does not memcpy (zero copy)
- *   - SHM-DATA submessage: byte0 = DATA | DART_F_SHM, [alias][base seqno][count]
+ *   - SHM-DATA submessage: byte0 = DATA | DART_F_SHM, [index][base seqno][count]
  *     [24-byte descriptor]. Writer lane emits it for an SHM peer instead of frags;
  *     reader marks [base,base+count) delivered, hands the descriptor up flagged.
  *   - delivery carries an "is SHM descriptor" flag to the node (the public app
@@ -208,10 +208,10 @@ int i_dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16
  *     between the frag prefix and the interest list (ver-2 peers ignore it)
  *   - on peer up: if peer.shm and host matches ours, i_dart_shm_attach its segment and
  *     set peer_shm in the transport; on down/dormant, detach / clear it
- *   - dart_node_loan(n, ch, len, &ptr) / dart_node_publish(n, ch): loan a chunk for
- *     the channel's next history slot, app fills ptr, publish hands the chunk +
- *     descriptor to the transport. dart_channel_send keeps working (one-copy into the
- *     chunk when the channel has any SHM peer, else plain inline)
+ *   - dart_node_loan(n, topic, len, &ptr) / dart_node_publish(n, topic): loan a chunk for
+ *     the topic's next history slot, app fills ptr, publish hands the chunk +
+ *     descriptor to the transport. dart_topic_send keeps working (one-copy into the
+ *     chunk when the topic has any SHM peer, else plain inline)
  *   - on receive: the node's on_message wrapper sees the SHM flag, i_dart_shm_read the
  *     descriptor, calls the app on_message with the in-place pointer
  */

@@ -15,16 +15,16 @@ shm_open on Linux (drop it on macOS/BSD, or build -DDART_NO_SHM).
 #include <string.h>
 #include <stdlib.h>
 
-/* The public node API is handle-based (dart_node_create_channel -> DartChannel*,
- * dart_channel_send, ...). This tool creates its channels in index order, so these
- * shims keep the concise (node, channel-index) call form: dart_node_channel(n, i)
+/* The public node API is handle-based (dart_node_create_topic -> DartTopic*,
+ * dart_topic_send, ...). This tool creates its topics in index order, so these
+ * shims keep the concise (node, topic-index) call form: dart_node_topic(n, i)
  * maps a creation index back to its handle. */
-#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), dart_bytes((d),(l)))
-#define dart_node_drain(n, idx, ms)          dart_channel_drain(dart_node_channel((n),(idx)), (ms))
-#define dart_node_writer_match_count(n, idx) dart_channel_match_count(dart_node_channel((n),(idx)))
-#define dart_node_repair_stats(n, idx, o)    dart_channel_repair_stats(dart_node_channel((n),(idx)), (o))
-#define dart_node_reader_progress(n, idx, p, b, h, t) \
-        dart_channel_reader_progress(dart_node_channel((n),(idx)), (p),(b),(h),(t))
+#define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)))
+#define dart_node_drain(n, idx, ms)          dart_topic_drain(dart_node_topic((n),(idx)), (ms))
+#define dart_node_publisher_match_count(n, idx) dart_topic_match_count(dart_node_topic((n),(idx)))
+#define dart_node_repair_stats(n, idx, o)    dart_topic_repair_stats(dart_node_topic((n),(idx)), (o))
+#define dart_node_subscriber_progress(n, idx, p, b, h, t) \
+        dart_topic_subscriber_progress(dart_node_topic((n),(idx)), (p),(b),(h),(t))
 
 /* Minimal thread + lock shim. A DART node only does discovery, liveness, and
  * reliable repair inside dart_node_poll, so the interactive publisher must keep
@@ -81,7 +81,7 @@ static unsigned long long g_rx_total = 0;  /* cumulative messages delivered to o
 static unsigned long long g_lost     = 0;  /* cumulative messages the transport reported lost */
 static uint32_t           g_last_peer = 0; /* most recent sender: the peer we snapshot HOL progress for */
 #define MAX_TOPICS 64
-static const char *g_topics[MAX_TOPICS];   /* channel handle -> topic name, for the receive print */
+static const char *g_topics[MAX_TOPICS];   /* topic handle -> topic name, for the receive print */
 static int         g_n_topics = 0;
 
 #ifdef _WIN32
@@ -142,10 +142,10 @@ static size_t parse_size(const char *s){
 }
 
 static void on_message(const DartMsg *msg){
-    char topic[DART_TOPIC_NAME_MAX + 1];   /* NUL-terminated copy: channel_name is a DartString */
-    uint32_t from = msg->sender_id; const void *data = msg->data.data; size_t len = msg->data.len;
-    size_t tn = msg->channel_name.len < sizeof topic - 1 ? msg->channel_name.len : sizeof topic - 1;
-    if (tn) memcpy(topic, msg->channel_name.data, tn);
+    char topic[DART_TOPIC_NAME_MAX + 1];   /* NUL-terminated copy: topic_name is a DartString */
+    uint32_t from = msg->publisher_id; const void *data = msg->data.data; size_t len = msg->data.len;
+    size_t tn = msg->topic_name.len < sizeof topic - 1 ? msg->topic_name.len : sizeof topic - 1;
+    if (tn) memcpy(topic, msg->topic_name.data, tn);
     topic[tn] = '\0';
     if (!tn){ topic[0] = '?'; topic[1] = '\0'; }
     g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* accounting for sub --rate (the loop prints it) */
@@ -178,27 +178,27 @@ static void usage(void){
         "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DDART_FRAG_PAYLOAD_MAX>=N)\n");
 }
 
-/* Wait for subscribers to match this channel, pumping the node throughout, so a
+/* Wait for subscribers to match this topic, pumping the node throughout, so a
  * one-shot publisher never fires into the void. Returns once >=1 subscriber has
  * matched AND the count has stopped growing for a short quiet window -- so peers
  * discovered around the same time are all captured, not just the first -- or 0 on
  * timeout with none. (A late joiner that appears after the window still misses a
  * one-shot send: the publisher can't know how many to expect; use --subscribers
  * if you need a specific count, or a long-lived publisher for late joiners.) */
-static int wait_for_sub(DartNode *n, uint16_t channel, int timeout_ms){
+static int wait_for_sub(DartNode *n, uint16_t topic, int timeout_ms){
     int t, count = 0, stable = 0, printed_wait = 0;
     /* Short window: just longer than the startup-solicit reply jitter (~20ms),
        so a burst of already-up subscribers is captured, but a lone subscriber --
        the common case -- isn't made to wait for a second that will never come. */
     const int QUIET_WINDOW_MS = 60;
     for (t = 0; t < timeout_ms; t += 20){
-        int match_count = dart_node_writer_match_count(n, channel);
+        int match_count = dart_node_publisher_match_count(n, topic);
         if (match_count > count){ count = match_count; stable = 0; }              /* a new sub: keep waiting */
         else if (count > 0 && (stable += 20) >= QUIET_WINDOW_MS) return 1;
         if (!printed_wait && count == 0 && t >= 400){ printf("[pub] waiting for a subscriber...\n"); printed_wait = 1; }
         dart_node_poll(n, 20);
     }
-    return dart_node_writer_match_count(n, channel) > 0;
+    return dart_node_publisher_match_count(n, topic) > 0;
 }
 
 /* Read all of file into a freshly malloc'd buffer (caller frees), growing up to
@@ -235,10 +235,10 @@ static char *read_all(FILE *file, size_t cap, size_t *out_len, int *too_big){
  * + reassembles it). Refuses input larger than cap rather than splitting.
  * Settles first so a freshly discovered subscriber is matched, then drains
  * delivery before returning. */
-static int publish_stream(DartNode *n, uint16_t channel, FILE *file, int wait_ms, size_t cap){
+static int publish_stream(DartNode *n, uint16_t topic, FILE *file, int wait_ms, size_t cap){
     size_t len = 0; int too_big, t;
     char *buf;
-    if (!wait_for_sub(n, channel, wait_ms)){
+    if (!wait_for_sub(n, topic, wait_ms)){
         fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
         return -1;
     }
@@ -249,12 +249,12 @@ static int publish_stream(DartNode *n, uint16_t channel, FILE *file, int wait_ms
         else      fprintf(stderr, "out of memory\n");
         return -1;
     }
-    if (dart_node_send(n, channel, buf, len) < 0){ fprintf(stderr, "send failed\n"); free(buf); return -1; }
+    if (dart_node_send(n, topic, buf, len) < 0){ fprintf(stderr, "send failed\n"); free(buf); return -1; }
     printf("[pub] sent %lu bytes\n", (unsigned long)len);
     /* Wait until the receiver has acked every byte before returning (the caller
        then sends BYE). A fixed grace would cut off a large or slow transfer:
        with the BYE the reader drops the peer and abandons in-flight data. */
-    if (!dart_node_drain(n, channel, 30000))
+    if (!dart_node_drain(n, topic, 30000))
         fprintf(stderr, "[pub] warning: delivery incomplete (reader slow or gone)\n");
     for (t = 0; t < 200; t += 20) dart_node_poll(n, 20);   /* brief flush (best-effort) */
     free(buf);
@@ -281,7 +281,7 @@ static int publish_stream(DartNode *n, uint16_t channel, FILE *file, int wait_ms
  * is bandwidth there is nothing to "catch up" anyway: the wire is already full and a
  * long block resyncs, so extra sends would only be backpressured or evicted.
  * Never returns. */
-static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t len,
+static void publish_rate(DartNode *n, uint16_t topic, const void *data, size_t len,
                          double hz, int wait_ms){
     uint64_t period_us = (uint64_t)(1000000.0/hz + 0.5);
     uint64_t next, now, last_print;
@@ -297,14 +297,14 @@ static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t
        into the 4-deep history. Sits well above expected jitter (~1-10ms) and well
        below a backpressure block. */
     const uint64_t RESYNC_LAG_US = 50000;              /* 50 ms */
-    if (!wait_for_sub(n, channel, wait_ms))
+    if (!wait_for_sub(n, topic, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
     printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
     now = i_dart_plat_now_us(); next = now; last_print = now;
     for (;;){
         now = i_dart_plat_now_us();
         if (now >= next){
-            if (dart_node_send(n, channel, data, len) >= 0) sent++;  /* may block in backpressure */
+            if (dart_node_send(n, topic, data, len) >= 0) sent++;  /* may block in backpressure */
             next += period_us;
             now = i_dart_plat_now_us();                  /* a blocking send moved the clock */
             if (next + RESYNC_LAG_US < now) next = now; /* far behind = real block: resync, no burst.
@@ -320,9 +320,9 @@ static void publish_rate(DartNode *n, uint16_t channel, const void *data, size_t
             dart_node_backpressure_stats(n, &backpressure_us, &backpressure_waits);
             printf("[pub] %.1f msg/s (sent %lu)  matched=%d  bp_waits=+%u  bp_total=%.2fs\n",
                    (sent - last_sent)/secs, sent,
-                   dart_node_writer_match_count(n, channel),
+                   dart_node_publisher_match_count(n, topic),
                    backpressure_waits - last_backpressure_waits, backpressure_us/1e6);
-            dart_node_repair_stats(n, channel, &repair_stats);   /* only meaningful for a reliable channel */
+            dart_node_repair_stats(n, topic, &repair_stats);   /* only meaningful for a reliable topic */
             if (repair_stats.nacks_recv != prev_repair_stats.nacks_recv || repair_stats.frags_resent != prev_repair_stats.frags_resent){
                 uint64_t delta_sent = repair_stats.frags_sent - prev_repair_stats.frags_sent;
                 uint64_t delta_resent  = repair_stats.frags_resent - prev_repair_stats.frags_resent;
@@ -352,7 +352,7 @@ int main(int argc, char **argv){
     g_start_ms = now_ms();
 
     /* Parse: recognized --flags anywhere; the rest are positionals
-     * [mode, channel, message words...]. Message words join with spaces. */
+     * [mode, topic, message words...]. Message words join with spaces. */
     for (i = 1; i < argc; i++){
         const char *arg = argv[i];
         if      (!strcmp(arg, "--domain") && i+1 < argc) domain  = (uint16_t)atoi(argv[++i]);
@@ -403,8 +403,8 @@ int main(int argc, char **argv){
     size_t send_limit = dynamic ? DART_MESSAGE_MAX : cap;
 
     /* A topic name's 64-bit hash is its cross-peer identity; the local handle is the
-       channel's creation index. The publisher sends on the first channel (index 0). */
-    const uint16_t channel = 0;
+       topic's creation index. The publisher sends on the first topic (index 0). */
+    const uint16_t topic = 0;
 
     /* A deliberate big-message profile (not the defaults), shared by every topic:
        shallow keep_last because messages can be megabytes, fast 5ms repair, and a long
@@ -426,7 +426,7 @@ int main(int argc, char **argv){
        data_port defaults to 0 = an OS-assigned ephemeral port. */
     DartNodeOpts opts; memset(&opts, 0, sizeof opts);
     opts.domain       = domain;
-    opts.max_channels = (uint16_t)g_n_topics;
+    opts.max_topics = (uint16_t)g_n_topics;
     opts.discovery.max_peers = max_peers;
     /* A single big message has no within-message flow control, so the receive
        socket must buffer it whole or fragments drop and 32-wide NACK repair
@@ -452,8 +452,8 @@ int main(int argc, char **argv){
     /* The node's memory allocator. Dynamic mode (no --max) is heap-backed and grows
        message buffers to fit, so a small initial hint suffices and a megabyte file
        still goes through. Fixed mode (--max) is a static allocator over one pre-sized
-       block: a small base for node/channel structures plus (keep_last + max_peers) x
-       cap of history+reassembly per channel. The block must outlive the node; here it
+       block: a small base for node/topic structures plus (keep_last + max_peers) x
+       cap of history+reassembly per topic. The block must outlive the node; here it
        lives for the whole process (freed implicitly at exit). */
     DartAllocator alloc;
     if (dynamic){
@@ -468,13 +468,13 @@ int main(int argc, char **argv){
     DartNode *n = dart_node_open(&alloc, NULL, on_message, on_event, &opts);
     if (!n){ fprintf(stderr, "dart_node_open failed\n"); return 1; }
 
-    /* Create channels in index order, so channel index i is g_topics[i] and the
+    /* Create topics in index order, so topic index i is g_topics[i] and the
        shims above resolve an index straight to its handle. */
     for (i = 0; i < g_n_topics; i++){
-        DartChannelOpts co; memset(&co, 0, sizeof co);
+        DartTopicOpts co; memset(&co, 0, sizeof co);
         co.qos = qos;
-        if (!dart_node_create_channel(n, g_topics[i], is_pub ? DART_PUB_ONLY : DART_SUB_ONLY, NULL, &co)){
-            fprintf(stderr, "create channel '%s' failed\n", g_topics[i]);
+        if (!dart_node_create_topic(n, g_topics[i], is_pub ? DART_PUB_ONLY : DART_SUB_ONLY, NULL, &co)){
+            fprintf(stderr, "create topic '%s' failed\n", g_topics[i]);
             dart_node_close(n, 0); return 1;
         }
     }
@@ -513,11 +513,11 @@ int main(int argc, char **argv){
                 repair_elapsed = now - repair_last;
                 if (repair_elapsed >= 250000u){
                     double repair_secs = repair_elapsed/1e6;
-                    dart_node_repair_stats(n, channel, &repair_stats);
+                    dart_node_repair_stats(n, topic, &repair_stats);
                     if (repair_stats.nacks_sent != prev_repair_stats.nacks_sent || repair_stats.frags_recv != prev_repair_stats.frags_recv
                         || repair_stats.frags_old != prev_repair_stats.frags_old || repair_stats.frags_ahead != prev_repair_stats.frags_ahead){
                         uint64_t base; uint32_t have, total;
-                        int mid_reassembly = dart_node_reader_progress(n, channel, g_last_peer, &base, &have, &total);
+                        int mid_reassembly = dart_node_subscriber_progress(n, topic, g_last_peer, &base, &have, &total);
                         /* recv = ACCEPTED (base==deliver_upto). old/ahead = arrived-but-rejected,
                            so "recv 0" with old/ahead high means the flood is landing on the wrong
                            seqno position, not failing to arrive. */
@@ -583,9 +583,9 @@ int main(int argc, char **argv){
                 else      fprintf(stderr, "out of memory\n");
                 dart_node_close(n, 1); return 1;
             }
-            publish_rate(n, channel, buf, len, rate_hz, wait_ms);   /* never returns */
+            publish_rate(n, topic, buf, len, rate_hz, wait_ms);   /* never returns */
         }
-        int rc = publish_stream(n, channel, file, wait_ms, send_limit);
+        int rc = publish_stream(n, topic, file, wait_ms, send_limit);
         fclose(file);
         dart_node_close(n, 1);
         return rc < 0 ? 1 : 0;
@@ -594,18 +594,18 @@ int main(int argc, char **argv){
     if (msg_len){
         int t;
         if (rate_hz > 0)
-            publish_rate(n, channel, msg, msg_len, rate_hz, wait_ms);   /* never returns */
+            publish_rate(n, topic, msg, msg_len, rate_hz, wait_ms);   /* never returns */
         /* one-shot: wait for a matched subscriber, publish the CLI text, drain
          * delivery, then exit. */
-        if (!wait_for_sub(n, channel, wait_ms)){
+        if (!wait_for_sub(n, topic, wait_ms)){
             fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
             dart_node_close(n, 1); return 1;
         }
-        if (dart_node_send(n, channel, msg, msg_len) < 0)
+        if (dart_node_send(n, topic, msg, msg_len) < 0)
             fprintf(stderr, "send failed\n");
         else
             printf("[pub] sent %lu bytes\n", (unsigned long)msg_len);
-        dart_node_drain(n, channel, 30000);      /* wait for delivery, not a fixed grace */
+        dart_node_drain(n, topic, 30000);      /* wait for delivery, not a fixed grace */
         for (t = 0; t < 200; t += 20) dart_node_poll(n, 20);   /* brief flush */
         dart_node_close(n, 1);   /* BYE: peers drop us now, not after timeout */
         return 0;
@@ -615,7 +615,7 @@ int main(int argc, char **argv){
      * whole stream as messages with newlines intact, splitting only at the 64KB
      * sample cap, never one-per-line. */
     if (!stdin_is_tty()){
-        int rc = publish_stream(n, channel, stdin, wait_ms, send_limit);
+        int rc = publish_stream(n, topic, stdin, wait_ms, send_limit);
         dart_node_close(n, 1);
         return rc < 0 ? 1 : 0;
     }
@@ -636,7 +636,7 @@ int main(int argc, char **argv){
             while (line_len && (line[line_len-1] == '\n' || line[line_len-1] == '\r')) line[--line_len] = '\0';
             if (!line_len) continue;
             lock_get(&g_lock);
-            if (dart_node_send(n, channel, line, line_len) < 0) fprintf(stderr, "send failed\n");
+            if (dart_node_send(n, topic, line, line_len) < 0) fprintf(stderr, "send failed\n");
             lock_put(&g_lock);
         }
         g_pumping = 0;              /* stop the pump first: only we touch the node now */
@@ -645,7 +645,7 @@ int main(int argc, char **argv){
 #else
         pthread_join(th, NULL);
 #endif
-        dart_node_drain(n, channel, 30000);   /* deliver the last typed messages before BYE */
+        dart_node_drain(n, topic, 30000);   /* deliver the last typed messages before BYE */
     }
 
     dart_node_close(n, 1);   /* BYE: peers drop us now instead of after timeout */

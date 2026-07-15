@@ -152,32 +152,32 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #endif
 
 /* ===================== node-API test shims =============================
- * The public node API is handle-based (dart_node_create_channel -> DartChannel*,
- * dart_channel_send, ...). These test-internal helpers keep the index-based call
- * sites concise: dart_node_channel(n, i) maps a creation index back to its handle,
- * so the old (node, channel-index) call form maps straight onto the handle calls. */
-#define dart_node_send(n, idx, d, l)         dart_channel_send(dart_node_channel((n),(idx)), dart_bytes((d),(l)))
-#define dart_node_set_role(n, idx, r)        dart_channel_set_role(dart_node_channel((n),(idx)), (r))
-#define dart_node_drain(n, idx, ms)          dart_channel_drain(dart_node_channel((n),(idx)), (ms))
-#define dart_node_writer_match_count(n, idx) dart_channel_match_count(dart_node_channel((n),(idx)))
-#define dart_node_repair_stats(n, idx, o)    dart_channel_repair_stats(dart_node_channel((n),(idx)), (o))
-#define dart_node_reader_progress(n, idx, p, b, h, t) \
-        dart_channel_reader_progress(dart_node_channel((n),(idx)), (p),(b),(h),(t))
+ * The public node API is handle-based (dart_node_create_topic -> DartTopic*,
+ * dart_topic_send, ...). These test-internal helpers keep the index-based call
+ * sites concise: dart_node_topic(n, i) maps a creation index back to its handle,
+ * so the old (node, topic-index) call form maps straight onto the handle calls. */
+#define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)))
+#define dart_node_set_role(n, idx, r)        dart_topic_set_role(dart_node_topic((n),(idx)), (r))
+#define dart_node_drain(n, idx, ms)          dart_topic_drain(dart_node_topic((n),(idx)), (ms))
+#define dart_node_publisher_match_count(n, idx) dart_topic_match_count(dart_node_topic((n),(idx)))
+#define dart_node_repair_stats(n, idx, o)    dart_topic_repair_stats(dart_node_topic((n),(idx)), (o))
+#define dart_node_subscriber_progress(n, idx, p, b, h, t) \
+        dart_topic_subscriber_progress(dart_node_topic((n),(idx)), (p),(b),(h),(t))
 
-/* Open a node and create its channels from a DartChannelDef array in index order, so
- * the array index is the channel handle index the shims above resolve. opts carries
- * everything that used to live in DartNodeConfig except channels/on_message. */
+/* Open a node and create its topics from a DartTopicDef array in index order, so
+ * the array index is the topic handle index the shims above resolve. opts carries
+ * everything that used to live in DartNodeConfig except topics/on_message. */
 static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
-                               DartEventFn on_event, DartNodeOpts opts, const DartChannelDef *chans, uint16_t nch){
+                               DartEventFn on_event, DartNodeOpts opts, const DartTopicDef *chans, uint16_t nch){
     DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     (void)mem; (void)cap;             /* heap-backed: the node self-sizes (was a static arena) */
-    if (!opts.max_channels) opts.max_channels = nch ? nch : 1;
+    if (!opts.max_topics) opts.max_topics = nch ? nch : 1;
     node = dart_node_open(&alloc, name, on_msg, on_event, &opts);
     if (!node) return NULL;
     for (i=0;i<nch;i++){
-        DartChannelOpts co; memset(&co, 0, sizeof co);
+        DartTopicOpts co; memset(&co, 0, sizeof co);
         co.qos = chans[i].qos;
-        if (!dart_node_create_channel(node, chans[i].name, (DartRole)chans[i].role, NULL, &co)){
+        if (!dart_node_create_topic(node, chans[i].name, (DartRole)chans[i].role, NULL, &co)){
             dart_node_close(node, 0); return NULL;
         }
     }
@@ -205,9 +205,9 @@ static uint64_t get64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v
 
 /* ======================= node: latency/throughput ======================= */
 
-#define CH_PROBE          0     /* channel handles are array indices         */
+#define CH_PROBE          0     /* topic handles are array indices         */
 #define CH_LOAD           1
-#define XCH_ID0           2     /* extra load channels: indices 2..2+xch-1   */
+#define XCH_ID0           2     /* extra load topics: indices 2..2+xch-1   */
 #define XCH_MAX           512
 #define LAT_DOMAIN        11
 #define PING_INTERVAL_NS  250000000ull    /* probe ping cadence: 250 ms       */
@@ -231,7 +231,7 @@ static uint64_t get64(const uint8_t *p){ uint64_t v=0; int i; for(i=0;i<8;i++) v
 static const char *g_name = "node";
 static uint32_t    g_tag  = 0;
 static uint64_t    g_report_ns = 0;   /* wall time spent inside print_report */
-static int         g_xch = 0;         /* extra channels declared              */
+static int         g_xch = 0;         /* extra topics declared              */
 static int         g_spread = 0;      /* 1 = load round-robins across them;
                                          2 = same but extras are PUB_ONLY on
                                          every node, so those writes have no
@@ -261,7 +261,7 @@ typedef struct {
     double   ewma_ns;
     double   jit_ns;             /* RFC3550-style smoothed |delta RTT| */
     unsigned long rtt_n;
-    /* load / drops, tracked per channel: cross-channel arrival order is not
+    /* load / drops, tracked per topic: cross-topic arrival order is not
        defined, so one shared counter would read reorder as drops */
     uint8_t  ch_init[1+XCH_MAX];      /* [0]=CH_LOAD, [1+k]=extra k          */
     uint32_t ch_expect[1+XCH_MAX];
@@ -288,7 +288,7 @@ static pong_req g_pong_q[512];
 static int      g_pong_n = 0;
 
 /* transport-reported permanent skips (KEEP_LAST supersession on reliable
- * channels, detected wire loss on best-effort). */
+ * topics, detected wire loss on best-effort). */
 static unsigned long      g_gap_evt = 0;
 static unsigned long long g_gap_tus = 0;
 /* backpressure cost, read from the node before SUMMARY */
@@ -300,7 +300,7 @@ static void lat_on_event(const DartEvent *ev){
 }
 
 static void lat_on_message(const DartMsg *msg){
-    uint16_t ch = msg->channel_id; uint32_t from = msg->sender_id;
+    uint16_t ch = msg->topic_index; uint32_t from = msg->publisher_id;
     const void *data = msg->data.data; size_t len = msg->data.len;
     const uint8_t *p = (const uint8_t*)data; uint64_t now = now_ns();
     peer_stat *e = tbl_get(from);
@@ -427,8 +427,8 @@ static int node_main(int argc, char **argv){
 #endif
               << 16)); }
 
-    static DartChannelDef ch[2+XCH_MAX];
-    static char xnames[XCH_MAX][8];   /* "x0".."x511": extra channels' topic names */
+    static DartTopicDef ch[2+XCH_MAX];
+    static char xnames[XCH_MAX][8];   /* "x0".."x511": extra topics' topic names */
     memset(ch, 0, sizeof ch);
     ch[0].name = "probe";
     /* depth must cover the pongs one tick can stage (one per peer) or the ring
@@ -438,7 +438,7 @@ static int node_main(int argc, char **argv){
     ch[1].qos.reliability = reliable ? DART_RELIABLE : DART_BEST_EFFORT;
     ch[1].qos.keep_last = LOAD_DEPTH; ch[1].qos.max_message_bytes = 64;
     ch[1].qos.backpressure_wait_us = (uint32_t)(block_ms > 0 ? block_ms : 0) * 1000u;
-    { int i;     /* extra channels: idle (depth 1) or load-bearing when spread */
+    { int i;     /* extra topics: idle (depth 1) or load-bearing when spread */
       for (i=0;i<g_xch;i++){
           ch[2+i] = ch[1];
           sprintf(xnames[i], "x%d", i); ch[2+i].name = xnames[i];
@@ -446,8 +446,8 @@ static int node_main(int argc, char **argv){
           if (g_spread==2) ch[2+i].role = DART_PUB_ONLY;   /* nobody subscribes */
       } }
 
-    /* meta_max_ids is gone: the core auto-raises it to 2*n_channels, which
-       already covers every extra channel here. disable_shm: the sweep measures the
+    /* meta_max_ids is gone: the core auto-raises it to 2*n_topics, which
+       already covers every extra topic here. disable_shm: the sweep measures the
        UDP path, so don't let same-host peers silently switch to shared memory. */
     DartNodeOpts opts = {
         .domain      = domain,
@@ -476,7 +476,7 @@ static int node_main(int argc, char **argv){
                            g_name, opts.net.recv_buffer_bytes, opts.net.send_buffer_bytes); }
     g_trace = (getenv("DART_DIAG_TRACE") != NULL);
 
-    static uint8_t mem[48<<20];  /* deep load ring + extra channels x 64 peers */
+    static uint8_t mem[48<<20];  /* deep load ring + extra topics x 64 peers */
     DartNode *n = test_node_open(mem, sizeof mem, g_name, lat_on_message, lat_on_event, opts, ch, (uint16_t)(2+g_xch));
     if (!n){ fprintf(stderr, "[%s] dart_node_open failed\n", g_name); return 1; }
 
@@ -709,19 +709,19 @@ static int sendbench_main(void){
  *   2. GAP      : writer stages a burst beyond keep_last without flushing,
  *                 so KEEP_LAST evicts and the reader gets one GAP plus the
  *                 surviving tail; on_gap count must equal the evicted span.
- *   3. BLOCKED  : on a backpressure_wait_us channel, sends that would evict un-acked
+ *   3. BLOCKED  : on a backpressure_wait_us topic, sends that would evict un-acked
  *                 history wait ~backpressure_wait_us while the reader never acks, then
  *                 proceed (KEEP_LAST fallback, never refusal).
- *   4. RELEASED : same channel once the reader acks; sends are instant.
+ *   4. RELEASED : same topic once the reader acks; sends are instant.
  *   4b SWEEP-ACK: a sub-only reader whose ACKNACK is timer-armed (nack_delay>0)
  *                 must flush it via the periodic sweep when the writer goes
  *                 quiet; backpressure must release with no data event to ride.
- *   5. DYNAMIC  : reader flips a channel inactive/subscribed at runtime;
+ *   5. DYNAMIC  : reader flips a topic inactive/subscribed at runtime;
  *                 each (re)subscribe replays cached history with no gap.
- *   6. SCALE    : 40 channels, past the old 31-id announce cap. */
+ *   6. SCALE    : 40 topics, past the old 31-id announce cap. */
 
 #define ST_DOMAIN   33
-/* channel handles are array indices (declaration order in ch[]) */
+/* topic handles are array indices (declaration order in ch[]) */
 #define ST_CH_GAP   0   /* reliable, depth 4, no backpressure  */
 #define ST_CH_BLOCK 1   /* reliable, depth 4, slow_reader_wait 100 ms */
 #define ST_CH_DYN   2   /* reliable, depth 4, reader starts DART_INACTIVE */
@@ -738,21 +738,21 @@ static int st_fail = 0;
     if (!(cond)) st_fail = 1; } while (0)
 
 static unsigned long st_samples[8], st_gap_calls[8], st_gap_tus[8], st_any;
-static char st_last_sender[64];   /* sender_name of the most recently delivered message */
+static char st_last_sender[64];   /* publisher_name of the most recently delivered message */
 
 static void st_on_message(const DartMsg *msg){
-    if (msg->channel_id < 8) st_samples[msg->channel_id]++;
+    if (msg->topic_index < 8) st_samples[msg->topic_index]++;
     st_last_sender[0] = '\0';
-    if (msg->sender_name.data){
-        size_t n = msg->sender_name.len < sizeof st_last_sender - 1 ? msg->sender_name.len : sizeof st_last_sender - 1;
-        memcpy(st_last_sender, msg->sender_name.data, n); st_last_sender[n] = '\0';
+    if (msg->publisher_name.data){
+        size_t n = msg->publisher_name.len < sizeof st_last_sender - 1 ? msg->publisher_name.len : sizeof st_last_sender - 1;
+        memcpy(st_last_sender, msg->publisher_name.data, n); st_last_sender[n] = '\0';
     }
     st_any++;
 }
 static unsigned long st_collisions;
 static void st_on_event(const DartEvent *ev){
     if (ev->kind == DART_MSG_LOST){
-        if (ev->channel < 8){ st_gap_calls[ev->channel]++; st_gap_tus[ev->channel] += (unsigned long)ev->lost_count; }
+        if (ev->topic < 8){ st_gap_calls[ev->topic]++; st_gap_tus[ev->topic] += (unsigned long)ev->lost_count; }
     } else if (ev->kind == DART_ERROR && ev->error == DART_E_NAME_COLLISION){
         st_collisions++;
     }
@@ -925,20 +925,20 @@ static void node_core_checks(void){
     static uint8_t tmem[1<<18], cmem[4096], dmem[8192];
     uint8_t buf[256], out[DART_DISCOVERY_WIRE_MAX];
     uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
-    DartConfig tc; DartTransportState *tr; DartChannelDef ch[1];
+    DartConfig tc; DartTransportState *tr; DartTopicDef ch[1];
     DartDiscoveryCoreConfig dcfg; DartDiscoveryState *st;
     i_DartNodeCoreConfig cc; i_DartNodeCore *nc;
     i_DartNodeDest d; uint32_t id, idA, idB; size_t n;
 
     memset(ch,0,sizeof ch); ch[0].name="nc/topic";
-    memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=1; tc.max_peers=2;
+    memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=1; tc.max_peers=2;
     tr = dart_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "node-core: transport init");
     if (!tr) return;
 
     /* node core first (discovery bound once it exists, exactly like the runtime) */
     memset(&cc,0,sizeof cc);
-    cc.transport=tr; cc.n_channels=1; cc.frag_size=1200; cc.on_event=nc_event;
+    cc.transport=tr; cc.n_topics=1; cc.frag_size=1200; cc.on_event=nc_event;
     nc = i_dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
@@ -1078,13 +1078,13 @@ static void shml_send(void){
     memset(desc,0,sizeof desc); dart_transport_send_shm(shml_W, 0, dart_bytes(chunk, 1000), desc, shml_now);
 }
 static void shm_loss_checks(void){
-    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
     q.heartbeat_us=50000; q.repair_delay_us=20000;
     memset(&cw,0,sizeof cw); cw.name="shmloss"; cw.qos=q; cw.role=DART_PUB_ONLY;
     memset(&cr,0,sizeof cr); cr.name="shmloss"; cr.qos=q; cr.role=DART_SUB_ONLY;
-    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
-    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.on_shm=shml_on_shm; rc.on_event=shml_on_event;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); shml_W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); shml_R=dart_transport_init(mr,nr,&rc);
@@ -1093,7 +1093,7 @@ static void shm_loss_checks(void){
     st_apply_verified(shml_R, 1u, shml_W);
     st_apply_verified(shml_W, 2u, shml_R);
     dart_transport_peer_set_shm(shml_W,2u,1);
-    ST_CHECK(dart_transport_writer_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
+    ST_CHECK(dart_transport_publisher_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
     shml_ok=1; shml_recv=0; shml_lost=0; shml_drop=0; shml_send(); shml_pump(5);
     ST_CHECK(shml_recv==1 && shml_lost==0, "shm-loss: [a] normal delivered");
     shml_recv=0; shml_lost=0; shml_drop=1; shml_send(); shml_pump(10);
@@ -1118,8 +1118,8 @@ static void shmn_on_message(const DartMsg *msg){
     shmn_recv++; shmn_len=len; shmn_sum=s;
 }
 static DartNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **mem_out){
-    static DartChannelDef ch[2]; static int slot;
-    DartChannelDef *d=&ch[slot++ & 1]; DartDiscoveryAddr seed; DartNodeOpts opts;
+    static DartTopicDef ch[2]; static int slot;
+    DartTopicDef *d=&ch[slot++ & 1]; DartDiscoveryAddr seed; DartNodeOpts opts;
     size_t cap = 1u<<20; void *mem; DartQos q; memset(&q,0,sizeof q);
     q.reliability=DART_RELIABLE; q.keep_last=4; q.catch_up=1;
     memset(d,0,sizeof *d); d->name="shmnode"; d->qos=q; d->role=is_pub?DART_PUB_ONLY:DART_SUB_ONLY;
@@ -1137,8 +1137,8 @@ static void shm_node_checks(void){
     P=shmn_open(1,1,77,&mp); S=shmn_open(0,1,77,&ms);
     ST_CHECK(P&&S, "shm-node: SHM-capable pub + sub open");
     if (P&&S){
-        for (i=0;i<800 && dart_node_writer_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-        ST_CHECK(dart_node_writer_match_count(P,0)>0, "shm-node: matched");
+        for (i=0;i<800 && dart_node_publisher_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+        ST_CHECK(dart_node_publisher_match_count(P,0)>0, "shm-node: matched");
         /* sizes[0] fits one datagram (< frag) so it ships INLINE, not SHM; the two
            larger ones would fragment, so they take the SHM path. */
         sizes[0]=200; sizes[1]=300*1024; sizes[2]=4*1024*1024;
@@ -1163,7 +1163,7 @@ static void shm_node_checks(void){
     P=shmn_open(1,1,78,&mp); S=shmn_open(0,0,78,&ms);
     if (P&&S){
         unsigned long want=0; size_t j; int before, t;
-        for (i=0;i<800 && dart_node_writer_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+        for (i=0;i<800 && dart_node_publisher_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
         for (j=0;j<50*1024;j++){ buf[j]=(unsigned char)((j*31u+9)&0xFF); want+=buf[j]; }
         before=shmn_recv; dart_node_send(P,0,buf,50*1024);
         for (t=0;t<500 && shmn_recv==before;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
@@ -1208,21 +1208,21 @@ static void unit_checks(void){
              "topic-id: deterministic and name-distinct");
 
     /* dart_transport_send result codes (transport core, no sockets). The size check precedes
-       the role check, so an oversize send on the pub channel is TOO_BIG, while a
-       valid-size send on the sub-only channel is ROLE. */
+       the role check, so an oversize send on the pub topic is TOO_BIG, while a
+       valid-size send on the sub-only topic is ROLE. */
     {   static uint8_t tmem[1<<16];
-        DartChannelDef uch[2]; DartConfig tc; DartTransportState *ts; uint8_t buf[128];
+        DartTopicDef uch[2]; DartConfig tc; DartTransportState *ts; uint8_t buf[128];
         memset(uch, 0, sizeof uch);
         uch[0].name = "u/pub"; uch[0].role = DART_PUBSUB;   uch[0].qos.max_message_bytes = 64;
         uch[1].name = "u/sub"; uch[1].role = DART_SUB_ONLY; uch[1].qos.max_message_bytes = 64;
         memset(&tc, 0, sizeof tc);
-        tc.channels = uch; tc.n_channels = 2; tc.max_peers = 2;
+        tc.topics = uch; tc.n_topics = 2; tc.max_peers = 2;
         ts = dart_transport_init(tmem, sizeof tmem, &tc);
         ST_CHECK(ts != NULL, "result: transport init");
         if (ts){
             memset(buf, 0, sizeof buf);
-            ST_CHECK(dart_transport_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_CHANNEL, "result: out-of-range channel -> NO_CHANNEL");
-            ST_CHECK(dart_transport_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only channel -> ROLE");
+            ST_CHECK(dart_transport_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_TOPIC, "result: out-of-range topic -> NO_CHANNEL");
+            ST_CHECK(dart_transport_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only topic -> ROLE");
             ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, 100), 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
             ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, 16),  0) == DART_OK,             "result: valid publish -> OK");
         }
@@ -1242,14 +1242,14 @@ static void open_fail_checks(void){
     DartNode *n;
     of_seen_error = DART_E_NONE;
 
-    /* create-fail: an over-long topic name is rejected by dart_node_create_channel; the
-       node opened fine and stays usable (validation moved from init to channel create) */
-    {   static char longname[DART_TOPIC_NAME_MAX + 8]; DartChannel *c;
+    /* create-fail: an over-long topic name is rejected by dart_node_create_topic; the
+       node opened fine and stays usable (validation moved from init to topic create) */
+    {   static char longname[DART_TOPIC_NAME_MAX + 8]; DartTopic *c;
         DartAllocator a = dart_allocator_static(mem, sizeof mem);
         memset(longname, 'x', sizeof longname - 1); longname[sizeof longname - 1] = 0;
         n = dart_node_open(&a, NULL, NULL, NULL, &(DartNodeOpts){ .domain=ST_DOMAIN });
         ST_CHECK(n != NULL, "open-fail: node opens for create-fail check");
-        c = n ? dart_node_create_channel(n, longname, DART_PUBSUB, NULL, NULL) : NULL;
+        c = n ? dart_node_create_topic(n, longname, DART_PUBSUB, NULL, NULL) : NULL;
         ST_CHECK(c == NULL, "open-fail: over-long topic name -> create_channel NULL");
         if (n) dart_node_close(n, 0);
     }
@@ -1323,7 +1323,7 @@ static void evu_on_event(const DartEvent *ev){
 static void event_user_checks(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
     const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> one identity (see collide.c) */
-    DartChannelDef cw, cr; DartNodeOpts wo, ro; DartNode *w, *r;
+    DartTopicDef cw, cr; DartNodeOpts wo, ro; DartNode *w, *r;
     uint8_t payload[16]; int i; memset(payload,0x5A,sizeof payload);
     memset(&cw,0,sizeof cw);
     cw.name=A; cw.role=DART_PUB_ONLY;
@@ -1347,15 +1347,15 @@ static void event_user_checks(void){
 }
 
 
-/* Dynamic growth: creating channels past the reserve relocates the whole node into a bigger
- * arena, carrying live reliable state across. Stream on channel 0, force several grows by
- * creating channels mid-stream, then keep streaming on the ORIGINAL handle and assert no
+/* Dynamic growth: creating topics past the reserve relocates the whole node into a bigger
+ * arena, carrying live reliable state across. Stream on topic 0, force several grows by
+ * creating topics mid-stream, then keep streaming on the ORIGINAL handle and assert no
  * message was lost, duplicated or reordered -- i.e. the migration preserved reader/writer
  * position, the peer/discovery state and the user's handle. */
 static int dg_recv[24]; static int dg_seq_ok; static int dg_next0;
 static void dg_on_message(const DartMsg *msg){
-    if (msg->channel_id < 24) dg_recv[msg->channel_id]++;
-    if (msg->channel_id == 0 && msg->data.len >= 1){
+    if (msg->topic_index < 24) dg_recv[msg->topic_index]++;
+    if (msg->topic_index == 0 && msg->data.len >= 1){
         int s = ((const uint8_t*)msg->data.data)[0];
         if (s != dg_next0) dg_seq_ok = 0;            /* gap, dup or reorder */
         dg_next0 = s + 1;
@@ -1365,39 +1365,39 @@ static void dynamic_grow_checks(void){
     static const char *names[12] = {"dg/0","dg/1","dg/2","dg/3","dg/4","dg/5",
                                     "dg/6","dg/7","dg/8","dg/9","dg/10","dg/11"};
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0), sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc0=NULL, *pcN;
-    DartChannelOpts co; DartDiscoveryAddr seed; uint8_t payload[8]; int i, t;
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc0=NULL, *pcN;
+    DartTopicOpts co; DartDiscoveryAddr seed; uint8_t payload[8]; int i, t;
     memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=32;
     co.qos.catch_up=32; co.qos.heartbeat_us=50000;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
-    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+7; po.max_channels=2; po.discovery.max_peers=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+7; po.max_topics=2; po.discovery.max_peers=4;
     po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
     so=po;
     for (i=0;i<24;i++) dg_recv[i]=0;
     dg_seq_ok=1; dg_next0=0;
     P = dart_node_open(&pa, "dg-pub", NULL, NULL, &po);
     S = dart_node_open(&sa, "dg-sub", dg_on_message, NULL, &so);
-    ST_CHECK(P&&S, "dyn-grow: nodes open (max_channels=2)");
+    ST_CHECK(P&&S, "dyn-grow: nodes open (max_topics=2)");
     if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); return; }
-    pc0 = dart_node_create_channel(P, names[0], DART_PUB_ONLY, NULL, &co);
-    dart_node_create_channel(S, names[0], DART_SUB_ONLY, NULL, &co);
-    ST_CHECK(pc0 != NULL, "dyn-grow: channel 0 created");
-    for (t=0;t<800 && dart_channel_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-    ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 matched");
-    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
-    /* create channels 1..11 on both -> several grows (max_channels 2 -> 4 -> 8 -> 16) */
-    for (i=1;i<12;i++){ dart_node_create_channel(P, names[i], DART_PUB_ONLY, NULL, &co);
-                        dart_node_create_channel(S, names[i], DART_SUB_ONLY, NULL, &co);
+    pc0 = dart_node_create_topic(P, names[0], DART_PUB_ONLY, NULL, &co);
+    dart_node_create_topic(S, names[0], DART_SUB_ONLY, NULL, &co);
+    ST_CHECK(pc0 != NULL, "dyn-grow: topic 0 created");
+    for (t=0;t<800 && dart_topic_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_topic_match_count(pc0)>0, "dyn-grow: topic 0 matched");
+    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
+    /* create topics 1..11 on both -> several grows (max_topics 2 -> 4 -> 8 -> 16) */
+    for (i=1;i<12;i++){ dart_node_create_topic(P, names[i], DART_PUB_ONLY, NULL, &co);
+                        dart_node_create_topic(S, names[i], DART_SUB_ONLY, NULL, &co);
                         dart_node_poll(P,1); dart_node_poll(S,1); }
-    ST_CHECK(dart_channel_match_count(pc0)>0, "dyn-grow: channel 0 still matched after grows");
-    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_channel_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
+    ST_CHECK(dart_topic_match_count(pc0)>0, "dyn-grow: topic 0 still matched after grows");
+    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
     for (t=0;t<400 && dg_recv[0]<10;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
-    ST_CHECK(dg_recv[0]==10, "dyn-grow: all 10 on channel 0 delivered across grows (got %d)", dg_recv[0]);
-    ST_CHECK(dg_seq_ok, "dyn-grow: channel 0 in-order, no loss/dup across grows");
-    pcN = dart_node_channel(P, 11);                  /* a channel created AFTER a grow */
-    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_channel_send(pcN,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
+    ST_CHECK(dg_recv[0]==10, "dyn-grow: all 10 on topic 0 delivered across grows (got %d)", dg_recv[0]);
+    ST_CHECK(dg_seq_ok, "dyn-grow: topic 0 in-order, no loss/dup across grows");
+    pcN = dart_node_topic(P, 11);                  /* a topic created AFTER a grow */
+    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_topic_send(pcN,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
     for (t=0;t<200 && dg_recv[11]<3;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
-    ST_CHECK(dg_recv[11]==3, "dyn-grow: post-grow channel delivers (got %d)", dg_recv[11]);
+    ST_CHECK(dg_recv[11]==3, "dyn-grow: post-grow topic delivers (got %d)", dg_recv[11]);
     dart_node_close(P,1); dart_node_close(S,1);
 }
 
@@ -1407,14 +1407,14 @@ static void dynamic_grow_checks(void){
 static unsigned long qos_incompat_n;
 static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANSPORT_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
-    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint16_t pub=0, recv=0;
     memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=wrel?DART_RELIABLE:DART_BEST_EFFORT; cw.qos.keep_last=4;
     memset(&cr,0,sizeof cr); cr.name="qostopic"; cr.role=DART_SUB_ONLY;
     cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=4;
-    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
-    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2; rc.on_event=qos_on_event;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2; rc.on_event=qos_on_event;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
     dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
@@ -1442,14 +1442,14 @@ static void qos_match_checks(void){
    toward backpressure (it never acks). Reliable writer + (rrel?reliable:best-effort)
    reader; fill the history ring past keep_last with no acks, return would-evict. */
 static int beff_would_evict(int rrel){
-    DartChannelDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint8_t payload[8]; int i, evict;
     memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2; cw.qos.max_message_bytes=8;
     memset(&cr,0,sizeof cr); cr.name="beff"; cr.role=DART_SUB_ONLY;
     cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=2; cr.qos.max_message_bytes=8;
-    memset(&wc,0,sizeof wc); wc.channels=&cw; wc.n_channels=1; wc.max_peers=2;
-    memset(&rc,0,sizeof rc); rc.channels=&cr; rc.n_channels=1; rc.max_peers=2;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
     dart_transport_peer_add(W,2u,DART_FRAG_PAYLOAD); dart_transport_peer_add(R,1u,DART_FRAG_PAYLOAD);
@@ -1831,17 +1831,17 @@ static void schema_dsl_checks(void){
 }
 
 /* (18) announce interest (v10): the blob carries one positional [u32 hash][u8 flags]
-   entry per channel slot, no names or schemas. The subscriber's peer view yields each
-   advertised direction with the right alias (= the publisher's channel index) and the
-   low 32 bits of the topic identity; an INACTIVE channel is not yielded but HOLDS ITS
-   POSITION, so a later role flip advertises the same alias. A typed match forming at
+   entry per topic slot, no names or schemas. The subscriber's peer view yields each
+   advertised direction with the right index (= the publisher's topic index) and the
+   low 32 bits of the topic identity; an INACTIVE topic is not yielded but HOLDS ITS
+   POSITION, so a later role flip advertises the same index. A typed match forming at
    all proves the schema now travels via the detail exchange. */
 static void schema_advert_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);   /* the caller-side schema */
-    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannel *pc;
-    DartChannelOpts co; DartDiscoveryAddr seed; DartSchema *sch=NULL;
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc;
+    DartTopicOpts co; DartDiscoveryAddr seed; DartSchema *sch=NULL;
     uint32_t pose_h = (uint32_t)dart_topic_id("sch/pose");
     uint32_t raw_h  = (uint32_t)dart_topic_id("sch/raw");
     uint32_t late_h = (uint32_t)dart_topic_id("sch/late");
@@ -1866,48 +1866,48 @@ static void schema_advert_checks(void){
     S = dart_node_open(&sa, "sch-sub", NULL, NULL, &so);
     ST_CHECK(P&&S, "announce: nodes open");
     if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); dart_allocator_reset(&ma); return; }
-    pc = dart_node_create_channel(P, "sch/pose", DART_PUB_ONLY, sch, &co);   /* alias 0, typed */
-    dart_node_create_channel(P, "sch/raw",  DART_PUB_ONLY, NULL, &co);       /* alias 1, raw */
-    dart_node_create_channel(S, "sch/pose", DART_SUB_ONLY, sch, &co);
-    ST_CHECK(pc!=NULL, "announce: channels created");
+    pc = dart_node_create_topic(P, "sch/pose", DART_PUB_ONLY, sch, &co);   /* index 0, typed */
+    dart_node_create_topic(P, "sch/raw",  DART_PUB_ONLY, NULL, &co);       /* index 1, raw */
+    dart_node_create_topic(S, "sch/pose", DART_SUB_ONLY, sch, &co);
+    ST_CHECK(pc!=NULL, "announce: topics created");
     dart_schema_free(sch, dart_allocator_alloc, &ma);   /* node owns its copy: caller's freed NOW */
 
     /* a typed-typed match through hash nomination + detail verification */
-    for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-    ST_CHECK(dart_channel_match_count(pc)>0, "announce: typed match formed via detail exchange");
+    for (t=0;t<800 && dart_topic_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_topic_match_count(pc)>0, "announce: typed match formed via detail exchange");
 
     peers = dart_node_peers(S, &n_peers);   /* S's view of P */
     ST_CHECK(peers && n_peers==1, "announce: subscriber sees one peer (%u)", n_peers);
     if (peers && n_peers==1){
-        DartInterestIter it; DartTopic tp;
+        DartInterestIter it; DartTopicEntry tp;
         memset(&it,0,sizeof it);
         while (dart_node_peer_interest_next(&peers[0], &it, &tp)){
             if (!tp.is_pub) continue;
-            if (tp.alias==0 && tp.hash==pose_h && tp.role==DART_PUB_ONLY) pose_ok=1;
-            if (tp.alias==1 && tp.hash==raw_h  && tp.role==DART_PUB_ONLY) raw_ok=1;
+            if (tp.index==0 && tp.hash==pose_h && tp.role==DART_PUB_ONLY) pose_ok=1;
+            if (tp.index==1 && tp.hash==raw_h  && tp.role==DART_PUB_ONLY) raw_ok=1;
         }
-        ST_CHECK(pose_ok && raw_ok, "announce: positional aliases carry the 32-bit hashes");
+        ST_CHECK(pose_ok && raw_ok, "announce: positional indices carry the 32-bit hashes");
 
-        /* the runtime-flip flow (the example's): an INACTIVE channel holds its position
-           but is not yielded; flipping it to publish advertises the SAME alias */
-        {   DartChannel *lc = dart_node_create_channel(P, "sch/late", DART_INACTIVE, NULL, &co);
-            ST_CHECK(lc!=NULL, "announce: inactive channel created");
+        /* the runtime-flip flow (the example's): an INACTIVE topic holds its position
+           but is not yielded; flipping it to publish advertises the SAME index */
+        {   DartTopic *lc = dart_node_create_topic(P, "sch/late", DART_INACTIVE, NULL, &co);
+            ST_CHECK(lc!=NULL, "announce: inactive topic created");
             for (t=0;t<200;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-            {   DartInterestIter it2; DartTopic tp2; int seen=0;
+            {   DartInterestIter it2; DartTopicEntry tp2; int seen=0;
                 peers = dart_node_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
                 while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
                     if (tp2.hash==late_h) seen=1;
-                ST_CHECK(!seen, "announce: inactive channel not advertised");
+                ST_CHECK(!seen, "announce: inactive topic not advertised");
             }
-            dart_channel_set_role(lc, DART_PUB_ONLY);
+            dart_topic_set_role(lc, DART_PUB_ONLY);
             for (t=0;t<400;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-            {   DartInterestIter it2; DartTopic tp2; uint16_t late_alias=0xFFFF;
+            {   DartInterestIter it2; DartTopicEntry tp2; uint16_t late_alias=0xFFFF;
                 peers = dart_node_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
                 while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
-                    if (tp2.is_pub && tp2.hash==late_h) late_alias=tp2.alias;
-                ST_CHECK(late_alias==2, "announce: role flip advertises the held position (alias %u)",
+                    if (tp2.is_pub && tp2.hash==late_h) late_alias=tp2.index;
+                ST_CHECK(late_alias==2, "announce: role flip advertises the held position (index %u)",
                          late_alias);
             }
         }
@@ -1939,7 +1939,7 @@ static void schema_bind_checks(void){
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL;
-    DartChannel *pc, *pc_bad; DartChannelOpts co; DartDiscoveryAddr seed;
+    DartTopic *pc, *pc_bad; DartTopicOpts co; DartDiscoveryAddr seed;
     DartSchema *W, *R, *WB, *RB; int t;
     /* writer: full Pose; reader: a reordered subset of it */
     W  = dart_schema_compile(dart_allocator_alloc, &ma,
@@ -1963,15 +1963,15 @@ static void schema_bind_checks(void){
     S = dart_node_open(&sa, "sb-sub", sb_on_message, sb_on_event, &so);
     ST_CHECK(P&&S, "schema-bind: nodes open");
     if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); dart_allocator_reset(&ma); return; }
-    pc     = dart_node_create_channel(P, "sb/pose", DART_PUB_ONLY, W,  &co);
-    pc_bad = dart_node_create_channel(P, "sb/bad",  DART_PUB_ONLY, WB, &co);
-    dart_node_create_channel(S, "sb/pose", DART_SUB_ONLY, R,  &co);
-    dart_node_create_channel(S, "sb/bad",  DART_SUB_ONLY, RB, &co);
-    ST_CHECK(pc && pc_bad, "schema-bind: channels created");
+    pc     = dart_node_create_topic(P, "sb/pose", DART_PUB_ONLY, W,  &co);
+    pc_bad = dart_node_create_topic(P, "sb/bad",  DART_PUB_ONLY, WB, &co);
+    dart_node_create_topic(S, "sb/pose", DART_SUB_ONLY, R,  &co);
+    dart_node_create_topic(S, "sb/bad",  DART_SUB_ONLY, RB, &co);
+    ST_CHECK(pc && pc_bad, "schema-bind: topics created");
 
-    for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-    ST_CHECK(dart_channel_match_count(pc)==1, "schema-bind: subset reader matched");
-    ST_CHECK(dart_channel_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
+    for (t=0;t<800 && dart_topic_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_topic_match_count(pc)==1, "schema-bind: subset reader matched");
+    ST_CHECK(dart_topic_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
     ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu DART_E_SCHEMA_MISMATCH)", sb_mismatch_n);
 
     {   /* publish one Pose packed in the WRITER's layout; the reader decodes through
@@ -1981,7 +1981,7 @@ static void schema_bind_checks(void){
         memcpy(&bits,&x,8); i_dart_le_w64(buf+8,  bits);        /* x     @8 */
         memcpy(&bits,&y,8); i_dart_le_w64(buf+16, bits);        /* y     @16 */
         buf[24]=7;                                              /* tag   @24 */
-        dart_channel_send(pc, dart_bytes(buf, sizeof buf));
+        dart_topic_send(pc, dart_bytes(buf, sizeof buf));
         for (t=0;t<400 && sb_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
         ST_CHECK(sb_recv==1, "schema-bind: subset message delivered");
         ST_CHECK(sb_schema_ok, "schema-bind: DartMsg.schema is the rebased view (writer size, reader fields)");
@@ -1991,7 +1991,7 @@ static void schema_bind_checks(void){
     {   /* a message that does not fit the sender's schema is dropped + surfaced */
         unsigned long before = sb_mismatch_n;
         uint8_t junk[3] = {1,2,3};
-        dart_channel_send(pc, dart_bytes(junk, sizeof junk));
+        dart_topic_send(pc, dart_bytes(junk, sizeof junk));
         for (t=0;t<200 && sb_mismatch_n==before;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
         ST_CHECK(sb_recv==1 && sb_mismatch_n>before,
                  "schema-bind: wrong-size message dropped + surfaced (recv=%d)", sb_recv);
@@ -2001,13 +2001,13 @@ static void schema_bind_checks(void){
 }
 
 /* (19b) pairwise detail codec ('uDTL', sans-IO): request build + header accessors, the
-   stateless responder (advertised aliases answered, INACTIVE/unknown skipped), schema
+   stateless responder (advertised indices answered, INACTIVE/unknown skipped), schema
    wire inlined ONLY on hash mismatch, entry-boundary truncation (the paging seam), and
    wholesale rejection of malformed input. No sockets: the codec is called directly. */
 static void detail_codec_checks(void){
     static uint8_t tmem[1<<18];
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartConfig tc; DartTransportState *tr; DartChannelDef ch[3];
+    DartConfig tc; DartTransportState *tr; DartTopicDef ch[3];
     DartMetaSchema schemas[3]; DartSchema *S;
     DartDetailWant wants[4];
     uint8_t req[256], resp[1024], out2[1024];
@@ -2017,18 +2017,18 @@ static void detail_codec_checks(void){
     memset(ch,0,sizeof ch);
     ch[0].name="dt/typed"; ch[1].name="dt/raw";
     ch[2].name="dt/off"; ch[2].role=DART_INACTIVE;
-    memset(&tc,0,sizeof tc); tc.channels=ch; tc.n_channels=3; tc.max_peers=2;
+    memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=3; tc.max_peers=2;
     tr = dart_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL && S!=NULL, "detail: transport + schema ready");
     if (!tr || !S){ dart_allocator_reset(&ma); return; }
     memset(schemas,0,sizeof schemas);
     schemas[0].hash = dart_schema_hash(S); schemas[0].wire = dart_schema_wire(S);
 
-    /* request four aliases: typed (requester untyped: hash 0), raw, INACTIVE, unknown */
-    wants[0].alias=0; wants[0].schema_hash=0;
-    wants[1].alias=1; wants[1].schema_hash=0;
-    wants[2].alias=2; wants[2].schema_hash=0;
-    wants[3].alias=9; wants[3].schema_hash=0;
+    /* request four indices: typed (requester untyped: hash 0), raw, INACTIVE, unknown */
+    wants[0].index=0; wants[0].schema_hash=0;
+    wants[1].index=1; wants[1].schema_hash=0;
+    wants[2].index=2; wants[2].schema_hash=0;
+    wants[3].index=9; wants[3].schema_hash=0;
     rl = dart_detail_req_build(77, 5, wants, 4, req, sizeof req);
     ST_CHECK(rl == 14u+4u*10u, "detail: req builds (%u bytes)", (unsigned)rl);
     ST_CHECK(dart_detail_kind(dart_bytes(req,rl))==DART_DETAIL_REQ
@@ -2049,17 +2049,17 @@ static void detail_codec_checks(void){
         memset(&it,0,sizeof it);
         while (dart_detail_next(dart_bytes(resp,len), &it, &d)){
             n++;
-            if (d.alias==0){
+            if (d.index==0){
                 ok_typed = d.name.len==8 && memcmp(d.name.data,"dt/typed",8)==0
                         && d.schema_hash==dart_schema_hash(S)
                         && d.schema_wire.len==dart_schema_wire(S).len;
                 wire = d.schema_wire;
             }
-            if (d.alias==1)
+            if (d.index==1)
                 ok_raw = d.name.len==6 && memcmp(d.name.data,"dt/raw",6)==0
                       && d.schema_hash==0 && d.schema_wire.len==0;
         }
-        ST_CHECK(n==2, "detail: advertised aliases answered, INACTIVE + unknown skipped (n=%d)", n);
+        ST_CHECK(n==2, "detail: advertised indices answered, INACTIVE + unknown skipped (n=%d)", n);
         ST_CHECK(ok_typed, "detail: typed entry carries name + hash + inlined wire");
         ST_CHECK(ok_raw, "detail: raw entry carries name, no schema");
         {   DartSchema *P2 = wire.len ? dart_schema_parse(wire.data, wire.len,
@@ -2075,7 +2075,7 @@ static void detail_codec_checks(void){
     len = dart_transport_detail_respond(tr, schemas, 9, dart_bytes(req,rl), resp, sizeof resp);
     {   DartDetailIter it; DartDetail d; int hash_only=0; memset(&it,0,sizeof it);
         while (dart_detail_next(dart_bytes(resp,len), &it, &d))
-            if (d.alias==0) hash_only = d.schema_wire.len==0 && d.schema_hash==dart_schema_hash(S);
+            if (d.index==0) hash_only = d.schema_wire.len==0 && d.schema_hash==dart_schema_hash(S);
         ST_CHECK(hash_only, "detail: identical hash rides hash-only (no wire)");
     }
 
@@ -2087,7 +2087,7 @@ static void detail_codec_checks(void){
         size_t cut  = dart_transport_detail_respond(tr, schemas, 9, dart_bytes(req,rl), out2, full-1);
         DartDetailIter it; DartDetail d; int n=0; uint16_t first=0xFFFF;
         memset(&it,0,sizeof it);
-        while (dart_detail_next(dart_bytes(out2,cut), &it, &d)){ if (!n) first=d.alias; n++; }
+        while (dart_detail_next(dart_bytes(out2,cut), &it, &d)){ if (!n) first=d.index; n++; }
         ST_CHECK(cut>0 && cut<full && n==1 && first==0,
                  "detail: truncation stops at an entry boundary (paging: %d/%d entries)", n, 2);
     }
@@ -2115,8 +2115,8 @@ static void detail_live_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartChannelOpts co; DartDiscoveryAddr seed;
-    DartSchema *W; DartChannel *pc;
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopicOpts co; DartDiscoveryAddr seed;
+    DartSchema *W; DartTopic *pc;
     i_DartSock q = DART_SOCK_BAD;
     uint8_t pip[4]={0,0,0,0}; uint16_t pport=0; uint32_t pversion=0;
     /* the oracle, copied out of the peer view BEFORE any further poll invalidates it */
@@ -2137,11 +2137,11 @@ static void detail_live_checks(void){
         if (P) dart_node_close(P,0); if (S) dart_node_close(S,0);
         dart_allocator_reset(&ma); return;
     }
-    pc = dart_node_create_channel(P, "dt/pose",  DART_PUB_ONLY, W,    &co);
-    dart_node_create_channel(P, "dt/plain", DART_PUB_ONLY, NULL, &co);
-    dart_node_create_channel(S, "dt/pose",  DART_SUB_ONLY, W,    &co);
-    for (t=0;t<800 && dart_channel_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
-    ST_CHECK(pc && dart_channel_match_count(pc)==1, "detail-live: matched");
+    pc = dart_node_create_topic(P, "dt/pose",  DART_PUB_ONLY, W,    &co);
+    dart_node_create_topic(P, "dt/plain", DART_PUB_ONLY, NULL, &co);
+    dart_node_create_topic(S, "dt/pose",  DART_SUB_ONLY, W,    &co);
+    for (t=0;t<800 && dart_topic_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(pc && dart_topic_match_count(pc)==1, "detail-live: matched");
 
     /* the oracle: the publisher's locator, version, and advertised topics as its v9
        blob (held by the subscriber) states them */
@@ -2150,14 +2150,14 @@ static void detail_live_checks(void){
         for (k=0;k<cnt;k++) if (ps[k].name.len==6 && memcmp(ps[k].name.data,"dt-pub",6)==0) pp=&ps[k];
         ST_CHECK(pp!=NULL, "detail-live: publisher in the peer view");
         if (pp){
-            DartInterestIter it; DartTopic tp;
+            DartInterestIter it; DartTopicEntry tp;
             memcpy(pip, pp->addr.ip, 4); pport = pp->addr.port; pversion = pp->meta_version;
             memset(&it,0,sizeof it);
             /* v10 entries carry 32-bit hashes only: bind each announced entry to the
-               channel we created on P by hash, and expect the RESP to fill in the rest */
+               topic we created on P by hash, and expect the RESP to fill in the rest */
             while (nw<4 && dart_node_peer_interest_next(pp, &it, &tp)){
                 if (!tp.is_pub) continue;
-                oalias[nw] = tp.alias;
+                oalias[nw] = tp.index;
                 if (tp.hash == (uint32_t)dart_topic_id("dt/pose")){
                     onlen[nw]=7; memcpy(oname[nw],"dt/pose",7);  ohash[nw]=dart_schema_hash(W);
                 } else if (tp.hash == (uint32_t)dart_topic_id("dt/plain")){
@@ -2169,7 +2169,7 @@ static void detail_live_checks(void){
     }
     ST_CHECK(nw==2 && pport!=0, "detail-live: oracle holds both pub topics (nw=%u)", nw);
 
-    /* observer mode (opts.fetch_details): a channel-less node greedily fetches every
+    /* observer mode (opts.fetch_details): a topic-less node greedily fetches every
        peer topic's name + schema and serves the dart_node_peer_topic_* queries */
     {   DartAllocator oa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
         DartNodeOpts oo = po; DartNode *O;
@@ -2202,7 +2202,7 @@ static void detail_live_checks(void){
                 ST_CHECK(!s1 && h1==0, "detail-obs: raw topic cached untyped");
             }
             /* the SUBSCRIBER is authoritative about ITS schema too: the observer fetches a
-               SUB_ONLY channel's schema exactly like a publisher's (v10 detail exchange is
+               SUB_ONLY topic's schema exactly like a publisher's (v10 detail exchange is
                role-agnostic). A subscriber-in-charge topic must show its schema. */
             {   uint32_t sid = 0; const DartSchema *ss = NULL; uint64_t hs = 0;
                 for (t=0;t<800;t++){
@@ -2220,19 +2220,19 @@ static void detail_live_checks(void){
                          "detail-obs: subscriber-only topic's schema fetched (subscriber authoritative)");
             }
             /* observe THEN subscribe (the explorer's flow): the greedy fetch dissolved
-               these aliases against a channel-less node, so creating the channel must
+               these indices against a topic-less node, so creating the topic must
                send them back to pending, re-verify, and form the match */
-            {   DartChannel *osub = dart_node_create_channel(O, "dt/pose", DART_SUB_ONLY, W, &co);
+            {   DartTopic *osub = dart_node_create_topic(O, "dt/pose", DART_SUB_ONLY, W, &co);
                 unsigned long a0 = st_any;
-                ST_CHECK(osub != NULL, "detail-obs: late subscribe channel created");
-                for (t=0;t<800 && dart_channel_match_count(pc)<2;t++){
+                ST_CHECK(osub != NULL, "detail-obs: late subscribe topic created");
+                for (t=0;t<800 && dart_topic_match_count(pc)<2;t++){
                     dart_node_poll(O,2); dart_node_poll(P,1); dart_node_poll(S,1);
                 }
-                ST_CHECK(dart_channel_match_count(pc)==2,
+                ST_CHECK(dart_topic_match_count(pc)==2,
                          "detail-obs: observe-then-subscribe re-verifies and matches (%u readers)",
-                         dart_channel_match_count(pc));
+                         dart_topic_match_count(pc));
                 {   uint8_t pose[16]; memset(pose, 0x33, sizeof pose);   /* stamp + x */
-                    dart_channel_send(pc, dart_bytes(pose, sizeof pose));
+                    dart_topic_send(pc, dart_bytes(pose, sizeof pose));
                     for (t=0;t<400 && st_any < a0+2;t++){
                         dart_node_poll(P,1); dart_node_poll(S,1); dart_node_poll(O,2);
                     }
@@ -2251,7 +2251,7 @@ static void detail_live_checks(void){
         uint8_t req[128], r1[2048], r2[2048]; size_t rl; int n1=-1, n2=-1;
         DartDetailWant wants[4]; uint16_t k;
         i_dart_plat_set_nonblock(q);
-        for (k=0;k<nw;k++){ wants[k].alias=oalias[k]; wants[k].schema_hash=0; }
+        for (k=0;k<nw;k++){ wants[k].index=oalias[k]; wants[k].schema_hash=0; }
         rl = dart_detail_req_build(dom, pversion, wants, nw, req, sizeof req);
 
         /* a wrong-domain request is ignored (the node core's domain gate) */
@@ -2279,7 +2279,7 @@ static void detail_live_checks(void){
                      "detail-live: header matches the announced version (%u)", pversion);
             memset(&it,0,sizeof it);
             while (dart_detail_next(rb, &it, &d)){
-                for (k=0;k<nw;k++) if (oalias[k]==d.alias) break;
+                for (k=0;k<nw;k++) if (oalias[k]==d.index) break;
                 if (k==nw){ names_ok=0; continue; }
                 if (d.name.len!=onlen[k] || memcmp(d.name.data, oname[k], onlen[k])!=0) names_ok=0;
                 if (d.schema_hash != ohash[k]) hashes_ok=0;
@@ -2367,37 +2367,37 @@ static void th_on_event(const DartEvent *ev){
     else if (ev->kind == DART_ERROR && ev->error == DART_E_EVICTED_UNSENT) th_evicted_evt++;
 }
 
-typedef struct { DartChannel *ch; uint32_t id; } th_sender_arg;
+typedef struct { DartTopic *ch; uint32_t id; } th_sender_arg;
 static void th_sender(void *arg){
     th_sender_arg *a = (th_sender_arg*)arg;
     uint8_t buf[8]; uint32_t i;
     for (i=0;i<TH_MSGS;i++){
         buf[0]=(uint8_t)a->id; buf[1]=(uint8_t)(a->id>>8); buf[2]=(uint8_t)(a->id>>16); buf[3]=(uint8_t)(a->id>>24);
         buf[4]=(uint8_t)i; buf[5]=(uint8_t)(i>>8); buf[6]=(uint8_t)(i>>16); buf[7]=(uint8_t)(i>>24);
-        dart_channel_send(a->ch, dart_bytes(buf, sizeof buf));
+        dart_topic_send(a->ch, dart_bytes(buf, sizeof buf));
     }
 }
 
-/* phase 23 state: node B echoes every request onto its reply channel from the
+/* phase 23 state: node B echoes every request onto its reply topic from the
  * callback, and probes the forbidden reentrant calls exactly once */
 static DartNode *th_echo_b;
-static DartChannel *th_echo_rep;
+static DartTopic *th_echo_rep;
 static volatile unsigned long th_echo_replies;
 static volatile int th_cb_send_rc = -100, th_cb_create_refused = -1, th_cb_setrole_rc = -100;
 static void th_echo_b_on_msg(const DartMsg *m){
-    th_cb_send_rc = dart_channel_send(th_echo_rep, m->data);
+    th_cb_send_rc = dart_topic_send(th_echo_rep, m->data);
     if (th_cb_create_refused < 0){
-        th_cb_create_refused = (dart_node_create_channel(th_echo_b, "th/na", DART_PUBSUB, NULL, NULL) == NULL);
-        th_cb_setrole_rc = dart_channel_set_role(th_echo_rep, DART_PUB_ONLY);
+        th_cb_create_refused = (dart_node_create_topic(th_echo_b, "th/na", DART_PUBSUB, NULL, NULL) == NULL);
+        th_cb_setrole_rc = dart_topic_set_role(th_echo_rep, DART_PUB_ONLY);
     }
 }
 static void th_echo_a_on_msg(const DartMsg *m){ (void)m; th_echo_replies++; }
 
-/* phase 24: hammer a reliable channel until told to stop */
+/* phase 24: hammer a reliable topic until told to stop */
 static volatile int th_hammer_stop;
 static void th_hammer(void *arg){
     uint8_t buf[8]; memset(buf, 0x77, sizeof buf);
-    while (!th_hammer_stop) dart_channel_send((DartChannel*)arg, dart_bytes(buf, sizeof buf));
+    while (!th_hammer_stop) dart_topic_send((DartTopic*)arg, dart_bytes(buf, sizeof buf));
 }
 
 static void threaded_checks(void){
@@ -2406,7 +2406,7 @@ static void threaded_checks(void){
     memset(payload, 0x33, sizeof payload);
 
     /* 20. RELIABLE: exactly-once ordered delivery under multithreaded send */
-    { DartChannelDef cd[1]; DartNodeOpts o; DartNode *w, *r;
+    { DartTopicDef cd[1]; DartNodeOpts o; DartNode *w, *r;
       memset(cd, 0, sizeof cd);
       cd[0].name = "th/rel"; cd[0].role = DART_PUB_ONLY;
       cd[0].qos.reliability = DART_RELIABLE; cd[0].qos.keep_last = 8;
@@ -2432,12 +2432,12 @@ static void threaded_checks(void){
           }
           /* the service threads own discovery + matching: no polling from here on */
           { uint64_t end = i_dart_plat_now_us() + 5000000u;
-            while (dart_node_writer_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
+            while (dart_node_publisher_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
                 sw_sleep_ms(5); }
-          ST_CHECK(dart_node_writer_match_count(w, 0) == 1, "threaded: match formed by the services");
+          ST_CHECK(dart_node_publisher_match_count(w, 0) == 1, "threaded: match formed by the services");
           {   i_DartThread th[TH_SENDERS]; th_sender_arg ta[TH_SENDERS]; uint32_t t;
               for (t=0;t<TH_SENDERS;t++){
-                  ta[t].ch = dart_node_channel(w, 0); ta[t].id = t;
+                  ta[t].ch = dart_node_topic(w, 0); ta[t].id = t;
                   i_dart_plat_thread_start(&th[t], th_sender, &ta[t]);
               }
               for (t=0;t<TH_SENDERS;t++) i_dart_plat_thread_join(&th[t]);
@@ -2461,7 +2461,7 @@ static void threaded_checks(void){
     }
 
     /* 21 + 21b + 22. BURST / HOSTILE / WAKER on one best-effort pair */
-    { DartChannelDef cd[1]; DartNodeOpts o; DartNode *w, *r;
+    { DartTopicDef cd[1]; DartNodeOpts o; DartNode *w, *r;
       memset(cd, 0, sizeof cd);
       cd[0].name = "th/burst"; cd[0].role = DART_PUB_ONLY;
       cd[0].qos.keep_last = 4;   /* best-effort */
@@ -2476,7 +2476,7 @@ static void threaded_checks(void){
           th_recv = th_lost = th_evicted_evt = 0;
           dart_node_start(w); dart_node_start(r);
           { uint64_t end = i_dart_plat_now_us() + 5000000u;
-            while (dart_node_writer_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
+            while (dart_node_publisher_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
                 sw_sleep_ms(5); }
 
           /* 21. 64 back-to-back sends, keep_last 4: the unsent guard must let every
@@ -2537,7 +2537,7 @@ static void threaded_checks(void){
        wait (it runs inside the service pass), so if all 10 requests batch into one
        RX drain the 10 replies commit with no TX pass between them, and a shallower
        ring would (correctly, counted) evict the overflow. */
-    { DartChannelDef ca[2], cb[2]; DartNodeOpts o; DartNode *a, *b;
+    { DartTopicDef ca[2], cb[2]; DartNodeOpts o; DartNode *a, *b;
       memset(ca, 0, sizeof ca);
       ca[0].name = "th/req"; ca[0].role = DART_PUB_ONLY;
       ca[0].qos.reliability = DART_RELIABLE; ca[0].qos.keep_last = 16;
@@ -2551,11 +2551,11 @@ static void threaded_checks(void){
       b = test_node_open(dummy, 0, "th-echo-b", th_echo_b_on_msg, NULL, o, cb, 2);
       ST_CHECK(a && b, "reentrant: nodes open");
       if (a && b){
-          th_echo_b = b; th_echo_rep = dart_node_channel(b, 1);
+          th_echo_b = b; th_echo_rep = dart_node_topic(b, 1);
           th_echo_replies = 0; th_cb_send_rc = -100; th_cb_create_refused = -1; th_cb_setrole_rc = -100;
           dart_node_start(a); dart_node_start(b);
           { uint64_t end = i_dart_plat_now_us() + 5000000u;
-            while ((dart_node_writer_match_count(a, 0) == 0 || dart_node_writer_match_count(b, 1) == 0)
+            while ((dart_node_publisher_match_count(a, 0) == 0 || dart_node_publisher_match_count(b, 1) == 0)
                    && i_dart_plat_now_us() < end)
                 sw_sleep_ms(5); }
           for (i=0;i<10;i++) dart_node_send(a, 0, payload, sizeof payload);
@@ -2564,7 +2564,7 @@ static void threaded_checks(void){
           dart_node_stop(b); dart_node_stop(a);
           ST_CHECK(th_echo_replies == 10, "reentrant: callback send echoes (%lu/10)", th_echo_replies);
           ST_CHECK(th_cb_send_rc == DART_OK, "reentrant: callback send returns DART_OK (%d)", th_cb_send_rc);
-          ST_CHECK(th_cb_create_refused == 1, "reentrant: callback create_channel refused");
+          ST_CHECK(th_cb_create_refused == 1, "reentrant: callback create_topic refused");
           ST_CHECK(th_cb_setrole_rc == DART_ERR_STATE, "reentrant: callback set_role refused (%d)", th_cb_setrole_rc);
           dart_node_close(b, 1); dart_node_close(a, 1);
       }
@@ -2575,7 +2575,7 @@ static void threaded_checks(void){
        The whole phase under a watchdog: a hang here is the deadlock detector. */
     { uint64_t phase_t0 = i_dart_plat_now_us(); int iter;
       for (iter=0; iter<3; iter++){
-          DartChannelDef cd[1]; DartNodeOpts o; DartNode *w, *r;
+          DartTopicDef cd[1]; DartNodeOpts o; DartNode *w, *r;
           i_DartThread h1, h2;
           memset(cd, 0, sizeof cd);
           cd[0].name = "th/stop"; cd[0].role = DART_PUB_ONLY;
@@ -2589,12 +2589,12 @@ static void threaded_checks(void){
           r = test_node_open(dummy, 0, "th-hsub", NULL, NULL, o, cd, 1);
           if (!w || !r){ ST_CHECK(0, "stop-load: nodes open (iter %d)", iter); break; }
           { uint64_t end = i_dart_plat_now_us() + 5000000u;   /* match, then silence the reader */
-            while (dart_node_writer_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
+            while (dart_node_publisher_match_count(w, 0) == 0 && i_dart_plat_now_us() < end)
                 st_pump(w, r, 10); }
           dart_node_start(w);                    /* reader stays unpolled: never acks */
           th_hammer_stop = 0;
-          i_dart_plat_thread_start(&h1, th_hammer, dart_node_channel(w, 0));
-          i_dart_plat_thread_start(&h2, th_hammer, dart_node_channel(w, 0));
+          i_dart_plat_thread_start(&h1, th_hammer, dart_node_topic(w, 0));
+          i_dart_plat_thread_start(&h2, th_hammer, dart_node_topic(w, 0));
           sw_sleep_ms(50);                       /* hammers now parked in the wait */
           dart_node_stop(w);                     /* broadcasts the waiters loose */
           th_hammer_stop = 1;
@@ -2624,10 +2624,10 @@ static void qc_on_message(const DartMsg *msg){ (void)msg; qc_dispatched++; }
 static void queue_checks(void){
     static uint8_t mem_a[1], mem_b[1];
     uint8_t payload[512];
-    DartChannelDef ca[4], cb[4];
+    DartTopicDef ca[4], cb[4];
     DartNodeOpts ao, bo;
     DartNode *a, *b;
-    DartChannel *lazy, *be, *rel, *disp;
+    DartTopic *lazy, *be, *rel, *disp;
     DartMsg m;
     int i, r, got;
     memset(ca, 0, sizeof ca); memset(payload, 0, sizeof payload); memset(&m, 0, sizeof m);
@@ -2652,19 +2652,19 @@ static void queue_checks(void){
     b = test_node_open(mem_b, sizeof mem_b, "qb-node", qc_on_message, st_on_event, bo, cb, 4);
     ST_CHECK(a && b, "queue: nodes open");
     if (!a || !b){ if (a) dart_node_close(a,0); if (b) dart_node_close(b,0); return; }
-    lazy = dart_node_channel(b, 0); be   = dart_node_channel(b, 1);
-    rel  = dart_node_channel(b, 2); disp = dart_node_channel(b, 3);
+    lazy = dart_node_topic(b, 0); be   = dart_node_topic(b, 1);
+    rel  = dart_node_topic(b, 2); disp = dart_node_topic(b, 3);
 
     { uint64_t end = i_dart_plat_now_us()+5000000u;    /* all four matches first */
       while (i_dart_plat_now_us()<end &&
-             (dart_node_writer_match_count(a,0)<1 || dart_node_writer_match_count(a,1)<1 ||
-              dart_node_writer_match_count(a,2)<1 || dart_node_writer_match_count(a,3)<1))
+             (dart_node_publisher_match_count(a,0)<1 || dart_node_publisher_match_count(a,1)<1 ||
+              dart_node_publisher_match_count(a,2)<1 || dart_node_publisher_match_count(a,3)<1))
           st_pump(a,b,10); }
-    ST_CHECK(dart_node_writer_match_count(a,0)==1 && dart_node_writer_match_count(a,2)==1,
+    ST_CHECK(dart_node_publisher_match_count(a,0)==1 && dart_node_publisher_match_count(a,2)==1,
              "queue: matches formed");
 
     /* Q1: the first take enables the queue; a timeout-take pumps the loop itself */
-    r = dart_channel_take(lazy, &m, 0);
+    r = dart_topic_take(lazy, &m, 0);
     ST_CHECK(r == 0, "queue: first take is empty (rc=%d) and enables queued delivery", r);
     qc_dispatched = 0;
     for (i=0;i<5;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 0, payload, 64); }
@@ -2672,16 +2672,16 @@ static void queue_checks(void){
     { uint64_t end = i_dart_plat_now_us()+5000000u;
       while (got<5 && i_dart_plat_now_us()<end){
           dart_node_poll(a, 0);
-          if (dart_channel_take(lazy, &m, 50) == 1){    /* waits by pumping b's own loop */
+          if (dart_topic_take(lazy, &m, 50) == 1){    /* waits by pumping b's own loop */
               if ((int)get32(m.data.data) != got || m.data.len != 64) break;
               got++;
           }
       } }
     ST_CHECK(got==5, "queue: take drains 5 in order via its own pump (%d)", got);
     ST_CHECK(m.recv_us != 0, "queue: taken msg carries the poll-side arrival stamp");
-    ST_CHECK(m.channel_name.len==6 && !memcmp(m.channel_name.data,"q/lazy",6),
-             "queue: taken msg carries the channel name");
-    ST_CHECK(m.sender_name.len==7 && !memcmp(m.sender_name.data,"qa-node",7),
+    ST_CHECK(m.topic_name.len==6 && !memcmp(m.topic_name.data,"q/lazy",6),
+             "queue: taken msg carries the topic name");
+    ST_CHECK(m.publisher_name.len==7 && !memcmp(m.publisher_name.data,"qa-node",7),
              "queue: taken msg carries the sender name");
     ST_CHECK(qc_dispatched==0, "queue: no inline callback once queued (%lu)", qc_dispatched);
 
@@ -2689,11 +2689,11 @@ static void queue_checks(void){
     { uint32_t msgs=0, bytes=0, cap=0, dropped=0, last=0;
       for (i=0;i<60;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 1, payload, 256); st_pump(a,b,1); }
       st_pump(a,b,50);
-      dart_channel_queue_stats(be, &msgs, &bytes, &cap, &dropped);
+      dart_topic_queue_stats(be, &msgs, &bytes, &cap, &dropped);
       ST_CHECK(cap==4096 && dropped>0 && msgs>0,
                "queue: BE cap held, oldest dropped (cap=%u msgs=%u dropped=%u)", cap, msgs, dropped);
       got=0;
-      while (dart_channel_take(be, &m, 0)==1){ last=get32(m.data.data); got++; }
+      while (dart_topic_take(be, &m, 0)==1){ last=get32(m.data.data); got++; }
       ST_CHECK(got>0 && last==59u, "queue: newest survive a BE overflow (got=%d last=%u)", got, last);
       ST_CHECK(st_gap_calls[1]>0, "queue: BE queue loss fired DART_MSG_LOST (%lu)", st_gap_calls[1]);
     }
@@ -2706,7 +2706,7 @@ static void queue_checks(void){
     ST_CHECK(dart_node_drain(a, 2, 0)==0, "queue: parked reader withholds acks (writer not drained)");
     { uint64_t end=i_dart_plat_now_us()+8000000u;
       while (got<12 && i_dart_plat_now_us()<end){
-          if (dart_channel_take(rel, &m, 20)==1){
+          if (dart_topic_take(rel, &m, 20)==1){
               if ((int)get32(m.data.data)!=got) break;
               got++;
           }
@@ -2724,8 +2724,8 @@ static void queue_checks(void){
     qc_dispatched=0;
     for (i=0;i<3;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 3, payload, 64); }
     { uint64_t end=i_dart_plat_now_us()+5000000u; uint32_t msgs=0;
-      while (msgs<3 && i_dart_plat_now_us()<end){ st_pump(a,b,10); dart_channel_queue_stats(disp,&msgs,NULL,NULL,NULL); } }
-    r = dart_channel_dispatch(disp, 0, 0);
+      while (msgs<3 && i_dart_plat_now_us()<end){ st_pump(a,b,10); dart_topic_queue_stats(disp,&msgs,NULL,NULL,NULL); } }
+    r = dart_topic_dispatch(disp, 0, 0);
     ST_CHECK(r==3 && qc_dispatched==3, "queue: dispatch runs the callback here (r=%d cb=%lu)", r, qc_dispatched);
     r = dart_node_dispatch(b, 0, 0);
     ST_CHECK(r==0, "queue: node dispatch finds nothing left (%d)", r);
@@ -2738,7 +2738,7 @@ static void queue_checks(void){
     for (i=0;i<40;i++){
         put32(payload,(uint32_t)i);
         dart_node_send(a, 3, payload, 64);
-        if (dart_channel_take(disp, &m, 2000)!=1 || (int)get32(m.data.data)!=i) break;
+        if (dart_topic_take(disp, &m, 2000)!=1 || (int)get32(m.data.data)!=i) break;
     }
     ST_CHECK(i==40, "queue: threaded take (cv wait) delivers 40 in order (%d)", i);
     dart_node_stop(b); dart_node_stop(a);
@@ -2754,7 +2754,7 @@ static int selftest_main(void){
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: keep output on a crash */
     memset(payload, 0x5A, sizeof payload);
 
-    DartChannelDef ch[4]; memset(ch, 0, sizeof ch);
+    DartTopicDef ch[4]; memset(ch, 0, sizeof ch);
     ch[0].name = "st/gap";
     ch[0].qos.reliability = DART_RELIABLE; ch[0].qos.keep_last = ST_DEPTH;
     ch[0].qos.max_message_bytes = 64; ch[0].qos.heartbeat_us = 50000;
@@ -2769,7 +2769,7 @@ static int selftest_main(void){
        its own coverage (shm_*_checks), and its chunk-recycle semantics differ, so the
        general transport phases stay on UDP -- as they did before (fixed, no allocator). */
     DartNodeOpts wo = { .domain = ST_DOMAIN, .disable_shm = 1 };
-    { DartNodeOpts ro = wo; DartChannelDef chr[4]; DartNode *w, *r;
+    { DartNodeOpts ro = wo; DartTopicDef chr[4]; DartNode *w, *r;
       memcpy(chr, ch, sizeof ch);
       ch[0].role = ch[1].role = ch[2].role = ch[3].role = DART_PUB_ONLY;
       chr[0].role = chr[1].role = chr[3].role = DART_SUB_ONLY;
@@ -2832,8 +2832,8 @@ static int selftest_main(void){
       /* 4b. SWEEP-ACK: ST_CH_BLOCK2 has nack_delay>0, so the reader's ACKNACK is
             timer-armed and, once a burst fills the ring and the writer goes
             quiet, can be flushed ONLY by the periodic sweep, not a data event.
-            A sub-only reader's data channel never advances next_seqno, so a
-            sweep that skips next_seqno==0 channels starves that ack and every
+            A sub-only reader's data topic never advances next_seqno, so a
+            sweep that skips next_seqno==0 topics starves that ack and every
             later send waits the full backpressure_wait_us. Fill the ring, go quiet long
             enough for the sweep, then a send that would evict must NOT block. */
       st_pump(w, r, 200);                              /* match + settle */
@@ -2947,10 +2947,10 @@ static int selftest_main(void){
       dart_node_close(w, 1);
     }
 
-    /* 6. SCALE: 40 channels; the full interest list rides one discovery announce
+    /* 6. SCALE: 40 topics; the full interest list rides one discovery announce
           blob (IP-fragmented if large), matched at peer_up */
     { static uint8_t mem_a[1<<20], mem_b[1<<20];
-      static DartChannelDef cha[ST_NCH], chb[ST_NCH];
+      static DartTopicDef cha[ST_NCH], chb[ST_NCH];
       static char snames[ST_NCH][12];     /* "scale/0".."scale/39" */
       DartNodeOpts ao, bo; DartNode *a, *b; uint16_t k;
       memset(cha, 0, sizeof cha);
@@ -2969,24 +2969,24 @@ static int selftest_main(void){
       bo = ao;
       a = test_node_open(mem_a, sizeof mem_a, NULL, NULL, NULL, ao, cha, ST_NCH);
       b = test_node_open(mem_b, sizeof mem_b, NULL, st_on_message, st_on_event, bo, chb, ST_NCH);
-      ST_CHECK(a && b, "scale: %u-channel nodes open", ST_NCH);
+      ST_CHECK(a && b, "scale: %u-topic nodes open", ST_NCH);
       if (a && b){
           st_any = 0;
           for (k=0;k<ST_NCH;k++) dart_node_send(a, k, payload, 16);
           { uint64_t end = i_dart_plat_now_us() + 5000000u;
             while (st_any < ST_NCH && i_dart_plat_now_us() < end) st_pump(a, b, 20); }
-          ST_CHECK(st_any == ST_NCH, "scale: all channels delivered (%lu/%u)", st_any, ST_NCH);
+          ST_CHECK(st_any == ST_NCH, "scale: all topics delivered (%lu/%u)", st_any, ST_NCH);
           dart_node_close(b, 1);
           dart_node_close(a, 1);
       }
     }
 
     /* 7. NAMED: the cross-peer identity is the topic NAME (its 64-bit hash),
-          independent of each node's local channel handle. A matching name matches
+          independent of each node's local topic handle. A matching name matches
           across differing handles; a distinct name never cross-wires; and clean
           names raise no false collision. */
     { static uint8_t mem_nw[1<<20], mem_nr[1<<20];
-      DartChannelDef nw[1], nr[2];
+      DartTopicDef nw[1], nr[2];
       DartNodeOpts wo2, ro2; DartNode *w2, *r2;
       memset(nw,0,sizeof nw); memset(nr,0,sizeof nr);
       nw[0].name="robot/lidar"; nw[0].role=DART_PUB_ONLY;
@@ -3006,9 +3006,9 @@ static int selftest_main(void){
               dart_node_send(w2, 0, payload, 16); st_pump(w2,r2,20);
           }
           ST_CHECK(st_samples[0] > 0, "named: same name matches across nodes (%lu)", st_samples[0]);
-          /* the node name is synced via discovery and surfaces as DartMsg.sender_name */
+          /* the node name is synced via discovery and surfaces as DartMsg.publisher_name */
           ST_CHECK(strcmp(st_last_sender, "lidar-node")==0,
-                   "named: sender_name carries the publisher's node name (%s)", st_last_sender);
+                   "named: publisher_name carries the publisher's node name (%s)", st_last_sender);
           st_pump(w2,r2,200);
           ST_CHECK(st_samples[1] == 0, "named: distinct name never cross-wires (%lu)", st_samples[1]);
           ST_CHECK(st_collisions == 0, "named: clean names raise no collision (%lu)", st_collisions);
@@ -3023,7 +3023,7 @@ static int selftest_main(void){
           ever changes, the first check fails loudly (regenerate via collide). */
     { static uint8_t mem_cw[1<<20], mem_cr[1<<20];
       const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> 23f58aa8628b1cce */
-      DartChannelDef cw, cr; DartNodeOpts wo3, ro3; DartNode *w3, *r3;
+      DartTopicDef cw, cr; DartNodeOpts wo3, ro3; DartNode *w3, *r3;
       ST_CHECK(dart_topic_id(A)==dart_topic_id(B) && strcmp(A,B)!=0,
                "collision: test pair still shares one identity (else regen via collide)");
       memset(&cw,0,sizeof cw);
@@ -3058,7 +3058,7 @@ static int selftest_main(void){
     qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
     beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
-    schema_advert_checks();       /* 18. channel schema rides the announce; peer reads it back */
+    schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
@@ -3080,7 +3080,7 @@ static int selftest_main(void){
 
 /* control plane (two-machine sweeps), constants shared by sweep and serve */
 #define CTL_DOMAIN     9     /* keep test --domain away from this */
-#define CTL_CMD        0     /* channel handles are array indices */
+#define CTL_CMD        0     /* topic handles are array indices */
 #define CTL_RES        1
 #define CTL_RES_MAX    1400
 #define SW_MAX_RESULTS 128
@@ -3201,7 +3201,7 @@ static int sw_spawn(sw_child *c, const char *self, const char *name,
 }
 
 /* wait for children to self-exit, pumping the control node (if any) so the
- * control-plane discovery and result channel stay live meanwhile; kill
+ * control-plane discovery and result topic stay live meanwhile; kill
  * stragglers at the deadline. cmd (optional) is re-published every 2s so a
  * worker that lost the control plane and recovered still hears about the run
  * (workers dedup by run nonce). */
@@ -3244,8 +3244,8 @@ static void sw_wait_pump(sw_child *cs, int n, int timeout_ms, DartNode *ctl, con
  * a control domain, spawns the same node children the coordinator does, and
  * publishes each child's raw SUMMARY lines back.
  * dart_test sweep --remote   the coordinator: per rate it publishes one kv
- * command (reliable CMD channel, catch_up 0 so stale commands never replay
- * to late workers) and collects results (reliable RES channel, catch_up =
+ * command (reliable CMD topic, catch_up 0 so stale commands never replay
+ * to late workers) and collects results (reliable RES topic, catch_up =
  * depth so results survive a control-peer flap; entries are tagged with
  * domain + run nonce so replays of older runs are filtered, not recounted).
  * Workers HELLO at startup so the coordinator knows how many results to
@@ -3260,7 +3260,7 @@ static char g_ctl_workers[16][24];
 static int  g_ctl_nworkers = 0;
 
 static void ctl_on_message(const DartMsg *msg){
-    uint16_t ch = msg->channel_id; const void *d = msg->data.data; size_t len = msg->data.len;
+    uint16_t ch = msg->topic_index; const void *d = msg->data.data; size_t len = msg->data.len;
     if (ch==CTL_CMD && len < sizeof g_ctl_cmd){
         memcpy(g_ctl_cmd, d, len); g_ctl_cmd[len]=0; g_ctl_cmd_new=1;
     } else if (ch==CTL_RES){
@@ -3284,7 +3284,7 @@ static void ctl_on_message(const DartMsg *msg){
 static DartNode *ctl_open(uint16_t domain, int coordinator,
                          const char *if_ip, const char *peer_ip){
     static uint8_t mem[8<<20];
-    static DartChannelDef ch[2];
+    static DartTopicDef ch[2];
     static DartDiscoveryAddr seed;
     DartNodeOpts opts;
     memset(ch, 0, sizeof ch);
@@ -3394,7 +3394,7 @@ static int ctl_drain(int domain, unsigned long run, sw_kv *sum, sw_kv *sum2, int
     return got;
 }
 
-/* last SUMMARY/SUMMARY2 lines of a child's output, wrapped for the RES channel */
+/* last SUMMARY/SUMMARY2 lines of a child's output, wrapped for the RES topic */
 static int sw_read_result(const char *path, char *out, size_t cap, int domain, unsigned long run){
     FILE *f = fopen(path, "rb"); char line[1024], s1[1024]="", s2[1024]="";
     if (!f) return 0;
@@ -3700,7 +3700,7 @@ static uint64_t ms_allocs(DartNode *P, DartNode **S, int nsubs){
 }
 static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     DartAllocator pa, sa[16]; DartNodeOpts po, so; DartNode *P=NULL, *S[16];
-    DartChannel *pc=NULL; DartChannelOpts co; DartDiscoveryAddr seed;
+    DartTopic *pc=NULL; DartTopicOpts co; DartDiscoveryAddr seed;
     uint8_t *payload; int i, j, k, t, nwarm, nsteady; unsigned dom = ms_domain++;
     uint64_t a0=0, a1=0, a2=0; size_t ppeak=0, speak=0;
     double cold_sum=0, warm_sum=0, t0, t1, msg_s; int coldc=0;
@@ -3710,7 +3710,7 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     nwarm   = keep + 4;
     memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=keep; co.qos.heartbeat_us=50000;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
-    memset(&po,0,sizeof po); po.domain=(uint16_t)dom; po.max_channels=4;
+    memset(&po,0,sizeof po); po.domain=(uint16_t)dom; po.max_topics=4;
     po.discovery.max_peers=(uint16_t)(nsubs+2); po.disable_shm=(uint8_t)disable_shm;
     po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
     so=po;
@@ -3718,21 +3718,21 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     P=dart_node_open(&pa,"ms-pub",NULL,NULL,&po);
     for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(i_dart_plat_realloc, 0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
     if (!P){ free(payload); return; }
-    pc=dart_node_create_channel(P,"ms/ch",DART_PUB_ONLY,NULL,&co);
-    for (i=0;i<nsubs;i++) dart_node_create_channel(S[i],"ms/ch",DART_SUB_ONLY,NULL,&co);
-    for (t=0;t<4000 && dart_channel_match_count(pc)<nsubs;t++){ dart_node_poll(P,1); for(j=0;j<nsubs;j++) dart_node_poll(S[j],1); }
+    pc=dart_node_create_topic(P,"ms/ch",DART_PUB_ONLY,NULL,&co);
+    for (i=0;i<nsubs;i++) dart_node_create_topic(S[i],"ms/ch",DART_SUB_ONLY,NULL,&co);
+    for (t=0;t<4000 && dart_topic_match_count(pc)<nsubs;t++){ dart_node_poll(P,1); for(j=0;j<nsubs;j++) dart_node_poll(S[j],1); }
 
     a0=ms_allocs(P,S,nsubs);                              /* total allocs before any traffic */
     g_ms_rx=0;                                            /* warmup: fill + size the buffers */
     for (i=0;i<nwarm;i++){
-        double s0=(double)i_dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
+        double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
         if (i<keep){ cold_sum += s1-s0; coldc++; }
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
     a1=ms_allocs(P,S,nsubs);                              /* allocs after warmup */
     g_ms_rx=0; t0=(double)i_dart_plat_now_us();             /* steady: buffers sized -> must not alloc */
     for (i=0;i<nsteady;i++){
-        double s0=(double)i_dart_plat_now_us(); dart_channel_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
+        double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
         warm_sum += s1-s0;
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
@@ -3790,16 +3790,16 @@ static DartNode *tb_open(const char *name, int sub, int disable_shm){
     return dart_node_open(&a, name, sub ? tb_on_message : NULL, NULL, &o);
 }
 
-static DartChannel *tb_channel(DartNode *n, int sub){
-    DartChannelOpts co;
+static DartTopic *tb_channel(DartNode *n, int sub){
+    DartTopicOpts co;
     memset(&co, 0, sizeof co);
     co.qos.keep_last = 64;               /* best-effort: isolates the unsent drain guard */
     co.qos.max_message_bytes = 64;
     co.qos.heartbeat_us = 50000;
-    return dart_node_create_channel(n, "tb/bench", sub ? DART_SUB_ONLY : DART_PUB_ONLY, NULL, &co);
+    return dart_node_create_topic(n, "tb/bench", sub ? DART_SUB_ONLY : DART_PUB_ONLY, NULL, &co);
 }
 
-static void tb_run_rate(DartNode *w, DartChannel *ch, unsigned rate_hz, double dur_s){
+static void tb_run_rate(DartNode *w, DartTopic *ch, unsigned rate_hz, double dur_s){
     uint8_t payload[32];
     uint64_t t0, t_end, next = 0, wait_us0, wait_us1;
     uint32_t wait_n0, wait_n1, ev0, ev1;
@@ -3821,7 +3821,7 @@ static void tb_run_rate(DartNode *w, DartChannel *ch, unsigned rate_hz, double d
             next += 1000000u / rate_hz;
             if (next < now) next = now;              /* fell behind: no burst catch-up */
         }
-        dart_channel_send(ch, dart_bytes(payload, sizeof payload));
+        dart_topic_send(ch, dart_bytes(payload, sizeof payload));
         sent++;
     }
     wall = (i_dart_plat_now_us() - t0) / 1e6;
@@ -3846,14 +3846,14 @@ static int tb_mode(const char *title, int disable_shm){
     static const unsigned rates[] = { 10000, 50000, 100000, 200000, 500000, 0 };
     DartNode *w = tb_open("tb-pub", 0, disable_shm);
     DartNode *r = tb_open("tb-sub", 1, disable_shm);
-    DartChannel *cw, *cr;
+    DartTopic *cw, *cr;
     unsigned k;
     if (!w || !r){ fprintf(stderr, "threadbench: open failed\n"); return 1; }
     cw = tb_channel(w, 0); cr = tb_channel(r, 1); (void)cr;
     dart_node_start(w); dart_node_start(r);
     { uint64_t end = i_dart_plat_now_us() + 5000000u;
-      while (dart_channel_match_count(cw) == 0 && i_dart_plat_now_us() < end) sw_sleep_ms(2); }
-    if (dart_channel_match_count(cw) != 1){ fprintf(stderr, "threadbench: no match\n"); return 1; }
+      while (dart_topic_match_count(cw) == 0 && i_dart_plat_now_us() < end) sw_sleep_ms(2); }
+    if (dart_topic_match_count(cw) != 1){ fprintf(stderr, "threadbench: no match\n"); return 1; }
 
     printf("\n== %s ==\n", title);
     printf("%9s  %10s  %9s  %10s  %8s  %7s  %9s\n",
@@ -3878,20 +3878,20 @@ static int threadbench_main(void){
     {
         DartNode *w = tb_open("tb-base-pub", 0, 1);
         DartNode *r = tb_open("tb-base-sub", 1, 1);
-        DartChannel *cw = tb_channel(w, 0), *cr = tb_channel(r, 1);
+        DartTopic *cw = tb_channel(w, 0), *cr = tb_channel(r, 1);
         uint8_t payload[32]; unsigned long sent = 0, recv0;
         uint64_t t0, t_end; double wall;
         (void)cr;
         if (!w || !r || !cw){ fprintf(stderr, "threadbench: baseline open failed\n"); return 1; }
         memset(payload, 0x42, sizeof payload);
         { uint64_t end = i_dart_plat_now_us() + 5000000u;
-          while (dart_channel_match_count(cw) == 0 && i_dart_plat_now_us() < end){
+          while (dart_topic_match_count(cw) == 0 && i_dart_plat_now_us() < end){
               dart_node_poll(w, 1); dart_node_poll(r, 0);
           } }
         recv0 = g_tb_recv;
         t0 = i_dart_plat_now_us(); t_end = t0 + 2000000u;
         while (i_dart_plat_now_us() < t_end){
-            dart_channel_send(cw, dart_bytes(payload, sizeof payload));
+            dart_topic_send(cw, dart_bytes(payload, sizeof payload));
             dart_node_poll(w, 0);
             dart_node_poll(r, 0);
             sent++;
@@ -3914,8 +3914,8 @@ static int threadbench_main(void){
  * the number IS the sustainable end-to-end goodput), 2s per run:
  *   inline : the pre-queue model; the sub's on_message counts deliveries on its
  *            SERVICE thread (zero-copy view, no ring).
- *   queued : the sub channel owns a 4 MB consumer queue; THIS thread drains it
- *            with dart_channel_take (adds the one ring memcpy per message).
+ *   queued : the sub topic owns a 4 MB consumer queue; THIS thread drains it
+ *            with dart_topic_take (adds the one ring memcpy per message).
  * The shm_rx column verifies which path carried the payload (SHM section: it must
  * track delivered; UDP section: 0). */
 static volatile unsigned long g_qb_recv;
@@ -3925,17 +3925,17 @@ static volatile int g_qb_stop;
 static uint32_t     g_qb_len;
 static void qb_sender(void *arg){
     static uint8_t payload[1u << 20];
-    DartChannel *ch = (DartChannel *)arg;
+    DartTopic *ch = (DartTopic *)arg;
     memset(payload, 0x42, g_qb_len);
     while (!g_qb_stop)
-        dart_channel_send(ch, dart_bytes(payload, g_qb_len));
+        dart_topic_send(ch, dart_bytes(payload, g_qb_len));
 }
 
 static void qb_run(uint32_t size, int queued, int disable_shm){
     DartAllocator aw = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ar = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartNodeOpts o; DartChannelOpts co;
-    DartNode *w, *r; DartChannel *cw, *cr;
+    DartNodeOpts o; DartTopicOpts co;
+    DartNode *w, *r; DartTopic *cw, *cr;
     i_DartThread th;
     uint64_t t0, t_end;
     unsigned long recv = 0;
@@ -3955,7 +3955,7 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     co.qos.heartbeat_us = 20000;
     co.qos.repair_delay_us = 5000;
     co.qos.shm_max_bytes = size;            /* pin one SHM size class per run */
-    cw = dart_node_create_channel(w, "qb/t", DART_PUB_ONLY, NULL, &co);
+    cw = dart_node_create_topic(w, "qb/t", DART_PUB_ONLY, NULL, &co);
     /* the queue must cover the writer's in-flight burst (keep_last x size), else the
        reader PARKS while the writer keeps bursting and the overrun heals through the
        paced repair path -- a sizing bug, not steady-state cost. 2x burst, min 4 MB. */
@@ -3963,12 +3963,12 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
         if (qb < (4u << 20)) qb = 4u << 20;
         co.qos.queue_bytes = queued ? qb : 0;
     }
-    cr = dart_node_create_channel(r, "qb/t", DART_SUB_ONLY, NULL, &co);
-    if (!cw || !cr){ fprintf(stderr, "queuebench: channel create failed\n"); exit(1); }
+    cr = dart_node_create_topic(r, "qb/t", DART_SUB_ONLY, NULL, &co);
+    if (!cw || !cr){ fprintf(stderr, "queuebench: topic create failed\n"); exit(1); }
     dart_node_start(w); dart_node_start(r);
     {   uint64_t end = i_dart_plat_now_us() + 5000000u;
-        while (dart_channel_match_count(cw) == 0 && i_dart_plat_now_us() < end) sw_sleep_ms(2); }
-    if (dart_channel_match_count(cw) != 1){ fprintf(stderr, "queuebench: no match\n"); exit(1); }
+        while (dart_topic_match_count(cw) == 0 && i_dart_plat_now_us() < end) sw_sleep_ms(2); }
+    if (dart_topic_match_count(cw) != 1){ fprintf(stderr, "queuebench: no match\n"); exit(1); }
 
 #ifdef DART_SHM
     dart_node_shm_stats(r, NULL, &shm_rx0);
@@ -3979,7 +3979,7 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     if (queued){
         DartMsg m;
         while (i_dart_plat_now_us() < t_end)
-            if (dart_channel_take(cr, &m, 5) == 1) recv++;
+            if (dart_topic_take(cr, &m, 5) == 1) recv++;
     } else {
         while (i_dart_plat_now_us() < t_end) sw_sleep_ms(5);
         recv = g_qb_recv;
@@ -4064,9 +4064,9 @@ int main(int argc, char **argv){
         "        peer_ip: seed discovery with this address (no multicast needed);\n"
         "        \"0\" = unset for either\n"
         "        latency/throughput node; SUMMARY+SUMMARY2 on timed exit. Data is unicast.\n"
-        "        reliable=1: load channel DART_RELIABLE; block_ms: writer\n"
-        "        backpressure window (qos.backpressure_wait_us) for that channel\n"
-        "        extra_ch: declare N more channels; spread=1 round-robins the\n"
+        "        reliable=1: load topic DART_RELIABLE; block_ms: writer\n"
+        "        backpressure window (qos.backpressure_wait_us) for that topic\n"
+        "        extra_ch: declare N more topics; spread=1 round-robins the\n"
         "        load across them (0 = they stay idle, 2 = they are PUB_ONLY\n"
         "        everywhere so those writes have no readers)\n"
         "        if_mode: discovery interface -- 1 = loopback (single host), 2 = real NIC\n"

@@ -6,7 +6,7 @@ static const char    *WIFI_SSID   = "ssid";
 static const char    *WIFI_PASS   = "password";
 
 static std::optional<dart::Node> g_node;
-static dart::Channel             g_chat;
+static dart::Topic             g_chat;
 static uint32_t                  g_seq = 0;
 
 void setup() {
@@ -22,14 +22,14 @@ void setup() {
     Serial.printf("\nconnected, ip=%s\n", WiFi.localIP().toString().c_str());
 
     dart::NodeOptions opts;
-    opts.max_channels = 4;
+    opts.max_topics = 4;
     opts.max_peers    = 8;
 
     g_node = dart::Node::open("esp32",
         [](const dart::MessageIn &m) {
             Serial.printf("[%.*s] %.*s > %.*s\n",
-                          (int)m.sender_name().size(),  m.sender_name().data(),
-                          (int)m.channel_name().size(), m.channel_name().data(),
+                          (int)m.publisher_name().size(),  m.publisher_name().data(),
+                          (int)m.topic_name().size(), m.topic_name().data(),
                           (int)m.text().size(),         m.text().data());
         },
         [](const dart::Event &e) {
@@ -45,7 +45,7 @@ void setup() {
     qos.backpressure_wait_us = 1000000; // wait for up to 1s
     qos.reliability = dart::Reliability::Reliable;
 
-    g_chat = g_node->create_channel("chat", dart::Role::PubSub, nullptr, qos);
+    g_chat = g_node->create_topic("chat", dart::Role::PubSub, nullptr, qos);
 }
 
 void loop()

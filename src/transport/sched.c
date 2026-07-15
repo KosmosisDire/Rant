@@ -4,12 +4,12 @@
 
 /* scheduler: work is queued as lane-RECORD indices; destination = the record's peer slot */
 static void i_dart_dest_push(DartTransportState *st, uint32_t d){
-    uint32_t ndest = st->cfg.max_peers, t;
+    uint32_t ndest = st->cfg.max_peers, pos;
     if (st->dest_queued[d]) return;
     st->dest_queued[d]=1;
-    t = st->dest_queue_head + st->dest_queue_count;
-    if (t >= ndest) t -= ndest;
-    st->dest_queue[t]=d; st->dest_queue_count++;
+    pos = st->dest_queue_head + st->dest_queue_count;
+    if (pos >= ndest) pos -= ndest;
+    st->dest_queue[pos]=d; st->dest_queue_count++;
 }
 
 
@@ -48,8 +48,8 @@ void i_dart_sched_drop(DartTransportState *st, uint32_t li){
 /* enqueue, and track a freshly-armed reader ack/NACK deadline for the poll cap. Used
  * by the arm sites (ack_due_us is future or 0); the sweep enqueues due lanes with
  * i_dart_lane_enq_idx instead, since it recomputes next_deadline itself. */
-void i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t peer_slot){
-    uint32_t li=i_dart_lane_id(st,channel_idx,peer_slot);
+void i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+    uint32_t li=i_dart_lane_id(st,topic_index,peer_slot);
     i_DartLane *l;
     if (li==DART__NIL) return;                     /* unmatched lane: nothing to schedule */
     l=&st->lanes[li];
@@ -60,12 +60,12 @@ void i_dart_lane_wake(DartTransportState *st, uint16_t channel_idx, uint32_t pee
 
 /* sendable work a popped record still owes now (timer-armed work is the sweep's job) */
 static int i_dart_lane_work(DartTransportState *st, const i_DartLane *l, uint64_t now){
-    i_DartChannel *ch=&st->channels[l->channel];
+    i_DartTopic *topic=&st->topics[l->topic];
     uint32_t peer_slot=l->peer_slot;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
     if (l->w.used && l->w.has_nack) return 1;
-    if (l->w.used && l->w.sent_upto < ch->next_seqno) return 1;
-    if (l->r.used && ch->qos.reliability==DART_RELIABLE
+    if (l->w.used && l->w.sent_upto < topic->next_seqno) return 1;
+    if (l->r.used && topic->qos.reliability==DART_RELIABLE
         && l->r.ack_pending && now >= l->r.ack_due_us) return 1;
     return 0;
 }
@@ -76,8 +76,8 @@ static int i_dart_lane_work(DartTransportState *st, const i_DartLane *l, uint64_
  * every DART_HB_SWEEP_US) and a forced full pass when next_deadline_us comes due, so
  * a deadline-capped poll that wakes for a timer actually services it. A full pass
  * also recomputes next_deadline_us exactly (the global min of not-yet-due timers).
- * Read-only; cost is bounded by the pool (i.e. by matched lanes, not channels x peers:
- * an idle channel has no records to visit at all in dynamic mode). */
+ * Read-only; cost is bounded by the pool (i.e. by matched lanes, not topics x peers:
+ * an idle topic has no records to visit at all in dynamic mode). */
 static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
     uint32_t total=st->lane_cap, due, k;
     uint64_t span = now - st->sweep_time_us;
@@ -97,17 +97,17 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
     for (k=0;k<due;k++){
         uint32_t li=st->sweep;
         i_DartLane *l=&st->lanes[li];
-        i_DartChannel *ch;
+        i_DartTopic *topic;
         uint32_t peer_slot;
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
         if (!l->in_use) continue;                  /* free pool slot */
-        ch=&st->channels[l->channel];
-        if (!i_dart_channel_needs_sweep(ch)) continue;   /* best-effort, or nothing matched */
+        topic=&st->topics[l->topic];
+        if (!i_dart_topic_needs_sweep(topic)) continue;   /* best-effort, or nothing matched */
         peer_slot=l->peer_slot;
         /* gate writer heartbeats on next_seqno, never the reader ack: a sub-only
-           node's data channels never advance next_seqno but still owe acks */
+           node's data topics never advance next_seqno but still owe acks */
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
-        if (l->w.used && l->w.reader_reliable && l->w.acked_upto < ch->next_seqno){
+        if (l->w.used && l->w.reader_reliable && l->w.acked_upto < topic->next_seqno){
             if (now>=l->w.hb_next_us) i_dart_lane_enq_idx(st,li);
             else if (l->w.hb_next_us < mind) mind = l->w.hb_next_us;
         }
@@ -134,13 +134,13 @@ int dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, void *ou
         while (st->dest_head[d]!=DART__NIL){
             uint32_t li=st->dest_head[d];
             i_DartLane *l=&st->lanes[li];
-            uint16_t channel_idx=l->channel; uint32_t peer_slot=l->peer_slot;
+            uint16_t topic_index=l->topic; uint32_t peer_slot=l->peer_slot;
             size_t n;
             do {
                 /* acks first: small, one-shot, and carry the NACKs that drive
                    repair, so a backlogged writer can't starve them */
-                n=i_dart_reader_emit(st,(int)channel_idx,(int)peer_slot,(uint8_t*)out+offset,cap-offset,now);
-                if (!n) n=i_dart_writer_emit(st,(int)channel_idx,(int)peer_slot,(uint8_t*)out+offset,cap-offset,now);
+                n=i_dart_reader_emit(st,(int)topic_index,(int)peer_slot,(uint8_t*)out+offset,cap-offset,now);
+                if (!n) n=i_dart_writer_emit(st,(int)topic_index,(int)peer_slot,(uint8_t*)out+offset,cap-offset,now);
                 offset+=n;
             } while (n && offset<cap);
             st->dest_head[d]=l->sched_next;

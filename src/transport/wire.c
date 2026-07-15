@@ -2,15 +2,15 @@
 #include "internal.h"
 
 
-/* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = alias, then the body.
+/* Submessage wire layout. Byte 0 = type|flags, bytes 1-2 = index, then the body.
  * Builders (dart_mk_*) and the readers both index off these, so moving a field is one
  * edit, never a silent builder/parser drift. Several fields share an offset (distinct
  * names on purpose). Header sizes: DATA 13 (single)/21 (multi), HB 23, NACK 21. */
 
 /* datagram builders (return length) */
-size_t i_dart_wire_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWriterSample *s,
+size_t i_dart_wire_mk_data(uint8_t *o, uint16_t index, uint64_t seqno, i_DartWriterSample *s,
                          uint16_t frag, const uint8_t *payload, uint16_t payload_len){
-    i_dart_le_w16(o+DART_OFFSET_ALIAS,alias);
+    i_dart_le_w16(o+DART_OFFSET_INDEX,index);
     if (s->count==1){                       /* frag=0, count=1, len=payload_len implied */
         o[0]=(uint8_t)(DART_DATA|DART_F_SINGLE);
         i_dart_le_w64(o+DART_OFFSET_SEQNO,seqno); i_dart_le_w16(o+DART_OFFSET_PAYLOAD_LEN_SINGLE,payload_len);
@@ -26,24 +26,24 @@ size_t i_dart_wire_mk_data(uint8_t *o, uint16_t alias, uint64_t seqno, i_DartWri
 
 #ifdef DART_SHM
 /* SHM-DATA: one submessage covers [base, base+count); body is the descriptor, no
- * payload. 37 bytes = 1 (type|F_SHM) + 2 (alias) + 8 (base) + 2 (count) + 24 (desc). */
-size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t alias, uint64_t base, uint16_t count,
+ * payload. 37 bytes = 1 (type|F_SHM) + 2 (index) + 8 (base) + 2 (count) + 24 (desc). */
+size_t i_dart_wire_mk_shm(uint8_t *o, uint16_t index, uint64_t base, uint16_t count,
                           const uint8_t *desc){
-    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); i_dart_le_w16(o+DART_OFFSET_ALIAS,alias);
+    o[0]=(uint8_t)(DART_DATA|DART_F_SHM); i_dart_le_w16(o+DART_OFFSET_INDEX,index);
     i_dart_le_w64(o+DART_OFFSET_SEQNO,base); i_dart_le_w16(o+DART_OFFSET_SHM_COUNT,count);
     memcpy(o+DART_OFFSET_SHM_DESC,desc,DART_SHM_DESC_BYTES);
     return DART_SHM_DATA_BYTES;
 }
 #endif
 
-size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t alias, uint64_t first, uint64_t last, uint32_t cnt){
-    o[0]=DART_HB; i_dart_le_w16(o+DART_OFFSET_ALIAS,alias); i_dart_le_w64(o+DART_OFFSET_SEQNO,first); i_dart_le_w64(o+DART_OFFSET_HB_LAST,last); i_dart_le_w32(o+DART_OFFSET_HB_COUNT,cnt);
+size_t i_dart_wire_mk_hb(uint8_t *o, uint16_t index, uint64_t first, uint64_t last, uint32_t cnt){
+    o[0]=DART_HB; i_dart_le_w16(o+DART_OFFSET_INDEX,index); i_dart_le_w64(o+DART_OFFSET_SEQNO,first); i_dart_le_w64(o+DART_OFFSET_HB_LAST,last); i_dart_le_w32(o+DART_OFFSET_HB_COUNT,cnt);
     return DART_HEADER_HB;
 }
 
-size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t alias, uint64_t base, uint16_t nbits, uint32_t bitmap,
+size_t i_dart_wire_mk_nack(uint8_t *o, uint16_t index, uint64_t base, uint16_t nbits, uint32_t bitmap,
                          uint32_t epoch, uint8_t flags){
-    o[0]=(uint8_t)(DART_NACK|flags); i_dart_le_w16(o+DART_OFFSET_ALIAS,alias); i_dart_le_w64(o+DART_OFFSET_SEQNO,base);
+    o[0]=(uint8_t)(DART_NACK|flags); i_dart_le_w16(o+DART_OFFSET_INDEX,index); i_dart_le_w64(o+DART_OFFSET_SEQNO,base);
     i_dart_le_w16(o+DART_OFFSET_NACK_NBITS,nbits); i_dart_le_w32(o+DART_OFFSET_NACK_BITMAP,bitmap); i_dart_le_w32(o+DART_OFFSET_NACK_EPOCH,epoch);
     return DART_HEADER_NACK;
 }

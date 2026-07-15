@@ -1,12 +1,12 @@
 // The DartNode component: the scene's shared DART node. Lives in its own file
 // because Unity only registers a MonoBehaviour whose class name matches the file
-// name. The channel/subscription API it hands out is in DartUnity.cs.
+// name. The topic/subscription API it hands out is in DartUnity.cs.
 //
 //   public struct Pose { public float X, Y, Z; }
 //
 //   // publish from any component
-//   DartChannel<Pose> pose;
-//   void Start()  { pose = DartNode.Channel<Pose>("player/pose"); }
+//   DartTopic<Pose> pose;
+//   void Start()  { pose = DartNode.Topic<Pose>("player/pose"); }
 //   void Update() { pose.Publish(new Pose { X = transform.position.x }); }
 //
 //   // subscribe from any other component: dies with the component, skipped while
@@ -21,7 +21,7 @@ using UnityEngine;
 namespace Dart
 {
     /// <summary>The scene's shared DART node. Add exactly one to the scene; every
-    /// other script reaches it through the static API (DartNode.Channel&lt;T&gt;,
+    /// other script reaches it through the static API (DartNode.Topic&lt;T&gt;,
     /// DartNode.Subscribe). Runs in edit mode too when Run In Edit Mode is on.</summary>
     [ExecuteAlways]
     [DefaultExecutionOrder(-1000)]   // dispatch before other scripts' Update
@@ -33,8 +33,8 @@ namespace Dart
         [SerializeField] private string nodeName = "";
         [Tooltip("Discovery domain: nodes only see peers on the same domain.")]
         [SerializeField] private int domain = 0;
-        [Tooltip("Max channels this node can create (the core default of 8 is small for a scene of components).")]
-        [SerializeField] private int maxChannels = 32;
+        [Tooltip("Max topics this node can create (the core default of 8 is small for a scene of components).")]
+        [SerializeField] private int maxTopics = 32;
         [Tooltip("Multihomed hosts (VPN adapters, WSL, docker bridges): this machine's LAN IP, so discovery uses the right interface. Empty = auto probe.")]
         [SerializeField] private string multicastInterface = "";
         [Tooltip("Keep the node live in the editor outside play mode.")]
@@ -50,8 +50,8 @@ namespace Dart
         private bool _pollFallback;      // service thread unavailable: pump polls instead
         private bool _configDirty;
         private int _frame;
-        private readonly Dictionary<string, DartChannelBase> _channels = new Dictionary<string, DartChannelBase>();
-        private readonly Dictionary<ushort, DartChannelBase> _byIndex = new Dictionary<ushort, DartChannelBase>();
+        private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
+        private readonly Dictionary<ushort, DartTopicBase> _byIndex = new Dictionary<ushort, DartTopicBase>();
         private readonly List<Event> _pending = new List<Event>();   // service thread -> main
         private readonly List<Event> _drain = new List<Event>();
         private readonly object _pendingLock = new object();
@@ -75,7 +75,7 @@ namespace Dart
         }
 
         /// <summary>The underlying wrapper Node; null while closed. Escape hatch to
-        /// the full API (peers via events, MemoryStats, extra channels...).</summary>
+        /// the full API (peers via events, MemoryStats, extra topics...).</summary>
         public Node Raw => _node;
         public bool IsOpen => _node != null;
         internal Node NativeNode => _node;
@@ -83,67 +83,67 @@ namespace Dart
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
         public static event Action<Event> Events;
 
-        /// <summary>The shared channel named <paramref name="name"/> on the scene
+        /// <summary>The shared topic named <paramref name="name"/> on the scene
         /// node, created on first request. Qos applies only to that first request
-        /// (null = reliable defaults); later callers share the existing channel.</summary>
-        public static DartChannel<T> Channel<T>(string name, Qos qos = null)
-            => RequireMain().GetChannel<T>(name, qos);
+        /// (null = reliable defaults); later callers share the existing topic.</summary>
+        public static DartTopic<T> Topic<T>(string name, Qos qos = null)
+            => RequireMain().GetTopic<T>(name, qos);
 
-        /// <summary>The shared raw (bytes) channel named <paramref name="name"/>.</summary>
-        public static DartChannel Channel(string name, Qos qos = null)
-            => RequireMain().GetChannel(name, qos);
+        /// <summary>The shared raw (bytes) topic named <paramref name="name"/>.</summary>
+        public static DartTopic Topic(string name, Qos qos = null)
+            => RequireMain().GetTopic(name, qos);
 
         /// <summary>One-liner subscribe on the scene node.</summary>
         public static DartSubscription Subscribe<T>(string name, Action<T> handler)
-            => Channel<T>(name).Subscribe(handler);
+            => Topic<T>(name).Subscribe(handler);
 
         /// <summary>One-liner owner-bound subscribe: dies with owner, skipped while
         /// it is disabled.</summary>
         public static DartSubscription Subscribe<T>(string name, Component owner, Action<T> handler)
-            => Channel<T>(name).Subscribe(owner, handler);
+            => Topic<T>(name).Subscribe(owner, handler);
 
-        /// <summary>Instance form of the static Channel&lt;T&gt;().</summary>
-        public DartChannel<T> GetChannel<T>(string name, Qos qos = null)
+        /// <summary>Instance form of the static Topic&lt;T&gt;().</summary>
+        public DartTopic<T> GetTopic<T>(string name, Qos qos = null)
         {
-            DartChannelBase ch = LookupOrNull(name, qos);
+            DartTopicBase ch = LookupOrNull(name, qos);
             if (ch != null)
             {
-                var typed = ch as DartChannel<T>;
-                if (typed == null) throw ShapeMismatch(name, ch, "DartChannel<" + typeof(T).Name + ">");
+                var typed = ch as DartTopic<T>;
+                if (typed == null) throw ShapeMismatch(name, ch, "DartTopic<" + typeof(T).Name + ">");
                 return typed;
             }
-            var c = new DartChannel<T>(this, name, EffectiveQos(qos));
-            _channels.Add(name, c);
+            var c = new DartTopic<T>(this, name, EffectiveQos(qos));
+            _topics.Add(name, c);
             return c;
         }
 
-        /// <summary>Instance form of the static raw Channel().</summary>
-        public DartChannel GetChannel(string name, Qos qos = null)
+        /// <summary>Instance form of the static raw Topic().</summary>
+        public DartTopic GetTopic(string name, Qos qos = null)
         {
-            DartChannelBase ch = LookupOrNull(name, qos);
+            DartTopicBase ch = LookupOrNull(name, qos);
             if (ch != null)
             {
-                var raw = ch as DartChannel;
-                if (raw == null) throw ShapeMismatch(name, ch, "a raw DartChannel");
+                var raw = ch as DartTopic;
+                if (raw == null) throw ShapeMismatch(name, ch, "a raw DartTopic");
                 return raw;
             }
-            var c = new DartChannel(this, name, EffectiveQos(qos));
-            _channels.Add(name, c);
+            var c = new DartTopic(this, name, EffectiveQos(qos));
+            _topics.Add(name, c);
             return c;
         }
 
-        private DartChannelBase LookupOrNull(string name, Qos qos)
+        private DartTopicBase LookupOrNull(string name, Qos qos)
         {
-            if (string.IsNullOrEmpty(name)) throw new ArgumentException("channel name required", nameof(name));
-            DartChannelBase ch;
-            if (!_channels.TryGetValue(name, out ch)) return null;
+            if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
+            DartTopicBase ch;
+            if (!_topics.TryGetValue(name, out ch)) return null;
             if (qos != null)
-                Debug.LogWarning("[DART] channel '" + name + "' already exists: the Qos passed here is ignored (first request wins)", this);
+                Debug.LogWarning("[DART] topic '" + name + "' already exists: the Qos passed here is ignored (first request wins)", this);
             return ch;
         }
 
-        private static InvalidOperationException ShapeMismatch(string name, DartChannelBase have, string want)
-            => new InvalidOperationException("channel '" + name + "' already exists as " + have.GetType().Name
+        private static InvalidOperationException ShapeMismatch(string name, DartTopicBase have, string want)
+            => new InvalidOperationException("topic '" + name + "' already exists as " + have.GetType().Name
                 + ", requested as " + want + ": one name = one message type per node");
 
         private static DartNode RequireMain()
@@ -156,7 +156,7 @@ namespace Dart
         }
 
         // Reliable by default, and always queued from creation: with the service
-        // thread owning the wire, only a queued channel keeps its handlers off that
+        // thread owning the wire, only a queued topic keeps its handlers off that
         // thread (they then fire from the per-frame Dispatch, on the main thread).
         private static Qos EffectiveQos(Qos q)
         {
@@ -232,7 +232,7 @@ namespace Dart
                 && (Application.isPlaying || runInEditMode);
             bool changed = _node != null
                 && (_openName != nodeName || _openDomain != domain
-                    || _openMax != maxChannels || _openIf != multicastInterface);
+                    || _openMax != maxTopics || _openIf != multicastInterface);
             if (_node != null && (!shouldRun || changed)) CloseNativeNode();
             if (_node == null && shouldRun) OpenNativeNode();
         }
@@ -246,7 +246,7 @@ namespace Dart
                                  new NodeOptions
                                  {
                                      Domain = (ushort)Mathf.Clamp(domain, 0, ushort.MaxValue),
-                                     MaxChannels = (ushort)Mathf.Clamp(maxChannels, 0, ushort.MaxValue),
+                                     MaxTopics = (ushort)Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
                                      MulticastInterface = string.IsNullOrEmpty(multicastInterface)
                                          ? null : multicastInterface,
                                  });
@@ -257,15 +257,15 @@ namespace Dart
                 _node = null;
                 return;
             }
-            _openName = nodeName; _openDomain = domain; _openMax = maxChannels; _openIf = multicastInterface;
+            _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
             _pollFallback = !_node.Start();     // DART_NO_THREADS builds: pump polls
-            foreach (DartChannelBase ch in _channels.Values) ch.OnNodeOpened();
+            foreach (DartTopicBase ch in _topics.Values) ch.OnNodeOpened();
         }
 
         private void CloseNativeNode()
         {
             if (_node == null) return;
-            foreach (DartChannelBase ch in _channels.Values) ch.OnNodeClosed();
+            foreach (DartTopicBase ch in _topics.Values) ch.OnNodeClosed();
             lock (_byIndex) _byIndex.Clear();
             _node.Close();
             _node = null;
@@ -280,23 +280,23 @@ namespace Dart
             if (_node == null) return;
             DrainEvents();
             if (_pollFallback) _node.Poll(0);
-            _node.Dispatch();                   // every queued channel -> this thread
+            _node.Dispatch();                   // every queued topic -> this thread
             if ((++_frame & 0xFF) == 0)
-                foreach (DartChannelBase ch in _channels.Values) ch.PruneDeadOwners();
+                foreach (DartTopicBase ch in _topics.Values) ch.PruneDeadOwners();
         }
 
-        internal void RegisterIndex(ushort index, DartChannelBase ch)
+        internal void RegisterIndex(ushort index, DartTopicBase ch)
         {
             lock (_byIndex) _byIndex[index] = ch;
         }
 
-        // Runs on whichever thread dispatches. Our channels are all queued, so this
+        // Runs on whichever thread dispatches. Our topics are all queued, so this
         // is the main thread; a locked lookup keeps a user's own extra (non-queued)
-        // channel on Raw from racing the table, it just isn't routed.
+        // topic on Raw from racing the table, it just isn't routed.
         private void RouteMessage(Message m)
         {
-            DartChannelBase ch;
-            lock (_byIndex) _byIndex.TryGetValue(m.ChannelId, out ch);
+            DartTopicBase ch;
+            lock (_byIndex) _byIndex.TryGetValue(m.TopicIndex, out ch);
             if (ch != null) ch.Deliver(m);
         }
 
