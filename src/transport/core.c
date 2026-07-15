@@ -59,6 +59,8 @@ uint16_t dart_clamp_frag(uint16_t frag_payload){
     return f;
 }
 
+uint16_t dart_transport_frag(DartTransportState *st){ return st ? st->frag : dart_clamp_frag(0); }
+
 
 /* lay out everything (b->base==NULL = measure only) */
 static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfig *cfg){

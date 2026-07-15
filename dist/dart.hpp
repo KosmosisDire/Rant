@@ -1273,6 +1273,12 @@ uint64_t  dart_channel_identity(const DartChannelDef *def);   /* = dart_topic_id
  * The rule dart_transport_init and the node's announce blob both apply (single source). */
 uint16_t  dart_clamp_frag(uint16_t frag_payload);
 
+/* This node's own (clamped) UDP fragment size: a send whose payload exceeds it
+ * fragments into 2+ datagrams. The node uses it as the SHM cutoff: a message that
+ * fits one datagram gains nothing from SHM (SHM still sends a descriptor datagram),
+ * so only messages larger than this take the shared-memory path. */
+uint16_t  dart_transport_frag(DartTransportState *st);
+
 /* A new peer matches nothing until dart_transport_apply_peer_interest feeds its interest
  * list (carried in its discovery announce). peer_frag: that peer's advertised UDP
  * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_PAYLOAD.
@@ -6248,6 +6254,8 @@ uint16_t dart_clamp_frag(uint16_t frag_payload){
     if (f > DART_FRAG_PAYLOAD_MAX) f = DART_FRAG_PAYLOAD_MAX;
     return f;
 }
+
+uint16_t dart_transport_frag(DartTransportState *st){ return st ? st->frag : dart_clamp_frag(0); }
 
 
 /* lay out everything (b->base==NULL = measure only) */
@@ -11372,7 +11380,15 @@ static int i_dart_node_do_send(DartNode *n, uint16_t channel, DartBytes data, in
             dart_transport_send_would_evict_unsent(n->transport, channel, &evict_base, &evict_count);
         int r;
 #ifdef DART_SHM
-        if (n->shm_capable && len>0 && channel < n->shm_n_channels && matched && dart_transport_writer_shm_eligible(n->transport, channel)){
+        /* Only messages that would FRAGMENT (len > our fragment size) gain from SHM:
+           a single-datagram message ships as one inline DATA either way, and the SHM
+           path still sends a descriptor datagram plus pool/desc/attach overhead, so
+           below the fragment size inline UDP is strictly cheaper. Fragmentation is
+           writer-driven with our own one size (never the peer's), so this is the
+           unambiguous cutoff even when several same-host peers match. */
+        if (n->shm_capable && len > dart_transport_frag(n->transport)
+            && channel < n->shm_n_channels && matched
+            && dart_transport_writer_shm_eligible(n->transport, channel)){
             uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
             /* a hint (shm_max_bytes / max_message_bytes) pins the channel to one class, so
                same-sized traffic reuses a single prefix-sized segment; without it each message

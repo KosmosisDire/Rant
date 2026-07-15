@@ -235,6 +235,12 @@ uint64_t  dart_channel_identity(const DartChannelDef *def);   /* = dart_topic_id
  * The rule dart_transport_init and the node's announce blob both apply (single source). */
 uint16_t  dart_clamp_frag(uint16_t frag_payload);
 
+/* This node's own (clamped) UDP fragment size: a send whose payload exceeds it
+ * fragments into 2+ datagrams. The node uses it as the SHM cutoff: a message that
+ * fits one datagram gains nothing from SHM (SHM still sends a descriptor datagram),
+ * so only messages larger than this take the shared-memory path. */
+uint16_t  dart_transport_frag(DartTransportState *st);
+
 /* A new peer matches nothing until dart_transport_apply_peer_interest feeds its interest
  * list (carried in its discovery announce). peer_frag: that peer's advertised UDP
  * fragment size (from discovery), used to reassemble its messages; 0 = DART_FRAG_PAYLOAD.

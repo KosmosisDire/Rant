@@ -1139,6 +1139,8 @@ static void shm_node_checks(void){
     if (P&&S){
         for (i=0;i<800 && dart_node_writer_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
         ST_CHECK(dart_node_writer_match_count(P,0)>0, "shm-node: matched");
+        /* sizes[0] fits one datagram (< frag) so it ships INLINE, not SHM; the two
+           larger ones would fragment, so they take the SHM path. */
         sizes[0]=200; sizes[1]=300*1024; sizes[2]=4*1024*1024;
         for (i=0;i<3;i++){
             unsigned long want=0; size_t j; int before=shmn_recv, t;
@@ -1147,9 +1149,12 @@ static void shm_node_checks(void){
             for (t=0;t<500 && shmn_recv==before;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
             ST_CHECK(shmn_recv==before+1 && shmn_len==sizes[i] && shmn_sum==want,
                      "shm-node: byte-exact %lu bytes", (unsigned long)sizes[i]);
+            if (i==0){ tx=0; dart_node_shm_stats(P,&tx,NULL);
+                ST_CHECK(tx==0, "shm-node: sub-fragment %lu B went inline, not SHM (tx=%u)",
+                         (unsigned long)sizes[i], tx); }
         }
         dart_node_shm_stats(P,&tx,NULL); dart_node_shm_stats(S,NULL,&rx);
-        ST_CHECK(tx==3 && rx==3, "shm-node: all 3 over SHM (tx=%u rx=%u)", tx, rx);
+        ST_CHECK(tx==2 && rx==2, "shm-node: 2 fragmenting msgs over SHM, small inline (tx=%u rx=%u)", tx, rx);
         dart_node_close(P,1); dart_node_close(S,1);
     }
     free(mp); free(ms);
