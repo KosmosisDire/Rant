@@ -2313,29 +2313,45 @@ extern "C" {
  * TIMEOUT/PEER_LOST are synthesized client-side when no response arrives. */
 typedef enum {
     DART_CALL_OK        = 0,
-    DART_CALL_APP_ERROR = 1,   /* the handler replied with dart_call_fail */
+    DART_CALL_APP_ERROR = 1,   /* the handler replied with dart_request_fail */
     DART_CALL_NO_HANDLER= 2,   /* the provider has no handler registered */
-    DART_CALL_TIMEOUT   = 3,   /* client-synthesized: no reply within the timeout */
+    DART_CALL_TIMEOUT   = 3,   /* client-synthesized: no response within the timeout */
     DART_CALL_PEER_LOST = 4    /* client-synthesized: the provider dropped mid-call */
 } DartCallStatus;
 
 typedef struct DartFunction DartFunction;   /* opaque function handle */
-typedef struct DartCall     DartCall;       /* opaque in-flight call, valid only in the handler */
 
-/* Delivered to the caller when a reply arrives (or is synthesized). data is a view valid for
- * the callback only. provider = the peer that answered (0 if synthesized). */
+/* The request as delivered to the provider's handler: what a DartMsg carries, in function
+ * vocabulary. Views are valid for the handler call only. The reply machinery lives BEHIND
+ * this struct, so pass only the exact pointer the handler received to dart_request_reply /
+ * dart_request_fail / dart_request_defer, never a copy. */
+typedef struct DartRequest {
+    DartNode         *node;          /* the node the provider runs on */
+    DartString        function_name; /* the function's name, @req suffix stripped (a view) */
+    DartBytes         data;          /* the request payload */
+    const DartSchema *schema;        /* the schema data decodes with (NULL = untyped caller).
+                                        Non-NULL means data.len was validated against it. */
+    uint32_t          caller;        /* the calling peer's id */
+    DartString        caller_name;   /* the calling node's name (.data never NULL) */
+    uint64_t          recv_us;       /* the node's monotonic clock at arrival */
+} DartRequest;
+
+/* Delivered to the caller when a response arrives (or is synthesized). data is a view valid
+ * for the callback only. provider = the peer that answered (0 if synthesized). */
 typedef struct {
-    DartCallStatus status;
-    DartBytes      data;
-    uint32_t       provider;
-    void          *user;       /* the user pointer passed to dart_function_call */
-} DartCallReply;
-typedef void (*DartReplyFn)(const DartCallReply *reply);
+    DartCallStatus    status;
+    DartBytes         data;
+    const DartSchema *schema;    /* the schema data decodes with (NULL = untyped provider or
+                                    a synthesized outcome) */
+    uint32_t          provider;
+    void             *user;      /* the user pointer passed to dart_function_call */
+} DartResponse;
+typedef void (*DartResponseFn)(const DartResponse *response);
 
-/* The provider's handler: inspect the request, then reply exactly once with dart_call_reply /
- * dart_call_fail, or dart_call_defer for an async completion. Returning without replying
- * auto-acks DART_CALL_OK with an empty payload. */
-typedef void (*DartCallFn)(DartCall *call, void *user);
+/* The provider's handler: inspect the request, then reply exactly once with
+ * dart_request_reply / dart_request_fail, or dart_request_defer for an async completion.
+ * Returning without replying auto-acks DART_CALL_OK with an empty payload. */
+typedef void (*DartRequestFn)(DartRequest *request, void *user);
 
 typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
@@ -2343,37 +2359,36 @@ typedef struct {
 } DartFunctionOpts;
 
 /* Create the PROVIDER side (you own the implementation): subscribes requests, publishes
- * replies, runs on_call for each request. Open the CALLER side (it lives elsewhere):
+ * replies, runs on_request for each request. Open the CALLER side (it lives elsewhere):
  * publishes requests, subscribes replies. req/rsp schemas may be NULL (untyped; an empty
  * rsp schema still flows an ack). Returns a handle or NULL. */
 DartFunction *dart_node_create_function(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
-                    DartCallFn on_call, void *user, const DartFunctionOpts *opts);
+                    DartRequestFn on_request, void *user, const DartFunctionOpts *opts);
 DartFunction *dart_node_open_function(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     const DartFunctionOpts *opts);
 
-/* Call the function. on_reply (NULL = fire-and-forget: use a signal instead if you truly do
- * not care) fires once with the outcome. Returns DART_OK, or a negative DartResult. */
-int  dart_function_call(DartFunction *fn, DartBytes req, DartReplyFn on_reply, void *user);
-/* Synchronous call: blocks driving the node loop until a reply arrives or timeout_ms elapses
- * (negative = the function's default timeout). *out is filled; out->data views a manager-owned
- * buffer valid until the next sync call on this function. Returns 1 (replied, read out->status:
- * OK, APP_ERROR, NO_HANDLER, or PEER_LOST), 0 (timed out, out->status = DART_CALL_TIMEOUT
- * whether the local wait or the pending deadline expired first), or a negative DartResult.
- * Refused (DART_ERR_STATE) from inside a callback or while a service thread owns the loop. */
-int  dart_function_call_sync(DartFunction *fn, DartBytes req, DartCallReply *out, int timeout_ms);
+/* Call the function. on_response (NULL = fire-and-forget: use a signal instead if you truly
+ * do not care) fires once with the outcome. Returns DART_OK, or a negative DartResult. */
+int  dart_function_call(DartFunction *fn, DartBytes req, DartResponseFn on_response, void *user);
+/* Synchronous call: blocks driving the node loop until a response arrives or timeout_ms
+ * elapses (negative = the function's default timeout). *out is filled; out->data views a
+ * manager-owned buffer valid until the next sync call on this function. Returns 1 (answered,
+ * read out->status: OK, APP_ERROR, NO_HANDLER, or PEER_LOST), 0 (timed out, out->status =
+ * DART_CALL_TIMEOUT whether the local wait or the pending deadline expired first), or a
+ * negative DartResult. Refused (DART_ERR_STATE) from inside a callback or while a service
+ * thread owns the loop. */
+int  dart_function_call_sync(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms);
 /* Providers currently matched (caller side) / callers matched (provider side). */
 int  dart_function_match_count(DartFunction *fn);
 
-/* ---- in the provider's handler (DartCallFn) ---------------------------------------- */
-DartBytes dart_call_request(const DartCall *call);   /* the request payload (view) */
-uint32_t  dart_call_caller (const DartCall *call);   /* the caller's peer id */
-void      dart_call_reply(DartCall *call, DartBytes rsp);   /* answer OK */
-void      dart_call_fail (DartCall *call, DartBytes rsp);   /* answer APP_ERROR */
+/* ---- in the provider's handler (DartRequestFn) -------------------------------------- */
+void      dart_request_reply(DartRequest *request, DartBytes rsp);   /* answer OK */
+void      dart_request_fail (DartRequest *request, DartBytes rsp);   /* answer APP_ERROR */
 /* Defer the reply: returns a token (0 on failure), suppresses the auto-ack, and lets the
  * handler return now. Complete it later (from any thread) with dart_function_complete. */
-uint64_t  dart_call_defer(DartCall *call);
+uint64_t  dart_request_defer(DartRequest *request);
 int       dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus status, DartBytes rsp);
 
 /* ---- VARIABLES ---------------------------------------------------------------------- */
@@ -10302,6 +10317,7 @@ int dart_node_close(DartNode *n, int send_bye){
  * under a held lock (reentrant, no wait, per the from-a-callback send rules): replies built
  * inside a delivery callback, and the owner's force/unforce republish from the shadow. */
 #include <string.h>
+#include <stddef.h>            /* offsetof */
 
 /* ---- per-node manager: fans the node-wide event + tick out to every entity -------------- */
 typedef struct i_DartPatterns {
@@ -10338,15 +10354,15 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
  * open never silently times out. queued_req != NULL = not yet on the wire. */
 typedef struct i_DartPending {
     struct i_DartPending *next;
-    uint32_t     call_id;
-    uint64_t     deadline_us;
-    DartReplyFn  on_reply;
-    void        *user;
-    uint8_t     *queued_req;
-    uint32_t     queued_len;
+    uint32_t        call_id;
+    uint64_t        deadline_us;
+    DartResponseFn  on_response;
+    void           *user;
+    uint8_t        *queued_req;
+    uint32_t        queued_len;
 } i_DartPending;
 
-/* a deferred provider reply (dart_call_defer -> token -> dart_function_complete) */
+/* a deferred provider reply (dart_request_defer -> token -> dart_function_complete) */
 typedef struct i_DartDefer {
     DartFunction *fn;
     uint32_t      caller;
@@ -10359,7 +10375,7 @@ struct DartFunction {
     struct DartFunction *next;      /* manager list */
     DartTopic      *req;            /* provider: SUB_ONLY; caller: PUB_ONLY (kind FUNC_REQ) */
     DartTopic      *rsp;            /* provider: PUB_ONLY; caller: SUB_ONLY (kind FUNC_RSP, directed) */
-    DartCallFn      on_call; void *on_call_user;   /* provider */
+    DartRequestFn   on_request; void *on_request_user;   /* provider */
     uint32_t        next_call_id;   /* caller counter */
     uint32_t        timeout_us;
     i_DartPending  *pending;        /* caller: outstanding calls */
@@ -10367,14 +10383,17 @@ struct DartFunction {
     uint8_t         is_provider;
 };
 
-/* the transient call handed to the provider's handler */
-struct DartCall {
+/* the transient request handed to the provider's handler: the public read-only head
+ * (core.h DartRequest) first, the reply machinery behind it. The reply entry points
+ * downcast the handler's DartRequest* back to this, so it must be the first member. */
+typedef struct {
+    DartRequest   pub;
     DartFunction *fn;
-    uint32_t      caller;
     uint32_t      call_id;
-    DartBytes     request;
     uint8_t       replied;   /* a reply/fail/defer already happened: suppress the auto-ack */
-};
+} i_DartRequest;
+/* the downcast requires pub at offset 0 (C99: no _Static_assert) */
+typedef char i_dart_request_pub_first[(offsetof(i_DartRequest, pub) == 0) ? 1 : -1];
 
 /* send a response directly to one caller: [call_id][status] header, rsp payload. Runs from
  * a delivery callback or a held-lock context: the send commits reentrantly (no wait). */
@@ -10385,18 +10404,28 @@ static void i_dart_func_send_reply(DartFunction *fn, uint32_t caller, uint32_t c
     (void)i_dart_topic_send_to(fn->rsp, caller, dart_bytes(hdr, DART__FN_PREFIX), rsp);
 }
 
-/* provider: a request arrived on the req channel */
+/* provider: a request arrived on the req channel. The public head carries what the DartMsg
+ * does, in function vocabulary (the topic name minus its "@req" suffix, publisher = caller). */
 static void i_dart_func_on_request(void *user, const DartMsg *msg){
     DartFunction *fn = (DartFunction*)user;
-    DartCall call;
+    i_DartRequest r;
     if (msg->header.len < DART__FN_PREFIX) return;   /* malformed prefix */
-    call.fn = fn; call.caller = msg->publisher_id;
-    call.call_id = i_dart_le_r32(msg->header.data);
-    call.request = msg->data; call.replied = 0;
-    if (fn->on_call) fn->on_call(&call, fn->on_call_user);
-    else i_dart_func_send_reply(fn, call.caller, call.call_id, DART_CALL_NO_HANDLER, dart_bytes(NULL,0));
-    if (!call.replied)   /* handler returned without replying/deferring: auto-ack OK, empty */
-        i_dart_func_send_reply(fn, call.caller, call.call_id, DART_CALL_OK, dart_bytes(NULL,0));
+    r.pub.node          = msg->node;
+    r.pub.function_name = dart_string(msg->topic_name.data,
+                              msg->topic_name.len > 4u ? msg->topic_name.len - 4u : 0);
+    r.pub.data          = msg->data;
+    r.pub.schema        = msg->schema;
+    r.pub.caller        = msg->publisher_id;
+    r.pub.caller_name   = msg->publisher_name;
+    r.pub.recv_us       = msg->recv_us;
+    r.fn = fn; r.call_id = i_dart_le_r32(msg->header.data); r.replied = 0;
+    if (fn->on_request) fn->on_request(&r.pub, fn->on_request_user);
+    else {   /* no handler: NO_HANDLER is the answer, not the auto-ack too */
+        i_dart_func_send_reply(fn, r.pub.caller, r.call_id, DART_CALL_NO_HANDLER, dart_bytes(NULL,0));
+        r.replied = 1;
+    }
+    if (!r.replied)   /* handler returned without replying/deferring: auto-ack OK, empty */
+        i_dart_func_send_reply(fn, r.pub.caller, r.call_id, DART_CALL_OK, dart_bytes(NULL,0));
 }
 
 /* caller: unlink the pending entry for call_id (dedup: a second provider's reply finds none) */
@@ -10432,31 +10461,32 @@ static void i_dart_func_flush_queued(DartFunction *fn){
     }
 }
 
-/* caller: a reply arrived on the rsp channel */
-static void i_dart_func_on_reply(void *user, const DartMsg *msg){
+/* caller: a response arrived on the rsp channel */
+static void i_dart_func_on_response(void *user, const DartMsg *msg){
     DartFunction *fn = (DartFunction*)user;
     i_DartPending *p;
-    DartCallReply r;
+    DartResponse r;
     if (msg->header.len < DART__FN_PREFIX) return;
     p = i_dart_func_take_pending(fn, i_dart_le_r32(msg->header.data));
     if (!p) return;                          /* unknown/duplicate call_id: dropped */
     r.status = (DartCallStatus)msg->header.data[4];
-    r.data = msg->data; r.provider = msg->publisher_id; r.user = p->user;
-    if (p->on_reply) p->on_reply(&r);
+    r.data = msg->data; r.schema = msg->schema;
+    r.provider = msg->publisher_id; r.user = p->user;
+    if (p->on_response) p->on_response(&r);
     i_dart_func_free_pending(fn, p);
 }
 
 /* create both channels for a function; roles per side (provider owns the impl) */
 static DartFunction *i_dart_function_new(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
-                    DartCallFn on_call, void *user, const DartFunctionOpts *opts, int provider){
+                    DartRequestFn on_request, void *user, const DartFunctionOpts *opts, int provider){
     i_DartPatterns *pm; DartFunction *fn;
     char rn[DART_TOPIC_NAME_MAX + 1]; size_t nl;
     DartTopicOpts topt; int acquired;
     DartRole req_role = provider ? DART_SUB_ONLY : DART_PUB_ONLY;
     DartRole rsp_role = provider ? DART_PUB_ONLY : DART_SUB_ONLY;
     i_DartSysMsgFn req_cb = provider ? i_dart_func_on_request : NULL;
-    i_DartSysMsgFn rsp_cb = provider ? NULL : i_dart_func_on_reply;
+    i_DartSysMsgFn rsp_cb = provider ? NULL : i_dart_func_on_response;
     if (!n || !name) return NULL;
     nl = strlen(name);
     if (nl == 0 || nl + 4 > DART_TOPIC_NAME_MAX) return NULL;   /* room for the "@req"/"@rsp" suffix */
@@ -10475,7 +10505,7 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     if (fn){
         memset(fn, 0, sizeof *fn);
         fn->n = n; fn->pm = pm; fn->is_provider = (uint8_t)provider;
-        fn->on_call = on_call; fn->on_call_user = user;
+        fn->on_request = on_request; fn->on_request_user = user;
         fn->timeout_us = (opts && opts->timeout_us) ? opts->timeout_us : DART_CALL_TIMEOUT_US;
         fn->next_call_id = 1;
     }
@@ -10506,8 +10536,8 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 
 DartFunction *dart_node_create_function(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
-                    DartCallFn on_call, void *user, const DartFunctionOpts *opts){
-    return i_dart_function_new(n, name, req_schema, rsp_schema, on_call, user, opts, 1);
+                    DartRequestFn on_request, void *user, const DartFunctionOpts *opts){
+    return i_dart_function_new(n, name, req_schema, rsp_schema, on_request, user, opts, 1);
 }
 DartFunction *dart_node_open_function(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
@@ -10517,8 +10547,8 @@ DartFunction *dart_node_open_function(DartNode *n, const char *name,
 
 /* Link the pending entry under the lock, then send OUTSIDE it so the request engages the
  * normal flow-control wait (req is the caller's buffer, stable across the wait). The entry
- * must be linked before the send: a reply can arrive the moment the datagram is out. */
-static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartReplyFn on_reply,
+ * must be linked before the send: a response can arrive the moment the datagram is out. */
+static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponseFn on_response,
                                    void *user, uint32_t *id_out){
     uint8_t hdr[DART__FN_PREFIX]; i_DartPending *p; int acquired, r; uint32_t id;
     if (!fn || !fn->req || !fn->rsp) return DART_ERR_NO_TOPIC;
@@ -10528,7 +10558,7 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartReplyFn 
     id = fn->next_call_id++;
     p->call_id = id;
     p->deadline_us = i_dart_node_now_us(fn->n) + fn->timeout_us;
-    p->on_reply = on_reply; p->user = user;
+    p->on_response = on_response; p->user = user;
     p->queued_req = NULL; p->queued_len = 0;
     p->next = fn->pending; fn->pending = p;
     if (dart_topic_match_count(fn->req) == 0){
@@ -10562,16 +10592,18 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartReplyFn 
     return DART_OK;
 }
 
-int dart_function_call(DartFunction *fn, DartBytes req, DartReplyFn on_reply, void *user){
-    return i_dart_function_call_id(fn, req, on_reply, user, NULL);
+int dart_function_call(DartFunction *fn, DartBytes req, DartResponseFn on_response, void *user){
+    return i_dart_function_call_id(fn, req, on_response, user, NULL);
 }
 
-/* sync-call reply capture: copy the payload into the function's scratch, mark done */
-typedef struct { DartFunction *fn; volatile int done; DartCallStatus status; uint32_t len; } i_DartSyncCtx;
-static void i_dart_func_sync_reply(const DartCallReply *r){
+/* sync-call response capture: copy the payload into the function's scratch, mark done.
+ * The schema pointer is safe to hold: an interned schema lives until node close. */
+typedef struct { DartFunction *fn; volatile int done; DartCallStatus status;
+                 const DartSchema *schema; uint32_t len; } i_DartSyncCtx;
+static void i_dart_func_sync_response(const DartResponse *r){
     i_DartSyncCtx *c = (i_DartSyncCtx*)r->user;
     DartFunction *fn = c->fn;
-    c->status = r->status; c->len = (uint32_t)r->data.len;
+    c->status = r->status; c->schema = r->schema; c->len = (uint32_t)r->data.len;
     if (r->data.len){
         if (fn->sync_cap < r->data.len){
             uint8_t *nb = (uint8_t*)i_dart_node_sys_alloc(fn->n, fn->sync_buf, r->data.len);
@@ -10583,7 +10615,7 @@ static void i_dart_func_sync_reply(const DartCallReply *r){
     c->done = 1;
 }
 
-int dart_function_call_sync(DartFunction *fn, DartBytes req, DartCallReply *out, int timeout_ms){
+int dart_function_call_sync(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms){
     i_DartSyncCtx ctx; int acquired, r; uint64_t deadline; uint32_t id;
     if (!fn) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_sys_lock(fn->n);
@@ -10592,8 +10624,8 @@ int dart_function_call_sync(DartFunction *fn, DartBytes req, DartCallReply *out,
         return DART_ERR_STATE;
     }
     i_dart_node_sys_unlock(fn->n, acquired);
-    ctx.fn = fn; ctx.done = 0; ctx.status = DART_CALL_TIMEOUT; ctx.len = 0;
-    r = i_dart_function_call_id(fn, req, i_dart_func_sync_reply, &ctx, &id);
+    ctx.fn = fn; ctx.done = 0; ctx.status = DART_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
+    r = i_dart_function_call_id(fn, req, i_dart_func_sync_response, &ctx, &id);
     if (r != DART_OK) return r;
     deadline = i_dart_node_now_us(fn->n)
              + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u : fn->timeout_us) + 20000u;
@@ -10603,9 +10635,9 @@ int dart_function_call_sync(DartFunction *fn, DartBytes req, DartCallReply *out,
     }
     if (!ctx.done){
         /* Local wait expired first: UNLINK the pending entry before this stack frame dies,
-           or the tick reap / a late real reply would fire i_dart_func_sync_reply into a
-           reclaimed frame. Under the lock a racing poller may have completed it meanwhile:
-           then ctx.done flipped and the reply stands. */
+           or the tick reap / a late real response would fire i_dart_func_sync_response into
+           a reclaimed frame. Under the lock a racing poller may have completed it meanwhile:
+           then ctx.done flipped and the response stands. */
         i_DartPending *p;
         acquired = i_dart_node_sys_lock(fn->n);
         if (!ctx.done && (p = i_dart_func_take_pending(fn, id)) != NULL)
@@ -10617,6 +10649,7 @@ int dart_function_call_sync(DartFunction *fn, DartBytes req, DartCallReply *out,
         out->status = ctx.done ? ctx.status : DART_CALL_TIMEOUT;
         out->data = dart_bytes(fn->sync_buf,
                                (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? ctx.len : 0);
+        out->schema = out->data.len ? ctx.schema : NULL;
     }
     /* 0 = timed out, whichever deadline (local or pending) expired first; 1 = a real outcome */
     return (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? 1 : 0;
@@ -10627,25 +10660,26 @@ int dart_function_match_count(DartFunction *fn){
     return dart_topic_match_count(fn->is_provider ? fn->rsp : fn->req);
 }
 
-/* ---- provider handler API --------------------------------------------------------------- */
-DartBytes dart_call_request(const DartCall *call){ return call ? call->request : dart_bytes(NULL,0); }
-uint32_t  dart_call_caller (const DartCall *call){ return call ? call->caller : 0; }
-
-static void i_dart_call_answer(DartCall *call, uint8_t status, DartBytes rsp){
-    if (!call || call->replied) return;
-    call->replied = 1;
-    i_dart_func_send_reply(call->fn, call->caller, call->call_id, status, rsp);
+/* ---- provider handler API ----------------------------------------------------------------
+ * The handler's DartRequest* is the pub head of an i_DartRequest (first member), so these
+ * recover the reply machinery by downcast. A copy of the public struct answers nothing. */
+static void i_dart_request_answer(DartRequest *request, uint8_t status, DartBytes rsp){
+    i_DartRequest *r = (i_DartRequest*)request;
+    if (!request || r->replied) return;
+    r->replied = 1;
+    i_dart_func_send_reply(r->fn, request->caller, r->call_id, status, rsp);
 }
-void dart_call_reply(DartCall *call, DartBytes rsp){ i_dart_call_answer(call, DART_CALL_OK, rsp); }
-void dart_call_fail (DartCall *call, DartBytes rsp){ i_dart_call_answer(call, DART_CALL_APP_ERROR, rsp); }
+void dart_request_reply(DartRequest *request, DartBytes rsp){ i_dart_request_answer(request, DART_CALL_OK, rsp); }
+void dart_request_fail (DartRequest *request, DartBytes rsp){ i_dart_request_answer(request, DART_CALL_APP_ERROR, rsp); }
 
-uint64_t dart_call_defer(DartCall *call){
+uint64_t dart_request_defer(DartRequest *request){
+    i_DartRequest *r = (i_DartRequest*)request;
     i_DartDefer *d;
-    if (!call || call->replied) return 0;
-    d = (i_DartDefer*)i_dart_node_sys_alloc(call->fn->n, NULL, sizeof *d);
+    if (!request || r->replied) return 0;
+    d = (i_DartDefer*)i_dart_node_sys_alloc(r->fn->n, NULL, sizeof *d);
     if (!d) return 0;
-    d->fn = call->fn; d->caller = call->caller; d->call_id = call->call_id;
-    call->replied = 1;   /* suppress the auto-ack; the reply comes via dart_function_complete */
+    d->fn = r->fn; d->caller = request->caller; d->call_id = r->call_id;
+    r->replied = 1;   /* suppress the auto-ack; the reply comes via dart_function_complete */
     return (uint64_t)(uintptr_t)d;
 }
 
@@ -10985,9 +11019,9 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
     while ((p = *pp) != NULL){
         if (all || now >= p->deadline_us){
             *pp = p->next;
-            {   DartCallReply r; r.status = fail_status; r.data = dart_bytes(NULL,0);
-                r.provider = 0; r.user = p->user;
-                if (p->on_reply) p->on_reply(&r);
+            {   DartResponse r; r.status = fail_status; r.data = dart_bytes(NULL,0);
+                r.schema = NULL; r.provider = 0; r.user = p->user;
+                if (p->on_response) p->on_response(&r);
             }
             i_dart_func_free_pending(fn, p);
             continue;

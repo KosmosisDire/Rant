@@ -2767,38 +2767,38 @@ static void queue_checks(void){
 static volatile int   pf_reply_done;
 static DartCallStatus pf_reply_status;
 static uint32_t       pf_reply_val;
-static void pf_on_reply(const DartCallReply *r){
+static void pf_on_reply(const DartResponse *r){
     pf_reply_status = r->status;
     pf_reply_val = r->data.len>=4 ? i_dart_le_r32(r->data.data) : 0;
     pf_reply_done = 1;
 }
 static int pf_calls;
-static void pf_add_handler(DartCall *call, void *user){
-    DartBytes q = dart_call_request(call); uint8_t out[4];
-    uint32_t v = q.len>=4 ? i_dart_le_r32(q.data) : 0;
+static void pf_add_handler(DartRequest *req, void *user){
+    uint8_t out[4];
+    uint32_t v = req->data.len>=4 ? i_dart_le_r32(req->data.data) : 0;
     (void)user; pf_calls++;
     i_dart_le_w32(out, v+1);
-    dart_call_reply(call, dart_bytes(out,4));
+    dart_request_reply(req, dart_bytes(out,4));
 }
-static void pf_empty_handler(DartCall *call, void *user){ (void)call;(void)user; pf_calls++; /* no reply -> auto OK */ }
+static void pf_empty_handler(DartRequest *req, void *user){ (void)req;(void)user; pf_calls++; /* no reply -> auto OK */ }
 /* second caller's reply capture (two-caller directed-isolation test) */
 static volatile int   pf_reply2_done;
 static DartCallStatus pf_reply2_status;
 static uint32_t       pf_reply2_val;
-static void pf_on_reply2(const DartCallReply *r){
+static void pf_on_reply2(const DartResponse *r){
     pf_reply2_status = r->status;
     pf_reply2_val = r->data.len>=4 ? i_dart_le_r32(r->data.data) : 0;
     pf_reply2_done = 1;
 }
 /* burst capture: counts completions, sums returned values, flags any non-OK */
 static volatile int pf_burst_done; static uint32_t pf_burst_sum; static int pf_burst_bad;
-static void pf_on_reply_burst(const DartCallReply *r){
+static void pf_on_reply_burst(const DartResponse *r){
     if (r->status == DART_CALL_OK && r->data.len>=4) pf_burst_sum += i_dart_le_r32(r->data.data);
     else pf_burst_bad++;
     pf_burst_done++;
 }
 static volatile uint64_t pf_defer_token;
-static void pf_defer_handler(DartCall *call, void *user){ (void)user; pf_calls++; pf_defer_token = dart_call_defer(call); }
+static void pf_defer_handler(DartRequest *req, void *user){ (void)user; pf_calls++; pf_defer_token = dart_request_defer(req); }
 static int pf_sig_count; static uint32_t pf_sig_last;
 static void pf_on_signal(const DartMsg *m, void *user){ (void)user; pf_sig_count++; pf_sig_last = m->data.len>=4 ? i_dart_le_r32(m->data.data) : 0; }
 
@@ -2874,7 +2874,7 @@ static void patterns_checks(void){
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==99,
                "patterns: deferred completion delivers 99 (done=%d val=%u)", pf_reply_done, pf_reply_val); }
 
-    /* no-handler: provider has NULL on_call -> NO_HANDLER */
+    /* no-handler: provider has NULL on_request -> NO_HANDLER */
     { pf_reply_done=0;
       dart_function_call(cnh, dart_bytes(NULL,0), pf_on_reply, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
@@ -2959,7 +2959,7 @@ static void patterns_checks(void){
     /* sync call that times out locally, then the deferred reply lands LATE: the pending
        entry must have been unlinked (no write into the dead stack frame) and the late
        reply dropped; a subsequent sync call still works. */
-    { DartCallReply rep; int rc;
+    { DartResponse rep; int rc;
       dart_node_start(P);
       pf_defer_token=0;
       rc = dart_function_call_sync(cd, dart_bytes(NULL,0), &rep, 120);
@@ -3059,7 +3059,7 @@ static void patterns_checks(void){
 #ifdef DART_THREADS
     /* sync call: the provider answers from its own service thread while the caller's
        sync loop drives its node */
-    { DartCallReply rep; int rc; uint8_t req[4]; i_dart_le_w32(req,7);
+    { DartResponse rep; int rc; uint8_t req[4]; i_dart_le_w32(req,7);
       dart_node_start(P);
       rc = dart_function_call_sync(call_add, dart_bytes(req,4), &rep, 1000);
       ST_CHECK(rc==1 && rep.status==DART_CALL_OK && rep.data.len>=4 && i_dart_le_r32(rep.data.data)==8,
