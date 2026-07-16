@@ -41,6 +41,10 @@ typedef struct {
     uint16_t              max_peers;         /* peer-table capacity; 16 */
 } DartNodeDiscovery;
 
+#ifndef DART_MATCH_WAIT_MS
+#define DART_MATCH_WAIT_MS 1000   /* default send-path match-wait bound (opts.match_wait_ms = 0) */
+#endif
+
 /* Optional node config, passed to dart_node_open as a compound literal (every field is
  * zero-means-default, so &(DartNodeOpts){0} or NULL is "all defaults"):
  *   dart_node_open(mem, "robot1", on_message, on_event, &(DartNodeOpts){ .domain = 7 });
@@ -58,6 +62,16 @@ typedef struct {
                                             dart_node_peer_topic_* queries. For observer/debugger
                                             UIs (the explorer, the bridge); costs memory in
                                             proportion to the peers' topic counts. */
+    int32_t               match_wait_ms; /* the send-path MATCH WAIT bound (see dart_topic_ready):
+                                            a send that would reach ZERO subscribers while a match
+                                            is still resolving (the announce/detail round trip
+                                            after create_topic, or discovery still gathering after
+                                            open) blocks up to this long for it to form, instead
+                                            of silently dropping the first message. 0 = default
+                                            (DART_MATCH_WAIT_MS, 1000); negative = disabled: such
+                                            a send commits immediately (dropped as before, but
+                                            loudly: DART_E_UNMATCHED_SEND). GUIs disable it and
+                                            poll dart_topic_ready instead. */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;
@@ -316,17 +330,45 @@ int      dart_topic_subscriber_progress(DartTopic *topic, uint32_t peer,
 int      dart_topic_drain(DartTopic *topic, int timeout_ms);
 /* Subscribers matched on this topic now; a one-shot publisher polls it before sending. */
 int      dart_topic_match_count(DartTopic *topic);
+
+/* ---- the send-path MATCH WAIT (first send vs the forming match) ---------------------
+ * Matching a fresh topic to an already-present peer costs one announce/detail round trip
+ * after create_topic, so a send inside that window would commit to ZERO subscribers and
+ * be dropped: invisible on a stream, fatal for one-shot / last-value semantics. The node
+ * closes that window itself: discovery solicits at open (existing peers answer within an
+ * RTT), create_topic kicks the detail cycle, and a send that would reach zero subscribers
+ * WHILE a candidate match is still resolving (a peer's announce nominates this topic but
+ * its verdicts are in flight, or the post-open gather has not settled) blocks -- bounded
+ * by opts.match_wait_ms -- until the match forms or matching converges. A topic nobody
+ * advertises interest in proceeds immediately (fire-and-forget is the contract), so only
+ * a genuine race ever waits, once, for about a round trip; steady-state sends are
+ * untouched (the converged state is memoized until the topology changes). On timeout the
+ * send proceeds and DART_E_UNMATCHED_SEND fires, never silent. Reentrant sends (from a
+ * callback) cannot wait, as ever. */
+/* Unresolved candidate matches for this topic right now: peers whose announces nominate
+ * it but whose name/schema verdicts are still in flight (or whose blob is still being
+ * fetched). 0 = matching has converged for everyone currently known, so
+ * dart_topic_match_count is the final answer until the topology changes. */
+int      dart_topic_pending_count(DartTopic *topic);
+/* 1 when a send on this topic would not wait: it has a matched subscriber, or matching
+ * has converged (post-open gather settled + no unresolved candidates) so there is nobody
+ * to wait for. The async form of the match wait: a GUI that must not block disables the
+ * wait (opts.match_wait_ms < 0), parks the payload while this is 0, and flushes when it
+ * flips to 1 (poll it per frame, or on DART_PEER_INTEREST events). */
+int      dart_topic_ready(DartTopic *topic);
+
 /* Block until discovery + matching SETTLE. Solicits (like dart_discovery_gather: existing
  * peers answer immediately), then waits until every active peer has answered and the
  * peer/match topology has been quiet for a beat, so a populated network settles in a few
  * hundred ms; only a (seemingly) empty one waits a full announce interval to rule out a
- * slow peer. The startup idiom for "everything I now send reaches everyone who was
- * already out there": open, create topics, settle, publish. Call it AFTER creating your
- * topics: matching is per topic, so settling before they exist guarantees nothing (which
- * is also why open does not auto-settle). Sends themselves never block or queue on
- * matching; a topic with no subscriber stays fire-and-forget. Waits by sleeping on a
- * running service thread's progress, else by driving the poll loop. timeout_ms < 0 =
- * 3 announce intervals. Returns 1 settled, 0 on timeout (or from a callback). */
+ * slow peer. The explicit form of the startup guarantee ("everything I now send reaches
+ * everyone who was already out there"): open, create topics, settle, publish. Call it
+ * AFTER creating your topics: matching is per topic, so settling before they exist
+ * guarantees nothing (which is also why open does not auto-settle). Most apps never need
+ * it: the per-send match wait above gives the same guarantee lazily and more precisely.
+ * Waits by sleeping on a running service thread's progress, else by driving the poll
+ * loop. timeout_ms < 0 = 3 announce intervals. Returns 1 settled, 0 on timeout (or from
+ * a callback). */
 int      dart_node_settle(DartNode *n, int timeout_ms);
 #ifdef DART_SHM
 /* Messages published / delivered via the zero-fragment shared-memory path since open

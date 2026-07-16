@@ -116,7 +116,7 @@ enum class ErrorKind {
     None = 0,
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
     MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
-    PeerRefused, EvictedUnsent,
+    PeerRefused, EvictedUnsent, UnmatchedSend,
     Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
 };
 
@@ -219,6 +219,12 @@ struct NodeOptions {
     bool                     fetch_details        = false; /* greedily fetch every peer topic's
                                                               name + schema (observer UIs): fills
                                                               Peer::topics names via the cache */
+    int32_t                  match_wait_ms        = 0;   /* send-path match wait: a send that would
+                                                            reach ZERO subscribers while a match is
+                                                            still resolving blocks up to this long
+                                                            for it to form. 0 = default (1s);
+                                                            negative = disabled (drop loudly:
+                                                            ErrorKind::UnmatchedSend). */
     /* networking (all optional) */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
@@ -788,6 +794,7 @@ public:
         co.max_topics  = o.max_topics;
         co.disable_shm   = o.disable_shm ? 1 : 0;
         co.fetch_details = o.fetch_details ? 1 : 0;
+        co.match_wait_ms = o.match_wait_ms;
         co.user_data    = impl.get();
         co.net.data_port           = o.data_port;
         co.net.discovery_group     = impl->disc_group.empty() ? nullptr : impl->disc_group.c_str();

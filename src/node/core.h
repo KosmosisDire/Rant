@@ -66,6 +66,10 @@ typedef enum {
     DART_E_EVICTED_UNSENT,   /* a send overwrote history never handed to the wire for some matched subscriber,
                                 after the bounded wait (.topic, .lost_first = evicted base seqno,
                                 .lost_count = fragment count): the send burst outran the TX drain. */
+    DART_E_UNMATCHED_SEND,   /* a send committed with ZERO matched subscribers while a candidate match was
+                                still resolving (.topic, .topic_name): the match wait timed out (or was
+                                disabled / the send came from a callback), so the message likely missed a
+                                subscriber that was already on the network. See dart_topic_ready. */
     /* ---- low-level IO / setup (mostly at dart_node_open; .os_error carries errno) ---- */
     DART_E_OOM,              /* allocator returned NULL / static buffer too small (.too_big_bytes = bytes needed) */
     DART_E_PLATFORM,         /* platform net init failed (WSAStartup) */
@@ -236,6 +240,12 @@ int    i_dart_node_core_detail_any(i_DartNodeCore *c);
 void   i_dart_node_core_detail_rearm(i_DartNodeCore *c);
 size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
                                         void *out, size_t cap, i_DartNodeDest *to);
+/* Unresolved candidate matches for one topic across every ACTIVE peer: peers whose
+ * announce nominates this topic but whose detail verdicts are still in flight, plus a
+ * peer admitted before its blob arrived (its interest is unknown, so it may nominate).
+ * 0 = matching has converged for everyone currently known. The runtime's send-path
+ * match wait and dart_topic_pending_count read; cold-path only (walks peers). */
+int    i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index);
 
 /* The greedy detail cache (cfg.fetch_details): a peer topic's fetched name + parsed
  * schema by (peer id, index). name is a view of the cache's copy ({NULL,0} = not

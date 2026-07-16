@@ -478,6 +478,15 @@ uint16_t  dart_transport_detail_wants(DartTransportState *st, const DartMetaSche
 uint16_t  dart_transport_apply_peer_details(DartTransportState *st, uint32_t peer_id,
                        DartBytes resp);
 
+/* Unresolved candidates for ONE topic in a peer's advertised interest: entries whose
+ * 32-bit hash nominates this topic and whose role could pair with ours, but whose detail
+ * verdict has not arrived yet. >0 = a match with this peer may still form with no further
+ * action here (the detail request/response cycle is in flight); 0 = every entry this peer
+ * advertises is decided for this topic. The topic-scoped slice of detail_wants; feeds the
+ * node's send-path match wait and dart_topic_pending_count. */
+uint16_t  dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_index,
+                       uint32_t peer_id, DartBytes interest);
+
 /* Change a topic's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
 int       dart_transport_set_role(DartTransportState *st, uint16_t topic_index, uint8_t role);

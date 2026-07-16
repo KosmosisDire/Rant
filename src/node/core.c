@@ -99,6 +99,9 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
         p=i_dart_event_append_str(p,end," seqno "); p=i_dart_event_append_u64(p,end,ev->lost_first);
         p=i_dart_event_append_str(p,end,".."); p=i_dart_event_append_u64(p,end,ev->lost_first + ev->lost_count - 1);
         p=i_dart_event_append_str(p,end,": send burst outran the TX drain"); break;
+    case DART_E_UNMATCHED_SEND:
+        p=i_dart_event_append_str(p,end,"unmatched-send "); p=i_dart_event_append_topic(p,end,ev);
+        p=i_dart_event_append_str(p,end,": committed with no subscriber while a match was still resolving (likely missed an already-present subscriber)"); break;
     case DART_E_OOM:
         p=i_dart_event_append_str(p,end,"out-of-memory");
         if (ev->too_big_bytes){ p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
@@ -841,6 +844,29 @@ void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
 }
 
 int i_dart_node_core_detail_any(i_DartNodeCore *c){ return c ? c->detail_due_any : 0; }
+
+/* Unresolved candidates for one topic across active peers (see core.h). A peer counts
+ * once when its blob has not arrived yet (interest unknown = possibly nominating), else
+ * by its unresolved entries for this topic. Dropped peers are skipped: they are not
+ * expected to answer, and waiting on one would only ever time out. */
+int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
+    uint16_t s, n; int cnt = 0;
+    if (!c || !c->discovery) return 0;
+    n = dart_discovery_max_peers(c->discovery);
+    for (s=0;s<n;s++){
+        DartDiscoveryPeer v; i_DartNodePeerExtra *ex;
+        DartBytes interest;
+        if (!dart_discovery_peer_at(c->discovery, s, &v)) continue;
+        if (v.liveness != DART_PEER_ACTIVE) continue;
+        ex = (i_DartNodePeerExtra*)v.user;
+        if (!ex || !ex->added) continue;
+        if (!v.meta.data){ cnt++; continue; }   /* announce heard, blob still being fetched */
+        interest = dart_meta_interest(v.meta);
+        if (!interest.data) continue;           /* a blob with no interest: nothing to resolve */
+        cnt += dart_transport_topic_unresolved(c->transport, topic_index, v.id, interest);
+    }
+    return cnt;
+}
 
 /* Drain one queued DETAIL_REQ: find the next detail_due peer, recompute its pending
    wants, and build the request + destination for the runtime to send. Returns bytes

@@ -1131,6 +1131,43 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
     return cnt;
 }
 
+/* Unresolved candidates for one topic in a peer's interest (see core.h). Same entry walk
+ * as detail_wants, filtered to entries that nominate THIS topic by 32-bit hash. Entries
+ * with no verdict storage (fixed-mode table overflow, already surfaced as
+ * INTEREST_OVERFLOW) are NOT counted: they can never resolve, so a wait on them would
+ * only ever time out. */
+uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_index,
+                                         uint32_t peer_id, DartBytes interest){
+    const uint8_t *d=interest.data;
+    i_DartTopic *topic;
+    uint16_t n, cnt=0; uint32_t a; int slot;
+    uint8_t *astate; uint32_t alen;
+    int ours_pub, ours_sub;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic || topic->name_len==0 || !d || interest.len < 2) return 0;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return 0;
+    n = i_dart_le_r16(d);
+    if (interest.len < 2u + 5u*(uint32_t)n) return 0;
+    ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
+    ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+    if (!ours_pub && !ours_sub) return 0;
+    astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
+    for (a=0;a<n;a++){
+        const uint8_t *e = d + 2u + 5u*a;
+        uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
+        int their_pub, their_sub;
+        if (role == DART_INACTIVE) continue;
+        if (i_dart_le_r32(e) != (uint32_t)topic->identity) continue;   /* not this topic */
+        if (!astate || a >= alen) continue;                     /* unresolvable: never counted */
+        if (astate[a] & DART__AST_DETAILED) continue;           /* decided (matched or refused) */
+        their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
+        their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        if ((their_pub && ours_sub) || (their_sub && ours_pub)) cnt++;
+    }
+    return cnt;
+}
+
 /* Ingest a DETAIL_RESP: verify each entry (full identity from the name; the schema gate
  * per direction) and cache the verdict. Returns newly decided indices; the caller then
  * re-applies the peer's interest so the verdicts form their matches. Idempotent: decided

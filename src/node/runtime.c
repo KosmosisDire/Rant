@@ -52,6 +52,10 @@ struct DartTopic {   /* schema: node-owned copy */
     i_DartSysMsgFn sys_on_message;      /* patterns layer: routes this topic's deliveries here
                                            instead of the app on_message (NULL = normal topic) */
     void    *sys_msg_user;
+    uint32_t resolve_epoch;             /* match-wait memo: node->match_epoch at which this topic
+                                           last computed "converged, nothing unresolved", so a
+                                           steady-state zero-subscriber send never re-walks the
+                                           peers (0 = never computed; the epoch starts at 1) */
     uint8_t  prefix_bytes;              /* pattern-header bytes split off the front of each
                                            delivered payload into DartMsg.header (0 = plain topic) */
     uint8_t  kind;                      /* DartTopicKind, mirrored from the def (reflection) */
@@ -121,6 +125,14 @@ struct DartNode {
     void            *sys_user;
     uint64_t         sys_tick_next;   /* the tick's returned next deadline, folded into the poll wait */
     uint64_t         settle_topology_us; /* last PEER_UP/DOWN/INTEREST change (dart_node_settle) */
+    /* the send-path match wait (runtime.h "MATCH WAIT"): bound, the post-open gather latch
+       (anchored at open_us; discovery solicits on startup so existing peers answer within an
+       RTT), and the epoch that invalidates each topic's converged memo whenever the peer/
+       interest topology (or our own topic set) changes. */
+    uint32_t         match_wait_us;   /* 0 = disabled (opts.match_wait_ms < 0) */
+    uint64_t         open_us;         /* when the node opened (the gather predicate's anchor) */
+    uint8_t          gather_done;     /* latched once the post-open gather settles */
+    uint32_t         match_epoch;     /* bumped on peer/interest change + create/set_role */
     void            *patterns;        /* the patterns layer's per-node manager (lazily created); the
                                          node treats it opaquely and its memory rides the pool reset */
     DartEvent     last_error;  /* most recent DART_ERROR (dart_last_error(n)); DART_E_NONE until one fires */
@@ -241,8 +253,10 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
         e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
     }
     if (e->kind == DART_ERROR) n->last_error = *e;
-    if (e->kind == DART_PEER_UP || e->kind == DART_PEER_DOWN || e->kind == DART_PEER_INTEREST)
+    if (e->kind == DART_PEER_UP || e->kind == DART_PEER_DOWN || e->kind == DART_PEER_INTEREST){
         n->settle_topology_us = i_dart_plat_now_us();   /* dart_node_settle's quiet-window clock */
+        n->match_epoch++;                               /* invalidate the topics' converged memos */
+    }
     if (n->sys_on_event) n->sys_on_event(n->sys_user, e);   /* patterns layer observes peer up/down, etc. */
     if (n->on_event) n->on_event(e);
 }
@@ -776,6 +790,10 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->net = o.net;
     n->announce_us = o.discovery.announce_interval_us ? o.discovery.announce_interval_us
                                                       : 1000000u;   /* discovery's default */
+    n->match_wait_us = o.match_wait_ms < 0 ? 0u
+                     : o.match_wait_ms ? (uint32_t)o.match_wait_ms * 1000u
+                                       : (uint32_t)DART_MATCH_WAIT_MS * 1000u;
+    n->match_epoch = 1;   /* topics memo at 0 = never computed, so a first send always checks */
     n->user_on_message = on_message;   /* on_event + user_data were set early (open-time error reporting) */
     n->arena = arena;
     n->handles = (DartTopic**)blocks.handles;
@@ -870,6 +888,10 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
     i_dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
 
+    /* the post-open gather anchor: discovery solicits on startup, so every peer already
+       out there answers within an RTT of the first poll; the send-path match wait treats
+       "settled since open" as the proof that the announce cache covers them */
+    n->open_us = i_dart_plat_now_us();
     return n;
 
 fail_sock:
@@ -1027,7 +1049,9 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
     n->n_created++;
-    i_dart_node_kick(n);                       /* announce the new topic now */
+    n->match_epoch++;   /* a new topic may raise fresh candidates: converged memos are stale */
+    i_dart_node_kick(n);                       /* announce the new topic now; the replay above
+                                                  queued any DETAIL_REQs, so the pass sends them */
     i_dart_node_unlock(n, acquired);
     return h;
 }
@@ -1123,6 +1147,8 @@ static int i_dart_node_wait_ms(DartNode *n, int timeout_ms){
     } else timeout_ms = 0;                 /* something is due right now */
     return timeout_ms;
 }
+
+static int i_dart_node_gather_done(DartNode *n, uint64_t now);   /* defined with the match wait below */
 
 /* One poll tick with the node lock held: deferred grow + discovery tick, the blocking
  * wait, then RX drain + TX flush. The ONE poll body: dart_node_poll, the service loop,
@@ -1235,6 +1261,11 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
             now=i_dart_plat_now_us();
         }
 
+    /* latch the post-open gather the moment it settles (cheap peer walk, only until it
+       latches): a later create's own replay events then cannot reset the quiet clock and
+       make that topic's first send re-wait a window the network already earned. */
+    if (!n->gather_done) (void)i_dart_node_gather_done(n, now);
+
     /* patterns layer per-poll tick (call timeouts, retry sweeps): runs under the node lock
        like a callback, returns its next deadline for the wait cap. */
     if (n->sys_tick) n->sys_tick_next = n->sys_tick(n->sys_user, i_dart_plat_now_us());
@@ -1262,10 +1293,79 @@ int dart_node_poll(DartNode *n, int timeout_ms){
     return 0;
 }
 
-/* publish on a topic index: flow-control wait (condvar under a service thread, the
- * nested pump otherwise), then SHM fast path, then UDP. may_wait=0 is a reentrant send
- * (from a callback): it can never block or run the loop, so it commits KEEP_LAST-style
- * and only the unsent guard below applies. */
+/* ---- the send-path MATCH WAIT (runtime.h "MATCH WAIT") ------------------------------- */
+
+static int i_dart_node_settled(DartNode *n, uint64_t start, uint64_t now);   /* defined with settle below */
+
+/* Has the post-open discovery gather completed? The settle predicate anchored at open
+ * (discovery solicits on startup, so every already-present peer answers within an RTT of
+ * the first poll); LATCHED once true, so it is derived at most a handful of times. */
+static int i_dart_node_gather_done(DartNode *n, uint64_t now){
+    if (n->gather_done) return 1;
+    if (!i_dart_node_settled(n, n->open_us, now)) return 0;
+    n->gather_done = 1;
+    return 1;
+}
+
+/* Would a send on this topic RIGHT NOW race a still-forming match? 1 while the post-open
+ * gather is unsettled or some candidate's verdicts are in flight; 0 once converged, then
+ * MEMOIZED against the topology epoch, so the steady-state zero-subscriber send pays one
+ * integer compare here, never the peer walk. Node lock held. */
+static int i_dart_node_topic_unsettled(DartNode *n, DartTopic *h, uint64_t now){
+    if (h->resolve_epoch == n->match_epoch) return 0;   /* converged at this topology */
+    if (!i_dart_node_gather_done(n, now)) return 1;
+    if (i_dart_node_core_topic_unresolved(n->core, h->index) > 0) return 1;
+    h->resolve_epoch = n->match_epoch;
+    return 0;
+}
+
+/* Bounded wait for a forming match before a would-be-zero-subscriber send commits: sleep
+ * on the poller's progress under a service thread, else pump the loop (both re-check the
+ * clock on a short cadence: gather settling is partly time-driven, like settle). Returns
+ * the matched count after the wait; a timeout fires DART_E_UNMATCHED_SEND, never silent. */
+static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *h){
+    uint64_t now = i_dart_plat_now_us();
+    uint64_t deadline = now + n->match_wait_us;
+    int matched = 0, timed_out = 0;
+#ifdef DART_THREADS
+    if (n->svc_running){
+        n->cv_waiters++;
+        for (;;){
+            matched = dart_transport_publisher_match_count(n->transport, topic_index);
+            if (matched) break;
+            now = i_dart_plat_now_us();
+            if (!i_dart_node_topic_unsettled(n, h, now)) break;
+            if (now >= deadline){ timed_out = 1; break; }
+            {   uint64_t left = deadline - now;
+                i_dart_node_cv_wait(n, left < 50000u ? left : 50000u);   /* mu drops: nothing cached survives */
+            }
+            if (!n->svc_running) break;   /* stopped under us */
+        }
+        n->cv_waiters--;
+    } else
+#endif
+    for (;;){
+        matched = dart_transport_publisher_match_count(n->transport, topic_index);
+        if (matched) break;
+        now = i_dart_plat_now_us();
+        if (!i_dart_node_topic_unsettled(n, h, now)) break;
+        if (now >= deadline){ timed_out = 1; break; }
+        i_dart_node_poll_locked(n, 1, 0);   /* nested tick: the lock stays held */
+    }
+    if (timed_out){
+        DartEvent e; memset(&e, 0, sizeof e);
+        e.kind = DART_ERROR; e.error = DART_E_UNMATCHED_SEND;
+        e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
+        i_dart_node_emit(n, &e);
+    }
+    return matched;
+}
+
+/* publish on a topic index: match wait (a first send racing the forming match), then
+ * flow-control wait (condvar under a service thread, the nested pump otherwise), then SHM
+ * fast path, then UDP. may_wait=0 is a reentrant send (from a callback): it can never
+ * block or run the loop, so it commits KEEP_LAST-style and only the unsent guard below
+ * applies. */
 static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes hdr, DartBytes data,
                                   int directed, uint32_t to_peer, int may_wait){
     size_t len = hdr.len + data.len;
@@ -1274,6 +1374,32 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
     int matched = dart_transport_publisher_match_count(n->transport, topic_index);
     const DartQos *q = dart_transport_topic_qos(n->transport, topic_index);
     int guarded = 0;   /* the unsent-eviction check runs after the wait */
+
+    /* MATCH WAIT: a send that would commit to ZERO subscribers while a match is still
+       forming (candidate verdicts in flight after create, or the post-open gather not yet
+       settled) waits for matching to converge instead of silently dropping, so the first
+       send after create/open reaches subscribers that were already on the network. When
+       it cannot wait (disabled, or a reentrant send) it proceeds immediately but the
+       drop-in-the-making still fires DART_E_UNMATCHED_SEND. A topic that RETAINS history
+       (reliable + catch_up > 0) is exempt: the forming match replays its history, so the
+       race loses nothing there. Steady state costs one epoch compare
+       (i_dart_node_topic_unsettled memoizes convergence). */
+    if (!matched && topic_index < n->max_topics
+        && !(q && q->reliability == DART_RELIABLE && q->catch_up > 0)){
+        DartTopic *h = n->handles[topic_index];
+        if (h && (h->role == DART_PUBSUB || h->role == DART_PUB_ONLY)
+              && i_dart_node_topic_unsettled(n, h, i_dart_plat_now_us())){
+            if (may_wait && n->match_wait_us){
+                matched = i_dart_node_match_wait(n, topic_index, h);
+                q = dart_transport_topic_qos(n->transport, topic_index);   /* the wait may have grown/moved the arena */
+            } else {
+                DartEvent e; memset(&e, 0, sizeof e);
+                e.kind = DART_ERROR; e.error = DART_E_UNMATCHED_SEND;
+                e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
+                i_dart_node_emit(n, &e);
+            }
+        }
+    }
 
 #ifdef DART_THREADS
     if (matched && n->svc_running){
@@ -1541,6 +1667,7 @@ int dart_topic_set_role(DartTopic *topic, DartRole role){
         i_dart_node_core_build_meta(topic->n->core);
         dart_discovery_advertise(topic->n->discovery, i_dart_node_core_meta(topic->n->core));
         dart_discovery_replay(topic->n->discovery);   /* re-apply peers' interest to our new role */
+        topic->n->match_epoch++;   /* a role flip may raise fresh candidates: memos are stale */
         i_dart_node_kick(topic->n);                   /* announce the change now */
     }
     i_dart_node_unlock(topic->n, acquired);
@@ -1687,6 +1814,28 @@ int dart_topic_match_count(DartTopic *topic){
     if (!topic) return 0;
     acquired = i_dart_node_lock(topic->n);
     r = dart_transport_publisher_match_count(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+int dart_topic_pending_count(DartTopic *topic){
+    int r, acquired;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = i_dart_node_core_topic_unresolved(topic->n->core, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+/* 1 = a send now would not wait (see runtime.h): matched, or converged with nobody to
+ * wait for. Shares the send path's own predicate, so a GUI polling this then sending
+ * observes exactly what the send would have decided. */
+int dart_topic_ready(DartTopic *topic){
+    int r, acquired;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_publisher_match_count(topic->n->transport, topic->index) > 0
+     || !i_dart_node_topic_unsettled(topic->n, topic, i_dart_plat_now_us());
     i_dart_node_unlock(topic->n, acquired);
     return r;
 }

@@ -54,6 +54,10 @@ static unsigned long long g_rx_calls, g_rx_would,      g_rx_reset, g_rx_err, g_r
  * would-block, so the threaded phases can prove eviction is surfaced, never silent.
  * Discovery datagrams ('uDSC') pass. Windows only (the wrappers are absent on POSIX). */
 static volatile int g_tx_block_data;
+/* swallow 'uDTL' DETAIL_RESP datagrams destined to this port (0 = off): the destination
+ * node then never verifies its candidates while everyone else converges normally, which
+ * is how the match-wait phases hold one side of the detail exchange open on demand. */
+static volatile unsigned g_tx_block_detail_resp_port;
 static unsigned long long g_tx_type[5], g_rx_type[5];   /* [0]=other/disc, 1=DATA 2=HB 3=NACK 4=GAP */
 static unsigned long long g_tx_data_ch[4], g_rx_data_ch[4];
 static int g_trace = 0, g_trace_left = 24;
@@ -97,6 +101,13 @@ static int diag_sendto(SOCKET s, const char *buf, int len, int flags,
         WSASetLastError(WSAEWOULDBLOCK);
         g_tx_calls++; g_tx_wouldblock++;
         return -1;
+    }
+    if (g_tx_block_detail_resp_port && len >= 6
+        && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L' && (unsigned char)buf[4]==2
+        && to && to->sa_family == AF_INET
+        && ntohs(((const struct sockaddr_in*)to)->sin_port) == (unsigned short)g_tx_block_detail_resp_port){
+        g_tx_calls++;
+        return len;   /* swallowed, not would-blocked: the requester's own re-ask heals it later */
     }
     QueryPerformanceCounter(&a);
     r = sendto(s, buf, len, flags, to, tolen);
@@ -3101,6 +3112,167 @@ static void patterns_checks(void){
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
 }
 
+/* ===================== match-wait checks (19f) ===========================
+ * The send-path match wait (runtime.h "MATCH WAIT"): a first send racing the announce/
+ * detail cycle must reach an already-present subscriber; a disabled wait must drop
+ * LOUDLY (DART_E_UNMATCHED_SEND); a topic nobody consumes must not stall; and delivery
+ * must be WRITER-AUTHORITATIVE: a sample committed after our side matched but before the
+ * peer verified us heals through reliable repair once its verdict lands (the property
+ * the whole design leans on). */
+static volatile unsigned long mw_recv, mw_lost, mw_unmatched;
+static char mw_last[64];
+static void mw_on_message(const DartMsg *m){
+    size_t c = m->data.len < sizeof mw_last - 1 ? m->data.len : sizeof mw_last - 1;
+    memcpy(mw_last, m->data.data, c); mw_last[c] = 0;
+    mw_recv++;
+}
+static void mw_on_event(const DartEvent *ev){
+    if (ev->kind == DART_MSG_LOST) mw_lost++;
+    if (ev->kind == DART_ERROR && ev->error == DART_E_UNMATCHED_SEND) mw_unmatched++;
+}
+
+static void matchwait_checks(void){
+    DartDiscoveryAddr seed; int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+
+#ifdef _WIN32
+    /* (a) WRITER-AUTHORITATIVE HEAL: B (sub, fixed port) never receives DETAIL_RESPs, so
+       it cannot verify A's pub entry, while A verifies B normally and matches. A's send
+       commits onto the formed lane; B drops the DATA (unverified index cannot demux).
+       Unblocking lets B's re-ask (on A's next announce) verify A, and the reliable
+       HB/NACK path must then deliver the ORIGINAL sample: our-side verdicts are
+       sufficient for delivery, reader-side lateness heals. */
+    { enum { MW_PORT = 47653 };
+      DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts ao, bo; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
+      memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+24; bo.disable_shm=1; bo.discovery.max_peers=4;
+      bo.discovery.announce_interval_us=200000;
+      bo.net.multicast_interface="127.0.0.1"; bo.net.seed_peers=&seed; bo.net.n_seed_peers=1;
+      ao=bo; bo.net.data_port=MW_PORT;
+      mw_recv=0; mw_lost=0; mw_last[0]=0;
+      B = dart_node_open(&ba, "mw-b", mw_on_message, mw_on_event, &bo);
+      ST_CHECK(B!=NULL, "matchwait: sub node opens (is port %d free?)", (int)MW_PORT);
+      if (B) bt = dart_node_create_topic(B, "mw-auth", DART_SUB_ONLY, NULL,
+                      &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } });
+      g_tx_block_detail_resp_port = MW_PORT;   /* B stays PENDING on every candidate */
+      A = dart_node_open(&aa, "mw-a", NULL, NULL, &ao);
+      at = A ? dart_node_create_topic(A, "mw-auth", DART_PUB_ONLY, NULL,
+                      &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE, .keep_last=8,
+                                               .heartbeat_us=50000 } }) : NULL;
+      ST_CHECK(A && at && bt, "matchwait: nodes + topics up");
+      if (A && B && at && bt){
+          int r;
+          for (t=0;t<3000 && dart_topic_match_count(at)==0;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
+          ST_CHECK(dart_topic_match_count(at)==1,
+                   "matchwait: writer side matched while B's responses are blocked (%d)",
+                   dart_topic_match_count(at));
+          ST_CHECK(dart_topic_pending_count(bt) > 0,
+                   "matchwait: reader side still PENDING (%d)", dart_topic_pending_count(bt));
+          r = dart_topic_send(at, dart_bytes("authoritative", 13));
+          ST_CHECK(r==DART_OK, "matchwait: matched send commits (%d)", r);
+          for (t=0;t<150;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
+          ST_CHECK(mw_recv==0, "matchwait: unverified reader drops the DATA (recv=%lu)", mw_recv);
+          g_tx_block_detail_resp_port = 0;      /* B's next re-ask verifies A */
+          for (t=0;t<3000 && mw_recv==0;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
+          ST_CHECK(mw_recv==1 && strcmp(mw_last,"authoritative")==0,
+                   "matchwait: repair delivers the pre-verify sample (recv=%lu '%s')", mw_recv, mw_last);
+          ST_CHECK(mw_lost==0, "matchwait: healed with no MSG_LOST (%lu)", mw_lost);
+          ST_CHECK(dart_topic_pending_count(at)==0 && dart_topic_ready(at)==1,
+                   "matchwait: probes converge (pending=%d ready=%d)",
+                   dart_topic_pending_count(at), dart_topic_ready(at));
+      }
+      g_tx_block_detail_resp_port = 0;
+      if (A) dart_node_close(A,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+    }
+#endif
+
+#ifdef DART_THREADS
+    /* (b) FIRST SEND vs the forming match: a reliable catch_up=0 publish (signal-shaped:
+       retention exempt, so the wait applies) fired immediately after create_topic must
+       WAIT for the already-present subscriber's match, commit, and deliver. The
+       subscriber runs its service thread so it can answer announces and detail requests
+       while the sender's blocked send pumps only its own loop (in reality peers are
+       independent processes). */
+    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts o; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
+      memset(&o,0,sizeof o); o.domain=ST_DOMAIN+25; o.disable_shm=1; o.discovery.max_peers=4;
+      o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+      mw_recv=0; mw_lost=0; mw_unmatched=0; mw_last[0]=0;
+      B = dart_node_open(&ba, "mw-sub", mw_on_message, mw_on_event, &o);
+      bt = B ? dart_node_create_topic(B, "mw-first", DART_SUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } }) : NULL;
+      ST_CHECK(B && bt, "matchwait: first-send sub up");
+      if (B) dart_node_start(B);
+      A = dart_node_open(&aa, "mw-pub", NULL, mw_on_event, &o);
+      at = A ? dart_node_create_topic(A, "mw-first", DART_PUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } }) : NULL;
+      ST_CHECK(A && at, "matchwait: first-send pub up");
+      if (A && B && at && bt){
+          int r = dart_topic_send(at, dart_bytes("first", 5));   /* immediately: the race */
+          ST_CHECK(r==DART_OK, "matchwait: racing first send commits (%d)", r);
+          ST_CHECK(dart_topic_match_count(at) > 0,
+                   "matchwait: ...after waiting out the match (%d)", dart_topic_match_count(at));
+          for (t=0;t<1500 && mw_recv==0;t++) dart_node_poll(A,2);
+          ST_CHECK(mw_recv==1 && strcmp(mw_last,"first")==0,
+                   "matchwait: subscriber got the racing first send (recv=%lu '%s')", mw_recv, mw_last);
+          ST_CHECK(mw_unmatched==0, "matchwait: no timeout diagnostic (%lu)", mw_unmatched);
+          /* a topic NOBODY consumes must not stall once the gather has settled: the
+             converged state is memoized, so this send early-outs as it always did */
+          for (t=0;t<300;t++) dart_node_poll(A,2);   /* let the post-open gather settle */
+          { DartTopic *v = dart_node_create_topic(A, "mw-void", DART_PUB_ONLY, NULL, NULL);
+            uint64_t t0, el;
+            ST_CHECK(v!=NULL, "matchwait: void topic up");
+            t0 = i_dart_plat_now_us();
+            r = v ? dart_topic_send(v, dart_bytes("x",1)) : -1;
+            el = i_dart_plat_now_us() - t0;
+            ST_CHECK(r==DART_OK && el < 250000u,
+                     "matchwait: no-consumer send returns fast (%d, %luus)", r, (unsigned long)el); }
+      }
+      if (B) dart_node_stop(B);
+      if (A) dart_node_close(A,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+    }
+#endif
+
+    /* (c) CONTROL, wait DISABLED (match_wait_ms < 0): the same racing send commits
+       immediately to zero subscribers and is gone for good (catch_up 0: nothing
+       replays when the match forms a beat later), but LOUDLY: DART_E_UNMATCHED_SEND
+       fires on the way out. */
+    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts o, ao; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
+      memset(&o,0,sizeof o); o.domain=ST_DOMAIN+26; o.disable_shm=1; o.discovery.max_peers=4;
+      o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+      ao=o; ao.match_wait_ms=-1;
+      mw_recv=0; mw_unmatched=0;
+      B = dart_node_open(&ba, "mw-sub2", mw_on_message, NULL, &o);
+      bt = B ? dart_node_create_topic(B, "mw-off", DART_SUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } }) : NULL;
+      A = dart_node_open(&aa, "mw-off-pub", NULL, mw_on_event, &ao);
+      at = A ? dart_node_create_topic(A, "mw-off", DART_PUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } }) : NULL;
+      ST_CHECK(A && B && at && bt, "matchwait: knob-off pair up");
+      if (A && B && at && bt){
+          int r = dart_topic_send(at, dart_bytes("gone", 4));   /* no wait: commits to zero */
+          ST_CHECK(r==DART_OK && mw_unmatched==1,
+                   "matchwait: disabled wait drops LOUDLY (r=%d events=%lu)", r, mw_unmatched);
+          for (t=0;t<2000 && dart_topic_match_count(at)==0;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
+          ST_CHECK(dart_topic_match_count(at)==1, "matchwait: the match still forms after (%d)",
+                   dart_topic_match_count(at));
+          for (t=0;t<150;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
+          ST_CHECK(mw_recv==0, "matchwait: the dropped send never resurrects (recv=%lu)", mw_recv);
+      }
+      if (A) dart_node_close(A,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+    }
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -3417,6 +3589,7 @@ static int selftest_main(void){
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
     patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */
+    matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
 #ifdef DART_THREADS
     threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */
 #endif
