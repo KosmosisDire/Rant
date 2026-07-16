@@ -77,7 +77,7 @@ namespace Dart
         None = 0,
         NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
         MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
-        PeerRefused, EvictedUnsent,
+        PeerRefused, EvictedUnsent, UnmatchedSend,
         Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
     }
 
@@ -144,6 +144,7 @@ namespace Dart
         public IntPtr user_data;
         public byte disable_shm;
         public byte fetch_details;
+        public int match_wait_ms;              // send-path match wait; 0 = default (1s), <0 = off
         public DartNodeNet net;
         public DartNodeDiscovery discovery;
     }
