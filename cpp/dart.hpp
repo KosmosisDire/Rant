@@ -114,7 +114,7 @@ enum class EventKind {
    DartErrorKind. Everything that goes wrong is EventKind::Error + one of these. */
 enum class ErrorKind {
     None = 0,
-    NameCollision, QosIncompatible, SchemaMismatch, InterestOverflow,
+    NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
     MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
     PeerRefused, EvictedUnsent,
     Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker

@@ -297,6 +297,7 @@ class DartMsg(Structure):
         ("publisher_id", c_uint32),
         ("publisher_name", DartStringView),
         ("topic_name", DartStringView),
+        ("header", DartBytes),   # pattern-header prefix view ({None,0} on a plain topic); layout mirror of the C DartMsg
         ("data", DartBytes),
         ("schema", c_void_p),
         ("recv_us", c_uint64),
@@ -523,23 +524,24 @@ class ErrorKind(enum.IntEnum):
     NONE = 0
     NAME_COLLISION = 1
     QOS_INCOMPATIBLE = 2
-    SCHEMA_MISMATCH = 3
-    INTEREST_OVERFLOW = 4
-    META_TRUNCATED_INTEREST = 5
-    META_TRUNCATED_SCHEMA = 6
-    PEER_META_TOO_BIG = 7
-    MSG_TOO_BIG = 8
-    PEER_REFUSED = 9
-    EVICTED_UNSENT = 10
-    OOM = 11
-    PLATFORM = 12
-    SOCKET = 13
-    BIND = 14
-    MCAST_JOIN = 15
-    SEND = 16
-    RECV = 17
-    POLL = 18
-    WAKER = 19
+    KIND_MISMATCH = 3
+    SCHEMA_MISMATCH = 4
+    INTEREST_OVERFLOW = 5
+    META_TRUNCATED_INTEREST = 6
+    META_TRUNCATED_SCHEMA = 7
+    PEER_META_TOO_BIG = 8
+    MSG_TOO_BIG = 9
+    PEER_REFUSED = 10
+    EVICTED_UNSENT = 11
+    OOM = 12
+    PLATFORM = 13
+    SOCKET = 14
+    BIND = 15
+    MCAST_JOIN = 16
+    SEND = 17
+    RECV = 18
+    POLL = 19
+    WAKER = 20
 
 
 class FieldType(enum.IntEnum):

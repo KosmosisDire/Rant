@@ -64,6 +64,7 @@ static int i_dart_lane_work(DartTransportState *st, const i_DartLane *l, uint64_
     uint32_t peer_slot=l->peer_slot;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
     if (l->w.used && l->w.has_nack) return 1;
+    if (l->w.used && l->w.skip_hb) return 1;   /* directed floor HB still owed */
     if (l->w.used && l->w.sent_upto < topic->next_seqno) return 1;
     if (l->r.used && topic->qos.reliability==DART_RELIABLE
         && l->r.ack_pending && now >= l->r.ack_due_us) return 1;

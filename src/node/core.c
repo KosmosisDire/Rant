@@ -63,6 +63,10 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
         p=i_dart_event_append_str(p,end,"qos-incompatible "); p=i_dart_event_append_topic(p,end,ev);
         p=i_dart_event_append_str(p,end," from "); p=i_dart_event_append_peer(p,end,ev);
         p=i_dart_event_append_str(p,end,": reliable subscriber refused best-effort publisher"); break;
+    case DART_E_KIND_MISMATCH:
+        p=i_dart_event_append_str(p,end,"kind-mismatch "); p=i_dart_event_append_topic(p,end,ev);
+        p=i_dart_event_append_str(p,end," from "); p=i_dart_event_append_peer(p,end,ev);
+        p=i_dart_event_append_str(p,end,": same name, different entity kind, refused"); break;
     case DART_E_SCHEMA_MISMATCH:
         p=i_dart_event_append_str(p,end,"schema-mismatch "); p=i_dart_event_append_topic(p,end,ev);
         p=i_dart_event_append_str(p,end," peer "); p=i_dart_event_append_peer(p,end,ev);

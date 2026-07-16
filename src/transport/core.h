@@ -77,6 +77,21 @@ typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
                DART_INACTIVE = 3 } DartRole;
 
+/* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
+ * layer (src/patterns/) builds functions, variables, and signals over dedicated kinds,
+ * each a distinct channel that only pairs with the same kind. The kind rides the announce
+ * interest flags (bits 3-5, so 8 values) and gates matching like role/reliability: a same
+ * name with a different kind is a disjoint entity, its pairing refused (KIND_MISMATCH), not
+ * silently cross-wired. Kind is immutable per topic (like name/schema). */
+typedef enum {
+    DART_KIND_TOPIC    = 0,   /* plain pub/sub */
+    DART_KIND_FUNC_REQ = 1,   /* function request channel  (caller pubs, provider subs) */
+    DART_KIND_FUNC_RSP = 2,   /* function response channel  (provider pubs, caller subs; directed) */
+    DART_KIND_VARIABLE = 3,   /* variable value channel     (owner pubs, observers sub) */
+    DART_KIND_VAR_SET  = 4,   /* variable set channel       (writers pub, owner subs) */
+    DART_KIND_SIGNAL   = 5    /* signal channel             (emitters pub, listeners sub) */
+} DartTopicKind;
+
 /* Every field except reliability is zero-means-default, so a reliable topic is
  * just { .reliability = DART_RELIABLE }. */
 typedef struct {
@@ -108,6 +123,13 @@ typedef struct {
     const char *name;  /* topic name = cross-peer identity. Required, same on every node, <= DART_TOPIC_NAME_MAX */
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
+    uint8_t  kind;     /* DartTopicKind; 0 = plain DART_KIND_TOPIC (the patterns layer sets the rest) */
+    uint8_t  prefix_bytes; /* pattern-header bytes prepended to every payload on this topic (the wire
+                              carries hdr+payload as one message; the receiver splits at this offset and
+                              validates the schema against the payload only). 0 = none. */
+    uint8_t  directed; /* 1 = messages are addressed point-to-point (dart_transport_send_to): a
+                          non-destination reliable lane is skipped past the seqno via its HB floor
+                          without surfacing MSG_LOST. Used by function-response channels. */
 } DartTopicDef;
 
 /* dart_transport_poll_send destination: a peer id. Data is unicast point-to-point per matched subscriber. */
@@ -151,8 +173,11 @@ typedef enum {
     DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
                                                dropped, so peers see none of our topics (needs ~13k topics
                                                at 5 B/entry against the one-datagram ceiling). */
-    DART_TRANSPORT_META_TRUNCATED_SCHEMA    /* RETIRED (schemas left the announce for the detail
+    DART_TRANSPORT_META_TRUNCATED_SCHEMA,   /* RETIRED (schemas left the announce for the detail
                                                exchange); value kept so binding enums stay aligned. */
+    DART_TRANSPORT_KIND_MISMATCH    /* a name-verified peer advertised the same topic name under a
+                                       different entity kind (.topic, .peer): the pairing is refused,
+                                       never silently cross-wired (a plain topic vs a function, etc.) */
 } DartTransportEventKind;
 
 /* The topic name for a topic-scoped event is not carried here: read it with
@@ -331,6 +356,7 @@ typedef struct {
     uint8_t     is_pub;     /* this yield: 1 = publish direction, 0 = subscribe (a PUBSUB
                                topic yields twice, pub first, mirroring the old two-list walk) */
     uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
+    uint8_t     kind;       /* the advertiser's DartTopicKind for this topic (0 = plain) */
     uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
 } DartTopicEntry;
 
@@ -482,6 +508,26 @@ typedef enum {
 
 /* Publish a message to all peers. Returns DART_OK, or a negative DartResult. */
 int       dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now_us);
+
+/* Matched subscribers excluding dormant peers: the liveness-sensitive variant of
+ * dart_transport_publisher_match_count (which keeps counting a dropped-but-resumable peer).
+ * O(matched lanes). */
+int       dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic_index);
+/* Matched publishers feeding OUR subscription side of this topic (the mirror count). */
+int       dart_transport_subscriber_match_count(DartTransportState *st, uint16_t topic_index);
+
+/* Publish hdr followed by data as one message (the pattern-header gather; see
+ * DartTopicDef.prefix_bytes). hdr rides in front of the payload on the wire, byte-identical
+ * to a plain send of the concatenation. hdr {NULL,0} == dart_transport_send. Same return. */
+int       dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index,
+                      DartBytes hdr, DartBytes data, uint64_t now_us);
+/* Publish hdr+data to ONE peer (unicast point-to-point): only that peer's lane carries the
+ * message; every other matched reliable lane is advanced past its seqno and skipped via its
+ * HB floor (no cross-delivery, no repair traffic, no MSG_LOST when the topic is `directed`).
+ * The topic shares one seqno line, so a directed send still consumes a seqno everywhere.
+ * No-op delivery if the peer is not a matched subscriber. Same return as dart_transport_send. */
+int       dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
+                      DartBytes hdr, DartBytes data, uint64_t now_us);
 
 #ifdef DART_SHM
 /* Publish a message whose payload lives in an external shared-memory buffer: the

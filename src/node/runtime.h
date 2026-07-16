@@ -89,7 +89,10 @@ typedef struct {
                                         into discovery state, never on the per-message wire; valid
                                         for the callback's duration. */
     DartString     topic_name;     /* topic name (not NUL-terminated; use .data/.len), or {NULL,0} */
-    DartBytes      data;             /* the message payload (data.data, data.len) */
+    DartBytes      header;           /* pattern-header bytes in front of the payload (the patterns
+                                        layer's call-id/status/flags prefix); {NULL,0} on a plain
+                                        topic. A view valid for the callback / take view. */
+    DartBytes      data;             /* the message payload after the header (data.data, data.len) */
     const DartSchema *schema;        /* the schema data decodes with: this topic's fields bound
                                         to the publisher's layout (a typed topic), or the publisher's
                                         own schema (a NULL-schema topic; may still be NULL if
@@ -318,6 +321,56 @@ int      dart_topic_match_count(DartTopic *topic);
  * (observability; same-host subscribers only). Either out-pointer may be NULL. */
 void     dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv);
 #endif
+
+/* ---- internal hooks for the patterns layer (src/patterns) ---------------------------
+ * The patterns layer (functions / variables / signals) builds on a node but needs three
+ * node-internal seams the public API does not expose: create a topic carrying an entity
+ * kind + payload prefix (and a reserved '@' name), route that topic's messages to a
+ * pattern handler instead of the app's on_message, and observe node-wide events + a
+ * per-poll tick for call timeouts. These are i_-prefixed and kind-agnostic; the node
+ * knows nothing of what functions/variables/signals mean. */
+typedef void     (*i_DartSysMsgFn)(void *user, const DartMsg *msg);
+typedef void     (*i_DartSysEventFn)(void *user, const DartEvent *ev);
+typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns next deadline us (0 = none) */
+
+/* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
+ * per-payload prefix, and the directed flag, permits '@' in the name (reserved for pattern
+ * channels), and routes this topic's deliveries to on_msg (may be NULL) instead of the
+ * node's on_message. Never queued. Returns a handle or NULL. */
+DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
+                              const DartSchema *schema, const DartTopicOpts *opts,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              i_DartSysMsgFn on_msg, void *on_msg_user);
+/* Publish hdr+payload on a pattern topic (broadcast to all matched subscribers). */
+int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
+/* Publish hdr+payload to ONE peer, point-to-point (function replies). */
+int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data);
+/* Register the patterns layer's node-wide event observer + per-poll tick (NULL clears both).
+ * The tick runs each poll pass with now_us and returns its next deadline, folded into the
+ * poll wait cap so call timeouts fire on time with no traffic. */
+void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick, void *user);
+/* Node-pool alloc/realloc/free (size 0 = free) for the patterns layer; its per-node manager
+ * handle slot; and the node's monotonic clock (us). Call only under the node lock. */
+void    *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size);
+void   **i_dart_node_sys_slot (DartNode *n);
+uint64_t i_dart_node_now_us   (DartNode *n);
+/* Node lock for a pattern call that mutates manager state: 1 = acquired here, 0 = already
+ * held by this thread (a pattern call from inside a callback). sys_unlock releases WITHOUT
+ * kicking (the send helpers and create kick for themselves; read-only ops must stay silent).
+ * sys_poll drives one loop tick (for a sync call that owns no service thread). */
+int      i_dart_node_sys_lock  (DartNode *n);
+void     i_dart_node_sys_unlock(DartNode *n, int acquired);
+int      i_dart_node_sys_poll  (DartNode *n, int timeout_ms);
+/* Matched subscribers excluding dormant peers: the patterns layer's provider-liveness query
+ * (dart_topic_match_count counts a dropped-but-resumable peer as still matched). */
+int      i_dart_topic_live_match_count(DartTopic *topic);
+/* Matched publishers feeding this topic's subscription side (mirror of dart_topic_match_count). */
+int      i_dart_topic_source_match_count(DartTopic *topic);
+/* Reflection getters for the patterns layer's entity enumeration. */
+uint8_t    i_dart_topic_kind (const DartTopic *topic);   /* DartTopicKind */
+uint8_t    i_dart_topic_role (const DartTopic *topic);   /* DartRole (current) */
+DartString i_dart_topic_name (const DartTopic *topic);   /* the stable name copy */
+uint16_t   i_dart_node_topic_count(DartNode *n);         /* created topics (handles 0..count) */
 
 #ifdef __cplusplus
 }

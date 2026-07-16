@@ -44,7 +44,9 @@ static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int
             i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
             return DART_ORDER_GAP;
         }
-        if (r->started){                                         /* best-effort / first contact: adopt */
+        if (r->started && !topic->directed){                     /* best-effort / first contact: adopt.
+                                                                    directed: skipping a seqno addressed
+                                                                    elsewhere is not loss */
             i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],
                         r->deliver_upto, base - r->deliver_upto);
             topic->repair_stats.msgs_skipped += base - r->deliver_upto;
@@ -256,9 +258,12 @@ void i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, co
        partial assembly, so the same mid-sample guard protects it from our own ack echo */
     if (r->started && first > r->deliver_upto &&
         (!(r->assembly_active || r->parked) || first >= r->deliver_upto + r->assembly_count)){
-        i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],   /* superseded before repair */
-                    r->deliver_upto, first - r->deliver_upto);
-        topic->repair_stats.msgs_skipped += first - r->deliver_upto;
+        if (!topic->directed){   /* directed: the floor advanced because a seqno was addressed
+                                    to another peer, not real loss -- skip silently */
+            i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],   /* superseded before repair */
+                        r->deliver_upto, first - r->deliver_upto);
+            topic->repair_stats.msgs_skipped += first - r->deliver_upto;
+        }
         r->deliver_upto=first; r->assembly_active=0;
         r->parked=0;            /* the writer moved past the held sample: give it up */
 #ifdef DART_SHM

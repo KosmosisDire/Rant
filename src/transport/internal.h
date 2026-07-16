@@ -37,6 +37,8 @@
 /* per-entry interest flags (the announce's hash list; see core.h "Interest exchange") */
 #define DART__INT_ROLE_MASK 0x03u /* bits 0-1: the advertiser's DartRole */
 #define DART__INT_RELIABLE  0x04u /* bit 2: offered (pub) / requested (sub) reliability */
+#define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
+#define DART__INT_KIND_SHIFT 3u
 #ifdef DART_SHM
 #ifndef DART_SHM_MAX_RETRY
 #define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
@@ -83,6 +85,15 @@
 /* The three per-lane/per-slot structs below are laid out widest-field-first (u64s,
  * pointers, u32s, u16s, then u8s) so they carry no padding holes: they are allocated
  * n_topics*max_peers (proxies) and keep_last (samples) times, so padding multiplies. */
+/* i_DartWriterSample.dest_slot: which lane a sample is addressed to. DART__DEST_ALL =
+ * broadcast (every matched lane); DART__DEST_NONE = directed at a peer that was unknown/
+ * unmatched at send time (nobody receives it, every lane steps over it). A peer SLOT is
+ * stored, not a peer id: slots are reused after eviction, which is safe here because a
+ * directed topic never replays history to a fresh reader (catch_up is refused at define)
+ * and a new peer joins at next_seqno, above every stamped sample. */
+#define DART__DEST_ALL  0xFFFFFFFFu
+#define DART__DEST_NONE 0xFFFFFFFEu
+
 typedef struct {
     uint64_t base;       /* seqno of frag 0 */
     uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
@@ -91,6 +102,7 @@ typedef struct {
 #endif
     uint32_t len;        /* message bytes */
     uint32_t cap;        /* allocated bytes of buf (dynamic grows it) */
+    uint32_t dest_slot;  /* DART__DEST_ALL, DART__DEST_NONE, or the destination peer slot */
     uint16_t count;      /* frag count */
     uint8_t  valid;
 #ifdef DART_SHM
@@ -114,6 +126,9 @@ typedef struct {        /* writer-side, per (topic,peer) */
                                  never acks, so it must stay out of flow control (fire-and-
                                  forget), else it stalls a reliable writer forever. */
     uint8_t  has_nack;   /* pending repair request from ACKNACK */
+    uint8_t  skip_hb;    /* directed send: this non-destination lane owes a one-shot HB whose
+                            first advertises the advanced floor, so its reader skips past the
+                            seqno addressed to another peer (see dart_transport_send_to) */
 } i_DartWriterProxy;
 
 typedef struct {        /* reader-side, per (topic,peer) */
@@ -177,6 +192,9 @@ typedef struct {
     uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
     uint16_t  max_frags;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
+    uint8_t   kind;         /* DartTopicKind: gates matching (same kind only) */
+    uint8_t   prefix_bytes; /* pattern-header bytes in front of each payload (0 = plain) */
+    uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
                                dart_transport_topic_define), so dart_transport_destroy frees it */

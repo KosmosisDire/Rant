@@ -18,20 +18,57 @@ static i_DartWriterSample *i_dart_sample_find(i_DartTopic *topic, uint64_t seqno
 }
 
 
-/* append the filled head slot to history and wake the lanes that carry it */
-static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len){
-    i_DartTopic *topic = &st->topics[topic_index];
+/* seal the filled head slot into history at the next seqno, stamped with its destination
+ * (DART__DEST_ALL = broadcast); a commit variant then wakes the lanes that carry it */
+static void i_dart_writer_seal(DartTransportState *st, i_DartTopic *topic, size_t len,
+                               uint32_t dest_slot, uint64_t *base_out, uint16_t *count_out){
     uint16_t depth = topic->qos.keep_last;
     uint16_t count = (uint16_t)((len + st->frag - 1) / st->frag);
     i_DartWriterSample *slot = &topic->history[topic->history_head];
     if (count==0) count=1;
     slot->valid=1; slot->base=topic->next_seqno; slot->count=count; slot->len=(uint32_t)len;
+    slot->dest_slot = dest_slot;
+    *base_out = slot->base; *count_out = count;
     topic->history_head = (uint16_t)((topic->history_head+1) % depth);
     topic->next_seqno += count;
     /* oldest cached: where the head points once wrapped, else slot 0 */
     topic->first_seqno = topic->history[topic->history_head].valid ? topic->history[topic->history_head].base
                                                     : topic->history[0].base;
     topic->have_first  = 1;
+}
+
+
+/* Directed topics: step a lane's counters over samples addressed to OTHER peers, deriving
+ * the skips from the history stamps instead of pushing them at commit time. The invariant
+ * that makes every directed path safe: acked_upto only ever steps CONTIGUOUSLY, so a lane
+ * can never be marked past a sample it is still owed (in flight, lost, or unsent), while
+ * sent_upto additionally steps over foreign samples it reaches at a sample boundary (a
+ * best-effort lane never acks, so its skips ride sent_upto alone). Sets skip_hb when the
+ * acked floor moved: the lane then owes its reader one HB advertising the new floor.
+ * Runs at commit, after each ack, and at the top of emit (covering dormant lanes on
+ * resume with no commit-time bookkeeping); O(1) when there is nothing to step over. */
+static void i_dart_writer_lane_advance(i_DartTopic *topic, i_DartWriterProxy *w, uint32_t peer_slot){
+    i_DartWriterSample *s;
+    if (!topic->directed) return;
+    while ((s = i_dart_sample_find(topic, w->acked_upto)) != NULL
+           && s->dest_slot != DART__DEST_ALL && s->dest_slot != peer_slot){
+        w->acked_upto = s->base + s->count;
+        w->skip_hb = 1;
+    }
+    if (w->sent_upto < w->acked_upto) w->sent_upto = w->acked_upto;
+    while (w->sent_upto < topic->next_seqno
+           && (s = i_dart_sample_find(topic, w->sent_upto)) != NULL
+           && s->dest_slot != DART__DEST_ALL && s->dest_slot != peer_slot
+           && w->sent_upto == s->base)
+        w->sent_upto = s->base + s->count;
+}
+
+
+/* append the filled head slot to history and wake the lanes that carry it */
+static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len){
+    i_DartTopic *topic = &st->topics[topic_index];
+    uint64_t base; uint16_t count;
+    i_dart_writer_seal(st, topic, len, DART__DEST_ALL, &base, &count);
     { uint32_t li = topic->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
       while (li != DART__NIL){
           i_DartLane *l = &st->lanes[li];
@@ -42,19 +79,41 @@ static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, s
 }
 
 
-int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
-    i_DartTopic *topic; size_t len = data.len;
-    (void)now;
-    topic = i_dart_topic_at(st, topic_index, NULL);                /* rejects the internal meta topic */
-    if (!topic) return DART_ERR_NO_TOPIC;
-    if (topic->dynamic){
-        if (len > 65535u*(uint32_t)st->frag) return DART_ERR_TOO_BIG;   /* wire fragment-count cap */
-    } else if (len > topic->qos.max_message_bytes) return DART_ERR_TOO_BIG;
-    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
-    /* Nobody subscribes and nothing durable to keep: the sample would land in the ring and
-       be orphaned (a fresh match joins at next_seqno unless reliable+catch_up), so skip the
-       grow, the copy, and the commit sweep entirely. The many-idle-publishers fast path. */
-    if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
+/* directed variant: the sample is stamped with its destination; only that lane is pushed
+ * the data. Every other live lane derives its skip via i_dart_writer_lane_advance (a
+ * reliable one then owes the one-shot floor HB); dormant lanes need nothing here, they
+ * derive their skips when they next advance after resume. */
+static void i_dart_writer_commit_directed(DartTransportState *st, uint16_t topic_index, size_t len,
+                                          uint32_t dest_slot){
+    i_DartTopic *topic = &st->topics[topic_index];
+    int reliable = (topic->qos.reliability==DART_RELIABLE);
+    uint64_t base; uint16_t count;
+    uint32_t li;
+    i_dart_writer_seal(st, topic, len, dest_slot, &base, &count);
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
+        i_DartLane *l = &st->lanes[li];
+        if (!l->w.used || st->peer_dormant[l->peer_slot]) continue;
+        if (l->peer_slot == dest_slot){ i_dart_lane_enqueue(st, li); continue; }
+        i_dart_writer_lane_advance(topic, &l->w, l->peer_slot);
+        if (reliable && l->w.reader_reliable && l->w.skip_hb) i_dart_lane_enqueue(st, li);
+    }
+}
+
+
+/* Reject a message larger than this topic can carry (checked before the no-subscriber
+ * early-out so an oversize send is refused even when nobody is listening). */
+static int i_dart_writer_too_big(DartTransportState *st, i_DartTopic *topic, size_t len){
+    if (topic->dynamic) return len > 65535u*(uint32_t)st->frag;   /* wire fragment-count cap */
+    return len > topic->qos.max_message_bytes;
+}
+
+/* Store hdr+data into the head slot (growing it in dynamic mode). Fills *len_out with the
+ * stored byte count. Returns DART_OK or a negative DartResult; on a negative return nothing
+ * was committed. Shared by the broadcast and directed send paths. */
+static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
+                               DartBytes hdr, DartBytes data, size_t *len_out){
+    size_t len = hdr.len + data.len;
+    if (i_dart_writer_too_big(st, topic, len)) return DART_ERR_TOO_BIG;
     if (topic->dynamic){
         i_DartWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
@@ -64,11 +123,57 @@ int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes 
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
     }
-    if (len) memcpy(topic->history[topic->history_head].buf, data.data, len);
+    {   uint8_t *dst = topic->history[topic->history_head].buf;    /* gather: hdr then payload */
+        if (hdr.len)  memcpy(dst, hdr.data, hdr.len);
+        if (data.len) memcpy(dst + hdr.len, data.data, data.len);
+    }
 #ifdef DART_SHM
     topic->history[topic->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
 #endif
+    *len_out = len;
+    return DART_OK;
+}
+
+
+int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
+    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
+    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
+}
+
+
+int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+    i_DartTopic *topic; size_t len; int r;
+    (void)now;
+    topic = i_dart_topic_at(st, topic_index, NULL);                /* rejects the internal meta topic */
+    if (!topic) return DART_ERR_NO_TOPIC;
+    if (i_dart_writer_too_big(st, topic, hdr.len + data.len)) return DART_ERR_TOO_BIG;
+    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
+    /* Nobody subscribes and nothing durable to keep: the sample would land in the ring and
+       be orphaned (a fresh match joins at next_seqno unless reliable+catch_up), so skip the
+       grow, the copy, and the commit sweep entirely. The many-idle-publishers fast path. */
+    if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
+    r = i_dart_writer_store(st, topic, hdr, data, &len);
+    if (r != DART_OK) return r;
     i_dart_writer_commit(st, (uint16_t)topic_index, len);
+    return DART_OK;
+}
+
+
+int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
+                           DartBytes hdr, DartBytes data, uint64_t now){
+    i_DartTopic *topic; size_t len; int r, peer_slot;
+    (void)now;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic) return DART_ERR_NO_TOPIC;
+    if (i_dart_writer_too_big(st, topic, hdr.len + data.len)) return DART_ERR_TOO_BIG;
+    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
+    if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
+    r = i_dart_writer_store(st, topic, hdr, data, &len);
+    if (r != DART_OK) return r;
+    peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown peer: the sample is addressed to
+                                                    nobody but still consumes its seqnos */
+    i_dart_writer_commit_directed(st, (uint16_t)topic_index, len,
+                                  peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
     return DART_OK;
 }
 
@@ -145,6 +250,31 @@ int dart_transport_send_drained(DartTransportState *st, uint16_t topic_index){
 int dart_transport_publisher_match_count(DartTransportState *st, uint16_t topic_index){
     i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
     return topic ? (int)topic->matched_writers : 0;   /* cached at match/unmatch, so O(1) */
+}
+
+
+/* Matched PUBLISHERS on our subscription side (reader proxies), the mirror of
+ * dart_transport_publisher_match_count: how many peers currently feed this topic to us.
+ * O(1) from the cached count. */
+int dart_transport_subscriber_match_count(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    return topic ? (int)topic->matched_readers : 0;
+}
+
+
+/* Matched subscriber lanes that are LIVE right now (dormant excluded): the liveness-
+ * sensitive variant of dart_transport_publisher_match_count, which counts a dropped-but-
+ * resumable peer as matched. O(matches); for liveness decisions (a caller failing its
+ * outstanding calls when the last provider drops), not for the send fast path. */
+int dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    uint32_t li; int cnt = 0;
+    if (!topic) return 0;
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && !st->peer_dormant[l->peer_slot]) cnt++;
+    }
+    return cnt;
 }
 
 
@@ -246,6 +376,10 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
         return;                    /* no position information to apply */
     }
     if (base > w->acked_upto) w->acked_upto=base;
+    /* directed: the ack may have made foreign samples contiguous from the new floor;
+       step over them now and schedule the floor HB the reader is owed */
+    i_dart_writer_lane_advance(topic, w, (uint32_t)peer_slot);
+    if (w->skip_hb) i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
     if (nbits>0 && bitmap!=0){
         topic->repair_stats.nacks_recv++;                           /* a repair request, not a bare ack */
         w->has_nack=1; w->nack_base=base; w->nack_bits=bitmap;
@@ -263,6 +397,10 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
     uint16_t index = i_dart_wire_index_of(st, topic_index);
     if (!w || !w->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: nothing to emit */
 
+    /* directed: derive any owed skips before deciding what to emit (this is also where a
+       lane that was dormant during directed sends catches up after resume) */
+    i_dart_writer_lane_advance(topic, w, (uint32_t)peer_slot);
+
     /* 1. repair (reliable only) */
     if (reliable && w->has_nack){
         uint32_t i;
@@ -276,6 +414,22 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
                     continue;
                 }
                 s=i_dart_sample_find(topic,seqno);
+                if (s && topic->directed && s->dest_slot != DART__DEST_ALL
+                      && s->dest_slot != (uint32_t)peer_slot){
+                    /* addressed to another lane: NEVER re-serve it here (per-caller call ids
+                       make a leaked directed sample deliverable to the wrong pending call).
+                       Clear every requested bit inside this sample and owe the floor HB so
+                       the reader skips instead. */
+                    uint32_t j;
+                    for (j=0;j<DART_NACK_WINDOW;j++){
+                        uint64_t sq=w->nack_base+j;
+                        if (sq>=s->base && sq<s->base+s->count) w->nack_bits &= ~(1u<<j);
+                    }
+                    if (w->nack_bits==0) w->has_nack=0;
+                    i_dart_writer_lane_advance(topic,w,(uint32_t)peer_slot);
+                    w->skip_hb = 1;
+                    continue;
+                }
                 if (s){
 #ifdef DART_SHM
                     if (st->peer_shm[peer_slot] && s->shm){   /* re-send the whole message as one SHM-DATA */
@@ -313,6 +467,16 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             }
         }
         w->has_nack=0;
+    }
+
+    /* directed-send floor HB, BEFORE any new data: advertise the advanced acked_upto so
+       the reader's floor moves past seqnos addressed elsewhere first and the data that
+       follows arrives in order (no perceived gap, no NACK round trip). */
+    if (reliable && w->reader_reliable && w->skip_hb){
+        size_t hb = i_dart_writer_hb(st,topic,w,index,out,cap,now);
+        if (!hb) return 0;        /* did not fit this datagram: retry next pass, flag intact */
+        w->skip_hb = 0;
+        return hb;
     }
 
     /* 2. push new data */

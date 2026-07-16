@@ -184,6 +184,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                 size_t lane = i_dart_name_len(def->name);
                 topic->qos=q; topic->max_frags=max_frags;
                 topic->role=def->role; topic->dynamic=(uint8_t)dyn;
+                topic->kind=def->kind; topic->prefix_bytes=def->prefix_bytes; topic->directed=def->directed;
                 topic->identity = dart_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
                 topic->name_len = (uint8_t)lane;
@@ -228,10 +229,17 @@ DartTransportState *dart_transport_init(void *mem, size_t cap, const DartConfig 
     if (!cfg->topics && !cfg->allocator) return NULL;    /* reserve mode needs an allocator */
     if (cfg->topics) for (i=0;i<cfg->n_topics;i++){
         const DartTopicDef *d = &cfg->topics[i];
-        size_t lane = 0;
+        size_t lane = 0; uint16_t j;
         if (!d->name || !d->name[0]) return NULL;          /* name = identity, required */
         while (d->name[lane]) lane++;
         if (lane > DART_TOPIC_NAME_MAX) return NULL;           /* the wire name is the whole name */
+        if (d->directed && d->qos.catch_up) return NULL;   /* directed history never replays: a late
+                                                              joiner would receive other peers' samples */
+        for (j=0;j<i;j++)   /* same name under a different kind: the alias maps bind a peer's
+                               entry to ONE local topic by identity, so cross-kind twins on one
+                               node would cross-bind; coexistence is a cross-node property */
+            if (cfg->topics[j].kind != d->kind &&
+                dart_topic_id(cfg->topics[j].name) == dart_topic_id(d->name)) return NULL;
     }
     memset(&b,0,sizeof b);
     b.base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
@@ -714,7 +722,8 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
         uint8_t role = topic->name_len ? topic->role : (uint8_t)DART_INACTIVE;
         i_dart_le_w32(e, topic->name_len ? (uint32_t)topic->identity : 0u);
         e[4] = (uint8_t)((role & DART__INT_ROLE_MASK)
-             | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u));
+             | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u)
+             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u));
     }
     return 2u + 5u*(size_t)n;
 }
@@ -769,6 +778,15 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
             i_dart_topic_by_identity(st, topic->identity, &resolved_index);
             if ((uint16_t)resolved_index != cidx){
                 astate[a] = 0; amap[a] = 0xFFFFu;      /* pending again; wants() re-asks */
+                continue;
+            }
+        }
+        {   /* entity-kind gate: a name-verified peer that advertises this name under a
+               different kind is a disjoint entity (a plain topic vs a function, etc.). Refuse
+               the pairing (no proxy, never cross-wired) and surface it, like QOS_INCOMPATIBLE. */
+            uint8_t their_kind = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
+            if (their_kind != topic->kind){
+                i_dart_transport_fire_event(st, DART_TRANSPORT_KIND_MISMATCH, cidx, peer_id, 0, 0);
                 continue;
             }
         }
@@ -916,6 +934,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
         out->index    = it->index;
         out->role     = role;
         out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
+        out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
         out->hash     = i_dart_le_r32(meta.data + off);
         if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
             out->is_pub = 1;
@@ -1176,8 +1195,17 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     if (!def->name || !def->name[0]) return -1;             /* name = identity, required */
     lane = i_dart_name_len(def->name);
     if (def->name[lane]) return -1;                          /* longer than DART_TOPIC_NAME_MAX */
+    if (def->directed && def->qos.catch_up) return -1;       /* directed history never replays */
     topic = &st->topics[topic_index];
     if (topic->identity != 0 || topic->history) return -1;        /* slot already defined */
+    {   /* same name under a different kind on ONE node: refuse at define. The per-peer alias
+           maps bind an entry to one local topic by identity (kind-blind), so local cross-kind
+           twins would cross-bind and refuse forever; coexistence is a cross-node property. */
+        uint64_t id = dart_topic_identity(def); uint16_t c;
+        for (c=0;c<st->cfg.n_topics;c++)
+            if (st->topics[c].name_len && st->topics[c].identity == id
+                && st->topics[c].kind != def->kind) return -1;
+    }
     q = def->qos; i_dart_qos_defaults(&q, 1);                 /* dynamic: grow-to-fit buffers */
     depth = q.keep_last;
     topic->history = (i_DartWriterSample*)st->cfg.allocator(st->cfg.user, NULL,
@@ -1187,6 +1215,7 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     topic->history_owned = 1; topic->dynamic = 1;
     topic->qos = q; topic->max_frags = i_dart_max_frags(q.max_message_bytes);
     topic->role = def->role;
+    topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
     topic->identity = dart_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;

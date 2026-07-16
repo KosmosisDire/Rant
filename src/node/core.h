@@ -47,6 +47,9 @@ typedef enum {
                                 .topic_name): the match is refused, never silently cross-wired */
     DART_E_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.topic, .peer,
                                 .topic_name): no silent downgrade; forms if the publisher upgrades */
+    DART_E_KIND_MISMATCH,    /* a peer advertised this topic name under a different entity kind (a plain
+                                topic vs a function/variable/signal): the pairing is refused (.topic,
+                                .peer, .topic_name), never silently cross-wired */
     DART_E_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not fit
                                 its publisher's schema was dropped (.topic, .peer, .topic_name) */
     DART_E_INTEREST_OVERFLOW,/* a peer's matched topics exceed our index table (.peer, .lost_count =

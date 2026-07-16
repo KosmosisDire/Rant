@@ -49,6 +49,13 @@ typedef struct {
 struct DartTopic {   /* schema: node-owned copy */
     DartNode *n; uint16_t index; DartSchema *schema;
     i_DartMsgQueue *q;                  /* consumer queue (NULL = inline callbacks) */
+    i_DartSysMsgFn sys_on_message;      /* patterns layer: routes this topic's deliveries here
+                                           instead of the app on_message (NULL = normal topic) */
+    void    *sys_msg_user;
+    uint8_t  prefix_bytes;              /* pattern-header bytes split off the front of each
+                                           delivered payload into DartMsg.header (0 = plain topic) */
+    uint8_t  kind;                      /* DartTopicKind, mirrored from the def (reflection) */
+    uint8_t  role;                      /* DartRole, mirrored at create + set_role (reflection) */
     uint8_t  name_len;                  /* stable topic-name copy: queued DartMsg views
                                            must not point into the (relocatable) arena */
     char     name[DART_TOPIC_NAME_MAX];
@@ -107,6 +114,14 @@ struct DartNode {
     DartMsgFn    user_on_message;
     DartEventFn  on_event;
     void          *user_data;
+    /* patterns layer (src/patterns): a node-wide event observer + a per-poll tick, and
+       (per-topic) message routing via DartTopic.sys_on_message. All optional. */
+    i_DartSysEventFn sys_on_event;
+    i_DartSysTickFn  sys_tick;
+    void            *sys_user;
+    uint64_t         sys_tick_next;   /* the tick's returned next deadline, folded into the poll wait */
+    void            *patterns;        /* the patterns layer's per-node manager (lazily created); the
+                                         node treats it opaquely and its memory rides the pool reset */
     DartEvent     last_error;  /* most recent DART_ERROR (dart_last_error(n)); DART_E_NONE until one fires */
     void          *arena;      /* control-structs block (a freeable pool allocation); relocated on grow */
     /* the node's paged region allocator (common/alloc.h): backs the node struct, arena, message
@@ -225,6 +240,7 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
         e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
     }
     if (e->kind == DART_ERROR) n->last_error = *e;
+    if (n->sys_on_event) n->sys_on_event(n->sys_user, e);   /* patterns layer observes peer up/down, etc. */
     if (n->on_event) n->on_event(e);
 }
 
@@ -233,6 +249,15 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
 static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
     DartString s = dart_transport_topic_name(n->transport, topic_index);
     return (const char*)s.data;
+}
+
+/* Split a delivered wire payload into its pattern header (the first prefix_bytes) and the
+ * user payload after it. A plain topic (or a wire shorter than the prefix) yields an empty
+ * header and the whole payload, so plain delivery is unchanged. */
+static void i_dart_node_split(DartTopic *h, DartBytes wire, DartBytes *hdr, DartBytes *payload){
+    uint8_t pfx = (h && (uint32_t)wire.len >= h->prefix_bytes) ? h->prefix_bytes : 0u;
+    hdr->data = pfx ? wire.data : NULL; hdr->len = pfx;
+    payload->data = wire.data + pfx; payload->len = wire.len - pfx;
 }
 
 /* ---- consumer-queue ring (runtime.h "consumer queues") ------------------------------ */
@@ -359,8 +384,8 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
     m->publisher_name = rec->name_len ? dart_string((const char*)(rec + 1), rec->name_len)
                                    : dart_cstr("unknown-peer");
     m->topic_name = dart_string(h->name, h->name_len);
-    m->data = dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
-                         rec->data_len);
+    i_dart_node_split(h, dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
+                         rec->data_len), &m->header, &m->data);
     m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
     m->recv_us = rec->t_recv_us;
 }
@@ -429,30 +454,32 @@ DartEvent dart_last_error(DartNode *n){ return n ? n->last_error : g_last_error;
  * contract: dropped + surfaced (accepted), never handed to the app to misdecode. */
 static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from, DartBytes data){
     DartMsg m;
+    DartTopic *h = (topic_index < n->n_created) ? n->handles[topic_index] : NULL;
+    DartBytes hdr, payload;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
-    if (schema && !dart_schema_validate(schema, data)){
+    i_dart_node_split(h, data, &hdr, &payload);              /* schema validates the payload, not the prefix */
+    if (schema && !dart_schema_validate(schema, payload)){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
         e.peer = from; e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
         e.schema_detail = i_dart_node_core_note_size_mismatch(n->core, from, topic_index,
-                                            data.len, dart_schema_msg_min(schema));
+                                            payload.len, dart_schema_msg_min(schema));
         i_dart_node_emit(n, &e);
         return 0;
     }
-    {   DartTopic *h = (topic_index < n->n_created) ? n->handles[topic_index] : NULL;
-        if (h && h->q) return i_dart_node_queue_push(n, topic_index, h->q, from, data);
-    }
-    if (!n->user_on_message) return 0;
+    if (h && h->q) return i_dart_node_queue_push(n, topic_index, h->q, from, data);   /* store the full wire */
+    if (!(h && h->sys_on_message) && !n->user_on_message) return 0;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
     m.topic_index = topic_index; m.publisher_id = from;
     m.publisher_name = i_dart_node_core_peer_name(n->core, from);          /* view into discovery state */
     if (!m.publisher_name.data) m.publisher_name = dart_cstr("unknown-peer"); /* .data never NULL on delivery */
     m.topic_name = dart_transport_topic_name(n->transport, topic_index);
-    m.data = data;
+    m.header = hdr; m.data = payload;
     m.schema = schema;
     m.recv_us = i_dart_plat_now_us();
-    n->user_on_message(&m);
+    if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* patterns layer routing */
+    else n->user_on_message(&m);
     return 0;
 }
 static int i_dart_node_on_message(void *u, uint16_t topic_index, uint32_t from, DartBytes data){
@@ -514,6 +541,8 @@ static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
         e.kind = DART_ERROR; e.error = DART_E_NAME_COLLISION; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
     case DART_TRANSPORT_QOS_INCOMPATIBLE:
         e.kind = DART_ERROR; e.error = DART_E_QOS_INCOMPATIBLE; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
+    case DART_TRANSPORT_KIND_MISMATCH:
+        e.kind = DART_ERROR; e.error = DART_E_KIND_MISMATCH; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
     case DART_TRANSPORT_SCHEMA_MISMATCH:
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.topic_name = i_dart_node_topic_name(n, tev->topic);
         e.schema_detail = i_dart_node_core_schema_why(n->core, tev->peer, tev->topic,
@@ -928,10 +957,20 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     return 1;
 }
 
-DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
-                                      const DartSchema *schema, const DartTopicOpts *opts){
+/* Shared topic-create core: the public dart_node_create_topic and the patterns layer's
+ * i_dart_node_create_pattern_topic both funnel here. kind/prefix_bytes/directed stamp the
+ * entity (0/0/0 = a plain topic); sys_msg routes deliveries to the patterns layer; allow_at
+ * permits the reserved '@' in the name (public topics may not use it). */
+static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRole role,
+                              const DartSchema *schema, const DartTopicOpts *opts,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
     if (!n || !name) return NULL;
+    if (!allow_at){   /* '@' is reserved for pattern channels (f@req, v@set, ...) */
+        const char *s = name;
+        while (*s){ if (*s=='@') return NULL; s++; }
+    }
     acquired = i_dart_node_lock(n);
     if (!acquired) return NULL;   /* from a callback: a grow here would relocate the arena mid-delivery */
     if (n->n_created >= n->max_topics){       /* reserve full: grow (dynamic) or refuse (static) */
@@ -952,6 +991,7 @@ DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
+    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed;
     if (opts) def.qos = opts->qos;
     if (dart_transport_topic_define(n->transport, idx, &def) != 0){
         if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
@@ -959,7 +999,9 @@ DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
         i_dart_node_unlock(n, acquired);
         return NULL;
     }
-    h->n = n; h->index = idx;
+    h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
+    h->role = (uint8_t)role;
+    h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* stable name copy: queued DartMsg views must not point into the relocatable arena */
         size_t nl = strlen(name);
         if (nl > DART_TOPIC_NAME_MAX) nl = DART_TOPIC_NAME_MAX;
@@ -980,6 +1022,19 @@ DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
     i_dart_node_kick(n);                       /* announce the new topic now */
     i_dart_node_unlock(n, acquired);
     return h;
+}
+
+DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
+                                      const DartSchema *schema, const DartTopicOpts *opts){
+    return i_dart_node_create_impl(n, name, role, schema, opts, DART_KIND_TOPIC, 0, 0, NULL, NULL, 0);
+}
+
+DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
+                              const DartSchema *schema, const DartTopicOpts *opts,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              i_DartSysMsgFn on_msg, void *on_msg_user){
+    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed,
+                                   on_msg, on_msg_user, 1);
 }
 
 /* max wall-time draining RX (and running on_message) per poll tick before
@@ -1050,6 +1105,7 @@ static int i_dart_node_wait_ms(DartNode *n, int timeout_ms){
     uint64_t due  = dart_discovery_next_due_us(dart_discovery_state(n->discovery));
     if (timeout_ms < 0) timeout_ms = 0;
     if (!next || due < next) next = due;   /* due is a real time (0 = now); next 0 = none */
+    if (n->sys_tick_next && (!next || n->sys_tick_next < next)) next = n->sys_tick_next;  /* patterns tick */
     if (next){
         uint64_t t0 = i_dart_plat_now_us();
         uint64_t us = (next > t0) ? next - t0 : 0;
@@ -1171,6 +1227,10 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
             now=i_dart_plat_now_us();
         }
 
+    /* patterns layer per-poll tick (call timeouts, retry sweeps): runs under the node lock
+       like a callback, returns its next deadline for the wait cap. */
+    if (n->sys_tick) n->sys_tick_next = n->sys_tick(n->sys_user, i_dart_plat_now_us());
+
 #ifdef DART_THREADS
     n->work_seq++;
     if (n->cv_waiters) i_dart_plat_cond_broadcast(&n->cv);   /* acks/TX may have progressed */
@@ -1198,8 +1258,9 @@ int dart_node_poll(DartNode *n, int timeout_ms){
  * nested pump otherwise), then SHM fast path, then UDP. may_wait=0 is a reentrant send
  * (from a callback): it can never block or run the loop, so it commits KEEP_LAST-style
  * and only the unsent guard below applies. */
-static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data, int may_wait){
-    size_t len = data.len;
+static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes hdr, DartBytes data,
+                                  int directed, uint32_t to_peer, int may_wait){
+    size_t len = hdr.len + data.len;
     /* one O(1) count gates the per-send fast paths: a topic no peer subscribes to skips
        backpressure and the SHM eligibility scan here, and the copy+commit in the core. */
     int matched = dart_transport_publisher_match_count(n->transport, topic_index);
@@ -1317,7 +1378,7 @@ static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data
            below the fragment size inline UDP is strictly cheaper. Fragmentation is
            writer-driven with our own one size (never the peer's), so this is the
            unambiguous cutoff even when several same-host peers match. */
-        if (n->shm_capable && len > dart_transport_frag(n->transport)
+        if (!directed && n->shm_capable && len > dart_transport_frag(n->transport)
             && topic_index < n->shm_n_topics && matched
             && dart_transport_publisher_shm_eligible(n->transport, topic_index)){
             uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
@@ -1334,7 +1395,8 @@ static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data
                 void *chunk_ptr = pool ? i_dart_shm_chunk(pool, slot, NULL) : NULL;
                 if (chunk_ptr){
                     i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
-                    memcpy(chunk_ptr, data.data, len);                  /* one-copy write into shm */
+                    if (hdr.len) memcpy(chunk_ptr, hdr.data, hdr.len);  /* gather: pattern header then payload */
+                    memcpy((uint8_t*)chunk_ptr + hdr.len, data.data, data.len);  /* one-copy write into shm */
                     i_dart_shm_stamp(pool, slot, (uint32_t)len, &d);
                     i_dart_shm_desc_encode(&d, desc);
                     if (dart_transport_send_shm(n->transport, topic_index, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
@@ -1346,7 +1408,8 @@ static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data
             }
         }
 #endif
-        r = dart_transport_send(n->transport, topic_index, data, i_dart_plat_now_us());
+        r = directed ? dart_transport_send_to(n->transport, topic_index, to_peer, hdr, data, i_dart_plat_now_us())
+                     : dart_transport_send_hdr(n->transport, topic_index, hdr, data, i_dart_plat_now_us());
 #ifdef DART_SHM
 committed:
 #endif
@@ -1362,6 +1425,12 @@ committed:
     }
 }
 
+/* plain broadcast send (the hot dart_topic_send path): no header, no directed target */
+static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data, int may_wait){
+    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
+    return i_dart_node_do_send_ex(n, topic_index, nohdr, data, 0, 0, may_wait);
+}
+
 int dart_topic_send(DartTopic *topic, DartBytes data){
     int acquired, r;
     if (!topic) return DART_ERR_NO_TOPIC;
@@ -1370,6 +1439,83 @@ int dart_topic_send(DartTopic *topic, DartBytes data){
     i_dart_node_kick(topic->n);              /* flush the commit now, not at the next tick */
     i_dart_node_unlock(topic->n, acquired);
     return r;
+}
+
+int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
+    int acquired, r;
+    if (!topic) return DART_ERR_NO_TOPIC;
+    acquired = i_dart_node_lock(topic->n);
+    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, acquired);
+    i_dart_node_kick(topic->n);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data){
+    int acquired, r;
+    if (!topic) return DART_ERR_NO_TOPIC;
+    acquired = i_dart_node_lock(topic->n);
+    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 1, to_peer, acquired);
+    i_dart_node_kick(topic->n);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+/* Node-pool allocation for the patterns layer (freed en masse by the close-time reset,
+ * like every other node allocation), the layer's per-node handle slot, and the clock.
+ * Not lock-guarded: the patterns layer calls them only while holding the node lock (from a
+ * create/send that took it, or from a sys hook that runs under it). */
+void  *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size){ return i_dart_node_alloc(n, ptr, size); }
+void **i_dart_node_sys_slot (DartNode *n){ return &n->patterns; }
+uint64_t i_dart_node_now_us (DartNode *n){ (void)n; return i_dart_plat_now_us(); }
+/* The node lock, for a pattern API call that mutates manager state: reentrancy-aware exactly
+ * like the internal entry lock (1 = acquired here, 0 = the calling thread already held it,
+ * e.g. a pattern call from inside a callback). No kick on unlock: every mutating path already
+ * kicks at its own layer (the send helpers, topic create, set_sys_hooks), and the read-only
+ * pattern ops (dart_variable_get and friends) must not wake a sleeping service thread. */
+int  i_dart_node_sys_lock  (DartNode *n){ return i_dart_node_lock(n); }
+void i_dart_node_sys_unlock(DartNode *n, int acquired){ i_dart_node_unlock(n, acquired); }
+int  i_dart_node_sys_poll  (DartNode *n, int timeout_ms){ return dart_node_poll(n, timeout_ms); }
+
+/* Matched subscribers on this topic excluding dormant peers: the liveness query behind the
+ * patterns layer's provider-loss detection (dart_topic_match_count keeps counting a
+ * dropped-but-resumable peer, so it cannot answer "can anyone still reply?"). */
+int i_dart_topic_live_match_count(DartTopic *topic){
+    int acquired, r;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_publisher_live_matches(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+/* Matched publishers feeding this topic's subscription side (the mirror of
+ * dart_topic_match_count): the patterns layer's "is any owner present" query. */
+int i_dart_topic_source_match_count(DartTopic *topic){
+    int acquired, r;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_subscriber_match_count(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+/* Reflection getters for the patterns layer's entity enumeration (read-only, stable). */
+uint8_t    i_dart_topic_kind (const DartTopic *topic){ return topic ? topic->kind : 0; }
+uint8_t    i_dart_topic_role (const DartTopic *topic){ return topic ? topic->role : (uint8_t)DART_INACTIVE; }
+DartString i_dart_topic_name (const DartTopic *topic){
+    return topic ? dart_string(topic->name, topic->name_len) : dart_string(NULL, 0);
+}
+uint16_t   i_dart_node_topic_count(DartNode *n){ return n ? n->n_created : 0; }
+
+void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick, void *user){
+    int acquired;
+    if (!n) return;
+    acquired = i_dart_node_lock(n);
+    n->sys_on_event = on_event; n->sys_tick = tick; n->sys_user = user;
+    n->sys_tick_next = 0;
+    i_dart_node_kick(n);   /* re-evaluate the wait cap with the new tick */
+    i_dart_node_unlock(n, acquired);
 }
 
 int dart_topic_set_role(DartTopic *topic, DartRole role){
@@ -1382,6 +1528,7 @@ int dart_topic_set_role(DartTopic *topic, DartRole role){
         return DART_ERR_STATE;
     }
     r = dart_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
+    if (r == 0) topic->role = (uint8_t)role;
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
         i_dart_node_core_build_meta(topic->n->core);
         dart_discovery_advertise(topic->n->discovery, i_dart_node_core_meta(topic->n->core));

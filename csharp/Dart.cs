@@ -75,7 +75,7 @@ namespace Dart
     public enum ErrorKind
     {
         None = 0,
-        NameCollision, QosIncompatible, SchemaMismatch, InterestOverflow,
+        NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
         MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
         PeerRefused, EvictedUnsent,
         Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
@@ -157,6 +157,7 @@ namespace Dart
         public uint publisher_id;
         public DartStringView publisher_name;
         public DartStringView topic_name;
+        public DartBytes header;   // pattern-header prefix view ({null,0} on a plain topic); layout mirror of the C DartMsg
         public DartBytes data;
         public IntPtr schema;
         public ulong recv_us;
