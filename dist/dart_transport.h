@@ -1920,6 +1920,18 @@ int      dart_topic_subscriber_progress(DartTopic *topic, uint32_t peer,
 int      dart_topic_drain(DartTopic *topic, int timeout_ms);
 /* Subscribers matched on this topic now; a one-shot publisher polls it before sending. */
 int      dart_topic_match_count(DartTopic *topic);
+/* Block until discovery + matching SETTLE. Solicits (like dart_discovery_gather: existing
+ * peers answer immediately), then waits until every active peer has answered and the
+ * peer/match topology has been quiet for a beat, so a populated network settles in a few
+ * hundred ms; only a (seemingly) empty one waits a full announce interval to rule out a
+ * slow peer. The startup idiom for "everything I now send reaches everyone who was
+ * already out there": open, create topics, settle, publish. Call it AFTER creating your
+ * topics: matching is per topic, so settling before they exist guarantees nothing (which
+ * is also why open does not auto-settle). Sends themselves never block or queue on
+ * matching; a topic with no subscriber stays fire-and-forget. Waits by sleeping on a
+ * running service thread's progress, else by driving the poll loop. timeout_ms < 0 =
+ * 3 announce intervals. Returns 1 settled, 0 on timeout (or from a callback). */
+int      dart_node_settle(DartNode *n, int timeout_ms);
 #ifdef DART_SHM
 /* Messages published / delivered via the zero-fragment shared-memory path since open
  * (observability; same-host subscribers only). Either out-pointer may be NULL. */
@@ -8082,6 +8094,7 @@ struct DartNode {
     i_DartSysTickFn  sys_tick;
     void            *sys_user;
     uint64_t         sys_tick_next;   /* the tick's returned next deadline, folded into the poll wait */
+    uint64_t         settle_topology_us; /* last PEER_UP/DOWN/INTEREST change (dart_node_settle) */
     void            *patterns;        /* the patterns layer's per-node manager (lazily created); the
                                          node treats it opaquely and its memory rides the pool reset */
     DartEvent     last_error;  /* most recent DART_ERROR (dart_last_error(n)); DART_E_NONE until one fires */
@@ -8202,6 +8215,8 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
         e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
     }
     if (e->kind == DART_ERROR) n->last_error = *e;
+    if (e->kind == DART_PEER_UP || e->kind == DART_PEER_DOWN || e->kind == DART_PEER_INTEREST)
+        n->settle_topology_us = i_dart_plat_now_us();   /* dart_node_settle's quiet-window clock */
     if (n->sys_on_event) n->sys_on_event(n->sys_user, e);   /* patterns layer observes peer up/down, etc. */
     if (n->on_event) n->on_event(e);
 }
@@ -8349,6 +8364,7 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
     i_dart_node_split(h, dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
                          rec->data_len), &m->header, &m->data);
     m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
+    if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* op-only pattern message */
     m->recv_us = rec->t_recv_us;
 }
 
@@ -8420,6 +8436,10 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     DartBytes hdr, payload;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
     i_dart_node_split(h, data, &hdr, &payload);              /* schema validates the payload, not the prefix */
+    /* a ZERO-LENGTH payload on a prefix-carrying (pattern) channel is an op-only message
+       (a variable's unforce, an empty ack): the op byte is the content, so the payload
+       schema does not apply; the pattern layer judges it. Plain topics are unaffected. */
+    if (h && h->prefix_bytes && payload.len == 0) schema = NULL;
     if (schema && !dart_schema_validate(schema, payload)){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
@@ -9645,6 +9665,76 @@ int dart_topic_match_count(DartTopic *topic){
     return r;
 }
 
+/* settled = the network answered and went quiet. dart_node_settle SOLICITS (the same
+ * mechanism dart_discovery_gather uses: peers reply immediately with targeted unicast
+ * announces), so on a populated network every existing peer is heard within an RTT and
+ * this returns after one quiet window (~300ms), not a full announce interval. Three
+ * conditions, under the node lock:
+ *   - every ACTIVE peer has been heard since the solicit went out (it answered), and
+ *   - the peer/match topology has been QUIET for a beat (no PEER_UP/DOWN/INTEREST change:
+ *     announces only re-apply interest when something actually changed), and
+ *   - one quiet window has passed overall (a straggler's first announce gets its chance).
+ * With NO peer heard at all, only a full announce interval can rule out a slow one. */
+static int i_dart_node_settled(DartNode *n, uint64_t start, uint64_t now){
+    uint64_t quiet = n->announce_us < 300000u ? n->announce_us : 300000u;
+    uint16_t i, count = 0;
+    const DartDiscoveryPeer *peers = dart_discovery_peers(n->discovery, &count);
+    int any = 0;
+    for (i = 0; i < count; i++){
+        if (peers[i].liveness != DART_PEER_ACTIVE) continue;   /* dropped: not expected to answer */
+        any = 1;
+        if (peers[i].last_heard_us < start) return 0;          /* has not answered the solicit yet */
+    }
+    if (!any) return now - start >= n->announce_us;            /* alone, as far as we can know */
+    if (now - start < quiet) return 0;
+    return n->settle_topology_us < start || now - n->settle_topology_us >= quiet;
+}
+
+int dart_node_settle(DartNode *n, int timeout_ms){
+    uint64_t start, deadline, last_solicit; int acquired, settled = 1;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    if (!acquired){ return 0; }   /* from a callback: can neither pump nor wait */
+    start = i_dart_plat_now_us();
+    last_solicit = 0;
+    deadline = start + (timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u
+                                        : (uint64_t)n->announce_us * 3u);
+#ifdef DART_THREADS
+    if (n->svc_running){
+        n->cv_waiters++;
+        while (!i_dart_node_settled(n, start, i_dart_plat_now_us())){
+            uint64_t now = i_dart_plat_now_us();
+            if (now >= deadline){ settled = 0; break; }
+            if (now - last_solicit >= 250000u){   /* (re)solicit ~4x/s so a lost one retries */
+                dart_discovery_solicit(dart_discovery_state(n->discovery));
+                i_dart_node_kick(n);              /* the service thread sends it now */
+                last_solicit = now;
+            }
+            {   uint64_t left = deadline - now;
+                i_dart_node_cv_wait(n, left < 50000u ? left : 50000u);   /* re-check the clock */
+            }
+            if (!n->svc_running) break;   /* stopped under us: finish with the pump below */
+        }
+        n->cv_waiters--;
+        if (n->svc_running || !settled){
+            i_dart_node_unlock(n, acquired);
+            return settled;
+        }
+    }
+#endif
+    while (!i_dart_node_settled(n, start, i_dart_plat_now_us())){
+        uint64_t now = i_dart_plat_now_us();
+        if (now >= deadline){ settled = 0; break; }
+        if (now - last_solicit >= 250000u){
+            dart_discovery_solicit(dart_discovery_state(n->discovery));
+            last_solicit = now;
+        }
+        i_dart_node_poll_locked(n, 1, 0);   /* sends the solicit, takes in the replies */
+    }
+    i_dart_node_unlock(n, acquired);
+    return settled;
+}
+
 /* ---- consumer-queue API (runtime.h "consumer queues") ------------------------------- */
 
 static int i_dart_node_any_queued(DartNode *n){
@@ -9969,13 +10059,18 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
 
 #define DART__FN_PREFIX 5u   /* [u32 call_id][u8 flags-or-status] */
 
-/* a caller-side outstanding call */
+/* a caller-side outstanding call. A call made BEFORE any provider matched is not handed to
+ * the transport (an unmatched reliable channel drops the send: nobody would ever replay it);
+ * the request bytes queue here and flush the moment the match forms, so the first call after
+ * open never silently times out. queued_req != NULL = not yet on the wire. */
 typedef struct i_DartPending {
     struct i_DartPending *next;
     uint32_t     call_id;
     uint64_t     deadline_us;
     DartReplyFn  on_reply;
     void        *user;
+    uint8_t     *queued_req;
+    uint32_t     queued_len;
 } i_DartPending;
 
 /* a deferred provider reply (dart_call_defer -> token -> dart_function_complete) */
@@ -10039,6 +10134,31 @@ static i_DartPending *i_dart_func_take_pending(DartFunction *fn, uint32_t call_i
     return NULL;
 }
 
+/* free an unlinked pending entry (and any still-queued request bytes) */
+static void i_dart_func_free_pending(DartFunction *fn, i_DartPending *p){
+    if (p->queued_req) i_dart_node_sys_alloc(fn->n, p->queued_req, 0);
+    i_dart_node_sys_alloc(fn->n, p, 0);
+}
+
+/* send every call queued before a provider matched, oldest first (the list is newest-first).
+ * Runs under the node lock (the tick / the interest event), so the sends commit reentrantly:
+ * fine, a fresh lane has an empty history. */
+static void i_dart_func_flush_queued(DartFunction *fn){
+    if (fn->is_provider || !fn->pending) return;
+    if (dart_topic_match_count(fn->req) == 0) return;   /* still no provider */
+    for (;;){
+        i_DartPending *pick = NULL, *p;
+        uint8_t hdr[DART__FN_PREFIX];
+        for (p = fn->pending; p; p = p->next) if (p->queued_req) pick = p;
+        if (!pick) return;
+        i_dart_le_w32(hdr, pick->call_id); hdr[4] = 0;
+        (void)i_dart_topic_send_hdr(fn->req, dart_bytes(hdr, DART__FN_PREFIX),
+                                    dart_bytes(pick->queued_req, pick->queued_len));
+        i_dart_node_sys_alloc(fn->n, pick->queued_req, 0);
+        pick->queued_req = NULL; pick->queued_len = 0;
+    }
+}
+
 /* caller: a reply arrived on the rsp channel */
 static void i_dart_func_on_reply(void *user, const DartMsg *msg){
     DartFunction *fn = (DartFunction*)user;
@@ -10050,7 +10170,7 @@ static void i_dart_func_on_reply(void *user, const DartMsg *msg){
     r.status = (DartCallStatus)msg->header.data[4];
     r.data = msg->data; r.provider = msg->publisher_id; r.user = p->user;
     if (p->on_reply) p->on_reply(&r);
-    i_dart_node_sys_alloc(fn->n, p, 0);
+    i_dart_func_free_pending(fn, p);
 }
 
 /* create both channels for a function; roles per side (provider owns the impl) */
@@ -10136,14 +10256,32 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartReplyFn 
     p->call_id = id;
     p->deadline_us = i_dart_node_now_us(fn->n) + fn->timeout_us;
     p->on_reply = on_reply; p->user = user;
+    p->queued_req = NULL; p->queued_len = 0;
     p->next = fn->pending; fn->pending = p;
+    if (dart_topic_match_count(fn->req) == 0){
+        /* no provider matched yet (the announce/detail cycle after open takes a beat, or the
+           provider is late): the transport would DROP an unmatched send, so QUEUE the request
+           and flush the instant the match forms. Times out normally if none ever does. */
+        p->queued_req = (uint8_t*)i_dart_node_sys_alloc(fn->n, NULL, req.len ? req.len : 1u);
+        if (!p->queued_req){
+            fn->pending = p->next;
+            i_dart_node_sys_alloc(fn->n, p, 0);
+            i_dart_node_sys_unlock(fn->n, acquired);
+            return DART_ERR_OOM;
+        }
+        if (req.len) memcpy(p->queued_req, req.data, req.len);
+        p->queued_len = (uint32_t)req.len;
+        i_dart_node_sys_unlock(fn->n, acquired);
+        if (id_out) *id_out = id;
+        return DART_OK;
+    }
     i_dart_node_sys_unlock(fn->n, acquired);
     i_dart_le_w32(hdr, id); hdr[4] = 0;   /* flags reserved */
     r = i_dart_topic_send_hdr(fn->req, dart_bytes(hdr, DART__FN_PREFIX), req);
     if (r != DART_OK){
         acquired = i_dart_node_sys_lock(fn->n);
         p = i_dart_func_take_pending(fn, id);   /* may already be reaped/answered: then gone */
-        if (p) i_dart_node_sys_alloc(fn->n, p, 0);
+        if (p) i_dart_func_free_pending(fn, p);
         i_dart_node_sys_unlock(fn->n, acquired);
         return r;
     }
@@ -10326,13 +10464,15 @@ static void i_dart_var_owner_unforce(DartVariable *v){
     i_dart_var_publish_locked(v);
 }
 
-/* owner: a set/force/unforce op arrived on the set channel (delivery callback, lock held) */
+/* owner: a set/force/unforce op arrived on the set channel (delivery callback, lock held).
+ * A zero-length payload rides the schema-validation exemption for op-only messages, so a
+ * plain set (op 0) must carry a value: an empty one is ignored (a dumb write of nothing). */
 static void i_dart_var_on_set(void *user, const DartMsg *msg){
     DartVariable *v = (DartVariable*)user;
     uint8_t op = msg->header.len >= 1 ? msg->header.data[0] : 0;
     if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v);
-    else if (op & DART__SET_OP_FORCE) i_dart_var_owner_force(v, msg->data);
-    else                              i_dart_var_owner_apply(v, msg->data);
+    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data); }
+    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data); }
 }
 
 /* accessor: a new value arrived on the value channel (cache it + its forced/write_seq) */
@@ -10576,7 +10716,7 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
                 r.provider = 0; r.user = p->user;
                 if (p->on_reply) p->on_reply(&r);
             }
-            i_dart_node_sys_alloc(fn->n, p, 0);
+            i_dart_func_free_pending(fn, p);
             continue;
         }
         if (!soonest || p->deadline_us < soonest) soonest = p->deadline_us;
@@ -10589,7 +10729,9 @@ static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn; uint64_t soonest = 0;
     for (fn = pm->funcs; fn; fn = fn->next){
-        uint64_t s = i_dart_func_reap(fn, now_us, DART_CALL_TIMEOUT, 0);
+        uint64_t s;
+        i_dart_func_flush_queued(fn);   /* backstop: the interest event is the fast path */
+        s = i_dart_func_reap(fn, now_us, DART_CALL_TIMEOUT, 0);
         if (s && (!soonest || s < soonest)) soonest = s;
     }
     return soonest;   /* next timeout deadline for the poll wait cap */
@@ -10598,6 +10740,12 @@ static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
 static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn;
+    if (ev->kind == DART_PEER_INTEREST){
+        /* a match may just have formed: flush calls queued while no provider was matched */
+        for (fn = pm->funcs; fn; fn = fn->next)
+            if (!fn->is_provider && fn->pending) i_dart_func_flush_queued(fn);
+        return;
+    }
     if (ev->kind != DART_PEER_DOWN) return;
     /* a provider dropped: a caller with no LIVE provider left can never be answered, so fail
        its outstanding calls now with PEER_LOST instead of waiting out the timeout. The live

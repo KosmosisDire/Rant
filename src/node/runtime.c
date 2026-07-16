@@ -120,6 +120,7 @@ struct DartNode {
     i_DartSysTickFn  sys_tick;
     void            *sys_user;
     uint64_t         sys_tick_next;   /* the tick's returned next deadline, folded into the poll wait */
+    uint64_t         settle_topology_us; /* last PEER_UP/DOWN/INTEREST change (dart_node_settle) */
     void            *patterns;        /* the patterns layer's per-node manager (lazily created); the
                                          node treats it opaquely and its memory rides the pool reset */
     DartEvent     last_error;  /* most recent DART_ERROR (dart_last_error(n)); DART_E_NONE until one fires */
@@ -240,6 +241,8 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
         e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
     }
     if (e->kind == DART_ERROR) n->last_error = *e;
+    if (e->kind == DART_PEER_UP || e->kind == DART_PEER_DOWN || e->kind == DART_PEER_INTEREST)
+        n->settle_topology_us = i_dart_plat_now_us();   /* dart_node_settle's quiet-window clock */
     if (n->sys_on_event) n->sys_on_event(n->sys_user, e);   /* patterns layer observes peer up/down, etc. */
     if (n->on_event) n->on_event(e);
 }
@@ -387,6 +390,7 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
     i_dart_node_split(h, dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
                          rec->data_len), &m->header, &m->data);
     m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
+    if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* op-only pattern message */
     m->recv_us = rec->t_recv_us;
 }
 
@@ -458,6 +462,10 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     DartBytes hdr, payload;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
     i_dart_node_split(h, data, &hdr, &payload);              /* schema validates the payload, not the prefix */
+    /* a ZERO-LENGTH payload on a prefix-carrying (pattern) channel is an op-only message
+       (a variable's unforce, an empty ack): the op byte is the content, so the payload
+       schema does not apply; the pattern layer judges it. Plain topics are unaffected. */
+    if (h && h->prefix_bytes && payload.len == 0) schema = NULL;
     if (schema && !dart_schema_validate(schema, payload)){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
@@ -1681,6 +1689,76 @@ int dart_topic_match_count(DartTopic *topic){
     r = dart_transport_publisher_match_count(topic->n->transport, topic->index);
     i_dart_node_unlock(topic->n, acquired);
     return r;
+}
+
+/* settled = the network answered and went quiet. dart_node_settle SOLICITS (the same
+ * mechanism dart_discovery_gather uses: peers reply immediately with targeted unicast
+ * announces), so on a populated network every existing peer is heard within an RTT and
+ * this returns after one quiet window (~300ms), not a full announce interval. Three
+ * conditions, under the node lock:
+ *   - every ACTIVE peer has been heard since the solicit went out (it answered), and
+ *   - the peer/match topology has been QUIET for a beat (no PEER_UP/DOWN/INTEREST change:
+ *     announces only re-apply interest when something actually changed), and
+ *   - one quiet window has passed overall (a straggler's first announce gets its chance).
+ * With NO peer heard at all, only a full announce interval can rule out a slow one. */
+static int i_dart_node_settled(DartNode *n, uint64_t start, uint64_t now){
+    uint64_t quiet = n->announce_us < 300000u ? n->announce_us : 300000u;
+    uint16_t i, count = 0;
+    const DartDiscoveryPeer *peers = dart_discovery_peers(n->discovery, &count);
+    int any = 0;
+    for (i = 0; i < count; i++){
+        if (peers[i].liveness != DART_PEER_ACTIVE) continue;   /* dropped: not expected to answer */
+        any = 1;
+        if (peers[i].last_heard_us < start) return 0;          /* has not answered the solicit yet */
+    }
+    if (!any) return now - start >= n->announce_us;            /* alone, as far as we can know */
+    if (now - start < quiet) return 0;
+    return n->settle_topology_us < start || now - n->settle_topology_us >= quiet;
+}
+
+int dart_node_settle(DartNode *n, int timeout_ms){
+    uint64_t start, deadline, last_solicit; int acquired, settled = 1;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    if (!acquired){ return 0; }   /* from a callback: can neither pump nor wait */
+    start = i_dart_plat_now_us();
+    last_solicit = 0;
+    deadline = start + (timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u
+                                        : (uint64_t)n->announce_us * 3u);
+#ifdef DART_THREADS
+    if (n->svc_running){
+        n->cv_waiters++;
+        while (!i_dart_node_settled(n, start, i_dart_plat_now_us())){
+            uint64_t now = i_dart_plat_now_us();
+            if (now >= deadline){ settled = 0; break; }
+            if (now - last_solicit >= 250000u){   /* (re)solicit ~4x/s so a lost one retries */
+                dart_discovery_solicit(dart_discovery_state(n->discovery));
+                i_dart_node_kick(n);              /* the service thread sends it now */
+                last_solicit = now;
+            }
+            {   uint64_t left = deadline - now;
+                i_dart_node_cv_wait(n, left < 50000u ? left : 50000u);   /* re-check the clock */
+            }
+            if (!n->svc_running) break;   /* stopped under us: finish with the pump below */
+        }
+        n->cv_waiters--;
+        if (n->svc_running || !settled){
+            i_dart_node_unlock(n, acquired);
+            return settled;
+        }
+    }
+#endif
+    while (!i_dart_node_settled(n, start, i_dart_plat_now_us())){
+        uint64_t now = i_dart_plat_now_us();
+        if (now >= deadline){ settled = 0; break; }
+        if (now - last_solicit >= 250000u){
+            dart_discovery_solicit(dart_discovery_state(n->discovery));
+            last_solicit = now;
+        }
+        i_dart_node_poll_locked(n, 1, 0);   /* sends the solicit, takes in the replies */
+    }
+    i_dart_node_unlock(n, acquired);
+    return settled;
 }
 
 /* ---- consumer-queue API (runtime.h "consumer queues") ------------------------------- */

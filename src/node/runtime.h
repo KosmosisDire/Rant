@@ -316,6 +316,18 @@ int      dart_topic_subscriber_progress(DartTopic *topic, uint32_t peer,
 int      dart_topic_drain(DartTopic *topic, int timeout_ms);
 /* Subscribers matched on this topic now; a one-shot publisher polls it before sending. */
 int      dart_topic_match_count(DartTopic *topic);
+/* Block until discovery + matching SETTLE. Solicits (like dart_discovery_gather: existing
+ * peers answer immediately), then waits until every active peer has answered and the
+ * peer/match topology has been quiet for a beat, so a populated network settles in a few
+ * hundred ms; only a (seemingly) empty one waits a full announce interval to rule out a
+ * slow peer. The startup idiom for "everything I now send reaches everyone who was
+ * already out there": open, create topics, settle, publish. Call it AFTER creating your
+ * topics: matching is per topic, so settling before they exist guarantees nothing (which
+ * is also why open does not auto-settle). Sends themselves never block or queue on
+ * matching; a topic with no subscriber stays fire-and-forget. Waits by sleeping on a
+ * running service thread's progress, else by driving the poll loop. timeout_ms < 0 =
+ * 3 announce intervals. Returns 1 settled, 0 on timeout (or from a callback). */
+int      dart_node_settle(DartNode *n, int timeout_ms);
 #ifdef DART_SHM
 /* Messages published / delivered via the zero-fragment shared-memory path since open
  * (observability; same-host subscribers only). Either out-pointer may be NULL. */

@@ -2829,6 +2829,15 @@ static void patterns_checks(void){
     ST_CHECK(dart_function_match_count(call_add)==1, "patterns: provider matched (%d)",
              dart_function_match_count(call_add));
 
+    /* settle: the startup idiom solicits and blocks until every live peer answered and the
+       topology went quiet. The peer must be able to ANSWER while we block, so P runs its
+       service thread for the duration (in reality peers are independent processes). */
+    { int sr;
+      dart_node_start(P);
+      sr = dart_node_settle(C, 3000);
+      dart_node_stop(P);
+      ST_CHECK(sr == 1, "patterns: dart_node_settle settles (%d)", sr); }
+
     /* async call: add(41) -> 42, status OK */
     { uint8_t req[4]; i_dart_le_w32(req,41); pf_reply_done=0;
       dart_function_call(call_add, dart_bytes(req,4), pf_on_reply, NULL);
@@ -2867,6 +2876,21 @@ static void patterns_checks(void){
       for (t=0;t<400 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_TIMEOUT,
                "patterns: no-provider -> TIMEOUT (done=%d st=%d)", pf_reply_done, pf_reply_status); }
+
+    /* call BEFORE the match forms: open a fresh function pair and call immediately, before
+       any pump could run the announce/detail cycle. The request must QUEUE and flush when
+       the provider matches, never silently drop into a timeout. */
+    { DartFunction *pe2, *ce2; int cr; uint8_t req[4];
+      pe2 = dart_node_create_function(P, "early", NULL, NULL, pf_add_handler, NULL, NULL);
+      ce2 = dart_node_open_function(C, "early", NULL, NULL, NULL);
+      ST_CHECK(pe2 && ce2, "patterns: early function pair created");
+      i_dart_le_w32(req, 6); pf_reply_done = 0;
+      cr = dart_function_call(ce2, dart_bytes(req,4), pf_on_reply, NULL);   /* unmatched right now */
+      ST_CHECK(cr==DART_OK, "patterns: early call accepted (%d)", cr);
+      for (t=0;t<2000 && !pf_reply_done;t++) pf_pump(P,C,2);
+      ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==7,
+               "patterns: early call flushed on match -> 7 (done=%d st=%d val=%u)",
+               pf_reply_done, pf_reply_status, pf_reply_val); }
 
     /* two callers answered in ONE provider tick: both requests drain in one RX pass, both
        replies commit back-to-back before any TX runs. Each caller must receive ITS OWN
@@ -2983,6 +3007,29 @@ static void patterns_checks(void){
       ST_CHECK(orphan != NULL, "var: orphan accessor opens");
       sr = orphan ? dart_variable_set(orphan, dart_bytes(b,4)) : 0;
       ST_CHECK(sr==DART_ERR_NO_TOPIC, "var: set with no owner -> NO_TOPIC (%d)", sr); }
+    { /* TYPED variable, remote force/unforce: the op-only (zero-payload) unforce must pass
+         the schema gate (the empty-payload exemption on prefix channels), and remote sets
+         while forced absorb into the shadow */
+      DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartSchema *ts = dart_schema_compile(dart_allocator_alloc, &ma, "T { v: u32 }", NULL);
+      DartVariable *to, *ta; DartBytes gv; uint8_t b[4]; int fr, ur;
+      ST_CHECK(ts != NULL, "var: typed schema compiles");
+      i_dart_le_w32(b,10);
+      to = dart_node_create_variable(P, "ttemp", ts, &(DartVariableOpts){ .initial=dart_bytes(b,4), .allow_force=1 });
+      ta = dart_node_open_variable(C, "ttemp", ts, NULL);
+      ST_CHECK(to && ta, "var: typed created/opened");
+      for (t=0;t<2000 && dart_variable_match_count(to)==0;t++) pf_pump(P,C,2);
+      for (t=0;t<600 && !dart_variable_get(ta,&gv);t++) pf_pump(P,C,2);
+      i_dart_le_w32(b,777); fr = dart_variable_force(ta, dart_bytes(b,4));   /* remote force */
+      ST_CHECK(fr==DART_OK, "var: typed remote force sent (%d)", fr);
+      for (t=0;t<600;t++){ pf_pump(P,C,2); if (dart_variable_forced(ta)&&dart_variable_get(ta,&gv)&&i_dart_le_r32(gv.data)==777) break; }
+      ST_CHECK(dart_variable_forced(ta)&&dart_variable_get(ta,&gv)&&i_dart_le_r32(gv.data)==777,
+               "var: typed force pins (777, forced)");
+      ur = dart_variable_unforce(ta);                                        /* remote, op-only payload */
+      ST_CHECK(ur==DART_OK, "var: typed remote unforce sent (%d)", ur);
+      for (t=0;t<600;t++){ pf_pump(P,C,2); if (!dart_variable_forced(ta)) break; }
+      ST_CHECK(!dart_variable_forced(ta), "var: typed remote unforce applies (op-only payload)");
+      dart_allocator_reset(&ma); }
 
     /* ---- signals: emit/receive, payload-less ---- */
     { DartSignal *ps, *cs; uint8_t b[4];
@@ -3034,7 +3081,7 @@ static void patterns_checks(void){
             inc += ei.incomplete;
             for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
         }
-        ST_CHECK(fns==4 && vars==2 && sigs==1 && tops==0,
+        ST_CHECK(fns==5 && vars==3 && sigs==1 && tops==0,
                  "reflect: peer entities fold (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
         ST_CHECK(ats==0 && inc==0, "reflect: no internals leak (@bytes=%d incomplete=%d)", ats, inc);
         ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro); }
@@ -3047,7 +3094,7 @@ static void patterns_checks(void){
             case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             } }
-        ST_CHECK(fns==4 && vars==2 && sigs==1 && tops==0,
+        ST_CHECK(fns==5 && vars==3 && sigs==1 && tops==0,
                  "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops); } }
 
     dart_node_close(P,0); dart_node_close(C,0);
