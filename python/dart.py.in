@@ -284,6 +284,7 @@ class DartNodeOpts(Structure):
         ("user_data", c_void_p),
         ("disable_shm", c_uint8),
         ("fetch_details", c_uint8),
+        ("match_wait_ms", c_int32),
         ("net", DartNodeNet),
         ("discovery", DartNodeDiscovery),
     ]
@@ -533,15 +534,16 @@ class ErrorKind(enum.IntEnum):
     MSG_TOO_BIG = 9
     PEER_REFUSED = 10
     EVICTED_UNSENT = 11
-    OOM = 12
-    PLATFORM = 13
-    SOCKET = 14
-    BIND = 15
-    MCAST_JOIN = 16
-    SEND = 17
-    RECV = 18
-    POLL = 19
-    WAKER = 20
+    UNMATCHED_SEND = 12
+    OOM = 13
+    PLATFORM = 14
+    SOCKET = 15
+    BIND = 16
+    MCAST_JOIN = 17
+    SEND = 18
+    RECV = 19
+    POLL = 20
+    WAKER = 21
 
 
 class FieldType(enum.IntEnum):
@@ -606,6 +608,7 @@ class NodeOptions:
     max_topics: int = 0
     disable_shm: bool = False
     fetch_details: bool = False   # greedily fetch every peer topic's name + schema (observer UIs)
+    match_wait_ms: int = 0        # send-path match wait; 0 = default (1s), negative = disabled
     data_port: int = 0
     discovery_group: str = ""
     discovery_port: int = 0
@@ -1516,6 +1519,7 @@ class Node:
         co.max_topics = options.max_topics
         co.disable_shm = 1 if options.disable_shm else 0
         co.fetch_details = 1 if options.fetch_details else 0
+        co.match_wait_ms = options.match_wait_ms
         co.user_data = c_void_p(self._id)
         co.net.data_port = options.data_port
         co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None
