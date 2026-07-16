@@ -1611,6 +1611,16 @@ int  i_dart_node_sys_lock  (DartNode *n){ return i_dart_node_lock(n); }
 void i_dart_node_sys_unlock(DartNode *n, int acquired){ i_dart_node_unlock(n, acquired); }
 int  i_dart_node_sys_poll  (DartNode *n, int timeout_ms){ return dart_node_poll(n, timeout_ms); }
 
+/* A topic-scoped DART_ERROR from the patterns layer, through the node's one event path. */
+void i_dart_node_sys_error(DartNode *n, DartErrorKind error, DartTopic *topic, uint32_t peer){
+    DartEvent e;
+    if (!n) return;
+    memset(&e, 0, sizeof e);
+    e.kind = DART_ERROR; e.error = error; e.peer = peer;
+    if (topic){ e.topic = topic->index; e.topic_name = i_dart_node_topic_name(n, topic->index); }
+    i_dart_node_emit(n, &e);
+}
+
 /* Matched subscribers on this topic excluding dormant peers: the liveness query behind the
  * patterns layer's provider-loss detection (dart_topic_match_count keeps counting a
  * dropped-but-resumable peer, so it cannot answer "can anyone still reply?"). */

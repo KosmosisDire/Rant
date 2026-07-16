@@ -535,15 +535,16 @@ class ErrorKind(enum.IntEnum):
     PEER_REFUSED = 10
     EVICTED_UNSENT = 11
     UNMATCHED_SEND = 12
-    OOM = 13
-    PLATFORM = 14
-    SOCKET = 15
-    BIND = 16
-    MCAST_JOIN = 17
-    SEND = 18
-    RECV = 19
-    POLL = 20
-    WAKER = 21
+    DUPLICATE_AUTHORITY = 13
+    OOM = 14
+    PLATFORM = 15
+    SOCKET = 16
+    BIND = 17
+    MCAST_JOIN = 18
+    SEND = 19
+    RECV = 20
+    POLL = 21
+    WAKER = 22
 
 
 class FieldType(enum.IntEnum):

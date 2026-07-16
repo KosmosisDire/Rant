@@ -102,6 +102,10 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     case DART_E_UNMATCHED_SEND:
         p=i_dart_event_append_str(p,end,"unmatched-send "); p=i_dart_event_append_topic(p,end,ev);
         p=i_dart_event_append_str(p,end,": committed with no subscriber while a match was still resolving (likely missed an already-present subscriber)"); break;
+    case DART_E_DUPLICATE_AUTHORITY:
+        p=i_dart_event_append_str(p,end,"duplicate-authority "); p=i_dart_event_append_topic(p,end,ev);
+        p=i_dart_event_append_str(p,end,": peer "); p=i_dart_event_append_peer(p,end,ev);
+        p=i_dart_event_append_str(p,end," also claims the provider/owner side (expected exactly one)"); break;
     case DART_E_OOM:
         p=i_dart_event_append_str(p,end,"out-of-memory");
         if (ev->too_big_bytes){ p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);

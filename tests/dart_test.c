@@ -3112,6 +3112,70 @@ static void patterns_checks(void){
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
 }
 
+/* ============ duplicate-authority diagnostic (19e2) ============
+ * The pattern contract expects ONE provider per function and ONE owner per variable. Two
+ * authorities never form a lane (their roles are pub/pub or sub/sub), so the conflict is
+ * detected off the announce interest and surfaced as DART_E_DUPLICATE_AUTHORITY, once per
+ * (entity, peer), on BOTH rivals: the side creating second detects at create (the rival's
+ * interest is already cached), the first detects when the rival's announce arrives.
+ * Accessors/callers are not authorities and must never fire it. */
+static void dup_on_event(const DartEvent *ev){
+    if (ev->kind == DART_ERROR && ev->error == DART_E_DUPLICATE_AUTHORITY)
+        ++*(int*)ev->user;
+}
+static void dup_authority_checks(void){
+    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts ao, bo; DartNode *A, *B; DartDiscoveryAddr seed;
+    int a_dups = 0, b_dups = 0, t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+21; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao;
+    ao.user_data=&a_dups; bo.user_data=&b_dups;
+    A = dart_node_open(&aa, "dup-a", NULL, dup_on_event, &ao);
+    B = dart_node_open(&ba, "dup-b", NULL, dup_on_event, &bo);
+    ST_CHECK(A && B, "dup: nodes open");
+    if (!(A && B)){ if(A)dart_node_close(A,0); if(B)dart_node_close(B,0); return; }
+
+    { DartVariable *va = dart_node_create_variable(A, "dupvar", NULL, NULL);
+      DartFunction *fa = dart_node_create_function(A, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
+      ST_CHECK(va && fa, "dup: first authorities created");
+      /* wait until B holds A's interest: the create-time sweep's precondition */
+      { uint32_t want = (uint32_t)dart_topic_id("dupvar"); int seen = 0;
+        for (t=0;t<2000 && !seen;t++){
+            const DartDiscoveryPeer *ps; uint16_t pc;
+            pf_pump(A,B,2);
+            ps = dart_node_peers(B,&pc);
+            if (ps && pc){ DartInterestIter it; DartTopicEntry e; memset(&it,0,sizeof it);
+                while (dart_node_peer_interest_next(&ps[0], &it, &e))
+                    if (e.hash==want){ seen=1; break; } }
+        }
+        ST_CHECK(seen, "dup: B holds A's interest"); }
+      ST_CHECK(a_dups==0 && b_dups==0, "dup: quiet before the rival (a=%d b=%d)", a_dups, b_dups);
+
+      { DartVariable *vb = dart_node_create_variable(B, "dupvar", NULL, NULL);
+        ST_CHECK(vb!=NULL, "dup: rival owner creates (diagnostic, not a refusal)");
+        ST_CHECK(b_dups==1, "dup: rival owner detected at create (%d)", b_dups); }
+      { DartFunction *fb = dart_node_create_function(B, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
+        ST_CHECK(fb!=NULL, "dup: rival provider creates");
+        ST_CHECK(b_dups==2, "dup: rival provider detected at create (%d)", b_dups); }
+      for (t=0;t<2000 && a_dups<2;t++) pf_pump(A,B,2);
+      ST_CHECK(a_dups==2, "dup: first authority sees the rival's announce (%d)", a_dups);
+
+      /* dedup + negative: repeated announces re-report nothing, and an accessor pairing
+         with an owner is the LEGAL shape (sub side, no authority claim), never flagged */
+      { DartVariable *acc  = dart_node_open_variable(B, "solo", NULL, NULL);
+        DartVariable *solo = dart_node_create_variable(A, "solo", NULL, NULL);
+        ST_CHECK(acc && solo, "dup: solo owner + accessor create");
+        for (t=0;t<150;t++) pf_pump(A,B,2);
+        ST_CHECK(a_dups==2 && b_dups==2,
+                 "dup: once per (entity, peer); accessor never fires (a=%d b=%d)", a_dups, b_dups); } }
+
+    dart_node_close(A,0); dart_node_close(B,0);
+    dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+}
+
 /* ===================== match-wait checks (19f) ===========================
  * The send-path match wait (runtime.h "MATCH WAIT"): a first send racing the announce/
  * detail cycle must reach an already-present subscriber; a disabled wait must drop
@@ -3589,6 +3653,7 @@ static int selftest_main(void){
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
     patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */
+    dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
 #ifdef DART_THREADS
     threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */

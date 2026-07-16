@@ -2131,6 +2131,11 @@ typedef enum {
                                 still resolving (.topic, .topic_name): the match wait timed out (or was
                                 disabled / the send came from a callback), so the message likely missed a
                                 subscriber that was already on the network. See dart_topic_ready. */
+    DART_E_DUPLICATE_AUTHORITY, /* a peer also advertises the authoritative side of a function or
+                                   variable this node provides/owns (.topic, .peer, .topic_name): two
+                                   providers/owners exist where the pattern contract expects exactly one.
+                                   Diagnostic, not a refusal: calls take the first response, accessors
+                                   converge on the last write. Fired once per (entity, peer). */
     /* ---- low-level IO / setup (mostly at dart_node_open; .os_error carries errno) ---- */
     DART_E_OOM,              /* allocator returned NULL / static buffer too small (.too_big_bytes = bytes needed) */
     DART_E_PLATFORM,         /* platform net init failed (WSAStartup) */
@@ -2759,6 +2764,10 @@ uint64_t i_dart_node_now_us   (DartNode *n);
 int      i_dart_node_sys_lock  (DartNode *n);
 void     i_dart_node_sys_unlock(DartNode *n, int acquired);
 int      i_dart_node_sys_poll  (DartNode *n, int timeout_ms);
+/* Fire a topic-scoped DART_ERROR from the patterns layer (the duplicate-authority
+ * diagnostic): fills .topic/.topic_name/.peer and routes through the node's normal
+ * event path (last-error slot + on_event). Call under the node lock. */
+void     i_dart_node_sys_error (DartNode *n, DartErrorKind error, DartTopic *topic, uint32_t peer);
 /* Matched subscribers excluding dormant peers: the patterns layer's provider-liveness query
  * (dart_topic_match_count counts a dropped-but-resumable peer as still matched). */
 int      i_dart_topic_live_match_count(DartTopic *topic);
@@ -9884,6 +9893,10 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     case DART_E_UNMATCHED_SEND:
         p=i_dart_event_append_str(p,end,"unmatched-send "); p=i_dart_event_append_topic(p,end,ev);
         p=i_dart_event_append_str(p,end,": committed with no subscriber while a match was still resolving (likely missed an already-present subscriber)"); break;
+    case DART_E_DUPLICATE_AUTHORITY:
+        p=i_dart_event_append_str(p,end,"duplicate-authority "); p=i_dart_event_append_topic(p,end,ev);
+        p=i_dart_event_append_str(p,end,": peer "); p=i_dart_event_append_peer(p,end,ev);
+        p=i_dart_event_append_str(p,end," also claims the provider/owner side (expected exactly one)"); break;
     case DART_E_OOM:
         p=i_dart_event_append_str(p,end,"out-of-memory");
         if (ev->too_big_bytes){ p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
@@ -12384,6 +12397,16 @@ int  i_dart_node_sys_lock  (DartNode *n){ return i_dart_node_lock(n); }
 void i_dart_node_sys_unlock(DartNode *n, int acquired){ i_dart_node_unlock(n, acquired); }
 int  i_dart_node_sys_poll  (DartNode *n, int timeout_ms){ return dart_node_poll(n, timeout_ms); }
 
+/* A topic-scoped DART_ERROR from the patterns layer, through the node's one event path. */
+void i_dart_node_sys_error(DartNode *n, DartErrorKind error, DartTopic *topic, uint32_t peer){
+    DartEvent e;
+    if (!n) return;
+    memset(&e, 0, sizeof e);
+    e.kind = DART_ERROR; e.error = error; e.peer = peer;
+    if (topic){ e.topic = topic->index; e.topic_name = i_dart_node_topic_name(n, topic->index); }
+    i_dart_node_emit(n, &e);
+}
+
 /* Matched subscribers on this topic excluding dormant peers: the liveness query behind the
  * patterns layer's provider-loss detection (dart_topic_match_count keeps counting a
  * dropped-but-resumable peer, so it cannot answer "can anyone still reply?"). */
@@ -12989,6 +13012,11 @@ typedef struct i_DartPatterns {
 
 static void     i_dart_patterns_on_event(void *user, const DartEvent *ev);
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us);
+/* duplicate-authority sweep for a just-created provider/owner (defined with the rest of
+ * the detection, after both entity structs) */
+static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
+                                 int authority_is_pub, uint32_t **ids, uint16_t *n_ids,
+                                 uint16_t *cap);
 
 /* Lazily create the manager and register the node-wide sys hooks. Lock held (a create call
  * took it). NULL on OOM. */
@@ -13041,6 +13069,8 @@ struct DartFunction {
     i_DartPending  *pending;        /* caller: outstanding calls */
     uint8_t        *sync_buf; uint32_t sync_cap;   /* sync-call reply scratch (view lifetime) */
     uint8_t         is_provider;
+    uint32_t       *dup_peers;      /* provider: peers already reported for duplicate authority */
+    uint16_t        dup_n, dup_cap;
 };
 
 /* the transient request handed to the provider's handler: the public read-only head
@@ -13190,6 +13220,9 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list (tick/event fanout) */
     fn->next = pm->funcs; pm->funcs = fn;
+    if (provider)   /* a rival provider may already be on the network */
+        i_dart_pat_dup_sweep(n, fn->req, DART_KIND_FUNC_REQ, 0,
+                             &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     i_dart_node_sys_unlock(n, acquired);
     return fn;
 }
@@ -13376,6 +13409,8 @@ struct DartVariable {
     uint32_t        write_seq;
     uint8_t        *store;  uint32_t store_len,  store_cap;    /* owner: published value; accessor: cache */
     uint8_t        *shadow; uint32_t shadow_len, shadow_cap;   /* owner: source value while forced */
+    uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
+    uint16_t        dup_n, dup_cap;
 };
 
 /* copy v into a grown buffer; 0 on OOM (buffer unchanged) */
@@ -13502,6 +13537,9 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     }
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list */
     v->next = pm->vars; pm->vars = v;
+    if (owner)      /* a rival owner may already be on the network */
+        i_dart_pat_dup_sweep(n, v->value, DART_KIND_VARIABLE, 1,
+                             &v->dup_peers, &v->dup_n, &v->dup_cap);
     i_dart_node_sys_unlock(n, acquired);
     if (owner && opts && opts->initial.len)   /* seed the store + history so a late accessor catches up */
         dart_variable_set(v, opts->initial);
@@ -13668,6 +13706,116 @@ int dart_signal_listener_count(DartSignal *sig){
     return sig ? dart_topic_match_count(sig->topic) : 0;
 }
 
+/* ---- duplicate-authority detection --------------------------------------------------------
+ * The pattern contract expects exactly ONE provider per function and ONE owner per variable.
+ * Two authorities never match each other (both hold the channel's authoritative direction,
+ * so their roles are pub/pub or sub/sub and no lane forms), which means the transport's
+ * gates can never see the conflict; the announce interest can. A peer entry with the same
+ * kind, the same low-32 name hash, and the authoritative direction claims the same entity:
+ * DART_E_DUPLICATE_AUTHORITY fires once per (entity, peer). Like matching, the 32-bit hash
+ * only NOMINATES: when the peer's name is already in the detail cache it is confirmed first
+ * (authorities exchange no details between themselves, so it usually is not); an actual
+ * hash overlap costs one spurious diagnostic, never a refusal. Checked when a peer's
+ * interest is (re)applied and when the authority-side entity is created (peers whose
+ * interest arrived before the entity existed announce nothing new to trigger on). */
+
+static uint32_t i_dart_pat_hash32(DartString base, const char *suffix);         /* reflection */
+static const DartDiscoveryPeer *i_dart_pat_peer(DartNode *n, uint32_t peer);    /* helpers below */
+
+static int i_dart_pat_dup_reported(const uint32_t *ids, uint16_t n_ids, uint32_t peer){
+    uint16_t i;
+    for (i = 0; i < n_ids; i++) if (ids[i] == peer) return 1;
+    return 0;
+}
+
+/* remember peer in the entity's reported list (grown; on OOM it may report again later) */
+static void i_dart_pat_dup_remember(DartNode *n, uint32_t **ids, uint16_t *n_ids,
+                                    uint16_t *cap, uint32_t peer){
+    if (*n_ids == *cap){
+        uint16_t grown = *cap ? (uint16_t)(*cap * 2u) : 4u;
+        uint32_t *nb = (uint32_t*)i_dart_node_sys_alloc(n, *ids, grown * sizeof **ids);
+        if (!nb) return;
+        *ids = nb; *cap = grown;
+    }
+    (*ids)[(*n_ids)++] = peer;
+}
+
+/* forget peer in one entity's reported list (peer down: a genuine return re-reports) */
+static void i_dart_pat_dup_drop(uint32_t *ids, uint16_t *n_ids, uint32_t peer){
+    uint16_t i;
+    for (i = 0; i < *n_ids; i++)
+        if (ids[i] == peer){ ids[i] = ids[--*n_ids]; return; }
+}
+
+/* does peer advertise the authoritative direction of (hash, kind)? authority_is_pub says
+ * which direction is the authority on that channel (a variable's value channel: pub; a
+ * function's req channel: sub). */
+static int i_dart_pat_peer_claims(DartNode *n, const DartDiscoveryPeer *p, DartString our_name,
+                                  uint32_t hash, uint8_t kind, int authority_is_pub){
+    DartInterestIter it; DartTopicEntry e;
+    memset(&it, 0, sizeof it);
+    while (dart_node_peer_interest_next(p, &it, &e)){
+        int claims;
+        if (e.hash != hash || e.kind != kind) continue;
+        claims = authority_is_pub ? (e.role == DART_PUB_ONLY || e.role == DART_PUBSUB)
+                                  : (e.role == DART_SUB_ONLY || e.role == DART_PUBSUB);
+        if (!claims) continue;
+        {   /* the hash only nominates: confirm against the fetched name when we hold one */
+            DartString nm = dart_node_peer_topic_name(n, p->id, e.index);
+            if (nm.len && (nm.len != our_name.len
+                           || memcmp(nm.data, our_name.data, nm.len) != 0)) continue;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* check ONE authority-side entity against ONE peer; report a fresh claim exactly once */
+static void i_dart_pat_dup_check(DartNode *n, const DartDiscoveryPeer *p, DartTopic *primary,
+                                 uint8_t kind, int authority_is_pub,
+                                 uint32_t **ids, uint16_t *n_ids, uint16_t *cap){
+    DartString nm;
+    if (!primary || p->liveness != DART_PEER_ACTIVE) return;
+    if (i_dart_pat_dup_reported(*ids, *n_ids, p->id)) return;
+    nm = i_dart_topic_name(primary);
+    if (!i_dart_pat_peer_claims(n, p, nm, i_dart_pat_hash32(nm, ""), kind, authority_is_pub))
+        return;
+    i_dart_pat_dup_remember(n, ids, n_ids, cap, p->id);
+    i_dart_node_sys_error(n, DART_E_DUPLICATE_AUTHORITY, primary, p->id);
+}
+
+/* every authority-side entity vs one peer whose interest was just (re)applied */
+static void i_dart_pat_dup_check_peer(i_DartPatterns *pm, uint32_t peer){
+    const DartDiscoveryPeer *p = i_dart_pat_peer(pm->n, peer);
+    DartFunction *fn; DartVariable *v;
+    if (!p) return;
+    for (fn = pm->funcs; fn; fn = fn->next)
+        if (fn->is_provider)
+            i_dart_pat_dup_check(pm->n, p, fn->req, DART_KIND_FUNC_REQ, 0,
+                                 &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
+    for (v = pm->vars; v; v = v->next)
+        if (v->is_owner)
+            i_dart_pat_dup_check(pm->n, p, v->value, DART_KIND_VARIABLE, 1,
+                                 &v->dup_peers, &v->dup_n, &v->dup_cap);
+}
+
+/* a just-created authority-side entity vs every known peer (create-time sweep) */
+static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
+                                 int authority_is_pub, uint32_t **ids, uint16_t *n_ids,
+                                 uint16_t *cap){
+    uint16_t cnt, i;
+    const DartDiscoveryPeer *ps = dart_node_peers(n, &cnt);
+    if (!ps) return;
+    for (i = 0; i < cnt; i++)
+        i_dart_pat_dup_check(n, &ps[i], primary, kind, authority_is_pub, ids, n_ids, cap);
+}
+
+static void i_dart_pat_dup_forget_peer(i_DartPatterns *pm, uint32_t peer){
+    DartFunction *fn; DartVariable *v;
+    for (fn = pm->funcs; fn; fn = fn->next) i_dart_pat_dup_drop(fn->dup_peers, &fn->dup_n, peer);
+    for (v = pm->vars; v; v = v->next)      i_dart_pat_dup_drop(v->dup_peers, &v->dup_n, peer);
+}
+
 /* ---- manager hooks: call timeouts (tick) + provider-loss (event) ------------------------ */
 
 /* fail-and-remove every pending call of fn past its deadline (or, when all!=0,
@@ -13711,9 +13859,11 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
         /* a match may just have formed: flush calls queued while no provider was matched */
         for (fn = pm->funcs; fn; fn = fn->next)
             if (!fn->is_provider && fn->pending) i_dart_func_flush_queued(fn);
+        i_dart_pat_dup_check_peer(pm, ev->peer);   /* a rival authority may have appeared */
         return;
     }
     if (ev->kind != DART_PEER_DOWN) return;
+    i_dart_pat_dup_forget_peer(pm, ev->peer);
     /* a provider dropped: a caller with no LIVE provider left can never be answered, so fail
        its outstanding calls now with PEER_LOST instead of waiting out the timeout. The live
        count excludes dormant peers: dart_topic_match_count keeps counting the dropped peer
@@ -13976,7 +14126,7 @@ enum class ErrorKind {
     None = 0,
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
     MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
-    PeerRefused, EvictedUnsent, UnmatchedSend,
+    PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
     Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
 };
 

@@ -415,6 +415,10 @@ uint64_t i_dart_node_now_us   (DartNode *n);
 int      i_dart_node_sys_lock  (DartNode *n);
 void     i_dart_node_sys_unlock(DartNode *n, int acquired);
 int      i_dart_node_sys_poll  (DartNode *n, int timeout_ms);
+/* Fire a topic-scoped DART_ERROR from the patterns layer (the duplicate-authority
+ * diagnostic): fills .topic/.topic_name/.peer and routes through the node's normal
+ * event path (last-error slot + on_event). Call under the node lock. */
+void     i_dart_node_sys_error (DartNode *n, DartErrorKind error, DartTopic *topic, uint32_t peer);
 /* Matched subscribers excluding dormant peers: the patterns layer's provider-liveness query
  * (dart_topic_match_count counts a dropped-but-resumable peer as still matched). */
 int      i_dart_topic_live_match_count(DartTopic *topic);
