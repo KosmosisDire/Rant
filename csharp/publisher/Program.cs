@@ -25,7 +25,7 @@ static class Program
     {
         double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 => run forever
         string iface = args.Length > 1 ? args[1] : null;                 // optional: pin the interface
-        var node = new Node("cs-publisher", null, e => Console.Error.WriteLine("event: " + e),
+        var node = new DartNode("cs-publisher", null, e => Console.Error.WriteLine("event: " + e),
                             multicastInterface: iface);
         // keep_last deep enough that a small per-loop burst is not evicted before it flushes.
         var ch = new Topic<Tick>(node, "tick", Role.PubOnly, keepLast: 64);

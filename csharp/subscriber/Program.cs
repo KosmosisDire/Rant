@@ -23,7 +23,7 @@ static class Program
         double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 => run forever
         string iface = args.Length > 1 ? args[1] : null;
 
-        var node = new Node("cs-subscriber", _ => _count++,
+        var node = new DartNode("cs-subscriber", _ => _count++,
             e => Console.Error.WriteLine("event: " + e), multicastInterface: iface);
         new Topic<Tick>(node, "tick", Role.SubOnly);
         Console.WriteLine("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)");

@@ -1,8 +1,8 @@
-// DART for Unity: shared, name-keyed topics handed out by the scene's DartNode
-// component (DartNode.cs: Unity only registers a MonoBehaviour whose class name
+// DART for Unity: shared, name-keyed topics handed out by the scene's UnityDartNode
+// component (UnityDartNode.cs: Unity only registers a MonoBehaviour whose class name
 // matches its file name, so the component lives there and this file holds the rest).
 //
-// Put ONE DartNode component in the scene. It owns the process node (name, domain,
+// Put ONE UnityDartNode component in the scene. It owns the process node (name, domain,
 // lifecycle) and every other script publishes/subscribes through it, so components
 // never each open a node of their own:
 //
@@ -10,12 +10,12 @@
 //
 //   // publish from any component
 //   DartTopic<Pose> pose;
-//   void Start()  { pose = DartNode.Topic<Pose>("player/pose"); }
+//   void Start()  { pose = UnityDartNode.Topic<Pose>("player/pose"); }
 //   void Update() { pose.Publish(new Pose { X = transform.position.x }); }
 //
 //   // subscribe from any other component: dies with the component, skipped while
 //   // it is disabled, and always fires on the main thread
-//   void Start() { DartNode.Subscribe<Pose>("player/pose", this, OnPose); }
+//   void Start() { UnityDartNode.Subscribe<Pose>("player/pose", this, OnPose); }
 //   void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
 //
 // Topics are shared by name: every script asking for "player/pose" gets the same
@@ -24,17 +24,17 @@
 // unsubscribe withdraws it).
 //
 // Threading: the node runs the C service thread, so the wire never waits for a
-// frame; every topic is queued from creation and DartNode dispatches once per
+// frame; every topic is queued from creation and UnityDartNode dispatches once per
 // frame, so ALL handlers fire on the main thread, where the Unity API is legal.
 // Events (peer up/down, errors) reach the main thread the same way and are logged
-// to the Console by default (DartNode.Events to observe them).
+// to the Console by default (UnityDartNode.Events to observe them).
 //
 // Edit mode: the component is [ExecuteAlways]; with Run In Edit Mode on (default)
 // the node is live in the editor outside play, pumped from EditorApplication.update.
 // Whether publishers/subscribers exist at edit time is up to them: a topic
 // acquired while the node is closed simply goes live when it opens.
 //
-// The low-level wrapper stays fully available: DartNode.Main.Raw is the Node, and a
+// The low-level wrapper stays fully available: UnityDartNode.Main.Raw is the DartNode, and a
 // DartTopic's Raw is the underlying Dart.Topic (TryTake, Drain, QueueStats...).
 #if UNITY_5_3_OR_NEWER
 using System;
@@ -48,7 +48,7 @@ namespace Dart
     {
         /// <summary>The sending node's name (never null; "unknown-peer" fallback).</summary>
         public readonly string Sender;
-        /// <summary>Node monotonic clock (microseconds) at ARRIVAL on the poll side,
+        /// <summary>DartNode monotonic clock (microseconds) at ARRIVAL on the poll side,
         /// not at dispatch: inter-arrival timing is real even when dispatch is
         /// frame-paced.</summary>
         public readonly ulong RecvUs;
@@ -73,7 +73,7 @@ namespace Dart
         }
     }
 
-    /// <summary>A shared, name-keyed topic on the scene's DartNode. One instance
+    /// <summary>A shared, name-keyed topic on the scene's UnityDartNode. One instance
     /// exists per name; it survives the native node closing and reopening (edit
     /// mode toggles, inspector changes) by re-creating its native topic lazily.</summary>
     public abstract class DartTopicBase
@@ -86,7 +86,7 @@ namespace Dart
             internal bool Dead;
         }
 
-        private readonly DartNode _owner;
+        private readonly UnityDartNode _owner;
         private readonly string _name;
         private readonly Qos _qos;
         private readonly List<Sub> _subs = new List<Sub>();
@@ -96,7 +96,7 @@ namespace Dart
         private bool _wantPub;
         private bool _warnedClosed;
 
-        internal DartTopicBase(DartNode owner, string name, Qos qos)
+        internal DartTopicBase(UnityDartNode owner, string name, Qos qos)
         {
             _owner = owner; _name = name; _qos = qos;
         }
@@ -109,7 +109,7 @@ namespace Dart
         /// <summary>Local handlers currently subscribed.</summary>
         public int SubscriberCount => _live;
 
-        internal abstract Topic CreateRaw(Node node, string name, Role role, Qos qos);
+        internal abstract Topic CreateRaw(DartNode node, string name, Role role, Qos qos);
 
         // The advertised role always mirrors actual local use: create the native
         // topic on first use, flip the role on later changes (SetRole re-advertises
@@ -124,7 +124,7 @@ namespace Dart
                 return;
             }
             if (want == Role.Inactive) return;
-            Node node = _owner != null ? _owner.NativeNode : null;
+            DartNode node = _owner != null ? _owner.NativeNode : null;
             if (node == null) return;               // deferred until the node opens
             _raw = CreateRaw(node, _name, want, _qos);
             _appliedRole = want;
@@ -151,7 +151,7 @@ namespace Dart
             if (_raw == null && !_warnedClosed)
             {
                 _warnedClosed = true;
-                Debug.LogWarning("[DART] publish on '" + _name + "' dropped: no open DartNode "
+                Debug.LogWarning("[DART] publish on '" + _name + "' dropped: no open UnityDartNode "
                     + "(component disabled, Run In Edit Mode off, or open failed)");
             }
             return _raw;
@@ -172,7 +172,7 @@ namespace Dart
             ApplyRole();
         }
 
-        // Main thread, from DartNode's per-frame dispatch. Handlers may subscribe,
+        // Main thread, from UnityDartNode's per-frame dispatch. Handlers may subscribe,
         // unsubscribe, and publish freely from inside a delivery.
         internal void Deliver(Message m)
         {
@@ -217,9 +217,9 @@ namespace Dart
     /// <summary>A raw (schemaless) shared topic: bytes or UTF-8 strings.</summary>
     public sealed class DartTopic : DartTopicBase
     {
-        internal DartTopic(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
+        internal DartTopic(UnityDartNode owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Topic CreateRaw(Node node, string name, Role role, Qos qos)
+        internal override Topic CreateRaw(DartNode node, string name, Role role, Qos qos)
             => new Topic(node, name, (Schema)null, role, qos);
 
         public SendStatus Publish(byte[] data)
@@ -254,9 +254,9 @@ namespace Dart
     /// in the core wrapper's Topic&lt;T&gt;.</summary>
     public sealed class DartTopic<T> : DartTopicBase
     {
-        internal DartTopic(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
+        internal DartTopic(UnityDartNode owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Topic CreateRaw(Node node, string name, Role role, Qos qos)
+        internal override Topic CreateRaw(DartNode node, string name, Role role, Qos qos)
             => new Topic<T>(node, name, role, qos);   // the internal (role, qos) plumbing ctor
 
         public SendStatus Publish(T message)

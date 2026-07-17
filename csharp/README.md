@@ -58,7 +58,7 @@ public struct Pose  {
     public Twist Vel;
 }
 
-var node = new Node("robot1",
+var node = new DartNode("robot1",
                     onMessage: m => Console.WriteLine(m.As<Pose>()),
                     onEvent: e => Console.Error.WriteLine(e),   // required: it carries the diagnostics
                     domain: 7);                                 // all options are named parameters

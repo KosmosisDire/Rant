@@ -144,9 +144,9 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var srv = new Node("srv", null, e => Console.WriteLine("event(srv): " + e),
+        var srv = new DartNode("srv", null, e => Console.WriteLine("event(srv): " + e),
                            domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new Node("cli", null, e => Console.WriteLine("event(cli): " + e),
+        var cli = new DartNode("cli", null, e => Console.WriteLine("event(cli): " + e),
                            domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
 
         // definitions on srv: simple form (return = reply), a thrower (-> AppError),
@@ -258,7 +258,7 @@ static class Program
         if (!RoundTrip()) return 1;
         Console.WriteLine("opening nodes...");
 
-        var sub = new Node("sub",
+        var sub = new DartNode("sub",
             onMessage: m =>
             {
                 Received = m;
@@ -268,7 +268,7 @@ static class Program
             onEvent: e => Console.WriteLine("event(sub): " + e),
             domain: 42, multicastInterface: "127.0.0.1");
 
-        var pub = new Node("pub", null, e => Console.WriteLine("event(pub): " + e),
+        var pub = new DartNode("pub", null, e => Console.WriteLine("event(pub): " + e),
             domain: 42, multicastInterface: "127.0.0.1");
 
         new Topic<Pose>(sub, "pose", Role.SubOnly, reliable: true, keepLast: 8);

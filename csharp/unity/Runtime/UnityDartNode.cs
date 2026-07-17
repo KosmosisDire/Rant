@@ -1,4 +1,4 @@
-// The DartNode component: the scene's shared DART node. Lives in its own file
+// The UnityDartNode component: the scene's shared DART node. Lives in its own file
 // because Unity only registers a MonoBehaviour whose class name matches the file
 // name. The topic/subscription API it hands out is in DartUnity.cs.
 //
@@ -6,12 +6,12 @@
 //
 //   // publish from any component
 //   DartTopic<Pose> pose;
-//   void Start()  { pose = DartNode.Topic<Pose>("player/pose"); }
+//   void Start()  { pose = UnityDartNode.Topic<Pose>("player/pose"); }
 //   void Update() { pose.Publish(new Pose { X = transform.position.x }); }
 //
 //   // subscribe from any other component: dies with the component, skipped while
 //   // it is disabled, and always fires on the main thread
-//   void Start() { DartNode.Subscribe<Pose>("player/pose", this, OnPose); }
+//   void Start() { UnityDartNode.Subscribe<Pose>("player/pose", this, OnPose); }
 //   void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
 #if UNITY_5_3_OR_NEWER
 using System;
@@ -21,13 +21,13 @@ using UnityEngine;
 namespace Dart
 {
     /// <summary>The scene's shared DART node. Add exactly one to the scene; every
-    /// other script reaches it through the static API (DartNode.Topic&lt;T&gt;,
-    /// DartNode.Subscribe). Runs in edit mode too when Run In Edit Mode is on.</summary>
+    /// other script reaches it through the static API (UnityDartNode.Topic&lt;T&gt;,
+    /// UnityDartNode.Subscribe). Runs in edit mode too when Run In Edit Mode is on.</summary>
     [ExecuteAlways]
     [DefaultExecutionOrder(-1000)]   // dispatch before other scripts' Update
     [DisallowMultipleComponent]
-    [AddComponentMenu("DART/DART Node")]
-    public sealed class DartNode : MonoBehaviour
+    [AddComponentMenu("DART/DART DartNode")]
+    public sealed class UnityDartNode : MonoBehaviour
     {
         [Tooltip("Human-readable node name, synced to peers; empty = auto node-XXXXXXXX.")]
         [SerializeField] private string nodeName = "";
@@ -44,9 +44,9 @@ namespace Dart
         [Tooltip("Play mode: survive scene loads (DontDestroyOnLoad).")]
         [SerializeField] private bool persistAcrossScenes = true;
 
-        private static DartNode s_main;
+        private static UnityDartNode s_main;
 
-        private Node _node;
+        private DartNode _node;
         private bool _pollFallback;      // service thread unavailable: pump polls instead
         private bool _configDirty;
         private int _frame;
@@ -57,28 +57,28 @@ namespace Dart
         private readonly object _pendingLock = new object();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
 
-        /// <summary>The scene's DartNode (found lazily), or null if none exists.</summary>
-        public static DartNode Main
+        /// <summary>The scene's UnityDartNode (found lazily), or null if none exists.</summary>
+        public static UnityDartNode Main
         {
             get
             {
                 if (s_main == null)
                 {
 #if UNITY_2023_1_OR_NEWER
-                    s_main = FindAnyObjectByType<DartNode>();
+                    s_main = FindAnyObjectByType<UnityDartNode>();
 #else
-                    s_main = FindObjectOfType<DartNode>();
+                    s_main = FindObjectOfType<UnityDartNode>();
 #endif
                 }
                 return s_main;
             }
         }
 
-        /// <summary>The underlying wrapper Node; null while closed. Escape hatch to
+        /// <summary>The underlying wrapper DartNode; null while closed. Escape hatch to
         /// the full API (peers via events, MemoryStats, extra topics...).</summary>
-        public Node Raw => _node;
+        public DartNode Raw => _node;
         public bool IsOpen => _node != null;
-        internal Node NativeNode => _node;
+        internal DartNode NativeNode => _node;
 
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
         public static event Action<Event> Events;
@@ -153,12 +153,12 @@ namespace Dart
             => new InvalidOperationException("topic '" + name + "' already exists as " + have.GetType().Name
                 + ", requested as " + want + ": one name = one message type per node");
 
-        private static DartNode RequireMain()
+        private static UnityDartNode RequireMain()
         {
-            DartNode m = Main;
+            UnityDartNode m = Main;
             if (m == null)
                 throw new InvalidOperationException(
-                    "no DartNode in the scene: add the DartNode component to a GameObject (it owns the shared node)");
+                    "no UnityDartNode in the scene: add the UnityDartNode component to a GameObject (it owns the shared node)");
             return m;
         }
 
@@ -184,7 +184,7 @@ namespace Dart
         {
             if (s_main != null && s_main != this)
             {
-                Debug.LogWarning("[DART] a DartNode already exists on '" + s_main.gameObject.name
+                Debug.LogWarning("[DART] a UnityDartNode already exists on '" + s_main.gameObject.name
                     + "'; the one on '" + gameObject.name + "' stays inactive", this);
                 return;
             }
@@ -246,7 +246,7 @@ namespace Dart
         {
             try
             {
-                _node = new Node(string.IsNullOrEmpty(nodeName) ? null : nodeName,
+                _node = new DartNode(string.IsNullOrEmpty(nodeName) ? null : nodeName,
                                  RouteMessage, QueueEvent,
                                  domain: Mathf.Clamp(domain, 0, ushort.MaxValue),
                                  maxTopics: Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
