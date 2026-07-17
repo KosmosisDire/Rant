@@ -122,6 +122,7 @@ struct DartNode {
        (per-topic) message routing via DartTopic.sys_on_message. All optional. */
     i_DartSysEventFn sys_on_event;
     i_DartSysTickFn  sys_tick;
+    i_DartSysCloseFn sys_on_close;
     void            *sys_user;
     uint64_t         sys_tick_next;   /* the tick's returned next deadline, folded into the poll wait */
     uint64_t         settle_topology_us; /* last PEER_UP/DOWN/INTEREST change (dart_node_settle) */
@@ -1652,11 +1653,12 @@ DartString i_dart_topic_name (const DartTopic *topic){
 }
 uint16_t   i_dart_node_topic_count(DartNode *n){ return n ? n->n_created : 0; }
 
-void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick, void *user){
+void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick,
+                               i_DartSysCloseFn on_close, void *user){
     int acquired;
     if (!n) return;
     acquired = i_dart_node_lock(n);
-    n->sys_on_event = on_event; n->sys_tick = tick; n->sys_user = user;
+    n->sys_on_event = on_event; n->sys_tick = tick; n->sys_on_close = on_close; n->sys_user = user;
     n->sys_tick_next = 0;
     i_dart_node_kick(n);   /* re-evaluate the wait cap with the new tick */
     i_dart_node_unlock(n, acquired);
@@ -2174,6 +2176,13 @@ int dart_node_close(DartNode *n, int send_bye){
     /* from here the contract holds: no other thread is inside, or may enter, any
        dart_* call on this node, so the teardown runs truly single-threaded */
 #endif
+    /* settle outstanding pattern promises (pending calls get CANCELLED) while the node is
+       still fully alive; cleared first so a callback closing the node cannot recurse */
+    if (n->sys_on_close){
+        i_DartSysCloseFn f = n->sys_on_close;
+        n->sys_on_close = NULL;
+        f(n->sys_user);
+    }
     if (n->discovery) dart_discovery_close(n->discovery, send_bye);   /* frees peer blobs via our
                                                                          hook, so it must run BEFORE
                                                                          the pool is copied out */

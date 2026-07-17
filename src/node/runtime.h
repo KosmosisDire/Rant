@@ -386,6 +386,7 @@ void     dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv);
 typedef void     (*i_DartSysMsgFn)(void *user, const DartMsg *msg);
 typedef void     (*i_DartSysEventFn)(void *user, const DartEvent *ev);
 typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns next deadline us (0 = none) */
+typedef void     (*i_DartSysCloseFn)(void *user);   /* node closing: settle outstanding promises */
 
 /* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
  * per-payload prefix, and the directed flag, permits '@' in the name (reserved for pattern
@@ -399,10 +400,13 @@ DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartR
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
 /* Publish hdr+payload to ONE peer, point-to-point (function replies). */
 int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data);
-/* Register the patterns layer's node-wide event observer + per-poll tick (NULL clears both).
- * The tick runs each poll pass with now_us and returns its next deadline, folded into the
- * poll wait cap so call timeouts fire on time with no traffic. */
-void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick, void *user);
+/* Register the patterns layer's node-wide event observer + per-poll tick + close hook
+ * (NULL clears). The tick runs each poll pass with now_us and returns its next deadline,
+ * folded into the poll wait cap so call timeouts fire on time with no traffic. The close
+ * hook fires ONCE at the top of dart_node_close (service thread already joined, node still
+ * fully alive) so pending call outcomes can be synthesized before teardown. */
+void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick,
+                               i_DartSysCloseFn on_close, void *user);
 /* Node-pool alloc/realloc/free (size 0 = free) for the patterns layer; its per-node manager
  * handle slot; and the node's monotonic clock (us). Call only under the node lock. */
 void    *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size);

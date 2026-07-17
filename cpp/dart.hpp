@@ -150,8 +150,10 @@ enum class FieldType : uint8_t {
 };
 
 /* A function call's outcome (mirrors DartCallStatus). Ok/AppError/NoHandler travel on
- * the wire; Timeout/PeerLost are synthesized client-side when no response arrives. */
-enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4 };
+ * the wire; Timeout/PeerLost are synthesized client-side when no response arrives;
+ * Cancelled is synthesized for calls still pending when the local node closes. */
+enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4,
+                        Cancelled = 5 };
 
 /* What a network entity is (mirrors DartEntityKind): observers consume ENTITIES, never
  * raw channels; a function's req/rsp pair or a variable's set channel fold into one. */
@@ -168,6 +170,7 @@ static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
 #ifndef DART_NO_PATTERNS
 static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum drift");
 static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
+static_assert((int)CallStatus::Cancelled == detail::DART_CALL_CANCELLED, "call-status enum drift");
 static_assert((int)EntityKind::Topic == detail::DART_ENTITY_TOPIC, "entity enum drift");
 static_assert((int)EntityKind::Signal == detail::DART_ENTITY_SIGNAL, "entity enum drift");
 #endif

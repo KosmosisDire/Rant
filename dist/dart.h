@@ -2640,6 +2640,7 @@ void     dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv);
 typedef void     (*i_DartSysMsgFn)(void *user, const DartMsg *msg);
 typedef void     (*i_DartSysEventFn)(void *user, const DartEvent *ev);
 typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns next deadline us (0 = none) */
+typedef void     (*i_DartSysCloseFn)(void *user);   /* node closing: settle outstanding promises */
 
 /* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
  * per-payload prefix, and the directed flag, permits '@' in the name (reserved for pattern
@@ -2653,10 +2654,13 @@ DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartR
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
 /* Publish hdr+payload to ONE peer, point-to-point (function replies). */
 int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data);
-/* Register the patterns layer's node-wide event observer + per-poll tick (NULL clears both).
- * The tick runs each poll pass with now_us and returns its next deadline, folded into the
- * poll wait cap so call timeouts fire on time with no traffic. */
-void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick, void *user);
+/* Register the patterns layer's node-wide event observer + per-poll tick + close hook
+ * (NULL clears). The tick runs each poll pass with now_us and returns its next deadline,
+ * folded into the poll wait cap so call timeouts fire on time with no traffic. The close
+ * hook fires ONCE at the top of dart_node_close (service thread already joined, node still
+ * fully alive) so pending call outcomes can be synthesized before teardown. */
+void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick,
+                               i_DartSysCloseFn on_close, void *user);
 /* Node-pool alloc/realloc/free (size 0 = free) for the patterns layer; its per-node manager
  * handle slot; and the node's monotonic clock (us). Call only under the node lock. */
 void    *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size);
@@ -2954,7 +2958,10 @@ typedef enum {
     DART_CALL_APP_ERROR = 1,   /* the handler replied with dart_request_fail */
     DART_CALL_NO_HANDLER= 2,   /* the definition side has no on_request registered */
     DART_CALL_TIMEOUT   = 3,   /* client-synthesized: no response within the timeout */
-    DART_CALL_PEER_LOST = 4    /* client-synthesized: the handler node dropped mid-call */
+    DART_CALL_PEER_LOST = 4,   /* client-synthesized: the handler node dropped mid-call */
+    DART_CALL_CANCELLED = 5    /* client-synthesized: the LOCAL node closed with the call still
+                                  pending (fired during dart_node_close, on the closing thread),
+                                  so every call gets exactly one outcome even at close */
 } DartCallStatus;
 
 typedef struct DartFunction DartFunction;   /* opaque function handle */
@@ -10822,6 +10829,7 @@ struct DartNode {
        (per-topic) message routing via DartTopic.sys_on_message. All optional. */
     i_DartSysEventFn sys_on_event;
     i_DartSysTickFn  sys_tick;
+    i_DartSysCloseFn sys_on_close;
     void            *sys_user;
     uint64_t         sys_tick_next;   /* the tick's returned next deadline, folded into the poll wait */
     uint64_t         settle_topology_us; /* last PEER_UP/DOWN/INTEREST change (dart_node_settle) */
@@ -12352,11 +12360,12 @@ DartString i_dart_topic_name (const DartTopic *topic){
 }
 uint16_t   i_dart_node_topic_count(DartNode *n){ return n ? n->n_created : 0; }
 
-void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick, void *user){
+void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick,
+                               i_DartSysCloseFn on_close, void *user){
     int acquired;
     if (!n) return;
     acquired = i_dart_node_lock(n);
-    n->sys_on_event = on_event; n->sys_tick = tick; n->sys_user = user;
+    n->sys_on_event = on_event; n->sys_tick = tick; n->sys_on_close = on_close; n->sys_user = user;
     n->sys_tick_next = 0;
     i_dart_node_kick(n);   /* re-evaluate the wait cap with the new tick */
     i_dart_node_unlock(n, acquired);
@@ -12874,6 +12883,13 @@ int dart_node_close(DartNode *n, int send_bye){
     /* from here the contract holds: no other thread is inside, or may enter, any
        dart_* call on this node, so the teardown runs truly single-threaded */
 #endif
+    /* settle outstanding pattern promises (pending calls get CANCELLED) while the node is
+       still fully alive; cleared first so a callback closing the node cannot recurse */
+    if (n->sys_on_close){
+        i_DartSysCloseFn f = n->sys_on_close;
+        n->sys_on_close = NULL;
+        f(n->sys_user);
+    }
     if (n->discovery) dart_discovery_close(n->discovery, send_bye);   /* frees peer blobs via our
                                                                          hook, so it must run BEFORE
                                                                          the pool is copied out */
@@ -12926,6 +12942,7 @@ typedef struct i_DartPatterns {
 
 static void     i_dart_patterns_on_event(void *user, const DartEvent *ev);
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us);
+static void     i_dart_patterns_on_close(void *user);
 /* duplicate-authority sweep for a just-created provider/owner (defined with the rest of
  * the detection, after both entity structs) */
 static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
@@ -12942,7 +12959,8 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
     if (!pm) return NULL;
     memset(pm, 0, sizeof *pm);
     pm->n = n; *slot = pm;
-    i_dart_node_set_sys_hooks(n, i_dart_patterns_on_event, i_dart_patterns_tick, pm);
+    i_dart_node_set_sys_hooks(n, i_dart_patterns_on_event, i_dart_patterns_tick,
+                              i_dart_patterns_on_close, pm);
     return pm;
 }
 
@@ -13773,6 +13791,17 @@ static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
         if (s && (!soonest || s < soonest)) soonest = s;
     }
     return soonest;   /* next timeout deadline for the poll wait cap */
+}
+
+/* node closing: a call still pending can never be answered, so synthesize CANCELLED for
+ * each (the always-one-outcome contract holds at close; a binding's future/Task settles
+ * instead of hanging). Runs once, on the closing thread, node still fully alive. */
+static void i_dart_patterns_on_close(void *user){
+    i_DartPatterns *pm = (i_DartPatterns*)user;
+    DartFunction *fn;
+    for (fn = pm->funcs; fn; fn = fn->next)
+        if (!fn->is_provider && fn->pending)
+            i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1);
 }
 
 static void i_dart_patterns_on_event(void *user, const DartEvent *ev){

@@ -2801,6 +2801,9 @@ static volatile uint64_t pf_defer_token;
 static void pf_defer_handler(DartRequest *req, void *user){ (void)user; pf_calls++; pf_defer_token = dart_request_defer(req); }
 static int pf_sig_count; static uint32_t pf_sig_last;
 static void pf_on_signal(const DartMsg *m, void *user){ (void)user; pf_sig_count++; pf_sig_last = m->data.len>=4 ? i_dart_le_r32(m->data.data) : 0; }
+/* cancel-at-close capture: a call pending at close must get exactly one CANCELLED outcome */
+static volatile int pf_cancel_count; static DartCallStatus pf_cancel_status;
+static void pf_on_cancel(const DartResponse *r){ pf_cancel_status = r->status; pf_cancel_count++; }
 
 static void pf_pump(DartNode *a, DartNode *b, int ms){
     uint64_t end = i_dart_plat_now_us() + (uint64_t)ms*1000u;
@@ -3134,7 +3137,17 @@ static void patterns_checks(void){
         ST_CHECK(fns==5 && vars==3 && sigs==2 && tops==0,
                  "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops); } }
 
+    /* a call still pending when the node closes gets one synthesized CANCELLED outcome */
+    { DartFunction *never = dart_node_create_remote_function(C, "never-served", NULL, NULL,
+                              &(DartFunctionOpts){ .timeout_us = 60000000u });
+      ST_CHECK(never != NULL, "patterns: cancel-at-close remote created");
+      pf_cancel_count = 0; pf_cancel_status = DART_CALL_OK;
+      if (never) dart_function_call_async(never, dart_bytes(NULL,0), pf_on_cancel, NULL); }
+
     dart_node_close(P,0); dart_node_close(C,0);
+    ST_CHECK(pf_cancel_count==1 && pf_cancel_status==DART_CALL_CANCELLED,
+             "patterns: pending call cancelled at close (n=%d status=%d)",
+             pf_cancel_count, (int)pf_cancel_status);
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
 }
 

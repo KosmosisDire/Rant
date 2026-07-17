@@ -39,7 +39,10 @@ typedef enum {
     DART_CALL_APP_ERROR = 1,   /* the handler replied with dart_request_fail */
     DART_CALL_NO_HANDLER= 2,   /* the definition side has no on_request registered */
     DART_CALL_TIMEOUT   = 3,   /* client-synthesized: no response within the timeout */
-    DART_CALL_PEER_LOST = 4    /* client-synthesized: the handler node dropped mid-call */
+    DART_CALL_PEER_LOST = 4,   /* client-synthesized: the handler node dropped mid-call */
+    DART_CALL_CANCELLED = 5    /* client-synthesized: the LOCAL node closed with the call still
+                                  pending (fired during dart_node_close, on the closing thread),
+                                  so every call gets exactly one outcome even at close */
 } DartCallStatus;
 
 typedef struct DartFunction DartFunction;   /* opaque function handle */

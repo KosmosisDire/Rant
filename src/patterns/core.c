@@ -26,6 +26,7 @@ typedef struct i_DartPatterns {
 
 static void     i_dart_patterns_on_event(void *user, const DartEvent *ev);
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us);
+static void     i_dart_patterns_on_close(void *user);
 /* duplicate-authority sweep for a just-created provider/owner (defined with the rest of
  * the detection, after both entity structs) */
 static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
@@ -42,7 +43,8 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
     if (!pm) return NULL;
     memset(pm, 0, sizeof *pm);
     pm->n = n; *slot = pm;
-    i_dart_node_set_sys_hooks(n, i_dart_patterns_on_event, i_dart_patterns_tick, pm);
+    i_dart_node_set_sys_hooks(n, i_dart_patterns_on_event, i_dart_patterns_tick,
+                              i_dart_patterns_on_close, pm);
     return pm;
 }
 
@@ -873,6 +875,17 @@ static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
         if (s && (!soonest || s < soonest)) soonest = s;
     }
     return soonest;   /* next timeout deadline for the poll wait cap */
+}
+
+/* node closing: a call still pending can never be answered, so synthesize CANCELLED for
+ * each (the always-one-outcome contract holds at close; a binding's future/Task settles
+ * instead of hanging). Runs once, on the closing thread, node still fully alive. */
+static void i_dart_patterns_on_close(void *user){
+    i_DartPatterns *pm = (i_DartPatterns*)user;
+    DartFunction *fn;
+    for (fn = pm->funcs; fn; fn = fn->next)
+        if (!fn->is_provider && fn->pending)
+            i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1);
 }
 
 static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
