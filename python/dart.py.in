@@ -38,6 +38,14 @@ a fixed array, and a nested annotated class for a sub-struct. Set an optional
 __dart_name__ on the class to override the wire type name (defaults to the class
 name). A plain class works too; @dataclass just gives you a handy constructor.
 
+Patterns layer over topic kinds, each subscriptable like Topic[T] for the typed
+form (untyped: explicit schema args, bytes payloads): FunctionDefinition /
+RemoteFunction (request/response, exactly one reply per call), VariableDefinition
+/ RemoteVariable (replicated state, one owner, optional force), Signal (reliable
+fire-and-forget event; a handler IS the subscription, every handle may emit), and
+the side-named Publisher / Subscriber topic handles (same-name constructions on
+one node share the topic slot with a widened role).
+
 Requires a C compiler on the machine at first use only (override with DART_CC).
 Every node/topic call is thread-safe (a node-level lock in the C core
 serializes them). Drive a node either with node.start() (a C background service
@@ -51,6 +59,7 @@ import ctypes
 import dataclasses
 import enum
 import hashlib
+import inspect
 import os
 import shutil
 import struct
@@ -60,11 +69,11 @@ import tempfile
 import threading
 import traceback
 from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
-                    sizeof, string_at, c_char_p, c_void_p, c_int, c_int64,
-                    c_uint8, c_uint16, c_uint32, c_uint64, c_size_t, c_double,
-                    c_float, c_ubyte)
+                    sizeof, string_at, c_char_p, c_void_p, c_int, c_int32,
+                    c_int64, c_uint8, c_uint16, c_uint32, c_uint64, c_size_t,
+                    c_double, c_float, c_ubyte)
 
-_WRAPPER_VERSION = "3"   # bump to force a recompile when this file's ABI view changes
+_WRAPPER_VERSION = "4"   # bump to force a recompile when this file's ABI view changes
 
 # ---------------------------------------------------------------------------
 # Embedded C source. The packer (tools/pack.cmake) replaces the single marker
@@ -106,6 +115,18 @@ _EXPORTS = [
     "dart_topic_take", "dart_topic_dispatch", "dart_node_dispatch",
     "dart_topic_queue_stats",
     "dart_node_mem_stats", "dart_node_backpressure_stats", "dart_event_str",
+    "dart_node_settle", "dart_topic_ready", "dart_topic_pending_count",
+    "dart_node_lock", "dart_node_unlock",
+    # patterns: functions / variables / signals
+    "dart_node_create_function_definition", "dart_node_create_remote_function",
+    "dart_function_call", "dart_function_call_async", "dart_function_match_count",
+    "dart_request_reply", "dart_request_fail", "dart_request_defer",
+    "dart_function_complete",
+    "dart_node_create_variable_definition", "dart_node_create_remote_variable",
+    "dart_variable_get", "dart_variable_set", "dart_variable_force",
+    "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
+    "dart_variable_match_count",
+    "dart_node_create_signal", "dart_signal_emit", "dart_signal_listener_count",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size",
     "dart_schema_field_count", "dart_schema_field_at", "dart_schema_field_index",
@@ -372,11 +393,64 @@ class DartValue(Structure):
     ]
 
 
+# ---- pattern struct mirrors (src/patterns/core.h; field order/types EXACT) ----
+
+# The public head of the C DartRequest. Only ever touched through the callback's
+# pointer: the reply machinery lives BEHIND the struct, so the exact pointer
+# (never a copy) is what dart_request_reply/fail/defer take.
+class DartRequest(Structure):
+    _fields_ = [
+        ("node", c_void_p),
+        ("function_name", DartStringView),
+        ("data", DartBytes),
+        ("schema", c_void_p),
+        ("caller", c_uint32),
+        ("caller_name", DartStringView),
+        ("recv_us", c_uint64),
+    ]
+
+
+class DartResponse(Structure):
+    _fields_ = [
+        ("status", c_int),
+        ("data", DartBytes),
+        ("schema", c_void_p),
+        ("provider", c_uint32),
+        ("user", c_void_p),
+    ]
+
+
+class DartFunctionOpts(Structure):
+    _fields_ = [
+        ("backpressure_wait_us", c_uint32),
+        ("timeout_us", c_uint32),
+    ]
+
+
+class DartVariableOpts(Structure):
+    _fields_ = [
+        ("initial", DartBytes),
+        ("access", c_uint8),
+        ("allow_force", c_uint8),
+        ("catch_up", c_uint16),
+        ("backpressure_wait_us", c_uint32),
+    ]
+
+
+class DartSignalOpts(Structure):
+    _fields_ = [("backpressure_wait_us", c_uint32)]
+
+
 _DART_ALLOCATOR_PAGE = 64 * 1024   # DART_ALLOCATOR_PAGE default
 
 _MsgFn = CFUNCTYPE(None, POINTER(DartMsg))
 _EvtFn = CFUNCTYPE(None, POINTER(DartEvent))
 _AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
+_ReqFn = CFUNCTYPE(None, POINTER(DartRequest), c_void_p)
+_RspFn = CFUNCTYPE(None, POINTER(DartResponse))
+_SigFn = CFUNCTYPE(None, POINTER(DartMsg), c_void_p)
+_NULL_REQ_FN = cast(None, _ReqFn)   # a CFUNCTYPE argtype refuses a bare None
+_NULL_SIG_FN = cast(None, _SigFn)
 
 
 def _bind(lib):
@@ -409,6 +483,39 @@ def _bind(lib):
     F("dart_node_backpressure_stats", [c_void_p, POINTER(c_uint64),
                                        POINTER(c_uint32)], None)
     F("dart_event_str", [POINTER(DartEvent), c_char_p, c_size_t], c_char_p)
+    F("dart_node_settle", [c_void_p, c_int], c_int)
+    F("dart_topic_ready", [c_void_p], c_int)
+    F("dart_topic_pending_count", [c_void_p], c_int)
+    F("dart_node_lock", [c_void_p], None)
+    F("dart_node_unlock", [c_void_p], None)
+    # patterns: functions / variables / signals
+    F("dart_node_create_function_definition", [c_void_p, c_char_p, c_void_p,
+                                               c_void_p, _ReqFn, c_void_p,
+                                               POINTER(DartFunctionOpts)], c_void_p)
+    F("dart_node_create_remote_function", [c_void_p, c_char_p, c_void_p, c_void_p,
+                                           POINTER(DartFunctionOpts)], c_void_p)
+    F("dart_function_call", [c_void_p, DartBytes, POINTER(DartResponse), c_int], c_int)
+    F("dart_function_call_async", [c_void_p, DartBytes, _RspFn, c_void_p], c_int)
+    F("dart_function_match_count", [c_void_p], c_int)
+    F("dart_request_reply", [POINTER(DartRequest), DartBytes], None)
+    F("dart_request_fail", [POINTER(DartRequest), DartBytes], None)
+    F("dart_request_defer", [POINTER(DartRequest)], c_uint64)
+    F("dart_function_complete", [c_void_p, c_uint64, c_int, DartBytes], c_int)
+    F("dart_node_create_variable_definition", [c_void_p, c_char_p, c_void_p,
+                                               POINTER(DartVariableOpts)], c_void_p)
+    F("dart_node_create_remote_variable", [c_void_p, c_char_p, c_void_p,
+                                           POINTER(DartVariableOpts)], c_void_p)
+    F("dart_variable_get", [c_void_p, POINTER(DartBytes)], c_int)
+    F("dart_variable_set", [c_void_p, DartBytes], c_int)
+    F("dart_variable_force", [c_void_p, DartBytes], c_int)
+    F("dart_variable_unforce", [c_void_p], c_int)
+    F("dart_variable_forced", [c_void_p], c_int)
+    F("dart_variable_wait", [c_void_p, c_int], c_int)
+    F("dart_variable_match_count", [c_void_p], c_int)
+    F("dart_node_create_signal", [c_void_p, c_char_p, c_void_p, _SigFn, c_void_p,
+                                  POINTER(DartSignalOpts)], c_void_p)
+    F("dart_signal_emit", [c_void_p, DartBytes], c_int)
+    F("dart_signal_listener_count", [c_void_p], c_int)
     # serialize / schema
     F("dart_schema_compile", [_AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
     F("dart_schema_free", [c_void_p, _AllocFn, c_void_p], None)
@@ -512,6 +619,19 @@ class SendStatus(enum.IntEnum):
     NOSYS = -6       # not compiled in (start() under DART_NO_THREADS)
 
 
+class CallStatus(enum.IntEnum):
+    """A function call's outcome. OK/APP_ERROR/NO_HANDLER travel on the wire;
+    TIMEOUT/PEER_LOST are synthesized client-side; CANCELLED is synthesized for
+    calls still pending when the local node closes (fired during close, so every
+    call gets exactly one outcome). Mirrors DartCallStatus."""
+    OK = 0
+    APP_ERROR = 1
+    NO_HANDLER = 2
+    TIMEOUT = 3
+    PEER_LOST = 4
+    CANCELLED = 5
+
+
 class EventKind(enum.IntEnum):
     PEER_UP = 0
     PEER_DOWN = 1
@@ -584,6 +704,15 @@ _TOKEN = {_U8: "u8", _U16: "u16", _U32: "u32", _U64: "u64", _I8: "i8", _I16: "i1
 
 class SchemaError(Exception):
     pass
+
+
+class CallError(Exception):
+    """Raised by Response.value when the call did not complete CallStatus.OK.
+    Carries .status (the CallStatus) and .send_status (a synchronous refusal)."""
+    def __init__(self, status, send_status, msg):
+        super().__init__(msg)
+        self.status = status
+        self.send_status = send_status
 
 
 # ---------------------------------------------------------------------------
@@ -1295,6 +1424,80 @@ def _to_obj(spec, d):
 # Public runtime API.
 # ---------------------------------------------------------------------------
 
+def _send_status(r):
+    return SendStatus(r) if r in SendStatus._value2member_map_ else r
+
+
+def _c_view(payload):
+    """(DartBytes, keepalive buffer) over a bytes payload; hold the buffer across
+    the native call."""
+    b = DartBytes()
+    buf = None
+    if payload:
+        buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
+        b.data = cast(buf, c_void_p)
+        b.len = len(payload)
+    return b, buf
+
+
+def _payload_bytes(sch, value):
+    """Encode a payload per the wrapper's send conventions: bytes/str pass
+    through, None = empty, anything else is encoded by the schema."""
+    if value is None:
+        return b""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if sch is None:
+        raise TypeError("no schema on this handle; pass bytes/str, or construct "
+                        "the typed [T] form / pass schema= to send objects")
+    return sch.encode(value)
+
+
+def _decode_payload(wire_schema, local, data):
+    """Decode payload bytes: the wire schema (the sender's layout bound to ours)
+    wins, else the local Schema; no schema at all passes the raw bytes through.
+    Returns (value, ok); a typed local schema yields its class instance."""
+    sp = wire_schema or (local._s if local is not None else None)
+    if not sp:
+        return data, True
+    try:
+        d = _decode(_load(), sp, data)
+        spec = local._spec if local is not None else None
+        return (_to_obj(spec, d) if spec else d), True
+    except Exception:
+        return None, False
+
+
+def _arity(fn):
+    """1 or 2: how many positional args a handler accepts (bound methods drop
+    self; *args counts as the 2-arg form)."""
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return 1
+    n = 0
+    for p in params:
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+            n += 1
+        elif p.kind == p.VAR_POSITIONAL:
+            return 2
+    return 2 if n >= 2 else 1
+
+
+# role <-> pub/sub bit pair (bit 0 = pub, bit 1 = sub) for same-name role widening
+def _role_bits(role):
+    role = int(role)
+    return (3 if role == Role.PUBSUB else 1 if role == Role.PUB_ONLY
+            else 2 if role == Role.SUB_ONLY else 0)
+
+
+def _role_from_bits(bits):
+    return (Role.PUBSUB if bits == 3 else Role.PUB_ONLY if bits == 1
+            else Role.SUB_ONLY if bits == 2 else Role.INACTIVE)
+
+
 class Message:
     """A delivered message. Views are copied out, so it outlives the callback.
     For a typed topic, `.value` is the decoded object and `.fields` the dict.
@@ -1401,7 +1604,7 @@ class Topic:
         sch = _as_schema(schema)
         self._node = node
         self._schema = sch
-        self._h = node._create_native(name, role, sch, qos, qos_kwargs)
+        self._h = node._create_or_share(name, role, sch, qos, qos_kwargs)
 
     def __class_getitem__(cls, item):
         return _TypedTopic(item)
@@ -1418,15 +1621,10 @@ class Topic:
                 raise TypeError("topic has no schema; send bytes/str, or create the "
                                 "topic with a schema to send objects/dicts")
             payload = self._schema.encode(data)
-        b = DartBytes()
-        buf = None
-        if payload:
-            buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
-            b.data = cast(buf, c_void_p)
-            b.len = len(payload)
+        b, buf = _c_view(payload)
         r = self._node._lib.dart_topic_send(self._h, b)
         del buf
-        return SendStatus(r) if r in SendStatus._value2member_map_ else r
+        return _send_status(r)
 
     def set_role(self, role):
         return self._node._lib.dart_topic_set_role(self._h, int(role))
@@ -1437,6 +1635,19 @@ class Topic:
 
     def match_count(self):
         return self._node._lib.dart_topic_match_count(self._h)
+
+    def ready(self):
+        """True when a send would not wait on the match wait: a matched subscriber
+        exists, or matching has converged so there is nobody to wait for. The async
+        form for GUIs: disable the wait (match_wait_ms < 0), park payloads while
+        False, flush when it flips."""
+        return self._node._lib.dart_topic_ready(self._h) == 1
+
+    def pending_count(self):
+        """Unresolved candidate matches right now: peers whose announces nominate
+        this topic but whose name/schema verdicts are still in flight. 0 = matching
+        has converged for everyone currently known."""
+        return self._node._lib.dart_topic_pending_count(self._h)
 
     def drain(self, timeout_ms):
         """Pump until every reader has acked, or timeout. Call before close."""
@@ -1486,14 +1697,17 @@ class Node:
     Node(name, on_message, on_event, **opts)."""
 
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt",
-                 "_topic_specs", "_schemas")
+                 "_topic_specs", "_schemas", "_topics_by_name", "_create_lock",
+                 "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock")
 
     def __init__(self, name, on_message, on_event, options=None, **opts):
         """Open a node. name is a human-readable label synced via discovery (None or ""
-        => an auto "node-XXXXXXXX"). on_message/on_event are required (pass None for
-        either if truly not needed) so they are wired in before the constructor returns
-        -- no early peer/error event is missed. Pass other config as keyword args
-        (domain=7, max_peers=32, ...) or as options=NodeOptions(...)."""
+        => an auto "node-XXXXXXXX"). on_message may be None (per-Subscriber handlers
+        and take()/dispatch() cover consumption); on_event is REQUIRED and may not be
+        None -- it carries diagnostics (errors, peer changes) that must never be
+        missed. Both are wired in before the constructor returns, so no early event
+        slips by. Pass other config as keyword args (domain=7, max_peers=32, ...) or
+        as options=NodeOptions(...)."""
         self._lib = None
         self._h = None
         self._id = None
@@ -1502,6 +1716,15 @@ class Node:
         self._on_evt = on_event
         self._topic_specs = {}
         self._schemas = []       # compiled schemas kept alive for the node's life
+        self._topics_by_name = {}   # name -> [handle, role bits, schema hash]
+        self._create_lock = threading.Lock()
+        self._sub_handlers = {}     # topic index -> [Message handlers] (Subscriber)
+        self._pattern_boxes = []    # pattern handler box ids (reaped at close)
+        self._async_live = set()    # in-flight async-call box ids
+        self._pat_lock = threading.Lock()
+        if on_event is None:
+            raise ValueError("on_event is required: it carries diagnostics that "
+                             "must never be missed (pass e.g. print)")
         if options is None:
             options = NodeOptions(**opts)
         elif opts:
@@ -1561,15 +1784,37 @@ class Node:
         self._on_evt = fn
         return self
 
-    def create_topic(self, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
-        """Convenience helper: construct and return a Topic on this node. Exactly
-        dart.Topic(self, name, schema, role, qos) -- schema may be None (raw), a
-        Schema, a schema class, or DSL text. (dart.Topic[T](self, name, ...) is the
-        typed shorthand.)"""
-        return Topic(self, name, schema, role, qos, **qos_kwargs)
+    # The create behind every Topic-carrying constructor. Same-name creates on this
+    # node SHARE the native slot: the role is widened (set_role re-advertises, peers
+    # rematch from cached verdicts) and a different schema is refused.
+    def _create_or_share(self, name, role, sch, qos, qos_kwargs):
+        if not name:
+            raise ValueError("topic name required")
+        with self._create_lock:
+            rec = self._topics_by_name.get(name)
+            sh = sch.hash if sch else 0
+            if rec is not None:
+                if sh and rec[2] and sh != rec[2]:
+                    raise RuntimeError("topic %r already exists on this node with a "
+                                       "different schema" % name)
+                bits = rec[1] | _role_bits(role)
+                if bits != rec[1]:
+                    self._lib.dart_topic_set_role(rec[0], int(_role_from_bits(bits)))
+                    rec[1] = bits
+                if sch is not None:
+                    idx = self._lib.dart_topic_index(rec[0])
+                    if self._topic_specs.get(idx) is None:
+                        self._topic_specs[idx] = sch._spec
+                    self._schemas.append(sch)
+                    if not rec[2]:
+                        rec[2] = sh
+                return rec[0]
+            h = self._create_native(name, role, sch, qos, qos_kwargs)
+            self._topics_by_name[name] = [h, _role_bits(role), sh]
+            return h
 
-    # the native create behind the Topic constructor: makes the handle and registers
-    # the schema (kept alive) + decode spec against the topic index.
+    # the native create: makes the handle and registers the schema (kept alive)
+    # + decode spec against the topic index.
     def _create_native(self, name, role, sch, qos, qos_kwargs):
         if qos is None:
             qos = Qos(**qos_kwargs)
@@ -1590,7 +1835,7 @@ class Node:
             self._h, name.encode("utf-8"), int(role),
             sch._s if sch else None, byref(co))
         if not h:
-            raise RuntimeError("Topic(...) create failed (reserve full, bad name, or OOM)")
+            raise RuntimeError("Topic(%r) create failed: %s" % (name, self.last_error()))
         idx = self._lib.dart_topic_index(h)
         self._topic_specs[idx] = sch._spec if sch else None
         if sch is not None:
@@ -1625,6 +1870,35 @@ class Node:
         all the queues. Waits up to timeout_ms for any queued topic to hold data."""
         return self._lib.dart_node_dispatch(self._h, max_msgs, timeout_ms)
 
+    def settle(self, timeout_ms=-1):
+        """Block until discovery + matching settle: everything now sent reaches
+        everyone already on the network. Call AFTER creating your topics; most
+        apps never need it (the per-send match wait covers the window lazily).
+        timeout_ms < 0 = 3 announce intervals. True when settled."""
+        return self._lib.dart_node_settle(self._h, timeout_ms) == 1
+
+    # ---- pattern-layer bookkeeping (reaped at close) ----
+    def _retain(self, *schemas):
+        for s in schemas:
+            if s is not None:
+                self._schemas.append(s)
+
+    def _register_box(self, box_id):
+        with self._pat_lock:
+            self._pattern_boxes.append(box_id)
+
+    def _register_async(self, box_id):
+        with self._pat_lock:
+            self._async_live.add(box_id)
+
+    def _drop_async(self, box_id):
+        with self._pat_lock:
+            self._async_live.discard(box_id)
+
+    def _add_sub_handler(self, index, fn):
+        with self._pat_lock:
+            self._sub_handlers.setdefault(index, []).append(fn)
+
     def evicted_unsent(self):
         """Sends that evicted never-sent history after the bounded wait (the
         EVICTED_UNSENT error count): the send-burst/overload indicator."""
@@ -1658,6 +1932,23 @@ class Node:
             self._h = None
         with _REG_LOCK:
             _NODES.pop(self._id, None)
+        # Reap this node's pattern handler boxes; backstop any async call the C did
+        # not cancel (it fires every pending on_response with CANCELLED during
+        # dart_node_close, so the straggler loop normally finds nothing).
+        with self._pat_lock:
+            boxes, self._pattern_boxes = self._pattern_boxes, []
+            stragglers, self._async_live = list(self._async_live), set()
+        for box_id in boxes:
+            _pbox_pop(box_id)
+        for box_id in stragglers:
+            box = _pbox_pop(box_id)
+            if box is not None:
+                r = Response()
+                r.status = CallStatus.CANCELLED
+                try:
+                    box.on_response(r)
+                except Exception:
+                    traceback.print_exc()
         return True
 
     def __enter__(self):
@@ -1671,6 +1962,584 @@ class Node:
             self.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Patterns: functions / variables / signals over topic kinds, plus the side-named
+# Publisher/Subscriber topic handles. Each subscripts like Topic[T] for the typed
+# form; untyped forms take explicit schema args (None = raw bytes).
+# ---------------------------------------------------------------------------
+
+class _TypedPattern:
+    """The result of Handle[T]: a factory bound to schema class(es), callable like
+    the untyped constructor minus its schema argument(s)."""
+    __slots__ = ("_cls", "_schemas")
+
+    def __init__(self, cls, schemas):
+        self._cls = cls
+        self._schemas = schemas   # schema kwarg name -> schema class
+
+    def __call__(self, *args, **kwargs):
+        for k in self._schemas:
+            if k in kwargs:
+                raise TypeError("%s is fixed by the [T] subscript" % k)
+        kwargs.update(self._schemas)
+        return self._cls(*args, **kwargs)
+
+    def __repr__(self):
+        return "dart.%s[%s]" % (self._cls.__name__, ", ".join(
+            getattr(t, "__name__", str(t)) for t in self._schemas.values()))
+
+
+def _typed_pattern(cls, item, kw_names):
+    items = item if isinstance(item, tuple) else (item,)
+    if len(items) != len(kw_names):
+        raise TypeError("%s[...] takes %d schema class(es)" % (cls.__name__, len(kw_names)))
+    return _TypedPattern(cls, dict(zip(kw_names, items)))
+
+
+class Request:
+    """A function call as seen by the definition's handler (the full form's second
+    arg): the request metadata plus the reply surface. Valid only while the handler
+    runs: reply/fail there, or defer() and complete later from any thread; after
+    the handler returns they raise RuntimeError. Returning without answering
+    auto-acks CallStatus.OK with an empty payload."""
+    __slots__ = ("_ptr", "_fn", "_rsp_schema", "_done",
+                 "data", "caller", "caller_name", "function_name", "recv_us")
+
+    def __init__(self, ptr, fn, rsp_schema, r, data):
+        self._ptr = ptr           # the EXACT native pointer; dropped at expiry
+        self._fn = fn
+        self._rsp_schema = rsp_schema
+        self._done = False
+        self.data = data
+        self.caller = r.caller
+        self.caller_name = _dstr(r.caller_name)
+        self.function_name = _dstr(r.function_name)
+        self.recv_us = r.recv_us
+
+    @property
+    def answered(self):
+        """True once reply/fail/defer has been called."""
+        return self._done
+
+    def reply(self, rsp=None):
+        """Answer CallStatus.OK with rsp (bytes/str, or a typed value)."""
+        self._guard()
+        b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
+        _load().dart_request_reply(self._ptr, b)
+        del buf
+        self._done = True
+
+    def fail(self, rsp=None):
+        """Answer CallStatus.APP_ERROR (with an optional error payload)."""
+        self._guard()
+        b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
+        _load().dart_request_fail(self._ptr, b)
+        del buf
+        self._done = True
+
+    def defer(self):
+        """Park the reply: suppresses the auto-ack and lets the handler return
+        now. The returned Deferred completes the call later, from any thread."""
+        self._guard()
+        token = _load().dart_request_defer(self._ptr)
+        if not token:
+            raise RuntimeError("defer failed")
+        self._done = True
+        return Deferred(self._fn, self._rsp_schema, token)
+
+    def _expire(self):
+        self._ptr = None
+
+    def _guard(self):
+        if self._ptr is None:
+            raise RuntimeError("request expired: answer inside the handler "
+                               "callback, or defer() first")
+        if self._done:
+            raise RuntimeError("request already answered")
+
+
+class Deferred:
+    """A parked function reply (from Request.defer): complete()/fail() exactly
+    once, from any thread (a second call returns False). Dropping it leaves the
+    caller to its timeout."""
+    __slots__ = ("_fn", "_rsp_schema", "_token", "_lock")
+
+    def __init__(self, fn, rsp_schema, token):
+        self._fn = fn
+        self._rsp_schema = rsp_schema
+        self._token = token
+        self._lock = threading.Lock()
+
+    @property
+    def valid(self):
+        return self._token != 0
+
+    def complete(self, rsp=None):
+        """Answer CallStatus.OK with rsp. True if the completion was accepted."""
+        return self._finish(CallStatus.OK, rsp)
+
+    def fail(self, rsp=None):
+        """Answer CallStatus.APP_ERROR."""
+        return self._finish(CallStatus.APP_ERROR, rsp)
+
+    def _finish(self, status, rsp):
+        with self._lock:
+            token, self._token = self._token, 0
+        if not token:
+            return False
+        b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
+        r = _load().dart_function_complete(self._fn, token, int(status), b)
+        del buf
+        return r == 0
+
+
+class Response:
+    """An owning function-call outcome: the payload is copied out, so it outlives
+    the call. status/send_status/data/provider never raise; reading .value when
+    not ok raises CallError. send_status carries a synchronous refusal (status
+    stays TIMEOUT then: the call never launched)."""
+    __slots__ = ("status", "send_status", "provider", "data", "_value", "_decoded")
+
+    def __init__(self):
+        self.status = CallStatus.TIMEOUT
+        self.send_status = SendStatus.OK
+        self.provider = 0
+        self.data = b""
+        self._value = None
+        self._decoded = False
+
+    @classmethod
+    def _from_c(cls, o, rsp_schema):
+        self = cls()
+        self.status = (CallStatus(o.status)
+                       if o.status in CallStatus._value2member_map_ else o.status)
+        self.provider = o.provider
+        self.data = string_at(o.data.data, o.data.len) if o.data.data and o.data.len else b""
+        if self.status == CallStatus.OK:
+            # decode NOW: the wire-schema view dies with the C callback/call
+            self._value, self._decoded = _decode_payload(o.schema, rsp_schema, self.data)
+        return self
+
+    @property
+    def ok(self):
+        return self.status == CallStatus.OK
+
+    @property
+    def value(self):
+        """The decoded reply (a typed instance / dict; raw bytes for an untyped
+        pair). Raises CallError when the call did not complete OK."""
+        if not self.ok:
+            name = self.status.name if isinstance(self.status, CallStatus) else self.status
+            tail = "" if self.send_status == SendStatus.OK else " (send %s)" % self.send_status
+            raise CallError(self.status, self.send_status,
+                            "call did not complete OK: %s%s" % (name, tail))
+        if not self._decoded:
+            raise CallError(self.status, self.send_status, "response payload failed to decode")
+        return self._value
+
+    def __repr__(self):
+        return "Response(%s, %d bytes)" % (
+            self.status.name if isinstance(self.status, CallStatus) else self.status,
+            len(self.data))
+
+
+class _FnBox:
+    """Handler-side state for one function definition (alive until node close)."""
+    __slots__ = ("fn", "handler", "arity", "req_schema", "rsp_schema")
+
+    def __init__(self, handler, req_schema, rsp_schema):
+        self.fn = None            # set right after create (no callback before poll)
+        self.handler = handler
+        self.arity = _arity(handler)
+        self.req_schema = req_schema
+        self.rsp_schema = rsp_schema
+
+    def dispatch(self, req_ptr):
+        r = req_ptr.contents
+        data = string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
+        request = Request(req_ptr, self.fn, self.rsp_schema, r, data)
+        try:
+            val, ok = _decode_payload(r.schema, self.req_schema, data)
+            if not ok:
+                request.fail()
+                return
+            if self.arity == 1:
+                out = self.handler(val)
+                if out is not None and not request.answered:
+                    request.reply(out)
+            else:
+                self.handler(val, request)
+        except Exception:
+            # a raising handler answers APP_ERROR; the exception never crosses into C
+            traceback.print_exc()
+            if not request.answered:
+                try:
+                    request.fail()
+                except Exception:
+                    pass
+        finally:
+            request._expire()
+
+
+class _AsyncBox:
+    """One in-flight async call: released when its response fires (including the
+    CANCELLED one synthesized at node close, so no leak, no dead pointer)."""
+    __slots__ = ("node", "on_response", "rsp_schema", "id")
+
+    def __init__(self, node, on_response, rsp_schema):
+        self.node = node
+        self.on_response = on_response
+        self.rsp_schema = rsp_schema
+        self.id = 0
+
+
+class _SigBox:
+    __slots__ = ("handler", "arity", "spec")
+
+    def __init__(self, handler, spec):
+        self.handler = handler
+        self.arity = _arity(handler)
+        self.spec = spec
+
+
+class FunctionDefinition:
+    """The implementation side of a request/response function: exactly one reply
+    per call, ONE definition per name on the network (a rival fires
+    ErrorKind.DUPLICATE_AUTHORITY on both). handler forms, arity dispatched:
+    (req) -> rsp auto-replies OK, and raising answers APP_ERROR (the exception
+    never crosses into C); (req, request) is the full form (request.reply/fail/
+    defer). handler=None answers every call NO_HANDLER (a declared stub).
+    FunctionDefinition[Req, Rsp](node, name, handler) is the typed shorthand;
+    untyped, pass req_schema=/rsp_schema= (None = raw bytes)."""
+    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema")
+
+    def __init__(self, node, name, handler, req_schema=None, rsp_schema=None,
+                 backpressure_wait_us=0, timeout_us=0):
+        self._node = node
+        self._req_schema = _as_schema(req_schema)
+        self._rsp_schema = _as_schema(rsp_schema)
+        co = DartFunctionOpts(backpressure_wait_us, timeout_us)
+        box_id = 0
+        box = None
+        if handler is not None:
+            box = _FnBox(handler, self._req_schema, self._rsp_schema)
+            box_id = _pbox_add(box)
+        h = node._lib.dart_node_create_function_definition(
+            node._h, name.encode("utf-8"),
+            self._req_schema._s if self._req_schema else None,
+            self._rsp_schema._s if self._rsp_schema else None,
+            _on_request if box else _NULL_REQ_FN, c_void_p(box_id), byref(co))
+        if not h:
+            if box:
+                _pbox_pop(box_id)
+            raise RuntimeError("FunctionDefinition(%r) create failed: %s"
+                               % (name, node.last_error()))
+        self._fn = h
+        if box:
+            box.fn = h
+            node._register_box(box_id)
+        node._retain(self._req_schema, self._rsp_schema)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("req_schema", "rsp_schema"))
+
+    def caller_count(self):
+        """Callers currently matched to this definition."""
+        return self._node._lib.dart_function_match_count(self._fn)
+
+
+class RemoteFunction:
+    """A reference to a function defined on another node.
+    RemoteFunction[Req, Rsp](node, name) is the typed shorthand."""
+    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema")
+
+    def __init__(self, node, name, req_schema=None, rsp_schema=None,
+                 backpressure_wait_us=0, timeout_us=0):
+        self._node = node
+        self._req_schema = _as_schema(req_schema)
+        self._rsp_schema = _as_schema(rsp_schema)
+        co = DartFunctionOpts(backpressure_wait_us, timeout_us)
+        h = node._lib.dart_node_create_remote_function(
+            node._h, name.encode("utf-8"),
+            self._req_schema._s if self._req_schema else None,
+            self._rsp_schema._s if self._rsp_schema else None, byref(co))
+        if not h:
+            raise RuntimeError("RemoteFunction(%r) create failed: %s"
+                               % (name, node.last_error()))
+        self._fn = h
+        node._retain(self._req_schema, self._rsp_schema)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("req_schema", "rsp_schema"))
+
+    def call(self, req=None, timeout_ms=-1):
+        """BLOCKING call: drives the node loop until the response arrives or
+        timeout_ms elapses (negative = the function's default timeout). Refused
+        from inside a callback or while a service thread owns the loop:
+        send_status is then SendStatus.STATE while status stays TIMEOUT (use
+        call_async there). Never raises on a failed call: inspect .status
+        (reading .value raises CallError)."""
+        b, buf = _c_view(_payload_bytes(self._req_schema, req))
+        out = DartResponse()
+        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms)
+        del buf
+        if rc == 1:
+            return Response._from_c(out, self._rsp_schema)
+        r = Response()
+        if rc < 0:
+            r.send_status = _send_status(rc)
+        return r
+
+    def call_async(self, req, on_response):
+        """Async call: returns as soon as the request is committed; on_response
+        then fires EXACTLY once with an owning Response, from whichever thread
+        polls this node (or the closing thread, with CallStatus.CANCELLED, if the
+        node closes first). A synchronous refusal also arrives through
+        on_response (send_status set). Returns the launch SendStatus."""
+        if not callable(on_response):
+            raise TypeError("on_response must be callable")
+        box = _AsyncBox(self._node, on_response, self._rsp_schema)
+        box_id = _pbox_add(box)
+        box.id = box_id
+        self._node._register_async(box_id)
+        b, buf = _c_view(_payload_bytes(self._req_schema, req))
+        rc = self._node._lib.dart_function_call_async(self._fn, b, _on_response,
+                                                      c_void_p(box_id))
+        del buf
+        st = _send_status(rc)
+        if rc != 0:
+            _pbox_pop(box_id)
+            self._node._drop_async(box_id)
+            r = Response()
+            r.send_status = st
+            try:
+                on_response(r)
+            except Exception:
+                traceback.print_exc()
+        return st
+
+    def match_count(self):
+        """Providers currently matched (the definition side present)."""
+        return self._node._lib.dart_function_match_count(self._fn)
+
+    def has_definition(self):
+        return self.match_count() > 0
+
+
+class VariableDefinition:
+    """Replicated state, ONE owner: this node holds the authoritative value.
+    Methods only, so every write returns its SendStatus.
+    VariableDefinition[T](node, name, initial=..., ...) is the typed shorthand;
+    untyped, pass schema= (None = raw bytes) and a bytes initial."""
+    __slots__ = ("_node", "_var", "_schema", "_name")
+    _remote = False
+
+    def __init__(self, node, name, schema=None, initial=None, read_only=False,
+                 allow_force=False, catch_up=0, backpressure_wait_us=0):
+        self._node = node
+        self._name = name
+        sch = self._schema = _as_schema(schema)
+        co = DartVariableOpts()
+        memset(byref(co), 0, sizeof(co))
+        co.access = 1 if read_only else 0
+        co.allow_force = 1 if allow_force else 0
+        co.catch_up = catch_up
+        co.backpressure_wait_us = backpressure_wait_us
+        b, buf = _c_view(_payload_bytes(sch, initial) if initial is not None else b"")
+        co.initial = b
+        create = (node._lib.dart_node_create_remote_variable if self._remote
+                  else node._lib.dart_node_create_variable_definition)
+        h = create(node._h, name.encode("utf-8"), sch._s if sch else None, byref(co))
+        del buf
+        if not h:
+            raise RuntimeError("%s(%r) create failed: %s"
+                               % (type(self).__name__, name, node.last_error()))
+        self._var = h
+        node._retain(sch)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("schema",))
+
+    def get(self):
+        """The current value (definition: the store; remote: the cached latest),
+        fully copied out under the node lock; None when no value exists yet."""
+        lib = self._node._lib
+        lib.dart_node_lock(self._node._h)
+        try:
+            b = DartBytes()
+            if lib.dart_variable_get(self._var, byref(b)) != 1:
+                return None
+            data = string_at(b.data, b.len) if b.data and b.len else b""
+        finally:
+            lib.dart_node_unlock(self._node._h)
+        if self._schema is None:
+            return data
+        val, ok = _decode_payload(None, self._schema, data)
+        return val if ok else data
+
+    def set(self, value):
+        """Set the value (definition: apply + publish; remote: send over the set
+        channel). SendStatus.NO_TOPIC = no owner matched at all; SendStatus.BAD_ROLE
+        = the owner advertises no set channel (a read-only variable)."""
+        b, buf = _c_view(_payload_bytes(self._schema, value))
+        r = self._node._lib.dart_variable_set(self._var, b)
+        del buf
+        return _send_status(r)
+
+    def force(self, value):
+        """Force the value: sets are absorbed into the shadow source until
+        unforce(), which restores the latest absorbed set. The definition must
+        have been created with allow_force (SendStatus.STATE otherwise)."""
+        b, buf = _c_view(_payload_bytes(self._schema, value))
+        r = self._node._lib.dart_variable_force(self._var, b)
+        del buf
+        return _send_status(r)
+
+    def unforce(self):
+        return _send_status(self._node._lib.dart_variable_unforce(self._var))
+
+    def forced(self):
+        """True while forced (definition: authoritative; remote: the last
+        received value's FORCED flag)."""
+        return self._node._lib.dart_variable_forced(self._var) == 1
+
+    def wait(self, timeout_ms):
+        """Block driving the node loop until a value exists, or timeout_ms
+        elapses (negative = forever-ish). Refused (False) from a callback or
+        while a service thread owns the loop."""
+        return self._node._lib.dart_variable_wait(self._var, timeout_ms) == 1
+
+    def remote_count(self):
+        """Remotes matched to this definition."""
+        return self._node._lib.dart_variable_match_count(self._var)
+
+
+class RemoteVariable(VariableDefinition):
+    """A reference to a variable owned by another node: reads see the cached
+    latest, writes go over the set channel (dumb writes, no response; the
+    definition decides write/force permissions). RemoteVariable[T](node, name)
+    is the typed shorthand."""
+    _remote = True
+
+    def __init__(self, node, name, schema=None, catch_up=0, backpressure_wait_us=0):
+        super().__init__(node, name, schema, None, False, False, catch_up,
+                         backpressure_wait_us)
+
+    def match_count(self):
+        """Owners currently matched (0 = no owner present)."""
+        return self.remote_count()
+
+    def has_definition(self):
+        return self.remote_count() > 0
+
+
+class Signal:
+    """A reliable fire-and-forget event: N emitters / N listeners, never latched
+    (a late joiner receives nothing emitted before it joined). Passing a handler
+    IS the subscription -- (value) or (value, msg), arity dispatched -- and
+    every handle may emit. Signal[T](node, name, ...) is the typed shorthand;
+    untyped with no schema, emit() with no args is a payload-less event."""
+    __slots__ = ("_node", "_sig", "_schema")
+
+    def __init__(self, node, name, handler=None, schema=None, backpressure_wait_us=0):
+        self._node = node
+        sch = self._schema = _as_schema(schema)
+        co = DartSignalOpts(backpressure_wait_us)
+        box_id = 0
+        box = None
+        if handler is not None:
+            box = _SigBox(handler, sch._spec if sch else None)
+            box_id = _pbox_add(box)
+        h = node._lib.dart_node_create_signal(
+            node._h, name.encode("utf-8"), sch._s if sch else None,
+            _on_signal if box else _NULL_SIG_FN, c_void_p(box_id), byref(co))
+        if not h:
+            if box:
+                _pbox_pop(box_id)
+            raise RuntimeError("Signal(%r) create failed: %s" % (name, node.last_error()))
+        self._sig = h
+        if box:
+            node._register_box(box_id)
+        node._retain(sch)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("schema",))
+
+    def emit(self, value=None):
+        """Emit to every matched listener (no args = payload-less). SendStatus."""
+        b, buf = _c_view(_payload_bytes(self._schema, value))
+        r = self._node._lib.dart_signal_emit(self._sig, b)
+        del buf
+        return _send_status(r)
+
+    def listener_count(self):
+        """Listeners currently matched (other nodes subscribed to this signal)."""
+        return self._node._lib.dart_signal_listener_count(self._sig)
+
+
+class Publisher:
+    """The publish side of a topic (role PUB_ONLY). Same-name constructions on
+    one node share the topic slot with a widened role. Publisher[T](node, name,
+    ...) is the typed shorthand; qos as keyword args or qos=Qos(...)."""
+    __slots__ = ("topic",)
+
+    def __init__(self, node, name, schema=None, qos=None, **qos_kwargs):
+        self.topic = Topic(node, name, schema, Role.PUB_ONLY, qos, **qos_kwargs)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("schema",))
+
+    def send(self, data):
+        """Publish (typed value, mapping, or bytes/str). SendStatus."""
+        return self.topic.send(data)
+
+    def match_count(self):
+        return self.topic.match_count()
+
+    def ready(self):
+        return self.topic.ready()
+
+    def pending_count(self):
+        return self.topic.pending_count()
+
+
+class Subscriber:
+    """The subscribe side (role SUB_ONLY). handler, arity dispatched -- (value)
+    or (value, msg) -- fires per message on the polling thread INSTEAD of the
+    node's on_message; or consume with take()/dispatch() on a thread of your
+    choosing. value is the decoded object (a dict for untyped-with-schema, bytes
+    for raw). Subscriber[T](node, name, handler) is the typed shorthand."""
+    __slots__ = ("topic", "_schema")
+
+    def __init__(self, node, name, handler=None, schema=None, qos=None, **qos_kwargs):
+        self.topic = Topic(node, name, schema, Role.SUB_ONLY, qos, **qos_kwargs)
+        self._schema = self.topic.schema
+        if handler is not None:
+            if _arity(handler) == 1:
+                fn = lambda m: handler(m.value if m.value is not None else m.data)
+            else:
+                fn = lambda m: handler(m.value if m.value is not None else m.data, m)
+            node._add_sub_handler(self.topic.index, fn)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("schema",))
+
+    def take(self, timeout_ms=0):
+        """Typed take: pops the next queued message and returns its decoded value
+        (the whole Message for a schema-less subscriber); None when nothing
+        arrived in time. First use switches the topic to queued delivery (see
+        Topic.take)."""
+        m = self.topic.take(timeout_ms)
+        if m is None or self._schema is None:
+            return m
+        return m.value if m.value is not None else m.data
+
+    def dispatch(self, max_msgs=0, timeout_ms=0):
+        """Drain the queue on the calling thread through this subscriber's
+        handler (see Topic.dispatch). Returns the number dispatched."""
+        return self.topic.dispatch(max_msgs, timeout_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -1688,9 +2557,17 @@ def _on_message(msg_ptr):
     try:
         m = msg_ptr.contents
         node = _NODES.get(m.user)
-        if node is not None and node._on_msg is not None:
-            spec = node._topic_specs.get(m.topic_index)
-            node._on_msg(Message._from_c(m, spec))
+        if node is None:
+            return
+        # Subscriber handlers on this topic index receive the message INSTEAD of
+        # the node-wide on_message.
+        handlers = node._sub_handlers.get(m.topic_index)
+        if handlers:
+            msg = Message._from_c(m, node._topic_specs.get(m.topic_index))
+            for fn in list(handlers):
+                fn(msg)
+        elif node._on_msg is not None:
+            node._on_msg(Message._from_c(m, node._topic_specs.get(m.topic_index)))
     except Exception:
         traceback.print_exc()
 
@@ -1702,5 +2579,77 @@ def _on_event(ev_ptr):
         node = _NODES.get(e.user)
         if node is not None and node._on_evt is not None:
             node._on_evt(Event._from_c(e))
+    except Exception:
+        traceback.print_exc()
+
+
+# Pattern handler boxes: the C-side user pointer carries an id into this registry,
+# never a Python reference, and the trampolines below are module-lived ctypes
+# objects, so native code never holds a collectable callback. Handler/signal boxes
+# live until their node closes; async-call boxes are per-call and released when
+# the response fires (including the CANCELLED one at close).
+_PBOXES = {}
+_PBOX_LOCK = threading.Lock()
+_PBOX_NEXT = 1
+
+
+def _pbox_add(box):
+    global _PBOX_NEXT
+    with _PBOX_LOCK:
+        box_id = _PBOX_NEXT
+        _PBOX_NEXT += 1
+        _PBOXES[box_id] = box
+        return box_id
+
+
+def _pbox_get(box_id):
+    with _PBOX_LOCK:
+        return _PBOXES.get(box_id)
+
+
+def _pbox_pop(box_id):
+    with _PBOX_LOCK:
+        return _PBOXES.pop(box_id, None)
+
+
+@_ReqFn
+def _on_request(req_ptr, user):
+    try:
+        box = _pbox_get(user)
+        if box is not None:
+            box.dispatch(req_ptr)
+    except Exception:
+        traceback.print_exc()
+
+
+@_RspFn
+def _on_response(rsp_ptr):
+    try:
+        o = rsp_ptr.contents
+        box = _pbox_pop(o.user)
+        if box is None:
+            return
+        box.node._drop_async(box.id)
+        resp = Response._from_c(o, box.rsp_schema)
+        try:
+            box.on_response(resp)
+        except Exception:
+            traceback.print_exc()
+    except Exception:
+        traceback.print_exc()
+
+
+@_SigFn
+def _on_signal(msg_ptr, user):
+    try:
+        box = _pbox_get(user)
+        if box is None:
+            return
+        msg = Message._from_c(msg_ptr.contents, box.spec)
+        val = msg.value if msg.value is not None else msg.data
+        if box.arity == 1:
+            box.handler(val)
+        else:
+            box.handler(val, msg)
     except Exception:
         traceback.print_exc()

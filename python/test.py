@@ -93,6 +93,165 @@ def round_trip():
     return ok
 
 
+# patterns leg types
+@dataclass
+class AddReq:
+    a: dart.i32 = 0
+    b: dart.i32 = 0
+
+
+@dataclass
+class AddRsp:
+    sum: dart.i32 = 0
+
+
+@dataclass
+class Level:
+    value: dart.i32 = 0
+
+
+def patterns():
+    """Functions / variables / signals between two nodes on an isolated domain."""
+    print("patterns leg: two nodes, domain 43, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    srv = dart.Node("srv", None, on_event("srv"),
+                    domain=43, multicast_interface=IFACE, max_topics=32)
+    cli = dart.Node("cli", None, on_event("cli"),
+                    domain=43, multicast_interface=IFACE, max_topics=32)
+
+    # definitions on srv: simple form (return = reply), a raiser (-> APP_ERROR),
+    # and a full form that defers and completes off-thread
+    add = dart.FunctionDefinition[AddReq, AddRsp](srv, "add",
+                                                  lambda q: AddRsp(sum=q.a + q.b))
+
+    def _boom(q):
+        raise RuntimeError("kaboom")   # noqa: the traceback print is expected
+    dart.FunctionDefinition[AddReq, AddRsp](srv, "boom", _boom)
+
+    def _late(q, request):
+        d = request.defer()
+        threading.Timer(0.05, lambda: d.complete(AddRsp(sum=q.a + q.b))).start()
+    dart.FunctionDefinition[AddReq, AddRsp](srv, "late", _late)
+
+    sig_count = []
+    dart.Signal(srv, "estop", lambda v: sig_count.append(v))
+    lvl_def = dart.VariableDefinition[Level](srv, "level", initial=Level(value=5),
+                                             allow_force=True)
+
+    srv.start()   # service thread owns srv's loop; handlers fire on it
+
+    # remotes on cli (manual poll: blocking calls drive cli's loop themselves)
+    add_r = dart.RemoteFunction[AddReq, AddRsp](cli, "add")
+    boom_r = dart.RemoteFunction[AddReq, AddRsp](cli, "boom")
+    late_r = dart.RemoteFunction[AddReq, AddRsp](cli, "late")
+    sig_out = dart.Signal(cli, "estop")
+    lvl = dart.RemoteVariable[Level](cli, "level")
+
+    deadline = time.time() + 8.0
+    while time.time() < deadline and not (add_r.has_definition()
+                                          and boom_r.has_definition()
+                                          and late_r.has_definition()
+                                          and sig_out.listener_count() > 0):
+        cli.poll(5)
+    check("definitions discovered", add_r.has_definition() and boom_r.has_definition()
+          and late_r.has_definition())
+    check("signal listener matched", sig_out.listener_count() == 1)
+
+    # blocking calls
+    r = add_r.call(AddReq(a=2, b=3), 3000)
+    check("blocking call ok", r.ok and r.status == dart.CallStatus.OK)
+    check("blocking call value", r.ok and r.value.sum == 5)
+    check("provider set", r.ok and r.provider != 0)
+
+    rb = boom_r.call(AddReq(a=1, b=1), 3000)
+    check("raising handler -> APP_ERROR", rb.status == dart.CallStatus.APP_ERROR)
+    threw = False
+    try:
+        _ = rb.value
+    except dart.CallError:
+        threw = True
+    check(".value on not-ok raises CallError", threw)
+
+    rl = late_r.call(AddReq(a=20, b=22), 3000)
+    check("deferred completion", rl.ok and rl.value.sum == 42)
+    check("caller count seen by definition", add.caller_count() == 1)
+
+    # variable: catch_up hands the remote the initial value
+    check("variable wait", lvl.wait(3000))
+    v = lvl.get()
+    check("initial value", v is not None and v.value == 5)
+    check("has_definition", lvl.has_definition())
+    check("remote set accepted", lvl.set(Level(value=9)) == dart.SendStatus.OK)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
+        cli.poll(5)
+    check("set round-trips to the remote", lvl.get().value == 9)
+    check("definition applied it", lvl_def.get().value == 9)
+
+    # force overrides with a shadow source; unforce restores the latest set
+    check("force", lvl_def.force(Level(value=99)) == dart.SendStatus.OK)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
+        cli.poll(5)
+    check("forced value visible remotely", lvl.get().value == 99)
+    check("remote sees forced()", lvl.forced())
+    check("unforce", lvl_def.unforce() == dart.SendStatus.OK)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
+        cli.poll(5)
+    check("unforce restores the latest set", lvl.get().value == 9 and not lvl.forced())
+
+    # signal: three payload-less emits, delivered on srv's service thread
+    check("emit accepted", sig_out.emit() == dart.SendStatus.OK)
+    sig_out.emit()
+    sig_out.emit()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and len(sig_count) < 3:
+        cli.poll(5)
+    check("three signals delivered", len(sig_count) == 3)
+
+    # async form: start cli's service thread, wait for the callback
+    cli.start()
+    done = threading.Event()
+    async_rsp = []
+
+    def on_rsp(resp):
+        async_rsp.append(resp)
+        done.set()
+    add_r.call_async(AddReq(a=10, b=5), on_rsp)
+    check("call_async answered", done.wait(5.0) and async_rsp[0].ok
+          and async_rsp[0].value.sum == 15)
+
+    # a blocking call is refused while the service thread owns the loop, loudly
+    rr = add_r.call(AddReq(a=1, b=2), 100)
+    check("blocking call refused under service thread",
+          rr.status == dart.CallStatus.TIMEOUT
+          and rr.send_status == dart.SendStatus.STATE)
+    cli.stop()
+
+    # a call still pending at close gets exactly one CANCELLED outcome, never hangs
+    never = dart.RemoteFunction(cli, "never-served", timeout_us=60_000_000)
+    cancelled = []
+    cdone = threading.Event()
+
+    def on_cancel(resp):
+        cancelled.append(resp)
+        cdone.set()
+    never.call_async(None, on_cancel)
+    srv.close()
+    cli.close()
+    check("pending call_async settles CANCELLED at close",
+          cdone.wait(2.0) and cancelled[0].status == dart.CallStatus.CANCELLED)
+    print("patterns: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 got = threading.Event()
 received = []
 
@@ -172,6 +331,9 @@ def main():
 
     pub.close()
     sub.close()
+
+    if ok:
+        ok = patterns()
     return 0 if ok else 1
 
 
