@@ -241,12 +241,12 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     return fn;
 }
 
-DartFunction *dart_node_create_function_handler(DartNode *n, const char *name,
+DartFunction *dart_node_create_function_definition(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     DartRequestFn on_request, void *user, const DartFunctionOpts *opts){
     return i_dart_function_new(n, name, req_schema, rsp_schema, on_request, user, opts, 1);
 }
-DartFunction *dart_node_create_function_caller(DartNode *n, const char *name,
+DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     const DartFunctionOpts *opts){
     return i_dart_function_new(n, name, req_schema, rsp_schema, NULL, NULL, opts, 0);
@@ -299,11 +299,11 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponse
     return DART_OK;
 }
 
-int dart_function_call(DartFunction *fn, DartBytes req, DartResponseFn on_response, void *user){
+int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response, void *user){
     return i_dart_function_call_id(fn, req, on_response, user, NULL);
 }
 
-/* sync-call response capture: copy the payload into the function's scratch, mark done.
+/* blocking-call response capture: copy the payload into the function's scratch, mark done.
  * The schema pointer is safe to hold: an interned schema lives until node close. */
 typedef struct { DartFunction *fn; volatile int done; DartCallStatus status;
                  const DartSchema *schema; uint32_t len; } i_DartSyncCtx;
@@ -322,7 +322,7 @@ static void i_dart_func_sync_response(const DartResponse *r){
     c->done = 1;
 }
 
-int dart_function_call_sync(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms){
+int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms){
     i_DartSyncCtx ctx; int acquired, r; uint64_t deadline; uint32_t id;
     if (!fn) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_sys_lock(fn->n);
@@ -560,11 +560,11 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     return v;
 }
 
-DartVariable *dart_node_create_variable_owner(DartNode *n, const char *name,
+DartVariable *dart_node_create_variable_definition(DartNode *n, const char *name,
                               const DartSchema *schema, const DartVariableOpts *opts){
     return i_dart_variable_new(n, name, schema, opts, 1);
 }
-DartVariable *dart_node_create_variable_accessor(DartNode *n, const char *name,
+DartVariable *dart_node_create_remote_variable(DartNode *n, const char *name,
                               const DartSchema *schema, const DartVariableOpts *opts){
     return i_dart_variable_new(n, name, schema, opts, 0);
 }
@@ -677,7 +677,8 @@ struct DartSignal {
     DartNode       *n;
     i_DartPatterns *pm;
     struct DartSignal *next;    /* manager list */
-    DartTopic      *topic;      /* kind SIGNAL, reliable, catch_up 0 (never latched); role as created */
+    DartTopic      *topic;      /* kind SIGNAL, reliable, catch_up 0 (never latched);
+                                   PUBSUB with a handler, else PUB_ONLY (emit always advertised) */
     DartSignalFn    on_signal;
     void           *user;
 };
@@ -687,14 +688,13 @@ static void i_dart_signal_on_msg(void *user, const DartMsg *msg){
     if (s->on_signal) s->on_signal(msg, s->user);
 }
 
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, DartRole role,
-                              const DartSchema *schema,
+DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
                               DartSignalFn on_signal, void *user, const DartSignalOpts *opts){
-    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired, listens;
+    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired;
+    /* the role is derived, never declared: a handler is the subscription, and the emit side
+       is EAGER for every handle so a first emit never pays an announce round trip (e-stop) */
+    DartRole role = on_signal ? DART_PUBSUB : DART_PUB_ONLY;
     if (!n || !name || !name[0]) return NULL;
-    if (role != DART_PUB_ONLY && role != DART_SUB_ONLY && role != DART_PUBSUB) return NULL;
-    listens = (role != DART_PUB_ONLY);
-    if (listens && !on_signal) return NULL;   /* a listening role that discards is a bug */
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
     topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
@@ -707,7 +707,7 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, DartRole role
     i_dart_node_sys_unlock(n, acquired);
     if (!s) return NULL;
     s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, listens ? i_dart_signal_on_msg : NULL, s);
+                              DART_KIND_SIGNAL, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
     if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
     acquired = i_dart_node_sys_lock(n);
     s->next = pm->sigs; pm->sigs = s;
@@ -717,14 +717,12 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, DartRole role
 
 int dart_signal_emit(DartSignal *sig, DartBytes payload){
     if (!sig) return DART_ERR_NO_TOPIC;
-    if (i_dart_topic_role(sig->topic) == DART_SUB_ONLY) return DART_ERR_ROLE;   /* listen-only */
     return dart_topic_send(sig->topic, payload);   /* public path: backpressure engages */
 }
 
-/* Listeners this handle's emits reach; 0 for a listen-only handle (it has no listeners,
- * it is one). */
+/* Listeners this handle's emits reach. */
 int dart_signal_listener_count(DartSignal *sig){
-    if (!sig || i_dart_topic_role(sig->topic) == DART_SUB_ONLY) return 0;
+    if (!sig) return 0;
     return dart_topic_match_count(sig->topic);
 }
 

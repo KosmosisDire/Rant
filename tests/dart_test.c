@@ -2824,15 +2824,15 @@ static void patterns_checks(void){
     ST_CHECK(P && C, "patterns: nodes open");
     if (!(P && C)){ if(P)dart_node_close(P,0); if(C)dart_node_close(C,0); return; }
 
-    prov = dart_node_create_function_handler(P, "add",  NULL, NULL, pf_add_handler,   NULL, NULL);
-    call_add = dart_node_create_function_caller(C, "add",  NULL, NULL, NULL);
-    pe   = dart_node_create_function_handler(P, "noop", NULL, NULL, pf_empty_handler, NULL, NULL);
-    ce   = dart_node_create_function_caller(C, "noop", NULL, NULL, NULL);
-    pd   = dart_node_create_function_handler(P, "defr", NULL, NULL, pf_defer_handler, NULL, NULL);
-    cd   = dart_node_create_function_caller(C, "defr", NULL, NULL, NULL);
-    pnh  = dart_node_create_function_handler(P, "nohd", NULL, NULL, NULL /* no handler */, NULL, NULL);
-    cnh  = dart_node_create_function_caller(C, "nohd", NULL, NULL, NULL);
-    ghost= dart_node_create_function_caller(C, "ghost",NULL, NULL, &(DartFunctionOpts){ .timeout_us = 150000u });
+    prov = dart_node_create_function_definition(P, "add",  NULL, NULL, pf_add_handler,   NULL, NULL);
+    call_add = dart_node_create_remote_function(C, "add",  NULL, NULL, NULL);
+    pe   = dart_node_create_function_definition(P, "noop", NULL, NULL, pf_empty_handler, NULL, NULL);
+    ce   = dart_node_create_remote_function(C, "noop", NULL, NULL, NULL);
+    pd   = dart_node_create_function_definition(P, "defr", NULL, NULL, pf_defer_handler, NULL, NULL);
+    cd   = dart_node_create_remote_function(C, "defr", NULL, NULL, NULL);
+    pnh  = dart_node_create_function_definition(P, "nohd", NULL, NULL, NULL /* no handler */, NULL, NULL);
+    cnh  = dart_node_create_remote_function(C, "nohd", NULL, NULL, NULL);
+    ghost= dart_node_create_remote_function(C, "ghost",NULL, NULL, &(DartFunctionOpts){ .timeout_us = 150000u });
     ST_CHECK(prov&&call_add&&pe&&ce&&pd&&cd&&pnh&&cnh&&ghost, "patterns: functions created/opened");
     (void)pe;(void)ce;
 
@@ -2851,21 +2851,21 @@ static void patterns_checks(void){
 
     /* async call: add(41) -> 42, status OK */
     { uint8_t req[4]; i_dart_le_w32(req,41); pf_reply_done=0;
-      dart_function_call(call_add, dart_bytes(req,4), pf_on_reply, NULL);
+      dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==42,
                "patterns: async add(41)=42 OK (done=%d st=%d val=%u)", pf_reply_done, pf_reply_status, pf_reply_val); }
 
     /* empty-ack: handler returns without replying -> auto OK, empty payload */
     { pf_reply_done=0; pf_calls=0;
-      dart_function_call(ce, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(ce, dart_bytes(NULL,0), pf_on_reply, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==0,
                "patterns: empty-ack auto OK (done=%d st=%d)", pf_reply_done, pf_reply_status); }
 
     /* deferred: handler defers, we complete later with a value */
     { pf_reply_done=0; pf_defer_token=0;
-      dart_function_call(cd, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(cd, dart_bytes(NULL,0), pf_on_reply, NULL);
       for (t=0;t<800 && !pf_defer_token;t++) pf_pump(P,C,2);
       ST_CHECK(pf_defer_token!=0, "patterns: handler deferred (token=%llu)", (unsigned long long)pf_defer_token);
       { uint8_t out[4]; i_dart_le_w32(out,99);
@@ -2876,14 +2876,14 @@ static void patterns_checks(void){
 
     /* no-handler: provider has NULL on_request -> NO_HANDLER */
     { pf_reply_done=0;
-      dart_function_call(cnh, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(cnh, dart_bytes(NULL,0), pf_on_reply, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_NO_HANDLER,
                "patterns: no-handler -> NO_HANDLER (done=%d st=%d)", pf_reply_done, pf_reply_status); }
 
     /* timeout: no provider for "ghost" -> client-synthesized TIMEOUT */
     { pf_reply_done=0;
-      dart_function_call(ghost, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(ghost, dart_bytes(NULL,0), pf_on_reply, NULL);
       for (t=0;t<400 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_TIMEOUT,
                "patterns: no-provider -> TIMEOUT (done=%d st=%d)", pf_reply_done, pf_reply_status); }
@@ -2892,11 +2892,11 @@ static void patterns_checks(void){
        any pump could run the announce/detail cycle. The request must QUEUE and flush when
        the provider matches, never silently drop into a timeout. */
     { DartFunction *pe2, *ce2; int cr; uint8_t req[4];
-      pe2 = dart_node_create_function_handler(P, "early", NULL, NULL, pf_add_handler, NULL, NULL);
-      ce2 = dart_node_create_function_caller(C, "early", NULL, NULL, NULL);
+      pe2 = dart_node_create_function_definition(P, "early", NULL, NULL, pf_add_handler, NULL, NULL);
+      ce2 = dart_node_create_remote_function(C, "early", NULL, NULL, NULL);
       ST_CHECK(pe2 && ce2, "patterns: early function pair created");
       i_dart_le_w32(req, 6); pf_reply_done = 0;
-      cr = dart_function_call(ce2, dart_bytes(req,4), pf_on_reply, NULL);   /* unmatched right now */
+      cr = dart_function_call_async(ce2, dart_bytes(req,4), pf_on_reply, NULL);   /* unmatched right now */
       ST_CHECK(cr==DART_OK, "patterns: early call accepted (%d)", cr);
       for (t=0;t<2000 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==7,
@@ -2910,7 +2910,7 @@ static void patterns_checks(void){
        ids are per-caller counters). */
     { DartAllocator c2a = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts c2o = co; DartNode *C2 = dart_node_open(&c2a, "fn-call2", NULL, NULL, &c2o);
-      DartFunction *call2 = C2 ? dart_node_create_function_caller(C2, "add", NULL, NULL, NULL) : NULL;
+      DartFunction *call2 = C2 ? dart_node_create_remote_function(C2, "add", NULL, NULL, NULL) : NULL;
       ST_CHECK(C2 && call2, "patterns: second caller open");
       if (C2 && call2){
           uint8_t r1[4], r2[4]; int i2;
@@ -2919,8 +2919,8 @@ static void patterns_checks(void){
           /* park both requests at the provider before it polls once */
           i_dart_le_w32(r1,100); i_dart_le_w32(r2,200);
           pf_reply_done=0; pf_reply2_done=0;
-          dart_function_call(call_add, dart_bytes(r1,4), pf_on_reply,  NULL);
-          dart_function_call(call2,    dart_bytes(r2,4), pf_on_reply2, NULL);
+          dart_function_call_async(call_add, dart_bytes(r1,4), pf_on_reply,  NULL);
+          dart_function_call_async(call2,    dart_bytes(r2,4), pf_on_reply2, NULL);
           dart_node_poll(C,0); dart_node_poll(C2,0);      /* flush both requests out */
           for (i2=0;i2<800 && !(pf_reply_done && pf_reply2_done);i2++){
               dart_node_poll(P,2); dart_node_poll(C,2); dart_node_poll(C2,2);
@@ -2945,7 +2945,7 @@ static void patterns_checks(void){
       for (i2=0;i2<14;i2++){
           int cr;   /* hoisted: ST_CHECK evaluates its condition twice */
           i_dart_le_w32(req,(uint32_t)(1000+i2)); expect_sum += (uint32_t)(1000+i2+1);
-          cr = dart_function_call(call_add, dart_bytes(req,4), pf_on_reply_burst, NULL);
+          cr = dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply_burst, NULL);
           ST_CHECK(cr==DART_OK, "patterns: burst call %d accepted (%d)", i2, cr);
       }
       for (t=0;t<2000 && pf_burst_done<14;t++) dart_node_poll(C,2);
@@ -2962,7 +2962,7 @@ static void patterns_checks(void){
     { DartResponse rep; int rc;
       dart_node_start(P);
       pf_defer_token=0;
-      rc = dart_function_call_sync(cd, dart_bytes(NULL,0), &rep, 120);
+      rc = dart_function_call(cd, dart_bytes(NULL,0), &rep, 120);
       ST_CHECK(rc==0 && rep.status==DART_CALL_TIMEOUT,
                "patterns: sync local timeout (rc=%d st=%d)", rc, rep.status);
       for (t=0;t<400 && !pf_defer_token;t++) dart_node_poll(C,2);
@@ -2972,7 +2972,7 @@ static void patterns_checks(void){
       for (t=0;t<200;t++) dart_node_poll(C,2);   /* late reply arrives: must be dropped safely */
       pf_reply_done=0;
       { uint8_t req[4]; i_dart_le_w32(req,60);
-        rc = dart_function_call_sync(call_add, dart_bytes(req,4), &rep, 1000); }
+        rc = dart_function_call(call_add, dart_bytes(req,4), &rep, 1000); }
       ST_CHECK(rc==1 && rep.status==DART_CALL_OK && rep.data.len>=4 && i_dart_le_r32(rep.data.data)==61,
                "patterns: sync works after late-reply drop (rc=%d st=%d)", rc, rep.status);
       dart_node_stop(P); }
@@ -2981,8 +2981,8 @@ static void patterns_checks(void){
     /* ---- variables: catch-up, convergence, read-only refusal, force/absorb/unforce ---- */
     { DartVariable *ov, *av; DartBytes gv; uint8_t b[4];
       i_dart_le_w32(b,20);
-      ov = dart_node_create_variable_owner(P, "temp", NULL, &(DartVariableOpts){ .initial=dart_bytes(b,4), .allow_force=1 });
-      av = dart_node_create_variable_accessor(C, "temp", NULL, NULL);
+      ov = dart_node_create_variable_definition(P, "temp", NULL, &(DartVariableOpts){ .initial=dart_bytes(b,4), .allow_force=1 });
+      av = dart_node_create_remote_variable(C, "temp", NULL, NULL);
       ST_CHECK(ov && av, "var: created/opened");
       for (t=0;t<2000 && dart_variable_match_count(ov)==0;t++) pf_pump(P,C,2);
       ST_CHECK(dart_variable_match_count(ov)==1, "var: accessor matched (%d)", dart_variable_match_count(ov));
@@ -3007,13 +3007,13 @@ static void patterns_checks(void){
       ST_CHECK(!dart_variable_forced(av)&&dart_variable_get(av,&gv)&&i_dart_le_r32(gv.data)==50,
                "var: unforce restores latest absorbed (50)"); }
     { DartVariable *ro_o, *ro_a; uint8_t b[4]; int sr; i_dart_le_w32(b,7);
-      ro_o = dart_node_create_variable_owner(P, "rovar", NULL, &(DartVariableOpts){ .initial=dart_bytes(b,4), .access=DART_VAR_READONLY });
-      ro_a = dart_node_create_variable_accessor(C, "rovar", NULL, NULL);
+      ro_o = dart_node_create_variable_definition(P, "rovar", NULL, &(DartVariableOpts){ .initial=dart_bytes(b,4), .access=DART_VAR_READONLY });
+      ro_a = dart_node_create_remote_variable(C, "rovar", NULL, NULL);
       ST_CHECK(ro_o&&ro_a, "var: read-only created/opened");
       for (t=0;t<600;t++) pf_pump(P,C,2);
       i_dart_le_w32(b,8); sr = dart_variable_set(ro_a, dart_bytes(b,4));
       ST_CHECK(sr==DART_ERR_ROLE, "var: read-only set refused (%d)", sr); }
-    { DartVariable *orphan = dart_node_create_variable_accessor(C, "nobody-owns-this", NULL, NULL);
+    { DartVariable *orphan = dart_node_create_remote_variable(C, "nobody-owns-this", NULL, NULL);
       uint8_t b[4]; int sr; i_dart_le_w32(b,1);
       ST_CHECK(orphan != NULL, "var: orphan accessor opens");
       sr = orphan ? dart_variable_set(orphan, dart_bytes(b,4)) : 0;
@@ -3026,8 +3026,8 @@ static void patterns_checks(void){
       DartVariable *to, *ta; DartBytes gv; uint8_t b[4]; int fr, ur;
       ST_CHECK(ts != NULL, "var: typed schema compiles");
       i_dart_le_w32(b,10);
-      to = dart_node_create_variable_owner(P, "ttemp", ts, &(DartVariableOpts){ .initial=dart_bytes(b,4), .allow_force=1 });
-      ta = dart_node_create_variable_accessor(C, "ttemp", ts, NULL);
+      to = dart_node_create_variable_definition(P, "ttemp", ts, &(DartVariableOpts){ .initial=dart_bytes(b,4), .allow_force=1 });
+      ta = dart_node_create_remote_variable(C, "ttemp", ts, NULL);
       ST_CHECK(to && ta, "var: typed created/opened");
       for (t=0;t<2000 && dart_variable_match_count(to)==0;t++) pf_pump(P,C,2);
       for (t=0;t<600 && !dart_variable_get(ta,&gv);t++) pf_pump(P,C,2);
@@ -3042,18 +3042,14 @@ static void patterns_checks(void){
       ST_CHECK(!dart_variable_forced(ta), "var: typed remote unforce applies (op-only payload)");
       dart_allocator_reset(&ma); }
 
-    /* ---- signals: roles, emit/receive, payload-less ---- */
+    /* ---- signals: derived roles (handler = subscription), emit/receive, payload-less ---- */
     { DartSignal *ps, *cs; uint8_t b[4]; int er;
-      ps = dart_node_create_signal(P, "evt", DART_PUB_ONLY, NULL, NULL,         NULL, NULL);  /* emitter */
-      cs = dart_node_create_signal(C, "evt", DART_SUB_ONLY, NULL, pf_on_signal, NULL, NULL);  /* listener */
+      ps = dart_node_create_signal(P, "evt", NULL, NULL,         NULL, NULL);  /* no handler: emit-only */
+      cs = dart_node_create_signal(C, "evt", NULL, pf_on_signal, NULL, NULL);  /* handler = subscription */
       ST_CHECK(ps && cs, "sig: created");
-      ST_CHECK(dart_node_create_signal(P, "evt2", DART_SUB_ONLY, NULL, NULL, NULL, NULL)==NULL,
-               "sig: listening role without a callback refused");
-      ST_CHECK(dart_node_create_signal(P, "evt3", DART_INACTIVE, NULL, NULL, NULL, NULL)==NULL,
-               "sig: inactive role refused");
       for (t=0;t<2000 && dart_signal_listener_count(ps)==0;t++) pf_pump(P,C,2);
       ST_CHECK(dart_signal_listener_count(ps)==1, "sig: listener matched (%d)", dart_signal_listener_count(ps));
-      ST_CHECK(dart_signal_listener_count(cs)==0, "sig: listen-only handle has no listeners (%d)",
+      ST_CHECK(dart_signal_listener_count(cs)==0, "sig: no listener subscribes to cs's emits (%d)",
                dart_signal_listener_count(cs));
       pf_sig_count=0; i_dart_le_w32(b,7); dart_signal_emit(ps, dart_bytes(b,4));
       for (t=0;t<400 && pf_sig_count==0;t++) pf_pump(P,C,2);
@@ -3061,24 +3057,46 @@ static void patterns_checks(void){
       pf_sig_count=0; pf_sig_last=123; dart_signal_emit(ps, dart_bytes(NULL,0));
       for (t=0;t<400 && pf_sig_count==0;t++) pf_pump(P,C,2);
       ST_CHECK(pf_sig_count==1 && pf_sig_last==0, "sig: payload-less received (n=%d)", pf_sig_count);
-      er = dart_signal_emit(cs, dart_bytes(b,4));
-      ST_CHECK(er==DART_ERR_ROLE, "sig: emit from a listen-only handle refused (%d)", er); }
+      er = dart_signal_emit(cs, dart_bytes(b,4));   /* every handle may emit, even a listening one */
+      ST_CHECK(er==DART_OK, "sig: emit from a listening handle allowed (%d)", er); }
+
+    /* never latched + every handle both ways: P emits on "evt2" BEFORE C joins (must not be
+       replayed to the late joiner), then both sides emit and both receive */
+    { DartSignal *p2, *c2; uint8_t b[4];
+      p2 = dart_node_create_signal(P, "evt2", NULL, pf_on_signal, NULL, NULL);
+      ST_CHECK(p2 != NULL, "sig: evt2 created");
+      i_dart_le_w32(b,55); dart_signal_emit(p2, dart_bytes(b,4));   /* nobody listening yet */
+      pf_pump(P,C,50);
+      pf_sig_count=0;
+      c2 = dart_node_create_signal(C, "evt2", NULL, pf_on_signal, NULL, NULL);
+      ST_CHECK(c2 != NULL, "sig: late joiner created");
+      for (t=0;t<2000 && (dart_signal_listener_count(p2)==0 || dart_signal_listener_count(c2)==0);t++)
+          pf_pump(P,C,2);
+      ST_CHECK(dart_signal_listener_count(p2)==1 && dart_signal_listener_count(c2)==1,
+               "sig: both sides matched (%d/%d)",
+               dart_signal_listener_count(p2), dart_signal_listener_count(c2));
+      pf_pump(P,C,100);
+      ST_CHECK(pf_sig_count==0, "sig: late joiner replayed nothing (%d)", pf_sig_count);
+      i_dart_le_w32(b,40); dart_signal_emit(p2, dart_bytes(b,4));
+      i_dart_le_w32(b,41); dart_signal_emit(c2, dart_bytes(b,4));
+      for (t=0;t<800 && pf_sig_count<2;t++) pf_pump(P,C,2);
+      ST_CHECK(pf_sig_count==2, "sig: both directions received (%d)", pf_sig_count); }
 
 #ifdef DART_THREADS
     /* sync call: the provider answers from its own service thread while the caller's
        sync loop drives its node */
     { DartResponse rep; int rc; uint8_t req[4]; i_dart_le_w32(req,7);
       dart_node_start(P);
-      rc = dart_function_call_sync(call_add, dart_bytes(req,4), &rep, 1000);
+      rc = dart_function_call(call_add, dart_bytes(req,4), &rep, 1000);
       ST_CHECK(rc==1 && rep.status==DART_CALL_OK && rep.data.len>=4 && i_dart_le_r32(rep.data.data)==8,
                "patterns: sync add(7)=8 (rc=%d st=%d)", rc, rep.status);
       dart_node_stop(P); }
 #endif
 
-    /* reflection: the entity walk folds P's channels into entities. P hosts 4 functions
-       (add/noop/defr/nohd), 2 variables (temp rw, rovar ro), 1 signal (evt): the peer walk
-       from C and P's local walk must both yield exactly those, with no '@' internals and
-       no incomplete pairs. */
+    /* reflection: the entity walk folds P's channels into entities. P hosts 5 functions
+       (add/noop/defr/nohd/early), 3 variables (temp rw, rovar ro, ttemp), 2 signals
+       (evt, evt2): the peer walk from C and P's local walk must both yield exactly those,
+       with no '@' internals and no incomplete pairs. */
     for (t=0;t<200;t++) pf_pump(P,C,2);   /* let any straggling detail fetches settle */
     { const DartDiscoveryPeer *ps; uint16_t pc = 0; uint32_t pid = 0;
       ps = dart_node_peers(C, &pc);
@@ -3100,7 +3118,7 @@ static void patterns_checks(void){
             inc += ei.incomplete;
             for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
         }
-        ST_CHECK(fns==5 && vars==3 && sigs==1 && tops==0,
+        ST_CHECK(fns==5 && vars==3 && sigs==2 && tops==0,
                  "reflect: peer entities fold (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
         ST_CHECK(ats==0 && inc==0, "reflect: no internals leak (@bytes=%d incomplete=%d)", ats, inc);
         ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro); }
@@ -3113,7 +3131,7 @@ static void patterns_checks(void){
             case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             } }
-        ST_CHECK(fns==5 && vars==3 && sigs==1 && tops==0,
+        ST_CHECK(fns==5 && vars==3 && sigs==2 && tops==0,
                  "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops); } }
 
     dart_node_close(P,0); dart_node_close(C,0);
@@ -3146,8 +3164,8 @@ static void dup_authority_checks(void){
     ST_CHECK(A && B, "dup: nodes open");
     if (!(A && B)){ if(A)dart_node_close(A,0); if(B)dart_node_close(B,0); return; }
 
-    { DartVariable *va = dart_node_create_variable_owner(A, "dupvar", NULL, NULL);
-      DartFunction *fa = dart_node_create_function_handler(A, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
+    { DartVariable *va = dart_node_create_variable_definition(A, "dupvar", NULL, NULL);
+      DartFunction *fa = dart_node_create_function_definition(A, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
       ST_CHECK(va && fa, "dup: first authorities created");
       /* wait until B holds A's interest: the create-time sweep's precondition */
       { uint32_t want = (uint32_t)dart_topic_id("dupvar"); int seen = 0;
@@ -3162,10 +3180,10 @@ static void dup_authority_checks(void){
         ST_CHECK(seen, "dup: B holds A's interest"); }
       ST_CHECK(a_dups==0 && b_dups==0, "dup: quiet before the rival (a=%d b=%d)", a_dups, b_dups);
 
-      { DartVariable *vb = dart_node_create_variable_owner(B, "dupvar", NULL, NULL);
+      { DartVariable *vb = dart_node_create_variable_definition(B, "dupvar", NULL, NULL);
         ST_CHECK(vb!=NULL, "dup: rival owner creates (diagnostic, not a refusal)");
         ST_CHECK(b_dups==1, "dup: rival owner detected at create (%d)", b_dups); }
-      { DartFunction *fb = dart_node_create_function_handler(B, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
+      { DartFunction *fb = dart_node_create_function_definition(B, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
         ST_CHECK(fb!=NULL, "dup: rival provider creates");
         ST_CHECK(b_dups==2, "dup: rival provider detected at create (%d)", b_dups); }
       for (t=0;t<2000 && a_dups<2;t++) pf_pump(A,B,2);
@@ -3173,8 +3191,8 @@ static void dup_authority_checks(void){
 
       /* dedup + negative: repeated announces re-report nothing, and an accessor pairing
          with an owner is the LEGAL shape (sub side, no authority claim), never flagged */
-      { DartVariable *acc  = dart_node_create_variable_accessor(B, "solo", NULL, NULL);
-        DartVariable *solo = dart_node_create_variable_owner(A, "solo", NULL, NULL);
+      { DartVariable *acc  = dart_node_create_remote_variable(B, "solo", NULL, NULL);
+        DartVariable *solo = dart_node_create_variable_definition(A, "solo", NULL, NULL);
         ST_CHECK(acc && solo, "dup: solo owner + accessor create");
         for (t=0;t<150;t++) pf_pump(A,B,2);
         ST_CHECK(a_dups==2 && b_dups==2,
