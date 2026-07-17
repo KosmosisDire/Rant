@@ -1,5 +1,5 @@
 /* Minimal C++ node demo over the dart.hpp wrapper. Mirrors examples/example.c
- * but with the OOP API: open a node, declare a typed "chat" topic, run a
+ * but with the OOP API: construct a node, declare a typed "chat" topic, run a
  * background poller, and pub/sub short text lines.
  *
  * Run two copies (optionally with a name):  ./example alice   /   ./example bob
@@ -31,7 +31,7 @@ static const char CHAT_SCHEMA[] =
     "}";
 
 /* Print a delivered message: decode it through its schema if typed, else raw. */
-static void handle_message(const dart::MessageIn& m) {
+static void handle_message(const dart::MessageView& m) {
     if (m.has_schema()) {
         dart::Bytes text = m.get_array("text");
         uint64_t n = m.get_uint("textLen");
@@ -61,12 +61,15 @@ int main(int argc, char** argv) {
     auto schema = dart::Schema::compile(CHAT_SCHEMA, &err);
     if (!schema) { std::fprintf(stderr, "schema: %s\n", err.c_str()); return 1; }
 
-    auto node = dart::Node::open(name ? name : std::string_view{}, handle_message, handle_event);
-    if (!node) { std::fprintf(stderr, "dart_node_open failed\n"); return 1; }
+#if defined(__cpp_exceptions)
+  try {
+#endif
+    dart::Node node(name ? name : std::string_view{}, handle_message, handle_event);
+    if (!node.valid()) { std::fprintf(stderr, "node: %s\n", dart::Node::last_open_error().c_str()); return 1; }
 
-    auto chat = node->create_topic("chat", dart::Role::PubSub, &*schema,
-                                     { dart::Reliability::Reliable });
-    node->start();   /* background poll thread; sends/creates are now thread-safe */
+    dart::Topic chat(node, "chat", dart::Role::PubSub, &*schema,
+                     { dart::Reliability::Reliable });
+    node.start();   /* background poll thread; sends/creates are now thread-safe */
 
     std::printf("typed chat on topic 'chat'. type a line to publish; ctrl-d/z to quit.\n");
 
@@ -76,7 +79,7 @@ int main(int argc, char** argv) {
         size_t len = std::strcspn(line, "\n");
         if (!len) continue;
         if (len > 240) len = 240;
-        dart::MessageOut msg(*schema);
+        dart::MessageBuilder msg(*schema);
         msg.set_uint("seq", ++seq)
            .set_uint("textLen", (uint64_t)len)
            .set_array("text", dart::Bytes(line, len));
@@ -85,4 +88,10 @@ int main(int argc, char** argv) {
     }
 
     return 0;   /* ~Node stops the poller and closes with a BYE */
+#if defined(__cpp_exceptions)
+  } catch (const dart::Error& e) {
+    std::fprintf(stderr, "dart error: %s\n", e.what());
+    return 1;
+  }
+#endif
 }

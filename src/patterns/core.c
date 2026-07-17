@@ -306,11 +306,12 @@ int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_
 /* blocking-call response capture: copy the payload into the function's scratch, mark done.
  * The schema pointer is safe to hold: an interned schema lives until node close. */
 typedef struct { DartFunction *fn; volatile int done; DartCallStatus status;
-                 const DartSchema *schema; uint32_t len; } i_DartSyncCtx;
+                 const DartSchema *schema; uint32_t len; uint32_t provider; } i_DartSyncCtx;
 static void i_dart_func_sync_response(const DartResponse *r){
     i_DartSyncCtx *c = (i_DartSyncCtx*)r->user;
     DartFunction *fn = c->fn;
     c->status = r->status; c->schema = r->schema; c->len = (uint32_t)r->data.len;
+    c->provider = r->provider;
     if (r->data.len){
         if (fn->sync_cap < r->data.len){
             uint8_t *nb = (uint8_t*)i_dart_node_sys_alloc(fn->n, fn->sync_buf, r->data.len);
@@ -332,6 +333,7 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
     }
     i_dart_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = DART_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
+    ctx.provider = 0;
     r = i_dart_function_call_id(fn, req, i_dart_func_sync_response, &ctx, &id);
     if (r != DART_OK) return r;
     deadline = i_dart_node_now_us(fn->n)
@@ -357,6 +359,7 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
         out->data = dart_bytes(fn->sync_buf,
                                (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? ctx.len : 0);
         out->schema = out->data.len ? ctx.schema : NULL;
+        out->provider = ctx.done ? ctx.provider : 0;
     }
     /* 0 = timed out, whichever deadline (local or pending) expired first; 1 = a real outcome */
     return (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? 1 : 0;
