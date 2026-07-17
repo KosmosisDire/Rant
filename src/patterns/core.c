@@ -241,12 +241,12 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     return fn;
 }
 
-DartFunction *dart_node_create_function(DartNode *n, const char *name,
+DartFunction *dart_node_create_function_handler(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     DartRequestFn on_request, void *user, const DartFunctionOpts *opts){
     return i_dart_function_new(n, name, req_schema, rsp_schema, on_request, user, opts, 1);
 }
-DartFunction *dart_node_open_function(DartNode *n, const char *name,
+DartFunction *dart_node_create_function_caller(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     const DartFunctionOpts *opts){
     return i_dart_function_new(n, name, req_schema, rsp_schema, NULL, NULL, opts, 0);
@@ -560,12 +560,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     return v;
 }
 
-DartVariable *dart_node_create_variable(DartNode *n, const char *name, const DartSchema *schema,
-                              const DartVariableOpts *opts){
+DartVariable *dart_node_create_variable_owner(DartNode *n, const char *name,
+                              const DartSchema *schema, const DartVariableOpts *opts){
     return i_dart_variable_new(n, name, schema, opts, 1);
 }
-DartVariable *dart_node_open_variable(DartNode *n, const char *name, const DartSchema *schema,
-                              const DartVariableOpts *opts){
+DartVariable *dart_node_create_variable_accessor(DartNode *n, const char *name,
+                              const DartSchema *schema, const DartVariableOpts *opts){
     return i_dart_variable_new(n, name, schema, opts, 0);
 }
 
@@ -677,7 +677,7 @@ struct DartSignal {
     DartNode       *n;
     i_DartPatterns *pm;
     struct DartSignal *next;    /* manager list */
-    DartTopic      *topic;      /* PUBSUB, kind SIGNAL, reliable, catch_up 0 (never latched) */
+    DartTopic      *topic;      /* kind SIGNAL, reliable, catch_up 0 (never latched); role as created */
     DartSignalFn    on_signal;
     void           *user;
 };
@@ -687,10 +687,14 @@ static void i_dart_signal_on_msg(void *user, const DartMsg *msg){
     if (s->on_signal) s->on_signal(msg, s->user);
 }
 
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
+DartSignal *dart_node_create_signal(DartNode *n, const char *name, DartRole role,
+                              const DartSchema *schema,
                               DartSignalFn on_signal, void *user, const DartSignalOpts *opts){
-    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired;
+    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired, listens;
     if (!n || !name || !name[0]) return NULL;
+    if (role != DART_PUB_ONLY && role != DART_SUB_ONLY && role != DART_PUBSUB) return NULL;
+    listens = (role != DART_PUB_ONLY);
+    if (listens && !on_signal) return NULL;   /* a listening role that discards is a bug */
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
     topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
@@ -702,8 +706,8 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     if (s){ memset(s, 0, sizeof *s); s->n = n; s->pm = pm; s->on_signal = on_signal; s->user = user; }
     i_dart_node_sys_unlock(n, acquired);
     if (!s) return NULL;
-    s->topic = i_dart_node_create_pattern_topic(n, name, DART_PUBSUB, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, i_dart_signal_on_msg, s);
+    s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
+                              DART_KIND_SIGNAL, 0, 0, listens ? i_dart_signal_on_msg : NULL, s);
     if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
     acquired = i_dart_node_sys_lock(n);
     s->next = pm->sigs; pm->sigs = s;
@@ -713,15 +717,19 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
 
 int dart_signal_emit(DartSignal *sig, DartBytes payload){
     if (!sig) return DART_ERR_NO_TOPIC;
+    if (i_dart_topic_role(sig->topic) == DART_SUB_ONLY) return DART_ERR_ROLE;   /* listen-only */
     return dart_topic_send(sig->topic, payload);   /* public path: backpressure engages */
 }
 
+/* Listeners this handle's emits reach; 0 for a listen-only handle (it has no listeners,
+ * it is one). */
 int dart_signal_listener_count(DartSignal *sig){
-    return sig ? dart_topic_match_count(sig->topic) : 0;
+    if (!sig || i_dart_topic_role(sig->topic) == DART_SUB_ONLY) return 0;
+    return dart_topic_match_count(sig->topic);
 }
 
 /* ---- duplicate-authority detection --------------------------------------------------------
- * The pattern contract expects exactly ONE provider per function and ONE owner per variable.
+ * The pattern contract expects exactly ONE handler per function and ONE owner per variable.
  * Two authorities never match each other (both hold the channel's authoritative direction,
  * so their roles are pub/pub or sub/sub and no lane forms), which means the transport's
  * gates can never see the conflict; the announce interest can. A peer entry with the same
@@ -1086,7 +1094,9 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             memset(out, 0, sizeof *out);
             out->kind = DART_ENTITY_SIGNAL;
             out->name = i_dart_topic_name(s->topic);
-            out->provides = 1; out->consumes = 1;
+            { uint8_t role = i_dart_topic_role(s->topic);
+              out->provides = (uint8_t)(role == DART_PUBSUB || role == DART_PUB_ONLY);
+              out->consumes = (uint8_t)(role == DART_PUBSUB || role == DART_SUB_ONLY); }
             out->reliable = 1;
             out->index = dart_topic_index(s->topic);
             out->schema = dart_topic_schema(s->topic);

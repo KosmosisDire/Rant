@@ -2132,8 +2132,8 @@ typedef enum {
                                 disabled / the send came from a callback), so the message likely missed a
                                 subscriber that was already on the network. See dart_topic_ready. */
     DART_E_DUPLICATE_AUTHORITY, /* a peer also advertises the authoritative side of a function or
-                                   variable this node provides/owns (.topic, .peer, .topic_name): two
-                                   providers/owners exist where the pattern contract expects exactly one.
+                                   variable this node handles/owns (.topic, .peer, .topic_name): two
+                                   handlers/owners exist where the pattern contract expects exactly one.
                                    Diagnostic, not a refusal: calls take the first response, accessors
                                    converge on the last write. Fired once per (entity, peer). */
     /* ---- low-level IO / setup (mostly at dart_node_open; .os_error carries errno) ---- */
@@ -3015,12 +3015,15 @@ int i_dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16
  * they share a name. Depends on node/runtime only; the node hooks it uses are kind-agnostic.
  * Compile it out with DART_NO_PATTERNS.
  *
- *   FUNCTION  request/response, exactly one reply per call, ONE provider (req/rsp channels)
+ *   FUNCTION  request/response, exactly one reply per call, ONE handler (req/rsp channels)
  *   VARIABLE  replicated state, one owner, dumb writes + optional force (value/@set channels)
  *   SIGNAL    reliable fire-and-forget event, N emitters / N listeners, never latched
  *
- * API doctrine: create = you are the authority (provider / owner / emitter+listener); open =
- * it lives elsewhere (caller / accessor). Bytes in C; the wrappers add typed ergonomics. */
+ * API doctrine: every constructor is dart_node_create_*, and the SIDE is in its name where
+ * the sides are mutually exclusive (function_handler / function_caller, variable_owner /
+ * variable_accessor: one node cannot be both). A signal participant CAN be emitter,
+ * listener, or both, so create_signal takes a DartRole instead (pub = emit, sub = listen),
+ * like create_topic. Bytes in C; the wrappers add typed ergonomics. */
 #ifndef DART_PATTERNS_H
 #define DART_PATTERNS_H
 
@@ -3044,19 +3047,19 @@ extern "C" {
 typedef enum {
     DART_CALL_OK        = 0,
     DART_CALL_APP_ERROR = 1,   /* the handler replied with dart_request_fail */
-    DART_CALL_NO_HANDLER= 2,   /* the provider has no handler registered */
+    DART_CALL_NO_HANDLER= 2,   /* the handler side has no on_request registered */
     DART_CALL_TIMEOUT   = 3,   /* client-synthesized: no response within the timeout */
-    DART_CALL_PEER_LOST = 4    /* client-synthesized: the provider dropped mid-call */
+    DART_CALL_PEER_LOST = 4    /* client-synthesized: the handler node dropped mid-call */
 } DartCallStatus;
 
 typedef struct DartFunction DartFunction;   /* opaque function handle */
 
-/* The request as delivered to the provider's handler: what a DartMsg carries, in function
- * vocabulary. Views are valid for the handler call only. The reply machinery lives BEHIND
- * this struct, so pass only the exact pointer the handler received to dart_request_reply /
- * dart_request_fail / dart_request_defer, never a copy. */
+/* The request as delivered to the handler side's on_request: what a DartMsg carries, in
+ * function vocabulary. Views are valid for the callback only. The reply machinery lives
+ * BEHIND this struct, so pass only the exact pointer the callback received to
+ * dart_request_reply / dart_request_fail / dart_request_defer, never a copy. */
 typedef struct DartRequest {
-    DartNode         *node;          /* the node the provider runs on */
+    DartNode         *node;          /* the node the handler runs on */
     DartString        function_name; /* the function's name, @req suffix stripped (a view) */
     DartBytes         data;          /* the request payload */
     const DartSchema *schema;        /* the schema data decodes with (NULL = untyped caller).
@@ -3071,14 +3074,14 @@ typedef struct DartRequest {
 typedef struct {
     DartCallStatus    status;
     DartBytes         data;
-    const DartSchema *schema;    /* the schema data decodes with (NULL = untyped provider or
-                                    a synthesized outcome) */
+    const DartSchema *schema;    /* the schema data decodes with (NULL = an untyped handler
+                                    side or a synthesized outcome) */
     uint32_t          provider;
     void             *user;      /* the user pointer passed to dart_function_call */
 } DartResponse;
 typedef void (*DartResponseFn)(const DartResponse *response);
 
-/* The provider's handler: inspect the request, then reply exactly once with
+/* The handler callback: inspect the request, then reply exactly once with
  * dart_request_reply / dart_request_fail, or dart_request_defer for an async completion.
  * Returning without replying auto-acks DART_CALL_OK with an empty payload. */
 typedef void (*DartRequestFn)(DartRequest *request, void *user);
@@ -3088,14 +3091,15 @@ typedef struct {
     uint32_t timeout_us;            /* caller-side call timeout; 0 = DART_CALL_TIMEOUT_US */
 } DartFunctionOpts;
 
-/* Create the PROVIDER side (you own the implementation): subscribes requests, publishes
- * replies, runs on_request for each request. Open the CALLER side (it lives elsewhere):
- * publishes requests, subscribes replies. req/rsp schemas may be NULL (untyped; an empty
- * rsp schema still flows an ack). Returns a handle or NULL. */
-DartFunction *dart_node_create_function(DartNode *n, const char *name,
+/* Create the HANDLER side (you own the implementation): subscribes requests, publishes
+ * replies, runs on_request for each request (NULL answers DART_CALL_NO_HANDLER). Create the
+ * CALLER side (the implementation lives elsewhere): publishes requests, subscribes replies.
+ * req/rsp schemas may be NULL (untyped; an empty rsp schema still flows an ack). Returns a
+ * handle or NULL. */
+DartFunction *dart_node_create_function_handler(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     DartRequestFn on_request, void *user, const DartFunctionOpts *opts);
-DartFunction *dart_node_open_function(DartNode *n, const char *name,
+DartFunction *dart_node_create_function_caller(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     const DartFunctionOpts *opts);
 
@@ -3110,10 +3114,10 @@ int  dart_function_call(DartFunction *fn, DartBytes req, DartResponseFn on_respo
  * negative DartResult. Refused (DART_ERR_STATE) from inside a callback or while a service
  * thread owns the loop. */
 int  dart_function_call_sync(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms);
-/* Providers currently matched (caller side) / callers matched (provider side). */
+/* Handlers currently matched (caller side) / callers matched (handler side). */
 int  dart_function_match_count(DartFunction *fn);
 
-/* ---- in the provider's handler (DartRequestFn) -------------------------------------- */
+/* ---- in the handler callback (DartRequestFn) ----------------------------------------- */
 void      dart_request_reply(DartRequest *request, DartBytes rsp);   /* answer OK */
 void      dart_request_fail (DartRequest *request, DartBytes rsp);   /* answer APP_ERROR */
 /* Defer the reply: returns a token (0 on failure), suppresses the auto-ack, and lets the
@@ -3139,12 +3143,13 @@ typedef struct {
     uint32_t  backpressure_wait_us;/* 0 = DART_PATTERN_BP_WAIT_US */
 } DartVariableOpts;
 
-/* Create the OWNER (you hold the authoritative value); open an ACCESSOR (it lives elsewhere).
- * schema may be NULL (untyped). Returns a handle or NULL. */
-DartVariable *dart_node_create_variable(DartNode *n, const char *name, const DartSchema *schema,
-                              const DartVariableOpts *opts);
-DartVariable *dart_node_open_variable(DartNode *n, const char *name, const DartSchema *schema,
-                              const DartVariableOpts *opts);
+/* Create the OWNER (you hold the authoritative value) or an ACCESSOR (the value lives
+ * elsewhere: reads see the cached latest, writes go over the set channel). schema may be
+ * NULL (untyped). Returns a handle or NULL. */
+DartVariable *dart_node_create_variable_owner(DartNode *n, const char *name,
+                              const DartSchema *schema, const DartVariableOpts *opts);
+DartVariable *dart_node_create_variable_accessor(DartNode *n, const char *name,
+                              const DartSchema *schema, const DartVariableOpts *opts);
 
 /* Read the current value: owner = the store, accessor = the cached latest. Returns 1 and fills
  * *out (a view valid until the next call on this variable / next poll) if a value exists, else 0. */
@@ -3173,8 +3178,10 @@ int  dart_variable_match_count(DartVariable *var);
 /* ---- SIGNALS ------------------------------------------------------------------------ */
 
 /* A reliable fire-and-forget event: N emitters, N listeners, NEVER latched (a late joiner
- * receives NOTHING published before it joined -- the safety property). One symmetric handle
- * both emits and listens; there is no open_ variant. */
+ * receives NOTHING published before it joined -- the safety property). The role declares
+ * THIS node's participation: DART_PUB_ONLY emits, DART_SUB_ONLY listens, DART_PUBSUB does
+ * both. The role is fixed at create, and the interest list advertises only what the node
+ * actually does (a pure listener claims no emit side). */
 typedef struct DartSignal DartSignal;
 typedef void (*DartSignalFn)(const DartMsg *msg, void *user);   /* a received signal */
 
@@ -3182,12 +3189,15 @@ typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
 } DartSignalOpts;
 
-/* Create a signal on this node. schema may be NULL (untyped / payload-less). on_signal (may be
- * NULL for an emit-only participant) fires for each signal from ANOTHER node. Returns a handle
- * or NULL. */
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
+/* Create a signal participant with the given role. schema may be NULL (untyped /
+ * payload-less). on_signal (required for a listening role, ignored for DART_PUB_ONLY)
+ * fires for each signal from ANOTHER node. Returns a handle or NULL (bad args, or a role
+ * of DART_INACTIVE). */
+DartSignal *dart_node_create_signal(DartNode *n, const char *name, DartRole role,
+                              const DartSchema *schema,
                               DartSignalFn on_signal, void *user, const DartSignalOpts *opts);
-/* Emit the signal to every listener (payload may be {NULL,0}). Returns DART_OK or a DartResult. */
+/* Emit the signal to every listener (payload may be {NULL,0}). Returns DART_OK, a negative
+ * DartResult from the send, or DART_ERR_ROLE from a listen-only (DART_SUB_ONLY) handle. */
 int  dart_signal_emit(DartSignal *sig, DartBytes payload);
 /* Listeners currently matched (other nodes subscribed to this signal). */
 int  dart_signal_listener_count(DartSignal *sig);
@@ -9896,7 +9906,7 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
     case DART_E_DUPLICATE_AUTHORITY:
         p=i_dart_event_append_str(p,end,"duplicate-authority "); p=i_dart_event_append_topic(p,end,ev);
         p=i_dart_event_append_str(p,end,": peer "); p=i_dart_event_append_peer(p,end,ev);
-        p=i_dart_event_append_str(p,end," also claims the provider/owner side (expected exactly one)"); break;
+        p=i_dart_event_append_str(p,end," also claims the handler/owner side (expected exactly one)"); break;
     case DART_E_OOM:
         p=i_dart_event_append_str(p,end,"out-of-memory");
         if (ev->too_big_bytes){ p=i_dart_event_append_str(p,end,": "); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
@@ -13227,12 +13237,12 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     return fn;
 }
 
-DartFunction *dart_node_create_function(DartNode *n, const char *name,
+DartFunction *dart_node_create_function_handler(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     DartRequestFn on_request, void *user, const DartFunctionOpts *opts){
     return i_dart_function_new(n, name, req_schema, rsp_schema, on_request, user, opts, 1);
 }
-DartFunction *dart_node_open_function(DartNode *n, const char *name,
+DartFunction *dart_node_create_function_caller(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     const DartFunctionOpts *opts){
     return i_dart_function_new(n, name, req_schema, rsp_schema, NULL, NULL, opts, 0);
@@ -13546,12 +13556,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     return v;
 }
 
-DartVariable *dart_node_create_variable(DartNode *n, const char *name, const DartSchema *schema,
-                              const DartVariableOpts *opts){
+DartVariable *dart_node_create_variable_owner(DartNode *n, const char *name,
+                              const DartSchema *schema, const DartVariableOpts *opts){
     return i_dart_variable_new(n, name, schema, opts, 1);
 }
-DartVariable *dart_node_open_variable(DartNode *n, const char *name, const DartSchema *schema,
-                              const DartVariableOpts *opts){
+DartVariable *dart_node_create_variable_accessor(DartNode *n, const char *name,
+                              const DartSchema *schema, const DartVariableOpts *opts){
     return i_dart_variable_new(n, name, schema, opts, 0);
 }
 
@@ -13663,7 +13673,7 @@ struct DartSignal {
     DartNode       *n;
     i_DartPatterns *pm;
     struct DartSignal *next;    /* manager list */
-    DartTopic      *topic;      /* PUBSUB, kind SIGNAL, reliable, catch_up 0 (never latched) */
+    DartTopic      *topic;      /* kind SIGNAL, reliable, catch_up 0 (never latched); role as created */
     DartSignalFn    on_signal;
     void           *user;
 };
@@ -13673,10 +13683,14 @@ static void i_dart_signal_on_msg(void *user, const DartMsg *msg){
     if (s->on_signal) s->on_signal(msg, s->user);
 }
 
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
+DartSignal *dart_node_create_signal(DartNode *n, const char *name, DartRole role,
+                              const DartSchema *schema,
                               DartSignalFn on_signal, void *user, const DartSignalOpts *opts){
-    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired;
+    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired, listens;
     if (!n || !name || !name[0]) return NULL;
+    if (role != DART_PUB_ONLY && role != DART_SUB_ONLY && role != DART_PUBSUB) return NULL;
+    listens = (role != DART_PUB_ONLY);
+    if (listens && !on_signal) return NULL;   /* a listening role that discards is a bug */
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
     topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
@@ -13688,8 +13702,8 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     if (s){ memset(s, 0, sizeof *s); s->n = n; s->pm = pm; s->on_signal = on_signal; s->user = user; }
     i_dart_node_sys_unlock(n, acquired);
     if (!s) return NULL;
-    s->topic = i_dart_node_create_pattern_topic(n, name, DART_PUBSUB, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, i_dart_signal_on_msg, s);
+    s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
+                              DART_KIND_SIGNAL, 0, 0, listens ? i_dart_signal_on_msg : NULL, s);
     if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
     acquired = i_dart_node_sys_lock(n);
     s->next = pm->sigs; pm->sigs = s;
@@ -13699,15 +13713,19 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
 
 int dart_signal_emit(DartSignal *sig, DartBytes payload){
     if (!sig) return DART_ERR_NO_TOPIC;
+    if (i_dart_topic_role(sig->topic) == DART_SUB_ONLY) return DART_ERR_ROLE;   /* listen-only */
     return dart_topic_send(sig->topic, payload);   /* public path: backpressure engages */
 }
 
+/* Listeners this handle's emits reach; 0 for a listen-only handle (it has no listeners,
+ * it is one). */
 int dart_signal_listener_count(DartSignal *sig){
-    return sig ? dart_topic_match_count(sig->topic) : 0;
+    if (!sig || i_dart_topic_role(sig->topic) == DART_SUB_ONLY) return 0;
+    return dart_topic_match_count(sig->topic);
 }
 
 /* ---- duplicate-authority detection --------------------------------------------------------
- * The pattern contract expects exactly ONE provider per function and ONE owner per variable.
+ * The pattern contract expects exactly ONE handler per function and ONE owner per variable.
  * Two authorities never match each other (both hold the channel's authoritative direction,
  * so their roles are pub/pub or sub/sub and no lane forms), which means the transport's
  * gates can never see the conflict; the announce interest can. A peer entry with the same
@@ -14072,7 +14090,9 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             memset(out, 0, sizeof *out);
             out->kind = DART_ENTITY_SIGNAL;
             out->name = i_dart_topic_name(s->topic);
-            out->provides = 1; out->consumes = 1;
+            { uint8_t role = i_dart_topic_role(s->topic);
+              out->provides = (uint8_t)(role == DART_PUBSUB || role == DART_PUB_ONLY);
+              out->consumes = (uint8_t)(role == DART_PUBSUB || role == DART_SUB_ONLY); }
             out->reliable = 1;
             out->index = dart_topic_index(s->topic);
             out->schema = dart_topic_schema(s->topic);

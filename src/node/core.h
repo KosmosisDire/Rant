@@ -71,8 +71,8 @@ typedef enum {
                                 disabled / the send came from a callback), so the message likely missed a
                                 subscriber that was already on the network. See dart_topic_ready. */
     DART_E_DUPLICATE_AUTHORITY, /* a peer also advertises the authoritative side of a function or
-                                   variable this node provides/owns (.topic, .peer, .topic_name): two
-                                   providers/owners exist where the pattern contract expects exactly one.
+                                   variable this node handles/owns (.topic, .peer, .topic_name): two
+                                   handlers/owners exist where the pattern contract expects exactly one.
                                    Diagnostic, not a refusal: calls take the first response, accessors
                                    converge on the last write. Fired once per (entity, peer). */
     /* ---- low-level IO / setup (mostly at dart_node_open; .os_error carries errno) ---- */
