@@ -84,14 +84,17 @@ namespace Dart
         public static event Action<Event> Events;
 
         /// <summary>The shared topic named <paramref name="name"/> on the scene
-        /// node, created on first request. Qos applies only to that first request
-        /// (null = reliable defaults); later callers share the existing topic.</summary>
-        public static DartTopic<T> Topic<T>(string name, Qos qos = null)
-            => RequireMain().GetTopic<T>(name, qos);
+        /// node, created on first request. The QoS parameters apply only to that
+        /// first request (defaults = reliable + queued); later callers share the
+        /// existing topic.</summary>
+        public static DartTopic<T> Topic<T>(string name, bool reliable = true, int keepLast = 0,
+                                            int catchUp = 0, int queueBytes = 0)
+            => RequireMain().GetTopic<T>(name, reliable, keepLast, catchUp, queueBytes);
 
         /// <summary>The shared raw (bytes) topic named <paramref name="name"/>.</summary>
-        public static DartTopic Topic(string name, Qos qos = null)
-            => RequireMain().GetTopic(name, qos);
+        public static DartTopic Topic(string name, bool reliable = true, int keepLast = 0,
+                                      int catchUp = 0, int queueBytes = 0)
+            => RequireMain().GetTopic(name, reliable, keepLast, catchUp, queueBytes);
 
         /// <summary>One-liner subscribe on the scene node.</summary>
         public static DartSubscription Subscribe<T>(string name, Action<T> handler)
@@ -103,42 +106,46 @@ namespace Dart
             => Topic<T>(name).Subscribe(owner, handler);
 
         /// <summary>Instance form of the static Topic&lt;T&gt;().</summary>
-        public DartTopic<T> GetTopic<T>(string name, Qos qos = null)
+        public DartTopic<T> GetTopic<T>(string name, bool reliable = true, int keepLast = 0,
+                                        int catchUp = 0, int queueBytes = 0)
         {
-            DartTopicBase ch = LookupOrNull(name, qos);
+            bool custom = !reliable || keepLast != 0 || catchUp != 0 || queueBytes != 0;
+            DartTopicBase ch = LookupOrNull(name, custom);
             if (ch != null)
             {
                 var typed = ch as DartTopic<T>;
                 if (typed == null) throw ShapeMismatch(name, ch, "DartTopic<" + typeof(T).Name + ">");
                 return typed;
             }
-            var c = new DartTopic<T>(this, name, EffectiveQos(qos));
+            var c = new DartTopic<T>(this, name, EffectiveQos(reliable, keepLast, catchUp, queueBytes));
             _topics.Add(name, c);
             return c;
         }
 
         /// <summary>Instance form of the static raw Topic().</summary>
-        public DartTopic GetTopic(string name, Qos qos = null)
+        public DartTopic GetTopic(string name, bool reliable = true, int keepLast = 0,
+                                  int catchUp = 0, int queueBytes = 0)
         {
-            DartTopicBase ch = LookupOrNull(name, qos);
+            bool custom = !reliable || keepLast != 0 || catchUp != 0 || queueBytes != 0;
+            DartTopicBase ch = LookupOrNull(name, custom);
             if (ch != null)
             {
                 var raw = ch as DartTopic;
                 if (raw == null) throw ShapeMismatch(name, ch, "a raw DartTopic");
                 return raw;
             }
-            var c = new DartTopic(this, name, EffectiveQos(qos));
+            var c = new DartTopic(this, name, EffectiveQos(reliable, keepLast, catchUp, queueBytes));
             _topics.Add(name, c);
             return c;
         }
 
-        private DartTopicBase LookupOrNull(string name, Qos qos)
+        private DartTopicBase LookupOrNull(string name, bool customQos)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
             DartTopicBase ch;
             if (!_topics.TryGetValue(name, out ch)) return null;
-            if (qos != null)
-                Debug.LogWarning("[DART] topic '" + name + "' already exists: the Qos passed here is ignored (first request wins)", this);
+            if (customQos)
+                Debug.LogWarning("[DART] topic '" + name + "' already exists: the QoS passed here is ignored (first request wins)", this);
             return ch;
         }
 
@@ -158,17 +165,15 @@ namespace Dart
         // Reliable by default, and always queued from creation: with the service
         // thread owning the wire, only a queued topic keeps its handlers off that
         // thread (they then fire from the per-frame Dispatch, on the main thread).
-        private static Qos EffectiveQos(Qos q)
+        private static Qos EffectiveQos(bool reliable, int keepLast, int catchUp, int queueBytes)
         {
-            Qos e = q == null
-                ? new Qos { Reliability = Reliability.Reliable }
-                : new Qos
-                {
-                    Reliability = q.Reliability, KeepLast = q.KeepLast, CatchUp = q.CatchUp,
-                    MaxMessageBytes = q.MaxMessageBytes, HeartbeatUs = q.HeartbeatUs,
-                    RepairDelayUs = q.RepairDelayUs, BackpressureWaitUs = q.BackpressureWaitUs,
-                    ShmMaxBytes = q.ShmMaxBytes, QueueBytes = q.QueueBytes,
-                };
+            var e = new Qos
+            {
+                Reliability = reliable ? Reliability.Reliable : Reliability.BestEffort,
+                KeepLast = (ushort)keepLast,
+                CatchUp = (ushort)catchUp,
+                QueueBytes = (uint)queueBytes,
+            };
             if (e.QueueBytes == 0) e.QueueBytes = 1 << 20;
             return e;
         }
@@ -243,13 +248,10 @@ namespace Dart
             {
                 _node = new Node(string.IsNullOrEmpty(nodeName) ? null : nodeName,
                                  RouteMessage, QueueEvent,
-                                 new NodeOptions
-                                 {
-                                     Domain = (ushort)Mathf.Clamp(domain, 0, ushort.MaxValue),
-                                     MaxTopics = (ushort)Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
-                                     MulticastInterface = string.IsNullOrEmpty(multicastInterface)
-                                         ? null : multicastInterface,
-                                 });
+                                 domain: Mathf.Clamp(domain, 0, ushort.MaxValue),
+                                 maxTopics: Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
+                                 multicastInterface: string.IsNullOrEmpty(multicastInterface)
+                                     ? null : multicastInterface);
             }
             catch (Exception e)
             {

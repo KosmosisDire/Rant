@@ -60,13 +60,34 @@ public struct Pose  {
 
 var node = new Node("robot1",
                     onMessage: m => Console.WriteLine(m.As<Pose>()),
-                    onEvent: e => Console.Error.WriteLine(e),
-                    new NodeOptions { Domain = 7 });
-var ch = new Topic<Pose>(node, "pose",
-                           qos: new Qos { Reliability = Reliability.Reliable });
+                    onEvent: e => Console.Error.WriteLine(e),   // required: it carries the diagnostics
+                    domain: 7);                                 // all options are named parameters
+var ch = new Topic<Pose>(node, "pose", reliable: true);
 node.Start();                                    // C-level service thread owns the loop
 ch.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
 // (or skip Start() and drive node.Poll(1) in your own loop)
+```
+
+The patterns layer is bound too, untyped (`Schema` + `byte[]`) and typed:
+
+```csharp
+// request/response: ONE definition on the network, callers anywhere
+var def = new FunctionDefinition<AddReq, AddRsp>(node, "add", q => new AddRsp { Sum = q.A + q.B });
+var fn  = new RemoteFunction<AddReq, AddRsp>(other, "add");
+var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking; rsp.Ok / rsp.Value
+var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<Response<AddRsp>>, never faults
+
+// replicated state: ONE owner, remotes read the cached latest and push writes
+var own = new VariableDefinition<Level>(node, "level", new Level { Value = 5 });
+var acc = new RemoteVariable<Level>(other, "level");     // acc.Value / acc.Set(...) / acc.Wait(...)
+
+// reliable fire-and-forget event: a handler IS the subscription, every handle may emit
+var sig = new Signal(node, "estop", handler: m => Stop());
+new Signal(other, "estop").Emit();
+
+// side-named topic handles (share the topic slot by name, widening the role)
+var pub = new Publisher<Pose>(node, "pose", reliable: true);
+var sub = new Subscriber<Pose>(other, "pose", p => Console.WriteLine(p.X));
 ```
 
 Any struct/class with public fields is a message type: the fields become the schema in

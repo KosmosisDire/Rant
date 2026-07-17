@@ -220,7 +220,7 @@ namespace Dart
         internal DartTopic(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
 
         internal override Topic CreateRaw(Node node, string name, Role role, Qos qos)
-            => new Topic(node, name, role, qos);
+            => new Topic(node, name, (Schema)null, role, qos);
 
         public SendStatus Publish(byte[] data)
         {
@@ -257,7 +257,7 @@ namespace Dart
         internal DartTopic(DartNode owner, string name, Qos qos) : base(owner, name, qos) { }
 
         internal override Topic CreateRaw(Node node, string name, Role role, Qos qos)
-            => new Topic<T>(node, name, role, qos);
+            => new Topic<T>(node, name, role, qos);   // the internal (role, qos) plumbing ctor
 
         public SendStatus Publish(T message)
         {

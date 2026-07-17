@@ -15,10 +15,16 @@
 //   var node = new Dart.Node("robot1",
 //                            onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed topic
 //                            onEvent: e => Console.Error.WriteLine(e));   // wired up before the ctor returns
-//   var ch = new Dart.Topic<Pose>(node, "pose",
-//                                   qos: new Dart.Qos { Reliability = Dart.Reliability.Reliable });
+//   var ch = new Dart.Topic<Pose>(node, "pose", reliable: true);
 //   node.Start();                                      // C-level service thread owns the loop
 //   ch.Send(new Pose { X = 1, Frame = "map" });        // thread-safe from any thread
+//
+// All optional configuration is named parameters (there are no options classes).
+// Beyond plain topics, the patterns layer is bound too: FunctionDefinition /
+// RemoteFunction (request/response), VariableDefinition / RemoteVariable
+// (replicated state, one owner), Signal (reliable fire-and-forget event), and
+// Publisher/Subscriber (side-named topic handles); each has an untyped (Schema +
+// byte[]) core and a typed generic layered on it.
 //
 // Schemas come straight from the type: public fields become the wire fields, in
 // declaration order. [DartArray(n)] fixes an array's element count, [DartString(cap)]
@@ -39,6 +45,8 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 #if UNITY_5_3_OR_NEWER
 using MonoPInvokeCallbackAttribute = AOT.MonoPInvokeCallbackAttribute;
@@ -84,6 +92,14 @@ namespace Dart
     public enum FieldType : byte
     {
         U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String
+    }
+
+    // A function call's outcome. Ok/AppError/NoHandler travel on the wire;
+    // Timeout/PeerLost are synthesized client-side; Cancelled is synthesized for
+    // calls still pending when the local node closes. Mirrors DartCallStatus.
+    public enum CallStatus
+    {
+        Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5
     }
 
     // ---- native struct layouts (mirror the C exactly) ---------------------------
@@ -235,12 +251,68 @@ namespace Dart
         public DartBytes bytes;
     }
 
+    // ---- pattern struct mirrors (src/patterns/core.h; field order/types EXACT) --
+
+    // The public head of the C DartRequest. Only ever read through the callback's
+    // pointer; the reply machinery lives BEHIND the struct, so the exact pointer
+    // (never a copy) is what dart_request_reply/fail/defer take.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartRequest
+    {
+        public IntPtr node;
+        public DartStringView function_name;
+        public DartBytes data;
+        public IntPtr schema;                  // const DartSchema*
+        public uint caller;
+        public DartStringView caller_name;
+        public ulong recv_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartResponse
+    {
+        public int status;                     // DartCallStatus
+        public DartBytes data;
+        public IntPtr schema;                  // const DartSchema*
+        public uint provider;
+        public IntPtr user;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartFunctionOpts
+    {
+        public uint backpressure_wait_us;
+        public uint timeout_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartVariableOpts
+    {
+        public DartBytes initial;
+        public byte access;                    // DartVarAccess
+        public byte allow_force;
+        public ushort catch_up;
+        public uint backpressure_wait_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartSignalOpts
+    {
+        public uint backpressure_wait_us;
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartMsgFn(IntPtr msg);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartEventFn(IntPtr ev);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate IntPtr DartAllocFn(IntPtr user, IntPtr ptr, UIntPtr size);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DartRequestFn(IntPtr request, IntPtr user);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DartResponseFn(IntPtr response);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DartSignalFn(IntPtr msg, IntPtr user);
 
     // ---- native entry points ----------------------------------------------------
 
@@ -342,11 +414,81 @@ namespace Dart
         internal static extern uint dart_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_set_map(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, DartBytes map);
+
+        // node lock (bracket zero-copy views) + match-wait companions
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void dart_node_lock(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void dart_node_unlock(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_node_settle(IntPtr node, int timeout_ms);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_topic_ready(IntPtr ch);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_topic_pending_count(IntPtr ch);
+
+        // patterns: functions
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_function_definition(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr rsp_schema, DartRequestFn on_request, IntPtr user,
+            ref DartFunctionOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_remote_function(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr rsp_schema, ref DartFunctionOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_call(IntPtr fn, DartBytes req,
+            out DartResponse response, int timeout_ms);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_call_async(IntPtr fn, DartBytes req,
+            DartResponseFn on_response, IntPtr user);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_match_count(IntPtr fn);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void dart_request_reply(IntPtr request, DartBytes rsp);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void dart_request_fail(IntPtr request, DartBytes rsp);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern ulong dart_request_defer(IntPtr request);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_complete(IntPtr fn, ulong token, int status, DartBytes rsp);
+
+        // patterns: variables
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_variable_definition(IntPtr node, byte[] name,
+            IntPtr schema, ref DartVariableOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_remote_variable(IntPtr node, byte[] name,
+            IntPtr schema, ref DartVariableOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_get(IntPtr var, out DartBytes value);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_set(IntPtr var, DartBytes value);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_force(IntPtr var, DartBytes value);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_unforce(IntPtr var);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_forced(IntPtr var);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_wait(IntPtr var, int timeout_ms);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_match_count(IntPtr var);
+
+        // patterns: signals
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_signal(IntPtr node, byte[] name,
+            IntPtr schema, DartSignalFn on_signal, IntPtr user, ref DartSignalOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_signal_emit(IntPtr sig, DartBytes payload);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_signal_listener_count(IntPtr sig);
     }
 
     // ---- config + reflection attributes -----------------------------------------
 
-    public sealed class Qos
+    // Internal QoS carrier: the PUBLIC surface is named constructor parameters
+    // (reliable, keepLast, ...); this just plumbs them to the native DartQos.
+    internal sealed class Qos
     {
         public Reliability Reliability = Reliability.BestEffort;
         public ushort KeepLast = 0;
@@ -356,28 +498,41 @@ namespace Dart
         public uint RepairDelayUs = 0;
         public uint BackpressureWaitUs = 0;
         public uint ShmMaxBytes = 0;
-        /// <summary>Consumer-queue cap in bytes for TryTake/Dispatch; 0 = the queue
-        /// appears lazily on first use and grows on demand to 1 MB.</summary>
         public uint QueueBytes = 0;
-    }
 
-    public sealed class NodeOptions
-    {
-        public ushort Domain = 0;
-        public ushort MaxTopics = 0;
-        public bool DisableShm = false;
-        /// <summary>Greedily fetch every peer topic's name + schema (observer/debugger
-        /// UIs); costs memory in proportion to the peers' topic counts.</summary>
-        public bool FetchDetails = false;
-        public ushort DataPort = 0;
-        public string DiscoveryGroup = null;
-        public ushort DiscoveryPort = 0;
-        public string MulticastInterface = null;
-        public byte MulticastTtl = 0;
-        public ushort FragmentSize = 0;
-        public uint AnnounceIntervalUs = 0;
-        public uint PeerTimeoutUs = 0;
-        public ushort MaxPeers = 0;
+        internal static Qos FromParams(bool reliable, int keepLast, int catchUp,
+            int maxMessageBytes, int heartbeatUs, int repairDelayUs, int backpressureWaitMs,
+            int shmMaxBytes, int queueBytes)
+        {
+            return new Qos
+            {
+                Reliability = reliable ? Reliability.Reliable : Reliability.BestEffort,
+                KeepLast = (ushort)keepLast,
+                CatchUp = (ushort)catchUp,
+                MaxMessageBytes = (uint)maxMessageBytes,
+                HeartbeatUs = (uint)heartbeatUs,
+                RepairDelayUs = (uint)repairDelayUs,
+                BackpressureWaitUs = (uint)backpressureWaitMs * 1000u,
+                ShmMaxBytes = (uint)shmMaxBytes,
+                QueueBytes = (uint)queueBytes,
+            };
+        }
+
+        internal DartQos ToNative()
+        {
+            return new DartQos
+            {
+                reliability = (int)Reliability,
+                keep_last = KeepLast,
+                catch_up = CatchUp,
+                max_message_bytes = MaxMessageBytes,
+                heartbeat_us = HeartbeatUs,
+                repair_delay_us = RepairDelayUs,
+                backpressure_wait_us = BackpressureWaitUs,
+                shm_max_bytes = ShmMaxBytes,
+                queue_bytes = QueueBytes,
+            };
+        }
     }
 
     /// <summary>Optional: override the wire type name of a message struct/class
@@ -422,6 +577,21 @@ namespace Dart
     public class SchemaException : Exception
     {
         public SchemaException(string m) : base(m) { }
+    }
+
+    /// <summary>A DART call was refused (a non-Ok SendStatus surfaced through a
+    /// throwing surface, e.g. the VariableDefinition&lt;T&gt;.Value setter).</summary>
+    public class DartException : Exception
+    {
+        public SendStatus Status;
+        public DartException(SendStatus status, string m) : base(m) { Status = status; }
+    }
+
+    /// <summary>Reading Response&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
+    public class CallException : Exception
+    {
+        public CallStatus Status;
+        public CallException(CallStatus status, string m) : base(m) { Status = status; }
     }
 
     // ---- schema: DSL compile, reflection, encode/decode -------------------------
@@ -576,22 +746,37 @@ namespace Dart
 
     public class Topic
     {
-        private readonly Node _node;
-        private readonly IntPtr _handle;
+        internal readonly Node _node;
+        internal readonly IntPtr _handle;
         internal readonly Schema Schema;
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
-        /// UTF-8 strings.</summary>
-        public Topic(Node node, string name, Role role = Role.PubSub, Qos qos = null)
-            : this(node, name, (Schema)null, role, qos) { }
+        /// UTF-8 strings. QoS rides as named parameters (all zero = defaults).</summary>
+        public Topic(Node node, string name, Role role = Role.PubSub,
+                     bool reliable = false, int keepLast = 0, int catchUp = 0,
+                     int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+            : this(node, name, (Schema)null, role, Qos.FromParams(reliable, keepLast, catchUp,
+                   maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
+                   shmMaxBytes, queueBytes)) { }
 
         /// <summary>Create a typed topic with an explicit Schema (compiled from DSL or
         /// reflected). Topic&lt;T&gt; is the shorthand for the reflected case.</summary>
-        public Topic(Node node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+        public Topic(Node node, string name, Schema schema, Role role = Role.PubSub,
+                     bool reliable = false, int keepLast = 0, int catchUp = 0,
+                     int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+            : this(node, name, schema, role, Qos.FromParams(reliable, keepLast, catchUp,
+                   maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
+                   shmMaxBytes, queueBytes)) { }
+
+        // The plumbing constructor every path funnels through: same-name topics on
+        // one node share the native slot with a widened role (registry in Node).
+        internal Topic(Node node, string name, Schema schema, Role role, Qos qos)
         {
             _node = node;
             Schema = schema;
-            _handle = node.CreateNativeTopic(name, role, schema, qos);
+            _handle = node.CreateOrShareTopic(name, role, schema, qos);
         }
 
         /// <summary>Publish bytes/string (raw) or a message object (encoded via the
@@ -637,6 +822,16 @@ namespace Dart
             return Native.dart_topic_match_count(_handle);
         }
 
+        /// <summary>1-liner form of the send-path match wait for GUIs: true when a send
+        /// would not wait (a matched subscriber exists, or matching has converged so
+        /// there is nobody to wait for). Park payloads while false, flush on true.</summary>
+        public bool Ready => Native.dart_topic_ready(_handle) == 1;
+
+        /// <summary>Unresolved candidate matches right now: peers whose announces
+        /// nominate this topic but whose name/schema verdicts are still in flight.
+        /// 0 = matching has converged for everyone currently known.</summary>
+        public int PendingCount => Native.dart_topic_pending_count(_handle);
+
         public bool Drain(int timeoutMs)
         {
             return Native.dart_topic_drain(_handle, timeoutMs) == 1;
@@ -681,7 +876,15 @@ namespace Dart
     /// (Message.Value / Message.As&lt;T&gt;()).</summary>
     public sealed class Topic<T> : Topic
     {
-        public Topic(Node node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(Node node, string name, Role role = Role.PubSub,
+                     bool reliable = false, int keepLast = 0, int catchUp = 0,
+                     int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+            : base(node, name, new Schema(typeof(T)), role, Qos.FromParams(reliable, keepLast,
+                   catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
+                   shmMaxBytes, queueBytes)) { }
+
+        internal Topic(Node node, string name, Role role, Qos qos)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
         public SendStatus Send(T value) => Send((object)value);
@@ -710,6 +913,18 @@ namespace Dart
         private Action<Event> _onEvt;
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
+        // same-name topic sharing (role widening); serialized by the ctor path's lock
+        private sealed class TopicRec { public IntPtr Handle; public byte Bits; public ulong SchemaHash; }
+        private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
+        private readonly object _createLock = new object();
+        // per-topic subscriber handlers (Subscriber ctor); copy-on-write arrays so the
+        // poll-thread read never takes more than a volatile fetch
+        private readonly Dictionary<ushort, Action<Message>[]> _subHandlers = new Dictionary<ushort, Action<Message>[]>();
+        private readonly object _subLock = new object();
+        // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
+        private readonly List<long> _patternBoxes = new List<long>();
+        private readonly HashSet<long> _asyncLive = new HashSet<long>();
+        internal readonly object PatternLock = new object();
 
         // rooted so the GC never collects the trampolines handed to native code.
         private static readonly DartMsgFn s_onMsg = OnMessageTramp;
@@ -718,39 +933,48 @@ namespace Dart
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
-        /// <summary>Open a node. onMessage/onEvent are required (pass null for either if
-        /// truly not needed) so they are wired in before the constructor even returns --
-        /// no early peer/error event is ever missed. OnMessage/OnEvent below can still
-        /// rebind them later.</summary>
+        /// <summary>Open a node. onMessage may be null (per-Subscriber handlers and
+        /// TryTake/Dispatch still deliver); onEvent is REQUIRED (it carries the
+        /// diagnostics: null throws) and is wired in before the constructor returns,
+        /// so no early peer/error event is ever missed. Everything else is optional
+        /// named parameters (0/null = the C default).</summary>
         public Node(string name, Action<Message> onMessage, Action<Event> onEvent,
-                    NodeOptions options = null)
+                    int domain = 0, int maxTopics = 0, bool disableShm = false,
+                    bool fetchDetails = false, int matchWaitMs = 0,
+                    int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
+                    string multicastInterface = null, int multicastTtl = 0,
+                    int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
+                    int maxPeers = 0)
         {
-            options = options ?? new NodeOptions();
+            if (onEvent == null)
+                throw new ArgumentNullException(nameof(onEvent),
+                    "onEvent carries the node's diagnostics (errors, peer lifecycle) and must not be null");
             _onMsg = onMessage;
             _onEvt = onEvent;
             lock (s_reg) { _id = s_nextId++; s_nodes[_id] = this; }
 
             var co = new DartNodeOpts
             {
-                domain = options.Domain,
-                max_topics = options.MaxTopics,
-                disable_shm = (byte)(options.DisableShm ? 1 : 0),
-                fetch_details = (byte)(options.FetchDetails ? 1 : 0),
+                domain = (ushort)domain,
+                max_topics = (ushort)maxTopics,
+                disable_shm = (byte)(disableShm ? 1 : 0),
+                fetch_details = (byte)(fetchDetails ? 1 : 0),
+                match_wait_ms = matchWaitMs,
                 user_data = (IntPtr)_id,
             };
             // The node retains these pointers for its lifetime, so keep them alive
             // (freed in Close), matching the C++ wrapper.
-            _discGroup = Codec.CStrPtr(options.DiscoveryGroup);
-            _mcastIf = Codec.CStrPtr(options.MulticastInterface);
-            co.net.data_port = options.DataPort;
+            _discGroup = Codec.CStrPtr(discoveryGroup);
+            _mcastIf = Codec.CStrPtr(multicastInterface);
+            co.net.data_port = (ushort)dataPort;
             co.net.discovery_group = _discGroup;
-            co.net.discovery_port = options.DiscoveryPort;
+            co.net.discovery_port = (ushort)discoveryPort;
             co.net.multicast_interface = _mcastIf;
-            co.net.multicast_ttl = options.MulticastTtl;
-            co.net.fragment_size = options.FragmentSize;
-            co.discovery.announce_interval_us = options.AnnounceIntervalUs;
-            co.discovery.peer_timeout_us = options.PeerTimeoutUs;
-            co.discovery.max_peers = options.MaxPeers;
+            co.net.multicast_ttl = (byte)multicastTtl;
+            co.net.fragment_size = (ushort)fragmentSize;
+            co.discovery.announce_interval_us = (uint)announceIntervalUs;
+            co.discovery.peer_timeout_us = (uint)peerTimeoutUs;
+            co.discovery.max_peers = (ushort)maxPeers;
 
             _alloc = Codec.DefaultAllocator();
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
@@ -774,45 +998,81 @@ namespace Dart
         /// constructor already requires an initial one.</summary>
         public Node OnEvent(Action<Event> fn) { _onEvt = fn; return this; }
 
-        /// <summary>Convenience helper: construct and return a raw (schemaless) Topic
-        /// on this node -- exactly new Topic(this, name, role, qos).</summary>
-        public Topic CreateTopic(string name, Role role = Role.PubSub, Qos qos = null)
-            => new Topic(this, name, role, qos);
-
-        /// <summary>Convenience helper: construct and return a typed Topic with an
-        /// explicit Schema -- exactly new Topic(this, name, schema, role, qos).</summary>
-        public Topic CreateTopic(string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
-            => new Topic(this, name, schema, role, qos);
-
-        /// <summary>Convenience helper: construct and return a typed Topic&lt;T&gt; on
-        /// this node -- exactly new Topic&lt;T&gt;(this, name, role, qos).</summary>
-        public Topic<T> CreateTopic<T>(string name, Role role = Role.PubSub, Qos qos = null)
-            => new Topic<T>(this, name, role, qos);
-
-        // the native create behind the Topic constructors: makes the handle and
-        // registers the schema/decode type against the topic index.
-        internal IntPtr CreateNativeTopic(string name, Role role, Schema schema, Qos qos)
+        // The native create behind the Topic constructors. Same-name creates on this
+        // node SHARE the native slot: the role is widened (SetRole re-advertises, peers
+        // rematch from cached verdicts) and a different schema is refused.
+        internal IntPtr CreateOrShareTopic(string name, Role role, Schema schema, Qos qos)
         {
-            qos = qos ?? new Qos();
-            var co = new DartTopicOpts();
-            co.qos.reliability = (int)qos.Reliability;
-            co.qos.keep_last = qos.KeepLast;
-            co.qos.catch_up = qos.CatchUp;
-            co.qos.max_message_bytes = qos.MaxMessageBytes;
-            co.qos.heartbeat_us = qos.HeartbeatUs;
-            co.qos.repair_delay_us = qos.RepairDelayUs;
-            co.qos.backpressure_wait_us = qos.BackpressureWaitUs;
-            co.qos.shm_max_bytes = qos.ShmMaxBytes;
-            co.qos.queue_bytes = qos.QueueBytes;
+            if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
+            lock (_createLock)
+            {
+                TopicRec rec;
+                ulong sh = schema != null ? schema.Hash : 0;
+                if (_topicsByName.TryGetValue(name, out rec))
+                {
+                    if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
+                        throw new InvalidOperationException(
+                            "topic '" + name + "' already exists on this node with a different schema");
+                    byte bits = (byte)(rec.Bits | RoleBits(role));
+                    if (bits != rec.Bits)
+                    {
+                        Native.dart_topic_set_role(rec.Handle, (int)RoleFromBits(bits));
+                        rec.Bits = bits;
+                    }
+                    if (schema != null) _schemas.Add(schema);
+                    return rec.Handle;
+                }
 
-            IntPtr h = Native.dart_node_create_topic(_handle, Codec.CStr(name), (int)role,
-                schema != null ? schema.Handle : IntPtr.Zero, ref co);
-            if (h == IntPtr.Zero)
-                throw new InvalidOperationException("topic create failed (reserve full, bad name, or OOM)");
-            ushort idx = Native.dart_topic_index(h);
-            if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
-            return h;
+                qos = qos ?? new Qos();
+                var co = new DartTopicOpts { qos = qos.ToNative() };
+                IntPtr h = Native.dart_node_create_topic(_handle, Codec.CStr(name), (int)role,
+                    schema != null ? schema.Handle : IntPtr.Zero, ref co);
+                if (h == IntPtr.Zero)
+                    throw new InvalidOperationException("topic create failed: " + LastError);
+                ushort idx = Native.dart_topic_index(h);
+                if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
+                _topicsByName[name] = new TopicRec { Handle = h, Bits = RoleBits(role), SchemaHash = sh };
+                return h;
+            }
         }
+
+        // role <-> pub/sub bit pair (bit 0 = pub, bit 1 = sub) for role widening
+        private static byte RoleBits(Role r)
+            => r == Role.PubSub ? (byte)3 : r == Role.PubOnly ? (byte)1
+             : r == Role.SubOnly ? (byte)2 : (byte)0;
+        private static Role RoleFromBits(byte b)
+            => b == 3 ? Role.PubSub : b == 1 ? Role.PubOnly : b == 2 ? Role.SubOnly : Role.Inactive;
+
+        // Subscriber handlers: per-topic-index, copy-on-write; when any exist for an
+        // index they receive the message INSTEAD of the node-wide onMessage.
+        internal void AddSubHandler(ushort index, Action<Message> fn)
+        {
+            lock (_subLock)
+            {
+                Action<Message>[] cur;
+                if (!_subHandlers.TryGetValue(index, out cur)) cur = Array.Empty<Action<Message>>();
+                var nv = new Action<Message>[cur.Length + 1];
+                Array.Copy(cur, nv, cur.Length);
+                nv[cur.Length] = fn;
+                _subHandlers[index] = nv;
+            }
+        }
+
+        private Action<Message>[] SubHandlersOf(ushort index)
+        {
+            lock (_subLock)
+            {
+                Action<Message>[] hs;
+                _subHandlers.TryGetValue(index, out hs);
+                return hs;
+            }
+        }
+
+        // pattern-layer bookkeeping (reaped at Close)
+        internal void RetainSchema(Schema s) { if (s != null) lock (_createLock) _schemas.Add(s); }
+        internal void RegisterPatternBox(long id) { lock (PatternLock) _patternBoxes.Add(id); }
+        internal void RegisterAsync(long id) { lock (PatternLock) _asyncLive.Add(id); }
+        internal void UnregisterAsync(long id) { lock (PatternLock) _asyncLive.Remove(id); }
 
         /// <summary>One loop tick: drives discovery, RX, timers, and flushes queued TX.
         /// timeoutMs blocks up to that long in the socket wait (0 = non-blocking; a send
@@ -838,6 +1098,14 @@ namespace Dart
         public void Stop() => Native.dart_node_stop(_handle);
 
         public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
+
+        /// <summary>Block until discovery + matching settle: everything now sent reaches
+        /// everyone already on the network. Call AFTER creating your topics. Most apps
+        /// never need it (the per-send match wait covers the same window lazily).
+        /// timeoutMs &lt; 0 = 3 announce intervals. True when settled.</summary>
+        public bool Settle(int timeoutMs = -1) => Native.dart_node_settle(_handle, timeoutMs) == 1;
+
+        internal IntPtr Handle => _handle;
 
         /// <summary>Dispatch every already-queued topic on the calling thread (see
         /// Topic.TryTake/Dispatch): with Start() running, this in a Unity Update() (or
@@ -892,6 +1160,15 @@ namespace Dart
                 _handle = IntPtr.Zero;
             }
             lock (s_reg) s_nodes.Remove(_id);
+            // reap this node's pattern handler boxes and complete any still-pending
+            // async calls (the C never fires their callbacks after close)
+            lock (PatternLock)
+            {
+                foreach (long id in _patternBoxes) Patterns.DropBox(id);
+                _patternBoxes.Clear();
+                foreach (long id in _asyncLive) Patterns.AbandonAsync(id);
+                _asyncLive.Clear();
+            }
             foreach (var s in _schemas) s.Dispose();
             _schemas.Clear();
             Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
@@ -910,9 +1187,13 @@ namespace Dart
                 var m = Marshal.PtrToStructure<DartMsg>(msgPtr);
                 Node node; Type clr = null;
                 lock (s_reg) s_nodes.TryGetValue((long)m.user, out node);
-                if (node == null || node._onMsg == null) return;
+                if (node == null) return;
+                var hs = node.SubHandlersOf(m.topic_index);
+                if (hs == null && node._onMsg == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
-                node._onMsg(Message.FromNative(ref m, clr));   // fully copied: safe past the callback
+                var msg = Message.FromNative(ref m, clr);      // fully copied: safe past the callback
+                if (hs != null) { foreach (var h in hs) h(msg); }
+                else node._onMsg(msg);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_message: " + e); }
         }
@@ -930,6 +1211,905 @@ namespace Dart
             }
             catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
         }
+    }
+
+    // ---- patterns: shared plumbing ----------------------------------------------
+
+    // Pins a byte[] for the duration of one native call ({NULL,0} for null/empty).
+    internal struct PinnedBytes : IDisposable
+    {
+        private GCHandle _h;
+        internal DartBytes B;
+        internal PinnedBytes(byte[] d)
+        {
+            if (d == null || d.Length == 0)
+            {
+                _h = default(GCHandle);
+                B = new DartBytes { data = IntPtr.Zero, len = UIntPtr.Zero };
+            }
+            else
+            {
+                _h = GCHandle.Alloc(d, GCHandleType.Pinned);
+                B = new DartBytes { data = _h.AddrOfPinnedObject(), len = (UIntPtr)d.Length };
+            }
+        }
+        public void Dispose() { if (_h.IsAllocated) _h.Free(); }
+    }
+
+    // Static trampolines + id-keyed handler boxes (IL2CPP-safe: the native user
+    // pointer carries an id, never a managed reference).
+    internal static class Patterns
+    {
+        private static readonly object s_lock = new object();
+        private static long s_next = 1;
+        private static readonly Dictionary<long, object> s_boxes = new Dictionary<long, object>();
+        private static readonly Dictionary<long, AsyncCall> s_async = new Dictionary<long, AsyncCall>();
+
+        internal sealed class RequestBox
+        {
+            public Action<Request> Handler;
+            public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
+        }
+        internal sealed class SignalBox
+        {
+            public Action<Message> Handler;
+            public Type ClrType;
+        }
+        internal sealed class AsyncCall
+        {
+            public TaskCompletionSource<Response> Tcs;
+            public Node Node;
+        }
+
+        internal static long AddBox(object box)
+        {
+            lock (s_lock) { long id = s_next++; s_boxes[id] = box; return id; }
+        }
+        internal static object GetBox(long id)
+        {
+            lock (s_lock) { object b; s_boxes.TryGetValue(id, out b); return b; }
+        }
+        internal static void DropBox(long id) { lock (s_lock) s_boxes.Remove(id); }
+
+        internal static long AddAsync(AsyncCall c)
+        {
+            lock (s_lock) { long id = s_next++; s_async[id] = c; return id; }
+        }
+        internal static AsyncCall TakeAsync(long id)
+        {
+            lock (s_lock)
+            {
+                AsyncCall c;
+                if (s_async.TryGetValue(id, out c)) s_async.Remove(id);
+                return c;
+            }
+        }
+        // Backstop only: the C fires every pending callback with CANCELLED during
+        // dart_node_close, so this normally finds nothing. Completes any straggler
+        // the same way instead of hanging its Task.
+        internal static void AbandonAsync(long id)
+        {
+            AsyncCall c = TakeAsync(id);
+            if (c != null) c.Tcs.TrySetResult(new Response { Status = CallStatus.Cancelled });
+        }
+
+        // rooted delegates handed to native code
+        internal static readonly DartRequestFn OnRequest = OnRequestTramp;
+        internal static readonly DartResponseFn OnResponse = OnResponseTramp;
+        internal static readonly DartSignalFn OnSignal = OnSignalTramp;
+
+        [MonoPInvokeCallback(typeof(DartRequestFn))]
+        private static void OnRequestTramp(IntPtr reqPtr, IntPtr user)
+        {
+            try
+            {
+                var box = GetBox((long)user) as RequestBox;
+                if (box == null) return;
+                var r = new Request(reqPtr, box.Fn);
+                try { box.Handler(r); }
+                catch (Exception e)
+                {
+                    // a thrown handler answers AppError; the exception never crosses into C
+                    r.FailQuiet();
+                    Console.Error.WriteLine("dart on_request: " + e);
+                }
+                finally { r.Expire(); }
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart on_request: " + e); }
+        }
+
+        [MonoPInvokeCallback(typeof(DartResponseFn))]
+        private static void OnResponseTramp(IntPtr rspPtr)
+        {
+            try
+            {
+                var o = Marshal.PtrToStructure<DartResponse>(rspPtr);
+                AsyncCall call = TakeAsync((long)o.user);
+                if (call == null) return;
+                call.Node.UnregisterAsync((long)o.user);
+                var r = new Response
+                {
+                    Status = (CallStatus)o.status,
+                    Provider = o.provider,
+                    SchemaPtr = o.schema,
+                    Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
+                };
+                call.Tcs.TrySetResult(r);
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart on_response: " + e); }
+        }
+
+        [MonoPInvokeCallback(typeof(DartSignalFn))]
+        private static void OnSignalTramp(IntPtr msgPtr, IntPtr user)
+        {
+            try
+            {
+                var box = GetBox((long)user) as SignalBox;
+                if (box == null) return;
+                var m = Marshal.PtrToStructure<DartMsg>(msgPtr);
+                box.Handler(Message.FromNative(ref m, box.ClrType));
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart on_signal: " + e); }
+        }
+
+        // Decode wire bytes to a typed value: prefer the wire schema (the publisher's
+        // layout bound to ours), fall back to the local one.
+        internal static bool TryDecode(Schema local, IntPtr wireSchema, byte[] data, Type t, out object v)
+        {
+            v = null;
+            IntPtr sp = wireSchema != IntPtr.Zero ? wireSchema
+                      : local != null ? local.Handle : IntPtr.Zero;
+            if (sp == IntPtr.Zero) return false;
+            try
+            {
+                v = Codec.ToObject(t, Codec.DecodeDict(sp, data));
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+    }
+
+    // ---- patterns: functions ----------------------------------------------------
+
+    /// <summary>The request as seen by a FunctionDefinition handler. Valid only inside
+    /// the handler callback: reply there (Reply/Fail), or Defer() and complete later
+    /// from any thread. Returning without answering auto-acks CallStatus.Ok.</summary>
+    public sealed class Request
+    {
+        private IntPtr _ptr;          // the EXACT native pointer; zeroed when the callback returns
+        private readonly IntPtr _fn;
+        private bool _done;
+        internal readonly IntPtr SchemaPtr;
+
+        public byte[] Data { get; private set; }
+        public uint Caller { get; private set; }
+        public string CallerName { get; private set; }
+        public string FunctionName { get; private set; }
+        public ulong RecvUs { get; private set; }
+        /// <summary>True once Reply/Fail/Defer has been called.</summary>
+        public bool Answered => _done;
+
+        internal Request(IntPtr ptr, IntPtr fn)
+        {
+            _ptr = ptr;
+            _fn = fn;
+            var r = Marshal.PtrToStructure<DartRequest>(ptr);
+            Data = Codec.Bytes(r.data);
+            Caller = r.caller;
+            CallerName = Codec.Str(r.caller_name);
+            FunctionName = Codec.Str(r.function_name);
+            RecvUs = r.recv_us;
+            SchemaPtr = r.schema;
+        }
+
+        /// <summary>Answer CallStatus.Ok with rsp.</summary>
+        public void Reply(byte[] rsp)
+        {
+            Guard();
+            using (var p = new PinnedBytes(rsp)) Native.dart_request_reply(_ptr, p.B);
+            _done = true;
+        }
+
+        /// <summary>Answer CallStatus.AppError (with an optional error payload).</summary>
+        public void Fail(byte[] rsp = null)
+        {
+            Guard();
+            using (var p = new PinnedBytes(rsp)) Native.dart_request_fail(_ptr, p.B);
+            _done = true;
+        }
+
+        /// <summary>Park the reply: suppresses the auto-ack and lets the handler return
+        /// now; the returned Deferred completes the call later, from any thread.</summary>
+        public Deferred Defer()
+        {
+            Guard();
+            ulong token = Native.dart_request_defer(_ptr);
+            _done = true;
+            return new Deferred(_fn, token);
+        }
+
+        internal void FailQuiet() { if (_ptr != IntPtr.Zero && !_done) Fail(); }
+        internal void Expire() { _ptr = IntPtr.Zero; }
+        private void Guard()
+        {
+            if (_ptr == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    "request expired: answer inside the handler callback, or Defer() first");
+            if (_done) throw new InvalidOperationException("request already answered");
+        }
+    }
+
+    /// <summary>A parked function reply (from Request.Defer): complete exactly once,
+    /// from any thread. Dropping it leaves the caller to its timeout.</summary>
+    public sealed class Deferred
+    {
+        private readonly IntPtr _fn;
+        private long _token;
+
+        internal Deferred(IntPtr fn, ulong token) { _fn = fn; _token = (long)token; }
+
+        public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
+
+        public bool Complete(byte[] rsp = null) => Finish(CallStatus.Ok, rsp);
+        public bool Fail(byte[] rsp = null) => Finish(CallStatus.AppError, rsp);
+
+        private bool Finish(CallStatus status, byte[] rsp)
+        {
+            long token = Interlocked.Exchange(ref _token, 0);   // single-shot
+            if (_fn == IntPtr.Zero || token == 0) return false;
+            using (var p = new PinnedBytes(rsp))
+                return Native.dart_function_complete(_fn, (ulong)token, (int)status, p.B) == 0;
+        }
+    }
+
+    /// <summary>The implementation side of a request/response function (untyped:
+    /// Schema + byte[]). Exactly one reply per call; ONE definition per name on the
+    /// network (a rival fires ErrorKind.DuplicateAuthority on both). A null handler
+    /// answers every call CallStatus.NoHandler (a declared stub).</summary>
+    public class FunctionDefinition
+    {
+        internal readonly IntPtr Fn;
+        internal readonly Node Node;
+
+        public FunctionDefinition(Node node, string name, Schema requestSchema, Schema responseSchema,
+                                  Action<Request> handler, int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            Node = node;
+            var co = new DartFunctionOpts
+            {
+                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
+                timeout_us = (uint)timeoutMs * 1000u,
+            };
+            long id = 0;
+            Patterns.RequestBox box = null;
+            if (handler != null)
+            {
+                box = new Patterns.RequestBox { Handler = handler };
+                id = Patterns.AddBox(box);
+            }
+            Fn = Native.dart_node_create_function_definition(node.Handle, Codec.CStr(name),
+                requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
+                responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
+                box != null ? Patterns.OnRequest : null, (IntPtr)id, ref co);
+            if (Fn == IntPtr.Zero)
+            {
+                if (box != null) Patterns.DropBox(id);
+                throw new InvalidOperationException("function definition create failed: " + node.LastError);
+            }
+            if (box != null) { box.Fn = Fn; node.RegisterPatternBox(id); }
+            node.RetainSchema(requestSchema);
+            node.RetainSchema(responseSchema);
+        }
+
+        /// <summary>Callers currently matched to this definition.</summary>
+        public int CallerCount => Native.dart_function_match_count(Fn);
+    }
+
+    /// <summary>An owning function-call outcome: the payload is copied out, so it
+    /// outlives the call. SendStatus carries a synchronous refusal (Status stays
+    /// Timeout then: the call never launched).</summary>
+    public sealed class Response
+    {
+        public CallStatus Status { get; internal set; } = CallStatus.Timeout;
+        public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
+        public uint Provider { get; internal set; }
+        public byte[] Data { get; internal set; } = Array.Empty<byte>();
+        internal IntPtr SchemaPtr;
+
+        public bool Ok => Status == CallStatus.Ok;
+    }
+
+    /// <summary>A reference to a function definition on another node (untyped).</summary>
+    public class RemoteFunction
+    {
+        internal readonly IntPtr Fn;
+        internal readonly Node Node;
+
+        public RemoteFunction(Node node, string name, Schema requestSchema = null,
+                              Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            Node = node;
+            var co = new DartFunctionOpts
+            {
+                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
+                timeout_us = (uint)timeoutMs * 1000u,
+            };
+            Fn = Native.dart_node_create_remote_function(node.Handle, Codec.CStr(name),
+                requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
+                responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
+            if (Fn == IntPtr.Zero)
+                throw new InvalidOperationException("remote function create failed: " + node.LastError);
+            node.RetainSchema(requestSchema);
+            node.RetainSchema(responseSchema);
+        }
+
+        /// <summary>BLOCKING call: drives the node loop until the response arrives or
+        /// timeoutMs elapses (negative = the function's default timeout). Refused
+        /// (SendStatus.State) from inside a callback or while a service thread owns
+        /// this node's loop; use CallAsync there. Inspect Status, never throws.</summary>
+        public Response Call(byte[] request, int timeoutMs = -1)
+        {
+            var r = new Response();
+            DartResponse o;
+            int rc;
+            using (var p = new PinnedBytes(request))
+                rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs);
+            if (rc == 1)
+            {
+                r.Status = (CallStatus)o.status;
+                r.Provider = o.provider;
+                r.SchemaPtr = o.schema;
+                r.Data = Codec.Bytes(o.data);   // the view is only valid until the next call: copy now
+            }
+            else if (rc < 0)
+            {
+                r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
+            }
+            return r;
+        }
+
+        /// <summary>Async call over dart_function_call_async: the Task completes with
+        /// the outcome and NEVER faults (inspect Status/SendStatus). The response fires
+        /// from whichever thread polls this node, continuations run off it.</summary>
+        public Task<Response> CallAsync(byte[] request)
+        {
+            var tcs = new TaskCompletionSource<Response>(TaskCreationOptions.RunContinuationsAsynchronously);
+            long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, Node = Node });
+            Node.RegisterAsync(id);
+            int rc;
+            using (var p = new PinnedBytes(request))
+                rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id);
+            if (rc != 0)
+            {
+                Patterns.TakeAsync(id);
+                Node.UnregisterAsync(id);
+                tcs.TrySetResult(new Response { SendStatus = (SendStatus)rc });
+            }
+            return tcs.Task;
+        }
+
+        /// <summary>Providers currently matched (the definition side present).</summary>
+        public int MatchCount => Native.dart_function_match_count(Fn);
+        public bool HasDefinition => MatchCount > 0;
+    }
+
+    // ---- patterns: variables ----------------------------------------------------
+
+    /// <summary>Replicated state, ONE owner: this node holds the authoritative value
+    /// (untyped: Schema + byte[]). Remotes cache the latest published value.</summary>
+    public class VariableDefinition
+    {
+        internal readonly IntPtr Var;
+        internal readonly Node Node;
+        internal readonly string Name;
+
+        public VariableDefinition(Node node, string name, Schema schema, byte[] initial = null,
+                                  bool readOnly = false, bool allowForce = false,
+                                  int catchUp = 0, int backpressureWaitMs = 0)
+            : this(node, name, schema, initial, readOnly, allowForce, catchUp, backpressureWaitMs, true) { }
+
+        private protected VariableDefinition(Node node, string name, Schema schema, byte[] initial,
+                                             bool readOnly, bool allowForce, int catchUp,
+                                             int backpressureWaitMs, bool definition)
+        {
+            Node = node;
+            Name = name;
+            var co = new DartVariableOpts
+            {
+                access = (byte)(readOnly ? 1 : 0),
+                allow_force = (byte)(allowForce ? 1 : 0),
+                catch_up = (ushort)catchUp,
+                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
+            };
+            using (var p = new PinnedBytes(initial))
+            {
+                co.initial = p.B;
+                Var = definition
+                    ? Native.dart_node_create_variable_definition(node.Handle, Codec.CStr(name),
+                          schema != null ? schema.Handle : IntPtr.Zero, ref co)
+                    : Native.dart_node_create_remote_variable(node.Handle, Codec.CStr(name),
+                          schema != null ? schema.Handle : IntPtr.Zero, ref co);
+            }
+            if (Var == IntPtr.Zero)
+                throw new InvalidOperationException((definition ? "variable definition" : "remote variable")
+                    + " create failed: " + node.LastError);
+            node.RetainSchema(schema);
+        }
+
+        /// <summary>Read the current value fully copied out (definition: the store;
+        /// remote: the cached latest). False when no value exists yet.</summary>
+        public bool TryGet(out byte[] value)
+        {
+            value = null;
+            // the returned view is valid only until the next poll: copy under the node lock
+            Native.dart_node_lock(Node.Handle);
+            try
+            {
+                DartBytes b;
+                if (Native.dart_variable_get(Var, out b) != 1) return false;
+                value = Codec.Bytes(b);
+                return true;
+            }
+            finally { Native.dart_node_unlock(Node.Handle); }
+        }
+
+        /// <summary>Set the value (definition: apply + publish; remote: send over the
+        /// set channel). SendStatus.BadRole = the owner advertises no set channel.</summary>
+        public SendStatus Set(byte[] value)
+        {
+            using (var p = new PinnedBytes(value)) return (SendStatus)Native.dart_variable_set(Var, p.B);
+        }
+
+        /// <summary>Force the value: writes are absorbed into the shadow source until
+        /// Unforce, which restores the latest absorbed set. The definition must have
+        /// been created with allowForce (SendStatus.State otherwise).</summary>
+        public SendStatus Force(byte[] value)
+        {
+            using (var p = new PinnedBytes(value)) return (SendStatus)Native.dart_variable_force(Var, p.B);
+        }
+        public SendStatus Unforce() => (SendStatus)Native.dart_variable_unforce(Var);
+        public bool Forced => Native.dart_variable_forced(Var) == 1;
+
+        /// <summary>Remotes matched to this definition (on a RemoteVariable: owners
+        /// matched, 0 = no owner present).</summary>
+        public int RemoteCount => Native.dart_variable_match_count(Var);
+
+        /// <summary>Block driving the node loop until a value exists or timeoutMs
+        /// elapses (negative = forever-ish). Refused (false) from a callback or while
+        /// a service thread owns this node's loop.</summary>
+        public bool Wait(int timeoutMs) => Native.dart_variable_wait(Var, timeoutMs) == 1;
+    }
+
+    /// <summary>A reference to a variable owned by another node (untyped): reads see
+    /// the cached latest, writes go over the set channel (dumb writes, no response).</summary>
+    public class RemoteVariable : VariableDefinition
+    {
+        public RemoteVariable(Node node, string name, Schema schema = null,
+                              int catchUp = 0, int backpressureWaitMs = 0)
+            : base(node, name, schema, null, false, false, catchUp, backpressureWaitMs, false) { }
+
+        /// <summary>Owners currently matched.</summary>
+        public int MatchCount => RemoteCount;
+        public bool HasDefinition => RemoteCount > 0;
+    }
+
+    // ---- patterns: signals ------------------------------------------------------
+
+    /// <summary>A reliable fire-and-forget event: N emitters / N listeners, NEVER
+    /// latched (a late joiner receives nothing emitted before it joined). Passing a
+    /// handler IS the subscription; every handle may emit.</summary>
+    public class Signal
+    {
+        internal readonly IntPtr Sig;
+        internal readonly Node Node;
+
+        public Signal(Node node, string name, Schema schema = null,
+                      Action<Message> handler = null, int backpressureWaitMs = 0)
+            : this(node, name, schema, handler, null, backpressureWaitMs) { }
+
+        internal Signal(Node node, string name, Schema schema, Action<Message> handler,
+                        Type clrType, int backpressureWaitMs)
+        {
+            Node = node;
+            var co = new DartSignalOpts { backpressure_wait_us = (uint)backpressureWaitMs * 1000u };
+            long id = 0;
+            Patterns.SignalBox box = null;
+            if (handler != null)
+            {
+                box = new Patterns.SignalBox { Handler = handler, ClrType = clrType };
+                id = Patterns.AddBox(box);
+            }
+            Sig = Native.dart_node_create_signal(node.Handle, Codec.CStr(name),
+                schema != null ? schema.Handle : IntPtr.Zero,
+                box != null ? Patterns.OnSignal : null, (IntPtr)id, ref co);
+            if (Sig == IntPtr.Zero)
+            {
+                if (box != null) Patterns.DropBox(id);
+                throw new InvalidOperationException("signal create failed: " + node.LastError);
+            }
+            if (box != null) node.RegisterPatternBox(id);
+            node.RetainSchema(schema);
+        }
+
+        /// <summary>Emit to every matched listener (payload may be null/empty).</summary>
+        public SendStatus Emit(byte[] payload = null)
+        {
+            using (var p = new PinnedBytes(payload)) return (SendStatus)Native.dart_signal_emit(Sig, p.B);
+        }
+
+        /// <summary>Listeners currently matched (other nodes subscribed).</summary>
+        public int ListenerCount => Native.dart_signal_listener_count(Sig);
+    }
+
+    // ---- patterns: pub/sub handles ----------------------------------------------
+
+    /// <summary>The publish-side handle over a (possibly shared) topic (untyped).
+    /// Same-name handles on one node share the topic slot with a widened role.</summary>
+    public class Publisher
+    {
+        internal readonly Topic T;
+
+        public Publisher(Node node, string name, Schema schema = null,
+                         bool reliable = false, int keepLast = 0, int catchUp = 0,
+                         int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+        {
+            T = new Topic(node, name, schema, Role.PubOnly, Qos.FromParams(reliable, keepLast,
+                    catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
+                    shmMaxBytes, queueBytes));
+        }
+
+        public SendStatus Send(byte[] data) => T.Send(data);
+        public SendStatus Send(string text) => T.Send(text);
+        public int MatchCount => T.MatchCount();
+        public int PendingCount => T.PendingCount;
+        public bool Ready => T.Ready;
+        public Topic Topic => T;
+    }
+
+    /// <summary>The subscribe-side handle (untyped). A handler fires per message on
+    /// the polling thread; or consume with TryTake/Dispatch on a thread of your
+    /// choosing. Handlers on a topic replace the node-wide onMessage for it.</summary>
+    public class Subscriber
+    {
+        internal readonly Topic T;
+
+        public Subscriber(Node node, string name, Schema schema = null,
+                          Action<Message> handler = null,
+                          bool reliable = false, int keepLast = 0, int catchUp = 0,
+                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+        {
+            T = new Topic(node, name, schema, Role.SubOnly, Qos.FromParams(reliable, keepLast,
+                    catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
+                    shmMaxBytes, queueBytes));
+            if (handler != null) node.AddSubHandler(T.Index, handler);
+        }
+
+        public bool TryTake(out Message message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
+        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => T.Dispatch(maxMsgs, timeoutMs);
+        public Topic Topic => T;
+    }
+
+    // ---- patterns: typed sugar --------------------------------------------------
+
+    /// <summary>The typed request view inside a full-form function handler: reply with
+    /// a typed value, Fail, or Defer. Valid only inside the handler callback.</summary>
+    public sealed class Request<TRsp>
+    {
+        private readonly Request _core;
+        private readonly Schema _rsp;
+
+        internal Request(Request core, Schema rsp) { _core = core; _rsp = rsp; }
+
+        public byte[] Data => _core.Data;
+        public uint Caller => _core.Caller;
+        public string CallerName => _core.CallerName;
+        public string FunctionName => _core.FunctionName;
+        public ulong RecvUs => _core.RecvUs;
+        public bool Answered => _core.Answered;
+
+        public void Reply(TRsp value) => _core.Reply(_rsp.Encode(value));
+        public void Fail() => _core.Fail();
+        public Deferred<TRsp> Defer() => new Deferred<TRsp>(_core.Defer(), _rsp);
+    }
+
+    /// <summary>The typed parked reply: Complete(value)/Fail() exactly once, any thread.</summary>
+    public sealed class Deferred<TRsp>
+    {
+        private readonly Deferred _core;
+        private readonly Schema _rsp;
+
+        internal Deferred(Deferred core, Schema rsp) { _core = core; _rsp = rsp; }
+
+        public bool Valid => _core.Valid;
+        public bool Complete(TRsp value) => _core.Complete(_rsp.Encode(value));
+        public bool Fail() => _core.Fail();
+    }
+
+    /// <summary>The typed implementation side. Simple form: the return value is the
+    /// reply, a THROWN exception answers CallStatus.AppError (it never crosses into
+    /// the C). Full form: reply/fail/defer explicitly through Request&lt;TRsp&gt;.</summary>
+    public sealed class FunctionDefinition<TReq, TRsp>
+    {
+        private readonly FunctionDefinition _core;
+        private readonly Schema _req, _rsp;
+
+        public FunctionDefinition(Node node, string name, Func<TReq, TRsp> handler,
+                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            _req = new Schema(typeof(TReq));
+            _rsp = new Schema(typeof(TRsp));
+            Action<Request> h = null;
+            if (handler != null)
+            {
+                Schema req = _req, rsp = _rsp;
+                h = r =>
+                {
+                    object q;
+                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail(); return; }
+                    TRsp outv = handler((TReq)q);   // a throw answers AppError (trampoline catch)
+                    if (!r.Answered) r.Reply(rsp.Encode(outv));
+                };
+            }
+            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
+        }
+
+        public FunctionDefinition(Node node, string name, Action<TReq, Request<TRsp>> handler,
+                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            _req = new Schema(typeof(TReq));
+            _rsp = new Schema(typeof(TRsp));
+            Action<Request> h = null;
+            if (handler != null)
+            {
+                Schema req = _req, rsp = _rsp;
+                h = r =>
+                {
+                    object q;
+                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail(); return; }
+                    handler((TReq)q, new Request<TRsp>(r, rsp));
+                };
+            }
+            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
+        }
+
+        public int CallerCount => _core.CallerCount;
+    }
+
+    /// <summary>The typed owning call outcome. Reading Value when !Ok throws
+    /// CallException; Status/SendStatus never throw.</summary>
+    public sealed class Response<TRsp>
+    {
+        internal Response Core;
+        internal Schema RspSchema;
+
+        public CallStatus Status => Core.Status;
+        public bool Ok => Core.Ok;
+        public uint Provider => Core.Provider;
+        public SendStatus SendStatus => Core.SendStatus;
+
+        public TRsp Value
+        {
+            get
+            {
+                if (!Ok)
+                    throw new CallException(Status, "call did not complete Ok: status " + Status
+                        + (Core.SendStatus != SendStatus.Ok ? " (send " + Core.SendStatus + ")" : ""));
+                object v;
+                if (!Patterns.TryDecode(RspSchema, Core.SchemaPtr, Core.Data, typeof(TRsp), out v))
+                    throw new CallException(Status, "response payload failed to decode");
+                return (TRsp)v;
+            }
+        }
+    }
+
+    /// <summary>The typed caller side of a function defined on another node.</summary>
+    public sealed class RemoteFunction<TReq, TRsp>
+    {
+        private readonly RemoteFunction _core;
+        private readonly Schema _req, _rsp;
+
+        public RemoteFunction(Node node, string name, int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            _req = new Schema(typeof(TReq));
+            _rsp = new Schema(typeof(TRsp));
+            _core = new RemoteFunction(node, name, _req, _rsp, backpressureWaitMs, timeoutMs);
+        }
+
+        /// <summary>BLOCKING call (see the untyped RemoteFunction.Call).</summary>
+        public Response<TRsp> Call(TReq request, int timeoutMs = -1)
+            => new Response<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs), RspSchema = _rsp };
+
+        /// <summary>Async call: the Task NEVER faults, inspect Status.</summary>
+        public async Task<Response<TRsp>> CallAsync(TReq request)
+        {
+            Response core = await _core.CallAsync(_req.Encode(request)).ConfigureAwait(false);
+            return new Response<TRsp> { Core = core, RspSchema = _rsp };
+        }
+
+        public int MatchCount => _core.MatchCount;
+        public bool HasDefinition => _core.HasDefinition;
+    }
+
+    /// <summary>The typed authoritative variable. Value get throws
+    /// InvalidOperationException while no value exists; Value set throws DartException
+    /// on a non-Ok SendStatus (use Set for the status-returning form).</summary>
+    public class VariableDefinition<T>
+    {
+        private protected VariableDefinition _core;
+        private protected Schema _schema;
+
+        private protected VariableDefinition() { }
+
+        public VariableDefinition(Node node, string name, bool readOnly = false,
+                                  bool allowForce = false, int catchUp = 0, int backpressureWaitMs = 0)
+        {
+            _schema = new Schema(typeof(T));
+            _core = new VariableDefinition(node, name, _schema, null, readOnly, allowForce,
+                                           catchUp, backpressureWaitMs);
+        }
+
+        /// <summary>Overload with an initial value (the value before any set).</summary>
+        public VariableDefinition(Node node, string name, T initial, bool readOnly = false,
+                                  bool allowForce = false, int catchUp = 0, int backpressureWaitMs = 0)
+        {
+            _schema = new Schema(typeof(T));
+            _core = new VariableDefinition(node, name, _schema, _schema.Encode(initial),
+                                           readOnly, allowForce, catchUp, backpressureWaitMs);
+        }
+
+        public T Value
+        {
+            get
+            {
+                T v;
+                if (!TryGet(out v))
+                    throw new InvalidOperationException("variable '" + _core.Name + "' has no value yet");
+                return v;
+            }
+            set
+            {
+                SendStatus st = Set(value);
+                if (st != SendStatus.Ok)
+                    throw new DartException(st, "variable '" + _core.Name + "' set refused: " + st);
+            }
+        }
+
+        public bool TryGet(out T value)
+        {
+            value = default(T);
+            byte[] b;
+            if (!_core.TryGet(out b)) return false;
+            object v;
+            if (!Patterns.TryDecode(_schema, IntPtr.Zero, b, typeof(T), out v)) return false;
+            value = (T)v;
+            return true;
+        }
+
+        public SendStatus Set(T value) => _core.Set(_schema.Encode(value));
+        public SendStatus Force(T value) => _core.Force(_schema.Encode(value));
+        public SendStatus Unforce() => _core.Unforce();
+        public bool Forced => _core.Forced;
+        public int RemoteCount => _core.RemoteCount;
+        public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
+    }
+
+    /// <summary>The typed accessor of a variable owned elsewhere. Same surface as the
+    /// definition (the definition decides force/write permissions), plus
+    /// HasDefinition/MatchCount.</summary>
+    public sealed class RemoteVariable<T> : VariableDefinition<T>
+    {
+        public RemoteVariable(Node node, string name, int catchUp = 0, int backpressureWaitMs = 0)
+        {
+            _schema = new Schema(typeof(T));
+            _core = new RemoteVariable(node, name, _schema, catchUp, backpressureWaitMs);
+        }
+
+        /// <summary>Owners currently matched.</summary>
+        public int MatchCount => _core.RemoteCount;
+        public bool HasDefinition => _core.RemoteCount > 0;
+    }
+
+    /// <summary>The typed signal. Constructing with a handler subscribes; every
+    /// handle may emit.</summary>
+    public sealed class Signal<T>
+    {
+        private readonly Signal _core;
+        private readonly Schema _schema;
+
+        /// <summary>Emit-only handle (no subscription).</summary>
+        public Signal(Node node, string name, int backpressureWaitMs = 0)
+        {
+            _schema = new Schema(typeof(T));
+            _core = new Signal(node, name, _schema, null, null, backpressureWaitMs);
+        }
+
+        public Signal(Node node, string name, Action<T> handler, int backpressureWaitMs = 0)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            _schema = new Schema(typeof(T));
+            _core = new Signal(node, name, _schema,
+                m => { if (m.Value is T v) handler(v); }, typeof(T), backpressureWaitMs);
+        }
+
+        public Signal(Node node, string name, Action<T, Message> handler, int backpressureWaitMs = 0)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            _schema = new Schema(typeof(T));
+            _core = new Signal(node, name, _schema,
+                m => { if (m.Value is T v) handler(v, m); }, typeof(T), backpressureWaitMs);
+        }
+
+        public SendStatus Emit(T value) => _core.Emit(_schema.Encode(value));
+        public int ListenerCount => _core.ListenerCount;
+    }
+
+    /// <summary>The typed publish side.</summary>
+    public sealed class Publisher<T>
+    {
+        private readonly Publisher _core;
+        private readonly Schema _schema;
+
+        public Publisher(Node node, string name,
+                         bool reliable = false, int keepLast = 0, int catchUp = 0,
+                         int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+        {
+            _schema = new Schema(typeof(T));
+            _core = new Publisher(node, name, _schema, reliable, keepLast, catchUp,
+                maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
+                shmMaxBytes, queueBytes);
+        }
+
+        public SendStatus Send(T value) => _core.Send(_schema.Encode(value));
+        public int MatchCount => _core.MatchCount;
+        public int PendingCount => _core.PendingCount;
+        public bool Ready => _core.Ready;
+        public Topic Topic => _core.Topic;
+    }
+
+    /// <summary>The typed subscribe side: a handler per message (on the polling
+    /// thread), or the typed TryTake/Dispatch consumer-queue form.</summary>
+    public sealed class Subscriber<T>
+    {
+        private readonly Subscriber _core;
+
+        public Subscriber(Node node, string name, Action<T> handler = null,
+                          bool reliable = false, int keepLast = 0, int catchUp = 0,
+                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+        {
+            _core = new Subscriber(node, name, new Schema(typeof(T)),
+                handler == null ? (Action<Message>)null : m => { if (m.Value is T v) handler(v); },
+                reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
+                backpressureWaitMs, shmMaxBytes, queueBytes);
+        }
+
+        public Subscriber(Node node, string name, Action<T, Message> handler,
+                          bool reliable = false, int keepLast = 0, int catchUp = 0,
+                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
+                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            _core = new Subscriber(node, name, new Schema(typeof(T)),
+                m => { if (m.Value is T v) handler(v, m); },
+                reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
+                backpressureWaitMs, shmMaxBytes, queueBytes);
+        }
+
+        /// <summary>Typed take: decodes straight from the queue.</summary>
+        public bool TryTake(out T value, int timeoutMs = 0)
+        {
+            value = default(T);
+            Message m;
+            if (!_core.TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
+            value = (T)m.Value;
+            return true;
+        }
+
+        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => _core.Dispatch(maxMsgs, timeoutMs);
+        public Topic Topic => _core.Topic;
     }
 
     // ---- marshaling, allocators, schema codec + reflection ----------------------

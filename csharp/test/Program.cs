@@ -1,7 +1,7 @@
-// DART C# test: two nodes, reliable typed pub/sub, on one host.
-// Exercises compile-on-first-use, discovery/match, and schema reflection (encode a
-// struct on one node, decode it back on the other), including capped strings and
-// string arrays. Exit 0 = crossed and matched.
+// DART C# test: two nodes, reliable typed pub/sub, on one host, plus a patterns
+// leg (functions / variables / signals). Exercises discovery/match, schema
+// reflection (capped strings, string arrays, maps), the consumer surface, and the
+// typed pattern handles. Exit 0 = all legs passed.
 //
 //   dotnet run --project csharp/test
 
@@ -35,6 +35,11 @@ struct Pose
     [DartArray(2), DartString(8)] public string[] Tags;
     public Twist Vel;
 }
+
+// patterns leg types
+struct AddReq { public int A; public int B; }
+struct AddRsp { public int Sum; }
+struct Level { public int Value; }
 
 static class Program
 {
@@ -132,11 +137,126 @@ static class Program
         return ok;
     }
 
+    // Functions / variables / signals between two nodes on an isolated domain.
+    static bool Patterns()
+    {
+        Console.WriteLine("patterns leg: two nodes, domain 43, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var srv = new Node("srv", null, e => Console.WriteLine("event(srv): " + e),
+                           domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
+        var cli = new Node("cli", null, e => Console.WriteLine("event(cli): " + e),
+                           domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
+
+        // definitions on srv: simple form (return = reply), a thrower (-> AppError),
+        // and a full form that defers off-thread
+        var add = new FunctionDefinition<AddReq, AddRsp>(srv, "add",
+            q => new AddRsp { Sum = q.A + q.B });
+        var boom = new FunctionDefinition<AddReq, AddRsp>(srv, "boom",
+            (Func<AddReq, AddRsp>)(q => throw new Exception("kaboom")));
+        var late = new FunctionDefinition<AddReq, AddRsp>(srv, "late", (q, req) =>
+        {
+            var d = req.Defer();
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Thread.Sleep(50);
+                d.Complete(new AddRsp { Sum = q.A + q.B });
+            });
+        });
+        int sigCount = 0;
+        var sigIn = new Signal(srv, "estop", null, m => Interlocked.Increment(ref sigCount));
+        var lvlDef = new VariableDefinition<Level>(srv, "level", new Level { Value = 5 },
+                                                   allowForce: true);
+
+        srv.Start();   // service thread owns srv's loop; handlers fire on it
+
+        // remotes on cli (manual poll: blocking calls drive cli's loop themselves)
+        var addR = new RemoteFunction<AddReq, AddRsp>(cli, "add");
+        var boomR = new RemoteFunction<AddReq, AddRsp>(cli, "boom");
+        var lateR = new RemoteFunction<AddReq, AddRsp>(cli, "late");
+        var sigOut = new Signal(cli, "estop");
+        var lvl = new RemoteVariable<Level>(cli, "level");
+
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline
+               && !(addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition
+                    && sigOut.ListenerCount > 0))
+            cli.Poll(5);
+        Check("definitions discovered", addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition);
+        Check("signal listener matched", sigOut.ListenerCount == 1);
+
+        // blocking calls
+        var r = addR.Call(new AddReq { A = 2, B = 3 }, 3000);
+        Check("blocking call Ok", r.Ok && r.Status == CallStatus.Ok);
+        Check("blocking call value", r.Ok && r.Value.Sum == 5);
+        Check("provider set", r.Ok && r.Provider != 0);
+
+        var rb = boomR.Call(new AddReq { A = 1, B = 1 }, 3000);
+        Check("thrown handler -> AppError", rb.Status == CallStatus.AppError);
+        bool threw = false;
+        try { var _ = rb.Value; } catch (CallException) { threw = true; }
+        Check("Value on !Ok throws CallException", threw);
+
+        var rl = lateR.Call(new AddReq { A = 20, B = 22 }, 3000);
+        Check("deferred completion", rl.Ok && rl.Value.Sum == 42);
+        Check("caller count seen by definition", add.CallerCount == 1);
+
+        // variable: catch_up hands the remote the initial value
+        Check("variable wait", lvl.Wait(3000));
+        Level lv;
+        Check("initial value", lvl.TryGet(out lv) && lv.Value == 5);
+        Check("HasDefinition", lvl.HasDefinition);
+        Check("remote set accepted", lvl.Set(new Level { Value = 9 }) == SendStatus.Ok);
+        deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 9)) cli.Poll(5);
+        Check("set round-trips to the remote", lvl.Value.Value == 9);
+        Check("definition applied it", lvlDef.Value.Value == 9);
+
+        // force overrides with a shadow source; unforce restores the latest set
+        Check("force", lvlDef.Force(new Level { Value = 99 }) == SendStatus.Ok);
+        deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 99)) cli.Poll(5);
+        Check("forced value visible remotely", lvl.Value.Value == 99);
+        Check("remote sees Forced", lvl.Forced);
+        Check("unforce", lvlDef.Unforce() == SendStatus.Ok);
+        deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 9)) cli.Poll(5);
+        Check("unforce restores the latest set", lvl.Value.Value == 9 && !lvl.Forced);
+
+        // signal: three payload-less emits (untyped form), delivered on srv's thread
+        Check("emit accepted", sigOut.Emit() == SendStatus.Ok);
+        sigOut.Emit();
+        sigOut.Emit();
+        deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && Volatile.Read(ref sigCount) < 3) cli.Poll(5);
+        Check("three signals delivered", Volatile.Read(ref sigCount) == 3);
+
+        // async form: start cli's service thread, await the Task (it never faults)
+        cli.Start();
+        var t = addR.CallAsync(new AddReq { A = 10, B = 5 });
+        Check("await CallAsync", t.Wait(5000) && t.Result.Ok && t.Result.Value.Sum == 15);
+        // a blocking call is refused while the service thread owns the loop, loudly
+        var rr = addR.Call(new AddReq { A = 1, B = 2 }, 100);
+        Check("blocking call refused under service thread",
+              rr.Status == CallStatus.Timeout && rr.SendStatus == SendStatus.State);
+        cli.Stop();
+
+        // a call still pending at Close settles its Task with Cancelled, never hangs
+        var never = new RemoteFunction(cli, "never-served", null, null, timeoutMs: 60000);
+        var tc = never.CallAsync(null);
+        srv.Close();
+        cli.Close();
+        Check("pending CallAsync settles Cancelled at Close",
+              tc.Wait(2000) && tc.Result.Status == CallStatus.Cancelled);
+        Console.WriteLine(ok ? "patterns: PASS\n" : "patterns: FAIL\n");
+        return ok;
+    }
+
     static int Main()
     {
         if (!RoundTrip()) return 1;
-        Console.WriteLine("opening nodes (first run compiles the embedded C, please wait)...");
-        var netOpts = new NodeOptions { Domain = 42, MulticastInterface = "127.0.0.1" };
+        Console.WriteLine("opening nodes...");
 
         var sub = new Node("sub",
             onMessage: m =>
@@ -146,14 +266,13 @@ static class Program
                 Got.Set();
             },
             onEvent: e => Console.WriteLine("event(sub): " + e),
-            netOpts);
+            domain: 42, multicastInterface: "127.0.0.1");
 
         var pub = new Node("pub", null, e => Console.WriteLine("event(pub): " + e),
-            new NodeOptions { Domain = 42, MulticastInterface = "127.0.0.1" });
+            domain: 42, multicastInterface: "127.0.0.1");
 
-        var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
-        new Topic<Pose>(sub, "pose", Role.SubOnly, qos);
-        var pubch = new Topic<Pose>(pub, "pose", Role.PubOnly, qos);
+        new Topic<Pose>(sub, "pose", Role.SubOnly, reliable: true, keepLast: 8);
+        var pubch = new Topic<Pose>(pub, "pose", Role.PubOnly, reliable: true, keepLast: 8);
 
         var sent = new Pose
         {
@@ -226,6 +345,9 @@ static class Program
 
         pub.Close();
         sub.Close();
+
+        if (ok) ok = Patterns();
+        Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;
     }
 }
