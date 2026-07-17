@@ -1,28 +1,33 @@
 /* DART WebSocket bridge: one WebSocket connection = one full DART node on the mesh.
- * Text frames are the JSON control plane (open the node, create topics, flip roles,
- * drain); binary frames are the data plane (a fixed 3/7-byte little-endian header plus
- * the raw payload). The protocol is specified in PROTOCOL.md.
+ * Text frames are the JSON control plane (open the node, create topics and pattern
+ * entities, settle); binary frames are the data plane (a fixed little-endian header plus
+ * the raw payload). The protocol (v3) is specified in PROTOCOL.md.
  *
- * This is a LEAN pub/sub proxy, not a mesh debugger: it does not expose the peer table
- * or other nodes' schemas. A typed topic carries its own declared schema (both ends
- * paste the same DSL), so the client encodes/decodes with the field table returned by
- * `topic` and never needs to see a peer's layout.
+ * This is a LEAN proxy, not a mesh debugger: it does not expose the peer table or other
+ * nodes' schemas. A typed topic/entity carries its own declared schema (both ends paste
+ * the same DSL), so the client encodes/decodes with the field tables the create replies
+ * return and never needs to see a peer's layout.
  *
  * Built entirely on the C++ wrapper (dart.hpp): the Conn owns a dart::Node whose
  * handlers (captured lambdas) format deliveries/events straight onto the WebSocket.
+ * Patterns ride the wrapper's UNTYPED handles (FunctionDefinition<> etc): the payloads
+ * stay raw bytes end to end, the client owns encode/decode.
  *
  * Threading: IXWebSocket runs each accepted connection on its own thread, which fits
- * the one-node-per-connection model directly. The node is thread-safe (a node-level
- * lock in the C core serializes every call) and runs its own background service thread
- * via Node::start(), so the bridge holds no lock and no poll thread of its own: the
- * connection thread does control ops + publishes, the node's service thread delivers
- * messages/events out of its handlers (IXWebSocket's send is itself thread-safe). */
+ * the one-node-per-connection model directly. The node is thread-safe and runs its own
+ * background service thread via Node::start(). One extra bridge thread per connection
+ * (the ticker) polls variable values (the C variable API is poll-based: it has no
+ * on-change callback) and recomputes per-entity match state. Discipline: never call
+ * into dart while holding Conn::mu (the dart handlers take mu from the service thread,
+ * so holding mu across a dart call that wants the node lock would deadlock). */
 #include "dart.hpp"
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -30,24 +35,64 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 using json = nlohmann::json;
 
-static const int      kProtoVersion = 2;
-static const uint8_t  kOpData       = 0x01;      /* the one binary op, both directions */
-static size_t         g_max_buffered = 8u << 20; /* drop a client that buffers past this */
-static int            g_verbose      = 0;
+static const int kProtoVersion = 3;
+
+/* Binary frame ops (byte 0). One value space, meaning per direction:
+ *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][payload])
+ *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 forced][payload])
+ *   0x03  signal emit (c->s: [u16 ent][payload])      signal fired (s->c: [u16 ent][u32 emitter][payload])
+ *   0x04  call (c->s: [u16 ent][u32 call][payload])   call response (s->c: [u32 call][u8 status][u32 provider][payload])
+ *   0x05  request reply (c->s: [u32 req][u8 status][payload])   request (s->c: [u16 ent][u32 req][payload]) */
+static const uint8_t kOpData     = 0x01;
+static const uint8_t kOpVar      = 0x02;
+static const uint8_t kOpSignal   = 0x03;
+static const uint8_t kOpCall     = 0x04;
+static const uint8_t kOpRequest  = 0x05;
+
+static const int kTickMs = 30;   /* variable-value + match-state poll cadence */
+
+static size_t g_max_buffered = 8u << 20; /* drop a client that buffers past this */
+static int    g_verbose      = 0;
+
+/* One created pattern entity. Handles are thin and non-owning (the entity lives in the
+ * node until close); Ent pointers are stable (unique_ptr, append-only until close). */
+struct Ent {
+    enum Kind { FnDef, FnRemote, VarDef, VarRemote, Sig } kind = FnDef;
+    uint16_t                   id = 0;
+    dart::FunctionDefinition<> fndef;
+    dart::RemoteFunction<>     fnrem;
+    dart::VariableDefinition<> vardef;
+    dart::RemoteVariable<>     varrem;
+    dart::Signal<>             sig;
+    /* ticker state, guarded by Conn::mu */
+    std::vector<uint8_t> last_val;                     /* last pushed variable value */
+    bool                 pushed = false, last_forced = false;
+    int                  last_match = -1;              /* match-state change detector */
+};
 
 /* One WebSocket connection = one node. node/ws/name are written only by the
- * connection's own thread (IXWebSocket delivers one connection's messages on one
- * thread); the node's service thread reads them from inside the dart handlers, which
- * the node's teardown fences (Node::~Node joins the service thread before returning). */
+ * connection's own thread; the node's service thread and the ticker read them, fenced
+ * by conn_close (ticker joined, then ~Node joins the service thread). */
 struct Conn {
     std::optional<dart::Node> node;
     ix::WebSocket            *ws = nullptr;
     std::string               name;   /* node name (bridge-generated when the client omits it) */
+
+    std::mutex mu;                    /* leaf lock: never call into dart while holding it */
+    std::vector<std::unique_ptr<Ent>>              ents;
+    std::unordered_map<uint32_t, dart::Deferred<>> parked;   /* req id -> parked function reply */
+    uint32_t                                       next_req = 0;
+    std::vector<uint16_t>                          topic_ids;
+    std::unordered_map<uint16_t, int>              topic_match;  /* topic id -> packed matches/ready */
+
+    std::thread       ticker;
+    std::atomic<bool> stop{ false };
 };
 
 static std::mutex g_conns_lock;
@@ -59,6 +104,15 @@ static std::string hex64(uint64_t v){
     char buf[17];
     snprintf(buf, sizeof buf, "%016llx", (unsigned long long)v);
     return buf;
+}
+
+static void w16(uint8_t *p, uint16_t v){ p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void w32(uint8_t *p, uint32_t v){
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+static uint16_t r16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t r32(const uint8_t *p){
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static const char *kind_str(dart::FieldType kind){
@@ -79,9 +133,9 @@ static const char *kind_str(dart::FieldType kind){
 
 static const char *send_status_str(dart::SendStatus rc){
     switch (rc){
-    case dart::SendStatus::NoTopic:   return "no such topic";
+    case dart::SendStatus::NoTopic:     return "no such topic";
     case dart::SendStatus::TooBig:      return "message too big";
-    case dart::SendStatus::BadRole:     return "topic role cannot publish";
+    case dart::SendStatus::BadRole:     return "role cannot do that";
     case dart::SendStatus::OutOfMemory: return "out of memory";
     case dart::SendStatus::State:       return "wrong state";
     case dart::SendStatus::NoSys:       return "not supported";
@@ -92,7 +146,7 @@ static const char *send_status_str(dart::SendStatus rc){
 /* The compiled schema as the protocol's field table: every field at every depth with a
  * dotted path and its absolute offset, so a client encodes/decodes with no codegen.
  * Fixed fields carry offset/size; the variable kinds (vstring/varr/map) report 0 and
- * live in the message tail after the fixed section (whose length is the reply's `size`). */
+ * live in the message tail after the fixed section (whose length is `size`). */
 static json fields_json(const dart::Schema &s){
     json fields = json::array();
     std::vector<std::string> parents;   /* enclosing struct names, one per depth level */
@@ -113,6 +167,11 @@ static json fields_json(const dart::Schema &s){
         if (f.kind == dart::FieldType::Struct) parents.push_back(std::string(f.name.data(), f.name.size()));
     }
     return fields;
+}
+
+/* one schema's layout block ({size, hash, fields}), as `topic` replies it */
+static json schema_json(const dart::Schema &s){
+    return { {"size", s.size()}, {"hash", hex64(s.hash())}, {"fields", fields_json(s)} };
 }
 
 static int role_from(const std::string &s, dart::Role *out){
@@ -138,14 +197,115 @@ static void reply_err(Conn *c, const json &seq, const std::string &error){
     send_json(c, { {"op", "reply"}, {"seq", seq}, {"ok", false}, {"error", error} });
 }
 
-static void send_error_event(Conn *c, uint16_t topic, dart::SendStatus rc){
+/* a failed fire-and-forget data op; `entity` scopes pattern ops, `topic` publishes */
+static void send_error_event(Conn *c, const char *scope, uint16_t id, dart::SendStatus rc){
     send_json(c, { {"op", "event"}, {"event", "send_error"},
-                   {"topic", topic}, {"code", (int)rc}, {"error", send_status_str(rc)} });
+                   {scope, id}, {"code", (int)rc}, {"error", send_status_str(rc)} });
+}
+
+/* binary push helpers */
+static void push_frame(Conn *c, const uint8_t *hdr, size_t hdr_len, dart::Bytes payload){
+    if (!c->ws) return;
+    std::string frame;
+    frame.resize(hdr_len + payload.size());
+    memcpy(&frame[0], hdr, hdr_len);
+    if (payload.size()) memcpy(&frame[hdr_len], payload.data(), payload.size());
+    c->ws->send(frame, true);
+}
+
+/* ---- match-state push -------------------------------------------------------------
+ * Recompute each created entity's match summary (all read-only dart queries, legal from
+ * a callback) and push {op:"match", ...} for the ones that changed. Runs on the node's
+ * service thread (peer events) and on the ticker; the cache under mu dedupes. */
+static void push_match_states(Conn *c){
+    if (!c->node || !c->ws) return;
+
+    std::vector<uint16_t> topics;
+    std::vector<Ent *>    ents;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        topics = c->topic_ids;
+        for (auto &e : c->ents) ents.push_back(e.get());
+    }
+
+    for (uint16_t id : topics){
+        dart::Topic t = c->node->topic(id);
+        if (!t) continue;
+        int matches = t.match_count(), ready = t.ready() ? 1 : 0;
+        int packed = matches * 2 + ready;
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            auto it = c->topic_match.find(id);
+            if (it != c->topic_match.end() && it->second == packed) continue;
+            c->topic_match[id] = packed;
+            send_json(c, { {"op", "match"}, {"type", "topic"}, {"id", id},
+                           {"matches", matches}, {"ready", ready != 0} });
+        }
+    }
+    for (Ent *e : ents){
+        int  m = 0;
+        json j = { {"op", "match"}, {"id", e->id} };
+        switch (e->kind){
+        case Ent::FnDef:
+            m = e->fndef.caller_count();
+            j["type"] = "function_definition"; j["callers"] = m;
+            break;
+        case Ent::FnRemote:
+            m = e->fnrem.has_definition() ? 1 : 0;
+            j["type"] = "remote_function"; j["has_definition"] = m != 0;
+            break;
+        case Ent::VarDef:
+            m = e->vardef.remote_count();
+            j["type"] = "variable_definition"; j["remotes"] = m;
+            break;
+        case Ent::VarRemote:
+            m = e->varrem.has_definition() ? 1 : 0;
+            j["type"] = "remote_variable"; j["has_definition"] = m != 0;
+            break;
+        case Ent::Sig:
+            m = e->sig.listener_count();
+            j["type"] = "signal"; j["listeners"] = m;
+            break;
+        }
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            if (e->last_match == m) continue;
+            e->last_match = m;
+            send_json(c, j);
+        }
+    }
+}
+
+/* variable value pushes: the C variable API is poll-based (no on-change callback), so
+ * the ticker diffs each variable's value + forced flag and pushes on change. A set to
+ * the byte-identical value does not re-push (idempotent by design). */
+static void push_var_updates(Conn *c){
+    if (!c->node || !c->ws) return;
+    std::vector<Ent *> ents;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        for (auto &e : c->ents)
+            if (e->kind == Ent::VarDef || e->kind == Ent::VarRemote) ents.push_back(e.get());
+    }
+    for (Ent *e : ents){
+        dart::VariableDefinition<> &v = (e->kind == Ent::VarDef)
+            ? e->vardef : static_cast<dart::VariableDefinition<> &>(e->varrem);
+        auto val = v.get();               /* copies out under the node lock */
+        if (!val) continue;
+        bool forced = v.forced();
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            if (e->pushed && e->last_forced == forced && e->last_val == *val) continue;
+            e->last_val = *val; e->last_forced = forced; e->pushed = true;
+        }
+        uint8_t hdr[4];
+        hdr[0] = kOpVar; w16(hdr + 1, e->id); hdr[3] = forced ? 1 : 0;
+        push_frame(c, hdr, 4, dart::Bytes(val->data(), val->size()));
+    }
 }
 
 /* Format one event as JSON and send it. Runs inside the dart event handler (on the
- * node's service thread, or on the connection thread for events a control op triggered).
- * Lean: no address formatting or peer-name lookups (those were mesh-debugger fields). */
+ * node's service thread, or on the connection thread for events a control op triggered). */
 static void send_event(Conn *c, const dart::Event &ev){
     if (!c->ws) return;
     json e = { {"op", "event"}, {"text", ev.to_string()} };
@@ -168,36 +328,34 @@ static void send_event(Conn *c, const dart::Event &ev){
         e["event"] = "error"; e["error"] = (int)ev.error();
         if (!ev.topic_name().empty()) e["topic_name"] = std::string(ev.topic_name());
         if (ev.topic())               e["topic"]      = ev.topic();
-        if (ev.peer())                  e["peer"]         = ev.peer();
-        if (ev.os_error())              e["os_error"]     = ev.os_error();
+        if (ev.peer())                e["peer"]       = ev.peer();
+        if (ev.os_error())            e["os_error"]   = ev.os_error();
         break;
     default:
         e["event"] = "unknown";
         break;
     }
     send_json(c, e);
+    /* peer/interest churn is when match summaries move; recompute + push changes */
+    if (ev.kind() == dart::EventKind::PeerUp || ev.kind() == dart::EventKind::PeerDown ||
+        ev.kind() == dart::EventKind::PeerInterest)
+        push_match_states(c);
 }
 
 /* Delivery: one DART message -> one binary WebSocket frame [op][u16 topic][u32 publisher]
- * [payload]. Runs on the node's service thread; drops a client that cannot keep up. */
-static void deliver_message(Conn *c, const dart::MessageIn &m){
+ * [payload]. Runs on the node's service thread; drops a client that cannot keep up.
+ * Pattern channels never reach this handler (the patterns layer routes them). */
+static void deliver_message(Conn *c, const dart::MessageView &m){
     if (!c->ws) return;
     if (c->ws->bufferedAmount() > g_max_buffered){
         c->ws->close(1008, "slow consumer");    /* drop rather than buffer forever */
         return;
     }
-    dart::Bytes data = m.data();
-    uint16_t    ch   = m.topic_index();
-    uint32_t    from = m.publisher_id();
-    std::string frame;
-    frame.resize(7 + data.size());
-    uint8_t *p = (uint8_t *)&frame[0];
-    p[0] = kOpData;
-    p[1] = (uint8_t)(ch & 0xff);   p[2] = (uint8_t)(ch >> 8);
-    p[3] = (uint8_t)(from);        p[4] = (uint8_t)(from >> 8);
-    p[5] = (uint8_t)(from >> 16);  p[6] = (uint8_t)(from >> 24);
-    if (data.size()) memcpy(p + 7, data.data(), data.size());
-    c->ws->send(frame, true);
+    uint8_t hdr[7];
+    hdr[0] = kOpData;
+    w16(hdr + 1, m.topic_index());
+    w32(hdr + 3, m.publisher_id());
+    push_frame(c, hdr, 7, m.data());
 }
 
 /* ---- control plane ---------------------------------------------------------------- */
@@ -214,28 +372,61 @@ static void op_open(Conn *c, const json &req, const json &seq){
 
     dart::NodeOptions o;
     o.domain              = (uint16_t)req.value("domain", 0);
-    o.max_topics        = (uint16_t)req.value("max_topics", 0);
+    o.max_topics          = (uint16_t)req.value("max_topics", 0);
     o.disable_shm         = req.value("disable_shm", false);
     o.multicast_interface = req.value("interface", std::string());
     o.fragment_size       = (uint16_t)req.value("fragment_size", 0);
     o.announce_interval_us = (uint32_t)req.value("announce_interval_ms", 0) * 1000u;
     o.peer_timeout_us      = (uint32_t)req.value("peer_timeout_ms", 0) * 1000u;
     o.max_peers            = (uint16_t)req.value("max_peers", 0);
+    o.match_wait_ms        = req.value("match_wait_ms", 0);
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
         o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
+    if (o.max_topics == 0) o.max_topics = 8;
 
     /* handlers capture the stable Conn*; the node's service thread owns them and the
      * Conn always outlives its node (conn_close resets the node first). */
-    auto on_msg = [c](const dart::MessageIn &m){ deliver_message(c, m); };
+    auto on_msg = [c](const dart::MessageView &m){ deliver_message(c, m); };
     auto on_evt = [c](const dart::Event    &e){ send_event(c, e); };
 
-    auto node = dart::Node::open(name, on_msg, on_evt, o);
-    if (!node){ reply_err(c, seq, "dart_node_open failed: " + dart::Node::last_open_error()); return; }
-    c->node = std::move(node);
+    try {
+        c->node.emplace(name, on_msg, on_evt, o);
+    } catch (const dart::Error &e){
+        reply_err(c, seq, std::string("dart_node_open failed: ") + e.what());
+        return;
+    }
     c->name = name;
     c->node->start();   /* the node's own service thread drives everything */
+
+    /* the ticker: variable-value diffs + match-state recompute (see PROTOCOL.md) */
+    c->stop = false;
+    std::shared_ptr<Conn> keep;
+    {
+        std::lock_guard<std::mutex> g(g_conns_lock);
+        for (auto &kv : g_conns) if (kv.second.get() == c) keep = kv.second;
+    }
+    c->ticker = std::thread([keep, c]{
+        while (!c->stop.load()){
+            std::this_thread::sleep_for(std::chrono::milliseconds(kTickMs));
+            if (c->stop.load()) break;
+            push_var_updates(c);
+            push_match_states(c);
+        }
+    });
+
     reply_ok(c, seq, { {"proto", kProtoVersion}, {"name", name} });
     if (g_verbose) printf("[bridge] node '%s' opened\n", name.c_str());
+}
+
+/* compile the DSL text at `key` (optional). Returns 0 + replies on error. */
+static int compile_schema(Conn *c, const json &req, const json &seq, const char *key,
+                          std::optional<dart::Schema> *out){
+    std::string text = req.value(key, "");
+    if (text.empty()) return 1;
+    std::string err;
+    *out = dart::Schema::compile(text, &err);
+    if (!*out){ reply_err(c, seq, "schema error: " + err); return 0; }
+    return 1;
 }
 
 static void op_topic(Conn *c, const json &req, const json &seq){
@@ -258,16 +449,20 @@ static void op_topic(Conn *c, const json &req, const json &seq){
     /* Optional typed schema. create_topic copies the schema into node memory, so the
      * local one need not outlive the topic; we keep it just long enough to reply. */
     std::optional<dart::Schema> schema;
-    std::string text = req.value("schema", "");
-    if (!text.empty()){
-        std::string err;
-        schema = dart::Schema::compile(text, &err);
-        if (!schema){ reply_err(c, seq, "schema error: " + err); return; }
+    if (!compile_schema(c, req, seq, "schema", &schema)) return;
+
+    dart::Topic ch;
+    try {
+        ch = c->node->create_topic(name, role, schema ? &*schema : nullptr, qos);
+    } catch (const dart::Error &e){
+        reply_err(c, seq, std::string("create failed: ") + e.what());
+        return;
     }
 
-    dart::Topic ch = c->node->create_topic(name, role, schema ? &*schema : nullptr, qos);
-    if (!ch){ reply_err(c, seq, "create failed (topic reserve full, bad name, or OOM)"); return; }
-
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        c->topic_ids.push_back(ch.index());
+    }
     json r = { {"id", ch.index()} };
     if (schema){
         r["size"]   = schema->size();          /* fixed-section length = where the tail starts */
@@ -293,6 +488,162 @@ static void op_drain(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, { {"drained", drained} });
 }
 
+/* Runs on the WS handler thread (blocks this connection's receives, nothing else);
+ * the C wait machinery works under the node's service thread. */
+static void op_settle(Conn *c, const json &req, const json &seq){
+    bool settled = c->node->settle(req.value("timeout_ms", -1));
+    reply_ok(c, seq, { {"settled", settled} });
+}
+
+/* reserve an Ent slot (id = index). Kept on failure paths simple: creates are
+ * append-only; a failed create leaves a dead slot rather than shifting later ids. */
+static Ent *ent_new(Conn *c, Ent::Kind kind){
+    std::lock_guard<std::mutex> g(c->mu);
+    auto e = std::make_unique<Ent>();
+    e->kind = kind;
+    e->id   = (uint16_t)c->ents.size();
+    c->ents.push_back(std::move(e));
+    return c->ents.back().get();
+}
+
+static Ent *ent_get(Conn *c, uint16_t id, Ent::Kind kind){
+    std::lock_guard<std::mutex> g(c->mu);
+    if (id >= c->ents.size()) return nullptr;
+    Ent *e = c->ents[id].get();
+    return e->kind == kind ? e : nullptr;
+}
+
+static dart::FunctionOptions fn_opts(const json &req){
+    dart::FunctionOptions o;
+    o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
+    o.timeout_us           = (uint32_t)req.value("timeout_ms", 0) * 1000u;
+    return o;
+}
+
+/* `function_definition`: the bridge always uses the full handler form and DEFERS every
+ * request: {op:"request"} JSON + a binary payload frame go to the client, and the
+ * parked Deferred completes when the client answers (or fails at disconnect). */
+static void op_function_definition(Conn *c, const json &req, const json &seq){
+    std::string name = req.value("name", "");
+    if (name.empty()){ reply_err(c, seq, "missing function name"); return; }
+    std::optional<dart::Schema> rq, rs;
+    if (!compile_schema(c, req, seq, "req_schema", &rq)) return;
+    if (!compile_schema(c, req, seq, "rsp_schema", &rs)) return;
+
+    Ent *e = ent_new(c, Ent::FnDef);
+    uint16_t id = e->id;
+    auto handler = [c, id](dart::Request<> &r){
+        uint32_t req_id;
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            req_id = ++c->next_req;
+        }
+        json meta = { {"op", "request"}, {"fn", id}, {"req", req_id},
+                      {"caller", r.caller()}, {"caller_name", std::string(r.caller_name())} };
+        dart::Bytes data = r.data();
+        dart::Deferred<> d = r.defer();
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            c->parked.emplace(req_id, std::move(d));
+        }
+        send_json(c, meta);
+        uint8_t hdr[7];
+        hdr[0] = kOpRequest; w16(hdr + 1, id); w32(hdr + 3, req_id);
+        push_frame(c, hdr, 7, data);
+    };
+    try {
+        e->fndef = dart::FunctionDefinition<>(*c->node, name,
+                       rq ? &*rq : nullptr, rs ? &*rs : nullptr, handler, fn_opts(req));
+    } catch (const dart::Error &err){
+        reply_err(c, seq, std::string("create failed: ") + err.what());
+        return;
+    }
+    json r = { {"id", id} };
+    if (rq) r["req"] = schema_json(*rq);
+    if (rs) r["rsp"] = schema_json(*rs);
+    reply_ok(c, seq, r);
+}
+
+static void op_remote_function(Conn *c, const json &req, const json &seq){
+    std::string name = req.value("name", "");
+    if (name.empty()){ reply_err(c, seq, "missing function name"); return; }
+    std::optional<dart::Schema> rq, rs;
+    if (!compile_schema(c, req, seq, "req_schema", &rq)) return;
+    if (!compile_schema(c, req, seq, "rsp_schema", &rs)) return;
+
+    Ent *e = ent_new(c, Ent::FnRemote);
+    try {
+        e->fnrem = dart::RemoteFunction<>(*c->node, name,
+                       rq ? &*rq : nullptr, rs ? &*rs : nullptr, fn_opts(req));
+    } catch (const dart::Error &err){
+        reply_err(c, seq, std::string("create failed: ") + err.what());
+        return;
+    }
+    json r = { {"id", e->id} };
+    if (rq) r["req"] = schema_json(*rq);
+    if (rs) r["rsp"] = schema_json(*rs);
+    reply_ok(c, seq, r);
+}
+
+static void op_variable(Conn *c, const json &req, const json &seq, bool definition){
+    std::string name = req.value("name", "");
+    if (name.empty()){ reply_err(c, seq, "missing variable name"); return; }
+    std::optional<dart::Schema> sc;
+    if (!compile_schema(c, req, seq, "schema", &sc)) return;
+
+    dart::VariableOptions<> o;
+    o.read_only            = req.value("read_only", false);
+    o.allow_force          = req.value("allow_force", false);
+    o.catch_up             = (uint16_t)req.value("catch_up", 0);
+    o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
+    std::vector<uint8_t> initial = req.value("initial", std::vector<uint8_t>{});   /* raw bytes */
+    if (!initial.empty()) o.initial = dart::Bytes(initial.data(), initial.size());
+
+    Ent *e = ent_new(c, definition ? Ent::VarDef : Ent::VarRemote);
+    try {
+        if (definition) e->vardef = dart::VariableDefinition<>(*c->node, name, sc ? &*sc : nullptr, o);
+        else            e->varrem = dart::RemoteVariable<>(*c->node, name, sc ? &*sc : nullptr, o);
+    } catch (const dart::Error &err){
+        reply_err(c, seq, std::string("create failed: ") + err.what());
+        return;
+    }
+    json r = { {"id", e->id} };
+    if (sc){ r["size"] = sc->size(); r["hash"] = hex64(sc->hash()); r["fields"] = fields_json(*sc); }
+    reply_ok(c, seq, r);
+}
+
+static void op_signal(Conn *c, const json &req, const json &seq){
+    std::string name = req.value("name", "");
+    if (name.empty()){ reply_err(c, seq, "missing signal name"); return; }
+    std::optional<dart::Schema> sc;
+    if (!compile_schema(c, req, seq, "schema", &sc)) return;
+    bool listen = req.value("listen", false);
+
+    dart::SignalOptions o;
+    o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
+
+    Ent *e = ent_new(c, Ent::Sig);
+    uint16_t id = e->id;
+    try {
+        if (listen){
+            auto h = [c, id](const dart::MessageView &m){
+                uint8_t hdr[7];
+                hdr[0] = kOpSignal; w16(hdr + 1, id); w32(hdr + 3, m.publisher_id());
+                push_frame(c, hdr, 7, m.data());
+            };
+            e->sig = dart::Signal<>(*c->node, name, sc ? &*sc : nullptr, h, o);
+        } else {
+            e->sig = dart::Signal<>(*c->node, name, sc ? &*sc : nullptr, o);
+        }
+    } catch (const dart::Error &err){
+        reply_err(c, seq, std::string("create failed: ") + err.what());
+        return;
+    }
+    json r = { {"id", id} };
+    if (sc){ r["size"] = sc->size(); r["hash"] = hex64(sc->hash()); r["fields"] = fields_json(*sc); }
+    reply_ok(c, seq, r);
+}
+
 static void on_text(Conn *c, const std::string &raw){
     json req = json::parse(raw, nullptr, false);
     if (req.is_discarded() || !req.is_object()){
@@ -304,28 +655,126 @@ static void on_text(Conn *c, const std::string &raw){
 
     if (op == "open"){ op_open(c, req, seq); return; }
     if (!c->node){ reply_err(c, seq, "send open first"); return; }
-    if      (op == "topic") op_topic(c, req, seq);
-    else if (op == "role")    op_role(c, req, seq);
-    else if (op == "drain")   op_drain(c, req, seq);
+    if      (op == "topic")               op_topic(c, req, seq);
+    else if (op == "role")                op_role(c, req, seq);
+    else if (op == "drain")               op_drain(c, req, seq);
+    else if (op == "settle")              op_settle(c, req, seq);
+    else if (op == "function_definition") op_function_definition(c, req, seq);
+    else if (op == "remote_function")     op_remote_function(c, req, seq);
+    else if (op == "variable_definition") op_variable(c, req, seq, true);
+    else if (op == "remote_variable")     op_variable(c, req, seq, false);
+    else if (op == "signal")              op_signal(c, req, seq);
     else reply_err(c, seq, "unknown op: " + op);
 }
 
-/* ---- data plane: [u8 op][u16 topic][payload] ------------------------------------ */
+/* ---- data plane ------------------------------------------------------------------- */
+
+static void on_publish(Conn *c, const uint8_t *p, size_t n){
+    uint16_t id = r16(p + 1);
+    /* topic() yields an invalid handle for a bad id; send() then returns NoTopic */
+    dart::SendStatus rc = c->node->topic(id).send(dart::Bytes(p + 3, n - 3));
+    if (rc != dart::SendStatus::Ok) send_error_event(c, "topic", id, rc);
+}
+
+static void on_var_op(Conn *c, const uint8_t *p, size_t n){
+    if (n < 4) return;
+    uint16_t id   = r16(p + 1);
+    uint8_t  mode = p[3];
+    Ent *e = ent_get(c, id, Ent::VarDef);
+    if (!e) e = ent_get(c, id, Ent::VarRemote);
+    if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
+    dart::VariableDefinition<> &v = (e->kind == Ent::VarDef)
+        ? e->vardef : static_cast<dart::VariableDefinition<> &>(e->varrem);
+    dart::Bytes val(p + 4, n - 4);
+    dart::SendStatus rc = mode == 0 ? v.set(val)
+                        : mode == 1 ? v.force(val)
+                        : mode == 2 ? v.unforce()
+                        : dart::SendStatus::NoSys;
+    if (rc != dart::SendStatus::Ok) send_error_event(c, "entity", id, rc);
+}
+
+static void on_signal_emit(Conn *c, const uint8_t *p, size_t n){
+    uint16_t id = r16(p + 1);
+    Ent *e = ent_get(c, id, Ent::Sig);
+    if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
+    dart::SendStatus rc = e->sig.emit(dart::Bytes(p + 3, n - 3));
+    if (rc != dart::SendStatus::Ok) send_error_event(c, "entity", id, rc);
+}
+
+static void on_call(Conn *c, const uint8_t *p, size_t n){
+    if (n < 7) return;
+    uint16_t id   = r16(p + 1);
+    uint32_t call = r32(p + 3);
+    Ent *e = ent_get(c, id, Ent::FnRemote);
+    if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
+    auto cb = [c, call](const dart::ResponseView<> &rv){
+        uint8_t hdr[10];
+        hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)rv.status();
+        w32(hdr + 6, rv.provider());
+        push_frame(c, hdr, 10, rv.data());
+    };
+    dart::SendStatus rc = e->fnrem.call_async(dart::Bytes(p + 7, n - 7), cb);
+    if (rc != dart::SendStatus::Ok){
+        /* the call never launched: answer Cancelled so the promise settles, and carry
+         * the reason in a send_error event */
+        send_error_event(c, "entity", id, rc);
+        uint8_t hdr[10];
+        hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)dart::CallStatus::Cancelled;
+        w32(hdr + 6, 0);
+        push_frame(c, hdr, 10, dart::Bytes());
+    }
+}
+
+static void on_request_reply(Conn *c, const uint8_t *p, size_t n){
+    if (n < 6) return;
+    uint32_t req    = r32(p + 1);
+    uint8_t  status = p[5];
+    dart::Deferred<> d;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        auto it = c->parked.find(req);
+        if (it == c->parked.end()) return;   /* unknown/duplicate: drop */
+        d = std::move(it->second);
+        c->parked.erase(it);
+    }
+    dart::Bytes rsp(p + 6, n - 6);
+    if (status == 0) d.complete(rsp);
+    else             d.fail(rsp);
+}
 
 static void on_binary(Conn *c, const std::string &frame){
-    if (frame.size() < 3 || (uint8_t)frame[0] != kOpData) return;   /* reserved ops: drop */
-    uint16_t id = (uint16_t)((uint8_t)frame[1] | ((uint8_t)frame[2] << 8));
-
-    if (!c->node){ send_error_event(c, id, dart::SendStatus::NoTopic); return; }
-    /* topic() yields an invalid handle for a bad id; send() then returns NoTopic */
-    dart::SendStatus rc = c->node->topic(id).send(dart::Bytes(frame.data() + 3, frame.size() - 3));
-    if (rc != dart::SendStatus::Ok) send_error_event(c, id, rc);
-    /* no explicit flush: the send kicks the node's service thread awake */
+    if (frame.size() < 3) return;
+    const uint8_t *p = (const uint8_t *)frame.data();
+    if (!c->node){
+        if (p[0] == kOpData || p[0] == kOpVar || p[0] == kOpSignal)
+            send_error_event(c, "topic", r16(p + 1), dart::SendStatus::NoTopic);
+        return;
+    }
+    switch (p[0]){
+    case kOpData:    on_publish(c, p, frame.size());       break;
+    case kOpVar:     on_var_op(c, p, frame.size());        break;
+    case kOpSignal:  on_signal_emit(c, p, frame.size());   break;
+    case kOpCall:    on_call(c, p, frame.size());          break;
+    case kOpRequest: on_request_reply(c, p, frame.size()); break;
+    default: break;   /* reserved ops: drop */
+    }
+    /* no explicit flush: a send kicks the node's service thread awake */
 }
 
 /* ---- connection lifecycle --------------------------------------------------------- */
 
 static void conn_close(const std::shared_ptr<Conn> &c){
+    c->stop = true;
+    if (c->ticker.joinable()) c->ticker.join();
+    /* fail parked function requests while the node is still alive, so remote callers
+     * get an answer now instead of waiting out their timeout */
+    std::unordered_map<uint32_t, dart::Deferred<>> parked;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        parked = std::move(c->parked);
+        c->parked.clear();
+    }
+    for (auto &kv : parked) kv.second.fail();
     if (c->node){
         /* ~Node stops + joins the service thread first, so no handler can be mid-flight
            (touching c->ws) once it returns; it closes with a BYE and frees everything */
@@ -345,7 +794,7 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v")) g_verbose = 1;
         else {
             printf("usage: dart_bridge [--port 7480] [--bind 0.0.0.0] [--max-buffered bytes] [--verbose]\n"
-                   "One WebSocket connection = one DART node (pub/sub); see bridge/PROTOCOL.md.\n"
+                   "One WebSocket connection = one DART node; see bridge/PROTOCOL.md (v3).\n"
                    "--bind 0.0.0.0 exposes the bridge (and full mesh access) beyond this host.\n");
             return strcmp(argv[i], "--help") && strcmp(argv[i], "-h") ? 1 : 0;
         }

@@ -1,24 +1,28 @@
-# DART WebSocket bridge protocol (v2)
+# DART WebSocket bridge protocol (v3)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
 service thread, and closes it (with a BYE) when the connection drops. Everything a
-native node needs for **pub/sub** arrives over one socket, so a browser, a phone,
-or any language with a WebSocket client is a first-class peer.
+native node needs -- **pub/sub** plus the pattern entities (**functions**,
+**variables**, **signals**) -- arrives over one socket, so a browser, a phone, or
+any language with a WebSocket client is a first-class peer.
 
-This is a lean pub/sub proxy, **not** a mesh debugger: there is no peer-table
-snapshot and no way to see other nodes' schemas. A typed topic carries its own
-declared schema (both ends paste the same DSL text), so a client encodes and
-decodes with the field table `topic` returns and never needs a peer's layout.
+This is a lean proxy, **not** a mesh debugger: there is no peer-table snapshot and
+no way to see other nodes' schemas. A typed topic/entity carries its own declared
+schema (both ends paste the same DSL text), so the client encodes and decodes with
+the field tables the create replies return and never needs a peer's layout. The
+client owns all encoding: payloads cross the bridge as raw bytes.
 
 Two planes, split by WebSocket frame type:
 
-- **Text frames = control plane, JSON.** Open the node, create topics, flip
-  roles, drain. Requests carry a `seq`; every request gets exactly one reply
-  echoing it. The server also pushes unsolicited `event` messages.
-- **Binary frames = data plane.** Publish and delivery, with a fixed little-endian
-  header of a few bytes and the raw payload after it. No JSON, no base64, no
-  per-message metadata: the hot path costs a memcpy.
+- **Text frames = control plane, JSON.** Open the node, create topics and pattern
+  entities, flip roles, drain, settle. Requests carry a `seq`; every request gets
+  exactly one reply echoing it. The server also pushes unsolicited `event`,
+  `match`, and `request` messages.
+- **Binary frames = data plane.** Publish/delivery, variable writes/updates,
+  signal emits/firings, calls/responses: a fixed little-endian header of a few
+  bytes and the raw payload after it. No JSON, no base64: the hot path costs a
+  memcpy.
 
 All integers in binary frames are little-endian (matching the DART wire, and
 `DataView`'s `true` flag in JS). The protocol version is returned by `open`;
@@ -29,13 +33,15 @@ back-compat).
 
 1. Client connects: `ws://host:7480/`.
 2. Client sends `open` (must be the first message). The bridge creates the node.
-3. Client creates topics, publishes, receives, at will.
-4. Client closes the socket (or errors out): the bridge closes the node with a
-   BYE and frees everything. There is no explicit close op.
+3. Client creates topics/entities, publishes, calls, receives, at will.
+4. Client closes the socket (or errors out): the bridge fails any function
+   requests still parked at the client (so remote callers get an answer now, not a
+   timeout), then closes the node with a BYE and frees everything. There is no
+   explicit close op.
 
 Any request before `open` (or a second `open`) gets an error reply. A binary
-frame before `open`, or on an unknown topic, is dropped and reported with a
-`send_error` event (never a reply: publishes carry no seq).
+frame before `open`, or on an unknown id, is dropped and reported with a
+`send_error` event (never a reply: data-plane frames carry no seq).
 
 ## Control plane (text frames)
 
@@ -64,13 +70,14 @@ request, only for a broken WebSocket.
   "fragment_size": 0,             // UDP payload bytes per fragment; 0 = default
   "announce_interval_ms": 1000,
   "peer_timeout_ms": 3500,
+  "match_wait_ms": 0,             // send-path match wait; 0 = default 1s, negative = off
   "disable_shm": false }          // force on-wire UDP even to same-host peers
 ```
 
-Reply: `{ "ok": true, "proto": 2, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 3, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
-### `topic` : create a topic (topic)
+### `topic` : create a topic
 
 ```json
 { "op": "topic", "seq": 2,
@@ -104,50 +111,113 @@ offsets, little-endian, no padding):
 0). `hash` is the 64-bit schema identity as hex (it exceeds JS safe integers). A
 raw topic replies just `{ "ok": true, "id": 0 }`.
 
-**`size`** is the length of the **fixed section** — the exact message size when the
+**`size`** is the length of the **fixed section** -- the exact message size when the
 schema has no variable fields, and where the variable tail begins when it does.
 
 **Field kinds** (`kind`):
 
 | kind      | shape | extra fields |
 |-----------|-------|--------------|
-| `u8`..`u64`, `i8`..`i64`, `f32`, `f64`, `bool` | fixed scalar at `offset` | — |
+| `u8`..`u64`, `i8`..`i64`, `f32`, `f64`, `bool` | fixed scalar at `offset` | -- |
 | `arr`     | fixed array of `count` elements at `offset` | `elem`, `count` (+ `cap` if `elem` is `string`) |
-| `struct`  | group header; members follow with dotted paths (a decoder can skip it) | — |
+| `struct`  | group header; members follow with dotted paths (a decoder can skip it) | -- |
 | `string`  | capped string, fixed slot `[u16 len][cap bytes]` at `offset` (`size` = 2+cap) | `cap` |
-| `vstring` | variable string; lives in the tail (`offset`/`size` = 0) | — |
+| `vstring` | variable string; lives in the tail (`offset`/`size` = 0) | -- |
 | `varr`    | variable array; lives in the tail, live element count | `elem` (+ `cap` if `elem` is `string`) |
-| `map`     | self-describing tagged value tree; lives in the tail | — |
+| `map`     | self-describing tagged value tree; lives in the tail | -- |
 
 The **variable kinds** (`vstring` / `varr` / `map`) have no fixed offset: each is
 one `[u32 len][payload]` frame in the message tail, the frames in schema order,
 starting at `size`. To read variable field *k*, walk from `size` reading a u32
 length and hopping, *k* times. The `map` payload is a JSON-style tagged tree; the
-reference client (`dart.mjs`) has the codec.
+reference client (`dart.ts`) has the codec.
 
 A schema error replies `ok:false` with the reason in `error`. The schema DSL text
 must be byte-identical across nodes for the identical-hash fast path, and
 structurally a subset to match a wider publisher (the normal DART rules; the
 bridge adds nothing).
 
-### `role` : flip a topic's role at runtime
+### `role` / `drain` : topic maintenance
 
 ```json
-{ "op": "role", "seq": 3, "topic": 0, "role": "sub" }
-```
-
-Re-advertises immediately; peers rematch. `"inactive"` = declared but off.
-
-### `drain` : wait until every reader acked a topic
-
-```json
+{ "op": "role",  "seq": 3, "topic": 0, "role": "sub" }
 { "op": "drain", "seq": 5, "topic": 0, "timeout_ms": 1000 }
 ```
 
-Reply: `{ "ok": true, "drained": true }`. Call before closing when the last
-burst matters (reliable topics).
+`role` re-advertises immediately; peers rematch (`"inactive"` = declared but
+off). `drain` replies `{ "ok": true, "drained": true }` when every reader acked;
+call before closing when the last burst matters (reliable topics).
 
-## Events (server pushed, text frames)
+### `settle` : wait for discovery + matching to converge
+
+```json
+{ "op": "settle", "seq": 6, "timeout_ms": 5000 }   // negative = 3 announce intervals
+```
+
+Reply `{ "ok": true, "settled": true }` when everything created so far is matched
+against everyone currently on the network. Runs on the connection's receive
+thread, so further requests from this client wait for it (nothing else does).
+
+### Pattern entities
+
+The four creates below return a dense per-connection **entity id** (its own id
+space, separate from topic ids) plus the compiled field tables for every schema
+the entity carries. All schemas are optional DSL text; omitted = raw bytes.
+Entity ids appear in the pattern binary frames and in `match` pushes.
+
+**`function_definition`** -- host a request/response function (ONE definition per
+name on the network; exactly one reply per call).
+
+```json
+{ "op": "function_definition", "seq": 7, "name": "add",
+  "req_schema": "AddReq { a: i32, b: i32 }",     // optional
+  "rsp_schema": "AddRsp { sum: i32 }",           // optional
+  "timeout_ms": 0, "backpressure_wait_ms": 0 }   // optional
+```
+
+Reply: `{ "ok": true, "id": 0, "req": {size, hash, fields}, "rsp": {...} }`
+(each block present only when that schema was given). The bridge registers a
+handler that **defers every request to the client**: see "Function requests"
+below. There is no bridge-side handler logic; the client is the implementation.
+
+**`remote_function`** -- a reference to a function hosted elsewhere. Same fields
+and reply shape as `function_definition` (no handler). `timeout_ms` sets the call
+timeout (0 = 5s): the answer the wire never delivers becomes status `timeout`.
+
+**`variable_definition`** / **`remote_variable`** -- replicated state with ONE
+owner (the definition side holds the authoritative value).
+
+```json
+{ "op": "variable_definition", "seq": 8, "name": "config",
+  "schema": "Config { rate_hz: u32 }",   // optional
+  "initial": [80, 0, 0, 0],              // optional raw payload bytes
+  "read_only": false,                    // no set channel: remote sets get refused
+  "allow_force": false,                  // permit force (local + remote)
+  "catch_up": 0, "backpressure_wait_ms": 0 }
+{ "op": "remote_variable", "seq": 9, "name": "config", "schema": "..." }
+```
+
+Reply: `{ "ok": true, "id": 1, size, hash, fields }` (layout only when typed).
+`initial` is raw pre-encoded bytes; a client that encodes with the reply's field
+table (the reference client) instead sends a normal set right after the create,
+which is equivalent (the value channel latches the latest for late joiners).
+
+**`signal`** -- a reliable fire-and-forget event, N emitters / N listeners,
+never latched (a late joiner receives nothing emitted before it joined).
+
+```json
+{ "op": "signal", "seq": 10, "name": "alert",
+  "schema": "Alert { level: u8 }",   // optional
+  "listen": true,                    // subscribe: firings are pushed as binary frames
+  "backpressure_wait_ms": 0 }
+```
+
+Reply: `{ "ok": true, "id": 2, size, hash, fields }`. Every signal handle may
+emit; only a `listen: true` one receives.
+
+## Server pushes (text frames)
+
+### `event`
 
 ```json
 { "op": "event", "event": "peer_up", "text": "peer 2 up ...", ...fields }
@@ -161,105 +231,176 @@ are per event:
 | `peer_up`          | `peer`                                          |
 | `peer_down`        | `peer`                                          |
 | `peer_interest`    | `peer`, `publishes`, `receives` (matched counts)|
-| `msg_lost`         | `topic`, `peer`, `first`, `count`             |
+| `msg_lost`         | `topic`, `peer`, `first`, `count`               |
 | `error`            | `error` (numeric code) + whichever of `topic_name`, `topic`, `peer`, `os_error` apply |
-| `send_error`       | `topic`, `code`, `error` (a failed publish)   |
+| `send_error`       | `topic` OR `entity` (the id the failed data frame named), `code`, `error` |
 
-Everything that goes wrong is one `error` event: `text` carries the human-readable
-message and `error` the numeric code (a `DartErrorKind`: 1 name-collision,
-2 qos-incompatible, 3 schema-mismatch, 4 interest-overflow, 5/6 meta-truncated
-interest/schema, 7 peer-meta-too-big, 8 msg-too-big, 9 peer-refused, 10 evicted-unsent,
-11 oom, 12 platform, 13 socket, 14 bind, 15 mcast-join, 16 send, 17 recv, 18 poll,
-19 waker). A client that only prints `text` needs no per-code handling.
+Everything that goes wrong is one `error` event: `text` carries the message and
+`error` the numeric code (a `DartErrorKind`: 1 name-collision, 2 qos-incompatible,
+3 kind-mismatch, 4 schema-mismatch, 5 interest-overflow, 6/7 meta-truncated
+interest/schema, 8 peer-meta-too-big, 9 msg-too-big, 10 peer-refused,
+11 evicted-unsent, 12 unmatched-send, 13 duplicate-authority, 14 oom,
+15 platform, 16 socket, 17 bind, 18 mcast-join, 19 send, 20 recv, 21 poll,
+22 waker). A client that only prints `text` needs no per-code handling.
+`send_error` is the bridge's own event for a data-plane frame refused
+synchronously (bad id, bad role, too big, backpressure timeout).
 
-`peer_up` fires again on a dormant peer's resume; the events are informational for
-a pub/sub client (connection status), not a peer table.
+### `match` : per-entity match state
+
+Pushed whenever a created entity's match summary CHANGES (recomputed on peer /
+interest events and on the bridge's poll tick, deduplicated against the last
+pushed value, so steady state is silent). The client maintains its
+`ready`/`hasDefinition`/count properties purely from these.
+
+```json
+{ "op": "match", "type": "topic",               "id": 0, "matches": 2, "ready": true }
+{ "op": "match", "type": "function_definition", "id": 0, "callers": 1 }
+{ "op": "match", "type": "remote_function",     "id": 1, "has_definition": true }
+{ "op": "match", "type": "variable_definition", "id": 2, "remotes": 1 }
+{ "op": "match", "type": "remote_variable",     "id": 3, "has_definition": true }
+{ "op": "match", "type": "signal",              "id": 4, "listeners": 1 }
+```
+
+`type` picks the id space (`topic` = topic ids, everything else = entity ids).
+`ready` is the send-path match-wait predicate: a send now would not block on a
+forming match.
+
+### `request` : an incoming function call (definition side)
+
+The bridge defers every call to the client as a pair of frames, JSON meta first,
+then the binary request payload (WebSocket frames are ordered, so the client can
+correlate by `req`):
+
+```json
+{ "op": "request", "fn": 0, "req": 41, "caller": 2, "caller_name": "dashboard" }
+```
+
+followed by binary `0x05` (below) carrying the same `req` id and the payload.
+The client answers with a binary `0x05` request-reply frame whenever it is ready
+(the call is parked bridge-side as a deferred reply; the caller's timeout still
+bounds the wait). Requests parked when the connection drops are failed
+(`app_error`) so callers are not left to their timeout.
 
 ## Data plane (binary frames)
 
-One WebSocket binary message = one DART message. WebSocket does the framing, so
-there are no length fields.
+One WebSocket binary message = one DART payload. WebSocket does the framing, so
+there are no length fields. Byte 0 is the op; the same op value means the
+matching thing in each direction. All headers little-endian.
 
-**Publish, client to server** (3-byte header):
+**Client to server:**
 
-```
-[u8 op = 0x01] [u16 topic] [payload bytes ...]
-```
+| op | frame | meaning |
+|----|-------|---------|
+| `0x01` | `[u16 topic][payload]` | publish on a topic |
+| `0x02` | `[u16 entity][u8 mode][payload]` | variable write: mode 0 = set, 1 = force, 2 = unforce (empty payload) |
+| `0x03` | `[u16 entity][payload]` | signal emit (payload may be empty) |
+| `0x04` | `[u16 entity][u32 call][payload]` | function call; `call` is a client-chosen correlation id |
+| `0x05` | `[u32 req][u8 status][payload]` | reply to a pushed request: status 0 = ok, 1 = app_error |
 
-**Delivery, server to client** (7-byte header):
+**Server to client:**
 
-```
-[u8 op = 0x01] [u16 topic] [u32 publisher] [payload bytes ...]
-```
+| op | frame | meaning |
+|----|-------|---------|
+| `0x01` | `[u16 topic][u32 publisher][payload]` | topic delivery |
+| `0x02` | `[u16 entity][u8 forced][payload]` | variable value update (the latest value; `forced` = the shadow source is active) |
+| `0x03` | `[u16 entity][u32 emitter][payload]` | signal firing (listen entities only) |
+| `0x04` | `[u32 call][u8 status][u32 provider][payload]` | function-call outcome for `call` |
+| `0x05` | `[u16 fn][u32 req][payload]` | request payload (pairs with the `request` JSON push) |
 
-`topic` is the id from the `topic` reply. `publisher` is the peer id of the
-sending node. The payload is the DART message verbatim: for a typed topic it
-decodes with the `fields` table; for a raw topic it is whatever the publisher
-sent. On a typed topic the bridge's node has already length-validated the
-payload against the publisher's schema before forwarding.
+Other op values are reserved: a receiver must ignore unknown ops, the server
+drops them silently.
 
-Other `op` byte values are reserved and ignored (a client must not fail on an
-unknown op; the server drops unknown ops silently).
+Call `status` is the DART `DartCallStatus`: 0 ok, 1 app_error, 2 no_handler,
+3 timeout, 4 peer_lost, 5 cancelled. A call the bridge refuses synchronously
+(out of memory, bad state) answers status 5 (cancelled) plus a `send_error`
+event carrying the reason, so the client's promise always settles.
 
-Publishing is fire and forget: no ack (a reliable topic's guarantees run
-between the bridge node and its peers, as usual). A publish that fails
-immediately (bad role, too big, out of memory) surfaces as a `send_error`
-event. A reliable topic under backpressure blocks the connection's receive
-thread, which backpressures the WebSocket via TCP: a fast publisher into a slow
-mesh slows down instead of buffering unboundedly.
+**Variable updates** are pushed from a per-connection bridge poll (~30 ms tick):
+the C variable API is poll-based, so the bridge diffs each variable's value +
+forced flag and pushes on change. Consequences: update latency is up to one
+tick, and a set to the byte-identical current value pushes nothing (idempotent).
+Definition and remote sides both receive updates (a definition client sees
+remote writes land).
 
-Delivery on a slow client: frames queue in the socket's send buffer. The
-subscriber side of the bridge node is a normal DART reader (KEEP_LAST etc.); if
-the WebSocket client cannot drain its TCP connection the bridge drops the
+Publishing/writes are fire and forget: no ack (a reliable topic's guarantees run
+between the bridge node and its peers, as usual). A data frame that fails
+immediately surfaces as a `send_error` event. A reliable send under backpressure
+(including the send-path match wait) blocks the connection's receive thread,
+which backpressures the WebSocket via TCP: a fast publisher into a slow mesh
+slows down instead of buffering unboundedly.
+
+Delivery on a slow client: frames queue in the socket's send buffer. If the
+WebSocket client cannot drain its TCP connection the bridge drops the
 connection rather than buffer forever (`--max-buffered` bytes, default 8 MiB).
 
-## What a JS/TS client looks like
+## The JS/TS client
 
-The reference client (`bridge/client/dart.mjs`: one JSDoc-typed ES module, no
-dependencies, no build step, browser + Node + Deno + Bun) wraps this in a
-promise API and uses the `fields` table to give typed access without codegen:
+The reference client is **TypeScript source** (`bridge/client/dart.ts`, zero
+runtime dependencies) compiled by pure type stripping into three committed
+distributables (regenerate with `node bridge/client/build.mjs`, or configure
+CMake with `-DDART_BUILD_JS_CLIENT=ON`; tsc is pinned at 5.5 via npx):
+
+- `dist/dart.mjs` -- the ES module (browser + Node >= 22 + Deno + Bun)
+- `dist/dart.d.ts` -- the type declarations
+- `dist/dart.js` -- the classic-script twin: identical code with the export
+  block replaced by ONE global, `globalThis.DartNode`, for a plain
+  `<script src>` tag (no module MIME pitfalls)
 
 ```ts
-import { DartClient } from "./dart.mjs";
+import { DartNode } from "../../dist/dart.mjs";
 
-const node = await DartClient.connect("ws://localhost:7480", {
-  name: "dashboard", domain: 0 });
+const node = await DartNode.connect("ws://localhost:7480", {
+  name: "dashboard",
+  onEvent: (e) => { if (e.event === "error") console.warn(e.text); } });
 
-const pose = await node.topic("pose", "pubsub", {
-  reliable: true,
-  schema: "Pose { stamp: u64, x: f64, y: f64, vel: { dx: f32, dy: f32 } }" });
+// pub/sub over plain nested objects (schema = the DSL text; null = raw bytes)
+const pub = await node.publisher("pose", "Pose { x: f64, y: f64 }");
+pub.send({ x: 1.5, y: 2.0 });
+await node.subscriber("pose", "Pose { x: f64, y: f64 }",
+  (v, msg) => console.log(msg.publisher, v.x, v.y));
 
-pose.onMessage = (msg) => {
-  console.log(msg.publisher, msg.get("x"), msg.get("vel.dx"));  // typed reads
-  // msg.data is the raw Uint8Array view when you want the bytes
-};
+// functions: the handler's (possibly async) return value is the reply
+await node.functionDefinition("add", "A { a: i32, b: i32 }", "R { sum: i32 }",
+  (req) => ({ sum: req.a + req.b }));
+const add = await node.remoteFunction("add", "A { a: i32, b: i32 }", "R { sum: i32 }");
+const r = await add.call({ a: 2, b: 3 });   // never rejects on status:
+if (r.ok) console.log(r.value.sum);         // { ok, status, value, data, provider }
 
-pose.send({ stamp: BigInt(Date.now()) * 1000n, x: 1.5, y: 2.0 });  // typed encode
-pose.sendRaw(new Uint8Array(32));                                  // or raw bytes
+// variables: client-cached latest, fed by pushed updates
+const cfg = await node.remoteVariable("config", "Config { rate_hz: u32 }");
+await cfg.wait(2000);
+cfg.set({ rate_hz: 100 });
 
-node.onEvent = (e) => { if (e.event === "error") console.warn(e.text); };
-node.close();
+// signals: a handler is the subscription; every handle may emit
+const alert = await node.signal("alert", "Alert { level: u8 }", (v) => beep(v.level));
+alert.emit({ level: 2 });
+
+await node.settle(5000);
+node.close();   // outstanding call promises settle with status "cancelled"
 ```
 
-`get`/`send` read and write straight through a `DataView` at the offsets the
-server reported: no per-message parsing, no allocation beyond the message
-buffer. u64/i64 fields surface as `bigint`; `string`/`vstring` as a JS string; a
-`map` as a plain object; everything else as `number`.
+The factories take optional type parameters (`publisher<T>`,
+`remoteFunction<Req, Rsp>`, ...) defaulting to plain-object types, so JS callers
+see no difference. `node.topic(...)` remains the dynamic form with flat
+dotted-path `get`/`send` and raw bytes. Properties maintained from `match`
+pushes: `ready`, `matchCount`, `hasDefinition`, `callerCount`, `remoteCount`,
+`listenerCount`. `call(value, timeoutMs)` adds a client-side bound on top of the
+bridge's wire timeout; `close()` cancels, a dropped connection rejects.
+`VariableDefinition.initial` is implemented as a set right after the create
+(encoding needs the field table the create returns).
 
 ## Non-goals
 
 - **No mesh introspection.** No peer-table snapshot, no `fetch_details`, no
-  `adopt`: this is pub/sub only. A typed subscriber declares its own schema (the
-  same DSL the publisher uses); a raw subscriber gets bytes. Whole-mesh
-  observability is a separate tool, not this bridge.
+  `adopt`. A typed subscriber declares its own schema (the same DSL the
+  publisher uses); a raw subscriber gets bytes. Whole-mesh observability is a
+  separate tool, not this bridge.
 - **No auth, no TLS.** The bridge binds 127.0.0.1 by default; exposing it
   (`--bind 0.0.0.0`) puts full mesh access on that port. Put a reverse proxy in
   front for wss:// or auth.
 - **No JSON data path.** The data plane is bytes; a client that wants JSON
-  converts at the edge with the fields table (the reference client shows how).
+  converts at the edge with the field tables (the reference client shows how).
 - **No per-publisher layout tables.** A typed delivery is validated against the
-  publisher's schema by the node, but the client decodes with its own topic
-  layout. Byte-identical schema text end to end (the recommended deployment) is
-  always exact.
-```
-
+  publisher's schema by the node, but the client decodes with its own layout.
+  Byte-identical schema text end to end (the recommended deployment) is always
+  exact.

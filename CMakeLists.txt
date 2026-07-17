@@ -117,3 +117,16 @@ option(DART_BUILD_BRIDGE "Build the DART WebSocket bridge (fetches IXWebSocket)"
 if(DART_BUILD_BRIDGE)
   add_subdirectory(bridge)
 endif()
+
+# The bridge's JS/TS client distributables (dist/dart.mjs + dart.d.ts + dart.js),
+# compiled from bridge/client/dart.ts by tsc 5.5 (hermetic via npx). Off by default
+# (needs Node); the outputs are committed. Also runs standalone:
+#   node bridge/client/build.mjs
+option(DART_BUILD_JS_CLIENT "Build the bridge JS client distributables (needs Node)" OFF)
+if(DART_BUILD_JS_CLIENT)
+  find_program(NODE_EXECUTABLE node REQUIRED)
+  add_custom_target(js_client ALL
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bridge/client/build.mjs"
+    COMMENT "Building bridge JS client (dart.ts -> dist/dart.mjs + dart.d.ts + dart.js)"
+    VERBATIM)
+endif()

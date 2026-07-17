@@ -23,9 +23,10 @@
 <body>
 <h1>DART bridge &mdash; typed pub/sub example</h1>
 <p class="hint">
-  Serve this folder over http (ES modules don't load from <code>file://</code>), e.g.
-  <code>python -m http.server</code>, with <code>dart_bridge</code> running. Open this
-  page in <b>two tabs</b> to chat between them: each tab is its own node on the mesh.
+  Serve the <b>repo root</b> over http (the page loads <code>dist/dart.js</code>), e.g.
+  <code>python -m http.server</code> from the repository top, then open
+  <code>/bridge/client/example.html</code> with <code>dart_bridge</code> running. Open
+  this page in <b>two tabs</b> to chat between them: each tab is its own node on the mesh.
 </p>
 
 <p id="status">connecting&hellip;</p>
@@ -38,63 +39,52 @@
 
 <ul id="log"></ul>
 
-<script type="module">
-/* Load the client. Some static file servers (Python's http.server on Windows,
- * notably) send .mjs as text/plain, which strict MIME checking rejects for a module
- * script; on failure, fetch the source and import it via a blob URL with a good type.
- * (A dynamic import is used so the failure is catchable; a static one is not.) */
-async function loadDart() {
-  try {
-    return await import("./dart.mjs");
-  } catch {
-    const src = await (await fetch("./dart.mjs")).text();
-    const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
-    return import(url);
+<!-- the classic-script build: one global, DartNode (no module MIME pitfalls) -->
+<script src="../../dist/dart.js"></script>
+<script>
+(async () => {
+  const status = document.getElementById("status");
+  const log    = document.getElementById("log");
+  const form   = document.getElementById("send");
+  const nameEl = document.getElementById("name");
+  const textEl = document.getElementById("text");
+
+  /* The topic schema, identical on every node that speaks "chat". */
+  const SCHEMA = `Chat { seq: u32, from: string<24>, text: string<200> }`;
+
+  function line(html) {
+    const li = document.createElement("li");
+    li.innerHTML = html;
+    log.prepend(li);
   }
-}
-const { DartClient } = await loadDart();
 
-const status = document.getElementById("status");
-const log    = document.getElementById("log");
-const form   = document.getElementById("send");
-const nameEl = document.getElementById("name");
-const textEl = document.getElementById("text");
+  const node = await DartNode.connect(`ws://${location.hostname || "localhost"}:7480`, {
+    onEvent: (ev) => { if (ev.event === "error") console.warn("dart:", ev.text); },
+  });
+  status.textContent = `connected as node "${node.name}"`;
 
-/* The topic schema, identical on every node that speaks "chat". */
-const SCHEMA = `Chat { seq: u32, from: string<24>, text: string<200> }`;
+  /* A pubsub topic: this tab both publishes and receives. A node does not receive
+   * its own messages, so open a second tab (or run example.mjs) to see traffic. */
+  const chat = await node.topic("chat", "pubsub", { schema: SCHEMA, reliable: true, keep_last: 32 });
 
-function line(html) {
-  const li = document.createElement("li");
-  li.innerHTML = html;
-  log.prepend(li);
-}
+  chat.onMessage = (m) => {
+    const from = m.get("from"), text = m.get("text");
+    line(`<b>${escapeHtml(from)}</b>: ${escapeHtml(text)}`);
+  };
 
-const node = await DartClient.connect(`ws://${location.hostname || "localhost"}:7480`);
-status.textContent = `connected as node "${node.name}"`;
+  let seq = 0;
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = textEl.value.trim();
+    if (!text) return;
+    chat.send({ seq: ++seq, from: nameEl.value || "web", text });
+    textEl.value = "";
+  });
 
-/* A pubsub topic: this tab both publishes and receives. A node does not receive
- * its own messages, so open a second tab (or run example.mjs) to see traffic. */
-const chat = await node.topic("chat", "pubsub", { schema: SCHEMA, reliable: true, keep_last: 32 });
-
-chat.onMessage = (m) => {
-  const from = m.get("from"), text = m.get("text");
-  line(`<b>${escapeHtml(from)}</b>: ${escapeHtml(text)}`);
-};
-
-let seq = 0;
-form.addEventListener("submit", (e) => {
-  e.preventDefault();
-  const text = textEl.value.trim();
-  if (!text) return;
-  chat.send({ seq: ++seq, from: nameEl.value || "web", text });
-  textEl.value = "";
-});
-
-node.onEvent = (ev) => { if (ev.event === "error") console.warn("dart:", ev.text); };
-
-function escapeHtml(s) {
-  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-}
+  function escapeHtml(s) {
+    return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  }
+})();
 </script>
 </body>
 </html>
