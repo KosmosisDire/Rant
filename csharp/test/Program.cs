@@ -44,7 +44,7 @@ struct Level { public int Value; }
 static class Program
 {
     static readonly ManualResetEventSlim Got = new ManualResetEventSlim(false);
-    static Message Received;
+    static DartMessage Received;
 
     // Encode -> decode round-trip of the v4 variable kinds (no networking).
     static bool RoundTrip()

@@ -80,7 +80,7 @@ namespace Dart
     {
         internal sealed class Sub
         {
-            internal Action<Message> Fn;
+            internal Action<DartMessage> Fn;
             internal Component Owner;
             internal bool HasOwner;
             internal bool Dead;
@@ -135,7 +135,7 @@ namespace Dart
         {
             _warnedClosed = false;
             try { ApplyRole(); }
-            catch (Exception e) { Debug.LogError("[DART] topic '" + _name + "' create failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[DART] topic '" + _name + "' create failed: " + e.DartMessage); }
         }
 
         internal void OnNodeClosed()
@@ -157,7 +157,7 @@ namespace Dart
             return _raw;
         }
 
-        internal DartSubscription AddSub(Action<Message> fn, Component owner, bool hasOwner)
+        internal DartSubscription AddSub(Action<DartMessage> fn, Component owner, bool hasOwner)
         {
             var s = new Sub { Fn = fn, Owner = owner, HasOwner = hasOwner };
             _subs.Add(s); _live++;
@@ -174,7 +174,7 @@ namespace Dart
 
         // Main thread, from UnityDartNode's per-frame dispatch. Handlers may subscribe,
         // unsubscribe, and publish freely from inside a delivery.
-        internal void Deliver(Message m)
+        internal void Deliver(DartMessage m)
         {
             bool sawDead = false;
             int n = _subs.Count;                    // additions during the loop wait for the next message
@@ -234,7 +234,7 @@ namespace Dart
             return r != null ? r.Send(text) : SendStatus.NoTopic;
         }
 
-        public DartSubscription Subscribe(Action<Message> handler)
+        public DartSubscription Subscribe(Action<DartMessage> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             return AddSub(handler, null, false);
@@ -242,7 +242,7 @@ namespace Dart
 
         /// <summary>Owner-bound: auto-unsubscribes when owner is destroyed, skipped
         /// while it is disabled.</summary>
-        public DartSubscription Subscribe(Component owner, Action<Message> handler)
+        public DartSubscription Subscribe(Component owner, Action<DartMessage> handler)
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));

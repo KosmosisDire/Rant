@@ -1,4 +1,4 @@
-# Dart
+﻿# Dart
 
 C# wrapper for **DART** (Discovery And Realtime Transport): peer discovery over UDP
 multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
@@ -75,7 +75,7 @@ The patterns layer is bound too, untyped (`Schema` + `byte[]`) and typed:
 var def = new FunctionDefinition<AddReq, AddRsp>(node, "add", q => new AddRsp { Sum = q.A + q.B });
 var fn  = new RemoteFunction<AddReq, AddRsp>(other, "add");
 var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking; rsp.Ok / rsp.Value
-var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<Response<AddRsp>>, never faults
+var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<DartResponse<AddRsp>>, never faults
 
 // replicated state: ONE owner, remotes read the cached latest and push writes
 var own = new VariableDefinition<Level>(node, "level", new Level { Value = 5 });

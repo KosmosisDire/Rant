@@ -52,8 +52,8 @@ namespace Dart
         private int _frame;
         private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
         private readonly Dictionary<ushort, DartTopicBase> _byIndex = new Dictionary<ushort, DartTopicBase>();
-        private readonly List<Event> _pending = new List<Event>();   // service thread -> main
-        private readonly List<Event> _drain = new List<Event>();
+        private readonly List<DartEvent> _pending = new List<DartEvent>();   // service thread -> main
+        private readonly List<DartEvent> _drain = new List<DartEvent>();
         private readonly object _pendingLock = new object();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
 
@@ -81,7 +81,7 @@ namespace Dart
         internal DartNode NativeNode => _node;
 
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
-        public static event Action<Event> Events;
+        public static event Action<DartEvent> Events;
 
         /// <summary>The shared topic named <paramref name="name"/> on the scene
         /// node, created on first request. The QoS parameters apply only to that
@@ -255,7 +255,7 @@ namespace Dart
             }
             catch (Exception e)
             {
-                Debug.LogError("[DART] node open failed: " + e.Message, this);
+                Debug.LogError("[DART] node open failed: " + e.DartMessage, this);
                 _node = null;
                 return;
             }
@@ -295,7 +295,7 @@ namespace Dart
         // Runs on whichever thread dispatches. Our topics are all queued, so this
         // is the main thread; a locked lookup keeps a user's own extra (non-queued)
         // topic on Raw from racing the table, it just isn't routed.
-        private void RouteMessage(Message m)
+        private void RouteMessage(DartMessage m)
         {
             DartTopicBase ch;
             lock (_byIndex) _byIndex.TryGetValue(m.TopicIndex, out ch);
@@ -303,7 +303,7 @@ namespace Dart
         }
 
         // Service thread: park the event for the main-thread pump.
-        private void QueueEvent(Event e)
+        private void QueueEvent(DartEvent e)
         {
             lock (_pendingLock)
             {
@@ -319,10 +319,10 @@ namespace Dart
                 _drain.AddRange(_pending);
                 _pending.Clear();
             }
-            Action<Event> handler = Events;
+            Action<DartEvent> handler = Events;
             for (int i = 0; i < _drain.Count; i++)
             {
-                Event e = _drain[i];
+                DartEvent e = _drain[i];
                 if (logEvents)
                 {
                     if (e.IsError) Debug.LogError("[DART] " + e, this);

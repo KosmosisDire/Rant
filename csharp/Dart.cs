@@ -78,7 +78,7 @@ namespace Dart
         PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
     }
 
-    // The specific error carried by an EventKind.Error event (Event.Error / DartNode.LastError).
+    // The specific error carried by an EventKind.Error event (DartEvent.Error / DartNode.LastError).
     // Mirrors DartErrorKind in node/core.h.
     public enum ErrorKind
     {
@@ -181,7 +181,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartEvent
+    internal struct DartEventNative
     {
         public int kind;
         public int error;                      // DartErrorKind (Error events)
@@ -253,11 +253,11 @@ namespace Dart
 
     // ---- pattern struct mirrors (src/patterns/core.h; field order/types EXACT) --
 
-    // The public head of the C DartRequest. Only ever read through the callback's
+    // The public head of the C DartRequestNative. Only ever read through the callback's
     // pointer; the reply machinery lives BEHIND the struct, so the exact pointer
     // (never a copy) is what dart_request_reply/fail/defer take.
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartRequest
+    internal struct DartRequestNative
     {
         public IntPtr node;
         public DartStringView function_name;
@@ -269,7 +269,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartResponse
+    internal struct DartResponseNative
     {
         public int status;                     // DartCallStatus
         public DartBytes data;
@@ -325,7 +325,7 @@ namespace Dart
         internal static extern IntPtr dart_node_open(ref DartAllocator alloc, byte[] name,
             DartMsgFn on_message, DartEventFn on_event, ref DartNodeOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern DartEvent dart_last_error(IntPtr node);
+        internal static extern DartEventNative dart_last_error(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_node_poll(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
@@ -437,7 +437,7 @@ namespace Dart
             IntPtr req_schema, IntPtr rsp_schema, ref DartFunctionOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_call(IntPtr fn, DartBytes req,
-            out DartResponse response, int timeout_ms);
+            out DartResponseNative response, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_call_async(IntPtr fn, DartBytes req,
             DartResponseFn on_response, IntPtr user);
@@ -587,7 +587,7 @@ namespace Dart
         public DartException(SendStatus status, string m) : base(m) { Status = status; }
     }
 
-    /// <summary>Reading Response&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
+    /// <summary>Reading DartResponse&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
     public class CallException : Exception
     {
         public CallStatus Status;
@@ -647,7 +647,7 @@ namespace Dart
 
     // ---- delivered message / event ----------------------------------------------
 
-    public sealed class Message
+    public sealed class DartMessage
     {
         public ushort TopicIndex;
         public uint PublisherId;
@@ -664,9 +664,9 @@ namespace Dart
         public string Text => Encoding.UTF8.GetString(Data);
         public T As<T>() => (T)Value;
 
-        internal static Message FromNative(ref DartMsg m, Type clrType)
+        internal static DartMessage FromNative(ref DartMsg m, Type clrType)
         {
-            var msg = new Message
+            var msg = new DartMessage
             {
                 TopicIndex = m.topic_index,
                 PublisherId = m.publisher_id,
@@ -688,10 +688,10 @@ namespace Dart
         }
 
         public override string ToString()
-            => $"Message(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
+            => $"DartMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
     }
 
-    public sealed class Event
+    public sealed class DartEvent
     {
         public EventKind Kind;
         public ErrorKind Error;         // the specific error when Kind == EventKind.Error, else None
@@ -711,18 +711,18 @@ namespace Dart
 
         // format an event returned BY VALUE (dart_last_error): dart_event_str wants a
         // pointer, so briefly marshal the struct to unmanaged memory.
-        internal static Event FromValue(DartEvent e)
+        internal static DartEvent FromValue(DartEventNative e)
         {
-            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<DartEvent>());
+            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<DartEventNative>());
             try { Marshal.StructureToPtr(e, p, false); return FromNative(p, ref e); }
             finally { Marshal.FreeHGlobal(p); }
         }
 
-        internal static Event FromNative(IntPtr evPtr, ref DartEvent e)
+        internal static DartEvent FromNative(IntPtr evPtr, ref DartEventNative e)
         {
             var buf = new byte[192];
             Native.dart_event_str(evPtr, buf, (UIntPtr)buf.Length);
-            return new Event
+            return new DartEvent
             {
                 Kind = (EventKind)e.kind,
                 Error = (ErrorKind)e.error,
@@ -846,12 +846,12 @@ namespace Dart
         /// publisher. timeoutMs: 0 = just check, &gt;0 = wait up to that long, negative =
         /// wait indefinitely (the wait sleeps beside a running service thread and drives
         /// the poll loop itself otherwise).</summary>
-        public bool TryTake(out Message message, int timeoutMs = 0)
+        public bool TryTake(out DartMessage message, int timeoutMs = 0)
         {
             message = null;
             var m = new DartMsg();
             if (Native.dart_topic_take(_handle, ref m, timeoutMs) != 1) return false;
-            message = Message.FromNative(ref m, _node.ClrTypeOf(m.topic_index));
+            message = DartMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index));
             return true;
         }
 
@@ -873,7 +873,7 @@ namespace Dart
 
     /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
     /// [DartString] / [DartField] refine them). Delivered messages decode to T
-    /// (Message.Value / Message.As&lt;T&gt;()).</summary>
+    /// (DartMessage.Value / DartMessage.As&lt;T&gt;()).</summary>
     public sealed class Topic<T> : Topic
     {
         public Topic(DartNode node, string name, Role role = Role.PubSub,
@@ -893,7 +893,7 @@ namespace Dart
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
-            Message m;
+            DartMessage m;
             if (!TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
             value = (T)m.Value;
             return true;
@@ -909,8 +909,8 @@ namespace Dart
         private DartAllocator _alloc;
         private IntPtr _discGroup;   // native strings the node retains for its lifetime
         private IntPtr _mcastIf;
-        private Action<Message> _onMsg;
-        private Action<Event> _onEvt;
+        private Action<DartMessage> _onMsg;
+        private Action<DartEvent> _onEvt;
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
         // same-name topic sharing (role widening); serialized by the ctor path's lock
@@ -919,7 +919,7 @@ namespace Dart
         private readonly object _createLock = new object();
         // per-topic subscriber handlers (Subscriber ctor); copy-on-write arrays so the
         // poll-thread read never takes more than a volatile fetch
-        private readonly Dictionary<ushort, Action<Message>[]> _subHandlers = new Dictionary<ushort, Action<Message>[]>();
+        private readonly Dictionary<ushort, Action<DartMessage>[]> _subHandlers = new Dictionary<ushort, Action<DartMessage>[]>();
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
         private readonly List<long> _patternBoxes = new List<long>();
@@ -938,7 +938,7 @@ namespace Dart
         /// diagnostics: null throws) and is wired in before the constructor returns,
         /// so no early peer/error event is ever missed. Everything else is optional
         /// named parameters (0/null = the C default).</summary>
-        public DartNode(string name, Action<Message> onMessage, Action<Event> onEvent,
+        public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
                     int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
@@ -985,7 +985,7 @@ namespace Dart
                 lock (s_reg) s_nodes.Remove(_id);
                 Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
-                Event err = LastOpenError();
+                DartEvent err = LastOpenError();
                 throw new InvalidOperationException("dart_node_open failed: " + err);
             }
             _handle = h;
@@ -993,10 +993,10 @@ namespace Dart
 
         /// <summary>Rebind the message handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
-        public DartNode OnMessage(Action<Message> fn) { _onMsg = fn; return this; }
+        public DartNode OnMessage(Action<DartMessage> fn) { _onMsg = fn; return this; }
         /// <summary>Rebind the event handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
-        public DartNode OnEvent(Action<Event> fn) { _onEvt = fn; return this; }
+        public DartNode OnEvent(Action<DartEvent> fn) { _onEvt = fn; return this; }
 
         // The native create behind the Topic constructors. Same-name creates on this
         // node SHARE the native slot: the role is widened (SetRole re-advertises, peers
@@ -1045,24 +1045,24 @@ namespace Dart
 
         // Subscriber handlers: per-topic-index, copy-on-write; when any exist for an
         // index they receive the message INSTEAD of the node-wide onMessage.
-        internal void AddSubHandler(ushort index, Action<Message> fn)
+        internal void AddSubHandler(ushort index, Action<DartMessage> fn)
         {
             lock (_subLock)
             {
-                Action<Message>[] cur;
-                if (!_subHandlers.TryGetValue(index, out cur)) cur = Array.Empty<Action<Message>>();
-                var nv = new Action<Message>[cur.Length + 1];
+                Action<DartMessage>[] cur;
+                if (!_subHandlers.TryGetValue(index, out cur)) cur = Array.Empty<Action<DartMessage>>();
+                var nv = new Action<DartMessage>[cur.Length + 1];
                 Array.Copy(cur, nv, cur.Length);
                 nv[cur.Length] = fn;
                 _subHandlers[index] = nv;
             }
         }
 
-        private Action<Message>[] SubHandlersOf(ushort index)
+        private Action<DartMessage>[] SubHandlersOf(ushort index)
         {
             lock (_subLock)
             {
-                Action<Message>[] hs;
+                Action<DartMessage>[] hs;
                 _subHandlers.TryGetValue(index, out hs);
                 return hs;
             }
@@ -1123,13 +1123,13 @@ namespace Dart
         }
 
         /// <summary>The most recent error this node reported (also delivered via OnEvent).
-        /// Event.Kind is PeerUp with Error == None if none has occurred yet.</summary>
-        public Event LastError => Event.FromValue(Native.dart_last_error(_handle));
+        /// DartEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
+        public DartEvent LastError => DartEvent.FromValue(Native.dart_last_error(_handle));
 
         /// <summary>Why the most recent node open failed, from the process-global slot
         /// (there is no node handle on failure). The constructor already throws with
         /// this message.</summary>
-        public static Event LastOpenError() => Event.FromValue(Native.dart_last_error(IntPtr.Zero));
+        public static DartEvent LastOpenError() => DartEvent.FromValue(Native.dart_last_error(IntPtr.Zero));
 
         /// <summary>Sends that evicted never-sent history after the bounded wait (the
         /// ErrorKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
@@ -1191,7 +1191,7 @@ namespace Dart
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null && node._onMsg == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
-                var msg = Message.FromNative(ref m, clr);      // fully copied: safe past the callback
+                var msg = DartMessage.FromNative(ref m, clr);      // fully copied: safe past the callback
                 if (hs != null) { foreach (var h in hs) h(msg); }
                 else node._onMsg(msg);
             }
@@ -1203,11 +1203,11 @@ namespace Dart
         {
             try
             {
-                var e = Marshal.PtrToStructure<DartEvent>(evPtr);
+                var e = Marshal.PtrToStructure<DartEventNative>(evPtr);
                 DartNode node;
                 lock (s_reg) s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                node._onEvt(Event.FromNative(evPtr, ref e));    // fully copied: safe past the callback
+                node._onEvt(DartEvent.FromNative(evPtr, ref e));    // fully copied: safe past the callback
             }
             catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
         }
@@ -1247,17 +1247,17 @@ namespace Dart
 
         internal sealed class RequestBox
         {
-            public Action<Request> Handler;
+            public Action<DartRequest> Handler;
             public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
         }
         internal sealed class SignalBox
         {
-            public Action<Message> Handler;
+            public Action<DartMessage> Handler;
             public Type ClrType;
         }
         internal sealed class AsyncCall
         {
-            public TaskCompletionSource<Response> Tcs;
+            public TaskCompletionSource<DartResponse> Tcs;
             public DartNode DartNode;
         }
 
@@ -1290,7 +1290,7 @@ namespace Dart
         internal static void AbandonAsync(long id)
         {
             AsyncCall c = TakeAsync(id);
-            if (c != null) c.Tcs.TrySetResult(new Response { Status = CallStatus.Cancelled });
+            if (c != null) c.Tcs.TrySetResult(new DartResponse { Status = CallStatus.Cancelled });
         }
 
         // rooted delegates handed to native code
@@ -1305,7 +1305,7 @@ namespace Dart
             {
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
-                var r = new Request(reqPtr, box.Fn);
+                var r = new DartRequest(reqPtr, box.Fn);
                 try { box.Handler(r); }
                 catch (Exception e)
                 {
@@ -1323,11 +1323,11 @@ namespace Dart
         {
             try
             {
-                var o = Marshal.PtrToStructure<DartResponse>(rspPtr);
+                var o = Marshal.PtrToStructure<DartResponseNative>(rspPtr);
                 AsyncCall call = TakeAsync((long)o.user);
                 if (call == null) return;
                 call.DartNode.UnregisterAsync((long)o.user);
-                var r = new Response
+                var r = new DartResponse
                 {
                     Status = (CallStatus)o.status,
                     Provider = o.provider,
@@ -1347,7 +1347,7 @@ namespace Dart
                 var box = GetBox((long)user) as SignalBox;
                 if (box == null) return;
                 var m = Marshal.PtrToStructure<DartMsg>(msgPtr);
-                box.Handler(Message.FromNative(ref m, box.ClrType));
+                box.Handler(DartMessage.FromNative(ref m, box.ClrType));
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_signal: " + e); }
         }
@@ -1374,7 +1374,7 @@ namespace Dart
     /// <summary>The request as seen by a FunctionDefinition handler. Valid only inside
     /// the handler callback: reply there (Reply/Fail), or Defer() and complete later
     /// from any thread. Returning without answering auto-acks CallStatus.Ok.</summary>
-    public sealed class Request
+    public sealed class DartRequest
     {
         private IntPtr _ptr;          // the EXACT native pointer; zeroed when the callback returns
         private readonly IntPtr _fn;
@@ -1389,11 +1389,11 @@ namespace Dart
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
-        internal Request(IntPtr ptr, IntPtr fn)
+        internal DartRequest(IntPtr ptr, IntPtr fn)
         {
             _ptr = ptr;
             _fn = fn;
-            var r = Marshal.PtrToStructure<DartRequest>(ptr);
+            var r = Marshal.PtrToStructure<DartRequestNative>(ptr);
             Data = Codec.Bytes(r.data);
             Caller = r.caller;
             CallerName = Codec.Str(r.caller_name);
@@ -1439,7 +1439,7 @@ namespace Dart
         }
     }
 
-    /// <summary>A parked function reply (from Request.Defer): complete exactly once,
+    /// <summary>A parked function reply (from DartRequest.Defer): complete exactly once,
     /// from any thread. Dropping it leaves the caller to its timeout.</summary>
     public sealed class Deferred
     {
@@ -1472,7 +1472,7 @@ namespace Dart
         internal readonly DartNode DartNode;
 
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Action<Request> handler, int backpressureWaitMs = 0, int timeoutMs = 0)
+                                  Action<DartRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0)
         {
             DartNode = node;
             var co = new DartFunctionOpts
@@ -1508,7 +1508,7 @@ namespace Dart
     /// <summary>An owning function-call outcome: the payload is copied out, so it
     /// outlives the call. SendStatus carries a synchronous refusal (Status stays
     /// Timeout then: the call never launched).</summary>
-    public sealed class Response
+    public sealed class DartResponse
     {
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
@@ -1547,10 +1547,10 @@ namespace Dart
         /// timeoutMs elapses (negative = the function's default timeout). Refused
         /// (SendStatus.State) from inside a callback or while a service thread owns
         /// this node's loop; use CallAsync there. Inspect Status, never throws.</summary>
-        public Response Call(byte[] request, int timeoutMs = -1)
+        public DartResponse Call(byte[] request, int timeoutMs = -1)
         {
-            var r = new Response();
-            DartResponse o;
+            var r = new DartResponse();
+            DartResponseNative o;
             int rc;
             using (var p = new PinnedBytes(request))
                 rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs);
@@ -1571,9 +1571,9 @@ namespace Dart
         /// <summary>Async call over dart_function_call_async: the Task completes with
         /// the outcome and NEVER faults (inspect Status/SendStatus). The response fires
         /// from whichever thread polls this node, continuations run off it.</summary>
-        public Task<Response> CallAsync(byte[] request)
+        public Task<DartResponse> CallAsync(byte[] request)
         {
-            var tcs = new TaskCompletionSource<Response>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<DartResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, DartNode = DartNode });
             DartNode.RegisterAsync(id);
             int rc;
@@ -1583,7 +1583,7 @@ namespace Dart
             {
                 Patterns.TakeAsync(id);
                 DartNode.UnregisterAsync(id);
-                tcs.TrySetResult(new Response { SendStatus = (SendStatus)rc });
+                tcs.TrySetResult(new DartResponse { SendStatus = (SendStatus)rc });
             }
             return tcs.Task;
         }
@@ -1704,10 +1704,10 @@ namespace Dart
         internal readonly DartNode DartNode;
 
         public Signal(DartNode node, string name, Schema schema = null,
-                      Action<Message> handler = null, int backpressureWaitMs = 0)
+                      Action<DartMessage> handler = null, int backpressureWaitMs = 0)
             : this(node, name, schema, handler, null, backpressureWaitMs) { }
 
-        internal Signal(DartNode node, string name, Schema schema, Action<Message> handler,
+        internal Signal(DartNode node, string name, Schema schema, Action<DartMessage> handler,
                         Type clrType, int backpressureWaitMs)
         {
             DartNode = node;
@@ -1775,7 +1775,7 @@ namespace Dart
         internal readonly Topic T;
 
         public Subscriber(DartNode node, string name, Schema schema = null,
-                          Action<Message> handler = null,
+                          Action<DartMessage> handler = null,
                           bool reliable = false, int keepLast = 0, int catchUp = 0,
                           int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
                           int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
@@ -1786,7 +1786,7 @@ namespace Dart
             if (handler != null) node.AddSubHandler(T.Index, handler);
         }
 
-        public bool TryTake(out Message message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
+        public bool TryTake(out DartMessage message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => T.Dispatch(maxMsgs, timeoutMs);
         public Topic Topic => T;
     }
@@ -1795,12 +1795,12 @@ namespace Dart
 
     /// <summary>The typed request view inside a full-form function handler: reply with
     /// a typed value, Fail, or Defer. Valid only inside the handler callback.</summary>
-    public sealed class Request<TRsp>
+    public sealed class DartRequest<TRsp>
     {
-        private readonly Request _core;
+        private readonly DartRequest _core;
         private readonly Schema _rsp;
 
-        internal Request(Request core, Schema rsp) { _core = core; _rsp = rsp; }
+        internal DartRequest(DartRequest core, Schema rsp) { _core = core; _rsp = rsp; }
 
         public byte[] Data => _core.Data;
         public uint Caller => _core.Caller;
@@ -1829,7 +1829,7 @@ namespace Dart
 
     /// <summary>The typed implementation side. Simple form: the return value is the
     /// reply, a THROWN exception answers CallStatus.AppError (it never crosses into
-    /// the C). Full form: reply/fail/defer explicitly through Request&lt;TRsp&gt;.</summary>
+    /// the C). Full form: reply/fail/defer explicitly through DartRequest&lt;TRsp&gt;.</summary>
     public sealed class FunctionDefinition<TReq, TRsp>
     {
         private readonly FunctionDefinition _core;
@@ -1840,7 +1840,7 @@ namespace Dart
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Action<Request> h = null;
+            Action<DartRequest> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -1855,12 +1855,12 @@ namespace Dart
             _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
         }
 
-        public FunctionDefinition(DartNode node, string name, Action<TReq, Request<TRsp>> handler,
+        public FunctionDefinition(DartNode node, string name, Action<TReq, DartRequest<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Action<Request> h = null;
+            Action<DartRequest> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -1868,7 +1868,7 @@ namespace Dart
                 {
                     object q;
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail(); return; }
-                    handler((TReq)q, new Request<TRsp>(r, rsp));
+                    handler((TReq)q, new DartRequest<TRsp>(r, rsp));
                 };
             }
             _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
@@ -1879,9 +1879,9 @@ namespace Dart
 
     /// <summary>The typed owning call outcome. Reading Value when !Ok throws
     /// CallException; Status/SendStatus never throw.</summary>
-    public sealed class Response<TRsp>
+    public sealed class DartResponse<TRsp>
     {
-        internal Response Core;
+        internal DartResponse Core;
         internal Schema RspSchema;
 
         public CallStatus Status => Core.Status;
@@ -1918,14 +1918,14 @@ namespace Dart
         }
 
         /// <summary>BLOCKING call (see the untyped RemoteFunction.Call).</summary>
-        public Response<TRsp> Call(TReq request, int timeoutMs = -1)
-            => new Response<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs), RspSchema = _rsp };
+        public DartResponse<TRsp> Call(TReq request, int timeoutMs = -1)
+            => new DartResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs), RspSchema = _rsp };
 
         /// <summary>Async call: the Task NEVER faults, inspect Status.</summary>
-        public async Task<Response<TRsp>> CallAsync(TReq request)
+        public async Task<DartResponse<TRsp>> CallAsync(TReq request)
         {
-            Response core = await _core.CallAsync(_req.Encode(request)).ConfigureAwait(false);
-            return new Response<TRsp> { Core = core, RspSchema = _rsp };
+            DartResponse core = await _core.CallAsync(_req.Encode(request)).ConfigureAwait(false);
+            return new DartResponse<TRsp> { Core = core, RspSchema = _rsp };
         }
 
         public int MatchCount => _core.MatchCount;
@@ -2033,7 +2033,7 @@ namespace Dart
                 m => { if (m.Value is T v) handler(v); }, typeof(T), backpressureWaitMs);
         }
 
-        public Signal(DartNode node, string name, Action<T, Message> handler, int backpressureWaitMs = 0)
+        public Signal(DartNode node, string name, Action<T, DartMessage> handler, int backpressureWaitMs = 0)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             _schema = new Schema(typeof(T));
@@ -2081,12 +2081,12 @@ namespace Dart
                           int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
         {
             _core = new Subscriber(node, name, new Schema(typeof(T)),
-                handler == null ? (Action<Message>)null : m => { if (m.Value is T v) handler(v); },
+                handler == null ? (Action<DartMessage>)null : m => { if (m.Value is T v) handler(v); },
                 reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
                 backpressureWaitMs, shmMaxBytes, queueBytes);
         }
 
-        public Subscriber(DartNode node, string name, Action<T, Message> handler,
+        public Subscriber(DartNode node, string name, Action<T, DartMessage> handler,
                           bool reliable = false, int keepLast = 0, int catchUp = 0,
                           int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
                           int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0)
@@ -2102,7 +2102,7 @@ namespace Dart
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
-            Message m;
+            DartMessage m;
             if (!_core.TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
             value = (T)m.Value;
             return true;
