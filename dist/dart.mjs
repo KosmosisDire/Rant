@@ -614,6 +614,7 @@ class VarHandle {
         this._value = undefined;
         this._raw = undefined;
         this._waiters = new Set();
+        this._onChange = null;
     }
     /* the cached latest value as a plain object (undefined = none seen yet) */
     get() { return this._value; }
@@ -630,6 +631,15 @@ class VarHandle {
                 w.timer = setTimeout(() => { this._waiters.delete(w); res(false); }, timeoutMs);
             this._waiters.add(w);
         });
+    }
+    /* Observe changes: fires per pushed update (the bridge pushes only when the value
+     * or forced flag actually changed), and once immediately if a value is already
+     * cached, so registering late can never miss the current state. One handler
+     * (re-register replaces, null clears). */
+    onChange(handler) {
+        this._onChange = handler;
+        if (handler && this._value !== undefined)
+            handler(this._value, { forced: this.forced });
     }
     set(value) { this._sendVar(0, this.layout.encode(value)); }
     force(value) { this._sendVar(1, this.layout.encode(value)); }
@@ -653,6 +663,8 @@ class VarHandle {
             w.res(true);
         }
         this._waiters.clear();
+        if (this._onChange)
+            this._onChange(this._value, { forced });
     }
     _match(_m) { }
 }

@@ -315,12 +315,13 @@ Call `status` is the DART `DartCallStatus`: 0 ok, 1 app_error, 2 no_handler,
 (out of memory, bad state) answers status 5 (cancelled) plus a `send_error`
 event carrying the reason, so the client's promise always settles.
 
-**Variable updates** are pushed from a per-connection bridge poll (~30 ms tick):
-the C variable API is poll-based, so the bridge diffs each variable's value +
-forced flag and pushes on change. Consequences: update latency is up to one
-tick, and a set to the byte-identical current value pushes nothing (idempotent).
-Definition and remote sides both receive updates (a definition client sees
-remote writes land).
+**Variable updates** are pushed event-driven off the C `dart_variable_on_change`
+hook: an update frame goes out the moment a change applies (no poll latency),
+including once right after the create reply when a value already exists (a
+definition's `initial`). A set to the byte-identical current value pushes
+nothing (on_change fires only on an actual state change; idempotent). Definition
+and remote sides both receive updates (a definition client sees remote writes
+land).
 
 Publishing/writes are fire and forget: no ack (a reliable topic's guarantees run
 between the bridge node and its peers, as usual). A data frame that fails

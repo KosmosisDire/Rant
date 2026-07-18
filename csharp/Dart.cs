@@ -296,6 +296,19 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct DartVariableUpdateNative
+    {
+        public IntPtr variable;
+        public DartStringView name;
+        public DartBytes value;
+        public IntPtr schema;
+        public byte forced;
+        public uint write_seq;
+        public uint source;
+        public ulong recv_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct DartSignalOpts
     {
         public uint backpressure_wait_us;
@@ -313,6 +326,8 @@ namespace Dart
     internal delegate void DartResponseFn(IntPtr response);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartSignalFn(IntPtr msg, IntPtr user);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DartVariableUpdateFn(IntPtr update, IntPtr user);
 
     // ---- native entry points ----------------------------------------------------
 
@@ -473,6 +488,10 @@ namespace Dart
         internal static extern int dart_variable_wait(IntPtr var, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_match_count(IntPtr var);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_on_change(IntPtr var, DartVariableUpdateFn on_change, IntPtr user);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_on_write(IntPtr var, DartVariableUpdateFn on_write, IntPtr user);
 
         // patterns: signals
         [DllImport(LIB, CallingConvention = CC)]
@@ -1255,6 +1274,10 @@ namespace Dart
             public Action<DartMessage> Handler;
             public Type ClrType;
         }
+        internal sealed class VarBox
+        {
+            public Action<VariableUpdate> Handler;
+        }
         internal sealed class AsyncCall
         {
             public TaskCompletionSource<DartResponse> Tcs;
@@ -1297,6 +1320,7 @@ namespace Dart
         internal static readonly DartRequestFn OnRequest = OnRequestTramp;
         internal static readonly DartResponseFn OnResponse = OnResponseTramp;
         internal static readonly DartSignalFn OnSignal = OnSignalTramp;
+        internal static readonly DartVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
 
         [MonoPInvokeCallback(typeof(DartRequestFn))]
         private static void OnRequestTramp(IntPtr reqPtr, IntPtr user)
@@ -1350,6 +1374,28 @@ namespace Dart
                 box.Handler(DartMessage.FromNative(ref m, box.ClrType));
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_signal: " + e); }
+        }
+
+        [MonoPInvokeCallback(typeof(DartVariableUpdateFn))]
+        private static void OnVarUpdateTramp(IntPtr updPtr, IntPtr user)
+        {
+            try
+            {
+                var box = GetBox((long)user) as VarBox;
+                if (box == null) return;
+                var u = Marshal.PtrToStructure<DartVariableUpdateNative>(updPtr);
+                box.Handler(new VariableUpdate
+                {
+                    Name = Codec.Str(u.name),
+                    Data = Codec.Bytes(u.value),   // copied out: the view dies with the callback
+                    Forced = u.forced != 0,
+                    WriteSeq = u.write_seq,
+                    Source = u.source,
+                    RecvUs = u.recv_us,
+                    SchemaPtr = u.schema,
+                });
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart on_variable_update: " + e); }
         }
 
         // Decode wire bytes to a typed value: prefer the wire schema (the publisher's
@@ -1595,6 +1641,20 @@ namespace Dart
 
     // ---- patterns: variables ----------------------------------------------------
 
+    /// <summary>The state just applied to a variable, as handed to OnChange/OnWrite
+    /// handlers. A private copy: safe to hold past the callback.</summary>
+    public sealed class VariableUpdate
+    {
+        public string Name { get; internal set; }
+        public byte[] Data { get; internal set; }
+        public bool Forced { get; internal set; }
+        public uint WriteSeq { get; internal set; }
+        /// <summary>Peer id the write arrived from (0 = a local call on this node).</summary>
+        public uint Source { get; internal set; }
+        public ulong RecvUs { get; internal set; }
+        internal IntPtr SchemaPtr;
+    }
+
     /// <summary>Replicated state, ONE owner: this node holds the authoritative value
     /// (untyped: Schema + byte[]). Remotes cache the latest published value.</summary>
     public class VariableDefinition
@@ -1678,6 +1738,33 @@ namespace Dart
         /// elapses (negative = forever-ish). Refused (false) from a callback or while
         /// a service thread owns this node's loop.</summary>
         public bool Wait(int timeoutMs) => Native.dart_variable_wait(Var, timeoutMs) == 1;
+
+        /// <summary>Observe changes. Fires only when the observed state actually
+        /// changes (the first value, different bytes, or a forced flip; a
+        /// byte-identical re-set stays silent), and replays the current value once
+        /// at registration so it can never be missed. Runs inline on the thread that
+        /// applied the write (the service thread for anything off the wire), with the
+        /// usual from-a-callback restrictions. One handler; null clears.</summary>
+        public void OnChange(Action<VariableUpdate> handler) => Observe(handler, true);
+
+        /// <summary>Observe every applied write, byte-identical or not (no replay at
+        /// registration: writes are events, not state). Same threading as OnChange;
+        /// one handler, null clears.</summary>
+        public void OnWrite(Action<VariableUpdate> handler) => Observe(handler, false);
+
+        private void Observe(Action<VariableUpdate> handler, bool change)
+        {
+            if (handler == null)
+            {
+                if (change) Native.dart_variable_on_change(Var, null, IntPtr.Zero);
+                else Native.dart_variable_on_write(Var, null, IntPtr.Zero);
+                return;
+            }
+            long id = Patterns.AddBox(new Patterns.VarBox { Handler = handler });
+            DartNode.RegisterPatternBox(id);
+            if (change) Native.dart_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id);
+            else Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id);
+        }
     }
 
     /// <summary>A reference to a variable owned by another node (untyped): reads see
@@ -1993,6 +2080,27 @@ namespace Dart
         public bool Forced => _core.Forced;
         public int RemoteCount => _core.RemoteCount;
         public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
+
+        /// <summary>Observe changes, typed (see the untyped OnChange for the change
+        /// contract and threading). Handler forms: (T value) or
+        /// (T value, VariableUpdate update); pass a null-cast delegate to clear.</summary>
+        public void OnChange(Action<T> handler) => _core.OnChange(Adapt(handler, null));
+        public void OnChange(Action<T, VariableUpdate> handler) => _core.OnChange(Adapt(null, handler));
+        /// <summary>Observe every applied write, typed (no replay at registration).</summary>
+        public void OnWrite(Action<T> handler) => _core.OnWrite(Adapt(handler, null));
+        public void OnWrite(Action<T, VariableUpdate> handler) => _core.OnWrite(Adapt(null, handler));
+
+        private Action<VariableUpdate> Adapt(Action<T> plain, Action<T, VariableUpdate> full)
+        {
+            if (plain == null && full == null) return null;
+            Schema schema = _schema;
+            return u =>
+            {
+                object v;
+                if (!Patterns.TryDecode(schema, u.SchemaPtr, u.Data, typeof(T), out v)) return;
+                if (plain != null) plain((T)v); else full((T)v, u);
+            };
+        }
     }
 
     /// <summary>The typed accessor of a variable owned elsewhere. Same surface as the

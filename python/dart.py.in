@@ -125,7 +125,7 @@ _EXPORTS = [
     "dart_node_create_variable_definition", "dart_node_create_remote_variable",
     "dart_variable_get", "dart_variable_set", "dart_variable_force",
     "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
-    "dart_variable_match_count",
+    "dart_variable_match_count", "dart_variable_on_change", "dart_variable_on_write",
     "dart_node_create_signal", "dart_signal_emit", "dart_signal_listener_count",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size",
@@ -437,6 +437,19 @@ class DartVariableOpts(Structure):
     ]
 
 
+class DartVariableUpdate(Structure):
+    _fields_ = [
+        ("variable", c_void_p),
+        ("name", DartStringView),
+        ("value", DartBytes),
+        ("schema", c_void_p),
+        ("forced", c_uint8),
+        ("write_seq", c_uint32),
+        ("source", c_uint32),
+        ("recv_us", c_uint64),
+    ]
+
+
 class DartSignalOpts(Structure):
     _fields_ = [("backpressure_wait_us", c_uint32)]
 
@@ -449,8 +462,10 @@ _AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
 _ReqFn = CFUNCTYPE(None, POINTER(DartRequest), c_void_p)
 _RspFn = CFUNCTYPE(None, POINTER(DartResponse))
 _SigFn = CFUNCTYPE(None, POINTER(DartMsg), c_void_p)
+_VarFn = CFUNCTYPE(None, POINTER(DartVariableUpdate), c_void_p)
 _NULL_REQ_FN = cast(None, _ReqFn)   # a CFUNCTYPE argtype refuses a bare None
 _NULL_SIG_FN = cast(None, _SigFn)
+_NULL_VAR_FN = cast(None, _VarFn)
 
 
 def _bind(lib):
@@ -512,6 +527,8 @@ def _bind(lib):
     F("dart_variable_forced", [c_void_p], c_int)
     F("dart_variable_wait", [c_void_p, c_int], c_int)
     F("dart_variable_match_count", [c_void_p], c_int)
+    F("dart_variable_on_change", [c_void_p, _VarFn, c_void_p], c_int)
+    F("dart_variable_on_write", [c_void_p, _VarFn, c_void_p], c_int)
     F("dart_node_create_signal", [c_void_p, c_char_p, c_void_p, _SigFn, c_void_p,
                                   POINTER(DartSignalOpts)], c_void_p)
     F("dart_signal_emit", [c_void_p, DartBytes], c_int)
@@ -2204,6 +2221,27 @@ class _SigBox:
         self.spec = spec
 
 
+class VariableUpdate:
+    """The state just applied to a variable, as handed to on_change/on_write
+    handlers: value (decoded; raw bytes when untyped), data (the raw payload),
+    name, forced, write_seq, source (peer id the write arrived from; 0 = a
+    local call on this node), recv_us."""
+    __slots__ = ("name", "data", "value", "forced", "write_seq", "source", "recv_us")
+
+    def __repr__(self):
+        return "VariableUpdate(%r, value=%r, forced=%r, seq=%d, source=%d)" % (
+            self.name, self.value, self.forced, self.write_seq, self.source)
+
+
+class _VarBox:
+    __slots__ = ("handler", "arity", "schema")
+
+    def __init__(self, handler, schema):
+        self.handler = handler
+        self.arity = _arity(handler)
+        self.schema = schema
+
+
 class FunctionDefinition:
     """The implementation side of a request/response function: exactly one reply
     per call, ONE definition per name on the network (a rival fires
@@ -2414,6 +2452,32 @@ class VariableDefinition:
     def remote_count(self):
         """Remotes matched to this definition."""
         return self._node._lib.dart_variable_match_count(self._var)
+
+    def on_change(self, handler):
+        """Observe changes. Fires only when the observed state actually changes
+        (the first value, different bytes, or a forced flip; a byte-identical
+        re-set stays silent), and replays the current value once at registration
+        so it can never be missed. Handler forms, arity dispatched: (value) or
+        (value, update) with a VariableUpdate. Runs inline on the thread that
+        applied the write (the service thread for anything off the wire); None
+        clears."""
+        self._observe(handler, True)
+
+    def on_write(self, handler):
+        """Observe every applied write, byte-identical or not (no replay at
+        registration: writes are events, not state). Same handler forms and
+        threading as on_change; None clears."""
+        self._observe(handler, False)
+
+    def _observe(self, handler, change):
+        lib = self._node._lib
+        reg = lib.dart_variable_on_change if change else lib.dart_variable_on_write
+        if handler is None:
+            reg(self._var, _NULL_VAR_FN, None)
+            return
+        box_id = _pbox_add(_VarBox(handler, self._schema))
+        self._node._register_box(box_id)
+        reg(self._var, _on_var_update, c_void_p(box_id))
 
 
 class RemoteVariable(VariableDefinition):
@@ -2651,5 +2715,33 @@ def _on_signal(msg_ptr, user):
             box.handler(val)
         else:
             box.handler(val, msg)
+    except Exception:
+        traceback.print_exc()
+
+
+@_VarFn
+def _on_var_update(upd_ptr, user):
+    try:
+        box = _pbox_get(user)
+        if box is None:
+            return
+        u = upd_ptr.contents
+        data = string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
+        val, ok = _decode_payload(u.schema, box.schema, data)
+        if not ok:
+            val = data
+        if box.arity == 1:
+            box.handler(val)
+        else:
+            upd = VariableUpdate()
+            upd.name = string_at(u.name.data, u.name.len).decode("utf-8", "replace") \
+                       if u.name.data and u.name.len else ""
+            upd.data = data
+            upd.value = val
+            upd.forced = u.forced != 0
+            upd.write_seq = u.write_seq
+            upd.source = u.source
+            upd.recv_us = u.recv_us
+            box.handler(val, upd)
     except Exception:
         traceback.print_exc()

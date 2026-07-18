@@ -638,6 +638,7 @@ class RemoteFunction<Req = any, Rsp = any> {
 }
 
 type VarWaiter = { res: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> | undefined };
+type VarChangeHandler<T> = (value: T, info: { forced: boolean }) => void;
 
 /* Shared variable-handle core: the client-cached latest value fed by pushed updates. */
 class VarHandle<T = any> {
@@ -649,6 +650,7 @@ class VarHandle<T = any> {
     _value: T | undefined;
     _raw: Uint8Array | undefined;
     _waiters: Set<VarWaiter>;
+    _onChange: VarChangeHandler<T> | null;
 
     constructor(node: DartNode, name: string, r: any) {
         this._node = node;
@@ -659,6 +661,7 @@ class VarHandle<T = any> {
         this._value = undefined;
         this._raw = undefined;
         this._waiters = new Set();
+        this._onChange = null;
     }
 
     /* the cached latest value as a plain object (undefined = none seen yet) */
@@ -675,6 +678,15 @@ class VarHandle<T = any> {
             if (timeoutMs >= 0) w.timer = setTimeout(() => { this._waiters.delete(w); res(false); }, timeoutMs);
             this._waiters.add(w);
         });
+    }
+
+    /* Observe changes: fires per pushed update (the bridge pushes only when the value
+     * or forced flag actually changed), and once immediately if a value is already
+     * cached, so registering late can never miss the current state. One handler
+     * (re-register replaces, null clears). */
+    onChange(handler: VarChangeHandler<T> | null): void {
+        this._onChange = handler;
+        if (handler && this._value !== undefined) handler(this._value, { forced: this.forced });
     }
 
     set(value: T): void { this._sendVar(0, this.layout.encode(value)); }
@@ -696,6 +708,7 @@ class VarHandle<T = any> {
         this.forced = forced;
         for (const w of this._waiters) { if (w.timer !== undefined) clearTimeout(w.timer); w.res(true); }
         this._waiters.clear();
+        if (this._onChange) this._onChange(this._value, { forced });
     }
     _match(_m: any): void {}
 }

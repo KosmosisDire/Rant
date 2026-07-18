@@ -428,6 +428,12 @@ struct DartVariable {
     uint32_t        write_seq;
     uint8_t        *store;  uint32_t store_len,  store_cap;    /* owner: published value; accessor: cache */
     uint8_t        *shadow; uint32_t shadow_len, shadow_cap;   /* owner: source value while forced */
+    DartVariableUpdateFn on_change; void *on_change_user;   /* fires only on an actual state change */
+    DartVariableUpdateFn on_write;  void *on_write_user;    /* fires on every applied write */
+    const DartSchema *cur_schema;   /* what store decodes with (owner: the create schema;
+                                       remote: the last arrival's msg->schema) */
+    uint32_t        last_source;    /* peer behind the current state (0 = a local call) */
+    uint64_t        last_write_us;  /* when the current state applied (node clock) */
     uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
 };
@@ -449,6 +455,40 @@ static void i_dart_var_hdr(const DartVariable *v, uint8_t hdr[DART__VAR_PREFIX])
     i_dart_le_w32(hdr + 1, v->write_seq);
 }
 
+/* under the lock, BEFORE the store is overwritten: would applying (val, forced_now) change
+ * the observed state? First value, different bytes, or a forced-flag flip. */
+static int i_dart_var_would_change(const DartVariable *v, DartBytes val, int forced_now){
+    if (!v->has_value) return 1;
+    if ((v->forced != 0) != (forced_now != 0)) return 1;
+    if (v->store_len != val.len) return 1;
+    return val.len ? memcmp(v->store, val.data, val.len) != 0 : 0;
+}
+
+/* the current state as a DartVariableUpdate (views into manager memory: callback-only) */
+static void i_dart_var_update_view(DartVariable *v, DartVariableUpdate *u){
+    u->variable  = v;
+    u->name      = i_dart_topic_name(v->value);
+    u->value     = dart_bytes(v->store, v->store_len);
+    u->schema    = v->cur_schema;
+    u->forced    = v->forced;
+    u->write_seq = v->write_seq;
+    u->source    = v->last_source;
+    u->recv_us   = v->last_write_us;
+}
+
+/* a write just applied to the observed value (lock held, state already updated): stamp the
+ * write context, then fire on_write always and on_change when the state changed, inline on
+ * this thread (the poll / service thread for wire-originated writes, the caller's for local
+ * ones) */
+static void i_dart_var_notify(DartVariable *v, int changed, uint32_t source, uint64_t when_us){
+    DartVariableUpdate u;
+    v->last_source = source; v->last_write_us = when_us;
+    if (!v->on_write && !(changed && v->on_change)) return;
+    i_dart_var_update_view(v, &u);
+    if (v->on_write)             v->on_write(&u, v->on_write_user);
+    if (changed && v->on_change) v->on_change(&u, v->on_change_user);
+}
+
 /* owner: publish the store under a HELD lock (reentrant send, no wait): the paths that
  * cannot hand the app's buffer to an unlocked send (remote sets applied inside a delivery
  * callback, force/unforce republishing from the shadow/store). */
@@ -460,29 +500,37 @@ static void i_dart_var_publish_locked(DartVariable *v){
 }
 
 /* owner: a dumb write, from a HELD-lock context. Absorbed into the shadow source while
- * forced, else stored + published (reentrantly). */
-static void i_dart_var_owner_apply(DartVariable *v, DartBytes val){
+ * forced (no event: the observed value did not change), else stored + published
+ * (reentrantly) + notified. */
+static void i_dart_var_owner_apply(DartVariable *v, DartBytes val, uint32_t source, uint64_t when_us){
+    int changed;
     if (v->forced){ i_dart_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, val); return; }
+    changed = i_dart_var_would_change(v, val, 0);
     if (!i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->has_value = 1; v->write_seq++;
     i_dart_var_publish_locked(v);
+    i_dart_var_notify(v, changed, source, when_us);
 }
 /* owner: force to val. Without allow_force this is a SILENT NO-OP (force is opaque on the
  * wire; the local API layer refuses loudly before ever reaching here). */
-static void i_dart_var_owner_force(DartVariable *v, DartBytes val){
+static void i_dart_var_owner_force(DartVariable *v, DartBytes val, uint32_t source, uint64_t when_us){
+    int changed;
     if (!v->allow_force) return;
+    changed = i_dart_var_would_change(v, val, 1);
     if (!v->forced)   /* entering force: save the current source into the shadow */
         i_dart_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, dart_bytes(v->store, v->store_len));
     if (!i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->forced = 1; v->has_value = 1; v->write_seq++;
     i_dart_var_publish_locked(v);
+    i_dart_var_notify(v, changed, source, when_us);
 }
-static void i_dart_var_owner_unforce(DartVariable *v){
+static void i_dart_var_owner_unforce(DartVariable *v, uint32_t source, uint64_t when_us){
     if (!v->forced) return;
     v->forced = 0;
     i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, dart_bytes(v->shadow, v->shadow_len));
     v->write_seq++;
     i_dart_var_publish_locked(v);
+    i_dart_var_notify(v, 1, source, when_us);   /* the forced flag flipped: always a change */
 }
 
 /* owner: a set/force/unforce op arrived on the set channel (delivery callback, lock held).
@@ -491,19 +539,32 @@ static void i_dart_var_owner_unforce(DartVariable *v){
 static void i_dart_var_on_set(void *user, const DartMsg *msg){
     DartVariable *v = (DartVariable*)user;
     uint8_t op = msg->header.len >= 1 ? msg->header.data[0] : 0;
-    if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v);
-    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data); }
-    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data); }
+    if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v, msg->publisher_id, msg->recv_us);
+    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data, msg->publisher_id, msg->recv_us); }
+    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data, msg->publisher_id, msg->recv_us); }
 }
 
-/* accessor: a new value arrived on the value channel (cache it + its forced/write_seq) */
+/* accessor: a new value arrived on the value channel (cache it + its forced/write_seq,
+ * then notify: the source is the owner that published, not the original setter) */
 static void i_dart_var_on_value(void *user, const DartMsg *msg){
     DartVariable *v = (DartVariable*)user;
+    int forced_in, changed; uint32_t seq_in;
     if (msg->header.len < DART__VAR_PREFIX) return;
+    /* stale-order guard: a reentrant set inside an owner's on_write/on_change publishes
+       BEFORE the outer set's deferred send, so the older write_seq arrives second. A
+       SAME-OWNER value behind the cached seq is stale: drop it (signed distance, wrap-safe).
+       A different publisher (owner restart, failover) always applies. */
+    seq_in = i_dart_le_r32(msg->header.data + 1);
+    if (v->has_value && msg->publisher_id == v->last_source
+        && (int32_t)(seq_in - v->write_seq) < 0) return;
+    forced_in = (msg->header.data[0] & DART__VAR_FLAG_FORCED) ? 1 : 0;
+    changed = i_dart_var_would_change(v, msg->data, forced_in);
     if (i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, msg->data)){
         v->has_value = 1;
-        v->forced = (uint8_t)((msg->header.data[0] & DART__VAR_FLAG_FORCED) ? 1 : 0);
+        v->forced = (uint8_t)forced_in;
         v->write_seq = i_dart_le_r32(msg->header.data + 1);
+        v->cur_schema = msg->schema;
+        i_dart_var_notify(v, changed, msg->publisher_id, msg->recv_us);
     }
 }
 
@@ -534,6 +595,7 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
         v->n = n; v->pm = pm; v->is_owner = (uint8_t)owner;
         v->allow_force = (uint8_t)(opts && opts->allow_force);
         v->readonly = (uint8_t)readonly;
+        v->cur_schema = schema;
     }
     i_dart_node_sys_unlock(n, acquired);
     if (!v) return NULL;
@@ -595,6 +657,7 @@ static int i_dart_var_accessor_route(DartVariable *var){
 
 int dart_variable_set(DartVariable *var, DartBytes value){
     int acquired, r = DART_OK, publish = 0;
+    uint32_t my_seq = 0;
     uint8_t hdr[DART__VAR_PREFIX];
     if (!var) return DART_ERR_NO_TOPIC;
     if (var->is_owner){
@@ -603,12 +666,22 @@ int dart_variable_set(DartVariable *var, DartBytes value){
         acquired = i_dart_node_sys_lock(var->n);
         if (var->forced){
             i_dart_buf_put(var->n, &var->shadow, &var->shadow_len, &var->shadow_cap, value);
-        } else if (!i_dart_buf_put(var->n, &var->store, &var->store_len, &var->store_cap, value)){
-            r = DART_ERR_OOM;
         } else {
-            var->has_value = 1; var->write_seq++;
-            i_dart_var_hdr(var, hdr);
-            publish = 1;
+            int changed = i_dart_var_would_change(var, value, 0);
+            if (!i_dart_buf_put(var->n, &var->store, &var->store_len, &var->store_cap, value)){
+                r = DART_ERR_OOM;
+            } else {
+                var->has_value = 1; var->write_seq++;
+                my_seq = var->write_seq;
+                i_dart_var_hdr(var, hdr);
+                publish = 1;
+                i_dart_var_notify(var, changed, 0, i_dart_node_now_us(var->n));
+                /* a reentrant set inside the callback advanced the seq and already
+                   published the newer value under the held lock, so it COMMITTED FIRST:
+                   sending ours now would put stale bytes newest in transport history
+                   (and catch_up would replay them). Skip; the write itself stands. */
+                if (var->write_seq != my_seq) publish = 0;
+            }
         }
         i_dart_node_sys_unlock(var->n, acquired);
         return publish ? i_dart_topic_send_hdr(var->value, dart_bytes(hdr, DART__VAR_PREFIX), value) : r;
@@ -626,7 +699,7 @@ int dart_variable_force(DartVariable *var, DartBytes value){
     if (var->is_owner){
         if (!var->allow_force) return DART_ERR_STATE;   /* locally checkable: refuse loudly */
         acquired = i_dart_node_sys_lock(var->n);
-        i_dart_var_owner_force(var, value);             /* rare debug op: reentrant publish */
+        i_dart_var_owner_force(var, value, 0, i_dart_node_now_us(var->n));   /* rare debug op: reentrant publish */
         i_dart_node_sys_unlock(var->n, acquired);
         return DART_OK;
     }
@@ -643,7 +716,7 @@ int dart_variable_unforce(DartVariable *var){
     if (var->is_owner){
         if (!var->allow_force) return DART_ERR_STATE;
         acquired = i_dart_node_sys_lock(var->n);
-        i_dart_var_owner_unforce(var);
+        i_dart_var_owner_unforce(var, 0, i_dart_node_now_us(var->n));
         i_dart_node_sys_unlock(var->n, acquired);
         return DART_OK;
     }
@@ -655,6 +728,31 @@ int dart_variable_unforce(DartVariable *var){
 }
 
 int dart_variable_forced(DartVariable *var){ return var ? var->forced : 0; }
+
+int dart_variable_on_change(DartVariable *var, DartVariableUpdateFn on_change, void *user){
+    int acquired;
+    if (!var) return DART_ERR_NO_TOPIC;
+    acquired = i_dart_node_sys_lock(var->n);
+    var->on_change = on_change; var->on_change_user = user;
+    if (on_change && var->has_value){
+        /* replay the current state once, right here on the registering thread, so a value
+           that arrived between create and register is never missed */
+        DartVariableUpdate u;
+        i_dart_var_update_view(var, &u);
+        on_change(&u, user);
+    }
+    i_dart_node_sys_unlock(var->n, acquired);
+    return DART_OK;
+}
+
+int dart_variable_on_write(DartVariable *var, DartVariableUpdateFn on_write, void *user){
+    int acquired;
+    if (!var) return DART_ERR_NO_TOPIC;
+    acquired = i_dart_node_sys_lock(var->n);
+    var->on_write = on_write; var->on_write_user = user;
+    i_dart_node_sys_unlock(var->n, acquired);
+    return DART_OK;   /* writes are events, not state: no replay */
+}
 
 int dart_variable_wait(DartVariable *var, int timeout_ms){
     int acquired; uint64_t deadline;

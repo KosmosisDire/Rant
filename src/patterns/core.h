@@ -162,6 +162,42 @@ int  dart_variable_set(DartVariable *var, DartBytes value);
 int  dart_variable_force(DartVariable *var, DartBytes value);
 int  dart_variable_unforce(DartVariable *var);
 int  dart_variable_forced(DartVariable *var);
+
+/* ---- variable events (on_change / on_write) ------------------------------------------
+ * One registration slot each (re-register replaces, NULL clears); both receive the same
+ * DartVariableUpdate view of the state just applied. Both sides observe: a definition sees
+ * local and remote writes the moment they apply, a remote sees each value as it arrives.
+ *   on_write   fires on EVERY write applied to the observed value, byte-identical or not:
+ *              local and remote sets, force, unforce, each value a remote receives. A write
+ *              absorbed into the shadow while forced does not fire (the observed value did
+ *              not change; the unforce that restores it does).
+ *   on_change  fires only when the observed STATE changes: the first value, bytes that
+ *              differ from the current value, or a flip of the forced flag. A byte-identical
+ *              re-set stays silent (write_seq still advances). If a value already exists at
+ *              registration the callback fires once immediately with it, so registering
+ *              right after create can never miss the current state.
+ * THREADING: callbacks fire inline, under the node lock, on the thread that applied the
+ * write: the poll / service thread for anything arriving off the wire, the calling thread
+ * for a local set/force/unforce. Same restrictions as any delivery callback. A reentrant
+ * set from inside a callback is SAFE: the layer skips the then-stale outer publish, so
+ * transport history (and catch_up replay) always ends on the newest write. Consumer-thread
+ * delivery (dispatch-style, collapsed to the latest state) and edge triggers (rising /
+ * falling) are planned extensions; they will keep this shape: one slot per event kind, the
+ * same DartVariableUpdate payload. */
+typedef struct {
+    DartVariable     *variable;
+    DartString        name;        /* the variable's name (a stable view) */
+    DartBytes         value;       /* the value just applied (a view, valid for the callback) */
+    const DartSchema *schema;      /* the schema value decodes with (NULL = untyped) */
+    uint8_t           forced;      /* the value is a forced override */
+    uint32_t          write_seq;   /* the owner's write counter */
+    uint32_t          source;      /* peer id the write arrived from; 0 = a local call */
+    uint64_t          recv_us;     /* the node's monotonic clock when the write applied */
+} DartVariableUpdate;
+typedef void (*DartVariableUpdateFn)(const DartVariableUpdate *update, void *user);
+
+int  dart_variable_on_change(DartVariable *var, DartVariableUpdateFn on_change, void *user);
+int  dart_variable_on_write (DartVariable *var, DartVariableUpdateFn on_write,  void *user);
 /* Block driving the node loop until a value exists (remote first value) or timeout_ms
  * elapses (negative = forever-ish). 1 = have a value, 0 = timeout. Refused from a callback /
  * under a service thread (returns 0). */

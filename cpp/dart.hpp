@@ -186,6 +186,7 @@ template <class Req = void, class Rsp = void> class FunctionDefinition;
 template <class Req = void, class Rsp = void> class RemoteFunction;
 template <class T = void> class VariableDefinition;
 template <class T = void> class RemoteVariable;
+class VariableUpdate;
 template <class T = void> class Signal;
 template <class T = void> class Publisher;
 template <class T = void> class Subscriber;
@@ -2005,6 +2006,26 @@ private:
 
 /* ====================== VARIABLES (untyped cores) =========================== */
 
+/* VariableUpdate: the state just applied to a variable, as handed to on_change /
+ * on_write handlers. Views are valid for the callback only. */
+class VariableUpdate {
+public:
+    Bytes            value()     const { return { u_->value.data, u_->value.len }; }
+    std::string_view name()      const { return { u_->name.data, u_->name.len }; }
+    bool             forced()    const { return u_->forced != 0; }
+    uint32_t         write_seq() const { return u_->write_seq; }
+    /* peer id the write arrived from (0 = a local call on this node) */
+    uint32_t         source()    const { return u_->source; }
+    /* node monotonic us when the write applied */
+    uint64_t         recv_us()   const { return u_->recv_us; }
+    const detail::DartSchema* raw_schema() const { return u_->schema; }
+
+private:
+    friend class VariableDefinition<void>;
+    explicit VariableUpdate(const detail::DartVariableUpdate* u) : u_(u) {}
+    const detail::DartVariableUpdate* u_;
+};
+
 /* VariableDefinition<> (untyped): this node holds the authoritative value. */
 template <> class VariableDefinition<void> {
 public:
@@ -2049,7 +2070,40 @@ public:
     /* remotes currently matched to this definition */
     int remote_count() const { return var_ ? detail::dart_variable_match_count(var_) : 0; }
 
+    /* Observe this variable. on_change fires only when the observed state actually
+     * changes (the first value, different bytes, or a forced flip), and replays the
+     * current value once at registration so it can never be missed; on_write fires on
+     * every applied write, byte-identical or not. Handlers run inline on the thread
+     * that applied the write (the poll / service thread for anything off the wire),
+     * like a subscriber handler. One handler each; pass {} to clear. */
+    void on_change(std::function<void(const VariableUpdate&)> h) { observe(std::move(h), true); }
+    void on_write (std::function<void(const VariableUpdate&)> h) { observe(std::move(h), false); }
+
 protected:
+    struct UBox : priv::HandlerBox {
+        std::function<void(const VariableUpdate&)> h;
+        Node::Impl* impl = nullptr;
+    };
+    static void utramp(const detail::DartVariableUpdate* u, void* user) {
+        UBox* b = static_cast<UBox*>(user);
+        VariableUpdate up(u);
+#if defined(__cpp_exceptions)
+        try { b->h(up); } catch (...) { Node::report_handler_exception(b->impl); }
+#else
+        b->h(up);
+#endif
+    }
+    void observe(std::function<void(const VariableUpdate&)> h, bool change) {
+        if (!var_) return;
+        UBox* box = nullptr;
+        if (h) { box = new UBox(); box->h = std::move(h); box->impl = impl_; }
+        (void)(change ? detail::dart_variable_on_change(var_, box ? &VariableDefinition::utramp : nullptr, box)
+                      : detail::dart_variable_on_write (var_, box ? &VariableDefinition::utramp : nullptr, box));
+        if (box) {   /* kept alive until node close, like every handler box */
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->boxes.emplace_back(box);
+        }
+    }
     void create(Node& n, std::string_view name, const Schema* schema,
                 const VariableOptions<>& o, bool definition) {
         std::string nm(name);
@@ -2061,6 +2115,7 @@ protected:
         co.catch_up    = o.catch_up;
         co.backpressure_wait_us = o.backpressure_wait_us;
         node_ = n.impl_->node;
+        impl_ = n.impl_.get();
         var_ = definition
             ? detail::dart_node_create_variable_definition(node_, nm.c_str(),
                   schema ? schema->raw() : nullptr, &co)
@@ -2071,6 +2126,7 @@ protected:
     }
     detail::DartVariable* var_ = nullptr;
     detail::DartNode*     node_ = nullptr;
+    Node::Impl*           impl_ = nullptr;
     template <class A> friend class VariableDefinition;
 };
 
@@ -2443,7 +2499,31 @@ public:
     bool forced()          const { return core_.forced(); }
     int  remote_count()    const { return core_.remote_count(); }
 
+    /* Observe (see the untyped core for the change/write contract). Handler forms:
+     * void(const T&) or void(const T&, const VariableUpdate&); nullptr clears. */
+    template <class H, class = std::enable_if_t<
+        std::is_invocable_v<std::decay_t<H>&, const T&> ||
+        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
+    template <class H, class = std::enable_if_t<
+        std::is_invocable_v<std::decay_t<H>&, const T&> ||
+        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
+    void on_change(std::nullptr_t) { core_.on_change({}); }
+    void on_write (std::nullptr_t) { core_.on_write({}); }
+
 private:
+    template <class H>
+    static std::function<void(const VariableUpdate&)> adapt(H&& h) {
+        return [f = std::forward<H>(h)](const VariableUpdate& u) mutable {
+            T v{};
+            if (!priv::decode(v, u.value(), u.raw_schema())) return;
+            if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
+                f(v, u);
+            else
+                f(v);
+        };
+    }
     VariableDefinition<> core_;
 };
 
@@ -2477,7 +2557,31 @@ public:
     bool has_definition()  const { return core_.has_definition(); }
     int  match_count()     const { return core_.match_count(); }
 
+    /* Observe (see the untyped core for the change/write contract). Handler forms:
+     * void(const T&) or void(const T&, const VariableUpdate&); nullptr clears. */
+    template <class H, class = std::enable_if_t<
+        std::is_invocable_v<std::decay_t<H>&, const T&> ||
+        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
+    template <class H, class = std::enable_if_t<
+        std::is_invocable_v<std::decay_t<H>&, const T&> ||
+        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
+    void on_change(std::nullptr_t) { core_.on_change({}); }
+    void on_write (std::nullptr_t) { core_.on_write({}); }
+
 private:
+    template <class H>
+    static std::function<void(const VariableUpdate&)> adapt(H&& h) {
+        return [f = std::forward<H>(h)](const VariableUpdate& u) mutable {
+            T v{};
+            if (!priv::decode(v, u.value(), u.raw_schema())) return;
+            if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
+                f(v, u);
+            else
+                f(v);
+        };
+    }
     RemoteVariable<> core_;
 };
 

@@ -15,9 +15,9 @@
  *
  * Threading: IXWebSocket runs each accepted connection on its own thread, which fits
  * the one-node-per-connection model directly. The node is thread-safe and runs its own
- * background service thread via Node::start(). One extra bridge thread per connection
- * (the ticker) polls variable values (the C variable API is poll-based: it has no
- * on-change callback) and recomputes per-entity match state. Discipline: never call
+ * background service thread via Node::start(). Variable values push event-driven off
+ * the C on-change hook (on the thread that applied the write); one extra bridge thread
+ * per connection (the ticker) recomputes per-entity match state. Discipline: never call
  * into dart while holding Conn::mu (the dart handlers take mu from the service thread,
  * so holding mu across a dart call that wants the node lock would deadlock). */
 #include "dart.hpp"
@@ -55,7 +55,7 @@ static const uint8_t kOpSignal   = 0x03;
 static const uint8_t kOpCall     = 0x04;
 static const uint8_t kOpRequest  = 0x05;
 
-static const int kTickMs = 30;   /* variable-value + match-state poll cadence */
+static const int kTickMs = 30;   /* match-state poll cadence */
 
 static size_t g_max_buffered = 8u << 20; /* drop a client that buffers past this */
 static int    g_verbose      = 0;
@@ -71,8 +71,6 @@ struct Ent {
     dart::RemoteVariable<>     varrem;
     dart::Signal<>             sig;
     /* ticker state, guarded by Conn::mu */
-    std::vector<uint8_t> last_val;                     /* last pushed variable value */
-    bool                 pushed = false, last_forced = false;
     int                  last_match = -1;              /* match-state change detector */
 };
 
@@ -276,34 +274,6 @@ static void push_match_states(Conn *c){
     }
 }
 
-/* variable value pushes: the C variable API is poll-based (no on-change callback), so
- * the ticker diffs each variable's value + forced flag and pushes on change. A set to
- * the byte-identical value does not re-push (idempotent by design). */
-static void push_var_updates(Conn *c){
-    if (!c->node || !c->ws) return;
-    std::vector<Ent *> ents;
-    {
-        std::lock_guard<std::mutex> g(c->mu);
-        for (auto &e : c->ents)
-            if (e->kind == Ent::VarDef || e->kind == Ent::VarRemote) ents.push_back(e.get());
-    }
-    for (Ent *e : ents){
-        dart::VariableDefinition<> &v = (e->kind == Ent::VarDef)
-            ? e->vardef : static_cast<dart::VariableDefinition<> &>(e->varrem);
-        auto val = v.get();               /* copies out under the node lock */
-        if (!val) continue;
-        bool forced = v.forced();
-        {
-            std::lock_guard<std::mutex> g(c->mu);
-            if (e->pushed && e->last_forced == forced && e->last_val == *val) continue;
-            e->last_val = *val; e->last_forced = forced; e->pushed = true;
-        }
-        uint8_t hdr[4];
-        hdr[0] = kOpVar; w16(hdr + 1, e->id); hdr[3] = forced ? 1 : 0;
-        push_frame(c, hdr, 4, dart::Bytes(val->data(), val->size()));
-    }
-}
-
 /* Format one event as JSON and send it. Runs inside the dart event handler (on the
  * node's service thread, or on the connection thread for events a control op triggered). */
 static void send_event(Conn *c, const dart::Event &ev){
@@ -398,7 +368,8 @@ static void op_open(Conn *c, const json &req, const json &seq){
     c->name = name;
     c->node->start();   /* the node's own service thread drives everything */
 
-    /* the ticker: variable-value diffs + match-state recompute (see PROTOCOL.md) */
+    /* the ticker: match-state recompute (see PROTOCOL.md). Variable values are pushed
+       event-driven by the on_change hook, not polled here. */
     c->stop = false;
     std::shared_ptr<Conn> keep;
     {
@@ -409,7 +380,6 @@ static void op_open(Conn *c, const json &req, const json &seq){
         while (!c->stop.load()){
             std::this_thread::sleep_for(std::chrono::milliseconds(kTickMs));
             if (c->stop.load()) break;
-            push_var_updates(c);
             push_match_states(c);
         }
     });
@@ -610,6 +580,19 @@ static void op_variable(Conn *c, const json &req, const json &seq, bool definiti
     json r = { {"id", e->id} };
     if (sc){ r["size"] = sc->size(); r["hash"] = hex64(sc->hash()); r["fields"] = fields_json(*sc); }
     reply_ok(c, seq, r);
+
+    /* value updates are pushed event-driven: on_change fires only on an actual state
+       change (bytes or the forced flag), so a byte-identical re-set pushes nothing.
+       Registered AFTER the create reply: the registration replays the current value (a
+       definition's initial) and the client must already know the entity id. */
+    uint16_t id = e->id;
+    auto push_update = [c, id](const dart::VariableUpdate &u){
+        uint8_t hdr[4];
+        hdr[0] = kOpVar; w16(hdr + 1, id); hdr[3] = u.forced() ? 1 : 0;
+        push_frame(c, hdr, 4, u.value());
+    };
+    if (definition) e->vardef.on_change(push_update);
+    else            e->varrem.on_change(push_update);
 }
 
 static void op_signal(Conn *c, const json &req, const json &seq){

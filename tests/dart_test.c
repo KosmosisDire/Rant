@@ -2801,9 +2801,27 @@ static volatile uint64_t pf_defer_token;
 static void pf_defer_handler(DartRequest *req, void *user){ (void)user; pf_calls++; pf_defer_token = dart_request_defer(req); }
 static int pf_sig_count; static uint32_t pf_sig_last;
 static void pf_on_signal(const DartMsg *m, void *user){ (void)user; pf_sig_count++; pf_sig_last = m->data.len>=4 ? i_dart_le_r32(m->data.data) : 0; }
+/* variable on_change / on_write capture */
+typedef struct { int n; uint32_t val, seq, source; uint8_t forced; } PfVarEvt;
+static void pf_on_var_update(const DartVariableUpdate *u, void *user){
+    PfVarEvt *e = (PfVarEvt*)user;
+    e->n++; e->val = u->value.len>=4 ? i_dart_le_r32(u->value.data) : 0;
+    e->seq = u->write_seq; e->source = u->source; e->forced = u->forced;
+}
 /* cancel-at-close capture: a call pending at close must get exactly one CANCELLED outcome */
 static volatile int pf_cancel_count; static DartCallStatus pf_cancel_status;
 static void pf_on_cancel(const DartResponse *r){ pf_cancel_status = r->status; pf_cancel_count++; }
+/* reentrant on_write: the first write of 100 immediately re-sets to 200, once */
+static DartVariable *pf_reent_var; static int pf_reent_done;
+static void pf_on_var_reenter(const DartVariableUpdate *u, void *user){
+    (void)user;
+    if (!pf_reent_done && u->value.len>=4 && i_dart_le_r32(u->value.data)==100){
+        uint8_t nb[4];
+        pf_reent_done = 1;
+        i_dart_le_w32(nb, 200);
+        dart_variable_set(pf_reent_var, dart_bytes(nb,4));
+    }
+}
 
 static void pf_pump(DartNode *a, DartNode *b, int ms){
     uint64_t end = i_dart_plat_now_us() + (uint64_t)ms*1000u;
@@ -3044,6 +3062,61 @@ static void patterns_checks(void){
       for (t=0;t<600;t++){ pf_pump(P,C,2); if (!dart_variable_forced(ta)) break; }
       ST_CHECK(!dart_variable_forced(ta), "var: typed remote unforce applies (op-only payload)");
       dart_allocator_reset(&ma); }
+    { /* on_change / on_write: change dedup, write-every-write, replay at registration,
+         force transitions (a flag flip alone is a change), absorbed writes stay silent,
+         and the source peer stamp */
+      PfVarEvt oc, ow, ac, aw;   /* owner / accessor, change / write */
+      DartVariable *eo, *ea; uint8_t b[4]; int rr;
+      memset(&oc,0,sizeof oc); memset(&ow,0,sizeof ow); memset(&ac,0,sizeof ac); memset(&aw,0,sizeof aw);
+      i_dart_le_w32(b,5);
+      eo = dart_node_create_variable_definition(P, "evar", NULL, &(DartVariableOpts){ .initial=dart_bytes(b,4), .allow_force=1 });
+      ea = dart_node_create_remote_variable(C, "evar", NULL, NULL);
+      ST_CHECK(eo && ea, "var: event pair created");
+      /* registering AFTER the initial value exists replays it once, immediately */
+      rr = dart_variable_on_change(eo, pf_on_var_update, &oc);
+      ST_CHECK(rr==DART_OK && oc.n==1 && oc.val==5,
+               "var: on_change replays current at registration (n=%d val=%u)", oc.n, oc.val);
+      dart_variable_on_write(eo, pf_on_var_update, &ow);
+      ST_CHECK(ow.n==0, "var: on_write does not replay (writes are events, not state)");
+      dart_variable_on_change(ea, pf_on_var_update, &ac);
+      dart_variable_on_write(ea, pf_on_var_update, &aw);
+      for (t=0;t<2000 && ac.n==0;t++) pf_pump(P,C,2);   /* catch-up: the first value fires both */
+      ST_CHECK(ac.n==1 && aw.n==1 && ac.val==5,
+               "var: accessor first value fires (change=%d write=%d val=%u)", ac.n, aw.n, ac.val);
+      ST_CHECK(ac.source!=0, "var: accessor source = the owner peer (%u)", ac.source);
+      i_dart_le_w32(b,6); dart_variable_set(eo, dart_bytes(b,4));   /* local set: inline, source 0 */
+      ST_CHECK(oc.n==2 && ow.n==1 && oc.val==6 && oc.source==0,
+               "var: local set fires inline on the caller (change=%d write=%d src=%u)", oc.n, ow.n, oc.source);
+      dart_variable_set(eo, dart_bytes(b,4));               /* byte-identical re-set */
+      ST_CHECK(oc.n==2 && ow.n==2 && ow.seq==oc.seq+1,
+               "var: identical re-set fires write only, seq advances (change=%d write=%d)", oc.n, ow.n);
+      for (t=0;t<600 && aw.n<3;t++) pf_pump(P,C,2);
+      ST_CHECK(aw.n==3 && ac.n==2 && ac.val==6,
+               "var: accessor saw 3 writes / 2 changes (w=%d c=%d val=%u)", aw.n, ac.n, ac.val);
+      dart_variable_force(eo, dart_bytes(b,4));   /* same bytes: the forced flip alone is a change */
+      ST_CHECK(oc.n==3 && oc.forced==1 && ow.n==3,
+               "var: force with identical bytes still a change (n=%d forced=%u)", oc.n, oc.forced);
+      for (t=0;t<600 && ac.n<3;t++) pf_pump(P,C,2);
+      ST_CHECK(ac.n==3 && ac.forced==1, "var: accessor sees the forced flip (n=%d forced=%u)", ac.n, ac.forced);
+      i_dart_le_w32(b,44); dart_variable_set(eo, dart_bytes(b,4));   /* absorbed into the shadow */
+      pf_pump(P,C,40);
+      ST_CHECK(oc.n==3 && ow.n==3, "var: absorbed write fires nothing (c=%d w=%d)", oc.n, ow.n);
+      dart_variable_unforce(eo);
+      ST_CHECK(oc.n==4 && !oc.forced && oc.val==44 && ow.n==4,
+               "var: unforce fires with the restored value (n=%d val=%u)", oc.n, oc.val);
+      for (t=0;t<600 && ac.n<4;t++) pf_pump(P,C,2);
+      ST_CHECK(ac.n==4 && !ac.forced && ac.val==44,
+               "var: accessor unforce change (n=%d val=%u forced=%u)", ac.n, ac.val, ac.forced);
+      i_dart_le_w32(b,70);
+      { int sr = dart_variable_set(ea, dart_bytes(b,4)); ST_CHECK(sr==DART_OK, "var: event remote set ok (%d)", sr); }
+      for (t=0;t<600 && oc.n<5;t++) pf_pump(P,C,2);
+      ST_CHECK(oc.n==5 && oc.val==70 && oc.source!=0,
+               "var: remote set fires at the owner with the setter's peer (src=%u)", oc.source);
+      dart_variable_on_change(eo, NULL, NULL); dart_variable_on_write(eo, NULL, NULL);
+      i_dart_le_w32(b,71); dart_variable_set(eo, dart_bytes(b,4));
+      ST_CHECK(oc.n==5 && ow.n==5, "var: cleared callbacks stay silent (c=%d w=%d)", oc.n, ow.n);
+      for (t=0;t<600 && ac.n<5;t++) pf_pump(P,C,2);   /* drain the 70/71 echoes before the captures die */
+      dart_variable_on_change(ea, NULL, NULL); dart_variable_on_write(ea, NULL, NULL); }
 
     /* ---- signals: derived roles (handler = subscription), emit/receive, payload-less ---- */
     { DartSignal *ps, *cs; uint8_t b[4]; int er;
@@ -3121,7 +3194,7 @@ static void patterns_checks(void){
             inc += ei.incomplete;
             for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
         }
-        ST_CHECK(fns==5 && vars==3 && sigs==2 && tops==0,
+        ST_CHECK(fns==5 && vars==4 && sigs==2 && tops==0,
                  "reflect: peer entities fold (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
         ST_CHECK(ats==0 && inc==0, "reflect: no internals leak (@bytes=%d incomplete=%d)", ats, inc);
         ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro); }
@@ -3134,8 +3207,36 @@ static void patterns_checks(void){
             case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             } }
-        ST_CHECK(fns==5 && vars==3 && sigs==2 && tops==0,
+        ST_CHECK(fns==5 && vars==4 && sigs==2 && tops==0,
                  "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops); } }
+
+    { /* a reentrant set inside on_write publishes under the held lock, so it commits to
+         transport history BEFORE the outer set's deferred send: the owner must SKIP the
+         stale outer publish (else catch_up replays 100 as newest) and the remote's
+         write_seq guard drops any stale same-owner value that still slips through */
+      DartVariable *ro, *ra; uint8_t b[4]; DartBytes cur;
+      ro = dart_node_create_variable_definition(P, "rvar", NULL, NULL);
+      ra = dart_node_create_remote_variable(C, "rvar", NULL, NULL);
+      ST_CHECK(ro && ra, "var: reentrancy pair created");
+      pf_reent_var = ro; pf_reent_done = 0;
+      dart_variable_on_write(ro, pf_on_var_reenter, NULL);
+      i_dart_le_w32(b,100);
+      dart_variable_set(ro, dart_bytes(b,4));
+      ST_CHECK(pf_reent_done, "var: reentrant set ran inside on_write");
+      { DartBytes ov; int have = dart_variable_get(ro, &ov);
+        ST_CHECK(have && ov.len>=4 && i_dart_le_r32(ov.data)==200,
+                 "var: owner store holds the newest (200)"); }
+      for (t=0;t<2000;t++){ pf_pump(P,C,2);
+          if (dart_variable_get(ra, &cur) && cur.len>=4 && i_dart_le_r32(cur.data)==200) break; }
+      { int have = dart_variable_get(ra, &cur);
+        ST_CHECK(have && cur.len>=4 && i_dart_le_r32(cur.data)==200,
+                 "var: remote reached the newest value"); }
+      pf_pump(P,C,60);   /* nothing stale may follow: the owner skipped the outer publish */
+      { int have = dart_variable_get(ra, &cur);
+        ST_CHECK(have && cur.len>=4 && i_dart_le_r32(cur.data)==200,
+                 "var: stale outer publish skipped, remote stays newest (%u)",
+                 (have && cur.len>=4) ? i_dart_le_r32(cur.data) : 0u); }
+      dart_variable_on_write(ro, NULL, NULL); }
 
     /* a call still pending when the node closes gets one synthesized CANCELLED outcome */
     { DartFunction *never = dart_node_create_remote_function(C, "never-served", NULL, NULL,

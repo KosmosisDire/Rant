@@ -159,6 +159,9 @@ type VarWaiter = {
     res: (ok: boolean) => void;
     timer: ReturnType<typeof setTimeout> | undefined;
 };
+type VarChangeHandler<T> = (value: T, info: {
+    forced: boolean;
+}) => void;
 declare class VarHandle<T = any> {
     _node: DartNode;
     id: number;
@@ -168,10 +171,12 @@ declare class VarHandle<T = any> {
     _value: T | undefined;
     _raw: Uint8Array | undefined;
     _waiters: Set<VarWaiter>;
+    _onChange: VarChangeHandler<T> | null;
     constructor(node: DartNode, name: string, r: any);
     get(): T | undefined;
     raw(): Uint8Array | undefined;
     wait(timeoutMs?: number): Promise<boolean>;
+    onChange(handler: VarChangeHandler<T> | null): void;
     set(value: T): void;
     force(value: T): void;
     unforce(): void;

@@ -224,6 +224,32 @@ static class Program
         while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 9)) cli.Poll(5);
         Check("unforce restores the latest set", lvl.Value.Value == 9 && !lvl.Forced);
 
+        // variable events: OnChange dedups + replays at registration, OnWrite counts
+        // every applied write
+        var chg = new List<long>(); uint chgSource = 1234; int wr = 0;
+        lvlDef.OnChange((Level v, VariableUpdate u) => { chg.Add(v.Value); chgSource = u.Source; });
+        Check("OnChange replays current at registration", chg.Count == 1 && chg[0] == 9);
+        lvlDef.OnWrite((Level v) => Interlocked.Increment(ref wr));
+        Check("OnWrite does not replay", wr == 0);
+        Check("identical re-set accepted", lvlDef.Set(new Level { Value = 9 }) == SendStatus.Ok);
+        Check("identical re-set is a write, not a change", chg.Count == 1 && wr == 1);
+        Check("new set accepted", lvlDef.Set(new Level { Value = 12 }) == SendStatus.Ok);
+        Check("change fires inline with the new value",
+              chg.Count == 2 && chg[1] == 12 && chgSource == 0 && wr == 2);
+        var rchg = new List<long>();
+        lvl.OnChange((Level v) => { lock (rchg) rchg.Add(v.Value); });
+        lock (rchg) Check("remote OnChange replays the cache", rchg.Count == 1 && rchg[0] == 9);
+        deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (rchg) if (rchg.Count > 0 && rchg[rchg.Count - 1] == 12) break;
+            cli.Poll(5);
+        }
+        lock (rchg) Check("remote change arrives", rchg.Count > 0 && rchg[rchg.Count - 1] == 12);
+        lvlDef.OnChange((Action<Level>)null);
+        lvlDef.OnWrite((Action<Level>)null);
+        lvl.OnChange((Action<Level>)null);
+
         // signal: three payload-less emits (untyped form), delivered on srv's thread
         Check("emit accepted", sigOut.Emit() == SendStatus.Ok);
         sigOut.Emit();

@@ -45,6 +45,8 @@ dart_variable_unforce
 dart_variable_forced
 dart_variable_wait
 dart_variable_match_count
+dart_variable_on_change
+dart_variable_on_write
 dart_node_create_signal
 dart_signal_emit
 dart_signal_listener_count

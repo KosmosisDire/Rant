@@ -271,6 +271,22 @@ static bool patterns_leg() {
         [&] { auto v = rv.get(); return !rv.forced() && v && v->v == 50; }, &b));
     chk("var: has_definition/remote_count", rv.has_definition() && vd.remote_count() >= 1);
 
+    /* variable events: on_change replays + dedups, on_write counts every write */
+    std::atomic<int> vchg{ 0 }, vwr{ 0 }; std::atomic<int64_t> vlast{ 0 };
+    vd.on_change([&](const Speed& s, const dart::VariableUpdate& u) { (void)u; vchg++; vlast = s.v; });
+    chk("var: on_change replays current at registration", vchg.load() == 1 && vlast.load() == 50);
+    vd.on_write([&](const Speed& s) { (void)s; vwr++; });
+    chk("var: on_write does not replay", vwr.load() == 0);
+    chk("var: identical re-set accepted", vd.set(Speed{ 50 }) == dart::SendStatus::Ok);
+    chk("var: identical re-set is a write, not a change", vchg.load() == 1 && vwr.load() == 1);
+    chk("var: new set accepted", vd.set(Speed{ 51 }) == dart::SendStatus::Ok);
+    chk("var: change fires inline with the new value",
+        vchg.load() == 2 && vlast.load() == 51 && vwr.load() == 2);
+    std::atomic<int64_t> rlast{ 0 };
+    rv.on_change([&](const Speed& s) { rlast = s.v; });
+    chk("var: remote change arrives", wait_for(3000, [&] { return rlast.load() == 51; }, &b));
+    vd.on_change(nullptr); vd.on_write(nullptr); rv.on_change(nullptr);
+
     /* ---- signals ---- */
     std::atomic<uint32_t> alarm_code{ 0 };
     dart::Signal<Alarm> emitter(a, "alarm");

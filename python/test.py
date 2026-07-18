@@ -207,6 +207,29 @@ def patterns():
         cli.poll(5)
     check("unforce restores the latest set", lvl.get().value == 9 and not lvl.forced())
 
+    # variable events: on_change dedups + replays at registration, on_write counts
+    # every applied write
+    chg, wr = [], []
+    lvl_def.on_change(lambda v, u: chg.append((v.value, u.forced, u.source)))
+    check("on_change replays current at registration", len(chg) == 1 and chg[0][0] == 9)
+    lvl_def.on_write(lambda v: wr.append(v.value))
+    check("on_write does not replay", len(wr) == 0)
+    check("identical re-set accepted", lvl_def.set(Level(value=9)) == dart.SendStatus.OK)
+    check("identical re-set is a write, not a change", len(chg) == 1 and len(wr) == 1)
+    check("new set accepted", lvl_def.set(Level(value=12)) == dart.SendStatus.OK)
+    check("change fires inline with the new value",
+          len(chg) == 2 and chg[1][0] == 12 and chg[1][2] == 0 and len(wr) == 2)
+    rchg = []
+    lvl.on_change(lambda v: rchg.append(v.value))
+    check("remote on_change replays the cache", bool(rchg) and rchg[0] == 9)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and (not rchg or rchg[-1] != 12):
+        cli.poll(5)
+    check("remote change arrives", bool(rchg) and rchg[-1] == 12)
+    lvl_def.on_change(None)
+    lvl_def.on_write(None)
+    lvl.on_change(None)
+
     # signal: three payload-less emits, delivered on srv's service thread
     check("emit accepted", sig_out.emit() == dart.SendStatus.OK)
     sig_out.emit()
