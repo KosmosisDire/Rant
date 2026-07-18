@@ -26,7 +26,7 @@ namespace Dart
     [ExecuteAlways]
     [DefaultExecutionOrder(-1000)]   // dispatch before other scripts' Update
     [DisallowMultipleComponent]
-    [AddComponentMenu("DART/DART DartNode")]
+    [AddComponentMenu("DART/DartNode")]
     public sealed class DartNodeUnity : MonoBehaviour
     {
         [Tooltip("Human-readable node name, synced to peers; empty = auto node-XXXXXXXX.")]
