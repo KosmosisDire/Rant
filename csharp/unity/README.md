@@ -39,7 +39,7 @@ auto-detects Standalone by extension: `.dll` -> Windows, `.so` -> Linux).
 
 ## Use
 
-Put one **UnityDartNode** component in the scene (Add Component > DART > DART DartNode). It owns
+Put one **DartNodeUnity** component in the scene (Add Component > DART > DART DartNode). It owns
 the shared node (name, domain, lifecycle) and every other script publishes/subscribes
 through it:
 
@@ -51,20 +51,20 @@ public struct Pose { public float X, Y, Z; }
 
 public class PoseSender : MonoBehaviour {
     DartTopic<Pose> pose;
-    void Start()  { pose = UnityDartNode.Topic<Pose>("player/pose"); }
+    void Start()  { pose = DartNodeUnity.Topic<Pose>("player/pose"); }
     void Update() { pose.Publish(new Pose { X = transform.position.x,
                                             Y = transform.position.y,
                                             Z = transform.position.z }); }
 }
 
 public class PoseReceiver : MonoBehaviour {
-    void Start() { UnityDartNode.Subscribe<Pose>("player/pose", this, OnPose); }
+    void Start() { DartNodeUnity.Subscribe<Pose>("player/pose", this, OnPose); }
     void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }  // main thread, always
 }
 ```
 
 - **Handlers always fire on the main thread.** The node runs the C service thread (the
-  wire never waits for a frame); every topic is queued and UnityDartNode dispatches once
+  wire never waits for a frame); every topic is queued and DartNodeUnity dispatches once
   per frame, before other scripts' `Update()`.
 - **Topics are shared by name**: every script asking for `"player/pose"` gets the same
   `DartTopic<Pose>`. Roles are automatic: created inactive, the first `Publish`
@@ -72,13 +72,13 @@ public class PoseReceiver : MonoBehaviour {
 - **Owner-bound subscriptions** (`Subscribe(name, this, handler)`) die with their
   component and are skipped while it is disabled. The ownerless overload returns a
   `DartSubscription`: dispose it yourself.
-- **Edit mode**: `UnityDartNode` is `[ExecuteAlways]`; with Run In Edit Mode on (default) the
+- **Edit mode**: `DartNodeUnity` is `[ExecuteAlways]`; with Run In Edit Mode on (default) the
   node is live in the editor outside play. Whether your publishers/subscribers run at
   edit time is up to them; a topic acquired while the node is closed goes live when it
   opens.
 - **Events** (peer up/down, message loss, errors) are logged to the Console (toggle on
-  the component) and observable via `UnityDartNode.Events`, on the main thread.
-- **Escape hatch**: `UnityDartNode.Main.Raw` is the underlying `DartNode`, `topic.Raw` the
+  the component) and observable via `DartNodeUnity.Events`, on the main thread.
+- **Escape hatch**: `DartNodeUnity.Main.Raw` is the underlying `DartNode`, `topic.Raw` the
   underlying `Topic` (TryTake, Drain, QueueStats...). The low-level wrapper (`new
   DartNode(...)` + `Poll()`/`Start()`) remains fully usable without the component.
 
