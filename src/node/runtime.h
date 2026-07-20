@@ -389,12 +389,13 @@ typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns n
 typedef void     (*i_DartSysCloseFn)(void *user);   /* node closing: settle outstanding promises */
 
 /* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
- * per-payload prefix, and the directed flag, permits '@' in the name (reserved for pattern
- * channels), and routes this topic's deliveries to on_msg (may be NULL) instead of the
- * node's on_message. Never queued. Returns a handle or NULL. */
+ * per-payload prefix, the directed flag, and the forceable aux flag (advertised in interest
+ * bit 6), permits '@' in the name (reserved for pattern channels), and routes this topic's
+ * deliveries to on_msg (may be NULL) instead of the node's on_message. Never queued. Returns
+ * a handle or NULL. */
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn on_msg, void *on_msg_user);
 /* Publish hdr+payload on a pattern topic (broadcast to all matched subscribers). */
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);

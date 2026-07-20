@@ -124,6 +124,8 @@ typedef struct {
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
     uint8_t  kind;     /* DartTopicKind; 0 = plain DART_KIND_TOPIC (the patterns layer sets the rest) */
+    uint8_t  forceable; /* patterns aux flag ridden in interest bit 6 (the variable value channel sets it
+                           when the owner permits force); opaque to the transport, 0 = plain topic. */
     uint8_t  prefix_bytes; /* pattern-header bytes prepended to every payload on this topic (the wire
                               carries hdr+payload as one message; the receiver splits at this offset and
                               validates the schema against the payload only). 0 = none. */
@@ -357,6 +359,7 @@ typedef struct {
                                topic yields twice, pub first, mirroring the old two-list walk) */
     uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
     uint8_t     kind;       /* the advertiser's DartTopicKind for this topic (0 = plain) */
+    uint8_t     forceable;  /* patterns aux flag (interest bit 6): the variable value channel's owner permits force */
     uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
 } DartTopicEntry;
 

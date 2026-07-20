@@ -810,6 +810,7 @@ struct Entity {
     bool        consumes   = false;   /* they are the sink side: subscriber / caller / accessor / listener */
     bool        reliable   = false;   /* the primary channel's advertised reliability */
     bool        writable   = false;   /* VARIABLE: a set channel is advertised alongside the value */
+    bool        forceable  = false;   /* VARIABLE: the owner permits force/unforce (allow_force) */
     bool        incomplete = false;   /* a pattern half-pair: surfaced, never silently dropped */
     uint16_t    index = 0;            /* the primary channel's index at the peer */
     uint32_t    hash  = 0;            /* the primary channel's low-32 name hash (the placeholder) */
@@ -1746,6 +1747,7 @@ private:
         e.consumes   = ei.consumes != 0;
         e.reliable   = ei.reliable != 0;
         e.writable   = ei.writable != 0;
+        e.forceable  = ei.forceable != 0;
         e.incomplete = ei.incomplete != 0;
         e.index = ei.index;
         e.hash  = ei.hash;

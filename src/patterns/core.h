@@ -258,6 +258,8 @@ typedef struct {
     uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor / listener */
     uint8_t           reliable;    /* the primary channel's advertised reliability */
     uint8_t           writable;    /* VARIABLE: a @set channel is advertised alongside the value */
+    uint8_t           forceable;   /* VARIABLE: the owner permits force/unforce (allow_force); a
+                                      writable variable without it silently absorbs force ops */
     uint8_t           incomplete;  /* a pattern half-pair (partner channel missing or not yet
                                       identifiable): surfaced, never silently dropped */
     uint16_t          index;       /* the primary channel's index at the peer (the key for the

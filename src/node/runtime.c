@@ -994,7 +994,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
  * permits the reserved '@' in the name (public topics may not use it). */
 static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
     if (!n || !name) return NULL;
@@ -1022,7 +1022,7 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
-    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed;
+    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.forceable = forceable;
     if (opts) def.qos = opts->qos;
     if (dart_transport_topic_define(n->transport, idx, &def) != 0){
         if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
@@ -1059,14 +1059,14 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
 
 DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
                                       const DartSchema *schema, const DartTopicOpts *opts){
-    return i_dart_node_create_impl(n, name, role, schema, opts, DART_KIND_TOPIC, 0, 0, NULL, NULL, 0);
+    return i_dart_node_create_impl(n, name, role, schema, opts, DART_KIND_TOPIC, 0, 0, 0, NULL, NULL, 0);
 }
 
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn on_msg, void *on_msg_user){
-    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed,
+    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, forceable,
                                    on_msg, on_msg_user, 1);
 }
 

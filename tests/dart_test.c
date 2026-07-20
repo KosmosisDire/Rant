@@ -3178,15 +3178,15 @@ static void patterns_checks(void){
       ps = dart_node_peers(C, &pc);
       if (ps && pc) pid = ps[0].id;
       { DartEntityIter eit; DartEntityInfo ei;
-        int fns=0,vars=0,sigs=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0; size_t k;
+        int fns=0,vars=0,sigs=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
         memset(&eit,0,sizeof eit);
         while (dart_node_peer_entity_next(C, pid, &eit, &ei)){
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
                 vars++;
-                if (ei.name.len==4 && !memcmp(ei.name.data,"temp",4))  temp_rw  = ei.writable;
-                if (ei.name.len==5 && !memcmp(ei.name.data,"rovar",5)) rovar_ro = !ei.writable;
+                if (ei.name.len==4 && !memcmp(ei.name.data,"temp",4)) { temp_rw  = ei.writable; temp_forceable = ei.forceable; }
+                if (ei.name.len==5 && !memcmp(ei.name.data,"rovar",5)){ rovar_ro = !ei.writable; rovar_forceable = ei.forceable; }
                 break;
             case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
@@ -3197,18 +3197,24 @@ static void patterns_checks(void){
         ST_CHECK(fns==5 && vars==4 && sigs==2 && tops==0,
                  "reflect: peer entities fold (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
         ST_CHECK(ats==0 && inc==0, "reflect: no internals leak (@bytes=%d incomplete=%d)", ats, inc);
-        ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro); }
-      { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,sigs=0,tops=0;
+        ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro);
+        ST_CHECK(temp_forceable==1 && rovar_forceable==0,
+                 "reflect: forceability (temp allow_force=%d, rovar=%d)", temp_forceable, rovar_forceable); }
+      { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,sigs=0,tops=0,temp_forceable=0;
         memset(&eit,0,sizeof eit);
         while (dart_node_entity_next(P, &eit, &ei)){
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
-            case DART_ENTITY_VARIABLE: vars++; break;
+            case DART_ENTITY_VARIABLE:
+                vars++;
+                if (ei.name.len==4 && !memcmp(ei.name.data,"temp",4)) temp_forceable = ei.forceable;
+                break;
             case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             } }
         ST_CHECK(fns==5 && vars==4 && sigs==2 && tops==0,
-                 "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops); } }
+                 "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
+        ST_CHECK(temp_forceable==1, "reflect: local forceability (temp allow_force=%d)", temp_forceable); } }
 
     { /* a reentrant set inside on_write publishes under the held lock, so it commits to
          transport history BEFORE the outer set's deferred send: the owner must SKIP the

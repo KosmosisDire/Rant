@@ -1067,6 +1067,8 @@ typedef struct {
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
     uint8_t  kind;     /* DartTopicKind; 0 = plain DART_KIND_TOPIC (the patterns layer sets the rest) */
+    uint8_t  forceable; /* patterns aux flag ridden in interest bit 6 (the variable value channel sets it
+                           when the owner permits force); opaque to the transport, 0 = plain topic. */
     uint8_t  prefix_bytes; /* pattern-header bytes prepended to every payload on this topic (the wire
                               carries hdr+payload as one message; the receiver splits at this offset and
                               validates the schema against the payload only). 0 = none. */
@@ -1300,6 +1302,7 @@ typedef struct {
                                topic yields twice, pub first, mirroring the old two-list walk) */
     uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
     uint8_t     kind;       /* the advertiser's DartTopicKind for this topic (0 = plain) */
+    uint8_t     forceable;  /* patterns aux flag (interest bit 6): the variable value channel's owner permits force */
     uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
 } DartTopicEntry;
 
@@ -2643,12 +2646,13 @@ typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns n
 typedef void     (*i_DartSysCloseFn)(void *user);   /* node closing: settle outstanding promises */
 
 /* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
- * per-payload prefix, and the directed flag, permits '@' in the name (reserved for pattern
- * channels), and routes this topic's deliveries to on_msg (may be NULL) instead of the
- * node's on_message. Never queued. Returns a handle or NULL. */
+ * per-payload prefix, the directed flag, and the forceable aux flag (advertised in interest
+ * bit 6), permits '@' in the name (reserved for pattern channels), and routes this topic's
+ * deliveries to on_msg (may be NULL) instead of the node's on_message. Never queued. Returns
+ * a handle or NULL. */
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn on_msg, void *on_msg_user);
 /* Publish hdr+payload on a pattern topic (broadcast to all matched subscribers). */
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
@@ -3177,6 +3181,8 @@ typedef struct {
     uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor / listener */
     uint8_t           reliable;    /* the primary channel's advertised reliability */
     uint8_t           writable;    /* VARIABLE: a @set channel is advertised alongside the value */
+    uint8_t           forceable;   /* VARIABLE: the owner permits force/unforce (allow_force); a
+                                      writable variable without it silently absorbs force ops */
     uint8_t           incomplete;  /* a pattern half-pair (partner channel missing or not yet
                                       identifiable): surfaced, never silently dropped */
     uint16_t          index;       /* the primary channel's index at the peer (the key for the
@@ -5272,6 +5278,7 @@ static inline uint64_t i_dart_fnv1a64_str(const char *s){
 #define DART__INT_RELIABLE  0x04u /* bit 2: offered (pub) / requested (sub) reliability */
 #define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
 #define DART__INT_KIND_SHIFT 3u
+#define DART__INT_FORCEABLE 0x40u /* bit 6: a per-topic patterns flag (variable value channel: owner permits force) */
 #ifdef DART_SHM
 #ifndef DART_SHM_MAX_RETRY
 #define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
@@ -5426,6 +5433,7 @@ typedef struct {
     uint16_t  max_frags;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   kind;         /* DartTopicKind: gates matching (same kind only) */
+    uint8_t   forceable;    /* patterns aux flag advertised in interest bit 6 (variable value channel: owner permits force) */
     uint8_t   prefix_bytes; /* pattern-header bytes in front of each payload (0 = plain) */
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
@@ -6955,6 +6963,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                 topic->qos=q; topic->max_frags=max_frags;
                 topic->role=def->role; topic->dynamic=(uint8_t)dyn;
                 topic->kind=def->kind; topic->prefix_bytes=def->prefix_bytes; topic->directed=def->directed;
+                topic->forceable=def->forceable;
                 topic->identity = dart_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
                 topic->name_len = (uint8_t)lane;
@@ -7493,7 +7502,8 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
         i_dart_le_w32(e, topic->name_len ? (uint32_t)topic->identity : 0u);
         e[4] = (uint8_t)((role & DART__INT_ROLE_MASK)
              | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u)
-             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u));
+             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u)
+             | (topic->name_len && topic->forceable ? DART__INT_FORCEABLE : 0u));
     }
     return 2u + 5u*(size_t)n;
 }
@@ -7705,6 +7715,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
         out->role     = role;
         out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
+        out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
         out->hash     = i_dart_le_r32(meta.data + off);
         if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
             out->is_pub = 1;
@@ -8023,6 +8034,7 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     topic->qos = q; topic->max_frags = i_dart_max_frags(q.max_message_bytes);
     topic->role = def->role;
     topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
+    topic->forceable = def->forceable;
     topic->identity = dart_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;
@@ -11737,7 +11749,7 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
  * permits the reserved '@' in the name (public topics may not use it). */
 static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
     if (!n || !name) return NULL;
@@ -11765,7 +11777,7 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
-    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed;
+    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.forceable = forceable;
     if (opts) def.qos = opts->qos;
     if (dart_transport_topic_define(n->transport, idx, &def) != 0){
         if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
@@ -11802,14 +11814,14 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
 
 DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
                                       const DartSchema *schema, const DartTopicOpts *opts){
-    return i_dart_node_create_impl(n, name, role, schema, opts, DART_KIND_TOPIC, 0, 0, NULL, NULL, 0);
+    return i_dart_node_create_impl(n, name, role, schema, opts, DART_KIND_TOPIC, 0, 0, 0, NULL, NULL, 0);
 }
 
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn on_msg, void *on_msg_user){
-    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed,
+    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, forceable,
                                    on_msg, on_msg_user, 1);
 }
 
@@ -13172,11 +13184,11 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 
     memcpy(rn, name, nl); memcpy(rn + nl, "@req", 5);   /* NUL included */
     fn->req = i_dart_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
-                              DART_KIND_FUNC_REQ, DART__FN_PREFIX, 0, req_cb, fn);
+                              DART_KIND_FUNC_REQ, DART__FN_PREFIX, 0, 0, req_cb, fn);
     if (!fn->req) return NULL;   /* fn stays pool-allocated: nothing routes into it yet */
     memcpy(rn + nl, "@rsp", 5);
     fn->rsp = i_dart_node_create_pattern_topic(n, rn, rsp_role, rsp_schema, &topt,
-                              DART_KIND_FUNC_RSP, DART__FN_PREFIX, 1 /*directed*/, rsp_cb, fn);
+                              DART_KIND_FUNC_RSP, DART__FN_PREFIX, 1 /*directed*/, 0, rsp_cb, fn);
     if (!fn->rsp){
         /* Partial create: topics cannot be destroyed and fn->req still ROUTES deliveries to
            fn, so the handle must stay allocated (the pool reclaims it at close). Deactivate
@@ -13554,12 +13566,13 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
 
     v->value = i_dart_node_create_pattern_topic(n, name, owner ? DART_PUB_ONLY : DART_SUB_ONLY,
                               schema, &vopt, DART_KIND_VARIABLE, DART__VAR_PREFIX, 0,
+                              (uint8_t)(owner && v->allow_force),   /* owner advertises whether force is permitted */
                               owner ? NULL : i_dart_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool-allocated: nothing routes into it yet */
     if (make_set){
         memcpy(sn, name, nl); memcpy(sn + nl, "@set", 5);
         v->set = i_dart_node_create_pattern_topic(n, sn, owner ? DART_SUB_ONLY : DART_PUB_ONLY,
-                              schema, &sopt, DART_KIND_VAR_SET, DART__SET_PREFIX, 0,
+                              schema, &sopt, DART_KIND_VAR_SET, DART__SET_PREFIX, 0, 0,
                               owner ? i_dart_var_on_set : NULL, v);
         if (!v->set){
             /* partial create: the value topic may route to v (accessor side), so keep the
@@ -13762,7 +13775,7 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     i_dart_node_sys_unlock(n, acquired);
     if (!s) return NULL;
     s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
+                              DART_KIND_SIGNAL, 0, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
     if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
     acquired = i_dart_node_sys_lock(n);
     s->next = pm->sigs; pm->sigs = s;
@@ -14020,6 +14033,7 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
     out->hash = e->hash;
     out->provides = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_PUB_ONLY);
     out->consumes = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_SUB_ONLY);
+    out->forceable = e->forceable;   /* variable value channel: the owner advertised allow_force */
     out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
 }
 
@@ -14146,6 +14160,7 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             out->provides = v->is_owner; out->consumes = (uint8_t)!v->is_owner;
             out->reliable = 1;
             out->writable = (uint8_t)(v->is_owner ? !v->readonly : 1);
+            out->forceable = (uint8_t)(v->is_owner && v->allow_force);
             out->index = dart_topic_index(v->value);
             out->schema = dart_topic_schema(v->value);
             return 1;

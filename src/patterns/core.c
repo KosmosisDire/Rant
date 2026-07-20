@@ -220,11 +220,11 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 
     memcpy(rn, name, nl); memcpy(rn + nl, "@req", 5);   /* NUL included */
     fn->req = i_dart_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
-                              DART_KIND_FUNC_REQ, DART__FN_PREFIX, 0, req_cb, fn);
+                              DART_KIND_FUNC_REQ, DART__FN_PREFIX, 0, 0, req_cb, fn);
     if (!fn->req) return NULL;   /* fn stays pool-allocated: nothing routes into it yet */
     memcpy(rn + nl, "@rsp", 5);
     fn->rsp = i_dart_node_create_pattern_topic(n, rn, rsp_role, rsp_schema, &topt,
-                              DART_KIND_FUNC_RSP, DART__FN_PREFIX, 1 /*directed*/, rsp_cb, fn);
+                              DART_KIND_FUNC_RSP, DART__FN_PREFIX, 1 /*directed*/, 0, rsp_cb, fn);
     if (!fn->rsp){
         /* Partial create: topics cannot be destroyed and fn->req still ROUTES deliveries to
            fn, so the handle must stay allocated (the pool reclaims it at close). Deactivate
@@ -602,12 +602,13 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
 
     v->value = i_dart_node_create_pattern_topic(n, name, owner ? DART_PUB_ONLY : DART_SUB_ONLY,
                               schema, &vopt, DART_KIND_VARIABLE, DART__VAR_PREFIX, 0,
+                              (uint8_t)(owner && v->allow_force),   /* owner advertises whether force is permitted */
                               owner ? NULL : i_dart_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool-allocated: nothing routes into it yet */
     if (make_set){
         memcpy(sn, name, nl); memcpy(sn + nl, "@set", 5);
         v->set = i_dart_node_create_pattern_topic(n, sn, owner ? DART_SUB_ONLY : DART_PUB_ONLY,
-                              schema, &sopt, DART_KIND_VAR_SET, DART__SET_PREFIX, 0,
+                              schema, &sopt, DART_KIND_VAR_SET, DART__SET_PREFIX, 0, 0,
                               owner ? i_dart_var_on_set : NULL, v);
         if (!v->set){
             /* partial create: the value topic may route to v (accessor side), so keep the
@@ -810,7 +811,7 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     i_dart_node_sys_unlock(n, acquired);
     if (!s) return NULL;
     s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
+                              DART_KIND_SIGNAL, 0, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
     if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
     acquired = i_dart_node_sys_lock(n);
     s->next = pm->sigs; pm->sigs = s;
@@ -1068,6 +1069,7 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
     out->hash = e->hash;
     out->provides = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_PUB_ONLY);
     out->consumes = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_SUB_ONLY);
+    out->forceable = e->forceable;   /* variable value channel: the owner advertised allow_force */
     out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
 }
 
@@ -1194,6 +1196,7 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             out->provides = v->is_owner; out->consumes = (uint8_t)!v->is_owner;
             out->reliable = 1;
             out->writable = (uint8_t)(v->is_owner ? !v->readonly : 1);
+            out->forceable = (uint8_t)(v->is_owner && v->allow_force);
             out->index = dart_topic_index(v->value);
             out->schema = dart_topic_schema(v->value);
             return 1;

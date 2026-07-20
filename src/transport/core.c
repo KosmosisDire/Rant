@@ -185,6 +185,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                 topic->qos=q; topic->max_frags=max_frags;
                 topic->role=def->role; topic->dynamic=(uint8_t)dyn;
                 topic->kind=def->kind; topic->prefix_bytes=def->prefix_bytes; topic->directed=def->directed;
+                topic->forceable=def->forceable;
                 topic->identity = dart_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
                 topic->name_len = (uint8_t)lane;
@@ -723,7 +724,8 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
         i_dart_le_w32(e, topic->name_len ? (uint32_t)topic->identity : 0u);
         e[4] = (uint8_t)((role & DART__INT_ROLE_MASK)
              | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u)
-             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u));
+             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u)
+             | (topic->name_len && topic->forceable ? DART__INT_FORCEABLE : 0u));
     }
     return 2u + 5u*(size_t)n;
 }
@@ -935,6 +937,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
         out->role     = role;
         out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
+        out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
         out->hash     = i_dart_le_r32(meta.data + off);
         if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
             out->is_pub = 1;
@@ -1253,6 +1256,7 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     topic->qos = q; topic->max_frags = i_dart_max_frags(q.max_message_bytes);
     topic->role = def->role;
     topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
+    topic->forceable = def->forceable;
     topic->identity = dart_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;

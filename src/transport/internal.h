@@ -39,6 +39,7 @@
 #define DART__INT_RELIABLE  0x04u /* bit 2: offered (pub) / requested (sub) reliability */
 #define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
 #define DART__INT_KIND_SHIFT 3u
+#define DART__INT_FORCEABLE 0x40u /* bit 6: a per-topic patterns flag (variable value channel: owner permits force) */
 #ifdef DART_SHM
 #ifndef DART_SHM_MAX_RETRY
 #define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
@@ -193,6 +194,7 @@ typedef struct {
     uint16_t  max_frags;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   kind;         /* DartTopicKind: gates matching (same kind only) */
+    uint8_t   forceable;    /* patterns aux flag advertised in interest bit 6 (variable value channel: owner permits force) */
     uint8_t   prefix_bytes; /* pattern-header bytes in front of each payload (0 = plain) */
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
