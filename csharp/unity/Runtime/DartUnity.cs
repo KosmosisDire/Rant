@@ -55,21 +55,18 @@ namespace Dart
         public MessageInfo(string sender, ulong recvUs) { Sender = sender; RecvUs = recvUs; }
     }
 
-    /// <summary>A live subscription: Dispose() unsubscribes. Owner-bound
-    /// subscriptions dispose themselves when the owner is destroyed.</summary>
+    /// <summary>A live subscription (to a topic, signal, or variable observer):
+    /// Dispose() unsubscribes. Owner-bound subscriptions dispose themselves when the
+    /// owner is destroyed.</summary>
     public sealed class DartSubscription : IDisposable
     {
-        private DartTopicBase _topic;
-        private DartTopicBase.Sub _sub;
-        internal DartSubscription(DartTopicBase topic, DartTopicBase.Sub sub)
-        {
-            _topic = topic; _sub = sub;
-        }
+        private Action _unsub;
+        internal DartSubscription(Action unsub) { _unsub = unsub; }
         public void Dispose()
         {
-            if (_topic == null) return;
-            _topic.RemoveSub(_sub);
-            _topic = null; _sub = null;
+            Action u = _unsub;
+            _unsub = null;
+            if (u != null) u();
         }
     }
 
@@ -162,7 +159,7 @@ namespace Dart
             var s = new Sub { Fn = fn, Owner = owner, HasOwner = hasOwner };
             _subs.Add(s); _live++;
             ApplyRole();
-            return new DartSubscription(this, s);
+            return new DartSubscription(() => RemoveSub(s));
         }
 
         internal void RemoveSub(Sub s)

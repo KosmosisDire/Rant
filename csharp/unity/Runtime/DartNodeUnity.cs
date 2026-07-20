@@ -16,6 +16,7 @@
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using UnityEngine;
 
 namespace Dart
@@ -51,10 +52,15 @@ namespace Dart
         private bool _configDirty;
         private int _frame;
         private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
+        private readonly Dictionary<string, DartPatternEntity> _patterns = new Dictionary<string, DartPatternEntity>();
         private readonly Dictionary<ushort, DartTopicBase> _byIndex = new Dictionary<ushort, DartTopicBase>();
         private readonly List<DartEvent> _pending = new List<DartEvent>();   // service thread -> main
         private readonly List<DartEvent> _drain = new List<DartEvent>();
         private readonly object _pendingLock = new object();
+        private readonly List<Action> _mainActions = new List<Action>();     // pattern callbacks -> main
+        private readonly List<Action> _mainDrain = new List<Action>();
+        private readonly object _mainLock = new object();
+        private int _mainThreadId;
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
 
         /// <summary>The scene's DartNodeUnity (found lazily), or null if none exists.</summary>
@@ -96,14 +102,29 @@ namespace Dart
                                       int catchUp = 0, int queueBytes = 0)
             => RequireMain().GetTopic(name, reliable, keepLast, catchUp, queueBytes);
 
-        /// <summary>One-liner subscribe on the scene node.</summary>
-        public static DartSubscription Subscribe<T>(string name, Action<T> handler)
-            => Topic<T>(name).Subscribe(handler);
+        /// <summary>One-liner subscribe on the scene node. The reliability applies only if
+        /// this is the first request for the topic (first request sets its QoS).</summary>
+        public static DartSubscription Subscribe<T>(string name, Action<T> handler, bool reliable = true)
+            => Topic<T>(name, reliable).Subscribe(handler);
 
         /// <summary>One-liner owner-bound subscribe: dies with owner, skipped while
         /// it is disabled.</summary>
-        public static DartSubscription Subscribe<T>(string name, Component owner, Action<T> handler)
-            => Topic<T>(name).Subscribe(owner, handler);
+        public static DartSubscription Subscribe<T>(string name, Component owner, Action<T> handler,
+                                                    bool reliable = true)
+            => Topic<T>(name, reliable).Subscribe(owner, handler);
+
+        /// <summary>One-liner publish on the scene node (creates/shares the topic by name).
+        /// The reliability applies only if this is the first request for the topic.</summary>
+        public static SendStatus Publish<T>(string name, T message, bool reliable = true)
+            => RequireMain().GetTopic<T>(name, reliable).Publish(message);
+
+        /// <summary>One-liner raw (bytes) publish.</summary>
+        public static SendStatus Publish(string name, byte[] data, bool reliable = true)
+            => RequireMain().GetTopic(name, reliable).Publish(data);
+
+        /// <summary>One-liner raw (UTF-8 string) publish.</summary>
+        public static SendStatus Publish(string name, string text, bool reliable = true)
+            => RequireMain().GetTopic(name, reliable).Publish(text);
 
         /// <summary>Instance form of the static Topic&lt;T&gt;().</summary>
         public DartTopic<T> GetTopic<T>(string name, bool reliable = true, int keepLast = 0,
@@ -178,10 +199,94 @@ namespace Dart
             return e;
         }
 
+        // ---- patterns: signals / variables / functions ----------------------------
+
+        /// <summary>The scene-shared signal named <paramref name="name"/> (N emitters /
+        /// N listeners, never latched). Subscribe to listen, Emit to fire.</summary>
+        public static DartSignal<T> Signal<T>(string name)
+            => RequireMain().GetSignal<T>(name);
+
+        /// <summary>One-liner owner-bound signal subscribe.</summary>
+        public static DartSubscription OnSignal<T>(string name, Component owner, Action<T> handler)
+            => Signal<T>(name).Subscribe(owner, handler);
+
+        /// <summary>One-liner signal subscribe.</summary>
+        public static DartSubscription OnSignal<T>(string name, Action<T> handler)
+            => Signal<T>(name).Subscribe(handler);
+
+        /// <summary>One-liner emit on the scene node's signal named <paramref name="name"/>.</summary>
+        public static SendStatus Emit<T>(string name, T value)
+            => Signal<T>(name).Emit(value);
+
+        /// <summary>The scene-shared authoritative variable named <paramref name="name"/>
+        /// (this node owns the value). One side per node: asking for a RemoteVariable of the
+        /// same name throws.</summary>
+        public static DartVariableDefinition<T> VariableDefinition<T>(string name,
+                bool readOnly = false, bool allowForce = false, int catchUp = 0)
+            => RequireMain().GetVariableDefinition<T>(name, readOnly, allowForce, catchUp);
+
+        /// <summary>The scene-shared reference to a variable owned by another node.</summary>
+        public static DartRemoteVariable<T> RemoteVariable<T>(string name, int catchUp = 0)
+            => RequireMain().GetRemoteVariable<T>(name, catchUp);
+
+        /// <summary>The scene-shared function definition (this node implements it; ONE per
+        /// name on the network). The handler runs on the main thread.</summary>
+        public static DartFunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(
+                string name, Func<TReq, TRsp> handler)
+            => RequireMain().GetFunctionDefinition<TReq, TRsp>(name, handler);
+
+        /// <summary>The scene-shared reference to a function defined on another node.</summary>
+        public static DartRemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
+            => RequireMain().GetRemoteFunction<TReq, TRsp>(name);
+
+        public DartSignal<T> GetSignal<T>(string name)
+            => GetOrCreatePattern("sig:", name, () => new DartSignal<T>(this, name));
+
+        public DartVariableDefinition<T> GetVariableDefinition<T>(string name,
+                bool readOnly = false, bool allowForce = false, int catchUp = 0)
+            => GetOrCreatePattern("var:", name,
+                   () => new DartVariableDefinition<T>(this, name, readOnly, allowForce, catchUp));
+
+        public DartRemoteVariable<T> GetRemoteVariable<T>(string name, int catchUp = 0)
+            => GetOrCreatePattern("var:", name, () => new DartRemoteVariable<T>(this, name, catchUp));
+
+        public DartFunctionDefinition<TReq, TRsp> GetFunctionDefinition<TReq, TRsp>(
+                string name, Func<TReq, TRsp> handler)
+            => GetOrCreatePattern("fn:", name,
+                   () => new DartFunctionDefinition<TReq, TRsp>(this, name, handler));
+
+        public DartRemoteFunction<TReq, TRsp> GetRemoteFunction<TReq, TRsp>(string name)
+            => GetOrCreatePattern("fn:", name, () => new DartRemoteFunction<TReq, TRsp>(this, name));
+
+        // Share a pattern handle by (kind, name): the first request builds it (and creates
+        // the native object now if the node is open), later ones return it, and a mismatched
+        // kind/type on the same name is a hard error (as for topics).
+        private TEntity GetOrCreatePattern<TEntity>(string kind, string name, Func<TEntity> make)
+            where TEntity : DartPatternEntity
+        {
+            if (string.IsNullOrEmpty(name)) throw new ArgumentException("pattern name required", nameof(name));
+            string key = kind + name;
+            DartPatternEntity have;
+            if (_patterns.TryGetValue(key, out have))
+            {
+                var typed = have as TEntity;
+                if (typed == null)
+                    throw new InvalidOperationException("'" + name + "' already exists as "
+                        + have.GetType().Name + ", requested as " + typeof(TEntity).Name
+                        + ": one name = one kind/type per node");
+                return typed;
+            }
+            TEntity created = make();
+            _patterns.Add(key, created);
+            created.OnNodeOpened();   // create the native object now if the node is already open
+            return created;
+        }
+
         // ---- lifecycle ------------------------------------------------------------
 
         private void OnEnable()
         {
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             if (s_main != null && s_main != this)
             {
                 Debug.LogWarning("[DART] a DartNodeUnity already exists on '" + s_main.gameObject.name
@@ -262,16 +367,19 @@ namespace Dart
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
             _pollFallback = !_node.Start();     // DART_NO_THREADS builds: pump polls
             foreach (DartTopicBase ch in _topics.Values) ch.OnNodeOpened();
+            foreach (DartPatternEntity p in _patterns.Values) p.OnNodeOpened();
         }
 
         private void CloseNativeNode()
         {
             if (_node == null) return;
             foreach (DartTopicBase ch in _topics.Values) ch.OnNodeClosed();
+            foreach (DartPatternEntity p in _patterns.Values) p.OnNodeClosed();
             lock (_byIndex) _byIndex.Clear();
             _node.Close();
             _node = null;
             lock (_pendingLock) _pending.Clear();
+            lock (_mainLock) _mainActions.Clear();
         }
 
         // ---- per-frame pump ---------------------------------------------------------
@@ -283,13 +391,49 @@ namespace Dart
             DrainEvents();
             if (_pollFallback) _node.Poll(0);
             _node.Dispatch();                   // every queued topic -> this thread
+            DrainMainActions();                 // pattern callbacks parked by the service thread
             if ((++_frame & 0xFF) == 0)
+            {
                 foreach (DartTopicBase ch in _topics.Values) ch.PruneDeadOwners();
+                foreach (DartPatternEntity p in _patterns.Values) p.PruneDeadOwners();
+            }
         }
 
         internal void RegisterIndex(ushort index, DartTopicBase ch)
         {
             lock (_byIndex) _byIndex[index] = ch;
+        }
+
+        // Pattern callbacks fire on the service thread; hand them to the frame. When we are
+        // already on the main thread (poll fallback, or the core's synchronous OnChange
+        // replay at registration) run inline so ordering is preserved.
+        internal bool OnMainThread => Thread.CurrentThread.ManagedThreadId == _mainThreadId;
+
+        internal void Post(Action a)
+        {
+            lock (_mainLock) { if (_mainActions.Count < 4096) _mainActions.Add(a); }
+        }
+
+        internal void RunOnMain(Action a)
+        {
+            if (OnMainThread) a();
+            else Post(a);
+        }
+
+        private void DrainMainActions()
+        {
+            lock (_mainLock)
+            {
+                if (_mainActions.Count == 0) return;
+                _mainDrain.AddRange(_mainActions);
+                _mainActions.Clear();
+            }
+            for (int i = 0; i < _mainDrain.Count; i++)
+            {
+                try { _mainDrain[i](); }
+                catch (Exception e) { Debug.LogException(e); }
+            }
+            _mainDrain.Clear();
         }
 
         // Runs on whichever thread dispatches. Our topics are all queued, so this
