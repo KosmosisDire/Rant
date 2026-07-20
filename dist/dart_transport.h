@@ -750,17 +750,24 @@ size_t    dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
                        const DartDetailWant *wants, uint16_t n_wants,
                        void *out, size_t cap);
 
-/* Exact bytes a full (untruncated) response to req takes, for sizing the buffer; 0 if
- * req is malformed. Same walk as dart_transport_detail_respond, byte for byte. */
+/* Bytes ONE response PAGE to req takes, for sizing the buffer; 0 if req is malformed.
+ * Same walk as dart_transport_detail_respond, byte for byte: the response is capped to a
+ * single un-fragmented datagram (DART_DGRAM_MAX) so it never IP-fragments, and the
+ * requester re-asks for the indices that did not fit (paging). At least one entry is always
+ * included, so a lone entry larger than a datagram rides its own (fragmenting) page rather
+ * than wedging paging -- size the buffer to the returned value, which may exceed
+ * DART_DGRAM_MAX only in that case. */
 size_t    dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
                        DartBytes req);
 /* Answer req into out[cap]: one entry per requested index this st currently advertises
  * (unknown/INACTIVE indices are skipped), the schema wire inlined only where the
  * request's hash differs from ours. schemas is the same per-topic array
  * dart_transport_meta_build takes (or NULL). meta_version stamps the response (pass the
- * current announce version). Fills what fits, truncating at an entry boundary (the
- * requester re-requests the rest). Returns bytes written; 0 = malformed req or cap
- * cannot hold the header. Does NOT check the domain: that is the caller's. */
+ * current announce version). Fills ONE datagram, truncating at an entry boundary (the
+ * requester re-requests the rest); at least one entry is always emitted, so a lone
+ * over-a-datagram entry rides its own page. Size cap via dart_transport_detail_resp_size.
+ * Returns bytes written; 0 = malformed req or cap cannot hold the header. Does NOT check
+ * the domain: that is the caller's. */
 size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,
                        uint32_t meta_version, DartBytes req, void *out, size_t cap);
 
@@ -5362,9 +5369,14 @@ static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema 
         if (hash && hash != req_hash && schemas[index].wire.len <= 0xFFFFu)
             wire = schemas[index].wire;    /* differs: inline for the subset check */
         need = 2u + 1u + topic->name_len + 8u + 2u + wire.len;
+        /* One un-fragmented datagram per response: stop at cap, but ALWAYS include at least
+           one entry (n_out>0 gate) so a lone entry larger than a datagram rides its own
+           (fragmenting) page instead of wedging paging with an endless header-only reply.
+           Measure (out==NULL, cap=DART_DGRAM_MAX) and build (cap=the measured size) apply
+           the identical bound, so the sized buffer always holds exactly what is built. */
+        if (n_out > 0 && len + need > cap) break;
         if (out){
             uint8_t *e = out + len;
-            if (len + need > cap) break;
             i_dart_le_w16(e, index);
             e[2] = topic->name_len;
             memcpy(e+3, topic->name, topic->name_len);
@@ -5381,7 +5393,9 @@ static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema 
 
 size_t dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
                                        DartBytes req){
-    return i_dart_detail_answer(st, schemas, 0, req, NULL, 0);
+    /* ONE page (DART_DGRAM_MAX), so the response never IP-fragments; the requester pages
+       the rest. A lone entry over the cap is still measured whole (force-first above). */
+    return i_dart_detail_answer(st, schemas, 0, req, NULL, DART_DGRAM_MAX);
 }
 
 size_t dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,
@@ -7993,10 +8007,16 @@ DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, Da
     if (!c || !c->alloc || !c->discovery) return dart_bytes(NULL, 0);
     if (dart_detail_kind(req) != DART_DETAIL_REQ || dart_detail_domain(req) != domain)
         return dart_bytes(NULL, 0);
+    /* resp_size already returns ONE page: dart_transport_detail_respond truncates the
+       response at a single un-fragmented datagram (DART_DGRAM_MAX) and the requester pages
+       the remainder, reply-clocked (a page's arrival re-arms the next request at once; the
+       periodic rearm is only the lost-datagram fallback). This is why a big-topology peer
+       must NOT be answered in one multi-KB blob: that blob IP-fragments, and a peer whose
+       OS or RX buffer cannot reassemble it drops the WHOLE thing, so those entries could
+       never resolve while single (one-at-a-time) requests still worked. A lone entry larger
+       than a datagram still rides its own page, so a big schema can never wedge paging. */
     need = dart_transport_detail_resp_size(c->transport, c->chan_schemas, req);
     if (!need) return dart_bytes(NULL, 0);
-    if (need > 65000u) need = 65000u;   /* one datagram: the build truncates at an entry
-                                           boundary and the requester re-requests the rest */
     if (need > c->detail_cap){
         uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
         if (!nb) return dart_bytes(NULL, 0);

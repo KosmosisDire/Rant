@@ -688,10 +688,16 @@ DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, Da
     if (!c || !c->alloc || !c->discovery) return dart_bytes(NULL, 0);
     if (dart_detail_kind(req) != DART_DETAIL_REQ || dart_detail_domain(req) != domain)
         return dart_bytes(NULL, 0);
+    /* resp_size already returns ONE page: dart_transport_detail_respond truncates the
+       response at a single un-fragmented datagram (DART_DGRAM_MAX) and the requester pages
+       the remainder, reply-clocked (a page's arrival re-arms the next request at once; the
+       periodic rearm is only the lost-datagram fallback). This is why a big-topology peer
+       must NOT be answered in one multi-KB blob: that blob IP-fragments, and a peer whose
+       OS or RX buffer cannot reassemble it drops the WHOLE thing, so those entries could
+       never resolve while single (one-at-a-time) requests still worked. A lone entry larger
+       than a datagram still rides its own page, so a big schema can never wedge paging. */
     need = dart_transport_detail_resp_size(c->transport, c->chan_schemas, req);
     if (!need) return dart_bytes(NULL, 0);
-    if (need > 65000u) need = 65000u;   /* one datagram: the build truncates at an entry
-                                           boundary and the requester re-requests the rest */
     if (need > c->detail_cap){
         uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
         if (!nb) return dart_bytes(NULL, 0);

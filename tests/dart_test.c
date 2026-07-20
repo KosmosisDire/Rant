@@ -2179,6 +2179,102 @@ static void detail_codec_checks(void){
     dart_allocator_reset(&ma);
 }
 
+/* (19b2) detail paging never IP-fragments and never wedges. A big-topology peer answered
+   in one multi-KB datagram would IP-fragment, and a peer whose OS / RX buffer cannot
+   reassemble it drops the WHOLE thing -- so a response must fit ONE datagram and the
+   requester pages the rest. Two properties:
+     (a) many long-named typed topics resolve across several single-datagram pages, each
+         <= DART_DGRAM_MAX (proving both the cap and that paging converges), and
+     (b) a lone entry whose schema wire alone exceeds a datagram is still emitted (force
+         first), so it rides its own page instead of an endless header-only reply. */
+static void detail_paging_checks(void){
+#define DP_N 40
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartConfig tc; DartTransportState *tr; DartMetaSchema schemas[DP_N]; DartSchema *S;
+    DartDetailWant wants[DP_N]; uint8_t req[512], buf[DART_DGRAM_MAX + 8];
+    char names[DP_N][DART_TOPIC_NAME_MAX + 1];
+    int done[DP_N], i, rounds, resolved, max_page = 0;
+
+    S = dart_schema_compile(dart_allocator_alloc, &ma, "Pose { stamp: u64, x: f64, y: f64 }", NULL);
+    memset(&tc, 0, sizeof tc);
+    tc.topics = NULL; tc.n_topics = DP_N; tc.max_peers = 2; tc.allocator = dart_allocator_alloc; tc.user = &ma;
+    { size_t need = dart_transport_required_memory(&tc);       /* dynamic reserve mode */
+      void *mem = dart_allocator_alloc(&ma, NULL, need);
+      tr = mem ? dart_transport_init(mem, need, &tc) : NULL; }
+    ST_CHECK(tr != NULL && S != NULL, "detail-paging: transport + schema ready");
+    if (!tr || !S){ dart_allocator_reset(&ma); return; }
+
+    memset(schemas, 0, sizeof schemas);
+    for (i = 0; i < DP_N; i++){                          /* long names so entries are fat */
+        DartTopicDef d; memset(&d, 0, sizeof d);
+        snprintf(names[i], sizeof names[i],
+                 "paging.detail.regression.topic.with.a.long.name.%02d", i);
+        d.name = names[i]; d.role = DART_PUB_ONLY;
+        dart_transport_topic_define(tr, (uint16_t)i, &d);
+        schemas[i].hash = dart_schema_hash(S); schemas[i].wire = dart_schema_wire(S);
+    }
+
+    /* the requester's paging loop: ask for the still-unresolved indices, take one page,
+       mark what it carried, repeat -- exactly what dart_transport_detail_wants drives live */
+    memset(done, 0, sizeof done);
+    for (rounds = 0, resolved = 0; resolved < DP_N && rounds < DP_N; rounds++){
+        uint16_t nw = 0; size_t rl, page, len; DartDetailIter it; DartDetail dd; int got = 0;
+        for (i = 0; i < DP_N; i++) if (!done[i]){ wants[nw].index = (uint16_t)i; wants[nw].schema_hash = 0; nw++; }
+        rl = dart_detail_req_build(3, 1, wants, nw, req, sizeof req);
+        if (!rl) break;
+        page = dart_transport_detail_resp_size(tr, schemas, dart_bytes(req, rl));
+        if (page > (size_t)max_page) max_page = (int)page;
+        if (page > DART_DGRAM_MAX){ ST_CHECK(0, "detail-paging: a page exceeded one datagram (%u)", (unsigned)page); break; }
+        len = dart_transport_detail_respond(tr, schemas, 1, dart_bytes(req, rl), buf, page);
+        memset(&it, 0, sizeof it);
+        while (dart_detail_next(dart_bytes(buf, len), &it, &dd))
+            if (dd.index < DP_N && !done[dd.index]){ done[dd.index] = 1; resolved++; got++; }
+        if (!got) break;                                 /* no forward progress: wedged */
+    }
+    ST_CHECK(resolved == DP_N, "detail-paging: all %d entries resolved (%d)", DP_N, resolved);
+    ST_CHECK(rounds > 1, "detail-paging: it actually paged (%d single-datagram rounds)", rounds);
+    ST_CHECK(max_page > 0 && max_page <= DART_DGRAM_MAX,
+             "detail-paging: every page stayed within one datagram (max=%u)", (unsigned)max_page);
+    dart_allocator_reset(&ma);
+
+    /* (b) force-first: one topic whose schema wire alone exceeds a datagram. resp_size must
+       return the whole (over-a-datagram) entry, and respond must emit exactly it -- never a
+       header-only reply that would re-ask forever. */
+    {   DartAllocator mb = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+        DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &mb, "Big");
+        DartTransportState *t2; DartConfig c2; DartMetaSchema sc; DartDetailWant w; DartSchema *B;
+        DartTopicDef d; uint8_t rq[64], *big; size_t need2, rl2, page2, len2; int k;
+        for (k = 0; k < 200; k++){ char fn[16]; snprintf(fn, sizeof fn, "field%03d", k); dart_schema_field(&b, fn, DART_F64); }
+        B = dart_schema_finish(&b);
+        ST_CHECK(B && dart_schema_wire(B).len > DART_DGRAM_MAX,
+                 "detail-paging: built a schema wire over one datagram (%u)",
+                 (unsigned)(B ? dart_schema_wire(B).len : 0));
+        memset(&c2, 0, sizeof c2);
+        c2.topics = NULL; c2.n_topics = 1; c2.max_peers = 1; c2.allocator = dart_allocator_alloc; c2.user = &mb;
+        need2 = dart_transport_required_memory(&c2);
+        t2 = B ? dart_transport_init(dart_allocator_alloc(&mb, NULL, need2), need2, &c2) : NULL;
+        if (t2){
+            memset(&d, 0, sizeof d); d.name = "big/schema"; d.role = DART_PUB_ONLY;
+            dart_transport_topic_define(t2, 0, &d);
+            memset(&sc, 0, sizeof sc); sc.hash = dart_schema_hash(B); sc.wire = dart_schema_wire(B);
+            w.index = 0; w.schema_hash = 0;              /* requester untyped: forces the wire inline */
+            rl2 = dart_detail_req_build(3, 1, &w, 1, rq, sizeof rq);
+            page2 = dart_transport_detail_resp_size(t2, &sc, dart_bytes(rq, rl2));
+            ST_CHECK(page2 > DART_DGRAM_MAX, "detail-paging: the oversize entry is measured whole (%u)", (unsigned)page2);
+            big = (uint8_t*)dart_allocator_alloc(&mb, NULL, page2 + 8);
+            len2 = big ? dart_transport_detail_respond(t2, &sc, 1, dart_bytes(rq, rl2), big, page2) : 0;
+            {   DartDetailIter it; DartDetail dd; int n = 0; uint64_t h = 0;
+                memset(&it, 0, sizeof it);
+                while (big && dart_detail_next(dart_bytes(big, len2), &it, &dd)){ n++; h = dd.schema_hash; }
+                ST_CHECK(n == 1 && h == dart_schema_hash(B),
+                         "detail-paging: the lone oversize entry rides its own page (n=%d)", n);
+            }
+        } else ST_CHECK(0, "detail-paging: force-first transport ready");
+        dart_allocator_reset(&mb);
+    }
+#undef DP_N
+}
+
 /* (19c) live 'uDTL' routing: a DETAIL_REQ at a node's data socket is answered to the
    request's SOURCE address even though the requester is a bare socket, never a peer
    (the stateless-responder contract the explorer will rely on). The peer's v9 announce
@@ -3860,6 +3956,7 @@ static int selftest_main(void){
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
+    detail_paging_checks();       /* 19b2. detail paging fits one datagram + never wedges (force-first) */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
     patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */

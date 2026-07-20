@@ -1089,9 +1089,14 @@ static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema 
         if (hash && hash != req_hash && schemas[index].wire.len <= 0xFFFFu)
             wire = schemas[index].wire;    /* differs: inline for the subset check */
         need = 2u + 1u + topic->name_len + 8u + 2u + wire.len;
+        /* One un-fragmented datagram per response: stop at cap, but ALWAYS include at least
+           one entry (n_out>0 gate) so a lone entry larger than a datagram rides its own
+           (fragmenting) page instead of wedging paging with an endless header-only reply.
+           Measure (out==NULL, cap=DART_DGRAM_MAX) and build (cap=the measured size) apply
+           the identical bound, so the sized buffer always holds exactly what is built. */
+        if (n_out > 0 && len + need > cap) break;
         if (out){
             uint8_t *e = out + len;
-            if (len + need > cap) break;
             i_dart_le_w16(e, index);
             e[2] = topic->name_len;
             memcpy(e+3, topic->name, topic->name_len);
@@ -1108,7 +1113,9 @@ static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema 
 
 size_t dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
                                        DartBytes req){
-    return i_dart_detail_answer(st, schemas, 0, req, NULL, 0);
+    /* ONE page (DART_DGRAM_MAX), so the response never IP-fragments; the requester pages
+       the rest. A lone entry over the cap is still measured whole (force-first above). */
+    return i_dart_detail_answer(st, schemas, 0, req, NULL, DART_DGRAM_MAX);
 }
 
 size_t dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,

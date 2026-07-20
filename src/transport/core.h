@@ -433,17 +433,24 @@ size_t    dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
                        const DartDetailWant *wants, uint16_t n_wants,
                        void *out, size_t cap);
 
-/* Exact bytes a full (untruncated) response to req takes, for sizing the buffer; 0 if
- * req is malformed. Same walk as dart_transport_detail_respond, byte for byte. */
+/* Bytes ONE response PAGE to req takes, for sizing the buffer; 0 if req is malformed.
+ * Same walk as dart_transport_detail_respond, byte for byte: the response is capped to a
+ * single un-fragmented datagram (DART_DGRAM_MAX) so it never IP-fragments, and the
+ * requester re-asks for the indices that did not fit (paging). At least one entry is always
+ * included, so a lone entry larger than a datagram rides its own (fragmenting) page rather
+ * than wedging paging -- size the buffer to the returned value, which may exceed
+ * DART_DGRAM_MAX only in that case. */
 size_t    dart_transport_detail_resp_size(DartTransportState *st, const DartMetaSchema *schemas,
                        DartBytes req);
 /* Answer req into out[cap]: one entry per requested index this st currently advertises
  * (unknown/INACTIVE indices are skipped), the schema wire inlined only where the
  * request's hash differs from ours. schemas is the same per-topic array
  * dart_transport_meta_build takes (or NULL). meta_version stamps the response (pass the
- * current announce version). Fills what fits, truncating at an entry boundary (the
- * requester re-requests the rest). Returns bytes written; 0 = malformed req or cap
- * cannot hold the header. Does NOT check the domain: that is the caller's. */
+ * current announce version). Fills ONE datagram, truncating at an entry boundary (the
+ * requester re-requests the rest); at least one entry is always emitted, so a lone
+ * over-a-datagram entry rides its own page. Size cap via dart_transport_detail_resp_size.
+ * Returns bytes written; 0 = malformed req or cap cannot hold the header. Does NOT check
+ * the domain: that is the caller's. */
 size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSchema *schemas,
                        uint32_t meta_version, DartBytes req, void *out, size_t cap);
 
