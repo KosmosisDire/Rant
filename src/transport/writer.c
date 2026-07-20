@@ -397,6 +397,12 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
     uint16_t index = i_dart_wire_index_of(st, topic_index);
     if (!w || !w->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: nothing to emit */
 
+    /* a FIRE-AND-FORGET lane (best-effort reader, not a directed topic) carries its own
+       per-peer wire seqno = sent_upto - wire_skip, so its reader's loss detection counts
+       only what was meant for IT. Reliable/directed lanes keep the shared global line
+       (repair + directed skip-HB both index history by the global seqno). */
+    int per_lane = (!w->reader_reliable && !topic->directed);
+
     /* directed: derive any owed skips before deciding what to emit (this is also where a
        lane that was dormant during directed sends catches up after resume) */
     i_dart_writer_lane_advance(topic, w, (uint32_t)peer_slot);
@@ -483,6 +489,23 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
     if (w->sent_upto < topic->next_seqno){
         uint64_t seqno=w->sent_upto;
         i_DartWriterSample *s=i_dart_sample_find(topic,seqno);
+        /* RATE THROTTLE (fire-and-forget lanes), at a sample BOUNDARY only -- once a message's
+           first fragment goes out we finish it. A throttled lane only ever HOLDS at a boundary
+           (it sends a whole sample per tick), so a NULL s here means the sample we were about to
+           start evicted while we held: still a boundary. Before the tick, hold (i_dart_lane_work
+           gates on the same clock so this can't spin; the sweep re-wakes at rate_next_us). At the
+           tick, DECIMATE to the newest sample (always in history): wire_skip absorbs the skipped
+           older ones so the reader sees no gap, while a dropped SENT sample still shows as one. */
+        if (per_lane && w->rate_interval_us && (!s || seqno == s->base)){
+            if (now < w->rate_next_us){ i_dart_transport_arm_deadline(st, w->rate_next_us); return 0; }
+            { i_DartWriterSample *newest = i_dart_sample_find(topic, topic->next_seqno - 1);
+              if (newest && newest->base > seqno){
+                  w->wire_skip += newest->base - seqno;      /* paced skip: no perceived loss */
+                  w->sent_upto = newest->base; seqno = w->sent_upto; s = newest;
+              } }
+            w->rate_next_us = now + w->rate_interval_us;
+            i_dart_transport_arm_deadline(st, w->rate_next_us);   /* next tick fires on time */
+        }
         if (s){
 #ifdef DART_SHM
             /* peer_shm is set at attach (before data flows), so sent_upto sits at a
@@ -492,7 +515,8 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
                 w->sent_upto = s->base + s->count;
                 if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
                     i_dart_writer_arm_tail(st, w, now);
-                return i_dart_wire_mk_shm(out,index,s->base,s->count,s->desc);
+                return i_dart_wire_mk_shm(out,index,per_lane ? s->base - w->wire_skip : s->base,
+                                          s->count,s->desc);
             }
 #endif
             {
@@ -504,11 +528,16 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             topic->repair_stats.frags_sent++;                       /* new data (unicast lane) */
             if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
                 i_dart_writer_arm_tail(st, w, now);              /* queue drained: fast tail HB */
-            return i_dart_wire_mk_data(out,index,seqno,s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
+            return i_dart_wire_mk_data(out,index,per_lane ? seqno - w->wire_skip : seqno,
+                                       s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
             }
         } else {
-            /* fell out of the ring before we sent it: skip the reader up to first
-               cached with an HB (its first = our floor) */
+            /* fell out of the ring before we sent it. A fire-and-forget lane just advances
+               past it: wire_skip is untouched, so the NEXT DATA's per-lane seqno jumps, and
+               the reader reads that gap as loss (an HB here would carry GLOBAL seqnos and
+               corrupt the lane-local reader). A reliable/directed lane skips its reader up to
+               first-cached with an HB (its first = our floor). */
+            if (per_lane){ w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno); return 0; }
             if (cap < DART_HEADER_HB) return 0;
             w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno);
             return i_dart_writer_hb(st,topic,w,index,out,cap,now);

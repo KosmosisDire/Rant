@@ -115,6 +115,15 @@ typedef struct {
                                     dispatch, capped at DART_QUEUE_CAP. The ring starts small and
                                     grows on demand to the cap, like the message buffers. The
                                     transport core itself ignores this field. */
+    uint16_t max_rate_hz;        /* SUBSCRIBER side, BEST-EFFORT only: cap delivery of this topic
+                                    from each publisher to this many samples/sec. The publisher
+                                    paces its fire-and-forget lane to us: it DECIMATES (sends the
+                                    NEWEST sample each tick and drops older un-sent ones at the
+                                    source, so less wire + reader work), while our per-peer wire
+                                    seqno keeps loss detection honest (a paced skip is not loss; a
+                                    dropped SENT sample still is). 0 = unlimited (full rate).
+                                    Advertised in the announce; ignored on a reliable topic and on
+                                    the publish side. Set at create (immutable per topic). */
 } DartQos;
 
 /* A topic. Cross-peer identity is the name (64-bit hash); the LOCAL

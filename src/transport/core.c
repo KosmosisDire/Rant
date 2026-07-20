@@ -462,6 +462,7 @@ static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t pee
     w->reader_reliable = i_dart_bit_get(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], c) ? 1u : 0u;
     w->sent_upto = i_dart_topic_unicast_join_seqno(topic);
     w->acked_upto = w->sent_upto;
+    w->wire_skip = w->sent_upto;   /* fire-and-forget wire seqno starts at 0 (see i_DartWriterProxy) */
     i_dart_lane_wake(st, c, peer_slot);   /* lane primed for new data + ack/hb */
 }
 
@@ -701,21 +702,38 @@ static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx
 
 
 /* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
- * one positional [u32 hash][u8 flags] entry per topic slot. */
+ * one positional [u32 hash][u8 flags] entry per topic slot, plus the worst-case rate
+ * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry). */
 size_t dart_interest_max(uint16_t n_topics){
-    return 2u + 5u * (size_t)n_topics;
+    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics;
+}
+
+/* subscriber topics carrying a best-effort rate cap: the count for the interest rate
+ * section (build + meta_size must agree byte for byte, so both go through here). n =
+ * the highest defined slot + 1 (the entry count), so this matches the entry walk. */
+static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
+    uint16_t c, r=0;
+    for (c=0;c<n;c++){
+        const i_DartTopic *t=&st->topics[c];
+        if (t->name_len && t->qos.max_rate_hz
+            && (t->role==DART_SUB_ONLY || t->role==DART_PUBSUB)) r++;
+    }
+    return r;
 }
 
 
 /* Serialize our interest into out: [u16 n], then one [u32 hash][u8 flags] entry per
  * topic IN INDEX ORDER up to the highest defined slot (position = index; an undefined
- * reserve slot rides as an INACTIVE hole so later indices stay stable). Returns bytes
+ * reserve slot rides as an INACTIVE hole so later indices stay stable), then a SPARSE
+ * rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics
+ * that cap their best-effort delivery rate (see DartQos.max_rate_hz). Returns bytes
  * written, or 0 if cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
-    uint8_t *o=(uint8_t*)out;
-    uint16_t c, n=0;
+    uint8_t *o=(uint8_t*)out, *rp;
+    uint16_t c, n=0, n_rates;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
-    if (cap < 2u + 5u*(size_t)n) return 0;
+    n_rates = i_dart_rate_count(st, n);
+    if (cap < 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates) return 0;
     i_dart_le_w16(o, n);
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
@@ -727,7 +745,16 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
              | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u)
              | (topic->name_len && topic->forceable ? DART__INT_FORCEABLE : 0u));
     }
-    return 2u + 5u*(size_t)n;
+    rp = o + 2u + 5u*(size_t)n;
+    i_dart_le_w16(rp, n_rates); rp += 2u;
+    for (c=0;c<n;c++){
+        const i_DartTopic *topic = &st->topics[c];
+        if (topic->name_len && topic->qos.max_rate_hz
+            && (topic->role==DART_SUB_ONLY || topic->role==DART_PUBSUB)){
+            i_dart_le_w16(rp, c); i_dart_le_w16(rp+2, topic->qos.max_rate_hz); rp += 4u;
+        }
+    }
+    return (size_t)(rp - o);
 }
 
 
@@ -817,6 +844,28 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     if (unmappable)   /* never silent: those topics can never deliver here */
         i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     for (c=0;c<st->cfg.n_topics;c++) i_dart_topic_rematch(st,c,(uint16_t)peer_slot);
+
+    /* rate section (after the n entries): [u16 n_rates][(u16 their_index)(u16 rate_hz)]*.
+       Applied AFTER rematch so the writer lanes exist; a fire-and-forget lane (best-effort,
+       so w->used with the sub bit) then paces its sends. Re-applied every announce (the rate
+       is in the blob, immutable per topic), so a lane re-formed by a role flip re-derives it. */
+    if (amap){
+        const uint8_t *rp = d + 2u + 5u*(size_t)n;
+        if (blob.len >= (size_t)(rp - d) + 2u){
+            uint16_t nr = i_dart_le_r16(rp), k; rp += 2u;
+            for (k=0;k<nr;k++){
+                uint16_t their_idx, rate_hz, cidx; i_DartWriterProxy *w;
+                if ((size_t)(rp - d) + 4u > blob.len) break;   /* truncated: stop */
+                their_idx = i_dart_le_r16(rp); rate_hz = i_dart_le_r16(rp+2); rp += 4u;
+                if (their_idx >= st->peer_index_len[peer_slot]) continue;
+                cidx = amap[their_idx];
+                if (cidx >= st->cfg.n_topics) continue;         /* unverified/unmapped */
+                w = i_dart_writer_proxy_at(st, cidx, (uint32_t)peer_slot);
+                if (w && w->used)
+                    w->rate_interval_us = rate_hz ? (1000000u / (uint32_t)rate_hz) : 0u;
+            }
+        }
+    }
 }
 
 
@@ -876,10 +925,11 @@ uint16_t dart_meta_cap(uint16_t n_topics){
  * topic state (the same walk, byte for byte), so a caller can size the buffer to the
  * actual content instead of dart_meta_cap's full-reserve worst case. */
 uint16_t dart_transport_meta_size(DartTransportState *st){
-    uint16_t c, n=0;
+    uint16_t c, n=0, n_rates;
     size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
-    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n;
+    n_rates = i_dart_rate_count(st, n);            /* same walk build_interest emits */
+    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates;
     if (len > 65000u) len = 65000u;              /* the dart_meta_cap ceiling; past it the build truncates */
     return (uint16_t)len;
 }

@@ -324,6 +324,9 @@ struct Qos {
     uint32_t    shm_max_bytes        = 0;   /* pin topic to one same-host SHM size class */
     uint32_t    queue_bytes          = 0;   /* consumer-queue cap for take()/dispatch(); 0 = the
                                                queue appears lazily on first use, 1 MB cap */
+    uint16_t    max_rate_hz          = 0;   /* SUBSCRIBER, best-effort: cap delivery from each
+                                               publisher to this many samples/sec (it decimates
+                                               to the newest); 0 = unlimited */
 };
 
 struct NodeOptions {
@@ -1769,6 +1772,7 @@ private:
         c.backpressure_wait_us = q.backpressure_wait_us;
         c.shm_max_bytes        = q.shm_max_bytes;
         c.queue_bytes          = q.queue_bytes;
+        c.max_rate_hz          = q.max_rate_hz;
         return c;
     }
 

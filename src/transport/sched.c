@@ -65,7 +65,8 @@ static int i_dart_lane_work(DartTransportState *st, const i_DartLane *l, uint64_
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
     if (l->w.used && l->w.has_nack) return 1;
     if (l->w.used && l->w.skip_hb) return 1;   /* directed floor HB still owed */
-    if (l->w.used && l->w.sent_upto < topic->next_seqno) return 1;
+    if (l->w.used && l->w.sent_upto < topic->next_seqno
+        && (l->w.rate_interval_us == 0 || now >= l->w.rate_next_us)) return 1;   /* throttled: not before the tick */
     if (l->r.used && topic->qos.reliability==DART_RELIABLE
         && l->r.ack_pending && now >= l->r.ack_due_us) return 1;
     return 0;
@@ -103,8 +104,15 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
         if (!l->in_use) continue;                  /* free pool slot */
         topic=&st->topics[l->topic];
-        if (!i_dart_topic_needs_sweep(topic)) continue;   /* best-effort, or nothing matched */
         peer_slot=l->peer_slot;
+        /* fire-and-forget rate throttle: a held lane owes a send when its tick comes due.
+           Best-effort owes no HB/ack so needs_sweep skips it below -- do this FIRST. */
+        if (l->w.used && l->w.rate_interval_us && l->w.sent_upto < topic->next_seqno
+            && st->peer_used[peer_slot] && !st->peer_dormant[peer_slot]){
+            if (now>=l->w.rate_next_us) i_dart_lane_enqueue(st,li);
+            else if (l->w.rate_next_us < mind) mind = l->w.rate_next_us;
+        }
+        if (!i_dart_topic_needs_sweep(topic)) continue;   /* best-effort, or nothing matched */
         /* gate writer heartbeats on next_seqno, never the reader ack: a sub-only
            node's data topics never advance next_seqno but still owe acks */
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */

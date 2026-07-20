@@ -268,6 +268,7 @@ class DartQos(Structure):
         ("backpressure_wait_us", c_uint32),
         ("shm_max_bytes", c_uint32),
         ("queue_bytes", c_uint32),
+        ("max_rate_hz", c_uint16),
     ]
 
 
@@ -747,6 +748,8 @@ class Qos:
     backpressure_wait_us: int = 0
     shm_max_bytes: int = 0
     queue_bytes: int = 0   # consumer-queue cap for take()/dispatch(); 0 = lazy, 1 MB cap
+    max_rate_hz: int = 0   # SUBSCRIBER, best-effort: cap delivery from each publisher to this
+                           # many samples/sec (the publisher decimates to the newest); 0 = unlimited
 
 
 @dataclasses.dataclass
@@ -1848,6 +1851,7 @@ class Node:
         co.qos.backpressure_wait_us = qos.backpressure_wait_us
         co.qos.shm_max_bytes = qos.shm_max_bytes
         co.qos.queue_bytes = qos.queue_bytes
+        co.qos.max_rate_hz = qos.max_rate_hz
         h = self._lib.dart_node_create_topic(
             self._h, name.encode("utf-8"), int(role),
             sch._s if sch else None, byref(co))

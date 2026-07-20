@@ -791,6 +791,69 @@ static void st_apply_verified(DartTransportState *dst, uint32_t src_id, DartTran
     dart_transport_apply_peer_interest(dst, src_id, dart_bytes(ib, il));
 }
 
+/* ---- best-effort rate throttle (transport core, controlled clock) ----
+   A subscriber advertises qos.max_rate_hz; the writer paces its fire-and-forget lane,
+   decimating to the newest sample each tick. The per-peer wire seqno keeps loss honest:
+   a paced skip is NOT loss, a dropped SENT sample IS. Deterministic (virtual clock);
+   the pump can drop a DATA datagram. */
+static int rate_recv, rate_lost, rate_drop;
+static uint64_t rate_clk;
+static DartTransportState *rate_W, *rate_R;
+static int rate_on_msg(void *u, uint16_t ch, uint32_t from, DartBytes d){
+    (void)u;(void)ch;(void)from;(void)d; rate_recv++; return 0;
+}
+static void rate_on_event(const DartTransportEvent *ev){
+    if (ev->kind==DART_TRANSPORT_MSG_LOST) rate_lost += (int)ev->lost_count;
+}
+static void rate_send(void){
+    static unsigned char p[16];
+    dart_transport_send(rate_W, 0, dart_bytes(p, sizeof p), rate_clk);
+}
+static void rate_pump(uint64_t dt){   /* flush W -> R (dropping DATA per rate_drop), then advance the clock */
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
+    while (dart_transport_poll_send(rate_W,&to,buf,sizeof buf,&ol,rate_clk)){
+        if (rate_drop>0 && (buf[0]&0x07u)==1u){ rate_drop--; continue; }   /* drop this DATA */
+        dart_transport_on_datagram(rate_R, 1u, dart_bytes(buf, ol), rate_clk);
+    }
+    rate_clk += dt;
+}
+static void rate_checks(void){
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
+    DartQos q; memset(&q,0,sizeof q); q.reliability=DART_BEST_EFFORT; q.keep_last=4;
+    memset(&cw,0,sizeof cw); cw.name="ratech"; cw.qos=q; cw.role=DART_PUB_ONLY;
+    memset(&cr,0,sizeof cr); cr.name="ratech"; cr.qos=q; cr.qos.max_rate_hz=100; cr.role=DART_SUB_ONLY;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.on_message=rate_on_msg; rc.on_event=rate_on_event;
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); rate_W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); rate_R=dart_transport_init(mr,nr,&rc);
+    rate_clk=1000000;
+    dart_transport_peer_add(rate_W,2u,DART_FRAG_SIZE); dart_transport_peer_add(rate_R,1u,DART_FRAG_SIZE);
+    st_apply_verified(rate_R, 1u, rate_W);   /* reader learns the writer */
+    st_apply_verified(rate_W, 2u, rate_R);   /* writer learns the reader + its advertised rate */
+    ST_CHECK(dart_transport_publisher_match_count(rate_W,0)>0, "rate: writer matched the throttled reader");
+
+    /* decimation: publish 200 samples across ~100 ms of virtual time. At 100 Hz the reader
+       gets ~10-12, not 200, and NO false loss (the paced skips are absorbed by wire_skip). */
+    rate_recv=0; rate_lost=0; rate_drop=0;
+    for (i=0;i<200;i++){ rate_send(); rate_pump(500u); }
+    for (i=0;i<3;i++) rate_pump(20000u);        /* drain the final held tick via the sweep */
+    ST_CHECK(rate_recv>=5 && rate_recv<=20, "rate: decimated to ~rate*time (%d of 200 delivered)", rate_recv);
+    ST_CHECK(rate_lost==0, "rate: paced skips are not loss (lost=%d)", rate_lost);
+
+    /* a dropped SENT sample must still be reported: send + tick, DROP that DATA, then let
+       later ticks deliver -> the reader's per-peer seqno gap surfaces as one MSG_LOST. */
+    rate_recv=0; rate_lost=0;
+    rate_send(); rate_clk += 20000u; rate_drop=1;   /* the next tick's DATA is dropped */
+    rate_pump(20000u);
+    ST_CHECK(rate_recv==0, "rate: the tick's only sample was dropped on the wire (recv=%d)", rate_recv);
+    for (i=0;i<5;i++){ rate_send(); rate_pump(20000u); }
+    ST_CHECK(rate_recv>=1 && rate_lost>=1,
+             "rate: a dropped SENT sample IS reported as loss (recv=%d lost=%d)", rate_recv, rate_lost);
+
+    dart_transport_destroy(rate_W); dart_transport_destroy(rate_R); free(mw); free(mr);
+}
+
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
@@ -3792,6 +3855,7 @@ static int selftest_main(void){
     dynamic_grow_checks();        /* 16. dynamic-mode grow: relocate mid-stream, lose nothing       */
     qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
     beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
+    rate_checks();                /* 17d. best-effort rate throttle: decimation, no false loss, real loss kept */
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */

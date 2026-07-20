@@ -432,6 +432,15 @@ typedef struct {
                                     dispatch, capped at DART_QUEUE_CAP. The ring starts small and
                                     grows on demand to the cap, like the message buffers. The
                                     transport core itself ignores this field. */
+    uint16_t max_rate_hz;        /* SUBSCRIBER side, BEST-EFFORT only: cap delivery of this topic
+                                    from each publisher to this many samples/sec. The publisher
+                                    paces its fire-and-forget lane to us: it DECIMATES (sends the
+                                    NEWEST sample each tick and drops older un-sent ones at the
+                                    source, so less wire + reader work), while our per-peer wire
+                                    seqno keeps loss detection honest (a paced skip is not loss; a
+                                    dropped SENT sample still is). 0 = unlimited (full rate).
+                                    Advertised in the announce; ignored on a reliable topic and on
+                                    the publish side. Set at create (immutable per topic). */
 } DartQos;
 
 /* A topic. Cross-peer identity is the name (64-bit hash); the LOCAL
@@ -2791,6 +2800,20 @@ typedef struct {        /* writer-side, per (topic,peer) */
     uint64_t acked_upto; /* peer received all TUs < this */
     uint64_t nack_base;
     uint64_t hb_next_us; /* heartbeat timer */
+    uint64_t wire_skip;  /* fire-and-forget (best-effort, non-directed) lanes stamp a PER-LANE
+                            wire seqno = sent_upto - wire_skip, so this peer sees a private
+                            contiguous line and its loss detection counts only samples meant
+                            for IT -- never seqnos consumed by other peers, joined-before, or
+                            skipped by a rate pacer. = the join seqno at match (pre-join samples
+                            were never this lane's loss). A paced skip (rate throttle) adds the
+                            skipped count so it leaves NO gap; an eviction jumps sent_upto WITHOUT
+                            touching wire_skip, so it DOES leave a gap -> reported as loss.
+                            Reliable/directed lanes ignore it: they keep the shared global line
+                            so repair maps a NACK straight into history. */
+    uint64_t rate_next_us;  /* fire-and-forget throttle (qos.max_rate_hz): earliest time this lane may
+                               send its next sample. 0 until the first send, then now + rate_interval_us. */
+    uint32_t rate_interval_us;/* us between paced samples (1e6 / max_rate_hz); 0 = unthrottled (full rate).
+                               Sourced from the peer's advertised rate at interest apply. */
     uint32_t nack_bits;
     uint32_t hb_count;
     uint32_t reader_epoch; /* reader incarnation from last ACKNACK (0 = none); a change
@@ -3160,7 +3183,8 @@ static int i_dart_lane_work(DartTransportState *st, const i_DartLane *l, uint64_
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant: out of flow control */
     if (l->w.used && l->w.has_nack) return 1;
     if (l->w.used && l->w.skip_hb) return 1;   /* directed floor HB still owed */
-    if (l->w.used && l->w.sent_upto < topic->next_seqno) return 1;
+    if (l->w.used && l->w.sent_upto < topic->next_seqno
+        && (l->w.rate_interval_us == 0 || now >= l->w.rate_next_us)) return 1;   /* throttled: not before the tick */
     if (l->r.used && topic->qos.reliability==DART_RELIABLE
         && l->r.ack_pending && now >= l->r.ack_due_us) return 1;
     return 0;
@@ -3198,8 +3222,15 @@ static void i_dart_hb_sweep(DartTransportState *st, uint64_t now){
         st->sweep = (st->sweep+1u>=total) ? 0u : st->sweep+1u;
         if (!l->in_use) continue;                  /* free pool slot */
         topic=&st->topics[l->topic];
-        if (!i_dart_topic_needs_sweep(topic)) continue;   /* best-effort, or nothing matched */
         peer_slot=l->peer_slot;
+        /* fire-and-forget rate throttle: a held lane owes a send when its tick comes due.
+           Best-effort owes no HB/ack so needs_sweep skips it below -- do this FIRST. */
+        if (l->w.used && l->w.rate_interval_us && l->w.sent_upto < topic->next_seqno
+            && st->peer_used[peer_slot] && !st->peer_dormant[peer_slot]){
+            if (now>=l->w.rate_next_us) i_dart_lane_enqueue(st,li);
+            else if (l->w.rate_next_us < mind) mind = l->w.rate_next_us;
+        }
+        if (!i_dart_topic_needs_sweep(topic)) continue;   /* best-effort, or nothing matched */
         /* gate writer heartbeats on next_seqno, never the reader ack: a sub-only
            node's data topics never advance next_seqno but still owe acks */
         if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) continue;   /* dormant: out of flow control */
@@ -3668,6 +3699,12 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
     uint16_t index = i_dart_wire_index_of(st, topic_index);
     if (!w || !w->used || st->peer_dormant[peer_slot]) return 0;   /* unmatched/dormant: nothing to emit */
 
+    /* a FIRE-AND-FORGET lane (best-effort reader, not a directed topic) carries its own
+       per-peer wire seqno = sent_upto - wire_skip, so its reader's loss detection counts
+       only what was meant for IT. Reliable/directed lanes keep the shared global line
+       (repair + directed skip-HB both index history by the global seqno). */
+    int per_lane = (!w->reader_reliable && !topic->directed);
+
     /* directed: derive any owed skips before deciding what to emit (this is also where a
        lane that was dormant during directed sends catches up after resume) */
     i_dart_writer_lane_advance(topic, w, (uint32_t)peer_slot);
@@ -3754,6 +3791,23 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
     if (w->sent_upto < topic->next_seqno){
         uint64_t seqno=w->sent_upto;
         i_DartWriterSample *s=i_dart_sample_find(topic,seqno);
+        /* RATE THROTTLE (fire-and-forget lanes), at a sample BOUNDARY only -- once a message's
+           first fragment goes out we finish it. A throttled lane only ever HOLDS at a boundary
+           (it sends a whole sample per tick), so a NULL s here means the sample we were about to
+           start evicted while we held: still a boundary. Before the tick, hold (i_dart_lane_work
+           gates on the same clock so this can't spin; the sweep re-wakes at rate_next_us). At the
+           tick, DECIMATE to the newest sample (always in history): wire_skip absorbs the skipped
+           older ones so the reader sees no gap, while a dropped SENT sample still shows as one. */
+        if (per_lane && w->rate_interval_us && (!s || seqno == s->base)){
+            if (now < w->rate_next_us){ i_dart_transport_arm_deadline(st, w->rate_next_us); return 0; }
+            { i_DartWriterSample *newest = i_dart_sample_find(topic, topic->next_seqno - 1);
+              if (newest && newest->base > seqno){
+                  w->wire_skip += newest->base - seqno;      /* paced skip: no perceived loss */
+                  w->sent_upto = newest->base; seqno = w->sent_upto; s = newest;
+              } }
+            w->rate_next_us = now + w->rate_interval_us;
+            i_dart_transport_arm_deadline(st, w->rate_next_us);   /* next tick fires on time */
+        }
         if (s){
 #ifdef DART_SHM
             /* peer_shm is set at attach (before data flows), so sent_upto sits at a
@@ -3763,7 +3817,8 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
                 w->sent_upto = s->base + s->count;
                 if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
                     i_dart_writer_arm_tail(st, w, now);
-                return i_dart_wire_mk_shm(out,index,s->base,s->count,s->desc);
+                return i_dart_wire_mk_shm(out,index,per_lane ? s->base - w->wire_skip : s->base,
+                                          s->count,s->desc);
             }
 #endif
             {
@@ -3775,11 +3830,16 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             topic->repair_stats.frags_sent++;                       /* new data (unicast lane) */
             if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
                 i_dart_writer_arm_tail(st, w, now);              /* queue drained: fast tail HB */
-            return i_dart_wire_mk_data(out,index,seqno,s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
+            return i_dart_wire_mk_data(out,index,per_lane ? seqno - w->wire_skip : seqno,
+                                       s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
             }
         } else {
-            /* fell out of the ring before we sent it: skip the reader up to first
-               cached with an HB (its first = our floor) */
+            /* fell out of the ring before we sent it. A fire-and-forget lane just advances
+               past it: wire_skip is untouched, so the NEXT DATA's per-lane seqno jumps, and
+               the reader reads that gap as loss (an HB here would carry GLOBAL seqnos and
+               corrupt the lane-local reader). A reliable/directed lane skips its reader up to
+               first-cached with an HB (its first = our floor). */
+            if (per_lane){ w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno); return 0; }
             if (cap < DART_HEADER_HB) return 0;
             w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno);
             return i_dart_writer_hb(st,topic,w,index,out,cap,now);
@@ -4675,6 +4735,7 @@ static void i_dart_writer_match(DartTransportState *st, uint16_t c, uint16_t pee
     w->reader_reliable = i_dart_bit_get(&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len], c) ? 1u : 0u;
     w->sent_upto = i_dart_topic_unicast_join_seqno(topic);
     w->acked_upto = w->sent_upto;
+    w->wire_skip = w->sent_upto;   /* fire-and-forget wire seqno starts at 0 (see i_DartWriterProxy) */
     i_dart_lane_wake(st, c, peer_slot);   /* lane primed for new data + ack/hb */
 }
 
@@ -4914,21 +4975,38 @@ static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx
 
 
 /* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
- * one positional [u32 hash][u8 flags] entry per topic slot. */
+ * one positional [u32 hash][u8 flags] entry per topic slot, plus the worst-case rate
+ * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry). */
 size_t dart_interest_max(uint16_t n_topics){
-    return 2u + 5u * (size_t)n_topics;
+    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics;
+}
+
+/* subscriber topics carrying a best-effort rate cap: the count for the interest rate
+ * section (build + meta_size must agree byte for byte, so both go through here). n =
+ * the highest defined slot + 1 (the entry count), so this matches the entry walk. */
+static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
+    uint16_t c, r=0;
+    for (c=0;c<n;c++){
+        const i_DartTopic *t=&st->topics[c];
+        if (t->name_len && t->qos.max_rate_hz
+            && (t->role==DART_SUB_ONLY || t->role==DART_PUBSUB)) r++;
+    }
+    return r;
 }
 
 
 /* Serialize our interest into out: [u16 n], then one [u32 hash][u8 flags] entry per
  * topic IN INDEX ORDER up to the highest defined slot (position = index; an undefined
- * reserve slot rides as an INACTIVE hole so later indices stay stable). Returns bytes
+ * reserve slot rides as an INACTIVE hole so later indices stay stable), then a SPARSE
+ * rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics
+ * that cap their best-effort delivery rate (see DartQos.max_rate_hz). Returns bytes
  * written, or 0 if cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
-    uint8_t *o=(uint8_t*)out;
-    uint16_t c, n=0;
+    uint8_t *o=(uint8_t*)out, *rp;
+    uint16_t c, n=0, n_rates;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
-    if (cap < 2u + 5u*(size_t)n) return 0;
+    n_rates = i_dart_rate_count(st, n);
+    if (cap < 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates) return 0;
     i_dart_le_w16(o, n);
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
@@ -4940,7 +5018,16 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
              | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u)
              | (topic->name_len && topic->forceable ? DART__INT_FORCEABLE : 0u));
     }
-    return 2u + 5u*(size_t)n;
+    rp = o + 2u + 5u*(size_t)n;
+    i_dart_le_w16(rp, n_rates); rp += 2u;
+    for (c=0;c<n;c++){
+        const i_DartTopic *topic = &st->topics[c];
+        if (topic->name_len && topic->qos.max_rate_hz
+            && (topic->role==DART_SUB_ONLY || topic->role==DART_PUBSUB)){
+            i_dart_le_w16(rp, c); i_dart_le_w16(rp+2, topic->qos.max_rate_hz); rp += 4u;
+        }
+    }
+    return (size_t)(rp - o);
 }
 
 
@@ -5030,6 +5117,28 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     if (unmappable)   /* never silent: those topics can never deliver here */
         i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     for (c=0;c<st->cfg.n_topics;c++) i_dart_topic_rematch(st,c,(uint16_t)peer_slot);
+
+    /* rate section (after the n entries): [u16 n_rates][(u16 their_index)(u16 rate_hz)]*.
+       Applied AFTER rematch so the writer lanes exist; a fire-and-forget lane (best-effort,
+       so w->used with the sub bit) then paces its sends. Re-applied every announce (the rate
+       is in the blob, immutable per topic), so a lane re-formed by a role flip re-derives it. */
+    if (amap){
+        const uint8_t *rp = d + 2u + 5u*(size_t)n;
+        if (blob.len >= (size_t)(rp - d) + 2u){
+            uint16_t nr = i_dart_le_r16(rp), k; rp += 2u;
+            for (k=0;k<nr;k++){
+                uint16_t their_idx, rate_hz, cidx; i_DartWriterProxy *w;
+                if ((size_t)(rp - d) + 4u > blob.len) break;   /* truncated: stop */
+                their_idx = i_dart_le_r16(rp); rate_hz = i_dart_le_r16(rp+2); rp += 4u;
+                if (their_idx >= st->peer_index_len[peer_slot]) continue;
+                cidx = amap[their_idx];
+                if (cidx >= st->cfg.n_topics) continue;         /* unverified/unmapped */
+                w = i_dart_writer_proxy_at(st, cidx, (uint32_t)peer_slot);
+                if (w && w->used)
+                    w->rate_interval_us = rate_hz ? (1000000u / (uint32_t)rate_hz) : 0u;
+            }
+        }
+    }
 }
 
 
@@ -5089,10 +5198,11 @@ uint16_t dart_meta_cap(uint16_t n_topics){
  * topic state (the same walk, byte for byte), so a caller can size the buffer to the
  * actual content instead of dart_meta_cap's full-reserve worst case. */
 uint16_t dart_transport_meta_size(DartTransportState *st){
-    uint16_t c, n=0;
+    uint16_t c, n=0, n_rates;
     size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
-    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n;
+    n_rates = i_dart_rate_count(st, n);            /* same walk build_interest emits */
+    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates;
     if (len > 65000u) len = 65000u;              /* the dart_meta_cap ceiling; past it the build truncates */
     return (uint16_t)len;
 }

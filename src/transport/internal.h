@@ -117,6 +117,20 @@ typedef struct {        /* writer-side, per (topic,peer) */
     uint64_t acked_upto; /* peer received all TUs < this */
     uint64_t nack_base;
     uint64_t hb_next_us; /* heartbeat timer */
+    uint64_t wire_skip;  /* fire-and-forget (best-effort, non-directed) lanes stamp a PER-LANE
+                            wire seqno = sent_upto - wire_skip, so this peer sees a private
+                            contiguous line and its loss detection counts only samples meant
+                            for IT -- never seqnos consumed by other peers, joined-before, or
+                            skipped by a rate pacer. = the join seqno at match (pre-join samples
+                            were never this lane's loss). A paced skip (rate throttle) adds the
+                            skipped count so it leaves NO gap; an eviction jumps sent_upto WITHOUT
+                            touching wire_skip, so it DOES leave a gap -> reported as loss.
+                            Reliable/directed lanes ignore it: they keep the shared global line
+                            so repair maps a NACK straight into history. */
+    uint64_t rate_next_us;  /* fire-and-forget throttle (qos.max_rate_hz): earliest time this lane may
+                               send its next sample. 0 until the first send, then now + rate_interval_us. */
+    uint32_t rate_interval_us;/* us between paced samples (1e6 / max_rate_hz); 0 = unthrottled (full rate).
+                               Sourced from the peer's advertised rate at interest apply. */
     uint32_t nack_bits;
     uint32_t hb_count;
     uint32_t reader_epoch; /* reader incarnation from last ACKNACK (0 = none); a change
