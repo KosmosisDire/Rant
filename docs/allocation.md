@@ -1,71 +1,57 @@
 # DART memory and buffers
 
-DART puts all fixed state in one arena the caller provides. The node mallocs it
-once. `dart_node_required_memory` and `dart_required_memory` return the size. A
-few buffers live outside the arena. This file lists every buffer and how its size
-is set.
+DART splits memory into two pools with one owner each.
 
-## The arena
+The ARENA is one contiguous block the caller provides (the node sizes and takes it
+from its `DartAllocator` at open). It holds the fixed control tables: the node
+struct, the discovery state, the transport tables, the SHM handle table. Nothing
+in it is freed until the node closes.
 
-One contiguous block. It holds the node struct, the peer table, the discovery
-state, the transport state, and the SHM bookkeeping. Nothing in it is freed until
-the caller frees the block.
+The ALLOCATOR HOOK (`DartConfig.allocator`, a `DartAllocFn`) backs everything that
+scales with actual traffic: message buffers, reassembly state, per-peer index and
+verdict maps, matched-lane records, the announce blob. The hook is REQUIRED; there
+is no fixed-table mode. An embedded no-heap deployment passes a `DartAllocator` in
+STATIC mode (one caller buffer, no growth, overflow refused with an explicit OOM
+event); everything else uses DYNAMIC mode (pages from the platform heap, freed
+blocks pooled for reuse so steady state makes no system malloc/free).
 
-## Control tables (transport)
+## Control tables (arena, transport)
 
-Sized by `max_peers` and `n_topics`. Independent of message size. Small and fixed
-for the life of the node.
+Sized by `max_peers` and `n_topics`. Independent of message size and of how many
+peers or matches actually exist.
 
 | buffer | count | element |
 |--------|-------|---------|
-| peer ids, used, local, dormant, frag, shm | max_peers | 1 to 4 bytes |
-| interest bitmaps (pub, sub) | max_peers x ceil(n_topics/8) | 1 byte |
+| peer ids, used, dormant, frag, shm | max_peers | 1 to 4 bytes |
+| interest bitmaps (pub, sub, sub-reliable) | max_peers x ceil(n_topics/8) | 1 byte |
 | topics | n_topics | i_DartTopic |
-| writer proxies | n_topics x max_peers | i_DartWriterProxy |
-| reader proxies | n_topics x max_peers | i_DartReaderProxy |
-| lane scheduler | n_topics x (max_peers+1), and max_peers+n_topics | 1 to 4 bytes |
-| index table | max_peers x DART_META_MAX_IDS | 2 bytes |
-| name pool | sum of topic name lengths | 1 byte |
+| lane ticket table | n_topics x max_peers | 2 bytes |
+| lane scheduler (dest lists + queue) | max_peers | 1 to 4 bytes |
+| index/verdict map POINTERS | max_peers | 8 + 4 + 8 bytes |
+| name pool | n_topics x (DART_TOPIC_NAME_MAX + 1) | 1 byte |
 
-## Payload buffers (transport)
+## Hook allocations (transport)
 
-These scale with message size.
+These scale with real traffic and real matches, never with worst-case tables.
 
-| buffer | count | size |
-|--------|-------|------|
-| writer history | n_topics x keep_last | max_message_bytes |
-| reader reassembly | n_topics x max_peers | max_message_bytes |
-| reader fragment bitmap | n_topics x max_peers | ceil(maxfrags / 8) |
+| buffer | when allocated | size |
+|--------|----------------|------|
+| writer history slot | first send that needs it | grows to the largest message sent |
+| lane record pool | first match (doubles from 8) | live matches x sizeof(i_DartLane) |
+| reader reassembly + bitmap | per matched lane, on receive | grows to the largest message received |
+| per-peer index + verdict maps | peer's first matched topic | that peer's advertised entry count |
+| announce blob | first build | actual overlay size |
 
-`maxfrags` is `ceil(max_message_bytes / DART_FRAG_PAYLOAD_MIN)`.
+A grown buffer never shrinks; freeing (peer gone, lane released) returns the block
+to the allocator's reuse pool, not to the system heap.
 
-## Fixed mode and dynamic mode
+## Sends larger than the wire cap
 
-The mode is set by whether you pass an allocator.
-
-Fixed mode has no allocator. The payload buffers above are carved from the arena at
-init and sized to `max_message_bytes`. There is no per-message allocation. A message
-larger than `max_message_bytes` is refused.
-
-Dynamic mode has an allocator. The payload buffers start empty and grow to fit each
-message through the allocator hook. They grow only. They never shrink. One large
-message sets the size of its buffer for the rest of the run. The control tables stay
-in the arena.
-
-## Node additions
-
-The node arena also holds these.
-
-| buffer | size |
-|--------|------|
-| node struct | one struct |
-| peer table | max_peers x dart__nodepeer |
-| discovery announce blob | meta_cap bytes |
-| discovery state | its own region |
-| SHM bookkeeping | see SHM section |
-
-`meta_cap` is the frag prefix plus the largest interest list the topics can
-produce, capped to one UDP datagram.
+There is no per-topic message cap. `qos.max_message_bytes` is a HINT (it pins the
+SHM size class when `shm_max_bytes` is 0); the only hard limit is the wire's
+65535-fragment cap (`DART_MESSAGE_MAX`). A receive that cannot allocate its
+reassembly buffer skips the sample and fires `MSG_TOO_BIG` (allocation failure,
+never silent).
 
 ## Outside the arena
 
@@ -73,58 +59,31 @@ produce, capped to one UDP datagram.
 |--------|------|
 | socket receive buffer | net.recv_buffer_bytes (OS) |
 | socket send buffer | net.send_buffer_bytes (OS) |
-| per-datagram stack buffer | DART_DGRAM_MAX = DART_FRAG_PAYLOAD_MAX + 40 |
+| per-datagram stack buffer | DART_DGRAM_MAX = DART_FRAG_SIZE_MAX + 40 |
 | SHM segments | OS mapped, lazy, see SHM section |
-| SHM receive scratch | grows via allocator, one per node |
+| SHM receive scratch | grows via the hook, one per node |
 
 ## SHM (only with DART_SHM, on by default)
 
-SHM payloads live in shared-memory segments outside the arena. The OS maps them. The
-node creates a segment only when a same-host SHM reader exists and a publish needs
-that size class.
+SHM payloads live in shared-memory segments outside the arena. The OS maps them.
+The node creates a segment only when a same-host SHM reader exists and a publish
+needs that size class.
 
 Segments use size classes. Class k holds chunks of
 `DART_SHM_CLASS_BASE << (k * DART_SHM_CLASS_SHIFT)` bytes. The defaults give 64K,
-256K, 1M, 4M, 16M, 64M, 256M. A publish takes the smallest class that fits. There is
-no size-based fallback to UDP.
+256K, 1M, 4M, 16M, 64M, 256M. A publish takes the smallest class that fits.
 
-One segment per class holds `DART_SHM_CHUNKS_PER_CLASS` chunks. A publish takes a
-chunk from the class pool and frees it when its history slot is reused. Segment size
-is the header plus n_chunks times (chunk header plus chunk bytes).
-
-The node arena holds the SHM handles. It does not hold the segments.
-
-| buffer | size |
-|--------|------|
-| our pool handles | DART_SHM_N_CLASSES x state_bytes |
-| slot binding | n_topics x keepmax x 2 |
-| reader segment ids | rmax x 8 |
-| reader pool handles | rmax x state_bytes |
-
-`keepmax` is the largest keep_last across topics. `rmax` is
-`max_peers x DART_SHM_N_CLASSES`. `state_bytes` is the per-segment handle size.
-
-The SHM receive scratch is a node-owned buffer. The reader copies a chunk into it
-once before delivery. It grows to the largest message seen. Build with `DART_NO_SHM`
-to remove all of this.
-
-## How size is decided
-
-Fixed mode. You set `max_message_bytes`. History and reassembly buffers are that
-size.
-
-Dynamic mode. Buffers grow to the largest message seen and stay there.
-
-SHM chunks. The smallest size class that fits the message.
+Each (topic, class) gets its own segment of `keep_last` chunks; history slot i
+binds chunk i. The arena holds only the (topic, class) -> segment pointer table;
+segment state and the reader attach cache are lazy hook allocations. Build with
+`DART_NO_SHM` to remove all of this.
 
 ## Tunables that affect size
 
 | tunable | default | effect |
 |---------|---------|--------|
-| DART_FRAG_PAYLOAD_MIN | 1024 | sizes the reassembly bitmap |
-| DART_FRAG_PAYLOAD_MAX | 1024 | sizes the datagram buffers |
-| DART_META_MAX_IDS | 256 | sizes the index table |
+| DART_FRAG_SIZE | 1350 | fragment payload bytes; MIN/MAX bound the range |
+| DART_FRAG_SIZE_MAX | DART_FRAG_SIZE | sizes the datagram buffers |
 | DART_SHM_CLASS_BASE | 64K | smallest SHM chunk |
 | DART_SHM_CLASS_SHIFT | 2 | SHM class growth ratio |
 | DART_SHM_N_CLASSES | 7 | number of SHM classes |
-| DART_SHM_CHUNKS_PER_CLASS | 4 | chunks per SHM segment |

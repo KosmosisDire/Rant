@@ -596,9 +596,7 @@ static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_t
                               const DartConfig *transport_cfg,
                               const DartDiscoveryNetConfig *discovery_rt_cfg, i_DartNodeBlocks *o){
     o->handles       = (uint8_t*)i_dart_bump_take(b, (size_t)max_topics * sizeof(DartTopic*), 16);
-    o->node_core_bytes = i_dart_node_core_required_memory(max_topics, 1);   /* peers live in discovery; the
-                                                                                 node always has an alloc hook,
-                                                                                 so the blob is dynamic */
+    o->node_core_bytes = i_dart_node_core_required_memory(max_topics);   /* peers live in discovery */
     o->node_core = (uint8_t*)i_dart_bump_take(b, o->node_core_bytes, 16);
     o->transport_bytes = dart_transport_required_memory(transport_cfg);
     o->transport = (uint8_t*)i_dart_bump_take(b, o->transport_bytes, 16);
@@ -739,7 +737,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
     tc.frag_size= o.net.fragment_size;
-    tc.allocator   = i_dart_node_alloc;   /* non-NULL => reserve/dynamic mode in dart_transport_init */
+    tc.allocator   = i_dart_node_alloc;   /* required by dart_transport_init */
 
     {   i_DartBump b; memset(&b,0,sizeof b);
         i_dart_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks);

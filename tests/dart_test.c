@@ -819,11 +819,15 @@ static void rate_pump(uint64_t dt){   /* flush W -> R (dropping DATA per rate_dr
 }
 static void rate_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_BEST_EFFORT; q.keep_last=4;
     memset(&cw,0,sizeof cw); cw.name="ratech"; cw.qos=q; cw.role=DART_PUB_ONLY;
     memset(&cr,0,sizeof cr); cr.name="ratech"; cr.qos=q; cr.qos.max_rate_hz=100; cr.role=DART_SUB_ONLY;
     memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
     rc.on_message=rate_on_msg; rc.on_event=rate_on_event;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); rate_W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); rate_R=dart_transport_init(mr,nr,&rc);
@@ -852,6 +856,7 @@ static void rate_checks(void){
              "rate: a dropped SENT sample IS reported as loss (recv=%d lost=%d)", rate_recv, rate_lost);
 
     dart_transport_destroy(rate_W); dart_transport_destroy(rate_R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
 }
 
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
@@ -996,16 +1001,19 @@ static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
    the collapse: id<->address resolution + naming + the transport lifecycle all ride
    discovery's one peer table, with the node core's per-peer state in its user scratch. */
 static void node_core_checks(void){
-    static uint8_t tmem[1<<18], cmem[4096], dmem[8192];
+    static uint8_t tmem[1<<18], cmem[4096], dmem[8192], amem[1<<16];
     uint8_t buf[256], out[DART_DISCOVERY_WIRE_MAX];
     uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
     DartConfig tc; DartTransportState *tr; DartTopicDef ch[1];
     DartDiscoveryCoreConfig dcfg; DartDiscoveryState *st;
     i_DartNodeCoreConfig cc; i_DartNodeCore *nc;
     i_DartNodeDest d; uint32_t id, idA, idB; size_t n;
+    /* STATIC allocator over a caller buffer: the embedded no-heap contract */
+    static DartAllocator A; A = dart_allocator_static(amem, sizeof amem);
 
     memset(ch,0,sizeof ch); ch[0].name="nc/topic";
     memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=1; tc.max_peers=2;
+    tc.allocator=dart_allocator_alloc; tc.user=&A;
     tr = dart_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "node-core: transport init");
     if (!tr) return;
@@ -1013,6 +1021,7 @@ static void node_core_checks(void){
     /* node core first (discovery bound once it exists, exactly like the runtime) */
     memset(&cc,0,sizeof cc);
     cc.transport=tr; cc.n_topics=1; cc.frag_size=1200; cc.on_event=nc_event;
+    cc.alloc=dart_allocator_alloc; cc.alloc_user=&A;
     nc = i_dart_node_core_init(cmem, sizeof cmem, &cc);
     ST_CHECK(nc!=NULL, "node-core: init");
     if (!nc) return;
@@ -1153,12 +1162,16 @@ static void shml_send(void){
 }
 static void shm_loss_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
     q.heartbeat_us=50000; q.repair_delay_us=20000;
     memset(&cw,0,sizeof cw); cw.name="shmloss"; cw.qos=q; cw.role=DART_PUB_ONLY;
     memset(&cr,0,sizeof cr); cr.name="shmloss"; cr.qos=q; cr.role=DART_SUB_ONLY;
     memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
     rc.on_shm=shml_on_shm; rc.on_event=shml_on_event;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); shml_W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); shml_R=dart_transport_init(mr,nr,&rc);
@@ -1181,6 +1194,7 @@ static void shm_loss_checks(void){
     shml_ok=1; shml_recv=0; shml_send(); shml_pump(6);
     ST_CHECK(shml_recv==1, "shm-loss: [d] not wedged, next delivered");
     dart_transport_destroy(shml_W); dart_transport_destroy(shml_R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
 }
 
 /* (3) full nodes on loopback: SHM across size classes (byte-exact + shm_tx/rx), and
@@ -1281,23 +1295,29 @@ static void unit_checks(void){
              && dart_topic_id("alpha") != dart_topic_id("beta"),
              "topic-id: deterministic and name-distinct");
 
-    /* dart_transport_send result codes (transport core, no sockets). The size check precedes
-       the role check, so an oversize send on the pub topic is TOO_BIG, while a
-       valid-size send on the sub-only topic is ROLE. */
-    {   static uint8_t tmem[1<<16];
+    /* dart_transport_send result codes (transport core, no sockets). The size check
+       (the 65535-fragment wire cap) precedes the role check, so an oversize send on the
+       pub topic is TOO_BIG even with no subscriber, while a valid-size send on the
+       sub-only topic is ROLE. An init with no allocator must refuse (the allocator is
+       the one memory model). */
+    {   static uint8_t tmem[1<<16], amem[1<<12];
         DartTopicDef uch[2]; DartConfig tc; DartTransportState *ts; uint8_t buf[128];
+        static DartAllocator A; A = dart_allocator_static(amem, sizeof amem);
         memset(uch, 0, sizeof uch);
-        uch[0].name = "u/pub"; uch[0].role = DART_PUBSUB;   uch[0].qos.max_message_bytes = 64;
-        uch[1].name = "u/sub"; uch[1].role = DART_SUB_ONLY; uch[1].qos.max_message_bytes = 64;
+        uch[0].name = "u/pub"; uch[0].role = DART_PUBSUB;
+        uch[1].name = "u/sub"; uch[1].role = DART_SUB_ONLY;
         memset(&tc, 0, sizeof tc);
         tc.topics = uch; tc.n_topics = 2; tc.max_peers = 2;
+        ST_CHECK(dart_transport_init(tmem, sizeof tmem, &tc) == NULL, "result: init without an allocator refused");
+        tc.allocator = dart_allocator_alloc; tc.user = &A;
         ts = dart_transport_init(tmem, sizeof tmem, &tc);
         ST_CHECK(ts != NULL, "result: transport init");
         if (ts){
+            size_t wire_cap = 65535u * (size_t)dart_transport_frag(ts);   /* checked before any copy */
             memset(buf, 0, sizeof buf);
             ST_CHECK(dart_transport_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_TOPIC, "result: out-of-range topic -> NO_CHANNEL");
             ST_CHECK(dart_transport_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only topic -> ROLE");
-            ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, 100), 0) == DART_ERR_TOO_BIG,    "result: oversize message -> TOO_BIG");
+            ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, wire_cap + 1u), 0) == DART_ERR_TOO_BIG, "result: past the wire cap -> TOO_BIG");
             ST_CHECK(dart_transport_send(ts, 0, dart_bytes(buf, 16),  0) == DART_OK,             "result: valid publish -> OK");
         }
     }
@@ -1483,12 +1503,16 @@ static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANS
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint16_t pub=0, recv=0;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=wrel?DART_RELIABLE:DART_BEST_EFFORT; cw.qos.keep_last=4;
     memset(&cr,0,sizeof cr); cr.name="qostopic"; cr.role=DART_SUB_ONLY;
     cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=4;
     memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2; rc.on_event=qos_on_event;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
     dart_transport_peer_add(W,2u,DART_FRAG_SIZE); dart_transport_peer_add(R,1u,DART_FRAG_SIZE);
@@ -1498,6 +1522,7 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     if (recv_out) *recv_out=recv;
     if (evt_out)  *evt_out=qos_incompat_n;
     dart_transport_destroy(W); dart_transport_destroy(R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
 }
 static void qos_match_checks(void){
     uint16_t recv; unsigned long evt;
@@ -1518,12 +1543,16 @@ static void qos_match_checks(void){
 static int beff_would_evict(int rrel){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint8_t payload[8]; int i, evict;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=DART_PUB_ONLY;
-    cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2; cw.qos.max_message_bytes=8;
+    cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2;
     memset(&cr,0,sizeof cr); cr.name="beff"; cr.role=DART_SUB_ONLY;
-    cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=2; cr.qos.max_message_bytes=8;
+    cr.qos.reliability=rrel?DART_RELIABLE:DART_BEST_EFFORT; cr.qos.keep_last=2;
     memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
     nw=dart_transport_required_memory(&wc); mw=malloc(nw); W=dart_transport_init(mw,nw,&wc);
     nr=dart_transport_required_memory(&rc); mr=malloc(nr); R=dart_transport_init(mr,nr,&rc);
     dart_transport_peer_add(W,2u,DART_FRAG_SIZE); dart_transport_peer_add(R,1u,DART_FRAG_SIZE);
@@ -1532,6 +1561,7 @@ static int beff_would_evict(int rrel){
     for (i=0;i<5;i++) dart_transport_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
     evict = dart_transport_send_would_evict(W,0);
     dart_transport_destroy(W); dart_transport_destroy(R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
     return evict;
 }
 static void beff_flow_checks(void){
@@ -2092,6 +2122,7 @@ static void detail_codec_checks(void){
     ch[0].name="dt/typed"; ch[1].name="dt/raw";
     ch[2].name="dt/off"; ch[2].role=DART_INACTIVE;
     memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=3; tc.max_peers=2;
+    tc.allocator=dart_allocator_alloc; tc.user=&ma;
     tr = dart_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL && S!=NULL, "detail: transport + schema ready");
     if (!tr || !S){ dart_allocator_reset(&ma); return; }
@@ -3661,7 +3692,7 @@ static int selftest_main(void){
     /* disable_shm: phases 2-4b exercise the UDP reliability path (ring eviction,
        in-flight delivery, backpressure, sweep-ack). The same-host SHM fast path has
        its own coverage (shm_*_checks), and its chunk-recycle semantics differ, so the
-       general transport phases stay on UDP -- as they did before (fixed, no allocator). */
+       general transport phases stay on UDP -- as they did before. */
     DartNodeOpts wo = { .domain = ST_DOMAIN, .disable_shm = 1 };
     { DartNodeOpts ro = wo; DartTopicDef chr[4]; DartNode *w, *r;
       memcpy(chr, ch, sizeof ch);

@@ -97,7 +97,7 @@
 
 typedef struct {
     uint64_t base;       /* seqno of frag 0 */
-    uint8_t *buf;        /* >= len bytes; arena (fixed) or hook-malloc'd (dynamic) */
+    uint8_t *buf;        /* >= len bytes; hook-allocated, grown to fit */
 #ifdef DART_SHM
     const uint8_t *shm_buf;            /* external chunk payload (remote peers fragment from it) */
 #endif
@@ -156,7 +156,7 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                (nack_high, top] so in-flight repairs are not re-requested */
     uint64_t nack_retransmit_us;  /* earliest time to re-request a stalled floor (lost-repair backstop) */
     uint64_t ack_due_us;
-    uint8_t *assembly_buf;       /* >= assembly_len; arena (fixed) or hook-malloc'd (dynamic) */
+    uint8_t *assembly_buf;       /* >= assembly_len; hook-allocated, grown to fit */
     uint8_t *frag_bitmap;       /* ceil(assembly_count/8) */
     uint32_t epoch;         /* this incarnation's id, sent in every ACKNACK */
     uint32_t assembly_len;
@@ -182,12 +182,11 @@ typedef struct {        /* reader-side, per (topic,peer) */
 #endif
 } i_DartReaderProxy;
 
-/* One matched lane: both direction proxies plus the scheduler's chain fields. In dynamic
- * mode records are pool-allocated only while the (topic,peer) pair actually matches, so
- * lane memory scales with real matches, not topics x peers; fixed mode (no allocator)
- * keeps the dense identity layout with per-record buffers pre-bound at init. Records move
- * when the pool grows, so nothing holds an i_DartLane* across a call that can allocate:
- * durable references are pool INDICES. */
+/* One matched lane: both direction proxies plus the scheduler's chain fields. Records
+ * are pool-allocated only while the (topic,peer) pair actually matches, so lane memory
+ * scales with real matches, not topics x peers. Records move when the pool grows, so
+ * nothing holds an i_DartLane* across a call that can allocate: durable references are
+ * pool INDICES. */
 typedef struct {
     i_DartWriterProxy w;
     i_DartReaderProxy r;
@@ -197,7 +196,7 @@ typedef struct {
                              doubles as the free-list link while not in_use */
     uint32_t topic_next;     /* next matched lane of the same topic (DART__NIL) */
     uint8_t  queued;      /* on its dest's active list */
-    uint8_t  in_use;      /* dynamic: allocated to a lane (0 = free-list); fixed: always 1 */
+    uint8_t  in_use;      /* allocated to a lane (0 = on the free list) */
 } i_DartLane;
 
 typedef struct {
@@ -205,13 +204,11 @@ typedef struct {
     uint64_t  identity;     /* cross-peer topic identity (hash of name) */
     const char *name;       /* our copy of the topic name (NUL-terminated storage) */
     uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
-    uint16_t  max_frags;     /* ceil(max_message_bytes/FRAG) (fixed mode only) */
     uint8_t   role;         /* DartRole */
     uint8_t   kind;         /* DartTopicKind: gates matching (same kind only) */
     uint8_t   forceable;    /* patterns aux flag advertised in interest bit 6 (variable value channel: owner permits force) */
     uint8_t   prefix_bytes; /* pattern-header bytes in front of each payload (0 = plain) */
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
-    uint8_t   dynamic;      /* 1 = buffers grow via cfg.allocator, no fixed cap */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
                                dart_transport_topic_define), so dart_transport_destroy frees it */
     /* writer */
@@ -251,14 +248,12 @@ struct DartTransportState {
                                        at match time into i_DartWriterProxy.reader_reliable */
     uint16_t     bitmap_len;       /* ceil(n_topics / 8) */
     /* per-peer wire index -> our topic index; the data path carries the 2-byte
-       index instead of the topic name. Dynamic mode: each map is a hook allocation
-       sized to that peer's highest ADVERTISED index, made on its first matched topic
-       (an irrelevant peer costs nothing; a later local subscribe re-applies interest
-       and the map already covers every advertised index). Fixed mode: every map is a
-       fixed arena slice of index_max entries, exactly the old dense table. */
+       index instead of the topic name. Each map is a hook allocation sized to that
+       peer's highest ADVERTISED index, made on its first matched topic (an irrelevant
+       peer costs nothing; a later local subscribe re-applies interest and the map
+       already covers every advertised index). */
     uint16_t   **peer_index;      /* [max_peers] -> index map (0xFFFF = unmapped) */
     uint32_t    *peer_index_len;  /* [max_peers] entries in each map */
-    uint32_t     index_max;       /* fixed-mode stride = effective DART_META_MAX_IDS */
     /* per-(peer, index) detail verdicts, parallel to peer_index (same length/lifetime).
        An announce entry only NOMINATES by 32-bit hash; a verdict is written once at
        detail intake (name verified against the full identity, schema gated per
@@ -268,15 +263,13 @@ struct DartTransportState {
        candidate). */
     uint8_t    **peer_astate;     /* [max_peers] -> verdict map (DART__AST_* bits) */
     i_DartTopic  *topics;     /* [n_topics] */
-    /* matched-lane records (the proxies live inside). Dynamic mode: one hook allocation
-       grown by doubling, records allocated per real match, lane_index maps (topic,peer)
-       -> record. Fixed mode: a dense arena array in identity order (record c*max_peers+p),
-       lane_index NULL, buffers pre-bound at init. */
+    /* matched-lane records (the proxies live inside): one hook allocation grown by
+       doubling, records allocated per real match, lane_index maps (topic,peer)
+       -> record. */
     i_DartLane  *lanes;       /* [lane_cap] */
     uint32_t     lane_cap;
-    uint32_t     lane_free;   /* free-list head (dynamic), DART__NIL when empty */
-    uint16_t    *lane_index;  /* [n_topics*max_peers] record idx, 0xFFFF = unmatched;
-                                 NULL = fixed mode (identity mapping, no table) */
+    uint32_t     lane_free;   /* free-list head, DART__NIL when empty */
+    uint16_t    *lane_index;  /* [n_topics*max_peers] record idx, 0xFFFF = unmatched */
     /* active-lane scheduler: a lane is one (topic,peer) pair. The event that gives a
        lane work enqueues it, so poll_send pays for work done, not idle lanes. Timer work
        is found by an amortized clock-driven sweep over the record pool. */
@@ -328,15 +321,11 @@ static inline int i_dart_topic_needs_sweep(const i_DartTopic *topic){
     return topic->qos.reliability==DART_RELIABLE && (topic->matched_writers || topic->matched_readers);
 }
 
-/* lane record for a (topic,peer) pair: pool index, or DART__NIL when the lane has
-   never matched (dynamic mode; fixed mode maps every lane by identity). Centralizing
-   the index math here keeps a transposed topic/peer from silently corrupting a
-   neighbor lane. */
+/* lane record for a (topic,peer) pair: pool index, or DART__NIL when the lane is
+   unmatched. Centralizing the index math here keeps a transposed topic/peer from
+   silently corrupting a neighbor lane. */
 static inline uint32_t i_dart_lane_id(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){
-    size_t k = (size_t)topic_index*st->cfg.max_peers + peer_slot;
-    uint16_t lane;
-    if (!st->lane_index) return (uint32_t)k;          /* fixed: identity */
-    lane = st->lane_index[k];
+    uint16_t lane = st->lane_index[(size_t)topic_index*st->cfg.max_peers + peer_slot];
     return lane == 0xFFFFu ? DART__NIL : (uint32_t)lane;
 }
 static inline i_DartLane *i_dart_lane_at(DartTransportState *st, uint16_t topic_index, uint32_t peer_slot){

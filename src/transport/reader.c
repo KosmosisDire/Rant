@@ -103,7 +103,7 @@ void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, c
                assembly_buf; the chunk itself stays valid while unacked (the writer's flow
                control pins its history slot). An alloc failure falls through to the
                resolve-fail repair path: the writer re-sends and we retry. */
-            if (r->assembly_cap < DART_SHM_DESC_BYTES && st->cfg.allocator){
+            if (r->assembly_cap < DART_SHM_DESC_BYTES){
                 uint8_t *nb = (uint8_t*)st->cfg.allocator(st->cfg.user, r->assembly_buf, DART_SHM_DESC_BYTES);
                 if (nb){ r->assembly_buf = nb; r->assembly_cap = DART_SHM_DESC_BYTES; }
             }
@@ -159,19 +159,17 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
         case DART_ORDER_INORDER: break;
     }
     r->started = 1;   /* writer engaged: position adopted */
-    /* fit the reassembly buffers (dynamic grows via the hook, fixed is capped at
-       max_message_bytes); "too big" skips the whole sample and reports it */
+    /* fit the reassembly buffers (grown to fit via the hook); "too big" = the
+       allocation failed: skip the whole sample and report it */
     { uint32_t bitmap_need = ((uint32_t)count + 7u) / 8u, buf_cap, bitmap_bytes; int too_big = 0;
-      if (topic->dynamic){
-          if (r->assembly_cap < sample_len){
-              uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, r->assembly_buf, sample_len?sample_len:1u);
-              if (!new_buf) too_big = 1; else { r->assembly_buf = new_buf; r->assembly_cap = sample_len?sample_len:1u; }
-          }
-          if (!too_big && r->bitmap_cap < bitmap_need){
-              uint8_t *new_bitmap = (uint8_t*)st->cfg.allocator(st->cfg.user, r->frag_bitmap, bitmap_need?bitmap_need:1u);
-              if (!new_bitmap) too_big = 1; else { r->frag_bitmap = new_bitmap; r->bitmap_cap = bitmap_need?bitmap_need:1u; }
-          }
-      } else if (sample_len > topic->qos.max_message_bytes) too_big = 1;
+      if (r->assembly_cap < sample_len){
+          uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, r->assembly_buf, sample_len?sample_len:1u);
+          if (!new_buf) too_big = 1; else { r->assembly_buf = new_buf; r->assembly_cap = sample_len?sample_len:1u; }
+      }
+      if (!too_big && r->bitmap_cap < bitmap_need){
+          uint8_t *new_bitmap = (uint8_t*)st->cfg.allocator(st->cfg.user, r->frag_bitmap, bitmap_need?bitmap_need:1u);
+          if (!new_bitmap) too_big = 1; else { r->frag_bitmap = new_bitmap; r->bitmap_cap = bitmap_need?bitmap_need:1u; }
+      }
       if (too_big){
           i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)topic_index, st->peer_ids[peer_slot],
                       0, sample_len);
@@ -182,8 +180,8 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           }
           return;
       }
-      buf_cap  = topic->dynamic ? r->assembly_cap : topic->qos.max_message_bytes;
-      bitmap_bytes = topic->dynamic ? bitmap_need     : (uint32_t)((topic->max_frags+7u)/8u);
+      buf_cap  = r->assembly_cap;
+      bitmap_bytes = bitmap_need;
       /* base == deliver_upto: current sample */
       if (!r->assembly_active){
           r->assembly_active=1; r->assembly_count=count; r->assembly_len=sample_len; r->assembly_low=0;
@@ -195,8 +193,8 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
       new_frag = !i_dart_bit_get(r->frag_bitmap,frag);
       if (new_frag){
           /* reassemble at the SOURCE peer's fragment size (advertised via discovery);
-             a peer staying within [MIN, MAX] keeps count <= max_frags, so the bitmap
-             can't overflow and the buf_cap guard catches any stray offset */
+             the bitmap was sized to this sample's count and the buf_cap guard
+             catches any stray offset */
           uint32_t offset=(uint32_t)frag*st->peer_frag[peer_slot];
           if (offset+payload_len<=buf_cap) memcpy(r->assembly_buf+offset,payload,payload_len);
           i_dart_bit_set(r->frag_bitmap,frag);

@@ -100,22 +100,22 @@ static void i_dart_writer_commit_directed(DartTransportState *st, uint16_t topic
 }
 
 
-/* Reject a message larger than this topic can carry (checked before the no-subscriber
- * early-out so an oversize send is refused even when nobody is listening). */
+/* Reject a message larger than the wire can carry, i.e. the 65535-fragment cap
+ * (checked before the no-subscriber early-out so an oversize send is refused even
+ * when nobody is listening). */
 static int i_dart_writer_too_big(DartTransportState *st, i_DartTopic *topic, size_t len){
-    if (topic->dynamic) return len > 65535u*(uint32_t)st->frag;   /* wire fragment-count cap */
-    return len > topic->qos.max_message_bytes;
+    (void)topic;
+    return len > 65535u*(uint32_t)st->frag;
 }
 
-/* Store hdr+data into the head slot (growing it in dynamic mode). Fills *len_out with the
+/* Store hdr+data into the head slot (grown to fit via the hook). Fills *len_out with the
  * stored byte count. Returns DART_OK or a negative DartResult; on a negative return nothing
  * was committed. Shared by the broadcast and directed send paths. */
 static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
                                DartBytes hdr, DartBytes data, size_t *len_out){
     size_t len = hdr.len + data.len;
     if (i_dart_writer_too_big(st, topic, len)) return DART_ERR_TOO_BIG;
-    if (topic->dynamic){
-        i_DartWriterSample *slot = &topic->history[topic->history_head];
+    {   i_DartWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
         if ((size_t)slot->cap < need){                    /* grow the slot to fit (size checked above) */
             uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);

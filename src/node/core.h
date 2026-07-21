@@ -52,8 +52,9 @@ typedef enum {
                                 .peer, .topic_name), never silently cross-wired */
     DART_E_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not fit
                                 its publisher's schema was dropped (.topic, .peer, .topic_name) */
-    DART_E_INTEREST_OVERFLOW,/* a peer's matched topics exceed our index table (.peer, .lost_count =
-                                entries): their data cannot deliver here. Raise DART_META_MAX_IDS. */
+    DART_E_INTEREST_OVERFLOW,/* a peer's matched topics carry indices whose map could not be
+                                allocated (.peer, .lost_count = entries): their data cannot
+                                deliver here. */
     DART_E_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was dropped,
                                        so peers see none of our topics. Fewer / shorter topic names. */
     DART_E_META_TRUNCATED_SCHEMA,   /* our announce overlay overflowed: the schema section was dropped,
@@ -146,9 +147,9 @@ typedef struct {
 
 typedef struct i_DartNodeCore i_DartNodeCore;
 
-/* dynamic_meta = an alloc hook will be set: the announce blob is then hook-allocated at
- * actual size, so no arena reservation for it (must match the init cfg's alloc). */
-size_t          i_dart_node_core_required_memory(uint16_t n_topics, int dynamic_meta);
+/* The announce blob is hook-allocated at actual size, so the arena holds only the
+ * core struct + the per-topic schema registry. cfg.alloc is required. */
+size_t          i_dart_node_core_required_memory(uint16_t n_topics);
 i_DartNodeCore *i_dart_node_core_init(void *mem, size_t mem_size, const i_DartNodeCoreConfig *cfg);
 /* Relocate the sans-IO core into a bigger block at grown counts. The transport, discovery,
  * and announce-blob pointers are re-pointed by the caller after those move. Dynamic growth. */

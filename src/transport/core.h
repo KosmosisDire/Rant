@@ -19,7 +19,7 @@ extern "C" {
  * macOS/BSD, -lrt on older glibc), off elsewhere, and DART_NO_SHM always wins (strip
  * it explicitly, e.g. for a slimmer build). A new platform layer that implements the
  * i_dart_plat_shm_* contract declares support by defining DART_SHM itself. It is used
- * only between same-host nodes that set an allocator; a node with no local SHM peer
+ * only between same-host nodes; a node with no local SHM peer
  * creates no segment and pays nothing at runtime. This block mirrors platform/core.h
  * EXACTLY so every TU agrees whichever header it saw first. */
 #if !defined(DART_SHM) && !defined(DART_NO_SHM)
@@ -40,11 +40,10 @@ extern "C" {
  * advertised via discovery, so a receiver reassembles each message at the SOURCE
  * node's size -- a publisher always fragments with one size, so its seqno line stays
  * self-consistent (no per-message field on the wire). These two compile bounds
- * frame the runtime range so fixed buffers can be sized; both default to
- * DART_FRAG_SIZE, i.e. no change unless you opt in. MAX sizes the datagram
- * buffers (raise it for jumbo frames / a bigger same-LAN size); MIN sizes the
- * reassembly bitmaps (lower it only if some node uses a smaller size). Every
- * node's frag_size must lie in [MIN, MAX]. */
+ * frame the runtime range; both default to DART_FRAG_SIZE, i.e. no change unless
+ * you opt in. MAX sizes the datagram buffers (raise it for jumbo frames / a
+ * bigger same-LAN size); MIN is the lower clamp bound for any node's advertised
+ * size. Every node's frag_size must lie in [MIN, MAX]. */
 #ifndef DART_FRAG_SIZE_MAX
 #define DART_FRAG_SIZE_MAX DART_FRAG_SIZE
 #endif
@@ -63,13 +62,6 @@ extern "C" {
 
 #ifndef DART_NODE_NAME_MAX
 #define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
-#endif
-
-/* FIXED (no-allocator) mode only: sizes the static per-peer index tables, bounding the
- * highest peer index that can demux. Auto-raised to 2*n_topics. Dynamic mode ignores
- * it: each peer's index map is allocated at that peer's actual advertised size. */
-#ifndef DART_META_MAX_IDS
-#define DART_META_MAX_IDS 256u
 #endif
 
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
@@ -99,7 +91,9 @@ typedef struct {
     uint16_t keep_last;          /* recent messages retained for late join / repair. 0 = 1, or 10 on a reliable topic */
     uint16_t catch_up;           /* recent messages a new subscriber gets at once. 0 = future
                                     only, 1 = latest value. Keep small (bursts at startup) */
-    uint32_t max_message_bytes;  /* biggest message. 0 = one fragment, or grow-to-fit with an allocator */
+    uint32_t max_message_bytes;  /* size HINT, not a cap: pins the same-host SHM class when
+                                    shm_max_bytes is 0. Buffers grow to fit any message up to
+                                    the wire cap (DART_MESSAGE_MAX) regardless. */
     uint32_t heartbeat_us;       /* reliable: idle-publisher ping (repairs a lost final message). 0 = 250ms */
     uint32_t repair_delay_us;    /* reliable: subscriber's delay before requesting a resend. 0 = 50ms */
     uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow subscriber before
@@ -173,14 +167,15 @@ typedef int (*i_DartShmMsgFn)(void *user, uint16_t topic_index, uint32_t from_pe
  * directly. Flat and self-describing: read only the fields named for the .kind. */
 typedef enum {
     DART_TRANSPORT_MSG_LOST,        /* messages skipped: .topic, .peer, .lost_first .. +.lost_count-1 */
-    DART_TRANSPORT_MSG_TOO_BIG,     /* a received message exceeded max_message_bytes (.too_big_bytes), skipped */
+    DART_TRANSPORT_MSG_TOO_BIG,     /* a received message could not be buffered (allocation
+                                       failed at .too_big_bytes), skipped */
     DART_TRANSPORT_NAME_COLLISION,  /* a peer's name hashes to ours but differs (.identity, .topic), refused */
     DART_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best-effort publisher (.topic, .peer) */
     DART_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a match (.topic, .peer,
                                        .peer_is_pub = the refused direction) */
     DART_TRANSPORT_INTEREST_OVERFLOW,/* a peer's matched topics carry indices we cannot map (.peer,
-                                        .lost_count = entry count): their data can never demux here.
-                                        Fixed mode: raise DART_META_MAX_IDS; dynamic: map alloc failed. */
+                                        .lost_count = entry count): the index-map allocation failed,
+                                        so their data can never demux here. */
     DART_TRANSPORT_META_TRUNCATED_INTEREST, /* our announce overlay overflowed: the interest list was
                                                dropped, so peers see none of our topics (needs ~13k topics
                                                at 5 B/entry against the one-datagram ceiling). */
@@ -211,16 +206,18 @@ typedef void (*DartTransportEventFn)(const DartTransportEvent *ev);
 /* Largest message the wire can carry (65535 fragments, ~64 MB by default). */
 #define DART_MESSAGE_MAX (65535u * DART_FRAG_SIZE_MAX)
 
-/* DartConfig.allocator is a DartAllocFn (common/alloc.h): set it and user topics grow to
- * fit (max_message_bytes may be 0); NULL (default, embedded) keeps fixed buffers and a
- * bigger message is refused/skipped. Pair a set allocator with dart_transport_destroy to free it. */
+/* DartConfig.allocator is REQUIRED (a DartAllocFn, common/alloc.h): message buffers,
+ * reassembly state, per-peer index maps, and lane records all size dynamically through
+ * it, so memory scales with actual traffic and matches, never with worst-case tables.
+ * An embedded no-heap deployment passes dart_allocator_alloc over a DartAllocator in
+ * STATIC mode (one caller buffer, no growth, overflow refused) -- same contract, no heap.
+ * Pair with dart_transport_destroy to free the hook allocations at teardown. */
 
 /* Two ways to populate the topic table:
- *   fixed/at-init : topics != NULL, n_topics = its length. Slots are defined now;
- *                   buffers come from the arena (or the allocator if one is set).
- *   reserve/lazy  : topics == NULL, n_topics = the reserved capacity, allocator set.
- *                   All slots start DART_INACTIVE; fill them later with dart_transport_topic_define
- *                   (this is how the node's runtime dart_node_create_topic works). */
+ *   at-init      : topics != NULL, n_topics = its length. Slots are defined now.
+ *   reserve/lazy : topics == NULL, n_topics = the reserved capacity. All slots start
+ *                  DART_INACTIVE; fill them later with dart_transport_topic_define
+ *                  (this is how the node's runtime dart_node_create_topic works). */
 typedef struct {
     const DartTopicDef *topics;     /* NULL = reserve mode (see above) */
     uint16_t              n_topics;   /* defined count, or reserved capacity in reserve mode */
@@ -232,7 +229,7 @@ typedef struct {
     i_DartShmMsgFn         on_shm;     /* SHM-DATA delivery (descriptor); the node resolves it */
 #endif
     DartTransportEventFn  on_event;   /* optional: transport events (loss/too-big/collision/qos) */
-    DartAllocFn           allocator;  /* optional: set => dynamic message sizing */
+    DartAllocFn           allocator;  /* REQUIRED (see above); init fails without it */
     /* optional schema gate: called at DETAIL INTAKE (dart_transport_apply_peer_details),
      * once per direction of a name-verified topic, with the peer's advertised schema
      * identity + canonical wire (hash 0 = untyped; wire {NULL,0} = not inlined, identical
@@ -259,8 +256,8 @@ DartTransportState *dart_transport_init(void *mem, size_t mem_size, const DartCo
  * the new state, or NULL on failure (old is left intact). Dynamic-mode growth only. */
 DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_mem, size_t new_cap,
                         uint16_t new_max_peers, uint16_t new_n_topics);
-/* Free allocator-allocated buffers (dynamic topics). No-op in fixed mode; the
- * arena stays the caller's. The node calls it from close. */
+/* Free every hook allocation (message buffers, reassembly state, index maps, lane
+ * records); the arena stays the caller's. The node calls it from close. */
 void      dart_transport_destroy(DartTransportState *st);
 
 /* 64-bit topic identity from a name (FNV-1a): matches topics across peers. */
@@ -344,7 +341,7 @@ typedef struct {
 uint16_t  dart_meta_cap(uint16_t n_topics);
 /* Exact bytes the next dart_transport_meta_build will emit for the CURRENT topic state,
  * so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
- * fixed-buffer worst case (and the accept bound for peers' overlays). */
+ * worst-case bound (and the accept bound for peers' overlays). */
 uint16_t  dart_transport_meta_size(DartTransportState *st);
 /* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix
  * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), then st's interest
@@ -512,9 +509,8 @@ int       dart_transport_set_role(DartTransportState *st, uint16_t topic_index, 
 
 /* Define a reserved (currently inactive) topic slot at runtime: set its name/qos/
  * role, allocate its history ring via the allocator, and rematch known peers.
- * Reserve mode only (an allocator is required). Returns 0 ok, or negative: -1 bad index/
- * name / slot already defined / no allocator, -4 out of memory. Re-advertise interest
- * after (the node bumps its discovery announce). */
+ * Returns 0 ok, or negative: -1 bad index / name / slot already defined, -4 out of
+ * memory. Re-advertise interest after (the node bumps its discovery announce). */
 int       dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, const DartTopicDef *def);
 
 /* The topic's topic name ({NULL,0} if undefined or out of range), for surfacing it on a
@@ -526,9 +522,9 @@ DartString dart_transport_topic_name(DartTransportState *st, uint16_t topic_inde
 typedef enum {
     DART_OK             =  0,
     DART_ERR_NO_TOPIC = -1,  /* topic index out of range */
-    DART_ERR_TOO_BIG    = -2,  /* exceeds max_message_bytes or the wire fragment cap */
+    DART_ERR_TOO_BIG    = -2,  /* exceeds the wire fragment cap (DART_MESSAGE_MAX) */
     DART_ERR_ROLE       = -3,  /* topic is SUB_ONLY or INACTIVE: cannot publish */
-    DART_ERR_OOM        = -4,  /* dynamic allocator returned NULL */
+    DART_ERR_OOM        = -4,  /* allocator returned NULL */
     DART_ERR_STATE      = -5,  /* wrong state: poll while a service thread runs, start while
                                   started, or a call not allowed from inside a callback */
     DART_ERR_NOSYS      = -6   /* not compiled in (dart_node_start with DART_THREADS off) */
