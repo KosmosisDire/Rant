@@ -318,15 +318,22 @@ size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
- * hash-only interest list: the transport's OVERLAY, carried opaquely inside discovery's
- * announce blob (the node name lives in discovery's own section, not here). Layout:
- *   v10: ['D','N',10, frag_lo, frag_hi,                <interest>]
- *   v11: ['D','N',11, frag_lo, frag_hi, shm, host[16], <interest>]
- * frag sits at [3..4] in both; v11 adds the SHM byte + host. dart_transport_meta_build
- * writes v11 when DART_SHM is compiled, v10 otherwise. NO topic names and NO schemas ride
- * the announce: those are fetched pairwise via the detail exchange ('uDTL' below), so a
- * 2000-topic announce is ~10 kB instead of overflowing the one-datagram ceiling. */
+ * payload wrapping this node's UDP fragment size, SHM capability + host uuid, an iflags
+ * byte, and (inline case) its hash-only interest list: the transport's OVERLAY, carried
+ * opaquely inside discovery's announce blob (the node name lives in discovery's own
+ * section, not here). Layout:
+ *   v12: ['D','N',12, frag_lo, frag_hi, iflags,                <interest>]
+ *   v13: ['D','N',13, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
+ * frag sits at [3..4] in both; v13 adds the SHM byte + host. dart_transport_meta_build
+ * writes v13 when DART_SHM is compiled, v12 otherwise. iflags bit 0 = INTEREST_EXTERNAL:
+ * the interest list did NOT fit the announce datagram, nothing follows the base, and
+ * peers pull the identical interest blob over the unicast 'uDTL' paging below
+ * (DART_INTEREST_REQ/RESP). Clear = the inlined interest (even when empty) is
+ * authoritative. So the announce NEVER exceeds one datagram and never relies on IP
+ * reassembly, no matter how many topics a node has (a constrained receiver, e.g. lwIP
+ * with reassembly off, always gets the bootstrap: locator + version + this flag).
+ * NO topic names and NO schemas ride the announce either: those are fetched pairwise
+ * via the detail exchange ('uDTL' below). */
 
 /* One topic's schema advertisement, registered by the node: the 64-bit identity plus a
  * view of the canonical wire bytes (valid for the topic's lifetime). hash 0 = none.
@@ -339,20 +346,32 @@ typedef struct {
 /* Bytes to reserve for the overlay: prefix + the interest list at n_topics entries,
  * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_cap. */
 uint16_t  dart_meta_cap(uint16_t n_topics);
-/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT topic state,
- * so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
- * worst-case bound (and the accept bound for peers' overlays). */
+/* Exact bytes the next INLINE dart_transport_meta_build will emit for the CURRENT topic
+ * state, so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
+ * worst-case bound (and the accept bound for peers' overlays). The bootstrap (external)
+ * form is always dart_transport_meta_bootstrap_size(). */
 uint16_t  dart_transport_meta_size(DartTransportState *st);
-/* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix
- * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), then st's interest
- * list (one positional entry per topic slot up to the highest defined one). Returns
- * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
- * discovery's own section of the announce blob. */
+uint16_t  dart_transport_meta_bootstrap_size(void);
+/* Build the overlay into out[cap] (cap >= dart_transport_meta_size, or the bootstrap
+ * size when interest_external): the version prefix (frag_size, plus shm_capable +
+ * host[16] when DART_SHM is compiled) and the iflags byte, then st's interest list (one
+ * positional entry per topic slot up to the highest defined one) -- unless
+ * interest_external is nonzero, which sets the INTEREST_EXTERNAL bit and writes NO
+ * interest (peers pull it via DART_INTEREST_REQ). The caller owns the policy: inline
+ * whenever the whole announce fits one datagram (the node compares
+ * dart_transport_meta_size against its announce budget). Returns total bytes; host may
+ * be NULL when !shm_capable. The node NAME is not here: it rides discovery's own
+ * section of the announce blob. */
 uint16_t  dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                       int interest_external);
 /* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
 uint16_t  dart_meta_frag(DartBytes meta);
-/* The interest sub-blob inside the overlay; {NULL, 0} if absent. */
+/* The INTEREST_EXTERNAL bit: 1 = the overlay carries no interest and the peer serves it
+ * via the uDTL interest paging; 0 = the inline interest (even empty) is authoritative. */
+int       dart_meta_interest_external(DartBytes meta);
+/* The interest sub-blob inside the overlay; {NULL, 0} if absent OR external (so a
+ * bootstrap can never be misread as an empty interest list). */
 DartBytes dart_meta_interest(DartBytes meta);
 
 /* One advertised topic, as decoded by dart_meta_interest_next. The announce carries no
@@ -379,13 +398,16 @@ typedef struct {
     uint8_t  started;    /* 0 until the first call parses the [u16 n] header */
 } DartInterestIter;
 
-/* Walk a peer's interest list one advertised DIRECTION at a time (a PUBSUB topic yields
+/* Walk an interest list one advertised DIRECTION at a time (a PUBSUB topic yields
  * a pub entry then a sub entry; INACTIVE/undefined slots are skipped). Pass the same
- * overlay each call with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at
+ * blob each call with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at
  * the end (or on a malformed/truncated blob: it stops rather than reading past the end).
- * Usage:
+ * dart_interest_next walks a BARE interest blob (dart_transport_build_interest output,
+ * e.g. one assembled from external-interest pages); dart_meta_interest_next walks the
+ * one inlined in an announce overlay (nothing for a bootstrap). Usage:
  *   DartInterestIter it = {0}; DartTopicEntry t;
  *   while (dart_meta_interest_next(meta, &it, &t)) { ... } */
+int       dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry *out);
 int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
@@ -408,9 +430,12 @@ int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
  * meta_version: on a REQ, the responder announce version the indices were read from; on
  * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
  * the requested indices the responder currently advertises, truncated at an entry
- * boundary when it cannot fit the cap: the requester re-requests what it still lacks. */
-#define DART_DETAIL_REQ  1
-#define DART_DETAIL_RESP 2
+ * boundary when it cannot fit the cap: the requester re-requests what it still lacks.
+ * Kinds 3/4 (interest paging) share the family header with [u16 n] = 0. */
+#define DART_DETAIL_REQ    1
+#define DART_DETAIL_RESP   2
+#define DART_INTEREST_REQ  3
+#define DART_INTEREST_RESP 4
 
 /* One requested topic: the peer's index + our schema hash for it (0 = untyped/none). */
 typedef struct {
@@ -418,11 +443,45 @@ typedef struct {
     uint64_t schema_hash;
 } DartDetailWant;
 
-/* Header accessors, safe on any buffer: kind returns DART_DETAIL_REQ/RESP, or 0 when the
- * datagram is not a well-formed detail header (wrong magic/version/too short). */
+/* Header accessors, safe on any buffer: kind returns one of the four uDTL kinds above,
+ * or 0 when the datagram is not a well-formed family header (wrong magic/version/short). */
 int       dart_detail_kind(DartBytes dgram);
 uint16_t  dart_detail_domain(DartBytes dgram);
 uint32_t  dart_detail_meta_version(DartBytes dgram);
+
+/* Interest paging (uDTL kinds 3/4): how a peer whose interest list does not fit its
+ * announce (INTEREST_EXTERNAL, see the overlay codec above) serves it. The pages carry
+ * BYTE RANGES of the exact dart_transport_build_interest blob, so the assembled bytes
+ * feed the unchanged dart_transport_apply_peer_interest. The responder is STATELESS
+ * (slices its current interest at the requested offset, one sub-datagram page); the
+ * requester keeps one cursor per peer: request offset=cursor, append the chunk, re-ask
+ * until cursor == total_len. A RESP is stamped with the responder's CURRENT
+ * meta_version; a stamp differing from the version being assembled restarts the cursor
+ * at 0 (the interest changed mid-fetch). Lost datagrams heal requester-driven, exactly
+ * like details (re-ask on the peer's announces + the periodic sweep). Bodies (LE):
+ *   REQ  body: [u32 offset]
+ *   RESP body: [u32 total_len][u32 offset][u16 chunk_len][chunk bytes]
+ * Interest entries are 5 B, so a page can never hit the oversized-single-entry case the
+ * detail exchange allows: interest paging is unconditionally sub-datagram. */
+#define DART_INTEREST_RESP_HEAD 24u   /* family header (14) + total/offset/chunk_len (10) */
+
+/* Exact bytes of this node's current dart_transport_build_interest output (the
+ * total_len a responder advertises; the same walk, byte for byte). */
+uint32_t  dart_transport_interest_size(DartTransportState *st);
+/* Build an INTEREST_REQ asking for the blob from `offset`. Returns bytes (18), or 0 if
+ * cap is too small. peer_meta_version = the version being fetched (advisory: the
+ * responder always answers with its current one). */
+size_t    dart_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
+                       uint32_t offset, void *out, size_t cap);
+/* The offset a well-formed INTEREST_REQ asks from: 1 + *offset, else 0. */
+int       dart_interest_req_offset(DartBytes dgram, uint32_t *offset);
+/* Write one page's header into out[cap] (>= DART_INTEREST_RESP_HEAD); the caller lays
+ * the chunk bytes immediately after it. Returns DART_INTEREST_RESP_HEAD, or 0. */
+size_t    dart_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
+                       uint32_t offset, uint16_t chunk_len, void *out, size_t cap);
+/* Decode a page: 1 + total_len/offset/chunk (a view into dgram, bounds-checked), else 0. */
+int       dart_interest_resp_parse(DartBytes dgram, uint32_t *total_len, uint32_t *offset,
+                       DartBytes *chunk);
 
 /* Build a DETAIL_REQ for n_wants topics. Returns bytes written, or 0 if cap is too
  * small for all of them (14 + 10 per want): batch per peer, split only if huge. */

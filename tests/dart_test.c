@@ -60,6 +60,11 @@ static volatile int g_tx_block_data;
 static volatile unsigned g_tx_block_detail_resp_port;
 static unsigned long long g_tx_type[5], g_rx_type[5];   /* [0]=other/disc, 1=DATA 2=HB 3=NACK 4=GAP */
 static unsigned long long g_tx_data_ch[4], g_rx_data_ch[4];
+/* the under-one-MTU invariant: the largest datagram any layer handed to sendto since the
+ * last reset, plus uDTL interest-paging counters (kind 3 = REQ). The interest phase
+ * resets these, then asserts max <= DART_DGRAM_MAX and no steady-state re-fetch. */
+static volatile int g_tx_max_len;
+static volatile unsigned long long g_tx_interest_req;
 static int g_trace = 0, g_trace_left = 24;
 
 #ifdef _WIN32
@@ -119,7 +124,12 @@ static int diag_sendto(SOCKET s, const char *buf, int len, int flags,
         if (e == WSAEWOULDBLOCK) g_tx_wouldblock++;
         else if (e == WSAECONNRESET) g_tx_reset++;
         else g_tx_err++;
-    } else diag_classify(buf, len, g_tx_type, g_tx_data_ch);
+    } else {
+        diag_classify(buf, len, g_tx_type, g_tx_data_ch);
+        if (len > g_tx_max_len) g_tx_max_len = len;
+        if (len >= 5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'
+            && (unsigned char)buf[4]==3) g_tx_interest_req++;
+    }
     return r;
 }
 
@@ -3673,6 +3683,158 @@ static void matchwait_checks(void){
     }
 }
 
+/* (19b3) interest paging codec + the external-overlay flag: build both overlay forms,
+   page a blob by byte ranges, and reject malformed pages. Sans-IO, codec only (the
+   requester/responder cycle is proven end-to-end by interest_external_checks). */
+static void interest_codec_checks(void){
+    static uint8_t tmem[1<<16];
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartConfig tc; DartTransportState *tr; DartTopicDef ch[3];
+    uint8_t meta[256], req[64], page[128];
+    uint16_t ml; uint32_t total, off; DartBytes chunk;
+
+    memset(ch,0,sizeof ch);
+    ch[0].name="ic/a";
+    ch[1].name="ic/b"; ch[1].role=DART_SUB_ONLY; ch[1].qos.max_rate_hz=50;  /* rate section too */
+    ch[2].name="ic/c";
+    memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=3; tc.max_peers=2;
+    tc.allocator=dart_allocator_alloc; tc.user=&ma;
+    tr = dart_transport_init(tmem, sizeof tmem, &tc);
+    ST_CHECK(tr!=NULL, "icodec: transport init");
+    if (!tr){ dart_allocator_reset(&ma); return; }
+
+    /* inline overlay: flag clear, interest present, all three size views agree */
+    ml = dart_transport_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, 0);
+    ST_CHECK(ml == dart_transport_meta_size(tr), "icodec: inline build == meta_size (%u)", ml);
+    ST_CHECK(dart_meta_frag(dart_bytes(meta,ml))==1200, "icodec: frag survives");
+    ST_CHECK(!dart_meta_interest_external(dart_bytes(meta,ml)), "icodec: inline -> external flag clear");
+    {   DartBytes in = dart_meta_interest(dart_bytes(meta,ml));
+        ST_CHECK(in.data && in.len == dart_transport_interest_size(tr),
+                 "icodec: interest slice == interest_size (%u)", (unsigned)in.len); }
+
+    /* bootstrap overlay: fixed size, flag set, interest NULL (never read as empty) */
+    ml = dart_transport_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, 1);
+    ST_CHECK(ml == dart_transport_meta_bootstrap_size(), "icodec: bootstrap size (%u)", ml);
+    ST_CHECK(dart_meta_interest_external(dart_bytes(meta,ml)), "icodec: bootstrap -> external flag set");
+    ST_CHECK(dart_meta_interest(dart_bytes(meta,ml)).data == NULL, "icodec: bootstrap interest is NULL");
+    ST_CHECK(dart_meta_frag(dart_bytes(meta,ml))==1200, "icodec: bootstrap still carries frag");
+
+    /* REQ roundtrip + header gating */
+    {   size_t rl = dart_interest_req_build(7, 42u, 123u, req, sizeof req);
+        ST_CHECK(rl==18u, "icodec: req builds (%u bytes)", (unsigned)rl);
+        ST_CHECK(dart_detail_kind(dart_bytes(req,rl))==DART_INTEREST_REQ
+              && dart_detail_domain(dart_bytes(req,rl))==7
+              && dart_detail_meta_version(dart_bytes(req,rl))==42u, "icodec: req header decodes");
+        ST_CHECK(dart_interest_req_offset(dart_bytes(req,rl), &off) && off==123u, "icodec: req offset rides");
+        ST_CHECK(!dart_interest_req_offset(dart_bytes(req,rl-1u), &off), "icodec: short req rejected");
+        ST_CHECK(dart_interest_req_build(7,42u,0u,req,17u)==0u, "icodec: tiny cap refused"); }
+
+    /* RESP page roundtrip + bounds */
+    {   uint8_t blob[40]; size_t hl; unsigned i;
+        for (i=0;i<sizeof blob;i++) blob[i]=(uint8_t)i;
+        hl = dart_interest_resp_head(7, 42u, 40u, 10u, 20u, page, sizeof page);
+        ST_CHECK(hl==DART_INTEREST_RESP_HEAD, "icodec: resp head builds");
+        memcpy(page+hl, blob+10, 20);
+        ST_CHECK(dart_interest_resp_parse(dart_bytes(page, hl+20u), &total, &off, &chunk)
+              && total==40u && off==10u && chunk.len==20u && chunk.data[0]==10u,
+                 "icodec: resp page parses (total=%u off=%u len=%u)", total, off, (unsigned)chunk.len);
+        ST_CHECK(!dart_interest_resp_parse(dart_bytes(page, hl+19u), &total, &off, &chunk),
+                 "icodec: truncated page rejected");
+        dart_interest_resp_head(7, 42u, 40u, 30u, 20u, page, sizeof page);   /* 30+20 > 40 */
+        memcpy(page+DART_INTEREST_RESP_HEAD, blob, 20);
+        ST_CHECK(!dart_interest_resp_parse(dart_bytes(page, DART_INTEREST_RESP_HEAD+20u), &total, &off, &chunk),
+                 "icodec: out-of-blob range rejected"); }
+    dart_allocator_reset(&ma);
+}
+
+/* (19b4) EXTERNAL interest end-to-end: a ~300-topic publisher's announce cannot inline
+   its interest list, so it ships as a sub-MTU bootstrap (INTEREST_EXTERNAL) and the
+   subscriber pulls the blob over uDTL byte-range paging (2 pages at this size). Pins
+   the invariant that NO datagram ever exceeds DART_DGRAM_MAX (no reliance on IP
+   reassembly: the ESP32/lwIP failure mode), that the match still forms and delivers
+   through the fetch, and that steady-state announces trigger no re-fetch (the per-peer
+   version dedup). */
+#define IX_TOPICS 300
+static int ix_recv;
+static uint32_t ix_epoch_pid, ix_epoch;
+static void ix_on_message(const DartMsg *msg){ (void)msg; ix_recv++; }
+static void interest_external_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, so; DartNode *P, *S; DartTopic *pub=NULL, *sub=NULL;
+    DartTopicOpts co; DartDiscoveryAddr seed; char name[16];
+    uint8_t payload[8]; int i, t;
+    memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=4; co.qos.catch_up=1;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+30; po.max_topics=IX_TOPICS+2;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po; so.max_topics=2;
+#ifdef _WIN32
+    g_tx_max_len=0; g_tx_interest_req=0;
+#endif
+    P = dart_node_open(&pa, "ix-pub", NULL, NULL, &po);
+    S = dart_node_open(&sa, "ix-sub", ix_on_message, NULL, &so);
+    ST_CHECK(P&&S, "interest: nodes open");
+    if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); return; }
+    for (i=0;i<IX_TOPICS;i++){
+        snprintf(name,sizeof name,"ix/%03d",i);
+        if (!dart_node_create_topic(P, name, DART_PUB_ONLY, NULL, &co)) break;
+    }
+    ST_CHECK(i==IX_TOPICS, "interest: %d topics created (%d)", IX_TOPICS, i);
+    pub = dart_node_topic(P, 250);
+    sub = dart_node_create_topic(S, "ix/250", DART_SUB_ONLY, NULL, &co);
+    ST_CHECK(pub && sub, "interest: endpoints ready");
+    ix_recv=0;
+    for (t=0;t<2000 && (!pub || dart_topic_match_count(pub)==0);t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(pub && dart_topic_match_count(pub)>0, "interest: match formed through the external fetch");
+    memset(payload,0x77,sizeof payload);
+    if (pub) dart_topic_send(pub, dart_bytes(payload,sizeof payload));
+    for (t=0;t<800 && ix_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
+    ST_CHECK(ix_recv>=1, "interest: delivery across the external match (%d)", ix_recv);
+    {   /* reflection reads the ASSEMBLED interest, not the announce: the subscriber's
+           entity fold (the explorer's view) must enumerate the external peer's whole
+           set even though its announce carried no interest at all. The interest EPOCH
+           is the observer cache key: nonzero once anything applied. */
+        uint16_t cnt, k; int ents = 0; uint32_t pid = 0, epoch = 0;
+        const DartDiscoveryPeer *ps = dart_node_peers(S, &cnt);
+        for (k=0;k<cnt;k++)
+            if (ps && ps[k].name.len==6 && !memcmp(ps[k].name.data,"ix-pub",6)){
+                pid = ps[k].id; epoch = dart_node_peer_interest_epoch(&ps[k]);
+            }
+        ST_CHECK(pid!=0, "interest: publisher visible in the peer view");
+        ST_CHECK(epoch>0, "interest: interest epoch advanced on assembly (%u)", epoch);
+        if (pid){
+            DartEntityIter eit; DartEntityInfo ei;
+            memset(&eit,0,sizeof eit);
+            while (dart_node_peer_entity_next(S, pid, &eit, &ei)) ents++;
+            ST_CHECK(ents==IX_TOPICS, "interest: reflection enumerates all %d external entities (%d)",
+                     IX_TOPICS, ents);
+        }
+        ix_epoch_pid = pid; ix_epoch = epoch;   /* steady-state stability checked below */
+    }
+#ifdef _WIN32
+    ST_CHECK(g_tx_max_len>0 && g_tx_max_len<=(int)DART_DGRAM_MAX,
+             "interest: no datagram exceeded DART_DGRAM_MAX (max=%d)", g_tx_max_len);
+    ST_CHECK(g_tx_interest_req>=1, "interest: the blob traveled by paged fetch (%llu reqs)",
+             (unsigned long long)g_tx_interest_req);
+    {   unsigned long long before = g_tx_interest_req;   /* steady state: the version dedup */
+        for (t=0;t<250;t++){ dart_node_poll(P,5); dart_node_poll(S,5); }
+        ST_CHECK(g_tx_interest_req==before,
+                 "interest: steady-state announces trigger no re-fetch (+%llu)",
+                 (unsigned long long)(g_tx_interest_req-before)); }
+#endif
+    {   /* the epoch is quiet in steady state too: an epoch-keyed observer cache
+           (the explorer) re-walks only on real change, never per announce */
+        uint16_t cnt, k; uint32_t epoch_now = 0;
+        const DartDiscoveryPeer *ps = dart_node_peers(S, &cnt);
+        for (k=0;k<cnt;k++)
+            if (ps && ps[k].id==ix_epoch_pid) epoch_now = dart_node_peer_interest_epoch(&ps[k]);
+        ST_CHECK(ix_epoch_pid && epoch_now==ix_epoch,
+                 "interest: epoch stable across steady state (%u -> %u)", ix_epoch, epoch_now);
+    }
+    dart_node_close(P,1); dart_node_close(S,1);
+}
+
 static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
@@ -3988,6 +4150,8 @@ static int selftest_main(void){
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
     detail_paging_checks();       /* 19b2. detail paging fits one datagram + never wedges (force-first) */
+    interest_codec_checks();      /* 19b3. interest paging codec + the external-overlay flag */
+    interest_external_checks();   /* 19b4. >MTU interest end-to-end: bootstrap announce + paged fetch */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
     patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */

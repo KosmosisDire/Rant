@@ -635,15 +635,22 @@ size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
 
 /* Discovery-announce meta blob (sans-IO codec). A versioned, opaque-to-discovery
- * payload wrapping this node's UDP fragment size, SHM capability + host uuid, and its
- * hash-only interest list: the transport's OVERLAY, carried opaquely inside discovery's
- * announce blob (the node name lives in discovery's own section, not here). Layout:
- *   v10: ['D','N',10, frag_lo, frag_hi,                <interest>]
- *   v11: ['D','N',11, frag_lo, frag_hi, shm, host[16], <interest>]
- * frag sits at [3..4] in both; v11 adds the SHM byte + host. dart_transport_meta_build
- * writes v11 when DART_SHM is compiled, v10 otherwise. NO topic names and NO schemas ride
- * the announce: those are fetched pairwise via the detail exchange ('uDTL' below), so a
- * 2000-topic announce is ~10 kB instead of overflowing the one-datagram ceiling. */
+ * payload wrapping this node's UDP fragment size, SHM capability + host uuid, an iflags
+ * byte, and (inline case) its hash-only interest list: the transport's OVERLAY, carried
+ * opaquely inside discovery's announce blob (the node name lives in discovery's own
+ * section, not here). Layout:
+ *   v12: ['D','N',12, frag_lo, frag_hi, iflags,                <interest>]
+ *   v13: ['D','N',13, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
+ * frag sits at [3..4] in both; v13 adds the SHM byte + host. dart_transport_meta_build
+ * writes v13 when DART_SHM is compiled, v12 otherwise. iflags bit 0 = INTEREST_EXTERNAL:
+ * the interest list did NOT fit the announce datagram, nothing follows the base, and
+ * peers pull the identical interest blob over the unicast 'uDTL' paging below
+ * (DART_INTEREST_REQ/RESP). Clear = the inlined interest (even when empty) is
+ * authoritative. So the announce NEVER exceeds one datagram and never relies on IP
+ * reassembly, no matter how many topics a node has (a constrained receiver, e.g. lwIP
+ * with reassembly off, always gets the bootstrap: locator + version + this flag).
+ * NO topic names and NO schemas ride the announce either: those are fetched pairwise
+ * via the detail exchange ('uDTL' below). */
 
 /* One topic's schema advertisement, registered by the node: the 64-bit identity plus a
  * view of the canonical wire bytes (valid for the topic's lifetime). hash 0 = none.
@@ -656,20 +663,32 @@ typedef struct {
 /* Bytes to reserve for the overlay: prefix + the interest list at n_topics entries,
  * capped to one (IP-fragmentable) UDP datagram. Sizes discovery's meta_cap. */
 uint16_t  dart_meta_cap(uint16_t n_topics);
-/* Exact bytes the next dart_transport_meta_build will emit for the CURRENT topic state,
- * so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
- * worst-case bound (and the accept bound for peers' overlays). */
+/* Exact bytes the next INLINE dart_transport_meta_build will emit for the CURRENT topic
+ * state, so a growable caller sizes its buffer to actual content; dart_meta_cap stays the
+ * worst-case bound (and the accept bound for peers' overlays). The bootstrap (external)
+ * form is always dart_transport_meta_bootstrap_size(). */
 uint16_t  dart_transport_meta_size(DartTransportState *st);
-/* Build the overlay into out[cap] (cap >= dart_transport_meta_size): the version prefix
- * (frag_size, plus shm_capable + host[16] when DART_SHM is compiled), then st's interest
- * list (one positional entry per topic slot up to the highest defined one). Returns
- * total bytes; host may be NULL when !shm_capable. The node NAME is not here: it rides
- * discovery's own section of the announce blob. */
+uint16_t  dart_transport_meta_bootstrap_size(void);
+/* Build the overlay into out[cap] (cap >= dart_transport_meta_size, or the bootstrap
+ * size when interest_external): the version prefix (frag_size, plus shm_capable +
+ * host[16] when DART_SHM is compiled) and the iflags byte, then st's interest list (one
+ * positional entry per topic slot up to the highest defined one) -- unless
+ * interest_external is nonzero, which sets the INTEREST_EXTERNAL bit and writes NO
+ * interest (peers pull it via DART_INTEREST_REQ). The caller owns the policy: inline
+ * whenever the whole announce fits one datagram (the node compares
+ * dart_transport_meta_size against its announce budget). Returns total bytes; host may
+ * be NULL when !shm_capable. The node NAME is not here: it rides discovery's own
+ * section of the announce blob. */
 uint16_t  dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                       uint16_t frag_size, int shm_capable, const uint8_t host[16]);
+                       uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                       int interest_external);
 /* A peer's advertised UDP fragment size from the overlay; 0 if malformed. */
 uint16_t  dart_meta_frag(DartBytes meta);
-/* The interest sub-blob inside the overlay; {NULL, 0} if absent. */
+/* The INTEREST_EXTERNAL bit: 1 = the overlay carries no interest and the peer serves it
+ * via the uDTL interest paging; 0 = the inline interest (even empty) is authoritative. */
+int       dart_meta_interest_external(DartBytes meta);
+/* The interest sub-blob inside the overlay; {NULL, 0} if absent OR external (so a
+ * bootstrap can never be misread as an empty interest list). */
 DartBytes dart_meta_interest(DartBytes meta);
 
 /* One advertised topic, as decoded by dart_meta_interest_next. The announce carries no
@@ -696,13 +715,16 @@ typedef struct {
     uint8_t  started;    /* 0 until the first call parses the [u16 n] header */
 } DartInterestIter;
 
-/* Walk a peer's interest list one advertised DIRECTION at a time (a PUBSUB topic yields
+/* Walk an interest list one advertised DIRECTION at a time (a PUBSUB topic yields
  * a pub entry then a sub entry; INACTIVE/undefined slots are skipped). Pass the same
- * overlay each call with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at
+ * blob each call with a zeroed DartInterestIter; returns 1 and fills *out, or 0 at
  * the end (or on a malformed/truncated blob: it stops rather than reading past the end).
- * Usage:
+ * dart_interest_next walks a BARE interest blob (dart_transport_build_interest output,
+ * e.g. one assembled from external-interest pages); dart_meta_interest_next walks the
+ * one inlined in an announce overlay (nothing for a bootstrap). Usage:
  *   DartInterestIter it = {0}; DartTopicEntry t;
  *   while (dart_meta_interest_next(meta, &it, &t)) { ... } */
+int       dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry *out);
 int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out);
 #ifdef DART_SHM
 /* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
@@ -725,9 +747,12 @@ int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
  * meta_version: on a REQ, the responder announce version the indices were read from; on
  * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
  * the requested indices the responder currently advertises, truncated at an entry
- * boundary when it cannot fit the cap: the requester re-requests what it still lacks. */
-#define DART_DETAIL_REQ  1
-#define DART_DETAIL_RESP 2
+ * boundary when it cannot fit the cap: the requester re-requests what it still lacks.
+ * Kinds 3/4 (interest paging) share the family header with [u16 n] = 0. */
+#define DART_DETAIL_REQ    1
+#define DART_DETAIL_RESP   2
+#define DART_INTEREST_REQ  3
+#define DART_INTEREST_RESP 4
 
 /* One requested topic: the peer's index + our schema hash for it (0 = untyped/none). */
 typedef struct {
@@ -735,11 +760,45 @@ typedef struct {
     uint64_t schema_hash;
 } DartDetailWant;
 
-/* Header accessors, safe on any buffer: kind returns DART_DETAIL_REQ/RESP, or 0 when the
- * datagram is not a well-formed detail header (wrong magic/version/too short). */
+/* Header accessors, safe on any buffer: kind returns one of the four uDTL kinds above,
+ * or 0 when the datagram is not a well-formed family header (wrong magic/version/short). */
 int       dart_detail_kind(DartBytes dgram);
 uint16_t  dart_detail_domain(DartBytes dgram);
 uint32_t  dart_detail_meta_version(DartBytes dgram);
+
+/* Interest paging (uDTL kinds 3/4): how a peer whose interest list does not fit its
+ * announce (INTEREST_EXTERNAL, see the overlay codec above) serves it. The pages carry
+ * BYTE RANGES of the exact dart_transport_build_interest blob, so the assembled bytes
+ * feed the unchanged dart_transport_apply_peer_interest. The responder is STATELESS
+ * (slices its current interest at the requested offset, one sub-datagram page); the
+ * requester keeps one cursor per peer: request offset=cursor, append the chunk, re-ask
+ * until cursor == total_len. A RESP is stamped with the responder's CURRENT
+ * meta_version; a stamp differing from the version being assembled restarts the cursor
+ * at 0 (the interest changed mid-fetch). Lost datagrams heal requester-driven, exactly
+ * like details (re-ask on the peer's announces + the periodic sweep). Bodies (LE):
+ *   REQ  body: [u32 offset]
+ *   RESP body: [u32 total_len][u32 offset][u16 chunk_len][chunk bytes]
+ * Interest entries are 5 B, so a page can never hit the oversized-single-entry case the
+ * detail exchange allows: interest paging is unconditionally sub-datagram. */
+#define DART_INTEREST_RESP_HEAD 24u   /* family header (14) + total/offset/chunk_len (10) */
+
+/* Exact bytes of this node's current dart_transport_build_interest output (the
+ * total_len a responder advertises; the same walk, byte for byte). */
+uint32_t  dart_transport_interest_size(DartTransportState *st);
+/* Build an INTEREST_REQ asking for the blob from `offset`. Returns bytes (18), or 0 if
+ * cap is too small. peer_meta_version = the version being fetched (advisory: the
+ * responder always answers with its current one). */
+size_t    dart_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
+                       uint32_t offset, void *out, size_t cap);
+/* The offset a well-formed INTEREST_REQ asks from: 1 + *offset, else 0. */
+int       dart_interest_req_offset(DartBytes dgram, uint32_t *offset);
+/* Write one page's header into out[cap] (>= DART_INTEREST_RESP_HEAD); the caller lays
+ * the chunk bytes immediately after it. Returns DART_INTEREST_RESP_HEAD, or 0. */
+size_t    dart_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
+                       uint32_t offset, uint16_t chunk_len, void *out, size_t cap);
+/* Decode a page: 1 + total_len/offset/chunk (a view into dgram, bounds-checked), else 0. */
+int       dart_interest_resp_parse(DartBytes dgram, uint32_t *total_len, uint32_t *offset,
+                       DartBytes *chunk);
 
 /* Build a DETAIL_REQ for n_wants topics. Returns bytes written, or 0 if cap is too
  * small for all of them (14 + 10 per want): batch per peer, split only if huge. */
@@ -1540,6 +1599,17 @@ void            i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t to
  * until the next call. */
 DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
 
+/* The uDTL interest paging (kinds 3/4): how a peer whose interest list does not fit its
+ * announce (INTEREST_EXTERNAL) serves and fetches it. interest_respond answers an
+ * INTEREST_REQ with one sub-datagram byte-range page of our current interest blob (same
+ * contract as detail_respond: stateless, idempotent, {NULL,0} when unanswerable, view
+ * valid until the next call). apply_interest_page ingests one INTEREST_RESP page:
+ * appends at the peer's cursor, re-queues the next request while incomplete, and on
+ * completion applies the assembled blob exactly as an inline announce would. */
+DartBytes i_dart_node_core_interest_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
+void      i_dart_node_core_apply_interest_page(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
+                                      DartBytes resp);
+
 /* The transport's DartConfig.schema_check, node-style (see transport/core.h): decide a
  * would-be match from the peer's advertised schema identity + wire, delivered by its
  * detail response. Typed vs typed matches iff same root name and the subscriber's fields are
@@ -1589,12 +1659,14 @@ typedef struct {
 int  i_dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  i_dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 
-/* The requester side of the detail cycle (the announce nominates by hash; details verify
- * and match). apply_details ingests a peer's DETAIL_RESP off the data socket. detail_any
- * says a DETAIL_REQ is queued somewhere; the runtime then loops detail_req_next (build
- * request + destination, send each) until it returns 0. detail_rearm re-queues every
- * ACTIVE peer: the runtime's periodic retry sweep, cheap once converged (each peer costs
- * one wants() walk and sends nothing). */
+/* The requester side of the uDTL cycle (the announce nominates by hash; details verify
+ * and match; external interest is paged in first, since it gates candidate discovery).
+ * apply_details ingests a peer's DETAIL_RESP off the data socket. detail_any says a
+ * request (interest or detail) is queued somewhere; the runtime then loops
+ * detail_req_next (build request + destination, send each) until it returns 0; interest
+ * requests drain before detail requests. detail_rearm re-queues every ACTIVE peer: the
+ * runtime's periodic retry sweep, cheap once converged (each peer costs one wants()
+ * walk and sends nothing). */
 void   i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
                                       DartBytes resp);
 int    i_dart_node_core_detail_any(i_DartNodeCore *c);
@@ -1634,6 +1706,14 @@ int      i_dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id
  * fragment size + interest off a DartDiscoveryPeer (from dart_node_peers) without ever
  * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
 uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
+/* The peer's interest EPOCH: a per-incarnation counter bumped every time the peer's
+ * REFLECTED state changes -- an interest apply, an external-interest assembly completing,
+ * or fresh detail verdicts/names landing. Key any cached entity/interest walk on THIS
+ * (walk again iff it changed), never on the announce meta_version alone: an external
+ * peer's entities appear (and names page in) without any version bump. 0 = nothing
+ * applied yet, so a zero-initialized cache key starts stale and walks once the first
+ * interest lands. */
+uint32_t dart_node_peer_interest_epoch(const DartDiscoveryPeer *peer);
 /* Walk a peer's interest list one advertised direction at a time: zero a
  * DartInterestIter, then call until it returns 0. Fills *out with index/role/hash only:
  * the announce carries no topic names or schemas (fetch those via the detail exchange,
@@ -5097,21 +5177,24 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
    bounds-checked (see dart_transport_apply_peer_interest), so a malformed or foreign
    blob is dropped wholesale, never trusted. Names and schemas are NOT here: they ride
    the pairwise detail exchange below. */
-#define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
-#define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
+#define DART__META_BASE_NOSHM 6u    /* 'D','N',ver, frag_lo, frag_hi, iflags */
+#define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
+#define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  11u                 /* what WE write */
+#define DART__META_VER  13u                 /* what WE write */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  10u
+#define DART__META_VER  12u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
-    return meta.data && meta.len >= 5 && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=10 && meta.data[2]<=11;
+    return meta.data && meta.len >= DART__META_BASE_NOSHM
+        && meta.data[0]=='D' && meta.data[1]=='N'
+        && meta.data[2]>=12 && meta.data[2]<=13;
 }
-/* base prefix through host[16], by version (odd v11 carries shm+host, even v10 doesn't). */
+/* base prefix through the iflags byte, by version (odd v13 carries shm+host, even v12
+ * doesn't). iflags is always the base's last byte. */
 static uint16_t i_dart_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
@@ -5121,21 +5204,29 @@ uint16_t dart_meta_cap(uint16_t n_topics){
     return (uint16_t)cap;
 }
 
-/* Exact overlay size the next dart_transport_meta_build will emit for the current
- * topic state (the same walk, byte for byte), so a caller can size the buffer to the
- * actual content instead of dart_meta_cap's full-reserve worst case. */
-uint16_t dart_transport_meta_size(DartTransportState *st){
+/* Exact bytes of our current interest blob (the total_len interest paging serves).
+ * The same walk dart_transport_build_interest emits, byte for byte. */
+uint32_t dart_transport_interest_size(DartTransportState *st){
     uint16_t c, n=0, n_rates;
-    size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
-    n_rates = i_dart_rate_count(st, n);            /* same walk build_interest emits */
-    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates;
+    n_rates = i_dart_rate_count(st, n);
+    return 2u + 5u*(uint32_t)n + 2u + 4u*(uint32_t)n_rates;
+}
+
+/* Exact overlay size the next INLINE dart_transport_meta_build will emit for the
+ * current topic state, so a caller can size the buffer to the actual content instead
+ * of dart_meta_cap's full-reserve worst case. */
+uint16_t dart_transport_meta_size(DartTransportState *st){
+    size_t len = (size_t)DART__META_BASE + dart_transport_interest_size(st);
     if (len > 65000u) len = 65000u;              /* the dart_meta_cap ceiling; past it the build truncates */
     return (uint16_t)len;
 }
 
+uint16_t dart_transport_meta_bootstrap_size(void){ return DART__META_BASE; }
+
 uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                         int interest_external){
     size_t interest_len, len; uint16_t off = DART__META_BASE;
     out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
@@ -5145,6 +5236,8 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
 #else
     (void)shm_capable; (void)host;
 #endif
+    out[off-1] = interest_external ? DART__META_IFLAG_EXTERNAL : 0u;
+    if (interest_external) return off;     /* bootstrap: locator-sized, always one datagram */
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     len = (size_t)off + interest_len;
     if (interest_len == 0)    /* did not fit (returns >= 2 even with zero topics): never silent */
@@ -5157,28 +5250,37 @@ uint16_t dart_meta_frag(DartBytes meta){
     return (uint16_t)(meta.data[3] | ((uint16_t)meta.data[4] << 8));
 }
 
+int dart_meta_interest_external(DartBytes meta){
+    uint16_t base;
+    if (!i_dart_meta_ok(meta)) return 0;
+    base = i_dart_meta_base(meta.data);
+    if (meta.len < base) return 0;
+    return (meta.data[base-1] & DART__META_IFLAG_EXTERNAL) ? 1 : 0;
+}
+
 DartBytes dart_meta_interest(DartBytes meta){
     uint16_t off;
     if (!i_dart_meta_ok(meta)) return dart_bytes(NULL, 0);
     off = i_dart_meta_base(meta.data);     /* interest follows the base prefix (no name in the overlay) */
     if (meta.len < off) return dart_bytes(NULL, 0);
+    if (meta.data[off-1] & DART__META_IFLAG_EXTERNAL)
+        return dart_bytes(NULL, 0);        /* bootstrap: never misread as an empty interest list */
     return dart_bytes(meta.data + off, meta.len - off);
 }
 
-int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out){
+int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry *out){
     if (!it || !out) return 0;
     if (!it->started){                    /* first call: parse the [u16 n] header */
-        DartBytes in = dart_meta_interest(meta);
         it->started = 1; it->left = 0; it->index = 0; it->phase = 0; it->off = 0;
-        if (!in.data || in.len < 2) return 0;      /* no/short interest list: nothing to yield */
-        it->left = (uint16_t)(in.data[0] | ((uint16_t)in.data[1] << 8));
-        it->off  = (uint32_t)(in.data - meta.data) + 2u;   /* first entry, past n */
+        if (!interest.data || interest.len < 2) return 0;   /* no/short interest list: nothing to yield */
+        it->left = (uint16_t)(interest.data[0] | ((uint16_t)interest.data[1] << 8));
+        it->off  = 2u;                    /* first entry, past n */
     }
     while (it->left){
         uint32_t off = it->off;
         uint8_t flags, role;
-        if ((size_t)off + 5u > meta.len){ it->left = 0; return 0; }   /* truncated: stop */
-        flags = meta.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
+        if ((size_t)off + 5u > interest.len){ it->left = 0; return 0; }   /* truncated: stop */
+        flags = interest.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         if (role == DART_INACTIVE){       /* declared-but-off / undefined hole: not advertised */
             it->left--; it->index++; it->off = off + 5u; it->phase = 0;
             continue;
@@ -5188,7 +5290,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
         out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
         out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
-        out->hash     = i_dart_le_r32(meta.data + off);
+        out->hash     = i_dart_le_r32(interest.data + off);
         if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
             out->is_pub = 1;
             if (role==DART_PUBSUB){ it->phase = 1; return 1; }   /* sub direction next call */
@@ -5202,9 +5304,13 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
     return 0;
 }
 
+int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out){
+    return dart_interest_next(dart_meta_interest(meta), it, out);
+}
+
 #ifdef DART_SHM
 int dart_meta_shm(DartBytes meta, uint8_t host[16]){
-    if (!i_dart_meta_ok(meta) || meta.data[2]!=11
+    if (!i_dart_meta_ok(meta) || meta.data[2]!=13
         || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
     return 1;
@@ -5226,7 +5332,7 @@ static int i_dart_detail_hdr_ok(DartBytes d){
 
 int dart_detail_kind(DartBytes dgram){
     if (!i_dart_detail_hdr_ok(dgram)) return 0;
-    return (dgram.data[4]==DART_DETAIL_REQ || dgram.data[4]==DART_DETAIL_RESP)
+    return (dgram.data[4]>=DART_DETAIL_REQ && dgram.data[4]<=DART_INTEREST_RESP)
          ? dgram.data[4] : 0;
 }
 uint16_t dart_detail_domain(DartBytes dgram){
@@ -5258,6 +5364,53 @@ size_t dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
         i_dart_le_w64(e+2, wants[k].schema_hash);
     }
     return need;
+}
+
+
+/* Interest paging codec (uDTL kinds 3/4, see core.h): byte-range pages of the exact
+   build_interest blob. Pure header build/parse; the responder's slicing and the
+   requester's cursor live in the node core (a sans-IO caller runs its own). */
+size_t dart_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
+                               uint32_t offset, void *out, size_t cap){
+    uint8_t *o=(uint8_t*)out;
+    if (!o || cap < (size_t)DART__DETAIL_HDR + 4u) return 0;
+    i_dart_detail_hdr_write(o, DART_INTEREST_REQ, domain, peer_meta_version, 0);
+    i_dart_le_w32(o + DART__DETAIL_HDR, offset);
+    return (size_t)DART__DETAIL_HDR + 4u;
+}
+
+int dart_interest_req_offset(DartBytes dgram, uint32_t *offset){
+    if (dart_detail_kind(dgram) != DART_INTEREST_REQ) return 0;
+    if (dgram.len < (size_t)DART__DETAIL_HDR + 4u) return 0;
+    if (offset) *offset = i_dart_le_r32(dgram.data + DART__DETAIL_HDR);
+    return 1;
+}
+
+size_t dart_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
+                               uint32_t offset, uint16_t chunk_len, void *out, size_t cap){
+    uint8_t *o=(uint8_t*)out;
+    if (!o || cap < (size_t)DART_INTEREST_RESP_HEAD) return 0;
+    i_dart_detail_hdr_write(o, DART_INTEREST_RESP, domain, meta_version, 0);
+    i_dart_le_w32(o + DART__DETAIL_HDR,      total_len);
+    i_dart_le_w32(o + DART__DETAIL_HDR + 4u, offset);
+    i_dart_le_w16(o + DART__DETAIL_HDR + 8u, chunk_len);
+    return (size_t)DART_INTEREST_RESP_HEAD;
+}
+
+int dart_interest_resp_parse(DartBytes dgram, uint32_t *total_len, uint32_t *offset,
+                             DartBytes *chunk){
+    uint32_t total, off; uint16_t clen;
+    if (dart_detail_kind(dgram) != DART_INTEREST_RESP) return 0;
+    if (dgram.len < (size_t)DART_INTEREST_RESP_HEAD) return 0;
+    total = i_dart_le_r32(dgram.data + DART__DETAIL_HDR);
+    off   = i_dart_le_r32(dgram.data + DART__DETAIL_HDR + 4u);
+    clen  = i_dart_le_r16(dgram.data + DART__DETAIL_HDR + 8u);
+    if ((size_t)DART_INTEREST_RESP_HEAD + clen > dgram.len) return 0;   /* truncated: reject */
+    if (off > total || (uint32_t)clen > total - off) return 0;          /* range out of the blob */
+    if (total_len) *total_len = total;
+    if (offset)    *offset    = off;
+    if (chunk)     *chunk     = dart_bytes(dgram.data + DART_INTEREST_RESP_HEAD, clen);
+    return 1;
 }
 
 /* One walk serves size and build (out NULL = measure), so the two agree byte for byte.
@@ -7409,9 +7562,31 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
 /* the node core's per-peer transport-lifecycle state, kept in the discovery peer's user
    scratch (so the node holds NO peer table of its own). added = wired into the transport
    yet (dart_transport_peer_add called); dormant = discovery DROPPED it, kept for a same-incarnation
-   resume; detail_due = a DETAIL_REQ should go to this peer (unverified candidates).
-   Discovery zeroes this when a new UUID takes the slot, preserves it on resume. */
-typedef struct { uint8_t added; uint8_t dormant; uint8_t detail_due; } i_DartNodePeerExtra;
+   resume; detail_due / interest_due = a DETAIL_REQ / INTEREST_REQ should go to this peer.
+   Discovery zeroes this when a new UUID takes the slot, preserves it on resume.
+
+   The interest_* fields are the EXTERNAL-interest fetch (a peer whose announce sets
+   INTEREST_EXTERNAL): interest_buf assembles the peer's paged interest blob (a hook
+   allocation, freed on peer GONE; at node close the pool reset reclaims it);
+   fetch_cursor/fetch_len walk it; fetch_version is the version being assembled (the
+   RESP stamp; a differing stamp restarts at 0); interest_version is the last version
+   FULLY assembled -- the dedup that keeps a steady-state announce from re-triggering
+   the fetch. For an inline-interest peer all of it stays zero. */
+typedef struct {
+    uint8_t  added; uint8_t dormant; uint8_t detail_due; uint8_t interest_due;
+    uint32_t interest_epoch;     /* bumped on EVERY reflected-interest change (interest apply,
+                                    external assembly, fresh detail verdicts/names): the ONE
+                                    cache key an observer needs (dart_node_peer_interest_epoch),
+                                    covering changes the announce version cannot see. 0 = nothing
+                                    applied yet. */
+    uint32_t interest_version;   /* last fully assembled external version (0 = none) */
+    uint32_t fetch_version;      /* version the cursor is assembling (0 = idle) */
+    uint32_t fetch_cursor;       /* bytes assembled so far */
+    uint32_t fetch_len;          /* the blob's total_len (valid once the first page lands;
+                                    after assembly it is the retained blob's length) */
+    uint8_t *interest_buf;
+    uint32_t interest_cap;
+} i_DartNodePeerExtra;
 
 /* schema state for the gate + delivery: peer schemas interned by hash (parsed once),
    reader views cached per (peer schema, topic), and the per-(peer, topic) schema a
@@ -7890,16 +8065,22 @@ int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t top
    current fields. The codec lives in the transport core; the OOB fields default to 0 in a
    non-SHM build. The node NAME is not here: the runtime hands it to discovery directly. */
 uint16_t i_dart_node_core_build_meta(i_DartNodeCore *c){
-    {   /* (re)size the blob buffer to the exact content first */
-        uint16_t need = dart_transport_meta_size(c->transport);
-        if (need > c->meta_cap){
-            uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->meta_buf, need);
-            if (!nb) return c->meta_len;   /* OOM: keep the previous blob (stale but consistent) */
-            c->meta_buf = nb; c->meta_cap = need;
-        }
+    uint16_t need = dart_transport_meta_size(c->transport);
+    /* the ANNOUNCE BUDGET: the whole announce datagram (discovery framing + its locator/
+       name section + this overlay) must fit one un-fragmented datagram, so no receiver
+       ever depends on IP reassembly (lwIP commonly cannot). Over budget -> the bootstrap
+       form: INTEREST_EXTERNAL set, no interest inlined, peers pull the identical blob
+       over the uDTL interest paging (i_dart_node_core_interest_respond). */
+    int external = ((size_t)DART_DISCOVERY_META_OFF + DART_DISCOVERY_DISC_MAX + need
+                    > (size_t)DART_DGRAM_MAX);
+    if (external) need = dart_transport_meta_bootstrap_size();
+    if (need > c->meta_cap){   /* (re)size the blob buffer to the exact content */
+        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->meta_buf, need);
+        if (!nb) return c->meta_len;   /* OOM: keep the previous blob (stale but consistent) */
+        c->meta_buf = nb; c->meta_cap = need;
     }
     c->meta_len = dart_transport_meta_build(c->transport, c->meta_buf, c->meta_cap,
-                                  c->frag_size, c->oob_capable, c->oob_host);
+                                  c->frag_size, c->oob_capable, c->oob_host, external);
     return c->meta_len;
 }
 
@@ -7977,9 +8158,16 @@ static void i_dart_node_core_fire_error(i_DartNodeCore *c, DartErrorKind err, ui
 }
 
 /* fired whenever a peer's interest list is (re)applied to the transport: reports how
- * many topics now flow each way, so an app/example can watch a connection form. */
+ * many topics now flow each way, so an app/example can watch a connection form. Every
+ * reflected-interest change funnels through here (inline apply, external assembly,
+ * fresh detail verdicts re-applying), so this is also where the peer's interest EPOCH
+ * bumps -- the observer cache key -- and it must bump even with no event handler. */
 static void i_dart_node_core_fire_interest(i_DartNodeCore *c, uint32_t id){
     DartEvent ev; uint16_t publish_to = 0, receive_from = 0;
+    {   i_DartNodePeerExtra *ex = c->discovery
+            ? (i_DartNodePeerExtra*)dart_discovery_peer_user(c->discovery, id) : NULL;
+        if (ex) ex->interest_epoch++;
+    }
     if (!c->on_event) return;
     dart_transport_peer_match_counts(c->transport, id, &publish_to, &receive_from);
     memset(&ev, 0, sizeof ev);
@@ -7993,6 +8181,32 @@ static void i_dart_node_core_fire_interest(i_DartNodeCore *c, uint32_t id){
  * node core keeps no table of its own. NULL only before discovery is bound (no events yet). */
 static i_DartNodePeerExtra *i_dart_node_core_peer_extra(i_DartNodeCore *c, uint32_t id){
     return (i_DartNodePeerExtra*)dart_discovery_peer_user(c->discovery, id);
+}
+
+/* The peer's AUTHORITATIVE interest blob, wherever it lives: the announce's inline
+ * section, or the assembled external fetch (only at the version the blob advertises),
+ * or {NULL,0} while an external fetch is still in flight -- callers already treat a
+ * missing blob as "interest unknown", which is exactly that state. The ONE read point,
+ * so inline and external peers run identical apply/wants/unresolved logic. */
+static DartBytes i_dart_node_core_interest_of(i_DartNodePeerExtra *ex, DartBytes meta,
+                            uint32_t meta_version){
+    if (!meta.data) return dart_bytes(NULL, 0);
+    if (!dart_meta_interest_external(meta)) return dart_meta_interest(meta);
+    if (ex && ex->interest_buf && ex->interest_version == meta_version)
+        return dart_bytes(ex->interest_buf, ex->fetch_len);
+    return dart_bytes(NULL, 0);
+}
+
+/* An external-interest peer whose blob we have not assembled at its current version:
+ * queue an INTEREST_REQ (the runtime drains it with the detail requests). The
+ * version dedup here is what makes a steady-state announce free: an already-assembled
+ * version queues nothing. */
+static void i_dart_node_core_interest_check(i_DartNodeCore *c, i_DartNodePeerExtra *ex,
+                            DartBytes meta, uint32_t meta_version){
+    if (!ex || !meta.data || !dart_meta_interest_external(meta)) return;
+    if (ex->interest_version == meta_version) return;
+    ex->interest_due = 1;
+    c->detail_due_any = 1;
 }
 
 /* After an interest apply: if unverified candidates remain (hash overlap, no verdict
@@ -8015,8 +8229,11 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
                             DartBytes meta){
     i_DartNodePeerExtra *ex = i_dart_node_core_peer_extra(c, id);
     uint16_t frag = dart_meta_frag(meta);
-    DartBytes interest = dart_meta_interest(meta);
+    uint32_t meta_version = 0;
+    DartBytes interest;
     if (!ex) return;                                  /* discovery not bound / no scratch */
+    dart_discovery_peer_meta(c->discovery, id, &meta_version);   /* version of the blob we hold */
+    interest = i_dart_node_core_interest_of(ex, meta, meta_version);
     if (!ex->added){                                  /* brand-new peer: wire it into the transport */
         i_dart_node_core_peer_schema_clear(c, id);    /* its id may be recycled: no stale bindings */
         i_dart_node_core_topic_details_clear(c, id);
@@ -8040,6 +8257,7 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
             i_dart_node_core_fire(c, DART_PEER_UP, id, addr);
         }
     }
+    i_dart_node_core_interest_check(c, ex, meta, meta_version);   /* external + stale: pull it */
 }
 
 /* Ingest a peer's DETAIL_RESP (routed here by the runtime off the data socket): validate
@@ -8061,16 +8279,20 @@ void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t
         while (dart_detail_next(resp, &it, &dd)) i_dart_node_core_topic_set(c, peer, &dd);
     }
     if (!dart_transport_apply_peer_details(c->transport, peer, resp)) return;   /* nothing new */
-    meta = dart_discovery_peer_meta(c->discovery, peer, NULL);
-    interest = dart_meta_interest(meta);
+    {   uint32_t meta_version = 0;
+        meta = dart_discovery_peer_meta(c->discovery, peer, &meta_version);
+        interest = i_dart_node_core_interest_of(ex, meta, meta_version);
+    }
     if (!interest.data) return;
     dart_transport_apply_peer_interest(c->transport, peer, interest);
     i_dart_node_core_fire_interest(c, peer);
     i_dart_node_core_detail_check(c, ex, peer, interest);
 }
 
-/* Queue a DETAIL_REQ for every ACTIVE peer: the runtime's periodic retry sweep. Peers
-   with nothing pending cost one wants() walk and send nothing. */
+/* Queue a DETAIL_REQ for every ACTIVE peer (and an INTEREST_REQ for every external
+   peer still unassembled): the runtime's periodic retry sweep, the lost-datagram
+   backstop for both cycles. Peers with nothing pending cost one wants() walk and
+   send nothing. */
 void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
     uint16_t s, n;
     if (!c || !c->discovery) return;
@@ -8080,16 +8302,21 @@ void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
         if (!dart_discovery_peer_at(c->discovery, s, &v)) continue;
         if (v.liveness != DART_PEER_ACTIVE) continue;
         ex = (i_DartNodePeerExtra*)v.user;
-        if (ex && ex->added){ ex->detail_due = 1; c->detail_due_any = 1; }
+        if (ex && ex->added){
+            ex->detail_due = 1; c->detail_due_any = 1;
+            i_dart_node_core_interest_check(c, ex, v.meta, v.meta_version);
+        }
     }
 }
 
 int i_dart_node_core_detail_any(i_DartNodeCore *c){ return c ? c->detail_due_any : 0; }
 
 /* Unresolved candidates for one topic across active peers (see core.h). A peer counts
- * once when its blob has not arrived yet (interest unknown = possibly nominating), else
- * by its unresolved entries for this topic. Dropped peers are skipped: they are not
- * expected to answer, and waiting on one would only ever time out. */
+ * once while its interest is UNKNOWN: its blob has not arrived, or its external
+ * interest fetch is still assembling (both self-heal: the blob and every fetch page
+ * are single sub-MTU datagrams). Once known, it counts by its unresolved entries for
+ * this topic. Dropped peers are skipped: they are not expected to answer, and waiting
+ * on one would only ever time out. */
 int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
     uint16_t s, n; int cnt = 0;
     if (!c || !c->discovery) return 0;
@@ -8102,24 +8329,43 @@ int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
         ex = (i_DartNodePeerExtra*)v.user;
         if (!ex || !ex->added) continue;
         if (!v.meta.data){ cnt++; continue; }   /* announce heard, blob still being fetched */
-        interest = dart_meta_interest(v.meta);
-        if (!interest.data) continue;           /* a blob with no interest: nothing to resolve */
+        interest = i_dart_node_core_interest_of(ex, v.meta, v.meta_version);
+        if (!interest.data){
+            if (dart_meta_interest_external(v.meta)) cnt++;   /* fetch in flight: resolving */
+            continue;                           /* else a blob with no interest: nothing to resolve */
+        }
         cnt += dart_transport_topic_unresolved(c->transport, topic_index, v.id, interest);
     }
     return cnt;
 }
 
-/* Drain one queued DETAIL_REQ: find the next detail_due peer, recompute its pending
-   wants, and build the request + destination for the runtime to send. Returns bytes
-   (loop until 0); a peer whose wants emptied (or that dropped) just clears its flag.
-   Capped at 128 wants per request: a bigger pending set converges over successive
-   request/response rounds (each response retires its indices from wants). */
+/* Drain one queued uDTL request: INTEREST_REQs first (an unassembled interest gates
+   candidate discovery, so it outranks details), then DETAIL_REQs. Returns bytes (loop
+   until 0); a peer whose pending work emptied (or that dropped) just clears its flag.
+   Detail requests are capped at 128 wants: a bigger pending set converges over
+   successive request/response rounds (each response retires its indices from wants). */
 size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
                             void *out, size_t cap, i_DartNodeDest *to){
     DartDetailWant wants[128];
     uint16_t s, n;
-    if (!c || !c->discovery || cap < 14u) return 0;
+    if (!c || !c->discovery || cap < 24u) return 0;
     n = dart_discovery_max_peers(c->discovery);
+    for (s=0;s<n;s++){    /* interest pass: one INTEREST_REQ per due peer, cursor-driven */
+        DartDiscoveryPeer v; i_DartNodePeerExtra *ex;
+        uint32_t offset;
+        if (!dart_discovery_peer_at(c->discovery, s, &v)) continue;
+        ex = (i_DartNodePeerExtra*)v.user;
+        if (!ex || !ex->interest_due) continue;
+        ex->interest_due = 0;
+        if (!ex->added || v.liveness != DART_PEER_ACTIVE) continue;
+        if (!dart_meta_interest_external(v.meta)) continue;      /* flag cleared meanwhile */
+        if (ex->interest_version == v.meta_version) continue;    /* assembled meanwhile */
+        offset = (ex->fetch_version == v.meta_version) ? ex->fetch_cursor : 0;
+        if (!i_dart_node_core_resolve(c, v.id, to)) continue;
+        {   size_t len = dart_interest_req_build(domain, v.meta_version, offset, out, cap);
+            if (len) return len;
+        }
+    }
     for (s=0;s<n;s++){
         DartDiscoveryPeer v; i_DartNodePeerExtra *ex;
         DartBytes interest; uint16_t nw, maxw;
@@ -8128,7 +8374,7 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
         if (!ex || !ex->detail_due) continue;
         ex->detail_due = 0;
         if (!ex->added || v.liveness != DART_PEER_ACTIVE) continue;
-        interest = dart_meta_interest(v.meta);
+        interest = i_dart_node_core_interest_of(ex, v.meta, v.meta_version);
         if (!interest.data) continue;
         maxw = (uint16_t)((cap - 14u) / 10u);
         if (maxw > 128u) maxw = 128u;
@@ -8144,6 +8390,87 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
     }
     c->detail_due_any = 0;
     return 0;
+}
+
+/* Answer a peer's INTEREST_REQ: build our current interest blob into the scratch
+   (after a page-header's worth of headroom) and return ONE page from the requested
+   offset. Stateless and idempotent, like the detail responder: the header is written
+   immediately before the chunk inside the scratch, so the page is returned zero-copy.
+   {NULL,0} when not answerable (malformed, wrong domain, or OOM: the requester
+   just re-asks). */
+DartBytes i_dart_node_core_interest_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req){
+    uint32_t offset, total; size_t chunk, need, built;
+    uint8_t *blob, *head;
+    if (!c || !c->discovery) return dart_bytes(NULL, 0);
+    if (dart_detail_kind(req) != DART_INTEREST_REQ || dart_detail_domain(req) != domain)
+        return dart_bytes(NULL, 0);
+    if (!dart_interest_req_offset(req, &offset)) return dart_bytes(NULL, 0);
+    total = dart_transport_interest_size(c->transport);
+    need  = (size_t)DART_INTEREST_RESP_HEAD + total;
+    if (need > c->detail_cap){
+        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
+        if (!nb) return dart_bytes(NULL, 0);
+        c->detail_buf = nb; c->detail_cap = (uint32_t)need;
+    }
+    blob  = c->detail_buf + DART_INTEREST_RESP_HEAD;
+    built = dart_transport_build_interest(c->transport, blob, total);
+    if (built != total) return dart_bytes(NULL, 0);   /* size/build drifted: never serve garbage */
+    if (offset > total) offset = total;               /* clamp: a header-only page reports total */
+    chunk = total - offset;
+    if (chunk > (size_t)DART_DGRAM_MAX - DART_INTEREST_RESP_HEAD)
+        chunk = (size_t)DART_DGRAM_MAX - DART_INTEREST_RESP_HEAD;   /* one sub-datagram page */
+    head = blob + offset - DART_INTEREST_RESP_HEAD;   /* header right before the chunk (clobbers
+                                                         already-shipped bytes; rebuilt per request) */
+    dart_interest_resp_head(domain, dart_discovery_meta_version(c->discovery), total,
+                            offset, (uint16_t)chunk, head, DART_INTEREST_RESP_HEAD);
+    return dart_bytes(head, DART_INTEREST_RESP_HEAD + chunk);
+}
+
+/* Ingest one INTEREST_RESP page (routed here by the runtime off the data socket):
+   append it at the cursor, re-ask while incomplete (reply-clocked, the periodic sweep
+   is only the lost-datagram fallback), and on completion apply the assembled blob
+   exactly as an inline announce would (matches, PEER_INTEREST, detail cycle). The
+   version stamp drives everything: a duplicate of an assembled version is a no-op, a
+   stamp differing from the fetch in progress restarts the cursor (the peer's interest
+   changed mid-fetch). */
+void i_dart_node_core_apply_interest_page(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
+                            DartBytes resp){
+    i_DartNodePeerExtra *ex;
+    uint32_t total, offset, resp_version; DartBytes chunk;
+    if (!c || dart_detail_kind(resp) != DART_INTEREST_RESP || dart_detail_domain(resp) != domain)
+        return;
+    ex = i_dart_node_core_peer_extra(c, peer);
+    if (!ex || !ex->added) return;
+    if (!dart_interest_resp_parse(resp, &total, &offset, &chunk)) return;
+    if (total > dart_interest_max(0xFFFFu)) return;   /* absurd total: never a real blob */
+    resp_version = dart_detail_meta_version(resp);
+    if (ex->interest_buf && ex->interest_version == resp_version) return;   /* assembled: dup page */
+    if (ex->fetch_version != resp_version){           /* first page, or the version moved: restart */
+        ex->fetch_version = resp_version;
+        ex->fetch_cursor = 0; ex->fetch_len = total;
+    }
+    if (total != ex->fetch_len){ ex->fetch_cursor = 0; ex->fetch_len = total; }  /* drifted: restart */
+    if (offset != ex->fetch_cursor){                  /* out-of-order/stale page: re-ask from cursor */
+        ex->interest_due = 1; c->detail_due_any = 1;
+        return;
+    }
+    if (ex->interest_cap < total){
+        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, ex->interest_buf, total ? total : 1u);
+        if (!nb){ i_dart_node_core_fire_error(c, DART_E_OOM, peer, NULL, total); return; }
+        ex->interest_buf = nb; ex->interest_cap = total ? total : 1u;
+    }
+    if (chunk.len){ memcpy(ex->interest_buf + offset, chunk.data, chunk.len); ex->fetch_cursor += (uint32_t)chunk.len; }
+    if (ex->fetch_cursor < total){
+        if (chunk.len)                                /* progress: ask for the next page now */
+            { ex->interest_due = 1; c->detail_due_any = 1; }
+        return;                                       /* an empty short page: the sweep re-asks */
+    }
+    ex->interest_version = resp_version;              /* assembled: the dedup that ends the cycle */
+    ex->fetch_version = 0;
+    /* apply exactly as an inline announce would (idempotent; len is ex->fetch_len) */
+    dart_transport_apply_peer_interest(c->transport, peer, dart_bytes(ex->interest_buf, total));
+    i_dart_node_core_fire_interest(c, peer);
+    i_dart_node_core_detail_check(c, ex, peer, dart_bytes(ex->interest_buf, total));
 }
 
 static void i_dart_node_core_peer_down(i_DartNodeCore *c, uint32_t id, DartDiscoveryDownReason reason){
@@ -8162,6 +8489,12 @@ static void i_dart_node_core_peer_down(i_DartNodeCore *c, uint32_t id, DartDisco
         i_dart_node_core_peer_schema_clear(c, id);      /* the id may be reassigned */
         i_dart_node_core_topic_details_clear(c, id);
         i_dart_node_core_schema_why_clear(c, id);
+        if (ex && ex->interest_buf){                    /* retained external interest: hook memory */
+            c->alloc(c->alloc_user, ex->interest_buf, 0);
+            ex->interest_buf = NULL; ex->interest_cap = 0;
+            ex->interest_version = 0; ex->fetch_version = 0;
+            ex->fetch_cursor = 0; ex->fetch_len = 0; ex->interest_due = 0;
+        }
         if (notify) i_dart_node_core_fire(c, DART_PEER_DOWN, id, NULL);
     }
 }
@@ -8229,10 +8562,22 @@ uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer){
     return (peer && peer->meta.data) ? dart_meta_frag(peer->meta) : 0;
 }
 
+uint32_t dart_node_peer_interest_epoch(const DartDiscoveryPeer *peer){
+    const i_DartNodePeerExtra *ex = peer ? (const i_DartNodePeerExtra*)peer->user : NULL;
+    return ex ? ex->interest_epoch : 0;
+}
+
 int dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
                                  DartInterestIter *it, DartTopicEntry *out){
     if (!peer || !peer->meta.data) return 0;
-    return dart_meta_interest_next(peer->meta, it, out);
+    /* one read point for BOTH interest homes: the announce's inline section, or the
+       assembled external fetch (nothing while that fetch is still in flight, exactly
+       like a blob that has not arrived). Reflection (the entity fold), the patterns
+       authority check, and any app walk all resolve external peers through here. */
+    return dart_interest_next(
+        i_dart_node_core_interest_of((i_DartNodePeerExtra*)peer->user, peer->meta,
+                                     peer->meta_version),
+        it, out);
 }
 #pragma endregion
 #pragma region node/runtime.c
@@ -9342,6 +9687,17 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                     if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
                         i_dart_node_core_apply_details(n->core, n->domain, from,
                                                        dart_bytes(buf, (size_t)r));
+                } else if (buf[4]==DART_INTEREST_REQ){
+                    /* external-interest paging: serve one byte-range page of our interest
+                       blob to the request's source (stateless, like the detail responder) */
+                    DartBytes resp = i_dart_node_core_interest_respond(n->core, n->domain,
+                                                                       dart_bytes(buf, (size_t)r));
+                    if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                } else if (buf[4]==DART_INTEREST_RESP){
+                    uint32_t from;
+                    if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                        i_dart_node_core_apply_interest_page(n->core, n->domain, from,
+                                                             dart_bytes(buf, (size_t)r));
                 }
             } else {
                 uint32_t from;

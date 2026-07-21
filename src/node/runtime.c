@@ -1110,6 +1110,17 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                     if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
                         i_dart_node_core_apply_details(n->core, n->domain, from,
                                                        dart_bytes(buf, (size_t)r));
+                } else if (buf[4]==DART_INTEREST_REQ){
+                    /* external-interest paging: serve one byte-range page of our interest
+                       blob to the request's source (stateless, like the detail responder) */
+                    DartBytes resp = i_dart_node_core_interest_respond(n->core, n->domain,
+                                                                       dart_bytes(buf, (size_t)r));
+                    if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                } else if (buf[4]==DART_INTEREST_RESP){
+                    uint32_t from;
+                    if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                        i_dart_node_core_apply_interest_page(n->core, n->domain, from,
+                                                             dart_bytes(buf, (size_t)r));
                 }
             } else {
                 uint32_t from;

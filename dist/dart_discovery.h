@@ -334,6 +334,10 @@ extern "C" {
  * name][opaque overlay]: the locator + name moved out of the per-announce header into the
  * on-change blob so steady-state announces stay small (cached on the other side). */
 #define DART_DISCOVERY_META_OFF 30   /* HDR_LEN(24) + 4 (version) + 2 (len) */
+/* largest blob discovery section: [u16 data_port][u8 self_ip_len][self_ip..][u8 name_len]
+ * [name..]. Public so an overlay producer can budget its announce against one datagram
+ * (META_OFF + this + overlay). */
+#define DART_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + DART_DISCOVERY_NAME_MAX)
 /* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_cap */
 #define DART_DISCOVERY_WIRE_MAX 128
 
@@ -983,8 +987,6 @@ static inline void *i_dart_bump_take(i_DartBump *b, size_t n, size_t align){
 #include <string.h>
 
 #define DART_DISCOVERY_HDR_LEN 24            /* magic(4) ver(1) flags(1) domain(2) uuid(16) */
-/* the blob's discovery section: [u16 data_port][u8 self_ip_len][self_ip..][u8 name_len][name..] */
-#define DART_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + DART_DISCOVERY_NAME_MAX)
 #define DART_DISCOVERY_FLAG_BYE 0x01
 #define DART_DISCOVERY_FLAG_REQ 0x02         /* solicit: recipients announce back now */
 #define DART_DISCOVERY_BLOB_RESEND 3u        /* announces that carry the full blob after a change */

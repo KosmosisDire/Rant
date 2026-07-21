@@ -833,21 +833,24 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
    bounds-checked (see dart_transport_apply_peer_interest), so a malformed or foreign
    blob is dropped wholesale, never trusted. Names and schemas are NOT here: they ride
    the pairwise detail exchange below. */
-#define DART__META_BASE_NOSHM 5u    /* 'D','N',ver, frag_lo, frag_hi */
-#define DART__META_BASE_SHM   22u   /* ... + shm(1) + host[16] */
+#define DART__META_BASE_NOSHM 6u    /* 'D','N',ver, frag_lo, frag_hi, iflags */
+#define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
+#define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  11u                 /* what WE write */
+#define DART__META_VER  13u                 /* what WE write */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  10u
+#define DART__META_VER  12u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
-    return meta.data && meta.len >= 5 && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=10 && meta.data[2]<=11;
+    return meta.data && meta.len >= DART__META_BASE_NOSHM
+        && meta.data[0]=='D' && meta.data[1]=='N'
+        && meta.data[2]>=12 && meta.data[2]<=13;
 }
-/* base prefix through host[16], by version (odd v11 carries shm+host, even v10 doesn't). */
+/* base prefix through the iflags byte, by version (odd v13 carries shm+host, even v12
+ * doesn't). iflags is always the base's last byte. */
 static uint16_t i_dart_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
@@ -857,21 +860,29 @@ uint16_t dart_meta_cap(uint16_t n_topics){
     return (uint16_t)cap;
 }
 
-/* Exact overlay size the next dart_transport_meta_build will emit for the current
- * topic state (the same walk, byte for byte), so a caller can size the buffer to the
- * actual content instead of dart_meta_cap's full-reserve worst case. */
-uint16_t dart_transport_meta_size(DartTransportState *st){
+/* Exact bytes of our current interest blob (the total_len interest paging serves).
+ * The same walk dart_transport_build_interest emits, byte for byte. */
+uint32_t dart_transport_interest_size(DartTransportState *st){
     uint16_t c, n=0, n_rates;
-    size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
-    n_rates = i_dart_rate_count(st, n);            /* same walk build_interest emits */
-    len = (size_t)DART__META_BASE + 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates;
+    n_rates = i_dart_rate_count(st, n);
+    return 2u + 5u*(uint32_t)n + 2u + 4u*(uint32_t)n_rates;
+}
+
+/* Exact overlay size the next INLINE dart_transport_meta_build will emit for the
+ * current topic state, so a caller can size the buffer to the actual content instead
+ * of dart_meta_cap's full-reserve worst case. */
+uint16_t dart_transport_meta_size(DartTransportState *st){
+    size_t len = (size_t)DART__META_BASE + dart_transport_interest_size(st);
     if (len > 65000u) len = 65000u;              /* the dart_meta_cap ceiling; past it the build truncates */
     return (uint16_t)len;
 }
 
+uint16_t dart_transport_meta_bootstrap_size(void){ return DART__META_BASE; }
+
 uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_t cap,
-                         uint16_t frag_size, int shm_capable, const uint8_t host[16]){
+                         uint16_t frag_size, int shm_capable, const uint8_t host[16],
+                         int interest_external){
     size_t interest_len, len; uint16_t off = DART__META_BASE;
     out[0]='D'; out[1]='N'; out[2]=DART__META_VER;
     out[3]=(uint8_t)(frag_size & 0xFF); out[4]=(uint8_t)(frag_size >> 8);
@@ -881,6 +892,8 @@ uint16_t dart_transport_meta_build(DartTransportState *st, uint8_t *out, uint16_
 #else
     (void)shm_capable; (void)host;
 #endif
+    out[off-1] = interest_external ? DART__META_IFLAG_EXTERNAL : 0u;
+    if (interest_external) return off;     /* bootstrap: locator-sized, always one datagram */
     interest_len = dart_transport_build_interest(st, out + off, cap - off);   /* no name here: that is discovery's */
     len = (size_t)off + interest_len;
     if (interest_len == 0)    /* did not fit (returns >= 2 even with zero topics): never silent */
@@ -893,28 +906,37 @@ uint16_t dart_meta_frag(DartBytes meta){
     return (uint16_t)(meta.data[3] | ((uint16_t)meta.data[4] << 8));
 }
 
+int dart_meta_interest_external(DartBytes meta){
+    uint16_t base;
+    if (!i_dart_meta_ok(meta)) return 0;
+    base = i_dart_meta_base(meta.data);
+    if (meta.len < base) return 0;
+    return (meta.data[base-1] & DART__META_IFLAG_EXTERNAL) ? 1 : 0;
+}
+
 DartBytes dart_meta_interest(DartBytes meta){
     uint16_t off;
     if (!i_dart_meta_ok(meta)) return dart_bytes(NULL, 0);
     off = i_dart_meta_base(meta.data);     /* interest follows the base prefix (no name in the overlay) */
     if (meta.len < off) return dart_bytes(NULL, 0);
+    if (meta.data[off-1] & DART__META_IFLAG_EXTERNAL)
+        return dart_bytes(NULL, 0);        /* bootstrap: never misread as an empty interest list */
     return dart_bytes(meta.data + off, meta.len - off);
 }
 
-int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out){
+int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry *out){
     if (!it || !out) return 0;
     if (!it->started){                    /* first call: parse the [u16 n] header */
-        DartBytes in = dart_meta_interest(meta);
         it->started = 1; it->left = 0; it->index = 0; it->phase = 0; it->off = 0;
-        if (!in.data || in.len < 2) return 0;      /* no/short interest list: nothing to yield */
-        it->left = (uint16_t)(in.data[0] | ((uint16_t)in.data[1] << 8));
-        it->off  = (uint32_t)(in.data - meta.data) + 2u;   /* first entry, past n */
+        if (!interest.data || interest.len < 2) return 0;   /* no/short interest list: nothing to yield */
+        it->left = (uint16_t)(interest.data[0] | ((uint16_t)interest.data[1] << 8));
+        it->off  = 2u;                    /* first entry, past n */
     }
     while (it->left){
         uint32_t off = it->off;
         uint8_t flags, role;
-        if ((size_t)off + 5u > meta.len){ it->left = 0; return 0; }   /* truncated: stop */
-        flags = meta.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
+        if ((size_t)off + 5u > interest.len){ it->left = 0; return 0; }   /* truncated: stop */
+        flags = interest.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         if (role == DART_INACTIVE){       /* declared-but-off / undefined hole: not advertised */
             it->left--; it->index++; it->off = off + 5u; it->phase = 0;
             continue;
@@ -924,7 +946,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
         out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
         out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
-        out->hash     = i_dart_le_r32(meta.data + off);
+        out->hash     = i_dart_le_r32(interest.data + off);
         if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
             out->is_pub = 1;
             if (role==DART_PUBSUB){ it->phase = 1; return 1; }   /* sub direction next call */
@@ -938,9 +960,13 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
     return 0;
 }
 
+int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out){
+    return dart_interest_next(dart_meta_interest(meta), it, out);
+}
+
 #ifdef DART_SHM
 int dart_meta_shm(DartBytes meta, uint8_t host[16]){
-    if (!i_dart_meta_ok(meta) || meta.data[2]!=11
+    if (!i_dart_meta_ok(meta) || meta.data[2]!=13
         || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
     return 1;
@@ -962,7 +988,7 @@ static int i_dart_detail_hdr_ok(DartBytes d){
 
 int dart_detail_kind(DartBytes dgram){
     if (!i_dart_detail_hdr_ok(dgram)) return 0;
-    return (dgram.data[4]==DART_DETAIL_REQ || dgram.data[4]==DART_DETAIL_RESP)
+    return (dgram.data[4]>=DART_DETAIL_REQ && dgram.data[4]<=DART_INTEREST_RESP)
          ? dgram.data[4] : 0;
 }
 uint16_t dart_detail_domain(DartBytes dgram){
@@ -994,6 +1020,53 @@ size_t dart_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
         i_dart_le_w64(e+2, wants[k].schema_hash);
     }
     return need;
+}
+
+
+/* Interest paging codec (uDTL kinds 3/4, see core.h): byte-range pages of the exact
+   build_interest blob. Pure header build/parse; the responder's slicing and the
+   requester's cursor live in the node core (a sans-IO caller runs its own). */
+size_t dart_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
+                               uint32_t offset, void *out, size_t cap){
+    uint8_t *o=(uint8_t*)out;
+    if (!o || cap < (size_t)DART__DETAIL_HDR + 4u) return 0;
+    i_dart_detail_hdr_write(o, DART_INTEREST_REQ, domain, peer_meta_version, 0);
+    i_dart_le_w32(o + DART__DETAIL_HDR, offset);
+    return (size_t)DART__DETAIL_HDR + 4u;
+}
+
+int dart_interest_req_offset(DartBytes dgram, uint32_t *offset){
+    if (dart_detail_kind(dgram) != DART_INTEREST_REQ) return 0;
+    if (dgram.len < (size_t)DART__DETAIL_HDR + 4u) return 0;
+    if (offset) *offset = i_dart_le_r32(dgram.data + DART__DETAIL_HDR);
+    return 1;
+}
+
+size_t dart_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
+                               uint32_t offset, uint16_t chunk_len, void *out, size_t cap){
+    uint8_t *o=(uint8_t*)out;
+    if (!o || cap < (size_t)DART_INTEREST_RESP_HEAD) return 0;
+    i_dart_detail_hdr_write(o, DART_INTEREST_RESP, domain, meta_version, 0);
+    i_dart_le_w32(o + DART__DETAIL_HDR,      total_len);
+    i_dart_le_w32(o + DART__DETAIL_HDR + 4u, offset);
+    i_dart_le_w16(o + DART__DETAIL_HDR + 8u, chunk_len);
+    return (size_t)DART_INTEREST_RESP_HEAD;
+}
+
+int dart_interest_resp_parse(DartBytes dgram, uint32_t *total_len, uint32_t *offset,
+                             DartBytes *chunk){
+    uint32_t total, off; uint16_t clen;
+    if (dart_detail_kind(dgram) != DART_INTEREST_RESP) return 0;
+    if (dgram.len < (size_t)DART_INTEREST_RESP_HEAD) return 0;
+    total = i_dart_le_r32(dgram.data + DART__DETAIL_HDR);
+    off   = i_dart_le_r32(dgram.data + DART__DETAIL_HDR + 4u);
+    clen  = i_dart_le_r16(dgram.data + DART__DETAIL_HDR + 8u);
+    if ((size_t)DART_INTEREST_RESP_HEAD + clen > dgram.len) return 0;   /* truncated: reject */
+    if (off > total || (uint32_t)clen > total - off) return 0;          /* range out of the blob */
+    if (total_len) *total_len = total;
+    if (offset)    *offset    = off;
+    if (chunk)     *chunk     = dart_bytes(dgram.data + DART_INTEREST_RESP_HEAD, clen);
+    return 1;
 }
 
 /* One walk serves size and build (out NULL = measure), so the two agree byte for byte.

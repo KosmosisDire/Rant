@@ -185,6 +185,17 @@ void            i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t to
  * until the next call. */
 DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
 
+/* The uDTL interest paging (kinds 3/4): how a peer whose interest list does not fit its
+ * announce (INTEREST_EXTERNAL) serves and fetches it. interest_respond answers an
+ * INTEREST_REQ with one sub-datagram byte-range page of our current interest blob (same
+ * contract as detail_respond: stateless, idempotent, {NULL,0} when unanswerable, view
+ * valid until the next call). apply_interest_page ingests one INTEREST_RESP page:
+ * appends at the peer's cursor, re-queues the next request while incomplete, and on
+ * completion applies the assembled blob exactly as an inline announce would. */
+DartBytes i_dart_node_core_interest_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req);
+void      i_dart_node_core_apply_interest_page(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
+                                      DartBytes resp);
+
 /* The transport's DartConfig.schema_check, node-style (see transport/core.h): decide a
  * would-be match from the peer's advertised schema identity + wire, delivered by its
  * detail response. Typed vs typed matches iff same root name and the subscriber's fields are
@@ -234,12 +245,14 @@ typedef struct {
 int  i_dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out);
 int  i_dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 
-/* The requester side of the detail cycle (the announce nominates by hash; details verify
- * and match). apply_details ingests a peer's DETAIL_RESP off the data socket. detail_any
- * says a DETAIL_REQ is queued somewhere; the runtime then loops detail_req_next (build
- * request + destination, send each) until it returns 0. detail_rearm re-queues every
- * ACTIVE peer: the runtime's periodic retry sweep, cheap once converged (each peer costs
- * one wants() walk and sends nothing). */
+/* The requester side of the uDTL cycle (the announce nominates by hash; details verify
+ * and match; external interest is paged in first, since it gates candidate discovery).
+ * apply_details ingests a peer's DETAIL_RESP off the data socket. detail_any says a
+ * request (interest or detail) is queued somewhere; the runtime then loops
+ * detail_req_next (build request + destination, send each) until it returns 0; interest
+ * requests drain before detail requests. detail_rearm re-queues every ACTIVE peer: the
+ * runtime's periodic retry sweep, cheap once converged (each peer costs one wants()
+ * walk and sends nothing). */
 void   i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
                                       DartBytes resp);
 int    i_dart_node_core_detail_any(i_DartNodeCore *c);
@@ -279,6 +292,14 @@ int      i_dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id
  * fragment size + interest off a DartDiscoveryPeer (from dart_node_peers) without ever
  * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
 uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
+/* The peer's interest EPOCH: a per-incarnation counter bumped every time the peer's
+ * REFLECTED state changes -- an interest apply, an external-interest assembly completing,
+ * or fresh detail verdicts/names landing. Key any cached entity/interest walk on THIS
+ * (walk again iff it changed), never on the announce meta_version alone: an external
+ * peer's entities appear (and names page in) without any version bump. 0 = nothing
+ * applied yet, so a zero-initialized cache key starts stale and walks once the first
+ * interest lands. */
+uint32_t dart_node_peer_interest_epoch(const DartDiscoveryPeer *peer);
 /* Walk a peer's interest list one advertised direction at a time: zero a
  * DartInterestIter, then call until it returns 0. Fills *out with index/role/hash only:
  * the announce carries no topic names or schemas (fetch those via the detail exchange,

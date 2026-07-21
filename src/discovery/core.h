@@ -24,6 +24,10 @@ extern "C" {
  * name][opaque overlay]: the locator + name moved out of the per-announce header into the
  * on-change blob so steady-state announces stay small (cached on the other side). */
 #define DART_DISCOVERY_META_OFF 30   /* HDR_LEN(24) + 4 (version) + 2 (len) */
+/* largest blob discovery section: [u16 data_port][u8 self_ip_len][self_ip..][u8 name_len]
+ * [name..]. Public so an overlay producer can budget its announce against one datagram
+ * (META_OFF + this + overlay). */
+#define DART_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + DART_DISCOVERY_NAME_MAX)
 /* smallest egress/ingress datagram buffer; the runtime grows it to fit meta_cap */
 #define DART_DISCOVERY_WIRE_MAX 128
 
