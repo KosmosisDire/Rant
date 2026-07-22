@@ -263,9 +263,22 @@ function decodeArray(f, data, view, off, len) {
         out[i] = readScalar(view, f.elem, off + i * n);
     return out;
 }
+/* an enum value: a number passes through, a string is resolved to its option value */
+function enumToValue(f, v) {
+    if (typeof v !== "string")
+        return v;
+    const hit = f.variants?.find((o) => o.name === v);
+    if (!hit)
+        throw new Error(`'${f.path}': unknown enum option '${v}'`);
+    return hit.value;
+}
 function writeFixedField(view, buf, f, v) {
     if (f.kind === "struct")
         throw new Error(`'${f.path}' is a struct: set its members`);
+    if (f.kind === "enum") {
+        writeScalar(view, f.backing, f.offset, enumToValue(f, v));
+        return;
+    }
     if (f.kind === "string") {
         writeCappedString(view, buf, f.offset, f.cap ?? 0, v);
         return;
@@ -364,11 +377,23 @@ class Layout {
         }
         if (f.kind === "struct")
             return data.subarray(f.offset, f.offset + f.size);
+        if (f.kind === "enum")
+            return readScalar(view, f.backing, f.offset); /* the number; label via enumName */
         if (f.kind === "string")
             return readCappedString(view, data, f.offset, f.cap ?? 0);
         if (f.kind === "arr")
             return decodeArray(f, data, view, f.offset, f.size);
         return readScalar(view, f.kind, f.offset);
+    }
+    /* enum option helpers (by field path): resolve a wire number to its option name (""
+     * if none, i.e. an unknown/newer value) and a name to its number (undefined if none). */
+    enumName(path, value) {
+        const f = this.fields.get(path);
+        const hit = f?.variants?.find((o) => BigInt(o.value) === BigInt(value));
+        return hit ? hit.name : "";
+    }
+    enumValue(path, name) {
+        return this.fields.get(path)?.variants?.find((o) => o.name === name)?.value;
     }
     /* Full-message decode into a plain nested object (structs become sub-objects).
      * An untyped layout returns the raw bytes unchanged. */

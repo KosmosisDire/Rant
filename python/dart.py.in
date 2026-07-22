@@ -58,6 +58,7 @@ close are refused (SendStatus.STATE / None / False), never corrupting.
 import ctypes
 import dataclasses
 import enum
+import enum as _pyenum   # kept reachable after the public dart.enum() shadows the module name
 import hashlib
 import inspect
 import os
@@ -130,6 +131,7 @@ _EXPORTS = [
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size",
     "dart_schema_field_count", "dart_schema_field_at", "dart_schema_field_index",
+    "dart_schema_enum_count", "dart_schema_enum_variant", "dart_get_enum", "dart_set_enum",
     "dart_schema_message_default", "dart_schema_scalar_size",
     "dart_set_uint", "dart_set_int", "dart_set_f64", "dart_set_f32", "dart_set_array",
     "dart_set_string", "dart_set_string_at",
@@ -544,6 +546,11 @@ def _bind(lib):
     F("dart_schema_field_count", [c_void_p], c_uint16)
     F("dart_schema_field_at", [c_void_p, c_uint16, POINTER(DartSchemaFieldInfo)], c_int)
     F("dart_schema_field_index", [c_void_p, c_char_p], c_int)
+    F("dart_schema_enum_count", [c_void_p, c_uint16], c_uint16)
+    F("dart_schema_enum_variant", [c_void_p, c_uint16, c_uint16, POINTER(c_int64),
+                                   POINTER(DartStringView)], c_int)
+    F("dart_get_enum", [DartBytes, c_void_p, c_char_p], DartStringView)
+    F("dart_set_enum", [c_void_p, c_size_t, c_void_p, c_char_p, c_char_p], c_int)
     F("dart_schema_message_default", [c_void_p, c_void_p, c_size_t], c_int)
     F("dart_schema_scalar_size", [c_int], c_uint32)
     F("dart_set_uint", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint64], c_int)
@@ -703,6 +710,7 @@ class FieldType(enum.IntEnum):
     VSTRING = 14   # variable string (`string`): rides the message tail
     VARRAY = 15    # variable array (`elem[]` / `string<C>[]`): live element count
     MAP = 16       # self-describing tagged map (`map`)
+    ENUM = 17      # named integer (`enum<uN>{...}`): wire is just the backing scalar
 
 
 # raw kind bytes (== FieldType, kept short for the codec below)
@@ -710,6 +718,7 @@ _U8, _U16, _U32, _U64 = 0, 1, 2, 3
 _I8, _I16, _I32, _I64 = 4, 5, 6, 7
 _F32, _F64, _BOOL, _ARR, _STRUCT, _STR = 8, 9, 10, 11, 12, 13
 _VSTR, _VARR, _MAP = 14, 15, 16    # the variable kinds (ride the message tail)
+_ENUM = 17                          # named integer (wire = its backing scalar)
 _SIGNED = frozenset((_I8, _I16, _I32, _I64))
 _FLOATK = frozenset((_F32, _F64))
 _FMT = {_U8: "B", _U16: "H", _U32: "I", _U64: "Q", _I8: "b", _I16: "h",
@@ -847,10 +856,49 @@ def string(cap):
     return _String(cap)
 
 
-class _FieldSpec:
-    __slots__ = ("name", "kind", "elem", "count", "str_cap", "token", "nested")
+def _infer_enum_backing(cls):
+    """Smallest scalar kind that fits every member value: unsigned when all >= 0, else
+    signed. Cross-language matching wants an explicit backing (dart.enum(cls, dart.u8))."""
+    vals = [int(m.value) for m in cls] or [0]
+    lo, hi = min(vals), max(vals)
+    if lo >= 0:
+        return (_U8 if hi <= 0xFF else _U16 if hi <= 0xFFFF
+                else _U32 if hi <= 0xFFFFFFFF else _U64)
+    fits = lambda bits: lo >= -(1 << (bits - 1)) and hi <= (1 << (bits - 1)) - 1
+    return _I8 if fits(8) else _I16 if fits(16) else _I32 if fits(32) else _I64
 
-    def __init__(self, name, kind, elem=0, count=0, str_cap=0, token=None, nested=None):
+
+class _Enum:
+    """An enum field marker (a named integer). Wraps an enum.Enum subclass whose member
+    values ride the wire, plus the backing scalar kind."""
+    def __init__(self, cls, backing=None):
+        if not (isinstance(cls, type) and issubclass(cls, _pyenum.Enum)):
+            raise TypeError("dart.enum expects an enum.Enum subclass")
+        self.cls = cls
+        if isinstance(backing, _Type):
+            self.kind = backing.kind
+        elif backing is None:
+            self.kind = _infer_enum_backing(cls)
+        else:
+            raise TypeError("enum backing must be a dart scalar type, e.g. dart.u8")
+
+    def __repr__(self):
+        return "dart.enum(%s)" % self.cls.__name__
+
+
+def enum(cls, backing=None):
+    """A named-integer field from a Python enum.Enum (usually IntEnum): each member's value
+    is what rides the wire. Pass `backing` (dart.u8..dart.i64) to pin the wire width to what
+    another language uses; otherwise it is inferred from the values. A bare enum class as an
+    annotation is the same as dart.enum(cls) with an inferred backing."""
+    return _Enum(cls, backing)
+
+
+class _FieldSpec:
+    __slots__ = ("name", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls")
+
+    def __init__(self, name, kind, elem=0, count=0, str_cap=0, token=None, nested=None,
+                 enum_cls=None):
         self.name = name
         self.kind = kind
         self.elem = elem
@@ -858,6 +906,7 @@ class _FieldSpec:
         self.str_cap = str_cap
         self.token = token
         self.nested = nested       # a _Spec for STRUCT fields
+        self.enum_cls = enum_cls   # the enum.Enum class for ENUM fields (decode target)
 
 
 class _Spec:
@@ -930,6 +979,10 @@ def _field_spec(name, ann, g):
         return _FieldSpec(name, _F64, token="f64")
     if ann is bool:
         return _FieldSpec(name, _BOOL, token="bool")
+    if isinstance(ann, _Enum):                                  # dart.enum(cls[, backing])
+        return _FieldSpec(name, _ENUM, elem=ann.kind, enum_cls=ann.cls)
+    if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):  # a bare enum class (backing inferred)
+        return _FieldSpec(name, _ENUM, elem=_infer_enum_backing(ann), enum_cls=ann)
     if isinstance(ann, type):
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann))   # a nested schema class
     raise SchemaError("dart schema: field %r has unsupported type %r (use dart.u8..f64, "
@@ -966,8 +1019,22 @@ def _spec_text(spec):
             return "%s: string" % f.name
         if f.kind == _MAP:
             return "%s: map" % f.name
+        if f.kind == _ENUM:
+            opts = ", ".join("%s=%d" % (m.name, int(m.value)) for m in f.enum_cls)
+            return "%s: enum<%s> { %s }" % (f.name, _TOKEN[f.elem], opts)
         return "%s: %s" % (f.name, f.token)
     return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
+
+
+def _enum_body_from_schema(lib, s, field):
+    """`{ Name=value, ... }` read from a compiled schema's enum option table."""
+    parts = []
+    for k in range(lib.dart_schema_enum_count(s, field)):
+        val = c_int64()
+        nm = DartStringView()
+        if lib.dart_schema_enum_variant(s, field, k, byref(val), byref(nm)):
+            parts.append("%s=%d" % (_dstr(nm), val.value))
+    return "{ %s }" % ", ".join(parts)
 
 
 def _schema_dsl(lib, s):
@@ -979,6 +1046,8 @@ def _schema_dsl(lib, s):
     for i in range(lib.dart_schema_field_count(s)):
         lib.dart_schema_field_at(s, i, byref(info))
         node = [_dstr(info.name), info.kind, info.elem, info.count, info.str_cap, None]
+        if info.kind == _ENUM:
+            node[5] = _enum_body_from_schema(lib, s, i)   # the "{ ... }" option text
         d = info.depth
         stack[d].append(node)
         if info.kind == _STRUCT:
@@ -1001,6 +1070,8 @@ def _schema_dsl(lib, s):
             return "%s: string" % name
         if kind == _MAP:
             return "%s: map" % name
+        if kind == _ENUM:
+            return "%s: enum<%s> %s" % (name, _TOKEN[elem], children)   # children slot holds the body text
         return "%s: %s" % (name, _TOKEN[kind])
     return (_dstr(lib.dart_schema_name(s)) + "\n{\n"
             + ",\n".join("    " + line(f) for f in root) + "\n}\n")
@@ -1288,6 +1359,16 @@ def _encode(lib, s, src):
             lib.dart_set_f32(buf, size, s, path, float(val))
         elif kind == _F64:
             lib.dart_set_f64(buf, size, s, path, float(val))
+        elif kind == _ENUM:
+            if isinstance(val, str):                       # by option name
+                if not lib.dart_set_enum(buf, size, s, path, val.encode("utf-8")):
+                    raise SchemaError("unknown enum option %r for %s" % (val, path.decode("utf-8")))
+            else:                                          # by number (an int or an enum member)
+                n = int(val.value if isinstance(val, _pyenum.Enum) else val)
+                if elem in _SIGNED:
+                    lib.dart_set_int(buf, size, s, path, n)
+                else:
+                    lib.dart_set_uint(buf, size, s, path, n)
         elif kind in _SIGNED:
             lib.dart_set_int(buf, size, s, path, int(val))
         elif kind == _BOOL:
@@ -1392,6 +1473,8 @@ def _value_to_py(val):
         return _decode_map_body(raw, 0, len(raw))[0]
     if k in _FLOATK:
         return val.v.f
+    if k == _ENUM:
+        return val.v.i          # the number; _to_obj maps it to the enum member for typed decode
     if k in _SIGNED:
         return val.v.i
     if k == _BOOL:
@@ -1436,7 +1519,15 @@ def _to_obj(spec, d):
     kwargs = {}
     for f in spec.fields:
         v = d.get(f.name)
-        kwargs[f.name] = _to_obj(f.nested, v) if (f.kind == _STRUCT and v is not None) else v
+        if f.kind == _STRUCT and v is not None:
+            kwargs[f.name] = _to_obj(f.nested, v)
+        elif f.kind == _ENUM and v is not None and f.enum_cls is not None:
+            try:
+                kwargs[f.name] = f.enum_cls(v)      # map the number to the enum member
+            except ValueError:
+                kwargs[f.name] = v                  # unknown/newer value: keep the raw int
+        else:
+            kwargs[f.name] = v
     return _instantiate(spec.cls, kwargs)
 
 

@@ -4,6 +4,11 @@ type Field = {
     elem?: string;
     count?: number;
     cap?: number;
+    backing?: string;
+    variants?: {
+        name: string;
+        value: number;
+    }[];
     offset: number;
     size: number;
     varOrdinal?: number;
@@ -78,6 +83,8 @@ declare class Layout {
     constructor(r: SchemaBlock | undefined);
     get typed(): boolean;
     getField(data: Uint8Array, view: DataView, path: string): any;
+    enumName(path: string, value: number | bigint): string;
+    enumValue(path: string, name: string): number | undefined;
     decode(data: Uint8Array): any;
     encode(value: any): Uint8Array;
 }

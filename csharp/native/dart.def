@@ -59,6 +59,10 @@ dart_schema_size
 dart_schema_field_count
 dart_schema_field_at
 dart_schema_field_index
+dart_schema_enum_count
+dart_schema_enum_variant
+dart_get_enum
+dart_set_enum
 dart_schema_message_default
 dart_schema_scalar_size
 dart_set_uint

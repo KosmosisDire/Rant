@@ -125,6 +125,7 @@ static const char *kind_str(dart::FieldType kind){
     case dart::FieldType::String:  return "string";
     case dart::FieldType::VString: return "vstring"; case dart::FieldType::VArray: return "varr";
     case dart::FieldType::Map:     return "map";
+    case dart::FieldType::Enum:    return "enum";
     default: return "?";
     }
 }
@@ -160,6 +161,15 @@ static json fields_json(const dart::Schema &s){
                      {"offset", f.offset}, {"size", f.size} };
         if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
         if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);  /* live count, no bound */
+        if (f.kind == dart::FieldType::Enum){                                   /* backing + option table */
+            row["backing"] = kind_str(f.elem);
+            json opts = json::array();
+            dart::Schema::EnumVariant ev;
+            for (uint16_t k = 0; k < s.enum_count(i); k++)
+                if (s.enum_variant(i, k, ev))
+                    opts.push_back({ {"name", std::string(ev.name.data(), ev.name.size())}, {"value", ev.value} });
+            row["variants"] = opts;
+        }
         if (f.str_cap) row["cap"] = f.str_cap;                                  /* string + string arrays */
         fields.push_back(row);
         if (f.kind == dart::FieldType::Struct) parents.push_back(std::string(f.name.data(), f.name.size()));

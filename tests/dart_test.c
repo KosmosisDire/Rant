@@ -1931,7 +1931,11 @@ static void schema_dsl_checks(void){
             "Pose { x: string<0> }",        /* zero cap */
             "Pose { x: string<12 }",        /* missing '>' */
             "Pose { v: { y: u8[] } }",      /* variable field inside a nested struct */
-            "Pose { m: map[3] }"            /* a map has no element form */
+            "Pose { m: map[3] }",           /* a map has no element form */
+            "Pose { m: enum<u8> { A=300 } }",  /* value out of the backing range */
+            "Pose { m: enum<f32> { A=0 } }",   /* non-integer backing */
+            "Pose { m: enum<u8> A=0 }",        /* missing '{' */
+            "Pose { m: enum { A } }"           /* missing <backing> */
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
@@ -1940,6 +1944,68 @@ static void schema_dsl_checks(void){
             if (s || !ep || ep < bad[i] || ep > bad[i] + strlen(bad[i])) ok = 0;
         }
         ST_CHECK(ok, "schema-dsl: malformed text rejected with a position");
+    }
+    {   /* schema-enum: a named integer is a FIXED field carrying its backing scalar;
+           the name table is schema-only, so an unknown value stays readable (forward-compat)
+           and the subset rule compares the backing WIDTH only (names are advisory). */
+        static const char *EDSL =
+            "Robot { id: u32,"
+            " mode: enum<u8> { Idle=0, Running=1, Charging=2, Fault=3 },"
+            " step: enum<i8> { Back=-1, Hold, Fwd } }";   /* auto: Hold=0, Fwd=1 */
+        DartSchema *es = dart_schema_compile(dart_allocator_alloc, &ma, EDSL, NULL);
+        ST_CHECK(es != NULL, "schema-enum: compiles");
+        if (es){
+            DartSchemaFieldInfo fi; int mi = dart_schema_field_index(es, "mode");
+            uint8_t m[32]; DartString nm; int64_t vv; DartValue dv;
+            ST_CHECK(dart_schema_field_at(es, (uint16_t)mi, &fi) && fi.kind == DART_ENUM
+                     && fi.elem == DART_U8 && fi.count == 4 && fi.size == 1,
+                     "schema-enum: reflects as ENUM (backing=elem, options=count, size=1)");
+            ST_CHECK(dart_schema_size(es) == 4u + 1u + 1u, "schema-enum: fixed size %u", dart_schema_size(es));
+            ST_CHECK(dart_schema_enum_count(es, (uint16_t)mi) == 4
+                     && dart_schema_enum_variant(es, (uint16_t)mi, 2, &vv, &nm)
+                     && vv == 2 && nm.len == 8 && memcmp(nm.data, "Charging", 8) == 0,
+                     "schema-enum: variant listing");
+            {   int si = dart_schema_field_index(es, "step");    /* signed + auto-increment */
+                ST_CHECK(dart_schema_enum_variant(es, (uint16_t)si, 0, &vv, &nm) && vv == -1
+                      && dart_schema_enum_variant(es, (uint16_t)si, 2, &vv, &nm) && vv == 1,
+                         "schema-enum: signed backing + auto-increment"); }
+            ST_CHECK(dart_enum_name_of(es, (uint16_t)mi, 3).len == 5
+                     && dart_enum_name_of(es, (uint16_t)mi, 99).data == NULL
+                     && dart_enum_value_of(es, (uint16_t)mi, "Running", &vv) && vv == 1
+                     && !dart_enum_value_of(es, (uint16_t)mi, "Nope", &vv),
+                     "schema-enum: name<->value resolvers");
+
+            dart_schema_message_default(es, m, sizeof m);
+            dart_set_uint(m, sizeof m, es, "mode", 1);                 /* by number */
+            ST_CHECK(dart_set_enum(m, sizeof m, es, "step", "Fwd")     /* by name */
+                     && !dart_set_enum(m, sizeof m, es, "step", "Bad"),
+                     "schema-enum: set by name (unknown refused)");
+            nm = dart_get_enum(dart_bytes(m, sizeof m), es, "mode");
+            ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), es, "mode") == 1
+                     && nm.len == 7 && memcmp(nm.data, "Running", 7) == 0,
+                     "schema-enum: read number + label");
+            ST_CHECK(dart_get_int(dart_bytes(m,sizeof m), es, "step") == 1,
+                     "schema-enum: signed value reads back");
+            dart_set_uint(m, sizeof m, es, "mode", 42);                /* unknown value */
+            ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), es, "mode") == 42
+                     && dart_get_enum(dart_bytes(m,sizeof m), es, "mode").data == NULL,
+                     "schema-enum: an unknown/newer value stays readable, name empty");
+            dart_set_uint(m, sizeof m, es, "mode", 2);
+            ST_CHECK(dart_get_value(dart_bytes(m,sizeof m), es, (uint16_t)mi, &dv)
+                     && dv.kind == DART_ENUM && dv.elem == DART_U8 && dv.count == 4 && dv.v.i == 2,
+                     "schema-enum: dart_get_value carries the number + backing/options");
+
+            schema_print_roundtrip(&ma, es, "Robot (enum fields)");   /* prints options, recompiles same hash */
+
+            {   /* subset: same width compatible despite a different option table; width mismatch refused */
+                DartSchema *rd = dart_schema_compile(dart_allocator_alloc, &ma,
+                    "Robot { mode: enum<u8> { Idle=0, Down=7 } }", NULL);     /* renamed/fewer options */
+                DartSchema *bw = dart_schema_compile(dart_allocator_alloc, &ma,
+                    "Robot { mode: enum<u16> { Idle=0 } }", NULL);            /* wrong width */
+                ST_CHECK(rd && dart_schema_subset(rd, es), "schema-enum: same-width subset (names advisory)");
+                ST_CHECK(bw && !dart_schema_subset(bw, es), "schema-enum: backing-width mismatch refused");
+            }
+        }
     }
     dart_allocator_reset(&ma);
 }

@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #ifndef DART_SCHEMA_WIRE_VERSION
-#define DART_SCHEMA_WIRE_VERSION 4u    /* bumped on any schema wire-format change */
+#define DART_SCHEMA_WIRE_VERSION 5u    /* bumped on any schema wire-format change (5: enum) */
 #endif
 #ifndef DART_SCHEMA_MAX_DEPTH
 #define DART_SCHEMA_MAX_DEPTH 8u        /* struct nesting the builder accepts */
@@ -49,7 +49,10 @@ typedef enum {
     DART_VSTR   = 14,   /* variable string (`string`): its bytes are the field's tail frame                    */
     DART_VARR   = 15,   /* variable array (`elem[]`): [u8 elem] (+[u16 cap] if elem is STR); the frame holds a
                            live count of packed elements (count = frame len / element size)                    */
-    DART_MAP    = 16    /* self-describing map (`map`): the frame holds a tagged value tree (see the map API) */
+    DART_MAP    = 16,   /* self-describing map (`map`): the frame holds a tagged value tree (see the map API) */
+    DART_ENUM   = 17    /* named integer: [u8 backing (a U8..I64 kind)][u8 n]( [value:backing][u8 namelen][name] )*
+                           FIXED field, on the wire just its backing scalar; the name table is schema-only.
+                           dart_schema_field_at reports elem = the backing kind, count = the variant count.    */
 } DartSchemaTypeKind;
 
 /* Bytes of a fixed scalar kind (U8..BOOL); 0 otherwise. */
@@ -67,13 +70,20 @@ typedef struct DartSchema DartSchema;
 typedef struct {
     DartString name;      /* field's own name (into the schema's wire bytes) */
     uint8_t    kind;      /* DartSchemaTypeKind */
-    uint8_t    elem;      /* ARR element kind, else 0 */
-    uint16_t   count;     /* ARR element count, else 0 */
+    uint8_t    elem;      /* ARR element kind, or ENUM backing kind, else 0 */
+    uint16_t   count;     /* ARR element count, or ENUM variant count, else 0 */
     uint16_t   depth;     /* 0 = top level; n = member of the struct n levels up */
     uint16_t   str_cap;   /* string capacity (STR fields and STR-element arrays), else 0 */
     uint32_t   offset;    /* absolute byte offset of this field in a message; 0 for variable kinds */
     uint32_t   size;      /* byte size of this field; 0 for variable kinds (live, per message) */
 } DartSchemaFieldInfo;
+
+/* One option of an enum field: a wire number and its human name. Passed to the builder;
+ * read back with dart_schema_enum_variant. */
+typedef struct {
+    int64_t     value;
+    const char *name;     /* NUL-terminated (builder input); <= 255 bytes */
+} DartEnumVariant;
 
 /* Builder: define a schema and get back a compiled DartSchema. It grows its wire buffer
  * through the alloc hook as you add fields; finish resizes that block to hold the compiled
@@ -115,13 +125,17 @@ typedef struct {
  *   "    note:     string,                  -- variable string: unbounded, in the tail\n"
  *   "    samples:  f32[],                   -- variable array: live element count\n"
  *   "    names:    string<16>[],            -- variable array of capped strings\n"
- *   "    extras:   map                      -- self-describing tagged values (see map API)\n"
+ *   "    extras:   map,                     -- self-describing tagged values (see map API)\n"
+ *   "    mode:     enum<u8> { Idle=0, Run=1, Fault=2 }  -- named integer; wire = the u8\n"
  *   "}"
  *
  * Scalars: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 bool. `name: elem[N]` is a fixed
  * array of exactly N elements; `name: string<C>` is a capped string (up to C bytes,
  * carrying its live length; `string<C>[N]` an array of them); `name: { ... }` nests a
- * struct. The variable forms drop the bound: `string` (unbounded string), `elem[]` and
+ * struct. `name: enum<uN> { A=0, B, C=9 }` is a named integer with backing width uN (any
+ * U8..I64 kind); values may be omitted (auto-increment from the previous, starting 0) and
+ * the backing is part of the type's identity, like a string cap. The variable forms drop
+ * the bound: `string` (unbounded string), `elem[]` and
  * `string<C>[]` (live element count), `map` (tagged value tree). Variable fields may be
  * declared anywhere but always live at the END of a message, in schema order, so every
  * fixed field keeps a static offset; they are refused inside nested structs (`string[]`
@@ -156,6 +170,14 @@ void        dart_schema_field_var_string_array(DartSchemaBuilder *b, const char 
                                                uint16_t cap);
 /* Self-describing map (`map`): write with DartMapWriter, read with dart_map_get. */
 void        dart_schema_field_map(DartSchemaBuilder *b, const char *name);
+/* Named integer (`enum<uN>{...}`): a fixed field carrying `backing` (a U8..I64 kind) on
+ * the wire, with a schema-side table of `n` {value, name} options (n <= 255). Read the
+ * number with dart_get_int/uint, the label with dart_get_enum; enumerate the options with
+ * dart_schema_enum_count / dart_schema_enum_variant. Latches an error if backing is not an
+ * integer kind or a value does not fit it. */
+void        dart_schema_field_enum(DartSchemaBuilder *b, const char *name,
+                                   DartSchemaTypeKind backing,
+                                   const DartEnumVariant *variants, uint16_t n);
 /* Nested struct field: open it, add its fields, close it. */
 void        dart_schema_begin_struct(DartSchemaBuilder *b, const char *name);
 void        dart_schema_end_struct(DartSchemaBuilder *b);
@@ -196,6 +218,19 @@ int         dart_schema_field_at(const DartSchema *s, uint16_t i, DartSchemaFiel
  * flat index, or -1. Fields are addressed by NAME everywhere (the getters/setters take
  * the same paths); resolve once and use dart_get/set_value if a hot path measures it. */
 int         dart_schema_field_index(const DartSchema *s, const char *path);
+
+/* Enum options (by flat field index, as from dart_schema_field_index / dart_schema_field_at).
+ * enum_count is the option count (0 if the field is not an enum); enum_variant fills option
+ * i's wire number + name (a view into the schema bytes), returning 1, or 0 if i is out of
+ * range / not an enum. Together they enumerate an enum's choices (e.g. to build a dropdown). */
+uint16_t    dart_schema_enum_count  (const DartSchema *s, uint16_t field);
+int         dart_schema_enum_variant(const DartSchema *s, uint16_t field, uint16_t i,
+                                     int64_t *value, DartString *name);
+/* The two resolution directions, over the schema alone (no message). name_of returns the
+ * option name for a wire number ({NULL,0} if no option has it: an unknown/newer value is
+ * safe, not an error); value_of returns 1 + *out for a known name, else 0. */
+DartString  dart_enum_name_of (const DartSchema *s, uint16_t field, int64_t value);
+int         dart_enum_value_of(const DartSchema *s, uint16_t field, const char *name, int64_t *out);
 
 /* 1 if msg is exactly one message of this schema: its length equals the schema size,
  * or, with variable fields, the tail frames exactly consume it. */
@@ -240,6 +275,9 @@ DartString dart_get_string_at(DartBytes msg, const DartSchema *s, const char *fi
 /* MAP: a zero-copy view of the map body (feed it to dart_map_get / dart_map_at);
  * {NULL,0} on mismatch. An empty body is an empty map. */
 DartBytes dart_get_map(DartBytes msg, const DartSchema *s, const char *field);
+/* ENUM: the current value's option name ({NULL,0} if the stored number has no option, or
+ * the field is not an enum). The raw number is dart_get_int/dart_get_uint on the same field. */
+DartString dart_get_enum(DartBytes msg, const DartSchema *s, const char *field);
 
 /* The canonical default message: every fixed field is zero (numeric 0, false, zeroed
  * arrays and structs) and every variable field an empty frame (empty string, 0
@@ -275,17 +313,20 @@ int dart_set_string_at(void *buf, size_t cap, const DartSchema *s, const char *f
 /* MAP: the frame becomes the given map body (from dart_map_finish, or another
  * message's dart_get_map). The body is validated first: malformed bytes are refused. */
 int dart_set_map(void *buf, size_t cap, const DartSchema *s, const char *field, DartBytes map);
+/* ENUM: write the option named `name` (resolved to its number via the schema). Returns 1,
+ * or 0 for an unknown name / non-enum field. Set by number with dart_set_int/dart_set_uint. */
+int dart_set_enum(void *buf, size_t cap, const DartSchema *s, const char *field, const char *name);
 
 /* Reflection access by flat index (tools walking a schema they've never seen: the
  * explorer, loggers, bridges). One tagged value covers every kind; the typed name-based
  * getters/setters above stay the API for code that knows its fields. */
 typedef struct {
     uint8_t  kind;        /* DartSchemaTypeKind */
-    uint8_t  elem;        /* ARR/VARR element kind */
+    uint8_t  elem;        /* ARR/VARR element kind, or ENUM backing kind */
     uint16_t count;       /* ARR element count; VARR live count and MAP entry count
-                             (saturated at 65535: bytes.len is authoritative) */
+                             (saturated at 65535: bytes.len is authoritative); ENUM variant count */
     uint16_t str_cap;     /* string capacity (STR fields and STR-element arrays) */
-    union { uint64_t u; int64_t i; double f; } v;   /* scalar value (BOOL in u as 0/1) */
+    union { uint64_t u; int64_t i; double f; } v;   /* scalar value (BOOL in u as 0/1; ENUM value in i, also u) */
     DartBytes bytes;      /* ARR/STRUCT raw bytes (get: view into msg; set: source, may be
                              shorter than the field: the rest is zeroed). STR/VSTR: the
                              LIVE string bytes (get: view; set: content). VARR: the live

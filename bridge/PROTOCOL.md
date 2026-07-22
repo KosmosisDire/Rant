@@ -122,9 +122,15 @@ schema has no variable fields, and where the variable tail begins when it does.
 | `arr`     | fixed array of `count` elements at `offset` | `elem`, `count` (+ `cap` if `elem` is `string`) |
 | `struct`  | group header; members follow with dotted paths (a decoder can skip it) | -- |
 | `string`  | capped string, fixed slot `[u16 len][cap bytes]` at `offset` (`size` = 2+cap) | `cap` |
+| `enum`    | named integer; on the wire just its `backing` scalar at `offset` | `backing`, `variants` (`[{name,value}]`) |
 | `vstring` | variable string; lives in the tail (`offset`/`size` = 0) | -- |
 | `varr`    | variable array; lives in the tail, live element count | `elem` (+ `cap` if `elem` is `string`) |
 | `map`     | self-describing tagged value tree; lives in the tail | -- |
+
+An **`enum`** is a fixed field carrying its `backing` integer (`u8`..`i64`); the
+`variants` array names the values, so a client reads/writes the number and resolves
+the label from `variants` (an unknown value has no name: forward-compatible). The
+reference client (`dart.ts`) exposes `Schema.enumName` / `Schema.enumValue`.
 
 The **variable kinds** (`vstring` / `varr` / `map`) have no fixed offset: each is
 one `[u32 len][payload]` frame in the message tail, the frames in schema order,

@@ -146,7 +146,7 @@ enum class ErrorKind {
  * that ride the message tail (offset/size report 0). */
 enum class FieldType : uint8_t {
     U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
-    VString, VArray, Map
+    VString, VArray, Map, Enum
 };
 
 /* A function call's outcome (mirrors DartCallStatus). Ok/AppError/NoHandler travel on
@@ -167,6 +167,7 @@ static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift")
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
+static_assert((int)FieldType::Enum == detail::DART_ENUM, "field-type enum drift");
 #ifndef DART_NO_PATTERNS
 static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum drift");
 static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
@@ -437,8 +438,8 @@ public:
     struct Field {
         std::string_view name;
         FieldType kind;          /* the field's type */
-        FieldType elem;          /* array element type (only when kind == Array) */
-        uint16_t  count, depth;
+        FieldType elem;          /* array element type (Array), or enum backing type (Enum) */
+        uint16_t  count, depth;  /* array/enum option count */
         uint16_t  str_cap;       /* string capacity (String fields and String-element arrays) */
         uint32_t  offset, size;
     };
@@ -451,6 +452,16 @@ public:
         out.count  = f.count; out.depth = f.depth;
         out.str_cap = f.str_cap;
         out.offset = f.offset; out.size = f.size;
+        return true;
+    }
+
+    /* Enum options (by flat field index). One option of an Enum field. */
+    struct EnumVariant { int64_t value; std::string_view name; };
+    uint16_t enum_count(uint16_t field) const { return detail::dart_schema_enum_count(schema_, field); }
+    bool enum_variant(uint16_t field, uint16_t i, EnumVariant& out) const {
+        detail::DartString n; int64_t v;
+        if (!detail::dart_schema_enum_variant(schema_, field, i, &v, &n)) return false;
+        out.value = v; out.name = { n.data, n.len };
         return true;
     }
 
@@ -695,6 +706,16 @@ public:
         return *this;
     }
     MessageBuilder& set_map(const char* field, MapWriter& w) { return set_map(field, w.finish()); }
+    /* an `enum` field by its number, or by option name (unknown name is refused -> ok() false) */
+    MessageBuilder& set_enum(const char* field, int64_t value) {
+        ok_ &= detail::dart_set_int(buf_.data(), buf_.size(), schema_, field, value) != 0;
+        return *this;
+    }
+    MessageBuilder& set_enum(const char* field, std::string_view name) {
+        std::string n(name);
+        ok_ &= detail::dart_set_enum(buf_.data(), buf_.size(), schema_, field, n.c_str()) != 0;
+        return *this;
+    }
 
     /* false if any setter was refused (over-cap string, unknown field, short buffer) */
     bool ok() const { return ok_; }
@@ -738,6 +759,9 @@ public:
     std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::dart_get_string_at(d_, s_, field, index); return { s.data, s.len }; }
     /* a `map` field, as a reader over its body (valid while the view is) */
     MapReader get_map(const char* field) const { auto b = detail::dart_get_map(d_, s_, field); return MapReader(Bytes{ b.data, b.len }); }
+    /* an `enum` field: its number is get_int/get_uint; this is the current value's option
+     * name ({} if the stored number has no option, i.e. an unknown/newer value) */
+    std::string_view get_enum_name(const char* field) const { auto s = detail::dart_get_enum(d_, s_, field); return { s.data, s.len }; }
 
 protected:
     FieldView() = default;
@@ -874,6 +898,7 @@ private:
  * =========================================================================== */
 
 template <class T> struct reflect;              /* specialized by DART_SCHEMA */
+template <class E> struct reflect_enum;         /* specialized by DART_ENUM */
 template <class U> struct field_tag {};         /* visitor dispatch tag */
 
 /* String<N>: exactly the capped-string wire slot, [u16 live-length][N bytes].
@@ -916,6 +941,10 @@ template <class E, size_t N> struct is_std_array<std::array<E, N>> : std::true_t
 template <class U, class = void> struct is_reflected : std::false_type {};
 template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_dart_schema>>
     : std::true_type {};
+/* an enum type registered with DART_ENUM (else a plain enum ships as its backing integer) */
+template <class U, class = void> struct is_reg_enum : std::false_type {};
+template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_dart_enum>>
+    : std::true_type {};
 
 /* map a C++ scalar type onto the wire kind; -1 = not a wire scalar */
 template <class U> constexpr int scalar_kind_of() {
@@ -952,8 +981,9 @@ inline bool host_le() {
  * wire, and how to copy it. Arrays are one leaf with count > 1 (per-element strides). */
 struct Leaf {
     uint32_t    struct_off = 0, wire_off = 0;
-    uint8_t     kind = 0;                       /* scalar kind, or DART_STR */
+    uint8_t     kind = 0;                       /* scalar kind, DART_STR, or (enum) the backing kind */
     uint8_t     is_array = 0;
+    uint8_t     is_enum = 0;                     /* wire kind is ENUM; copies as its backing integer (kind) */
     uint16_t    count = 1, cap = 0;             /* elements; string capacity */
     uint32_t    s_stride = 0, w_stride = 0;     /* per-element byte strides */
     std::string path;                           /* dotted path for by-name offset lookup */
@@ -1002,6 +1032,29 @@ struct SchemaBuilder {
         l.path = prefix + name;
         leaves.push_back(std::move(l));
     }
+    /* a DART_ENUM-registered enum: emit `enum<uN> { A=v, ... }`, copy as the backing int */
+    template <class E> void add_enum(const char* name, size_t off) {
+        using Backing = std::underlying_type_t<E>;
+        constexpr int k = scalar_kind_of<Backing>();
+        static_assert(k >= 0 && k <= (int)detail::DART_I64,
+                      "DART_ENUM: backing must be an integer type (u8..i64)");
+        sep(name);
+        dsl += "enum<"; dsl += scalar_kind_name(k); dsl += "> { ";
+        bool firstv = true;
+        reflect_enum<E>::visit([&](int64_t value, const char* vn) {
+            if (!firstv) dsl += ", ";
+            firstv = false;
+            dsl += vn; dsl += "="; dsl += std::to_string(value);
+        });
+        dsl += " }";
+        Leaf l;
+        l.struct_off = base + (uint32_t)off;
+        l.kind = (uint8_t)k; l.is_enum = 1;
+        l.s_stride = (uint32_t)sizeof(E);
+        l.w_stride = scalar_wire_size(k);
+        l.path = prefix + name;
+        leaves.push_back(std::move(l));
+    }
     template <class U> void add(const char* name, size_t off);
 };
 
@@ -1015,6 +1068,9 @@ struct SchemaVisit {
 template <class U> void SchemaBuilder::add(const char* name, size_t off) {
     if constexpr (scalar_kind_of<U>() >= 0) {
         add_scalar<U>(name, off, 1, false);
+    } else if constexpr (std::is_enum_v<U>) {
+        if constexpr (is_reg_enum<U>::value) add_enum<U>(name, off);   /* named options on the wire */
+        else add_scalar<std::underlying_type_t<U>>(name, off, 1, false); /* plain int (no DART_ENUM) */
     } else if constexpr (is_dart_string<U>::value) {
         add_string<U>(name, off, 1, false);
     } else if constexpr (std::is_array_v<U>) {
@@ -1059,7 +1115,9 @@ inline bool fill_offsets(const detail::DartSchema* s, std::vector<Leaf>& lv) {
         if (idx < 0) return false;
         detail::DartSchemaFieldInfo fi;
         if (!detail::dart_schema_field_at(s, (uint16_t)idx, &fi)) return false;
-        if (l.is_array) {
+        if (l.is_enum) {
+            if (fi.kind != (uint8_t)detail::DART_ENUM || fi.elem != l.kind) return false;  /* same backing width */
+        } else if (l.is_array) {
             if (fi.kind != (uint8_t)detail::DART_ARR || fi.elem != l.kind || fi.count != l.count) return false;
             if (l.kind == (uint8_t)detail::DART_STR && fi.str_cap != l.cap) return false;
         } else if (l.kind == (uint8_t)detail::DART_STR) {
@@ -2817,6 +2875,27 @@ private:
         static constexpr const char* type_name = #T; \
         template <class V> static void visit(V&& dart_v) { \
             DART_PP_FOR_EACH(DART_SCHEMA_FIELD, T, __VA_ARGS__) \
+        } \
+    }
+
+/* ---- DART_ENUM(E, options...): register a C++ `enum class` so a member of it ships as a
+ * NAMED integer (wire kind `enum<uN>`, N the enum's underlying type) instead of a bare int.
+ * Invoke at global scope after the enum, listing its enumerators; the wire value of each is
+ * the enum's own value, so two ends agree without repeating numbers:
+ *
+ *     enum class Mode : uint8_t { Idle, Running, Fault };
+ *     DART_ENUM(Mode, Idle, Running, Fault);
+ *
+ * An enum member WITHOUT a DART_ENUM still works, shipping as its plain backing integer (so
+ * it cross-matches an `enum<uN>` only by width, not name). */
+#define DART_ENUM_ITEM(E, x) dart_v((int64_t)(E::x), #x);
+#define DART_ENUM(E, ...) \
+    template <> struct dart::reflect_enum<E> { \
+        using is_dart_enum = void; \
+        static_assert(std::is_enum<E>::value, "DART_ENUM: type must be an enum"); \
+        static constexpr const char* type_name = #E; \
+        template <class V> static void visit(V&& dart_v) { \
+            DART_PP_FOR_EACH(DART_ENUM_ITEM, E, __VA_ARGS__) \
         } \
     }
 

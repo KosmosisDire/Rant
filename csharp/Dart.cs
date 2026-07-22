@@ -406,6 +406,11 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_schema_field_at(IntPtr s, ushort i, out DartSchemaFieldInfo info);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern ushort dart_schema_enum_count(IntPtr s, ushort field);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_schema_enum_variant(IntPtr s, ushort field, ushort i,
+            out long value, out DartStringView name);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_schema_message_default(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_set_uint(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, ulong v);
@@ -2233,7 +2238,8 @@ namespace Dart
     {
         internal const byte U8 = 0, U16 = 1, U32 = 2, U64 = 3, I8 = 4, I16 = 5, I32 = 6,
             I64 = 7, F32 = 8, F64 = 9, BOOL = 10, ARR = 11, STRUCT = 12, STR = 13,
-            VSTR = 14, VARR = 15, MAP = 16;   // the variable kinds (ride the message tail)
+            VSTR = 14, VARR = 15, MAP = 16,   // the variable kinds (ride the message tail)
+            ENUM = 17;                        // named integer (wire = its backing scalar)
 
         private static readonly string[] Token = { "u8", "u16", "u32", "u64", "i8", "i16",
             "i32", "i64", "f32", "f64", "bool" };
@@ -2338,10 +2344,11 @@ namespace Dart
             public FieldInfo Field;
             public string WireName;
             public byte Kind;
-            public byte Elem;
+            public byte Elem;      // array element kind, or (enum) the backing scalar kind
             public int Count;
             public int StrCap;
             public Type Nested;
+            public Type EnumType;  // enum fields: the C# enum type (names/values via reflection)
         }
         private sealed class TypeSpec { public string Name; public List<FieldPlan> Fields; }
         private static readonly Dictionary<Type, TypeSpec> s_specs = new Dictionary<Type, TypeSpec>();
@@ -2408,6 +2415,12 @@ namespace Dart
                         else plan.Kind = VSTR;                                          // variable (unbounded)
                     }
                     else if (IsMapType(f.FieldType)) { plan.Kind = MAP; }
+                    else if (f.FieldType.IsEnum)   // named integer; backing from the enum's underlying type
+                    {
+                        if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(f.FieldType), out k) || k > I64)
+                            throw new SchemaException("enum field " + f.Name + " must have an integer backing type");
+                        plan.Kind = ENUM; plan.Elem = k; plan.EnumType = f.FieldType;
+                    }
                     else if (ScalarKind.TryGetValue(f.FieldType, out k)) { plan.Kind = k; }
                     else if (StructLike(f.FieldType)) { plan.Kind = STRUCT; plan.Nested = f.FieldType; }
                     else throw new SchemaException("unsupported field type " + f.FieldType + " on " + f.Name
@@ -2453,11 +2466,24 @@ namespace Dart
             if (f.Kind == STR) return f.WireName + ": string<" + f.StrCap + ">";
             if (f.Kind == VSTR) return f.WireName + ": string";
             if (f.Kind == MAP) return f.WireName + ": map";
+            if (f.Kind == ENUM) return f.WireName + ": enum<" + Token[f.Elem] + "> " + EnumBody(f.EnumType);
             return f.WireName + ": " + Token[f.Kind];
         }
 
         private static string ElemToken(byte elem, int strCap)
             => elem == STR ? "string<" + strCap + ">" : Token[elem];
+
+        // `{ Name=value, ... }` from a C# enum's members in DECLARATION order (GetFields, not
+        // Enum.GetNames which sorts by value), so the wire/hash matches the other languages.
+        private static string EnumBody(Type enumType)
+        {
+            var under = Enum.GetUnderlyingType(enumType);
+            var parts = new List<string>();
+            foreach (var fi in enumType.GetFields(BindingFlags.Public | BindingFlags.Static))
+                parts.Add(fi.Name + "=" + Convert.ToString(Convert.ChangeType(fi.GetValue(null), under),
+                                                           System.Globalization.CultureInfo.InvariantCulture));
+            return "{ " + string.Join(", ", parts) + " }";
+        }
 
         // --- DSL reconstruction from ANY compiled schema (flat depth-first table) ---
         internal static string SchemaDsl(IntPtr s)
@@ -2470,7 +2496,8 @@ namespace Dart
                 DartSchemaFieldInfo info;
                 Native.dart_schema_field_at(s, i, out info);
                 var node = new object[] { Str(info.name), info.kind, info.elem, (int)info.count,
-                                          (int)info.str_cap, null };
+                                          (int)info.str_cap, null,
+                                          info.kind == ENUM ? EnumBodyFromSchema(s, i) : null };
                 int d = info.depth;
                 stack[d].Add(node);
                 if (info.kind == STRUCT)
@@ -2514,7 +2541,22 @@ namespace Dart
             if (kind == STR) return name + ": string<" + strCap + ">";
             if (kind == VSTR) return name + ": string";
             if (kind == MAP) return name + ": map";
+            if (kind == ENUM) return name + ": enum<" + Token[elem] + "> " + (string)node[6];
             return name + ": " + Token[kind];
+        }
+
+        // `{ Name=value, ... }` reconstructed from a compiled schema's enum option table
+        private static string EnumBodyFromSchema(IntPtr s, ushort field)
+        {
+            var parts = new List<string>();
+            ushort n = Native.dart_schema_enum_count(s, field);
+            for (ushort k = 0; k < n; k++)
+            {
+                long val; DartStringView nm;
+                if (Native.dart_schema_enum_variant(s, field, k, out val, out nm) != 0)
+                    parts.Add(Str(nm) + "=" + val.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            return "{ " + string.Join(", ", parts) + " }";
         }
 
         // --- encode: object -> message bytes ---------------------------------------
@@ -2657,6 +2699,12 @@ namespace Dart
             }
             else if (op.Kind == F32) Native.dart_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
             else if (op.Kind == F64) Native.dart_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
+            else if (op.Kind == ENUM)   // write the enum's backing integer (signed vs unsigned per Elem)
+            {
+                object raw = op.Value is Enum ? Convert.ChangeType(op.Value, Enum.GetUnderlyingType(op.Value.GetType())) : op.Value;
+                if (op.Elem >= I8 && op.Elem <= I64) Native.dart_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
+                else Native.dart_set_uint(buf, cap, s, cpath, Convert.ToUInt64(raw));
+            }
             else if (op.Kind >= I8 && op.Kind <= I64) Native.dart_set_int(buf, cap, s, cpath, Convert.ToInt64(op.Value));
             else if (op.Kind == BOOL) Native.dart_set_uint(buf, cap, s, cpath, (bool)op.Value ? 1UL : 0UL);
             else Native.dart_set_uint(buf, cap, s, cpath, Convert.ToUInt64(op.Value));
@@ -2929,6 +2977,7 @@ namespace Dart
                 return DecodeMapBody(raw, ref off, raw.Length, 1);
             }
             if (v.kind == F32 || v.kind == F64) return v.v.f;
+            if (v.kind == ENUM) return v.v.i;   // the number; ToObject casts it to the enum type
             if (v.kind >= I8 && v.kind <= I64) return v.v.i;
             if (v.kind == BOOL) return v.v.u != 0;
             return v.v.u;
@@ -3050,6 +3099,7 @@ namespace Dart
                 if (fp.Kind == STRUCT) set = ToObject(fp.Nested, (Dictionary<string, object>)val);
                 else if (fp.Kind == ARR || fp.Kind == VARR || fp.Kind == STR || fp.Kind == VSTR
                          || fp.Kind == MAP) set = val;   // already string / typed array / dict
+                else if (fp.Kind == ENUM) set = Enum.ToObject(fp.Field.FieldType, val);   // number -> enum
                 else set = Convert.ChangeType(val, fp.Field.FieldType);
                 fp.Field.SetValue(obj, set);
             }

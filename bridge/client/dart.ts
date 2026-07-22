@@ -32,6 +32,8 @@ type Field = {
     elem?: string;
     count?: number;
     cap?: number;
+    backing?: string;                              /* enum: the wire scalar kind */
+    variants?: { name: string; value: number }[];  /* enum: the option table */
     offset: number;
     size: number;
     varOrdinal?: number;
@@ -274,8 +276,17 @@ function decodeArray(f: Field, data: Uint8Array, view: DataView, off: number, le
     return out;
 }
 
+/* an enum value: a number passes through, a string is resolved to its option value */
+function enumToValue(f: Field, v: any): number | bigint {
+    if (typeof v !== "string") return v;
+    const hit = f.variants?.find((o) => o.name === v);
+    if (!hit) throw new Error(`'${f.path}': unknown enum option '${v}'`);
+    return hit.value;
+}
+
 function writeFixedField(view: DataView, buf: Uint8Array, f: Field, v: any): void {
     if (f.kind === "struct") throw new Error(`'${f.path}' is a struct: set its members`);
+    if (f.kind === "enum") { writeScalar(view, f.backing!, f.offset, enumToValue(f, v)); return; }
     if (f.kind === "string") { writeCappedString(view, buf, f.offset, f.cap ?? 0, v); return; }
     if (f.kind === "arr" && f.elem === "string") {
         const slot = 2 + (f.cap ?? 0);
@@ -362,9 +373,21 @@ class Layout {
             return decodeArray(f, frame, new DataView(frame.buffer, frame.byteOffset, frame.byteLength), 0, frame.length);
         }
         if (f.kind === "struct") return data.subarray(f.offset, f.offset + f.size);
+        if (f.kind === "enum") return readScalar(view, f.backing!, f.offset);   /* the number; label via enumName */
         if (f.kind === "string") return readCappedString(view, data, f.offset, f.cap ?? 0);
         if (f.kind === "arr") return decodeArray(f, data, view, f.offset, f.size);
         return readScalar(view, f.kind, f.offset);
+    }
+
+    /* enum option helpers (by field path): resolve a wire number to its option name (""
+     * if none, i.e. an unknown/newer value) and a name to its number (undefined if none). */
+    enumName(path: string, value: number | bigint): string {
+        const f = this.fields.get(path);
+        const hit = f?.variants?.find((o) => BigInt(o.value) === BigInt(value));
+        return hit ? hit.name : "";
+    }
+    enumValue(path: string, name: string): number | undefined {
+        return this.fields.get(path)?.variants?.find((o) => o.name === name)?.value;
     }
 
     /* Full-message decode into a plain nested object (structs become sub-objects).
