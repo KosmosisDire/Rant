@@ -72,6 +72,9 @@ static inline size_t i_dart_allocator_align(size_t n){ return (n + 15u) & ~(size
 static inline size_t i_dart_allocator_class(size_t n){
     size_t p = 16u, q;
     if (n <= 16u) return 16u;
+    if (n >= 4096u) return i_dart_allocator_align(n);   /* large blocks: exact (16-aligned).
+        Class waste (<= 25%) costs real KB at this size while pool reuse barely needs it:
+        the within-2x fit rule still lets a freed large block serve nearby sizes. */
     while ((p << 1) <= n){ if (p > (SIZE_MAX >> 2)) return n; p <<= 1; }
     q = p >> 2;                               /* n in [p, 2p): round up to a quarter step */
     return p + ((n - p + q - 1u) / q) * q;
