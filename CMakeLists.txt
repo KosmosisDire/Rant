@@ -21,14 +21,13 @@ if(CMAKE_CONFIGURATION_TYPES)
   endif()
 endif()
 
-# Built executables go in the repo root; multi-config generators append a per-config
-# subdir, so pin the optimized configs to root and let Debug keep its own Debug/.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# All executables land in bin/, whatever the config. Multi-config generators would
+# otherwise append a per-config subdir (bin/Release, bin/Debug), so pin every config
+# to bin/ directly: switching Release<->Debug overwrites the same files in place.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
 foreach(_cfg ${CMAKE_CONFIGURATION_TYPES})
   string(TOUPPER "${_cfg}" _CFG)
-  if(NOT _cfg STREQUAL "Debug")
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_SOURCE_DIR}")
-  endif()
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_SOURCE_DIR}/bin")
 endforeach()
 
 # 1. Amalgamate src/ -> dist/. Re-runs only when a src file or the packer changes.

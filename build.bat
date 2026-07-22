@@ -1,15 +1,28 @@
 @echo off
-REM Configure CMake and build all DART executables in Release.
-REM Outputs land in the repo root (Debug builds go in Debug/).
+REM Configure CMake and build all DART targets. Output lands in bin\ for every
+REM config, so a Release build overwrites a Debug one (and vice versa).
+REM Usage: build [release^|debug]   (default: release)
 setlocal
 cd /d "%~dp0"
 
-cmake --preset windows
+set "CONFIG=%~1"
+if "%CONFIG%"=="" set "CONFIG=release"
+
+if /i "%CONFIG%"=="release" (
+  set "BUILDPRESET=windows"
+) else if /i "%CONFIG%"=="debug" (
+  set "BUILDPRESET=windows-debug"
+) else (
+  echo Unknown argument "%CONFIG%". Usage: build [release^|debug]
+  exit /b 2
+)
+
+cmake --preset windows -D DART_BUILD_JS_CLIENT=ON
 if errorlevel 1 exit /b 1
 
-cmake --build --preset windows
+cmake --build --preset %BUILDPRESET%
 if errorlevel 1 exit /b 1
 
 echo.
-echo Release build complete. Executables are in the repo root.
+echo %CONFIG% build complete. Executables are in bin\.
 endlocal
