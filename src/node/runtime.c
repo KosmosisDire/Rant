@@ -2025,8 +2025,10 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
         dart_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
         dart_map_put_uint(w, "peers", dart_discovery_peer_count(dart_discovery_state(n->discovery)));
         dart_map_put_uint(w, "max_peers", n->max_peers);
-        dart_map_put_uint(w, "topics", (uint64_t)(n->n_created + n->n_builtin));
-        dart_map_put_uint(w, "max_topics", n->max_topics);
+        /* app topics only: the "@dart/" builtins are hidden infrastructure, so neither
+           the counts nor the topics array below surface them */
+        dart_map_put_uint(w, "topics", (uint64_t)n->n_created);
+        dart_map_put_uint(w, "max_topics", (uint64_t)(n->max_topics - n->n_builtin));
 #ifdef DART_SHM
         dart_map_put_uint(w, "shm_tx", n->shm_tx);
         dart_map_put_uint(w, "shm_rx", n->shm_rx);
@@ -2064,6 +2066,8 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
             const DartQos *q = dart_transport_topic_qos(n->transport, i);
             DartRepairStats rs;
             if (!h) continue;
+            if (n->n_builtin && i >= n->builtin_lo
+                             && i < (uint16_t)(n->builtin_lo + n->n_builtin)) continue;
             dart_transport_repair_stats(n->transport, i, &rs);
             dart_map_open_map(w, NULL);
             dart_map_put_uint(w, "index", i);

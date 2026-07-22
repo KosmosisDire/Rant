@@ -268,7 +268,7 @@ int    i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index
 
 /* The greedy detail cache (cfg.fetch_details): a peer topic's fetched name + parsed
  * schema by (peer id, index). name is a view of the cache's copy ({NULL,0} = not
- * fetched yet); *schema/*schema_hash (either may be NULL) get the interned parsed
+ * fetched yet); *schema and *schema_hash (either may be NULL) get the interned parsed
  * schema and its identity (NULL/0 = untyped). Returns 1 on a cache hit. */
 int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t index,
                                   DartString *name, const DartSchema **schema,

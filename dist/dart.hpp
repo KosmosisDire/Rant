@@ -2500,7 +2500,7 @@ int    i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index
 
 /* The greedy detail cache (cfg.fetch_details): a peer topic's fetched name + parsed
  * schema by (peer id, index). name is a view of the cache's copy ({NULL,0} = not
- * fetched yet); *schema/*schema_hash (either may be NULL) get the interned parsed
+ * fetched yet); *schema and *schema_hash (either may be NULL) get the interned parsed
  * schema and its identity (NULL/0 = untyped). Returns 1 on a cache hit. */
 int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t index,
                                   DartString *name, const DartSchema **schema,
@@ -13801,8 +13801,10 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
         dart_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
         dart_map_put_uint(w, "peers", dart_discovery_peer_count(dart_discovery_state(n->discovery)));
         dart_map_put_uint(w, "max_peers", n->max_peers);
-        dart_map_put_uint(w, "topics", (uint64_t)(n->n_created + n->n_builtin));
-        dart_map_put_uint(w, "max_topics", n->max_topics);
+        /* app topics only: the "@dart/" builtins are hidden infrastructure, so neither
+           the counts nor the topics array below surface them */
+        dart_map_put_uint(w, "topics", (uint64_t)n->n_created);
+        dart_map_put_uint(w, "max_topics", (uint64_t)(n->max_topics - n->n_builtin));
 #ifdef DART_SHM
         dart_map_put_uint(w, "shm_tx", n->shm_tx);
         dart_map_put_uint(w, "shm_rx", n->shm_rx);
@@ -13840,6 +13842,8 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
             const DartQos *q = dart_transport_topic_qos(n->transport, i);
             DartRepairStats rs;
             if (!h) continue;
+            if (n->n_builtin && i >= n->builtin_lo
+                             && i < (uint16_t)(n->builtin_lo + n->n_builtin)) continue;
             dart_transport_repair_stats(n->transport, i, &rs);
             dart_map_open_map(w, NULL);
             dart_map_put_uint(w, "index", i);
@@ -14565,6 +14569,10 @@ static void i_dart_func_on_response(void *user, const DartMsg *msg){
     i_dart_func_free_pending(fn, p);
 }
 
+/* a leading '@' is reserved for the "@dart/" builtins: refused in every public
+   constructor so an application entity can never land in the hidden namespace */
+static int i_dart_pat_reserved(const char *name){ return name && name[0] == '@'; }
+
 /* Create both channels for a function; roles per mode. mode 1 = a pure DEFINITION
  * (SUB req / PUB rsp), 0 = a REMOTE (PUB req / SUB rsp), 2 = BOTH SIDES in one handle
  * (PUBSUB channels, a handler and a pending list: the @dart/meta shape). Both-sides
@@ -14637,11 +14645,13 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 DartFunction *dart_node_create_function_definition(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     DartRequestFn on_request, void *user, const DartFunctionOpts *opts){
+    if (i_dart_pat_reserved(name)) return NULL;
     return i_dart_function_new(n, name, req_schema, rsp_schema, on_request, user, opts, 1);
 }
 DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
                     const DartFunctionOpts *opts){
+    if (i_dart_pat_reserved(name)) return NULL;
     return i_dart_function_new(n, name, req_schema, rsp_schema, NULL, NULL, opts, 0);
 }
 
@@ -15091,10 +15101,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
 
 DartVariable *dart_node_create_variable_definition(DartNode *n, const char *name,
                               const DartSchema *schema, const DartVariableOpts *opts){
+    if (i_dart_pat_reserved(name)) return NULL;
     return i_dart_variable_new(n, name, schema, opts, 1);
 }
 DartVariable *dart_node_create_remote_variable(DartNode *n, const char *name,
                               const DartSchema *schema, const DartVariableOpts *opts){
+    if (i_dart_pat_reserved(name)) return NULL;
     return i_dart_variable_new(n, name, schema, opts, 0);
 }
 
@@ -15259,7 +15271,7 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     /* the role is derived, never declared: a handler is the subscription, and the emit side
        is EAGER for every handle so a first emit never pays an announce round trip (e-stop) */
     DartRole role = on_signal ? DART_PUBSUB : DART_PUB_ONLY;
-    if (!n || !name || !name[0]) return NULL;
+    if (!n || !name || !name[0] || i_dart_pat_reserved(name)) return NULL;
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
     topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
@@ -15533,6 +15545,24 @@ static int i_dart_pat_strip(DartString name, const char *suffix, DartString *out
     return 1;
 }
 
+/* The "@dart/" builtins every node hosts (the log topics + the meta function) are
+   infrastructure, not application entities: both entity walks hide them. Peer entries
+   are filtered by channel hash so the verdict never depends on detail-fetch state;
+   local handles always have names. A leading '@' is refused in every public
+   constructor (create_impl already refuses '@' anywhere in a plain topic name), so
+   an application entity can never land in the hidden namespace. */
+static int i_dart_pat_hidden_name(DartString nm){
+    return nm.len >= 6 && memcmp(nm.data, "@dart/", 6) == 0;
+}
+static int i_dart_pat_hidden_hash(uint32_t h){
+    static const char *const nm[] = { "@dart/log/error", "@dart/log/warn", "@dart/log/info",
+                                      "@dart/meta@req", "@dart/meta@rsp" };
+    size_t i;
+    for (i = 0; i < sizeof nm / sizeof nm[0]; i++)
+        if (h == (uint32_t)dart_topic_id(nm[i])) return 1;
+    return 0;
+}
+
 static const DartDiscoveryPeer *i_dart_pat_peer(DartNode *n, uint32_t peer){
     uint16_t cnt, i;
     const DartDiscoveryPeer *ps = dart_node_peers(n, &cnt);
@@ -15566,6 +15596,7 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
     for (;;){
         if (!i_dart_pat_entry_from(p, it->next_index, &e)) return 0;
         it->next_index = (uint16_t)(e.index + 1);
+        if (i_dart_pat_hidden_hash(e.hash)) continue;   /* builtins never surface */
         name = dart_node_peer_topic_name(n, peer, e.index);   /* {NULL,0} until details arrive */
         switch (e.kind){
         case DART_KIND_TOPIC:
@@ -15657,6 +15688,7 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             for (skip = it->next_index; fn && skip; skip--) fn = fn->next;
             if (!fn){ it->phase = 1; it->next_index = 0; continue; }
             it->next_index++;
+            if (i_dart_pat_hidden_name(i_dart_topic_name(fn->req))) continue;
             memset(out, 0, sizeof *out);
             out->kind = DART_ENTITY_FUNCTION;
             { DartString nm = i_dart_topic_name(fn->req), base;
@@ -15673,6 +15705,7 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             for (skip = it->next_index; v && skip; skip--) v = v->next;
             if (!v){ it->phase = 2; it->next_index = 0; continue; }
             it->next_index++;
+            if (i_dart_pat_hidden_name(i_dart_topic_name(v->value))) continue;
             memset(out, 0, sizeof *out);
             out->kind = DART_ENTITY_VARIABLE;
             out->name = i_dart_topic_name(v->value);
@@ -15689,6 +15722,7 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             for (skip = it->next_index; s && skip; skip--) s = s->next;
             if (!s){ it->phase = 3; it->next_index = 0; continue; }
             it->next_index++;
+            if (i_dart_pat_hidden_name(i_dart_topic_name(s->topic))) continue;
             memset(out, 0, sizeof *out);
             out->kind = DART_ENTITY_SIGNAL;
             out->name = i_dart_topic_name(s->topic);
@@ -15705,7 +15739,8 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             while (it->next_index < count){
                 DartTopic *t = dart_node_topic(n, it->next_index);
                 it->next_index++;
-                if (!t || i_dart_topic_kind(t) != DART_KIND_TOPIC) continue;
+                if (!t || i_dart_topic_kind(t) != DART_KIND_TOPIC
+                       || i_dart_pat_hidden_name(i_dart_topic_name(t))) continue;
                 memset(out, 0, sizeof *out);
                 out->kind = DART_ENTITY_TOPIC;
                 out->name = i_dart_topic_name(t);

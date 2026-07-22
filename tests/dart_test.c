@@ -3094,18 +3094,6 @@ static void pf_pump(DartNode *a, DartNode *b, int ms){
     while (i_dart_plat_now_us() < end){ dart_node_poll(a,2); dart_node_poll(b,2); }
 }
 
-/* the built-in channels every node hosts (@dart/log/* + the @dart/meta pair): the
- * reflection checks filter them by channel hash (fetch-state independent) or, for
- * local walks (hash unset there), by the reserved "@dart/" name prefix */
-static int pf_builtin_hash(uint32_t h){
-    return h==(uint32_t)dart_topic_id("@dart/log/error") || h==(uint32_t)dart_topic_id("@dart/log/warn")
-        || h==(uint32_t)dart_topic_id("@dart/log/info")  || h==(uint32_t)dart_topic_id("@dart/meta@req")
-        || h==(uint32_t)dart_topic_id("@dart/meta@rsp");
-}
-static int pf_builtin_name(DartString nm){
-    return nm.len >= 6 && !memcmp(nm.data, "@dart/", 6);
-}
-
 static void patterns_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -3459,7 +3447,6 @@ static void patterns_checks(void){
         int fns=0,vars=0,sigs=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
         memset(&eit,0,sizeof eit);
         while (dart_node_peer_entity_next(C, pid, &eit, &ei)){
-            if (pf_builtin_hash(ei.hash)) continue;   /* the @dart/ builtins are expected */
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
@@ -3482,7 +3469,6 @@ static void patterns_checks(void){
       { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,sigs=0,tops=0,temp_forceable=0;
         memset(&eit,0,sizeof eit);
         while (dart_node_entity_next(P, &eit, &ei)){
-            if (pf_builtin_name(ei.name)) continue;   /* the @dart/ builtins are expected */
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
@@ -3887,7 +3873,7 @@ static void interest_external_checks(void){
             DartEntityIter eit; DartEntityInfo ei;
             memset(&eit,0,sizeof eit);
             while (dart_node_peer_entity_next(S, pid, &eit, &ei))
-                if (!pf_builtin_hash(ei.hash)) ents++;   /* the @dart/ builtins ride along */
+                ents++;   /* the @dart/ builtins are hidden from the walk */
             ST_CHECK(ents==IX_TOPICS, "interest: reflection enumerates all %d external entities (%d)",
                      IX_TOPICS, ents);
         }
@@ -4006,11 +3992,34 @@ static void metalog_checks(void){
           int ok_topics = dart_map_get(info, "topics", &topv);
           ST_CHECK(ok_name && namev.bytes.len==6 && memcmp(namev.bytes.data,"meta-a",6)==0,
                    "metalog: snapshot node.name == meta-a (%d)", ok_name);
-          ST_CHECK(ok_topics && topv.count >= 6,
-                   "metalog: snapshot lists the topics (%u)", (unsigned)(ok_topics?topv.count:0));
+          { /* only APP topics ride the snapshot: mirror-src, never the @dart/ builtins */
+            DartValue row, nm; uint16_t r; int hid = 0;
+            for (r = 0; ok_topics && r < topv.count; r++)
+                if (dart_map_array_at(topv.bytes, r, &row) && dart_map_get(row.bytes, "name", &nm)
+                    && nm.bytes.len >= 6 && !memcmp(nm.bytes.data, "@dart/", 6)) hid++;
+            ST_CHECK(ok_topics && topv.count == 1 && hid == 0,
+                     "metalog: snapshot lists app topics only (%u rows, %d hidden)",
+                     (unsigned)(ok_topics?topv.count:0), hid); }
           ST_CHECK(ok_node && dart_map_get(nodev.bytes, "uptime_us", &upt) && upt.v.u > 0,
                    "metalog: snapshot uptime present");
-      } }
+      }
+
+      /* the builtins are hidden from reflection too: A's walks see only mirror-src,
+         B hosts nothing visible at all */
+      { DartEntityIter eit; DartEntityInfo ei; int la=0, lb=0, pa=0;
+        memset(&eit,0,sizeof eit);
+        while (dart_node_entity_next(A, &eit, &ei)) la++;
+        memset(&eit,0,sizeof eit);
+        while (dart_node_entity_next(B, &eit, &ei)) lb++;
+        memset(&eit,0,sizeof eit);
+        while (dart_node_peer_entity_next(B, idA, &eit, &ei)) pa++;
+        ST_CHECK(la==1 && lb==0 && pa==1,
+                 "metalog: entity walks hide the builtins (A=%d B=%d peerA=%d)", la, lb, pa); }
+
+      /* the hidden namespace is reserved: a leading '@' is refused in every constructor */
+      { DartSignal *ev = dart_node_create_signal(A, "@dart/evil", NULL, NULL, NULL, NULL);
+        DartTopic *tp = dart_node_create_topic(A, "a@b", DART_PUB_ONLY, NULL, NULL);
+        ST_CHECK(ev == NULL && tp == NULL, "metalog: reserved '@' names refused"); } }
 
     dart_node_close(B,1); dart_node_close(A,1);
     dart_allocator_reset(&ba); dart_allocator_reset(&aa);
