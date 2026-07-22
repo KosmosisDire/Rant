@@ -14336,7 +14336,12 @@ static void i_dart_node_service(void *arg){
     DartNode *n = (DartNode *)arg;
     i_dart_node_lock_raw(n);
     while (!n->svc_stop)
-        i_dart_node_poll_locked(n, 3600000, 1);   /* cap is moot: timers/kicks wake it */
+        /* Kicks and timers wake it early; the cap is the BACKSTOP for a wakeup that
+           never arrives: a kick whose loopback sendto transiently failed (possible
+           under load; i_dart_node_kick does not retry) or a degraded waker would
+           otherwise leave stop's join and cross-thread mutations stranded against an
+           unbounded sleep. 250 ms bounds that worst case at ~4 idle passes/s. */
+        i_dart_node_poll_locked(n, 250, 1);
     i_dart_node_unlock_raw(n);
 }
 #endif
