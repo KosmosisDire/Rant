@@ -2957,6 +2957,10 @@ typedef enum { DART_LOG_ERROR = 0, DART_LOG_WARN = 1, DART_LOG_INFO = 2 } DartLo
 /* printf-style publish on the level's log topic. Returns DART_OK, DART_ERR_NOSYS when
  * the log topics are disabled, or a negative DartResult from the send. */
 int          dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...);
+/* Publish an already-formatted line (len<0 = NUL-terminated): the FFI-friendly entry
+ * language bindings call after formatting in their own runtime, so the variadic
+ * dart_node_log stays a C convenience. Same return values, truncated at DART_LOG_MAX. */
+int          dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len);
 /* The node's own handle for a level's log topic (NULL when disabled): subscribe,
  * take/dispatch, or query it like any other topic. */
 DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
@@ -13036,6 +13040,16 @@ int dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...){
                                    i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
 }
 
+int dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len){
+    size_t tl;
+    if (!n || (int)level < 0 || level > DART_LOG_INFO || !text) return DART_ERR_NO_TOPIC;
+    if (!n->log_topics[level]) return DART_ERR_NOSYS;
+    tl = len < 0 ? strlen(text) : (size_t)len;
+    if (tl >= DART_LOG_MAX) tl = DART_LOG_MAX - 1;   /* match the variadic path's truncation */
+    return i_dart_node_log_publish(n, level, text, tl,
+                                   i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
+}
+
 DartTopic *dart_node_log_topic(DartNode *n, DartLogLevel level){
     if (!n || (int)level < 0 || level > DART_LOG_INFO) return NULL;
     return n->log_topics[level];
@@ -15822,6 +15836,9 @@ enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLo
  * raw channels; a function's req/rsp pair or a variable's set channel fold into one. */
 enum class EntityKind { Topic = 0, Function, Variable, Signal };
 
+/* Severity of a built-in @dart/log line (mirrors DartLogLevel). */
+enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
+
 static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
 static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
@@ -15838,6 +15855,7 @@ static_assert((int)CallStatus::Cancelled == detail::DART_CALL_CANCELLED, "call-s
 static_assert((int)EntityKind::Topic == detail::DART_ENTITY_TOPIC, "entity enum drift");
 static_assert((int)EntityKind::Signal == detail::DART_ENTITY_SIGNAL, "entity enum drift");
 #endif
+static_assert((int)LogLevel::Info == detail::DART_LOG_INFO, "log-level enum drift");
 
 /* forward decls */
 class Node;
@@ -16007,6 +16025,12 @@ struct NodeOptions {
                                                             negative = disabled (drop loudly:
                                                             ErrorKind::UnmatchedSend). */
     /* networking (all optional) */
+    /* built-in observability (all default on; see Node::log / Node::on_log / Node::meta) */
+    bool                     disable_logs         = false; /* strip the @dart/log/{error,warn,info}
+                                                              topics (saves their history memory) */
+    bool                     disable_meta         = false; /* do not host the @dart/meta endpoint */
+    bool                     log_errors           = false; /* mirror this node's own errors onto
+                                                              @dart/log/error (coalesced per poll) */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
     uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
@@ -16038,6 +16062,12 @@ struct FunctionOptions {
 };
 struct SignalOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s */
+};
+/* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
+ * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
+ * many host the same function, e.g. the @dart/meta endpoint (see Node::meta). */
+struct CallOptions {
+    uint32_t provider = 0;
 };
 /* VariableOptions<T> for the typed definition (initial is a typed value);
  * VariableOptions<> is the untyped twin (initial is raw Bytes). */
@@ -16516,6 +16546,20 @@ struct Peer {
     bool                active = false;
     uint16_t            fragment_size = 0;
     std::vector<Entity> entities;        /* what it advertises, folded into entities */
+};
+
+/* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
+ * `text` views are valid for the callback only (copy them to keep them). wall_us is epoch
+ * micros (comparable across nodes); mono_us is the publisher's monotonic clock (orders
+ * within one node); recv_us is this node's clock when the poll received it. */
+struct LogLine {
+    LogLevel         level = LogLevel::Info;
+    std::string_view node;         /* the publishing node's name */
+    uint32_t         node_id = 0;  /* the publishing peer id */
+    uint64_t         wall_us = 0;
+    uint64_t         mono_us = 0;
+    uint64_t         recv_us = 0;
+    std::string_view text;
 };
 
 /* Message<T> / Message<>: a message popped from a topic's consumer queue.
@@ -17043,6 +17087,15 @@ public:
         return s;
     }
 
+    /* Cumulative traffic counters (always on): messages/bytes this node committed to the
+     * topic (tx) and delivered from it (rx). Also carried in the @dart/meta snapshot. */
+    struct Counts { uint64_t tx_msgs = 0, tx_bytes = 0, rx_msgs = 0, rx_bytes = 0; };
+    Counts counts() const {
+        Counts c;
+        if (ch_) detail::dart_topic_counts(ch_, &c.tx_msgs, &c.tx_bytes, &c.rx_msgs, &c.rx_bytes);
+        return c;
+    }
+
 private:
     explicit Topic(detail::DartTopic* c) : ch_(c) {}
     detail::DartTopic* ch_ = nullptr;
@@ -17156,6 +17209,94 @@ struct AsyncBox {
 };
 }
 
+/* Section-mask bits for a @dart/meta request: OR them into Node::meta_request's
+ * `sections` (0 = every section). */
+enum MetaSection : uint32_t {
+    MetaNode   = 0x1u,   /* uptime, memory, backpressure, peer/topic counts, last error */
+    MetaProc   = 0x2u,   /* per-process cpu/rss (absent where the platform can't measure) */
+    MetaTopics = 0x4u,   /* per-topic array: names, roles, match counts, traffic counters */
+    MetaPeers  = 0x8u    /* per-peer array: id, name, address, match counts */
+};
+
+/* MetaSnapshot: a decoded @dart/meta reply, owned so it outlives the callback. The common
+ * "node" and "proc" scalars are pulled out; the full self-describing body (including the
+ * topics[] and peers[] arrays) stays in `info` as a MapDict for anything else. Absent
+ * sections leave their fields zero (proc.have stays false where unmeasured). */
+struct MetaSnapshot {
+    bool       valid    = false;                 /* a CallStatus::Ok reply decoded */
+    CallStatus status   = CallStatus::Timeout;
+    uint32_t   provider = 0;                      /* the peer that answered */
+    MapDict    info;                              /* the whole decoded body */
+
+    struct NodeInfo {
+        std::string name;
+        uint64_t uptime_us = 0, wall_us = 0;
+        uint64_t mem_in_use = 0, mem_peak = 0, alloc_calls = 0;
+        uint64_t evicted_unsent = 0, bp_waited_us = 0, bp_waits = 0;
+        uint64_t peers = 0, max_peers = 0, topics = 0, max_topics = 0;
+        uint64_t shm_tx = 0, shm_rx = 0, last_error = 0;
+        std::string last_error_text;
+    } node;
+    struct ProcInfo {
+        bool have = false;
+        uint64_t pid = 0, cpu_us = 0, rss = 0, peak_rss = 0;
+    } proc;
+
+    /* Decode from a raw response body + schema (the wrapper below feeds Response/
+     * ResponseView). status/provider are carried through unchanged. */
+    static MetaSnapshot decode(CallStatus st, uint32_t provider,
+                               Bytes data, const detail::DartSchema* schema) {
+        MetaSnapshot s;
+        s.status = st; s.provider = provider;
+        if (st != CallStatus::Ok || !schema) return s;
+        detail::DartBytes info = detail::dart_get_map(detail::dart_bytes(data.data(), data.size()),
+                                                      schema, "info");
+        if (!info.data) return s;
+        s.info = MapReader(Bytes{ info.data, info.len }).to_map();
+        s.valid = true;
+        auto it = s.info.find("node");
+        if (it != s.info.end() && it->second.is_map()) {
+            const MapDict& m = it->second.as_map();
+            auto u = [&](const char* k){ auto j = m.find(k); return j == m.end() ? uint64_t(0) : j->second.as_uint(); };
+            auto str = [&](const char* k){ auto j = m.find(k); return j == m.end() ? std::string() : j->second.as_string(); };
+            s.node.name           = str("name");
+            s.node.uptime_us      = u("uptime_us");
+            s.node.wall_us        = u("wall_us");
+            s.node.mem_in_use     = u("mem_in_use");
+            s.node.mem_peak       = u("mem_peak");
+            s.node.alloc_calls    = u("alloc_calls");
+            s.node.evicted_unsent = u("evicted_unsent");
+            s.node.bp_waited_us   = u("bp_waited_us");
+            s.node.bp_waits       = u("bp_waits");
+            s.node.peers          = u("peers");
+            s.node.max_peers      = u("max_peers");
+            s.node.topics         = u("topics");
+            s.node.max_topics     = u("max_topics");
+            s.node.shm_tx         = u("shm_tx");
+            s.node.shm_rx         = u("shm_rx");
+            s.node.last_error     = u("last_error");
+            s.node.last_error_text= str("last_error_text");
+        }
+        it = s.info.find("proc");
+        if (it != s.info.end() && it->second.is_map()) {
+            const MapDict& m = it->second.as_map();
+            auto u = [&](const char* k){ auto j = m.find(k); return j == m.end() ? uint64_t(0) : j->second.as_uint(); };
+            s.proc.have     = true;
+            s.proc.pid      = u("pid");
+            s.proc.cpu_us   = u("cpu_us");
+            s.proc.rss      = u("rss");
+            s.proc.peak_rss = u("peak_rss");
+        }
+        return s;
+    }
+    static MetaSnapshot decode(const Response<>& r) {
+        return decode(r.status(), r.provider(), r.data(), r.raw_schema());
+    }
+    static MetaSnapshot decode(const ResponseView<>& r) {
+        return decode(r.status(), r.provider(), r.data(), r.raw_schema());
+    }
+};
+
 #endif /* !DART_NO_PATTERNS */
 
 /* Node: owns the DartNode, its memory, and the user callbacks.
@@ -17198,6 +17339,9 @@ public:
         co.disable_shm   = o.disable_shm ? 1 : 0;
         co.fetch_details = o.fetch_details ? 1 : 0;
         co.match_wait_ms = o.match_wait_ms;
+        co.disable_logs  = o.disable_logs ? 1 : 0;
+        co.disable_meta  = o.disable_meta ? 1 : 0;
+        co.log_errors    = o.log_errors ? 1 : 0;
         co.user_data     = impl.get();
         co.net.data_port           = o.data_port;
         co.net.discovery_group     = impl->disc_group.empty() ? nullptr : impl->disc_group.c_str();
@@ -17360,6 +17504,74 @@ public:
     ErrorKind last_error_kind() const {
         return static_cast<ErrorKind>(detail::dart_last_error(valid() ? impl_->node : nullptr).error);
     }
+
+    /* ---- built-in logs (the @dart/log/{error,warn,info} topics) ---------------------
+     * Publish a line on a level's topic. Already-formatted text (format in your own
+     * code); truncated at DART_LOG_MAX. SendStatus::NoSys when logs are disabled. */
+    SendStatus log(LogLevel level, std::string_view text) {
+        if (!valid()) return SendStatus::State;
+        return static_cast<SendStatus>(detail::dart_node_log_text(
+            impl_->node, static_cast<detail::DartLogLevel>(level),
+            text.data(), static_cast<int>(text.size())));
+    }
+    SendStatus log_error(std::string_view t) { return log(LogLevel::Error, t); }
+    SendStatus log_warn (std::string_view t) { return log(LogLevel::Warn,  t); }
+    SendStatus log_info (std::string_view t) { return log(LogLevel::Info,  t); }
+
+    /* This node's own handle for a level's log topic (invalid Topic when disabled):
+     * widen its role and read it like any topic, or use on_log below. */
+    Topic log_topic(LogLevel level) {
+        if (!valid()) return Topic();
+        return Topic(detail::dart_node_log_topic(impl_->node,
+                     static_cast<detail::DartLogLevel>(level)));
+    }
+
+    /* Subscribe to a level's mesh-wide log stream: widens this node's own log handle to
+     * PubSub and delivers every OTHER node's lines at that level (never your own),
+     * decoded to a LogLine. Late-join history (keep_last per writer) replays on match.
+     * The handler fires on the polling thread like any subscription. Returns false when
+     * logs are disabled. Call it once per level from your setup (not from a callback). */
+    bool on_log(LogLevel level, std::function<void(const LogLine&)> cb) {
+        if (!valid() || !cb) return false;
+        detail::DartTopic* ch = detail::dart_node_log_topic(
+            impl_->node, static_cast<detail::DartLogLevel>(level));
+        if (!ch) return false;
+        if (detail::dart_topic_set_role(ch, detail::DART_PUBSUB) != 0) return false;
+        uint16_t idx = detail::dart_topic_index(ch);
+        MessageHandler h = [level, cb = std::move(cb)](const MessageView& m) {
+            LogLine ln;
+            ln.level   = level;
+            ln.node    = m.publisher_name();
+            ln.node_id = m.publisher_id();
+            ln.wall_us = m.get_uint("wall_us");
+            ln.mono_us = m.get_uint("mono_us");
+            ln.recv_us = m.recv_us();
+            ln.text    = m.get_string("text");
+            cb(ln);
+        };
+        std::lock_guard<std::mutex> g(impl_->reg_mu);   /* leaf lock: never call C while held */
+        auto& slot = impl_->sub_handlers[idx];
+        auto nv = slot ? std::make_shared<std::vector<MessageHandler>>(*slot)
+                       : std::make_shared<std::vector<MessageHandler>>();
+        nv->push_back(std::move(h));
+        slot = std::move(nv);
+        return true;
+    }
+
+#ifndef DART_NO_PATTERNS
+    /* ---- @dart/meta introspection --------------------------------------------------
+     * The local @dart/meta caller handle. Call it directed at a peer id to fetch that
+     * peer's snapshot, e.g. node.meta().call_async(req, cb, {peer_id}). Invalid when
+     * meta is disabled. Most callers want meta_request. (Defined out-of-line below:
+     * RemoteFunction<> is completed after Node.) */
+    RemoteFunction<> meta();
+    /* Fetch a peer's snapshot: directs a @dart/meta call at `peer` and decodes the reply
+     * into an owning MetaSnapshot. Async, so it works under start() (unlike a blocking
+     * call). cb fires once, on the polling thread. sections = OR of MetaSection (0 = all).
+     * Returns the send status of the request. */
+    SendStatus meta_request(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
+                            uint32_t sections = 0);
+#endif
 
 private:
     struct TopicRec { detail::DartTopic* ch; uint8_t bits; uint64_t schema_hash; };
@@ -17670,12 +17882,13 @@ public:
      * elapses (negative = the function's default timeout). Refused (send_status()
      * == SendStatus::State) from inside a callback or while a service thread owns
      * this node's loop; use call_async there. */
-    Response<> call(Bytes req, int timeout_ms = -1) {
+    Response<> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
         Response<> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::DartResponse out;
         std::memset(&out, 0, sizeof out);
-        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, nullptr);
+        detail::DartCallOpts co; std::memset(&co, 0, sizeof co); co.provider = opts.provider;
+        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
@@ -17688,7 +17901,8 @@ public:
     }
     /* Async form: returns as soon as the request is committed; on_response fires once
      * with the outcome (on the polling thread). */
-    SendStatus call_async(Bytes req, std::function<void(const ResponseView<>&)> on_response) {
+    SendStatus call_async(Bytes req, std::function<void(const ResponseView<>&)> on_response,
+                          const CallOptions& opts = {}) {
         if (!fn_) return SendStatus::NoTopic;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
                                                   &impl_->reg_mu, &impl_->async_live };
@@ -17696,8 +17910,9 @@ public:
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
         }
+        detail::DartCallOpts co; std::memset(&co, 0, sizeof co); co.provider = opts.provider;
         int rc = detail::dart_function_call_async(fn_, priv::to_c(req),
-                                                  &RemoteFunction::async_tramp, box, nullptr);
+                                                  &RemoteFunction::async_tramp, box, &co);
         if (rc != 0) {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.erase(box);
@@ -17710,6 +17925,9 @@ public:
     bool has_definition() const { return match_count() > 0; }
 
 private:
+    /* wrap a node-owned function handle (the @dart/meta endpoint): callable, never
+     * destroyed by us (functions are never torn down before the node). */
+    RemoteFunction(detail::DartFunction* fn, Node::Impl* impl) : fn_(fn), impl_(impl) {}
     static void async_tramp(const detail::DartResponse* r) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
         {
@@ -17729,7 +17947,28 @@ private:
     detail::DartFunction* fn_ = nullptr;
     Node::Impl*           impl_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
+    friend class Node;
 };
+
+/* Node::meta / meta_request: out-of-line so RemoteFunction<> is a complete type here. */
+inline RemoteFunction<> Node::meta() {
+    if (!valid()) return RemoteFunction<>();
+    return RemoteFunction<>(detail::dart_node_meta_function(impl_->node), impl_.get());
+}
+inline SendStatus Node::meta_request(uint32_t peer,
+                                     std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
+    RemoteFunction<> m = meta();
+    if (!m.valid()) return SendStatus::NoTopic;
+    uint8_t buf[4]; Bytes req;   /* the mask lives on the stack: call_async commits it now */
+    if (sections) {
+        buf[0] = (uint8_t)(sections);       buf[1] = (uint8_t)(sections >> 8);
+        buf[2] = (uint8_t)(sections >> 16); buf[3] = (uint8_t)(sections >> 24);
+        req = Bytes(buf, 4);
+    }
+    return m.call_async(req, [cb = std::move(cb)](const ResponseView<>& r) {
+        cb(MetaSnapshot::decode(r));
+    }, CallOptions{ peer });
+}
 
 /* ====================== VARIABLES (untyped cores) =========================== */
 
@@ -18169,15 +18408,16 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     /* BLOCKING call (see RemoteFunction<>::call); decodes into the owning Response. */
-    Response<Rsp> call(const Req& req, int timeout_ms = -1) {
+    Response<Rsp> call(const Req& req, int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<> ur = core_.call(priv::encode(req, s), timeout_ms);
+        Response<> ur = core_.call(priv::encode(req, s), timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
         return r;
     }
-    SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb) {
+    SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
+                          const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         return core_.call_async(priv::encode(req, s),
             [cb = std::move(cb)](const ResponseView<>& uv) {
@@ -18185,7 +18425,7 @@ public:
                 tv.st_ = uv.status(); tv.provider_ = uv.provider();
                 if (uv.ok()) (void)priv::decode(tv.v_, uv.data(), uv.raw_schema());
                 cb(tv);
-            });
+            }, opts);
     }
 
     int  match_count()    const { return core_.match_count(); }

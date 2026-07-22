@@ -102,6 +102,13 @@ namespace Dart
         Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5
     }
 
+    // Severity of a built-in @dart/log line. Mirrors DartLogLevel.
+    public enum LogLevel { Error = 0, Warn = 1, Info = 2 }
+
+    // A @dart/meta request's section mask (OR the bits; 0 = every section). Mirrors DART_META_*.
+    [Flags]
+    public enum MetaSection : uint { Node = 0x1, Proc = 0x2, Topics = 0x4, Peers = 0x8, All = 0 }
+
     // ---- native struct layouts (mirror the C exactly) ---------------------------
 
     [StructLayout(LayoutKind.Sequential)]
@@ -319,6 +326,12 @@ namespace Dart
         public uint backpressure_wait_us;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartCallOpts
+    {
+        public uint provider;   // direct a call at one definition by peer id (0 = undirected)
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartMsgFn(IntPtr msg);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -388,6 +401,15 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_node_backpressure_stats(IntPtr node, out ulong waited_us,
             out uint waited_sends);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void dart_topic_counts(IntPtr ch, out ulong tx_msgs, out ulong tx_bytes,
+            out ulong rx_msgs, out ulong rx_bytes);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_node_log_text(IntPtr node, int level, byte[] text, int len);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_log_topic(IntPtr node, int level);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_meta_function(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern IntPtr dart_event_str(IntPtr ev, byte[] buf, UIntPtr cap);
 
@@ -774,6 +796,78 @@ namespace Dart
         public override string ToString() => _line;
     }
 
+    /// <summary>One decoded @dart/log line handed to a DartNode.OnLog handler. WallUs is
+    /// epoch micros (comparable across nodes); MonoUs is the publisher's monotonic clock
+    /// (orders within one node); RecvUs is this node's clock when the poll received it.</summary>
+    public sealed class DartLogLine
+    {
+        public LogLevel Level;
+        public string Node;      // the publishing node's name
+        public uint NodeId;      // the publishing peer id
+        public ulong WallUs;
+        public ulong MonoUs;
+        public ulong RecvUs;
+        public string Text;
+
+        public override string ToString() => $"[{Level}] {Node}: {Text}";
+    }
+
+    /// <summary>A decoded @dart/meta reply (see DartNode.MetaAsync). The common "node" and
+    /// "proc" scalars are pulled out as fields; Info holds the full self-describing body
+    /// (including the topics/peers arrays) for anything else. Absent sections leave their
+    /// fields zero (HaveProc stays false where the platform can't measure).</summary>
+    public sealed class DartMetaSnapshot
+    {
+        public bool Valid;
+        public CallStatus Status = CallStatus.Timeout;
+        public uint Provider;                                   // the peer that answered
+        public IReadOnlyDictionary<string, object> Info;        // the whole decoded body
+
+        // node section
+        public string Name;
+        public ulong UptimeUs, WallUs, MemInUse, MemPeak, AllocCalls;
+        public ulong EvictedUnsent, BpWaitedUs, BpWaits;
+        public ulong Peers, MaxPeers, Topics, MaxTopics, ShmTx, ShmRx, LastError;
+        public string LastErrorText;
+
+        // proc section (per process; HaveProc false where unmeasured)
+        public bool HaveProc;
+        public ulong Pid, CpuUs, Rss, PeakRss;
+
+        private static ulong U(Dictionary<string, object> d, string k)
+            => d.TryGetValue(k, out var o) ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
+        private static string S(Dictionary<string, object> d, string k)
+            => d.TryGetValue(k, out var o) ? o as string ?? "" : "";
+
+        internal static DartMetaSnapshot FromResponse(DartResponse r)
+        {
+            var s = new DartMetaSnapshot { Status = r.Status, Provider = r.Provider };
+            if (r.Status != CallStatus.Ok || r.SchemaPtr == IntPtr.Zero) return s;
+            var top = Codec.DecodeDict(r.SchemaPtr, r.Data);
+            if (!(top.TryGetValue("info", out var io) && io is Dictionary<string, object> info)) return s;
+            s.Info = info; s.Valid = true;
+            if (info.TryGetValue("node", out var no) && no is Dictionary<string, object> node)
+            {
+                s.Name = S(node, "name");
+                s.UptimeUs = U(node, "uptime_us"); s.WallUs = U(node, "wall_us");
+                s.MemInUse = U(node, "mem_in_use"); s.MemPeak = U(node, "mem_peak");
+                s.AllocCalls = U(node, "alloc_calls"); s.EvictedUnsent = U(node, "evicted_unsent");
+                s.BpWaitedUs = U(node, "bp_waited_us"); s.BpWaits = U(node, "bp_waits");
+                s.Peers = U(node, "peers"); s.MaxPeers = U(node, "max_peers");
+                s.Topics = U(node, "topics"); s.MaxTopics = U(node, "max_topics");
+                s.ShmTx = U(node, "shm_tx"); s.ShmRx = U(node, "shm_rx");
+                s.LastError = U(node, "last_error"); s.LastErrorText = S(node, "last_error_text");
+            }
+            if (info.TryGetValue("proc", out var po) && po is Dictionary<string, object> proc)
+            {
+                s.HaveProc = true;
+                s.Pid = U(proc, "pid"); s.CpuUs = U(proc, "cpu_us");
+                s.Rss = U(proc, "rss"); s.PeakRss = U(proc, "peak_rss");
+            }
+            return s;
+        }
+    }
+
     // ---- topic ----------------------------------------------------------------
 
     public class Topic
@@ -809,6 +903,15 @@ namespace Dart
             _node = node;
             Schema = schema;
             _handle = node.CreateOrShareTopic(name, role, schema, qos);
+        }
+
+        // Wrap an already-existing native handle (e.g. a @dart/log topic from the node):
+        // no name registry entry, no schema. Query/send/set-role like any topic.
+        internal Topic(DartNode node, IntPtr handle)
+        {
+            _node = node;
+            Schema = null;
+            _handle = handle;
         }
 
         /// <summary>Publish bytes/string (raw) or a message object (encoded via the
@@ -901,6 +1004,15 @@ namespace Dart
             Native.dart_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
             return (m, b, c, d);
         }
+
+        /// <summary>Cumulative traffic counters (always on): messages/bytes this node
+        /// committed to the topic (Tx) and delivered from it (Rx). Also in the @dart/meta
+        /// snapshot.</summary>
+        public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
+        {
+            Native.dart_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
+            return (tm, tb, rm, rb);
+        }
     }
 
     /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
@@ -973,6 +1085,7 @@ namespace Dart
         public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
+                    bool disableLogs = false, bool disableMeta = false, bool logErrors = false,
                     int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
                     string multicastInterface = null, int multicastTtl = 0,
                     int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
@@ -992,6 +1105,9 @@ namespace Dart
                 disable_shm = (byte)(disableShm ? 1 : 0),
                 fetch_details = (byte)(fetchDetails ? 1 : 0),
                 match_wait_ms = matchWaitMs,
+                disable_logs = (byte)(disableLogs ? 1 : 0),
+                disable_meta = (byte)(disableMeta ? 1 : 0),
+                log_errors = (byte)(logErrors ? 1 : 0),
                 user_data = (IntPtr)_id,
             };
             // The node retains these pointers for its lifetime, so keep them alive
@@ -1146,6 +1262,76 @@ namespace Dart
         /// data; returns the number of messages dispatched.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
             => Native.dart_node_dispatch(_handle, maxMsgs, timeoutMs);
+
+        // ---- built-in logs (the @dart/log/{error,warn,info} topics) --------------------
+
+        /// <summary>Publish a line on a level's log topic (already-formatted text, truncated
+        /// at DART_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread-safe.</summary>
+        public SendStatus Log(LogLevel level, string text)
+        {
+            byte[] b = Encoding.UTF8.GetBytes(text ?? "");
+            return (SendStatus)Native.dart_node_log_text(_handle, (int)level, b, b.Length);
+        }
+        public SendStatus LogError(string text) => Log(LogLevel.Error, text);
+        public SendStatus LogWarn(string text) => Log(LogLevel.Warn, text);
+        public SendStatus LogInfo(string text) => Log(LogLevel.Info, text);
+
+        /// <summary>This node's own handle for a level's log topic (null when disabled):
+        /// widen its role and read it like any topic, or use OnLog.</summary>
+        public Topic LogTopic(LogLevel level)
+        {
+            IntPtr ch = Native.dart_node_log_topic(_handle, (int)level);
+            return ch == IntPtr.Zero ? null : new Topic(this, ch);
+        }
+
+        /// <summary>Subscribe to a level's mesh-wide log stream: widens this node's own log
+        /// handle to PubSub and delivers every OTHER node's lines at that level (never your
+        /// own), decoded to a DartLogLine. Late-join history replays on match. Handlers fire
+        /// on the polling thread like any subscription. False when logs are disabled.</summary>
+        public bool OnLog(LogLevel level, Action<DartLogLine> handler)
+        {
+            if (handler == null) return false;
+            IntPtr ch = Native.dart_node_log_topic(_handle, (int)level);
+            if (ch == IntPtr.Zero) return false;
+            if (Native.dart_topic_set_role(ch, (int)Role.PubSub) != 0) return false;
+            ushort idx = Native.dart_topic_index(ch);
+            AddSubHandler(idx, m => handler(new DartLogLine
+            {
+                Level = level, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
+                WallUs = LogFieldU(m, "wall_us"), MonoUs = LogFieldU(m, "mono_us"),
+                Text = m.Fields != null && m.Fields.TryGetValue("text", out var t) ? t as string ?? "" : "",
+            }));
+            return true;
+        }
+
+        private static ulong LogFieldU(DartMessage m, string k)
+            => m.Fields != null && m.Fields.TryGetValue(k, out var o)
+               ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
+
+        // ---- @dart/meta introspection --------------------------------------------------
+
+        /// <summary>The local @dart/meta caller handle (null when meta is disabled). Call it
+        /// directed at a peer id, e.g. MetaFunction().Call(req, -1, peerId). Most callers
+        /// want MetaAsync.</summary>
+        public RemoteFunction MetaFunction()
+        {
+            IntPtr fn = Native.dart_node_meta_function(_handle);
+            return fn == IntPtr.Zero ? null : new RemoteFunction(this, fn);
+        }
+
+        /// <summary>Fetch a peer's snapshot: directs a @dart/meta call at `peer` and decodes
+        /// the reply into a DartMetaSnapshot. The Task never faults (inspect Status). Works
+        /// under Start() (unlike a blocking call). sections = OR of MetaSection (All = every
+        /// section).</summary>
+        public async Task<DartMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
+        {
+            RemoteFunction fn = MetaFunction();
+            if (fn == null) return new DartMetaSnapshot { Status = CallStatus.NoHandler };
+            byte[] req = sections == MetaSection.All
+                ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);   // LE, as the C wire wants
+            DartResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
+            return DartMetaSnapshot.FromResponse(r);
+        }
 
         internal Type ClrTypeOf(ushort index)
         {
@@ -1602,17 +1788,36 @@ namespace Dart
             node.RetainSchema(responseSchema);
         }
 
+        // Wrap an existing node-owned function handle (the @dart/meta endpoint): callable,
+        // never created or destroyed here.
+        internal RemoteFunction(DartNode node, IntPtr fn) { DartNode = node; Fn = fn; }
+
+        // Pin a DartCallOpts for one native call (IntPtr.Zero when undirected).
+        private static GCHandle OptsHandle(uint provider, out IntPtr ptr)
+        {
+            if (provider == 0) { ptr = IntPtr.Zero; return default(GCHandle); }
+            var g = GCHandle.Alloc(new DartCallOpts[] { new DartCallOpts { provider = provider } },
+                                   GCHandleType.Pinned);
+            ptr = g.AddrOfPinnedObject();
+            return g;
+        }
+
         /// <summary>BLOCKING call: drives the node loop until the response arrives or
         /// timeoutMs elapses (negative = the function's default timeout). Refused
         /// (SendStatus.State) from inside a callback or while a service thread owns
         /// this node's loop; use CallAsync there. Inspect Status, never throws.</summary>
-        public DartResponse Call(byte[] request, int timeoutMs = -1)
+        public DartResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
             var r = new DartResponse();
             DartResponseNative o;
             int rc;
-            using (var p = new PinnedBytes(request))
-                rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs, IntPtr.Zero);
+            GCHandle og = OptsHandle(provider, out IntPtr optp);
+            try
+            {
+                using (var p = new PinnedBytes(request))
+                    rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs, optp);
+            }
+            finally { if (og.IsAllocated) og.Free(); }
             if (rc == 1)
             {
                 r.Status = (CallStatus)o.status;
@@ -1630,14 +1835,19 @@ namespace Dart
         /// <summary>Async call over dart_function_call_async: the Task completes with
         /// the outcome and NEVER faults (inspect Status/SendStatus). The response fires
         /// from whichever thread polls this node, continuations run off it.</summary>
-        public Task<DartResponse> CallAsync(byte[] request)
+        public Task<DartResponse> CallAsync(byte[] request, uint provider = 0)
         {
             var tcs = new TaskCompletionSource<DartResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, DartNode = DartNode });
             DartNode.RegisterAsync(id);
             int rc;
-            using (var p = new PinnedBytes(request))
-                rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, IntPtr.Zero);
+            GCHandle og = OptsHandle(provider, out IntPtr optp);   // committed synchronously; freed after
+            try
+            {
+                using (var p = new PinnedBytes(request))
+                    rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
+            }
+            finally { if (og.IsAllocated) og.Free(); }
             if (rc != 0)
             {
                 Patterns.TakeAsync(id);
@@ -2017,14 +2227,15 @@ namespace Dart
             _core = new RemoteFunction(node, name, _req, _rsp, backpressureWaitMs, timeoutMs);
         }
 
-        /// <summary>BLOCKING call (see the untyped RemoteFunction.Call).</summary>
-        public DartResponse<TRsp> Call(TReq request, int timeoutMs = -1)
-            => new DartResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs), RspSchema = _rsp };
+        /// <summary>BLOCKING call (see the untyped RemoteFunction.Call). provider directs it
+        /// at one definition by peer id (0 = undirected, first answer wins).</summary>
+        public DartResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
+            => new DartResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs, provider), RspSchema = _rsp };
 
         /// <summary>Async call: the Task NEVER faults, inspect Status.</summary>
-        public async Task<DartResponse<TRsp>> CallAsync(TReq request)
+        public async Task<DartResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
         {
-            DartResponse core = await _core.CallAsync(_req.Encode(request)).ConfigureAwait(false);
+            DartResponse core = await _core.CallAsync(_req.Encode(request), provider).ConfigureAwait(false);
             return new DartResponse<TRsp> { Core = core, RspSchema = _rsp };
         }
 

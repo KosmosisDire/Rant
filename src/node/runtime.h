@@ -415,6 +415,10 @@ typedef enum { DART_LOG_ERROR = 0, DART_LOG_WARN = 1, DART_LOG_INFO = 2 } DartLo
 /* printf-style publish on the level's log topic. Returns DART_OK, DART_ERR_NOSYS when
  * the log topics are disabled, or a negative DartResult from the send. */
 int          dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...);
+/* Publish an already-formatted line (len<0 = NUL-terminated): the FFI-friendly entry
+ * language bindings call after formatting in their own runtime, so the variadic
+ * dart_node_log stays a C convenience. Same return values, truncated at DART_LOG_MAX. */
+int          dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len);
 /* The node's own handle for a level's log topic (NULL when disabled): subscribe,
  * take/dispatch, or query it like any other topic. */
 DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);

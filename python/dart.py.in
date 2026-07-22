@@ -116,6 +116,8 @@ _EXPORTS = [
     "dart_topic_take", "dart_topic_dispatch", "dart_node_dispatch",
     "dart_topic_queue_stats",
     "dart_node_mem_stats", "dart_node_backpressure_stats", "dart_event_str",
+    "dart_topic_counts", "dart_node_log_text", "dart_node_log_topic",
+    "dart_node_meta_function",
     "dart_node_settle", "dart_topic_ready", "dart_topic_pending_count",
     "dart_node_lock", "dart_node_unlock",
     # patterns: functions / variables / signals
@@ -461,6 +463,11 @@ class DartSignalOpts(Structure):
     _fields_ = [("backpressure_wait_us", c_uint32)]
 
 
+class DartCallOpts(Structure):
+    # direct a call at one definition by peer id (0 = undirected, first answer wins)
+    _fields_ = [("provider", c_uint32)]
+
+
 _DART_ALLOCATOR_PAGE = 64 * 1024   # DART_ALLOCATOR_PAGE default
 
 _MsgFn = CFUNCTYPE(None, POINTER(DartMsg))
@@ -504,6 +511,11 @@ def _bind(lib):
                               POINTER(c_uint64)], None)
     F("dart_node_backpressure_stats", [c_void_p, POINTER(c_uint64),
                                        POINTER(c_uint32)], None)
+    F("dart_topic_counts", [c_void_p, POINTER(c_uint64), POINTER(c_uint64),
+                            POINTER(c_uint64), POINTER(c_uint64)], None)
+    F("dart_node_log_text", [c_void_p, c_int, c_char_p, c_int], c_int)
+    F("dart_node_log_topic", [c_void_p, c_int], c_void_p)
+    F("dart_node_meta_function", [c_void_p], c_void_p)
     F("dart_event_str", [POINTER(DartEvent), c_char_p, c_size_t], c_char_p)
     F("dart_node_settle", [c_void_p, c_int], c_int)
     F("dart_topic_ready", [c_void_p], c_int)
@@ -661,6 +673,23 @@ class CallStatus(enum.IntEnum):
     CANCELLED = 5
 
 
+class LogLevel(enum.IntEnum):
+    """Severity of a built-in @dart/log line. Mirrors DartLogLevel."""
+    ERROR = 0
+    WARN = 1
+    INFO = 2
+
+
+class MetaSection(enum.IntFlag):
+    """A @dart/meta request's section mask (OR the bits; ALL/0 = every section).
+    Mirrors DART_META_*."""
+    NODE = 0x1
+    PROC = 0x2
+    TOPICS = 0x4
+    PEERS = 0x8
+    ALL = 0
+
+
 class EventKind(enum.IntEnum):
     PEER_UP = 0
     PEER_DOWN = 1
@@ -772,6 +801,9 @@ class NodeOptions:
     disable_shm: bool = False
     fetch_details: bool = False   # greedily fetch every peer topic's name + schema (observer UIs)
     match_wait_ms: int = 0        # send-path match wait; 0 = default (1s), negative = disabled
+    disable_logs: bool = False    # strip the built-in @dart/log/{error,warn,info} topics
+    disable_meta: bool = False    # do not host the built-in @dart/meta introspection endpoint
+    log_errors: bool = False      # mirror this node's internal errors onto @dart/log/error
     data_port: int = 0
     discovery_group: str = ""
     discovery_port: int = 0
@@ -781,6 +813,87 @@ class NodeOptions:
     announce_interval_us: int = 0
     peer_timeout_us: int = 0
     max_peers: int = 0
+
+
+@dataclasses.dataclass
+class LogLine:
+    """One decoded @dart/log line handed to a Node.on_log handler. wall_us is epoch
+    micros (comparable across nodes); mono_us is the publisher's monotonic clock
+    (orders within one node); recv_us is this node's clock when the poll received it."""
+    level: LogLevel
+    node: str           # the publishing node's name
+    node_id: int        # the publishing peer id
+    wall_us: int
+    mono_us: int
+    recv_us: int
+    text: str
+
+
+@dataclasses.dataclass
+class MetaSnapshot:
+    """A decoded @dart/meta reply (see Node.meta / Node.meta_async). The common "node"
+    and "proc" scalars are pulled out as fields; `info` holds the full self-describing
+    body (including the topics/peers arrays) for anything else. Absent sections leave
+    their fields at 0 (have_proc stays False where the platform can't measure)."""
+    valid: bool = False
+    status: CallStatus = CallStatus.TIMEOUT
+    provider: int = 0           # the peer that answered
+    info: dict = None           # the whole decoded body
+    # node section
+    name: str = ""
+    uptime_us: int = 0
+    wall_us: int = 0
+    mem_in_use: int = 0
+    mem_peak: int = 0
+    alloc_calls: int = 0
+    evicted_unsent: int = 0
+    bp_waited_us: int = 0
+    bp_waits: int = 0
+    peers: int = 0
+    max_peers: int = 0
+    topics: int = 0
+    max_topics: int = 0
+    shm_tx: int = 0
+    shm_rx: int = 0
+    last_error: int = 0
+    last_error_text: str = ""
+    # proc section (per process; have_proc False where unmeasured)
+    have_proc: bool = False
+    pid: int = 0
+    cpu_us: int = 0
+    rss: int = 0
+    peak_rss: int = 0
+
+    @classmethod
+    def _from_response(cls, r):
+        s = cls(status=r.status, provider=r.provider)
+        if not r.ok:
+            return s
+        body = r.value if isinstance(r.value, dict) else None
+        info = body.get("info") if body else None
+        if not isinstance(info, dict):
+            return s
+        s.info = info
+        s.valid = True
+        node = info.get("node")
+        if isinstance(node, dict):
+            g = node.get
+            s.name = g("name", "") or ""
+            s.uptime_us = int(g("uptime_us", 0)); s.wall_us = int(g("wall_us", 0))
+            s.mem_in_use = int(g("mem_in_use", 0)); s.mem_peak = int(g("mem_peak", 0))
+            s.alloc_calls = int(g("alloc_calls", 0)); s.evicted_unsent = int(g("evicted_unsent", 0))
+            s.bp_waited_us = int(g("bp_waited_us", 0)); s.bp_waits = int(g("bp_waits", 0))
+            s.peers = int(g("peers", 0)); s.max_peers = int(g("max_peers", 0))
+            s.topics = int(g("topics", 0)); s.max_topics = int(g("max_topics", 0))
+            s.shm_tx = int(g("shm_tx", 0)); s.shm_rx = int(g("shm_rx", 0))
+            s.last_error = int(g("last_error", 0)); s.last_error_text = g("last_error_text", "") or ""
+        proc = info.get("proc")
+        if isinstance(proc, dict):
+            g = proc.get
+            s.have_proc = True
+            s.pid = int(g("pid", 0)); s.cpu_us = int(g("cpu_us", 0))
+            s.rss = int(g("rss", 0)); s.peak_rss = int(g("peak_rss", 0))
+        return s
 
 
 @dataclasses.dataclass
@@ -1721,6 +1834,16 @@ class Topic:
         self._schema = sch
         self._h = node._create_or_share(name, role, sch, qos, qos_kwargs)
 
+    @classmethod
+    def _from_handle(cls, node, handle):
+        # wrap an already-existing native handle (e.g. a @dart/log topic): no name
+        # registry entry, no schema. send/set_role/counts/query like any topic.
+        t = cls.__new__(cls)
+        t._node = node
+        t._schema = None
+        t._h = handle
+        return t
+
     def __class_getitem__(cls, item):
         return _TypedTopic(item)
 
@@ -1802,6 +1925,15 @@ class Topic:
                                                  byref(c), byref(d))
         return m.value, b.value, c.value, d.value
 
+    def counts(self):
+        """(tx_msgs, tx_bytes, rx_msgs, rx_bytes): cumulative traffic this node
+        committed to the topic (tx) and delivered from it (rx). Always on; also in
+        the @dart/meta snapshot."""
+        tm, tb, rm, rb = c_uint64(), c_uint64(), c_uint64(), c_uint64()
+        self._node._lib.dart_topic_counts(self._h, byref(tm), byref(tb),
+                                           byref(rm), byref(rb))
+        return tm.value, tb.value, rm.value, rb.value
+
     @property
     def schema(self):
         return self._schema
@@ -1859,6 +1991,9 @@ class Node:
         co.disable_shm = 1 if options.disable_shm else 0
         co.fetch_details = 1 if options.fetch_details else 0
         co.match_wait_ms = options.match_wait_ms
+        co.disable_logs = 1 if options.disable_logs else 0
+        co.disable_meta = 1 if options.disable_meta else 0
+        co.log_errors = 1 if options.log_errors else 0
         co.user_data = c_void_p(self._id)
         co.net.data_port = options.data_port
         co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None
@@ -1992,6 +2127,80 @@ class Node:
         apps never need it (the per-send match wait covers the window lazily).
         timeout_ms < 0 = 3 announce intervals. True when settled."""
         return self._lib.dart_node_settle(self._h, timeout_ms) == 1
+
+    # ---- built-in logs (the @dart/log/{error,warn,info} topics) ----
+
+    def log(self, level, text):
+        """Publish a line on a level's log topic (formatted in Python; truncated at
+        DART_LOG_MAX). Returns a SendStatus (NOSYS if logs are disabled). Thread-safe."""
+        b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+        return _send_status(self._lib.dart_node_log_text(self._h, int(level), b, len(b)))
+
+    def log_error(self, text):
+        return self.log(LogLevel.ERROR, text)
+
+    def log_warn(self, text):
+        return self.log(LogLevel.WARN, text)
+
+    def log_info(self, text):
+        return self.log(LogLevel.INFO, text)
+
+    def log_topic(self, level):
+        """This node's own handle for a level's log topic (None when disabled): widen
+        its role and read it like any topic, or use on_log()."""
+        h = self._lib.dart_node_log_topic(self._h, int(level))
+        return Topic._from_handle(self, h) if h else None
+
+    def on_log(self, level, handler):
+        """Subscribe to a level's mesh-wide log stream: widens this node's own log
+        handle to PUBSUB and delivers every OTHER node's lines at that level (never
+        your own) as a LogLine. Late-join history replays on match. Handlers fire on
+        the polling thread. Returns False when logs are disabled."""
+        h = self._lib.dart_node_log_topic(self._h, int(level))
+        if not h:
+            return False
+        if self._lib.dart_topic_set_role(h, int(Role.PUBSUB)) != 0:
+            return False
+        idx = self._lib.dart_topic_index(h)
+        lvl = LogLevel(int(level))
+
+        def _wrap(m):
+            f = m.fields or {}
+            handler(LogLine(level=lvl, node=m.publisher_name, node_id=m.publisher_id,
+                            wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
+                            recv_us=m.recv_us, text=f.get("text", "") or ""))
+        self._add_sub_handler(idx, _wrap)
+        return True
+
+    # ---- @dart/meta introspection ----
+
+    def meta_function(self):
+        """The local @dart/meta caller handle (None when meta is disabled). Call it
+        directed at a peer id. Most callers want meta()/meta_async()."""
+        h = self._lib.dart_node_meta_function(self._h)
+        return RemoteFunction._from_handle(self, h) if h else None
+
+    def meta(self, peer, sections=MetaSection.ALL, timeout_ms=1000):
+        """BLOCKING: direct a @dart/meta call at `peer` and decode the reply into a
+        MetaSnapshot. Drives the loop, so do NOT call it under start() or from a
+        callback (use meta_async there). sections = a MetaSection mask (ALL = all)."""
+        fn = self.meta_function()
+        if fn is None:
+            return MetaSnapshot(status=CallStatus.NO_HANDLER)
+        req = b"" if int(sections) == 0 else struct.pack("<I", int(sections))
+        return MetaSnapshot._from_response(fn.call(req, timeout_ms, provider=peer))
+
+    def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
+        """Async: direct a @dart/meta call at `peer`; on_snapshot fires once with a
+        MetaSnapshot from whichever thread polls this node. Works under start().
+        Returns the launch SendStatus."""
+        fn = self.meta_function()
+        if fn is None:
+            on_snapshot(MetaSnapshot(status=CallStatus.NO_HANDLER))
+            return SendStatus.NO_TOPIC
+        req = b"" if int(sections) == 0 else struct.pack("<I", int(sections))
+        return fn.call_async(req, lambda r: on_snapshot(MetaSnapshot._from_response(r)),
+                             provider=peer)
 
     # ---- pattern-layer bookkeeping (reaped at close) ----
     def _retain(self, *schemas):
@@ -2411,16 +2620,30 @@ class RemoteFunction:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "rsp_schema"))
 
-    def call(self, req=None, timeout_ms=-1):
+    @classmethod
+    def _from_handle(cls, node, handle, req_schema=None, rsp_schema=None):
+        # wrap a node-owned function handle (the @dart/meta endpoint): callable,
+        # never created or destroyed here.
+        self = cls.__new__(cls)
+        self._node = node
+        self._fn = handle
+        self._req_schema = req_schema
+        self._rsp_schema = rsp_schema
+        return self
+
+    def call(self, req=None, timeout_ms=-1, provider=0):
         """BLOCKING call: drives the node loop until the response arrives or
         timeout_ms elapses (negative = the function's default timeout). Refused
         from inside a callback or while a service thread owns the loop:
         send_status is then SendStatus.STATE while status stays TIMEOUT (use
         call_async there). Never raises on a failed call: inspect .status
-        (reading .value raises CallError)."""
+        (reading .value raises CallError). provider directs the call at one
+        definition by peer id (0 = undirected, first answer wins)."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = DartResponse()
-        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms, None)
+        co = DartCallOpts(int(provider)) if provider else None
+        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms,
+                                                cast(byref(co), c_void_p) if co else None)
         del buf
         if rc == 1:
             return Response._from_c(out, self._rsp_schema)
@@ -2429,12 +2652,13 @@ class RemoteFunction:
             r.send_status = _send_status(rc)
         return r
 
-    def call_async(self, req, on_response):
+    def call_async(self, req, on_response, provider=0):
         """Async call: returns as soon as the request is committed; on_response
         then fires EXACTLY once with an owning Response, from whichever thread
         polls this node (or the closing thread, with CallStatus.CANCELLED, if the
         node closes first). A synchronous refusal also arrives through
-        on_response (send_status set). Returns the launch SendStatus."""
+        on_response (send_status set). Returns the launch SendStatus. provider
+        directs the call at one definition by peer id (0 = undirected)."""
         if not callable(on_response):
             raise TypeError("on_response must be callable")
         box = _AsyncBox(self._node, on_response, self._rsp_schema)
@@ -2442,8 +2666,10 @@ class RemoteFunction:
         box.id = box_id
         self._node._register_async(box_id)
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
+        co = DartCallOpts(int(provider)) if provider else None
         rc = self._node._lib.dart_function_call_async(self._fn, b, _on_response,
-                                                      c_void_p(box_id), None)
+                                                      c_void_p(box_id),
+                                                      cast(byref(co), c_void_p) if co else None)
         del buf
         st = _send_status(rc)
         if rc != 0:

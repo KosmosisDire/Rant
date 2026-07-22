@@ -1,4 +1,4 @@
-# DART WebSocket bridge protocol (v3)
+# DART WebSocket bridge protocol (v4)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
@@ -71,10 +71,13 @@ request, only for a broken WebSocket.
   "announce_interval_ms": 1000,
   "peer_timeout_ms": 3500,
   "match_wait_ms": 0,             // send-path match wait; 0 = default 1s, negative = off
-  "disable_shm": false }          // force on-wire UDP even to same-host peers
+  "disable_shm": false,           // force on-wire UDP even to same-host peers
+  "disable_logs": false,          // strip the built-in @dart/log topics
+  "disable_meta": false,          // do not host the @dart/meta endpoint
+  "log_errors": false }           // mirror this node's own errors onto @dart/log/error
 ```
 
-Reply: `{ "ok": true, "proto": 3, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 4, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -163,6 +166,27 @@ call before closing when the last burst matters (reliable topics).
 Reply `{ "ok": true, "settled": true }` when everything created so far is matched
 against everyone currently on the network. Runs on the connection's receive
 thread, so further requests from this client wait for it (nothing else does).
+
+### `log` / `log_subscribe` : the built-in @dart/log topics
+
+Every node hosts three shared reliable log topics (`@dart/log/{error,warn,info}`,
+rosout-style), unless opened with `disable_logs`. `log` publishes a line; the text
+is formatted client-side (truncated at 512 bytes on the wire).
+
+```json
+{ "op": "log", "seq": 11, "level": "error", "text": "gripper stalled" }
+```
+
+Reply `{ "ok": true }`. `log_subscribe` starts pushing every OTHER node's lines at
+the requested levels as `log` server pushes (below); it never receives this node's
+own lines. Idempotent per level; late-join history (each writer's last `keep_last`
+lines) replays on match.
+
+```json
+{ "op": "log_subscribe", "seq": 12, "levels": ["error", "warn"] }   // omit levels = all three
+```
+
+Reply `{ "ok": true }`.
 
 ### Pattern entities
 
@@ -270,6 +294,20 @@ pushed value, so steady state is silent). The client maintains its
 `type` picks the id space (`topic` = topic ids, everything else = entity ids).
 `ready` is the send-path match-wait predicate: a send now would not block on a
 forming match.
+
+### `log` : a mesh log line (after `log_subscribe`)
+
+One per delivered `@dart/log` line at a subscribed level, from any other node:
+
+```json
+{ "op": "log", "level": "error", "node": "gripper", "text": "stalled",
+  "wall_us": 1753200000000000, "mono_us": 84213374, "recv_us": 84213402 }
+```
+
+`node` is the publishing node's name; `wall_us` is epoch micros (comparable across
+nodes, and within JS safe-integer range); `mono_us` orders lines within one node;
+`recv_us` is this node's clock when the poll received it. Low rate, so this rides
+the text plane as decoded JSON (no schema table needed).
 
 ### `request` : an incoming function call (definition side)
 
@@ -382,6 +420,10 @@ cfg.set({ rate_hz: 100 });
 const alert = await node.signal("alert", "Alert { level: u8 }", (v) => beep(v.level));
 alert.emit({ level: 2 });
 
+// logs: publish a line, and stream the whole mesh's lines (rosout-style)
+await node.logError("gripper stalled");
+await node.onLog((l) => console.log(`[${l.level}] ${l.node}: ${l.text}`));  // levels default to all
+
 await node.settle(5000);
 node.close();   // outstanding call promises settle with status "cancelled"
 ```
@@ -399,9 +441,14 @@ bridge's wire timeout; `close()` cancels, a dropped connection rejects.
 ## Non-goals
 
 - **No mesh introspection.** No peer-table snapshot, no `fetch_details`, no
-  `adopt`. A typed subscriber declares its own schema (the same DSL the
-  publisher uses); a raw subscriber gets bytes. Whole-mesh observability is a
-  separate tool, not this bridge.
+  `adopt`, and no client op to query a peer's `@dart/meta` snapshot. A typed
+  subscriber declares its own schema (the same DSL the publisher uses); a raw
+  subscriber gets bytes. Whole-mesh observability is a separate tool (the
+  explorer), not this bridge. The bridge node still HOSTS its own `@dart/meta`
+  endpoint (unless opened with `disable_meta`), so an observer tool can query the
+  bridge node like any other; the bridge just does not turn that into a
+  client-facing op. Logs are different: they are a first-class node feature (every
+  node publishes and may subscribe), so `log` / `log_subscribe` are supported.
 - **No auth, no TLS.** The bridge binds 127.0.0.1 by default; exposing it
   (`--bind 0.0.0.0`) puts full mesh access on that port. Put a reverse proxy in
   front for wss:// or auth.

@@ -1,5 +1,5 @@
 /* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v3, see ../PROTOCOL.md). Zero runtime dependencies: runs
+ * through the bridge (protocol v4, see ../PROTOCOL.md). Zero runtime dependencies: runs
  * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
@@ -766,6 +766,7 @@ class DartNode {
         this.name = "";
         this.onEvent = null;
         this.onClose = null;
+        this._onLog = null;
         ws.onmessage = (e) => {
             if (typeof e.data === "string")
                 this._onText(JSON.parse(e.data));
@@ -818,6 +819,10 @@ class DartNode {
         else if (m.op === "request") {
             /* meta first; the binary payload frame follows on the same ordered socket */
             this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "" });
+        }
+        else if (m.op === "log") {
+            this._onLog?.({ level: m.level, node: m.node, wallUs: m.wall_us,
+                monoUs: m.mono_us, recvUs: m.recv_us, text: m.text });
         }
     }
     _onBinary(buf) {
@@ -967,6 +972,22 @@ class DartNode {
     async settle(timeoutMs = -1) {
         const r = await this._request({ op: "settle", timeout_ms: timeoutMs });
         return r.settled;
+    }
+    /* Publish a line on a level's built-in @dart/log topic (mesh-wide, rosout-style).
+     * Every node that subscribed to that level receives it. */
+    async log(level, text) {
+        await this._request({ op: "log", level, text });
+    }
+    logError(text) { return this.log("error", text); }
+    logWarn(text) { return this.log("warn", text); }
+    logInfo(text) { return this.log("info", text); }
+    /* Subscribe to the mesh's log stream at the given levels (default all three). The
+     * handler fires for every OTHER node's lines at those levels (never this node's own),
+     * decoded to a LogLine; late-join history (keep_last per writer) replays on match.
+     * One handler for all subscribed levels (call again to widen the set). */
+    async onLog(handler, levels = ["error", "warn", "info"]) {
+        this._onLog = handler;
+        await this._request({ op: "log_subscribe", levels });
     }
     /* Close the connection; the bridge closes the node with a BYE. Outstanding call
      * promises settle with status "cancelled". */

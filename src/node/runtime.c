@@ -1243,6 +1243,16 @@ int dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...){
                                    i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
 }
 
+int dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len){
+    size_t tl;
+    if (!n || (int)level < 0 || level > DART_LOG_INFO || !text) return DART_ERR_NO_TOPIC;
+    if (!n->log_topics[level]) return DART_ERR_NOSYS;
+    tl = len < 0 ? strlen(text) : (size_t)len;
+    if (tl >= DART_LOG_MAX) tl = DART_LOG_MAX - 1;   /* match the variadic path's truncation */
+    return i_dart_node_log_publish(n, level, text, tl,
+                                   i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
+}
+
 DartTopic *dart_node_log_topic(DartNode *n, DartLogLevel level){
     if (!n || (int)level < 0 || level > DART_LOG_INFO) return NULL;
     return n->log_topics[level];

@@ -51,6 +51,7 @@ dart_node_create_signal
 dart_signal_emit
 dart_signal_listener_count
 dart_node_log
+dart_node_log_text
 dart_node_log_topic
 dart_topic_counts
 dart_node_meta_function

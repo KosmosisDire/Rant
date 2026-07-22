@@ -1,5 +1,5 @@
 /* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v3, see ../PROTOCOL.md). Zero runtime dependencies: runs
+ * through the bridge (protocol v4, see ../PROTOCOL.md). Zero runtime dependencies: runs
  * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
@@ -67,10 +67,27 @@ type NodeOpts = {
     peer_timeout_ms?: number;
     match_wait_ms?: number;
     disable_shm?: boolean;
+    disable_logs?: boolean;   /* strip the built-in @dart/log topics */
+    disable_meta?: boolean;   /* do not host the @dart/meta endpoint */
+    log_errors?: boolean;     /* mirror this node's own errors onto @dart/log/error */
     onEvent?: (e: DartEvent) => void;
 };
 
 type DartEvent = { op: "event"; event: string; text?: string } & Record<string, unknown>;
+
+type LogLevelName = "error" | "warn" | "info";
+
+/* One decoded @dart/log line handed to DartNode.onLog. wallUs is epoch micros
+ * (comparable across nodes); monoUs is the publisher's monotonic clock; recvUs is this
+ * node's clock when the poll received it. */
+type LogLine = {
+    level: LogLevelName;
+    node: string;      /* the publishing node's name */
+    wallUs: number;
+    monoUs: number;
+    recvUs: number;
+    text: string;
+};
 
 type CallStatusName = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled";
 const CALL_STATUS: CallStatusName[] = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled"];
@@ -809,6 +826,7 @@ class DartNode {
     name: string;                                /* this node's name (auto-generated if none given) */
     onEvent: ((e: DartEvent) => void) | null;    /* every bridge event (errors, peer up/down, msg loss) */
     onClose: ((e: CloseEvent) => void) | null;
+    _onLog: ((l: LogLine) => void) | null;       /* mesh log-stream handler (set by onLog) */
 
     /* Connect to a bridge and open the node. */
     static async connect(url: string, opts: NodeOpts = {}): Promise<DartNode> {
@@ -839,6 +857,7 @@ class DartNode {
         this.name = "";
         this.onEvent = null;
         this.onClose = null;
+        this._onLog = null;
 
         ws.onmessage = (e: MessageEvent) => {
             if (typeof e.data === "string") this._onText(JSON.parse(e.data));
@@ -882,6 +901,9 @@ class DartNode {
         } else if (m.op === "request") {
             /* meta first; the binary payload frame follows on the same ordered socket */
             this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "" });
+        } else if (m.op === "log") {
+            this._onLog?.({ level: m.level, node: m.node, wallUs: m.wall_us,
+                            monoUs: m.mono_us, recvUs: m.recv_us, text: m.text });
         }
     }
 
@@ -1036,6 +1058,25 @@ class DartNode {
         return r.settled as boolean;
     }
 
+    /* Publish a line on a level's built-in @dart/log topic (mesh-wide, rosout-style).
+     * Every node that subscribed to that level receives it. */
+    async log(level: LogLevelName, text: string): Promise<void> {
+        await this._request({ op: "log", level, text });
+    }
+    logError(text: string): Promise<void> { return this.log("error", text); }
+    logWarn (text: string): Promise<void> { return this.log("warn",  text); }
+    logInfo (text: string): Promise<void> { return this.log("info",  text); }
+
+    /* Subscribe to the mesh's log stream at the given levels (default all three). The
+     * handler fires for every OTHER node's lines at those levels (never this node's own),
+     * decoded to a LogLine; late-join history (keep_last per writer) replays on match.
+     * One handler for all subscribed levels (call again to widen the set). */
+    async onLog(handler: (line: LogLine) => void,
+                levels: LogLevelName[] = ["error", "warn", "info"]): Promise<void> {
+        this._onLog = handler;
+        await this._request({ op: "log_subscribe", levels });
+    }
+
     /* Close the connection; the bridge closes the node with a BYE. Outstanding call
      * promises settle with status "cancelled". */
     close(): void {
@@ -1052,4 +1093,5 @@ export {
     type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent,
     type CallStatusName, type Response, type RequestInfo, type SignalInfo,
     type SubscriberHandler, type FunctionHandler, type SignalHandler, type VariableDefOpts,
+    type LogLevelName, type LogLine,
 };

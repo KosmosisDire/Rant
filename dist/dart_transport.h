@@ -2180,6 +2180,10 @@ typedef enum { DART_LOG_ERROR = 0, DART_LOG_WARN = 1, DART_LOG_INFO = 2 } DartLo
 /* printf-style publish on the level's log topic. Returns DART_OK, DART_ERR_NOSYS when
  * the log topics are disabled, or a negative DartResult from the send. */
 int          dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...);
+/* Publish an already-formatted line (len<0 = NUL-terminated): the FFI-friendly entry
+ * language bindings call after formatting in their own runtime, so the variadic
+ * dart_node_log stays a C convenience. Same return values, truncated at DART_LOG_MAX. */
+int          dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len);
 /* The node's own handle for a level's log topic (NULL when disabled): subscribe,
  * take/dispatch, or query it like any other topic. */
 DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
@@ -10230,6 +10234,16 @@ int dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...){
     if (tn < 0) tn = 0;                                       /* encoding error: empty line */
     if (tn >= (int)sizeof text) tn = (int)sizeof text - 1;    /* truncated at DART_LOG_MAX */
     return i_dart_node_log_publish(n, level, text, (size_t)tn,
+                                   i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
+}
+
+int dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len){
+    size_t tl;
+    if (!n || (int)level < 0 || level > DART_LOG_INFO || !text) return DART_ERR_NO_TOPIC;
+    if (!n->log_topics[level]) return DART_ERR_NOSYS;
+    tl = len < 0 ? strlen(text) : (size_t)len;
+    if (tl >= DART_LOG_MAX) tl = DART_LOG_MAX - 1;   /* match the variadic path's truncation */
+    return i_dart_node_log_publish(n, level, text, tl,
                                    i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
 }
 

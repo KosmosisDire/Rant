@@ -41,7 +41,7 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 3;
+static const int kProtoVersion = 4;
 
 /* Binary frame ops (byte 0). One value space, meaning per direction:
  *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][payload])
@@ -88,6 +88,7 @@ struct Conn {
     uint32_t                                       next_req = 0;
     std::vector<uint16_t>                          topic_ids;
     std::unordered_map<uint16_t, int>              topic_match;  /* topic id -> packed matches/ready */
+    uint8_t                                        log_sub = 0;  /* bit (1<<level) set once subscribed */
 
     std::thread       ticker;
     std::atomic<bool> stop{ false };
@@ -188,6 +189,16 @@ static int role_from(const std::string &s, dart::Role *out){
     if (s == "sub")      { *out = dart::Role::SubOnly;  return 1; }
     if (s == "inactive") { *out = dart::Role::Inactive; return 1; }
     return 0;
+}
+
+static int log_level_from(const std::string &s, dart::LogLevel *out){
+    if (s == "error") { *out = dart::LogLevel::Error; return 1; }
+    if (s == "warn")  { *out = dart::LogLevel::Warn;  return 1; }
+    if (s == "info")  { *out = dart::LogLevel::Info;  return 1; }
+    return 0;
+}
+static const char *log_level_str(dart::LogLevel l){
+    return l == dart::LogLevel::Error ? "error" : l == dart::LogLevel::Warn ? "warn" : "info";
 }
 
 /* ---- server -> client sends ------------------------------------------------------- */
@@ -360,6 +371,9 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.peer_timeout_us      = (uint32_t)req.value("peer_timeout_ms", 0) * 1000u;
     o.max_peers            = (uint16_t)req.value("max_peers", 0);
     o.match_wait_ms        = req.value("match_wait_ms", 0);
+    o.disable_logs         = req.value("disable_logs", false);
+    o.disable_meta         = req.value("disable_meta", false);
+    o.log_errors           = req.value("log_errors", false);
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
         o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
     if (o.max_topics == 0) o.max_topics = 8;
@@ -637,6 +651,42 @@ static void op_signal(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, r);
 }
 
+/* ---- built-in logs (the @dart/log topics) ---------------------------------------- */
+
+/* publish a line on a level's log topic */
+static void op_log(Conn *c, const json &req, const json &seq){
+    dart::LogLevel level;
+    if (!log_level_from(req.value("level", ""), &level)){ reply_err(c, seq, "bad log level"); return; }
+    std::string text = req.value("text", "");
+    dart::SendStatus rc = c->node->log(level, text);
+    if (rc != dart::SendStatus::Ok){ reply_err(c, seq, std::string("log failed: ") + send_status_str(rc)); return; }
+    reply_ok(c, seq, {});
+}
+
+/* subscribe to one or more levels' mesh-wide log stream. Each requested level's lines
+ * are pushed as {op:"log", ...} text frames (low rate, so JSON not the binary plane).
+ * Idempotent per level (c->log_sub guards against a duplicate handler). */
+static void op_log_subscribe(Conn *c, const json &req, const json &seq){
+    std::vector<std::string> levels = req.value("levels",
+        std::vector<std::string>{ "error", "warn", "info" });
+    for (const std::string &ls : levels){
+        dart::LogLevel level;
+        if (!log_level_from(ls, &level)){ reply_err(c, seq, "bad log level: " + ls); return; }
+        uint8_t bit = (uint8_t)(1u << (int)level);
+        if (c->log_sub & bit) continue;                 /* already subscribed to this level */
+        bool ok = c->node->on_log(level, [c, level](const dart::LogLine &l){
+            send_json(c, { {"op", "log"}, {"level", log_level_str(level)},
+                           {"node", std::string(l.node.data(), l.node.size())},
+                           {"wall_us", l.wall_us}, {"mono_us", l.mono_us},
+                           {"recv_us", l.recv_us},
+                           {"text", std::string(l.text.data(), l.text.size())} });
+        });
+        if (!ok){ reply_err(c, seq, "logs are disabled on this node"); return; }
+        c->log_sub |= bit;
+    }
+    reply_ok(c, seq, {});
+}
+
 static void on_text(Conn *c, const std::string &raw){
     json req = json::parse(raw, nullptr, false);
     if (req.is_discarded() || !req.is_object()){
@@ -657,6 +707,8 @@ static void on_text(Conn *c, const std::string &raw){
     else if (op == "variable_definition") op_variable(c, req, seq, true);
     else if (op == "remote_variable")     op_variable(c, req, seq, false);
     else if (op == "signal")              op_signal(c, req, seq);
+    else if (op == "log")                 op_log(c, req, seq);
+    else if (op == "log_subscribe")       op_log_subscribe(c, req, seq);
     else reply_err(c, seq, "unknown op: " + op);
 }
 

@@ -42,6 +42,9 @@ type NodeOpts = {
     peer_timeout_ms?: number;
     match_wait_ms?: number;
     disable_shm?: boolean;
+    disable_logs?: boolean;
+    disable_meta?: boolean;
+    log_errors?: boolean;
     onEvent?: (e: DartEvent) => void;
 };
 type DartEvent = {
@@ -49,6 +52,15 @@ type DartEvent = {
     event: string;
     text?: string;
 } & Record<string, unknown>;
+type LogLevelName = "error" | "warn" | "info";
+type LogLine = {
+    level: LogLevelName;
+    node: string;
+    wallUs: number;
+    monoUs: number;
+    recvUs: number;
+    text: string;
+};
 type CallStatusName = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled";
 type Response<Rsp = any> = {
     ok: boolean;
@@ -230,6 +242,7 @@ declare class DartNode {
     name: string;
     onEvent: ((e: DartEvent) => void) | null;
     onClose: ((e: CloseEvent) => void) | null;
+    _onLog: ((l: LogLine) => void) | null;
     static connect(url: string, opts?: NodeOpts): Promise<DartNode>;
     constructor(ws: WebSocket);
     _request(obj: Record<string, any>): Promise<any>;
@@ -244,6 +257,11 @@ declare class DartNode {
     remoteVariable<T = any>(name: string, schema: string | null): Promise<RemoteVariable<T>>;
     signal<T = any>(name: string, schema: string | null, handler?: SignalHandler<T>): Promise<DartSignal<T>>;
     settle(timeoutMs?: number): Promise<boolean>;
+    log(level: LogLevelName, text: string): Promise<void>;
+    logError(text: string): Promise<void>;
+    logWarn(text: string): Promise<void>;
+    logInfo(text: string): Promise<void>;
+    onLog(handler: (line: LogLine) => void, levels?: LogLevelName[]): Promise<void>;
     close(): void;
 }
-export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, DartSignal, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SignalInfo, type SubscriberHandler, type FunctionHandler, type SignalHandler, type VariableDefOpts, };
+export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, DartSignal, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SignalInfo, type SubscriberHandler, type FunctionHandler, type SignalHandler, type VariableDefOpts, type LogLevelName, type LogLine, };
