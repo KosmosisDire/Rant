@@ -302,8 +302,20 @@ typedef struct {
     uint64_t          rsp_schema_hash;
 } DartEntityInfo;
 
-/* Iterator: zero-initialize, then call until 0. Internal walk state, not for direct use. */
-typedef struct { uint16_t next_index; uint8_t phase; } DartEntityIter;
+/* Iterator: zero-initialize, then call until 0. Internal walk state, not for direct use.
+ * The peer walk keeps a persistent overlay cursor plus the previously walked entry, so
+ * enumerating a peer's entities costs one pass over its interest list, not one pass per
+ * yielded entity; pattern partners are created at adjacent indices, so the fold checks
+ * hit the prev/peek fast paths and a full rescan is only the fallback. epoch keys the
+ * cursor to dart_node_peer_interest_epoch: an interest change mid-walk reseeks safely. */
+typedef struct {
+    uint16_t next_index;
+    uint8_t  phase;
+    uint8_t  has_prev;
+    uint32_t epoch;
+    DartInterestIter pos;
+    DartTopicEntry   prev;
+} DartEntityIter;
 
 /* Walk the entities a PEER advertises, one per call: plain topics pass through, pattern
  * channels fold (a function's @req/@rsp pair yields ONE function entity; a variable's @set

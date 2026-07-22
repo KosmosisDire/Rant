@@ -1135,13 +1135,30 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
  * the @-suffix convention, with partners located by the LOW-32 HASH of the expected partner
  * name so pairing works from the announce alone once the primary's name is fetched. */
 
-/* the first entry with index >= from (entries are yielded in index order; the pub/sub
- * double-yield collapses because entry.role already covers both directions) */
-static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, uint16_t from, DartTopicEntry *out){
-    DartInterestIter it; DartTopicEntry e;
-    memset(&it, 0, sizeof it);
-    while (dart_node_peer_interest_next(p, &it, &e))
-        if (e.index >= from){ *out = e; return 1; }
+/* the first entry with index >= it->next_index, resuming the walk's persistent cursor
+ * (entries are yielded in index order; the pub/sub double-yield collapses because
+ * entry.role already covers both directions). An interest change mid-walk (epoch bump)
+ * reseeks from the front, matching the old restart-per-call behavior. */
+static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, DartEntityIter *it, DartTopicEntry *out){
+    uint32_t ep = dart_node_peer_interest_epoch(p);
+    if (it->epoch != ep){
+        memset(&it->pos, 0, sizeof it->pos);
+        it->has_prev = 0;
+        it->epoch = ep;
+    }
+    while (dart_node_peer_interest_next(p, &it->pos, out))
+        if (out->index >= it->next_index) return 1;
+    return 0;
+}
+
+/* peek the entry after index `from` through a copy of the persistent cursor: the
+ * adjacent-partner fast path (pattern channel pairs are created back to back, so the
+ * partner is almost always at from+1). A miss falls back to i_dart_pat_find_hash. */
+static int i_dart_pat_peek_next(const DartDiscoveryPeer *p, const DartEntityIter *it,
+                                uint16_t from, DartTopicEntry *out){
+    DartInterestIter pos = it->pos;
+    while (dart_node_peer_interest_next(p, &pos, out))
+        if (out->index > from) return 1;
     return 0;
 }
 
@@ -1214,14 +1231,17 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
 
 int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out){
     const DartDiscoveryPeer *p;
-    DartTopicEntry e, partner;
+    DartTopicEntry e, partner, prev_e;
     DartString name, base;
+    uint8_t had_prev;
     if (!n || !it || !out) return 0;
     p = i_dart_pat_peer(n, peer);
     if (!p) return 0;
     for (;;){
-        if (!i_dart_pat_entry_from(p, it->next_index, &e)) return 0;
+        if (!i_dart_pat_entry_from(p, it, &e)) return 0;
         it->next_index = (uint16_t)(e.index + 1);
+        prev_e = it->prev; had_prev = it->has_prev;   /* the entry walked before e */
+        it->prev = e; it->has_prev = 1;
         if (i_dart_pat_hidden_hash(e.hash)) continue;   /* builtins never surface */
         name = dart_node_peer_topic_name(n, peer, e.index);   /* {NULL,0} until details arrive */
         switch (e.kind){
@@ -1235,9 +1255,14 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
             /* the value channel is the bare name: a same-peer "<name>@set" VAR_SET entry
                makes it writable (unknowable until the name is fetched: shown unwritable) */
-            if (name.len)
-                out->writable = (uint8_t)i_dart_pat_find_hash(p, i_dart_pat_hash32(name, "@set"),
-                                                              DART_KIND_VAR_SET, &partner);
+            if (name.len){
+                uint32_t want = i_dart_pat_hash32(name, "@set");
+                if (i_dart_pat_peek_next(p, it, e.index, &partner) && partner.index == e.index + 1
+                    && partner.kind == DART_KIND_VAR_SET && partner.hash == want)
+                    out->writable = 1;   /* adjacent partner: no rescan */
+                else
+                    out->writable = (uint8_t)i_dart_pat_find_hash(p, want, DART_KIND_VAR_SET, &partner);
+            }
             return 1;
         case DART_KIND_VAR_SET:
             /* secondary: consumed by its bare-name VARIABLE entry when both are advertised */
@@ -1246,9 +1271,13 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                 out->incomplete = 1;
                 return 1;
             }
-            if (i_dart_pat_strip(name, "@set", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, ""), DART_KIND_VARIABLE, &partner))
-                continue;   /* folded into the value entity */
+            if (i_dart_pat_strip(name, "@set", &base)){
+                uint32_t want = i_dart_pat_hash32(base, "");
+                if ((had_prev && prev_e.index + 1 == e.index && prev_e.kind == DART_KIND_VARIABLE
+                     && prev_e.hash == want)   /* adjacent partner: no rescan */
+                    || i_dart_pat_find_hash(p, want, DART_KIND_VARIABLE, &partner))
+                    continue;   /* folded into the value entity */
+            }
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE,
                             i_dart_pat_strip(name, "@set", &base) ? base : name, &e);
             out->writable = 1; out->incomplete = 1;   /* a set channel with no value channel */
@@ -1262,9 +1291,11 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
             out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
             out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
             if (name.len && i_dart_pat_strip(name, "@req", &base)){
+                uint32_t want = i_dart_pat_hash32(base, "@rsp");
                 out->name = base;
-                if (i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@rsp"),
-                                         DART_KIND_FUNC_RSP, &partner))
+                if ((i_dart_pat_peek_next(p, it, e.index, &partner) && partner.index == e.index + 1
+                     && partner.kind == DART_KIND_FUNC_RSP && partner.hash == want)   /* adjacent */
+                    || i_dart_pat_find_hash(p, want, DART_KIND_FUNC_RSP, &partner))
                     out->rsp_schema = dart_node_peer_topic_schema(n, peer, partner.index,
                                                                   &out->rsp_schema_hash);
                 else out->incomplete = 1;   /* half a function advertised */
@@ -1280,9 +1311,13 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                 out->incomplete = 1;
                 return 1;
             }
-            if (i_dart_pat_strip(name, "@rsp", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@req"), DART_KIND_FUNC_REQ, &partner))
-                continue;   /* folded into the function entity */
+            if (i_dart_pat_strip(name, "@rsp", &base)){
+                uint32_t want = i_dart_pat_hash32(base, "@req");
+                if ((had_prev && prev_e.index + 1 == e.index && prev_e.kind == DART_KIND_FUNC_REQ
+                     && prev_e.hash == want)   /* adjacent partner: no rescan */
+                    || i_dart_pat_find_hash(p, want, DART_KIND_FUNC_REQ, &partner))
+                    continue;   /* folded into the function entity */
+            }
             i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION,
                             i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
             out->incomplete = 1;
