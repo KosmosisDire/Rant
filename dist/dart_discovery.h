@@ -656,8 +656,8 @@ uint64_t i_dart_plat_wall_us(void);
 
 /* Process-usage stats follow the DART_SHM / DART_THREADS flag shape: DART_PROC_STATS is
  * AUTO-DETECTED where the bundled layer can measure (Windows; POSIX with getrusage:
- * Linux/macOS/BSD), off elsewhere (FreeRTOS / bare metal have no per-process
- * accounting), and DART_NO_PROC_STATS always wins. When OFF the function below is
+ * Linux/macOS/BSD; ESP-IDF via the FreeRTOS heap allocator), off elsewhere (bare metal
+ * has no accounting), and DART_NO_PROC_STATS always wins. When OFF the function below is
  * ABSENT and every consumer is compiled out with it (the @dart/meta snapshot simply
  * omits its proc section; all other stats are unaffected), so a platform layer with no
  * measurement implements NOTHING. A new platform layer that can measure declares
@@ -665,7 +665,7 @@ uint64_t i_dart_plat_wall_us(void);
 #if !defined(DART_PROC_STATS) && !defined(DART_NO_PROC_STATS)
   #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
       defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
-      defined(__DragonFly__)
+      defined(__DragonFly__) || defined(ESP_PLATFORM)
     #define DART_PROC_STATS
   #endif
 #endif
@@ -1796,9 +1796,13 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #include <stdio.h>
   #include <stdlib.h>           /* arc4random_buf on macOS/BSD */
   #ifdef DART_PROC_STATS
-    #include <sys/resource.h>   /* getrusage: i_dart_plat_proc_stats */
-    #if defined(__APPLE__)
-      #include <mach/mach.h>    /* task_info: current resident size */
+    #if defined(ESP_PLATFORM)
+      #include <esp_heap_caps.h>  /* heap_caps_get_*: the ESP proc-stats source */
+    #else
+      #include <sys/resource.h>   /* getrusage: i_dart_plat_proc_stats */
+      #if defined(__APPLE__)
+        #include <mach/mach.h>    /* task_info: current resident size */
+      #endif
     #endif
   #endif
   #if defined(ESP_PLATFORM)
@@ -1918,6 +1922,19 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
     if (rss_bytes)      *rss_bytes      = (uint64_t)pmc.WorkingSetSize;
     if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)pmc.PeakWorkingSetSize;
     return 1;
+#elif defined(ESP_PLATFORM)
+    /* One firmware image is the whole "process": the RSS analog is heap in use
+       (total - free), and peak RSS is the free-heap low-water mark (total - the
+       minimum free ever). There is no per-process CPU accounting without FreeRTOS
+       run-time stats, so cpu_us stays 0 (partial fill is permitted). */
+    {   size_t total   = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
+        size_t freeb   = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+        size_t minfree = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+        if (cpu_us)         *cpu_us         = 0;
+        if (rss_bytes)      *rss_bytes      = (uint64_t)(total > freeb   ? total - freeb   : 0);
+        if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)(total > minfree ? total - minfree : 0);
+        return 1;
+    }
 #else
     {   struct rusage ru;
         if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;

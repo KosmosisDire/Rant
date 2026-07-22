@@ -94,8 +94,8 @@ uint64_t i_dart_plat_wall_us(void);
 
 /* Process-usage stats follow the DART_SHM / DART_THREADS flag shape: DART_PROC_STATS is
  * AUTO-DETECTED where the bundled layer can measure (Windows; POSIX with getrusage:
- * Linux/macOS/BSD), off elsewhere (FreeRTOS / bare metal have no per-process
- * accounting), and DART_NO_PROC_STATS always wins. When OFF the function below is
+ * Linux/macOS/BSD; ESP-IDF via the FreeRTOS heap allocator), off elsewhere (bare metal
+ * has no accounting), and DART_NO_PROC_STATS always wins. When OFF the function below is
  * ABSENT and every consumer is compiled out with it (the @dart/meta snapshot simply
  * omits its proc section; all other stats are unaffected), so a platform layer with no
  * measurement implements NOTHING. A new platform layer that can measure declares
@@ -103,7 +103,7 @@ uint64_t i_dart_plat_wall_us(void);
 #if !defined(DART_PROC_STATS) && !defined(DART_NO_PROC_STATS)
   #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
       defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
-      defined(__DragonFly__)
+      defined(__DragonFly__) || defined(ESP_PLATFORM)
     #define DART_PROC_STATS
   #endif
 #endif
