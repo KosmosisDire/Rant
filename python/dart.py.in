@@ -313,7 +313,7 @@ class DartNodeOpts(Structure):
         ("match_wait_ms", c_int32),
         ("disable_logs", c_uint8),
         ("disable_meta", c_uint8),
-        ("log_errors", c_uint8),
+        ("disable_error_logs", c_uint8),
         ("net", DartNodeNet),
         ("discovery", DartNodeDiscovery),
     ]
@@ -803,7 +803,7 @@ class NodeOptions:
     match_wait_ms: int = 0        # send-path match wait; 0 = default (1s), negative = disabled
     disable_logs: bool = False    # strip the built-in @dart/log/{error,warn,info} topics
     disable_meta: bool = False    # do not host the built-in @dart/meta introspection endpoint
-    log_errors: bool = False      # mirror this node's internal errors onto @dart/log/error
+    disable_error_logs: bool = False # suppress default error mirroring onto @dart/log/error
     data_port: int = 0
     discovery_group: str = ""
     discovery_port: int = 0
@@ -1993,7 +1993,7 @@ class Node:
         co.match_wait_ms = options.match_wait_ms
         co.disable_logs = 1 if options.disable_logs else 0
         co.disable_meta = 1 if options.disable_meta else 0
-        co.log_errors = 1 if options.log_errors else 0
+        co.disable_error_logs = 1 if options.disable_error_logs else 0
         co.user_data = c_void_p(self._id)
         co.net.data_port = options.data_port
         co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None

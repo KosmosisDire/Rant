@@ -2504,9 +2504,9 @@ typedef struct {
                                             embedded; see "logs" below. */
     uint8_t               disable_meta;  /* 1 = do not host the built-in @dart/meta introspection
                                             function (also implied by DART_NO_PATTERNS). */
-    uint8_t               log_errors;    /* 1 = mirror this node's internal DART_ERROR events onto
-                                            @dart/log/error (coalesced per poll pass; see "logs").
-                                            Needs the log topics (ignored under disable_logs). */
+    uint8_t               disable_error_logs; /* 1 = do not mirror this node's internal DART_ERROR
+                                            events onto @dart/log/error. Mirroring is on by default
+                                            and is also disabled by disable_logs. */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;
@@ -11755,7 +11755,7 @@ struct DartTopic {   /* schema: node-owned copy */
     char     name[DART_TOPIC_NAME_MAX];
 };
 
-/* One pending error->log mirror entry (opts.log_errors). Errors fire deep inside RX and
+/* One pending error->log mirror entry (default on). Errors fire deep inside RX and
  * delivery processing, where a send may not re-enter the transport mid-datagram, so
  * i_dart_node_emit only RECORDS the event here (its text formatted immediately: the
  * event's views die with the callback) and the poll pass publishes the ring at a safe
@@ -11845,7 +11845,7 @@ struct DartNode {
     /* built-in @dart/log topics (runtime.h "logs") + the error->log mirror ring */
     DartTopic    *log_topics[3];       /* [DartLogLevel]; all NULL under opts.disable_logs */
     DartSchema   *log_schema;          /* DartLog { wall_us, mono_us, text } (node-owned) */
-    uint8_t       log_errors;          /* opts.log_errors: mirror DART_ERROR onto @dart/log/error */
+    uint8_t       log_errors;          /* default-on DART_ERROR mirror; opts can disable it */
     uint8_t       log_flushing;        /* reentrancy guard: an error fired while publishing a
                                           mirrored line must not re-enter the ring */
     uint8_t       log_pend_n;
@@ -11996,7 +11996,7 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
         e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
     }
     if (e->kind == DART_ERROR) n->last_error = *e;
-    /* the error->log mirror (opts.log_errors): RECORD only; the poll pass publishes the
+    /* the error->log mirror (default on): RECORD only; the poll pass publishes the
        ring at a safe point (i_dart_node_log_flush). Errors scoped to a log topic itself
        are excluded, and nothing is recorded while a flush publishes (reentrancy). */
     if (e->kind == DART_ERROR && n->log_errors && !n->log_flushing
@@ -12671,7 +12671,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     /* built-ins, last (they create topics, so the node must be fully open). A failed
        creation degrades (dart_node_log reports NOSYS / no meta endpoint), never fails
        the open: the node itself is healthy. */
-    n->log_errors = (uint8_t)(o.log_errors && !o.disable_logs);
+    n->log_errors = (uint8_t)(!o.disable_error_logs && !o.disable_logs);
     n->creating_builtin = 1;               /* allocate from the builtin block */
     if (!o.disable_logs) i_dart_node_logs_open(n);
 #ifndef DART_NO_PATTERNS

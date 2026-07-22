@@ -352,8 +352,8 @@ struct NodeOptions {
     bool                     disable_logs         = false; /* strip the @dart/log/{error,warn,info}
                                                               topics (saves their history memory) */
     bool                     disable_meta         = false; /* do not host the @dart/meta endpoint */
-    bool                     log_errors           = false; /* mirror this node's own errors onto
-                                                              @dart/log/error (coalesced per poll) */
+    bool                     disable_error_logs   = false; /* suppress the default mirroring of this
+                                                              node's errors onto @dart/log/error */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
     uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
@@ -1664,7 +1664,7 @@ public:
         co.match_wait_ms = o.match_wait_ms;
         co.disable_logs  = o.disable_logs ? 1 : 0;
         co.disable_meta  = o.disable_meta ? 1 : 0;
-        co.log_errors    = o.log_errors ? 1 : 0;
+        co.disable_error_logs = o.disable_error_logs ? 1 : 0;
         co.user_data     = impl.get();
         co.net.data_port           = o.data_port;
         co.net.discovery_group     = impl->disc_group.empty() ? nullptr : impl->disc_group.c_str();
@@ -1840,6 +1840,32 @@ public:
     SendStatus log_error(std::string_view t) { return log(LogLevel::Error, t); }
     SendStatus log_warn (std::string_view t) { return log(LogLevel::Warn,  t); }
     SendStatus log_info (std::string_view t) { return log(LogLevel::Info,  t); }
+
+    /* printf-style overloads. They preserve the C log API's bounded formatting:
+     * output is truncated at DART_LOG_MAX, and a formatting failure publishes an empty
+     * line. A plain string literal may use either overload and has the same result. */
+    template <class... Args>
+    SendStatus log(LogLevel level, const char* fmt, Args&&... args) {
+        if (!valid()) return SendStatus::State;
+        if (!fmt) return SendStatus::NoTopic;
+        char text[DART_LOG_MAX];
+        int len = std::snprintf(text, sizeof text, fmt, std::forward<Args>(args)...);
+        if (len < 0) len = 0;
+        if (len >= static_cast<int>(sizeof text)) len = static_cast<int>(sizeof text) - 1;
+        return log(level, std::string_view(text, static_cast<size_t>(len)));
+    }
+    template <class... Args>
+    SendStatus log_error(const char* fmt, Args&&... args) {
+        return log(LogLevel::Error, fmt, std::forward<Args>(args)...);
+    }
+    template <class... Args>
+    SendStatus log_warn(const char* fmt, Args&&... args) {
+        return log(LogLevel::Warn, fmt, std::forward<Args>(args)...);
+    }
+    template <class... Args>
+    SendStatus log_info(const char* fmt, Args&&... args) {
+        return log(LogLevel::Info, fmt, std::forward<Args>(args)...);
+    }
 
     /* This node's own handle for a level's log topic (invalid Topic when disabled):
      * widen its role and read it like any topic, or use on_log below. */

@@ -44,7 +44,7 @@ type NodeOpts = {
     disable_shm?: boolean;
     disable_logs?: boolean;
     disable_meta?: boolean;
-    log_errors?: boolean;
+    disable_error_logs?: boolean;
     onEvent?: (e: DartEvent) => void;
 };
 type DartEvent = {

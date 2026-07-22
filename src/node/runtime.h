@@ -78,9 +78,9 @@ typedef struct {
                                             embedded; see "logs" below. */
     uint8_t               disable_meta;  /* 1 = do not host the built-in @dart/meta introspection
                                             function (also implied by DART_NO_PATTERNS). */
-    uint8_t               log_errors;    /* 1 = mirror this node's internal DART_ERROR events onto
-                                            @dart/log/error (coalesced per poll pass; see "logs").
-                                            Needs the log topics (ignored under disable_logs). */
+    uint8_t               disable_error_logs; /* 1 = do not mirror this node's internal DART_ERROR
+                                            events onto @dart/log/error. Mirroring is on by default
+                                            and is also disabled by disable_logs. */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;

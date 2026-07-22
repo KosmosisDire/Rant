@@ -171,7 +171,7 @@ namespace Dart
         public int match_wait_ms;              // send-path match wait; 0 = default (1s), <0 = off
         public byte disable_logs;              // strip the built-in @dart/log topics
         public byte disable_meta;              // do not host the @dart/meta endpoint
-        public byte log_errors;                // mirror internal errors onto @dart/log/error
+        public byte disable_error_logs;        // suppress default error mirroring onto @dart/log/error
         public DartNodeNet net;
         public DartNodeDiscovery discovery;
     }
@@ -1085,7 +1085,7 @@ namespace Dart
         public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
-                    bool disableLogs = false, bool disableMeta = false, bool logErrors = false,
+                    bool disableLogs = false, bool disableMeta = false, bool disableErrorLogs = false,
                     int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
                     string multicastInterface = null, int multicastTtl = 0,
                     int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
@@ -1107,7 +1107,7 @@ namespace Dart
                 match_wait_ms = matchWaitMs,
                 disable_logs = (byte)(disableLogs ? 1 : 0),
                 disable_meta = (byte)(disableMeta ? 1 : 0),
-                log_errors = (byte)(logErrors ? 1 : 0),
+                disable_error_logs = (byte)(disableErrorLogs ? 1 : 0),
                 user_data = (IntPtr)_id,
             };
             // The node retains these pointers for its lifetime, so keep them alive

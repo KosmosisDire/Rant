@@ -69,7 +69,7 @@ type NodeOpts = {
     disable_shm?: boolean;
     disable_logs?: boolean;   /* strip the built-in @dart/log topics */
     disable_meta?: boolean;   /* do not host the @dart/meta endpoint */
-    log_errors?: boolean;     /* mirror this node's own errors onto @dart/log/error */
+    disable_error_logs?: boolean; /* suppress default mirroring onto @dart/log/error */
     onEvent?: (e: DartEvent) => void;
 };
 

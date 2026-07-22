@@ -74,7 +74,7 @@ request, only for a broken WebSocket.
   "disable_shm": false,           // force on-wire UDP even to same-host peers
   "disable_logs": false,          // strip the built-in @dart/log topics
   "disable_meta": false,          // do not host the @dart/meta endpoint
-  "log_errors": false }           // mirror this node's own errors onto @dart/log/error
+  "disable_error_logs": false }   // suppress default mirroring onto @dart/log/error
 ```
 
 Reply: `{ "ok": true, "proto": 4, "name": "dashboard" }` (the actual node name,

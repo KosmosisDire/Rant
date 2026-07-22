@@ -2620,9 +2620,9 @@ typedef struct {
                                             embedded; see "logs" below. */
     uint8_t               disable_meta;  /* 1 = do not host the built-in @dart/meta introspection
                                             function (also implied by DART_NO_PATTERNS). */
-    uint8_t               log_errors;    /* 1 = mirror this node's internal DART_ERROR events onto
-                                            @dart/log/error (coalesced per poll pass; see "logs").
-                                            Needs the log topics (ignored under disable_logs). */
+    uint8_t               disable_error_logs; /* 1 = do not mirror this node's internal DART_ERROR
+                                            events onto @dart/log/error. Mirroring is on by default
+                                            and is also disabled by disable_logs. */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;
@@ -11871,7 +11871,7 @@ struct DartTopic {   /* schema: node-owned copy */
     char     name[DART_TOPIC_NAME_MAX];
 };
 
-/* One pending error->log mirror entry (opts.log_errors). Errors fire deep inside RX and
+/* One pending error->log mirror entry (default on). Errors fire deep inside RX and
  * delivery processing, where a send may not re-enter the transport mid-datagram, so
  * i_dart_node_emit only RECORDS the event here (its text formatted immediately: the
  * event's views die with the callback) and the poll pass publishes the ring at a safe
@@ -11961,7 +11961,7 @@ struct DartNode {
     /* built-in @dart/log topics (runtime.h "logs") + the error->log mirror ring */
     DartTopic    *log_topics[3];       /* [DartLogLevel]; all NULL under opts.disable_logs */
     DartSchema   *log_schema;          /* DartLog { wall_us, mono_us, text } (node-owned) */
-    uint8_t       log_errors;          /* opts.log_errors: mirror DART_ERROR onto @dart/log/error */
+    uint8_t       log_errors;          /* default-on DART_ERROR mirror; opts can disable it */
     uint8_t       log_flushing;        /* reentrancy guard: an error fired while publishing a
                                           mirrored line must not re-enter the ring */
     uint8_t       log_pend_n;
@@ -12112,7 +12112,7 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
         e->peer_name = nm.data;   /* NUL-terminated view (discovery state); NULL if the id is unknown */
     }
     if (e->kind == DART_ERROR) n->last_error = *e;
-    /* the error->log mirror (opts.log_errors): RECORD only; the poll pass publishes the
+    /* the error->log mirror (default on): RECORD only; the poll pass publishes the
        ring at a safe point (i_dart_node_log_flush). Errors scoped to a log topic itself
        are excluded, and nothing is recorded while a flush publishes (reentrancy). */
     if (e->kind == DART_ERROR && n->log_errors && !n->log_flushing
@@ -12787,7 +12787,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     /* built-ins, last (they create topics, so the node must be fully open). A failed
        creation degrades (dart_node_log reports NOSYS / no meta endpoint), never fails
        the open: the node itself is healthy. */
-    n->log_errors = (uint8_t)(o.log_errors && !o.disable_logs);
+    n->log_errors = (uint8_t)(!o.disable_error_logs && !o.disable_logs);
     n->creating_builtin = 1;               /* allocate from the builtin block */
     if (!o.disable_logs) i_dart_node_logs_open(n);
 #ifndef DART_NO_PATTERNS
@@ -16029,8 +16029,8 @@ struct NodeOptions {
     bool                     disable_logs         = false; /* strip the @dart/log/{error,warn,info}
                                                               topics (saves their history memory) */
     bool                     disable_meta         = false; /* do not host the @dart/meta endpoint */
-    bool                     log_errors           = false; /* mirror this node's own errors onto
-                                                              @dart/log/error (coalesced per poll) */
+    bool                     disable_error_logs   = false; /* suppress the default mirroring of this
+                                                              node's errors onto @dart/log/error */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
     uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
@@ -17341,7 +17341,7 @@ public:
         co.match_wait_ms = o.match_wait_ms;
         co.disable_logs  = o.disable_logs ? 1 : 0;
         co.disable_meta  = o.disable_meta ? 1 : 0;
-        co.log_errors    = o.log_errors ? 1 : 0;
+        co.disable_error_logs = o.disable_error_logs ? 1 : 0;
         co.user_data     = impl.get();
         co.net.data_port           = o.data_port;
         co.net.discovery_group     = impl->disc_group.empty() ? nullptr : impl->disc_group.c_str();
@@ -17517,6 +17517,32 @@ public:
     SendStatus log_error(std::string_view t) { return log(LogLevel::Error, t); }
     SendStatus log_warn (std::string_view t) { return log(LogLevel::Warn,  t); }
     SendStatus log_info (std::string_view t) { return log(LogLevel::Info,  t); }
+
+    /* printf-style overloads. They preserve the C log API's bounded formatting:
+     * output is truncated at DART_LOG_MAX, and a formatting failure publishes an empty
+     * line. A plain string literal may use either overload and has the same result. */
+    template <class... Args>
+    SendStatus log(LogLevel level, const char* fmt, Args&&... args) {
+        if (!valid()) return SendStatus::State;
+        if (!fmt) return SendStatus::NoTopic;
+        char text[DART_LOG_MAX];
+        int len = std::snprintf(text, sizeof text, fmt, std::forward<Args>(args)...);
+        if (len < 0) len = 0;
+        if (len >= static_cast<int>(sizeof text)) len = static_cast<int>(sizeof text) - 1;
+        return log(level, std::string_view(text, static_cast<size_t>(len)));
+    }
+    template <class... Args>
+    SendStatus log_error(const char* fmt, Args&&... args) {
+        return log(LogLevel::Error, fmt, std::forward<Args>(args)...);
+    }
+    template <class... Args>
+    SendStatus log_warn(const char* fmt, Args&&... args) {
+        return log(LogLevel::Warn, fmt, std::forward<Args>(args)...);
+    }
+    template <class... Args>
+    SendStatus log_info(const char* fmt, Args&&... args) {
+        return log(LogLevel::Info, fmt, std::forward<Args>(args)...);
+    }
 
     /* This node's own handle for a level's log topic (invalid Topic when disabled):
      * widen its role and read it like any topic, or use on_log below. */

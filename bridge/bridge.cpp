@@ -373,7 +373,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.match_wait_ms        = req.value("match_wait_ms", 0);
     o.disable_logs         = req.value("disable_logs", false);
     o.disable_meta         = req.value("disable_meta", false);
-    o.log_errors           = req.value("log_errors", false);
+    o.disable_error_logs   = req.value("disable_error_logs", false);
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
         o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
     if (o.max_topics == 0) o.max_topics = 8;

@@ -3916,7 +3916,6 @@ static void metalog_checks(void){
     memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+35; ao.discovery.max_peers=4;
     ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
     bo=ao;
-    ao.log_errors = 1;        /* mirror A's internal errors onto its @dart/log/error */
     ao.match_wait_ms = -1;    /* so the unmatched send below commits + fires immediately */
     A = dart_node_open(&aa, "meta-a", NULL, NULL, &ao);
     B = dart_node_open(&ba, "meta-b", NULL, NULL, &bo);
