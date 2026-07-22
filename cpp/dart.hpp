@@ -340,7 +340,7 @@ struct NodeOptions {
     bool                     disable_shm          = false;
     bool                     fetch_details        = false; /* greedily fetch every peer topic's
                                                               name + schema (observer UIs): fills
-                                                              Peer::entities names via the cache */
+                                                              peer_entities() names via the cache */
     int32_t                  match_wait_ms        = 0;   /* send-path match wait: a send that would
                                                             reach ZERO subscribers while a match is
                                                             still resolving blocks up to this long
@@ -861,14 +861,16 @@ struct Entity {
     uint64_t    rsp_schema_hash = 0;  /* FUNCTION only: the response schema identity */
 };
 
-/* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). */
+/* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Peer
+ * facts only: what a peer advertises is a separate, explicit Node::peer_entities(id)
+ * call, so a peers() in a hot path (an event handler, a UI tick) never pays the
+ * entity fold or its allocations. */
 struct Peer {
     uint32_t            id = 0;
     std::string         name;
     std::string         address;         /* "1.2.3.4:port" */
     bool                active = false;
     uint16_t            fragment_size = 0;
-    std::vector<Entity> entities;        /* what it advertises, folded into entities */
 };
 
 /* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
@@ -1761,8 +1763,17 @@ public:
         return detail::dart_node_dispatch(impl_->node, max_msgs, timeout_ms);
     }
 
-    /* A copied snapshot of the live peer table (safe to keep after the poll), each
-     * peer's advertisements folded into entities. */
+    /* The number of known peers, allocation free (safe from any callback). */
+    uint16_t peer_count() const {
+        if (!valid()) return 0;
+        uint16_t count = 0;
+        LockGuard guard(impl_->node);
+        (void)detail::dart_node_peers(impl_->node, &count);
+        return count;
+    }
+
+    /* A copied snapshot of the live peer table (safe to keep after the poll): peer
+     * facts only. Use peer_entities(id) for what a peer advertises. */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
         if (!valid()) return out;
@@ -1780,21 +1791,32 @@ public:
             peer.address       = addr_string(p.addr);
             peer.active        = (p.liveness == detail::DART_PEER_ACTIVE);
             peer.fragment_size = detail::dart_node_peer_frag(&p);
-#ifndef DART_NO_PATTERNS
-            detail::DartEntityIter it;
-            std::memset(&it, 0, sizeof it);
-            detail::DartEntityInfo ei;
-            while (detail::dart_node_peer_entity_next(impl_->node, p.id, &it, &ei))
-                peer.entities.push_back(entity_from(ei));
-#endif
             out.push_back(std::move(peer));
         }
         return out;
     }
 
 #ifndef DART_NO_PATTERNS
+    /* What one peer advertises, folded into entities (a function's req/rsp pair is one
+     * entity, a variable's set channel merges as `writable`). A copied snapshot. This
+     * walks the peer's whole interest list and allocates per entity: an explicit,
+     * observer-grade call, deliberately not part of peers(). */
+    std::vector<Entity> peer_entities(uint32_t peer_id) const {
+        std::vector<Entity> out;
+        if (!valid()) return out;
+        LockGuard guard(impl_->node);
+        detail::DartEntityIter it;
+        std::memset(&it, 0, sizeof it);
+        detail::DartEntityInfo ei;
+        while (detail::dart_node_peer_entity_next(impl_->node, peer_id, &it, &ei))
+            out.push_back(entity_from(ei));
+        return out;
+    }
+#endif
+
+#ifndef DART_NO_PATTERNS
     /* The entities THIS node hosts (its functions/variables/signals, then its plain
-     * topics), the same folded shape as Peer::entities. A copied snapshot. */
+     * topics), the same folded shape as peer_entities(). A copied snapshot. */
     std::vector<Entity> entities() const {
         std::vector<Entity> out;
         if (!valid()) return out;

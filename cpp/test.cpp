@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <functional>
 #include <thread>
 
 static int g_failures = 0;
@@ -369,7 +370,8 @@ static bool patterns_leg() {
     for (const auto& p : b.peers()) {
         if (p.name != "PA") continue;
         peer_seen = true;
-        const dart::Entity* e = find(p.entities, dart::EntityKind::Function, "add");
+        auto es = b.peer_entities(p.id);
+        const dart::Entity* e = find(es, dart::EntityKind::Function, "add");
         peer_fn = e && e->provides;
     }
     chk("reflect: peer PA visible", peer_seen);
