@@ -128,6 +128,11 @@ void       dart_discovery_replay(DartDiscovery *d);
  * when one exists), for a caller embedding discovery in its own blocking wait. Fills
  * out[0..1] and returns the count (1 or 2). The fds are stable across a migrate. */
 int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
+/* dart_discovery_poll without its own socket wait, for a caller whose OWN wait covers
+ * the dart_discovery_pollfds sockets: pass each fd's readability (same order) and the
+ * drains, the announce/timeout update, and the targeted replies all run with zero
+ * extra syscalls. Call every pass: the clock-driven work needs no readable fd. */
+int        dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable);
 
 /* ---------------------------------------------------------------- UUID / iface */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */

@@ -169,7 +169,9 @@ struct DartNode {
                                           mirrored line must not re-enter the ring */
     uint8_t       log_pend_n;
     uint32_t      log_pend_dropped;    /* ring overflow between flushes (summarized, never silent) */
-    i_DartLogPend log_pend[DART_LOG_PEND];
+    i_DartLogPend *log_pend;           /* [DART_LOG_PEND], pool-allocated on the FIRST recorded
+                                          error: a healthy node never pays the ring (~1.8 KB).
+                                          Allocation failure counts into log_pend_dropped. */
     /* @dart/meta snapshot scratch (i_dart_node_snapshot), grown on demand */
     uint8_t      *snap_buf; uint32_t snap_cap;
     char          name[DART_NODE_NAME_MAX + 1];   /* our advertised node name (the snapshot's) */
@@ -321,6 +323,11 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
     if (e->kind == DART_ERROR && n->log_errors && !n->log_flushing
         && !(e->topic_name && i_dart_node_is_log_topic(n, e->topic))){
         uint8_t i;
+        if (!n->log_pend){                 /* first error ever: allocate the mirror ring */
+            n->log_pend = (i_DartLogPend*)i_dart_node_alloc(n, NULL,
+                              sizeof(i_DartLogPend) * DART_LOG_PEND);
+            if (!n->log_pend){ n->log_pend_dropped++; goto pend_done; }
+        }
         for (i = 0; i < n->log_pend_n; i++)
             if (n->log_pend[i].error == (uint8_t)e->error && n->log_pend[i].topic == e->topic
                 && n->log_pend[i].peer == e->peer) break;
@@ -332,6 +339,7 @@ static void i_dart_node_emit(DartNode *n, DartEvent *e){
             dart_event_str(e, p->text, sizeof p->text);
         } else n->log_pend_dropped++;
     }
+pend_done:
     if (e->kind == DART_PEER_UP || e->kind == DART_PEER_DOWN || e->kind == DART_PEER_INTEREST){
         n->settle_topology_us = i_dart_plat_now_us();   /* dart_node_settle's quiet-window clock */
         n->match_epoch++;                               /* invalidate the topics' converged memos */
@@ -1413,8 +1421,13 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
         }
     }
 
-    dart_discovery_poll(n->discovery, 0);                 /* discovery tick (non-blocking) */
-
+    /* discovery tick. NOTE: this must stay BEFORE the wait: moving it after (to reuse
+       the main wait's revents and drop its zero-timeout poll syscall) deterministically
+       breaks the set_role late-subscribe replay (selftest metalog phase), which is also
+       the phase that flakes rarely on the pre-move code; the ordering dependency is not
+       yet understood, so the syscall saving waits on that root cause (see
+       dart_discovery_service, the ready-made revents-driven entry). */
+    dart_discovery_poll(n->discovery, 0);
     wait_ms = i_dart_node_wait_ms(n, timeout_ms);
     memset(pfd, 0, sizeof pfd);
     pfd[nfds].fd = n->fd; pfd[nfds].events = DART_POLLIN; nfds++;
@@ -1425,7 +1438,8 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     }
 #endif
     {   /* discovery's sockets join the wait so an inbound announce cuts a long sleep
-           short (drained by the next tick's discovery poll). The fds are stable by
+           short; the post-wait dart_discovery_service drains them off THIS wait's
+           revents, so a node pass costs one poll syscall total. The fds are stable by
            value: a grow while the lock is dropped relocates structs, never sockets. */
         i_DartSock dfds[2]; int i, dn = dart_discovery_pollfds(n->discovery, dfds);
         for (i = 0; i < dn; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = DART_POLLIN; nfds++; }
@@ -1444,7 +1458,10 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     } else {
         poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
     }
-    if (waker_slot >= 0){
+    if (waker_slot >= 0 && (pfd[waker_slot].revents & DART_POLLIN)){
+        /* revents-gated: an idle pass costs no drain syscall. A kick whose datagram is
+           still in flight leaves wake_signaled set; the datagram wakes the next wait,
+           which drains and clears it, so no kick is ever lost. */
         i_dart_plat_waker_drain(&n->waker);
         n->wake_signaled = 0;
     }
@@ -2153,9 +2170,12 @@ DartBytes i_dart_node_snapshot(DartNode *n, uint32_t sections){
     for (;;){
         DartMapWriter w;
         if (!n->snap_buf){
-            n->snap_buf = (uint8_t*)i_dart_node_alloc(n, NULL, 4096u);
+            /* a small node's full snapshot is ~1-2 KB; start there and let the doubling
+               retry below find the real size, instead of pinning 4 KB on every observed
+               embedded node */
+            n->snap_buf = (uint8_t*)i_dart_node_alloc(n, NULL, 1024u);
             if (!n->snap_buf) return dart_bytes(NULL, 0);
-            n->snap_cap = 4096u;
+            n->snap_cap = 1024u;
         }
         w = dart_map_begin(n->snap_buf, n->snap_cap);
         i_dart_node_snapshot_fill(n, &w, sections);

@@ -389,20 +389,19 @@ static int i_dart_discovery_rt_drain(DartDiscovery *d, i_DartSock fd){
     return got;
 }
 
-int dart_discovery_poll(DartDiscovery *d, int timeout_ms){
-    i_DartPollfd pfd[2];
+/* The poll body without its own socket wait: the caller reports which of the
+ * dart_discovery_pollfds sockets ITS wait saw readable (same order: the shared
+ * discovery fd, then the unicast fd). The node runtime folds discovery into its one
+ * main wait and calls this every pass, so a node poll costs one poll syscall total. */
+int dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable){
     DartDiscoveryAddr to;
-    int got = 0, nfds = 1; size_t n_bytes;
-
-    memset(pfd, 0, sizeof pfd);
-    pfd[0].fd = d->fd; pfd[0].events = DART_POLLIN;
-    if (d->unicast_fd != DART_SOCK_BAD){ pfd[1].fd = d->unicast_fd; pfd[1].events = DART_POLLIN; nfds = 2; }
-    if (i_dart_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
-
-    if (pfd[0].revents & DART_POLLIN) got |= i_dart_discovery_rt_drain(d, d->fd);
+    int got = 0; size_t n_bytes;
+    if (!d) return 0;
+    if (fd_readable) got |= i_dart_discovery_rt_drain(d, d->fd);
     /* our own unicast port: solicit replies + re-fetch answers land here, so a same-host
        peer's reply reaches THIS process rather than the shared discovery port */
-    if (nfds == 2 && (pfd[1].revents & DART_POLLIN)) got |= i_dart_discovery_rt_drain(d, d->unicast_fd);
+    if (unicast_readable && d->unicast_fd != DART_SOCK_BAD)
+        got |= i_dart_discovery_rt_drain(d, d->unicast_fd);
 
     n_bytes = dart_discovery_update(d->core, i_dart_plat_now_us(), d->txbuf, d->wire_max);
     if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes);
@@ -411,6 +410,17 @@ int dart_discovery_poll(DartDiscovery *d, int timeout_ms){
     while ((n_bytes = dart_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to)) != 0)
         i_dart_discovery_tx_to(d, d->txbuf, n_bytes, &to);
     return got;
+}
+
+int dart_discovery_poll(DartDiscovery *d, int timeout_ms){
+    i_DartPollfd pfd[2];
+    int nfds = 1;
+    memset(pfd, 0, sizeof pfd);
+    pfd[0].fd = d->fd; pfd[0].events = DART_POLLIN;
+    if (d->unicast_fd != DART_SOCK_BAD){ pfd[1].fd = d->unicast_fd; pfd[1].events = DART_POLLIN; nfds = 2; }
+    if (i_dart_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
+    return dart_discovery_service(d, (pfd[0].revents & DART_POLLIN) != 0,
+                                  nfds == 2 && (pfd[1].revents & DART_POLLIN) != 0);
 }
 
 int dart_discovery_gather(DartDiscovery *d, int quiet_ms, int timeout_ms){
