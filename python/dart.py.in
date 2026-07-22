@@ -309,6 +309,9 @@ class DartNodeOpts(Structure):
         ("disable_shm", c_uint8),
         ("fetch_details", c_uint8),
         ("match_wait_ms", c_int32),
+        ("disable_logs", c_uint8),
+        ("disable_meta", c_uint8),
+        ("log_errors", c_uint8),
         ("net", DartNodeNet),
         ("discovery", DartNodeDiscovery),
     ]
@@ -427,6 +430,7 @@ class DartFunctionOpts(Structure):
     _fields_ = [
         ("backpressure_wait_us", c_uint32),
         ("timeout_us", c_uint32),
+        ("multi", c_uint8),
     ]
 
 
@@ -512,8 +516,8 @@ def _bind(lib):
                                                POINTER(DartFunctionOpts)], c_void_p)
     F("dart_node_create_remote_function", [c_void_p, c_char_p, c_void_p, c_void_p,
                                            POINTER(DartFunctionOpts)], c_void_p)
-    F("dart_function_call", [c_void_p, DartBytes, POINTER(DartResponse), c_int], c_int)
-    F("dart_function_call_async", [c_void_p, DartBytes, _RspFn, c_void_p], c_int)
+    F("dart_function_call", [c_void_p, DartBytes, POINTER(DartResponse), c_int, c_void_p], c_int)
+    F("dart_function_call_async", [c_void_p, DartBytes, _RspFn, c_void_p, c_void_p], c_int)
     F("dart_function_match_count", [c_void_p], c_int)
     F("dart_request_reply", [POINTER(DartRequest), DartBytes], None)
     F("dart_request_fail", [POINTER(DartRequest), DartBytes], None)
@@ -2416,7 +2420,7 @@ class RemoteFunction:
         (reading .value raises CallError)."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = DartResponse()
-        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms)
+        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms, None)
         del buf
         if rc == 1:
             return Response._from_c(out, self._rsp_schema)
@@ -2439,7 +2443,7 @@ class RemoteFunction:
         self._node._register_async(box_id)
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         rc = self._node._lib.dart_function_call_async(self._fn, b, _on_response,
-                                                      c_void_p(box_id))
+                                                      c_void_p(box_id), None)
         del buf
         st = _send_status(rc)
         if rc != 0:

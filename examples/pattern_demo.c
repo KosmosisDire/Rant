@@ -154,7 +154,7 @@ int main(int argc, char **argv){
         dart_schema_message_default(add_req_s, buf, sizeof buf);
         dart_set_int(buf, sizeof buf, add_req_s, "x", (int64_t)tick);
         dart_set_int(buf, sizeof buf, add_req_s, "y", 1000);
-        dart_function_call_async(fn_remote, dart_bytes(buf, dart_schema_size(add_req_s)), on_reply, NULL);
+        dart_function_call_async(fn_remote, dart_bytes(buf, dart_schema_size(add_req_s)), on_reply, NULL, NULL);
 
         dart_variable_set(var_def, enc_u32(temp_s, "celsius", tick, buf, sizeof buf));
         dart_signal_emit(emitter, enc_u32(alarm_s, "code", tick, buf, sizeof buf));

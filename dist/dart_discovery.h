@@ -650,6 +650,37 @@ int      i_dart_plat_random(void *buf, size_t len);
 /* Best-effort host identity for a UUID fallback when the CSPRNG is unavailable. */
 size_t   i_dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
 uint64_t i_dart_plat_pid(void);
+/* Wall-clock microseconds since the Unix epoch, for log timestamps that must compare
+ * across nodes (the monotonic clock's epoch is arbitrary and per host). */
+uint64_t i_dart_plat_wall_us(void);
+
+/* Process-usage stats follow the DART_SHM / DART_THREADS flag shape: DART_PROC_STATS is
+ * AUTO-DETECTED where the bundled layer can measure (Windows; POSIX with getrusage:
+ * Linux/macOS/BSD), off elsewhere (FreeRTOS / bare metal have no per-process
+ * accounting), and DART_NO_PROC_STATS always wins. When OFF the function below is
+ * ABSENT and every consumer is compiled out with it (the @dart/meta snapshot simply
+ * omits its proc section; all other stats are unaffected), so a platform layer with no
+ * measurement implements NOTHING. A new platform layer that can measure declares
+ * support by defining DART_PROC_STATS itself. */
+#if !defined(DART_PROC_STATS) && !defined(DART_NO_PROC_STATS)
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__)
+    #define DART_PROC_STATS
+  #endif
+#endif
+#if defined(DART_PROC_STATS) && defined(DART_NO_PROC_STATS)
+  #undef DART_PROC_STATS       /* both set: the opt-out wins */
+#endif
+#ifdef DART_PROC_STATS
+/* Process-wide resource usage for the introspection endpoint's proc section:
+ * cumulative CPU microseconds (user + kernel), current resident set bytes, and peak
+ * resident bytes. Any out-pointer may be NULL. Returns 1 on success, 0 on a transient
+ * OS failure; a platform may fill peak but not current (current then reports 0). Per
+ * PROCESS, not per node: several nodes in one process report the same numbers
+ * (consumers dedup by pid). */
+int      i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes);
+#endif /* DART_PROC_STATS */
 
 /* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =
  * allocate, size 0 = free (returns NULL). The single heap dependency, so the node
@@ -1724,6 +1755,10 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #include <windows.h>
   #include <bcrypt.h>            /* BCryptGenRandom (CSPRNG) */
   #include <mmsystem.h>          /* timeBeginPeriod */
+  #ifndef PSAPI_VERSION
+  #define PSAPI_VERSION 2        /* GetProcessMemoryInfo from kernel32 (Win7+), no psapi.lib */
+  #endif
+  #include <psapi.h>             /* i_dart_plat_proc_stats: working-set sizes */
   #ifdef _MSC_VER
     #pragma comment(lib, "ws2_32.lib")
     #pragma comment(lib, "bcrypt.lib")
@@ -1760,6 +1795,12 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #include <errno.h>
   #include <stdio.h>
   #include <stdlib.h>           /* arc4random_buf on macOS/BSD */
+  #ifdef DART_PROC_STATS
+    #include <sys/resource.h>   /* getrusage: i_dart_plat_proc_stats */
+    #if defined(__APPLE__)
+      #include <mach/mach.h>    /* task_info: current resident size */
+    #endif
+  #endif
   #if defined(ESP_PLATFORM)
     #include <esp_random.h>     /* esp_fill_random (HW RNG) */
     #include <esp_netif.h>      /* esp_netif_get_ip_info: the interface-IP enumeration */
@@ -1859,6 +1900,68 @@ uint64_t i_dart_plat_pid(void){
     return (uint64_t)GetCurrentProcessId();
 #else
     return (uint64_t)getpid();
+#endif
+}
+
+/* ------------------------------------------------------- process usage / wall */
+#ifdef DART_PROC_STATS
+int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes){
+#if defined(_WIN32)
+    FILETIME created, exited, kern, user; PROCESS_MEMORY_COUNTERS pmc;
+    ULARGE_INTEGER uk, uu;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kern, &user)) return 0;
+    uk.LowPart = kern.dwLowDateTime; uk.HighPart = kern.dwHighDateTime;
+    uu.LowPart = user.dwLowDateTime; uu.HighPart = user.dwHighDateTime;
+    if (cpu_us) *cpu_us = (uk.QuadPart + uu.QuadPart) / 10u;   /* 100ns -> us */
+    pmc.cb = sizeof pmc;
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return 0;
+    if (rss_bytes)      *rss_bytes      = (uint64_t)pmc.WorkingSetSize;
+    if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)pmc.PeakWorkingSetSize;
+    return 1;
+#else
+    {   struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+        if (cpu_us) *cpu_us = (uint64_t)ru.ru_utime.tv_sec * 1000000ull + (uint64_t)ru.ru_utime.tv_usec
+                            + (uint64_t)ru.ru_stime.tv_sec * 1000000ull + (uint64_t)ru.ru_stime.tv_usec;
+  #if defined(__APPLE__)
+        if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss;         /* bytes on macOS */
+        if (rss_bytes){                                                       /* current: task_info */
+            struct mach_task_basic_info info; mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+            *rss_bytes = (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                    (task_info_t)&info, &cnt) == KERN_SUCCESS)
+                       ? (uint64_t)info.resident_size : 0;
+        }
+  #elif defined(__linux__)
+        if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss * 1024u; /* KB on Linux */
+        if (rss_bytes){                                                       /* current: statm field 2 */
+            FILE *f = fopen("/proc/self/statm", "rb");
+            unsigned long total_pages = 0, res_pages = 0;
+            *rss_bytes = 0;
+            if (f){
+                if (fscanf(f, "%lu %lu", &total_pages, &res_pages) == 2)
+                    *rss_bytes = (uint64_t)res_pages * (uint64_t)sysconf(_SC_PAGESIZE);
+                fclose(f);
+            }
+        }
+  #else
+        if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss * 1024u; /* KB on the BSDs */
+        if (rss_bytes)      *rss_bytes      = 0;                              /* no cheap current-RSS read */
+  #endif
+        return 1;
+    }
+#endif
+}
+#endif /* DART_PROC_STATS */
+
+uint64_t i_dart_plat_wall_us(void){
+#ifdef _WIN32
+    FILETIME ft; ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
+    return (u.QuadPart - 116444736000000000ull) / 10u;   /* FILETIME epoch -> Unix, 100ns -> us */
+#else
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 #endif
 }
 

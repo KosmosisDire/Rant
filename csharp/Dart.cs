@@ -162,6 +162,9 @@ namespace Dart
         public byte disable_shm;
         public byte fetch_details;
         public int match_wait_ms;              // send-path match wait; 0 = default (1s), <0 = off
+        public byte disable_logs;              // strip the built-in @dart/log topics
+        public byte disable_meta;              // do not host the @dart/meta endpoint
+        public byte log_errors;                // mirror internal errors onto @dart/log/error
         public DartNodeNet net;
         public DartNodeDiscovery discovery;
     }
@@ -284,6 +287,7 @@ namespace Dart
     {
         public uint backpressure_wait_us;
         public uint timeout_us;
+        public byte multi;              // duplicate-authority diagnostic suppressed (@dart/meta)
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -458,10 +462,10 @@ namespace Dart
             IntPtr req_schema, IntPtr rsp_schema, ref DartFunctionOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_call(IntPtr fn, DartBytes req,
-            out DartResponseNative response, int timeout_ms);
+            out DartResponseNative response, int timeout_ms, IntPtr opts);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_call_async(IntPtr fn, DartBytes req,
-            DartResponseFn on_response, IntPtr user);
+            DartResponseFn on_response, IntPtr user, IntPtr opts);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_match_count(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
@@ -1608,7 +1612,7 @@ namespace Dart
             DartResponseNative o;
             int rc;
             using (var p = new PinnedBytes(request))
-                rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs);
+                rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs, IntPtr.Zero);
             if (rc == 1)
             {
                 r.Status = (CallStatus)o.status;
@@ -1633,7 +1637,7 @@ namespace Dart
             DartNode.RegisterAsync(id);
             int rc;
             using (var p = new PinnedBytes(request))
-                rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id);
+                rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, IntPtr.Zero);
             if (rc != 0)
             {
                 Patterns.TakeAsync(id);

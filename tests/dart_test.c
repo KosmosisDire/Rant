@@ -3094,6 +3094,18 @@ static void pf_pump(DartNode *a, DartNode *b, int ms){
     while (i_dart_plat_now_us() < end){ dart_node_poll(a,2); dart_node_poll(b,2); }
 }
 
+/* the built-in channels every node hosts (@dart/log/* + the @dart/meta pair): the
+ * reflection checks filter them by channel hash (fetch-state independent) or, for
+ * local walks (hash unset there), by the reserved "@dart/" name prefix */
+static int pf_builtin_hash(uint32_t h){
+    return h==(uint32_t)dart_topic_id("@dart/log/error") || h==(uint32_t)dart_topic_id("@dart/log/warn")
+        || h==(uint32_t)dart_topic_id("@dart/log/info")  || h==(uint32_t)dart_topic_id("@dart/meta@req")
+        || h==(uint32_t)dart_topic_id("@dart/meta@rsp");
+}
+static int pf_builtin_name(DartString nm){
+    return nm.len >= 6 && !memcmp(nm.data, "@dart/", 6);
+}
+
 static void patterns_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -3138,21 +3150,21 @@ static void patterns_checks(void){
 
     /* async call: add(41) -> 42, status OK */
     { uint8_t req[4]; i_dart_le_w32(req,41); pf_reply_done=0;
-      dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply, NULL);
+      dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==42,
                "patterns: async add(41)=42 OK (done=%d st=%d val=%u)", pf_reply_done, pf_reply_status, pf_reply_val); }
 
     /* empty-ack: handler returns without replying -> auto OK, empty payload */
     { pf_reply_done=0; pf_calls=0;
-      dart_function_call_async(ce, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(ce, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==0,
                "patterns: empty-ack auto OK (done=%d st=%d)", pf_reply_done, pf_reply_status); }
 
     /* deferred: handler defers, we complete later with a value */
     { pf_reply_done=0; pf_defer_token=0;
-      dart_function_call_async(cd, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(cd, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_defer_token;t++) pf_pump(P,C,2);
       ST_CHECK(pf_defer_token!=0, "patterns: handler deferred (token=%llu)", (unsigned long long)pf_defer_token);
       { uint8_t out[4]; i_dart_le_w32(out,99);
@@ -3163,14 +3175,14 @@ static void patterns_checks(void){
 
     /* no-handler: provider has NULL on_request -> NO_HANDLER */
     { pf_reply_done=0;
-      dart_function_call_async(cnh, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(cnh, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_NO_HANDLER,
                "patterns: no-handler -> NO_HANDLER (done=%d st=%d)", pf_reply_done, pf_reply_status); }
 
     /* timeout: no provider for "ghost" -> client-synthesized TIMEOUT */
     { pf_reply_done=0;
-      dart_function_call_async(ghost, dart_bytes(NULL,0), pf_on_reply, NULL);
+      dart_function_call_async(ghost, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<400 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_TIMEOUT,
                "patterns: no-provider -> TIMEOUT (done=%d st=%d)", pf_reply_done, pf_reply_status); }
@@ -3183,7 +3195,7 @@ static void patterns_checks(void){
       ce2 = dart_node_create_remote_function(C, "early", NULL, NULL, NULL);
       ST_CHECK(pe2 && ce2, "patterns: early function pair created");
       i_dart_le_w32(req, 6); pf_reply_done = 0;
-      cr = dart_function_call_async(ce2, dart_bytes(req,4), pf_on_reply, NULL);   /* unmatched right now */
+      cr = dart_function_call_async(ce2, dart_bytes(req,4), pf_on_reply, NULL, NULL);   /* unmatched right now */
       ST_CHECK(cr==DART_OK, "patterns: early call accepted (%d)", cr);
       for (t=0;t<2000 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==7,
@@ -3206,8 +3218,8 @@ static void patterns_checks(void){
           /* park both requests at the provider before it polls once */
           i_dart_le_w32(r1,100); i_dart_le_w32(r2,200);
           pf_reply_done=0; pf_reply2_done=0;
-          dart_function_call_async(call_add, dart_bytes(r1,4), pf_on_reply,  NULL);
-          dart_function_call_async(call2,    dart_bytes(r2,4), pf_on_reply2, NULL);
+          dart_function_call_async(call_add, dart_bytes(r1,4), pf_on_reply,  NULL, NULL);
+          dart_function_call_async(call2,    dart_bytes(r2,4), pf_on_reply2, NULL, NULL);
           dart_node_poll(C,0); dart_node_poll(C2,0);      /* flush both requests out */
           for (i2=0;i2<800 && !(pf_reply_done && pf_reply2_done);i2++){
               dart_node_poll(P,2); dart_node_poll(C,2); dart_node_poll(C2,2);
@@ -3232,7 +3244,7 @@ static void patterns_checks(void){
       for (i2=0;i2<14;i2++){
           int cr;   /* hoisted: ST_CHECK evaluates its condition twice */
           i_dart_le_w32(req,(uint32_t)(1000+i2)); expect_sum += (uint32_t)(1000+i2+1);
-          cr = dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply_burst, NULL);
+          cr = dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply_burst, NULL, NULL);
           ST_CHECK(cr==DART_OK, "patterns: burst call %d accepted (%d)", i2, cr);
       }
       for (t=0;t<2000 && pf_burst_done<14;t++) dart_node_poll(C,2);
@@ -3249,7 +3261,7 @@ static void patterns_checks(void){
     { DartResponse rep; int rc;
       dart_node_start(P);
       pf_defer_token=0;
-      rc = dart_function_call(cd, dart_bytes(NULL,0), &rep, 120);
+      rc = dart_function_call(cd, dart_bytes(NULL,0), &rep, 120, NULL);
       ST_CHECK(rc==0 && rep.status==DART_CALL_TIMEOUT,
                "patterns: sync local timeout (rc=%d st=%d)", rc, rep.status);
       for (t=0;t<400 && !pf_defer_token;t++) dart_node_poll(C,2);
@@ -3259,7 +3271,7 @@ static void patterns_checks(void){
       for (t=0;t<200;t++) dart_node_poll(C,2);   /* late reply arrives: must be dropped safely */
       pf_reply_done=0;
       { uint8_t req[4]; i_dart_le_w32(req,60);
-        rc = dart_function_call(call_add, dart_bytes(req,4), &rep, 1000); }
+        rc = dart_function_call(call_add, dart_bytes(req,4), &rep, 1000, NULL); }
       ST_CHECK(rc==1 && rep.status==DART_CALL_OK && rep.data.len>=4 && i_dart_le_r32(rep.data.data)==61,
                "patterns: sync works after late-reply drop (rc=%d st=%d)", rc, rep.status);
       dart_node_stop(P); }
@@ -3429,7 +3441,7 @@ static void patterns_checks(void){
        sync loop drives its node */
     { DartResponse rep; int rc; uint8_t req[4]; i_dart_le_w32(req,7);
       dart_node_start(P);
-      rc = dart_function_call(call_add, dart_bytes(req,4), &rep, 1000);
+      rc = dart_function_call(call_add, dart_bytes(req,4), &rep, 1000, NULL);
       ST_CHECK(rc==1 && rep.status==DART_CALL_OK && rep.data.len>=4 && i_dart_le_r32(rep.data.data)==8,
                "patterns: sync add(7)=8 (rc=%d st=%d)", rc, rep.status);
       dart_node_stop(P); }
@@ -3447,6 +3459,7 @@ static void patterns_checks(void){
         int fns=0,vars=0,sigs=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
         memset(&eit,0,sizeof eit);
         while (dart_node_peer_entity_next(C, pid, &eit, &ei)){
+            if (pf_builtin_hash(ei.hash)) continue;   /* the @dart/ builtins are expected */
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
@@ -3469,6 +3482,7 @@ static void patterns_checks(void){
       { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,sigs=0,tops=0,temp_forceable=0;
         memset(&eit,0,sizeof eit);
         while (dart_node_entity_next(P, &eit, &ei)){
+            if (pf_builtin_name(ei.name)) continue;   /* the @dart/ builtins are expected */
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
@@ -3515,7 +3529,7 @@ static void patterns_checks(void){
                               &(DartFunctionOpts){ .timeout_us = 60000000u });
       ST_CHECK(never != NULL, "patterns: cancel-at-close remote created");
       pf_cancel_count = 0; pf_cancel_status = DART_CALL_OK;
-      if (never) dart_function_call_async(never, dart_bytes(NULL,0), pf_on_cancel, NULL); }
+      if (never) dart_function_call_async(never, dart_bytes(NULL,0), pf_on_cancel, NULL, NULL); }
 
     dart_node_close(P,0); dart_node_close(C,0);
     ST_CHECK(pf_cancel_count==1 && pf_cancel_status==DART_CALL_CANCELLED,
@@ -3872,7 +3886,8 @@ static void interest_external_checks(void){
         if (pid){
             DartEntityIter eit; DartEntityInfo ei;
             memset(&eit,0,sizeof eit);
-            while (dart_node_peer_entity_next(S, pid, &eit, &ei)) ents++;
+            while (dart_node_peer_entity_next(S, pid, &eit, &ei))
+                if (!pf_builtin_hash(ei.hash)) ents++;   /* the @dart/ builtins ride along */
             ST_CHECK(ents==IX_TOPICS, "interest: reflection enumerates all %d external entities (%d)",
                      IX_TOPICS, ents);
         }
@@ -3899,6 +3914,106 @@ static void interest_external_checks(void){
                  "interest: epoch stable across steady state (%u -> %u)", ix_epoch, epoch_now);
     }
     dart_node_close(P,1); dart_node_close(S,1);
+}
+
+/* ============ metalog: the built-in @dart/log topics + the @dart/meta endpoint ========
+ * A logs before anyone listens (KEEP_LAST history), triggers a mirrored internal error,
+ * then B late-joins the error level (catch_up replay) and reads both; finally B calls
+ * A's @dart/meta directed at A's peer id and decodes the snapshot map. */
+static void metalog_checks(void){
+    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts ao, bo; DartNode *A=NULL, *B=NULL; DartDiscoveryAddr seed;
+    int t, i;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+35; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao;
+    ao.log_errors = 1;        /* mirror A's internal errors onto its @dart/log/error */
+    ao.match_wait_ms = -1;    /* so the unmatched send below commits + fires immediately */
+    A = dart_node_open(&aa, "meta-a", NULL, NULL, &ao);
+    B = dart_node_open(&ba, "meta-b", NULL, NULL, &bo);
+    ST_CHECK(A && B, "metalog: nodes open");
+    if (!(A && B)){ if(A)dart_node_close(A,0); if(B)dart_node_close(B,0);
+                    dart_allocator_reset(&ba); dart_allocator_reset(&aa); return; }
+
+    ST_CHECK(dart_node_log_topic(A, DART_LOG_ERROR) && dart_node_log_topic(A, DART_LOG_WARN)
+             && dart_node_log_topic(A, DART_LOG_INFO), "metalog: log topics exist");
+    ST_CHECK(dart_node_meta_function(A) != NULL && dart_node_meta_function(B) != NULL,
+             "metalog: meta endpoint hosted");
+
+    /* log BEFORE any subscriber exists: the lines land in KEEP_LAST history and a late
+       joiner replays them (catch_up = keep_last) */
+    for (i=0;i<3;i++){
+        int lr = dart_node_log(A, DART_LOG_ERROR, "boom %d", i);   /* hoisted: ST_CHECK double-evals */
+        ST_CHECK(lr == DART_OK, "metalog: log %d accepted (%d)", i, lr);
+    }
+    { uint64_t txm=0;
+      dart_topic_counts(dart_node_log_topic(A, DART_LOG_ERROR), &txm, NULL, NULL, NULL);
+      ST_CHECK(txm >= 3, "metalog: tx counter counts the lines (%u)", (unsigned)txm); }
+
+    /* an internal error mirrors onto @dart/log/error: an unmatched send right after open
+       (gather unsettled, wait disabled) fires DART_E_UNMATCHED_SEND */
+    { DartTopic *src = dart_node_create_topic(A, "mirror-src", DART_PUB_ONLY, NULL, NULL);
+      uint8_t payload[4] = {1,2,3,4};
+      ST_CHECK(src != NULL, "metalog: mirror-src created");
+      if (src) dart_topic_send(src, dart_bytes(payload, 4));
+      dart_node_poll(A, 0);   /* flush the mirror ring into the log topic */
+    }
+
+    /* late subscriber: widen B's own handle of the error level to PUBSUB, take the replay */
+    { DartTopic *eh = dart_node_log_topic(B, DART_LOG_ERROR);
+      DartMsg m; int got_boom0=0, got_mirror=0, n_got=0;
+      int sub_ok = eh && dart_topic_set_role(eh, DART_PUBSUB) == 0;
+      ST_CHECK(sub_ok, "metalog: log subscribe");
+      for (t=0;t<1500 && !(got_boom0 && got_mirror);t++){
+          pf_pump(A,B,2);
+          while (n_got<16 && dart_topic_take(eh, &m, 0) == 1){
+              DartString txt = dart_get_string(m.data, m.schema, "text");
+              uint64_t wall = dart_get_uint(m.data, m.schema, "wall_us");
+              char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
+              memcpy(tb, txt.data, tl); tb[tl]='\0';
+              n_got++;
+              if (strcmp(tb, "boom 0") == 0 && wall) got_boom0 = 1;
+              if (strstr(tb, "unmatched-send")) got_mirror = 1;
+          }
+      }
+      ST_CHECK(n_got >= 4 && got_boom0 && got_mirror,
+               "metalog: replay + mirrored error received (n=%d boom0=%d mirror=%d)",
+               n_got, got_boom0, got_mirror); }
+
+    /* @dart/meta: B calls A's endpoint, DIRECTED at A's peer id; A answers on its
+       service thread while B blocks in the call */
+    { const DartDiscoveryPeer *ps; uint16_t cnt=0; uint32_t idA=0;
+      DartResponse rep; int rc;
+      ps = dart_node_peers(B, &cnt);
+      for (i=0;i<(int)cnt;i++)
+          if (ps[i].name.len==6 && memcmp(ps[i].name.data,"meta-a",6)==0) idA = ps[i].id;
+      ST_CHECK(idA != 0, "metalog: found A's peer id (%u)", idA);
+      dart_node_start(A);
+      rc = dart_function_call(dart_node_meta_function(B), dart_bytes(NULL,0), &rep, 3000,
+                              &(DartCallOpts){ .provider = idA });
+      dart_node_stop(A);
+      ST_CHECK(rc==1 && rep.status==DART_CALL_OK && rep.data.len>0 && rep.schema,
+               "metalog: meta call answered (rc=%d st=%d len=%u)",
+               rc, rep.status, (unsigned)rep.data.len);
+      if (rc==1 && rep.status==DART_CALL_OK && rep.schema){
+          DartBytes info = dart_get_map(rep.data, rep.schema, "info");
+          DartValue nodev, namev, topv, upt;
+          int ok_node   = dart_map_get(info, "node", &nodev);
+          int ok_name   = ok_node && dart_map_get(nodev.bytes, "name", &namev);
+          int ok_topics = dart_map_get(info, "topics", &topv);
+          ST_CHECK(ok_name && namev.bytes.len==6 && memcmp(namev.bytes.data,"meta-a",6)==0,
+                   "metalog: snapshot node.name == meta-a (%d)", ok_name);
+          ST_CHECK(ok_topics && topv.count >= 6,
+                   "metalog: snapshot lists the topics (%u)", (unsigned)(ok_topics?topv.count:0));
+          ST_CHECK(ok_node && dart_map_get(nodev.bytes, "uptime_us", &upt) && upt.v.u > 0,
+                   "metalog: snapshot uptime present");
+      } }
+
+    dart_node_close(B,1); dart_node_close(A,1);
+    dart_allocator_reset(&ba); dart_allocator_reset(&aa);
 }
 
 static int selftest_main(void){
@@ -4221,6 +4336,7 @@ static int selftest_main(void){
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
     patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */
+    metalog_checks();             /* 19e1. built-in @dart/log topics + the @dart/meta endpoint */
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
 #ifdef DART_THREADS

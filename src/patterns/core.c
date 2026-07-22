@@ -22,6 +22,9 @@ typedef struct i_DartPatterns {
     struct DartFunction *funcs;   /* linked lists, for tick/event fanout + local reflection */
     struct DartVariable *vars;
     struct DartSignal   *sigs;
+    struct DartFunction *meta;    /* the built-in @dart/meta endpoint (both sides in one handle) */
+    DartSchema          *meta_rsp_schema;   /* DartMeta { info: map } */
+    uint8_t             *meta_msg; uint32_t meta_msg_cap;   /* reply scratch, grown on demand */
 } i_DartPatterns;
 
 static void     i_dart_patterns_on_event(void *user, const DartEvent *ev);
@@ -59,6 +62,8 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
 typedef struct i_DartPending {
     struct i_DartPending *next;
     uint32_t        call_id;
+    uint32_t        dest;        /* DartCallOpts.provider: the one peer this call is directed
+                                    at (0 = undirected); its drop fails the call immediately */
     uint64_t        deadline_us;
     DartResponseFn  on_response;
     void           *user;
@@ -84,7 +89,11 @@ struct DartFunction {
     uint32_t        timeout_us;
     i_DartPending  *pending;        /* caller: outstanding calls */
     uint8_t        *sync_buf; uint32_t sync_cap;   /* sync-call reply scratch (view lifetime) */
-    uint8_t         is_provider;
+    uint8_t         is_provider;    /* a pure DEFINITION (a both-sides handle is 0 here, so
+                                       every caller-side path covers it) */
+    uint8_t         both;           /* both sides in one handle (the @dart/meta shape):
+                                       PUBSUB channels, a handler AND a pending list */
+    uint8_t         multi;          /* DartFunctionOpts.multi: duplicate authority expected */
     uint32_t       *dup_peers;      /* provider: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
 };
@@ -160,8 +169,12 @@ static void i_dart_func_flush_queued(DartFunction *fn){
         for (p = fn->pending; p; p = p->next) if (p->queued_req) pick = p;
         if (!pick) return;
         i_dart_le_w32(hdr, pick->call_id); hdr[4] = 0;
-        (void)i_dart_topic_send_hdr(fn->req, dart_bytes(hdr, DART__FN_PREFIX),
-                                    dart_bytes(pick->queued_req, pick->queued_len));
+        if (pick->dest)
+            (void)i_dart_topic_send_to(fn->req, pick->dest, dart_bytes(hdr, DART__FN_PREFIX),
+                                       dart_bytes(pick->queued_req, pick->queued_len));
+        else
+            (void)i_dart_topic_send_hdr(fn->req, dart_bytes(hdr, DART__FN_PREFIX),
+                                        dart_bytes(pick->queued_req, pick->queued_len));
         i_dart_node_sys_alloc(fn->n, pick->queued_req, 0);
         pick->queued_req = NULL; pick->queued_len = 0;
     }
@@ -182,23 +195,29 @@ static void i_dart_func_on_response(void *user, const DartMsg *msg){
     i_dart_func_free_pending(fn, p);
 }
 
-/* create both channels for a function; roles per side (provider owns the impl) */
+/* Create both channels for a function; roles per mode. mode 1 = a pure DEFINITION
+ * (SUB req / PUB rsp), 0 = a REMOTE (PUB req / SUB rsp), 2 = BOTH SIDES in one handle
+ * (PUBSUB channels, a handler and a pending list: the @dart/meta shape). Both-sides
+ * requests are DIRECTED, so a call aimed at one definition never wakes the others, and
+ * the channels keep a shallow ring (calls carry no replay). */
 static DartFunction *i_dart_function_new(DartNode *n, const char *name,
                     const DartSchema *req_schema, const DartSchema *rsp_schema,
-                    DartRequestFn on_request, void *user, const DartFunctionOpts *opts, int provider){
+                    DartRequestFn on_request, void *user, const DartFunctionOpts *opts, int mode){
     i_DartPatterns *pm; DartFunction *fn;
     char rn[DART_TOPIC_NAME_MAX + 1]; size_t nl;
     DartTopicOpts topt; int acquired;
-    DartRole req_role = provider ? DART_SUB_ONLY : DART_PUB_ONLY;
-    DartRole rsp_role = provider ? DART_PUB_ONLY : DART_SUB_ONLY;
-    i_DartSysMsgFn req_cb = provider ? i_dart_func_on_request : NULL;
-    i_DartSysMsgFn rsp_cb = provider ? NULL : i_dart_func_on_response;
+    int handles_req = (mode != 0), makes_calls = (mode != 1);
+    DartRole req_role = mode == 2 ? DART_PUBSUB : (handles_req ? DART_SUB_ONLY : DART_PUB_ONLY);
+    DartRole rsp_role = mode == 2 ? DART_PUBSUB : (handles_req ? DART_PUB_ONLY : DART_SUB_ONLY);
+    i_DartSysMsgFn req_cb = handles_req ? i_dart_func_on_request : NULL;
+    i_DartSysMsgFn rsp_cb = makes_calls ? i_dart_func_on_response : NULL;
     if (!n || !name) return NULL;
     nl = strlen(name);
     if (nl == 0 || nl + 4 > DART_TOPIC_NAME_MAX) return NULL;   /* room for the "@req"/"@rsp" suffix */
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
     topt.qos.catch_up = 0;
+    if (mode == 2) topt.qos.keep_last = 2;   /* shallow: a deep ring would pin keep_last x reply size */
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
     /* Allocate + init the handle under the lock, then RELEASE it before creating the topics:
@@ -210,7 +229,9 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     fn = pm ? (DartFunction*)i_dart_node_sys_alloc(n, NULL, sizeof *fn) : NULL;
     if (fn){
         memset(fn, 0, sizeof *fn);
-        fn->n = n; fn->pm = pm; fn->is_provider = (uint8_t)provider;
+        fn->n = n; fn->pm = pm; fn->is_provider = (uint8_t)(mode == 1);
+        fn->both = (uint8_t)(mode == 2);
+        fn->multi = (uint8_t)(opts && opts->multi);
         fn->on_request = on_request; fn->on_request_user = user;
         fn->timeout_us = (opts && opts->timeout_us) ? opts->timeout_us : DART_CALL_TIMEOUT_US;
         fn->next_call_id = 1;
@@ -220,7 +241,7 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 
     memcpy(rn, name, nl); memcpy(rn + nl, "@req", 5);   /* NUL included */
     fn->req = i_dart_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
-                              DART_KIND_FUNC_REQ, DART__FN_PREFIX, 0, 0, req_cb, fn);
+                              DART_KIND_FUNC_REQ, DART__FN_PREFIX, (uint8_t)(mode == 2), 0, req_cb, fn);
     if (!fn->req) return NULL;   /* fn stays pool-allocated: nothing routes into it yet */
     memcpy(rn + nl, "@rsp", 5);
     fn->rsp = i_dart_node_create_pattern_topic(n, rn, rsp_role, rsp_schema, &topt,
@@ -236,7 +257,7 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
 
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list (tick/event fanout) */
     fn->next = pm->funcs; pm->funcs = fn;
-    if (provider)   /* a rival provider may already be on the network */
+    if (handles_req && !fn->multi)   /* a rival provider may already be on the network */
         i_dart_pat_dup_sweep(n, fn->req, DART_KIND_FUNC_REQ, 0,
                              &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     i_dart_node_sys_unlock(n, acquired);
@@ -258,7 +279,7 @@ DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
  * normal flow-control wait (req is the caller's buffer, stable across the wait). The entry
  * must be linked before the send: a response can arrive the moment the datagram is out. */
 static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponseFn on_response,
-                                   void *user, uint32_t *id_out){
+                                   void *user, uint32_t dest, uint32_t *id_out){
     uint8_t hdr[DART__FN_PREFIX]; i_DartPending *p; int acquired, r; uint32_t id;
     if (!fn || !fn->req || !fn->rsp) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_sys_lock(fn->n);
@@ -266,6 +287,7 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponse
     if (!p){ i_dart_node_sys_unlock(fn->n, acquired); return DART_ERR_OOM; }
     id = fn->next_call_id++;
     p->call_id = id;
+    p->dest = dest;
     p->deadline_us = i_dart_node_now_us(fn->n) + fn->timeout_us;
     p->on_response = on_response; p->user = user;
     p->queued_req = NULL; p->queued_len = 0;
@@ -289,7 +311,8 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponse
     }
     i_dart_node_sys_unlock(fn->n, acquired);
     i_dart_le_w32(hdr, id); hdr[4] = 0;   /* flags reserved */
-    r = i_dart_topic_send_hdr(fn->req, dart_bytes(hdr, DART__FN_PREFIX), req);
+    r = dest ? i_dart_topic_send_to(fn->req, dest, dart_bytes(hdr, DART__FN_PREFIX), req)
+             : i_dart_topic_send_hdr(fn->req, dart_bytes(hdr, DART__FN_PREFIX), req);
     if (r != DART_OK){
         acquired = i_dart_node_sys_lock(fn->n);
         p = i_dart_func_take_pending(fn, id);   /* may already be reaped/answered: then gone */
@@ -301,8 +324,9 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponse
     return DART_OK;
 }
 
-int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response, void *user){
-    return i_dart_function_call_id(fn, req, on_response, user, NULL);
+int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
+                             void *user, const DartCallOpts *opts){
+    return i_dart_function_call_id(fn, req, on_response, user, opts ? opts->provider : 0, NULL);
 }
 
 /* blocking-call response capture: copy the payload into the function's scratch, mark done.
@@ -325,7 +349,8 @@ static void i_dart_func_sync_response(const DartResponse *r){
     c->done = 1;
 }
 
-int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms){
+int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
+                       const DartCallOpts *opts){
     i_DartSyncCtx ctx; int acquired, r; uint64_t deadline; uint32_t id;
     if (!fn) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_sys_lock(fn->n);
@@ -336,7 +361,8 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
     i_dart_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = DART_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
     ctx.provider = 0;
-    r = i_dart_function_call_id(fn, req, i_dart_func_sync_response, &ctx, &id);
+    r = i_dart_function_call_id(fn, req, i_dart_func_sync_response, &ctx,
+                                opts ? opts->provider : 0, &id);
     if (r != DART_OK) return r;
     deadline = i_dart_node_now_us(fn->n)
              + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u : fn->timeout_us) + 20000u;
@@ -408,6 +434,71 @@ int dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus stat
     /* send outside the lock: a deferred completion from an app thread engages backpressure
        (rsp is the app's buffer); from a callback it commits reentrantly as usual */
     return i_dart_topic_send_to(rsp_topic, caller, dart_bytes(hdr, DART__FN_PREFIX), rsp);
+}
+
+/* ---- the built-in @dart/meta endpoint (patterns/core.h) ----------------------------------
+ * Hosted at node open (the runtime's i_dart_patterns_meta_open seam) as a BOTH-SIDES multi
+ * function: every node is a definition (serving its own i_dart_node_snapshot) and a remote
+ * (calling any peer's, directed by DartCallOpts.provider). The node builds the snapshot;
+ * this layer only wires it into the function machinery. */
+
+/* node-pool DartAllocFn adapter (the schema builders take the generic hook shape) */
+static void *i_dart_pat_alloc(void *user, void *ptr, size_t size){
+    return i_dart_node_sys_alloc((DartNode*)user, ptr, size);
+}
+
+static void i_dart_meta_on_request(DartRequest *request, void *user){
+    DartNode *n = (DartNode*)user;
+    i_DartPatterns *pm = (i_DartPatterns*)*i_dart_node_sys_slot(n);
+    uint32_t mask = 0, need;
+    DartBytes body;
+    if (!pm || !pm->meta_rsp_schema){ dart_request_fail(request, dart_bytes(NULL, 0)); return; }
+    if (request->data.len >= 4) mask = i_dart_le_r32(request->data.data);   /* empty = everything */
+    body = i_dart_node_snapshot(n, mask);
+    if (!body.data){ dart_request_fail(request, dart_bytes(NULL, 0)); return; }
+    need = dart_schema_msg_min(pm->meta_rsp_schema) + (uint32_t)body.len;
+    if (pm->meta_msg_cap < need){
+        uint8_t *nb = (uint8_t*)i_dart_node_sys_alloc(n, pm->meta_msg, need);
+        if (!nb){ dart_request_fail(request, dart_bytes(NULL, 0)); return; }
+        pm->meta_msg = nb; pm->meta_msg_cap = need;
+    }
+    if (!dart_schema_message_default(pm->meta_rsp_schema, pm->meta_msg, pm->meta_msg_cap)
+        || !dart_set_map(pm->meta_msg, pm->meta_msg_cap, pm->meta_rsp_schema, "info", body)){
+        dart_request_fail(request, dart_bytes(NULL, 0));
+        return;
+    }
+    dart_request_reply(request, dart_bytes(pm->meta_msg,
+                dart_schema_msg_len(pm->meta_rsp_schema, pm->meta_msg, pm->meta_msg_cap)));
+}
+
+/* the node-open seam (declared in node/runtime.c): host @dart/meta on this node */
+void i_dart_patterns_meta_open(DartNode *n){
+    i_DartPatterns *pm;
+    DartSchema *rsp;
+    DartFunctionOpts fo;
+    int acquired;
+    if (!n) return;
+    acquired = i_dart_node_sys_lock(n);
+    pm = i_dart_patterns_get(n);
+    if (pm && !pm->meta_rsp_schema)
+        pm->meta_rsp_schema = dart_schema_compile(i_dart_pat_alloc, n, "DartMeta { info: map }", NULL);
+    rsp = pm ? pm->meta_rsp_schema : NULL;
+    i_dart_node_sys_unlock(n, acquired);
+    if (!pm || pm->meta || !rsp) return;   /* OOM degrades: no endpoint, node still healthy */
+    memset(&fo, 0, sizeof fo);
+    fo.multi = 1;                          /* every node hosting one is the design */
+    pm->meta = i_dart_function_new(n, "@dart/meta", NULL /* raw 4-byte mask */, rsp,
+                                   i_dart_meta_on_request, n, &fo, 2 /* both sides */);
+}
+
+DartFunction *dart_node_meta_function(DartNode *n){
+    i_DartPatterns *pm; DartFunction *meta; int acquired;
+    if (!n) return NULL;
+    acquired = i_dart_node_sys_lock(n);
+    pm = (i_DartPatterns*)*i_dart_node_sys_slot(n);
+    meta = pm ? pm->meta : NULL;
+    i_dart_node_sys_unlock(n, acquired);
+    return meta;
 }
 
 /* ---- VARIABLES -------------------------------------------------------------------------- */
@@ -914,7 +1005,7 @@ static void i_dart_pat_dup_check_peer(i_DartPatterns *pm, uint32_t peer){
     DartFunction *fn; DartVariable *v;
     if (!p) return;
     for (fn = pm->funcs; fn; fn = fn->next)
-        if (fn->is_provider)
+        if ((fn->is_provider || fn->both) && !fn->multi)   /* multi: rivals are the design */
             i_dart_pat_dup_check(pm->n, p, fn->req, DART_KIND_FUNC_REQ, 0,
                                  &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     for (v = pm->vars; v; v = v->next)
@@ -964,6 +1055,24 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
     return soonest;
 }
 
+/* fail-and-remove the pending calls DIRECTED at a lost peer (a .provider call can only
+ * ever be answered by that peer, so waiting out the timeout serves nothing) */
+static void i_dart_func_reap_dest(DartFunction *fn, uint32_t dest){
+    i_DartPending **pp = &fn->pending, *p;
+    while ((p = *pp) != NULL){
+        if (p->dest == dest){
+            *pp = p->next;
+            {   DartResponse r; r.status = DART_CALL_PEER_LOST; r.data = dart_bytes(NULL,0);
+                r.schema = NULL; r.provider = 0; r.user = p->user;
+                if (p->on_response) p->on_response(&r);
+            }
+            i_dart_func_free_pending(fn, p);
+            continue;
+        }
+        pp = &p->next;
+    }
+}
+
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn; uint64_t soonest = 0;
@@ -1002,10 +1111,14 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
     /* a provider dropped: a caller with no LIVE provider left can never be answered, so fail
        its outstanding calls now with PEER_LOST instead of waiting out the timeout. The live
        count excludes dormant peers: dart_topic_match_count keeps counting the dropped peer
-       (its lane is preserved for resume), so it can never see the loss. */
-    for (fn = pm->funcs; fn; fn = fn->next)
-        if (!fn->is_provider && fn->pending && i_dart_topic_live_match_count(fn->req) == 0)
+       (its lane is preserved for resume), so it can never see the loss. A call DIRECTED at
+       the dropped peer fails regardless of who else is alive. */
+    for (fn = pm->funcs; fn; fn = fn->next){
+        if (fn->is_provider || !fn->pending) continue;
+        i_dart_func_reap_dest(fn, ev->peer);
+        if (fn->pending && i_dart_topic_live_match_count(fn->req) == 0)
             i_dart_func_reap(fn, 0, DART_CALL_PEER_LOST, 1);
+    }
 }
 
 /* ---- REFLECTION: the entity fold ---------------------------------------------------------

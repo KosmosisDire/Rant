@@ -72,6 +72,15 @@ typedef struct {
                                             a send commits immediately (dropped as before, but
                                             loudly: DART_E_UNMATCHED_SEND). GUIs disable it and
                                             poll dart_topic_ready instead. */
+    uint8_t               disable_logs;  /* 1 = do not create the built-in @dart/log/{error,warn,
+                                            info} topics (dart_node_log then returns
+                                            DART_ERR_NOSYS). Saves their history memory on
+                                            embedded; see "logs" below. */
+    uint8_t               disable_meta;  /* 1 = do not host the built-in @dart/meta introspection
+                                            function (also implied by DART_NO_PATTERNS). */
+    uint8_t               log_errors;    /* 1 = mirror this node's internal DART_ERROR events onto
+                                            @dart/log/error (coalesced per poll pass; see "logs").
+                                            Needs the log topics (ignored under disable_logs). */
     DartNodeNet         net;           /* addressing/sockets (optional) */
     DartNodeDiscovery   discovery;     /* discovery cadence (optional) */
 } DartNodeOpts;
@@ -376,6 +385,65 @@ int      dart_node_settle(DartNode *n, int timeout_ms);
 void     dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv);
 #endif
 
+/* Cumulative per-topic message counters, always on: messages/bytes this node's app
+ * committed to the topic (send calls that returned DART_OK, zero-subscriber early-outs
+ * included) and messages/bytes delivered to this node (accepted into the callback or
+ * the consumer queue). Any out-pointer may be NULL. Also carried in the @dart/meta
+ * snapshot's topics section. */
+void     dart_topic_counts(DartTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
+                           uint64_t *rx_msgs, uint64_t *rx_bytes);
+
+/* ---- logs: the built-in @dart/log/{error,warn,info} topics --------------------------
+ * Every node hosts three SHARED reliable log topics (plain topics, created at open,
+ * default on; opts.disable_logs strips them). Identity and history come free from the
+ * transport: DartMsg.publisher_name/id says who logged, and catch_up replay is PER
+ * WRITER LANE, so a late subscriber (the explorer) receives each node's last
+ * keep_last lines per level the moment it joins. The record schema is
+ *   DartLog { wall_us: u64, mono_us: u64, text: string }
+ * (level implied by the topic; wall_us compares across nodes, mono_us orders within
+ * one). qos: reliable, keep_last = catch_up = 16 (8 for info), NO backpressure wait:
+ * a slow or absent subscriber can never block the app; it just loses the oldest lines
+ * (KEEP_LAST). dart_node_log is thread-safe (the ordinary send path) and legal from
+ * callbacks. To CONSUME a level, take your node's own handle from dart_node_log_topic,
+ * widen its role to DART_PUBSUB (dart_topic_set_role), and read it like any topic
+ * (on_message, or take/dispatch): you then receive every OTHER node's lines at that
+ * level, never your own (a node does not deliver to itself). */
+typedef enum { DART_LOG_ERROR = 0, DART_LOG_WARN = 1, DART_LOG_INFO = 2 } DartLogLevel;
+#ifndef DART_LOG_MAX
+#define DART_LOG_MAX 512   /* max formatted log-text bytes (longer output is truncated) */
+#endif
+/* printf-style publish on the level's log topic. Returns DART_OK, DART_ERR_NOSYS when
+ * the log topics are disabled, or a negative DartResult from the send. */
+int          dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...);
+/* The node's own handle for a level's log topic (NULL when disabled): subscribe,
+ * take/dispatch, or query it like any other topic. */
+DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
+
+/* ---- the @dart/meta introspection snapshot ------------------------------------------
+ * Section mask bits for a @dart/meta request (a 4-byte LE u32 payload; empty or 0 =
+ * everything). The response is a message of the schema `DartMeta { info: map }`: the
+ * map body is self-describing (dart_map_get / dart_map_at decode it with no schema),
+ * one top-level key per requested section:
+ *   "node"   uptime_us, wall_us, name, mem in_use/peak/alloc_calls, evicted_unsent,
+ *            backpressure waited_us/waits, peers/max_peers, topics/max_topics,
+ *            shm tx/rx, last_error (+ text)
+ *   "proc"   pid, cpu_us, rss, peak_rss -- PER PROCESS (dedup by pid across nodes);
+ *            absent where the platform offers no measurement (DART_PROC_STATS off:
+ *            auto-detected like DART_SHM, DART_NO_PROC_STATS forces it off, and a
+ *            platform layer without it implements nothing; see platform/core.h)
+ *   "topics" an array, one nested map per created topic: index, name, kind, role,
+ *            reliability/keep_last/catch_up, matched subs/pubs, pending candidates,
+ *            tx/rx msgs+bytes, the repair counters, consumer-queue stats
+ *   "peers"  an array, one nested map per known peer: id, name, active, ip, port,
+ *            age_us, publish_to/receive_from match counts
+ * The endpoint itself lives in the patterns layer (dart_node_meta_function,
+ * patterns/core.h); this mask and the snapshot builder seam below are node-level so
+ * the data works without patterns compiled in. */
+#define DART_META_NODE   0x1u
+#define DART_META_PROC   0x2u
+#define DART_META_TOPICS 0x4u
+#define DART_META_PEERS  0x8u
+
 /* ---- internal hooks for the patterns layer (src/patterns) ---------------------------
  * The patterns layer (functions / variables / signals) builds on a node but needs three
  * node-internal seams the public API does not expose: create a topic carrying an entity
@@ -434,6 +502,11 @@ uint8_t    i_dart_topic_kind (const DartTopic *topic);   /* DartTopicKind */
 uint8_t    i_dart_topic_role (const DartTopic *topic);   /* DartRole (current) */
 DartString i_dart_topic_name (const DartTopic *topic);   /* the stable name copy */
 uint16_t   i_dart_node_topic_count(DartNode *n);         /* created topics (handles 0..count) */
+/* Build the introspection snapshot for the DART_META_* mask (0 = all sections) into a
+ * node-owned grown buffer: a serialize-layer MAP body (feed to dart_map_* or wrap in a
+ * schema message). A view valid until the next call; {NULL,0} on OOM. The @dart/meta
+ * handler (patterns) serves this; call under the node lock. */
+DartBytes i_dart_node_snapshot(DartNode *n, uint32_t sections);
 
 #ifdef __cplusplus
 }

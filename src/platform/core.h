@@ -88,6 +88,37 @@ int      i_dart_plat_random(void *buf, size_t len);
 /* Best-effort host identity for a UUID fallback when the CSPRNG is unavailable. */
 size_t   i_dart_plat_hostname(char *buf, size_t cap);   /* returns bytes written */
 uint64_t i_dart_plat_pid(void);
+/* Wall-clock microseconds since the Unix epoch, for log timestamps that must compare
+ * across nodes (the monotonic clock's epoch is arbitrary and per host). */
+uint64_t i_dart_plat_wall_us(void);
+
+/* Process-usage stats follow the DART_SHM / DART_THREADS flag shape: DART_PROC_STATS is
+ * AUTO-DETECTED where the bundled layer can measure (Windows; POSIX with getrusage:
+ * Linux/macOS/BSD), off elsewhere (FreeRTOS / bare metal have no per-process
+ * accounting), and DART_NO_PROC_STATS always wins. When OFF the function below is
+ * ABSENT and every consumer is compiled out with it (the @dart/meta snapshot simply
+ * omits its proc section; all other stats are unaffected), so a platform layer with no
+ * measurement implements NOTHING. A new platform layer that can measure declares
+ * support by defining DART_PROC_STATS itself. */
+#if !defined(DART_PROC_STATS) && !defined(DART_NO_PROC_STATS)
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__)
+    #define DART_PROC_STATS
+  #endif
+#endif
+#if defined(DART_PROC_STATS) && defined(DART_NO_PROC_STATS)
+  #undef DART_PROC_STATS       /* both set: the opt-out wins */
+#endif
+#ifdef DART_PROC_STATS
+/* Process-wide resource usage for the introspection endpoint's proc section:
+ * cumulative CPU microseconds (user + kernel), current resident set bytes, and peak
+ * resident bytes. Any out-pointer may be NULL. Returns 1 on success, 0 on a transient
+ * OS failure; a platform may fill peak but not current (current then reports 0). Per
+ * PROCESS, not per node: several nodes in one process report the same numbers
+ * (consumers dedup by pid). */
+int      i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes);
+#endif /* DART_PROC_STATS */
 
 /* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =
  * allocate, size 0 = free (returns NULL). The single heap dependency, so the node

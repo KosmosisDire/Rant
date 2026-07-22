@@ -82,7 +82,23 @@ typedef void (*DartRequestFn)(DartRequest *request, void *user);
 typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
     uint32_t timeout_us;            /* remote-side call timeout; 0 = DART_CALL_TIMEOUT_US */
+    uint8_t  multi;                 /* many definitions of this function are EXPECTED, so the
+                                       duplicate-authority diagnostic is suppressed for it.
+                                       Direct a call at one definition with DartCallOpts
+                                       .provider; an undirected call reaches EVERY definition
+                                       and the first answer wins. The built-in @dart/meta is
+                                       the canonical user; an ordinary function should keep
+                                       the one-definition contract (leave it 0). */
 } DartFunctionOpts;
+
+/* Optional per-call config (a trailing compound literal; NULL = defaults). */
+typedef struct {
+    uint32_t provider;              /* peer id to DIRECT the call at: only that peer receives
+                                       the request (found via dart_node_peers / PEER_UP). 0 =
+                                       undirected: every matched definition receives it, the
+                                       first answer wins. A directed call whose peer drops
+                                       fails with DART_CALL_PEER_LOST immediately. */
+} DartCallOpts;
 
 /* Create the DEFINITION (the implementation lives here): subscribes requests, publishes
  * replies, runs on_request for each request (NULL answers DART_CALL_NO_HANDLER). Create a
@@ -98,18 +114,32 @@ DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
 
 /* Call the function: blocks driving the node loop until the response arrives or timeout_ms
  * elapses (negative = the function's default timeout). *out is filled; out->data views a
- * manager-owned buffer valid until the next blocking call on this function. Returns 1
- * (answered, read out->status: OK, APP_ERROR, NO_HANDLER, or PEER_LOST), 0 (timed out,
- * out->status = DART_CALL_TIMEOUT whether the local wait or the pending deadline expired
- * first), or a negative DartResult. Refused (DART_ERR_STATE) from inside a callback or while
- * a service thread owns the loop. */
-int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms);
+ * manager-owned buffer valid until the next blocking call on this function. opts may be
+ * NULL (undirected). Returns 1 (answered, read out->status: OK, APP_ERROR, NO_HANDLER, or
+ * PEER_LOST), 0 (timed out, out->status = DART_CALL_TIMEOUT whether the local wait or the
+ * pending deadline expired first), or a negative DartResult. Refused (DART_ERR_STATE) from
+ * inside a callback or while a service thread owns the loop. */
+int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
+                        const DartCallOpts *opts);
 /* The async form: returns as soon as the request is committed, then on_response (NULL =
  * fire-and-forget: use a signal instead if you truly do not care) fires once with the
- * outcome. Returns DART_OK, or a negative DartResult. */
-int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response, void *user);
+ * outcome. opts may be NULL (undirected). Returns DART_OK, or a negative DartResult. */
+int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
+                              void *user, const DartCallOpts *opts);
 /* Providers matched (remote side) / callers matched (definition side). */
 int  dart_function_match_count(DartFunction *fn);
+
+/* ---- the built-in @dart/meta introspection endpoint ----------------------------------
+ * Every node (patterns compiled in, opts.disable_meta off) hosts a "@dart/meta" function
+ * AND can call every other node's: its channels are PUBSUB on both nodes, created with
+ * .multi (every node being a definition is the design, not a duplicate-authority fault)
+ * and DIRECTED requests, so a call aimed at one peer never wakes the rest. Ask with
+ * DartCallOpts { .provider = peer_id } and an optional 4-byte LE DART_META_* section
+ * mask as the payload (empty = everything); the reply is a `DartMeta { info: map }`
+ * message whose map body is documented at the mask in node/runtime.h. An UNDIRECTED
+ * call reaches every node and returns the first answer. Under a service thread / from a
+ * callback use dart_function_call_async, as with any function. */
+DartFunction *dart_node_meta_function(DartNode *n);   /* NULL when disabled / not built */
 
 /* ---- in the handler callback (DartRequestFn) ----------------------------------------- */
 void      dart_request_reply(DartRequest *request, DartBytes rsp);   /* answer OK */

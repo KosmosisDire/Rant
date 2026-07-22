@@ -2012,7 +2012,7 @@ public:
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::DartResponse out;
         std::memset(&out, 0, sizeof out);
-        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms);
+        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, nullptr);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
@@ -2034,7 +2034,7 @@ public:
             impl_->async_live.insert(box);
         }
         int rc = detail::dart_function_call_async(fn_, priv::to_c(req),
-                                                  &RemoteFunction::async_tramp, box);
+                                                  &RemoteFunction::async_tramp, box, nullptr);
         if (rc != 0) {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.erase(box);
