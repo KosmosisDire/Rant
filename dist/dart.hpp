@@ -16766,13 +16766,41 @@ private:
     friend class Node;
 };
 
+/* SchemaField: one field of a reflected schema, an OWNED copy (safe to keep). Mirrors
+ * Schema::Field plus, for an enum, its option table. The flat depth-first order matches
+ * Schema::field_at -- a struct's members directly follow it one depth deeper, and offsets
+ * are message-absolute (0 for the variable-tail kinds vstring/varr/map). */
+struct SchemaField {
+    std::string name;
+    FieldType   kind    = FieldType::U8;
+    FieldType   elem    = FieldType::U8;   /* Array element type, or Enum backing type */
+    uint16_t    count   = 0;               /* Array element / Enum option count */
+    uint16_t    depth   = 0;               /* 0 = top level; n = member of the struct n levels up */
+    uint16_t    str_cap = 0;               /* String capacity (String fields and String-element arrays) */
+    uint32_t    offset  = 0, size = 0;
+    struct Option { std::string name; int64_t value = 0; };
+    std::vector<Option> variants;          /* Enum only: its named options, declaration order */
+};
+
+/* SchemaInfo: a reflected schema as an OWNED snapshot (safe to keep) -- its root name,
+ * hash and fixed size, plus the flat field table. `empty()` when the entity is untyped
+ * or its details are not yet fetched. This is what a mesh debugger renders per entity,
+ * and what lets it decode live messages of a topic it merely discovered. */
+struct SchemaInfo {
+    std::string              name;
+    uint64_t                 hash = 0;   /* the schema identity (matches Entity::schema_hash) */
+    uint32_t                 size = 0;   /* fixed-section length; where the variable tail begins */
+    std::vector<SchemaField> fields;
+    bool empty() const { return fields.empty() && hash == 0; }
+};
+
 /* Entity: one network entity, as advertised by a peer or hosted locally. Pattern
  * channels are folded (a function's req/rsp pair is ONE function entity; a variable's
  * set channel merges into its value entity as `writable`); plain topics pass through.
- * A copied snapshot, safe to keep. `name` is the base name with any @-mangling
- * stripped; until the peer's details are fetched it is the "0x????????" hash
- * placeholder (details arrive within an RTT; NodeOptions::fetch_details covers
- * topics this node does not share). */
+ * A copied snapshot, safe to keep (including the schema field tables). `name` is the
+ * base name with any @-mangling stripped; until the peer's details are fetched it is the
+ * "0x????????" hash placeholder (details arrive within an RTT; NodeOptions::fetch_details
+ * covers topics this node does not share, so a full mesh debugger sets it). */
 struct Entity {
     EntityKind  kind = EntityKind::Topic;
     std::string name;
@@ -16786,6 +16814,8 @@ struct Entity {
     uint32_t    hash  = 0;            /* the primary channel's low-32 name hash (the placeholder) */
     uint64_t    schema_hash     = 0;  /* value/request/payload schema identity (0 = untyped/unfetched) */
     uint64_t    rsp_schema_hash = 0;  /* FUNCTION only: the response schema identity */
+    SchemaInfo  schema;               /* value/request/payload schema field table (empty = untyped/unfetched) */
+    SchemaInfo  rsp_schema;           /* FUNCTION only: the response schema field table */
 };
 
 /* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Peer
@@ -17974,6 +18004,43 @@ private:
     }
 
 #ifndef DART_NO_PATTERNS
+    /* Decode a node-owned schema (valid under the node lock the reflection call holds)
+     * into an owned SchemaInfo, so the returned Entity stays safe to keep. */
+    static SchemaInfo schema_info_from(const detail::DartSchema* s) {
+        SchemaInfo si;
+        if (!s) return si;
+        detail::DartString nm = detail::dart_schema_name(s);
+        if (nm.data) si.name.assign(nm.data, nm.len);
+        si.hash = detail::dart_schema_hash(s);
+        si.size = detail::dart_schema_size(s);
+        uint16_t n = detail::dart_schema_field_count(s);
+        si.fields.reserve(n);
+        for (uint16_t i = 0; i < n; i++) {
+            detail::DartSchemaFieldInfo f;
+            if (!detail::dart_schema_field_at(s, i, &f)) break;
+            SchemaField sf;
+            if (f.name.data) sf.name.assign(f.name.data, f.name.len);
+            sf.kind = static_cast<FieldType>(f.kind);
+            sf.elem = static_cast<FieldType>(f.elem);
+            sf.count = f.count; sf.depth = f.depth; sf.str_cap = f.str_cap;
+            sf.offset = f.offset; sf.size = f.size;
+            if (sf.kind == FieldType::Enum) {
+                uint16_t vc = detail::dart_schema_enum_count(s, i);
+                sf.variants.reserve(vc);
+                for (uint16_t k = 0; k < vc; k++) {
+                    int64_t val; detail::DartString vn;
+                    if (!detail::dart_schema_enum_variant(s, i, k, &val, &vn)) continue;
+                    SchemaField::Option o;
+                    o.value = val;
+                    if (vn.data) o.name.assign(vn.data, vn.len);
+                    sf.variants.push_back(std::move(o));
+                }
+            }
+            si.fields.push_back(std::move(sf));
+        }
+        return si;
+    }
+
     static Entity entity_from(const detail::DartEntityInfo& ei) {
         Entity e;
         e.kind = static_cast<EntityKind>(ei.kind);
@@ -17993,6 +18060,8 @@ private:
         e.hash  = ei.hash;
         e.schema_hash     = ei.schema_hash;
         e.rsp_schema_hash = ei.rsp_schema_hash;
+        e.schema     = schema_info_from(ei.schema);
+        e.rsp_schema = schema_info_from(ei.rsp_schema);
         return e;
     }
 #endif
