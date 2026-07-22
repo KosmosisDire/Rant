@@ -25,6 +25,30 @@ const OP_SIGNAL = 0x03; /* signal emit / signal fired */
 const OP_CALL = 0x04; /* call / call response */
 const OP_REQUEST = 0x05; /* request reply / request */
 const CALL_STATUS = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled"];
+/* @dart/meta section mask (OR the bits; 0 = every section). Mirrors DART_META_*. */
+const MetaSection = { Node: 0x1, Proc: 0x2, Topics: 0x4, Peers: 0x8, All: 0 };
+/* one reflected-entity reply row -> Entity (camel-cases the hex hash fields) */
+function toEntity(e) {
+    const out = {
+        kind: e.kind, name: e.name, provides: !!e.provides, consumes: !!e.consumes,
+        reliable: !!e.reliable, index: e.index, hash: e.hash
+    };
+    if (e.writable !== undefined)
+        out.writable = !!e.writable;
+    if (e.forceable !== undefined)
+        out.forceable = !!e.forceable;
+    if (e.incomplete)
+        out.incomplete = true;
+    if (e.schema_hash !== undefined)
+        out.schemaHash = e.schema_hash;
+    if (e.rsp_schema_hash !== undefined)
+        out.rspSchemaHash = e.rsp_schema_hash;
+    if (e.schema)
+        out.schema = e.schema;
+    if (e.rsp)
+        out.rspSchema = e.rsp;
+    return out;
+}
 const SCALAR_BYTES = {
     u8: 1, u16: 2, u32: 4, u64: 8, i8: 1, i16: 2, i32: 4, i64: 8, f32: 4, f64: 8, bool: 1,
 };
@@ -640,6 +664,7 @@ class VarHandle {
         this._raw = undefined;
         this._waiters = new Set();
         this._onChange = null;
+        this._onWrite = null;
     }
     /* the cached latest value as a plain object (undefined = none seen yet) */
     get() { return this._value; }
@@ -666,6 +691,10 @@ class VarHandle {
         if (handler && this._value !== undefined)
             handler(this._value, { forced: this.forced });
     }
+    /* Observe EVERY applied write (not just state changes; no replay). Requires the
+     * variable to have been created with onWrite:true so the bridge pushes them. One
+     * handler (re-register replaces, null clears). */
+    onWrite(handler) { this._onWrite = handler; }
     set(value) { this._sendVar(0, this.layout.encode(value)); }
     force(value) { this._sendVar(1, this.layout.encode(value)); }
     unforce() { this._sendVar(2, new Uint8Array(0)); }
@@ -690,6 +719,12 @@ class VarHandle {
         this._waiters.clear();
         if (this._onChange)
             this._onChange(this._value, { forced });
+    }
+    /* a write-event frame (bit1 set): fire onWrite only; the cache is maintained by the
+     * on_change frames, so a write is not double-counted. */
+    _write(payload, forced) {
+        if (this._onWrite)
+            this._onWrite(this.layout.decode(payload), { forced });
     }
     _match(_m) { }
 }
@@ -838,12 +873,17 @@ class DartNode {
                 ch?._deliver(view.getUint32(3, true), b.subarray(7));
                 return;
             }
-            case OP_VAR: { /* [u16 ent][u8 forced][payload] */
+            case OP_VAR: { /* [u16 ent][u8 flags][payload]; flags bit0=forced bit1=write-event */
                 if (b.length < 4)
                     return;
                 const v = this._entities.get(view.getUint16(1, true));
-                if (v instanceof VarHandle)
-                    v._update(b.subarray(4), b[3] !== 0);
+                if (v instanceof VarHandle) {
+                    const forced = (b[3] & 1) !== 0;
+                    if (b[3] & 2)
+                        v._write(b.subarray(4), forced);
+                    else
+                        v._update(b.subarray(4), forced);
+                }
                 return;
             }
             case OP_SIGNAL: { /* [u16 ent][u32 emitter][payload] */
@@ -942,6 +982,7 @@ class DartNode {
             ...(opts.allowForce ? { allow_force: true } : {}),
             ...(opts.catch_up ? { catch_up: opts.catch_up } : {}),
             ...(opts.backpressure_wait_ms ? { backpressure_wait_ms: opts.backpressure_wait_ms } : {}),
+            ...(opts.onWrite ? { on_write: true } : {}),
         });
         const v = new VariableDefinition(this, name, r);
         this._entities.set(v.id, v);
@@ -949,9 +990,11 @@ class DartNode {
             v.set(opts.initial);
         return v;
     }
-    /* Access a variable owned elsewhere. */
-    async remoteVariable(name, schema) {
-        const r = await this._request({ op: "remote_variable", name, ...(schema ? { schema } : {}) });
+    /* Access a variable owned elsewhere. Pass { onWrite: true } to also receive every
+     * applied write (route it via RemoteVariable.onWrite). */
+    async remoteVariable(name, schema, opts = {}) {
+        const r = await this._request({ op: "remote_variable", name,
+            ...(schema ? { schema } : {}), ...(opts.onWrite ? { on_write: true } : {}) });
         const v = new RemoteVariable(this, name, r);
         this._entities.set(v.id, v);
         return v;
@@ -988,6 +1031,33 @@ class DartNode {
     async onLog(handler, levels = ["error", "warn", "info"]) {
         this._onLog = handler;
         await this._request({ op: "log_subscribe", levels });
+    }
+    /* ---- introspection (query-based, pull-only) ---------------------------------- */
+    /* Snapshot the discovered peer table (a local read; resolves immediately). */
+    async peers() {
+        const r = await this._request({ op: "peers" });
+        return r.peers.map((p) => ({
+            id: p.id, name: p.name, address: p.address, active: p.active, fragmentSize: p.fragment_size
+        }));
+    }
+    /* The entities THIS node hosts (its functions/variables/signals, then its topics). */
+    async entities() {
+        const r = await this._request({ op: "entities" });
+        return r.entities.map(toEntity);
+    }
+    /* What one peer advertises, folded into entities (a local read of this node's view;
+     * names need fetch_details or a shared topic to resolve past the hash placeholder). */
+    async peerEntities(peerId) {
+        const r = await this._request({ op: "peer_entities", peer: peerId });
+        return r.entities.map(toEntity);
+    }
+    /* Fetch a peer's @dart/meta snapshot (an async directed call; works under the
+     * bridge's service thread). Never rejects on status: inspect the returned `status`.
+     * sections = OR of MetaSection (default All). */
+    async meta(peerId, sections = MetaSection.All) {
+        const r = await this._request({ op: "meta", peer: peerId, sections });
+        return { valid: !!r.valid, status: CALL_STATUS[r.status] ?? "cancelled",
+            provider: r.provider ?? 0, info: r.info ?? {} };
     }
     /* Close the connection; the bridge closes the node with a BYE. Outstanding call
      * promises settle with status "cancelled". */

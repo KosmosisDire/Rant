@@ -29,6 +29,7 @@ type TopicOpts = {
     repair_delay_ms?: number;
     backpressure_wait_ms?: number;
     shm_max_bytes?: number;
+    max_rate_hz?: number;
 };
 type NodeOpts = {
     name?: string;
@@ -45,6 +46,7 @@ type NodeOpts = {
     disable_logs?: boolean;
     disable_meta?: boolean;
     disable_error_logs?: boolean;
+    fetch_details?: boolean;
     onEvent?: (e: DartEvent) => void;
 };
 type DartEvent = {
@@ -62,6 +64,43 @@ type LogLine = {
     text: string;
 };
 type CallStatusName = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled";
+type Peer = {
+    id: number;
+    name: string;
+    address: string;
+    active: boolean;
+    fragmentSize: number;
+};
+type EntityKindName = "topic" | "function" | "variable" | "signal";
+type Entity = {
+    kind: EntityKindName;
+    name: string;
+    provides: boolean;
+    consumes: boolean;
+    reliable: boolean;
+    writable?: boolean;
+    forceable?: boolean;
+    incomplete?: boolean;
+    index: number;
+    hash: number;
+    schemaHash?: string;
+    rspSchemaHash?: string;
+    schema?: SchemaBlock;
+    rspSchema?: SchemaBlock;
+};
+declare const MetaSection: {
+    readonly Node: 1;
+    readonly Proc: 2;
+    readonly Topics: 4;
+    readonly Peers: 8;
+    readonly All: 0;
+};
+type MetaSnapshot = {
+    valid: boolean;
+    status: CallStatusName;
+    provider: number;
+    info: Record<string, any>;
+};
 type Response<Rsp = any> = {
     ok: boolean;
     status: CallStatusName;
@@ -86,6 +125,10 @@ type VariableDefOpts<T> = {
     allowForce?: boolean;
     catch_up?: number;
     backpressure_wait_ms?: number;
+    onWrite?: boolean;
+};
+type RemoteVarOpts = {
+    onWrite?: boolean;
 };
 declare class Layout {
     size: number | undefined;
@@ -191,16 +234,19 @@ declare class VarHandle<T = any> {
     _raw: Uint8Array | undefined;
     _waiters: Set<VarWaiter>;
     _onChange: VarChangeHandler<T> | null;
+    _onWrite: VarChangeHandler<T> | null;
     constructor(node: DartNode, name: string, r: any);
     get(): T | undefined;
     raw(): Uint8Array | undefined;
     wait(timeoutMs?: number): Promise<boolean>;
     onChange(handler: VarChangeHandler<T> | null): void;
+    onWrite(handler: VarChangeHandler<T> | null): void;
     set(value: T): void;
     force(value: T): void;
     unforce(): void;
     _sendVar(mode: number, payload: Uint8Array): void;
     _update(payload: Uint8Array, forced: boolean): void;
+    _write(payload: Uint8Array, forced: boolean): void;
     _match(_m: any): void;
 }
 declare class VariableDefinition<T = any> extends VarHandle<T> {
@@ -254,7 +300,7 @@ declare class DartNode {
     functionDefinition<Req = any, Rsp = any>(name: string, reqSchema: string | null, rspSchema: string | null, handler: FunctionHandler<Req, Rsp>): Promise<FunctionDefinition<Req, Rsp>>;
     remoteFunction<Req = any, Rsp = any>(name: string, reqSchema: string | null, rspSchema: string | null): Promise<RemoteFunction<Req, Rsp>>;
     variableDefinition<T = any>(name: string, schema: string | null, opts?: VariableDefOpts<T>): Promise<VariableDefinition<T>>;
-    remoteVariable<T = any>(name: string, schema: string | null): Promise<RemoteVariable<T>>;
+    remoteVariable<T = any>(name: string, schema: string | null, opts?: RemoteVarOpts): Promise<RemoteVariable<T>>;
     signal<T = any>(name: string, schema: string | null, handler?: SignalHandler<T>): Promise<DartSignal<T>>;
     settle(timeoutMs?: number): Promise<boolean>;
     log(level: LogLevelName, text: string): Promise<void>;
@@ -262,6 +308,10 @@ declare class DartNode {
     logWarn(text: string): Promise<void>;
     logInfo(text: string): Promise<void>;
     onLog(handler: (line: LogLine) => void, levels?: LogLevelName[]): Promise<void>;
+    peers(): Promise<Peer[]>;
+    entities(): Promise<Entity[]>;
+    peerEntities(peerId: number): Promise<Entity[]>;
+    meta(peerId: number, sections?: number): Promise<MetaSnapshot>;
     close(): void;
 }
-export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, DartSignal, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SignalInfo, type SubscriberHandler, type FunctionHandler, type SignalHandler, type VariableDefOpts, type LogLevelName, type LogLine, };
+export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, DartSignal, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SignalInfo, type SubscriberHandler, type FunctionHandler, type SignalHandler, type VariableDefOpts, type RemoteVarOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };

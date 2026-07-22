@@ -41,11 +41,11 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 4;
+static const int kProtoVersion = 5;
 
 /* Binary frame ops (byte 0). One value space, meaning per direction:
  *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][payload])
- *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 forced][payload])
+ *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 flags][payload]; flags bit0=forced bit1=write-event)
  *   0x03  signal emit (c->s: [u16 ent][payload])      signal fired (s->c: [u16 ent][u32 emitter][payload])
  *   0x04  call (c->s: [u16 ent][u32 call][payload])   call response (s->c: [u32 call][u8 status][u32 provider][payload])
  *   0x05  request reply (c->s: [u32 req][u8 status][payload])   request (s->c: [u16 ent][u32 req][payload]) */
@@ -181,6 +181,91 @@ static json fields_json(const dart::Schema &s){
 /* one schema's layout block ({size, hash, fields}), as `topic` replies it */
 static json schema_json(const dart::Schema &s){
     return { {"size", s.size()}, {"hash", hex64(s.hash())}, {"fields", fields_json(s)} };
+}
+
+/* one decoded @dart/meta MapItem -> JSON (the whole self-describing snapshot body). u64
+ * rides as a JSON number: the meta counters stay within JS safe range in practice, like
+ * @dart/log's wall_us already does. */
+static json mapitem_to_json(const dart::MapItem &m){
+    if (m.is_bool())   return m.as_bool();
+    if (m.is_uint())   return m.as_uint();
+    if (m.is_int())    return m.as_int();
+    if (m.is_double()) return m.as_f64();
+    if (m.is_string()) return m.as_string();
+    if (m.is_array()){
+        json a = json::array();
+        for (const dart::MapItem &e : m.as_array()) a.push_back(mapitem_to_json(e));
+        return a;
+    }
+    if (m.is_map()){
+        json o = json::object();
+        for (const auto &kv : m.as_map()) o[kv.first] = mapitem_to_json(kv.second);
+        return o;
+    }
+    return nullptr;   /* monostate */
+}
+
+static json mapdict_to_json(const dart::MapDict &d){
+    json o = json::object();
+    for (const auto &kv : d) o[kv.first] = mapitem_to_json(kv.second);
+    return o;
+}
+
+static const char *entity_kind_str(dart::EntityKind k){
+    switch (k){
+    case dart::EntityKind::Topic:    return "topic";
+    case dart::EntityKind::Function: return "function";
+    case dart::EntityKind::Variable: return "variable";
+    case dart::EntityKind::Signal:   return "signal";
+    default:                         return "?";
+    }
+}
+
+/* a reflected schema's field table ({size, hash, fields}), same shape as a topic create
+ * reply, from the owned SchemaInfo the wrapper hands back. Dotted paths are rebuilt from
+ * the flat depth-first field list, so a client renders/decodes with no codegen. */
+static json schemainfo_json(const dart::SchemaInfo &si){
+    json fields = json::array();
+    std::vector<std::string> parents;   /* enclosing struct names, one per depth level */
+    for (const dart::SchemaField &f : si.fields){
+        parents.resize(f.depth);        /* leaving a struct shrinks the path */
+        std::string path;
+        for (const std::string &p : parents){ path += p; path += '.'; }
+        path += f.name;
+        json row = { {"path", path}, {"kind", kind_str(f.kind)},
+                     {"offset", f.offset}, {"size", f.size} };
+        if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
+        if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);
+        if (f.kind == dart::FieldType::Enum){
+            row["backing"] = kind_str(f.elem);
+            json opts = json::array();
+            for (const dart::SchemaField::Option &v : f.variants)
+                opts.push_back({ {"name", v.name}, {"value", v.value} });
+            row["variants"] = opts;
+        }
+        if (f.str_cap) row["cap"] = f.str_cap;
+        fields.push_back(row);
+        if (f.kind == dart::FieldType::Struct) parents.push_back(f.name);
+    }
+    return { {"size", si.size}, {"hash", hex64(si.hash)}, {"fields", fields} };
+}
+
+/* one reflected entity (from Node::entities / peer_entities) as JSON. `name` is the base
+ * name (or a "0x????????" placeholder until details arrive); hash is the low-32 name
+ * hash; schema hashes ride as hex (64-bit, past JS safe integers). When the peer's schema
+ * is known, `schema` (and `rsp` for functions) carry the full field table so a client can
+ * render types and decode live messages of a topic it merely discovered. */
+static json entity_json(const dart::Entity &e){
+    json j = { {"kind", entity_kind_str(e.kind)}, {"name", e.name},
+               {"provides", e.provides}, {"consumes", e.consumes}, {"reliable", e.reliable},
+               {"index", e.index}, {"hash", e.hash} };
+    if (e.kind == dart::EntityKind::Variable){ j["writable"] = e.writable; j["forceable"] = e.forceable; }
+    if (e.incomplete)      j["incomplete"]     = true;
+    if (e.schema_hash)     j["schema_hash"]    = hex64(e.schema_hash);
+    if (e.rsp_schema_hash) j["rsp_schema_hash"] = hex64(e.rsp_schema_hash);
+    if (!e.schema.empty())     j["schema"] = schemainfo_json(e.schema);
+    if (!e.rsp_schema.empty()) j["rsp"]    = schemainfo_json(e.rsp_schema);
+    return j;
 }
 
 static int role_from(const std::string &s, dart::Role *out){
@@ -374,6 +459,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.disable_logs         = req.value("disable_logs", false);
     o.disable_meta         = req.value("disable_meta", false);
     o.disable_error_logs   = req.value("disable_error_logs", false);
+    o.fetch_details        = req.value("fetch_details", false);   /* resolve reflected names for unshared topics */
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
         o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
     if (o.max_topics == 0) o.max_topics = 8;
@@ -439,6 +525,7 @@ static void op_topic(Conn *c, const json &req, const json &seq){
     qos.repair_delay_us      = (uint32_t)req.value("repair_delay_ms", 0) * 1000u;
     qos.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
     qos.shm_max_bytes        = (uint32_t)req.value("shm_max_bytes", 0);
+    qos.max_rate_hz          = (uint16_t)req.value("max_rate_hz", 0);   /* subscriber best-effort delivery cap */
 
     /* Optional typed schema. create_topic copies the schema into node memory, so the
      * local one need not outlive the topic; we keep it just long enough to reply. */
@@ -607,16 +694,24 @@ static void op_variable(Conn *c, const json &req, const json &seq, bool definiti
 
     /* value updates are pushed event-driven: on_change fires only on an actual state
        change (bytes or the forced flag), so a byte-identical re-set pushes nothing.
-       Registered AFTER the create reply: the registration replays the current value (a
-       definition's initial) and the client must already know the entity id. */
+       on_write (opt-in) fires on EVERY applied write, tagged in the flag byte so the
+       client can route it. Registered AFTER the create reply: the registration replays
+       the current value (a definition's initial) and the client must already know the id. */
     uint16_t id = e->id;
-    auto push_update = [c, id](const dart::VariableUpdate &u){
+    bool wants_write = req.value("on_write", false);
+    auto push_var = [c, id](const dart::VariableUpdate &u, uint8_t evbit){
         uint8_t hdr[4];
-        hdr[0] = kOpVar; w16(hdr + 1, id); hdr[3] = u.forced() ? 1 : 0;
+        hdr[0] = kOpVar; w16(hdr + 1, id);
+        hdr[3] = (uint8_t)((u.forced() ? 1 : 0) | evbit);   /* bit0 = forced, bit1 = write-event */
         push_frame(c, hdr, 4, u.value());
     };
-    if (definition) e->vardef.on_change(push_update);
-    else            e->varrem.on_change(push_update);
+    if (definition){
+        e->vardef.on_change([push_var](const dart::VariableUpdate &u){ push_var(u, 0); });
+        if (wants_write) e->vardef.on_write([push_var](const dart::VariableUpdate &u){ push_var(u, 2); });
+    } else {
+        e->varrem.on_change([push_var](const dart::VariableUpdate &u){ push_var(u, 0); });
+        if (wants_write) e->varrem.on_write([push_var](const dart::VariableUpdate &u){ push_var(u, 2); });
+    }
 }
 
 static void op_signal(Conn *c, const json &req, const json &seq){
@@ -687,6 +782,48 @@ static void op_log_subscribe(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, {});
 }
 
+/* ---- introspection (query-based, pull-only) -------------------------------------- */
+
+/* Local reflection: synchronous reads of what THIS node already knows from discovery.
+ * peers()/entities()/peer_entities() take the node lock internally; we hold no Conn::mu,
+ * so calling into dart here is safe (see the threading note at the top). */
+static void op_peers(Conn *c, const json &seq){
+    json arr = json::array();
+    for (const dart::Peer &p : c->node->peers())
+        arr.push_back({ {"id", p.id}, {"name", p.name}, {"address", p.address},
+                        {"active", p.active}, {"fragment_size", p.fragment_size} });
+    reply_ok(c, seq, { {"peers", arr} });
+}
+
+static void op_entities(Conn *c, const json &seq){
+    json arr = json::array();
+    for (const dart::Entity &e : c->node->entities()) arr.push_back(entity_json(e));
+    reply_ok(c, seq, { {"entities", arr} });
+}
+
+static void op_peer_entities(Conn *c, const json &req, const json &seq){
+    uint32_t peer = (uint32_t)req.value("peer", 0);
+    json arr = json::array();
+    for (const dart::Entity &e : c->node->peer_entities(peer)) arr.push_back(entity_json(e));
+    reply_ok(c, seq, { {"peer", peer}, {"entities", arr} });
+}
+
+/* @dart/meta query: an async directed call to a peer's meta endpoint. The reply fires
+ * later from the poll thread, still echoing the request's seq; it never faults, the
+ * client inspects `status`. `sections` is an OR of DART_META_* (0 = every section). */
+static void op_meta(Conn *c, const json &req, const json &seq){
+    uint32_t peer     = (uint32_t)req.value("peer", 0);
+    uint32_t sections = (uint32_t)req.value("sections", 0);
+    dart::SendStatus rc = c->node->meta_request(peer,
+        [c, seq](const dart::MetaSnapshot &s){
+            json r = { {"valid", s.valid}, {"status", (int)s.status}, {"provider", s.provider} };
+            if (s.valid) r["info"] = mapdict_to_json(s.info);
+            reply_ok(c, seq, r);
+        }, sections);
+    if (rc != dart::SendStatus::Ok)
+        reply_err(c, seq, std::string("meta request failed: ") + send_status_str(rc));
+}
+
 static void on_text(Conn *c, const std::string &raw){
     json req = json::parse(raw, nullptr, false);
     if (req.is_discarded() || !req.is_object()){
@@ -709,6 +846,10 @@ static void on_text(Conn *c, const std::string &raw){
     else if (op == "signal")              op_signal(c, req, seq);
     else if (op == "log")                 op_log(c, req, seq);
     else if (op == "log_subscribe")       op_log_subscribe(c, req, seq);
+    else if (op == "meta")                op_meta(c, req, seq);
+    else if (op == "peers")               op_peers(c, seq);
+    else if (op == "entities")            op_entities(c, seq);
+    else if (op == "peer_entities")       op_peer_entities(c, req, seq);
     else reply_err(c, seq, "unknown op: " + op);
 }
 

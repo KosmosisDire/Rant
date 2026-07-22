@@ -1,4 +1,4 @@
-# DART WebSocket bridge protocol (v4)
+# DART WebSocket bridge protocol (v5)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
@@ -7,11 +7,13 @@ native node needs -- **pub/sub** plus the pattern entities (**functions**,
 **variables**, **signals**) -- arrives over one socket, so a browser, a phone, or
 any language with a WebSocket client is a first-class peer.
 
-This is a lean proxy, **not** a mesh debugger: there is no peer-table snapshot and
-no way to see other nodes' schemas. A typed topic/entity carries its own declared
-schema (both ends paste the same DSL text), so the client encodes and decodes with
-the field tables the create replies return and never needs a peer's layout. The
-client owns all encoding: payloads cross the bridge as raw bytes.
+This is a lean proxy. Introspection is **query-based and pull-only**: the client
+asks (`peers` / `entities` / `peer_entities` / `meta`) and the bridge answers from
+what its node already knows; nothing mesh-wide is pushed or mirrored, and there is
+no way to see another node's message *schema* (a typed topic/entity carries its own
+declared schema, both ends paste the same DSL text, so the client encodes and
+decodes with the field tables the create replies return). The client owns all
+encoding: payloads cross the bridge as raw bytes.
 
 Two planes, split by WebSocket frame type:
 
@@ -74,10 +76,12 @@ request, only for a broken WebSocket.
   "disable_shm": false,           // force on-wire UDP even to same-host peers
   "disable_logs": false,          // strip the built-in @dart/log topics
   "disable_meta": false,          // do not host the @dart/meta endpoint
-  "disable_error_logs": false }   // suppress default mirroring onto @dart/log/error
+  "disable_error_logs": false,    // suppress default mirroring onto @dart/log/error
+  "fetch_details": false }        // greedily fetch peer details so reflected entity
+                                  //   names resolve even for topics this node doesn't share
 ```
 
-Reply: `{ "ok": true, "proto": 4, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 5, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -92,7 +96,8 @@ so an auto-generated one is visible).
   "keep_last": 16,
   "catch_up": 0,
   "max_message_bytes": 0,
-  "backpressure_wait_ms": 0 }
+  "backpressure_wait_ms": 0,
+  "max_rate_hz": 0 }              // subscriber, best-effort: cap delivery from each publisher
 ```
 
 Reply for a typed topic returns the compiled layout, which is everything a
@@ -223,14 +228,18 @@ owner (the definition side holds the authoritative value).
   "initial": [80, 0, 0, 0],              // optional raw payload bytes
   "read_only": false,                    // no set channel: remote sets get refused
   "allow_force": false,                  // permit force (local + remote)
+  "on_write": false,                     // also push EVERY applied write (not just changes)
   "catch_up": 0, "backpressure_wait_ms": 0 }
-{ "op": "remote_variable", "seq": 9, "name": "config", "schema": "..." }
+{ "op": "remote_variable", "seq": 9, "name": "config", "schema": "...", "on_write": false }
 ```
 
 Reply: `{ "ok": true, "id": 1, size, hash, fields }` (layout only when typed).
 `initial` is raw pre-encoded bytes; a client that encodes with the reply's field
 table (the reference client) instead sends a normal set right after the create,
 which is equivalent (the value channel latches the latest for late joiners).
+With `on_write`, the bridge also pushes a variable-update frame on every applied
+write (flag bit1 set; see the data plane), so a client can observe writes that
+leave the value unchanged, not only state changes. Both sides may set it.
 
 **`signal`** -- a reliable fire-and-forget event, N emitters / N listeners,
 never latched (a late joiner receives nothing emitted before it joined).
@@ -244,6 +253,85 @@ never latched (a late joiner receives nothing emitted before it joined).
 
 Reply: `{ "ok": true, "id": 2, size, hash, fields }`. Every signal handle may
 emit; only a `listen: true` one receives.
+
+### Introspection (query-based, pull-only)
+
+Four request ops let a client ask what the node knows about the mesh. `peers`,
+`entities` and `peer_entities` are **local reads** answered synchronously from this
+node's own discovery state; `meta` is an **async directed call** to a peer's
+`@dart/meta` endpoint. None of them push: a client polls at whatever cadence it
+wants (the `match` pushes below already cover live match-state changes cheaply).
+
+**`peers`** -- snapshot the discovered peer table.
+
+```json
+{ "op": "peers", "seq": 20 }
+```
+
+Reply: `{ "ok": true, "peers": [ { "id": 2, "name": "gripper",
+"address": "192.168.1.9:47001", "active": true, "fragment_size": 1350 } ] }`.
+`active` is false for a dormant (dropped-but-remembered) peer.
+
+**`entities`** / **`peer_entities`** -- the entities this node hosts, or the ones a
+peer advertises (pattern channels folded: a function's req/rsp pair is one
+`function` entity; a variable's set channel merges as `writable`).
+
+```json
+{ "op": "entities", "seq": 21 }
+{ "op": "peer_entities", "seq": 22, "peer": 2 }
+```
+
+Reply: `{ "ok": true, "entities": [ ... ] }` (`peer_entities` also echoes `peer`).
+Each entity:
+
+```json
+{ "kind": "variable", "name": "config", "provides": true, "consumes": false,
+  "reliable": true, "writable": true, "forceable": false, "index": 3, "hash": 2748219392,
+  "schema_hash": "9f3a5c1e22b40d77",
+  "schema": { "size": 4, "hash": "9f3a5c1e22b40d77",
+              "fields": [ { "path": "rate_hz", "kind": "u32", "offset": 0, "size": 4 } ] } }
+```
+
+`kind` is `topic` | `function` | `variable` | `signal`. `provides`/`consumes` are
+the source/sink sides. `writable`/`forceable` appear on variables; `incomplete: true`
+marks a surfaced pattern half-pair. `hash` is the low-32 name hash; `schema_hash`
+(and `rsp_schema_hash` on functions) ride as hex, present only when typed and
+fetched. `name` is a `"0x????????"` placeholder until the peer's details arrive --
+open with `fetch_details` to resolve names and schemas for topics this node does not
+itself share.
+
+When the schema is known, **`schema`** carries the full field table -- the exact
+`{ size, hash, fields }` block a `topic` create reply returns (see that op for the
+kind/offset/enum rules), so a client renders a discovered topic's types and can
+build a decoder for its live messages with no shared DSL. A `function` entity also
+carries **`rsp`** (the response field table). Both are absent for a raw/untyped
+entity or one whose details have not been fetched. The reference client folds these
+into `Entity.schema` / `Entity.rspSchema`, ready for `new Layout(entity.schema)`.
+
+**`meta`** -- fetch a peer's `@dart/meta` runtime snapshot (an async call; works
+under the bridge's service thread).
+
+```json
+{ "op": "meta", "seq": 23, "peer": 2, "sections": 0 }
+```
+
+`sections` is an OR of the section mask (`1` node, `2` proc, `4` topics, `8` peers;
+`0` = all). The reply echoes `seq` when the call completes (or times out); it never
+fails on status -- inspect `status`:
+
+```json
+{ "ok": true, "valid": true, "status": 0, "provider": 2,
+  "info": { "node": { "name": "gripper", "uptime_us": 84213374, "mem_in_use": 30512,
+                      "peers": 3, "topics": 5, ... },
+            "proc": { "pid": 4123, "cpu_us": 220000, "rss": 8912896, ... },
+            "topics": [ { "name": "pose", "role": "pub", "tx_msgs": 900, ... } ],
+            "peers":  [ { "id": 1, "name": "dashboard", ... } ] } }
+```
+
+`status` is the `DartCallStatus` (0 ok, 3 timeout, ...); `info` is the whole decoded
+self-describing snapshot body (the sub-objects present per the requested sections,
+empty when `valid` is false). This is the same data the C++/C#/Python wrappers'
+`meta_request` / `MetaAsync` / `meta` return.
 
 ## Server pushes (text frames)
 
@@ -346,7 +434,7 @@ matching thing in each direction. All headers little-endian.
 | op | frame | meaning |
 |----|-------|---------|
 | `0x01` | `[u16 topic][u32 publisher][payload]` | topic delivery |
-| `0x02` | `[u16 entity][u8 forced][payload]` | variable value update (the latest value; `forced` = the shadow source is active) |
+| `0x02` | `[u16 entity][u8 flags][payload]` | variable update; `flags` bit0 = forced (shadow source active), bit1 = write-event (an `on_write` push, not a change) |
 | `0x03` | `[u16 entity][u32 emitter][payload]` | signal firing (listen entities only) |
 | `0x04` | `[u32 call][u8 status][u32 provider][payload]` | function-call outcome for `call` |
 | `0x05` | `[u16 fn][u32 req][payload]` | request payload (pairs with the `request` JSON push) |
@@ -365,7 +453,10 @@ including once right after the create reply when a value already exists (a
 definition's `initial`). A set to the byte-identical current value pushes
 nothing (on_change fires only on an actual state change; idempotent). Definition
 and remote sides both receive updates (a definition client sees remote writes
-land).
+land). A variable opened with `on_write` ALSO gets a frame on every applied write
+(flag bit1 set), including byte-identical re-sets that fire no change event; the
+client routes those separately (the reference client's `onWrite` handler) and the
+cached value stays driven by the change frames.
 
 Publishing/writes are fire and forget: no ack (a reliable topic's guarantees run
 between the bridge node and its peers, as usual). A data frame that fails
@@ -438,17 +529,23 @@ bridge's wire timeout; `close()` cancels, a dropped connection rejects.
 `VariableDefinition.initial` is implemented as a set right after the create
 (encoding needs the field table the create returns).
 
+Introspection is `await node.peers()`, `await node.entities()`,
+`await node.peerEntities(peerId)`, and `await node.meta(peerId, MetaSection.All)`
+(returns `{ valid, status, provider, info }`, never throwing on status). A
+variable created with `{ onWrite: true }` routes every applied write to its
+`onWrite(handler)` callback, separately from `onChange`.
+
 ## Non-goals
 
-- **No mesh introspection.** No peer-table snapshot, no `fetch_details`, no
-  `adopt`, and no client op to query a peer's `@dart/meta` snapshot. A typed
-  subscriber declares its own schema (the same DSL the publisher uses); a raw
-  subscriber gets bytes. Whole-mesh observability is a separate tool (the
-  explorer), not this bridge. The bridge node still HOSTS its own `@dart/meta`
-  endpoint (unless opened with `disable_meta`), so an observer tool can query the
-  bridge node like any other; the bridge just does not turn that into a
-  client-facing op. Logs are different: they are a first-class node feature (every
-  node publishes and may subscribe), so `log` / `log_subscribe` are supported.
+- **Introspection is query-based, never a live mirror.** `peers` / `entities` /
+  `peer_entities` / `meta` answer on demand from what the node already knows; the
+  bridge keeps no mesh model for the client and pushes nothing mesh-wide (only the
+  per-entity `match` state, which the client needs for send-readiness, is pushed).
+  There is still no `adopt`, and no way to see another node's message *schema* -- a
+  typed subscriber declares its own (the same DSL the publisher uses); a raw
+  subscriber gets bytes. Continuous whole-mesh observability (topology graphs, live
+  traffic) remains a job for a dedicated tool (the explorer), not a browser over
+  this bridge.
 - **No auth, no TLS.** The bridge binds 127.0.0.1 by default; exposing it
   (`--bind 0.0.0.0`) puts full mesh access on that port. Put a reverse proxy in
   front for wss:// or auth.
