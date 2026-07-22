@@ -10460,6 +10460,7 @@ static int i_dart_node_gather_done(DartNode *n, uint64_t now);   /* defined with
 static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
     i_DartPollfd pfd[5]; int nfds = 0, wait_ms, poll_rc;
+    int disc_slot = 0, disc_n = 0;
 #ifdef DART_THREADS
     int waker_slot = -1;
 #endif
@@ -10487,13 +10488,12 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
         }
     }
 
-    /* discovery tick. NOTE: this must stay BEFORE the wait: moving it after (to reuse
-       the main wait's revents and drop its zero-timeout poll syscall) deterministically
-       breaks the set_role late-subscribe replay (selftest metalog phase), which is also
-       the phase that flakes rarely on the pre-move code; the ordering dependency is not
-       yet understood, so the syscall saving waits on that root cause (see
-       dart_discovery_service, the ready-made revents-driven entry). */
-    dart_discovery_poll(n->discovery, 0);
+    /* The discovery tick runs AFTER the wait (dart_discovery_service off this wait's
+       revents), so a pass costs one poll syscall total. History: the tick used to run
+       here, pre-wait, and moving it once surfaced a real bug, the catch_up-replay vs
+       first-take race on the builtin log topics (a faster pipeline delivered the
+       replay before the consumer queue existed); dart_topic_set_role now queues a log
+       builtin before its subscribe side goes live, so the order is free again. */
     wait_ms = i_dart_node_wait_ms(n, timeout_ms);
     memset(pfd, 0, sizeof pfd);
     pfd[nfds].fd = n->fd; pfd[nfds].events = DART_POLLIN; nfds++;
@@ -10507,8 +10507,9 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
            short; the post-wait dart_discovery_service drains them off THIS wait's
            revents, so a node pass costs one poll syscall total. The fds are stable by
            value: a grow while the lock is dropped relocates structs, never sockets. */
-        i_DartSock dfds[2]; int i, dn = dart_discovery_pollfds(n->discovery, dfds);
-        for (i = 0; i < dn; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = DART_POLLIN; nfds++; }
+        i_DartSock dfds[2]; int i;
+        disc_slot = nfds; disc_n = dart_discovery_pollfds(n->discovery, dfds);
+        for (i = 0; i < disc_n; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = DART_POLLIN; nfds++; }
     }
 
 #ifdef DART_THREADS
@@ -10541,6 +10542,11 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
         i_dart_node_emit(n, &e);
     }
 
+    /* discovery tick off this wait's readiness: zero extra syscalls per pass (a failed
+       wait leaves revents zeroed, so the clock-driven work still runs) */
+    dart_discovery_service(n->discovery,
+                           disc_n > 0 && (pfd[disc_slot].revents & DART_POLLIN) != 0,
+                           disc_n > 1 && (pfd[disc_slot + 1].revents & DART_POLLIN) != 0);
     if (pfd[0].revents & DART_POLLIN)
         i_dart_node_rx_drain(n, n->fd, i_dart_plat_now_us() + DART_RX_BUDGET_US);
 
@@ -10991,6 +10997,14 @@ int dart_topic_set_role(DartTopic *topic, DartRole role){
            proxy mid-delivery, so refuse loudly */
         return DART_ERR_STATE;
     }
+    /* A builtin @dart/log topic is a consumer-queue topic (there is no per-topic app
+       callback for it): make it QUEUED before the subscribe side goes live, so the
+       catch_up replay that lands the moment the match forms can never race the
+       consumer's first take into the inline path (a NULL on_message would silently
+       eat it; the replay is reliable and delivered exactly once). */
+    if ((role == DART_PUBSUB || role == DART_SUB_ONLY) && !topic->q
+        && i_dart_node_is_log_topic(topic->n, topic->index))
+        (void)i_dart_node_queue_ensure(topic->n, topic, NULL);
     r = dart_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0) topic->role = (uint8_t)role;
     if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
