@@ -1,6 +1,8 @@
 old
 *.exe
 /build/
+
+/hmi-designer/
 /Debug/
 # cross-compiled / native binaries (no extension), repo-root only so they do not
 # also match source dirs like src/node/

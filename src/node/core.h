@@ -82,7 +82,11 @@ typedef enum {
     DART_E_SOCKET,           /* opening a UDP socket failed (.os_error) */
     DART_E_BIND,             /* bind failed, port in use? (.port, .os_error) */
     DART_E_MCAST_JOIN,       /* joining the discovery multicast group failed, bad interface? (.os_error) */
-    DART_E_SEND,             /* a datagram send hard-failed (.peer, .os_error); reliable data is repaired */
+    DART_E_SEND,             /* a datagram send hard-failed (.peer, .os_error, .too_big_bytes = the
+                                datagram size, .topic/.topic_name = the first submessage's topic;
+                                the datagram batches one peer's lanes, so more topics may ride along):
+                                reliable data is repaired. A resource-starved link surfaces here (an
+                                ESP32 out of WiFi TX buffers reports os_error ENOMEM even with heap free) */
     DART_E_RECV,             /* a socket receive hard-failed (.os_error) */
     DART_E_POLL,             /* the socket poll/wait failed (.os_error) */
     DART_E_WAKER             /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
@@ -103,7 +107,7 @@ typedef struct {
     uint16_t   port;           /* peer data port, where applicable */
     uint64_t   lost_first;     /* MSG_LOST / EVICTED_UNSENT: first skipped/evicted seqno */
     uint64_t   lost_count;     /* MSG_LOST / EVICTED_UNSENT: count; INTEREST_OVERFLOW: entry count */
-    uint64_t   too_big_bytes;  /* MSG_TOO_BIG / PEER_META_TOO_BIG: size; OOM: bytes needed */
+    uint64_t   too_big_bytes;  /* MSG_TOO_BIG / PEER_META_TOO_BIG: size; OOM: bytes needed; SEND: datagram size */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */

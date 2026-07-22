@@ -122,6 +122,9 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
         p=i_dart_event_append_str(p,end,"multicast join failed"); p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_SEND:
         p=i_dart_event_append_str(p,end,"send failed to "); p=i_dart_event_append_peer(p,end,ev);
+        if (ev->topic_name){ p=i_dart_event_append_str(p,end," "); p=i_dart_event_append_topic(p,end,ev); }
+        if (ev->too_big_bytes){ p=i_dart_event_append_str(p,end," ("); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
+                                p=i_dart_event_append_str(p,end," B)"); }
         p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_RECV:
         p=i_dart_event_append_str(p,end,"recv failed"); p=i_dart_event_append_oserr(p,end,ev); break;

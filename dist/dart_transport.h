@@ -1540,7 +1540,11 @@ typedef enum {
     DART_E_SOCKET,           /* opening a UDP socket failed (.os_error) */
     DART_E_BIND,             /* bind failed, port in use? (.port, .os_error) */
     DART_E_MCAST_JOIN,       /* joining the discovery multicast group failed, bad interface? (.os_error) */
-    DART_E_SEND,             /* a datagram send hard-failed (.peer, .os_error); reliable data is repaired */
+    DART_E_SEND,             /* a datagram send hard-failed (.peer, .os_error, .too_big_bytes = the
+                                datagram size, .topic/.topic_name = the first submessage's topic;
+                                the datagram batches one peer's lanes, so more topics may ride along):
+                                reliable data is repaired. A resource-starved link surfaces here (an
+                                ESP32 out of WiFi TX buffers reports os_error ENOMEM even with heap free) */
     DART_E_RECV,             /* a socket receive hard-failed (.os_error) */
     DART_E_POLL,             /* the socket poll/wait failed (.os_error) */
     DART_E_WAKER             /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
@@ -1561,7 +1565,7 @@ typedef struct {
     uint16_t   port;           /* peer data port, where applicable */
     uint64_t   lost_first;     /* MSG_LOST / EVICTED_UNSENT: first skipped/evicted seqno */
     uint64_t   lost_count;     /* MSG_LOST / EVICTED_UNSENT: count; INTEREST_OVERFLOW: entry count */
-    uint64_t   too_big_bytes;  /* MSG_TOO_BIG / PEER_META_TOO_BIG: size; OOM: bytes needed */
+    uint64_t   too_big_bytes;  /* MSG_TOO_BIG / PEER_META_TOO_BIG: size; OOM: bytes needed; SEND: datagram size */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from this peer */
@@ -8004,6 +8008,9 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
         p=i_dart_event_append_str(p,end,"multicast join failed"); p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_SEND:
         p=i_dart_event_append_str(p,end,"send failed to "); p=i_dart_event_append_peer(p,end,ev);
+        if (ev->topic_name){ p=i_dart_event_append_str(p,end," "); p=i_dart_event_append_topic(p,end,ev); }
+        if (ev->too_big_bytes){ p=i_dart_event_append_str(p,end," ("); p=i_dart_event_append_u64(p,end,ev->too_big_bytes);
+                                p=i_dart_event_append_str(p,end," B)"); }
         p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_RECV:
         p=i_dart_event_append_str(p,end,"recv failed"); p=i_dart_event_append_oserr(p,end,ev); break;
@@ -9780,10 +9787,21 @@ static int i_dart_node_tx(DartNode *n, uint32_t to, const uint8_t *buf, size_t l
     if (!i_dart_node_core_resolve(n->core, to, &d)) return 1;   /* peer vanished */
     if (i_dart_plat_send(n->fd, buf, len, d.ip, d.port) < 0){
         if (i_dart_plat_would_block()) return 0;                /* TX full: retry this datagram next tick */
-        {   /* hard send failure: report it and drop the datagram (reliable data is repaired) */
+        {   /* hard send failure: report it and drop the datagram (reliable data is repaired).
+               carry the datagram size + the FIRST submessage's topic (a datagram batches one
+               peer's lanes, so more topics may ride along): on a resource-starved link (an ESP32
+               out of WiFi TX buffers surfaces as os_error ENOMEM even with heap free) this says
+               which topic and how big, not just "send failed". byte 0 = type|flags, bytes 1-2 =
+               the topic index (little-endian), per the transport submessage layout. */
             DartEvent e; memset(&e, 0, sizeof e);
             e.kind = DART_ERROR; e.error = DART_E_SEND; e.peer = to;
             e.os_error = i_dart_plat_last_socket_error();
+            e.too_big_bytes = len;
+            if (len >= 3){
+                uint16_t idx = (uint16_t)(buf[1] | ((uint16_t)buf[2] << 8));
+                e.topic = idx;
+                e.topic_name = i_dart_node_topic_name(n, idx);
+            }
             i_dart_node_emit(n, &e);
         }
     }
