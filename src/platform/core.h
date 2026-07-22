@@ -117,7 +117,13 @@ uint64_t i_dart_plat_wall_us(void);
  * OS failure; a platform may fill peak but not current (current then reports 0). Per
  * PROCESS, not per node: several nodes in one process report the same numbers
  * (consumers dedup by pid). */
-int      i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes);
+int      i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
+                                int *have_cpu);
+/* Optional heap diagnostics for the introspection endpoint. ESP reports the default-capability
+ * heap's total/free/low-water/largest-contiguous-block bytes; other platforms return 0 so
+ * callers omit these fields rather than pretending RSS is a heap capacity. */
+int      i_dart_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
+                                uint64_t *min_free_bytes, uint64_t *largest_free_block_bytes);
 #endif /* DART_PROC_STATS */
 
 /* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =

@@ -2057,13 +2057,22 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
     }
 #ifdef DART_PROC_STATS
     if (sections & DART_META_PROC){
-        uint64_t cpu = 0, rss = 0, peak_rss = 0;
-        if (i_dart_plat_proc_stats(&cpu, &rss, &peak_rss)){   /* absent where unsupported */
+        uint64_t cpu = 0, rss = 0, peak_rss = 0; int have_cpu = 0;
+        if (i_dart_plat_proc_stats(&cpu, &rss, &peak_rss, &have_cpu)){   /* absent where unsupported */
             dart_map_open_map(w, "proc");
             dart_map_put_uint(w, "pid", i_dart_plat_pid());
-            dart_map_put_uint(w, "cpu_us", cpu);
+            if (have_cpu) dart_map_put_uint(w, "cpu_us", cpu);
             dart_map_put_uint(w, "rss", rss);
             dart_map_put_uint(w, "peak_rss", peak_rss);
+            {   uint64_t heap_total, heap_free, heap_min_free, heap_largest_free_block;
+                if (i_dart_plat_heap_stats(&heap_total, &heap_free, &heap_min_free,
+                                           &heap_largest_free_block)){
+                    dart_map_put_uint(w, "heap_total", heap_total);
+                    dart_map_put_uint(w, "heap_free", heap_free);
+                    dart_map_put_uint(w, "heap_min_free", heap_min_free);
+                    dart_map_put_uint(w, "heap_largest_free_block", heap_largest_free_block);
+                }
+            }
             dart_map_close(w);
         }
     }

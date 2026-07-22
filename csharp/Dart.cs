@@ -831,8 +831,8 @@ namespace Dart
         public string LastErrorText;
 
         // proc section (per process; HaveProc false where unmeasured)
-        public bool HaveProc;
-        public ulong Pid, CpuUs, Rss, PeakRss;
+        public bool HaveProc, HaveCpu;
+        public ulong Pid, CpuUs, Rss, PeakRss, HeapTotal, HeapFree, HeapMinFree, HeapLargestFreeBlock;
 
         private static ulong U(Dictionary<string, object> d, string k)
             => d.TryGetValue(k, out var o) ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
@@ -861,8 +861,12 @@ namespace Dart
             if (info.TryGetValue("proc", out var po) && po is Dictionary<string, object> proc)
             {
                 s.HaveProc = true;
+                s.HaveCpu = proc.ContainsKey("cpu_us");
                 s.Pid = U(proc, "pid"); s.CpuUs = U(proc, "cpu_us");
                 s.Rss = U(proc, "rss"); s.PeakRss = U(proc, "peak_rss");
+                s.HeapTotal = U(proc, "heap_total"); s.HeapFree = U(proc, "heap_free");
+                s.HeapMinFree = U(proc, "heap_min_free");
+                s.HeapLargestFreeBlock = U(proc, "heap_largest_free_block");
             }
             return s;
         }

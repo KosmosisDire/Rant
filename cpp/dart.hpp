@@ -1562,7 +1562,9 @@ struct MetaSnapshot {
     } node;
     struct ProcInfo {
         bool have = false;
+        bool have_cpu = false;
         uint64_t pid = 0, cpu_us = 0, rss = 0, peak_rss = 0;
+        uint64_t heap_total = 0, heap_free = 0, heap_min_free = 0, heap_largest_free_block = 0;
     } proc;
 
     /* Decode from a raw response body + schema (the wrapper below feeds Response/
@@ -1605,10 +1607,14 @@ struct MetaSnapshot {
             const MapDict& m = it->second.as_map();
             auto u = [&](const char* k){ auto j = m.find(k); return j == m.end() ? uint64_t(0) : j->second.as_uint(); };
             s.proc.have     = true;
+            s.proc.have_cpu = m.find("cpu_us") != m.end();
             s.proc.pid      = u("pid");
             s.proc.cpu_us   = u("cpu_us");
             s.proc.rss      = u("rss");
             s.proc.peak_rss = u("peak_rss");
+            s.proc.heap_total = u("heap_total"); s.proc.heap_free = u("heap_free");
+            s.proc.heap_min_free = u("heap_min_free");
+            s.proc.heap_largest_free_block = u("heap_largest_free_block");
         }
         return s;
     }

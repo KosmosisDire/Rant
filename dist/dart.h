@@ -696,7 +696,13 @@ uint64_t i_dart_plat_wall_us(void);
  * OS failure; a platform may fill peak but not current (current then reports 0). Per
  * PROCESS, not per node: several nodes in one process report the same numbers
  * (consumers dedup by pid). */
-int      i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes);
+int      i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
+                                int *have_cpu);
+/* Optional heap diagnostics for the introspection endpoint. ESP reports the default-capability
+ * heap's total/free/low-water/largest-contiguous-block bytes; other platforms return 0 so
+ * callers omit these fields rather than pretending RSS is a heap capacity. */
+int      i_dart_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
+                                uint64_t *min_free_bytes, uint64_t *largest_free_block_bytes);
 #endif /* DART_PROC_STATS */
 
 /* realloc-style heap hook backing a node's dynamic memory mode: ptr NULL =
@@ -2857,7 +2863,8 @@ DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
  *   "node"   uptime_us, wall_us, name, mem in_use/peak/alloc_calls, evicted_unsent,
  *            backpressure waited_us/waits, peers/max_peers, topics/max_topics,
  *            shm tx/rx, last_error (+ text)
- *   "proc"   pid, cpu_us, rss, peak_rss -- PER PROCESS (dedup by pid across nodes);
+ *   "proc"   pid, cpu_us, rss, peak_rss -- PER PROCESS (dedup by pid across nodes); ESP also
+ *            reports heap_total/free/min_free/largest_free_block for MALLOC_CAP_DEFAULT;
  *            absent where the platform offers no measurement (DART_PROC_STATS off:
  *            auto-detected like DART_SHM, DART_NO_PROC_STATS forces it off, and a
  *            platform layer without it implements nothing; see platform/core.h)
@@ -4330,6 +4337,8 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #ifdef DART_PROC_STATS
     #if defined(ESP_PLATFORM)
       #include <esp_heap_caps.h>  /* heap_caps_get_*: the ESP proc-stats source */
+      #include <freertos/FreeRTOS.h>
+      #include <freertos/task.h>  /* optional run-time task statistics */
     #else
       #include <sys/resource.h>   /* getrusage: i_dart_plat_proc_stats */
       #if defined(__APPLE__)
@@ -4441,7 +4450,8 @@ uint64_t i_dart_plat_pid(void){
 
 /* ------------------------------------------------------- process usage / wall */
 #ifdef DART_PROC_STATS
-int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes){
+int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
+                           int *have_cpu){
 #if defined(_WIN32)
     FILETIME created, exited, kern, user; PROCESS_MEMORY_COUNTERS pmc;
     ULARGE_INTEGER uk, uu;
@@ -4449,6 +4459,7 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
     uk.LowPart = kern.dwLowDateTime; uk.HighPart = kern.dwHighDateTime;
     uu.LowPart = user.dwLowDateTime; uu.HighPart = user.dwHighDateTime;
     if (cpu_us) *cpu_us = (uk.QuadPart + uu.QuadPart) / 10u;   /* 100ns -> us */
+    if (have_cpu) *have_cpu = 1;
     pmc.cb = sizeof pmc;
     if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return 0;
     if (rss_bytes)      *rss_bytes      = (uint64_t)pmc.WorkingSetSize;
@@ -4458,11 +4469,40 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
     /* One firmware image is the whole "process": the RSS analog is heap in use
        (total - free), and peak RSS is the free-heap low-water mark (total - the
        minimum free ever). There is no per-process CPU accounting without FreeRTOS
-       run-time stats, so cpu_us stays 0 (partial fill is permitted). */
+       run-time stats. When ESP Timer-backed FreeRTOS run-time stats are enabled,
+       accumulate non-idle task time across its cores; otherwise omit CPU entirely. */
     {   size_t total   = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
         size_t freeb   = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
         size_t minfree = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
         if (cpu_us)         *cpu_us         = 0;
+        if (have_cpu) *have_cpu = 0;
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS \
+ && defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY \
+ && defined(CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS) && CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS \
+ && defined(CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER) && CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER
+        {   static TaskStatus_t *tasks; static UBaseType_t cap;
+            static uint32_t prev_total, prev_idle; static uint64_t busy_us; static int started;
+            UBaseType_t need = uxTaskGetNumberOfTasks(), got, i;
+            uint32_t total_run = 0, idle_run = 0;
+            if (need > cap){
+                TaskStatus_t *p = (TaskStatus_t*)realloc(tasks, (size_t)need * sizeof *tasks);
+                if (!p) goto esp_cpu_done;
+                tasks = p; cap = need;
+            }
+            got = uxTaskGetSystemState(tasks, cap, &total_run);
+            for (i = 0; i < got; i++)
+                if (strncmp(tasks[i].pcTaskName, "IDLE", 4) == 0) idle_run += tasks[i].ulRunTimeCounter;
+            if (started){
+                uint32_t dt = total_run - prev_total, di = idle_run - prev_idle;
+                uint64_t span = (uint64_t)dt * (uint64_t)portNUM_PROCESSORS;
+                busy_us += span > di ? span - di : 0;
+            }
+            prev_total = total_run; prev_idle = idle_run; started = 1;
+            if (cpu_us) *cpu_us = busy_us;
+            if (have_cpu) *have_cpu = 1;
+        }
+esp_cpu_done:
+#endif
         if (rss_bytes)      *rss_bytes      = (uint64_t)(total > freeb   ? total - freeb   : 0);
         if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)(total > minfree ? total - minfree : 0);
         return 1;
@@ -4472,6 +4512,7 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
         if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
         if (cpu_us) *cpu_us = (uint64_t)ru.ru_utime.tv_sec * 1000000ull + (uint64_t)ru.ru_utime.tv_usec
                             + (uint64_t)ru.ru_stime.tv_sec * 1000000ull + (uint64_t)ru.ru_stime.tv_usec;
+        if (have_cpu) *have_cpu = 1;
   #if defined(__APPLE__)
         if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss;         /* bytes on macOS */
         if (rss_bytes){                                                       /* current: task_info */
@@ -4498,6 +4539,21 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
   #endif
         return 1;
     }
+#endif
+}
+
+int i_dart_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
+                           uint64_t *min_free_bytes, uint64_t *largest_free_block_bytes){
+#if defined(ESP_PLATFORM)
+    if (total_bytes)              *total_bytes = (uint64_t)heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
+    if (free_bytes)               *free_bytes = (uint64_t)heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    if (min_free_bytes)           *min_free_bytes = (uint64_t)heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+    if (largest_free_block_bytes) *largest_free_block_bytes =
+        (uint64_t)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    return 1;
+#else
+    (void)total_bytes; (void)free_bytes; (void)min_free_bytes; (void)largest_free_block_bytes;
+    return 0;
 #endif
 }
 #endif /* DART_PROC_STATS */
@@ -13738,13 +13794,22 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
     }
 #ifdef DART_PROC_STATS
     if (sections & DART_META_PROC){
-        uint64_t cpu = 0, rss = 0, peak_rss = 0;
-        if (i_dart_plat_proc_stats(&cpu, &rss, &peak_rss)){   /* absent where unsupported */
+        uint64_t cpu = 0, rss = 0, peak_rss = 0; int have_cpu = 0;
+        if (i_dart_plat_proc_stats(&cpu, &rss, &peak_rss, &have_cpu)){   /* absent where unsupported */
             dart_map_open_map(w, "proc");
             dart_map_put_uint(w, "pid", i_dart_plat_pid());
-            dart_map_put_uint(w, "cpu_us", cpu);
+            if (have_cpu) dart_map_put_uint(w, "cpu_us", cpu);
             dart_map_put_uint(w, "rss", rss);
             dart_map_put_uint(w, "peak_rss", peak_rss);
+            {   uint64_t heap_total, heap_free, heap_min_free, heap_largest_free_block;
+                if (i_dart_plat_heap_stats(&heap_total, &heap_free, &heap_min_free,
+                                           &heap_largest_free_block)){
+                    dart_map_put_uint(w, "heap_total", heap_total);
+                    dart_map_put_uint(w, "heap_free", heap_free);
+                    dart_map_put_uint(w, "heap_min_free", heap_min_free);
+                    dart_map_put_uint(w, "heap_largest_free_block", heap_largest_free_block);
+                }
+            }
             dart_map_close(w);
         }
     }

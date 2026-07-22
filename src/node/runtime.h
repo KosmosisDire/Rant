@@ -431,7 +431,8 @@ DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
  *   "node"   uptime_us, wall_us, name, mem in_use/peak/alloc_calls, evicted_unsent,
  *            backpressure waited_us/waits, peers/max_peers, topics/max_topics,
  *            shm tx/rx, last_error (+ text)
- *   "proc"   pid, cpu_us, rss, peak_rss -- PER PROCESS (dedup by pid across nodes);
+ *   "proc"   pid, cpu_us, rss, peak_rss -- PER PROCESS (dedup by pid across nodes); ESP also
+ *            reports heap_total/free/min_free/largest_free_block for MALLOC_CAP_DEFAULT;
  *            absent where the platform offers no measurement (DART_PROC_STATS off:
  *            auto-detected like DART_SHM, DART_NO_PROC_STATS forces it off, and a
  *            platform layer without it implements nothing; see platform/core.h)

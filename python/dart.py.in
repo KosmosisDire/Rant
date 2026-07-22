@@ -859,10 +859,15 @@ class MetaSnapshot:
     last_error_text: str = ""
     # proc section (per process; have_proc False where unmeasured)
     have_proc: bool = False
+    have_cpu: bool = False
     pid: int = 0
     cpu_us: int = 0
     rss: int = 0
     peak_rss: int = 0
+    heap_total: int = 0
+    heap_free: int = 0
+    heap_min_free: int = 0
+    heap_largest_free_block: int = 0
 
     @classmethod
     def _from_response(cls, r):
@@ -891,8 +896,12 @@ class MetaSnapshot:
         if isinstance(proc, dict):
             g = proc.get
             s.have_proc = True
+            s.have_cpu = "cpu_us" in proc
             s.pid = int(g("pid", 0)); s.cpu_us = int(g("cpu_us", 0))
             s.rss = int(g("rss", 0)); s.peak_rss = int(g("peak_rss", 0))
+            s.heap_total = int(g("heap_total", 0)); s.heap_free = int(g("heap_free", 0))
+            s.heap_min_free = int(g("heap_min_free", 0))
+            s.heap_largest_free_block = int(g("heap_largest_free_block", 0))
         return s
 
 
