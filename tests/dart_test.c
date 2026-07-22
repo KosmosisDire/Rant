@@ -1116,10 +1116,13 @@ static void shm_module_checks(void){
     const char msg[] = "hello shared memory";
     i_dart_plat_startup();
     memset(&cfg,0,sizeof cfg);
+    /* per-process segment name: the name is OS-global, so a fixed one lets a concurrent
+       selftest share (and re-stamp) this run's segment; suffix with the per-process
+       domain base like every other cross-process resource here */
 #ifdef _WIN32
-    strcpy(cfg.name,"dart-shm-stmod");
+    snprintf(cfg.name,sizeof cfg.name,"dart-shm-stmod-%u",(unsigned)st_domain_base);
 #else
-    strcpy(cfg.name,"/dart-shm-stmod");
+    snprintf(cfg.name,sizeof cfg.name,"/dart-shm-stmod-%u",(unsigned)st_domain_base);
 #endif
     cfg.segment_id=0x1234; cfg.chunk_bytes=4096; cfg.n_chunks=4;
     pw=malloc(i_dart_shm_state_bytes()); pr=malloc(i_dart_shm_state_bytes());
