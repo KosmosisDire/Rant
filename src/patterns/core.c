@@ -221,7 +221,11 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
     topt.qos.catch_up = 0;
-    if (mode == 2) topt.qos.keep_last = 2;   /* shallow: a deep ring would pin keep_last x reply size */
+    /* shallow ring: calls carry no replay (catch_up 0), so history is only the repair
+       window; a deep ring would pin keep_last x request/reply size per function. More
+       than keep_last un-acked in-flight calls engage backpressure, never loss. The
+       both-sides meta shape stays at 2; plain functions get room for small bursts. */
+    topt.qos.keep_last = (mode == 2) ? 2 : 4;
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
     /* Allocate + init the handle under the lock, then RELEASE it before creating the topics:
@@ -682,7 +686,10 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     vopt.qos.keep_last = vopt.qos.catch_up;
     vopt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
-    sopt = vopt; sopt.qos.catch_up = 0; sopt.qos.keep_last = 0;   /* set channel: no replay */
+    sopt = vopt; sopt.qos.catch_up = 0;   /* set channel: no replay */
+    sopt.qos.keep_last = 2;   /* writes are last-write-wins state, not a stream: history is
+                                 only the repair window (0 would inherit the reliable default
+                                 of 10 and pin 10x the value size); backpressure covers bursts */
 
     acquired = i_dart_node_sys_lock(n);
     pm = i_dart_patterns_get(n);
