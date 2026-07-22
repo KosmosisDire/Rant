@@ -741,7 +741,12 @@ static int sendbench_main(void){
  *                 each (re)subscribe replays cached history with no gap.
  *   6. SCALE    : 40 topics, past the old 31-id announce cap. */
 
-#define ST_DOMAIN   33
+/* Selftest domains are PER PROCESS: every phase offsets from this base, picked at
+ * selftest entry from the clock so concurrent selftests (or a stray node, the
+ * explorer, a sweep) land on disjoint domains instead of joining each other's
+ * loopback multicast and polluting peer sets and counts. */
+static uint16_t st_domain_base = 33;
+#define ST_DOMAIN   st_domain_base
 /* topic handles are array indices (declaration order in ch[]) */
 #define ST_CH_GAP   0   /* reliable, depth 4, no backpressure  */
 #define ST_CH_BLOCK 1   /* reliable, depth 4, slow_reader_wait 100 ms */
@@ -1232,7 +1237,7 @@ static DartNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **
 static void shm_node_checks(void){
     static unsigned char buf[6*1024*1024];
     DartNode *P,*S; void *mp,*ms; int i; uint32_t tx=0, rx=0; size_t sizes[3];
-    P=shmn_open(1,1,77,&mp); S=shmn_open(0,1,77,&ms);
+    P=shmn_open(1,1,(uint16_t)(ST_DOMAIN+40),&mp); S=shmn_open(0,1,(uint16_t)(ST_DOMAIN+40),&ms);
     ST_CHECK(P&&S, "shm-node: SHM-capable pub + sub open");
     if (P&&S){
         for (i=0;i<800 && dart_node_publisher_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
@@ -3618,7 +3623,9 @@ static void matchwait_checks(void){
        Unblocking lets B's re-ask (on A's next announce) verify A, and the reliable
        HB/NACK path must then deliver the ORIGINAL sample: our-side verdicts are
        sufficient for delivery, reader-side lateness heals. */
-    { enum { MW_PORT = 47653 };
+    { /* per-process fixed port, like the domain base: concurrent selftests must not
+         collide on the bind (the phase needs it fixed only to intercept by port) */
+      const uint16_t MW_PORT = (uint16_t)(40000u + st_domain_base % 20000u);
       DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts ao, bo; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
@@ -4028,6 +4035,10 @@ static int selftest_main(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20];
     uint8_t payload[32]; unsigned i;
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: keep output on a crash */
+    /* per-process domain base (see ST_DOMAIN): phases span base..base+~40, strides of
+       64 keep concurrent runs disjoint, offset past the small domains real nodes use */
+    st_domain_base = (uint16_t)(1000u + (uint16_t)(i_dart_plat_now_us() % 900u) * 64u);
+    printf("selftest domains: %u..\n", (unsigned)st_domain_base);
     memset(payload, 0x5A, sizeof payload);
 
     DartTopicDef ch[4]; memset(ch, 0, sizeof ch);
