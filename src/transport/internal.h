@@ -40,6 +40,11 @@
 #define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
 #define DART__INT_KIND_SHIFT 3u
 #define DART__INT_FORCEABLE 0x40u /* bit 6: a per-topic patterns flag (variable value channel: owner permits force) */
+#define DART__INT_HOLE_RUN  0x80u /* bit 7: this entry is a RUN of undefined reserve slots; the
+                                     hash field carries the run length. Later indices stay stable
+                                     without shipping one 5 B hole per slot (builtins sit at the
+                                     top of the reserve, so a big reserve would otherwise pad
+                                     every announce to its full size). */
 #ifdef DART_SHM
 #ifndef DART_SHM_MAX_RETRY
 #define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */

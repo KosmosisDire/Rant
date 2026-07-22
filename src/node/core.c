@@ -569,18 +569,16 @@ int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t ind
 static uint16_t i_dart_node_core_greedy_extend(i_DartNodeCore *c, uint32_t peer,
                             DartBytes interest, DartDetailWant *wants, uint16_t n,
                             uint16_t max_wants){
-    const uint8_t *d = interest.data;
-    uint16_t total, k; uint32_t a;
-    if (!d || interest.len < 2) return n;
-    total = (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
-    if (interest.len < 2u + 5u*(uint32_t)total) return n;
-    for (a = 0; a < total && n < max_wants; a++){
-        uint8_t role = (uint8_t)(d[2u + 5u*a + 4u] & 3u);   /* flags bits 0-1 (DartRole) */
-        if (role == DART_INACTIVE) continue;
-        if (i_dart_node_core_topic_find(c, peer, (uint16_t)a)) continue;
-        for (k = 0; k < n; k++) if (wants[k].index == (uint16_t)a) break;
+    DartInterestIter it; DartTopicEntry e;
+    uint16_t k;
+    memset(&it, 0, sizeof it);
+    while (n < max_wants && dart_interest_next(interest, &it, &e)){
+        /* the iterator skips INACTIVE entries and hole runs; a PUBSUB double-yield
+           dedupes against the want list below like any repeat */
+        if (i_dart_node_core_topic_find(c, peer, e.index)) continue;
+        for (k = 0; k < n; k++) if (wants[k].index == e.index) break;
         if (k < n) continue;
-        wants[n].index = (uint16_t)a;
+        wants[n].index = e.index;
         wants[n].schema_hash = 0;   /* force the wire inline: we may not hold that schema */
         n++;
     }

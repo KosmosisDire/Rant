@@ -3594,8 +3594,20 @@ typedef struct {
     uint64_t          rsp_schema_hash;
 } DartEntityInfo;
 
-/* Iterator: zero-initialize, then call until 0. Internal walk state, not for direct use. */
-typedef struct { uint16_t next_index; uint8_t phase; } DartEntityIter;
+/* Iterator: zero-initialize, then call until 0. Internal walk state, not for direct use.
+ * The peer walk keeps a persistent overlay cursor plus the previously walked entry, so
+ * enumerating a peer's entities costs one pass over its interest list, not one pass per
+ * yielded entity; pattern partners are created at adjacent indices, so the fold checks
+ * hit the prev/peek fast paths and a full rescan is only the fallback. epoch keys the
+ * cursor to dart_node_peer_interest_epoch: an interest change mid-walk reseeks safely. */
+typedef struct {
+    uint16_t next_index;
+    uint8_t  phase;
+    uint8_t  has_prev;
+    uint32_t epoch;
+    DartInterestIter pos;
+    DartTopicEntry   prev;
+} DartEntityIter;
 
 /* Walk the entities a PEER advertises, one per call: plain topics pass through, pattern
  * channels fold (a function's @req/@rsp pair yields ONE function entity; a variable's @set
@@ -5814,6 +5826,11 @@ static inline uint64_t i_dart_fnv1a64_str(const char *s){
 #define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
 #define DART__INT_KIND_SHIFT 3u
 #define DART__INT_FORCEABLE 0x40u /* bit 6: a per-topic patterns flag (variable value channel: owner permits force) */
+#define DART__INT_HOLE_RUN  0x80u /* bit 7: this entry is a RUN of undefined reserve slots; the
+                                     hash field carries the run length. Later indices stay stable
+                                     without shipping one 5 B hole per slot (builtins sit at the
+                                     top of the reserve, so a big reserve would otherwise pad
+                                     every announce to its full size). */
 #ifdef DART_SHM
 #ifndef DART_SHM_MAX_RETRY
 #define DART_SHM_MAX_RETRY 8u   /* give up on an unresolvable descriptor after this many */
@@ -8009,30 +8026,46 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
 }
 
 
-/* Serialize our interest into out: [u16 n], then one [u32 hash][u8 flags] entry per
- * topic IN INDEX ORDER up to the highest defined slot (position = index; an undefined
- * reserve slot rides as an INACTIVE hole so later indices stay stable), then a SPARSE
+/* Serialize our interest into out: [u16 n] (n = SLOTS, holes included), then one
+ * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest defined slot
+ * (position = index). A run of UNDEFINED reserve slots collapses to ONE entry flagged
+ * DART__INT_HOLE_RUN whose hash field is the run length, so later indices stay stable
+ * without a big reserve padding the announce to its full size. A defined-but-INACTIVE
+ * topic still rides as a normal entry (its identity survives role flips). Then a SPARSE
  * rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics
  * that cap their best-effort delivery rate (see DartQos.max_rate_hz). Returns bytes
  * written, or 0 if cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
-    uint8_t *o=(uint8_t*)out, *rp;
-    uint16_t c, n=0, n_rates;
+    uint8_t *o=(uint8_t*)out, *e, *rp;
+    uint16_t c, n=0, n_rates; uint32_t cells=0; int in_hole=0;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    for (c=0;c<n;c++){                       /* exact cell count (runs collapse), so a buffer
+                                                sized by dart_transport_interest_size fits */
+        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        else { if (!in_hole) cells++; in_hole=1; }
+    }
     n_rates = i_dart_rate_count(st, n);
-    if (cap < 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates) return 0;
+    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates) return 0;
     i_dart_le_w16(o, n);
+    e = o + 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
-        uint8_t *e = o + 2u + 5u*(size_t)c;
-        uint8_t role = topic->name_len ? topic->role : (uint8_t)DART_INACTIVE;
-        i_dart_le_w32(e, topic->name_len ? (uint32_t)topic->identity : 0u);
-        e[4] = (uint8_t)((role & DART__INT_ROLE_MASK)
+        if (!topic->name_len){
+            uint32_t run = 1;
+            while ((uint16_t)(c+run) < n && st->topics[c+run].name_len==0) run++;
+            i_dart_le_w32(e, run);
+            e[4] = (uint8_t)(DART_INACTIVE | DART__INT_HOLE_RUN);
+            e += 5u; c = (uint16_t)(c + run - 1u);
+            continue;
+        }
+        i_dart_le_w32(e, (uint32_t)topic->identity);
+        e[4] = (uint8_t)((topic->role & DART__INT_ROLE_MASK)
              | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u)
-             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u)
-             | (topic->name_len && topic->forceable ? DART__INT_FORCEABLE : 0u));
+             | ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK)
+             | (topic->forceable ? DART__INT_FORCEABLE : 0u));
+        e += 5u;
     }
-    rp = o + 2u + 5u*(size_t)n;
+    rp = e;
     i_dart_le_w16(rp, n_rates); rp += 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
@@ -8042,6 +8075,25 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
         }
     }
     return (size_t)(rp - o);
+}
+
+/* Serial validation walk over an interest entry stream: returns the stream's byte length
+ * (2 + 5 per cell) when it accounts exactly n slots inside len, else 0 (truncated or a
+ * malformed run). Every parser walks through this first, so a bad blob is rejected
+ * wholesale, matching the old fixed-stride length check. */
+static uint32_t i_dart_interest_walk_len(const uint8_t *d, size_t len, uint16_t n){
+    const uint8_t *e = d + 2u, *end = d + len;
+    uint32_t a = 0;
+    while (a < n){
+        uint32_t step = 1;
+        if (e + 5 > end) return 0;
+        if (e[4] & DART__INT_HOLE_RUN){
+            step = i_dart_le_r32(e);
+            if (step == 0 || step > (uint32_t)n - a) return 0;
+        }
+        e += 5u; a += step;
+    }
+    return (uint32_t)(e - d);
 }
 
 
@@ -8055,14 +8107,15 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
  * the publisher upgrades and re-advertises) and the cached schema verdict per
  * direction, each refusal fired as its event on every apply that would have used it. */
 void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
-    const uint8_t *d=blob.data;
-    uint16_t n, c; uint32_t a; int peer_slot=i_dart_peer_slot(st,peer_id);
+    const uint8_t *d=blob.data, *e;
+    uint16_t n, c; uint32_t a, entries_len; int peer_slot=i_dart_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap, *peer_sub_reliable;
     uint16_t *amap; uint8_t *astate;
     uint32_t unmappable = 0;
     if (peer_slot<0 || !d || blob.len<2) return;
     n = i_dart_le_r16(d);
-    if (blob.len < 2u + 5u*(uint32_t)n) return;        /* truncated: reject wholesale */
+    entries_len = i_dart_interest_walk_len(d, blob.len, n);
+    if (!entries_len) return;                          /* truncated/malformed: reject wholesale */
     peer_pub_bitmap  =&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_bitmap  =&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_reliable=&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len];
@@ -8070,11 +8123,12 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     memset(peer_sub_reliable,0,st->bitmap_len);
     amap   = n ? i_dart_peer_index_ensure(st, peer_slot, n) : NULL;
     astate = amap ? st->peer_astate[peer_slot] : NULL;
-    for (a=0;a<n;a++){
-        const uint8_t *e = d + 2u + 5u*a;
+    e = d + 2u;
+    for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int their_pub, their_sub, rel;
         uint16_t cidx; i_DartTopic *topic;
+        if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
         if (role == DART_INACTIVE) continue;
         if (!astate || a >= st->peer_index_len[peer_slot]){
             /* no verdict storage (the map allocation failed): this entry can never
@@ -8137,7 +8191,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
        so w->used with the sub bit) then paces its sends. Re-applied every announce (the rate
        is in the blob, immutable per topic), so a lane re-formed by a role flip re-derives it. */
     if (amap){
-        const uint8_t *rp = d + 2u + 5u*(size_t)n;
+        const uint8_t *rp = d + entries_len;
         if (blob.len >= (size_t)(rp - d) + 2u){
             uint16_t nr = i_dart_le_r16(rp), k; rp += 2u;
             for (k=0;k<nr;k++){
@@ -8188,17 +8242,17 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
 #define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  13u                 /* what WE write */
+#define DART__META_VER  15u                 /* what WE write (v14/15: hole-run interest) */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  12u
+#define DART__META_VER  14u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= DART__META_BASE_NOSHM
         && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=12 && meta.data[2]<=13;
+        && meta.data[2]>=14 && meta.data[2]<=15;
 }
 /* base prefix through the iflags byte, by version (odd v13 carries shm+host, even v12
  * doesn't). iflags is always the base's last byte. */
@@ -8212,12 +8266,17 @@ uint16_t dart_meta_cap(uint16_t n_topics){
 }
 
 /* Exact bytes of our current interest blob (the total_len interest paging serves).
- * The same walk dart_transport_build_interest emits, byte for byte. */
+ * The same walk dart_transport_build_interest emits, byte for byte: defined slots cost
+ * one 5 B entry each, every maximal run of undefined slots costs one. */
 uint32_t dart_transport_interest_size(DartTransportState *st){
-    uint16_t c, n=0, n_rates;
+    uint16_t c, n=0, n_rates; uint32_t cells=0; int in_hole=0;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    for (c=0;c<n;c++){
+        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        else { if (!in_hole) cells++; in_hole=1; }
+    }
     n_rates = i_dart_rate_count(st, n);
-    return 2u + 5u*(uint32_t)n + 2u + 4u*(uint32_t)n_rates;
+    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates;
 }
 
 /* Exact overlay size the next INLINE dart_transport_meta_build will emit for the
@@ -8288,7 +8347,14 @@ int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry 
         uint8_t flags, role;
         if ((size_t)off + 5u > interest.len){ it->left = 0; return 0; }   /* truncated: stop */
         flags = interest.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
-        if (role == DART_INACTIVE){       /* declared-but-off / undefined hole: not advertised */
+        if (flags & DART__INT_HOLE_RUN){  /* a run of undefined reserve slots: skip them all */
+            uint32_t run = i_dart_le_r32(interest.data + off);
+            if (run == 0 || run > it->left){ it->left = 0; return 0; }    /* malformed: stop */
+            it->left = (uint16_t)(it->left - run); it->index = (uint16_t)(it->index + run);
+            it->off = off + 5u; it->phase = 0;
+            continue;
+        }
+        if (role == DART_INACTIVE){       /* declared-but-off: not advertised */
             it->left--; it->index++; it->off = off + 5u; it->phase = 0;
             continue;
         }
@@ -8317,7 +8383,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
 
 #ifdef DART_SHM
 int dart_meta_shm(DartBytes meta, uint8_t host[16]){
-    if (!i_dart_meta_ok(meta) || meta.data[2]!=13
+    if (!i_dart_meta_ok(meta) || !(meta.data[2] & 1u)   /* odd version = the SHM-carrying base */
         || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
     return 1;
@@ -8521,14 +8587,15 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
     slot = i_dart_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
-    if (interest.len < 2u + 5u*(uint32_t)n) return 0;
+    if (!i_dart_interest_walk_len(d, interest.len, n)) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
-    for (a=0;a<n;a++){
-        const uint8_t *e = d + 2u + 5u*a;
+    {   const uint8_t *e = d + 2u;
+    for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int cidx = -1, nc;
         i_DartTopic *topic;
         int their_pub, their_sub, ours_pub, ours_sub;
+        if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
         if (role == DART_INACTIVE) continue;
         if (astate && a < alen && (astate[a] & DART__AST_DETAILED)) continue;   /* decided */
         nc = i_dart_hash32_candidates(st, i_dart_le_r32(e), &cidx);
@@ -8547,6 +8614,7 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
             out[cnt].schema_hash = (nc == 1 && schemas) ? schemas[cidx].hash : 0;
         }
         cnt++;
+    }
     }
     return cnt;
 }
@@ -8567,15 +8635,16 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     slot = i_dart_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
-    if (interest.len < 2u + 5u*(uint32_t)n) return 0;
+    if (!i_dart_interest_walk_len(d, interest.len, n)) return 0;
     ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
     ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
     if (!ours_pub && !ours_sub) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
-    for (a=0;a<n;a++){
-        const uint8_t *e = d + 2u + 5u*a;
+    {   const uint8_t *e = d + 2u;
+    for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int their_pub, their_sub;
+        if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
         if (role == DART_INACTIVE) continue;
         if (i_dart_le_r32(e) != (uint32_t)topic->identity) continue;   /* not this topic */
         if (!astate || a >= alen) continue;                     /* unresolvable: never counted */
@@ -8583,6 +8652,7 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
         their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
         their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
         if ((their_pub && ours_sub) || (their_sub && ours_pub)) cnt++;
+    }
     }
     return cnt;
 }
@@ -11236,18 +11306,16 @@ int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t ind
 static uint16_t i_dart_node_core_greedy_extend(i_DartNodeCore *c, uint32_t peer,
                             DartBytes interest, DartDetailWant *wants, uint16_t n,
                             uint16_t max_wants){
-    const uint8_t *d = interest.data;
-    uint16_t total, k; uint32_t a;
-    if (!d || interest.len < 2) return n;
-    total = (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
-    if (interest.len < 2u + 5u*(uint32_t)total) return n;
-    for (a = 0; a < total && n < max_wants; a++){
-        uint8_t role = (uint8_t)(d[2u + 5u*a + 4u] & 3u);   /* flags bits 0-1 (DartRole) */
-        if (role == DART_INACTIVE) continue;
-        if (i_dart_node_core_topic_find(c, peer, (uint16_t)a)) continue;
-        for (k = 0; k < n; k++) if (wants[k].index == (uint16_t)a) break;
+    DartInterestIter it; DartTopicEntry e;
+    uint16_t k;
+    memset(&it, 0, sizeof it);
+    while (n < max_wants && dart_interest_next(interest, &it, &e)){
+        /* the iterator skips INACTIVE entries and hole runs; a PUBSUB double-yield
+           dedupes against the want list below like any repeat */
+        if (i_dart_node_core_topic_find(c, peer, e.index)) continue;
+        for (k = 0; k < n; k++) if (wants[k].index == e.index) break;
         if (k < n) continue;
-        wants[n].index = (uint16_t)a;
+        wants[n].index = e.index;
         wants[n].schema_hash = 0;   /* force the wire inline: we may not hold that schema */
         n++;
     }
@@ -15605,13 +15673,30 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
  * the @-suffix convention, with partners located by the LOW-32 HASH of the expected partner
  * name so pairing works from the announce alone once the primary's name is fetched. */
 
-/* the first entry with index >= from (entries are yielded in index order; the pub/sub
- * double-yield collapses because entry.role already covers both directions) */
-static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, uint16_t from, DartTopicEntry *out){
-    DartInterestIter it; DartTopicEntry e;
-    memset(&it, 0, sizeof it);
-    while (dart_node_peer_interest_next(p, &it, &e))
-        if (e.index >= from){ *out = e; return 1; }
+/* the first entry with index >= it->next_index, resuming the walk's persistent cursor
+ * (entries are yielded in index order; the pub/sub double-yield collapses because
+ * entry.role already covers both directions). An interest change mid-walk (epoch bump)
+ * reseeks from the front, matching the old restart-per-call behavior. */
+static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, DartEntityIter *it, DartTopicEntry *out){
+    uint32_t ep = dart_node_peer_interest_epoch(p);
+    if (it->epoch != ep){
+        memset(&it->pos, 0, sizeof it->pos);
+        it->has_prev = 0;
+        it->epoch = ep;
+    }
+    while (dart_node_peer_interest_next(p, &it->pos, out))
+        if (out->index >= it->next_index) return 1;
+    return 0;
+}
+
+/* peek the entry after index `from` through a copy of the persistent cursor: the
+ * adjacent-partner fast path (pattern channel pairs are created back to back, so the
+ * partner is almost always at from+1). A miss falls back to i_dart_pat_find_hash. */
+static int i_dart_pat_peek_next(const DartDiscoveryPeer *p, const DartEntityIter *it,
+                                uint16_t from, DartTopicEntry *out){
+    DartInterestIter pos = it->pos;
+    while (dart_node_peer_interest_next(p, &pos, out))
+        if (out->index > from) return 1;
     return 0;
 }
 
@@ -15684,14 +15769,17 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
 
 int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out){
     const DartDiscoveryPeer *p;
-    DartTopicEntry e, partner;
+    DartTopicEntry e, partner, prev_e;
     DartString name, base;
+    uint8_t had_prev;
     if (!n || !it || !out) return 0;
     p = i_dart_pat_peer(n, peer);
     if (!p) return 0;
     for (;;){
-        if (!i_dart_pat_entry_from(p, it->next_index, &e)) return 0;
+        if (!i_dart_pat_entry_from(p, it, &e)) return 0;
         it->next_index = (uint16_t)(e.index + 1);
+        prev_e = it->prev; had_prev = it->has_prev;   /* the entry walked before e */
+        it->prev = e; it->has_prev = 1;
         if (i_dart_pat_hidden_hash(e.hash)) continue;   /* builtins never surface */
         name = dart_node_peer_topic_name(n, peer, e.index);   /* {NULL,0} until details arrive */
         switch (e.kind){
@@ -15705,9 +15793,14 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
             /* the value channel is the bare name: a same-peer "<name>@set" VAR_SET entry
                makes it writable (unknowable until the name is fetched: shown unwritable) */
-            if (name.len)
-                out->writable = (uint8_t)i_dart_pat_find_hash(p, i_dart_pat_hash32(name, "@set"),
-                                                              DART_KIND_VAR_SET, &partner);
+            if (name.len){
+                uint32_t want = i_dart_pat_hash32(name, "@set");
+                if (i_dart_pat_peek_next(p, it, e.index, &partner) && partner.index == e.index + 1
+                    && partner.kind == DART_KIND_VAR_SET && partner.hash == want)
+                    out->writable = 1;   /* adjacent partner: no rescan */
+                else
+                    out->writable = (uint8_t)i_dart_pat_find_hash(p, want, DART_KIND_VAR_SET, &partner);
+            }
             return 1;
         case DART_KIND_VAR_SET:
             /* secondary: consumed by its bare-name VARIABLE entry when both are advertised */
@@ -15716,9 +15809,13 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                 out->incomplete = 1;
                 return 1;
             }
-            if (i_dart_pat_strip(name, "@set", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, ""), DART_KIND_VARIABLE, &partner))
-                continue;   /* folded into the value entity */
+            if (i_dart_pat_strip(name, "@set", &base)){
+                uint32_t want = i_dart_pat_hash32(base, "");
+                if ((had_prev && prev_e.index + 1 == e.index && prev_e.kind == DART_KIND_VARIABLE
+                     && prev_e.hash == want)   /* adjacent partner: no rescan */
+                    || i_dart_pat_find_hash(p, want, DART_KIND_VARIABLE, &partner))
+                    continue;   /* folded into the value entity */
+            }
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE,
                             i_dart_pat_strip(name, "@set", &base) ? base : name, &e);
             out->writable = 1; out->incomplete = 1;   /* a set channel with no value channel */
@@ -15732,9 +15829,11 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
             out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
             out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
             if (name.len && i_dart_pat_strip(name, "@req", &base)){
+                uint32_t want = i_dart_pat_hash32(base, "@rsp");
                 out->name = base;
-                if (i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@rsp"),
-                                         DART_KIND_FUNC_RSP, &partner))
+                if ((i_dart_pat_peek_next(p, it, e.index, &partner) && partner.index == e.index + 1
+                     && partner.kind == DART_KIND_FUNC_RSP && partner.hash == want)   /* adjacent */
+                    || i_dart_pat_find_hash(p, want, DART_KIND_FUNC_RSP, &partner))
                     out->rsp_schema = dart_node_peer_topic_schema(n, peer, partner.index,
                                                                   &out->rsp_schema_hash);
                 else out->incomplete = 1;   /* half a function advertised */
@@ -15750,9 +15849,13 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                 out->incomplete = 1;
                 return 1;
             }
-            if (i_dart_pat_strip(name, "@rsp", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@req"), DART_KIND_FUNC_REQ, &partner))
-                continue;   /* folded into the function entity */
+            if (i_dart_pat_strip(name, "@rsp", &base)){
+                uint32_t want = i_dart_pat_hash32(base, "@req");
+                if ((had_prev && prev_e.index + 1 == e.index && prev_e.kind == DART_KIND_FUNC_REQ
+                     && prev_e.hash == want)   /* adjacent partner: no rescan */
+                    || i_dart_pat_find_hash(p, want, DART_KIND_FUNC_REQ, &partner))
+                    continue;   /* folded into the function entity */
+            }
             i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION,
                             i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
             out->incomplete = 1;
@@ -16082,7 +16185,7 @@ struct NodeOptions {
     bool                     disable_shm          = false;
     bool                     fetch_details        = false; /* greedily fetch every peer topic's
                                                               name + schema (observer UIs): fills
-                                                              Peer::entities names via the cache */
+                                                              peer_entities() names via the cache */
     int32_t                  match_wait_ms        = 0;   /* send-path match wait: a send that would
                                                             reach ZERO subscribers while a match is
                                                             still resolving blocks up to this long
@@ -16603,14 +16706,16 @@ struct Entity {
     uint64_t    rsp_schema_hash = 0;  /* FUNCTION only: the response schema identity */
 };
 
-/* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). */
+/* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Peer
+ * facts only: what a peer advertises is a separate, explicit Node::peer_entities(id)
+ * call, so a peers() in a hot path (an event handler, a UI tick) never pays the
+ * entity fold or its allocations. */
 struct Peer {
     uint32_t            id = 0;
     std::string         name;
     std::string         address;         /* "1.2.3.4:port" */
     bool                active = false;
     uint16_t            fragment_size = 0;
-    std::vector<Entity> entities;        /* what it advertises, folded into entities */
 };
 
 /* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
@@ -17503,8 +17608,17 @@ public:
         return detail::dart_node_dispatch(impl_->node, max_msgs, timeout_ms);
     }
 
-    /* A copied snapshot of the live peer table (safe to keep after the poll), each
-     * peer's advertisements folded into entities. */
+    /* The number of known peers, allocation free (safe from any callback). */
+    uint16_t peer_count() const {
+        if (!valid()) return 0;
+        uint16_t count = 0;
+        LockGuard guard(impl_->node);
+        (void)detail::dart_node_peers(impl_->node, &count);
+        return count;
+    }
+
+    /* A copied snapshot of the live peer table (safe to keep after the poll): peer
+     * facts only. Use peer_entities(id) for what a peer advertises. */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
         if (!valid()) return out;
@@ -17522,21 +17636,32 @@ public:
             peer.address       = addr_string(p.addr);
             peer.active        = (p.liveness == detail::DART_PEER_ACTIVE);
             peer.fragment_size = detail::dart_node_peer_frag(&p);
-#ifndef DART_NO_PATTERNS
-            detail::DartEntityIter it;
-            std::memset(&it, 0, sizeof it);
-            detail::DartEntityInfo ei;
-            while (detail::dart_node_peer_entity_next(impl_->node, p.id, &it, &ei))
-                peer.entities.push_back(entity_from(ei));
-#endif
             out.push_back(std::move(peer));
         }
         return out;
     }
 
 #ifndef DART_NO_PATTERNS
+    /* What one peer advertises, folded into entities (a function's req/rsp pair is one
+     * entity, a variable's set channel merges as `writable`). A copied snapshot. This
+     * walks the peer's whole interest list and allocates per entity: an explicit,
+     * observer-grade call, deliberately not part of peers(). */
+    std::vector<Entity> peer_entities(uint32_t peer_id) const {
+        std::vector<Entity> out;
+        if (!valid()) return out;
+        LockGuard guard(impl_->node);
+        detail::DartEntityIter it;
+        std::memset(&it, 0, sizeof it);
+        detail::DartEntityInfo ei;
+        while (detail::dart_node_peer_entity_next(impl_->node, peer_id, &it, &ei))
+            out.push_back(entity_from(ei));
+        return out;
+    }
+#endif
+
+#ifndef DART_NO_PATTERNS
     /* The entities THIS node hosts (its functions/variables/signals, then its plain
-     * topics), the same folded shape as Peer::entities. A copied snapshot. */
+     * topics), the same folded shape as peer_entities(). A copied snapshot. */
     std::vector<Entity> entities() const {
         std::vector<Entity> out;
         if (!valid()) return out;

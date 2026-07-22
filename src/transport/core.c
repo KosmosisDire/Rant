@@ -658,30 +658,46 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
 }
 
 
-/* Serialize our interest into out: [u16 n], then one [u32 hash][u8 flags] entry per
- * topic IN INDEX ORDER up to the highest defined slot (position = index; an undefined
- * reserve slot rides as an INACTIVE hole so later indices stay stable), then a SPARSE
+/* Serialize our interest into out: [u16 n] (n = SLOTS, holes included), then one
+ * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest defined slot
+ * (position = index). A run of UNDEFINED reserve slots collapses to ONE entry flagged
+ * DART__INT_HOLE_RUN whose hash field is the run length, so later indices stay stable
+ * without a big reserve padding the announce to its full size. A defined-but-INACTIVE
+ * topic still rides as a normal entry (its identity survives role flips). Then a SPARSE
  * rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics
  * that cap their best-effort delivery rate (see DartQos.max_rate_hz). Returns bytes
  * written, or 0 if cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
-    uint8_t *o=(uint8_t*)out, *rp;
-    uint16_t c, n=0, n_rates;
+    uint8_t *o=(uint8_t*)out, *e, *rp;
+    uint16_t c, n=0, n_rates; uint32_t cells=0; int in_hole=0;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    for (c=0;c<n;c++){                       /* exact cell count (runs collapse), so a buffer
+                                                sized by dart_transport_interest_size fits */
+        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        else { if (!in_hole) cells++; in_hole=1; }
+    }
     n_rates = i_dart_rate_count(st, n);
-    if (cap < 2u + 5u*(size_t)n + 2u + 4u*(size_t)n_rates) return 0;
+    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates) return 0;
     i_dart_le_w16(o, n);
+    e = o + 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
-        uint8_t *e = o + 2u + 5u*(size_t)c;
-        uint8_t role = topic->name_len ? topic->role : (uint8_t)DART_INACTIVE;
-        i_dart_le_w32(e, topic->name_len ? (uint32_t)topic->identity : 0u);
-        e[4] = (uint8_t)((role & DART__INT_ROLE_MASK)
+        if (!topic->name_len){
+            uint32_t run = 1;
+            while ((uint16_t)(c+run) < n && st->topics[c+run].name_len==0) run++;
+            i_dart_le_w32(e, run);
+            e[4] = (uint8_t)(DART_INACTIVE | DART__INT_HOLE_RUN);
+            e += 5u; c = (uint16_t)(c + run - 1u);
+            continue;
+        }
+        i_dart_le_w32(e, (uint32_t)topic->identity);
+        e[4] = (uint8_t)((topic->role & DART__INT_ROLE_MASK)
              | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u)
-             | (topic->name_len ? ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK) : 0u)
-             | (topic->name_len && topic->forceable ? DART__INT_FORCEABLE : 0u));
+             | ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK)
+             | (topic->forceable ? DART__INT_FORCEABLE : 0u));
+        e += 5u;
     }
-    rp = o + 2u + 5u*(size_t)n;
+    rp = e;
     i_dart_le_w16(rp, n_rates); rp += 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
@@ -691,6 +707,25 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
         }
     }
     return (size_t)(rp - o);
+}
+
+/* Serial validation walk over an interest entry stream: returns the stream's byte length
+ * (2 + 5 per cell) when it accounts exactly n slots inside len, else 0 (truncated or a
+ * malformed run). Every parser walks through this first, so a bad blob is rejected
+ * wholesale, matching the old fixed-stride length check. */
+static uint32_t i_dart_interest_walk_len(const uint8_t *d, size_t len, uint16_t n){
+    const uint8_t *e = d + 2u, *end = d + len;
+    uint32_t a = 0;
+    while (a < n){
+        uint32_t step = 1;
+        if (e + 5 > end) return 0;
+        if (e[4] & DART__INT_HOLE_RUN){
+            step = i_dart_le_r32(e);
+            if (step == 0 || step > (uint32_t)n - a) return 0;
+        }
+        e += 5u; a += step;
+    }
+    return (uint32_t)(e - d);
 }
 
 
@@ -704,14 +739,15 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
  * the publisher upgrades and re-advertises) and the cached schema verdict per
  * direction, each refusal fired as its event on every apply that would have used it. */
 void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
-    const uint8_t *d=blob.data;
-    uint16_t n, c; uint32_t a; int peer_slot=i_dart_peer_slot(st,peer_id);
+    const uint8_t *d=blob.data, *e;
+    uint16_t n, c; uint32_t a, entries_len; int peer_slot=i_dart_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap, *peer_sub_reliable;
     uint16_t *amap; uint8_t *astate;
     uint32_t unmappable = 0;
     if (peer_slot<0 || !d || blob.len<2) return;
     n = i_dart_le_r16(d);
-    if (blob.len < 2u + 5u*(uint32_t)n) return;        /* truncated: reject wholesale */
+    entries_len = i_dart_interest_walk_len(d, blob.len, n);
+    if (!entries_len) return;                          /* truncated/malformed: reject wholesale */
     peer_pub_bitmap  =&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_bitmap  =&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     peer_sub_reliable=&st->peer_sub_reliable[(size_t)peer_slot*st->bitmap_len];
@@ -719,11 +755,12 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     memset(peer_sub_reliable,0,st->bitmap_len);
     amap   = n ? i_dart_peer_index_ensure(st, peer_slot, n) : NULL;
     astate = amap ? st->peer_astate[peer_slot] : NULL;
-    for (a=0;a<n;a++){
-        const uint8_t *e = d + 2u + 5u*a;
+    e = d + 2u;
+    for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int their_pub, their_sub, rel;
         uint16_t cidx; i_DartTopic *topic;
+        if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
         if (role == DART_INACTIVE) continue;
         if (!astate || a >= st->peer_index_len[peer_slot]){
             /* no verdict storage (the map allocation failed): this entry can never
@@ -786,7 +823,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
        so w->used with the sub bit) then paces its sends. Re-applied every announce (the rate
        is in the blob, immutable per topic), so a lane re-formed by a role flip re-derives it. */
     if (amap){
-        const uint8_t *rp = d + 2u + 5u*(size_t)n;
+        const uint8_t *rp = d + entries_len;
         if (blob.len >= (size_t)(rp - d) + 2u){
             uint16_t nr = i_dart_le_r16(rp), k; rp += 2u;
             for (k=0;k<nr;k++){
@@ -837,17 +874,17 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
 #define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  13u                 /* what WE write */
+#define DART__META_VER  15u                 /* what WE write (v14/15: hole-run interest) */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  12u
+#define DART__META_VER  14u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= DART__META_BASE_NOSHM
         && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=12 && meta.data[2]<=13;
+        && meta.data[2]>=14 && meta.data[2]<=15;
 }
 /* base prefix through the iflags byte, by version (odd v13 carries shm+host, even v12
  * doesn't). iflags is always the base's last byte. */
@@ -861,12 +898,17 @@ uint16_t dart_meta_cap(uint16_t n_topics){
 }
 
 /* Exact bytes of our current interest blob (the total_len interest paging serves).
- * The same walk dart_transport_build_interest emits, byte for byte. */
+ * The same walk dart_transport_build_interest emits, byte for byte: defined slots cost
+ * one 5 B entry each, every maximal run of undefined slots costs one. */
 uint32_t dart_transport_interest_size(DartTransportState *st){
-    uint16_t c, n=0, n_rates;
+    uint16_t c, n=0, n_rates; uint32_t cells=0; int in_hole=0;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    for (c=0;c<n;c++){
+        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        else { if (!in_hole) cells++; in_hole=1; }
+    }
     n_rates = i_dart_rate_count(st, n);
-    return 2u + 5u*(uint32_t)n + 2u + 4u*(uint32_t)n_rates;
+    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates;
 }
 
 /* Exact overlay size the next INLINE dart_transport_meta_build will emit for the
@@ -937,7 +979,14 @@ int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry 
         uint8_t flags, role;
         if ((size_t)off + 5u > interest.len){ it->left = 0; return 0; }   /* truncated: stop */
         flags = interest.data[off + 4]; role = (uint8_t)(flags & DART__INT_ROLE_MASK);
-        if (role == DART_INACTIVE){       /* declared-but-off / undefined hole: not advertised */
+        if (flags & DART__INT_HOLE_RUN){  /* a run of undefined reserve slots: skip them all */
+            uint32_t run = i_dart_le_r32(interest.data + off);
+            if (run == 0 || run > it->left){ it->left = 0; return 0; }    /* malformed: stop */
+            it->left = (uint16_t)(it->left - run); it->index = (uint16_t)(it->index + run);
+            it->off = off + 5u; it->phase = 0;
+            continue;
+        }
+        if (role == DART_INACTIVE){       /* declared-but-off: not advertised */
             it->left--; it->index++; it->off = off + 5u; it->phase = 0;
             continue;
         }
@@ -966,7 +1015,7 @@ int dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry
 
 #ifdef DART_SHM
 int dart_meta_shm(DartBytes meta, uint8_t host[16]){
-    if (!i_dart_meta_ok(meta) || meta.data[2]!=13
+    if (!i_dart_meta_ok(meta) || !(meta.data[2] & 1u)   /* odd version = the SHM-carrying base */
         || meta.len < DART__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
     return 1;
@@ -1170,14 +1219,15 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
     slot = i_dart_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
-    if (interest.len < 2u + 5u*(uint32_t)n) return 0;
+    if (!i_dart_interest_walk_len(d, interest.len, n)) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
-    for (a=0;a<n;a++){
-        const uint8_t *e = d + 2u + 5u*a;
+    {   const uint8_t *e = d + 2u;
+    for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int cidx = -1, nc;
         i_DartTopic *topic;
         int their_pub, their_sub, ours_pub, ours_sub;
+        if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
         if (role == DART_INACTIVE) continue;
         if (astate && a < alen && (astate[a] & DART__AST_DETAILED)) continue;   /* decided */
         nc = i_dart_hash32_candidates(st, i_dart_le_r32(e), &cidx);
@@ -1196,6 +1246,7 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
             out[cnt].schema_hash = (nc == 1 && schemas) ? schemas[cidx].hash : 0;
         }
         cnt++;
+    }
     }
     return cnt;
 }
@@ -1216,15 +1267,16 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     slot = i_dart_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
-    if (interest.len < 2u + 5u*(uint32_t)n) return 0;
+    if (!i_dart_interest_walk_len(d, interest.len, n)) return 0;
     ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
     ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
     if (!ours_pub && !ours_sub) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
-    for (a=0;a<n;a++){
-        const uint8_t *e = d + 2u + 5u*a;
+    {   const uint8_t *e = d + 2u;
+    for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int their_pub, their_sub;
+        if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
         if (role == DART_INACTIVE) continue;
         if (i_dart_le_r32(e) != (uint32_t)topic->identity) continue;   /* not this topic */
         if (!astate || a >= alen) continue;                     /* unresolvable: never counted */
@@ -1232,6 +1284,7 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
         their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
         their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
         if ((their_pub && ours_sub) || (their_sub && ours_pub)) cnt++;
+    }
     }
     return cnt;
 }
