@@ -2188,6 +2188,102 @@ static void schema_bind_checks(void){
     dart_allocator_reset(&ma);
 }
 
+/* (19a2) a large procedurally-built enum (1024 options, u16 backing): the u16 option
+   count carries past the old 255 ceiling, the multi-KB schema round-trips through the
+   wire, and one value reaches a matched peer that resolves it to a human-readable name.
+   Both nodes define the identical list, so the hashes match and the detail exchange
+   sends NO schema wire: the everyday "same generated enum on every node" case, end to
+   end. (A differing large enum would inline the ~11 KB wire and IP-fragment; that path
+   is left for a later within-entry paging pass.) */
+#define BE_N 1024
+static int be_recv; static int64_t be_val; static char be_label[32];
+static void be_on_message(const DartMsg *msg){
+    DartString nm; size_t k;
+    if (!msg->schema) return;
+    be_recv++;
+    be_val = dart_get_int(msg->data, msg->schema, "job");
+    nm = dart_get_enum(msg->data, msg->schema, "job");
+    k = nm.len < sizeof be_label - 1 ? nm.len : sizeof be_label - 1;
+    if (nm.data) memcpy(be_label, nm.data, k);
+    be_label[k] = '\0';
+}
+static DartSchema *be_build_schema(DartAllocator *a){
+    static char be_names[BE_N][16];
+    static DartEnumVariant be_vs[BE_N];
+    DartSchemaBuilder b; int i;
+    for (i=0;i<BE_N;i++){ sprintf(be_names[i], "job_%04d", i);
+                          be_vs[i].value=i; be_vs[i].name=be_names[i]; }
+    b = dart_schema_begin(dart_allocator_alloc, a, "Jobs");
+    dart_schema_field(&b, "id", DART_U32);
+    dart_schema_field_enum(&b, "job", DART_U16, be_vs, BE_N);
+    return dart_schema_finish(&b);
+}
+static void schema_bigenum_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc; DartTopicOpts co;
+    DartDiscoveryAddr seed; DartSchema *es; int t, ji;
+
+    es = be_build_schema(&ma);
+    ST_CHECK(es!=NULL, "bigenum: 1024-option schema compiles");
+    if (!es){ dart_allocator_reset(&ma); return; }
+    ji = dart_schema_field_index(es, "job");
+
+    {   DartString nm; int64_t vv; DartSchema *back; DartBytes wire;
+        ST_CHECK(dart_schema_enum_count(es,(uint16_t)ji)==BE_N,
+                 "bigenum: option count carries past 255 (%u)",
+                 dart_schema_enum_count(es,(uint16_t)ji));
+        ST_CHECK(dart_schema_enum_variant(es,(uint16_t)ji,1000,&vv,&nm)
+                 && vv==1000 && nm.len==8 && memcmp(nm.data,"job_1000",8)==0,
+                 "bigenum: high-index variant reflects");
+        ST_CHECK(dart_enum_name_of(es,(uint16_t)ji,1023).len==8
+                 && dart_enum_value_of(es,(uint16_t)ji,"job_0500",&vv) && vv==500,
+                 "bigenum: name<->value at the tail");
+        wire = dart_schema_wire(es);
+        ST_CHECK(wire.len > DART_DGRAM_MAX,
+                 "bigenum: schema wire exceeds one datagram (%u bytes)", (unsigned)wire.len);
+        back = dart_schema_parse(wire.data, wire.len, dart_allocator_alloc, &ma);
+        ST_CHECK(back && dart_schema_hash(back)==dart_schema_hash(es)
+                 && dart_schema_enum_count(back,(uint16_t)ji)==BE_N,
+                 "bigenum: wire round-trips (parse preserves hash + count)");
+        if (back) dart_schema_free(back, dart_allocator_alloc, &ma);
+    }
+
+    memset(&co,0,sizeof co); co.qos.keep_last=4;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+10; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    be_recv=0; be_val=-1; be_label[0]='\0';
+    P = dart_node_open(&pa, "be-pub", NULL, NULL, &po);
+    S = dart_node_open(&sa, "be-sub", be_on_message, NULL, &so);
+    ST_CHECK(P&&S, "bigenum: nodes open");
+    if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0);
+                  dart_schema_free(es,dart_allocator_alloc,&ma); dart_allocator_reset(&ma); return; }
+    pc = dart_node_create_topic(P, "be/jobs", DART_PUB_ONLY, es, &co);
+    dart_node_create_topic(S, "be/jobs", DART_SUB_ONLY, es, &co);
+    ST_CHECK(pc!=NULL, "bigenum: topic created");
+
+    for (t=0;t<800 && dart_topic_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
+    ST_CHECK(dart_topic_match_count(pc)>0, "bigenum: typed match reached the peer");
+
+    {   uint8_t buf[16];
+        dart_schema_message_default(es, buf, sizeof buf);
+        dart_set_uint(buf, sizeof buf, es, "id", 42);
+        ST_CHECK(dart_set_enum(buf, sizeof buf, es, "job", "job_1000"),
+                 "bigenum: set the value by its human name");
+        dart_topic_send(pc, dart_bytes(buf, dart_schema_msg_len(es, buf, sizeof buf)));
+        for (t=0;t<400 && be_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
+        ST_CHECK(be_recv==1 && be_val==1000 && strcmp(be_label,"job_1000")==0,
+                 "bigenum: value delivered + resolved to its name (val=%lld, label=%s)",
+                 (long long)be_val, be_label);
+    }
+    dart_node_close(P,1); dart_node_close(S,1);
+    dart_schema_free(es, dart_allocator_alloc, &ma);
+    dart_allocator_reset(&ma);
+}
+
 /* (19b) pairwise detail codec ('uDTL', sans-IO): request build + header accessors, the
    stateless responder (advertised indices answered, INACTIVE/unknown skipped), schema
    wire inlined ONLY on hash mismatch, entry-boundary truncation (the paging seam), and
@@ -4351,6 +4447,7 @@ static int selftest_main(void){
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
+    schema_bigenum_checks();      /* 19a2. 1024-option enum: u16 count, wire round-trip, value reaches a peer */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
     detail_paging_checks();       /* 19b2. detail paging fits one datagram + never wedges (force-first) */
     interest_codec_checks();      /* 19b3. interest paging codec + the external-overlay flag */

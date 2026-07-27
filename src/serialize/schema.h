@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #ifndef DART_SCHEMA_WIRE_VERSION
-#define DART_SCHEMA_WIRE_VERSION 5u    /* bumped on any schema wire-format change (5: enum) */
+#define DART_SCHEMA_WIRE_VERSION 6u    /* bumped on any schema wire-format change (6: u16 enum option count) */
 #endif
 #ifndef DART_SCHEMA_MAX_DEPTH
 #define DART_SCHEMA_MAX_DEPTH 8u        /* struct nesting the builder accepts */
@@ -50,7 +50,7 @@ typedef enum {
     DART_VARR   = 15,   /* variable array (`elem[]`): [u8 elem] (+[u16 cap] if elem is STR); the frame holds a
                            live count of packed elements (count = frame len / element size)                    */
     DART_MAP    = 16,   /* self-describing map (`map`): the frame holds a tagged value tree (see the map API) */
-    DART_ENUM   = 17    /* named integer: [u8 backing (a U8..I64 kind)][u8 n]( [value:backing][u8 namelen][name] )*
+    DART_ENUM   = 17    /* named integer: [u8 backing (a U8..I64 kind)][u16 n]( [value:backing][u8 namelen][name] )*
                            FIXED field, on the wire just its backing scalar; the name table is schema-only.
                            dart_schema_field_at reports elem = the backing kind, count = the variant count.    */
 } DartSchemaTypeKind;
@@ -171,7 +171,7 @@ void        dart_schema_field_var_string_array(DartSchemaBuilder *b, const char 
 /* Self-describing map (`map`): write with DartMapWriter, read with dart_map_get. */
 void        dart_schema_field_map(DartSchemaBuilder *b, const char *name);
 /* Named integer (`enum<uN>{...}`): a fixed field carrying `backing` (a U8..I64 kind) on
- * the wire, with a schema-side table of `n` {value, name} options (n <= 255). Read the
+ * the wire, with a schema-side table of `n` {value, name} options (n <= 65535). Read the
  * number with dart_get_int/uint, the label with dart_get_enum; enumerate the options with
  * dart_schema_enum_count / dart_schema_enum_variant. Latches an error if backing is not an
  * integer kind or a value does not fit it. */

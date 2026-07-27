@@ -14,7 +14,7 @@
  *     VSTR                   : (none)                             ; top level only
  *     VARR                   : [u8 elem] (+[u16 cap] if elem STR) ; top level only
  *     MAP                    : (none)                             ; top level only
- *     ENUM                   : [u8 backing][u8 n]( [value:backing][u8 nl][name] )* ; wire = the backing scalar
+ *     ENUM                   : [u8 backing][u16 n]( [value:backing][u8 nl][name] )* ; wire = the backing scalar
  * Fixed types pack first: a fixed field's byte offset is the sum of the preceding fixed
  * sizes. Each variable field (VSTR/VARR/MAP) is one [u32 len][payload] frame in the
  * message tail, frames in schema order; its ordinal locates it by a length-hop walk. */
@@ -132,11 +132,11 @@ static uint32_t i_dart_rd_type_size(i_Rd *r, uint32_t *fields, uint32_t *nvar, u
             if ((uint64_t)count * es > 0xFFFFFFFFu){ r->fail = 1; return 0; }
             return (uint32_t)((uint64_t)count * es);
         }
-        case DART_ENUM: {                                        /* [u8 backing][u8 n]( [value][u8 nl][name] )* */
+        case DART_ENUM: {                                        /* [u8 backing][u16 n]( [value][u8 nl][name] )* */
             uint8_t backing = i_dart_rd_u8(r);
-            uint8_t n = i_dart_rd_u8(r);
+            uint16_t n = i_dart_rd_u16(r);
             uint32_t bs = dart_schema_scalar_size((DartSchemaTypeKind)backing);
-            uint16_t i;
+            uint32_t i;
             if (r->fail || bs == 0 || !i_dart_enum_backing_ok(backing)){ r->fail = 1; return 0; }
             for (i = 0; i < n && !r->fail; i++){                  /* skip the option table */
                 i_dart_rd_skip(r, bs);                           /* the value */
@@ -244,7 +244,7 @@ static uint32_t i_dart_schema_emit(uint8_t *buf, size_t wire_len, i_Rd *r, DartS
             if (f->kind == DART_ENUM){                          /* elem = backing kind, count = option count */
                 i_Rd q; q.w = buf; q.n = wire_len; q.pos = kpos + 1; q.fail = 0;
                 f->elem = i_dart_rd_u8(&q);
-                f->count = i_dart_rd_u8(&q);
+                f->count = i_dart_rd_u16(&q);
             }
         }
         if (r->fail) return 0;
@@ -435,7 +435,7 @@ void dart_schema_field_map(DartSchemaBuilder *b, const char *name){
 }
 
 /* enum construction, streaming (the DSL parser also uses these so it never buffers the
- * whole option list): open writes name + [ENUM][backing][n placeholder] and returns the
+ * whole option list): open writes name + [ENUM][backing][u16 n placeholder] and returns the
  * buffer offset of the placeholder; add appends one option; finish backpatches the count. */
 static size_t i_dart_schema_field_enum_open(DartSchemaBuilder *b, const char *name,
                                             DartSchemaTypeKind backing){
@@ -445,7 +445,7 @@ static size_t i_dart_schema_field_enum_open(DartSchemaBuilder *b, const char *na
     i_dart_schema_builder_put(b, (uint8_t)DART_ENUM);
     i_dart_schema_builder_put(b, (uint8_t)backing);
     count_pos = b->len;
-    i_dart_schema_builder_put(b, 0);                   /* n: backpatched by finish */
+    i_dart_schema_builder_put_u16(b, 0);               /* n: backpatched by finish */
     return count_pos;
 }
 static void i_dart_schema_field_enum_add(DartSchemaBuilder *b, DartSchemaTypeKind backing,
@@ -460,8 +460,7 @@ static void i_dart_schema_field_enum_add(DartSchemaBuilder *b, DartSchemaTypeKin
 }
 static void i_dart_schema_field_enum_finish(DartSchemaBuilder *b, size_t count_pos, uint16_t count){
     if (!b || b->err) return;
-    if (count > 255){ b->err = -5; return; }
-    b->buf[count_pos] = (uint8_t)count;
+    i_dart_le_w16(b->buf + count_pos, count);          /* u16: up to 65535 options */
 }
 
 void dart_schema_field_enum(DartSchemaBuilder *b, const char *name, DartSchemaTypeKind backing,
@@ -471,7 +470,6 @@ void dart_schema_field_enum(DartSchemaBuilder *b, const char *name, DartSchemaTy
     if (dart_schema_scalar_size(backing) == 0 || !i_dart_enum_backing_ok((uint8_t)backing)){
         b->err = -6; return;                           /* integer backings only */
     }
-    if (n > 255){ b->err = -5; return; }
     count_pos = i_dart_schema_field_enum_open(b, name, backing);
     for (i = 0; i < n; i++){
         int64_t v = variants ? variants[i].value : 0;
@@ -610,7 +608,7 @@ int dart_schema_enum_variant(const DartSchema *s, uint16_t field, uint16_t i,
     if (f->kind != DART_ENUM || i >= f->count) return 0;
     bs  = (uint8_t)dart_schema_scalar_size((DartSchemaTypeKind)f->elem);
     w   = s->wire.data;
-    pos = f->type_off + 3u;                 /* past [ENUM][backing][n] to the first option */
+    pos = f->type_off + 4u;                 /* past [ENUM][backing][u16 n] to the first option */
     end = f->type_off + f->type_len;
     for (k = 0; k < i; k++){                 /* hop over earlier options: [value][u8 nl][name] */
         if ((size_t)pos + bs + 1u > end) return 0;
