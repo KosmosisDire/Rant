@@ -14,6 +14,7 @@ type Field = {
     varOrdinal?: number;
 };
 type SchemaBlock = {
+    name?: string;
     size?: number;
     hash?: string;
     fields?: Field[];

@@ -39,7 +39,7 @@ type Field = {
     varOrdinal?: number;
 };
 
-type SchemaBlock = { size?: number; hash?: string; fields?: Field[] };
+type SchemaBlock = { name?: string; size?: number; hash?: string; fields?: Field[] };
 
 type Role = "pubsub" | "pub" | "sub" | "inactive";
 

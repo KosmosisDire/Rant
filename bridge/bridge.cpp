@@ -247,7 +247,10 @@ static json schemainfo_json(const dart::SchemaInfo &si){
         fields.push_back(row);
         if (f.kind == dart::FieldType::Struct) parents.push_back(f.name);
     }
-    return { {"size", si.size}, {"hash", hex64(si.hash)}, {"fields", fields} };
+    /* `name` is the schema's ROOT TYPE name: a client that reflects a peer's schema needs it
+       (with the field table) to reconstruct the exact DSL and create a matching typed handle,
+       so writing to a typed variable's set channel is accepted instead of schema-refused. */
+    return { {"name", si.name}, {"size", si.size}, {"hash", hex64(si.hash)}, {"fields", fields} };
 }
 
 /* one reflected entity (from Node::entities / peer_entities) as JSON. `name` is the base
