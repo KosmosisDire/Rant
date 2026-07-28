@@ -1842,6 +1842,12 @@ int       dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, vo
  * instead of waiting out the poll quantum or the amortized sweep. */
 uint64_t  dart_transport_next_deadline_us(DartTransportState *st);
 
+/* 1 while any lane holds work dart_transport_poll_send would hand out. The "is there
+ * anything to flush?" test for a caller that must decide whether to wake a sleeping
+ * poller: a send that committed nothing (no matched subscriber, so the send early-outs)
+ * leaves the poller nothing to do. O(1). */
+int       dart_transport_tx_pending(DartTransportState *st);
+
 #ifdef __cplusplus
 }
 #endif
@@ -6417,6 +6423,11 @@ int dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, void *ou
 
 uint64_t dart_transport_next_deadline_us(DartTransportState *st){
     return st->next_deadline_us == DART__NO_DEADLINE ? 0 : st->next_deadline_us;
+}
+
+
+int dart_transport_tx_pending(DartTransportState *st){
+    return st->dest_queue_count != 0;   /* the active-lane queue: empty = nothing to emit */
 }
 #pragma endregion
 #pragma region transport/writer.c
@@ -12232,6 +12243,20 @@ static void i_dart_node_unlock(DartNode *n, int acquired){ (void)n; (void)acquir
 static void i_dart_node_kick(DartNode *n){ (void)n; }
 #endif /* DART_THREADS */
 
+/* The kick a SEND owes: only when the transport actually has a datagram to hand out, or a
+   held one to retry. A send that committed nothing (nobody subscribes, so the transport
+   early-outs before the copy) leaves a sleeping poller nothing to service, and the waker
+   is a loopback datagram costing tens of microseconds on Windows: an idle publisher must
+   not pay that per send. Every other kick site signals a real state change and stays
+   unconditional. */
+static void i_dart_node_kick_tx(DartNode *n){
+#ifdef DART_THREADS
+    if (n->tx_hold_len || dart_transport_tx_pending(n->transport)) i_dart_node_kick(n);
+#else
+    (void)n;
+#endif
+}
+
 /* --- error reporting --------------------------------------------------------------
  * One path for every runtime-side event: stamp the app's user_data, capture a DART_ERROR
  * into the node's last-error slot (so dart_last_error(n) can report it even with no
@@ -13784,7 +13809,7 @@ int dart_topic_send(DartTopic *topic, DartBytes data){
     if (!topic) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_lock(topic->n);
     r = i_dart_node_do_send(topic->n, topic->index, data, acquired);
-    i_dart_node_kick(topic->n);              /* flush the commit now, not at the next tick */
+    i_dart_node_kick_tx(topic->n);           /* flush the commit now, not at the next tick */
     i_dart_node_unlock(topic->n, acquired);
     return r;
 }
@@ -13794,7 +13819,7 @@ int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
     if (!topic) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_lock(topic->n);
     r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, acquired);
-    i_dart_node_kick(topic->n);
+    i_dart_node_kick_tx(topic->n);
     i_dart_node_unlock(topic->n, acquired);
     return r;
 }
@@ -13804,7 +13829,7 @@ int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dart
     if (!topic) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_lock(topic->n);
     r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 1, to_peer, acquired);
-    i_dart_node_kick(topic->n);
+    i_dart_node_kick_tx(topic->n);
     i_dart_node_unlock(topic->n, acquired);
     return r;
 }

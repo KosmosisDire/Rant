@@ -734,6 +734,12 @@ int       dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, vo
  * instead of waiting out the poll quantum or the amortized sweep. */
 uint64_t  dart_transport_next_deadline_us(DartTransportState *st);
 
+/* 1 while any lane holds work dart_transport_poll_send would hand out. The "is there
+ * anything to flush?" test for a caller that must decide whether to wake a sleeping
+ * poller: a send that committed nothing (no matched subscriber, so the send early-outs)
+ * leaves the poller nothing to do. O(1). */
+int       dart_transport_tx_pending(DartTransportState *st);
+
 #ifdef __cplusplus
 }
 #endif

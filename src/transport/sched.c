@@ -181,3 +181,8 @@ int dart_transport_poll_send(DartTransportState *st, uint32_t *to_peer, void *ou
 uint64_t dart_transport_next_deadline_us(DartTransportState *st){
     return st->next_deadline_us == DART__NO_DEADLINE ? 0 : st->next_deadline_us;
 }
+
+
+int dart_transport_tx_pending(DartTransportState *st){
+    return st->dest_queue_count != 0;   /* the active-lane queue: empty = nothing to emit */
+}
