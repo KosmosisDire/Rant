@@ -367,6 +367,11 @@ typedef struct {
     uint16_t port;     /* data port, host order */
 } DartDiscoveryAddr;
 
+#define DART_DISCOVERY_MAX_SUBNETS 16   /* local IPv4 subnets the locator ranking considers */
+/* One IPv4 subnet this host is directly on: address + netmask, network-order bytes.
+ * See dart_discovery_set_local_subnets. */
+typedef struct { uint8_t ip[4], mask[4]; } DartDiscoverySubnet;
+
 /* Why a peer is going down, so the IO layer can keep transport state across a
  * transient blip instead of tearing it down on every silence timeout. */
 typedef enum {
@@ -528,6 +533,16 @@ uint32_t     dart_discovery_meta_version(const DartDiscoveryState *st);
  * to a port unique to THIS process instead of the shared discovery port (which the OS
  * hands to one arbitrary same-port socket). 0 = none (peers fall back to the disc port). */
 void         dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port);
+/* Tell the core which IPv4 subnets this host sits on directly (the IO layer's interface
+ * list; n = 0 means unknown, which is fine). An announce carries no address of its own, so
+ * a peer's locator is learned from the datagram source: a multihomed peer announcing out
+ * every interface is then heard at a DIFFERENT address per path, and taking the newest each
+ * time would flap the locator its data is unicast to. With this the core ranks candidates
+ * (on one of our subnets > ordinary routed > 169.254 link-local) and, at equal rank, stays
+ * with the address it is already hearing the peer at until that one goes quiet. Re-callable
+ * whenever the interface set changes; entries with a zero mask are ignored. */
+void         dart_discovery_set_local_subnets(DartDiscoveryState *st,
+                             const DartDiscoverySubnet *nets, uint8_t n);
 /* Drain one targeted (unicast) datagram and its destination: a solicit REPLY to a
  * peer that solicited us (carries the blob), or a re-fetch REQ to a peer whose
  * advertised version is ahead of what we hold. Returns bytes + fills *to, or 0 when
@@ -733,6 +748,7 @@ void i_dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr);
 void i_dart_plat_mcast_ttl  (i_DartSock s, uint8_t ttl);
 void i_dart_plat_mcast_loop (i_DartSock s, int on);
 int  i_dart_plat_mcast_join (i_DartSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
+void i_dart_plat_mcast_leave(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr);
 
 /* --- datagram IO --- */
 /* sendto: returns bytes sent, <0 on error (test i_dart_plat_would_block). */
@@ -755,14 +771,18 @@ uint32_t i_dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
 uint32_t i_dart_plat_ip4_to_naddr(const uint8_t ip[4]);
 void     i_dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
 /* Source address the OS would use to reach dst_naddr:port (connect + getsockname
- * on an unbound UDP socket; no packet leaves). 0 on failure. Backs interface
- * pinning and the same-host check. */
+ * on an unbound UDP socket; no packet leaves). 0 on failure. A diagnostic (see
+ * tools/if_probe_check.c): discovery no longer routes anything through it. */
 uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
-/* Enumerate this host's usable IPv4 interface addresses (up, non-loopback) as
- * network-order naddr into out[0..max), returning the count written (0 if none, or
- * if the platform offers no enumeration). Backs the auto interface-pin fallback when
- * a route probe can't name a real LAN interface. */
-int      i_dart_plat_local_ipv4s(uint32_t *out, int max);
+
+/* One of this host's IPv4 interfaces: address + netmask, both network order. */
+typedef struct { uint32_t addr, mask; } i_DartIface;
+/* Enumerate this host's usable IPv4 interfaces (up, non-loopback) into out[0..max),
+ * returning the count written (0 if none, or if the platform offers no enumeration).
+ * Discovery joins the multicast group on every one and announces out every one, and
+ * the netmasks tell the core which peer addresses are on a segment we share. A
+ * platform that cannot report a netmask leaves it 0 (unknown, never matches). */
+int      i_dart_plat_local_ifaces(i_DartIface *out, int max);
 
 /* --- threads (present only under DART_THREADS; see the detection above) -------
  * What the node runtime's thread safety and background service thread need: a
@@ -862,7 +882,7 @@ typedef struct {
     uint16_t              domain;               /* logical-network selector; 0 */
     const char           *discovery_group;      /* multicast group; "239.255.0.7" */
     uint16_t              discovery_port;       /* rendezvous port; 7400 */
-    const char           *multicast_interface;  /* interface IP; NULL = auto (pin on multihomed) */
+    const char           *multicast_interface;  /* pin to this interface IP; NULL = every interface */
     uint8_t               multicast_ttl;        /* hops; 1 */
     uint16_t              max_peers;            /* table capacity; 32 */
     DartDiscoveryEventFn  on_event;             /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
@@ -912,9 +932,9 @@ typedef struct {
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
-    const char  *multicast_interface;    /* interface IP to join/send on; NULL = auto
-                                 (route probe, falling back to a real LAN interface),
-                                 "127.0.0.1" = single-host */
+    const char  *multicast_interface;    /* join/send on THIS interface IP only (and never
+                                 rescan); NULL = every interface this host has,
+                                 "127.0.0.1" = single-host isolation */
     const DartDiscoveryAddr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
     uint16_t     n_seeds;
@@ -969,7 +989,7 @@ int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
  * extra syscalls. Call every pass: the clock-driven work needs no readable fd. */
 int        dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable);
 
-/* ---------------------------------------------------------------- UUID / iface */
+/* ----------------------------------------------------------------------- UUID */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
@@ -978,12 +998,6 @@ int        dart_discovery_make_uuid4(uint8_t out[16]);
  * Returns its length. Shared by dart_discovery_open and the node so both name peers the
  * same way. */
 uint8_t    dart_discovery_default_name(char *out, size_t cap, const char *want);
-
-/* The one interface every multicast socket should pin to: route-probe group:port,
- * falling back to the default-route LAN interface (a multicast route can resolve to
- * loopback on Windows) and then to interface enumeration. INADDR_ANY (0) only if nothing
- * usable is found. Exposed so layers above pin to the same interface on multihomed hosts. */
-uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 
 #ifdef __cplusplus
 }
@@ -2470,8 +2484,9 @@ typedef struct {
     uint16_t              data_port;         /* unicast data port; 0 = OS-assigned */
     const char           *discovery_group;   /* "239.255.0.7" */
     uint16_t              discovery_port;    /* 7400 */
-    const char           *multicast_interface;/* interface IP for discovery multicast; NULL = auto,
-                                                "127.0.0.1" = single-host. Pin on multihomed hosts */
+    const char           *multicast_interface;/* pin discovery multicast to THIS interface IP;
+                                                NULL = every interface (the default: no interface
+                                                is ever guessed at), "127.0.0.1" = single-host */
     uint8_t               multicast_ttl;     /* hops discovery announces may travel; 1 */
     const DartDiscoveryAddr *seed_peers;   /* peers to also unicast announces to (port 0 =
                                                 discovery_port), so discovery works without multicast */
@@ -3600,6 +3615,8 @@ struct i_DartDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
+    uint64_t addr_heard_us;  /* last datagram that actually ARRIVED from ip: an incumbent locator
+                                stays put while fresh, so multi-path announces can't flap it */
     uint8_t *meta;          /* the OVERLAY only: a meta_pool slot (capacity st->meta_cap),
                                or a hook allocation grown to the largest blob this slot has held */
     uint16_t meta_cap;      /* allocated capacity of this slot's meta buffer */
@@ -3634,6 +3651,8 @@ struct DartDiscoveryState {
     uint8_t       self_name_len;
     uint16_t      self_blob_resend; /* announces remaining that carry the full blob */
     uint16_t      targeted_cursor;  /* round-robin over peers for poll_targeted */
+    DartDiscoverySubnet local_nets[DART_DISCOVERY_MAX_SUBNETS];  /* our own subnets (locator ranking) */
+    uint8_t       n_local_nets;
     i_DartDiscoveryPeer  *peers;
 };
 
@@ -3924,6 +3943,26 @@ static size_t i_dart_discovery_build(DartDiscoveryState *st, uint8_t flags, int 
     return (size_t)DART_DISCOVERY_META_OFF + meta_len;
 }
 
+/* Rank one candidate IPv4 locator for a peer; higher wins. 2 = inside one of our own
+ * subnets, so it is directly reachable from here. 1 = an ordinary address we would route
+ * to. 0 = 169.254/16 link-local autoconfig (an adapter with no lease: usable only if we
+ * happen to share that exact link, so it is the last thing to prefer). Non-IPv4 has
+ * nothing to compare against and ranks with the ordinary case. */
+static int i_dart_discovery_addr_rank(const DartDiscoveryState *st, const uint8_t *ip, uint8_t ip_len){
+    uint8_t i;
+    if (ip_len != 4) return 1;
+    /* first, because a link-local adapter's own /16 would otherwise make every other
+       169.254 address on earth look like it shares our segment */
+    if (ip[0] == 169 && ip[1] == 254) return 0;
+    for (i = 0; i < st->n_local_nets; i++){
+        const DartDiscoverySubnet *net = &st->local_nets[i];
+        int k, same = 1;
+        for (k = 0; k < 4; k++) if (((ip[k] ^ net->ip[k]) & net->mask[k]) != 0){ same = 0; break; }
+        if (same) return 2;
+    }
+    return 1;
+}
+
 static void i_dart_discovery_addr_of(const i_DartDiscoveryPeer *peer, DartDiscoveryAddr *out){
     memset(out, 0, sizeof *out);
     memcpy(out->ip, peer->ip, 16);
@@ -4004,9 +4043,12 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         return;
     }
 
-    /* address: from the blob's locator when present (self_ip override, else the datagram
-       source); otherwise the cached locator (it is static between blob updates), or the
-       datagram source on first contact with no blob. */
+    /* Address: the port comes from the blob's locator (cached between blob updates, since a
+       steady-state announce carries none). The IP is a CANDIDATE path -- the source this
+       datagram actually arrived from, or an explicit self_ip where the peer states one --
+       and every announce offers one, so a better path than the one we first happened to
+       hear can still win the ranking below. Falls back to the cached locator only when the
+       datagram carries no usable source. */
     memset(&addr, 0, sizeof addr);
     if (have_disc){
         if (disc_ip_len){ addr.ip_len = disc_ip_len; memcpy(addr.ip, disc_ip, disc_ip_len); }
@@ -4014,8 +4056,9 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         else return;
         addr.port = disc_port;
     } else if (idx >= 0){
-        addr.ip_len = st->peers[idx].ip_len; addr.port = st->peers[idx].port;
-        memcpy(addr.ip, st->peers[idx].ip, 16);
+        addr.port = st->peers[idx].port;
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
+        else { addr.ip_len = st->peers[idx].ip_len; memcpy(addr.ip, st->peers[idx].ip, 16); }
     } else if (src_ip && (src_ip_len==4 || src_ip_len==16)){
         addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len);   /* port unknown until the blob */
     } else return;
@@ -4050,6 +4093,24 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (peer->dropped){ peer->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     peer->last_heard_us = now;
 
+    /* Which address do we keep for a peer we can hear on more than one path? It announces
+       out every interface it has, so each copy reaches us with a different source address,
+       and adopting the newest every time would flap the locator its data is unicast to (and
+       re-fire peer_up, re-applying its whole interest) on every announce. Prefer the better
+       ranked address, so a peer first heard over some link-local or VPN adapter moves to a
+       shared-subnet path as soon as one announces; at equal rank stay with the incumbent
+       while we are still hearing the peer there, so a genuine renumber (the old address
+       goes quiet) is picked up a couple of announces later instead. A locator the peer
+       states outright (self_ip) is authoritative and skips all of this. */
+    if (!disc_ip_len && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
+        int rank_new = i_dart_discovery_addr_rank(st, addr.ip, 4);
+        int rank_old = i_dart_discovery_addr_rank(st, peer->ip, 4);
+        if (rank_new < rank_old ||
+            (rank_new == rank_old &&
+             now - peer->addr_heard_us < (uint64_t)st->cfg.announce_interval_us * 2u))
+            memcpy(addr.ip, peer->ip, 4);          /* keep the incumbent */
+    }
+
     addr_changed = (peer->ip_len != addr.ip_len)
                 || (peer->port   != addr.port)
                 || (memcmp(peer->ip, addr.ip, 16) != 0);
@@ -4057,6 +4118,11 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         peer->ip_len = addr.ip_len; peer->port = addr.port;
         memcpy(peer->ip, addr.ip, 16);
     }
+    /* freshness of the locator we hold: only a datagram that really arrived FROM it counts
+       (a steady-state announce carries no blob, so addr is then the cached locator, not
+       where this datagram came from) */
+    if (peer->ip_len == 4 && src_ip && src_ip_len == 4 && memcmp(peer->ip, src_ip, 4) == 0)
+        peer->addr_heard_us = now;
 
     /* meta: a newer version with the blob present updates our stored overlay + name; a newer
        version without the blob (a steady-state version-only announce) means we fell behind,
@@ -4158,6 +4224,18 @@ void dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port){
     st->self_meta_version++;             /* bump the version + re-send so peers re-fetch it */
     st->self_blob_resend = DART_DISCOVERY_BLOB_RESEND;
     st->next_announce_us = 0;
+}
+
+void dart_discovery_set_local_subnets(DartDiscoveryState *st, const DartDiscoverySubnet *nets, uint8_t n){
+    uint8_t i, k = 0;
+    if (!st) return;
+    if (n > DART_DISCOVERY_MAX_SUBNETS) n = DART_DISCOVERY_MAX_SUBNETS;
+    for (i = 0; i < n; i++){
+        const uint8_t *m = nets[i].mask;
+        if (!(m[0] | m[1] | m[2] | m[3])) continue;   /* unknown prefix: it would match everything */
+        st->local_nets[k++] = nets[i];
+    }
+    st->n_local_nets = k;
 }
 
 size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
@@ -4694,6 +4772,13 @@ int i_dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr
     return setsockopt(DART__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
                       (const char*)&mr, sizeof mr) == 0;
 }
+/* Best-effort: an interface that went away may already have dropped its membership. */
+void i_dart_plat_mcast_leave(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
+    struct ip_mreq mr; memset(&mr, 0, sizeof mr);
+    mr.imr_multiaddr.s_addr = group_naddr;
+    mr.imr_interface.s_addr = if_naddr;
+    setsockopt(DART__FD(s), IPPROTO_IP, IP_DROP_MEMBERSHIP, (const char*)&mr, sizeof mr);
+}
 
 /* --------------------------------------------------------------- datagram IO */
 int i_dart_plat_send(i_DartSock s, const void *buf, size_t len,
@@ -4809,7 +4894,7 @@ uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
 #ifndef IFF_LOOPBACK
 #define IFF_LOOPBACK 0x00000004
 #endif
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
     INTERFACE_INFO info[32];
     DWORD bytes = 0;
@@ -4825,30 +4910,33 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
         struct sockaddr_in *a = &info[i].iiAddress.AddressIn;
         if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) continue;
         if (a->sin_family != AF_INET) continue;
-        out[n++] = a->sin_addr.s_addr;
+        out[n].addr = a->sin_addr.s_addr;
+        out[n].mask = info[i].iiNetmask.AddressIn.sin_addr.s_addr;
+        n++;
     }
     return n;
 }
 #elif defined(ESP_PLATFORM)
-/* lwIP connect() does not assign a local source address, so the route probes in
- * dart_discovery_mcast_if_for come back empty on the ESP. This backstop hands the
- * multicast join a concrete interface (the STA / Ethernet / SoftAP IP) from
- * esp_netif; without it the join lands on INADDR_ANY, which lwIP refuses, and
- * dart_node_open fails. Requires WiFi/Ethernet already up (the node opens after). */
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+/* lwIP has no getifaddrs, so name the netifs the IDF defines. Requires WiFi/Ethernet
+ * already up (the node opens after); an ESP that is both STA and SoftAP reports both,
+ * and discovery then joins and announces on each. */
+int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     static const char *const keys[] = { "WIFI_STA_DEF", "ETH_DEF", "WIFI_AP_DEF" };
     int n = 0; unsigned i;
     if (!out || max <= 0) return 0;
     for (i = 0; i < sizeof keys / sizeof keys[0] && n < max; i++){
         esp_netif_t *nif = esp_netif_get_handle_from_ifkey(keys[i]);
         esp_netif_ip_info_t info;
-        if (nif && esp_netif_get_ip_info(nif, &info) == ESP_OK && info.ip.addr != 0)
-            out[n++] = info.ip.addr;   /* esp_ip4_addr is network-order: our naddr convention */
+        if (nif && esp_netif_get_ip_info(nif, &info) == ESP_OK && info.ip.addr != 0){
+            out[n].addr = info.ip.addr;   /* esp_ip4_addr is network-order: our naddr convention */
+            out[n].mask = info.netmask.addr;
+            n++;
+        }
     }
     return n;
 }
 #else
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     struct ifaddrs *ifs = NULL, *p;
     int n = 0;
     if (!out || max <= 0 || getifaddrs(&ifs) != 0) return 0;
@@ -4857,7 +4945,10 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
         if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
         if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
         a = (struct sockaddr_in*)p->ifa_addr;
-        out[n++] = a->sin_addr.s_addr;
+        out[n].addr = a->sin_addr.s_addr;
+        out[n].mask = (p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET)
+                        ? ((struct sockaddr_in*)p->ifa_netmask)->sin_addr.s_addr : 0u;
+        n++;
     }
     freeifaddrs(ifs);
     return n;
@@ -5148,12 +5239,17 @@ void i_dart_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
 
 #define DART_DISCOVERY_BYE_SENDS 3   /* a graceful BYE is one-shot UDP: resend a few (idempotent,
                                         deduped by uuid) so one lands even under loss on exit */
+#define DART_DISCOVERY_IF_SCAN_US 3000000u   /* re-enumerate interfaces this often (auto mode) */
 
 struct DartDiscovery {
     DartDiscoveryState *core;
     i_DartSock            fd;
     i_DartSock            unicast_fd;    /* own same-host unicast RX on a unique port, or
                                             DART_SOCK_BAD when the caller gave a data_port */
+    i_DartIface          ifs[DART_DISCOVERY_MAX_SUBNETS];  /* every interface we join + announce out of */
+    uint8_t              n_ifs;          /* 0 = none usable: the OS picks (INADDR_ANY) */
+    uint8_t              pinned;         /* explicit multicast_interface: that one only, never rescanned */
+    uint64_t             if_scan_us;     /* next interface re-enumeration */
     uint32_t             group_naddr;   /* discovery multicast group, network order */
     uint16_t             discovery_port;
     uint16_t             max_peers;
@@ -5182,14 +5278,26 @@ static void i_dart_discovery_tx_to(DartDiscovery *d, const uint8_t *out, size_t 
     if (addr->port && addr->port != d->discovery_port) i_dart_discovery_tx1(d, out, n_bytes, addr->ip, addr->port);
 }
 
+/* multicast one datagram out of EVERY interface we hold. The announce carries no address
+ * of its own, so each copy reaches its segment with the source address that is correct for
+ * that path and the peer records exactly the address it can reach us at. An adapter with no
+ * multicast route just fails its own sendto; the others still went out. */
+static void i_dart_discovery_tx_group(DartDiscovery *d, const uint8_t *out, size_t n_bytes){
+    uint8_t group_ip[4], i;
+    i_dart_plat_naddr_to_ip4(d->group_naddr, group_ip);
+    if (!d->n_ifs){ i_dart_plat_send(d->fd, out, n_bytes, group_ip, d->discovery_port); return; }
+    for (i = 0; i < d->n_ifs; i++){
+        i_dart_plat_mcast_setif(d->fd, d->ifs[i].addr);
+        i_dart_plat_send(d->fd, out, n_bytes, group_ip, d->discovery_port);
+    }
+}
+
 /* send to the group, every seed, and every known peer. Survives multicast outages;
  * receivers dedup by uuid. */
 static void i_dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_bytes){
     uint16_t s, discovery_port = d->discovery_port;
     DartDiscoveryAddr addr;
-    uint8_t group_ip[4];
-    i_dart_plat_naddr_to_ip4(d->group_naddr, group_ip);
-    i_dart_plat_send(d->fd, out, n_bytes, group_ip, discovery_port);
+    i_dart_discovery_tx_group(d, out, n_bytes);
     for (s=0; s<d->n_seeds; s++){
         const DartDiscoveryAddr *seed = &d->seeds[s];
         if (seed->ip_len != 4) continue;
@@ -5223,49 +5331,82 @@ int dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]){
     return n;
 }
 
-/* A loopback (127/8) or unspecified address is never a usable multicast egress. */
-static int i_dart_discovery_if_routable(uint32_t naddr){
-    uint8_t ip[4];
-    if (!naddr) return 0;
-    i_dart_plat_naddr_to_ip4(naddr, ip);
-    return ip[0] != 127;
-}
-/* Link-local autoconfig (169.254/16): an adapter with no DHCP lease. Usable only as a
- * last resort, behind any properly addressed LAN interface. */
-static int i_dart_discovery_if_apipa(uint32_t naddr){
-    uint8_t ip[4];
-    i_dart_plat_naddr_to_ip4(naddr, ip);
-    return ip[0] == 169 && ip[1] == 254;
-}
-
-/* Every multicast send and join should pin to this one interface. Auto path (no
- * explicit --if): route-probe the group, which is correct on POSIX. But Windows
- * source-address selection for a multicast destination can resolve to loopback (stranding
- * all traffic on 127.0.0.1) or to a low-metric VPN adapter's 169.254 link-local (Tailscale
- * pins its metric at 5, below any real NIC); so when the group probe isn't a routable
- * non-APIPA address, probe the default route via a reserved global-unicast destination
- * (connect() on UDP sends nothing) to get the LAN interface, then finally enumerate and
- * prefer a real (non-APIPA) LAN address. Returns 0 only if nothing usable was found (the
- * OS then picks the default interface). */
-uint32_t dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port){
-    uint32_t ip, ifs[16];
-    int n, i, apipa = -1;
-
-    ip = i_dart_plat_route_src(group_naddr, port);
-    if (i_dart_discovery_if_routable(ip) && !i_dart_discovery_if_apipa(ip)) return ip;
-
-    /* 192.0.2.1 is TEST-NET-1 (RFC 5737): never a real host, so this resolves only the
-     * default-route source interface; no datagram is transmitted. */
-    ip = i_dart_plat_route_src(i_dart_plat_ipv4(192u, 0u, 2u, 1u), port);
-    if (i_dart_discovery_if_routable(ip) && !i_dart_discovery_if_apipa(ip)) return ip;
-
-    n = i_dart_plat_local_ipv4s(ifs, (int)(sizeof ifs / sizeof ifs[0]));
+/* This host's multicast interfaces, unfiltered: discovery joins the group on every one
+ * and announces out of every one, so no interface has to be guessed at and a peer on any
+ * segment is reachable. Loopback is the FALLBACK for a host with nothing else up, not a
+ * member of the normal set: as a member it would put a second copy of every same-host
+ * announce on a second path for no gain. Returns 0 only when the platform offers no
+ * enumeration at all, and the caller then lets the OS pick. */
+static uint8_t i_dart_discovery_if_scan(i_DartIface *out, uint8_t max){
+    int n = i_dart_plat_local_ifaces(out, (int)max), i;
+    uint8_t k = 0;
     for (i = 0; i < n; i++){
-        if (!i_dart_discovery_if_routable(ifs[i])) continue;
-        if (i_dart_discovery_if_apipa(ifs[i])){ if (apipa < 0) apipa = i; continue; }
-        return ifs[i];                 /* first real (DHCP/static) LAN address */
+        uint8_t ip[4];
+        i_dart_plat_naddr_to_ip4(out[i].addr, ip);
+        if (!out[i].addr || ip[0] == 127) continue;   /* unspecified / loopback */
+        out[k++] = out[i];
     }
-    return apipa >= 0 ? ifs[apipa] : 0;  /* APIPA only if nothing better; else OS default */
+    if (!k){                        /* nothing up, or a host that is loopback-only */
+        out[0].addr = i_dart_plat_ipv4(127u, 0u, 0u, 1u);
+        out[0].mask = i_dart_plat_ipv4(255u, 0u, 0u, 0u);
+        k = 1;
+    }
+    return k;
+}
+
+/* The netmask the host reports for `addr`, or 0 if it names no interface we can see. Lets
+ * an explicitly pinned interface still tell the core its subnet. */
+static uint32_t i_dart_discovery_if_mask_of(uint32_t addr){
+    i_DartIface all[DART_DISCOVERY_MAX_SUBNETS];
+    int n = i_dart_plat_local_ifaces(all, DART_DISCOVERY_MAX_SUBNETS), i;
+    for (i = 0; i < n; i++) if (all[i].addr == addr) return all[i].mask;
+    return 0;
+}
+
+static int i_dart_discovery_if_has(const i_DartIface *set, uint8_t n, uint32_t addr){
+    uint8_t i;
+    for (i = 0; i < n; i++) if (set[i].addr == addr) return 1;
+    return 0;
+}
+
+/* Move the live membership set to `want`: leave what went away, join what appeared, and
+ * hand the core our subnets so it can rank peer locators. A per-interface join failure is
+ * ORDINARY (an adapter that does no multicast; two addresses on one adapter, where the
+ * second join is a duplicate of the first; a per-socket membership cap), so this reports how
+ * many memberships are live rather than treating any one failure as fatal. Every enumerated
+ * interface stays in the egress set either way: a send costs nothing where a join was refused. */
+static uint8_t i_dart_discovery_if_apply(DartDiscovery *d, const i_DartIface *want, uint8_t n_want){
+    DartDiscoverySubnet nets[DART_DISCOVERY_MAX_SUBNETS];
+    uint8_t i, joined = 0;
+    if (n_want > DART_DISCOVERY_MAX_SUBNETS) n_want = DART_DISCOVERY_MAX_SUBNETS;
+    for (i = 0; i < d->n_ifs; i++)
+        if (!i_dart_discovery_if_has(want, n_want, d->ifs[i].addr))
+            i_dart_plat_mcast_leave(d->fd, d->group_naddr, d->ifs[i].addr);
+    for (i = 0; i < n_want; i++){
+        if (i_dart_discovery_if_has(d->ifs, d->n_ifs, want[i].addr)){ joined++; continue; }
+        if (i_dart_plat_mcast_join(d->fd, d->group_naddr, want[i].addr)) joined++;
+    }
+    for (i = 0; i < n_want; i++){
+        i_dart_plat_naddr_to_ip4(want[i].addr, nets[i].ip);
+        i_dart_plat_naddr_to_ip4(want[i].mask, nets[i].mask);
+        d->ifs[i] = want[i];
+    }
+    d->n_ifs = n_want;
+    dart_discovery_set_local_subnets(d->core, nets, n_want);
+    return joined;
+}
+
+/* Re-enumerate and re-apply: a NIC, VPN or Wi-Fi link that comes up after open is joined
+ * and announced on from then on, and one that goes away drops its membership. Skipped when
+ * the caller pinned an interface explicitly (that is a decision, not a guess). */
+static void i_dart_discovery_if_refresh(DartDiscovery *d){
+    i_DartIface want[DART_DISCOVERY_MAX_SUBNETS];
+    uint8_t n_want = i_dart_discovery_if_scan(want, DART_DISCOVERY_MAX_SUBNETS);
+    uint8_t i, same = (uint8_t)(n_want == d->n_ifs);
+    if (same)
+        for (i = 0; i < n_want; i++)
+            if (want[i].addr != d->ifs[i].addr || want[i].mask != d->ifs[i].mask){ same = 0; break; }
+    if (!same) i_dart_discovery_if_apply(d, want, n_want);
 }
 
 int dart_discovery_make_uuid4(uint8_t out[16]){
@@ -5352,8 +5493,9 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     i_DartRtBlocks blk;
     i_DartSock fd;
     int allzero = 1, i;
-    uint8_t ttl;
-    uint32_t group_naddr, interface_ip;
+    uint8_t ttl, n_want, joined;
+    uint32_t group_naddr;
+    i_DartIface want[DART_DISCOVERY_MAX_SUBNETS];
     const char *group;
 
     if (!mem || !cfg) return NULL;
@@ -5392,15 +5534,29 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     if (fd == DART_SOCK_BAD){ int e=i_dart_plat_last_socket_error(); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_SOCKET, e); }
     if (!i_dart_plat_bind(fd, 0, c.discovery_port, 1)){ int e=i_dart_plat_last_socket_error(); i_dart_plat_close(fd); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_BIND, e); }
 
-    /* pin join and egress to one deterministic interface */
+    /* Join and announce on EVERY interface, so nothing has to be guessed and a peer on any
+       segment hears us at an address correct for its own path. An explicit
+       multicast_interface still means exactly that one (and freezes the set). */
     group_naddr = i_dart_plat_parse_ip(group);
-    interface_ip = c.multicast_interface ? i_dart_plat_parse_ip(c.multicast_interface)
-                      : dart_discovery_mcast_if_for(group_naddr, c.discovery_port);
-    if (!i_dart_plat_mcast_join(fd, group_naddr, interface_ip)){
+    d->fd = fd;
+    d->group_naddr = group_naddr;
+    d->n_ifs = 0;
+    d->pinned = c.multicast_interface ? 1u : 0u;
+    if (d->pinned){
+        want[0].addr = i_dart_plat_parse_ip(c.multicast_interface);
+        want[0].mask = i_dart_discovery_if_mask_of(want[0].addr);   /* 0 if it names no real one */
+        n_want = 1;
+    } else n_want = i_dart_discovery_if_scan(want, DART_DISCOVERY_MAX_SUBNETS);
+    joined = i_dart_discovery_if_apply(d, want, n_want);
+    if (!joined && !(n_want == 1 && want[0].addr == 0)){
+        i_DartIface any; any.addr = 0; any.mask = 0;      /* nothing would take a membership: let
+                                                             the OS choose rather than not join */
+        joined = i_dart_discovery_if_apply(d, &any, 1);
+    }
+    if (!joined){
         int e=i_dart_plat_last_socket_error();
         i_dart_plat_close(fd); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_MCAST_JOIN, e);
     }
-    i_dart_plat_mcast_setif(fd, interface_ip);
     i_dart_plat_mcast_ttl(fd, ttl);
     /* loop always on (uuid self-filter drops echoes); needed for multi-instance per host */
     i_dart_plat_mcast_loop(fd, 1);
@@ -5410,9 +5566,8 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
                                            peer that died bounces an ICMP unreachable that would
                                            otherwise surface as WSAECONNRESET and disrupt RX */
 
-    d->fd = fd;
     d->unicast_fd = DART_SOCK_BAD;
-    d->group_naddr = group_naddr;
+    d->if_scan_us = i_dart_plat_now_us() + DART_DISCOVERY_IF_SCAN_US;
     d->discovery_port = c.discovery_port;
     d->max_peers = c.discovery.max_peers;
     d->n_seeds = 0;
@@ -5535,6 +5690,7 @@ static int i_dart_discovery_rt_drain(DartDiscovery *d, i_DartSock fd){
  * main wait and calls this every pass, so a node poll costs one poll syscall total. */
 int dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable){
     DartDiscoveryAddr to;
+    uint64_t now;
     int got = 0; size_t n_bytes;
     if (!d) return 0;
     if (fd_readable) got |= i_dart_discovery_rt_drain(d, d->fd);
@@ -5543,7 +5699,13 @@ int dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readab
     if (unicast_readable && d->unicast_fd != DART_SOCK_BAD)
         got |= i_dart_discovery_rt_drain(d, d->unicast_fd);
 
-    n_bytes = dart_discovery_update(d->core, i_dart_plat_now_us(), d->txbuf, d->wire_max);
+    now = i_dart_plat_now_us();
+    if (!d->pinned && now >= d->if_scan_us){    /* pick up an interface that came up since open */
+        d->if_scan_us = now + DART_DISCOVERY_IF_SCAN_US;
+        i_dart_discovery_if_refresh(d);
+    }
+
+    n_bytes = dart_discovery_update(d->core, now, d->txbuf, d->wire_max);
     if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes);
 
     /* targeted unicast: replies to soliciters + re-fetch requests for stale blobs */

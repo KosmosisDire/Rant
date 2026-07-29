@@ -27,7 +27,7 @@ typedef struct {
     uint16_t              domain;               /* logical-network selector; 0 */
     const char           *discovery_group;      /* multicast group; "239.255.0.7" */
     uint16_t              discovery_port;       /* rendezvous port; 7400 */
-    const char           *multicast_interface;  /* interface IP; NULL = auto (pin on multihomed) */
+    const char           *multicast_interface;  /* pin to this interface IP; NULL = every interface */
     uint8_t               multicast_ttl;        /* hops; 1 */
     uint16_t              max_peers;            /* table capacity; 32 */
     DartDiscoveryEventFn  on_event;             /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
@@ -77,9 +77,9 @@ typedef struct {
     const char  *group;       /* multicast group, default "239.255.0.7" */
     uint16_t     discovery_port;   /* rendezvous port, default 7400 */
     uint8_t      ttl;         /* multicast TTL, default 1 */
-    const char  *multicast_interface;    /* interface IP to join/send on; NULL = auto
-                                 (route probe, falling back to a real LAN interface),
-                                 "127.0.0.1" = single-host */
+    const char  *multicast_interface;    /* join/send on THIS interface IP only (and never
+                                 rescan); NULL = every interface this host has,
+                                 "127.0.0.1" = single-host isolation */
     const DartDiscoveryAddr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
     uint16_t     n_seeds;
@@ -134,7 +134,7 @@ int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
  * extra syscalls. Call every pass: the clock-driven work needs no readable fd. */
 int        dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable);
 
-/* ---------------------------------------------------------------- UUID / iface */
+/* ----------------------------------------------------------------------- UUID */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
 
@@ -143,12 +143,6 @@ int        dart_discovery_make_uuid4(uint8_t out[16]);
  * Returns its length. Shared by dart_discovery_open and the node so both name peers the
  * same way. */
 uint8_t    dart_discovery_default_name(char *out, size_t cap, const char *want);
-
-/* The one interface every multicast socket should pin to: route-probe group:port,
- * falling back to the default-route LAN interface (a multicast route can resolve to
- * loopback on Windows) and then to interface enumeration. INADDR_ANY (0) only if nothing
- * usable is found. Exposed so layers above pin to the same interface on multihomed hosts. */
-uint32_t   dart_discovery_mcast_if_for(uint32_t group_naddr, uint16_t port);
 
 #ifdef __cplusplus
 }

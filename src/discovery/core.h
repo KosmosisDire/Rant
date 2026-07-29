@@ -37,6 +37,11 @@ typedef struct {
     uint16_t port;     /* data port, host order */
 } DartDiscoveryAddr;
 
+#define DART_DISCOVERY_MAX_SUBNETS 16   /* local IPv4 subnets the locator ranking considers */
+/* One IPv4 subnet this host is directly on: address + netmask, network-order bytes.
+ * See dart_discovery_set_local_subnets. */
+typedef struct { uint8_t ip[4], mask[4]; } DartDiscoverySubnet;
+
 /* Why a peer is going down, so the IO layer can keep transport state across a
  * transient blip instead of tearing it down on every silence timeout. */
 typedef enum {
@@ -198,6 +203,16 @@ uint32_t     dart_discovery_meta_version(const DartDiscoveryState *st);
  * to a port unique to THIS process instead of the shared discovery port (which the OS
  * hands to one arbitrary same-port socket). 0 = none (peers fall back to the disc port). */
 void         dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port);
+/* Tell the core which IPv4 subnets this host sits on directly (the IO layer's interface
+ * list; n = 0 means unknown, which is fine). An announce carries no address of its own, so
+ * a peer's locator is learned from the datagram source: a multihomed peer announcing out
+ * every interface is then heard at a DIFFERENT address per path, and taking the newest each
+ * time would flap the locator its data is unicast to. With this the core ranks candidates
+ * (on one of our subnets > ordinary routed > 169.254 link-local) and, at equal rank, stays
+ * with the address it is already hearing the peer at until that one goes quiet. Re-callable
+ * whenever the interface set changes; entries with a zero mask are ignored. */
+void         dart_discovery_set_local_subnets(DartDiscoveryState *st,
+                             const DartDiscoverySubnet *nets, uint8_t n);
 /* Drain one targeted (unicast) datagram and its destination: a solicit REPLY to a
  * peer that solicited us (carries the blob), or a re-fetch REQ to a peer whose
  * advertised version is ahead of what we hold. Returns bytes + fills *to, or 0 when

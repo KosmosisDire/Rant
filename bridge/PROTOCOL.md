@@ -67,7 +67,7 @@ request, only for a broken WebSocket.
   "domain": 0,                    // optional; every field below is optional too
   "max_topics": 8,
   "max_peers": 16,
-  "interface": "192.168.1.10",    // pin discovery multicast (multihomed hosts)
+  "interface": "192.168.1.10",    // pin discovery to ONE interface; omit = all of them
   "seed_peers": ["10.0.0.7", "10.0.0.8:7400"],  // unicast discovery seeds
   "fragment_size": 0,             // UDP payload bytes per fragment; 0 = default
   "announce_interval_ms": 1000,

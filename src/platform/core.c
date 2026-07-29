@@ -396,6 +396,13 @@ int i_dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr
     return setsockopt(DART__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
                       (const char*)&mr, sizeof mr) == 0;
 }
+/* Best-effort: an interface that went away may already have dropped its membership. */
+void i_dart_plat_mcast_leave(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
+    struct ip_mreq mr; memset(&mr, 0, sizeof mr);
+    mr.imr_multiaddr.s_addr = group_naddr;
+    mr.imr_interface.s_addr = if_naddr;
+    setsockopt(DART__FD(s), IPPROTO_IP, IP_DROP_MEMBERSHIP, (const char*)&mr, sizeof mr);
+}
 
 /* --------------------------------------------------------------- datagram IO */
 int i_dart_plat_send(i_DartSock s, const void *buf, size_t len,
@@ -511,7 +518,7 @@ uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
 #ifndef IFF_LOOPBACK
 #define IFF_LOOPBACK 0x00000004
 #endif
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
     INTERFACE_INFO info[32];
     DWORD bytes = 0;
@@ -527,30 +534,33 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
         struct sockaddr_in *a = &info[i].iiAddress.AddressIn;
         if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) continue;
         if (a->sin_family != AF_INET) continue;
-        out[n++] = a->sin_addr.s_addr;
+        out[n].addr = a->sin_addr.s_addr;
+        out[n].mask = info[i].iiNetmask.AddressIn.sin_addr.s_addr;
+        n++;
     }
     return n;
 }
 #elif defined(ESP_PLATFORM)
-/* lwIP connect() does not assign a local source address, so the route probes in
- * dart_discovery_mcast_if_for come back empty on the ESP. This backstop hands the
- * multicast join a concrete interface (the STA / Ethernet / SoftAP IP) from
- * esp_netif; without it the join lands on INADDR_ANY, which lwIP refuses, and
- * dart_node_open fails. Requires WiFi/Ethernet already up (the node opens after). */
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+/* lwIP has no getifaddrs, so name the netifs the IDF defines. Requires WiFi/Ethernet
+ * already up (the node opens after); an ESP that is both STA and SoftAP reports both,
+ * and discovery then joins and announces on each. */
+int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     static const char *const keys[] = { "WIFI_STA_DEF", "ETH_DEF", "WIFI_AP_DEF" };
     int n = 0; unsigned i;
     if (!out || max <= 0) return 0;
     for (i = 0; i < sizeof keys / sizeof keys[0] && n < max; i++){
         esp_netif_t *nif = esp_netif_get_handle_from_ifkey(keys[i]);
         esp_netif_ip_info_t info;
-        if (nif && esp_netif_get_ip_info(nif, &info) == ESP_OK && info.ip.addr != 0)
-            out[n++] = info.ip.addr;   /* esp_ip4_addr is network-order: our naddr convention */
+        if (nif && esp_netif_get_ip_info(nif, &info) == ESP_OK && info.ip.addr != 0){
+            out[n].addr = info.ip.addr;   /* esp_ip4_addr is network-order: our naddr convention */
+            out[n].mask = info.netmask.addr;
+            n++;
+        }
     }
     return n;
 }
 #else
-int i_dart_plat_local_ipv4s(uint32_t *out, int max){
+int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     struct ifaddrs *ifs = NULL, *p;
     int n = 0;
     if (!out || max <= 0 || getifaddrs(&ifs) != 0) return 0;
@@ -559,7 +569,10 @@ int i_dart_plat_local_ipv4s(uint32_t *out, int max){
         if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
         if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
         a = (struct sockaddr_in*)p->ifa_addr;
-        out[n++] = a->sin_addr.s_addr;
+        out[n].addr = a->sin_addr.s_addr;
+        out[n].mask = (p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET)
+                        ? ((struct sockaddr_in*)p->ifa_netmask)->sin_addr.s_addr : 0u;
+        n++;
     }
     freeifaddrs(ifs);
     return n;

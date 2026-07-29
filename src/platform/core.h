@@ -151,6 +151,7 @@ void i_dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr);
 void i_dart_plat_mcast_ttl  (i_DartSock s, uint8_t ttl);
 void i_dart_plat_mcast_loop (i_DartSock s, int on);
 int  i_dart_plat_mcast_join (i_DartSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
+void i_dart_plat_mcast_leave(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr);
 
 /* --- datagram IO --- */
 /* sendto: returns bytes sent, <0 on error (test i_dart_plat_would_block). */
@@ -173,14 +174,18 @@ uint32_t i_dart_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
 uint32_t i_dart_plat_ip4_to_naddr(const uint8_t ip[4]);
 void     i_dart_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
 /* Source address the OS would use to reach dst_naddr:port (connect + getsockname
- * on an unbound UDP socket; no packet leaves). 0 on failure. Backs interface
- * pinning and the same-host check. */
+ * on an unbound UDP socket; no packet leaves). 0 on failure. A diagnostic (see
+ * tools/if_probe_check.c): discovery no longer routes anything through it. */
 uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port);
-/* Enumerate this host's usable IPv4 interface addresses (up, non-loopback) as
- * network-order naddr into out[0..max), returning the count written (0 if none, or
- * if the platform offers no enumeration). Backs the auto interface-pin fallback when
- * a route probe can't name a real LAN interface. */
-int      i_dart_plat_local_ipv4s(uint32_t *out, int max);
+
+/* One of this host's IPv4 interfaces: address + netmask, both network order. */
+typedef struct { uint32_t addr, mask; } i_DartIface;
+/* Enumerate this host's usable IPv4 interfaces (up, non-loopback) into out[0..max),
+ * returning the count written (0 if none, or if the platform offers no enumeration).
+ * Discovery joins the multicast group on every one and announces out every one, and
+ * the netmasks tell the core which peer addresses are on a segment we share. A
+ * platform that cannot report a netmask leaves it 0 (unknown, never matches). */
+int      i_dart_plat_local_ifaces(i_DartIface *out, int max);
 
 /* --- threads (present only under DART_THREADS; see the detection above) -------
  * What the node runtime's thread safety and background service thread need: a

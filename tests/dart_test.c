@@ -476,11 +476,11 @@ static int node_main(int argc, char **argv){
         .discovery   = { .max_peers = MAX_PEERS },
     };
     if (if_ip)
-        opts.net.multicast_interface = if_ip;       /* multihomed host: pin discovery here */
+        opts.net.multicast_interface = if_ip;       /* pin discovery to this one interface */
     else if (if_mode==1)
-        opts.net.multicast_interface = "127.0.0.1"; /* single-host test: discovery on loopback.
-                                             if_mode=2 leaves the real interface for
-                                             cross-machine runs (data is always unicast) */
+        opts.net.multicast_interface = "127.0.0.1"; /* single-host test: loopback only, so the
+                                             run cannot see (or be seen by) the LAN. if_mode=2
+                                             leaves the default: every interface */
     DartDiscoveryAddr seed;
     if (peer_ip){                     /* bootstrap without multicast */
         uint32_t a4 = inet_addr(peer_ip);
@@ -5470,10 +5470,12 @@ int main(int argc, char **argv){
         "        [--mcast 0|1|2] [--reliable] [--block-ms N] [--extra-ch N] [--spread]\n"
         "        [--void] [--remote] [--ctl-domain D] [--if IP] [--peer IP] [--diag]\n"
         "        spawn N node children per rate; print an RTT-vs-throughput table.\n"
-        "        --mcast selects the discovery interface (1 loopback, 2 NIC; data is unicast).\n"
+        "        --mcast selects the discovery interface (1 pins loopback to isolate the\n"
+        "        run from the LAN, 2 uses every real interface; data is unicast).\n"
         "        --remote also commands every 'serve' worker on the LAN to spawn N\n"
         "        nodes per rate and folds their SUMMARYs into the same table.\n"
-        "        --if pins the discovery interface (multihomed hosts);\n"
+        "        --if pins discovery to ONE interface (rarely needed: the default\n"
+        "        joins and announces on all of them);\n"
         "        --peer seeds discovery with the other machine's address, so the\n"
         "        run works even where multicast is broken or filtered\n"
         "  serve [--domain D] [--if IP] [--peer IP]\n"

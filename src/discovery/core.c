@@ -18,6 +18,8 @@ struct i_DartDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
+    uint64_t addr_heard_us;  /* last datagram that actually ARRIVED from ip: an incumbent locator
+                                stays put while fresh, so multi-path announces can't flap it */
     uint8_t *meta;          /* the OVERLAY only: a meta_pool slot (capacity st->meta_cap),
                                or a hook allocation grown to the largest blob this slot has held */
     uint16_t meta_cap;      /* allocated capacity of this slot's meta buffer */
@@ -52,6 +54,8 @@ struct DartDiscoveryState {
     uint8_t       self_name_len;
     uint16_t      self_blob_resend; /* announces remaining that carry the full blob */
     uint16_t      targeted_cursor;  /* round-robin over peers for poll_targeted */
+    DartDiscoverySubnet local_nets[DART_DISCOVERY_MAX_SUBNETS];  /* our own subnets (locator ranking) */
+    uint8_t       n_local_nets;
     i_DartDiscoveryPeer  *peers;
 };
 
@@ -342,6 +346,26 @@ static size_t i_dart_discovery_build(DartDiscoveryState *st, uint8_t flags, int 
     return (size_t)DART_DISCOVERY_META_OFF + meta_len;
 }
 
+/* Rank one candidate IPv4 locator for a peer; higher wins. 2 = inside one of our own
+ * subnets, so it is directly reachable from here. 1 = an ordinary address we would route
+ * to. 0 = 169.254/16 link-local autoconfig (an adapter with no lease: usable only if we
+ * happen to share that exact link, so it is the last thing to prefer). Non-IPv4 has
+ * nothing to compare against and ranks with the ordinary case. */
+static int i_dart_discovery_addr_rank(const DartDiscoveryState *st, const uint8_t *ip, uint8_t ip_len){
+    uint8_t i;
+    if (ip_len != 4) return 1;
+    /* first, because a link-local adapter's own /16 would otherwise make every other
+       169.254 address on earth look like it shares our segment */
+    if (ip[0] == 169 && ip[1] == 254) return 0;
+    for (i = 0; i < st->n_local_nets; i++){
+        const DartDiscoverySubnet *net = &st->local_nets[i];
+        int k, same = 1;
+        for (k = 0; k < 4; k++) if (((ip[k] ^ net->ip[k]) & net->mask[k]) != 0){ same = 0; break; }
+        if (same) return 2;
+    }
+    return 1;
+}
+
 static void i_dart_discovery_addr_of(const i_DartDiscoveryPeer *peer, DartDiscoveryAddr *out){
     memset(out, 0, sizeof *out);
     memcpy(out->ip, peer->ip, 16);
@@ -422,9 +446,12 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         return;
     }
 
-    /* address: from the blob's locator when present (self_ip override, else the datagram
-       source); otherwise the cached locator (it is static between blob updates), or the
-       datagram source on first contact with no blob. */
+    /* Address: the port comes from the blob's locator (cached between blob updates, since a
+       steady-state announce carries none). The IP is a CANDIDATE path -- the source this
+       datagram actually arrived from, or an explicit self_ip where the peer states one --
+       and every announce offers one, so a better path than the one we first happened to
+       hear can still win the ranking below. Falls back to the cached locator only when the
+       datagram carries no usable source. */
     memset(&addr, 0, sizeof addr);
     if (have_disc){
         if (disc_ip_len){ addr.ip_len = disc_ip_len; memcpy(addr.ip, disc_ip, disc_ip_len); }
@@ -432,8 +459,9 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         else return;
         addr.port = disc_port;
     } else if (idx >= 0){
-        addr.ip_len = st->peers[idx].ip_len; addr.port = st->peers[idx].port;
-        memcpy(addr.ip, st->peers[idx].ip, 16);
+        addr.port = st->peers[idx].port;
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
+        else { addr.ip_len = st->peers[idx].ip_len; memcpy(addr.ip, st->peers[idx].ip, 16); }
     } else if (src_ip && (src_ip_len==4 || src_ip_len==16)){
         addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len);   /* port unknown until the blob */
     } else return;
@@ -468,6 +496,24 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     if (peer->dropped){ peer->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     peer->last_heard_us = now;
 
+    /* Which address do we keep for a peer we can hear on more than one path? It announces
+       out every interface it has, so each copy reaches us with a different source address,
+       and adopting the newest every time would flap the locator its data is unicast to (and
+       re-fire peer_up, re-applying its whole interest) on every announce. Prefer the better
+       ranked address, so a peer first heard over some link-local or VPN adapter moves to a
+       shared-subnet path as soon as one announces; at equal rank stay with the incumbent
+       while we are still hearing the peer there, so a genuine renumber (the old address
+       goes quiet) is picked up a couple of announces later instead. A locator the peer
+       states outright (self_ip) is authoritative and skips all of this. */
+    if (!disc_ip_len && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
+        int rank_new = i_dart_discovery_addr_rank(st, addr.ip, 4);
+        int rank_old = i_dart_discovery_addr_rank(st, peer->ip, 4);
+        if (rank_new < rank_old ||
+            (rank_new == rank_old &&
+             now - peer->addr_heard_us < (uint64_t)st->cfg.announce_interval_us * 2u))
+            memcpy(addr.ip, peer->ip, 4);          /* keep the incumbent */
+    }
+
     addr_changed = (peer->ip_len != addr.ip_len)
                 || (peer->port   != addr.port)
                 || (memcmp(peer->ip, addr.ip, 16) != 0);
@@ -475,6 +521,11 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         peer->ip_len = addr.ip_len; peer->port = addr.port;
         memcpy(peer->ip, addr.ip, 16);
     }
+    /* freshness of the locator we hold: only a datagram that really arrived FROM it counts
+       (a steady-state announce carries no blob, so addr is then the cached locator, not
+       where this datagram came from) */
+    if (peer->ip_len == 4 && src_ip && src_ip_len == 4 && memcmp(peer->ip, src_ip, 4) == 0)
+        peer->addr_heard_us = now;
 
     /* meta: a newer version with the blob present updates our stored overlay + name; a newer
        version without the blob (a steady-state version-only announce) means we fell behind,
@@ -576,6 +627,18 @@ void dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port){
     st->self_meta_version++;             /* bump the version + re-send so peers re-fetch it */
     st->self_blob_resend = DART_DISCOVERY_BLOB_RESEND;
     st->next_announce_us = 0;
+}
+
+void dart_discovery_set_local_subnets(DartDiscoveryState *st, const DartDiscoverySubnet *nets, uint8_t n){
+    uint8_t i, k = 0;
+    if (!st) return;
+    if (n > DART_DISCOVERY_MAX_SUBNETS) n = DART_DISCOVERY_MAX_SUBNETS;
+    for (i = 0; i < n; i++){
+        const uint8_t *m = nets[i].mask;
+        if (!(m[0] | m[1] | m[2] | m[3])) continue;   /* unknown prefix: it would match everything */
+        st->local_nets[k++] = nets[i];
+    }
+    st->n_local_nets = k;
 }
 
 size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
