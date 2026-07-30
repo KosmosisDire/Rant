@@ -60,6 +60,8 @@ typedef struct DartRequest {
     uint32_t          caller;        /* the calling peer's id */
     DartString        caller_name;   /* the calling node's name (.data never NULL) */
     uint64_t          recv_us;       /* the node's monotonic clock at arrival */
+    uint64_t          sent_us;       /* the CALLER's wall clock when it sent the request
+                                        (DartMsg.sent_us; 0 = it opted out of the stamp) */
 } DartRequest;
 
 /* Delivered to the caller when a response arrives (or is synthesized). data is a view valid
@@ -71,6 +73,8 @@ typedef struct {
                                     side or a synthesized outcome) */
     uint32_t          provider;
     void             *user;      /* the user pointer passed to dart_function_call_async */
+    uint64_t          sent_us;   /* the PROVIDER's wall clock when it sent the response
+                                    (DartMsg.sent_us); 0 for a synthesized outcome */
 } DartResponse;
 typedef void (*DartResponseFn)(const DartResponse *response);
 
@@ -223,6 +227,9 @@ typedef struct {
     uint32_t          write_seq;   /* the owner's write counter */
     uint32_t          source;      /* peer id the write arrived from; 0 = a local call */
     uint64_t          recv_us;     /* the node's monotonic clock when the write applied */
+    uint64_t          sent_us;     /* the WRITER's wall clock for this write: the delivering
+                                      message's DartMsg.sent_us for a remote write, this node's
+                                      wall clock for a local one (0 = the source opted out) */
 } DartVariableUpdate;
 typedef void (*DartVariableUpdateFn)(const DartVariableUpdate *update, void *user);
 

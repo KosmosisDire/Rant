@@ -64,6 +64,14 @@ extern "C" {
 #define DART_NODE_NAME_MAX 32u           /* max node-name bytes carried in the announce meta blob */
 #endif
 
+/* Bytes of the SOURCE TIMESTAMP prepended inside every sample a stamped topic commits,
+ * ahead of the pattern header: wire payload = [sent_us u64 LE][pattern hdr][user payload].
+ * Stamped once at the writer's commit point from DartConfig.source_time, so a repair
+ * resend, a catch_up replay and an SHM chunk all carry the ORIGINAL stamp. A topic opts
+ * out with DartQos.no_timestamp (then nothing is prepended and receivers are told so via
+ * the announce). Ordinary payload bytes for fragmentation and size accounting. */
+#define DART_TIMESTAMP_BYTES 8u
+
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 /* DART_INACTIVE = declared but off (resources stay allocated; dart_transport_set_role flips it) */
 typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
@@ -118,6 +126,12 @@ typedef struct {
                                     dropped SENT sample still is). 0 = unlimited (full rate).
                                     Advertised in the announce; ignored on a reliable topic and on
                                     the publish side. Set at create (immutable per topic). */
+    uint8_t  no_timestamp;       /* PUBLISHER side: publish this topic WITHOUT the 8-byte source
+                                    timestamp (DART_TIMESTAMP_BYTES), so a receiver sees sent_us 0.
+                                    0 (the default) stamps every message with the sender's wall
+                                    clock at the commit point. The opt-out is advertised in the
+                                    announce, so a receiver always knows whether the stream carries
+                                    the stamp. Set at create (immutable per topic). */
 } DartQos;
 
 /* A topic. Cross-peer identity is the name (64-bit hash); the LOCAL
@@ -242,6 +256,13 @@ typedef struct {
     int                 (*schema_check)(void *user, uint32_t peer, uint16_t topic_index,
                                         int peer_is_pub, uint64_t schema_hash,
                                         DartBytes schema_wire);
+    /* optional source clock: WALL time in UTC microseconds, called with `user` at the
+     * writer's commit point and stamped into the sample (DART_TIMESTAMP_BYTES). The core is
+     * sans-IO and owns no clock, so this is how a message gets its send timestamp; the node
+     * runtime wires it to the platform wall clock. NULL = the 8 bytes are still framed on a
+     * stamped topic but carry 0, so the wire layout never depends on the hook. Never the
+     * monotonic now_us: the stamp is meant to be compared across hosts. */
+    uint64_t            (*source_time)(void *user);
     void                 *user;
 } DartConfig;
 
@@ -312,7 +333,12 @@ void      dart_transport_peer_set_frag(DartTransportState *st, uint32_t peer_id,
  * immutable per peer incarnation: that is what makes the verdict cache sound.
  * dart_transport_build_interest serializes OUR set into out, returning bytes written or
  * 0 if cap is too small; size out via dart_interest_max. apply is idempotent. Re-build +
- * re-disseminate after dart_transport_set_role. */
+ * re-disseminate after dart_transport_set_role.
+ *
+ * Two SPARSE sections follow the positional entries, each defaulting to zero entries so a
+ * plain node pays 4 bytes total: the best-effort rate caps (DartQos.max_rate_hz) and the
+ * topics published WITHOUT a source timestamp (DartQos.no_timestamp), so a receiver knows
+ * per writer whether the stream carries the 8-byte stamp. */
 size_t    dart_interest_max(uint16_t n_topics);
 size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_t cap);
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
@@ -322,10 +348,10 @@ void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t pe
  * byte, and (inline case) its hash-only interest list: the transport's OVERLAY, carried
  * opaquely inside discovery's announce blob (the node name lives in discovery's own
  * section, not here). Layout:
- *   v12: ['D','N',12, frag_lo, frag_hi, iflags,                <interest>]
- *   v13: ['D','N',13, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
- * frag sits at [3..4] in both; v13 adds the SHM byte + host. dart_transport_meta_build
- * writes v13 when DART_SHM is compiled, v12 otherwise. iflags bit 0 = INTEREST_EXTERNAL:
+ *   v16: ['D','N',16, frag_lo, frag_hi, iflags,                <interest>]
+ *   v17: ['D','N',17, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
+ * frag sits at [3..4] in both; v17 adds the SHM byte + host. dart_transport_meta_build
+ * writes v17 when DART_SHM is compiled, v16 otherwise. iflags bit 0 = INTEREST_EXTERNAL:
  * the interest list did NOT fit the announce datagram, nothing follows the base, and
  * peers pull the identical interest blob over the unicast 'uDTL' paging below
  * (DART_INTEREST_REQ/RESP). Clear = the inlined interest (even when empty) is
@@ -410,7 +436,7 @@ typedef struct {
 int       dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry *out);
 int       dart_meta_interest_next(DartBytes meta, DartInterestIter *it, DartTopicEntry *out);
 #ifdef DART_SHM
-/* A peer's SHM capability + host uuid (v3/v5 blobs only): 1 if SHM-capable (fills
+/* A peer's SHM capability + host uuid (odd-version blobs only): 1 if SHM-capable (fills
  * host[16]), else 0. */
 int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
 #endif
@@ -577,6 +603,13 @@ int       dart_transport_topic_define(DartTransportState *st, uint16_t topic_ind
  * never on the data path. */
 DartString dart_transport_topic_name(DartTransportState *st, uint16_t topic_index);
 
+/* 1 if the messages this peer publishes on topic_index carry the DART_TIMESTAMP_BYTES
+ * source stamp (the default), 0 if it advertised the opt-out (DartQos.no_timestamp) in its
+ * interest. An unknown peer / unmatched lane answers 1 (the default framing). The receiving
+ * side asks per delivered message so it strips exactly what the writer prepended. */
+int       dart_transport_peer_timestamped(DartTransportState *st, uint16_t topic_index,
+                       uint32_t peer_id);
+
 /* dart_transport_send / dart_transport_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {
     DART_OK             =  0,
@@ -617,7 +650,9 @@ int       dart_transport_send_to(DartTransportState *st, uint16_t topic_index, u
  * transport stores the message referencing chunk (NOT copied) plus the descriptor,
  * fragments from chunk for non-SHM peers, and sends ONE SHM-DATA (the descriptor) to
  * SHM-capable peers. desc is DART_SHM_DESC_BYTES. Same return as dart_transport_send. The chunk
- * must stay valid until the message leaves history (acked / evicted). */
+ * must stay valid until the message leaves history (acked / evicted). chunk is the whole
+ * wire sample, so on a stamped topic the CALLER writes the DART_TIMESTAMP_BYTES source
+ * stamp (then any pattern header, then the payload) into it. */
 int       dart_transport_send_shm(DartTransportState *st, uint16_t topic_index, DartBytes chunk,
                       const uint8_t *desc, uint64_t now_us);
 /* Mark whether a peer can receive SHM-DATA (same host AND its segment is attached).

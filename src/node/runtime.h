@@ -127,6 +127,12 @@ typedef struct {
                                         when it was taken), so rates and inter-arrival jitter
                                         measured by a frame-paced consumer reflect true arrival
                                         times, never the consumer's own cadence. */
+    uint64_t       sent_us;          /* the SENDER's wall clock (UTC microseconds) at the moment
+                                        its send committed into writer history: a source timestamp,
+                                        so a repaired or replayed message keeps its original value.
+                                        0 = the publisher opted out (DartQos.no_timestamp).
+                                        Comparability across hosts is only as good as their clock
+                                        sync; never mix it with the monotonic recv_us. */
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
@@ -483,10 +489,13 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick,
                                i_DartSysCloseFn on_close, void *user);
 /* Node-pool alloc/realloc/free (size 0 = free) for the patterns layer; its per-node manager
- * handle slot; and the node's monotonic clock (us). Call only under the node lock. */
+ * handle slot; the node's monotonic clock (us); and its WALL clock (UTC us), the same source
+ * the transport stamps DartMsg.sent_us from, for a locally-applied write that never rode the
+ * wire. Call only under the node lock. */
 void    *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size);
 void   **i_dart_node_sys_slot (DartNode *n);
 uint64_t i_dart_node_now_us   (DartNode *n);
+uint64_t i_dart_node_wall_us  (DartNode *n);
 /* Node lock for a pattern call that mutates manager state: 1 = acquired here, 0 = already
  * held by this thread (a pattern call from inside a callback). sys_unlock releases WITHOUT
  * kicking (the send helpers and create kick for themselves; read-only ops must stay silent).

@@ -639,9 +639,10 @@ static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx
 
 /* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
  * one positional [u32 hash][u8 flags] entry per topic slot, plus the worst-case rate
- * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry). */
+ * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry) and
+ * the worst-case no-timestamp section ([u16 n] + 2 B per opted-out topic). */
 size_t dart_interest_max(uint16_t n_topics){
-    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics;
+    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics + 2u + 2u * (size_t)n_topics;
 }
 
 /* subscriber topics carrying a best-effort rate cap: the count for the interest rate
@@ -657,19 +658,37 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
     return r;
 }
 
+/* is this a topic we PUBLISH without the source stamp? (the no-timestamp section's
+ * membership test, shared by the count and the write walk so they cannot drift) */
+static int i_dart_topic_unstamped_pub(const i_DartTopic *t){
+    return t->name_len && t->qos.no_timestamp
+        && (t->role==DART_PUB_ONLY || t->role==DART_PUBSUB);
+}
+
+/* publisher topics that opted OUT of the source stamp: the count for the interest
+ * no-timestamp section. Zero for a default node, so the section costs 2 bytes. */
+static uint16_t i_dart_unstamped_count(DartTransportState *st, uint16_t n){
+    uint16_t c, r=0;
+    for (c=0;c<n;c++) if (i_dart_topic_unstamped_pub(&st->topics[c])) r++;
+    return r;
+}
+
 
 /* Serialize our interest into out: [u16 n] (n = SLOTS, holes included), then one
  * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest defined slot
  * (position = index). A run of UNDEFINED reserve slots collapses to ONE entry flagged
  * DART__INT_HOLE_RUN whose hash field is the run length, so later indices stay stable
  * without a big reserve padding the announce to its full size. A defined-but-INACTIVE
- * topic still rides as a normal entry (its identity survives role flips). Then a SPARSE
- * rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics
- * that cap their best-effort delivery rate (see DartQos.max_rate_hz). Returns bytes
+ * topic still rides as a normal entry (its identity survives role flips). Then two SPARSE
+ * sections: a rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber
+ * topics that cap their best-effort delivery rate (see DartQos.max_rate_hz), and a
+ * no-timestamp section [u16 n_unstamped][(u16 topic_index)]* for the PUBLISHED topics that
+ * carry no source stamp (see DartQos.no_timestamp), which is what tells a receiver whether
+ * a stream begins with DART_TIMESTAMP_BYTES. Both default to zero entries. Returns bytes
  * written, or 0 if cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
     uint8_t *o=(uint8_t*)out, *e, *rp;
-    uint16_t c, n=0, n_rates; uint32_t cells=0; int in_hole=0;
+    uint16_t c, n=0, n_rates, n_unstamped; uint32_t cells=0; int in_hole=0;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){                       /* exact cell count (runs collapse), so a buffer
                                                 sized by dart_transport_interest_size fits */
@@ -677,7 +696,9 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
         else { if (!in_hole) cells++; in_hole=1; }
     }
     n_rates = i_dart_rate_count(st, n);
-    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates) return 0;
+    n_unstamped = i_dart_unstamped_count(st, n);
+    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 2u*(size_t)n_unstamped)
+        return 0;
     i_dart_le_w16(o, n);
     e = o + 2u;
     for (c=0;c<n;c++){
@@ -706,6 +727,9 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
             i_dart_le_w16(rp, c); i_dart_le_w16(rp+2, topic->qos.max_rate_hz); rp += 4u;
         }
     }
+    i_dart_le_w16(rp, n_unstamped); rp += 2u;
+    for (c=0;c<n;c++)
+        if (i_dart_topic_unstamped_pub(&st->topics[c])){ i_dart_le_w16(rp, c); rp += 2u; }
     return (size_t)(rp - o);
 }
 
@@ -818,18 +842,21 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
         i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     for (c=0;c<st->cfg.n_topics;c++) i_dart_topic_rematch(st,c,(uint16_t)peer_slot);
 
-    /* rate section (after the n entries): [u16 n_rates][(u16 their_index)(u16 rate_hz)]*.
-       Applied AFTER rematch so the writer lanes exist; a fire-and-forget lane (best-effort,
-       so w->used with the sub bit) then paces its sends. Re-applied every announce (the rate
-       is in the blob, immutable per topic), so a lane re-formed by a role flip re-derives it. */
+    /* The two sparse sections after the n entries, in order. Both are applied AFTER rematch
+       so the lanes exist, and re-applied on every announce: each value is immutable per
+       topic, so a lane re-formed by a role flip simply re-derives it (a fresh match memsets
+       the proxy, so nothing stale survives). A truncated rate section abandons both. */
     if (amap){
-        const uint8_t *rp = d + entries_len;
-        if (blob.len >= (size_t)(rp - d) + 2u){
-            uint16_t nr = i_dart_le_r16(rp), k; rp += 2u;
+        size_t off = entries_len; int ok = 1;
+        /* rate section [u16 n_rates][(u16 their_index)(u16 rate_hz)]*: their best-effort
+           delivery cap for a topic they SUBSCRIBE, so it paces our fire-and-forget writer
+           lane (best-effort, so w->used with the sub bit). */
+        if (blob.len >= off + 2u){
+            uint16_t nr = i_dart_le_r16(d + off), k; off += 2u;
             for (k=0;k<nr;k++){
                 uint16_t their_idx, rate_hz, cidx; i_DartWriterProxy *w;
-                if ((size_t)(rp - d) + 4u > blob.len) break;   /* truncated: stop */
-                their_idx = i_dart_le_r16(rp); rate_hz = i_dart_le_r16(rp+2); rp += 4u;
+                if (off + 4u > blob.len){ ok = 0; break; }      /* truncated: stop */
+                their_idx = i_dart_le_r16(d+off); rate_hz = i_dart_le_r16(d+off+2); off += 4u;
                 if (their_idx >= st->peer_index_len[peer_slot]) continue;
                 cidx = amap[their_idx];
                 if (cidx >= st->cfg.n_topics) continue;         /* unverified/unmapped */
@@ -837,8 +864,35 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
                 if (w && w->used)
                     w->rate_interval_us = rate_hz ? (1000000u / (uint32_t)rate_hz) : 0u;
             }
+        } else ok = 0;
+        /* no-timestamp section [u16 n_unstamped][(u16 their_index)]*: topics they PUBLISH
+           without the source stamp, recorded on our reader lane so delivery strips exactly
+           what the writer prepended. Absent/unlisted = stamped (the default). */
+        if (ok && blob.len >= off + 2u){
+            uint16_t nu = i_dart_le_r16(d + off), k; off += 2u;
+            for (k=0;k<nu;k++){
+                uint16_t their_idx, cidx; i_DartReaderProxy *r;
+                if (off + 2u > blob.len) break;                 /* truncated: stop */
+                their_idx = i_dart_le_r16(d+off); off += 2u;
+                if (their_idx >= st->peer_index_len[peer_slot]) continue;
+                cidx = amap[their_idx];
+                if (cidx >= st->cfg.n_topics) continue;         /* unverified/unmapped */
+                r = i_dart_reader_proxy_at(st, cidx, (uint32_t)peer_slot);
+                if (r && r->used) r->no_timestamp = 1;
+            }
         }
     }
+}
+
+
+int dart_transport_peer_timestamped(DartTransportState *st, uint16_t topic_index, uint32_t peer_id){
+    int peer_slot;
+    i_DartReaderProxy *r;
+    if (!st || topic_index >= st->cfg.n_topics) return 1;
+    peer_slot = i_dart_peer_slot(st, peer_id);
+    if (peer_slot < 0) return 1;                       /* unknown peer: the default framing */
+    r = i_dart_reader_proxy_at(st, topic_index, (uint32_t)peer_slot);
+    return (r && r->no_timestamp) ? 0 : 1;
 }
 
 
@@ -874,20 +928,20 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
 #define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  15u                 /* what WE write (v14/15: hole-run interest) */
+#define DART__META_VER  17u                 /* what WE write (v16/17: no-timestamp interest section) */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  14u
+#define DART__META_VER  16u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= DART__META_BASE_NOSHM
         && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=14 && meta.data[2]<=15;
+        && meta.data[2]>=16 && meta.data[2]<=17;
 }
-/* base prefix through the iflags byte, by version (odd v13 carries shm+host, even v12
- * doesn't). iflags is always the base's last byte. */
+/* base prefix through the iflags byte, by version (the odd one carries shm+host, the even
+ * one doesn't). iflags is always the base's last byte. */
 static uint16_t i_dart_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? DART__META_BASE_SHM : DART__META_BASE_NOSHM;
 }
@@ -901,14 +955,15 @@ uint16_t dart_meta_cap(uint16_t n_topics){
  * The same walk dart_transport_build_interest emits, byte for byte: defined slots cost
  * one 5 B entry each, every maximal run of undefined slots costs one. */
 uint32_t dart_transport_interest_size(DartTransportState *st){
-    uint16_t c, n=0, n_rates; uint32_t cells=0; int in_hole=0;
+    uint16_t c, n=0, n_rates, n_unstamped; uint32_t cells=0; int in_hole=0;
     for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){
         if (st->topics[c].name_len){ cells++; in_hole=0; }
         else { if (!in_hole) cells++; in_hole=1; }
     }
     n_rates = i_dart_rate_count(st, n);
-    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates;
+    n_unstamped = i_dart_unstamped_count(st, n);
+    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates + 2u + 2u*(uint32_t)n_unstamped;
 }
 
 /* Exact overlay size the next INLINE dart_transport_meta_build will emit for the

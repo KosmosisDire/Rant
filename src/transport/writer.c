@@ -108,12 +108,17 @@ static int i_dart_writer_too_big(DartTransportState *st, i_DartTopic *topic, siz
     return len > 65535u*(uint32_t)st->frag;
 }
 
-/* Store hdr+data into the head slot (grown to fit via the hook). Fills *len_out with the
+/* Store ts+hdr+data into the head slot (grown to fit via the hook). Fills *len_out with the
  * stored byte count. Returns DART_OK or a negative DartResult; on a negative return nothing
- * was committed. Shared by the broadcast and directed send paths. */
+ * was committed. Shared by the broadcast and directed send paths.
+ * THE STAMP POINT: a stamped topic (see DartQos.no_timestamp) gets its source timestamp
+ * written here, in front of the pattern header, so it is taken ONCE per message and every
+ * later use of the sample (repair resend, catch_up replay, the SHM chunk, the consumer
+ * queue) carries the ORIGINAL value: this is a SOURCE timestamp, not a transmit one. */
 static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
                                DartBytes hdr, DartBytes data, size_t *len_out){
-    size_t len = hdr.len + data.len;
+    uint32_t ts = i_dart_topic_ts_bytes(topic);
+    size_t len = (size_t)ts + hdr.len + data.len;
     if (i_dart_writer_too_big(st, topic, len)) return DART_ERR_TOO_BIG;
     {   i_DartWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
@@ -123,9 +128,10 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
     }
-    {   uint8_t *dst = topic->history[topic->history_head].buf;    /* gather: hdr then payload */
-        if (hdr.len)  memcpy(dst, hdr.data, hdr.len);
-        if (data.len) memcpy(dst + hdr.len, data.data, data.len);
+    {   uint8_t *dst = topic->history[topic->history_head].buf;    /* gather: ts, hdr, payload */
+        if (ts)       i_dart_le_w64(dst, st->cfg.source_time ? st->cfg.source_time(st->cfg.user) : 0u);
+        if (hdr.len)  memcpy(dst + ts, hdr.data, hdr.len);
+        if (data.len) memcpy(dst + ts + hdr.len, data.data, data.len);
     }
 #ifdef DART_SHM
     topic->history[topic->history_head].shm = 0;   /* an inline send: this slot is not SHM-backed */
@@ -146,7 +152,9 @@ int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBy
     (void)now;
     topic = i_dart_topic_at(st, topic_index, NULL);                /* rejects the internal meta topic */
     if (!topic) return DART_ERR_NO_TOPIC;
-    if (i_dart_writer_too_big(st, topic, hdr.len + data.len)) return DART_ERR_TOO_BIG;
+    /* the source stamp is ordinary payload for every size rule: count it in the wire cap */
+    if (i_dart_writer_too_big(st, topic, i_dart_topic_ts_bytes(topic) + hdr.len + data.len))
+        return DART_ERR_TOO_BIG;
     if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
     /* Nobody subscribes and nothing durable to keep: the sample would land in the ring and
        be orphaned (a fresh match joins at next_seqno unless reliable+catch_up), so skip the
@@ -165,7 +173,8 @@ int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_
     (void)now;
     topic = i_dart_topic_at(st, topic_index, NULL);
     if (!topic) return DART_ERR_NO_TOPIC;
-    if (i_dart_writer_too_big(st, topic, hdr.len + data.len)) return DART_ERR_TOO_BIG;
+    if (i_dart_writer_too_big(st, topic, i_dart_topic_ts_bytes(topic) + hdr.len + data.len))
+        return DART_ERR_TOO_BIG;
     if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
     if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
     r = i_dart_writer_store(st, topic, hdr, data, &len);
@@ -181,7 +190,9 @@ int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_
 
 /* publish a sample whose bytes live in an external (shared-memory) chunk: store the
  * chunk pointer + descriptor on the history slot without copying. Remote peers
- * fragment from the chunk; SHM peers get the one-submessage descriptor. */
+ * fragment from the chunk; SHM peers get the one-submessage descriptor. The chunk is
+ * already the WHOLE wire sample, so a stamped topic's caller wrote the source timestamp
+ * (and any pattern header) into it: there is nothing to gather here. */
 int dart_transport_send_shm(DartTransportState *st, uint16_t topic_index, DartBytes chunk,
                   const uint8_t *desc, uint64_t now){
     i_DartTopic *topic; i_DartWriterSample *slot; size_t len = chunk.len;

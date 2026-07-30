@@ -332,6 +332,9 @@ struct Qos {
     uint16_t    max_rate_hz          = 0;   /* SUBSCRIBER, best-effort: cap delivery from each
                                                publisher to this many samples/sec (it decimates
                                                to the newest); 0 = unlimited */
+    bool        no_timestamp         = false;/* PUBLISHER: send without the per-message source
+                                               timestamp, so receivers read sent_us() == 0.
+                                               Default (false) stamps every message */
 };
 
 struct NodeOptions {
@@ -798,6 +801,10 @@ public:
     /* node monotonic us when the poll RECEIVED it (queued: at enqueue), so paced
      * consumers measure true arrival times, never their own cadence */
     uint64_t         recv_us()        const { return msg_->recv_us; }
+    /* the SENDER's wall clock (UTC us) at the moment its send committed: a source stamp,
+     * kept across repair and replay. 0 = the publisher opted out (Qos::no_timestamp).
+     * Never mix it with the monotonic recv_us. */
+    uint64_t         sent_us()        const { return msg_->sent_us; }
 
 private:
     explicit MessageView(const detail::DartMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
@@ -933,6 +940,7 @@ public:
     uint16_t         topic_index()    const { return m_.topic_index; }
     Bytes            header()         const { return { m_.header.data, m_.header.len }; }
     uint64_t         recv_us()        const { return m_.recv_us; }   /* arrival stamp (see MessageView) */
+    uint64_t         sent_us()        const { return m_.sent_us; }   /* source stamp (see MessageView) */
 private:
     void bind() { d_ = m_.data; s_ = m_.schema; ok_ = true; }
     detail::DartMsg m_{};
@@ -1503,6 +1511,7 @@ public:
     uint32_t         caller()        const { return rq_->caller; }
     std::string_view caller_name()   const { return { rq_->caller_name.data, rq_->caller_name.len }; }
     uint64_t         recv_us()       const { return rq_->recv_us; }
+    uint64_t         sent_us()       const { return rq_->sent_us; }   /* the caller's send stamp */
 
     void reply(Bytes rsp)       { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
     void fail(Bytes rsp = {})   { detail::dart_request_fail (rq_, priv::to_c(rsp)); }
@@ -1528,6 +1537,7 @@ public:
     bool       ok()          const { return st_ == CallStatus::Ok; }
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
+    uint64_t   sent_us()     const { return sent_; }   /* the provider's send stamp (0 = synthesized) */
     Bytes      data()        const { return { data_.data(), data_.size() }; }
     /* the schema data decodes with (interned in the node, valid until node close) */
     const detail::DartSchema* raw_schema() const { return schema_; }
@@ -1536,6 +1546,7 @@ private:
     CallStatus                st_ = CallStatus::Timeout;
     SendStatus                ss_ = SendStatus::Ok;
     uint32_t                  provider_ = 0;
+    uint64_t                  sent_ = 0;
     std::vector<uint8_t>      data_;
     const detail::DartSchema* schema_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
@@ -1547,6 +1558,7 @@ public:
     CallStatus status()   const { return static_cast<CallStatus>(r_->status); }
     bool       ok()       const { return r_->status == detail::DART_CALL_OK; }
     uint32_t   provider() const { return r_->provider; }
+    uint64_t   sent_us()  const { return r_->sent_us; }   /* the provider's send stamp */
 
 private:
     explicit ResponseView(const detail::DartResponse* r)
@@ -2152,6 +2164,7 @@ private:
         c.shm_max_bytes        = q.shm_max_bytes;
         c.queue_bytes          = q.queue_bytes;
         c.max_rate_hz          = q.max_rate_hz;
+        c.no_timestamp         = q.no_timestamp ? 1 : 0;
         return c;
     }
 
@@ -2338,6 +2351,7 @@ public:
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
+            r.sent_     = out.sent_us;
             r.schema_   = out.schema;
             if (out.data.len) r.data_.assign(out.data.data, out.data.data + out.data.len);
         } else if (rc < 0) {
@@ -2430,6 +2444,8 @@ public:
     uint32_t         source()    const { return u_->source; }
     /* node monotonic us when the write applied */
     uint64_t         recv_us()   const { return u_->recv_us; }
+    /* the writer's wall clock for this write (this node's own for a local write) */
+    uint64_t         sent_us()   const { return u_->sent_us; }
     const detail::DartSchema* raw_schema() const { return u_->schema; }
 
 private:
@@ -2703,12 +2719,13 @@ public:
     std::string_view topic_name()     const { return topic_; }
     uint16_t         topic_index()    const { return idx_; }
     uint64_t         recv_us()        const { return recv_; }
+    uint64_t         sent_us()        const { return sent_; }
 private:
     T           v_{};
     std::string pub_, topic_;
     uint32_t    pid_ = 0;
     uint16_t    idx_ = 0;
-    uint64_t    recv_ = 0;
+    uint64_t    recv_ = 0, sent_ = 0;
     template <class U> friend class Subscriber;
 };
 
@@ -2724,6 +2741,7 @@ public:
     std::string_view caller_name()   const { return core_.caller_name(); }
     std::string_view function_name() const { return core_.function_name(); }
     uint64_t         recv_us()       const { return core_.recv_us(); }
+    uint64_t         sent_us()       const { return core_.sent_us(); }
 
     void reply(const Rsp& v) {
         std::vector<uint8_t> s;
@@ -2763,6 +2781,7 @@ public:
     bool       ok()          const { return st_ == CallStatus::Ok; }
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
+    uint64_t   sent_us()     const { return sent_; }
     const Rsp& value()       const { return v_; }
     const Rsp& operator*()   const { return v_; }
     const Rsp* operator->()  const { return &v_; }
@@ -2770,6 +2789,7 @@ private:
     CallStatus st_ = CallStatus::Timeout;
     SendStatus ss_ = SendStatus::Ok;
     uint32_t   provider_ = 0;
+    uint64_t   sent_ = 0;
     Rsp        v_{};
     template <class A, class B> friend class RemoteFunction;
 };
@@ -2780,6 +2800,7 @@ public:
     CallStatus status()     const { return st_; }
     bool       ok()         const { return st_ == CallStatus::Ok; }
     uint32_t   provider()   const { return provider_; }
+    uint64_t   sent_us()    const { return sent_; }
     const Rsp& value()      const { return v_; }
     const Rsp& operator*()  const { return v_; }
     const Rsp* operator->() const { return &v_; }
@@ -2787,6 +2808,7 @@ private:
     ResponseView() = default;
     CallStatus st_ = CallStatus::Timeout;
     uint32_t   provider_ = 0;
+    uint64_t   sent_ = 0;
     Rsp        v_{};
     template <class A, class B> friend class RemoteFunction;
 };
@@ -2859,6 +2881,7 @@ public:
         Response<> ur = core_.call(priv::encode(req, s), timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
+        r.sent_ = ur.sent_us();
         if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
         return r;
     }
@@ -2868,7 +2891,7 @@ public:
         return core_.call_async(priv::encode(req, s),
             [cb = std::move(cb)](const ResponseView<>& uv) {
                 ResponseView<Rsp> tv;
-                tv.st_ = uv.status(); tv.provider_ = uv.provider();
+                tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.sent_ = uv.sent_us();
                 if (uv.ok()) (void)priv::decode(tv.v_, uv.data(), uv.raw_schema());
                 cb(tv);
             }, opts);
@@ -3102,6 +3125,7 @@ public:
         m.pid_   = um->publisher_id();
         m.idx_   = um->topic_index();
         m.recv_  = um->recv_us();
+        m.sent_  = um->sent_us();
         return m;
     }
     int dispatch(int max_msgs = 0, int timeout_ms = 0) { return core_.dispatch(max_msgs, timeout_ms); }

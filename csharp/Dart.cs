@@ -132,6 +132,7 @@ namespace Dart
         public uint shm_max_bytes;
         public uint queue_bytes;
         public ushort max_rate_hz;
+        public byte no_timestamp;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -189,6 +190,7 @@ namespace Dart
         public DartBytes data;
         public IntPtr schema;
         public ulong recv_us;
+        public ulong sent_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -277,6 +279,7 @@ namespace Dart
         public uint caller;
         public DartStringView caller_name;
         public ulong recv_us;
+        public ulong sent_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -287,6 +290,7 @@ namespace Dart
         public IntPtr schema;                  // const DartSchema*
         public uint provider;
         public IntPtr user;
+        public ulong sent_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -318,6 +322,7 @@ namespace Dart
         public uint write_seq;
         public uint source;
         public ulong recv_us;
+        public ulong sent_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -551,10 +556,11 @@ namespace Dart
         public uint ShmMaxBytes = 0;
         public uint QueueBytes = 0;
         public ushort MaxRateHz = 0;
+        public bool NoTimestamp = false;
 
         internal static Qos FromParams(bool reliable, int keepLast, int catchUp,
             int maxMessageBytes, int heartbeatUs, int repairDelayUs, int backpressureWaitMs,
-            int shmMaxBytes, int queueBytes, int maxRateHz = 0)
+            int shmMaxBytes, int queueBytes, int maxRateHz = 0, bool noTimestamp = false)
         {
             return new Qos
             {
@@ -568,6 +574,7 @@ namespace Dart
                 ShmMaxBytes = (uint)shmMaxBytes,
                 QueueBytes = (uint)queueBytes,
                 MaxRateHz = (ushort)maxRateHz,
+                NoTimestamp = noTimestamp,
             };
         }
 
@@ -585,6 +592,7 @@ namespace Dart
                 shm_max_bytes = ShmMaxBytes,
                 queue_bytes = QueueBytes,
                 max_rate_hz = MaxRateHz,
+                no_timestamp = (byte)(NoTimestamp ? 1 : 0),
             };
         }
     }
@@ -712,6 +720,10 @@ namespace Dart
         /// (a queued topic stamps at enqueue), so a frame-paced consumer measures true
         /// arrival times, never its own cadence.</summary>
         public ulong RecvUs;
+        /// <summary>The SENDER's wall clock (UTC microseconds) when its send committed: a
+        /// source timestamp, kept across repair and replay. 0 = the publisher opted out
+        /// (noTimestamp). Never mix it with the monotonic RecvUs.</summary>
+        public ulong SentUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
         public object Value;                          // typed instance for a typed topic, else Fields
 
@@ -728,6 +740,7 @@ namespace Dart
                 TopicName = Codec.Str(m.topic_name),
                 Data = Codec.Bytes(m.data),
                 RecvUs = m.recv_us,
+                SentUs = m.sent_us,
             };
             if (m.schema != IntPtr.Zero)
             {
@@ -885,20 +898,20 @@ namespace Dart
         public Topic(DartNode node, string name, Role role = Role.PubSub,
                      bool reliable = false, int keepLast = 0, int catchUp = 0,
                      int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
             : this(node, name, (Schema)null, role, Qos.FromParams(reliable, keepLast, catchUp,
                    maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                   shmMaxBytes, queueBytes, maxRateHz)) { }
+                   shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
 
         /// <summary>Create a typed topic with an explicit Schema (compiled from DSL or
         /// reflected). Topic&lt;T&gt; is the shorthand for the reflected case.</summary>
         public Topic(DartNode node, string name, Schema schema, Role role = Role.PubSub,
                      bool reliable = false, int keepLast = 0, int catchUp = 0,
                      int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
             : this(node, name, schema, role, Qos.FromParams(reliable, keepLast, catchUp,
                    maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                   shmMaxBytes, queueBytes, maxRateHz)) { }
+                   shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
 
         // The plumbing constructor every path funnels through: same-name topics on
         // one node share the native slot with a widened role (registry in DartNode).
@@ -1027,10 +1040,10 @@ namespace Dart
         public Topic(DartNode node, string name, Role role = Role.PubSub,
                      bool reliable = false, int keepLast = 0, int catchUp = 0,
                      int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
             : base(node, name, new Schema(typeof(T)), role, Qos.FromParams(reliable, keepLast,
                    catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                   shmMaxBytes, queueBytes, maxRateHz)) { }
+                   shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
 
         internal Topic(DartNode node, string name, Role role, Qos qos)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
@@ -1558,6 +1571,7 @@ namespace Dart
                 {
                     Status = (CallStatus)o.status,
                     Provider = o.provider,
+                    SentUs = o.sent_us,
                     SchemaPtr = o.schema,
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                 };
@@ -1595,6 +1609,7 @@ namespace Dart
                     WriteSeq = u.write_seq,
                     Source = u.source,
                     RecvUs = u.recv_us,
+                    SentUs = u.sent_us,
                     SchemaPtr = u.schema,
                 });
             }
@@ -1635,6 +1650,8 @@ namespace Dart
         public string CallerName { get; private set; }
         public string FunctionName { get; private set; }
         public ulong RecvUs { get; private set; }
+        /// <summary>The caller's wall clock when it sent the request (0 = unstamped).</summary>
+        public ulong SentUs { get; private set; }
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
@@ -1648,6 +1665,7 @@ namespace Dart
             CallerName = Codec.Str(r.caller_name);
             FunctionName = Codec.Str(r.function_name);
             RecvUs = r.recv_us;
+            SentUs = r.sent_us;
             SchemaPtr = r.schema;
         }
 
@@ -1762,6 +1780,8 @@ namespace Dart
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
         public uint Provider { get; internal set; }
+        /// <summary>The provider's wall clock when it sent the response (0 = synthesized).</summary>
+        public ulong SentUs { get; internal set; }
         public byte[] Data { get; internal set; } = Array.Empty<byte>();
         internal IntPtr SchemaPtr;
 
@@ -1826,6 +1846,7 @@ namespace Dart
             {
                 r.Status = (CallStatus)o.status;
                 r.Provider = o.provider;
+                r.SentUs = o.sent_us;
                 r.SchemaPtr = o.schema;
                 r.Data = Codec.Bytes(o.data);   // the view is only valid until the next call: copy now
             }
@@ -1879,6 +1900,8 @@ namespace Dart
         /// <summary>Peer id the write arrived from (0 = a local call on this node).</summary>
         public uint Source { get; internal set; }
         public ulong RecvUs { get; internal set; }
+        /// <summary>The writer's wall clock for this write (this node's own for a local one).</summary>
+        public ulong SentUs { get; internal set; }
         internal IntPtr SchemaPtr;
     }
 
@@ -2066,11 +2089,11 @@ namespace Dart
         public Publisher(DartNode node, string name, Schema schema = null,
                          bool reliable = false, int keepLast = 0, int catchUp = 0,
                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
         {
             T = new Topic(node, name, schema, Role.PubOnly, Qos.FromParams(reliable, keepLast,
                     catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                    shmMaxBytes, queueBytes, maxRateHz));
+                    shmMaxBytes, queueBytes, maxRateHz, noTimestamp));
         }
 
         public SendStatus Send(byte[] data) => T.Send(data);
@@ -2092,11 +2115,11 @@ namespace Dart
                           Action<DartMessage> handler = null,
                           bool reliable = false, int keepLast = 0, int catchUp = 0,
                           int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
         {
             T = new Topic(node, name, schema, Role.SubOnly, Qos.FromParams(reliable, keepLast,
                     catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                    shmMaxBytes, queueBytes, maxRateHz));
+                    shmMaxBytes, queueBytes, maxRateHz, noTimestamp));
             if (handler != null) node.AddSubHandler(T.Index, handler);
         }
 
@@ -2201,6 +2224,7 @@ namespace Dart
         public CallStatus Status => Core.Status;
         public bool Ok => Core.Ok;
         public uint Provider => Core.Provider;
+        public ulong SentUs => Core.SentUs;
         public SendStatus SendStatus => Core.SendStatus;
 
         public TRsp Value
@@ -2390,12 +2414,12 @@ namespace Dart
         public Publisher(DartNode node, string name,
                          bool reliable = false, int keepLast = 0, int catchUp = 0,
                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
         {
             _schema = new Schema(typeof(T));
             _core = new Publisher(node, name, _schema, reliable, keepLast, catchUp,
                 maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                shmMaxBytes, queueBytes, maxRateHz);
+                shmMaxBytes, queueBytes, maxRateHz, noTimestamp);
         }
 
         public SendStatus Send(T value) => _core.Send(_schema.Encode(value));
@@ -2414,24 +2438,24 @@ namespace Dart
         public Subscriber(DartNode node, string name, Action<T> handler = null,
                           bool reliable = false, int keepLast = 0, int catchUp = 0,
                           int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
         {
             _core = new Subscriber(node, name, new Schema(typeof(T)),
                 handler == null ? (Action<DartMessage>)null : m => { if (m.Value is T v) handler(v); },
                 reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
-                backpressureWaitMs, shmMaxBytes, queueBytes, maxRateHz);
+                backpressureWaitMs, shmMaxBytes, queueBytes, maxRateHz, noTimestamp);
         }
 
         public Subscriber(DartNode node, string name, Action<T, DartMessage> handler,
                           bool reliable = false, int keepLast = 0, int catchUp = 0,
                           int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0)
+                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             _core = new Subscriber(node, name, new Schema(typeof(T)),
                 m => { if (m.Value is T v) handler(v, m); },
                 reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
-                backpressureWaitMs, shmMaxBytes, queueBytes, maxRateHz);
+                backpressureWaitMs, shmMaxBytes, queueBytes, maxRateHz, noTimestamp);
         }
 
         /// <summary>Typed take: decodes straight from the queue.</summary>

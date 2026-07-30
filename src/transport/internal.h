@@ -171,6 +171,10 @@ typedef struct {        /* reader-side, per (topic,peer) */
     uint16_t assembly_low;        /* lowest still-missing frag index of current sample (its
                                contiguous-received front); deliver_upto+assembly_low = first hole */
     uint8_t  used;
+    uint8_t  no_timestamp;  /* this writer publishes the topic WITHOUT the source stamp: sourced
+                               from the peer's interest (the sparse opt-out section) on every
+                               apply, so the receiving side knows whether the sample begins with
+                               DART_TIMESTAMP_BYTES. 0 (a fresh match memsets it) = stamped. */
     uint8_t  started;       /* accepted any DATA from this writer yet */
     uint8_t  assembly_active;    /* received >=1 frag of current sample */
     uint8_t  ack_force;     /* a delivery/skip/HB/(re)match owes the writer an ACKNACK even if
@@ -307,6 +311,13 @@ static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ ret
    active-lane queue, not a timer), so it is ignored here. */
 static inline void i_dart_transport_arm_deadline(DartTransportState *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
+}
+
+/* Bytes of source timestamp this topic's samples begin with: DART_TIMESTAMP_BYTES, or 0
+ * when the publisher opted out (DartQos.no_timestamp). Framing is driven by the qos alone,
+ * never by whether a source_time hook exists, so it stays deterministic. */
+static inline uint32_t i_dart_topic_ts_bytes(const i_DartTopic *topic){
+    return topic->qos.no_timestamp ? 0u : DART_TIMESTAMP_BYTES;
 }
 
 /* Does a late joiner ever receive samples published before it matched? Only a reliable

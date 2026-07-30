@@ -273,6 +273,7 @@ class DartQos(Structure):
         ("shm_max_bytes", c_uint32),
         ("queue_bytes", c_uint32),
         ("max_rate_hz", c_uint16),
+        ("no_timestamp", c_uint8),
     ]
 
 
@@ -331,6 +332,7 @@ class DartMsg(Structure):
         ("data", DartBytes),
         ("schema", c_void_p),
         ("recv_us", c_uint64),
+        ("sent_us", c_uint64),
     ]
 
 
@@ -415,6 +417,7 @@ class DartRequest(Structure):
         ("caller", c_uint32),
         ("caller_name", DartStringView),
         ("recv_us", c_uint64),
+        ("sent_us", c_uint64),
     ]
 
 
@@ -425,6 +428,7 @@ class DartResponse(Structure):
         ("schema", c_void_p),
         ("provider", c_uint32),
         ("user", c_void_p),
+        ("sent_us", c_uint64),
     ]
 
 
@@ -456,6 +460,7 @@ class DartVariableUpdate(Structure):
         ("write_seq", c_uint32),
         ("source", c_uint32),
         ("recv_us", c_uint64),
+        ("sent_us", c_uint64),
     ]
 
 
@@ -792,6 +797,8 @@ class Qos:
     queue_bytes: int = 0   # consumer-queue cap for take()/dispatch(); 0 = lazy, 1 MB cap
     max_rate_hz: int = 0   # SUBSCRIBER, best-effort: cap delivery from each publisher to this
                            # many samples/sec (the publisher decimates to the newest); 0 = unlimited
+    no_timestamp: bool = False  # PUBLISHER: send without the per-message source timestamp, so
+                                # receivers read msg.sent_us == 0. Default stamps every message
 
 
 @dataclasses.dataclass
@@ -1740,9 +1747,11 @@ class Message:
     For a typed topic, `.value` is the decoded object and `.fields` the dict.
     recv_us is the node's monotonic clock (microseconds) when the poll RECEIVED the
     message (queued topics stamp at enqueue), so a paced consumer measures true
-    arrival times, never its own cadence."""
+    arrival times, never its own cadence. sent_us is the SENDER's wall clock (UTC
+    microseconds) when its send committed: a source stamp, kept across repair and
+    replay, 0 when the publisher opted out (qos.no_timestamp). Never mix the two."""
     __slots__ = ("topic_index", "publisher_id", "publisher_name", "topic_name",
-                 "data", "recv_us", "fields", "value")
+                 "data", "recv_us", "sent_us", "fields", "value")
 
     @classmethod
     def _from_c(cls, m, spec):
@@ -1752,6 +1761,7 @@ class Message:
         self.publisher_name = _dstr(m.publisher_name)
         self.topic_name = _dstr(m.topic_name)
         self.recv_us = m.recv_us
+        self.sent_us = m.sent_us
         self.data = string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
         self.fields = None
         self.value = None
@@ -2091,6 +2101,7 @@ class Node:
         co.qos.shm_max_bytes = qos.shm_max_bytes
         co.qos.queue_bytes = qos.queue_bytes
         co.qos.max_rate_hz = qos.max_rate_hz
+        co.qos.no_timestamp = 1 if qos.no_timestamp else 0
         h = self._lib.dart_node_create_topic(
             self._h, name.encode("utf-8"), int(role),
             sch._s if sch else None, byref(co))
@@ -2339,7 +2350,7 @@ class Request:
     the handler returns they raise RuntimeError. Returning without answering
     auto-acks CallStatus.OK with an empty payload."""
     __slots__ = ("_ptr", "_fn", "_rsp_schema", "_done",
-                 "data", "caller", "caller_name", "function_name", "recv_us")
+                 "data", "caller", "caller_name", "function_name", "recv_us", "sent_us")
 
     def __init__(self, ptr, fn, rsp_schema, r, data):
         self._ptr = ptr           # the EXACT native pointer; dropped at expiry
@@ -2351,6 +2362,7 @@ class Request:
         self.caller_name = _dstr(r.caller_name)
         self.function_name = _dstr(r.function_name)
         self.recv_us = r.recv_us
+        self.sent_us = r.sent_us   # the caller's wall clock when it sent the request
 
     @property
     def answered(self):
@@ -2434,12 +2446,13 @@ class Response:
     the call. status/send_status/data/provider never raise; reading .value when
     not ok raises CallError. send_status carries a synchronous refusal (status
     stays TIMEOUT then: the call never launched)."""
-    __slots__ = ("status", "send_status", "provider", "data", "_value", "_decoded")
+    __slots__ = ("status", "send_status", "provider", "sent_us", "data", "_value", "_decoded")
 
     def __init__(self):
         self.status = CallStatus.TIMEOUT
         self.send_status = SendStatus.OK
         self.provider = 0
+        self.sent_us = 0   # the provider's wall clock when it sent the reply (0 = synthesized)
         self.data = b""
         self._value = None
         self._decoded = False
@@ -2450,6 +2463,7 @@ class Response:
         self.status = (CallStatus(o.status)
                        if o.status in CallStatus._value2member_map_ else o.status)
         self.provider = o.provider
+        self.sent_us = o.sent_us
         self.data = string_at(o.data.data, o.data.len) if o.data.data and o.data.len else b""
         if self.status == CallStatus.OK:
             # decode NOW: the wire-schema view dies with the C callback/call
@@ -2542,8 +2556,10 @@ class VariableUpdate:
     """The state just applied to a variable, as handed to on_change/on_write
     handlers: value (decoded; raw bytes when untyped), data (the raw payload),
     name, forced, write_seq, source (peer id the write arrived from; 0 = a
-    local call on this node), recv_us."""
-    __slots__ = ("name", "data", "value", "forced", "write_seq", "source", "recv_us")
+    local call on this node), recv_us, and sent_us (the writer's wall clock for
+    this write; this node's own for a local one)."""
+    __slots__ = ("name", "data", "value", "forced", "write_seq", "source", "recv_us",
+                 "sent_us")
 
     def __repr__(self):
         return "VariableUpdate(%r, value=%r, forced=%r, seq=%d, source=%d)" % (
@@ -3076,6 +3092,7 @@ def _on_var_update(upd_ptr, user):
             upd.write_seq = u.write_seq
             upd.source = u.source
             upd.recv_us = u.recv_us
+            upd.sent_us = u.sent_us
             box.handler(val, upd)
     except Exception:
         traceback.print_exc()
