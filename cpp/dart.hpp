@@ -967,6 +967,12 @@ private:
  *  those, dart::String<N> (the capped-string wire slot), and nested DART_SCHEMA
  *  structs. std::string / std::vector / pointers / maps are refused at compile
  *  time (variable-length fields belong to the dynamic Schema/MessageBuilder API).
+ *
+ *  A BARE TYPE needs no DART_SCHEMA: any of those wire types used DIRECTLY as the
+ *  handle's T (Publisher<bool>, RemoteVariable<float>, Signal<std::array<float,3>>,
+ *  Subscriber<std::string>) is the whole schema, anonymous, so `bool` from any
+ *  language is the same wire bytes and the same hash. std::string is allowed HERE
+ *  (as a root it is the unbounded `string` type, one tail frame, not a fixed slot).
  * =========================================================================== */
 
 template <class T> struct reflect;              /* specialized by DART_SCHEMA */
@@ -1017,6 +1023,8 @@ template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_da
 template <class U, class = void> struct is_reg_enum : std::false_type {};
 template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_dart_enum>>
     : std::true_type {};
+/* std::string as a handle's T: the unbounded `string` root (a tail frame, not a slot) */
+template <class U> struct is_var_string : std::is_same<U, std::string> {};
 
 /* map a C++ scalar type onto the wire kind; -1 = not a wire scalar */
 template <class U> constexpr int scalar_kind_of() {
@@ -1067,8 +1075,10 @@ struct SchemaBuilder {
     uint32_t          base = 0;
     std::string       prefix;
     bool              first = true;
+    bool              value_root = false;   /* the schema IS one bare type: no name, no braces */
 
     void sep(const char* name) {
+        if (value_root) return;             /* a bare type spells only itself */
         if (!first) dsl += ", ";
         first = false;
         dsl += name;
@@ -1241,11 +1251,20 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
     }
 }
 
+/* T is a BARE WIRE TYPE: usable as a handle's whole schema with no DART_SCHEMA, since a
+ * bare type's identity is its shape. std::string is the unbounded `string` root, handled
+ * on its own path (a tail frame has no fixed leaf). */
+template <class U> constexpr bool is_value_type() {
+    return scalar_kind_of<U>() >= 0 || std::is_enum_v<U> || is_dart_string<U>::value
+        || is_std_array<U>::value || is_var_string<U>::value;
+}
+
 /* the per-T registration: schema + copy table + rebase cache, built once, immortal */
 struct TypeCodec {
     bool                      ok = false;
     bool                      memcpy_ok = false;      /* our own layout coincides with our wire */
     bool                      memcpy_capable = false; /* trivially copyable + little-endian host */
+    bool                      var_string = false;     /* T is std::string: the whole message is one frame */
     std::optional<Schema>     schema;
     const detail::DartSchema* raw = nullptr;
     uint64_t                  hash = 0;
@@ -1286,13 +1305,22 @@ inline std::string strip_namespaces(const char* type_name) {
 }
 
 template <class T> TypeCodec* build_codec() {
-    static_assert(is_reflected<T>::value, "type has no DART_SCHEMA(T, fields...) declaration");
+    static_assert(is_reflected<T>::value || is_value_type<T>(),
+                  "type has no DART_SCHEMA(T, fields...) declaration and is not a bare wire type");
     auto* c = new TypeCodec();
     SchemaBuilder b;
-    b.dsl = strip_namespaces(reflect<T>::type_name);
-    b.dsl += " { ";
-    reflect<T>::visit(SchemaVisit{ &b });
-    b.dsl += " }";
+    if constexpr (is_reflected<T>::value) {
+        b.dsl = strip_namespaces(reflect<T>::type_name);
+        b.dsl += " { ";
+        reflect<T>::visit(SchemaVisit{ &b });
+        b.dsl += " }";
+    } else if constexpr (is_var_string<T>::value) {
+        b.dsl = "string";                       /* one tail frame: no fixed leaf to copy */
+        c->var_string = true;
+    } else {
+        b.value_root = true;                    /* a bare type: the schema is its spelling alone */
+        b.add<T>("", 0);
+    }
     c->leaves = std::move(b.leaves);
     c->schema = Schema::compile(b.dsl);
     if (!c->schema) return c;
@@ -1327,12 +1355,21 @@ template <class T> const Schema* schema_of() {
 template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return Bytes();
-    if (c.memcpy_ok) return Bytes(&v, sizeof(T));
-    scratch.assign(c.wire_size, 0);
-    const bool le = host_le();
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(&v);
-    for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
-    return Bytes(scratch.data(), scratch.size());
+    if constexpr (is_var_string<T>::value) {              /* `string` root: one [u32 len] frame */
+        scratch.assign((size_t)detail::dart_schema_msg_min(c.raw) + v.size(), 0);
+        detail::dart_schema_message_default(c.raw, scratch.data(), scratch.size());
+        detail::DartString sv; sv.data = v.data(); sv.len = v.size();
+        if (!detail::dart_set_string(scratch.data(), scratch.size(), c.raw, "", sv)) return Bytes();
+        return Bytes(scratch.data(),
+                     detail::dart_schema_msg_len(c.raw, scratch.data(), scratch.size()));
+    } else {
+        if (c.memcpy_ok) return Bytes(&v, sizeof(T));
+        scratch.assign(c.wire_size, 0);
+        const bool le = host_le();
+        const uint8_t* base = reinterpret_cast<const uint8_t*>(&v);
+        for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
+        return Bytes(scratch.data(), scratch.size());
+    }
 }
 
 /* wire -> struct. Offsets always come from the delivered schema (deliveries arrive in
@@ -1343,26 +1380,34 @@ template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
 template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* schema) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return false;
-    const std::vector<Leaf>* lv = &c.leaves;
-    uint32_t need = c.wire_size;
-    bool fast = c.memcpy_ok;
-    if (schema && schema != c.raw) {
-        const TypeCodec::Rebased* rb = c.rebased_for(schema);
-        if (!rb->ok) return false;
-        lv = &rb->leaves;
-        need = rb->size;
-        fast = rb->coincide;
-    }
-    if (fast) {
-        if (data.size() < sizeof(T)) return false;
-        std::memcpy(&out, data.data(), sizeof(T));
+    if constexpr (is_var_string<T>::value) {              /* `string` root: read the frame */
+        detail::DartBytes mb; mb.data = data.data(); mb.len = data.size();
+        detail::DartString sv = detail::dart_get_string(mb, schema ? schema : c.raw, "");
+        if (!sv.data) { out.clear(); return false; }
+        out.assign(sv.data, sv.len);
+        return true;
+    } else {
+        const std::vector<Leaf>* lv = &c.leaves;
+        uint32_t need = c.wire_size;
+        bool fast = c.memcpy_ok;
+        if (schema && schema != c.raw) {
+            const TypeCodec::Rebased* rb = c.rebased_for(schema);
+            if (!rb->ok) return false;
+            lv = &rb->leaves;
+            need = rb->size;
+            fast = rb->coincide;
+        }
+        if (fast) {
+            if (data.size() < sizeof(T)) return false;
+            std::memcpy(&out, data.data(), sizeof(T));
+            return true;
+        }
+        if (data.size() < need) return false;
+        const bool le = host_le();
+        uint8_t* base = reinterpret_cast<uint8_t*>(&out);
+        for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
         return true;
     }
-    if (data.size() < need) return false;
-    const bool le = host_le();
-    uint8_t* base = reinterpret_cast<uint8_t*>(&out);
-    for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
-    return true;
 }
 
 }   /* namespace priv */

@@ -2284,6 +2284,342 @@ static void schema_bigenum_checks(void){
     dart_allocator_reset(&ma);
 }
 
+/* (19a3) PRIMITIVE-ROOTED schemas: a schema may be ONE BARE TYPE instead of a struct, so a
+   topic that publishes a bool is `bool`. Such a root is anonymous (one field named "",
+   addressed by the empty path), the SAME bare type is byte-identical wire in any language
+   (the canonical hashes below are pinned for exactly that), and matching compares the two
+   roots' types: a bool writer and a u8 reader are refused, as is a struct against a bare
+   type. Every root kind is covered: compile, print round-trip, empty-path get/set, and end
+   to end over two nodes, including a raw (schema-less) reader decoding through the sender's. */
+static const uint64_t SR_HASH_BOOL  = 0xb1edca4f3f7a622aULL;   /* `bool`  canonical wire hash */
+static const uint64_t SR_HASH_F32ARR = 0xd166c4a8dcec317bULL;  /* `f32[]` canonical wire hash */
+
+/* one bare-type spelling: compiles, prints back to the identical text, recompiles to the
+   same wire, and reflects as a single anonymous field with the expected layout */
+static void sr_root_case(DartAllocator *ma, const char *text, uint8_t kind,
+                         uint32_t size, uint32_t msg_min){
+    DartSchema *s = dart_schema_compile(dart_allocator_alloc, ma, text, NULL);
+    DartSchema *back = NULL; DartSchemaFieldInfo fi; char buf[128];
+    ST_CHECK(s != NULL, "schema-root: '%s' compiles", text);
+    if (!s) return;
+    dart_schema_print(s, buf, sizeof buf);
+    ST_CHECK(strncmp(buf, text, strlen(text)) == 0 && strcmp(buf + strlen(text), "\n") == 0,
+             "schema-root: '%s' prints back bare (got '%s')", text, buf);
+    ST_CHECK(dart_schema_print(s, NULL, 0) == (uint32_t)strlen(buf),
+             "schema-root: '%s' print measures with (NULL,0)", text);
+    back = dart_schema_compile(dart_allocator_alloc, ma, buf, NULL);
+    ST_CHECK(back && dart_schema_hash(back) == dart_schema_hash(s),
+             "schema-root: '%s' print recompiles to the same wire (hash)", text);
+    ST_CHECK(dart_schema_field_count(s) == 1 && dart_schema_field_at(s, 0, &fi)
+             && fi.kind == kind && fi.name.len == 0 && fi.name.data != NULL
+             && fi.depth == 0 && fi.offset == 0,
+             "schema-root: '%s' is one anonymous field (kind=%u)", text, fi.kind);
+    ST_CHECK(dart_schema_name(s).len == 0 && dart_schema_field_index(s, "") == 0,
+             "schema-root: '%s' root is unnamed, the empty path resolves it", text);
+    ST_CHECK(dart_schema_size(s) == size && dart_schema_msg_min(s) == msg_min,
+             "schema-root: '%s' layout (size=%u min=%u)", text,
+             dart_schema_size(s), dart_schema_msg_min(s));
+    if (back) dart_schema_free(back, dart_allocator_alloc, ma);
+    dart_schema_free(s, dart_allocator_alloc, ma);
+}
+
+static int sr_flag_recv, sr_flag_val, sr_note_recv, sr_samples_recv, sr_map_recv, sr_enum_recv;
+static int sr_raw_recv, sr_raw_ok;
+static unsigned long sr_mismatch_n;
+static char sr_note[32], sr_mode[16];
+static float sr_s0, sr_s2; static size_t sr_ns;
+static uint64_t sr_battery;
+/* one handler for every root kind: the delivered schema's single field says which */
+static void sr_on_message(const DartMsg *msg){
+    DartSchemaFieldInfo fi;
+    if (!msg->schema || !dart_schema_field_at(msg->schema, 0, &fi)) return;
+    switch (fi.kind){
+        case DART_BOOL:
+            sr_flag_recv++; sr_flag_val = (int)dart_get_uint(msg->data, msg->schema, "");
+            break;
+        case DART_VSTR: {
+            DartString v = dart_get_string(msg->data, msg->schema, "");
+            size_t k = v.len < sizeof sr_note - 1 ? v.len : sizeof sr_note - 1;
+            if (v.data) memcpy(sr_note, v.data, k);
+            sr_note[k] = '\0'; sr_note_recv++;
+            break;
+        }
+        case DART_VARR: {
+            DartBytes a = dart_get_array(msg->data, msg->schema, "");
+            sr_ns = a.len / sizeof(float);
+            if (sr_ns >= 3){ memcpy(&sr_s0, a.data, 4); memcpy(&sr_s2, a.data + 8, 4); }
+            sr_samples_recv++;
+            break;
+        }
+        case DART_MAP: {
+            DartValue v;
+            if (dart_map_get(dart_get_map(msg->data, msg->schema, ""), "battery", &v))
+                sr_battery = v.v.u;
+            sr_map_recv++;
+            break;
+        }
+        case DART_ENUM: {
+            DartString nm = dart_get_enum(msg->data, msg->schema, "");
+            size_t k = nm.len < sizeof sr_mode - 1 ? nm.len : sizeof sr_mode - 1;
+            if (nm.data) memcpy(sr_mode, nm.data, k);
+            sr_mode[k] = '\0'; sr_enum_recv++;
+            break;
+        }
+        default: break;
+    }
+}
+/* the schema-less reader: everything it knows comes from the sender's schema */
+static void sr_on_raw(const DartMsg *msg){
+    DartSchemaFieldInfo fi;
+    sr_raw_recv++;
+    sr_raw_ok = msg->schema && dart_schema_field_count(msg->schema) == 1
+             && dart_schema_name(msg->schema).len == 0
+             && dart_schema_field_at(msg->schema, 0, &fi) && fi.kind == DART_BOOL
+             && fi.name.len == 0
+             && dart_get_uint(msg->data, msg->schema, "") == 1;
+}
+static void sr_on_event(const DartEvent *ev){
+    if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sr_mismatch_n++;
+}
+static void schema_root_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator qa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, so, qo; DartNode *P=NULL, *S=NULL, *Q=NULL;
+    DartTopicOpts co; DartDiscoveryAddr seed;
+    DartSchema *sb, *su8, *sstr, *sarr, *smap, *senum, *swrap;
+    DartTopic *pflag, *pnote, *psamples, *pextras, *pmode, *pbad, *pwrap;
+    int t;
+
+    sr_root_case(&ma, "bool",   DART_BOOL, 1, 1);
+    sr_root_case(&ma, "u8",     DART_U8,   1, 1);
+    sr_root_case(&ma, "i16",    DART_I16,  2, 2);
+    sr_root_case(&ma, "u32",    DART_U32,  4, 4);
+    sr_root_case(&ma, "i64",    DART_I64,  8, 8);
+    sr_root_case(&ma, "f32",    DART_F32,  4, 4);
+    sr_root_case(&ma, "f64",    DART_F64,  8, 8);
+    sr_root_case(&ma, "u8[16]", DART_ARR, 16, 16);
+    sr_root_case(&ma, "string<64>",   DART_STR, 66, 66);
+    sr_root_case(&ma, "string<8>[4]", DART_ARR, 40, 40);
+    sr_root_case(&ma, "string", DART_VSTR, 0, 4);
+    sr_root_case(&ma, "f32[]",  DART_VARR, 0, 4);
+    sr_root_case(&ma, "string<8>[]", DART_VARR, 0, 4);
+    sr_root_case(&ma, "map",    DART_MAP,  0, 4);
+    sr_root_case(&ma, "enum<u8> { Idle = 0, Run = 1, Fault = 2 }", DART_ENUM, 1, 1);
+
+    sb    = dart_schema_compile(dart_allocator_alloc, &ma, "bool", NULL);
+    su8   = dart_schema_compile(dart_allocator_alloc, &ma, "u8", NULL);
+    sstr  = dart_schema_compile(dart_allocator_alloc, &ma, "string", NULL);
+    sarr  = dart_schema_compile(dart_allocator_alloc, &ma, "f32[]", NULL);
+    smap  = dart_schema_compile(dart_allocator_alloc, &ma, "map", NULL);
+    senum = dart_schema_compile(dart_allocator_alloc, &ma, "enum<u8> { Idle, Run, Fault }", NULL);
+    swrap = dart_schema_compile(dart_allocator_alloc, &ma, "Wrap { v: bool }", NULL);
+    ST_CHECK(sb && su8 && sstr && sarr && smap && senum && swrap,
+             "schema-root: the e2e schemas compile");
+    if (!(sb && su8 && sstr && sarr && smap && senum && swrap)){ dart_allocator_reset(&ma); return; }
+
+    /* THE canonical-hash pin: a bare type's wire is its kind alone, so every language's
+       `bool` topic hashes to this and cross-language matching costs zero detail bytes. */
+    ST_CHECK(dart_schema_hash(sb) == SR_HASH_BOOL,
+             "schema-root: `bool` canonical hash %016llx", (unsigned long long)dart_schema_hash(sb));
+    ST_CHECK(dart_schema_hash(sarr) == SR_HASH_F32ARR,
+             "schema-root: `f32[]` canonical hash %016llx", (unsigned long long)dart_schema_hash(sarr));
+    ST_CHECK(dart_schema_wire(sb).len == 3, "schema-root: `bool` wire is 3 bytes (%u)",
+             (unsigned)dart_schema_wire(sb).len);
+
+    {   /* the C builder twin of the DSL: begin_value + one unnamed field */
+        DartSchemaBuilder b = dart_schema_begin_value(dart_allocator_alloc, &ma);
+        DartSchema *twin;
+        dart_schema_field(&b, "", DART_BOOL);
+        twin = dart_schema_finish(&b);
+        ST_CHECK(twin && dart_schema_hash(twin) == dart_schema_hash(sb),
+                 "schema-root: builder value root == compiled `bool` (same hash)");
+        if (twin) dart_schema_free(twin, dart_allocator_alloc, &ma);
+    }
+    {   DartSchemaBuilder b = dart_schema_begin_value(dart_allocator_alloc, &ma);
+        DartSchema *twin;
+        dart_schema_field_var_array(&b, NULL, DART_F32);       /* NULL name == "" */
+        twin = dart_schema_finish(&b);
+        ST_CHECK(twin && dart_schema_hash(twin) == dart_schema_hash(sarr),
+                 "schema-root: builder value root == compiled `f32[]` (same hash)");
+        if (twin) dart_schema_free(twin, dart_allocator_alloc, &ma);
+    }
+    {   DartSchemaBuilder b = dart_schema_begin_value(dart_allocator_alloc, &ma);
+        dart_schema_field(&b, "x", DART_BOOL);                 /* a named bare root: refused */
+        ST_CHECK(dart_schema_finish(&b) == NULL, "schema-root: builder refuses a named bare root");
+    }
+    {   DartSchemaBuilder b = dart_schema_begin_value(dart_allocator_alloc, &ma);
+        dart_schema_field(&b, "", DART_BOOL);
+        dart_schema_field(&b, "", DART_U8);                    /* two types: not a bare root */
+        ST_CHECK(dart_schema_finish(&b) == NULL, "schema-root: builder refuses two bare fields");
+    }
+    ST_CHECK(dart_schema_compile(dart_allocator_alloc, &ma, "Temperature: f32", NULL) == NULL
+          && dart_schema_compile(dart_allocator_alloc, &ma, "bool bool", NULL) == NULL,
+             "schema-root: a named bare root and trailing garbage are compile errors");
+    {   /* the wire: a bare root round-trips, and a NAMED one is not canonical (refused) */
+        DartBytes w = dart_schema_wire(sarr);
+        DartSchema *rt = dart_schema_parse(w.data, w.len, dart_allocator_alloc, &ma);
+        uint8_t named[4];
+        ST_CHECK(rt && dart_schema_hash(rt) == dart_schema_hash(sarr)
+                 && dart_schema_field_count(rt) == 1,
+                 "schema-root: a bare root parses back from its wire");
+        if (rt) dart_schema_free(rt, dart_allocator_alloc, &ma);
+        named[0] = (uint8_t)DART_SCHEMA_WIRE_VERSION;   /* [ver][namelen 1]['x'][BOOL] */
+        named[1] = 1; named[2] = 'x'; named[3] = (uint8_t)DART_BOOL;
+        ST_CHECK(dart_schema_parse(named, sizeof named, dart_allocator_alloc, &ma) == NULL,
+                 "schema-root: a NAMED bare root on the wire is refused");
+    }
+
+    {   /* empty-path and flat-index-0 access, every kind */
+        uint8_t m[128]; DartValue v; DartBytes got; DartString sv;
+        float xs[3]; uint8_t body[32]; DartMapWriter mw; uint32_t bl;
+        xs[0]=1.5f; xs[1]=2.5f; xs[2]=-3.0f;
+        ST_CHECK(dart_schema_message_default(sb, m, sizeof m) && m[0] == 0,
+                 "schema-root: bare default is the zero value");
+        ST_CHECK(dart_set_uint(m, sizeof m, sb, "", 1)
+                 && dart_get_uint(dart_bytes(m, 1), sb, "") == 1
+                 && dart_schema_msg_len(sb, m, sizeof m) == 1
+                 && dart_schema_validate(sb, dart_bytes(m, 1)),
+                 "schema-root: bool set/get through the empty path");
+        memset(&v, 0, sizeof v);
+        ST_CHECK(dart_get_value(dart_bytes(m, 1), sb, 0, &v) && v.kind == DART_BOOL && v.v.u == 1,
+                 "schema-root: dart_get_value at flat index 0");
+        v.v.u = 0;
+        ST_CHECK(dart_set_value(m, sizeof m, sb, 0, &v)
+                 && dart_get_uint(dart_bytes(m, 1), sb, "") == 0,
+                 "schema-root: dart_set_value at flat index 0");
+        ST_CHECK(dart_schema_message_default(sarr, m, sizeof m)
+                 && dart_set_array(m, sizeof m, sarr, "", dart_bytes(xs, sizeof xs))
+                 && dart_schema_msg_len(sarr, m, sizeof m) == 4 + 12,
+                 "schema-root: f32[] frame set through the empty path");
+        got = dart_get_array(dart_bytes(m, 16), sarr, "");
+        ST_CHECK(got.len == 12 && memcmp(got.data, xs, 12) == 0, "schema-root: f32[] reads back");
+        ST_CHECK(dart_schema_message_default(sstr, m, sizeof m)
+                 && dart_set_string(m, sizeof m, sstr, "", dart_cstr("bare")),
+                 "schema-root: string frame set through the empty path");
+        sv = dart_get_string(dart_bytes(m, dart_schema_msg_len(sstr, m, sizeof m)), sstr, "");
+        ST_CHECK(sv.len == 4 && memcmp(sv.data, "bare", 4) == 0, "schema-root: string reads back");
+        mw = dart_map_begin(body, sizeof body);
+        dart_map_put_uint(&mw, "battery", 87);
+        bl = dart_map_finish(&mw);
+        ST_CHECK(dart_schema_message_default(smap, m, sizeof m)
+                 && dart_set_map(m, sizeof m, smap, "", dart_bytes(body, bl))
+                 && dart_map_count(dart_get_map(dart_bytes(m, dart_schema_msg_len(smap, m, sizeof m)),
+                                                smap, "")) == 1,
+                 "schema-root: map body set/get through the empty path");
+        ST_CHECK(dart_schema_message_default(senum, m, sizeof m)
+                 && dart_set_enum(m, sizeof m, senum, "", "Fault")
+                 && dart_get_uint(dart_bytes(m, 1), senum, "") == 2
+                 && dart_get_enum(dart_bytes(m, 1), senum, "").len == 5,
+                 "schema-root: enum set by name, read back as value + name");
+    }
+    {   /* matching: the roots' types compare like fields, struct vs bare never matches */
+        char why[128]; DartSchema *rb;
+        ST_CHECK(dart_schema_subset(sb, sb) == 1 && dart_schema_subset(sb, su8) == 0
+              && dart_schema_subset(sb, swrap) == 0 && dart_schema_subset(swrap, sb) == 0,
+                 "schema-root: bare roots match only their own type");
+        dart_schema_subset_why(sb, su8, why, sizeof why);
+        ST_CHECK(strcmp(why, "root: reader bool, writer u8") == 0,
+                 "schema-root: subset_why names both roots ('%s')", why);
+        dart_schema_subset_why(swrap, sb, why, sizeof why);
+        ST_CHECK(strcmp(why, "root: reader struct 'Wrap', writer bool") == 0,
+                 "schema-root: subset_why explains struct vs bare ('%s')", why);
+        rb = dart_schema_rebase(sarr, sarr, dart_allocator_alloc, &ma);
+        ST_CHECK(rb && dart_schema_field_count(rb) == 1 && dart_schema_msg_min(rb) == 4,
+                 "schema-root: rebase of a bare root stays valid");
+        if (rb) dart_schema_free(rb, dart_allocator_alloc, &ma);
+    }
+
+    /* ---- end to end: one topic per root kind, plus the two refusals ---- */
+    memset(&co,0,sizeof co); co.qos.keep_last=4; co.qos.reliability=DART_RELIABLE;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+11; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po; qo=po;
+    sr_flag_recv=sr_flag_val=sr_note_recv=sr_samples_recv=sr_map_recv=sr_enum_recv=0;
+    sr_raw_recv=sr_raw_ok=0; sr_mismatch_n=0; sr_ns=0; sr_battery=0;
+    sr_note[0]='\0'; sr_mode[0]='\0';
+    P = dart_node_open(&pa, "sr-pub", NULL,          sr_on_event, &po);
+    S = dart_node_open(&sa, "sr-sub", sr_on_message, sr_on_event, &so);
+    Q = dart_node_open(&qa, "sr-raw", sr_on_raw,     NULL,        &qo);
+    ST_CHECK(P&&S&&Q, "schema-root: nodes open");
+    if (!(P&&S&&Q)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); if(Q)dart_node_close(Q,0);
+                     dart_allocator_reset(&ma); return; }
+    pflag    = dart_node_create_topic(P, "sr/flag",    DART_PUB_ONLY, sb,    &co);
+    pnote    = dart_node_create_topic(P, "sr/note",    DART_PUB_ONLY, sstr,  &co);
+    psamples = dart_node_create_topic(P, "sr/samples", DART_PUB_ONLY, sarr,  &co);
+    pextras  = dart_node_create_topic(P, "sr/extras",  DART_PUB_ONLY, smap,  &co);
+    pmode    = dart_node_create_topic(P, "sr/mode",    DART_PUB_ONLY, senum, &co);
+    pbad     = dart_node_create_topic(P, "sr/bad",     DART_PUB_ONLY, sb,    &co);
+    pwrap    = dart_node_create_topic(P, "sr/wrap",    DART_PUB_ONLY, swrap, &co);
+    dart_node_create_topic(S, "sr/flag",    DART_SUB_ONLY, sb,    &co);
+    dart_node_create_topic(S, "sr/note",    DART_SUB_ONLY, sstr,  &co);
+    dart_node_create_topic(S, "sr/samples", DART_SUB_ONLY, sarr,  &co);
+    dart_node_create_topic(S, "sr/extras",  DART_SUB_ONLY, smap,  &co);
+    dart_node_create_topic(S, "sr/mode",    DART_SUB_ONLY, senum, &co);
+    dart_node_create_topic(S, "sr/bad",     DART_SUB_ONLY, su8,   &co);   /* bool writer: refused */
+    dart_node_create_topic(S, "sr/wrap",    DART_SUB_ONLY, sb,    &co);   /* struct writer: refused */
+    dart_node_create_topic(Q, "sr/flag",    DART_SUB_ONLY, NULL,  &co);   /* raw reader */
+    ST_CHECK(pflag && pnote && psamples && pextras && pmode && pbad && pwrap,
+             "schema-root: topics created");
+
+    for (t=0;t<1200 && (dart_topic_match_count(pflag)==0 || dart_topic_match_count(pmode)==0
+                        || dart_topic_match_count(pextras)==0);t++){
+        dart_node_poll(P,2); dart_node_poll(S,2); dart_node_poll(Q,2);
+    }
+    ST_CHECK(dart_topic_match_count(pflag)==2, "schema-root: bool topic matched typed + raw readers (%d)",
+             dart_topic_match_count(pflag));
+    ST_CHECK(dart_topic_match_count(pnote)==1 && dart_topic_match_count(psamples)==1
+             && dart_topic_match_count(pextras)==1 && dart_topic_match_count(pmode)==1,
+             "schema-root: string/f32[]/map/enum roots matched");
+    ST_CHECK(dart_topic_match_count(pbad)==0 && dart_topic_match_count(pwrap)==0,
+             "schema-root: bool-vs-u8 and struct-vs-bare readers refused");
+    ST_CHECK(sr_mismatch_n>=2, "schema-root: both refusals surfaced (%lu DART_E_SCHEMA_MISMATCH)",
+             sr_mismatch_n);
+
+    {   uint8_t m[128]; float xs[3]; uint8_t body[32]; DartMapWriter mw; uint32_t bl;
+        xs[0]=1.5f; xs[1]=2.5f; xs[2]=-3.0f;
+        dart_schema_message_default(sb, m, sizeof m);
+        dart_set_uint(m, sizeof m, sb, "", 1);
+        dart_topic_send(pflag, dart_bytes(m, 1));
+        dart_schema_message_default(sstr, m, sizeof m);
+        dart_set_string(m, sizeof m, sstr, "", dart_cstr("bare-string"));
+        dart_topic_send(pnote, dart_bytes(m, dart_schema_msg_len(sstr, m, sizeof m)));
+        dart_schema_message_default(sarr, m, sizeof m);
+        dart_set_array(m, sizeof m, sarr, "", dart_bytes(xs, sizeof xs));
+        dart_topic_send(psamples, dart_bytes(m, dart_schema_msg_len(sarr, m, sizeof m)));
+        mw = dart_map_begin(body, sizeof body);
+        dart_map_put_uint(&mw, "battery", 87);
+        bl = dart_map_finish(&mw);
+        dart_schema_message_default(smap, m, sizeof m);
+        dart_set_map(m, sizeof m, smap, "", dart_bytes(body, bl));
+        dart_topic_send(pextras, dart_bytes(m, dart_schema_msg_len(smap, m, sizeof m)));
+        dart_schema_message_default(senum, m, sizeof m);
+        dart_set_enum(m, sizeof m, senum, "", "Fault");
+        dart_topic_send(pmode, dart_bytes(m, 1));
+        for (t=0;t<800 && (sr_flag_recv==0 || sr_note_recv==0 || sr_samples_recv==0
+                           || sr_map_recv==0 || sr_enum_recv==0 || sr_raw_recv==0);t++){
+            dart_node_poll(P,1); dart_node_poll(S,2); dart_node_poll(Q,2);
+        }
+    }
+    ST_CHECK(sr_flag_recv==1 && sr_flag_val==1, "schema-root: bool delivered (recv=%d val=%d)",
+             sr_flag_recv, sr_flag_val);
+    ST_CHECK(sr_note_recv==1 && strcmp(sr_note,"bare-string")==0,
+             "schema-root: string root delivered ('%s')", sr_note);
+    ST_CHECK(sr_samples_recv==1 && sr_ns==3 && sr_s0==1.5f && sr_s2==-3.0f,
+             "schema-root: f32[] root delivered (%u elems)", (unsigned)sr_ns);
+    ST_CHECK(sr_map_recv==1 && sr_battery==87, "schema-root: map root delivered (battery=%llu)",
+             (unsigned long long)sr_battery);
+    ST_CHECK(sr_enum_recv==1 && strcmp(sr_mode,"Fault")==0,
+             "schema-root: enum root delivered + resolved to its name ('%s')", sr_mode);
+    ST_CHECK(sr_raw_recv==1 && sr_raw_ok,
+             "schema-root: schema-less reader decodes through the sender's bare schema");
+
+    dart_node_close(P,1); dart_node_close(S,1); dart_node_close(Q,1);
+    dart_allocator_reset(&ma);
+}
+
 /* (19b) pairwise detail codec ('uDTL', sans-IO): request build + header accessors, the
    stateless responder (advertised indices answered, INACTIVE/unknown skipped), schema
    wire inlined ONLY on hash mismatch, entry-boundary truncation (the paging seam), and
@@ -4665,6 +5001,7 @@ static int selftest_main(void){
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
     schema_bigenum_checks();      /* 19a2. 1024-option enum: u16 count, wire round-trip, value reaches a peer */
+    schema_root_checks();         /* 19a3. primitive-rooted schemas: bare types, canonical hash, e2e */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
     detail_paging_checks();       /* 19b2. detail paging fits one datagram + never wedges (force-first) */
     interest_codec_checks();      /* 19b3. interest paging codec + the external-overlay flag */

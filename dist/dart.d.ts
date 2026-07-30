@@ -140,6 +140,7 @@ declare class Layout {
     hash: string | undefined;
     fields: Map<string, Field>;
     varFields: Field[];
+    valueRoot: boolean;
     constructor(r: SchemaBlock | undefined);
     get typed(): boolean;
     getField(data: Uint8Array, view: DataView, path: string): any;
@@ -175,7 +176,7 @@ declare class DartTopic {
     get hash(): string | undefined;
     get fields(): Map<string, Field>;
     sendRaw(bytes: Uint8Array): void;
-    send(values: Record<string, any>): void;
+    send(values: Record<string, any> | any): void;
     setRole(role: Role): Promise<any>;
     drain(timeout_ms?: number): Promise<boolean>;
     _match(m: any): void;

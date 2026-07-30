@@ -279,9 +279,125 @@ static class Program
         return ok;
     }
 
+    // The canonical wire of a bare type is its kind alone, so these hashes are the same in
+    // every language binding (pinned in C by dart_test's schema-root phase).
+    const ulong HashBool = 0xb1edca4f3f7a622aUL;
+    const ulong HashF32Arr = 0xd166c4a8dcec317bUL;
+
+    enum Mode : byte { Idle = 0, Run = 1, Fault = 2 }
+
+    // Bare types as whole schemas: no struct wrapper, plain values through Send/TryTake.
+    static bool ValueRoots()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        using (var sb = new Schema(typeof(bool)))
+        using (var sa = new Schema(typeof(float[])))
+        {
+            Check("bool canonical hash", sb.Hash == HashBool);
+            Check("float[] canonical hash", sa.Hash == HashF32Arr);
+            Check("bool dsl", sb.Dsl == "bool\n");
+            Check("float[] dsl", sa.Dsl == "f32[]\n");
+            Check("bare root is one anonymous field",
+                  sb.FieldCount == 1 && sb.Name == "" && sb.IsValueRoot);
+            using (var text = new Schema("bool"))
+                Check("text `bool` == typeof(bool)", text.Hash == sb.Hash);
+        }
+        // every bare kind round-trips as a plain value
+        (Type, object)[] cases =
+        {
+            (typeof(bool), true), (typeof(byte), (byte)200), (typeof(int), -7),
+            (typeof(long), 5L), (typeof(float), 1.5f), (typeof(double), -2.25),
+            (typeof(string), "unbounded"), (typeof(Mode), Mode.Fault),
+        };
+        foreach (var (t, v) in cases)
+        {
+            using var s = new Schema(t);
+            object back = s.Decode(s.Encode(v));
+            Check($"round-trip {s.Dsl.Trim()} -> {back}", Equals(back, v));
+        }
+        using (var s = new Schema(typeof(float[])))
+        {
+            var back = (float[])s.Decode(s.Encode(new[] { 1.5f, -2.5f }));
+            Check("round-trip f32[]", back.Length == 2 && back[0] == 1.5f && back[1] == -2.5f);
+        }
+        using (var s = new Schema(typeof(Dictionary<string, object>)))
+        {
+            var back = (Dictionary<string, object>)s.Decode(
+                s.Encode(new Dictionary<string, object> { { "battery", 87 } }));
+            Check("round-trip map", back.Count == 1 && Convert.ToInt64(back["battery"]) == 87);
+        }
+        Console.WriteLine(ok ? "bare-type roots: PASS\n" : "bare-type roots: FAIL\n");
+        return ok;
+    }
+
+    // Two nodes: bare-typed topics and a bare-typed variable over loopback.
+    static bool ValueRootsLive()
+    {
+        Console.WriteLine("bare-root live leg: two nodes, domain 44, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var a = new DartNode("VA", null, e => { if (e.IsError) Console.WriteLine("event(VA): " + e); },
+                             domain: 44, multicastInterface: "127.0.0.1");
+        var b = new DartNode("VB", null, e => { if (e.IsError) Console.WriteLine("event(VB): " + e); },
+                             domain: 44, multicastInterface: "127.0.0.1");
+        try
+        {
+            var pubFlag = new Topic<bool>(a, "flag", Role.PubOnly, reliable: true, keepLast: 4);
+            var subFlag = new Topic<bool>(b, "flag", Role.SubOnly, reliable: true, keepLast: 4);
+            var pubNote = new Topic<string>(a, "note", Role.PubOnly, reliable: true, keepLast: 4);
+            var subNote = new Topic<string>(b, "note", Role.SubOnly, reliable: true, keepLast: 4);
+            subFlag.TryTake(out bool _);      // switch both to queued delivery
+            subNote.TryTake(out string _);
+            var vd = new VariableDefinition<double>(a, "gain", 1.25);
+            var rv = new RemoteVariable<double>(b, "gain");
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline && (pubFlag.MatchCount() == 0
+                   || pubNote.MatchCount() == 0 || !rv.TryGet(out double _)))
+            {
+                a.Poll(1);
+                b.Poll(1);
+            }
+            Check("bare topics matched", pubFlag.MatchCount() == 1 && pubNote.MatchCount() == 1);
+            Check("bare variable replicated the initial",
+                  rv.TryGet(out double gain0) && gain0 == 1.25);
+            Check("bool send", pubFlag.Send(true) == SendStatus.Ok);
+            Check("string send", pubNote.Send("a bare unbounded string") == SendStatus.Ok);
+            bool gotFlag = false, gotNote = false;
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline && !(gotFlag && gotNote))
+            {
+                a.Poll(1);
+                b.Poll(1);
+                if (subFlag.TryTake(out bool f, 1) && f) gotFlag = true;
+                if (subNote.TryTake(out string s, 1) && s == "a bare unbounded string") gotNote = true;
+            }
+            Check("bool taken as a plain value", gotFlag);
+            Check("string taken as a plain value", gotNote);
+            Check("bare variable set accepted", rv.Set(2.5) == SendStatus.Ok);
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline && !(vd.TryGet(out double g) && g == 2.5))
+            {
+                a.Poll(1);
+                b.Poll(1);
+            }
+            Check("bare variable set converged", vd.TryGet(out double gain1) && gain1 == 2.5);
+        }
+        finally
+        {
+            a.Close();
+            b.Close();
+        }
+        Console.WriteLine(ok ? "bare-root live leg: PASS\n" : "bare-root live leg: FAIL\n");
+        return ok;
+    }
+
     static int Main()
     {
         if (!RoundTrip()) return 1;
+        if (!ValueRoots()) return 1;
         Console.WriteLine("opening nodes...");
 
         var sub = new DartNode("sub",
@@ -372,6 +488,7 @@ static class Program
         pub.Close();
         sub.Close();
 
+        if (ok) ok = ValueRootsLive();
         if (ok) ok = Patterns();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;

@@ -446,6 +446,7 @@ class Layout {
     hash: string | undefined;         /* 64-bit schema identity, hex */
     fields: Map<string, Field>;       /* dotted path -> field, in schema order */
     varFields: Field[];               /* variable fields in tail order */
+    valueRoot: boolean;               /* a bare type: the whole message is one value */
 
     constructor(r: SchemaBlock | undefined) {
         this.size = r?.size;
@@ -454,6 +455,8 @@ class Layout {
         this.fields = new Map(list.map((f) => [f.path, f]));
         this.varFields = [];
         for (const f of list) if (VARIABLE.has(f.kind)) { f.varOrdinal = this.varFields.length; this.varFields.push(f); }
+        /* a BARE TYPE: one anonymous field (empty path), so the message IS one value */
+        this.valueRoot = list.length === 1 && list[0].path === "" && list[0].kind !== "struct";
     }
 
     get typed(): boolean { return this.size !== undefined; }
@@ -488,11 +491,12 @@ class Layout {
         return this.fields.get(path)?.variants?.find((o) => o.name === name)?.value;
     }
 
-    /* Full-message decode into a plain nested object (structs become sub-objects).
-     * An untyped layout returns the raw bytes unchanged. */
+    /* Full-message decode into a plain nested object (structs become sub-objects), or the
+     * bare value for a bare-type schema. An untyped layout returns the raw bytes unchanged. */
     decode(data: Uint8Array): any {
         if (!this.typed) return data;
         const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        if (this.valueRoot) return this.getField(data, view, "");
         const out: Record<string, any> = {};
         for (const f of this.fields.values()) {
             if (f.kind === "struct") continue;   /* members fill it via their paths */
@@ -502,13 +506,15 @@ class Layout {
     }
 
     /* Full-message encode from a plain nested object (missing fixed fields are zero,
-     * missing variable fields empty). An untyped layout accepts bytes (or nothing). */
+     * missing variable fields empty), or from the bare value for a bare-type schema. An
+     * untyped layout accepts bytes (or nothing). */
     encode(value: any): Uint8Array {
         if (!this.typed) {
             if (value === undefined || value === null) return new Uint8Array(0);
             if (value instanceof Uint8Array) return value;
             throw new Error("raw entity: pass a Uint8Array");
         }
+        if (this.valueRoot) value = { "": value };   /* the value IS the one anonymous field */
         const fixed = new Uint8Array(this.size!);
         const view = new DataView(fixed.buffer);
         for (const f of this.fields.values()) {
@@ -604,9 +610,11 @@ class DartTopic {
 
     /* Typed publish: encode named fields (FLAT dotted paths, the v2 form) into a
      * message and send it. Unset fixed fields are zero; unset variable fields are
-     * empty. For nested plain objects use a Publisher. */
-    send(values: Record<string, any>): void {
+     * empty. For nested plain objects use a Publisher. A BARE-TYPE topic (`bool`,
+     * `f32[]`, ...) takes the value itself: send(true). */
+    send(values: Record<string, any> | any): void {
         if (this.layout.size === undefined) throw new Error(`'${this.name}' is a raw topic: use sendRaw`);
+        if (this.layout.valueRoot) { this.sendRaw(this.layout.encode(values)); return; }
         const fixed = new Uint8Array(this.layout.size);
         const view = new DataView(fixed.buffer);
         for (const [path, v] of Object.entries(values)) {

@@ -38,6 +38,12 @@ a fixed array, and a nested annotated class for a sub-struct. Set an optional
 __dart_name__ on the class to override the wire type name (defaults to the class
 name). A plain class works too; @dataclass just gives you a handy constructor.
 
+A BARE TYPE is a schema of its own, for a topic whose payload is a single value:
+dart.Topic[dart.bool_](node, "estop") sends and receives plain True/False, and so do
+dart.u8..dart.f64, dart.string(N), dart.<scalar>[n], list[dart.f32], str, dict, an
+enum class, and int/float/bool. Such a root is anonymous (a bare type's identity is
+its shape), so the same one in any language is the same wire bytes and the same hash.
+
 Patterns layer over topic kinds, each subscriptable like Topic[T] for the typed
 form (untyped: explicit schema args, bytes payloads): FunctionDefinition /
 RemoteFunction (request/response, exactly one reply per call), VariableDefinition
@@ -1134,29 +1140,50 @@ def _build_spec(cls):
     return _Spec(name, [_field_spec(n, a, g) for n, a in anns.items()], cls)
 
 
+def _value_spec(ann):
+    """A spec for a BARE type used as the whole schema (dart.bool_, dart.u8[16],
+    dart.string(16), list[dart.f32], dict, str, int, float, bool, an enum class): the root
+    is anonymous, one field named "". None if ann is not a bare type. A bare type has no
+    name because its identity is its shape, so the same one in any language is the same
+    wire bytes and the same hash."""
+    if isinstance(ann, (_Type, _String, _Array, _Enum)):
+        return _Spec(None, [_field_spec("", ann, {})], None)
+    if getattr(ann, "__origin__", None) in (list, tuple, dict):   # list[...] IS a type: check first
+        return _Spec(None, [_field_spec("", ann, {})], None)
+    if isinstance(ann, type):
+        if ann in (str, int, float, bool, dict) or issubclass(ann, _pyenum.Enum):
+            return _Spec(None, [_field_spec("", ann, {})], None)
+        return None                              # an annotated schema class: a struct root
+    return None
+
+
 def _elem_token(elem, str_cap):
     return "string<%d>" % str_cap if elem == _STR else _TOKEN[elem]
 
 
 def _spec_text(spec):
     """The schema DSL text a spec compiles to (pure reflection; no native lib)."""
-    def line(f):
+    def type_text(f):
         if f.kind == _STRUCT:
-            return "%s: { %s }" % (f.name, ", ".join(line(g) for g in f.nested.fields))
+            return "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
         if f.kind == _ARR:
-            return "%s: %s[%d]" % (f.name, _elem_token(f.elem, f.str_cap), f.count)
+            return "%s[%d]" % (_elem_token(f.elem, f.str_cap), f.count)
         if f.kind == _VARR:
-            return "%s: %s[]" % (f.name, _elem_token(f.elem, f.str_cap))
+            return "%s[]" % _elem_token(f.elem, f.str_cap)
         if f.kind == _STR:
-            return "%s: string<%d>" % (f.name, f.str_cap)
+            return "string<%d>" % f.str_cap
         if f.kind == _VSTR:
-            return "%s: string" % f.name
+            return "string"
         if f.kind == _MAP:
-            return "%s: map" % f.name
+            return "map"
         if f.kind == _ENUM:
             opts = ", ".join("%s=%d" % (m.name, int(m.value)) for m in f.enum_cls)
-            return "%s: enum<%s> { %s }" % (f.name, _TOKEN[f.elem], opts)
-        return "%s: %s" % (f.name, f.token)
+            return "enum<%s> { %s }" % (_TOKEN[f.elem], opts)
+        return f.token
+    def line(f):
+        return "%s: %s" % (f.name, type_text(f))
+    if spec.name is None:                     # a bare type: the whole schema is its spelling
+        return type_text(spec.fields[0]) + "\n"
     return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
 
 
@@ -1169,6 +1196,16 @@ def _enum_body_from_schema(lib, s, field):
         if lib.dart_schema_enum_variant(s, field, k, byref(val), byref(nm)):
             parts.append("%s=%d" % (_dstr(nm), val.value))
     return "{ %s }" % ", ".join(parts)
+
+
+def _is_value_root(lib, s):
+    """True when the schema is a BARE TYPE: an unnamed root of one anonymous field, so its
+    message is a single value (encode/decode take and give that value, not a dict)."""
+    if lib.dart_schema_field_count(s) != 1 or lib.dart_schema_name(s).len != 0:
+        return False
+    info = DartSchemaFieldInfo()
+    return (bool(lib.dart_schema_field_at(s, 0, byref(info)))
+            and info.depth == 0 and info.name.len == 0 and info.kind != _STRUCT)
 
 
 def _schema_dsl(lib, s):
@@ -1190,23 +1227,27 @@ def _schema_dsl(lib, s):
                 stack.append(None)
             stack[d + 1] = node[5]
 
-    def line(f):
+    def type_text(f):
         name, kind, elem, count, str_cap, children = f
         if kind == _STRUCT:
-            return "%s: { %s }" % (name, ", ".join(line(c) for c in children))
+            return "{ %s }" % ", ".join(line(c) for c in children)
         if kind == _ARR:
-            return "%s: %s[%d]" % (name, _elem_token(elem, str_cap), count)
+            return "%s[%d]" % (_elem_token(elem, str_cap), count)
         if kind == _VARR:
-            return "%s: %s[]" % (name, _elem_token(elem, str_cap))
+            return "%s[]" % _elem_token(elem, str_cap)
         if kind == _STR:
-            return "%s: string<%d>" % (name, str_cap)
+            return "string<%d>" % str_cap
         if kind == _VSTR:
-            return "%s: string" % name
+            return "string"
         if kind == _MAP:
-            return "%s: map" % name
+            return "map"
         if kind == _ENUM:
-            return "%s: enum<%s> %s" % (name, _TOKEN[elem], children)   # children slot holds the body text
-        return "%s: %s" % (name, _TOKEN[kind])
+            return "enum<%s> %s" % (_TOKEN[elem], children)   # children slot holds the body text
+        return _TOKEN[kind]
+    def line(f):
+        return "%s: %s" % (f[0], type_text(f))
+    if _is_value_root(lib, s):                # a bare type: no name, no braces
+        return type_text(root[0]) + "\n"
     return (_dstr(lib.dart_schema_name(s)) + "\n{\n"
             + ",\n".join("    " + line(f) for f in root) + "\n}\n")
 
@@ -1232,20 +1273,26 @@ def _compile_dsl(text):
 
 class Schema:
     """A compiled DART message schema. Construct from DSL text -- Schema("Pose { x:
-    f32, frame: string<16> }") -- or from a schema class -- Schema(Pose) -- whose
-    annotated public fields become the wire fields, in declaration order."""
+    f32, frame: string<16> }") -- from a schema class -- Schema(Pose) -- whose annotated
+    public fields become the wire fields, in declaration order, or from a BARE TYPE --
+    Schema(dart.bool_), Schema(list[dart.f32]), Schema(str), Schema(dict) -- whose message
+    is that one value (encode/decode take and give it directly)."""
 
-    __slots__ = ("_s", "_spec")
+    __slots__ = ("_s", "_spec", "_vroot")
 
     def __init__(self, source):
         self._spec = None
+        self._vroot = None
         if isinstance(source, str):
             self._s = _compile_dsl(source)
-        elif isinstance(source, type):
+            return
+        self._spec = _value_spec(source)
+        if self._spec is None:
+            if not isinstance(source, type):
+                raise TypeError("Schema(...) expects DSL text, a schema class, or a bare "
+                                "type (dart.u8, dart.string(16), list[dart.f32], dict, ...)")
             self._spec = _spec_of(source)
-            self._s = _compile_dsl(_spec_text(self._spec))
-        else:
-            raise TypeError("Schema(...) expects DSL text (a str) or a schema class")
+        self._s = _compile_dsl(_spec_text(self._spec))
 
     @property
     def name(self):
@@ -1274,6 +1321,14 @@ class Schema:
     def field_count(self):
         return _load().dart_schema_field_count(self._s)
 
+    @property
+    def is_value_root(self):
+        """True when this schema is a BARE TYPE: its message is one value, so encode takes
+        and decode returns that value instead of a field dict."""
+        if self._vroot is None:
+            self._vroot = _is_value_root(_load(), self._s)   # probed once
+        return self._vroot
+
     def fields(self):
         lib = _load()
         out = []
@@ -1290,10 +1345,9 @@ class Schema:
         return _encode(_load(), self._s, value)
 
     def decode(self, data):
-        """Decode message bytes to a nested dict (any schema), or a typed instance if
-        this schema was built from a class."""
-        d = _decode(_load(), self._s, bytes(data))
-        return _to_obj(self._spec, d) if self._spec else d
+        """Decode message bytes to a nested dict (any schema), the bare value (a bare-type
+        schema), or a typed instance if this schema was built from a class."""
+        return _from_decoded(self._spec, _decode(_load(), self._s, bytes(data)))
 
     def __del__(self):
         try:
@@ -1309,24 +1363,23 @@ def _as_schema(schema_arg):
         return None
     if isinstance(schema_arg, Schema):
         return schema_arg
-    if isinstance(schema_arg, str):
-        return Schema(schema_arg)
-    if isinstance(schema_arg, type):
-        return Schema(schema_arg)
-    raise TypeError("schema must be None, a Schema, a schema class, or DSL text")
+    return Schema(schema_arg)      # DSL text, a schema class, or a bare type
 
 
 def dsl(x):
-    """The DSL text for a schema source: a schema class (no lib load needed), a
-    compiled Schema, or DSL text (returned as-is). Use it to display a schema or hand
+    """The DSL text for a schema source: a schema class or bare type (no lib load needed),
+    a compiled Schema, or DSL text (returned as-is). Use it to display a schema or hand
     it to a C/C++ node for interop."""
     if isinstance(x, str):
         return x
     if isinstance(x, Schema):
         return x.dsl
+    spec = _value_spec(x)
+    if spec is not None:
+        return _spec_text(spec)
     if isinstance(x, type):
         return _spec_text(_spec_of(x))
-    raise TypeError("dsl() expects a schema class, a Schema, or DSL text")
+    raise TypeError("dsl() expects a schema class, a bare type, a Schema, or DSL text")
 
 
 # ---------------------------------------------------------------------------
@@ -1427,6 +1480,8 @@ def _encode_map_body(d):
 def _encode(lib, s, src):
     # One walk of the flattened field table: resolve each value, and pre-serialize the
     # variable-field payloads so the tail can be sized before the buffer is allocated.
+    if _is_value_root(lib, s):
+        src = {"": src}              # a bare type: the value IS the one anonymous field
     names, srcs, ops = [], [src], []
     var_bytes = 0
     for i in range(lib.dart_schema_field_count(s)):
@@ -1618,6 +1673,10 @@ def _value_to_py(val):
 
 def _decode(lib, s, msg):
     mb = DartBytes(cast(c_char_p(msg), c_void_p) if msg else None, len(msg))
+    if _is_value_root(lib, s):       # a bare type: hand back the value, not a one-key dict
+        val = DartValue()
+        lib.dart_get_value(mb, s, 0, byref(val))
+        return _value_to_py(val)
     root = {}
     dests = [root]
     for i in range(lib.dart_schema_field_count(s)):
@@ -1665,6 +1724,23 @@ def _to_obj(spec, d):
     return _instantiate(spec.cls, kwargs)
 
 
+def _from_decoded(spec, d):
+    """Apply a spec's typing to what _decode produced: a class instance for a struct
+    spec, the bare value (an enum member where the spec names one) for a bare-type spec,
+    or the plain decoded form when there is no spec."""
+    if spec is None:
+        return d
+    if spec.name is None:                       # a bare type: d IS the value
+        f = spec.fields[0]
+        if f.kind == _ENUM and f.enum_cls is not None and d is not None:
+            try:
+                return f.enum_cls(d)            # the number as its enum member
+            except ValueError:
+                return d                        # an unknown/newer number stays raw
+        return d
+    return _to_obj(spec, d)
+
+
 # ---------------------------------------------------------------------------
 # Public runtime API.
 # ---------------------------------------------------------------------------
@@ -1687,12 +1763,14 @@ def _c_view(payload):
 
 def _payload_bytes(sch, value):
     """Encode a payload per the wrapper's send conventions: bytes/str pass
-    through, None = empty, anything else is encoded by the schema."""
+    through, None = empty, anything else is encoded by the schema. A bare-type schema
+    (`string`, `string<16>`) encodes a str through the schema instead: its message is a
+    framed value, not loose text."""
     if value is None:
         return b""
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
-    if isinstance(value, str):
+    if isinstance(value, str) and (sch is None or not sch.is_value_root):
         return value.encode("utf-8")
     if sch is None:
         raise TypeError("no schema on this handle; pass bytes/str, or construct "
@@ -1709,8 +1787,7 @@ def _decode_payload(wire_schema, local, data):
         return data, True
     try:
         d = _decode(_load(), sp, data)
-        spec = local._spec if local is not None else None
-        return (_to_obj(spec, d) if spec else d), True
+        return _from_decoded(local._spec if local is not None else None, d), True
     except Exception:
         return None, False
 
@@ -1745,7 +1822,8 @@ def _role_from_bits(bits):
 
 class Message:
     """A delivered message. Views are copied out, so it outlives the callback.
-    For a typed topic, `.value` is the decoded object and `.fields` the dict.
+    For a typed topic, `.value` is the decoded object and `.fields` the dict; for a
+    bare-type schema both are that one value.
     recv_us is the node's monotonic clock (microseconds) when the poll RECEIVED the
     message (queued topics stamp at enqueue), so a paced consumer measures true
     arrival times, never its own cadence. sent_us is the SENDER's wall clock (UTC
@@ -1769,7 +1847,7 @@ class Message:
         if m.schema:
             try:
                 self.fields = _decode(_load(), m.schema, self.data)
-                self.value = _to_obj(spec, self.fields) if spec else self.fields
+                self.value = _from_decoded(spec, self.fields)
             except Exception:
                 traceback.print_exc()
         return self
@@ -1827,8 +1905,8 @@ class Event:
 
 
 class _TypedTopic:
-    """The result of Topic[T]: a typed-topic factory bound to schema class T,
-    callable exactly like the Topic constructor minus the schema argument."""
+    """The result of Topic[T]: a typed-topic factory bound to schema class (or bare
+    type) T, callable exactly like the Topic constructor minus the schema argument."""
     __slots__ = ("_type",)
 
     def __init__(self, cls_type):
@@ -1843,9 +1921,9 @@ class _TypedTopic:
 
 class Topic:
     """A topic handle (owned by the Node, stable for its life). Construct it directly:
-    Topic(node, name) is a raw bytes/str topic; pass a schema (a Schema, a schema
-    class, or DSL text) for a typed one; Topic[T](node, name, ...) is the typed
-    shorthand (schema reflected from class T)."""
+    Topic(node, name) is a raw bytes/str topic; pass a schema (a Schema, a schema class,
+    a bare type, or DSL text) for a typed one; Topic[T](node, name, ...) is the typed
+    shorthand (T = a schema class or a bare type like dart.bool_)."""
     __slots__ = ("_node", "_h", "_schema")
 
     def __init__(self, node, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
@@ -1869,10 +1947,13 @@ class Topic:
 
     def send(self, data):
         """Publish. `data` may be bytes/str (raw), or a mapping/object for a typed
-        topic (encoded via its schema). Returns a SendStatus."""
+        topic (encoded via its schema; a bare-type schema takes the bare value, so a
+        `string` root encodes a str instead of sending it as loose text). Returns a
+        SendStatus."""
         if isinstance(data, (bytes, bytearray, memoryview)):
             payload = bytes(data)
-        elif isinstance(data, str):
+        elif isinstance(data, str) and (self._schema is None
+                                        or not self._schema.is_value_root):
             payload = data.encode("utf-8")
         else:
             if self._schema is None:

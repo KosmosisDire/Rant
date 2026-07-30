@@ -674,7 +674,10 @@ namespace Dart
         }
 
         /// <summary>Reflect a type into a compiled schema: public fields become the
-        /// wire fields (class -> DSL -> compile).</summary>
+        /// wire fields (class -> DSL -> compile). A BARE TYPE (bool, int, float, string,
+        /// float[], Dictionary&lt;string,object&gt;, an enum) is the whole schema instead: an
+        /// anonymous root whose message is that one value, byte-identical in every
+        /// language.</summary>
         public Schema(Type t) : this(Codec.TypeDsl(t)) { ClrType = t; }
 
         public string Name => Codec.Str(Native.dart_schema_name(Handle));
@@ -687,12 +690,26 @@ namespace Dart
         /// schema, including one parsed from a peer). Paste into a C node for interop.</summary>
         public string Dsl => Codec.SchemaDsl(Handle);
 
+        /// <summary>True when this schema is a BARE TYPE: its message is one value, so Encode
+        /// takes that value and Decode returns it instead of a field dictionary.</summary>
+        public bool IsValueRoot
+        {
+            get
+            {
+                if (_valueRoot < 0) _valueRoot = Codec.IsValueRoot(Handle) ? 1 : 0;   // probed once
+                return _valueRoot != 0;
+            }
+        }
+        private int _valueRoot = -1;
+
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
+        /// <summary>The decoded fields by name; a bare-type schema yields its one value
+        /// under the empty name.</summary>
         public Dictionary<string, object> DecodeFields(byte[] data) => Codec.DecodeDict(Handle, data);
         public object Decode(byte[] data)
         {
             var d = Codec.DecodeDict(Handle, data);
-            return ClrType != null ? Codec.ToObject(ClrType, d) : d;
+            return ClrType != null ? Codec.ToObject(ClrType, d) : Codec.RootOrFields(Handle, d);
         }
 
         public void Dispose()
@@ -725,7 +742,8 @@ namespace Dart
         /// (noTimestamp). Never mix it with the monotonic RecvUs.</summary>
         public ulong SentUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
-        public object Value;                          // typed instance for a typed topic, else Fields
+        public object Value;                          // typed instance for a typed topic, the bare
+                                                      // value for a bare-type schema, else Fields
 
         public string Text => Encoding.UTF8.GetString(Data);
         public T As<T>() => (T)Value;
@@ -747,7 +765,8 @@ namespace Dart
                 try
                 {
                     msg.Fields = Codec.DecodeDict(m.schema, msg.Data);
-                    msg.Value = clrType != null ? Codec.ToObject(clrType, msg.Fields) : msg.Fields;
+                    msg.Value = clrType != null ? Codec.ToObject(clrType, msg.Fields)
+                                                : Codec.RootOrFields(m.schema, msg.Fields);
                 }
                 catch (Exception e) { Console.Error.WriteLine("dart decode: " + e); }
             }
@@ -956,8 +975,11 @@ namespace Dart
 
         public SendStatus Send(object value)
         {
-            if (value is byte[] b) return Send(b);
-            if (value is string s) return Send(s);
+            // A bare-type schema frames its own value, so bytes/string go through it too:
+            // a `string` root is a framed value, not loose text.
+            bool bare = Schema != null && Schema.IsValueRoot;
+            if (!bare && value is byte[] b) return Send(b);
+            if (!bare && value is string s) return Send(s);
             if (Schema == null)
                 throw new InvalidOperationException(
                     "topic has no schema; send bytes/string, or create the topic with a schema");
@@ -1035,7 +1057,9 @@ namespace Dart
     }
 
     /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
-    /// [DartString] / [DartField] refine them). Delivered messages decode to T
+    /// [DartString] / [DartField] refine them), or, when T is a BARE TYPE (bool, int,
+    /// float, string, float[], Dictionary&lt;string,object&gt;, an enum), T itself is the
+    /// schema and Send/TryTake carry the plain value. Delivered messages decode to T
     /// (DartMessage.Value / DartMessage.As&lt;T&gt;()).</summary>
     public sealed class Topic<T> : Topic
     {
@@ -2607,12 +2631,52 @@ namespace Dart
         private static bool IsMapType(Type t)
             => typeof(System.Collections.IDictionary).IsAssignableFrom(t);
 
+        // A BARE TYPE used directly as a handle's T (CreateTopic<bool>, Variable<double>,
+        // Topic<float[]>, Topic<string>, Topic<Dictionary<string,object>>, an enum): the whole
+        // schema is that one type, anonymous (its identity is its shape), so the same bare type
+        // in any language is the same wire bytes and the same hash. Mirrors the field rules: a
+        // plain string is the unbounded `string`, a plain array is the variable `elem[]`.
+        private static bool IsValueType(Type t)
+            => ScalarKind.ContainsKey(t) || t.IsEnum || t == typeof(string) || t.IsArray
+               || IsMapType(t);
+
+        // the one-field spec of a bare type: no root name, the field is anonymous
+        private static TypeSpec ValueSpec(Type t)
+        {
+            var plan = new FieldPlan { Field = null, WireName = "" };
+            byte k;
+            if (t == typeof(string)) plan.Kind = VSTR;
+            else if (t.IsArray)
+            {
+                Type et = t.GetElementType();
+                if (et == null || !ScalarKind.TryGetValue(et, out k))
+                    throw new SchemaException("bare array schema " + t
+                        + " element must be a scalar (a capped-string array needs DSL text)");
+                plan.Kind = VARR; plan.Elem = k;
+            }
+            else if (IsMapType(t)) plan.Kind = MAP;
+            else if (t.IsEnum)
+            {
+                if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(t), out k) || k > I64)
+                    throw new SchemaException("bare enum schema " + t + " must have an integer backing type");
+                plan.Kind = ENUM; plan.Elem = k; plan.EnumType = t;
+            }
+            else plan.Kind = ScalarKind[t];
+            return new TypeSpec { Name = null, Fields = new List<FieldPlan> { plan } };
+        }
+
         private static TypeSpec Spec(Type t)
         {
             lock (s_specs)
             {
                 TypeSpec cached;
                 if (s_specs.TryGetValue(t, out cached)) return cached;
+                if (IsValueType(t))
+                {
+                    cached = ValueSpec(t);
+                    s_specs[t] = cached;
+                    return cached;
+                }
                 var attr = (DartSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(DartSchemaAttribute));
                 string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : t.Name;
                 FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
@@ -2686,6 +2750,7 @@ namespace Dart
         internal static string TypeDsl(Type t)
         {
             var spec = Spec(t);
+            if (spec.Name == null) return TypeToken(spec.Fields[0]) + "\n";   // a bare type
             var sb = new StringBuilder();
             sb.Append(spec.Name).Append("\n{\n");
             for (int i = 0; i < spec.Fields.Count; i++)
@@ -2697,23 +2762,25 @@ namespace Dart
             return sb.ToString();
         }
 
-        private static string FieldLine(FieldPlan f)
+        private static string FieldLine(FieldPlan f) => f.WireName + ": " + TypeToken(f);
+
+        // one field's type in DSL form (the whole schema when the root is a bare type)
+        private static string TypeToken(FieldPlan f)
         {
             if (f.Kind == STRUCT)
             {
                 var nested = Spec(f.Nested).Fields;
                 var parts = new List<string>();
                 foreach (var g in nested) parts.Add(FieldLine(g));
-                return f.WireName + ": { " + string.Join(", ", parts) + " }";
+                return "{ " + string.Join(", ", parts) + " }";
             }
-            if (f.Kind == ARR)
-                return f.WireName + ": " + ElemToken(f.Elem, f.StrCap) + "[" + f.Count + "]";
-            if (f.Kind == VARR) return f.WireName + ": " + ElemToken(f.Elem, f.StrCap) + "[]";
-            if (f.Kind == STR) return f.WireName + ": string<" + f.StrCap + ">";
-            if (f.Kind == VSTR) return f.WireName + ": string";
-            if (f.Kind == MAP) return f.WireName + ": map";
-            if (f.Kind == ENUM) return f.WireName + ": enum<" + Token[f.Elem] + "> " + EnumBody(f.EnumType);
-            return f.WireName + ": " + Token[f.Kind];
+            if (f.Kind == ARR) return ElemToken(f.Elem, f.StrCap) + "[" + f.Count + "]";
+            if (f.Kind == VARR) return ElemToken(f.Elem, f.StrCap) + "[]";
+            if (f.Kind == STR) return "string<" + f.StrCap + ">";
+            if (f.Kind == VSTR) return "string";
+            if (f.Kind == MAP) return "map";
+            if (f.Kind == ENUM) return "enum<" + Token[f.Elem] + "> " + EnumBody(f.EnumType);
+            return Token[f.Kind];
         }
 
         private static string ElemToken(byte elem, int strCap)
@@ -2754,11 +2821,23 @@ namespace Dart
                     stack[d + 1] = ch;
                 }
             }
+            if (IsValueRoot(s)) return NodeType(root[0]) + "\n";   // a bare type: no name, no braces
             var sb = new StringBuilder();
             sb.Append(Str(Native.dart_schema_name(s))).Append("\n{\n");
             EmitNodes(sb, root);
             sb.Append("\n}\n");
             return sb.ToString();
+        }
+
+        // True when a compiled schema is a BARE TYPE: an unnamed root of one anonymous field,
+        // so its message is a single value (encode takes it, decode returns it).
+        internal static bool IsValueRoot(IntPtr s)
+        {
+            if (s == IntPtr.Zero || Native.dart_schema_field_count(s) != 1) return false;
+            if ((ulong)Native.dart_schema_name(s).len != 0) return false;
+            DartSchemaFieldInfo info;
+            if (Native.dart_schema_field_at(s, 0, out info) == 0) return false;
+            return info.depth == 0 && (ulong)info.name.len == 0 && info.kind != STRUCT;
         }
 
         private static void EmitNodes(StringBuilder sb, List<object[]> nodes)
@@ -2770,9 +2849,10 @@ namespace Dart
             }
         }
 
-        private static string NodeLine(object[] node)
+        private static string NodeLine(object[] node) => (string)node[0] + ": " + NodeType(node);
+
+        private static string NodeType(object[] node)
         {
-            string name = (string)node[0];
             byte kind = (byte)node[1], elem = (byte)node[2];
             int count = (int)node[3], strCap = (int)node[4];
             var children = (List<object[]>)node[5];
@@ -2780,15 +2860,15 @@ namespace Dart
             {
                 var parts = new List<string>();
                 foreach (var c in children) parts.Add(NodeLine(c));
-                return name + ": { " + string.Join(", ", parts) + " }";
+                return "{ " + string.Join(", ", parts) + " }";
             }
-            if (kind == ARR) return name + ": " + ElemToken(elem, strCap) + "[" + count + "]";
-            if (kind == VARR) return name + ": " + ElemToken(elem, strCap) + "[]";
-            if (kind == STR) return name + ": string<" + strCap + ">";
-            if (kind == VSTR) return name + ": string";
-            if (kind == MAP) return name + ": map";
-            if (kind == ENUM) return name + ": enum<" + Token[elem] + "> " + (string)node[6];
-            return name + ": " + Token[kind];
+            if (kind == ARR) return ElemToken(elem, strCap) + "[" + count + "]";
+            if (kind == VARR) return ElemToken(elem, strCap) + "[]";
+            if (kind == STR) return "string<" + strCap + ">";
+            if (kind == VSTR) return "string";
+            if (kind == MAP) return "map";
+            if (kind == ENUM) return "enum<" + Token[elem] + "> " + (string)node[6];
+            return Token[kind];
         }
 
         // `{ Name=value, ... }` reconstructed from a compiled schema's enum option table
@@ -2824,7 +2904,9 @@ namespace Dart
         {
             var ops = new List<SetOp>();
             long varBytes = 0;
-            if (value is System.Collections.IDictionary dict)
+            if (IsValueRoot(s))
+                CollectRootValue(s, value, ops, ref varBytes);   // a bare type: the value IS the field
+            else if (value is System.Collections.IDictionary dict)
                 CollectFromDict(s, dict, ops, ref varBytes);
             else
                 Collect(s, Spec(value.GetType()), value, "", ops, ref varBytes);
@@ -2846,6 +2928,17 @@ namespace Dart
                 return outb;
             }
             finally { gh.Free(); }
+        }
+
+        // bare-type root -> one op on the empty path (the schema's single anonymous field)
+        private static void CollectRootValue(IntPtr s, object value, List<SetOp> ops, ref long varBytes)
+        {
+            DartSchemaFieldInfo info;
+            if (value == null || Native.dart_schema_field_at(s, 0, out info) == 0) return;
+            var op = new SetOp { Cpath = CStr(""), Path = "", Kind = info.kind, Elem = info.elem,
+                                 Count = info.count, StrCap = info.str_cap };
+            PrepareOp(op, value, ref varBytes);
+            ops.Add(op);
         }
 
         // reflected object -> ops (recurses the type spec, dotted paths for nested structs)
@@ -3333,9 +3426,32 @@ namespace Dart
             return arr;
         }
 
+        // The bare value out of a decoded bare-type message, coerced to T (an enum member, a
+        // typed array, a string, a Dictionary, or a widened scalar).
+        internal static object RootValue(Type t, object val)
+        {
+            if (val == null) return null;
+            if (t.IsEnum) return Enum.ToObject(t, val);
+            if (t.IsArray || t == typeof(string) || IsMapType(t)) return val;
+            return Convert.ChangeType(val, t);
+        }
+
+        // What a decoded bare-type message is worth without a CLR type: the value itself.
+        internal static object RootOrFields(IntPtr s, Dictionary<string, object> fields)
+        {
+            object v;
+            return (IsValueRoot(s) && fields != null && fields.TryGetValue("", out v)) ? v : fields;
+        }
+
         internal static object ToObject(Type t, Dictionary<string, object> dict)
         {
             var spec = Spec(t);
+            if (spec.Name == null)          // a bare type: the whole message is one value
+            {
+                object rv;
+                dict.TryGetValue("", out rv);
+                return RootValue(t, rv);
+            }
             object obj = Activator.CreateInstance(t);
             foreach (var fp in spec.Fields)
             {

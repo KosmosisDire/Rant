@@ -119,6 +119,21 @@ offsets, little-endian, no padding):
 0). `hash` is the 64-bit schema identity as hex (it exceeds JS safe integers). A
 raw topic replies just `{ "ok": true, "id": 0 }`.
 
+A **BARE-TYPE schema** (the whole schema is one type, e.g. `bool` or `f32[]`, not a
+struct) replies with exactly ONE field whose `path` is the **empty string**, and its
+type name is empty (an anonymous root: a bare type's identity is its shape, so the
+same one from any language is the same bytes and the same `hash`):
+
+```json
+{ "ok": true, "id": 0, "size": 1, "hash": "b1edca4f3f7a622a",
+  "fields": [ { "path": "", "kind": "bool", "offset": 0, "size": 1 } ] }
+```
+
+Nothing else changes: that one field is read and written exactly like any other, at
+`offset` (or as the single tail frame for a variable kind). The reference client
+detects the shape and lets the message BE the value (`topic.send(true)`,
+`msg.value() === true`) instead of an object with one empty-named key.
+
 **`size`** is the length of the **fixed section** -- the exact message size when the
 schema has no variable fields, and where the variable tail begins when it does.
 

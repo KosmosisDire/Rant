@@ -390,6 +390,8 @@ class Layout {
                 f.varOrdinal = this.varFields.length;
                 this.varFields.push(f);
             }
+        /* a BARE TYPE: one anonymous field (empty path), so the message IS one value */
+        this.valueRoot = list.length === 1 && list[0].path === "" && list[0].kind !== "struct";
     }
     get typed() { return this.size !== undefined; }
     /* one field by dotted path (see DartMessage.get) */
@@ -428,12 +430,14 @@ class Layout {
     enumValue(path, name) {
         return this.fields.get(path)?.variants?.find((o) => o.name === name)?.value;
     }
-    /* Full-message decode into a plain nested object (structs become sub-objects).
-     * An untyped layout returns the raw bytes unchanged. */
+    /* Full-message decode into a plain nested object (structs become sub-objects), or the
+     * bare value for a bare-type schema. An untyped layout returns the raw bytes unchanged. */
     decode(data) {
         if (!this.typed)
             return data;
         const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        if (this.valueRoot)
+            return this.getField(data, view, "");
         const out = {};
         for (const f of this.fields.values()) {
             if (f.kind === "struct")
@@ -443,7 +447,8 @@ class Layout {
         return out;
     }
     /* Full-message encode from a plain nested object (missing fixed fields are zero,
-     * missing variable fields empty). An untyped layout accepts bytes (or nothing). */
+     * missing variable fields empty), or from the bare value for a bare-type schema. An
+     * untyped layout accepts bytes (or nothing). */
     encode(value) {
         if (!this.typed) {
             if (value === undefined || value === null)
@@ -452,6 +457,8 @@ class Layout {
                 return value;
             throw new Error("raw entity: pass a Uint8Array");
         }
+        if (this.valueRoot)
+            value = { "": value }; /* the value IS the one anonymous field */
         const fixed = new Uint8Array(this.size);
         const view = new DataView(fixed.buffer);
         for (const f of this.fields.values()) {
@@ -534,10 +541,15 @@ class DartTopic {
     }
     /* Typed publish: encode named fields (FLAT dotted paths, the v2 form) into a
      * message and send it. Unset fixed fields are zero; unset variable fields are
-     * empty. For nested plain objects use a Publisher. */
+     * empty. For nested plain objects use a Publisher. A BARE-TYPE topic (`bool`,
+     * `f32[]`, ...) takes the value itself: send(true). */
     send(values) {
         if (this.layout.size === undefined)
             throw new Error(`'${this.name}' is a raw topic: use sendRaw`);
+        if (this.layout.valueRoot) {
+            this.sendRaw(this.layout.encode(values));
+            return;
+        }
         const fixed = new Uint8Array(this.layout.size);
         const view = new DataView(fixed.buffer);
         for (const [path, v] of Object.entries(values)) {

@@ -131,6 +131,33 @@ await new Promise((res) => setTimeout(res, 200));
 console.log(`status writes=${writes} changes=${changes} (writes > changes: re-sets fire on_write only)`);
 if (writes < 2) throw new Error("on_write did not fire for every write");
 
+/* ---- bare-type schemas: the whole schema is one type, the message IS that value ---- */
+let sawFlag, sawTemp;
+const gotFlag = new Promise((res) => { sawFlag = res; });
+const gotTemp = new Promise((res) => { sawTemp = res; });
+const flagPub = await robot.publisher("estop", "bool", { reliable: true });
+await dash.subscriber("estop", "bool", (v) => sawFlag(v));
+const tempPub = await robot.publisher("temps", "f32[]", { reliable: true });
+await dash.subscriber("temps", "f32[]", (v) => sawTemp(v));
+const gain = await robot.variableDefinition("gain", "f64", { initial: 1.25 });
+const gainRemote = await dash.remoteVariable("gain", "f64");
+await robot.settle(5000);
+await dash.settle(5000);
+flagPub.send(true);                       /* not { "": true }: the bare value */
+tempPub.send([36.5, 34.25]);
+const flag = await gotFlag, temps = await gotTemp;
+console.log(`bare roots: estop=${flag}  temps=[${temps.join(", ")}]  ` +
+            `estop schema hash=${flagPub.topic.layout.hash}`);
+if (flag !== true) throw new Error("bare bool did not arrive as true");
+if (temps.length !== 2 || Math.abs(temps[0] - 36.5) > 1e-3) throw new Error("bare f32[] mismatch");
+if (flagPub.topic.layout.hash !== "b1edca4f3f7a622a") throw new Error("bare `bool` hash is not canonical");
+if (!(await gainRemote.wait(5000))) throw new Error("no bare-typed variable value");
+if (gainRemote.get() !== 1.25) throw new Error("bare-typed variable value mismatch");
+gainRemote.set(2.5);
+for (let i = 0; i < 50 && gain.get() !== 2.5; i++) await new Promise((res) => setTimeout(res, 100));
+if (gain.get() !== 2.5) throw new Error("bare-typed variable set did not replicate");
+console.log(`bare variable: gain=${gain.get()} (set through the remote)`);
+
 /* ---- source timestamps: every delivery surface carries the sender's wall clock ----- */
 const nowUs = Date.now() * 1000;
 const stamps = { message: msgSentUs, call: r.sentUs, request: reqSentUs,

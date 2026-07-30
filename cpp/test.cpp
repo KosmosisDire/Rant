@@ -3,9 +3,12 @@
  * kinds: capped + variable string, variable scalar array, map). Leg 2: the same
  * over service threads. Leg 3: the patterns layer (typed functions incl. blocking /
  * async / fail / defer, variables, signals, typed pub/sub over DART_SCHEMA with the
- * memcpy, loop, and subset/rebase codec paths, entity reflection). Single process,
+ * memcpy, loop, and subset/rebase codec paths, entity reflection). Leg 4: bare-type
+ * roots (bool / std::string / std::array / a bare-double variable, plus the dynamic API
+ * through the empty path) and the canonical cross-language hashes. Single process,
  * discovery pinned to loopback on isolated domains (never 0). Exit 0 = PASS. */
 #include "dart.hpp"
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -381,6 +384,103 @@ static bool patterns_leg() {
     return g_failures == fails_at_entry;
 }
 
+/* ---- leg 4: BARE-TYPE roots (no DART_SCHEMA): the type IS the schema ------------- */
+/* The canonical wire of a bare type is its kind alone, so these hashes are the same in
+ * every language binding (pinned in C by dart_test's schema-root phase). */
+static const uint64_t HASH_BOOL   = 0xb1edca4f3f7a622aULL;
+static const uint64_t HASH_F32ARR = 0xd166c4a8dcec317bULL;
+
+static bool value_root_leg() {
+    int fails_at_entry = g_failures;
+    dart::NodeOptions opts;
+    opts.domain = 44;
+    opts.multicast_interface = "127.0.0.1";
+    auto on_evt = [](const char* tag) {
+        return [tag](const dart::Event& e) {
+            if (e.is_error()) std::printf("event(%s): %s\n", tag, e.to_string().c_str());
+        };
+    };
+    dart::Node a("VA", {}, on_evt("VA"), opts);
+    dart::Node b("VB", {}, on_evt("VB"), opts);
+    chk("root: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    chk("root: A started", a.start());   /* A on its service thread, B pumped by wait_for */
+
+    /* the canonical-hash pin: the typed codec and the DSL agree, and both agree with C */
+    const dart::Schema* sb = dart::priv::schema_of<bool>();
+    auto arr = dart::Schema::compile("f32[]");
+    chk("root: bool codec compiles", sb != nullptr);
+    chk("root: `bool` canonical hash", sb && sb->hash() == HASH_BOOL);
+    chk("root: `f32[]` canonical hash", arr && arr->hash() == HASH_F32ARR);
+    chk("root: bare root is one anonymous field",
+        sb && sb->field_count() == 1 && sb->name().empty());
+
+    dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
+
+    /* bool: the whole payload is one byte */
+    std::atomic<int> flags{ 0 };
+    dart::Publisher<bool>  pb(a, "flag", rel);
+    dart::Subscriber<bool> sub_b(b, "flag", [&](const bool& v) { if (v) flags++; }, rel);
+    chk("root: bool pair created", pb.valid() && sub_b.valid());
+    chk("root: bool matched", wait_for(4000, [&] { return pb.match_count() > 0 && pb.ready(); }, &b));
+    chk("root: bool send", pb.send(true) == dart::SendStatus::Ok);
+    chk("root: bool round trip", wait_for(3000, [&] { return flags.load() == 1; }, &b));
+
+    /* std::string: the unbounded `string` root, one tail frame */
+    std::string got;
+    dart::Publisher<std::string>  ps(a, "note", rel);
+    dart::Subscriber<std::string> sub_s(b, "note", [&](const std::string& v) { got = v; }, rel);
+    chk("root: string pair created", ps.valid() && sub_s.valid());
+    chk("root: string matched", wait_for(4000, [&] { return ps.match_count() > 0 && ps.ready(); }, &b));
+    chk("root: string send", ps.send(std::string("a bare unbounded string")) == dart::SendStatus::Ok);
+    chk("root: string round trip", wait_for(3000, [&] { return got == "a bare unbounded string"; }, &b));
+
+    /* std::array: a fixed array root, taken through the queue */
+    dart::Publisher<std::array<float, 3>>  pa3(a, "xyz", rel);
+    dart::Subscriber<std::array<float, 3>> sa3(b, "xyz", rel);
+    (void)sa3.take(0);                                  /* queued delivery */
+    chk("root: array pair created", pa3.valid() && sa3.valid());
+    chk("root: array matched", wait_for(4000, [&] { return pa3.match_count() > 0; }, &b));
+    chk("root: array send", pa3.send(std::array<float, 3>{ 1.5f, 2.5f, -3.f }) == dart::SendStatus::Ok);
+    {   auto tm = sa3.take(3000);
+        chk("root: array take round trip", tm.has_value() && tm->value()[0] == 1.5f
+            && tm->value()[2] == -3.f);
+    }
+
+    /* a variable whose type is a bare double */
+    dart::VariableOptions<double> vo;
+    vo.initial = 1.25;
+    dart::VariableDefinition<double> vd(a, "gain", vo);
+    dart::RemoteVariable<double>     rv(b, "gain");
+    chk("root: variable pair created", vd.valid() && rv.valid());
+    chk("root: variable replicates the initial", wait_for(4000,
+        [&] { auto v = rv.get(); return v && *v == 1.25; }, &b));
+    chk("root: variable set accepted", rv.set(2.5) == dart::SendStatus::Ok);
+    chk("root: variable set converges", wait_for(3000,
+        [&] { auto v = vd.get(); return v && *v == 2.5; }, &b));
+
+    /* the dynamic API over a bare root: MessageBuilder/FieldView through the "" path */
+    auto f64 = dart::Schema::compile("f64");
+    chk("root: dynamic f64 schema", f64 && f64->field_count() == 1);
+    if (f64) {
+        std::atomic<int> hits{ 0 };
+        double seen = 0;
+        dart::Topic dp(a, "dyn", dart::Role::PubOnly, &*f64, rel);
+        dart::Subscriber<> ds(b, "dyn", &*f64,
+            [&](const dart::MessageView& m) { seen = m.get_f64(""); hits++; }, rel);
+        chk("root: dynamic pair created", dp.valid() && ds.valid());
+        chk("root: dynamic matched", wait_for(4000, [&] { return dp.match_count() > 0 && dp.ready(); }, &b));
+        dart::MessageBuilder mb(*f64);
+        mb.set_f64("", -7.5);
+        chk("root: builder set through the empty path", mb.ok());
+        chk("root: dynamic send", dp.send(mb) == dart::SendStatus::Ok);
+        chk("root: dynamic round trip", wait_for(3000, [&] { return hits.load() == 1; }, &b));
+        chk("root: dynamic value read through the empty path", seen == -7.5);
+    }
+    a.stop();
+    return g_failures == fails_at_entry;
+}
+
 int main() {
 #if defined(__cpp_exceptions)
   try {
@@ -438,6 +538,11 @@ int main() {
     std::printf("patterns leg:\n");
     bool pat_ok = patterns_leg();
     std::printf("%s\n", pat_ok ? "PASS: patterns + typed codec" : "FAIL: patterns leg");
+
+    /* bare-type roots: the type itself is the schema */
+    std::printf("value-root leg:\n");
+    bool root_ok = value_root_leg();
+    std::printf("%s\n", root_ok ? "PASS: bare-type roots" : "FAIL: value-root leg");
 
 #if defined(__cpp_exceptions)
     /* a failed constructor throws dart::Error (on_event is required) */

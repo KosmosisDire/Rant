@@ -10,6 +10,11 @@
  * strings and arrays get their typing from the schema like every other field. Building
  * and parsing a schema take a DartAllocFn hook (common/alloc.h); pass a node's and you
  * inherit its static/dynamic memory. The message read/write path allocates nothing.
+ * A schema's root need not be a struct: the whole schema may be ONE BARE TYPE (`bool`,
+ * `f32[]`, `string<64>`, `map`, an enum), so a topic that publishes a bool is just `bool`
+ * and not a one-field wrapper struct. Such a root is ANONYMOUS (no type name: types are
+ * structural, so the same bare type in any language is byte-identical wire and the same
+ * hash) and compiles to a single field named "", addressed by the empty path.
  * Depends only on common/, so it is usable on its own. */
 #ifndef DART_SCHEMA_H
 #define DART_SCHEMA_H
@@ -24,7 +29,7 @@ extern "C" {
 #endif
 
 #ifndef DART_SCHEMA_WIRE_VERSION
-#define DART_SCHEMA_WIRE_VERSION 6u    /* bumped on any schema wire-format change (6: u16 enum option count) */
+#define DART_SCHEMA_WIRE_VERSION 7u    /* bumped on any schema wire-format change (7: any-kind root) */
 #endif
 #ifndef DART_SCHEMA_MAX_DEPTH
 #define DART_SCHEMA_MAX_DEPTH 8u        /* struct nesting the builder accepts */
@@ -103,6 +108,7 @@ typedef struct {
     size_t   cap;
     size_t   len;                              /* wire bytes written so far */
     int      err;                              /* 0 ok; nonzero latches failure */
+    uint8_t  value_root;                       /* 1 = a bare-type root (dart_schema_begin_value) */
     uint16_t depth;                            /* open structs (1 = root only) */
     size_t   count_pos[DART_SCHEMA_MAX_DEPTH]; /* wire offset of each open struct's nfields byte */
     uint16_t field_count[DART_SCHEMA_MAX_DEPTH];
@@ -144,12 +150,27 @@ typedef struct {
  * (so C string literals using comments need their `\n`s, as above). Types are
  * structural: there are no named type references, because a peer's schema can only be
  * trusted by its shape.
+ * The whole text may instead be ONE BARE TYPE, in the exact same spellings, for a topic
+ * whose payload is a single value: "bool", "u8", "f64", "string", "string<64>", "f32[]",
+ * "u8[16]", "string<8>[4]", "map", "enum<u8> { Idle, Run }". That root is anonymous:
+ * naming it ("Temperature: f32" as the whole schema) is an error, because a bare type has
+ * no identity beyond its shape, so the same bare type from any language is the same wire
+ * bytes and the same hash. Its single field is named "" (see dart_schema_field_count).
  * A field's index is its order in the text. Identical text compiles to identical wire
  * bytes, hence the same hash on both ends. Free with dart_schema_free. On any error
  * returns NULL and points *err (optional, may be NULL) at the offending character. */
 DartSchema *dart_schema_compile(DartAllocFn alloc, void *user, const char *text, const char **err);
 
 DartSchemaBuilder dart_schema_begin(DartAllocFn alloc, void *user, const char *root_name);
+/* Begin a BARE-TYPE schema: the root is one anonymous value instead of a struct. Add
+ * EXACTLY ONE field with an empty name (any of the field functions below except
+ * dart_schema_begin_struct: a struct root comes from dart_schema_begin), then finish.
+ *
+ *   DartSchemaBuilder b = dart_schema_begin_value(alloc, user);
+ *   dart_schema_field(&b, "", DART_BOOL);
+ *   DartSchema *flag = dart_schema_finish(&b);
+ */
+DartSchemaBuilder dart_schema_begin_value(DartAllocFn alloc, void *user);
 /* A fixed scalar field (U8..BOOL). */
 void        dart_schema_field(DartSchemaBuilder *b, const char *name, DartSchemaTypeKind kind);
 /* Fixed array of exactly `count` scalar elements. */
@@ -193,9 +214,10 @@ void        dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user);
 
 DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (advertise these) */
 uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */
-DartString  dart_schema_name(const DartSchema *s);        /* root type name */
+DartString  dart_schema_name(const DartSchema *s);        /* root type name ("" for a bare type) */
 /* Spell the schema back as compile-ready DSL text (the inverse of dart_schema_compile):
- * "Name {\n  field: type,\n  nested: {\n    ...\n  }\n}\n". Recompiles to the same wire
+ * "Name {\n  field: type,\n  nested: {\n    ...\n  }\n}\n", or just "bool\n" for a bare-type
+ * root. Recompiles to the same wire
  * (hence hash). Writes up to cap bytes, always NUL-terminated when cap > 0, and returns the
  * FULL length excluding the NUL, so dart_schema_print(s, NULL, 0) measures for sizing. */
 uint32_t    dart_schema_print(const DartSchema *s, char *buf, size_t cap);
@@ -211,7 +233,8 @@ uint32_t    dart_schema_msg_min(const DartSchema *s);
  * dart_schema_message_default, which writes every frame). */
 uint32_t    dart_schema_msg_len(const DartSchema *s, const void *buf, size_t cap);
 /* Fields in the flattened depth-first table (EVERY depth; a field's index is its order
- * of appearance in the schema text, nested members included). */
+ * of appearance in the schema text, nested members included). A bare-type root is one
+ * field, named "" (so the getters/setters address it with the empty path). */
 uint16_t    dart_schema_field_count(const DartSchema *s);
 int         dart_schema_field_at(const DartSchema *s, uint16_t i, DartSchemaFieldInfo *out); /* 1 + fills out, else 0 */
 /* Resolve a field by name; nested members by dotted path ("velocity.dx"). Returns the
@@ -239,7 +262,9 @@ int       dart_schema_validate(const DartSchema *s, DartBytes msg);
 /* Reader/writer structural compatibility: 1 if a reader declaring `sub` can read
  * messages written with `pub`. Same root name, and every sub field must exist in pub
  * under the same name with the same type (a nested struct field must match exactly).
- * The subset applies at the top level: field order and extra pub fields are free. */
+ * The subset applies at the top level: field order and extra pub fields are free.
+ * With a bare-type root the two roots' types must match by the same per-kind rules a
+ * field uses; a bare type against a struct is a mismatch (there is nothing to subset). */
 int dart_schema_subset(const DartSchema *sub, const DartSchema *pub);
 /* dart_schema_subset with a reason: on refusal (returns 0) writes the first
  * incompatibility into buf as one line, e.g. "field 'position': reader f32[8],

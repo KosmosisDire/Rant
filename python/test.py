@@ -7,6 +7,7 @@ the expected values.
 
     python python/test.py
 """
+import enum as _enum
 import os
 import sys
 import threading
@@ -90,6 +91,117 @@ def round_trip():
     except dart.SchemaError:
         check("over-cap raises", True)
     print("variable-kinds round-trip: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
+# The canonical wire of a bare type is its kind alone, so these hashes are the same in
+# every language binding (pinned in C by dart_test's schema-root phase).
+HASH_BOOL = 0xB1EDCA4F3F7A622A
+HASH_F32ARR = 0xD166C4A8DCEC317B
+
+
+class Mode(_enum.IntEnum):
+    IDLE = 0
+    RUN = 1
+    FAULT = 2
+
+
+def value_roots():
+    """Bare types as whole schemas: encode/decode plain values, and the canonical hash."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    check("bool canonical hash", dart.Schema(dart.bool_).hash == HASH_BOOL)
+    check("f32[] canonical hash", dart.Schema(list[dart.f32]).hash == HASH_F32ARR)
+    check("bool dsl", dart.dsl(dart.bool_) == "bool\n")
+    check("f32[] dsl", dart.dsl(list[dart.f32]) == "f32[]\n")
+    check("string(16) dsl", dart.dsl(dart.string(16)) == "string<16>\n")
+    check("bare root reflects as one anonymous field",
+          dart.Schema(dart.f64).field_count == 1
+          and dart.Schema(dart.f64).name == ""
+          and dart.Schema(dart.f64).fields()[0].name == "")
+    for src, value in ((dart.bool_, True), (dart.u8, 200), (dart.i32, -7),
+                       (dart.f32, 1.5), (dart.f64, -2.25), (int, 5), (float, 0.5),
+                       (bool, False), (dart.string(16), "capped"), (str, "unbounded"),
+                       (list[dart.f32], [1.5, -2.5]), (dict, {"battery": 87}),
+                       (dart.u8[4], b"\x01\x02\x03\x04"), (Mode, Mode.FAULT)):
+        sch = dart.Schema(src)
+        out = sch.decode(sch.encode(value))
+        if isinstance(value, list):
+            same = [round(x, 3) for x in out] == [round(x, 3) for x in value]
+        elif isinstance(value, float):
+            same = abs(out - value) < 1e-6
+        elif isinstance(value, bytes):
+            same = bytes(out) == value
+        else:
+            same = out == value
+        check("round-trip %s -> %r" % (dart.dsl(src).strip(), out), same)
+    # text DSL and the bare type agree, and a named bare root is an error
+    check("text `bool` == dart.bool_", dart.Schema("bool").hash == HASH_BOOL)
+    try:
+        dart.Schema("Temperature: f32")
+        check("named bare root refused", False)
+    except dart.SchemaError:
+        check("named bare root refused", True)
+    print("bare-type roots: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
+def value_roots_live():
+    """Two nodes, bare-typed topics and a bare-typed variable, over loopback."""
+    print("bare-root live leg: two nodes, domain 44, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    got = {}
+    a = dart.Node("VA", None, lambda e: None, domain=44, multicast_interface=IFACE)
+    b = dart.Node("VB", None, lambda e: None, domain=44, multicast_interface=IFACE)
+    try:
+        qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=4)
+        pub_flag = dart.Topic[dart.bool_](a, "flag", dart.Role.PUB_ONLY, qos)
+        sub_flag = dart.Topic[dart.bool_](b, "flag", dart.Role.SUB_ONLY, qos)
+        pub_note = dart.Topic[str](a, "note", dart.Role.PUB_ONLY, qos)
+        sub_note = dart.Topic[str](b, "note", dart.Role.SUB_ONLY, qos)
+        b.on_message(lambda m: got.setdefault(m.topic_name, m.value))
+        vd = dart.VariableDefinition[dart.f64](a, "gain", initial=1.25)
+        rv = dart.RemoteVariable[dart.f64](b, "gain")
+        check("handles created", all(h is not None for h in
+                                    (pub_flag, sub_flag, pub_note, sub_note, vd, rv)))
+        deadline = time.time() + 8.0
+        while time.time() < deadline and (pub_flag.match_count() == 0
+                                          or pub_note.match_count() == 0
+                                          or rv.get() is None):
+            a.poll(1)
+            b.poll(1)
+        check("bare topics matched",
+              pub_flag.match_count() == 1 and pub_note.match_count() == 1)
+        check("bare variable replicated the initial", rv.get() == 1.25)
+        pub_flag.send(True)
+        pub_note.send("a bare unbounded string")
+        deadline = time.time() + 5.0
+        while time.time() < deadline and len(got) < 2:
+            a.poll(1)
+            b.poll(1)
+        check("bool delivered as a plain value", got.get("flag") is True)
+        check("string delivered as a plain value", got.get("note") == "a bare unbounded string")
+        rv.set(2.5)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and vd.get() != 2.5:
+            a.poll(1)
+            b.poll(1)
+        check("bare variable set converged", vd.get() == 2.5)
+    finally:
+        a.close()
+        b.close()
+    print("bare-root live leg: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
 
@@ -292,6 +404,8 @@ def on_event(tag):
 def main():
     if not round_trip():
         return 1
+    if not value_roots():
+        return 1
     print("opening nodes (first run compiles the embedded C, please wait)...")
     sub = dart.Node("sub", on_message, on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE)
@@ -355,6 +469,8 @@ def main():
     pub.close()
     sub.close()
 
+    if ok:
+        ok = value_roots_live()
     if ok:
         ok = patterns()
     return 0 if ok else 1
