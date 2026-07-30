@@ -1,7 +1,7 @@
 /* DART WebSocket bridge: one WebSocket connection = one full DART node on the mesh.
  * Text frames are the JSON control plane (open the node, create topics and pattern
  * entities, settle); binary frames are the data plane (a fixed little-endian header plus
- * the raw payload). The protocol (v3) is specified in PROTOCOL.md.
+ * the raw payload). The protocol is specified in PROTOCOL.md (kProtoVersion below).
  *
  * This is a LEAN proxy, not a mesh debugger: it does not expose the peer table or other
  * nodes' schemas. A typed topic/entity carries its own declared schema (both ends paste
@@ -41,14 +41,18 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 5;
+static const int kProtoVersion = 6;
 
-/* Binary frame ops (byte 0). One value space, meaning per direction:
- *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][payload])
- *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 flags][payload]; flags bit0=forced bit1=write-event)
- *   0x03  signal emit (c->s: [u16 ent][payload])      signal fired (s->c: [u16 ent][u32 emitter][payload])
- *   0x04  call (c->s: [u16 ent][u32 call][payload])   call response (s->c: [u32 call][u8 status][u32 provider][payload])
- *   0x05  request reply (c->s: [u32 req][u8 status][payload])   request (s->c: [u16 ent][u32 req][payload]) */
+/* Binary frame ops (byte 0). One value space, meaning per direction. EVERY server-to-client
+ * data frame ends its header with [u64 sent_us], the sender's wall clock at the moment its
+ * send committed (0 = the publisher opted out, or a synthesized outcome): one rule, always
+ * the LAST header field, immediately before the payload, so every other field keeps its
+ * offset. Client-to-server frames carry no stamp.
+ *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][u64 sent][payload])
+ *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 flags][u64 sent][payload]; flags bit0=forced bit1=write-event)
+ *   0x03  signal emit (c->s: [u16 ent][payload])      signal fired (s->c: [u16 ent][u32 emitter][u64 sent][payload])
+ *   0x04  call (c->s: [u16 ent][u32 call][payload])   call response (s->c: [u32 call][u8 status][u32 provider][u64 sent][payload])
+ *   0x05  request reply (c->s: [u32 req][u8 status][payload])   request (s->c: [u16 ent][u32 req][u64 sent][payload]) */
 static const uint8_t kOpData     = 0x01;
 static const uint8_t kOpVar      = 0x02;
 static const uint8_t kOpSignal   = 0x03;
@@ -109,6 +113,7 @@ static void w16(uint8_t *p, uint16_t v){ p[0] = (uint8_t)v; p[1] = (uint8_t)(v >
 static void w32(uint8_t *p, uint32_t v){
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
+static void w64(uint8_t *p, uint64_t v){ for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
 static uint16_t r16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t r32(const uint8_t *p){
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -422,7 +427,7 @@ static void send_event(Conn *c, const dart::Event &ev){
 }
 
 /* Delivery: one DART message -> one binary WebSocket frame [op][u16 topic][u32 publisher]
- * [payload]. Runs on the node's service thread; drops a client that cannot keep up.
+ * [u64 sent_us][payload]. Runs on the node's service thread; drops a client that cannot keep up.
  * Pattern channels never reach this handler (the patterns layer routes them). */
 static void deliver_message(Conn *c, const dart::MessageView &m){
     if (!c->ws) return;
@@ -430,11 +435,12 @@ static void deliver_message(Conn *c, const dart::MessageView &m){
         c->ws->close(1008, "slow consumer");    /* drop rather than buffer forever */
         return;
     }
-    uint8_t hdr[7];
+    uint8_t hdr[15];
     hdr[0] = kOpData;
     w16(hdr + 1, m.topic_index());
     w32(hdr + 3, m.publisher_id());
-    push_frame(c, hdr, 7, m.data());
+    w64(hdr + 7, m.sent_us());        /* the publisher's source stamp (0 = opted out) */
+    push_frame(c, hdr, 15, m.data());
 }
 
 /* ---- control plane ---------------------------------------------------------------- */
@@ -625,15 +631,17 @@ static void op_function_definition(Conn *c, const json &req, const json &seq){
         json meta = { {"op", "request"}, {"fn", id}, {"req", req_id},
                       {"caller", r.caller()}, {"caller_name", std::string(r.caller_name())} };
         dart::Bytes data = r.data();
+        uint64_t sent_us = r.sent_us();   /* read before defer(): the request view is callback-lived */
         dart::Deferred<> d = r.defer();
         {
             std::lock_guard<std::mutex> g(c->mu);
             c->parked.emplace(req_id, std::move(d));
         }
         send_json(c, meta);
-        uint8_t hdr[7];
+        uint8_t hdr[15];
         hdr[0] = kOpRequest; w16(hdr + 1, id); w32(hdr + 3, req_id);
-        push_frame(c, hdr, 7, data);
+        w64(hdr + 7, sent_us);
+        push_frame(c, hdr, 15, data);
     };
     try {
         e->fndef = dart::FunctionDefinition<>(*c->node, name,
@@ -703,10 +711,11 @@ static void op_variable(Conn *c, const json &req, const json &seq, bool definiti
     uint16_t id = e->id;
     bool wants_write = req.value("on_write", false);
     auto push_var = [c, id](const dart::VariableUpdate &u, uint8_t evbit){
-        uint8_t hdr[4];
+        uint8_t hdr[12];
         hdr[0] = kOpVar; w16(hdr + 1, id);
         hdr[3] = (uint8_t)((u.forced() ? 1 : 0) | evbit);   /* bit0 = forced, bit1 = write-event */
-        push_frame(c, hdr, 4, u.value());
+        w64(hdr + 4, u.sent_us());     /* the writer's source stamp (0 = a local/unstamped write) */
+        push_frame(c, hdr, 12, u.value());
     };
     if (definition){
         e->vardef.on_change([push_var](const dart::VariableUpdate &u){ push_var(u, 0); });
@@ -732,9 +741,10 @@ static void op_signal(Conn *c, const json &req, const json &seq){
     try {
         if (listen){
             auto h = [c, id](const dart::MessageView &m){
-                uint8_t hdr[7];
+                uint8_t hdr[15];
                 hdr[0] = kOpSignal; w16(hdr + 1, id); w32(hdr + 3, m.publisher_id());
-                push_frame(c, hdr, 7, m.data());
+                w64(hdr + 7, m.sent_us());
+                push_frame(c, hdr, 15, m.data());
             };
             e->sig = dart::Signal<>(*c->node, name, sc ? &*sc : nullptr, h, o);
         } else {
@@ -776,7 +786,7 @@ static void op_log_subscribe(Conn *c, const json &req, const json &seq){
             send_json(c, { {"op", "log"}, {"level", log_level_str(level)},
                            {"node", std::string(l.node.data(), l.node.size())},
                            {"wall_us", l.wall_us}, {"mono_us", l.mono_us},
-                           {"recv_us", l.recv_us},
+                           {"recv_us", l.recv_us}, {"sent_us", l.sent_us},
                            {"text", std::string(l.text.data(), l.text.size())} });
         });
         if (!ok){ reply_err(c, seq, "logs are disabled on this node"); return; }
@@ -897,20 +907,22 @@ static void on_call(Conn *c, const uint8_t *p, size_t n){
     Ent *e = ent_get(c, id, Ent::FnRemote);
     if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
     auto cb = [c, call](const dart::ResponseView<> &rv){
-        uint8_t hdr[10];
+        uint8_t hdr[18];
         hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)rv.status();
         w32(hdr + 6, rv.provider());
-        push_frame(c, hdr, 10, rv.data());
+        w64(hdr + 10, rv.sent_us());
+        push_frame(c, hdr, 18, rv.data());
     };
     dart::SendStatus rc = e->fnrem.call_async(dart::Bytes(p + 7, n - 7), cb);
     if (rc != dart::SendStatus::Ok){
         /* the call never launched: answer Cancelled so the promise settles, and carry
          * the reason in a send_error event */
         send_error_event(c, "entity", id, rc);
-        uint8_t hdr[10];
+        uint8_t hdr[18];
         hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)dart::CallStatus::Cancelled;
         w32(hdr + 6, 0);
-        push_frame(c, hdr, 10, dart::Bytes());
+        w64(hdr + 10, 0);            /* synthesized outcome: no source stamp */
+        push_frame(c, hdr, 18, dart::Bytes());
     }
 }
 

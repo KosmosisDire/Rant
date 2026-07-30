@@ -1,5 +1,5 @@
 /* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v4, see ../PROTOCOL.md). Zero runtime dependencies: runs
+ * through the bridge (protocol v6, see ../PROTOCOL.md). Zero runtime dependencies: runs
  * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
@@ -24,6 +24,15 @@ const OP_VAR = 0x02; /* var set-force-unforce / var update */
 const OP_SIGNAL = 0x03; /* signal emit / signal fired */
 const OP_CALL = 0x04; /* call / call response */
 const OP_REQUEST = 0x05; /* request reply / request */
+/* Every SERVER-TO-CLIENT data frame ends its header with [u64 sent_us], the sender's wall
+ * clock (UTC microseconds) at the moment its send committed: a SOURCE stamp, so a repaired
+ * or replayed message keeps the original value. 0 = the publisher opted out, or the frame is
+ * a synthesized outcome. Surfaced as `sentUs` wherever a delivery reaches the app; it is a
+ * different clock from a log line's recvUs, so never mix them. Microseconds stay inside the
+ * JS safe-integer range, so it reads as a plain number. */
+function rdSentUs(view, off) {
+    return Number(view.getBigUint64(off, true));
+}
 const CALL_STATUS = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled"];
 /* @dart/meta section mask (OR the bits; 0 = every section). Mirrors DART_META_*. */
 const MetaSection = { Node: 0x1, Proc: 0x2, Topics: 0x4, Peers: 0x8, All: 0 };
@@ -472,11 +481,12 @@ class Layout {
 }
 /* A delivered message: raw bytes plus typed reads through the entity's field table. */
 class DartMessage {
-    constructor(layout, topic, publisher, data) {
+    constructor(layout, topic, publisher, data, sentUs = 0) {
         this._layout = layout;
         this.topic = topic;
         this.publisher = publisher;
         this.data = data;
+        this.sentUs = sentUs;
         this._view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     }
     /* Typed read of one field by dotted path ("vel.dx"). Scalars return number
@@ -563,8 +573,8 @@ class DartTopic {
         return r.drained;
     }
     _match(m) { this.matchCount = m.matches; this.ready = !!m.ready; }
-    _deliver(publisher, data) {
-        this.onMessage?.(new DartMessage(this.layout, this, publisher, data));
+    _deliver(publisher, data, sentUs) {
+        this.onMessage?.(new DartMessage(this.layout, this, publisher, data, sentUs));
     }
 }
 /* Publish-side handle over a topic; speaks plain nested objects. */
@@ -644,7 +654,8 @@ class RemoteFunction {
             if (timeoutMs > 0) {
                 p.timer = setTimeout(() => {
                     this._node._calls.delete(callId);
-                    resolve({ ok: false, status: "timeout", value: undefined, data: new Uint8Array(0), provider: 0 });
+                    resolve({ ok: false, status: "timeout", value: undefined,
+                        data: new Uint8Array(0), provider: 0, sentUs: 0 });
                 }, timeoutMs);
             }
             this._node._calls.set(callId, p);
@@ -660,6 +671,7 @@ class VarHandle {
         this.name = name;
         this.layout = new Layout(r);
         this.forced = false;
+        this.sentUs = 0;
         this._value = undefined;
         this._raw = undefined;
         this._waiters = new Set();
@@ -689,7 +701,7 @@ class VarHandle {
     onChange(handler) {
         this._onChange = handler;
         if (handler && this._value !== undefined)
-            handler(this._value, { forced: this.forced });
+            handler(this._value, { forced: this.forced, sentUs: this.sentUs });
     }
     /* Observe EVERY applied write (not just state changes; no replay). Requires the
      * variable to have been created with onWrite:true so the bridge pushes them. One
@@ -707,10 +719,11 @@ class VarHandle {
         frame.set(payload, 4);
         this._node._ws.send(frame);
     }
-    _update(payload, forced) {
+    _update(payload, forced, sentUs) {
         this._raw = payload;
         this._value = this.layout.decode(payload);
         this.forced = forced;
+        this.sentUs = sentUs;
         for (const w of this._waiters) {
             if (w.timer !== undefined)
                 clearTimeout(w.timer);
@@ -718,13 +731,13 @@ class VarHandle {
         }
         this._waiters.clear();
         if (this._onChange)
-            this._onChange(this._value, { forced });
+            this._onChange(this._value, { forced, sentUs });
     }
     /* a write-event frame (bit1 set): fire onWrite only; the cache is maintained by the
      * on_change frames, so a write is not double-counted. */
-    _write(payload, forced) {
+    _write(payload, forced, sentUs) {
         if (this._onWrite)
-            this._onWrite(this.layout.decode(payload), { forced });
+            this._onWrite(this.layout.decode(payload), { forced, sentUs });
     }
     _match(_m) { }
 }
@@ -766,8 +779,8 @@ class DartSignal {
         this._node._ws.send(frame);
     }
     _match(m) { this.listenerCount = m.listeners; }
-    _fire(emitter, data) {
-        this._handler?.(this.layout.decode(data), { emitter, data });
+    _fire(emitter, data, sentUs) {
+        this._handler?.(this.layout.decode(data), { emitter, data, sentUs });
     }
 }
 /* The node handle: one WebSocket connection = one DART node owned by the bridge. */
@@ -816,7 +829,8 @@ class DartNode {
                 if (p.timer !== undefined)
                     clearTimeout(p.timer);
                 if (this._closing)
-                    p.resolve({ ok: false, status: "cancelled", value: undefined, data: new Uint8Array(0), provider: 0 });
+                    p.resolve({ ok: false, status: "cancelled", value: undefined,
+                        data: new Uint8Array(0), provider: 0, sentUs: 0 });
                 else
                     p.reject(new Error("connection closed"));
             }
@@ -853,11 +867,12 @@ class DartNode {
         }
         else if (m.op === "request") {
             /* meta first; the binary payload frame follows on the same ordered socket */
-            this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "" });
+            this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "", sentUs: 0 });
         }
         else if (m.op === "log") {
             this._onLog?.({ level: m.level, node: m.node, wallUs: m.wall_us,
-                monoUs: m.mono_us, recvUs: m.recv_us, text: m.text });
+                monoUs: m.mono_us, recvUs: m.recv_us, sentUs: m.sent_us ?? 0,
+                text: m.text });
         }
     }
     _onBinary(buf) {
@@ -866,36 +881,37 @@ class DartNode {
             return;
         const view = new DataView(buf);
         switch (b[0]) {
-            case OP_DATA: { /* [u16 topic][u32 publisher][payload] */
-                if (b.length < 7)
+            case OP_DATA: { /* [u16 topic][u32 publisher][u64 sent][payload] */
+                if (b.length < 15)
                     return;
                 const ch = this._topics.get(view.getUint16(1, true));
-                ch?._deliver(view.getUint32(3, true), b.subarray(7));
+                ch?._deliver(view.getUint32(3, true), b.subarray(15), rdSentUs(view, 7));
                 return;
             }
-            case OP_VAR: { /* [u16 ent][u8 flags][payload]; flags bit0=forced bit1=write-event */
-                if (b.length < 4)
+            case OP_VAR: { /* [u16 ent][u8 flags][u64 sent][payload]; flags bit0=forced bit1=write-event */
+                if (b.length < 12)
                     return;
                 const v = this._entities.get(view.getUint16(1, true));
                 if (v instanceof VarHandle) {
                     const forced = (b[3] & 1) !== 0;
+                    const sentUs = rdSentUs(view, 4);
                     if (b[3] & 2)
-                        v._write(b.subarray(4), forced);
+                        v._write(b.subarray(12), forced, sentUs);
                     else
-                        v._update(b.subarray(4), forced);
+                        v._update(b.subarray(12), forced, sentUs);
                 }
                 return;
             }
-            case OP_SIGNAL: { /* [u16 ent][u32 emitter][payload] */
-                if (b.length < 7)
+            case OP_SIGNAL: { /* [u16 ent][u32 emitter][u64 sent][payload] */
+                if (b.length < 15)
                     return;
                 const s = this._entities.get(view.getUint16(1, true));
                 if (s instanceof DartSignal)
-                    s._fire(view.getUint32(3, true), b.subarray(7));
+                    s._fire(view.getUint32(3, true), b.subarray(15), rdSentUs(view, 7));
                 return;
             }
-            case OP_CALL: { /* [u32 call][u8 status][u32 provider][payload] */
-                if (b.length < 10)
+            case OP_CALL: { /* [u32 call][u8 status][u32 provider][u64 sent][payload] */
+                if (b.length < 18)
                     return;
                 const callId = view.getUint32(1, true);
                 const p = this._calls.get(callId);
@@ -905,25 +921,27 @@ class DartNode {
                 if (p.timer !== undefined)
                     clearTimeout(p.timer);
                 const status = CALL_STATUS[b[5]] ?? "cancelled";
-                const data = b.subarray(10);
+                const data = b.subarray(18);
                 p.resolve({
                     ok: status === "ok",
                     status,
                     value: status === "ok" ? p.layout.decode(data) : undefined,
                     data,
                     provider: view.getUint32(6, true),
+                    sentUs: rdSentUs(view, 10),
                 });
                 return;
             }
-            case OP_REQUEST: { /* [u16 ent][u32 req][payload] */
-                if (b.length < 7)
+            case OP_REQUEST: { /* [u16 ent][u32 req][u64 sent][payload] */
+                if (b.length < 15)
                     return;
                 const fn = this._entities.get(view.getUint16(1, true));
                 const reqId = view.getUint32(3, true);
-                const info = this._reqMeta.get(reqId) ?? { caller: 0, callerName: "" };
+                const info = this._reqMeta.get(reqId) ?? { caller: 0, callerName: "", sentUs: 0 };
+                info.sentUs = rdSentUs(view, 7); /* the caller's stamp rides the binary frame */
                 this._reqMeta.delete(reqId);
                 if (fn instanceof FunctionDefinition)
-                    void fn._handle(reqId, info, b.subarray(7));
+                    void fn._handle(reqId, info, b.subarray(15));
                 return;
             }
             default: return; /* reserved ops: ignore */

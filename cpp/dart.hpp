@@ -913,7 +913,8 @@ struct Peer {
 /* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
  * `text` views are valid for the callback only (copy them to keep them). wall_us is epoch
  * micros (comparable across nodes); mono_us is the publisher's monotonic clock (orders
- * within one node); recv_us is this node's clock when the poll received it. */
+ * within one node); recv_us is this node's clock when the poll received it; sent_us is the
+ * transport's source stamp for the carrying message (see MessageView::sent_us). */
 struct LogLine {
     LogLevel         level = LogLevel::Info;
     std::string_view node;         /* the publishing node's name */
@@ -921,6 +922,7 @@ struct LogLine {
     uint64_t         wall_us = 0;
     uint64_t         mono_us = 0;
     uint64_t         recv_us = 0;
+    uint64_t         sent_us = 0;
     std::string_view text;
 };
 
@@ -1965,6 +1967,7 @@ public:
             ln.wall_us = m.get_uint("wall_us");
             ln.mono_us = m.get_uint("mono_us");
             ln.recv_us = m.recv_us();
+            ln.sent_us = m.sent_us();
             ln.text    = m.get_string("text");
             cb(ln);
         };

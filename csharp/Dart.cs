@@ -820,6 +820,8 @@ namespace Dart
         public ulong WallUs;
         public ulong MonoUs;
         public ulong RecvUs;
+        /// <summary>The carrying message's source stamp (see DartMessage.SentUs).</summary>
+        public ulong SentUs;
         public string Text;
 
         public override string ToString() => $"[{Level}] {Node}: {Text}";
@@ -1315,6 +1317,7 @@ namespace Dart
             AddSubHandler(idx, m => handler(new DartLogLine
             {
                 Level = level, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
+                SentUs = m.SentUs,
                 WallUs = LogFieldU(m, "wall_us"), MonoUs = LogFieldU(m, "mono_us"),
                 Text = m.Fields != null && m.Fields.TryGetValue("text", out var t) ? t as string ?? "" : "",
             }));

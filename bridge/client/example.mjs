@@ -35,25 +35,29 @@ console.log(`connected to ${url}`);
 
 /* ---- the robot hosts everything -------------------------------------------------- */
 const telemetry = await robot.publisher("telemetry", TELEMETRY, { reliable: true });
+let reqSentUs = 0;
 const add = await robot.functionDefinition("add", ADD_REQ, ADD_RSP,
-    (req) => ({ sum: req.a + req.b }));                       /* return value = the reply */
+    (req, info) => { reqSentUs = info.sentUs;                  /* the caller's source stamp */
+                     return { sum: req.a + req.b }; });        /* return value = the reply */
 const config = await robot.variableDefinition("config", CONFIG,
     { initial: { rate_hz: 50, label: "default" } });
 const alerts = await robot.signal("alert", ALERT);            /* emit side */
 
 /* ---- the dashboard uses them ------------------------------------------------------ */
-let sawTelemetry;
+let sawTelemetry, msgSentUs = 0;
 const gotTelemetry = new Promise((res) => { sawTelemetry = res; });
 await dash.subscriber("telemetry", TELEMETRY, (v, msg) => {
+    msgSentUs = msg.sentUs;   /* the publisher's wall clock when it sent (0 = opted out) */
     console.log(`telemetry #${v.seq}  battery=${v.battery.toFixed(1)}%  ` +
                 `pos=(${v.pos.x}, ${v.pos.y})  from peer ${msg.publisher}`);
     sawTelemetry(v);
 });
 const addRemote = await dash.remoteFunction("add", ADD_REQ, ADD_RSP);
 const configRemote = await dash.remoteVariable("config", CONFIG);
-let sawAlert;
+let sawAlert, alertSentUs = 0;
 const gotAlert = new Promise((res) => { sawAlert = res; });
-await dash.signal("alert", ALERT, (v) => {
+await dash.signal("alert", ALERT, (v, info) => {
+    alertSentUs = info.sentUs;
     console.log(`alert level ${v.level}: "${v.what}"`);
     sawAlert(v);
 });
@@ -117,15 +121,26 @@ if (!snap.valid) throw new Error("meta query failed");
 
 /* ---- on_write: every applied write, even a byte-identical re-set ------------------ */
 const STATUS = `Status { state: u8 }`;
-let writes = 0, changes = 0;
+let writes = 0, changes = 0, writeSentUs = 0;
 const status = await robot.variableDefinition("status", STATUS, { initial: { state: 1 }, onWrite: true });
 status.onChange(() => { changes++; });   /* replays the initial once, then only on change */
-status.onWrite(() => { writes++; });
+status.onWrite((_v, info) => { writes++; writeSentUs = info.sentUs; });
 status.set({ state: 1 });                /* byte-identical: a write, not a change */
 status.set({ state: 2 });                /* a real change: both fire */
 await new Promise((res) => setTimeout(res, 200));
 console.log(`status writes=${writes} changes=${changes} (writes > changes: re-sets fire on_write only)`);
 if (writes < 2) throw new Error("on_write did not fire for every write");
+
+/* ---- source timestamps: every delivery surface carries the sender's wall clock ----- */
+const nowUs = Date.now() * 1000;
+const stamps = { message: msgSentUs, call: r.sentUs, request: reqSentUs,
+                 signal: alertSentUs, variable: writeSentUs };
+console.log("sent_us per surface: " + Object.entries(stamps)
+    .map(([k, v]) => `${k}=${v ? `${((nowUs - v) / 1000).toFixed(1)}ms ago` : "0"}`).join("  "));
+for (const [what, us] of Object.entries(stamps)) {
+    if (!us) throw new Error(`no source timestamp on the ${what} surface`);
+    if (Math.abs(nowUs - us) > 60e6) throw new Error(`${what} sent_us is not a wall clock: ${us}`);
+}
 
 console.log("done");
 clearTimeout(fail);

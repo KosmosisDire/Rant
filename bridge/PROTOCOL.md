@@ -1,4 +1,4 @@
-# DART WebSocket bridge protocol (v5)
+# DART WebSocket bridge protocol (v6)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
@@ -81,7 +81,7 @@ request, only for a broken WebSocket.
                                   //   names resolve even for topics this node doesn't share
 ```
 
-Reply: `{ "ok": true, "proto": 5, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 6, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -389,13 +389,15 @@ One per delivered `@dart/log` line at a subscribed level, from any other node:
 
 ```json
 { "op": "log", "level": "error", "node": "gripper", "text": "stalled",
-  "wall_us": 1753200000000000, "mono_us": 84213374, "recv_us": 84213402 }
+  "wall_us": 1753200000000000, "mono_us": 84213374, "recv_us": 84213402,
+  "sent_us": 1753200000000012 }
 ```
 
 `node` is the publishing node's name; `wall_us` is epoch micros (comparable across
 nodes, and within JS safe-integer range); `mono_us` orders lines within one node;
-`recv_us` is this node's clock when the poll received it. Low rate, so this rides
-the text plane as decoded JSON (no schema table needed).
+`recv_us` is this node's clock when the poll received it; `sent_us` is the carrying
+message's source stamp (as on the binary frames). Low rate, so this rides the text
+plane as decoded JSON (no schema table needed).
 
 ### `request` : an incoming function call (definition side)
 
@@ -433,11 +435,24 @@ matching thing in each direction. All headers little-endian.
 
 | op | frame | meaning |
 |----|-------|---------|
-| `0x01` | `[u16 topic][u32 publisher][payload]` | topic delivery |
-| `0x02` | `[u16 entity][u8 flags][payload]` | variable update; `flags` bit0 = forced (shadow source active), bit1 = write-event (an `on_write` push, not a change) |
-| `0x03` | `[u16 entity][u32 emitter][payload]` | signal firing (listen entities only) |
-| `0x04` | `[u32 call][u8 status][u32 provider][payload]` | function-call outcome for `call` |
-| `0x05` | `[u16 fn][u32 req][payload]` | request payload (pairs with the `request` JSON push) |
+| `0x01` | `[u16 topic][u32 publisher][u64 sent_us][payload]` | topic delivery |
+| `0x02` | `[u16 entity][u8 flags][u64 sent_us][payload]` | variable update; `flags` bit0 = forced (shadow source active), bit1 = write-event (an `on_write` push, not a change) |
+| `0x03` | `[u16 entity][u32 emitter][u64 sent_us][payload]` | signal firing (listen entities only) |
+| `0x04` | `[u32 call][u8 status][u32 provider][u64 sent_us][payload]` | function-call outcome for `call` |
+| `0x05` | `[u16 fn][u32 req][u64 sent_us][payload]` | request payload (pairs with the `request` JSON push) |
+
+Every server-to-client frame carries `sent_us` as the LAST header field,
+immediately before the payload: one rule for all five ops, so each frame's other
+fields keep their offsets and the payload starts at 15, 12, 15, 18, 15 bytes
+respectively. Client-to-server frames carry no stamp.
+
+**`sent_us` is a SOURCE timestamp**: the sending node's wall clock in UTC
+microseconds, taken when its send committed, so a message repaired, replayed from
+history, or handed over shared memory keeps the original value. 0 means the
+publisher opted out (`no_timestamp` on its topic) or the frame is a synthesized
+outcome (a refused call). It compares across hosts only as well as their clocks
+are synced, and it is a different clock from the `recv_us` on a log line: never
+mix the two.
 
 Other op values are reserved: a receiver must ignore unknown ops, the server
 drops them silently.
@@ -534,6 +549,11 @@ Introspection is `await node.peers()`, `await node.entities()`,
 (returns `{ valid, status, provider, info }`, never throwing on status). A
 variable created with `{ onWrite: true }` routes every applied write to its
 `onWrite(handler)` callback, separately from `onChange`.
+
+The source stamp reaches every delivery surface as `sentUs` (microseconds, a
+plain number): `msg.sentUs` on a topic message, the second argument's `sentUs` on
+a variable `onChange`/`onWrite` handler and on a signal handler, `r.sentUs` on a
+call result, and `info.sentUs` on a function definition's request handler.
 
 ## Non-goals
 

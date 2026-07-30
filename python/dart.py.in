@@ -833,6 +833,7 @@ class LogLine:
     wall_us: int
     mono_us: int
     recv_us: int
+    sent_us: int    # the carrying message's source stamp (see Message.sent_us)
     text: str
 
 
@@ -2188,7 +2189,8 @@ class Node:
             f = m.fields or {}
             handler(LogLine(level=lvl, node=m.publisher_name, node_id=m.publisher_id,
                             wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
-                            recv_us=m.recv_us, text=f.get("text", "") or ""))
+                            recv_us=m.recv_us, sent_us=m.sent_us,
+                            text=f.get("text", "") or ""))
         self._add_sub_handler(idx, _wrap)
         return True
 
