@@ -325,6 +325,7 @@ class DartNodeNet(Structure):
         ("multicast_ttl", c_uint8),
         ("seed_peers", c_void_p),
         ("n_seed_peers", c_uint16),
+        ("unicast_only", c_uint8),
         ("recv_buffer_bytes", c_uint32),
         ("send_buffer_bytes", c_uint32),
         ("fragment_size", c_uint16),
@@ -854,6 +855,10 @@ class NodeOptions:
     seed_peers: list = dataclasses.field(default_factory=list)
                                   # "ip" or "ip:port" strings to also unicast announces to, so
                                   # discovery works where multicast is filtered
+    unicast_only: bool = False    # this node cannot multicast at all: join no group, announce only
+                                  # to seed_peers + peers already known, and ask whoever hears us to
+                                  # RE-ANNOUNCE us on their paths. Seeding ONE reachable node then
+                                  # makes us discoverable mesh-wide (data is unicast either way).
     fragment_size: int = 0
     announce_interval_us: int = 0
     peer_timeout_us: int = 0
@@ -2138,6 +2143,7 @@ class Node:
         if n_seeds:
             co.net.seed_peers = cast(seeds, c_void_p)
             co.net.n_seed_peers = n_seeds
+        co.net.unicast_only = 1 if options.unicast_only else 0
         co.net.fragment_size = options.fragment_size
         co.discovery.announce_interval_us = options.announce_interval_us
         co.discovery.peer_timeout_us = options.peer_timeout_us

@@ -34,6 +34,7 @@ typedef struct {
     void                 *user;                 /* passed to on_event */
     const DartDiscoveryAddr *seed_peers;        /* unicast seeds for multicast-filtered nets */
     uint16_t              n_seed_peers;
+    uint8_t               unicast_only;         /* 1 = never touch multicast (see the net config) */
     DartBytes             meta;                 /* optional OPAQUE overlay to advertise; {NULL,0} = none */
     uint16_t              meta_cap;        /* per-peer INCOMING overlay buffer; 0 = default */
     uint16_t              peer_user_bytes;      /* opaque scratch reserved per peer; 0 = none
@@ -83,6 +84,13 @@ typedef struct {
     const DartDiscoveryAddr *seeds;  /* peers to also unicast announces to, for
                                  networks where multicast is filtered (max DART_DISCOVERY_MAX_SEEDS) */
     uint16_t     n_seeds;
+    uint8_t      unicast_only;  /* 1 = this host cannot multicast at all (a stack without IGMP, a
+                                 segment that filters it): join nothing, send to seeds and known
+                                 peers only, and never fail open for want of a membership. Implies
+                                 discovery.relay_me, so peers that CAN multicast re-announce us on
+                                 their paths (dart_discovery_poll_relay) and one seeded address is
+                                 enough to become discoverable mesh-wide. Seed at least one peer,
+                                 or be seeded BY one: with neither, nothing can ever find us. */
 } DartDiscoveryNetConfig;
 
 size_t     dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg);

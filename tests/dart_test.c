@@ -902,6 +902,27 @@ static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16
     return off + 4;
 }
 
+/* craft an announce that STATES its locator: [u16 port][u8 ip_len=4][ip][u8 name_len=0].
+   flags 0x04 = RELAY_ME (sender cannot multicast), 0x08 = PROXIED (a relay speaking for
+   the origin, so the stated address is only where the RELAY sees it). */
+static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
+                       uint32_t mver, const uint8_t ip[4]){
+    size_t off = DART_DISCOVERY_META_OFF;
+    uint8_t *b = p + off;
+    memset(p, 0, off);
+    p[0]='u';p[1]='D';p[2]='S';p[3]='C';
+    p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
+    p[5]=flags;
+    p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
+    memset(p+8, uid, 16);
+    p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
+    p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
+    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=4;
+    memcpy(b+3, ip, 4); b[7]=0;                    /* name_len 0, no overlay */
+    p[off-2]=8; p[off-1]=0;                        /* meta_len = 8 */
+    return off + 8;
+}
+
 static void disc_core_checks(void){
     static uint8_t mem[8192];
     uint8_t buf[DART_DISCOVERY_WIRE_MAX], out[DART_DISCOVERY_WIRE_MAX];
@@ -976,6 +997,52 @@ static void disc_core_checks(void){
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
                dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, dart_discovery_peer_count(st));
     }
+
+    /* 8. RELAY (the rules the loopback e2e phase cannot see, since every address there
+          is 127.0.0.1): who enlists us, one hop only, and a proxied locator losing to a
+          direct path we are still hearing. */
+    { uint32_t id9; DartDiscoveryAddr a; size_t pn; uint16_t pport;
+      st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
+      dart_discovery_update(st, 1000, out, sizeof out);
+      /* (a) a DIRECT relay-me announce enlists us: we owe a proxied announce for it */
+      n=dc_mk(buf,9,0x04,99,7001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),3000);
+      id9=dc_up_id;
+      pn = dart_discovery_poll_relay(st, out, sizeof out);
+      ST_CHECK(pn > 0 && (out[5] & 0x08) && !(out[5] & 0x04),
+               "disc-core: relay-me peer is proxied, PROXIED and never re-relayable (n=%u flags=0x%02X)",
+               (unsigned)pn, (unsigned)(pn ? out[5] : 0));
+      pport = pn ? (uint16_t)(out[DART_DISCOVERY_META_OFF] |
+                             ((uint16_t)out[DART_DISCOVERY_META_OFF+1] << 8)) : 0;
+      ST_CHECK(pn > 0 && out[8]==9 && out[DART_DISCOVERY_META_OFF+2]==4 &&
+               memcmp(out+DART_DISCOVERY_META_OFF+3, sa, 4)==0 && pport==7001,
+               "disc-core: the proxy carries the ORIGIN's uuid + the locator we hold (uuid=%u port=%u)",
+               (unsigned)(pn ? out[8] : 0), (unsigned)pport);
+      ST_CHECK(dart_discovery_poll_relay(st, out, sizeof out)==0,
+               "disc-core: one proxied announce per peer per interval");
+      /* (b) a PROXIED announce never enlists a SECOND hop, even carrying RELAY_ME: a
+             peer we know only second-hand is not ours to introduce (the loop stop) */
+      n=dc_mk_ip(buf,11,(uint8_t)(0x08|0x04),99,7011,1,sc);
+      dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),3100);
+      ST_CHECK(dart_discovery_peer_count(st)==2 && dart_discovery_poll_relay(st,out,sizeof out)==0,
+               "disc-core: a proxied announce never enlists a second relay hop");
+      /* (c) a proxied locator is a CANDIDATE: the direct path we are still hearing wins,
+             so a relay's view cannot flap the address a peer's data is unicast to */
+      n=dc_mk_ip(buf,9,0x08,99,7001,2,sb);        /* the relay says peer 9 is at 10.0.0.2 */
+      dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),3200);
+      memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id9, &a);
+      ST_CHECK(memcmp(a.ip, sa, 4)==0,
+               "disc-core: a proxied locator never stomps a live direct one (%u.%u.%u.%u)",
+               a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
+      /* (d) contrast: the same stated address WITHOUT the proxied flag is the peer
+             speaking for itself, which stays authoritative and does move it */
+      n=dc_mk_ip(buf,9,0,99,7001,3,sb);
+      dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),3300);
+      memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id9, &a);
+      ST_CHECK(memcmp(a.ip, sb, 4)==0,
+               "disc-core: ...but a peer's OWN stated locator still is (%u.%u.%u.%u)",
+               a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
+    }
+
 }
 
 /* node-core peer lifecycle (sans-IO): drive dart_node_core_peer_up/down/refused
@@ -4191,6 +4258,138 @@ static void matchwait_checks(void){
     }
 }
 
+/* ============ relay: DISCOVERY FOR A NODE THAT CANNOT MULTICAST ============ *
+ * U opens unicast_only (joins no group, announces only to its seeds + peers it already
+ * knows) with ONE seeded address: R's data port. R can multicast; B can multicast but
+ * knows nothing of U and can never hear U's announces, because U sends to nobody but R.
+ * So every U<->B fact below arrives through R's PROXIED announces -- and once introduced
+ * the two sustain each other directly (announces already go unicast to every known peer),
+ * which the relay-death phase pins. Loopback-pinned + own domain, like the other phases. */
+static unsigned long rly_recv = 0;
+static char rly_last[64];
+static void rly_on_message(const DartMsg *msg){
+    size_t k = msg->data.len < sizeof rly_last - 1 ? msg->data.len : sizeof rly_last - 1;
+    memcpy(rly_last, msg->data.data, k); rly_last[k] = '\0';
+    rly_recv++;
+}
+/* is `name` an ACTIVE peer of n? (the peer view is discovery's own, valid until the next poll) */
+static int rly_sees(DartNode *n, const char *name){
+    uint16_t c = 0, i; size_t nl = strlen(name);
+    const DartDiscoveryPeer *p = dart_node_peers(n, &c);
+    for (i=0;i<c;i++)
+        if (p[i].liveness == DART_PEER_ACTIVE && p[i].name.len == nl &&
+            memcmp(p[i].name.data, name, nl) == 0) return 1;
+    return 0;
+}
+static void rly_pump(DartNode *a, DartNode *b, DartNode *c, int iters){
+    int t;
+    for (t=0;t<iters;t++){
+        if (a) dart_node_poll(a, 2);
+        if (b) dart_node_poll(b, 2);
+        if (c) dart_node_poll(c, 2);
+    }
+}
+static void relay_checks(void){
+    /* R's data port is fixed so U can seed exactly one address (per-process, like the
+       matchwait port: concurrent selftests must not collide on the bind) */
+    const uint16_t R_PORT = (uint16_t)(20000u + st_domain_base % 15000u);
+    DartDiscoveryAddr seed; int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4; seed.port=R_PORT;
+
+    /* (a) INTRODUCTION + DATA, then the relay dies */
+    { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts uo, ro, bo; DartNode *U=NULL, *R=NULL, *B=NULL;
+      DartTopic *ut=NULL, *bt=NULL;
+      memset(&ro,0,sizeof ro); ro.domain=ST_DOMAIN+27; ro.disable_shm=1; ro.discovery.max_peers=4;
+      ro.discovery.announce_interval_us=200000;
+      ro.net.multicast_interface="127.0.0.1";
+      ro.net.data_port=R_PORT;                 /* the one address anybody ever states */
+      bo=ro; bo.net.data_port=0;
+      uo=ro; uo.net.data_port=0;
+      uo.net.unicast_only=1;                    /* no group join, no group sends, RELAY_ME */
+      uo.net.seed_peers=&seed; uo.net.n_seed_peers=1;
+      rly_recv=0; rly_last[0]='\0';
+
+      R = dart_node_open(&ra, "rly-relay", NULL, NULL, &ro);
+      ST_CHECK(R!=NULL, "relay: relay node opens (is port %d free?)", (int)R_PORT);
+      B = dart_node_open(&ba, "rly-far", rly_on_message, NULL, &bo);
+      U = dart_node_open(&ua, "rly-uni", NULL, NULL, &uo);
+      ST_CHECK(U!=NULL, "relay: unicast-only node opens with no multicast membership");
+      ST_CHECK(B!=NULL, "relay: far node opens");
+      if (U && R && B){
+          bt = dart_node_create_topic(B, "rly/t", DART_SUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } });
+          ut = dart_node_create_topic(U, "rly/t", DART_PUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE, .keep_last=8 } });
+          ST_CHECK(ut && bt, "relay: topics up");
+
+          for (t=0;t<3000 && !(rly_sees(B,"rly-uni") && rly_sees(U,"rly-far"));t++)
+              rly_pump(U,R,B,1);
+          ST_CHECK(rly_sees(B,"rly-uni"),
+                   "relay: far node discovers the unicast-only node it cannot hear");
+          ST_CHECK(rly_sees(U,"rly-far"),
+                   "relay: and the unicast-only node discovers it back");
+
+          if (ut && bt){
+              int r;
+              for (t=0;t<2000 && dart_topic_match_count(ut)==0;t++) rly_pump(U,R,B,1);
+              ST_CHECK(dart_topic_match_count(ut)==1, "relay: topic matches across the introduction (%d)",
+                       dart_topic_match_count(ut));
+              r = dart_topic_send(ut, dart_bytes("over-unicast", 12));
+              for (t=0;t<2000 && rly_recv==0;t++) rly_pump(U,R,B,1);
+              ST_CHECK(r==DART_OK && rly_recv==1 && strcmp(rly_last,"over-unicast")==0,
+                       "relay: data flows unicast end to end (r=%d recv=%lu '%s')", r, rly_recv, rly_last);
+          }
+
+          /* the relay only INTRODUCED: it is not in the data path and not needed to keep
+             the pair alive, since each now unicasts its announces to the other directly */
+          dart_node_close(R,1); R=NULL;
+          rly_pump(U,NULL,B,400);                       /* ~0.8s: several announce intervals */
+          ST_CHECK(rly_sees(B,"rly-uni") && rly_sees(U,"rly-far"),
+                   "relay: the pair outlives the relay (B sees U=%d, U sees B=%d)",
+                   rly_sees(B,"rly-uni"), rly_sees(U,"rly-far"));
+          ST_CHECK(!rly_sees(B,"rly-relay") && !rly_sees(U,"rly-relay"),
+                   "relay: ...and the departed relay itself is gone from both");
+          if (ut && bt){
+              int r = dart_topic_send(ut, dart_bytes("after-relay-died", 16));
+              for (t=0;t<2000 && rly_recv<2;t++) rly_pump(U,NULL,B,1);
+              ST_CHECK(r==DART_OK && rly_recv==2 && strcmp(rly_last,"after-relay-died")==0,
+                       "relay: data still flows with the relay dead (r=%d recv=%lu '%s')",
+                       r, rly_recv, rly_last);
+          }
+      }
+      if (R) dart_node_close(R,1);
+      if (U) dart_node_close(U,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&ua); dart_allocator_reset(&ra); dart_allocator_reset(&ba);
+    }
+
+    /* (b) CONTROL: the same unicast-only node with NOBODY to relay it (no seed, no peer)
+       is unreachable in both directions -- so (a) measured the relay, not the loopback. */
+    { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts uo, bo; DartNode *U=NULL, *B=NULL;
+      memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+28; bo.disable_shm=1; bo.discovery.max_peers=4;
+      bo.discovery.announce_interval_us=200000;
+      bo.net.multicast_interface="127.0.0.1";
+      uo=bo; uo.net.unicast_only=1;              /* no seeds: it can announce to nobody at all */
+      U = dart_node_open(&ua, "rly-alone", NULL, NULL, &uo);
+      B = dart_node_open(&ba, "rly-far2", NULL, NULL, &bo);
+      ST_CHECK(U && B, "relay: control pair up");
+      if (U && B){
+          rly_pump(U,B,NULL,400);                 /* ~0.8s: several announce intervals each way */
+          ST_CHECK(!rly_sees(B,"rly-alone") && !rly_sees(U,"rly-far2"),
+                   "relay: unrelayed unicast-only node stays invisible (B sees U=%d, U sees B=%d)",
+                   rly_sees(B,"rly-alone"), rly_sees(U,"rly-far2"));
+      }
+      if (U) dart_node_close(U,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&ua); dart_allocator_reset(&ba);
+    }
+}
+
 /* ============ sentts: the per-message SOURCE TIMESTAMP ============ *
  * Every published message carries the sender's wall clock (DartMsg.sent_us) unless the
  * topic opts out with qos.no_timestamp. A publisher node and a subscriber node on their own
@@ -5012,6 +5211,7 @@ static int selftest_main(void){
     metalog_checks();             /* 19e1. built-in @dart/log topics + the @dart/meta endpoint */
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
+    relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     ts_checks();                  /* 19g. per-message source timestamp: stamp, opt-out, replay, queue */
 #ifdef DART_THREADS
     threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */

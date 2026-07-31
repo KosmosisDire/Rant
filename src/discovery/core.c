@@ -7,6 +7,11 @@
 #define DART_DISCOVERY_HDR_LEN 24            /* magic(4) ver(1) flags(1) domain(2) uuid(16) */
 #define DART_DISCOVERY_FLAG_BYE 0x01
 #define DART_DISCOVERY_FLAG_REQ 0x02         /* solicit: recipients announce back now */
+#define DART_DISCOVERY_FLAG_RELAY_ME 0x04    /* sender cannot multicast: whoever hears this DIRECTLY
+                                                should re-announce it on their own paths */
+#define DART_DISCOVERY_FLAG_PROXIED  0x08    /* this announce was rebuilt by a relay on another
+                                                node's behalf: never re-relayed (loop stop), and its
+                                                embedded locator is a candidate, not authoritative */
 #define DART_DISCOVERY_BLOB_RESEND 3u        /* announces that carry the full blob after a change */
 
 struct i_DartDiscoveryPeer {
@@ -31,6 +36,8 @@ struct i_DartDiscoveryPeer {
     uint8_t  name_len;
     uint8_t  reply_due;     /* owes a unicast announce+blob (this peer solicited us) */
     uint8_t  solicit_due;   /* owes a unicast REQ (re-fetch: peer's version is ahead) */
+    uint8_t  wants_relay;   /* its DIRECT announces carry RELAY_ME: we re-announce it for it */
+    uint8_t  relay_due;     /* a proxied announce for it is due out of poll_relay */
 };
 typedef struct i_DartDiscoveryPeer i_DartDiscoveryPeer;
 
@@ -54,6 +61,7 @@ struct DartDiscoveryState {
     uint8_t       self_name_len;
     uint16_t      self_blob_resend; /* announces remaining that carry the full blob */
     uint16_t      targeted_cursor;  /* round-robin over peers for poll_targeted */
+    uint16_t      relay_cursor;     /* round-robin over peers for poll_relay */
     DartDiscoverySubnet local_nets[DART_DISCOVERY_MAX_SUBNETS];  /* our own subnets (locator ranking) */
     uint8_t       n_local_nets;
     i_DartDiscoveryPeer  *peers;
@@ -323,6 +331,9 @@ static size_t i_dart_discovery_build(DartDiscoveryState *st, uint8_t flags, int 
                                    uint8_t *p, size_t cap){
     uint16_t meta_len = 0;
     if (cap < (size_t)DART_DISCOVERY_META_OFF) return 0;
+    /* ask to be relayed: a node with no multicast of its own is announced onward by
+       whoever hears it, so one seeded address makes it discoverable mesh-wide */
+    if (st->cfg.relay_me && !(flags & DART_DISCOVERY_FLAG_BYE)) flags |= DART_DISCOVERY_FLAG_RELAY_ME;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
     p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
     p[5]=flags;
@@ -344,6 +355,38 @@ static size_t i_dart_discovery_build(DartDiscoveryState *st, uint8_t flags, int 
     i_dart_le_w32(p+DART_DISCOVERY_HDR_LEN, st->self_meta_version);
     i_dart_le_w16(p+DART_DISCOVERY_HDR_LEN+4, meta_len);
     return (size_t)DART_DISCOVERY_META_OFF + meta_len;
+}
+
+/* Build a PROXIED announce on behalf of `peer`: its uuid, the blob version we hold for
+ * it, and a blob whose discovery section states its locator OUTRIGHT (a forwarded
+ * datagram would carry OUR source address, which tells nobody how to reach it) followed
+ * by the overlay we hold verbatim. Our own uuid appears nowhere, so a receiver files this
+ * under the origin exactly as if it had heard it directly. Returns 0 for a peer we cannot
+ * usefully introduce: no locator yet, or no blob received so far. */
+static size_t i_dart_discovery_build_proxy(DartDiscoveryState *st, const i_DartDiscoveryPeer *peer,
+                                   uint8_t *p, size_t cap){
+    uint8_t *b, *bend;
+    size_t need;
+    if (cap < (size_t)DART_DISCOVERY_META_OFF) return 0;
+    if (!peer->port || (peer->ip_len != 4 && peer->ip_len != 16)) return 0;
+    if (!peer->meta_version) return 0;
+    p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
+    p[4]=(uint8_t)DART_DISCOVERY_PROTO_VERSION;
+    p[5]=DART_DISCOVERY_FLAG_PROXIED;   /* never RELAY_ME: one hop only, so this cannot loop */
+    i_dart_le_w16(p+6, st->cfg.domain_id);
+    memcpy(p+8, peer->uuid, 16);
+    b = p + DART_DISCOVERY_META_OFF; bend = p + cap;
+    need = 2u + 1u + (size_t)peer->ip_len + 1u + peer->name_len + peer->meta_len;
+    if ((size_t)(bend - b) < need) return 0;
+    i_dart_le_w16(b, peer->port); b += 2;
+    *b++ = peer->ip_len;
+    memcpy(b, peer->ip, peer->ip_len); b += peer->ip_len;
+    *b++ = peer->name_len;
+    if (peer->name_len){ memcpy(b, peer->name, peer->name_len); b += peer->name_len; }
+    if (peer->meta_len){ memcpy(b, peer->meta, peer->meta_len); b += peer->meta_len; }
+    i_dart_le_w32(p+DART_DISCOVERY_HDR_LEN, peer->meta_version);   /* the ORIGIN's version */
+    i_dart_le_w16(p+DART_DISCOVERY_HDR_LEN+4, (uint16_t)(b - (p + DART_DISCOVERY_META_OFF)));
+    return (size_t)(b - p);
 }
 
 /* Rank one candidate IPv4 locator for a peer; higher wins. 2 = inside one of our own
@@ -379,6 +422,8 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     uint8_t flags; uint16_t meta_len; uint32_t meta_version;
     const uint8_t *uuid, *blob;
     DartDiscoveryAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
+    int proxied;   /* a relay rebuilt this for its origin: locator is second-hand (ranked, not
+                      authoritative) and it can never enlist us to relay in turn */
     i_DartDiscoveryPeer *peer;
     /* the blob's discovery section (valid only when have_disc): locator + name, then overlay.
        disc_name points into the datagram (NOT NUL-terminated): a non-NUL wire string. */
@@ -408,6 +453,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
     }
     blob = p + DART_DISCOVERY_META_OFF;
     flags = p[5];
+    proxied = (flags & DART_DISCOVERY_FLAG_PROXIED) != 0;
 
     /* parse the blob's discovery section (locator + name); the remainder is the opaque
        overlay we hand up. Fully bounds-checked: a malformed blob drops the datagram. */
@@ -504,8 +550,12 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
        shared-subnet path as soon as one announces; at equal rank stay with the incumbent
        while we are still hearing the peer there, so a genuine renumber (the old address
        goes quiet) is picked up a couple of announces later instead. A locator the peer
-       states outright (self_ip) is authoritative and skips all of this. */
-    if (!disc_ip_len && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
+       states outright (self_ip) is authoritative and skips all of this -- but a PROXIED
+       one does not: that address is only where a RELAY sees the origin, so it ranks like
+       any other candidate. Otherwise the relay's view would stomp a direct path we share
+       a subnet with on every proxy interval, flapping the locator (and re-firing peer_up,
+       re-applying the peer's whole interest) forever. */
+    if ((!disc_ip_len || proxied) && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
         int rank_new = i_dart_discovery_addr_rank(st, addr.ip, 4);
         int rank_old = i_dart_discovery_addr_rank(st, peer->ip, 4);
         if (rank_new < rank_old ||
@@ -557,6 +607,16 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, u
         peer->solicit_due = 1;
     }
 
+    /* Relaying is enlisted by DIRECT announces only: a proxied one is already a relay's
+       work, so it can never recruit a second hop (the loop stop). Introduce a newly heard
+       or changed relay-me peer at once rather than at our next announce, so a
+       unicast-only node joins the mesh about a round trip after it seeds anyone. */
+    if (!proxied){
+        peer->wants_relay = (flags & DART_DISCOVERY_FLAG_RELAY_ME) ? 1u : 0u;
+        if (peer->wants_relay && (first_contact || blob_changed || revived || addr_changed))
+            peer->relay_due = 1;
+    }
+
     if (first_contact || addr_changed || blob_changed || revived)
         i_dart_discovery_fire_up(st, peer, &addr);
 
@@ -597,8 +657,15 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
     }
     if (now >= st->next_announce_us){
         int with_blob = st->self_blob_resend > 0;
+        uint16_t k;
         if (with_blob) st->self_blob_resend--;
         st->next_announce_us = now + st->cfg.announce_interval_us;
+        /* keep every relay-me peer present on the paths it cannot reach itself: one
+           proxied announce per peer per announce interval, drained by poll_relay. The
+           relay stops the moment it drops the peer, so third parties time it out too. */
+        for (k=0;k<st->cap_peers;k++)
+            if (st->peers[k].used && !st->peers[k].dropped && st->peers[k].wants_relay)
+                st->peers[k].relay_due = 1;
         return i_dart_discovery_build(st, 0, with_blob, (uint8_t *)out, cap);
     }
     return 0;
@@ -660,6 +727,26 @@ size_t dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t ca
             i_dart_discovery_addr_of(peer, to);
             return i_dart_discovery_build(st, DART_DISCOVERY_FLAG_REQ, 1, (uint8_t *)out, cap);
         }
+    }
+    return 0;
+}
+
+size_t dart_discovery_poll_relay(DartDiscoveryState *st, void *out, size_t cap){
+    uint16_t n, k;
+    if (!st) return 0;
+    n = st->cap_peers;
+    if (n == 0) return 0;
+    for (k=0;k<n;k++){
+        uint16_t i = st->relay_cursor;
+        i_DartDiscoveryPeer *peer = &st->peers[i];
+        st->relay_cursor = (uint16_t)((i+1u) % n);
+        /* a dropped or freed peer is not introduced to anyone: the relay's silence is
+           how third parties learn it went away (they time it out one timeout later) */
+        if (!peer->used || peer->dropped || !peer->wants_relay){ peer->relay_due = 0; continue; }
+        if (!peer->relay_due) continue;
+        peer->relay_due = 0;
+        {   size_t n_bytes = i_dart_discovery_build_proxy(st, peer, (uint8_t *)out, cap);
+            if (n_bytes) return n_bytes; }   /* 0 = nothing useful to say yet; try the next peer */
     }
     return 0;
 }

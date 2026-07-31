@@ -73,6 +73,8 @@ type NodeOpts = {
     max_peers?: number;
     interface?: string;
     seed_peers?: string[];
+    unicast_only?: boolean;   /* cannot multicast: announce to seed_peers + known peers only,
+                                 and be re-announced onward by whoever hears us */
     fragment_size?: number;
     announce_interval_ms?: number;
     peer_timeout_ms?: number;

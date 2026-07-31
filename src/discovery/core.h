@@ -14,7 +14,8 @@ extern "C" {
 #endif
 
 #ifndef DART_DISCOVERY_PROTO_VERSION
-#define DART_DISCOVERY_PROTO_VERSION 3     /* v3: versioned meta blob, u16 meta_len */
+#define DART_DISCOVERY_PROTO_VERSION 4     /* v4: relay flags (RELAY_ME / PROXIED); v3: versioned
+                                              meta blob, u16 meta_len */
 #endif
 
 #define DART_DISCOVERY_META_MAX 64   /* default per-peer OVERLAY capacity (cfg.meta_cap overrides) */
@@ -134,6 +135,10 @@ typedef struct {
     uint16_t meta_cap;      /* per-peer OVERLAY buffer capacity; 0 => DART_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* opaque scratch reserved per peer (0 = none); see dart_discovery_peer_user.
                                     Zeroed when a new UUID takes a slot, preserved across a drop -> resume. */
+    uint8_t  relay_me;      /* 1 = mark our announces "relay me": a peer that hears one directly
+                               re-announces us on ITS paths (multicast we may not have), so a
+                               unicast-only node becomes discoverable mesh-wide from one seed.
+                               See dart_discovery_poll_relay for the relaying side. */
     DartDiscoveryEventFn on_event;   /* optional: PEER_UP / PEER_DOWN / PEER_REFUSED */
     void *user;
     /* Optional allocation hook. When set, per-peer overlay blobs are allocated on demand
@@ -219,6 +224,16 @@ void         dart_discovery_set_local_subnets(DartDiscoveryState *st,
  * none. Loop like dart_discovery_update; the runtime unicasts each to *to. */
 size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
                              DartDiscoveryAddr *to);
+/* Drain one relay (PROXIED) announce: an announce rebuilt ON BEHALF OF an ACTIVE peer
+ * that asked to be relayed (its announces carried RELAY_ME), from the state we hold for
+ * it -- its uuid, blob (version intact) and the locator we know it at, embedded as an
+ * explicit address since a forwarded datagram's source would be OURS. Due once per peer
+ * per local announce interval. The IO layer sends each on every path it has (the
+ * multicast group + known peers), introducing the unicast-only peer to nodes it cannot
+ * reach itself; a PROXIED announce is never re-relayed (no loops) and its embedded
+ * locator is a ranked CANDIDATE at the receiver, so direct contact always wins over the
+ * relay's view of the address. Returns bytes or 0 when none due; loop until 0. */
+size_t       dart_discovery_poll_relay(DartDiscoveryState *st, void *out, size_t cap);
 /* Count of live peers currently known. */
 uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
 /* Table capacity (the slot range for dart_discovery_peer_addr / dart_discovery_peer_at). */

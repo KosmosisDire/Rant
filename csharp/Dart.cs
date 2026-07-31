@@ -148,6 +148,7 @@ namespace Dart
         public byte multicast_ttl;
         public IntPtr seed_peers;              // const DartDiscoveryAddr*
         public ushort n_seed_peers;
+        public byte unicast_only;
         public uint recv_buffer_bytes;
         public uint send_buffer_bytes;
         public ushort fragment_size;
@@ -1134,14 +1135,17 @@ namespace Dart
         /// so no early peer/error event is ever missed. Everything else is optional
         /// named parameters (0/null = the C default).
         /// seedPeers are "ip" or "ip:port" strings to also unicast announces to, so
-        /// discovery works where multicast is filtered.</summary>
+        /// discovery works where multicast is filtered. unicastOnly says this node
+        /// cannot multicast AT ALL: it joins no group, announces only to seedPeers and
+        /// peers it already knows, and asks whoever hears it to re-announce it on their
+        /// paths, so seeding one reachable node makes it discoverable mesh-wide.</summary>
         public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
                     bool disableLogs = false, bool disableMeta = false, bool disableErrorLogs = false,
                     int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
                     string multicastInterface = null, int multicastTtl = 0,
-                    string[] seedPeers = null,
+                    string[] seedPeers = null, bool unicastOnly = false,
                     int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
                     int maxPeers = 0)
         {
@@ -1177,6 +1181,7 @@ namespace Dart
             IntPtr seedBlock = SeedArray(seedPeers, out nSeeds);   // copied by open, freed below
             co.net.seed_peers = seedBlock;
             co.net.n_seed_peers = nSeeds;
+            co.net.unicast_only = (byte)(unicastOnly ? 1 : 0);
             co.net.fragment_size = (ushort)fragmentSize;
             co.discovery.announce_interval_us = (uint)announceIntervalUs;
             co.discovery.peer_timeout_us = (uint)peerTimeoutUs;

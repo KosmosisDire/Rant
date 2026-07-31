@@ -471,6 +471,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.fetch_details        = req.value("fetch_details", false);   /* resolve reflected names for unshared topics */
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
         o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
+    o.unicast_only         = req.value("unicast_only", false);   /* no multicast: seeds + relaying */
     if (o.max_topics == 0) o.max_topics = 8;
 
     /* handlers capture the stable Conn*; the node's service thread owns them and the

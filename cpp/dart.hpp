@@ -363,6 +363,12 @@ struct NodeOptions {
     std::string              multicast_interface;        /* empty = auto; "127.0.0.1" = single-host */
     uint8_t                  multicast_ttl        = 0;   /* 0 = 1 hop */
     std::vector<std::string> seed_peers;                 /* "ip" or "ip:port", unicast announce targets */
+    bool                     unicast_only         = false; /* this node cannot multicast at all: join
+                                                   no group, announce only to seed_peers + peers already
+                                                   known, and ask whoever hears us to RE-ANNOUNCE us on
+                                                   their paths. Seeding ONE reachable node then makes us
+                                                   discoverable mesh-wide (data stays unicast either
+                                                   way). Pair with seed_peers, or be seeded by a peer. */
     uint16_t                 fragment_size        = 0;   /* UDP payload bytes per fragment */
     /* discovery cadence */
     uint32_t                 announce_interval_us = 0;   /* 0 = 1s */
@@ -1770,6 +1776,7 @@ public:
         co.net.multicast_ttl       = o.multicast_ttl;
         co.net.seed_peers          = impl->seeds.empty() ? nullptr : impl->seeds.data();
         co.net.n_seed_peers        = static_cast<uint16_t>(impl->seeds.size());
+        co.net.unicast_only        = o.unicast_only ? 1 : 0;
         co.net.fragment_size       = o.fragment_size;
         co.discovery.announce_interval_us = o.announce_interval_us;
         co.discovery.peer_timeout_us      = o.peer_timeout_us;

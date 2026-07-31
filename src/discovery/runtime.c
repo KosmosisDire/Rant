@@ -18,6 +18,7 @@ struct DartDiscovery {
     i_DartIface          ifs[DART_DISCOVERY_MAX_SUBNETS];  /* every interface we join + announce out of */
     uint8_t              n_ifs;          /* 0 = none usable: the OS picks (INADDR_ANY) */
     uint8_t              pinned;         /* explicit multicast_interface: that one only, never rescanned */
+    uint8_t              unicast_only;   /* no multicast at all: no joins, no group sends (relay_me) */
     uint64_t             if_scan_us;     /* next interface re-enumeration */
     uint32_t             group_naddr;   /* discovery multicast group, network order */
     uint16_t             discovery_port;
@@ -53,6 +54,7 @@ static void i_dart_discovery_tx_to(DartDiscovery *d, const uint8_t *out, size_t 
  * multicast route just fails its own sendto; the others still went out. */
 static void i_dart_discovery_tx_group(DartDiscovery *d, const uint8_t *out, size_t n_bytes){
     uint8_t group_ip[4], i;
+    if (d->unicast_only) return;   /* seeds + known peers are the only paths we have */
     i_dart_plat_naddr_to_ip4(d->group_naddr, group_ip);
     if (!d->n_ifs){ i_dart_plat_send(d->fd, out, n_bytes, group_ip, d->discovery_port); return; }
     for (i = 0; i < d->n_ifs; i++){
@@ -148,12 +150,16 @@ static uint8_t i_dart_discovery_if_apply(DartDiscovery *d, const i_DartIface *wa
     DartDiscoverySubnet nets[DART_DISCOVERY_MAX_SUBNETS];
     uint8_t i, joined = 0;
     if (n_want > DART_DISCOVERY_MAX_SUBNETS) n_want = DART_DISCOVERY_MAX_SUBNETS;
-    for (i = 0; i < d->n_ifs; i++)
-        if (!i_dart_discovery_if_has(want, n_want, d->ifs[i].addr))
-            i_dart_plat_mcast_leave(d->fd, d->group_naddr, d->ifs[i].addr);
-    for (i = 0; i < n_want; i++){
-        if (i_dart_discovery_if_has(d->ifs, d->n_ifs, want[i].addr)){ joined++; continue; }
-        if (i_dart_plat_mcast_join(d->fd, d->group_naddr, want[i].addr)) joined++;
+    if (d->unicast_only) joined = n_want;   /* take no membership, but still tell the core our
+                                               subnets: locator ranking is unicast-relevant too */
+    else {
+        for (i = 0; i < d->n_ifs; i++)
+            if (!i_dart_discovery_if_has(want, n_want, d->ifs[i].addr))
+                i_dart_plat_mcast_leave(d->fd, d->group_naddr, d->ifs[i].addr);
+        for (i = 0; i < n_want; i++){
+            if (i_dart_discovery_if_has(d->ifs, d->n_ifs, want[i].addr)){ joined++; continue; }
+            if (i_dart_plat_mcast_join(d->fd, d->group_naddr, want[i].addr)) joined++;
+        }
     }
     for (i = 0; i < n_want; i++){
         i_dart_plat_naddr_to_ip4(want[i].addr, nets[i].ip);
@@ -271,6 +277,9 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     g_place_error = DART_DISCOVERY_OK; g_place_os_error = 0;
     c = *cfg;
     dart_discovery_config_defaults(&c.discovery);
+    /* a node with no multicast has no way to be found on its own: every announce it sends
+       asks whoever hears it to re-announce it onward */
+    if (c.unicast_only) c.discovery.relay_me = 1;
     group     = c.group     ? c.group     : "239.255.0.7";
     if (c.discovery_port == 0)    c.discovery_port  = 7400;
     ttl  = c.ttl ? c.ttl : 1;
@@ -310,6 +319,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
     d->fd = fd;
     d->group_naddr = group_naddr;
     d->n_ifs = 0;
+    d->unicast_only = c.unicast_only ? 1u : 0u;
     d->pinned = c.multicast_interface ? 1u : 0u;
     if (d->pinned){
         want[0].addr = i_dart_plat_parse_ip(c.multicast_interface);
@@ -317,18 +327,21 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
         n_want = 1;
     } else n_want = i_dart_discovery_if_scan(want, DART_DISCOVERY_MAX_SUBNETS);
     joined = i_dart_discovery_if_apply(d, want, n_want);
-    if (!joined && !(n_want == 1 && want[0].addr == 0)){
-        i_DartIface any; any.addr = 0; any.mask = 0;      /* nothing would take a membership: let
-                                                             the OS choose rather than not join */
-        joined = i_dart_discovery_if_apply(d, &any, 1);
-    }
-    if (!joined){
-        int e=i_dart_plat_last_socket_error();
-        i_dart_plat_close(fd); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_MCAST_JOIN, e);
-    }
-    i_dart_plat_mcast_ttl(fd, ttl);
-    /* loop always on (uuid self-filter drops echoes); needed for multi-instance per host */
-    i_dart_plat_mcast_loop(fd, 1);
+    if (!d->unicast_only){
+        if (!joined && !(n_want == 1 && want[0].addr == 0)){
+            i_DartIface any; any.addr = 0; any.mask = 0;      /* nothing would take a membership: let
+                                                                 the OS choose rather than not join */
+            joined = i_dart_discovery_if_apply(d, &any, 1);
+        }
+        if (!joined){
+            int e=i_dart_plat_last_socket_error();
+            i_dart_plat_close(fd); i_dart_plat_cleanup(); return i_dart_discovery_fail(DART_DISCOVERY_E_MCAST_JOIN, e);
+        }
+        i_dart_plat_mcast_ttl(fd, ttl);
+        /* loop always on (uuid self-filter drops echoes); needed for multi-instance per host */
+        i_dart_plat_mcast_loop(fd, 1);
+    }   /* unicast_only: no membership to take and no group option to set, so a stack with no
+           multicast at all (no IGMP, an option that errors) never fails us open */
     i_dart_plat_set_nonblock(fd);   /* poll then DRAIN to empty (i_dart_discovery_rt_drain): the recv that
                                      finds the queue empty must return would-block, not block */
     i_dart_plat_suppress_connreset(fd);   /* we reinforce announces by unicast to known peers; a
@@ -395,6 +408,7 @@ DartDiscovery *dart_discovery_open(DartAllocator *alloc, const char *name, const
     nc.multicast_interface = o.multicast_interface;
     nc.seeds               = o.seed_peers;
     nc.n_seeds             = o.n_seed_peers;
+    nc.unicast_only        = o.unicast_only;
 
     need = dart_discovery_placement_memory(&nc);
     pool = *alloc;                                 /* copied: the caller's allocator may be a temporary */
@@ -480,6 +494,12 @@ int dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readab
     /* targeted unicast: replies to soliciters + re-fetch requests for stale blobs */
     while ((n_bytes = dart_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to)) != 0)
         i_dart_discovery_tx_to(d, d->txbuf, n_bytes, &to);
+
+    /* relay: announces rebuilt for peers that cannot multicast, out of every path we DO
+       have (group + seeds + known peers), so a unicast-only node reaches nodes it could
+       never announce to itself. The origin's own copy is dropped by its uuid self-filter. */
+    while ((n_bytes = dart_discovery_poll_relay(d->core, d->txbuf, d->wire_max)) != 0)
+        i_dart_discovery_tx(d, d->txbuf, n_bytes);
     return got;
 }
 

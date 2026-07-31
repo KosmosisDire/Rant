@@ -890,6 +890,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.multicast_interface   = o.net.multicast_interface;
     dc.seeds                 = o.net.seed_peers;
     dc.n_seeds               = o.net.n_seed_peers;
+    dc.unicast_only          = o.net.unicast_only;
     tc.topics    = NULL;            /* reserve mode: topics created at runtime */
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;

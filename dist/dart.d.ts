@@ -39,6 +39,7 @@ type NodeOpts = {
     max_peers?: number;
     interface?: string;
     seed_peers?: string[];
+    unicast_only?: boolean;
     fragment_size?: number;
     announce_interval_ms?: number;
     peer_timeout_ms?: number;

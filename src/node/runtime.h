@@ -27,6 +27,15 @@ typedef struct {
     const DartDiscoveryAddr *seed_peers;   /* peers to also unicast announces to (port 0 =
                                                 discovery_port), so discovery works without multicast */
     uint16_t              n_seed_peers;
+    uint8_t               unicast_only;      /* 1 = this node cannot multicast at all (an IGMP-less
+                                                stack, a segment that filters it): join no group and
+                                                announce only to seed_peers + peers already known.
+                                                It also asks every node that hears it to RE-ANNOUNCE
+                                                it on their paths, so seeding ONE reachable node
+                                                makes it discoverable across the whole mesh (the
+                                                relay only introduces: data stays unicast end to
+                                                end, and established pairs survive its death).
+                                                Set seed_peers, or have one node seed this one. */
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
