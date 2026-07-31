@@ -472,6 +472,8 @@ static void op_open(Conn *c, const json &req, const json &seq){
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
         o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
     o.unicast_only         = req.value("unicast_only", false);   /* no multicast: seeds + relaying */
+    o.self_ip              = req.value("self_ip", std::string()); /* state our locator outright */
+    o.advertise_port       = (uint16_t)req.value("advertise_port", 0);
     if (o.max_topics == 0) o.max_topics = 8;
 
     /* handlers capture the stable Conn*; the node's service thread owns them and the

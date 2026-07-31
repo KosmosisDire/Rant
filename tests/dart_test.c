@@ -1043,6 +1043,38 @@ static void disc_core_checks(void){
                a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
     }
 
+    /* 9. SELF-IP: a node whose reachable address is NOT the one its packets appear to
+          come from (a static 1:1 mapping) states its locator outright. It must ride our
+          own announce, and a relay must propagate the STATED address, not the source it
+          saw -- otherwise relaying would undo the override for every third party. */
+    { DartDiscoveryCoreConfig sc2; DartDiscoveryState *s2; DartDiscoveryAddr a;
+      uint8_t pub_ip[4]={203,0,113,7}; uint32_t id12; size_t pn;
+      sc2 = c;                                     /* same domain/timing, our own uuid */
+      memcpy(sc2.self_ip, pub_ip, 4); sc2.self_ip_len = 4; sc2.data_port = 7400;
+      s2 = dart_discovery_init(mem,sizeof mem,&sc2);
+      ST_CHECK(s2!=NULL, "disc-core: self-ip core init");
+      if (s2){
+          n = dart_discovery_update(s2, 1000, out, sizeof out);        /* start: solicit + blob */
+          ST_CHECK(n > (size_t)DART_DISCOVERY_META_OFF + 3 &&
+                   out[DART_DISCOVERY_META_OFF+2]==4 &&
+                   memcmp(out+DART_DISCOVERY_META_OFF+3, pub_ip, 4)==0,
+                   "disc-core: our announce states the configured self ip");
+      }
+      /* the relay side: peer 12 announces RELAY_ME FROM sa while STATING pub_ip. The relay
+         must hold (and hand on) the stated address, so the override survives the hop. */
+      st = dart_discovery_init(mem+4096,sizeof mem-4096,&c);
+      dart_discovery_update(st, 1000, out, sizeof out);
+      n=dc_mk_ip(buf,12,0x04,99,7400,1,pub_ip);
+      dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),4000);      /* source sa, states pub_ip */
+      id12=dc_up_id;
+      memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id12, &a);
+      ST_CHECK(memcmp(a.ip, pub_ip, 4)==0,
+               "disc-core: a stated locator beats the source it arrived from (%u.%u.%u.%u)",
+               a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
+      pn = dart_discovery_poll_relay(st, out, sizeof out);
+      ST_CHECK(pn > 0 && memcmp(out+DART_DISCOVERY_META_OFF+3, pub_ip, 4)==0,
+               "disc-core: the relay proxies the STATED locator, not the source it saw");
+    }
 }
 
 /* node-core peer lifecycle (sans-IO): drive dart_node_core_peer_up/down/refused
@@ -4390,6 +4422,64 @@ static void relay_checks(void){
     }
 }
 
+/* ============ selfip: STATING OUR OWN LOCATOR ============ *
+ * By default an announce carries no address and each peer records the source it arrived
+ * from. opts.net.self_ip / advertise_port override that with a locator we assert, for a
+ * static 1:1 mapping (an elastic IP, a container published on another port) or to pin
+ * which address a multihomed host advertises. A single-host test can only truthfully
+ * state loopback, so the ADVERTISED PORT carries the proof here: it is deliberately not
+ * the port A bound. The override's semantics against real, distinct addresses (beating
+ * the arrival source, and surviving a relay hop) are pinned in disc_core_checks. */
+static int sip_addr_of(DartNode *n, const char *name, DartDiscoveryAddr *out){
+    uint16_t c = 0, i; size_t nl = strlen(name);
+    const DartDiscoveryPeer *p = dart_node_peers(n, &c);
+    for (i=0;i<c;i++)
+        if (p[i].liveness == DART_PEER_ACTIVE && p[i].name.len == nl &&
+            memcmp(p[i].name.data, name, nl) == 0){ *out = p[i].addr; return 1; }
+    return 0;
+}
+static void selfip_checks(void){
+    const uint16_t ADV_PORT = (uint16_t)(45000u + st_domain_base % 15000u);
+    int t;
+    /* (a) peers record what we STATE, not where our packets came from */
+    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts ao, bo; DartNode *A=NULL, *B=NULL; DartDiscoveryAddr got;
+      memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+29; bo.disable_shm=1; bo.discovery.max_peers=4;
+      bo.discovery.announce_interval_us=200000; bo.net.multicast_interface="127.0.0.1";
+      ao=bo; ao.net.self_ip="127.0.0.1"; ao.net.advertise_port=ADV_PORT;
+      A = dart_node_open(&aa, "sip-a", NULL, NULL, &ao);
+      B = dart_node_open(&ba, "sip-b", NULL, NULL, &bo);
+      ST_CHECK(A && B, "selfip: pair up");
+      if (A && B){
+          memset(&got,0,sizeof got);
+          for (t=0;t<3000 && !sip_addr_of(B,"sip-a",&got);t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
+          ST_CHECK(got.ip_len==4 && got.ip[0]==127 && got.ip[3]==1 && got.port==ADV_PORT,
+                   "selfip: peers record the stated locator (%u.%u.%u.%u:%u, want 127.0.0.1:%u)",
+                   got.ip[0], got.ip[1], got.ip[2], got.ip[3],
+                   (unsigned)got.port, (unsigned)ADV_PORT);
+      }
+      if (A) dart_node_close(A,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+    }
+    /* (b) an unparseable locator is a config error, never a silent fallback to the
+       default: a node advertising an address nobody can reach would look healthy and
+       receive nothing. */
+    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts o; DartNode *n; DartEvent err; char line[160];
+      memset(&o,0,sizeof o); o.domain=ST_DOMAIN+29; o.net.multicast_interface="127.0.0.1";
+      o.net.self_ip="not-an-ip";
+      n = dart_node_open(&aa, "sip-bad", NULL, NULL, &o);
+      ST_CHECK(n==NULL, "selfip: unparseable self ip refuses the open");
+      err = dart_last_error(NULL);
+      ST_CHECK(err.kind==DART_ERROR && err.error==DART_E_BAD_ADDRESS,
+               "selfip: ...and says why (%s)", dart_event_str(&err, line, sizeof line));
+      if (n) dart_node_close(n,1);
+      dart_allocator_reset(&aa);
+    }
+}
+
 /* ============ sentts: the per-message SOURCE TIMESTAMP ============ *
  * Every published message carries the sender's wall clock (DartMsg.sent_us) unless the
  * topic opts out with qos.no_timestamp. A publisher node and a subscriber node on their own
@@ -5212,6 +5302,7 @@ static int selftest_main(void){
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
+    selfip_checks();              /* 19f3. stating our own locator (self_ip / advertise_port) */
     ts_checks();                  /* 19g. per-message source timestamp: stamp, opt-out, replay, queue */
 #ifdef DART_THREADS
     threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */

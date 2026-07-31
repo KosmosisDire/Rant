@@ -42,6 +42,32 @@ typedef struct {
                                                 0 = DART_FRAG_SIZE. Advertised via discovery so
                                                 peers reassemble at our size. Clamp [MIN, MAX]; raise
                                                 MAX (compile) for jumbo frames. One size per node. */
+    /* ---- stating our own locator outright (the default is to state nothing) --------
+     * Normally an announce carries NO address of its own: each peer records the source
+     * address the announce arrived FROM, which is correct per path and needs no config
+     * (multihomed hosts, VPN adapters, WSL/docker bridges). These two override that with
+     * a locator we assert, which peers then treat as AUTHORITATIVE (it skips the source
+     * ranking entirely). Use them when the address peers must reach us at is NOT the one
+     * our packets appear to come from, and the mapping is STATIC and 1:1:
+     *   - multihomed pinning: state which of our real addresses to advertise instead of
+     *     letting the locator ranking choose,
+     *   - a 1:1 static NAT / port forward (a cloud elastic IP, a container published with
+     *     -p 7400:7400): state the outside address, and the outside port too if it differs.
+     * Both are global: ONE locator is advertised to every peer. That is right for a 1:1
+     * mapping and wrong when different peers need different addresses (LAN peers the
+     * inside one, remote peers the outside one) -- that needs per-peer candidates, which
+     * DART does not do. Neither makes an inbound path exist: without a port forward
+     * nothing arrives however we advertise. State the port whenever it is translated:
+     * a peer maps arriving datagrams back to their sender by (source ip, source port)
+     * against this locator, so an advertised port that does not match what NAT actually
+     * emits leaves our data unattributable at the far end. */
+    const char           *self_ip;           /* "203.0.113.7": advertise THIS IPv4 address instead of
+                                                letting each peer learn ours from the datagram source.
+                                                NULL = the default (learn per path). Unparseable =
+                                                open fails with DART_E_PLATFORM. */
+    uint16_t              advertise_port;    /* advertise THIS data port instead of the one we bound
+                                                (0 = the bound port, the default). For a forward that
+                                                does not preserve the port. */
 } DartNodeNet;
 
 /* Discovery cadence and peer-table size; zero-means-default (defaults shown). */

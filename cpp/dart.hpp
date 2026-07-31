@@ -138,7 +138,7 @@ enum class ErrorKind {
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
     MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
     PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
-    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
+    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
 };
 
 /* Schema field kinds for reflection (Schema::Field); values match the C wire.
@@ -167,6 +167,7 @@ static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
 static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
 static_assert((int)EventKind::Error == detail::DART_ERROR, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift");
+static_assert((int)ErrorKind::BadAddress == detail::DART_E_BAD_ADDRESS, "error enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
@@ -370,6 +371,13 @@ struct NodeOptions {
                                                    discoverable mesh-wide (data stays unicast either
                                                    way). Pair with seed_peers, or be seeded by a peer. */
     uint16_t                 fragment_size        = 0;   /* UDP payload bytes per fragment */
+    /* State our locator outright instead of letting each peer learn it from the datagram
+     * source (the default, and right for multihomed hosts). For a STATIC 1:1 mapping (a
+     * cloud elastic IP, a container published with -p 7400:7400) or to pin which of our
+     * addresses to advertise. One locator goes to EVERY peer, so it suits a 1:1 mapping
+     * and not a split inside/outside view; and it creates no inbound path by itself. */
+    std::string              self_ip;                    /* "203.0.113.7"; empty = learn per path */
+    uint16_t                 advertise_port       = 0;   /* 0 = the port we actually bound */
     /* discovery cadence */
     uint32_t                 announce_interval_us = 0;   /* 0 = 1s */
     uint32_t                 peer_timeout_us      = 0;   /* 0 = 3.5s */
@@ -1752,6 +1760,7 @@ public:
         /* The node retains the net string/seed pointers, so own that storage. */
         impl->disc_group = o.discovery_group;
         impl->mcast_if   = o.multicast_interface;
+        impl->self_ip    = o.self_ip;
         for (const std::string& s : o.seed_peers) {
             detail::DartDiscoveryAddr a;
             if (parse_addr(s, a)) impl->seeds.push_back(a);
@@ -1777,6 +1786,8 @@ public:
         co.net.seed_peers          = impl->seeds.empty() ? nullptr : impl->seeds.data();
         co.net.n_seed_peers        = static_cast<uint16_t>(impl->seeds.size());
         co.net.unicast_only        = o.unicast_only ? 1 : 0;
+        co.net.self_ip             = impl->self_ip.empty() ? nullptr : impl->self_ip.c_str();
+        co.net.advertise_port      = o.advertise_port;
         co.net.fragment_size       = o.fragment_size;
         co.discovery.announce_interval_us = o.announce_interval_us;
         co.discovery.peer_timeout_us      = o.peer_timeout_us;
@@ -2056,6 +2067,7 @@ private:
         EventHandler             on_event;
         std::string              disc_group;
         std::string              mcast_if;
+        std::string              self_ip;
         std::vector<detail::DartDiscoveryAddr> seeds;
 
         /* wrapper-level registries. create_mu serializes wrapper-side creates (held

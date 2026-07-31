@@ -1022,7 +1022,21 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     i_dart_plat_suppress_connreset(fd);  /* suppress WSAECONNRESET from a bounced send */
     if (o.net.recv_buffer_bytes) i_dart_plat_set_rcvbuf(fd, (int)o.net.recv_buffer_bytes);
     if (o.net.send_buffer_bytes) i_dart_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
-    dc.discovery.data_port = local_port;       /* advertise the actual port */
+    /* What we ADVERTISE as our locator: the port we really bound and no address at all
+       (peers learn ours per path from the datagram source), unless the caller states one
+       outright for a static 1:1 mapping or to pin a multihomed host (see DartNodeNet). */
+    dc.discovery.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
+    if (o.net.self_ip){
+        uint32_t naddr = i_dart_plat_parse_ip(o.net.self_ip);
+        /* 0 and 0xFFFFFFFF are inet_addr's failure value and the broadcast address: neither
+           is a unicast locator, so a bad string is a config error, never a silent default */
+        if (!naddr || naddr == 0xFFFFFFFFu){
+            (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_BAD_ADDRESS, 0, 0, 0);
+            goto fail_sock;
+        }
+        i_dart_plat_naddr_to_ip4(naddr, dc.discovery.self_ip);
+        dc.discovery.self_ip_len = 4;
+    }
 
     dc.discovery.on_event = i_dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;

@@ -2438,8 +2438,11 @@ typedef enum {
                                 ESP32 out of WiFi TX buffers reports os_error ENOMEM even with heap free) */
     DART_E_RECV,             /* a socket receive hard-failed (.os_error) */
     DART_E_POLL,             /* the socket poll/wait failed (.os_error) */
-    DART_E_WAKER             /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
+    DART_E_WAKER,            /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
                                 only at the next timer tick (still works, just less snappy) */
+    DART_E_BAD_ADDRESS       /* a configured address string could not be parsed (opts.net.self_ip):
+                                a config fault, refused at open rather than silently ignored, since
+                                a node advertising an unreachable locator looks healthy and is not */
 } DartErrorKind;
 
 typedef struct {
@@ -2705,6 +2708,32 @@ typedef struct {
                                                 0 = DART_FRAG_SIZE. Advertised via discovery so
                                                 peers reassemble at our size. Clamp [MIN, MAX]; raise
                                                 MAX (compile) for jumbo frames. One size per node. */
+    /* ---- stating our own locator outright (the default is to state nothing) --------
+     * Normally an announce carries NO address of its own: each peer records the source
+     * address the announce arrived FROM, which is correct per path and needs no config
+     * (multihomed hosts, VPN adapters, WSL/docker bridges). These two override that with
+     * a locator we assert, which peers then treat as AUTHORITATIVE (it skips the source
+     * ranking entirely). Use them when the address peers must reach us at is NOT the one
+     * our packets appear to come from, and the mapping is STATIC and 1:1:
+     *   - multihomed pinning: state which of our real addresses to advertise instead of
+     *     letting the locator ranking choose,
+     *   - a 1:1 static NAT / port forward (a cloud elastic IP, a container published with
+     *     -p 7400:7400): state the outside address, and the outside port too if it differs.
+     * Both are global: ONE locator is advertised to every peer. That is right for a 1:1
+     * mapping and wrong when different peers need different addresses (LAN peers the
+     * inside one, remote peers the outside one) -- that needs per-peer candidates, which
+     * DART does not do. Neither makes an inbound path exist: without a port forward
+     * nothing arrives however we advertise. State the port whenever it is translated:
+     * a peer maps arriving datagrams back to their sender by (source ip, source port)
+     * against this locator, so an advertised port that does not match what NAT actually
+     * emits leaves our data unattributable at the far end. */
+    const char           *self_ip;           /* "203.0.113.7": advertise THIS IPv4 address instead of
+                                                letting each peer learn ours from the datagram source.
+                                                NULL = the default (learn per path). Unparseable =
+                                                open fails with DART_E_PLATFORM. */
+    uint16_t              advertise_port;    /* advertise THIS data port instead of the one we bound
+                                                (0 = the bound port, the default). For a forward that
+                                                does not preserve the port. */
 } DartNodeNet;
 
 /* Discovery cadence and peer-table size; zero-means-default (defaults shown). */
@@ -11477,6 +11506,8 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
         break;
     case DART_E_PLATFORM:
         p=i_dart_event_append_str(p,end,"platform net init failed"); break;
+    case DART_E_BAD_ADDRESS:
+        p=i_dart_event_append_str(p,end,"configured address could not be parsed"); break;
     case DART_E_SOCKET:
         p=i_dart_event_append_str(p,end,"socket open failed"); p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_BIND:
@@ -13572,7 +13603,21 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     i_dart_plat_suppress_connreset(fd);  /* suppress WSAECONNRESET from a bounced send */
     if (o.net.recv_buffer_bytes) i_dart_plat_set_rcvbuf(fd, (int)o.net.recv_buffer_bytes);
     if (o.net.send_buffer_bytes) i_dart_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
-    dc.discovery.data_port = local_port;       /* advertise the actual port */
+    /* What we ADVERTISE as our locator: the port we really bound and no address at all
+       (peers learn ours per path from the datagram source), unless the caller states one
+       outright for a static 1:1 mapping or to pin a multihomed host (see DartNodeNet). */
+    dc.discovery.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
+    if (o.net.self_ip){
+        uint32_t naddr = i_dart_plat_parse_ip(o.net.self_ip);
+        /* 0 and 0xFFFFFFFF are inet_addr's failure value and the broadcast address: neither
+           is a unicast locator, so a bad string is a config error, never a silent default */
+        if (!naddr || naddr == 0xFFFFFFFFu){
+            (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_BAD_ADDRESS, 0, 0, 0);
+            goto fail_sock;
+        }
+        i_dart_plat_naddr_to_ip4(naddr, dc.discovery.self_ip);
+        dc.discovery.self_ip_len = 4;
+    }
 
     dc.discovery.on_event = i_dart_node_core_on_disc_event;   /* node core demuxes PEER_UP/DOWN/REFUSED */
     dc.discovery.user     = n->core;
@@ -16739,7 +16784,7 @@ enum class ErrorKind {
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
     MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
     PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
-    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
+    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
 };
 
 /* Schema field kinds for reflection (Schema::Field); values match the C wire.
@@ -16768,6 +16813,7 @@ static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
 static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
 static_assert((int)EventKind::Error == detail::DART_ERROR, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift");
+static_assert((int)ErrorKind::BadAddress == detail::DART_E_BAD_ADDRESS, "error enum drift");
 static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
@@ -16971,6 +17017,13 @@ struct NodeOptions {
                                                    discoverable mesh-wide (data stays unicast either
                                                    way). Pair with seed_peers, or be seeded by a peer. */
     uint16_t                 fragment_size        = 0;   /* UDP payload bytes per fragment */
+    /* State our locator outright instead of letting each peer learn it from the datagram
+     * source (the default, and right for multihomed hosts). For a STATIC 1:1 mapping (a
+     * cloud elastic IP, a container published with -p 7400:7400) or to pin which of our
+     * addresses to advertise. One locator goes to EVERY peer, so it suits a 1:1 mapping
+     * and not a split inside/outside view; and it creates no inbound path by itself. */
+    std::string              self_ip;                    /* "203.0.113.7"; empty = learn per path */
+    uint16_t                 advertise_port       = 0;   /* 0 = the port we actually bound */
     /* discovery cadence */
     uint32_t                 announce_interval_us = 0;   /* 0 = 1s */
     uint32_t                 peer_timeout_us      = 0;   /* 0 = 3.5s */
@@ -18353,6 +18406,7 @@ public:
         /* The node retains the net string/seed pointers, so own that storage. */
         impl->disc_group = o.discovery_group;
         impl->mcast_if   = o.multicast_interface;
+        impl->self_ip    = o.self_ip;
         for (const std::string& s : o.seed_peers) {
             detail::DartDiscoveryAddr a;
             if (parse_addr(s, a)) impl->seeds.push_back(a);
@@ -18378,6 +18432,8 @@ public:
         co.net.seed_peers          = impl->seeds.empty() ? nullptr : impl->seeds.data();
         co.net.n_seed_peers        = static_cast<uint16_t>(impl->seeds.size());
         co.net.unicast_only        = o.unicast_only ? 1 : 0;
+        co.net.self_ip             = impl->self_ip.empty() ? nullptr : impl->self_ip.c_str();
+        co.net.advertise_port      = o.advertise_port;
         co.net.fragment_size       = o.fragment_size;
         co.discovery.announce_interval_us = o.announce_interval_us;
         co.discovery.peer_timeout_us      = o.peer_timeout_us;
@@ -18657,6 +18713,7 @@ private:
         EventHandler             on_event;
         std::string              disc_group;
         std::string              mcast_if;
+        std::string              self_ip;
         std::vector<detail::DartDiscoveryAddr> seeds;
 
         /* wrapper-level registries. create_mu serializes wrapper-side creates (held

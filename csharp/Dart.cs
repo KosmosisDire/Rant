@@ -86,7 +86,7 @@ namespace Dart
         NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
         MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
         PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
-        Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker
+        Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
     }
 
     public enum FieldType : byte
@@ -152,6 +152,8 @@ namespace Dart
         public uint recv_buffer_bytes;
         public uint send_buffer_bytes;
         public ushort fragment_size;
+        public IntPtr self_ip;                 // const char*
+        public ushort advertise_port;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1138,7 +1140,11 @@ namespace Dart
         /// discovery works where multicast is filtered. unicastOnly says this node
         /// cannot multicast AT ALL: it joins no group, announces only to seedPeers and
         /// peers it already knows, and asks whoever hears it to re-announce it on their
-        /// paths, so seeding one reachable node makes it discoverable mesh-wide.</summary>
+        /// paths, so seeding one reachable node makes it discoverable mesh-wide.
+        /// selfIp/advertisePort state our locator outright ("203.0.113.7") instead of
+        /// letting each peer learn it from the datagram source: for a static 1:1 mapping
+        /// (elastic IP, a container published with -p 7400:7400) or multihomed pinning.
+        /// One locator goes to every peer, and neither opens an inbound path by itself.</summary>
         public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
@@ -1146,6 +1152,7 @@ namespace Dart
                     int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
                     string multicastInterface = null, int multicastTtl = 0,
                     string[] seedPeers = null, bool unicastOnly = false,
+                    string selfIp = null, int advertisePort = 0,
                     int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
                     int maxPeers = 0)
         {
@@ -1182,6 +1189,11 @@ namespace Dart
             co.net.seed_peers = seedBlock;
             co.net.n_seed_peers = nSeeds;
             co.net.unicast_only = (byte)(unicastOnly ? 1 : 0);
+            // parsed into 4 bytes during open, never retained: free it right after (unlike
+            // the group/interface strings, which the wrapper keeps for the node's life)
+            IntPtr selfIpPtr = Codec.CStrPtr(selfIp);
+            co.net.self_ip = selfIpPtr;
+            co.net.advertise_port = (ushort)advertisePort;
             co.net.fragment_size = (ushort)fragmentSize;
             co.discovery.announce_interval_us = (uint)announceIntervalUs;
             co.discovery.peer_timeout_us = (uint)peerTimeoutUs;
@@ -1191,6 +1203,7 @@ namespace Dart
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
             IntPtr h = Native.dart_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
+            Codec.FreeCStr(selfIpPtr);
 
             if (h == IntPtr.Zero)
             {

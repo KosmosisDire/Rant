@@ -113,6 +113,8 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
         break;
     case DART_E_PLATFORM:
         p=i_dart_event_append_str(p,end,"platform net init failed"); break;
+    case DART_E_BAD_ADDRESS:
+        p=i_dart_event_append_str(p,end,"configured address could not be parsed"); break;
     case DART_E_SOCKET:
         p=i_dart_event_append_str(p,end,"socket open failed"); p=i_dart_event_append_oserr(p,end,ev); break;
     case DART_E_BIND:

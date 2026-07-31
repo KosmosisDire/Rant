@@ -75,6 +75,9 @@ type NodeOpts = {
     seed_peers?: string[];
     unicast_only?: boolean;   /* cannot multicast: announce to seed_peers + known peers only,
                                  and be re-announced onward by whoever hears us */
+    self_ip?: string;         /* state this address as our locator instead of letting peers learn
+                                 it from the datagram source (static 1:1 mapping / multihomed pin) */
+    advertise_port?: number;  /* advertise this data port instead of the one we bound */
     fragment_size?: number;
     announce_interval_ms?: number;
     peer_timeout_ms?: number;

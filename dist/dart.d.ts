@@ -40,6 +40,8 @@ type NodeOpts = {
     interface?: string;
     seed_peers?: string[];
     unicast_only?: boolean;
+    self_ip?: string;
+    advertise_port?: number;
     fragment_size?: number;
     announce_interval_ms?: number;
     peer_timeout_ms?: number;

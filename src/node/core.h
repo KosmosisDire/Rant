@@ -89,8 +89,11 @@ typedef enum {
                                 ESP32 out of WiFi TX buffers reports os_error ENOMEM even with heap free) */
     DART_E_RECV,             /* a socket receive hard-failed (.os_error) */
     DART_E_POLL,             /* the socket poll/wait failed (.os_error) */
-    DART_E_WAKER             /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
+    DART_E_WAKER,            /* the cross-thread wake loopback is unavailable; a send wakes a blocked poll
                                 only at the next timer tick (still works, just less snappy) */
+    DART_E_BAD_ADDRESS       /* a configured address string could not be parsed (opts.net.self_ip):
+                                a config fault, refused at open rather than silently ignored, since
+                                a node advertising an unreachable locator looks healthy and is not */
 } DartErrorKind;
 
 typedef struct {

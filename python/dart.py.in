@@ -329,6 +329,8 @@ class DartNodeNet(Structure):
         ("recv_buffer_bytes", c_uint32),
         ("send_buffer_bytes", c_uint32),
         ("fragment_size", c_uint16),
+        ("self_ip", c_char_p),
+        ("advertise_port", c_uint16),
     ]
 
 
@@ -764,6 +766,7 @@ class ErrorKind(enum.IntEnum):
     RECV = 20
     POLL = 21
     WAKER = 22
+    BAD_ADDRESS = 23
 
 
 class FieldType(enum.IntEnum):
@@ -859,6 +862,11 @@ class NodeOptions:
                                   # to seed_peers + peers already known, and ask whoever hears us to
                                   # RE-ANNOUNCE us on their paths. Seeding ONE reachable node then
                                   # makes us discoverable mesh-wide (data is unicast either way).
+    self_ip: str = ""             # state THIS address as our locator instead of letting each peer
+                                  # learn it from the datagram source (the default). For a static
+                                  # 1:1 mapping (elastic IP, -p 7400:7400) or multihomed pinning;
+                                  # one locator reaches every peer, and it opens no inbound path.
+    advertise_port: int = 0       # advertise THIS data port instead of the one we bound (0 = bound)
     fragment_size: int = 0
     announce_interval_us: int = 0
     peer_timeout_us: int = 0
@@ -2144,6 +2152,8 @@ class Node:
             co.net.seed_peers = cast(seeds, c_void_p)
             co.net.n_seed_peers = n_seeds
         co.net.unicast_only = 1 if options.unicast_only else 0
+        co.net.self_ip = options.self_ip.encode() if options.self_ip else None
+        co.net.advertise_port = options.advertise_port
         co.net.fragment_size = options.fragment_size
         co.discovery.announce_interval_us = options.announce_interval_us
         co.discovery.peer_timeout_us = options.peer_timeout_us
