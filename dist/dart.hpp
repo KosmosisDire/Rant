@@ -4649,6 +4649,11 @@ int dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot, DartDi
   #if defined(ESP_PLATFORM)
     #include <esp_random.h>     /* esp_fill_random (HW RNG) */
     #include <esp_netif.h>      /* esp_netif_get_ip_info: the interface-IP enumeration */
+    #if defined(__has_include) && __has_include(<esp_mac.h>)
+      #include <esp_mac.h>      /* IDF 5: esp_efuse_mac_get_default (the host identity) */
+    #else
+      #include <esp_system.h>   /* IDF 4: same declaration lives here */
+    #endif
   #elif defined(__linux__)
     #include <sys/random.h>     /* getrandom(2) */
   #endif
@@ -4735,7 +4740,24 @@ int i_dart_plat_random(void *buf, size_t len){
 size_t i_dart_plat_hostname(char *buf, size_t cap){
     if (!buf || cap == 0) return 0;
     buf[0] = 0;
+#if defined(ESP_PLATFORM)
+    /* lwIP has no gethostname (a device is not a host with a name), so identify the
+       chip by its factory MAC: unique per device and readable before any interface
+       comes up, which is exactly what the UUID fallback wants. */
+    {   static const char hex[] = "0123456789abcdef";
+        uint8_t mac[6]; size_t i;
+        if (cap >= 17 && esp_efuse_mac_get_default(mac) == ESP_OK){
+            memcpy(buf, "esp-", 4);
+            for (i = 0; i < 6; i++){
+                buf[4 + i*2]     = hex[mac[i] >> 4];
+                buf[4 + i*2 + 1] = hex[mac[i] & 0x0F];
+            }
+            buf[16] = 0;
+        }
+    }
+#else
     gethostname(buf, (int)cap - 1);
+#endif
     buf[cap - 1] = 0;
     return strlen(buf);
 }
