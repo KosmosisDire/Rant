@@ -287,6 +287,35 @@ class DartTopicOpts(Structure):
     _fields_ = [("qos", DartQos)]
 
 
+class DartDiscoveryAddr(Structure):
+    _fields_ = [
+        ("ip", c_uint8 * 16),   # network-order bytes
+        ("ip_len", c_uint8),    # 4 = IPv4, 16 = IPv6
+        ("port", c_uint16),     # host order; 0 = the discovery port
+    ]
+
+
+def _seed_addrs(seeds):
+    """Marshal "ip" / "ip:port" strings into a C array of DartDiscoveryAddr (IPv4).
+    The node copies the array at open, so it need not outlive the call."""
+    if not seeds:
+        return None, 0
+    arr = (DartDiscoveryAddr * len(seeds))()
+    for i, s in enumerate(seeds):
+        host, _, port = s.partition(":")
+        octets = host.split(".")
+        if len(octets) != 4:
+            raise ValueError("seed_peers entry %r is not an IPv4 address" % s)
+        for k, o in enumerate(octets):
+            v = int(o)
+            if not 0 <= v <= 255:
+                raise ValueError("seed_peers entry %r is not an IPv4 address" % s)
+            arr[i].ip[k] = v
+        arr[i].ip_len = 4
+        arr[i].port = int(port) if port else 0    # 0 = the discovery port
+    return arr, len(seeds)
+
+
 class DartNodeNet(Structure):
     _fields_ = [
         ("data_port", c_uint16),
@@ -822,6 +851,9 @@ class NodeOptions:
     discovery_port: int = 0
     multicast_interface: str = ""
     multicast_ttl: int = 0
+    seed_peers: list = dataclasses.field(default_factory=list)
+                                  # "ip" or "ip:port" strings to also unicast announces to, so
+                                  # discovery works where multicast is filtered
     fragment_size: int = 0
     announce_interval_us: int = 0
     peer_timeout_us: int = 0
@@ -2102,6 +2134,10 @@ class Node:
         co.net.multicast_interface = (options.multicast_interface.encode()
                                       if options.multicast_interface else None)
         co.net.multicast_ttl = options.multicast_ttl
+        seeds, n_seeds = _seed_addrs(options.seed_peers)   # copied by open; alive for the call
+        if n_seeds:
+            co.net.seed_peers = cast(seeds, c_void_p)
+            co.net.n_seed_peers = n_seeds
         co.net.fragment_size = options.fragment_size
         co.discovery.announce_interval_us = options.announce_interval_us
         co.discovery.peer_timeout_us = options.peer_timeout_us

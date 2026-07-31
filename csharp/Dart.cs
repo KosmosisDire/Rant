@@ -154,6 +154,14 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct DartDiscoveryAddr
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
+        public byte ip_len;                    // 4 = IPv4, 16 = IPv6
+        public ushort port;                    // host order; 0 = the discovery port
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct DartNodeDiscovery
     {
         public uint announce_interval_us;
@@ -1124,13 +1132,16 @@ namespace Dart
         /// TryTake/Dispatch still deliver); onEvent is REQUIRED (it carries the
         /// diagnostics: null throws) and is wired in before the constructor returns,
         /// so no early peer/error event is ever missed. Everything else is optional
-        /// named parameters (0/null = the C default).</summary>
+        /// named parameters (0/null = the C default).
+        /// seedPeers are "ip" or "ip:port" strings to also unicast announces to, so
+        /// discovery works where multicast is filtered.</summary>
         public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
                     bool disableLogs = false, bool disableMeta = false, bool disableErrorLogs = false,
                     int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
                     string multicastInterface = null, int multicastTtl = 0,
+                    string[] seedPeers = null,
                     int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
                     int maxPeers = 0)
         {
@@ -1162,6 +1173,10 @@ namespace Dart
             co.net.discovery_port = (ushort)discoveryPort;
             co.net.multicast_interface = _mcastIf;
             co.net.multicast_ttl = (byte)multicastTtl;
+            ushort nSeeds;
+            IntPtr seedBlock = SeedArray(seedPeers, out nSeeds);   // copied by open, freed below
+            co.net.seed_peers = seedBlock;
+            co.net.n_seed_peers = nSeeds;
             co.net.fragment_size = (ushort)fragmentSize;
             co.discovery.announce_interval_us = (uint)announceIntervalUs;
             co.discovery.peer_timeout_us = (uint)peerTimeoutUs;
@@ -1170,6 +1185,7 @@ namespace Dart
             _alloc = Codec.DefaultAllocator();
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
             IntPtr h = Native.dart_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
+            if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
 
             if (h == IntPtr.Zero)
             {
@@ -1180,6 +1196,34 @@ namespace Dart
                 throw new InvalidOperationException("dart_node_open failed: " + err);
             }
             _handle = h;
+        }
+
+        // Marshal "ip" / "ip:port" seeds into one unmanaged array. The node COPIES it at
+        // open, so the caller frees the block as soon as open returns.
+        static IntPtr SeedArray(string[] seeds, out ushort count)
+        {
+            count = 0;
+            if (seeds == null || seeds.Length == 0) return IntPtr.Zero;
+            int stride = Marshal.SizeOf<DartDiscoveryAddr>();
+            IntPtr block = Marshal.AllocHGlobal(stride * seeds.Length);
+            try
+            {
+                for (int i = 0; i < seeds.Length; i++)
+                {
+                    string s = seeds[i];
+                    int colon = s.IndexOf(':');
+                    string[] oct = (colon < 0 ? s : s.Substring(0, colon)).Split('.');
+                    if (oct.Length != 4)
+                        throw new ArgumentException("seedPeers entry '" + s + "' is not an IPv4 address");
+                    var a = new DartDiscoveryAddr { ip = new byte[16], ip_len = 4 };
+                    for (int k = 0; k < 4; k++) a.ip[k] = byte.Parse(oct[k]);
+                    if (colon >= 0) a.port = ushort.Parse(s.Substring(colon + 1));
+                    Marshal.StructureToPtr(a, IntPtr.Add(block, i * stride), false);
+                }
+            }
+            catch { Marshal.FreeHGlobal(block); throw; }
+            count = (ushort)seeds.Length;
+            return block;
         }
 
         /// <summary>Rebind the message handler set at construction. Rarely needed: the
