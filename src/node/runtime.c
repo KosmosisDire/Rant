@@ -946,7 +946,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->domain = o.domain;
     n->net = o.net;
     n->announce_us = o.discovery.announce_interval_us ? o.discovery.announce_interval_us
-                                                      : 1000000u;   /* discovery's default */
+                                                      : 3000000u;   /* discovery's default */
     n->match_wait_us = o.match_wait_ms < 0 ? 0u
                      : o.match_wait_ms ? (uint32_t)o.match_wait_ms * 1000u
                                        : (uint32_t)DART_MATCH_WAIT_MS * 1000u;
@@ -1062,6 +1062,19 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     }
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
     i_dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
+
+    /* EVERY node sends its unicast discovery TX from its DATA socket (group sends stay
+       on the joined multicast socket). Behind a NAT (rootless containers, slirp-class
+       stacks) every outbound flow gets its own rewritten source, so announcing from the
+       data socket makes the announces themselves open, identify (by uuid) and keep alive
+       exactly the per-peer mappings the data will use, and peers bind their sends to
+       those observed sources. It matters on the OTHER end too: a NAT'd peer replies to
+       an announce's arrival source (its published-port forward relays that back to the
+       announcing socket), and only the data socket demuxes every datagram family, so
+       announcing from it is what makes those replies land somewhere that can read them.
+       On an unfiltered network it changes nothing observable: the announce blob already
+       names the data port, so peers record the same locator either way. */
+    dart_discovery_set_tx_fd(n->discovery, fd);
 
     /* the post-open gather anchor: discovery solicits on startup, so every peer already
        out there answers within an RTT of the first poll; the send-path match wait treats
@@ -1392,8 +1405,12 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
         }
         if (r>0){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
-                /* unicast announce aimed at our data port: hand it to discovery */
-                dart_discovery_feed(n->discovery, src_ip, 4, dart_bytes(buf, (size_t)r));
+                /* unicast announce aimed at our data port: hand it to discovery (source
+                   port included, so a translated peer's observed source can bind) */
+                DartDiscoveryAddr src;
+                memset(&src, 0, sizeof src);
+                memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
+                dart_discovery_feed(n->discovery, &src, dart_bytes(buf, (size_t)r));
             } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
                 /* pairwise detail exchange: answer a request to its SOURCE (stateless, so
                    any requester works, peer or not: the explorer, a not-yet-added node).

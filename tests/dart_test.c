@@ -759,9 +759,12 @@ static uint16_t st_domain_base = 33;
 #define ST_NCH      40
 
 static int st_fail = 0;
-#define ST_CHECK(cond, ...) do { \
-    printf((cond) ? "  ok   " : "  FAIL "); printf(__VA_ARGS__); printf("\n"); \
-    if (!(cond)) st_fail = 1; } while (0)
+/* cond is evaluated exactly ONCE: a condition with side effects (a poll that drains
+   state) must not run twice, or the second evaluation fails silently while the first
+   printed ok -- an invisible st_fail with no FAIL line anywhere. */
+#define ST_CHECK(cond, ...) do { int st_ok_ = !!(cond); \
+    printf(st_ok_ ? "  ok   " : "  FAIL "); printf(__VA_ARGS__); printf("\n"); \
+    if (!st_ok_) st_fail = 1; } while (0)
 
 static unsigned long st_samples[8], st_gap_calls[8], st_gap_tus[8], st_any;
 static char st_last_sender[64];   /* publisher_name of the most recently delivered message */
@@ -923,6 +926,18 @@ static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     return off + 8;
 }
 
+/* feed one crafted datagram to a core as if received from (ip, sport); via 0 = arrived
+   on the discovery socket, 1 = on the data-port socket (the two observed channels) */
+static void dc_feed(DartDiscoveryState *st, const uint8_t ip[4], uint16_t sport, int via,
+                    const uint8_t *buf, size_t n, uint64_t now){
+    DartDiscoveryAddr src;
+    memset(&src, 0, sizeof src);
+    memcpy(src.ip, ip, 4); src.ip_len = 4; src.port = sport;
+    dart_discovery_on_datagram(st, &src,
+                               via ? DART_DISCOVERY_VIA_DATA : DART_DISCOVERY_VIA_DISCOVERY,
+                               dart_bytes(buf, n), now);
+}
+
 static void disc_core_checks(void){
     static uint8_t mem[8192];
     uint8_t buf[DART_DISCOVERY_WIRE_MAX], out[DART_DISCOVERY_WIRE_MAX];
@@ -940,14 +955,14 @@ static void disc_core_checks(void){
 
     /* 1. two peers announce -> two ups, both ACTIVE */
     dc_up_n=dc_down_n=dc_refused_n=0;
-    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2000); idA=dc_up_id;
-    n=dc_mk(buf,2,0,99,5002,1); dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),2000); idB=dc_up_id;
+    n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2000); idA=dc_up_id;
+    n=dc_mk(buf,2,0,99,5002,1); dc_feed(st,sb,7400,0,buf,n,2000); idB=dc_up_id;
     ST_CHECK(dc_up_n==2 && dart_discovery_peer_count(st)==2,
              "disc-core: two peers up (ups=%u count=%u)", dc_up_n, dart_discovery_peer_count(st));
 
     /* 2. a new peer is REFUSED when the table is full of ACTIVE peers */
     dc_up_n=dc_refused_n=0;
-    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),2000);
+    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,7400,0,buf,n,2000);
     ST_CHECK(dc_refused_n==1 && dc_up_n==0 && dart_discovery_peer_count(st)==2,
              "disc-core: refuse new peer when full of active (refused=%u up=%u count=%u)",
              dc_refused_n, dc_up_n, dart_discovery_peer_count(st));
@@ -961,21 +976,21 @@ static void disc_core_checks(void){
 
     /* 4. same uuid returns -> RESUME under the SAME local_id */
     dc_up_n=0;
-    n=dc_mk(buf,1,0,99,5001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2100000);
+    n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2100000);
     ST_CHECK(dc_up_n==1 && dc_up_id==idA && dart_discovery_peer_count(st)==1,
              "disc-core: same uuid resumes same id (up=%u sameid=%d count=%u)",
              dc_up_n, dc_up_id==idA, dart_discovery_peer_count(st));
 
     /* 5. a new peer now evicts the oldest DROPPED peer (B) as GONE */
     dc_down_n=dc_up_n=0;
-    n=dc_mk(buf,3,0,99,5003,1); dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),2100000);
+    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,7400,0,buf,n,2100000);
     ST_CHECK(dc_down_n==1 && dc_down_id==idB && dc_down_reason==(int)DART_DISCOVERY_GONE && dc_up_n==1,
              "disc-core: new peer evicts oldest dropped as GONE (downs=%u sameid=%d reason=%d up=%u)",
              dc_down_n, dc_down_id==idB, dc_down_reason, dc_up_n);
 
     /* 6. BYE is GONE */
     dc_down_n=0;
-    n=dc_mk(buf,1,0x01,99,5001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2100000);
+    n=dc_mk(buf,1,0x01,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2100000);
     ST_CHECK(dc_down_n==1 && dc_down_id==idA && dc_down_reason==(int)DART_DISCOVERY_GONE
              && dart_discovery_peer_count(st)==1,
              "disc-core: BYE is GONE (downs=%u sameid=%d reason=%d count=%u)",
@@ -989,9 +1004,9 @@ static void disc_core_checks(void){
       st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
       dart_discovery_update(st, 1000, out, sizeof out);
       dc_up_n=dc_down_n=0;
-      n=dc_mk(buf,7,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),3000); idP=dc_up_id;
+      n=dc_mk(buf,7,0,99,6001,1); dc_feed(st,sa,7400,0,buf,n,3000); idP=dc_up_id;
       dc_up_n=dc_down_n=0;
-      n=dc_mk(buf,8,0,99,6001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),3100);  /* new uuid, same ip:port */
+      n=dc_mk(buf,8,0,99,6001,1); dc_feed(st,sa,7400,0,buf,n,3100);  /* new uuid, same ip:port */
       ST_CHECK(dc_down_n==1 && dc_down_id==idP && dc_down_reason==(int)DART_DISCOVERY_GONE
                && dc_up_n==1 && dart_discovery_peer_count(st)==1,
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
@@ -1005,11 +1020,14 @@ static void disc_core_checks(void){
       st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
       dart_discovery_update(st, 1000, out, sizeof out);
       /* (a) a DIRECT relay-me announce enlists us: we owe a proxied announce for it */
-      n=dc_mk(buf,9,0x04,99,7001,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),3000);
+      n=dc_mk(buf,9,0x04,99,7001,1); dc_feed(st,sa,7400,0,buf,n,3000);
       id9=dc_up_id;
       pn = dart_discovery_poll_relay(st, out, sizeof out);
-      ST_CHECK(pn > 0 && (out[5] & 0x08) && !(out[5] & 0x04),
-               "disc-core: relay-me peer is proxied, PROXIED and never re-relayable (n=%u flags=0x%02X)",
+      /* PROXIED is the loop stop (8b proves it defeats enlistment even with RELAY_ME set);
+         RELAY_ME rides along as origin info, so third parties know the origin's stated
+         locator is no endpoint identity (two NAT'd containers may state the same one) */
+      ST_CHECK(pn > 0 && (out[5] & 0x08) && (out[5] & 0x04),
+               "disc-core: relay-me peer is proxied PROXIED, origin's RELAY_ME carried (n=%u flags=0x%02X)",
                (unsigned)pn, (unsigned)(pn ? out[5] : 0));
       pport = pn ? (uint16_t)(out[DART_DISCOVERY_META_OFF] |
                              ((uint16_t)out[DART_DISCOVERY_META_OFF+1] << 8)) : 0;
@@ -1022,13 +1040,13 @@ static void disc_core_checks(void){
       /* (b) a PROXIED announce never enlists a SECOND hop, even carrying RELAY_ME: a
              peer we know only second-hand is not ours to introduce (the loop stop) */
       n=dc_mk_ip(buf,11,(uint8_t)(0x08|0x04),99,7011,1,sc);
-      dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),3100);
+      dc_feed(st,sb,7400,0,buf,n,3100);
       ST_CHECK(dart_discovery_peer_count(st)==2 && dart_discovery_poll_relay(st,out,sizeof out)==0,
                "disc-core: a proxied announce never enlists a second relay hop");
       /* (c) a proxied locator is a CANDIDATE: the direct path we are still hearing wins,
              so a relay's view cannot flap the address a peer's data is unicast to */
       n=dc_mk_ip(buf,9,0x08,99,7001,2,sb);        /* the relay says peer 9 is at 10.0.0.2 */
-      dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),3200);
+      dc_feed(st,sc,7400,0,buf,n,3200);
       memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id9, &a);
       ST_CHECK(memcmp(a.ip, sa, 4)==0,
                "disc-core: a proxied locator never stomps a live direct one (%u.%u.%u.%u)",
@@ -1036,7 +1054,7 @@ static void disc_core_checks(void){
       /* (d) contrast: the same stated address WITHOUT the proxied flag is the peer
              speaking for itself, which stays authoritative and does move it */
       n=dc_mk_ip(buf,9,0,99,7001,3,sb);
-      dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),3300);
+      dc_feed(st,sc,7400,0,buf,n,3300);
       memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id9, &a);
       ST_CHECK(memcmp(a.ip, sb, 4)==0,
                "disc-core: ...but a peer's OWN stated locator still is (%u.%u.%u.%u)",
@@ -1065,7 +1083,7 @@ static void disc_core_checks(void){
       st = dart_discovery_init(mem+4096,sizeof mem-4096,&c);
       dart_discovery_update(st, 1000, out, sizeof out);
       n=dc_mk_ip(buf,12,0x04,99,7400,1,pub_ip);
-      dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),4000);      /* source sa, states pub_ip */
+      dc_feed(st,sa,7400,0,buf,n,4000);      /* source sa, states pub_ip */
       id12=dc_up_id;
       memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id12, &a);
       ST_CHECK(memcmp(a.ip, pub_ip, 4)==0,
@@ -1074,6 +1092,231 @@ static void disc_core_checks(void){
       pn = dart_discovery_poll_relay(st, out, sizeof out);
       ST_CHECK(pn > 0 && memcmp(out+DART_DISCOVERY_META_OFF+3, pub_ip, 4)==0,
                "disc-core: the relay proxies the STATED locator, not the source it saw");
+    }
+
+    /* 10. OBSERVED SOURCES (NAT). A unicast-only peer sends everything from its data
+       socket, and a NAT rewrites its source per flow: its advertised locator is fiction.
+       Its direct RELAY_ME announces carry uuid + the real return path, so the receiver
+       binds one observed source per local channel and routes everything there. */
+    { DartDiscoveryCoreConfig c4; DartDiscoveryAddr a; uint32_t id20, id21, id22, idX, idU;
+      uint8_t na[4]={192,168,1,50}, sx[4]={192,168,1,200}, su[4]={192,168,1,51};
+      size_t pn; int ex;
+      c4 = c; c4.max_peers = 4;
+      st = dart_discovery_init(mem,sizeof mem,&c4);
+      dart_discovery_update(st, 1000, out, sizeof out);
+      /* (a) bind + route: announce (RELAY_ME, blob port 6000) arrives on our DATA channel
+         from (na, 33333). Data goes to the observed source, never the phantom locator;
+         attribution accepts the observed source and REFUSES the phantom. */
+      dc_up_n=0;
+      n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,33333,1,buf,n,5000); id20=dc_up_id;
+      memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id20, &a);
+      ST_CHECK(dc_up_n==1 && a.port==33333 && memcmp(a.ip,na,4)==0,
+               "disc-core: data routes to the observed source, not the locator (port=%u)", a.port);
+      ST_CHECK(dart_discovery_id_for_addr(st,na,4,33333,NULL) &&
+               !dart_discovery_id_for_addr(st,na,4,6000,NULL),
+               "disc-core: attribution accepts the observed source, refuses the phantom locator");
+      /* (b) the discovery channel binds independently: the same announce heard on our
+         discovery socket from another flow; discovery TX then hits exactly that endpoint */
+      n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,44444,0,buf,n,5001);
+      { int k = dart_discovery_peer_addr(st, 0, &a);
+        ST_CHECK(k==2 && a.port==44444,
+                 "disc-core: discovery TX targets the discovery-channel source exactly (k=%d port=%u)",
+                 k, a.port); }
+      /* (c) QUIET rebind: the NAT expired and the next announce arrives from a new flow.
+         Sends follow at once; no peer_up refires (nothing about the peer changed). */
+      dc_up_n=0;
+      n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,55555,1,buf,n,5002);
+      memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id20, &a);
+      ST_CHECK(a.port==55555 && dc_up_n==0,
+               "disc-core: a rebound mapping redirects sends quietly (port=%u ups=%u)", a.port, dc_up_n);
+      /* (d) two NAT'd containers on ONE device advertise the SAME phantom locator: they
+         must coexist (neither is that endpoint), distinguished by their observed sources */
+      dc_down_n=0; dc_up_n=0;
+      n=dc_mk(buf,21,0x04,99,6000,1); dc_feed(st,na,55666,1,buf,n,5003); id21=dc_up_id;
+      ST_CHECK(dc_up_n==1 && dc_down_n==0 && dart_discovery_peer_count(st)==2,
+               "disc-core: same phantom locator never evicts a NAT'd sibling (downs=%u count=%u)",
+               dc_down_n, dart_discovery_peer_count(st));
+      { uint32_t got=0;
+        ST_CHECK(dart_discovery_id_for_addr(st,na,4,55666,&got) && got==id21 &&
+                 dart_discovery_id_for_addr(st,na,4,55555,&got) && got==id20,
+                 "disc-core: observed sources tell the siblings apart"); }
+      /* (e) ...but a NEW uuid arriving from an endpoint held as some peer's OBSERVED
+         source is that socket reused by a new process: the old occupant is evicted */
+      dc_down_n=0;
+      n=dc_mk(buf,22,0x04,99,6000,1); dc_feed(st,na,55666,1,buf,n,5004); id22=dc_up_id;
+      ST_CHECK(dc_down_n==1 && dc_down_id==id21 && dc_down_reason==(int)DART_DISCOVERY_GONE,
+               "disc-core: a reused observed endpoint evicts its old occupant (downs=%u sameid=%d)",
+               dc_down_n, dc_down_id==id21);
+      (void)id22;
+      /* (f) a stated self_ip is authoritative: observed never binds over the operator's
+         asserted locator, even for a RELAY_ME sender */
+      { uint8_t pub2[4]={203,0,113,9};
+        n=dc_mk_ip(buf,23,0x04,99,6001,1,pub2); dc_feed(st,su,60123,1,buf,n,5005);
+        memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, dc_up_id, &a);
+        ST_CHECK(memcmp(a.ip,pub2,4)==0 && a.port==6001,
+                 "disc-core: a stated self_ip beats the observed source (%u.%u.%u.%u:%u)",
+                 a.ip[0],a.ip[1],a.ip[2],a.ip[3],a.port); }
+      /* (g) INTRODUCTIONS: the inbound half of relaying. A relay-me peer is told who we
+         hear directly, at its observed source, and re-told when someone new appears. */
+      c4.max_peers = 6;
+      st = dart_discovery_init(mem,sizeof mem,&c4);        /* fresh relayer */
+      dart_discovery_update(st, 1000, out, sizeof out);
+      n=dc_mk(buf,30,0,99,7000,1); dc_feed(st,sx,7400,0,buf,n,6000); idX=dc_up_id;   /* normal peer X */
+      n=dc_mk(buf,31,0x04,99,6000,1); dc_feed(st,su,50001,1,buf,n,6001); idU=dc_up_id; /* relay-me U */
+      pn = dart_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
+      ST_CHECK(pn > 0 && out[8]==30 && ex==1 && a.port==50001 && memcmp(a.ip,su,4)==0,
+               "disc-core: a new relay-me peer is introduced to everyone we hear (uuid=%u to=%u)",
+               (unsigned)(pn?out[8]:0), a.port);
+      ST_CHECK(dart_discovery_poll_introduce(st, out, sizeof out, &a, &ex)==0,
+               "disc-core: ...exactly once (change-triggered, not periodic)");
+      /* a newcomer re-triggers a walk to every relay-me peer */
+      n=dc_mk(buf,32,0,99,7002,1); dc_feed(st,sx,7401,0,buf,n,6002);
+      { int saw32=0, k2;
+        for (k2=0;k2<8;k2++){
+            pn = dart_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
+            if (!pn) break;
+            if (out[8]==32) saw32=1;
+        }
+        ST_CHECK(saw32, "disc-core: a newcomer is introduced to existing relay-me peers"); }
+      /* a peer known only from a PROXY is not ours to introduce (the one-hop rule) */
+      n=dc_mk_ip(buf,33,0x08,99,7003,1,sx); dc_feed(st,sx,7400,0,buf,n,6003);
+      { int saw33=0, k2;
+        n=dc_mk(buf,34,0,99,7004,1); dc_feed(st,sx,7402,0,buf,n,6004);   /* re-trigger a walk */
+        for (k2=0;k2<8;k2++){
+            pn = dart_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
+            if (!pn) break;
+            if (out[8]==33) saw33=1;
+        }
+        ST_CHECK(!saw33, "disc-core: a proxy-heard peer is never introduced onward"); }
+      (void)idX; (void)idU;
+    }
+
+    /* 11. GHOST GATE: relaying is sustained by DIRECT liveness only. Every relay hears
+       the other relays' proxies (and its own multicast-looped echoes, which carry the
+       ORIGIN's uuid, so the self-filter never drops them); if those sustained the relay
+       decision, a dead unicast-only origin would be re-announced forever, mesh-wide
+       (each relay's proxies refreshing the others). Proxies still refresh plain
+       liveness, so the entry outlives the origin by one extra timeout, then dies. */
+    { DartDiscoveryCoreConfig c5; uint64_t t; size_t pn; int round, relayed;
+      c5 = c; c5.max_peers = 4;
+      st = dart_discovery_init(mem,sizeof mem,&c5);
+      dart_discovery_update(st, 1000, out, sizeof out);
+      n=dc_mk(buf,40,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,1000);     /* direct relay-me */
+      n=dc_mk(buf,40,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,900000);   /* still direct */
+      t = 1001000;                       /* first announce tick: direct heard 101ms ago */
+      dart_discovery_update(st, t, out, sizeof out);
+      pn = dart_discovery_poll_relay(st, out, sizeof out);
+      ST_CHECK(pn > 0 && out[8]==40, "disc-core: a directly heard relay-me peer is relayed");
+      /* the origin dies; other relays' PROXIED announces keep arriving every interval.
+         They keep the entry ALIVE, but must never keep US relaying it. */
+      relayed = 0;
+      for (round = 0; round < 3; round++){
+          t += 1000000;
+          n=dc_mk_ip(buf,40,(uint8_t)(0x08|0x04),99,8000,1,sa);
+          dc_feed(st,sb,7400,0,buf,n,t);
+          dart_discovery_update(st, t + 1000, out, sizeof out);
+          if (dart_discovery_poll_relay(st, out, sizeof out)) relayed = 1;
+      }
+      ST_CHECK(!relayed && dart_discovery_peer_count(st)==1,
+               "disc-core: proxies keep a peer alive but never sustain relaying (count=%u)",
+               dart_discovery_peer_count(st));
+      /* nor is a direct-stale origin introduced to a newly appearing relay-me peer */
+      n=dc_mk(buf,41,0x04,99,8001,1); dc_feed(st,sb,50002,1,buf,n,t + 2000);
+      { int saw40=0, k2; DartDiscoveryAddr a2; int ex2;
+        for (k2=0;k2<8;k2++){
+            pn = dart_discovery_poll_introduce(st, out, sizeof out, &a2, &ex2);
+            if (!pn) break;
+            if (out[8]==40) saw40=1;
+        }
+        ST_CHECK(!saw40, "disc-core: a direct-stale peer is not ours to introduce"); }
+      /* the proxies stop (every relay's own direct went stale): the ghost now times out */
+      dc_down_n=0;
+      dart_discovery_update(st, t + 2200000, out, sizeof out);
+      ST_CHECK(dc_down_n>=1, "disc-core: the ghost dies once proxies cease (downs=%u)", dc_down_n);
+    }
+
+    /* 12. A UNICAST-ONLY RECEIVER (cfg.relay_me): everything it hears arrived through
+       its OWN NAT. A published-port forward rewrites the source to the NAT's internal
+       gateway -- an address on the receiver's own subnet, which would WIN the locator
+       ranking against the peer's true routed address and silently black-hole every
+       send to that peer, permanently (each forwarded arrival refreshes the wrong
+       incumbent). So a source never overrides a held locator there; it binds as the
+       observed RETURN PATH instead, for every direct peer, not just relay-me ones. */
+    { DartDiscoveryCoreConfig c6; DartDiscoverySubnet net; DartDiscoveryAddr a;
+      DartDiscoveryPeer v; uint32_t id50, got;
+      static const uint8_t gw[4]={10,0,2,2}, real_ip[4]={192,168,1,106};
+      static const uint8_t net_ip[4]={10,0,2,0}, net_mask[4]={255,255,255,0};
+      c6 = c; c6.max_peers = 4; c6.relay_me = 1;         /* we are the NAT'd node */
+      st = dart_discovery_init(mem,sizeof mem,&c6);
+      memcpy(net.ip, net_ip, 4); memcpy(net.mask, net_mask, 4);
+      dart_discovery_set_local_subnets(st, &net, 1);     /* the container's own subnet */
+      dart_discovery_update(st, 1000, out, sizeof out);
+      /* (a) an introduction states the peer's true routed locator */
+      n=dc_mk_ip(buf,50,0x08,99,5555,1,real_ip); dc_feed(st,sa,7400,0,buf,n,9000);
+      id50=dc_up_id;
+      /* (b) its direct announce arrives through our published-port forward: source = the
+         gateway, on our own subnet (rank 2 vs the real address's rank 1). The locator
+         must NOT move -- without the guard the gateway wins the ranking and every send
+         to the peer goes to it instead of the peer. */
+      n=dc_mk(buf,50,0,99,5555,2); dc_feed(st,gw,33445,1,buf,n,9001);
+      { int have = dart_discovery_peer_at(st, 0, &v);
+        ST_CHECK(have && memcmp(v.addr.ip,real_ip,4)==0 && v.addr.port==5555,
+                 "disc-core: a forwarded source never overrides the held locator (%u.%u.%u.%u:%u)",
+                 v.addr.ip[0],v.addr.ip[1],v.addr.ip[2],v.addr.ip[3],v.addr.port); }
+      /* (c) ...but it IS the peer's return path: bound as the observed source even for
+         an ordinary (non-relay-me) peer, routing data + attribution through the flow */
+      memset(&a,0,sizeof a);
+      ST_CHECK(dart_discovery_addr_of_id(st, id50, &a) && a.port==33445 && memcmp(a.ip,gw,4)==0,
+               "disc-core: a unicast-only node routes every peer via its observed return path (port=%u)",
+               a.port);
+      got=0;
+      ST_CHECK(dart_discovery_id_for_addr(st,gw,4,33445,&got) && got==id50,
+               "disc-core: ...and attributes arrivals from that flow to the peer");
+    }
+
+    /* 13. DUPLICATE SUPPRESSION: every direct hearer is a relay, but the mesh needs 2-3
+       active ones, not N. 2+ FOREIGN proxies for an origin heard within one announce
+       interval suppress our own periodic emission; our own multicast-looped echo (told
+       apart by the relayer-uuid trailer after the blob) never counts, or a lone relay
+       would suppress itself; and a CHANGED origin re-arms emission immediately, so news
+       always propagates and only steady-state repetition thins out. */
+    { DartDiscoveryCoreConfig c7; uint8_t mine[DART_DISCOVERY_WIRE_MAX];
+      size_t mn, pn2;
+      c7 = c; c7.max_peers = 4;
+      st = dart_discovery_init(mem,sizeof mem,&c7);
+      dart_discovery_update(st, 1000, out, sizeof out);
+      n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,1000);   /* direct relay-me */
+      mn = dart_discovery_poll_relay(st, mine, sizeof mine);
+      ST_CHECK(mn > 16 && mine[8]==60 && memcmp(mine + mn - 16, c7.uuid, 16)==0,
+               "disc-core: our proxy carries our relayer trailer (n=%u)", (unsigned)mn);
+      /* our own echo comes back, plus ONE foreign proxy (old-style, trailer-less) */
+      dc_feed(st,sc,7400,0,mine,mn,2000);                                  /* self echo */
+      n=dc_mk_ip(buf,60,(uint8_t)(0x08|0x04),99,8000,1,sa);
+      dc_feed(st,sb,7400,0,buf,n,2001);                                    /* 1 foreign */
+      n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,900000);  /* stay direct-fresh */
+      dart_discovery_update(st, 1001000, out, sizeof out);
+      ST_CHECK(dart_discovery_poll_relay(st, out, sizeof out) > 0,
+               "disc-core: one foreign proxy does not suppress; a self echo never counts");
+      /* two foreign proxies within the interval: quorum exists, we sit this one out */
+      n=dc_mk_ip(buf,60,(uint8_t)(0x08|0x04),99,8000,1,sa);
+      dc_feed(st,sb,7400,0,buf,n,1500000);
+      dc_feed(st,sc,7400,0,buf,n,1600000);
+      n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,1900000);
+      dart_discovery_update(st, 2001000, out, sizeof out);
+      ST_CHECK(dart_discovery_poll_relay(st, out, sizeof out) == 0,
+               "disc-core: a relay quorum suppresses our periodic emission");
+      /* the quorum went quiet: the next tick re-enlists us */
+      n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,2900000);
+      dart_discovery_update(st, 3001000, out, sizeof out);
+      pn2 = dart_discovery_poll_relay(st, out, sizeof out);
+      ST_CHECK(pn2 > 0, "disc-core: relay silence re-enlists us at the next tick");
+      /* a CHANGED origin bypasses suppression: news beats steady-state thinning */
+      n=dc_mk_ip(buf,60,(uint8_t)(0x08|0x04),99,8000,1,sa);
+      dc_feed(st,sb,7400,0,buf,n,3200000);
+      dc_feed(st,sc,7400,0,buf,n,3200001);
+      n=dc_mk(buf,60,0x04,99,8000,2); dc_feed(st,sa,7400,0,buf,n,3300000);  /* blob v2 */
+      ST_CHECK(dart_discovery_poll_relay(st, out, sizeof out) > 0,
+               "disc-core: a changed origin is relayed at once despite a quorum");
     }
 }
 
@@ -1161,8 +1404,8 @@ static void node_core_checks(void){
 
     /* 1. two peers announce -> two ups; discovery assigns the ids; resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2000); idA=nc_up_id;
-    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dart_discovery_on_datagram(st,sb,4,dart_bytes(buf,n),2000); idB=nc_up_id;
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,7400,0,buf,n,2000); idA=nc_up_id;
+    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,7400,0,buf,n,2000); idB=nc_up_id;
     ST_CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
     {   DartString pn = i_dart_node_core_peer_name(nc, idA);
         ST_CHECK(pn.data && pn.len==7 && memcmp(pn.data,"nc-self",7)==0,
@@ -1174,15 +1417,15 @@ static void node_core_checks(void){
 
     /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
     {   DartString pn;
-        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2001);
+        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,7400,0,buf,n,2001);
         pn = i_dart_node_core_peer_name(nc, idA);
         ST_CHECK(pn.data && pn.len==12 && memcmp(pn.data,"unknown-peer",12)==0,
                  "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
-        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),2002); }
+        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,7400,0,buf,n,2002); }
 
     /* 2. a 3rd peer is REFUSED while the table is full of ACTIVE peers; the node forwards it */
     nc_refused_n=0;
-    n=nc_dgram(buf,3,0,99,5003,"three",1); dart_discovery_on_datagram(st,sc,4,dart_bytes(buf,n),2003);
+    n=nc_dgram(buf,3,0,99,5003,"three",1); dc_feed(st,sc,7400,0,buf,n,2003);
     ST_CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 
     /* 3. silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
@@ -1193,12 +1436,12 @@ static void node_core_checks(void){
 
     /* 4. the same uuid returns -> RESUME re-fires PEER_UP under the same id */
     nc_up_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),1100000);
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,7400,0,buf,n,1100000);
     ST_CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* 5. GONE (BYE) on the now-active peer: one PEER_DOWN, and it no longer resolves */
     nc_down_n=0;
-    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dart_discovery_on_datagram(st,sa,4,dart_bytes(buf,n),1100001);
+    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dc_feed(st,sa,7400,0,buf,n,1100001);
     ST_CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
     ST_CHECK(i_dart_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
 }
@@ -4422,6 +4665,108 @@ static void relay_checks(void){
     }
 }
 
+/* ============ nat: A UNICAST-ONLY NODE BEHIND AN OUTBOUND-ONLY NAT ============ *
+ * The relay phase's unicast-only node still had a real, reachable locator on loopback,
+ * so third parties could simply dial the address the relay proxied. Behind a slirp-class
+ * NAT (a rootless container) that locator is FICTION: nothing dials in, and only flows
+ * the NAT'd node itself opened can carry replies. Simulate exactly the lethal part on
+ * loopback by having U ADVERTISE a black-holed port (bound by the test, never read):
+ * anything sent to U's advertised locator now vanishes, like a real NAT, and U is
+ * reachable only at the sources it actually speaks from. What must then carry the mesh,
+ * end to end: U's announces leave its DATA socket (identity + return path in one
+ * datagram), every peer binds its sends to that OBSERVED source instead of the locator,
+ * and R INTRODUCES its directly heard peers to U so U can speak first to each. */
+static void nat_checks(void){
+    const uint16_t R2_PORT = (uint16_t)(21000u + st_domain_base % 15000u);
+    uint16_t DEAD_PORT = 0;
+    DartDiscoveryAddr seed; int t;
+    i_DartSock bh;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4; seed.port=R2_PORT;
+
+    /* the black hole: owns U's advertised port so nothing else answers there, and never
+       reads it, so every datagram sent to U's locator disappears exactly like a NAT drop.
+       OS-assigned, so it can never collide with a reserved or in-use port. */
+    i_dart_plat_startup();          /* raw socket outside any node: needs the net stack up */
+    bh = i_dart_plat_udp_open();
+    if (bh != DART_SOCK_BAD){
+        if (i_dart_plat_bind(bh, 0, 0, 0)) DEAD_PORT = i_dart_plat_local_port(bh);
+        if (!DEAD_PORT){ i_dart_plat_close(bh); bh = DART_SOCK_BAD; }
+    }
+    ST_CHECK(DEAD_PORT != 0, "nat: black-hole port binds");
+
+    { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts uo, ro, bo; DartNode *U=NULL, *R=NULL, *B=NULL;
+      DartTopic *ut=NULL, *bt=NULL;
+      memset(&ro,0,sizeof ro); ro.domain=ST_DOMAIN+29; ro.disable_shm=1; ro.discovery.max_peers=4;
+      ro.discovery.announce_interval_us=200000;
+      ro.net.multicast_interface="127.0.0.1";
+      ro.net.data_port=R2_PORT;                /* the seeded address */
+      bo=ro; bo.net.data_port=0;
+      uo=ro; uo.net.data_port=0;
+      uo.net.unicast_only=1;
+      uo.net.advertise_port=DEAD_PORT;         /* the locator lie: what a NAT'd node's blob
+                                                  port amounts to on the outside */
+      uo.net.seed_peers=&seed; uo.net.n_seed_peers=1;
+      rly_recv=0; rly_last[0]='\0';
+
+      R = dart_node_open(&ra, "nat-relay", NULL, NULL, &ro);
+      B = dart_node_open(&ba, "nat-far", rly_on_message, NULL, &bo);
+      U = dart_node_open(&ua, "nat-uni", NULL, NULL, &uo);
+      ST_CHECK(R!=NULL, "nat: relay node opens (is port %d free?)", (int)R2_PORT);
+      ST_CHECK(U!=NULL && B!=NULL, "nat: NAT'd + far nodes open");
+      if (U && R && B){
+          bt = dart_node_create_topic(B, "nat/t", DART_SUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } });
+          ut = dart_node_create_topic(U, "nat/t", DART_PUB_ONLY, NULL,
+                   &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE, .keep_last=8 } });
+          ST_CHECK(ut && bt, "nat: topics up");
+
+          /* B cannot dial U (locator black-holed) and U cannot hear multicast: the pair
+             can only form through R's introduction followed by U speaking first */
+          for (t=0;t<3000 && !(rly_sees(B,"nat-uni") && rly_sees(U,"nat-far"));t++)
+              rly_pump(U,R,B,1);
+          ST_CHECK(rly_sees(U,"nat-far"),
+                   "nat: the NAT'd node is INTRODUCED to a peer it cannot hear");
+          ST_CHECK(rly_sees(B,"nat-uni"),
+                   "nat: and reaches it first, so the far node binds its observed source");
+
+          if (ut && bt){
+              int r;
+              for (t=0;t<2000 && dart_topic_match_count(ut)==0;t++) rly_pump(U,R,B,1);
+              ST_CHECK(dart_topic_match_count(ut)==1, "nat: topic matches through the mappings (%d)",
+                       dart_topic_match_count(ut));
+              r = dart_topic_send(ut, dart_bytes("through-the-nat", 15));
+              for (t=0;t<2000 && rly_recv==0;t++) rly_pump(U,R,B,1);
+              ST_CHECK(r==DART_OK && rly_recv==1 && strcmp(rly_last,"through-the-nat")==0,
+                       "nat: reliable data flows despite a dead locator (r=%d recv=%lu '%s')",
+                       r, rly_recv, rly_last);
+          }
+
+          /* the introducer is bootstrap only: the pair sustains itself point to point */
+          dart_node_close(R,1); R=NULL;
+          rly_pump(U,NULL,B,400);
+          ST_CHECK(rly_sees(B,"nat-uni") && rly_sees(U,"nat-far"),
+                   "nat: the pair outlives the introducer (B sees U=%d, U sees B=%d)",
+                   rly_sees(B,"nat-uni"), rly_sees(U,"nat-far"));
+          if (ut && bt){
+              int r = dart_topic_send(ut, dart_bytes("after-introducer-died", 21));
+              for (t=0;t<2000 && rly_recv<2;t++) rly_pump(U,NULL,B,1);
+              ST_CHECK(r==DART_OK && rly_recv==2 && strcmp(rly_last,"after-introducer-died")==0,
+                       "nat: data still flows with the introducer dead (r=%d recv=%lu '%s')",
+                       r, rly_recv, rly_last);
+          }
+      }
+      if (R) dart_node_close(R,1);
+      if (U) dart_node_close(U,1);
+      if (B) dart_node_close(B,1);
+      dart_allocator_reset(&ua); dart_allocator_reset(&ra); dart_allocator_reset(&ba);
+    }
+    if (bh != DART_SOCK_BAD) i_dart_plat_close(bh);
+    i_dart_plat_cleanup();
+}
+
 /* ============ selfip: STATING OUR OWN LOCATOR ============ *
  * By default an announce carries no address and each peer records the source it arrived
  * from. opts.net.self_ip / advertise_port override that with a locator we assert, for a
@@ -5302,6 +5647,7 @@ static int selftest_main(void){
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
+    nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */
     selfip_checks();              /* 19f3. stating our own locator (self_ip / advertise_port) */
     ts_checks();                  /* 19g. per-message source timestamp: stamp, opt-out, replay, queue */
 #ifdef DART_THREADS

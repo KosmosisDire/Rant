@@ -13,6 +13,12 @@
 struct DartDiscovery {
     DartDiscoveryState *core;
     i_DartSock            fd;
+    i_DartSock            tx_fd;         /* socket all unicast discovery TX leaves from: the
+                                            node's DATA socket (dart_discovery_set_tx_fd), or a
+                                            discovery-only instance's own unicast_fd, so replies
+                                            to the arrival source reach a socket that demuxes
+                                            everything and NAT flows carry the data identity;
+                                            d->fd until one is set */
     i_DartSock            unicast_fd;    /* own same-host unicast RX on a unique port, or
                                             DART_SOCK_BAD when the caller gave a data_port */
     i_DartIface          ifs[DART_DISCOVERY_MAX_SUBNETS];  /* every interface we join + announce out of */
@@ -35,17 +41,28 @@ struct DartDiscovery {
 
 static void i_dart_discovery_tx1(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const uint8_t ip[4], uint16_t port){
-    i_dart_plat_send(d->fd, out, n_bytes, ip, port);
+    i_dart_plat_send(d->tx_fd, out, n_bytes, ip, port);
 }
 
-/* unicast one datagram to a peer: at the discovery port, and at its data port too (the
- * only per-process address when processes share the discovery port; the data-socket owner
- * forwards discovery datagrams to its core). */
+/* unicast one datagram to a peer: at its data port once the locator names one (the only
+ * per-process address when processes share the discovery port, the socket that demuxes
+ * every datagram family, and the endpoint whose NAT flow its data rides), else at the
+ * conventional discovery port (all we have until its blob arrives). ONE copy, never both:
+ * a peer whose known data port is unreachable SHOULD look dead, since its data could not
+ * arrive either, and the second copy only doubled the steady-state announce fan. */
 static void i_dart_discovery_tx_to(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const DartDiscoveryAddr *addr){
     if (addr->ip_len != 4) return;
-    i_dart_discovery_tx1(d, out, n_bytes, addr->ip, d->discovery_port);
-    if (addr->port && addr->port != d->discovery_port) i_dart_discovery_tx1(d, out, n_bytes, addr->ip, addr->port);
+    i_dart_discovery_tx1(d, out, n_bytes, addr->ip, addr->port ? addr->port : d->discovery_port);
+}
+
+/* unicast to the peer in table slot s: to its observed source EXACTLY when the core
+ * bound one (a translated peer; expanding would miss its NAT flows), else to its
+ * locator. */
+static void i_dart_discovery_tx_peer(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
+                          const DartDiscoveryAddr *addr, int kind){
+    if (kind == 2){ if (addr->ip_len == 4) i_dart_discovery_tx1(d, out, n_bytes, addr->ip, addr->port); }
+    else if (kind == 1) i_dart_discovery_tx_to(d, out, n_bytes, addr);
 }
 
 /* multicast one datagram out of EVERY interface we hold. The announce carries no address
@@ -64,8 +81,11 @@ static void i_dart_discovery_tx_group(DartDiscovery *d, const uint8_t *out, size
 }
 
 /* send to the group, every seed, and every known peer. Survives multicast outages;
- * receivers dedup by uuid. */
-static void i_dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_bytes){
+ * receivers dedup by uuid. skip_uuid names a peer to leave out: a relay proxy unicast
+ * back to its own ORIGIN is a guaranteed discard (the origin's self-filter drops it),
+ * so the relay loop passes the proxied uuid; everything else passes NULL. */
+static void i_dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_bytes,
+                          const uint8_t *skip_uuid){
     uint16_t s, discovery_port = d->discovery_port;
     DartDiscoveryAddr addr;
     i_dart_discovery_tx_group(d, out, n_bytes);
@@ -75,15 +95,25 @@ static void i_dart_discovery_tx(DartDiscovery *d, const uint8_t *out, size_t n_b
         i_dart_discovery_tx1(d, out, n_bytes, seed->ip, seed->port ? seed->port : discovery_port);
     }
     for (s=0; s<d->max_peers; s++){
-        if (!dart_discovery_peer_addr(d->core, s, &addr)) continue;
-        i_dart_discovery_tx_to(d, out, n_bytes, &addr);
+        int kind;
+        if (skip_uuid){
+            DartDiscoveryPeer v;
+            if (dart_discovery_peer_at(d->core, s, &v) && memcmp(v.uuid, skip_uuid, 16)==0)
+                continue;
+        }
+        kind = dart_discovery_peer_addr(d->core, s, &addr);
+        if (kind) i_dart_discovery_tx_peer(d, out, n_bytes, &addr, kind);
     }
 }
 
-void dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
-                    DartBytes datagram){
+void dart_discovery_feed(DartDiscovery *d, const DartDiscoveryAddr *src, DartBytes datagram){
     if (!d) return;
-    dart_discovery_on_datagram(d->core, src_ip, src_ip_len, datagram, i_dart_plat_now_us());
+    /* arrived on the port we advertise as our locator (the data socket): the DATA channel */
+    dart_discovery_on_datagram(d->core, src, DART_DISCOVERY_VIA_DATA, datagram, i_dart_plat_now_us());
+}
+
+void dart_discovery_set_tx_fd(DartDiscovery *d, i_DartSock fd){
+    if (d) d->tx_fd = (fd == DART_SOCK_BAD) ? d->fd : fd;
 }
 
 void dart_discovery_advertise(DartDiscovery *d, DartBytes meta){
@@ -317,6 +347,7 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
        multicast_interface still means exactly that one (and freezes the set). */
     group_naddr = i_dart_plat_parse_ip(group);
     d->fd = fd;
+    d->tx_fd = fd;
     d->group_naddr = group_naddr;
     d->n_ifs = 0;
     d->unicast_only = c.unicast_only ? 1u : 0u;
@@ -374,6 +405,10 @@ DartDiscovery *dart_discovery_place(void *mem, size_t cap, const DartDiscoveryNe
                 i_dart_plat_set_nonblock(uc);
                 i_dart_plat_suppress_connreset(uc);   /* same: a bounced unicast must not disrupt RX */
                 d->unicast_fd = uc;
+                d->tx_fd = uc;   /* unicast TX identifies with the advertised port (like a
+                                    node's data-socket TX): a peer that replies to the
+                                    arrival source reaches THIS process, not the shared
+                                    discovery port's arbitrary owner */
                 dart_discovery_set_data_port(d->core, uport);
             } else i_dart_plat_close(uc);
         }
@@ -456,13 +491,19 @@ DartDiscovery *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t 
  * keep refreshing its last_heard, so it never times out). Drain fully so timing tracks
  * real arrival, like the node's data socket already does. */
 #define DART_DISCOVERY_RX_BURST 2048
-static int i_dart_discovery_rt_drain(DartDiscovery *d, i_DartSock fd){
+static int i_dart_discovery_rt_drain(DartDiscovery *d, i_DartSock fd, DartDiscoveryVia via){
     int got = 0, guard;
     for (guard = 0; guard < DART_DISCOVERY_RX_BURST; guard++){
-        uint8_t src_ip[4];
-        int n = i_dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, NULL);
+        DartDiscoveryAddr src;
+        uint8_t src_ip[4]; uint16_t src_port = 0;
+        int n = i_dart_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, &src_port);
         if (n < 0){ if (i_dart_plat_would_block()) break; continue; }  /* empty vs transient error */
-        if (n > 0){ dart_discovery_on_datagram(d->core, src_ip, 4, dart_bytes(d->rxbuf, (size_t)n), i_dart_plat_now_us()); got = 1; }
+        if (n > 0){
+            memset(&src, 0, sizeof src);
+            memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
+            dart_discovery_on_datagram(d->core, &src, via, dart_bytes(d->rxbuf, (size_t)n), i_dart_plat_now_us());
+            got = 1;
+        }
     }
     return got;
 }
@@ -474,13 +515,14 @@ static int i_dart_discovery_rt_drain(DartDiscovery *d, i_DartSock fd){
 int dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable){
     DartDiscoveryAddr to;
     uint64_t now;
-    int got = 0; size_t n_bytes;
+    int got = 0, exact; size_t n_bytes;
     if (!d) return 0;
-    if (fd_readable) got |= i_dart_discovery_rt_drain(d, d->fd);
+    if (fd_readable) got |= i_dart_discovery_rt_drain(d, d->fd, DART_DISCOVERY_VIA_DISCOVERY);
     /* our own unicast port: solicit replies + re-fetch answers land here, so a same-host
-       peer's reply reaches THIS process rather than the shared discovery port */
+       peer's reply reaches THIS process rather than the shared discovery port. It is the
+       port we ADVERTISE (our "data port"), so it is the DATA channel. */
     if (unicast_readable && d->unicast_fd != DART_SOCK_BAD)
-        got |= i_dart_discovery_rt_drain(d, d->unicast_fd);
+        got |= i_dart_discovery_rt_drain(d, d->unicast_fd, DART_DISCOVERY_VIA_DATA);
 
     now = i_dart_plat_now_us();
     if (!d->pinned && now >= d->if_scan_us){    /* pick up an interface that came up since open */
@@ -489,17 +531,24 @@ int dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readab
     }
 
     n_bytes = dart_discovery_update(d->core, now, d->txbuf, d->wire_max);
-    if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes);
+    if (n_bytes) i_dart_discovery_tx(d, d->txbuf, n_bytes, NULL);
 
     /* targeted unicast: replies to soliciters + re-fetch requests for stale blobs */
-    while ((n_bytes = dart_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to)) != 0)
-        i_dart_discovery_tx_to(d, d->txbuf, n_bytes, &to);
+    while ((n_bytes = dart_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to, &exact)) != 0)
+        i_dart_discovery_tx_peer(d, d->txbuf, n_bytes, &to, exact ? 2 : 1);
 
     /* relay: announces rebuilt for peers that cannot multicast, out of every path we DO
        have (group + seeds + known peers), so a unicast-only node reaches nodes it could
-       never announce to itself. The origin's own copy is dropped by its uuid self-filter. */
+       never announce to itself. The origin itself is skipped (bytes 8..23 carry its
+       uuid): its self-filter would only discard the copy. */
     while ((n_bytes = dart_discovery_poll_relay(d->core, d->txbuf, d->wire_max)) != 0)
-        i_dart_discovery_tx(d, d->txbuf, n_bytes);
+        i_dart_discovery_tx(d, d->txbuf, n_bytes, d->txbuf + 8);
+
+    /* introductions, the inbound half: proxied announces of the peers WE hear directly,
+       each unicast to one relay-me peer, which cannot hear the mesh any other way and,
+       behind a NAT, must always be the side that speaks first. Change-triggered. */
+    while ((n_bytes = dart_discovery_poll_introduce(d->core, d->txbuf, d->wire_max, &to, &exact)) != 0)
+        i_dart_discovery_tx_peer(d, d->txbuf, n_bytes, &to, exact ? 2 : 1);
     return got;
 }
 
@@ -552,7 +601,7 @@ void dart_discovery_close(DartDiscovery *d, int send_bye){
     if (send_bye){
         size_t n_bytes = dart_discovery_leave(d->core, d->txbuf, d->wire_max);
         int k;
-        for (k = 0; n_bytes && k < DART_DISCOVERY_BYE_SENDS; k++) i_dart_discovery_tx(d, d->txbuf, n_bytes);
+        for (k = 0; n_bytes && k < DART_DISCOVERY_BYE_SENDS; k++) i_dart_discovery_tx(d, d->txbuf, n_bytes, NULL);
     }
     dart_discovery_destroy(d->core);   /* hook-allocated peer blobs (no-op without a hook); may
                                           mutate the pool, so it must run before the copy-out */

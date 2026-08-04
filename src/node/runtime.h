@@ -35,7 +35,17 @@ typedef struct {
                                                 makes it discoverable across the whole mesh (the
                                                 relay only introduces: data stays unicast end to
                                                 end, and established pairs survive its death).
-                                                Set seed_peers, or have one node seed this one. */
+                                                Set seed_peers, or have one node seed this one.
+                                                Works from behind an outbound-only NAT too (a
+                                                rootless container, slirp-class user stacks): all
+                                                discovery leaves the data socket, so the announces
+                                                open and keep alive the per-peer NAT mappings, peers
+                                                bind everything to the OBSERVED source (uuid-keyed,
+                                                per flow) instead of the useless advertised locator,
+                                                and peers this node cannot hear are INTRODUCED to it
+                                                by whoever hears both, whereupon this side speaks
+                                                first. Two such NAT'd nodes cannot reach each other
+                                                (neither can receive first): that pair stays apart. */
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
@@ -64,7 +74,7 @@ typedef struct {
     const char           *self_ip;           /* "203.0.113.7": advertise THIS IPv4 address instead of
                                                 letting each peer learn ours from the datagram source.
                                                 NULL = the default (learn per path). Unparseable =
-                                                open fails with DART_E_PLATFORM. */
+                                                open fails with DART_E_BAD_ADDRESS. */
     uint16_t              advertise_port;    /* advertise THIS data port instead of the one we bound
                                                 (0 = the bound port, the default). For a forward that
                                                 does not preserve the port. */
@@ -72,8 +82,8 @@ typedef struct {
 
 /* Discovery cadence and peer-table size; zero-means-default (defaults shown). */
 typedef struct {
-    uint32_t              announce_interval_us; /* "I'm here" broadcast period; 1s */
-    uint32_t              peer_timeout_us;   /* drop a peer after this silence; 3.5s */
+    uint32_t              announce_interval_us; /* "I'm here" broadcast period; 3s */
+    uint32_t              peer_timeout_us;   /* drop a peer after this silence; 12s */
     uint16_t              max_peers;         /* peer-table capacity; 16 */
 } DartNodeDiscovery;
 

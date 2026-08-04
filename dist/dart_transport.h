@@ -1876,7 +1876,17 @@ typedef struct {
                                                 makes it discoverable across the whole mesh (the
                                                 relay only introduces: data stays unicast end to
                                                 end, and established pairs survive its death).
-                                                Set seed_peers, or have one node seed this one. */
+                                                Set seed_peers, or have one node seed this one.
+                                                Works from behind an outbound-only NAT too (a
+                                                rootless container, slirp-class user stacks): all
+                                                discovery leaves the data socket, so the announces
+                                                open and keep alive the per-peer NAT mappings, peers
+                                                bind everything to the OBSERVED source (uuid-keyed,
+                                                per flow) instead of the useless advertised locator,
+                                                and peers this node cannot hear are INTRODUCED to it
+                                                by whoever hears both, whereupon this side speaks
+                                                first. Two such NAT'd nodes cannot reach each other
+                                                (neither can receive first): that pair stays apart. */
     uint32_t              recv_buffer_bytes; /* data-socket SO_RCVBUF; 0 = OS default */
     uint32_t              send_buffer_bytes; /* data-socket SO_SNDBUF; 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment this node sends;
@@ -1905,7 +1915,7 @@ typedef struct {
     const char           *self_ip;           /* "203.0.113.7": advertise THIS IPv4 address instead of
                                                 letting each peer learn ours from the datagram source.
                                                 NULL = the default (learn per path). Unparseable =
-                                                open fails with DART_E_PLATFORM. */
+                                                open fails with DART_E_BAD_ADDRESS. */
     uint16_t              advertise_port;    /* advertise THIS data port instead of the one we bound
                                                 (0 = the bound port, the default). For a forward that
                                                 does not preserve the port. */
@@ -1913,8 +1923,8 @@ typedef struct {
 
 /* Discovery cadence and peer-table size; zero-means-default (defaults shown). */
 typedef struct {
-    uint32_t              announce_interval_us; /* "I'm here" broadcast period; 1s */
-    uint32_t              peer_timeout_us;   /* drop a peer after this silence; 3.5s */
+    uint32_t              announce_interval_us; /* "I'm here" broadcast period; 3s */
+    uint32_t              peer_timeout_us;   /* drop a peer after this silence; 12s */
     uint16_t              max_peers;         /* peer-table capacity; 16 */
 } DartNodeDiscovery;
 
@@ -10341,7 +10351,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     n->domain = o.domain;
     n->net = o.net;
     n->announce_us = o.discovery.announce_interval_us ? o.discovery.announce_interval_us
-                                                      : 1000000u;   /* discovery's default */
+                                                      : 3000000u;   /* discovery's default */
     n->match_wait_us = o.match_wait_ms < 0 ? 0u
                      : o.match_wait_ms ? (uint32_t)o.match_wait_ms * 1000u
                                        : (uint32_t)DART_MATCH_WAIT_MS * 1000u;
@@ -10457,6 +10467,19 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     }
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
     i_dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
+
+    /* EVERY node sends its unicast discovery TX from its DATA socket (group sends stay
+       on the joined multicast socket). Behind a NAT (rootless containers, slirp-class
+       stacks) every outbound flow gets its own rewritten source, so announcing from the
+       data socket makes the announces themselves open, identify (by uuid) and keep alive
+       exactly the per-peer mappings the data will use, and peers bind their sends to
+       those observed sources. It matters on the OTHER end too: a NAT'd peer replies to
+       an announce's arrival source (its published-port forward relays that back to the
+       announcing socket), and only the data socket demuxes every datagram family, so
+       announcing from it is what makes those replies land somewhere that can read them.
+       On an unfiltered network it changes nothing observable: the announce blob already
+       names the data port, so peers record the same locator either way. */
+    dart_discovery_set_tx_fd(n->discovery, fd);
 
     /* the post-open gather anchor: discovery solicits on startup, so every peer already
        out there answers within an RTT of the first poll; the send-path match wait treats
@@ -10787,8 +10810,12 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
         }
         if (r>0){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
-                /* unicast announce aimed at our data port: hand it to discovery */
-                dart_discovery_feed(n->discovery, src_ip, 4, dart_bytes(buf, (size_t)r));
+                /* unicast announce aimed at our data port: hand it to discovery (source
+                   port included, so a translated peer's observed source can bind) */
+                DartDiscoveryAddr src;
+                memset(&src, 0, sizeof src);
+                memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
+                dart_discovery_feed(n->discovery, &src, dart_bytes(buf, (size_t)r));
             } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
                 /* pairwise detail exchange: answer a request to its SOURCE (stateless, so
                    any requester works, peer or not: the explorer, a not-yet-added node).

@@ -14,8 +14,9 @@ extern "C" {
 #endif
 
 #ifndef DART_DISCOVERY_PROTO_VERSION
-#define DART_DISCOVERY_PROTO_VERSION 4     /* v4: relay flags (RELAY_ME / PROXIED); v3: versioned
-                                              meta blob, u16 meta_len */
+#define DART_DISCOVERY_PROTO_VERSION 5     /* v5: observed sources (NAT), proxied announces carry the
+                                              origin's RELAY_ME; v4: relay flags (RELAY_ME / PROXIED);
+                                              v3: versioned meta blob, u16 meta_len */
 #endif
 
 #define DART_DISCOVERY_META_MAX 64   /* default per-peer OVERLAY capacity (cfg.meta_cap overrides) */
@@ -37,6 +38,21 @@ typedef struct {
     uint8_t  ip_len;   /* 4 = IPv4, 16 = IPv6 */
     uint16_t port;     /* data port, host order */
 } DartDiscoveryAddr;
+
+/* Which LOCAL socket a discovery datagram arrived on. A unicast-only peer sends all its
+ * discovery traffic from its DATA socket, and a NAT between us may rewrite its source
+ * per (its socket, our endpoint) flow, so the source seen at our discovery port and the
+ * one seen at our data port are two distinct return paths. The core stores one OBSERVED
+ * source per channel for such a peer (bound only from its direct RELAY_ME announces,
+ * keyed by uuid) and hands them back out: dart_discovery_addr_of_id prefers the
+ * data-channel source (where our data-socket sends pass the NAT's endpoint filter) and
+ * the discovery TX destinations prefer the discovery-channel one. A normal peer binds
+ * nothing and nothing changes. */
+typedef enum {
+    DART_DISCOVERY_VIA_DISCOVERY = 0,   /* the shared discovery port (the runtime's own socket) */
+    DART_DISCOVERY_VIA_DATA      = 1    /* the port we advertise as our locator (the node's data
+                                           socket, or the runtime's own unicast RX socket) */
+} DartDiscoveryVia;
 
 #define DART_DISCOVERY_MAX_SUBNETS 16   /* local IPv4 subnets the locator ranking considers */
 /* One IPv4 subnet this host is directly on: address + netmask, network-order bytes.
@@ -155,7 +171,7 @@ typedef struct {
 typedef struct DartDiscoveryState DartDiscoveryState;
 
 /* Fill any zero (unset) timing/size field with its default: announce_interval_us
- * (1s), peer_timeout_us (3.5x the interval), gone_timeout_us (60s), max_peers (32).
+ * (3s), peer_timeout_us (4x the interval, 12s), gone_timeout_us (2min), max_peers (32).
  * dart_discovery_init REQUIRES announce_interval_us + peer_timeout_us non-zero (it rejects
  * a zero); gone_timeout_us may stay 0 (never promote a dropped peer). An IO layer applies
  * this once before both sizing and init so the two always agree. Idempotent. */
@@ -178,8 +194,11 @@ void         dart_discovery_destroy(DartDiscoveryState *st);
 DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
         size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
         const uint8_t *self_meta, void *peer_cb_user);
-void         dart_discovery_on_datagram(DartDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
-                               DartBytes datagram, uint64_t now_us);
+/* Feed one received discovery datagram. src is the datagram's source address (NULL or
+ * port 0 when the IO layer cannot say: the peer's locator then comes from its blob alone
+ * and no observed source ever binds); via says which local socket it arrived on. */
+void         dart_discovery_on_datagram(DartDiscoveryState *st, const DartDiscoveryAddr *src,
+                               DartDiscoveryVia via, DartBytes datagram, uint64_t now_us);
 size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
 /* The next monotonic time dart_discovery_update wants to run its timers (announce due;
  * 0 = immediately, e.g. a pending solicit or a just-advertised blob). Lets a driving
@@ -221,9 +240,11 @@ void         dart_discovery_set_local_subnets(DartDiscoveryState *st,
 /* Drain one targeted (unicast) datagram and its destination: a solicit REPLY to a
  * peer that solicited us (carries the blob), or a re-fetch REQ to a peer whose
  * advertised version is ahead of what we hold. Returns bytes + fills *to, or 0 when
- * none. Loop like dart_discovery_update; the runtime unicasts each to *to. */
+ * none. Loop like dart_discovery_update; the runtime unicasts each to *to. *exact
+ * (optional) is 1 when *to is the peer's OBSERVED source: send to exactly that
+ * endpoint, never expanded to the discovery + data ports. */
 size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
-                             DartDiscoveryAddr *to);
+                             DartDiscoveryAddr *to, int *exact);
 /* Drain one relay (PROXIED) announce: an announce rebuilt ON BEHALF OF an ACTIVE peer
  * that asked to be relayed (its announces carried RELAY_ME), from the state we hold for
  * it -- its uuid, blob (version intact) and the locator we know it at, embedded as an
@@ -234,13 +255,29 @@ size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, siz
  * locator is a ranked CANDIDATE at the receiver, so direct contact always wins over the
  * relay's view of the address. Returns bytes or 0 when none due; loop until 0. */
 size_t       dart_discovery_poll_relay(DartDiscoveryState *st, void *out, size_t cap);
+/* Drain one INTRODUCTION: a proxied announce of some peer we hear DIRECTLY, addressed to
+ * ONE relay-me peer (*to, *exact as in poll_targeted). Where poll_relay announces a
+ * unicast-only peer outward on the paths it lacks, this is the inbound half: the
+ * unicast-only peer cannot hear the mesh's multicast either, so whoever it reaches
+ * directly tells it who else exists; it then contacts each of them itself (announces
+ * already go to every known peer), which matters when IT sits behind a NAT nobody can
+ * dial into. CHANGE-TRIGGERED, not periodic: a relay-me peer is walked the whole table
+ * once when first heard (or resumed), re-walked when any directly heard peer appears,
+ * resumes or moves, and re-walked on a slow repair sweep (every
+ * DART_DISCOVERY_INTRODUCE_SWEEP announce intervals) so a lost introduction heals.
+ * Receivers dedup by uuid + blob version, so re-walks are idempotent. Loop until 0. */
+size_t       dart_discovery_poll_introduce(DartDiscoveryState *st, void *out, size_t cap,
+                             DartDiscoveryAddr *to, int *exact);
 /* Count of live peers currently known. */
 uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
 /* Table capacity (the slot range for dart_discovery_peer_addr / dart_discovery_peer_at). */
 uint16_t     dart_discovery_max_peers(const DartDiscoveryState *st);
-/* Address of the peer in table slot (0..max_peers-1); 1 + fills *out only if it holds an
- * ACTIVE peer (not a dropped/silent one). Lets a runtime reinforce announces over unicast to
- * survive multicast outages, without bouncing them off peers that have gone away. */
+/* Discovery TX destination for the peer in table slot (0..max_peers-1); fills *out only
+ * if it holds an ACTIVE peer (not a dropped/silent one). Lets a runtime reinforce
+ * announces over unicast to survive multicast outages, without bouncing them off peers
+ * that have gone away. Returns 0 (none), 1 (*out is the advertised locator: the runtime
+ * expands it to the discovery + data ports), or 2 (*out is the peer's OBSERVED source:
+ * send to exactly that endpoint). */
 int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot,
                              DartDiscoveryAddr *out);
 /* Read-only peer view: fill *out for the peer in table slot (0..max_peers-1) and return
@@ -255,12 +292,18 @@ int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
  * slot for a same-UUID return, so it still resolves). The peer table is discovery's; a
  * consumer (e.g. the node core) uses these instead of duplicating it.
  *   peer_user  -> pointer to the peer's opaque scratch (cfg.peer_user_bytes), or NULL.
- *   addr_of_id -> 1 + fills *out with the advertised locator, else 0.
+ *   addr_of_id -> 1 + fills *out with the address that reaches the peer's DATA socket:
+ *                 its observed data-channel source when one is bound (a translated
+ *                 unicast-only peer), else the advertised locator. The one address a
+ *                 consumer should ever send data to.
  *   peer_name  -> advertised name as a DartString (into discovery state; {NULL,0} if unknown).
  *   peer_meta  -> the opaque overlay blob we hold for the peer ({NULL,0} if none) and, via
  *                 *version (optional), the version it is at. A view into discovery state,
  *                 valid until the next poll.
- *   id_for_addr-> reverse map an (ip, port) back to a peer id: 1 + *id on a hit, else 0. */
+ *   id_for_addr-> reverse map an (ip, port) source back to a peer id: 1 + *id on a hit,
+ *                 else 0. A peer with observed sources matches ONLY those (its advertised
+ *                 locator is not its endpoint, and two NAT'd peers on one host may even
+ *                 advertise the same one); every other peer matches its locator. */
 void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
 DartBytes    dart_discovery_peer_meta(const DartDiscoveryState *st, uint32_t id,
                              uint32_t *version);

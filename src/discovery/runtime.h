@@ -121,10 +121,18 @@ DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_
         uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user);
 
 /* ----------------------------------------------------------- node integration */
-/* Hand the core a discovery datagram that arrived on another socket (unicast announces
- * target the peer's data port, so the data-socket owner forwards them). */
-void       dart_discovery_feed(DartDiscovery *d, const uint8_t *src_ip, uint8_t src_ip_len,
-                          DartBytes datagram);
+/* Hand the core a discovery datagram that arrived on the ADVERTISED (data) port's socket
+ * (unicast announces target the peer's data port, so the data-socket owner forwards
+ * them). src is the datagram's source address; the core needs the port too, to bind a
+ * translated peer's observed source. */
+void       dart_discovery_feed(DartDiscovery *d, const DartDiscoveryAddr *src, DartBytes datagram);
+/* Route all discovery TX out of `fd` instead of the runtime's own socket (DART_SOCK_BAD
+ * restores it). A unicast-only node passes its DATA socket: every announce then leaves
+ * the socket its data will use, so behind a NAT the announces themselves open, identify
+ * (by uuid) and keep alive the per-peer mappings, and a peer's reply to the announce's
+ * source is already on the data path. Unicast-only runtimes only: group TX stays on the
+ * runtime's socket (its multicast options live there), and unicast_only sends none. */
+void       dart_discovery_set_tx_fd(DartDiscovery *d, i_DartSock fd);
 /* Replace the opaque overlay carried in announces and bump its version, so peers
  * re-fetch it (e.g. after an interest change). meta must outlive the runtime. */
 void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
