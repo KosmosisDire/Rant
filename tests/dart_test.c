@@ -4825,8 +4825,8 @@ static void selfip_checks(void){
     }
 }
 
-/* ============ sentts: the per-message SOURCE TIMESTAMP ============ *
- * Every published message carries the sender's wall clock (DartMsg.sent_us) unless the
+/* ============ writets: the per-message SOURCE TIMESTAMP ============ *
+ * Every published message carries the writer's wall clock (DartMsg.written_us) unless the
  * topic opts out with qos.no_timestamp. A publisher node and a subscriber node on their own
  * domain cover: a delivered stamp inside [wall before send, wall after delivery]; the
  * opt-out (stamp 0, payload byte-identical); catch_up replay to a LATE joiner keeping the
@@ -4845,22 +4845,22 @@ static void ts_on_message(const DartMsg *msg){
     const unsigned char *p = (const unsigned char*)msg->data.data;
     size_t i; unsigned long s = 0;
     for (i=0;i<msg->data.len;i++) s += p[i];
-    ts_sent[c] = msg->sent_us; ts_recv_wall[c] = i_dart_plat_wall_us();
+    ts_sent[c] = msg->written_us; ts_recv_wall[c] = i_dart_plat_wall_us();
     ts_len[c] = msg->data.len; ts_sum[c] = s;
     ts_msgs[c]++;
 }
 /* late joiner (its own node, one topic at index 0) */
 static uint64_t ts_late_sent; static unsigned long ts_late_msgs;
-static void ts_late_on_message(const DartMsg *msg){ ts_late_sent = msg->sent_us; ts_late_msgs++; }
+static void ts_late_on_message(const DartMsg *msg){ ts_late_sent = msg->written_us; ts_late_msgs++; }
 /* patterns capture: the handler's request stamp, the owner's write stamp */
 static uint64_t ts_req_sent, ts_var_sent;
 static volatile int ts_req_done;
 static void ts_on_request(DartRequest *req, void *user){
-    (void)user; ts_req_sent = req->sent_us; ts_req_done = 1;
+    (void)user; ts_req_sent = req->written_us; ts_req_done = 1;
     dart_request_reply(req, dart_bytes(NULL,0));
 }
 static void ts_on_var_write(const DartVariableUpdate *u, void *user){
-    (void)user; ts_var_sent = u->sent_us;
+    (void)user; ts_var_sent = u->written_us;
 }
 
 static void ts_checks(void){
@@ -4896,7 +4896,7 @@ static void ts_checks(void){
     bo = ao;
     A = test_node_open(mem_a, sizeof mem_a, "ts-pub", NULL, NULL, ao, ca, 4);
     B = test_node_open(mem_b, sizeof mem_b, "ts-sub", ts_on_message, NULL, bo, cb, 4);
-    ST_CHECK(A && B, "sentts: nodes open");
+    ST_CHECK(A && B, "writets: nodes open");
     if (!(A && B)){ if (A) dart_node_close(A,0); if (B) dart_node_close(B,0); return; }
     { uint64_t end = i_dart_plat_now_us()+5000000u;
       while (i_dart_plat_now_us()<end &&
@@ -4906,32 +4906,32 @@ static void ts_checks(void){
               dart_node_publisher_match_count(A,TS_CH_BIG)<1))
           st_pump(A,B,10); }
     ST_CHECK(dart_node_publisher_match_count(A,TS_CH_PLAIN)==1
-          && dart_node_publisher_match_count(A,TS_CH_BIG)==1, "sentts: matches formed");
+          && dart_node_publisher_match_count(A,TS_CH_BIG)==1, "writets: matches formed");
 
-    /* (a) a stamped message: sent_us lies between the wall clock before the send and the
+    /* (a) a stamped message: written_us lies between the wall clock before the send and the
        wall clock read inside the callback */
     before = i_dart_plat_wall_us();
     dart_node_send(A, TS_CH_PLAIN, payload, sizeof payload);
     for (t=0;t<800 && ts_msgs[TS_CH_PLAIN]==0;t++) st_pump(A,B,2);
     after = ts_recv_wall[TS_CH_PLAIN];
-    ST_CHECK(ts_msgs[TS_CH_PLAIN]==1, "sentts: stamped message delivered (%lu)", ts_msgs[TS_CH_PLAIN]);
+    ST_CHECK(ts_msgs[TS_CH_PLAIN]==1, "writets: stamped message delivered (%lu)", ts_msgs[TS_CH_PLAIN]);
     ST_CHECK(ts_sent[TS_CH_PLAIN] >= before && ts_sent[TS_CH_PLAIN] <= after,
-             "sentts: sent_us within [before, delivered] (%llu in [%llu, %llu])",
+             "writets: written_us within [before, delivered] (%llu in [%llu, %llu])",
              (unsigned long long)ts_sent[TS_CH_PLAIN], (unsigned long long)before,
              (unsigned long long)after);
     ST_CHECK(ts_len[TS_CH_PLAIN]==sizeof payload,
-             "sentts: the stamp is stripped, payload intact (%lu B)", (unsigned long)ts_len[TS_CH_PLAIN]);
+             "writets: the stamp is stripped, payload intact (%lu B)", (unsigned long)ts_len[TS_CH_PLAIN]);
 
-    /* (b) the opt-out: sent_us 0, payload byte-identical */
+    /* (b) the opt-out: written_us 0, payload byte-identical */
     {   unsigned long want = 0; size_t k;
         for (k=0;k<sizeof payload;k++) want += payload[k];
         dart_node_send(A, TS_CH_OFF, payload, sizeof payload);
         for (t=0;t<800 && ts_msgs[TS_CH_OFF]==0;t++) st_pump(A,B,2);
         ST_CHECK(ts_msgs[TS_CH_OFF]==1 && ts_sent[TS_CH_OFF]==0,
-                 "sentts: no_timestamp topic delivers sent_us 0 (n=%lu ts=%llu)",
+                 "writets: no_timestamp topic delivers written_us 0 (n=%lu ts=%llu)",
                  ts_msgs[TS_CH_OFF], (unsigned long long)ts_sent[TS_CH_OFF]);
         ST_CHECK(ts_len[TS_CH_OFF]==sizeof payload && ts_sum[TS_CH_OFF]==want,
-                 "sentts: opted-out payload byte-identical (%lu B)", (unsigned long)ts_len[TS_CH_OFF]);
+                 "writets: opted-out payload byte-identical (%lu B)", (unsigned long)ts_len[TS_CH_OFF]);
     }
 
     /* (c) catch_up replay: a LATE joiner gets the original stamp, not a fresh one */
@@ -4945,16 +4945,16 @@ static void ts_checks(void){
         lo.max_topics = 1;
         L = dart_node_open(&la, "ts-late", ts_late_on_message, NULL, &lo);
         lt = L ? dart_node_create_topic(L, "ts/plain", DART_SUB_ONLY, NULL, &lopt) : NULL;
-        ST_CHECK(L && lt, "sentts: late joiner opens");
+        ST_CHECK(L && lt, "writets: late joiner opens");
         if (L && lt){
             for (t=0;t<2000 && ts_late_msgs==0;t++){ st_pump(A,B,2); dart_node_poll(L,2); }
-            ST_CHECK(ts_late_msgs>=1, "sentts: replayed history reached the late joiner (%lu)",
+            ST_CHECK(ts_late_msgs>=1, "writets: replayed history reached the late joiner (%lu)",
                      ts_late_msgs);
             ST_CHECK(ts_late_sent==ts_sent[TS_CH_PLAIN],
-                     "sentts: replay keeps the ORIGINAL stamp (%llu == %llu)",
+                     "writets: replay keeps the ORIGINAL stamp (%llu == %llu)",
                      (unsigned long long)ts_late_sent, (unsigned long long)ts_sent[TS_CH_PLAIN]);
             ST_CHECK(ts_late_sent!=0 && ts_late_sent < join_wall,
-                     "sentts: the stamp predates the join (%llu < %llu)",
+                     "writets: the stamp predates the join (%llu < %llu)",
                      (unsigned long long)ts_late_sent, (unsigned long long)join_wall);
             dart_node_close(L,1);
         }
@@ -4966,18 +4966,18 @@ static void ts_checks(void){
         int r; uint64_t q_before;
         memset(&m,0,sizeof m);
         r = dart_topic_take(qt, &m, 0);          /* the first take makes the topic queued */
-        ST_CHECK(r==0, "sentts: queued topic starts empty (%d)", r);
+        ST_CHECK(r==0, "writets: queued topic starts empty (%d)", r);
         q_before = i_dart_plat_wall_us();
         dart_node_send(A, TS_CH_QUEUED, payload, sizeof payload);
         r = 0;
         for (t=0;t<800 && r!=1;t++){ dart_node_poll(A,0); r = dart_topic_take(qt, &m, 20); }
         ST_CHECK(r==1 && ts_msgs[TS_CH_QUEUED]==0,
-                 "sentts: queued message taken, no inline callback (r=%d cb=%lu)", r, ts_msgs[TS_CH_QUEUED]);
-        ST_CHECK(r==1 && m.sent_us >= q_before && m.sent_us <= i_dart_plat_wall_us(),
-                 "sentts: taken message carries the stamp (%llu >= %llu)",
-                 (unsigned long long)m.sent_us, (unsigned long long)q_before);
+                 "writets: queued message taken, no inline callback (r=%d cb=%lu)", r, ts_msgs[TS_CH_QUEUED]);
+        ST_CHECK(r==1 && m.written_us >= q_before && m.written_us <= i_dart_plat_wall_us(),
+                 "writets: taken message carries the stamp (%llu >= %llu)",
+                 (unsigned long long)m.written_us, (unsigned long long)q_before);
         ST_CHECK(r==1 && m.data.len==sizeof payload,
-                 "sentts: taken payload intact (%lu B)", (unsigned long)m.data.len);
+                 "writets: taken payload intact (%lu B)", (unsigned long)m.data.len);
     }
 
     /* (e) a fragmenting payload (the SHM path where compiled in): the stamp rides the
@@ -4988,14 +4988,14 @@ static void ts_checks(void){
         dart_node_send(A, TS_CH_BIG, big, sizeof big);
         for (t=0;t<2000 && ts_msgs[TS_CH_BIG]==0;t++) st_pump(A,B,2);
         ST_CHECK(ts_msgs[TS_CH_BIG]==1 && ts_len[TS_CH_BIG]==sizeof big && ts_sum[TS_CH_BIG]==want,
-                 "sentts: %lu B message byte-exact (n=%lu len=%lu)", (unsigned long)sizeof big,
+                 "writets: %lu B message byte-exact (n=%lu len=%lu)", (unsigned long)sizeof big,
                  ts_msgs[TS_CH_BIG], (unsigned long)ts_len[TS_CH_BIG]);
         ST_CHECK(ts_sent[TS_CH_BIG] >= before && ts_sent[TS_CH_BIG] <= ts_recv_wall[TS_CH_BIG],
-                 "sentts: big message carries the stamp (%llu)", (unsigned long long)ts_sent[TS_CH_BIG]);
+                 "writets: big message carries the stamp (%llu)", (unsigned long long)ts_sent[TS_CH_BIG]);
 #ifdef DART_SHM
         {   uint32_t shm_tx = 0;
             dart_node_shm_stats(A, &shm_tx, NULL);   /* same host: it went through shared memory */
-            ST_CHECK(shm_tx>=1, "sentts: the big message took the SHM path (tx=%u)", shm_tx); }
+            ST_CHECK(shm_tx>=1, "writets: the big message took the SHM path (tx=%u)", shm_tx); }
 #endif
     }
     dart_node_close(B,1); dart_node_close(A,1);
@@ -5010,7 +5010,7 @@ static void ts_checks(void){
         po.domain = (uint16_t)(ST_DOMAIN+51); co = po;
         P = dart_node_open(&pa, "ts-def", NULL, NULL, &po);
         C = dart_node_open(&qa, "ts-rem", NULL, NULL, &co);
-        ST_CHECK(P && C, "sentts: pattern nodes open");
+        ST_CHECK(P && C, "writets: pattern nodes open");
         if (P && C){
             i_dart_le_w32(b, 1);
             fd = dart_node_create_function_definition(P, "ts/fn", NULL, NULL, ts_on_request, NULL, NULL);
@@ -5018,21 +5018,21 @@ static void ts_checks(void){
             vd = dart_node_create_variable_definition(P, "ts/var", NULL,
                      &(DartVariableOpts){ .initial=dart_bytes(b,4) });
             vr = dart_node_create_remote_variable(C, "ts/var", NULL, NULL);
-            ST_CHECK(fd && fr && vd && vr, "sentts: pattern entities created");
+            ST_CHECK(fd && fr && vd && vr, "writets: pattern entities created");
             dart_variable_on_write(vd, ts_on_var_write, NULL);
             for (t=0;t<2000 && dart_function_match_count(fr)==0;t++) pf_pump(P,C,2);
             ts_req_done = 0; ts_req_sent = 0;
             dart_function_call_async(fr, dart_bytes(b,4), NULL, NULL, NULL);
             for (t=0;t<800 && !ts_req_done;t++) pf_pump(P,C,2);
             ST_CHECK(ts_req_done && ts_req_sent!=0,
-                     "sentts: DartRequest.sent_us stamped (done=%d ts=%llu)",
+                     "writets: DartRequest.written_us stamped (done=%d ts=%llu)",
                      ts_req_done, (unsigned long long)ts_req_sent);
             ts_var_sent = 0;
             i_dart_le_w32(b, 42);
             for (t=0;t<2000 && dart_variable_match_count(vr)==0;t++) pf_pump(P,C,2);
             dart_variable_set(vr, dart_bytes(b,4));
             for (t=0;t<800 && ts_var_sent==0;t++) pf_pump(P,C,2);
-            ST_CHECK(ts_var_sent!=0, "sentts: DartVariableUpdate.sent_us stamped (%llu)",
+            ST_CHECK(ts_var_sent!=0, "writets: DartVariableUpdate.written_us stamped (%llu)",
                      (unsigned long long)ts_var_sent);
             dart_variable_on_write(vd, NULL, NULL);
         }

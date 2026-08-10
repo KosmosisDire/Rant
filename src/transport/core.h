@@ -65,7 +65,7 @@ extern "C" {
 #endif
 
 /* Bytes of the SOURCE TIMESTAMP prepended inside every sample a stamped topic commits,
- * ahead of the pattern header: wire payload = [sent_us u64 LE][pattern hdr][user payload].
+ * ahead of the pattern header: wire payload = [written_us u64 LE][pattern hdr][user payload].
  * Stamped once at the writer's commit point from DartConfig.source_time, so a repair
  * resend, a catch_up replay and an SHM chunk all carry the ORIGINAL stamp. A topic opts
  * out with DartQos.no_timestamp (then nothing is prepended and receivers are told so via
@@ -127,8 +127,8 @@ typedef struct {
                                     Advertised in the announce; ignored on a reliable topic and on
                                     the publish side. Set at create (immutable per topic). */
     uint8_t  no_timestamp;       /* PUBLISHER side: publish this topic WITHOUT the 8-byte source
-                                    timestamp (DART_TIMESTAMP_BYTES), so a receiver sees sent_us 0.
-                                    0 (the default) stamps every message with the sender's wall
+                                    timestamp (DART_TIMESTAMP_BYTES), so a receiver sees written_us 0.
+                                    0 (the default) stamps every message with the writer's wall
                                     clock at the commit point. The opt-out is advertised in the
                                     announce, so a receiver always knows whether the stream carries
                                     the stamp. Set at create (immutable per topic). */

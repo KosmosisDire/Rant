@@ -133,7 +133,7 @@ static void i_dart_func_on_request(void *user, const DartMsg *msg){
     r.pub.caller        = msg->publisher_id;
     r.pub.caller_name   = msg->publisher_name;
     r.pub.recv_us       = msg->recv_us;
-    r.pub.sent_us       = msg->sent_us;
+    r.pub.written_us    = msg->written_us;
     r.fn = fn; r.call_id = i_dart_le_r32(msg->header.data); r.replied = 0;
     if (fn->on_request) fn->on_request(&r.pub, fn->on_request_user);
     else {   /* no handler: NO_HANDLER is the answer, not the auto-ack too */
@@ -192,7 +192,7 @@ static void i_dart_func_on_response(void *user, const DartMsg *msg){
     r.status = (DartCallStatus)msg->header.data[4];
     r.data = msg->data; r.schema = msg->schema;
     r.provider = msg->publisher_id; r.user = p->user;
-    r.sent_us = msg->sent_us;
+    r.written_us = msg->written_us;
     if (p->on_response) p->on_response(&r);
     i_dart_func_free_pending(fn, p);
 }
@@ -345,12 +345,12 @@ int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_
  * The schema pointer is safe to hold: an interned schema lives until node close. */
 typedef struct { DartFunction *fn; volatile int done; DartCallStatus status;
                  const DartSchema *schema; uint32_t len; uint32_t provider;
-                 uint64_t sent_us; } i_DartSyncCtx;
+                 uint64_t written_us; } i_DartSyncCtx;
 static void i_dart_func_sync_response(const DartResponse *r){
     i_DartSyncCtx *c = (i_DartSyncCtx*)r->user;
     DartFunction *fn = c->fn;
     c->status = r->status; c->schema = r->schema; c->len = (uint32_t)r->data.len;
-    c->provider = r->provider; c->sent_us = r->sent_us;
+    c->provider = r->provider; c->written_us = r->written_us;
     if (r->data.len){
         if (fn->sync_cap < r->data.len){
             uint8_t *nb = (uint8_t*)i_dart_node_sys_alloc(fn->n, fn->sync_buf, r->data.len);
@@ -373,7 +373,7 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
     }
     i_dart_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = DART_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
-    ctx.provider = 0; ctx.sent_us = 0;
+    ctx.provider = 0; ctx.written_us = 0;
     r = i_dart_function_call_id(fn, req, i_dart_func_sync_response, &ctx,
                                 opts ? opts->provider : 0, &id);
     if (r != DART_OK) return r;
@@ -401,7 +401,7 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
                                (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? ctx.len : 0);
         out->schema = out->data.len ? ctx.schema : NULL;
         out->provider = ctx.done ? ctx.provider : 0;
-        out->sent_us = ctx.done ? ctx.sent_us : 0;
+        out->written_us = ctx.done ? ctx.written_us : 0;
     }
     /* 0 = timed out, whichever deadline (local or pending) expired first; 1 = a real outcome */
     return (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? 1 : 0;
@@ -539,7 +539,7 @@ struct DartVariable {
                                        remote: the last arrival's msg->schema) */
     uint32_t        last_source;    /* peer behind the current state (0 = a local call) */
     uint64_t        last_write_us;  /* when the current state applied (node clock) */
-    uint64_t        last_sent_us;   /* the writer's wall clock for that write (0 = unstamped) */
+    uint64_t        last_written_us;   /* the writer's wall clock for that write (0 = unstamped) */
     uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
 };
@@ -572,15 +572,15 @@ static int i_dart_var_would_change(const DartVariable *v, DartBytes val, int for
 
 /* the current state as a DartVariableUpdate (views into manager memory: callback-only) */
 static void i_dart_var_update_view(DartVariable *v, DartVariableUpdate *u){
-    u->variable  = v;
-    u->name      = i_dart_topic_name(v->value);
-    u->value     = dart_bytes(v->store, v->store_len);
-    u->schema    = v->cur_schema;
-    u->forced    = v->forced;
-    u->write_seq = v->write_seq;
-    u->source    = v->last_source;
-    u->recv_us   = v->last_write_us;
-    u->sent_us   = v->last_sent_us;
+    u->variable   = v;
+    u->name       = i_dart_topic_name(v->value);
+    u->value      = dart_bytes(v->store, v->store_len);
+    u->schema     = v->cur_schema;
+    u->forced     = v->forced;
+    u->write_seq  = v->write_seq;
+    u->source     = v->last_source;
+    u->recv_us    = v->last_write_us;
+    u->written_us = v->last_written_us;
 }
 
 /* a write just applied to the observed value (lock held, state already updated): stamp the
@@ -588,9 +588,9 @@ static void i_dart_var_update_view(DartVariable *v, DartVariableUpdate *u){
  * this thread (the poll / service thread for wire-originated writes, the caller's for local
  * ones) */
 static void i_dart_var_notify(DartVariable *v, int changed, uint32_t source, uint64_t when_us,
-                              uint64_t sent_us){
+                              uint64_t written_us){
     DartVariableUpdate u;
-    v->last_source = source; v->last_write_us = when_us; v->last_sent_us = sent_us;
+    v->last_source = source; v->last_write_us = when_us; v->last_written_us = written_us;
     if (!v->on_write && !(changed && v->on_change)) return;
     i_dart_var_update_view(v, &u);
     if (v->on_write)             v->on_write(&u, v->on_write_user);
@@ -611,19 +611,19 @@ static void i_dart_var_publish_locked(DartVariable *v){
  * forced (no event: the observed value did not change), else stored + published
  * (reentrantly) + notified. */
 static void i_dart_var_owner_apply(DartVariable *v, DartBytes val, uint32_t source,
-                                   uint64_t when_us, uint64_t sent_us){
+                                   uint64_t when_us, uint64_t written_us){
     int changed;
     if (v->forced){ i_dart_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, val); return; }
     changed = i_dart_var_would_change(v, val, 0);
     if (!i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->has_value = 1; v->write_seq++;
     i_dart_var_publish_locked(v);
-    i_dart_var_notify(v, changed, source, when_us, sent_us);
+    i_dart_var_notify(v, changed, source, when_us, written_us);
 }
 /* owner: force to val. Without allow_force this is a SILENT NO-OP (force is opaque on the
  * wire; the local API layer refuses loudly before ever reaching here). */
 static void i_dart_var_owner_force(DartVariable *v, DartBytes val, uint32_t source,
-                                   uint64_t when_us, uint64_t sent_us){
+                                   uint64_t when_us, uint64_t written_us){
     int changed;
     if (!v->allow_force) return;
     changed = i_dart_var_would_change(v, val, 1);
@@ -632,16 +632,16 @@ static void i_dart_var_owner_force(DartVariable *v, DartBytes val, uint32_t sour
     if (!i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->forced = 1; v->has_value = 1; v->write_seq++;
     i_dart_var_publish_locked(v);
-    i_dart_var_notify(v, changed, source, when_us, sent_us);
+    i_dart_var_notify(v, changed, source, when_us, written_us);
 }
 static void i_dart_var_owner_unforce(DartVariable *v, uint32_t source, uint64_t when_us,
-                                     uint64_t sent_us){
+                                     uint64_t written_us){
     if (!v->forced) return;
     v->forced = 0;
     i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, dart_bytes(v->shadow, v->shadow_len));
     v->write_seq++;
     i_dart_var_publish_locked(v);
-    i_dart_var_notify(v, 1, source, when_us, sent_us);   /* the forced flag flipped: always a change */
+    i_dart_var_notify(v, 1, source, when_us, written_us);   /* the forced flag flipped: always a change */
 }
 
 /* owner: a set/force/unforce op arrived on the set channel (delivery callback, lock held).
@@ -650,9 +650,9 @@ static void i_dart_var_owner_unforce(DartVariable *v, uint32_t source, uint64_t 
 static void i_dart_var_on_set(void *user, const DartMsg *msg){
     DartVariable *v = (DartVariable*)user;
     uint8_t op = msg->header.len >= 1 ? msg->header.data[0] : 0;
-    if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v, msg->publisher_id, msg->recv_us, msg->sent_us);
-    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data, msg->publisher_id, msg->recv_us, msg->sent_us); }
-    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data, msg->publisher_id, msg->recv_us, msg->sent_us); }
+    if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v, msg->publisher_id, msg->recv_us, msg->written_us);
+    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data, msg->publisher_id, msg->recv_us, msg->written_us); }
+    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data, msg->publisher_id, msg->recv_us, msg->written_us); }
 }
 
 /* accessor: a new value arrived on the value channel (cache it + its forced/write_seq,
@@ -675,7 +675,7 @@ static void i_dart_var_on_value(void *user, const DartMsg *msg){
         v->forced = (uint8_t)forced_in;
         v->write_seq = i_dart_le_r32(msg->header.data + 1);
         v->cur_schema = msg->schema;
-        i_dart_var_notify(v, changed, msg->publisher_id, msg->recv_us, msg->sent_us);
+        i_dart_var_notify(v, changed, msg->publisher_id, msg->recv_us, msg->written_us);
     }
 }
 
@@ -1070,7 +1070,7 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
         if (all || now >= p->deadline_us){
             *pp = p->next;
             {   DartResponse r; r.status = fail_status; r.data = dart_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.sent_us = 0;
+                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
                 if (p->on_response) p->on_response(&r);
             }
             i_dart_func_free_pending(fn, p);
@@ -1090,7 +1090,7 @@ static void i_dart_func_reap_dest(DartFunction *fn, uint32_t dest){
         if (p->dest == dest){
             *pp = p->next;
             {   DartResponse r; r.status = DART_CALL_PEER_LOST; r.data = dart_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.sent_us = 0;
+                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
                 if (p->on_response) p->on_response(&r);
             }
             i_dart_func_free_pending(fn, p);

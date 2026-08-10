@@ -385,7 +385,7 @@ extern "C" {
 #endif
 
 /* Bytes of the SOURCE TIMESTAMP prepended inside every sample a stamped topic commits,
- * ahead of the pattern header: wire payload = [sent_us u64 LE][pattern hdr][user payload].
+ * ahead of the pattern header: wire payload = [written_us u64 LE][pattern hdr][user payload].
  * Stamped once at the writer's commit point from DartConfig.source_time, so a repair
  * resend, a catch_up replay and an SHM chunk all carry the ORIGINAL stamp. A topic opts
  * out with DartQos.no_timestamp (then nothing is prepended and receivers are told so via
@@ -447,8 +447,8 @@ typedef struct {
                                     Advertised in the announce; ignored on a reliable topic and on
                                     the publish side. Set at create (immutable per topic). */
     uint8_t  no_timestamp;       /* PUBLISHER side: publish this topic WITHOUT the 8-byte source
-                                    timestamp (DART_TIMESTAMP_BYTES), so a receiver sees sent_us 0.
-                                    0 (the default) stamps every message with the sender's wall
+                                    timestamp (DART_TIMESTAMP_BYTES), so a receiver sees written_us 0.
+                                    0 (the default) stamps every message with the writer's wall
                                     clock at the commit point. The opt-out is advertised in the
                                     announce, so a receiver always knows whether the stream carries
                                     the stamp. Set at create (immutable per topic). */
@@ -2013,10 +2013,12 @@ typedef struct {
                                         when it was taken), so rates and inter-arrival jitter
                                         measured by a frame-paced consumer reflect true arrival
                                         times, never the consumer's own cadence. */
-    uint64_t       sent_us;          /* the SENDER's wall clock (UTC microseconds) at the moment
-                                        its send committed into writer history: a source timestamp,
-                                        so a repaired or replayed message keeps its original value.
-                                        0 = the publisher opted out (DartQos.no_timestamp).
+    uint64_t       written_us;       /* the WRITER's wall clock (UTC microseconds) at the moment it
+                                        wrote this message into writer history: a source timestamp,
+                                        not a transmit one, so a repaired or replayed message keeps
+                                        the time it was originally written (a variable value set an
+                                        hour ago still reads as that write when it replays to a late
+                                        joiner). 0 = the publisher opted out (DartQos.no_timestamp).
                                         Comparability across hosts is only as good as their clock
                                         sync; never mix it with the monotonic recv_us. */
 } DartMsg;
@@ -2376,7 +2378,7 @@ void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSys
                                i_DartSysCloseFn on_close, void *user);
 /* Node-pool alloc/realloc/free (size 0 = free) for the patterns layer; its per-node manager
  * handle slot; the node's monotonic clock (us); and its WALL clock (UTC us), the same source
- * the transport stamps DartMsg.sent_us from, for a locally-applied write that never rode the
+ * the transport stamps DartMsg.written_us from, for a locally-applied write that never rode the
  * wire. Call only under the node lock. */
 void    *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size);
 void   **i_dart_node_sys_slot (DartNode *n);
@@ -2700,8 +2702,8 @@ typedef struct DartRequest {
     uint32_t          caller;        /* the calling peer's id */
     DartString        caller_name;   /* the calling node's name (.data never NULL) */
     uint64_t          recv_us;       /* the node's monotonic clock at arrival */
-    uint64_t          sent_us;       /* the CALLER's wall clock when it sent the request
-                                        (DartMsg.sent_us; 0 = it opted out of the stamp) */
+    uint64_t          written_us;    /* the CALLER's wall clock when it wrote the request
+                                        (DartMsg.written_us; 0 = it opted out of the stamp) */
 } DartRequest;
 
 /* Delivered to the caller when a response arrives (or is synthesized). data is a view valid
@@ -2713,8 +2715,8 @@ typedef struct {
                                     side or a synthesized outcome) */
     uint32_t          provider;
     void             *user;      /* the user pointer passed to dart_function_call_async */
-    uint64_t          sent_us;   /* the PROVIDER's wall clock when it sent the response
-                                    (DartMsg.sent_us); 0 for a synthesized outcome */
+    uint64_t          written_us; /* the PROVIDER's wall clock when it wrote the response
+                                     (DartMsg.written_us); 0 for a synthesized outcome */
 } DartResponse;
 typedef void (*DartResponseFn)(const DartResponse *response);
 
@@ -2867,8 +2869,8 @@ typedef struct {
     uint32_t          write_seq;   /* the owner's write counter */
     uint32_t          source;      /* peer id the write arrived from; 0 = a local call */
     uint64_t          recv_us;     /* the node's monotonic clock when the write applied */
-    uint64_t          sent_us;     /* the WRITER's wall clock for this write: the delivering
-                                      message's DartMsg.sent_us for a remote write, this node's
+    uint64_t          written_us;  /* the WRITER's wall clock for this write: the delivering
+                                      message's DartMsg.written_us for a remote write, this node's
                                       wall clock for a local one (0 = the source opted out) */
 } DartVariableUpdate;
 typedef void (*DartVariableUpdateFn)(const DartVariableUpdate *update, void *user);
@@ -9434,7 +9436,7 @@ typedef struct {
                               the ring reads it at offset 0 for the sentinel test */
     uint32_t data_len;
     uint64_t t_recv_us;    /* poll-side arrival stamp, surfaced as DartMsg.recv_us */
-    uint64_t t_sent_us;    /* the publisher's source stamp, already stripped off the stored
+    uint64_t t_written_us; /* the publisher's source stamp, already stripped off the stored
                               bytes at enqueue (0 = the publisher opted out) */
     uint32_t publisher_id;
     uint8_t  name_len;     /* publisher name copied inline (discovery views die with the peer) */
@@ -9778,14 +9780,14 @@ static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
 }
 
 /* Strip the leading source timestamp a stamped publisher prepends to every sample (see
- * DART_TIMESTAMP_BYTES): fills *sent_us and returns the rest of the wire. `stamped` comes
+ * DART_TIMESTAMP_BYTES): fills *written_us and returns the rest of the wire. `stamped` comes
  * from the writer's advertised interest, so we strip exactly what it wrote; an unstamped
- * stream (or one too short to hold a stamp) yields sent_us 0 and the bytes untouched.
+ * stream (or one too short to hold a stamp) yields written_us 0 and the bytes untouched.
  * THE single strip point: every delivery path (inline UDP, SHM, parked redelivery, the
  * consumer queue's enqueue) runs through here before the pattern-header split. */
-static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *sent_us){
-    if (!stamped || wire.len < DART_TIMESTAMP_BYTES){ *sent_us = 0; return wire; }
-    *sent_us = i_dart_le_r64(wire.data);
+static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us){
+    if (!stamped || wire.len < DART_TIMESTAMP_BYTES){ *written_us = 0; return wire; }
+    *written_us = i_dart_le_r64(wire.data);
     return dart_bytes(wire.data + DART_TIMESTAMP_BYTES, wire.len - DART_TIMESTAMP_BYTES);
 }
 
@@ -9878,7 +9880,7 @@ static void i_dart_node_queue_lost(DartNode *n, uint16_t topic_index, uint32_t f
  * contract), 1 = refused (reliable at cap: the transport parks and the writer's flow
  * control backpressures the publisher). */
 static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQueue *q,
-                                  uint32_t from, DartBytes data, uint64_t sent_us){
+                                  uint32_t from, DartBytes data, uint64_t written_us){
     DartString name = i_dart_node_core_peer_name(n->core, from);
     uint32_t name_len = name.len > DART_NODE_NAME_MAX ? (uint32_t)DART_NODE_NAME_MAX
                                                       : (uint32_t)name.len;
@@ -9899,7 +9901,7 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQu
     {   i_DartQRec *rec = (i_DartQRec*)(q->buf + at);
         rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
         rec->t_recv_us = i_dart_plat_now_us();
-        rec->t_sent_us = sent_us;
+        rec->t_written_us = written_us;
         rec->publisher_id = from; rec->name_len = (uint8_t)name_len;
         rec->pad[0] = rec->pad[1] = rec->pad[2] = 0;
         if (name_len) memcpy((uint8_t*)rec + sizeof *rec, name.data, name_len);
@@ -9915,7 +9917,7 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQu
  * name copy), valid until the next take/dispatch on this topic. The decode schema is
  * re-resolved now rather than stored: the delivery map may repoint between queue and
  * take, and the record must never outlive a pointer into it. The source timestamp was
- * stripped at enqueue and rides the record, so a taken message carries the same sent_us an
+ * stripped at enqueue and rides the record, so a taken message carries the same written_us an
  * inline callback would have seen. */
 static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *rec, DartMsg *m){
     memset(m, 0, sizeof *m);
@@ -9930,7 +9932,7 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
     m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
     if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* op-only pattern message */
     m->recv_us = rec->t_recv_us;
-    m->sent_us = rec->t_sent_us;
+    m->written_us = rec->t_written_us;
 }
 
 /* create the queue (qos.queue_bytes at topic create, or lazily on first take/dispatch).
@@ -9999,12 +10001,12 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     DartMsg m;
     DartTopic *h = (topic_index < i_dart_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
     DartBytes hdr, payload, body;
-    uint64_t sent_us;
+    uint64_t written_us;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
     /* source timestamp first (whether this writer stamps is in its advertised interest),
        then the pattern-header split: the schema validates the payload after both */
     body = i_dart_node_strip_ts(data,
-              dart_transport_peer_timestamped(n->transport, topic_index, from), &sent_us);
+              dart_transport_peer_timestamped(n->transport, topic_index, from), &written_us);
     i_dart_node_split(h, body, &hdr, &payload);
     /* a ZERO-LENGTH payload on a prefix-carrying (pattern) channel is an op-only message
        (a variable's unforce, an empty ack): the op byte is the content, so the payload
@@ -10022,7 +10024,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     if (h && h->q){
         /* store the wire minus the stamp (the stamp rides the record), so take/dispatch
            splits the prefix exactly as an inline delivery does */
-        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, sent_us))
+        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, written_us))
             return 1;   /* parked: the accepted retry re-counts */
         h->rx_msgs++; h->rx_bytes += data.len;
         return 0;
@@ -10038,7 +10040,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     m.header = hdr; m.data = payload;
     m.schema = schema;
     m.recv_us = i_dart_plat_now_us();
-    m.sent_us = sent_us;
+    m.written_us = written_us;
     if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* patterns layer routing */
     else n->user_on_message(&m);
     return 0;
@@ -10081,7 +10083,7 @@ static int i_dart_node_schema_check(void *u, uint32_t peer, uint16_t topic_index
 }
 
 /* the transport's source clock (DartConfig.source_time): the platform WALL clock, stamped
- * into every message a stamped topic commits and surfaced as DartMsg.sent_us. Never the
+ * into every message a stamped topic commits and surfaced as DartMsg.written_us. Never the
  * monotonic clock the loop runs on: this value is read on other hosts. */
 static uint64_t i_dart_node_source_time(void *u){ (void)u; return i_dart_plat_wall_us(); }
 
@@ -12294,7 +12296,7 @@ static void i_dart_func_on_request(void *user, const DartMsg *msg){
     r.pub.caller        = msg->publisher_id;
     r.pub.caller_name   = msg->publisher_name;
     r.pub.recv_us       = msg->recv_us;
-    r.pub.sent_us       = msg->sent_us;
+    r.pub.written_us    = msg->written_us;
     r.fn = fn; r.call_id = i_dart_le_r32(msg->header.data); r.replied = 0;
     if (fn->on_request) fn->on_request(&r.pub, fn->on_request_user);
     else {   /* no handler: NO_HANDLER is the answer, not the auto-ack too */
@@ -12353,7 +12355,7 @@ static void i_dart_func_on_response(void *user, const DartMsg *msg){
     r.status = (DartCallStatus)msg->header.data[4];
     r.data = msg->data; r.schema = msg->schema;
     r.provider = msg->publisher_id; r.user = p->user;
-    r.sent_us = msg->sent_us;
+    r.written_us = msg->written_us;
     if (p->on_response) p->on_response(&r);
     i_dart_func_free_pending(fn, p);
 }
@@ -12506,12 +12508,12 @@ int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_
  * The schema pointer is safe to hold: an interned schema lives until node close. */
 typedef struct { DartFunction *fn; volatile int done; DartCallStatus status;
                  const DartSchema *schema; uint32_t len; uint32_t provider;
-                 uint64_t sent_us; } i_DartSyncCtx;
+                 uint64_t written_us; } i_DartSyncCtx;
 static void i_dart_func_sync_response(const DartResponse *r){
     i_DartSyncCtx *c = (i_DartSyncCtx*)r->user;
     DartFunction *fn = c->fn;
     c->status = r->status; c->schema = r->schema; c->len = (uint32_t)r->data.len;
-    c->provider = r->provider; c->sent_us = r->sent_us;
+    c->provider = r->provider; c->written_us = r->written_us;
     if (r->data.len){
         if (fn->sync_cap < r->data.len){
             uint8_t *nb = (uint8_t*)i_dart_node_sys_alloc(fn->n, fn->sync_buf, r->data.len);
@@ -12534,7 +12536,7 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
     }
     i_dart_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = DART_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
-    ctx.provider = 0; ctx.sent_us = 0;
+    ctx.provider = 0; ctx.written_us = 0;
     r = i_dart_function_call_id(fn, req, i_dart_func_sync_response, &ctx,
                                 opts ? opts->provider : 0, &id);
     if (r != DART_OK) return r;
@@ -12562,7 +12564,7 @@ int dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int t
                                (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? ctx.len : 0);
         out->schema = out->data.len ? ctx.schema : NULL;
         out->provider = ctx.done ? ctx.provider : 0;
-        out->sent_us = ctx.done ? ctx.sent_us : 0;
+        out->written_us = ctx.done ? ctx.written_us : 0;
     }
     /* 0 = timed out, whichever deadline (local or pending) expired first; 1 = a real outcome */
     return (ctx.done && ctx.status != DART_CALL_TIMEOUT) ? 1 : 0;
@@ -12700,7 +12702,7 @@ struct DartVariable {
                                        remote: the last arrival's msg->schema) */
     uint32_t        last_source;    /* peer behind the current state (0 = a local call) */
     uint64_t        last_write_us;  /* when the current state applied (node clock) */
-    uint64_t        last_sent_us;   /* the writer's wall clock for that write (0 = unstamped) */
+    uint64_t        last_written_us;   /* the writer's wall clock for that write (0 = unstamped) */
     uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
 };
@@ -12733,15 +12735,15 @@ static int i_dart_var_would_change(const DartVariable *v, DartBytes val, int for
 
 /* the current state as a DartVariableUpdate (views into manager memory: callback-only) */
 static void i_dart_var_update_view(DartVariable *v, DartVariableUpdate *u){
-    u->variable  = v;
-    u->name      = i_dart_topic_name(v->value);
-    u->value     = dart_bytes(v->store, v->store_len);
-    u->schema    = v->cur_schema;
-    u->forced    = v->forced;
-    u->write_seq = v->write_seq;
-    u->source    = v->last_source;
-    u->recv_us   = v->last_write_us;
-    u->sent_us   = v->last_sent_us;
+    u->variable   = v;
+    u->name       = i_dart_topic_name(v->value);
+    u->value      = dart_bytes(v->store, v->store_len);
+    u->schema     = v->cur_schema;
+    u->forced     = v->forced;
+    u->write_seq  = v->write_seq;
+    u->source     = v->last_source;
+    u->recv_us    = v->last_write_us;
+    u->written_us = v->last_written_us;
 }
 
 /* a write just applied to the observed value (lock held, state already updated): stamp the
@@ -12749,9 +12751,9 @@ static void i_dart_var_update_view(DartVariable *v, DartVariableUpdate *u){
  * this thread (the poll / service thread for wire-originated writes, the caller's for local
  * ones) */
 static void i_dart_var_notify(DartVariable *v, int changed, uint32_t source, uint64_t when_us,
-                              uint64_t sent_us){
+                              uint64_t written_us){
     DartVariableUpdate u;
-    v->last_source = source; v->last_write_us = when_us; v->last_sent_us = sent_us;
+    v->last_source = source; v->last_write_us = when_us; v->last_written_us = written_us;
     if (!v->on_write && !(changed && v->on_change)) return;
     i_dart_var_update_view(v, &u);
     if (v->on_write)             v->on_write(&u, v->on_write_user);
@@ -12772,19 +12774,19 @@ static void i_dart_var_publish_locked(DartVariable *v){
  * forced (no event: the observed value did not change), else stored + published
  * (reentrantly) + notified. */
 static void i_dart_var_owner_apply(DartVariable *v, DartBytes val, uint32_t source,
-                                   uint64_t when_us, uint64_t sent_us){
+                                   uint64_t when_us, uint64_t written_us){
     int changed;
     if (v->forced){ i_dart_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, val); return; }
     changed = i_dart_var_would_change(v, val, 0);
     if (!i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->has_value = 1; v->write_seq++;
     i_dart_var_publish_locked(v);
-    i_dart_var_notify(v, changed, source, when_us, sent_us);
+    i_dart_var_notify(v, changed, source, when_us, written_us);
 }
 /* owner: force to val. Without allow_force this is a SILENT NO-OP (force is opaque on the
  * wire; the local API layer refuses loudly before ever reaching here). */
 static void i_dart_var_owner_force(DartVariable *v, DartBytes val, uint32_t source,
-                                   uint64_t when_us, uint64_t sent_us){
+                                   uint64_t when_us, uint64_t written_us){
     int changed;
     if (!v->allow_force) return;
     changed = i_dart_var_would_change(v, val, 1);
@@ -12793,16 +12795,16 @@ static void i_dart_var_owner_force(DartVariable *v, DartBytes val, uint32_t sour
     if (!i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->forced = 1; v->has_value = 1; v->write_seq++;
     i_dart_var_publish_locked(v);
-    i_dart_var_notify(v, changed, source, when_us, sent_us);
+    i_dart_var_notify(v, changed, source, when_us, written_us);
 }
 static void i_dart_var_owner_unforce(DartVariable *v, uint32_t source, uint64_t when_us,
-                                     uint64_t sent_us){
+                                     uint64_t written_us){
     if (!v->forced) return;
     v->forced = 0;
     i_dart_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, dart_bytes(v->shadow, v->shadow_len));
     v->write_seq++;
     i_dart_var_publish_locked(v);
-    i_dart_var_notify(v, 1, source, when_us, sent_us);   /* the forced flag flipped: always a change */
+    i_dart_var_notify(v, 1, source, when_us, written_us);   /* the forced flag flipped: always a change */
 }
 
 /* owner: a set/force/unforce op arrived on the set channel (delivery callback, lock held).
@@ -12811,9 +12813,9 @@ static void i_dart_var_owner_unforce(DartVariable *v, uint32_t source, uint64_t 
 static void i_dart_var_on_set(void *user, const DartMsg *msg){
     DartVariable *v = (DartVariable*)user;
     uint8_t op = msg->header.len >= 1 ? msg->header.data[0] : 0;
-    if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v, msg->publisher_id, msg->recv_us, msg->sent_us);
-    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data, msg->publisher_id, msg->recv_us, msg->sent_us); }
-    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data, msg->publisher_id, msg->recv_us, msg->sent_us); }
+    if (op & DART__SET_OP_UNFORCE)    i_dart_var_owner_unforce(v, msg->publisher_id, msg->recv_us, msg->written_us);
+    else if (op & DART__SET_OP_FORCE) { if (msg->data.len) i_dart_var_owner_force(v, msg->data, msg->publisher_id, msg->recv_us, msg->written_us); }
+    else                              { if (msg->data.len) i_dart_var_owner_apply(v, msg->data, msg->publisher_id, msg->recv_us, msg->written_us); }
 }
 
 /* accessor: a new value arrived on the value channel (cache it + its forced/write_seq,
@@ -12836,7 +12838,7 @@ static void i_dart_var_on_value(void *user, const DartMsg *msg){
         v->forced = (uint8_t)forced_in;
         v->write_seq = i_dart_le_r32(msg->header.data + 1);
         v->cur_schema = msg->schema;
-        i_dart_var_notify(v, changed, msg->publisher_id, msg->recv_us, msg->sent_us);
+        i_dart_var_notify(v, changed, msg->publisher_id, msg->recv_us, msg->written_us);
     }
 }
 
@@ -13231,7 +13233,7 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
         if (all || now >= p->deadline_us){
             *pp = p->next;
             {   DartResponse r; r.status = fail_status; r.data = dart_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.sent_us = 0;
+                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
                 if (p->on_response) p->on_response(&r);
             }
             i_dart_func_free_pending(fn, p);
@@ -13251,7 +13253,7 @@ static void i_dart_func_reap_dest(DartFunction *fn, uint32_t dest){
         if (p->dest == dest){
             *pp = p->next;
             {   DartResponse r; r.status = DART_CALL_PEER_LOST; r.data = dart_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.sent_us = 0;
+                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
                 if (p->on_response) p->on_response(&r);
             }
             i_dart_func_free_pending(fn, p);

@@ -24,13 +24,13 @@ const OP_VAR = 0x02; /* var set-force-unforce / var update */
 const OP_SIGNAL = 0x03; /* signal emit / signal fired */
 const OP_CALL = 0x04; /* call / call response */
 const OP_REQUEST = 0x05; /* request reply / request */
-/* Every SERVER-TO-CLIENT data frame ends its header with [u64 sent_us], the sender's wall
+/* Every SERVER-TO-CLIENT data frame ends its header with [u64 written_us], the sender's wall
  * clock (UTC microseconds) at the moment its send committed: a SOURCE stamp, so a repaired
  * or replayed message keeps the original value. 0 = the publisher opted out, or the frame is
- * a synthesized outcome. Surfaced as `sentUs` wherever a delivery reaches the app; it is a
+ * a synthesized outcome. Surfaced as `writtenUs` wherever a delivery reaches the app; it is a
  * different clock from a log line's recvUs, so never mix them. Microseconds stay inside the
  * JS safe-integer range, so it reads as a plain number. */
-function rdSentUs(view, off) {
+function rdWrittenUs(view, off) {
     return Number(view.getBigUint64(off, true));
 }
 const CALL_STATUS = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled"];
@@ -488,12 +488,12 @@ class Layout {
 }
 /* A delivered message: raw bytes plus typed reads through the entity's field table. */
 class DartMessage {
-    constructor(layout, topic, publisher, data, sentUs = 0) {
+    constructor(layout, topic, publisher, data, writtenUs = 0) {
         this._layout = layout;
         this.topic = topic;
         this.publisher = publisher;
         this.data = data;
-        this.sentUs = sentUs;
+        this.writtenUs = writtenUs;
         this._view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     }
     /* Typed read of one field by dotted path ("vel.dx"). Scalars return number
@@ -585,8 +585,8 @@ class DartTopic {
         return r.drained;
     }
     _match(m) { this.matchCount = m.matches; this.ready = !!m.ready; }
-    _deliver(publisher, data, sentUs) {
-        this.onMessage?.(new DartMessage(this.layout, this, publisher, data, sentUs));
+    _deliver(publisher, data, writtenUs) {
+        this.onMessage?.(new DartMessage(this.layout, this, publisher, data, writtenUs));
     }
 }
 /* Publish-side handle over a topic; speaks plain nested objects. */
@@ -667,7 +667,7 @@ class RemoteFunction {
                 p.timer = setTimeout(() => {
                     this._node._calls.delete(callId);
                     resolve({ ok: false, status: "timeout", value: undefined,
-                        data: new Uint8Array(0), provider: 0, sentUs: 0 });
+                        data: new Uint8Array(0), provider: 0, writtenUs: 0 });
                 }, timeoutMs);
             }
             this._node._calls.set(callId, p);
@@ -683,7 +683,7 @@ class VarHandle {
         this.name = name;
         this.layout = new Layout(r);
         this.forced = false;
-        this.sentUs = 0;
+        this.writtenUs = 0;
         this._value = undefined;
         this._raw = undefined;
         this._waiters = new Set();
@@ -713,7 +713,7 @@ class VarHandle {
     onChange(handler) {
         this._onChange = handler;
         if (handler && this._value !== undefined)
-            handler(this._value, { forced: this.forced, sentUs: this.sentUs });
+            handler(this._value, { forced: this.forced, writtenUs: this.writtenUs });
     }
     /* Observe EVERY applied write (not just state changes; no replay). Requires the
      * variable to have been created with onWrite:true so the bridge pushes them. One
@@ -731,11 +731,11 @@ class VarHandle {
         frame.set(payload, 4);
         this._node._ws.send(frame);
     }
-    _update(payload, forced, sentUs) {
+    _update(payload, forced, writtenUs) {
         this._raw = payload;
         this._value = this.layout.decode(payload);
         this.forced = forced;
-        this.sentUs = sentUs;
+        this.writtenUs = writtenUs;
         for (const w of this._waiters) {
             if (w.timer !== undefined)
                 clearTimeout(w.timer);
@@ -743,13 +743,13 @@ class VarHandle {
         }
         this._waiters.clear();
         if (this._onChange)
-            this._onChange(this._value, { forced, sentUs });
+            this._onChange(this._value, { forced, writtenUs });
     }
     /* a write-event frame (bit1 set): fire onWrite only; the cache is maintained by the
      * on_change frames, so a write is not double-counted. */
-    _write(payload, forced, sentUs) {
+    _write(payload, forced, writtenUs) {
         if (this._onWrite)
-            this._onWrite(this.layout.decode(payload), { forced, sentUs });
+            this._onWrite(this.layout.decode(payload), { forced, writtenUs });
     }
     _match(_m) { }
 }
@@ -791,8 +791,8 @@ class DartSignal {
         this._node._ws.send(frame);
     }
     _match(m) { this.listenerCount = m.listeners; }
-    _fire(emitter, data, sentUs) {
-        this._handler?.(this.layout.decode(data), { emitter, data, sentUs });
+    _fire(emitter, data, writtenUs) {
+        this._handler?.(this.layout.decode(data), { emitter, data, writtenUs });
     }
 }
 /* The node handle: one WebSocket connection = one DART node owned by the bridge. */
@@ -842,7 +842,7 @@ class DartNode {
                     clearTimeout(p.timer);
                 if (this._closing)
                     p.resolve({ ok: false, status: "cancelled", value: undefined,
-                        data: new Uint8Array(0), provider: 0, sentUs: 0 });
+                        data: new Uint8Array(0), provider: 0, writtenUs: 0 });
                 else
                     p.reject(new Error("connection closed"));
             }
@@ -879,11 +879,11 @@ class DartNode {
         }
         else if (m.op === "request") {
             /* meta first; the binary payload frame follows on the same ordered socket */
-            this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "", sentUs: 0 });
+            this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "", writtenUs: 0 });
         }
         else if (m.op === "log") {
             this._onLog?.({ level: m.level, node: m.node, wallUs: m.wall_us,
-                monoUs: m.mono_us, recvUs: m.recv_us, sentUs: m.sent_us ?? 0,
+                monoUs: m.mono_us, recvUs: m.recv_us, writtenUs: m.written_us ?? 0,
                 text: m.text });
         }
     }
@@ -893,36 +893,36 @@ class DartNode {
             return;
         const view = new DataView(buf);
         switch (b[0]) {
-            case OP_DATA: { /* [u16 topic][u32 publisher][u64 sent][payload] */
+            case OP_DATA: { /* [u16 topic][u32 publisher][u64 written][payload] */
                 if (b.length < 15)
                     return;
                 const ch = this._topics.get(view.getUint16(1, true));
-                ch?._deliver(view.getUint32(3, true), b.subarray(15), rdSentUs(view, 7));
+                ch?._deliver(view.getUint32(3, true), b.subarray(15), rdWrittenUs(view, 7));
                 return;
             }
-            case OP_VAR: { /* [u16 ent][u8 flags][u64 sent][payload]; flags bit0=forced bit1=write-event */
+            case OP_VAR: { /* [u16 ent][u8 flags][u64 written][payload]; flags bit0=forced bit1=write-event */
                 if (b.length < 12)
                     return;
                 const v = this._entities.get(view.getUint16(1, true));
                 if (v instanceof VarHandle) {
                     const forced = (b[3] & 1) !== 0;
-                    const sentUs = rdSentUs(view, 4);
+                    const writtenUs = rdWrittenUs(view, 4);
                     if (b[3] & 2)
-                        v._write(b.subarray(12), forced, sentUs);
+                        v._write(b.subarray(12), forced, writtenUs);
                     else
-                        v._update(b.subarray(12), forced, sentUs);
+                        v._update(b.subarray(12), forced, writtenUs);
                 }
                 return;
             }
-            case OP_SIGNAL: { /* [u16 ent][u32 emitter][u64 sent][payload] */
+            case OP_SIGNAL: { /* [u16 ent][u32 emitter][u64 written][payload] */
                 if (b.length < 15)
                     return;
                 const s = this._entities.get(view.getUint16(1, true));
                 if (s instanceof DartSignal)
-                    s._fire(view.getUint32(3, true), b.subarray(15), rdSentUs(view, 7));
+                    s._fire(view.getUint32(3, true), b.subarray(15), rdWrittenUs(view, 7));
                 return;
             }
-            case OP_CALL: { /* [u32 call][u8 status][u32 provider][u64 sent][payload] */
+            case OP_CALL: { /* [u32 call][u8 status][u32 provider][u64 written][payload] */
                 if (b.length < 18)
                     return;
                 const callId = view.getUint32(1, true);
@@ -940,17 +940,17 @@ class DartNode {
                     value: status === "ok" ? p.layout.decode(data) : undefined,
                     data,
                     provider: view.getUint32(6, true),
-                    sentUs: rdSentUs(view, 10),
+                    writtenUs: rdWrittenUs(view, 10),
                 });
                 return;
             }
-            case OP_REQUEST: { /* [u16 ent][u32 req][u64 sent][payload] */
+            case OP_REQUEST: { /* [u16 ent][u32 req][u64 written][payload] */
                 if (b.length < 15)
                     return;
                 const fn = this._entities.get(view.getUint16(1, true));
                 const reqId = view.getUint32(3, true);
-                const info = this._reqMeta.get(reqId) ?? { caller: 0, callerName: "", sentUs: 0 };
-                info.sentUs = rdSentUs(view, 7); /* the caller's stamp rides the binary frame */
+                const info = this._reqMeta.get(reqId) ?? { caller: 0, callerName: "", writtenUs: 0 };
+                info.writtenUs = rdWrittenUs(view, 7); /* the caller's stamp rides the binary frame */
                 this._reqMeta.delete(reqId);
                 if (fn instanceof FunctionDefinition)
                     void fn._handle(reqId, info, b.subarray(15));

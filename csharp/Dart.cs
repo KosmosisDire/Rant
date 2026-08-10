@@ -201,7 +201,7 @@ namespace Dart
         public DartBytes data;
         public IntPtr schema;
         public ulong recv_us;
-        public ulong sent_us;
+        public ulong written_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -290,7 +290,7 @@ namespace Dart
         public uint caller;
         public DartStringView caller_name;
         public ulong recv_us;
-        public ulong sent_us;
+        public ulong written_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -301,7 +301,7 @@ namespace Dart
         public IntPtr schema;                  // const DartSchema*
         public uint provider;
         public IntPtr user;
-        public ulong sent_us;
+        public ulong written_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -333,7 +333,7 @@ namespace Dart
         public uint write_seq;
         public uint source;
         public ulong recv_us;
-        public ulong sent_us;
+        public ulong written_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -751,7 +751,7 @@ namespace Dart
         /// <summary>The SENDER's wall clock (UTC microseconds) when its send committed: a
         /// source timestamp, kept across repair and replay. 0 = the publisher opted out
         /// (noTimestamp). Never mix it with the monotonic RecvUs.</summary>
-        public ulong SentUs;
+        public ulong WrittenUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
         public object Value;                          // typed instance for a typed topic, the bare
                                                       // value for a bare-type schema, else Fields
@@ -769,7 +769,7 @@ namespace Dart
                 TopicName = Codec.Str(m.topic_name),
                 Data = Codec.Bytes(m.data),
                 RecvUs = m.recv_us,
-                SentUs = m.sent_us,
+                WrittenUs = m.written_us,
             };
             if (m.schema != IntPtr.Zero)
             {
@@ -850,8 +850,8 @@ namespace Dart
         public ulong WallUs;
         public ulong MonoUs;
         public ulong RecvUs;
-        /// <summary>The carrying message's source stamp (see DartMessage.SentUs).</summary>
-        public ulong SentUs;
+        /// <summary>The carrying message's source stamp (see DartMessage.WrittenUs).</summary>
+        public ulong WrittenUs;
         public string Text;
 
         public override string ToString() => $"[{Level}] {Node}: {Text}";
@@ -1403,7 +1403,7 @@ namespace Dart
             AddSubHandler(idx, m => handler(new DartLogLine
             {
                 Level = level, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
-                SentUs = m.SentUs,
+                WrittenUs = m.WrittenUs,
                 WallUs = LogFieldU(m, "wall_us"), MonoUs = LogFieldU(m, "mono_us"),
                 Text = m.Fields != null && m.Fields.TryGetValue("text", out var t) ? t as string ?? "" : "",
             }));
@@ -1660,7 +1660,7 @@ namespace Dart
                 {
                     Status = (CallStatus)o.status,
                     Provider = o.provider,
-                    SentUs = o.sent_us,
+                    WrittenUs = o.written_us,
                     SchemaPtr = o.schema,
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                 };
@@ -1698,7 +1698,7 @@ namespace Dart
                     WriteSeq = u.write_seq,
                     Source = u.source,
                     RecvUs = u.recv_us,
-                    SentUs = u.sent_us,
+                    WrittenUs = u.written_us,
                     SchemaPtr = u.schema,
                 });
             }
@@ -1740,7 +1740,7 @@ namespace Dart
         public string FunctionName { get; private set; }
         public ulong RecvUs { get; private set; }
         /// <summary>The caller's wall clock when it sent the request (0 = unstamped).</summary>
-        public ulong SentUs { get; private set; }
+        public ulong WrittenUs { get; private set; }
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
@@ -1754,7 +1754,7 @@ namespace Dart
             CallerName = Codec.Str(r.caller_name);
             FunctionName = Codec.Str(r.function_name);
             RecvUs = r.recv_us;
-            SentUs = r.sent_us;
+            WrittenUs = r.written_us;
             SchemaPtr = r.schema;
         }
 
@@ -1870,7 +1870,7 @@ namespace Dart
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
         public uint Provider { get; internal set; }
         /// <summary>The provider's wall clock when it sent the response (0 = synthesized).</summary>
-        public ulong SentUs { get; internal set; }
+        public ulong WrittenUs { get; internal set; }
         public byte[] Data { get; internal set; } = Array.Empty<byte>();
         internal IntPtr SchemaPtr;
 
@@ -1935,7 +1935,7 @@ namespace Dart
             {
                 r.Status = (CallStatus)o.status;
                 r.Provider = o.provider;
-                r.SentUs = o.sent_us;
+                r.WrittenUs = o.written_us;
                 r.SchemaPtr = o.schema;
                 r.Data = Codec.Bytes(o.data);   // the view is only valid until the next call: copy now
             }
@@ -1990,7 +1990,7 @@ namespace Dart
         public uint Source { get; internal set; }
         public ulong RecvUs { get; internal set; }
         /// <summary>The writer's wall clock for this write (this node's own for a local one).</summary>
-        public ulong SentUs { get; internal set; }
+        public ulong WrittenUs { get; internal set; }
         internal IntPtr SchemaPtr;
     }
 
@@ -2313,7 +2313,7 @@ namespace Dart
         public CallStatus Status => Core.Status;
         public bool Ok => Core.Ok;
         public uint Provider => Core.Provider;
-        public ulong SentUs => Core.SentUs;
+        public ulong WrittenUs => Core.WrittenUs;
         public SendStatus SendStatus => Core.SendStatus;
 
         public TRsp Value

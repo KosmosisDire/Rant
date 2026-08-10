@@ -65,7 +65,7 @@ type LogLine = {
     wallUs: number;
     monoUs: number;
     recvUs: number;
-    sentUs: number;
+    writtenUs: number;
     text: string;
 };
 type CallStatusName = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled";
@@ -112,17 +112,17 @@ type Response<Rsp = any> = {
     value: Rsp | undefined;
     data: Uint8Array;
     provider: number;
-    sentUs: number;
+    writtenUs: number;
 };
 type RequestInfo = {
     caller: number;
     callerName: string;
-    sentUs: number;
+    writtenUs: number;
 };
 type SignalInfo = {
     emitter: number;
     data: Uint8Array;
-    sentUs: number;
+    writtenUs: number;
 };
 type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
@@ -156,10 +156,10 @@ declare class DartMessage {
     topic: DartTopic | null;
     publisher: number;
     data: Uint8Array;
-    sentUs: number;
+    writtenUs: number;
     _layout: Layout;
     _view: DataView;
-    constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array, sentUs?: number);
+    constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array, writtenUs?: number);
     get(path: string): any;
     value(): any;
     text(path: string, lenField?: string): string;
@@ -183,7 +183,7 @@ declare class DartTopic {
     setRole(role: Role): Promise<any>;
     drain(timeout_ms?: number): Promise<boolean>;
     _match(m: any): void;
-    _deliver(publisher: number, data: Uint8Array, sentUs: number): void;
+    _deliver(publisher: number, data: Uint8Array, writtenUs: number): void;
 }
 declare class Publisher<T = any> {
     topic: DartTopic;
@@ -233,7 +233,7 @@ type VarWaiter = {
 };
 type VarChangeHandler<T> = (value: T, info: {
     forced: boolean;
-    sentUs: number;
+    writtenUs: number;
 }) => void;
 declare class VarHandle<T = any> {
     _node: DartNode;
@@ -241,7 +241,7 @@ declare class VarHandle<T = any> {
     name: string;
     layout: Layout;
     forced: boolean;
-    sentUs: number;
+    writtenUs: number;
     _value: T | undefined;
     _raw: Uint8Array | undefined;
     _waiters: Set<VarWaiter>;
@@ -257,8 +257,8 @@ declare class VarHandle<T = any> {
     force(value: T): void;
     unforce(): void;
     _sendVar(mode: number, payload: Uint8Array): void;
-    _update(payload: Uint8Array, forced: boolean, sentUs: number): void;
-    _write(payload: Uint8Array, forced: boolean, sentUs: number): void;
+    _update(payload: Uint8Array, forced: boolean, writtenUs: number): void;
+    _write(payload: Uint8Array, forced: boolean, writtenUs: number): void;
     _match(_m: any): void;
 }
 declare class VariableDefinition<T = any> extends VarHandle<T> {
@@ -281,7 +281,7 @@ declare class DartSignal<T = any> {
     constructor(node: DartNode, name: string, r: any, handler: SignalHandler<T> | null);
     emit(value?: T): void;
     _match(m: any): void;
-    _fire(emitter: number, data: Uint8Array, sentUs: number): void;
+    _fire(emitter: number, data: Uint8Array, writtenUs: number): void;
 }
 type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle | DartSignal;
 declare class DartNode {

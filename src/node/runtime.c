@@ -29,7 +29,7 @@ typedef struct {
                               the ring reads it at offset 0 for the sentinel test */
     uint32_t data_len;
     uint64_t t_recv_us;    /* poll-side arrival stamp, surfaced as DartMsg.recv_us */
-    uint64_t t_sent_us;    /* the publisher's source stamp, already stripped off the stored
+    uint64_t t_written_us; /* the publisher's source stamp, already stripped off the stored
                               bytes at enqueue (0 = the publisher opted out) */
     uint32_t publisher_id;
     uint8_t  name_len;     /* publisher name copied inline (discovery views die with the peer) */
@@ -373,14 +373,14 @@ static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
 }
 
 /* Strip the leading source timestamp a stamped publisher prepends to every sample (see
- * DART_TIMESTAMP_BYTES): fills *sent_us and returns the rest of the wire. `stamped` comes
+ * DART_TIMESTAMP_BYTES): fills *written_us and returns the rest of the wire. `stamped` comes
  * from the writer's advertised interest, so we strip exactly what it wrote; an unstamped
- * stream (or one too short to hold a stamp) yields sent_us 0 and the bytes untouched.
+ * stream (or one too short to hold a stamp) yields written_us 0 and the bytes untouched.
  * THE single strip point: every delivery path (inline UDP, SHM, parked redelivery, the
  * consumer queue's enqueue) runs through here before the pattern-header split. */
-static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *sent_us){
-    if (!stamped || wire.len < DART_TIMESTAMP_BYTES){ *sent_us = 0; return wire; }
-    *sent_us = i_dart_le_r64(wire.data);
+static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us){
+    if (!stamped || wire.len < DART_TIMESTAMP_BYTES){ *written_us = 0; return wire; }
+    *written_us = i_dart_le_r64(wire.data);
     return dart_bytes(wire.data + DART_TIMESTAMP_BYTES, wire.len - DART_TIMESTAMP_BYTES);
 }
 
@@ -473,7 +473,7 @@ static void i_dart_node_queue_lost(DartNode *n, uint16_t topic_index, uint32_t f
  * contract), 1 = refused (reliable at cap: the transport parks and the writer's flow
  * control backpressures the publisher). */
 static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQueue *q,
-                                  uint32_t from, DartBytes data, uint64_t sent_us){
+                                  uint32_t from, DartBytes data, uint64_t written_us){
     DartString name = i_dart_node_core_peer_name(n->core, from);
     uint32_t name_len = name.len > DART_NODE_NAME_MAX ? (uint32_t)DART_NODE_NAME_MAX
                                                       : (uint32_t)name.len;
@@ -494,7 +494,7 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQu
     {   i_DartQRec *rec = (i_DartQRec*)(q->buf + at);
         rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
         rec->t_recv_us = i_dart_plat_now_us();
-        rec->t_sent_us = sent_us;
+        rec->t_written_us = written_us;
         rec->publisher_id = from; rec->name_len = (uint8_t)name_len;
         rec->pad[0] = rec->pad[1] = rec->pad[2] = 0;
         if (name_len) memcpy((uint8_t*)rec + sizeof *rec, name.data, name_len);
@@ -510,7 +510,7 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQu
  * name copy), valid until the next take/dispatch on this topic. The decode schema is
  * re-resolved now rather than stored: the delivery map may repoint between queue and
  * take, and the record must never outlive a pointer into it. The source timestamp was
- * stripped at enqueue and rides the record, so a taken message carries the same sent_us an
+ * stripped at enqueue and rides the record, so a taken message carries the same written_us an
  * inline callback would have seen. */
 static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *rec, DartMsg *m){
     memset(m, 0, sizeof *m);
@@ -525,7 +525,7 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
     m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
     if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* op-only pattern message */
     m->recv_us = rec->t_recv_us;
-    m->sent_us = rec->t_sent_us;
+    m->written_us = rec->t_written_us;
 }
 
 /* create the queue (qos.queue_bytes at topic create, or lazily on first take/dispatch).
@@ -594,12 +594,12 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     DartMsg m;
     DartTopic *h = (topic_index < i_dart_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
     DartBytes hdr, payload, body;
-    uint64_t sent_us;
+    uint64_t written_us;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
     /* source timestamp first (whether this writer stamps is in its advertised interest),
        then the pattern-header split: the schema validates the payload after both */
     body = i_dart_node_strip_ts(data,
-              dart_transport_peer_timestamped(n->transport, topic_index, from), &sent_us);
+              dart_transport_peer_timestamped(n->transport, topic_index, from), &written_us);
     i_dart_node_split(h, body, &hdr, &payload);
     /* a ZERO-LENGTH payload on a prefix-carrying (pattern) channel is an op-only message
        (a variable's unforce, an empty ack): the op byte is the content, so the payload
@@ -617,7 +617,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     if (h && h->q){
         /* store the wire minus the stamp (the stamp rides the record), so take/dispatch
            splits the prefix exactly as an inline delivery does */
-        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, sent_us))
+        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, written_us))
             return 1;   /* parked: the accepted retry re-counts */
         h->rx_msgs++; h->rx_bytes += data.len;
         return 0;
@@ -633,7 +633,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     m.header = hdr; m.data = payload;
     m.schema = schema;
     m.recv_us = i_dart_plat_now_us();
-    m.sent_us = sent_us;
+    m.written_us = written_us;
     if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* patterns layer routing */
     else n->user_on_message(&m);
     return 0;
@@ -676,7 +676,7 @@ static int i_dart_node_schema_check(void *u, uint32_t peer, uint16_t topic_index
 }
 
 /* the transport's source clock (DartConfig.source_time): the platform WALL clock, stamped
- * into every message a stamped topic commits and surfaced as DartMsg.sent_us. Never the
+ * into every message a stamped topic commits and surfaced as DartMsg.written_us. Never the
  * monotonic clock the loop runs on: this value is read on other hosts. */
 static uint64_t i_dart_node_source_time(void *u){ (void)u; return i_dart_plat_wall_us(); }
 
