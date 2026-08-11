@@ -32,6 +32,7 @@ dart_node_create_remote_function
 dart_function_call
 dart_function_call_async
 dart_function_match_count
+dart_function_retire
 dart_request_reply
 dart_request_fail
 dart_request_defer
@@ -45,11 +46,13 @@ dart_variable_unforce
 dart_variable_forced
 dart_variable_wait
 dart_variable_match_count
+dart_variable_retire
 dart_variable_on_change
 dart_variable_on_write
 dart_node_create_signal
 dart_signal_emit
 dart_signal_listener_count
+dart_signal_retire
 dart_node_log
 dart_node_log_text
 dart_node_log_topic

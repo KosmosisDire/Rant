@@ -3873,6 +3873,12 @@ static void pf_on_var_update(const DartVariableUpdate *u, void *user){
 /* cancel-at-close capture: a call pending at close must get exactly one CANCELLED outcome */
 static volatile int pf_cancel_count; static DartCallStatus pf_cancel_status;
 static void pf_on_cancel(const DartResponse *r){ pf_cancel_status = r->status; pf_cancel_count++; }
+/* retire from inside a callback must be refused (the role flip would rematch mid-delivery) */
+static int pf_retire_in_cb_rc;
+static void pf_on_var_retire_attempt(const DartVariableUpdate *u, void *user){
+    (void)user;
+    pf_retire_in_cb_rc = dart_variable_retire(u->variable);
+}
 /* reentrant on_write: the first write of 100 immediately re-sets to 200, once */
 static DartVariable *pf_reent_var; static int pf_reent_done;
 static void pf_on_var_reenter(const DartVariableUpdate *u, void *user){
@@ -4408,6 +4414,127 @@ static void dup_authority_checks(void){
         for (t=0;t<150;t++) pf_pump(A,B,2);
         ST_CHECK(a_dups==2 && b_dups==2,
                  "dup: once per (entity, peer); accessor never fires (a=%d b=%d)", a_dups, b_dups); } }
+
+    dart_node_close(A,0); dart_node_close(B,0);
+    dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+}
+
+/* ============ pattern retire (19e3) ============
+ * The re-create lifecycle. The per-peer index maps bind a name to ONE local topic
+ * (preferring the oldest active one), so a second same-name handle on one node is
+ * silently SHADOWED while the first lives: it receives nothing and its writes collide
+ * with the twin's seqno line. dart_*_retire parks the predecessor (INACTIVE, verdicts
+ * re-pend, peers re-verify against the successor), so a re-created handle receives and
+ * writes where the twin would have been deaf. */
+static void retire_checks(void){
+    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts ao, bo; DartNode *A, *B; DartDiscoveryAddr seed;
+    int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+22; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao;
+    A = dart_node_open(&aa, "retire-a", NULL, NULL, &ao);
+    B = dart_node_open(&ba, "retire-b", NULL, NULL, &bo);
+    ST_CHECK(A && B, "retire: nodes open");
+    if (!(A && B)){ if(A)dart_node_close(A,0); if(B)dart_node_close(B,0); return; }
+
+    /* variable: retire + recreate the accessor, then the definition */
+    { DartVariable *def, *acc, *acc2; DartBytes gv; uint8_t b[4]; int rr;
+      i_dart_le_w32(b, 20);
+      def = dart_node_create_variable_definition(A, "dial", NULL,
+                &(DartVariableOpts){ .initial = dart_bytes(b,4) });
+      acc = dart_node_create_remote_variable(B, "dial", NULL, NULL);
+      ST_CHECK(def && acc, "retire: variable pair created");
+      for (t=0;t<2000 && !dart_variable_get(acc,&gv);t++) pf_pump(A,B,2);
+      ST_CHECK(dart_variable_get(acc,&gv) && gv.len==4 && i_dart_le_r32(gv.data)==20,
+               "retire: first accessor got the value (20)");
+      rr = dart_variable_retire(acc);
+      ST_CHECK(rr==DART_OK, "retire: accessor retired (%d)", rr);
+      acc2 = dart_node_create_remote_variable(B, "dial", NULL, NULL);
+      ST_CHECK(acc2 != NULL, "retire: successor accessor created");
+      for (t=0;t<2000 && !dart_variable_get(acc2,&gv);t++) pf_pump(A,B,2);
+      ST_CHECK(dart_variable_get(acc2,&gv) && gv.len==4 && i_dart_le_r32(gv.data)==20,
+               "retire: successor RECEIVES where a live twin would be shadowed (20)");
+      i_dart_le_w32(b, 33);
+      { int sr = dart_variable_set(acc2, dart_bytes(b,4));
+        ST_CHECK(sr==DART_OK, "retire: successor set accepted (%d)", sr); }
+      for (t=0;t<2000;t++){ pf_pump(A,B,2);
+          if (dart_variable_get(def,&gv)&&gv.len==4&&i_dart_le_r32(gv.data)==33) break; }
+      ST_CHECK(dart_variable_get(def,&gv)&&gv.len==4&&i_dart_le_r32(gv.data)==33,
+               "retire: successor write reached the definition (33)");
+      /* definition retire + recreate: the restart-shaped recipe (the old channel must
+         stop matching-and-refusing so the successor can serve) */
+      rr = dart_variable_retire(def);
+      ST_CHECK(rr==DART_OK, "retire: definition retired (%d)", rr);
+      i_dart_le_w32(b, 77);
+      def = dart_node_create_variable_definition(A, "dial", NULL,
+                &(DartVariableOpts){ .initial = dart_bytes(b,4) });
+      ST_CHECK(def != NULL, "retire: successor definition created");
+      for (t=0;t<2000;t++){ pf_pump(A,B,2);
+          if (dart_variable_get(acc2,&gv)&&gv.len==4&&i_dart_le_r32(gv.data)==77) break; }
+      ST_CHECK(dart_variable_get(acc2,&gv)&&gv.len==4&&i_dart_le_r32(gv.data)==77,
+               "retire: successor definition serves the accessor (77)");
+      /* retire from inside a callback: refused, handle stays valid (on_change replays
+         inline at registration, so the attempt runs right here on this thread) */
+      pf_retire_in_cb_rc = 1234;
+      dart_variable_on_change(def, pf_on_var_retire_attempt, NULL);
+      ST_CHECK(pf_retire_in_cb_rc==DART_ERR_STATE,
+               "retire: refused from a callback (%d)", pf_retire_in_cb_rc);
+      dart_variable_on_change(def, NULL, NULL);
+      { DartBytes chk; ST_CHECK(dart_variable_get(def,&chk)==1,
+               "retire: handle survives the refused attempt"); } }
+
+    /* function: an outstanding call cancels at retire; a retired-then-recreated remote calls */
+    { DartFunction *fdef, *rem, *rem2, *never; uint8_t req[4]; int rr;
+      fdef = dart_node_create_function_definition(A, "calc", NULL, NULL, pf_add_handler, NULL, NULL);
+      rem  = dart_node_create_remote_function(B, "calc", NULL, NULL, NULL);
+      ST_CHECK(fdef && rem, "retire: function pair created");
+      for (t=0;t<2000 && dart_function_match_count(rem)==0;t++) pf_pump(A,B,2);
+      never = dart_node_create_remote_function(B, "retire-never", NULL, NULL,
+                &(DartFunctionOpts){ .timeout_us = 60000000u });
+      ST_CHECK(never != NULL, "retire: never-served remote created");
+      pf_cancel_count = 0; pf_cancel_status = DART_CALL_OK;
+      if (never){
+          dart_function_call_async(never, dart_bytes(NULL,0), pf_on_cancel, NULL, NULL);
+          rr = dart_function_retire(never);
+          ST_CHECK(rr==DART_OK && pf_cancel_count==1 && pf_cancel_status==DART_CALL_CANCELLED,
+                   "retire: outstanding call cancelled (rc=%d n=%d st=%d)",
+                   rr, pf_cancel_count, (int)pf_cancel_status); }
+      rr = dart_function_retire(rem);
+      ST_CHECK(rr==DART_OK, "retire: remote function retired (%d)", rr);
+      rem2 = dart_node_create_remote_function(B, "calc", NULL, NULL, NULL);
+      ST_CHECK(rem2 != NULL, "retire: successor remote created");
+      pf_reply_done = 0;
+      i_dart_le_w32(req, 41);
+      dart_function_call_async(rem2, dart_bytes(req,4), pf_on_reply, NULL, NULL);
+      for (t=0;t<2000 && !pf_reply_done;t++) pf_pump(A,B,2);
+      ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==42,
+               "retire: successor remote calls (done=%d st=%d val=%u)",
+               pf_reply_done, pf_reply_status, pf_reply_val); }
+
+    /* signal: retire the listening handle, recreate, emits reach the successor */
+    { DartSignal *em, *ls, *ls2; uint8_t b[4]; int rr;
+      em = dart_node_create_signal(A, "alarm", NULL, NULL,         NULL, NULL);
+      ls = dart_node_create_signal(B, "alarm", NULL, pf_on_signal, NULL, NULL);
+      ST_CHECK(em && ls, "retire: signal pair created");
+      for (t=0;t<2000 && dart_signal_listener_count(em)==0;t++) pf_pump(A,B,2);
+      rr = dart_signal_retire(ls);
+      ST_CHECK(rr==DART_OK, "retire: listener retired (%d)", rr);
+      for (t=0;t<2000 && dart_signal_listener_count(em)!=0;t++) pf_pump(A,B,2);
+      ST_CHECK(dart_signal_listener_count(em)==0, "retire: emitter lane torn (%d)",
+               dart_signal_listener_count(em));
+      ls2 = dart_node_create_signal(B, "alarm", NULL, pf_on_signal, NULL, NULL);
+      ST_CHECK(ls2 != NULL, "retire: successor listener created");
+      for (t=0;t<2000 && dart_signal_listener_count(em)==0;t++) pf_pump(A,B,2);
+      ST_CHECK(dart_signal_listener_count(em)==1, "retire: emitter re-matched the successor (%d)",
+               dart_signal_listener_count(em));
+      pf_sig_count = 0; i_dart_le_w32(b, 9);
+      dart_signal_emit(em, dart_bytes(b,4));
+      for (t=0;t<800 && pf_sig_count==0;t++) pf_pump(A,B,2);
+      ST_CHECK(pf_sig_count==1 && pf_sig_last==9,
+               "retire: successor listener receives (n=%d val=%u)", pf_sig_count, pf_sig_last); }
 
     dart_node_close(A,0); dart_node_close(B,0);
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
@@ -5688,6 +5815,7 @@ static int selftest_main(void){
     patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */
     metalog_checks();             /* 19e1. built-in @dart/log topics + the @dart/meta endpoint */
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
+    retire_checks();              /* 19e3. pattern retire: successor binds where a twin would shadow */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */

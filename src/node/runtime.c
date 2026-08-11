@@ -1958,6 +1958,12 @@ int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
     return r;
 }
 
+void i_dart_topic_clear_sys(DartTopic *topic){
+    if (!topic) return;
+    topic->sys_on_message = NULL;
+    topic->sys_msg_user = NULL;
+}
+
 int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data){
     int acquired, r;
     if (!topic) return DART_ERR_NO_TOPIC;

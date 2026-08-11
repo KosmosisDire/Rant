@@ -529,6 +529,9 @@ DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartR
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
 /* Publish hdr+payload to ONE peer, point-to-point (function replies). */
 int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data);
+/* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
+ * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
+void i_dart_topic_clear_sys(DartTopic *topic);
 /* Register the patterns layer's node-wide event observer + per-poll tick + close hook
  * (NULL clears). The tick runs each poll pass with now_us and returns its next deadline,
  * folded into the poll wait cap so call timeouts fire on time with no traffic. The close

@@ -2383,6 +2383,15 @@ public:
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
     int caller_count() const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+    /* Retire the definition: park its channels and release the name so a successor can
+     * bind (see dart_function_retire). The handle is empty after; refused (State) from
+     * inside a callback, and the handle then stays valid. */
+    SendStatus retire() {
+        if (!fn_) return SendStatus::NoTopic;
+        int rc = detail::dart_function_retire(fn_);
+        if (rc == 0) fn_ = nullptr;
+        return static_cast<SendStatus>(rc);
+    }
 
 private:
     struct Box : priv::HandlerBox {
@@ -2474,6 +2483,16 @@ public:
 
     int  match_count()    const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
     bool has_definition() const { return match_count() > 0; }
+    /* Retire the remote: park its channels and release the name so a successor can bind
+     * (see dart_function_retire); every outstanding call completes with
+     * CallStatus::Cancelled. The handle is empty after; refused (State) from inside a
+     * callback, and the handle then stays valid. */
+    SendStatus retire() {
+        if (!fn_) return SendStatus::NoTopic;
+        int rc = detail::dart_function_retire(fn_);
+        if (rc == 0) fn_ = nullptr;
+        return static_cast<SendStatus>(rc);
+    }
 
 private:
     /* wrap a node-owned function handle (the @dart/meta endpoint): callable, never
@@ -2598,6 +2617,17 @@ public:
     void on_change(std::function<void(const VariableUpdate&)> h) { observe(std::move(h), true); }
     void on_write (std::function<void(const VariableUpdate&)> h) { observe(std::move(h), false); }
 
+    /* Retire the handle: park its channels and release the name so a successor can bind
+     * (see dart_variable_retire; without it a re-created same-name handle is silently
+     * shadowed by the live twin). The handle is empty after; refused (State) from inside
+     * a callback, and the handle then stays valid. */
+    SendStatus retire() {
+        if (!var_) return SendStatus::NoTopic;
+        int rc = detail::dart_variable_retire(var_);
+        if (rc == 0) var_ = nullptr;
+        return static_cast<SendStatus>(rc);
+    }
+
 protected:
     struct UBox : priv::HandlerBox {
         std::function<void(const VariableUpdate&)> h;
@@ -2692,6 +2722,15 @@ public:
         return static_cast<SendStatus>(detail::dart_signal_emit(sig_, priv::to_c(payload)));
     }
     int listener_count() const { return sig_ ? detail::dart_signal_listener_count(sig_) : 0; }
+    /* Retire the handle: park its channel and release the name so a successor can bind
+     * (see dart_signal_retire). The handle is empty after; refused (State) from inside a
+     * callback, and the handle then stays valid. */
+    SendStatus retire() {
+        if (!sig_) return SendStatus::NoTopic;
+        int rc = detail::dart_signal_retire(sig_);
+        if (rc == 0) sig_ = nullptr;
+        return static_cast<SendStatus>(rc);
+    }
 
 private:
     struct Box : priv::HandlerBox {
@@ -2928,6 +2967,7 @@ public:
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
     int caller_count() const { return core_.caller_count(); }
+    SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
@@ -2998,6 +3038,7 @@ public:
 
     int  match_count()    const { return core_.match_count(); }
     bool has_definition() const { return core_.has_definition(); }
+    SendStatus retire() { return core_.retire(); }
 
 private:
     RemoteFunction<> core_;
@@ -3046,6 +3087,7 @@ public:
     void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
+    SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
@@ -3104,6 +3146,7 @@ public:
     void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
+    SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
@@ -3148,6 +3191,7 @@ public:
         return core_.emit(priv::encode(v, s));
     }
     int listener_count() const { return core_.listener_count(); }
+    SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>

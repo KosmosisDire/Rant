@@ -3130,6 +3130,9 @@ DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartR
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
 /* Publish hdr+payload to ONE peer, point-to-point (function replies). */
 int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data);
+/* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
+ * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
+void i_dart_topic_clear_sys(DartTopic *topic);
 /* Register the patterns layer's node-wide event observer + per-poll tick + close hook
  * (NULL clears). The tick runs each poll pass with now_us and returns its next deadline,
  * folded into the poll wait cap so call timeouts fire on time with no traffic. The close
@@ -3548,6 +3551,16 @@ int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on
                               void *user, const DartCallOpts *opts);
 /* Providers matched (remote side) / callers matched (definition side). */
 int  dart_function_match_count(DartFunction *fn);
+/* Retire the handle: park both channels (role INACTIVE, re-advertised, so peers re-verify
+ * the name against a successor and a new create under the same name binds cleanly where a
+ * live twin would have been SHADOWED), cancel every outstanding call with one
+ * DART_CALL_CANCELLED outcome, silence its callbacks, and free the handle: it is INVALID
+ * after, like a closed node. The channels' announce entries stay for the node's lifetime
+ * (indices are append-only), so each retire/create cycle grows the announce by one entry
+ * per channel. Complete (or abandon) outstanding defer tokens BEFORE retiring a
+ * definition. Returns DART_OK; DART_ERR_STATE from inside a callback (the role flip would
+ * rematch lanes mid-delivery), and the handle then remains valid. */
+int  dart_function_retire(DartFunction *fn);
 
 /* ---- the built-in @dart/meta introspection endpoint ----------------------------------
  * Every node (patterns compiled in, opts.disable_meta off) hosts a "@dart/meta" function
@@ -3662,6 +3675,12 @@ int  dart_variable_on_write (DartVariable *var, DartVariableUpdateFn on_write,  
 int  dart_variable_wait(DartVariable *var, int timeout_ms);
 /* Remote: owners matched (0 = no owner present). Definition: remotes matched. */
 int  dart_variable_match_count(DartVariable *var);
+/* Retire the handle: park its channels, silence on_change/on_write, free the handle
+ * (INVALID after). The one lifecycle verb for "this accessor/definition is done": without
+ * it a re-created same-name handle is silently shadowed by the live twin (the per-peer
+ * index maps bind a name to ONE local topic, preferring the oldest active one). Same
+ * contract as dart_function_retire. */
+int  dart_variable_retire(DartVariable *var);
 
 /* ---- SIGNALS ------------------------------------------------------------------------ */
 
@@ -3687,6 +3706,9 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
 int  dart_signal_emit(DartSignal *sig, DartBytes payload);
 /* Listeners currently matched (other nodes subscribed to this signal). */
 int  dart_signal_listener_count(DartSignal *sig);
+/* Retire the handle: park its channel, silence on_signal, free the handle (INVALID after).
+ * Same contract as dart_function_retire. */
+int  dart_signal_retire(DartSignal *sig);
 
 /* ---- REFLECTION (entity enumeration) -------------------------------------------------
  * The canonical way to see what exists on the network. Observers consume ENTITIES, never
@@ -14804,6 +14826,12 @@ int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
     return r;
 }
 
+void i_dart_topic_clear_sys(DartTopic *topic){
+    if (!topic) return;
+    topic->sys_on_message = NULL;
+    topic->sys_msg_user = NULL;
+}
+
 int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data){
     int acquired, r;
     if (!topic) return DART_ERR_NO_TOPIC;
@@ -15647,6 +15675,9 @@ typedef struct i_DartPatterns {
 static void     i_dart_patterns_on_event(void *user, const DartEvent *ev);
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us);
 static void     i_dart_patterns_on_close(void *user);
+/* pending-call reaper (defined with the manager hooks; retire cancels through it) */
+static uint64_t i_dart_func_reap(struct DartFunction *fn, uint64_t now,
+                                 DartCallStatus fail_status, int all);
 /* duplicate-authority sweep for a just-created provider/owner (defined with the rest of
  * the detection, after both entity structs) */
 static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
@@ -15996,6 +16027,34 @@ static int i_dart_function_call_id(DartFunction *fn, DartBytes req, DartResponse
 int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
                              void *user, const DartCallOpts *opts){
     return i_dart_function_call_id(fn, req, on_response, user, opts ? opts->provider : 0, NULL);
+}
+
+int dart_function_retire(DartFunction *fn){
+    i_DartPatterns *pm; DartFunction **pp; DartNode *n; int acquired, r;
+    if (!fn) return DART_ERR_NO_TOPIC;
+    pm = fn->pm; n = fn->n;
+    if (pm && fn == pm->meta) return DART_ERR_STATE;   /* the builtin endpoint is node infrastructure */
+    /* Park the channels FIRST: set_role refuses from a callback (DART_ERR_STATE, nothing
+       mutated yet), and on success it rematches under the node lock, so once both flips
+       land nothing can deliver into fn again. */
+    r = dart_topic_set_role(fn->req, DART_INACTIVE);
+    if (r != 0) return r;
+    (void)dart_topic_set_role(fn->rsp, DART_INACTIVE);
+    acquired = i_dart_node_sys_lock(n);
+    i_dart_topic_clear_sys(fn->req);
+    i_dart_topic_clear_sys(fn->rsp);
+    /* every outstanding call gets its one outcome, CANCELLED, exactly as at close; a
+       reentrant call made from a cancel callback queues (the channel is unmatched now)
+       and the next round cancels it too */
+    while (fn->pending) i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1);
+    if (pm)
+        for (pp = &pm->funcs; *pp; pp = &(*pp)->next)
+            if (*pp == fn){ *pp = fn->next; break; }
+    if (fn->sync_buf)  i_dart_node_sys_alloc(n, fn->sync_buf, 0);
+    if (fn->dup_peers) i_dart_node_sys_alloc(n, fn->dup_peers, 0);
+    i_dart_node_sys_alloc(n, fn, 0);
+    i_dart_node_sys_unlock(n, acquired);
+    return DART_OK;
 }
 
 /* blocking-call response capture: copy the payload into the function's scratch, mark done.
@@ -16519,6 +16578,27 @@ int dart_variable_unforce(DartVariable *var){
 
 int dart_variable_forced(DartVariable *var){ return var ? var->forced : 0; }
 
+int dart_variable_retire(DartVariable *var){
+    i_DartPatterns *pm; DartVariable **pp; DartNode *n; int acquired, r;
+    if (!var) return DART_ERR_NO_TOPIC;
+    pm = var->pm; n = var->n;
+    r = dart_topic_set_role(var->value, DART_INACTIVE);   /* refused from a callback, nothing mutated */
+    if (r != 0) return r;
+    if (var->set) (void)dart_topic_set_role(var->set, DART_INACTIVE);
+    acquired = i_dart_node_sys_lock(n);
+    i_dart_topic_clear_sys(var->value);
+    if (var->set) i_dart_topic_clear_sys(var->set);
+    if (pm)
+        for (pp = &pm->vars; *pp; pp = &(*pp)->next)
+            if (*pp == var){ *pp = var->next; break; }
+    if (var->store)     i_dart_node_sys_alloc(n, var->store, 0);
+    if (var->shadow)    i_dart_node_sys_alloc(n, var->shadow, 0);
+    if (var->dup_peers) i_dart_node_sys_alloc(n, var->dup_peers, 0);
+    i_dart_node_sys_alloc(n, var, 0);
+    i_dart_node_sys_unlock(n, acquired);
+    return DART_OK;
+}
+
 int dart_variable_on_change(DartVariable *var, DartVariableUpdateFn on_change, void *user){
     int acquired;
     if (!var) return DART_ERR_NO_TOPIC;
@@ -16606,6 +16686,22 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     s->next = pm->sigs; pm->sigs = s;
     i_dart_node_sys_unlock(n, acquired);
     return s;
+}
+
+int dart_signal_retire(DartSignal *sig){
+    i_DartPatterns *pm; DartSignal **pp; DartNode *n; int acquired, r;
+    if (!sig) return DART_ERR_NO_TOPIC;
+    pm = sig->pm; n = sig->n;
+    r = dart_topic_set_role(sig->topic, DART_INACTIVE);   /* refused from a callback, nothing mutated */
+    if (r != 0) return r;
+    acquired = i_dart_node_sys_lock(n);
+    i_dart_topic_clear_sys(sig->topic);
+    if (pm)
+        for (pp = &pm->sigs; *pp; pp = &(*pp)->next)
+            if (*pp == sig){ *pp = sig->next; break; }
+    i_dart_node_sys_alloc(n, sig, 0);
+    i_dart_node_sys_unlock(n, acquired);
+    return DART_OK;
 }
 
 int dart_signal_emit(DartSignal *sig, DartBytes payload){
@@ -16800,9 +16896,17 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn;
     if (ev->kind == DART_PEER_INTEREST){
+        DartVariable *v;
         /* a match may just have formed: flush calls queued while no provider was matched */
         for (fn = pm->funcs; fn; fn = fn->next)
             if (!fn->is_provider && fn->pending) i_dart_func_flush_queued(fn);
+        /* an accessor whose owner just parked (retire) or left: disarm the stale-order
+           guard in i_dart_var_on_value. A successor definition on the SAME node keeps the
+           peer id while its write_seq restarts at 1, so without this the guard would drop
+           the new incarnation's values as stale forever. */
+        for (v = pm->vars; v; v = v->next)
+            if (!v->is_owner && v->last_source
+                && i_dart_topic_source_match_count(v->value) == 0) v->last_source = 0;
         i_dart_pat_dup_check_peer(pm, ev->peer);   /* a rival authority may have appeared */
         return;
     }

@@ -129,13 +129,16 @@ _EXPORTS = [
     # patterns: functions / variables / signals
     "dart_node_create_function_definition", "dart_node_create_remote_function",
     "dart_function_call", "dart_function_call_async", "dart_function_match_count",
+    "dart_function_retire",
     "dart_request_reply", "dart_request_fail", "dart_request_defer",
     "dart_function_complete",
     "dart_node_create_variable_definition", "dart_node_create_remote_variable",
     "dart_variable_get", "dart_variable_set", "dart_variable_force",
     "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
-    "dart_variable_match_count", "dart_variable_on_change", "dart_variable_on_write",
+    "dart_variable_match_count", "dart_variable_retire",
+    "dart_variable_on_change", "dart_variable_on_write",
     "dart_node_create_signal", "dart_signal_emit", "dart_signal_listener_count",
+    "dart_signal_retire",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size",
     "dart_schema_field_count", "dart_schema_field_at", "dart_schema_field_index",
@@ -575,6 +578,7 @@ def _bind(lib):
     F("dart_function_call", [c_void_p, DartBytes, POINTER(DartResponse), c_int, c_void_p], c_int)
     F("dart_function_call_async", [c_void_p, DartBytes, _RspFn, c_void_p, c_void_p], c_int)
     F("dart_function_match_count", [c_void_p], c_int)
+    F("dart_function_retire", [c_void_p], c_int)
     F("dart_request_reply", [POINTER(DartRequest), DartBytes], None)
     F("dart_request_fail", [POINTER(DartRequest), c_char_p, DartBytes], None)
     F("dart_request_defer", [POINTER(DartRequest)], c_uint64)
@@ -590,12 +594,14 @@ def _bind(lib):
     F("dart_variable_forced", [c_void_p], c_int)
     F("dart_variable_wait", [c_void_p, c_int], c_int)
     F("dart_variable_match_count", [c_void_p], c_int)
+    F("dart_variable_retire", [c_void_p], c_int)
     F("dart_variable_on_change", [c_void_p, _VarFn, c_void_p], c_int)
     F("dart_variable_on_write", [c_void_p, _VarFn, c_void_p], c_int)
     F("dart_node_create_signal", [c_void_p, c_char_p, c_void_p, _SigFn, c_void_p,
                                   POINTER(DartSignalOpts)], c_void_p)
     F("dart_signal_emit", [c_void_p, DartBytes], c_int)
     F("dart_signal_listener_count", [c_void_p], c_int)
+    F("dart_signal_retire", [c_void_p], c_int)
     # serialize / schema
     F("dart_schema_compile", [_AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
     F("dart_schema_free", [c_void_p, _AllocFn, c_void_p], None)
@@ -2768,6 +2774,17 @@ class FunctionDefinition:
         """Callers currently matched to this definition."""
         return self._node._lib.dart_function_match_count(self._fn)
 
+    def retire(self):
+        """Retire the definition: park its channels and release the name so a
+        successor can bind (a re-created same-name handle is otherwise silently
+        shadowed by the live twin). The handle is unusable after. Refused
+        (SendStatus.STATE) from inside a callback; the handle then stays
+        valid."""
+        rc = self._node._lib.dart_function_retire(self._fn)
+        if rc == 0:
+            self._fn = None
+        return _send_status(rc)
+
 
 class RemoteFunction:
     """A reference to a function defined on another node.
@@ -2864,6 +2881,17 @@ class RemoteFunction:
 
     def has_definition(self):
         return self.match_count() > 0
+
+    def retire(self):
+        """Retire the remote: park its channels and release the name so a
+        successor can bind; every outstanding call completes with
+        CallStatus.CANCELLED. The handle is unusable after. Refused
+        (SendStatus.STATE) from inside a callback; the handle then stays
+        valid."""
+        rc = self._node._lib.dart_function_retire(self._fn)
+        if rc == 0:
+            self._fn = None
+        return _send_status(rc)
 
 
 class VariableDefinition:
@@ -2979,6 +3007,17 @@ class VariableDefinition:
         self._node._register_box(box_id)
         reg(self._var, _on_var_update, c_void_p(box_id))
 
+    def retire(self):
+        """Retire the handle: park its channels and release the name so a
+        successor can bind (a re-created same-name handle is otherwise silently
+        shadowed by the live twin). The handle is unusable after. Refused
+        (SendStatus.STATE) from inside a callback; the handle then stays
+        valid."""
+        rc = self._node._lib.dart_variable_retire(self._var)
+        if rc == 0:
+            self._var = None
+        return _send_status(rc)
+
 
 class RemoteVariable(VariableDefinition):
     """A reference to a variable owned by another node: reads see the cached
@@ -3041,6 +3080,16 @@ class Signal:
     def listener_count(self):
         """Listeners currently matched (other nodes subscribed to this signal)."""
         return self._node._lib.dart_signal_listener_count(self._sig)
+
+    def retire(self):
+        """Retire the handle: park its channel and release the name so a
+        successor can bind. The handle is unusable after. Refused
+        (SendStatus.STATE) from inside a callback; the handle then stays
+        valid."""
+        rc = self._node._lib.dart_signal_retire(self._sig)
+        if rc == 0:
+            self._sig = None
+        return _send_status(rc)
 
 
 class Publisher:

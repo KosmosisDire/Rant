@@ -508,6 +508,8 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_match_count(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_retire(IntPtr fn);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_request_reply(IntPtr request, DartBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_request_fail(IntPtr request, byte[] message, DartBytes rsp);
@@ -538,6 +540,8 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_match_count(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_retire(IntPtr var);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_on_change(IntPtr var, DartVariableUpdateFn on_change, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_on_write(IntPtr var, DartVariableUpdateFn on_write, IntPtr user);
@@ -550,6 +554,8 @@ namespace Dart
         internal static extern int dart_signal_emit(IntPtr sig, DartBytes payload);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_signal_listener_count(IntPtr sig);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_signal_retire(IntPtr sig);
     }
 
     // ---- config + reflection attributes -----------------------------------------
@@ -1832,7 +1838,7 @@ namespace Dart
     /// answers every call CallStatus.NoHandler (a declared stub).</summary>
     public class FunctionDefinition
     {
-        internal readonly IntPtr Fn;
+        internal IntPtr Fn;   // zeroed by Retire
         internal readonly DartNode DartNode;
 
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
@@ -1867,6 +1873,17 @@ namespace Dart
 
         /// <summary>Callers currently matched to this definition.</summary>
         public int CallerCount => Native.dart_function_match_count(Fn);
+
+        /// <summary>Retire the definition: park its channels and release the name so a
+        /// successor can bind (a re-created same-name handle is otherwise silently
+        /// shadowed by the live twin). The handle is unusable after. Refused
+        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        public SendStatus Retire()
+        {
+            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
+            return rc;
+        }
     }
 
     /// <summary>An owning function-call outcome: the payload is copied out, so it
@@ -1893,7 +1910,7 @@ namespace Dart
     /// <summary>A reference to a function definition on another node (untyped).</summary>
     public class RemoteFunction
     {
-        internal readonly IntPtr Fn;
+        internal IntPtr Fn;   // zeroed by Retire
         internal readonly DartNode DartNode;
 
         public RemoteFunction(DartNode node, string name, Schema requestSchema = null,
@@ -1989,6 +2006,17 @@ namespace Dart
         /// <summary>Providers currently matched (the definition side present).</summary>
         public int MatchCount => Native.dart_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
+
+        /// <summary>Retire the remote: park its channels and release the name so a
+        /// successor can bind; every outstanding call completes with
+        /// CallStatus.Cancelled. The handle is unusable after. Refused
+        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        public SendStatus Retire()
+        {
+            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
+            return rc;
+        }
     }
 
     // ---- patterns: variables ----------------------------------------------------
@@ -2013,7 +2041,7 @@ namespace Dart
     /// (untyped: Schema + byte[]). Remotes cache the latest published value.</summary>
     public class VariableDefinition
     {
-        internal readonly IntPtr Var;
+        internal IntPtr Var;   // zeroed by Retire
         internal readonly DartNode DartNode;
         internal readonly string Name;
 
@@ -2119,6 +2147,17 @@ namespace Dart
             if (change) Native.dart_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id);
             else Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id);
         }
+
+        /// <summary>Retire the handle: park its channels and release the name so a
+        /// successor can bind (a re-created same-name handle is otherwise silently
+        /// shadowed by the live twin). The handle is unusable after. Refused
+        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        public SendStatus Retire()
+        {
+            var rc = (SendStatus)Native.dart_variable_retire(Var);
+            if (rc == SendStatus.Ok) Var = IntPtr.Zero;
+            return rc;
+        }
     }
 
     /// <summary>A reference to a variable owned by another node (untyped): reads see
@@ -2141,7 +2180,7 @@ namespace Dart
     /// handler IS the subscription; every handle may emit.</summary>
     public class Signal
     {
-        internal readonly IntPtr Sig;
+        internal IntPtr Sig;   // zeroed by Retire
         internal readonly DartNode DartNode;
 
         public Signal(DartNode node, string name, Schema schema = null,
@@ -2180,6 +2219,16 @@ namespace Dart
 
         /// <summary>Listeners currently matched (other nodes subscribed).</summary>
         public int ListenerCount => Native.dart_signal_listener_count(Sig);
+
+        /// <summary>Retire the handle: park its channel and release the name so a
+        /// successor can bind. The handle is unusable after. Refused
+        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        public SendStatus Retire()
+        {
+            var rc = (SendStatus)Native.dart_signal_retire(Sig);
+            if (rc == SendStatus.Ok) Sig = IntPtr.Zero;
+            return rc;
+        }
     }
 
     // ---- patterns: pub/sub handles ----------------------------------------------
@@ -2316,6 +2365,7 @@ namespace Dart
         }
 
         public int CallerCount => _core.CallerCount;
+        public SendStatus Retire() => _core.Retire();
     }
 
     /// <summary>The typed owning call outcome. Reading Value when !Ok throws
@@ -2376,6 +2426,7 @@ namespace Dart
 
         public int MatchCount => _core.MatchCount;
         public bool HasDefinition => _core.HasDefinition;
+        public SendStatus Retire() => _core.Retire();
     }
 
     /// <summary>The typed authoritative variable. Value get throws
@@ -2439,6 +2490,7 @@ namespace Dart
         public bool Forced => _core.Forced;
         public int RemoteCount => _core.RemoteCount;
         public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
+        public SendStatus Retire() => _core.Retire();
 
         /// <summary>Observe changes, typed (see the untyped OnChange for the change
         /// contract and threading). Handler forms: (T value) or
@@ -2510,6 +2562,7 @@ namespace Dart
 
         public SendStatus Emit(T value) => _core.Emit(_schema.Encode(value));
         public int ListenerCount => _core.ListenerCount;
+        public SendStatus Retire() => _core.Retire();
     }
 
     /// <summary>The typed publish side.</summary>
