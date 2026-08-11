@@ -297,6 +297,10 @@ peer advertises (pattern channels folded: a function's req/rsp pair is one
 ```
 
 Reply: `{ "ok": true, "entities": [ ... ] }` (`peer_entities` also echoes `peer`).
+A dropped (silent, resumable) peer answers `entities: []` by default: its cached
+entities are its dead incarnation's, and after a restart they would stand beside the
+live incarnation's. Pass `"include_dropped": true` to serve that last-known view
+anyway (a ghost display); gate on `peers`' `active` flag yourself then.
 Each entity:
 
 ```json

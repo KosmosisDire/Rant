@@ -1093,9 +1093,12 @@ class DartNode {
         return r.entities.map(toEntity);
     }
     /* What one peer advertises, folded into entities (a local read of this node's view;
-     * names need fetch_details or a shared topic to resolve past the hash placeholder). */
-    async peerEntities(peerId) {
-        const r = await this._request({ op: "peer_entities", peer: peerId });
+     * names need fetch_details or a shared topic to resolve past the hash placeholder).
+     * A dropped (silent, resumable) peer yields [] by default: its cached entities are
+     * its dead incarnation's. includeDropped serves that last-known view anyway. */
+    async peerEntities(peerId, includeDropped = false) {
+        const r = await this._request({ op: "peer_entities", peer: peerId,
+            include_dropped: includeDropped });
         return r.entities.map(toEntity);
     }
     /* Fetch a peer's @dart/meta snapshot (an async directed call; works under the

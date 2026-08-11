@@ -1929,13 +1929,18 @@ public:
     /* What one peer advertises, folded into entities (a function's req/rsp pair is one
      * entity, a variable's set channel merges as `writable`). A copied snapshot. This
      * walks the peer's whole interest list and allocates per entity: an explicit,
-     * observer-grade call, deliberately not part of peers(). */
-    std::vector<Entity> peer_entities(uint32_t peer_id) const {
+     * observer-grade call, deliberately not part of peers(). A DROPPED (silent,
+     * resumable) peer yields an empty vector by default: its cached entities are its
+     * dead incarnation's, and after a restart they would stand beside the live
+     * incarnation's. include_dropped = true serves that last-known view anyway (a
+     * ghost display); gate on Peer::active yourself then. */
+    std::vector<Entity> peer_entities(uint32_t peer_id, bool include_dropped = false) const {
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
         detail::DartEntityIter it;
         std::memset(&it, 0, sizeof it);
+        it.include_dropped = include_dropped ? 1 : 0;
         detail::DartEntityInfo ei;
         while (detail::dart_node_peer_entity_next(impl_->node, peer_id, &it, &ei))
             out.push_back(entity_from(ei));

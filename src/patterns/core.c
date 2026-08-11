@@ -1388,6 +1388,9 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
     if (!n || !it || !out) return 0;
     p = i_dart_pat_peer(n, peer);
     if (!p) return 0;
+    /* a DROPPED peer's cached entities are its DEAD incarnation's: refused unless the
+       caller opted in (see core.h), so liveness gating cannot be forgotten */
+    if (p->liveness != DART_PEER_ACTIVE && !it->include_dropped) return 0;
     for (;;){
         if (!i_dart_pat_entry_from(p, it, &e)) return 0;
         it->next_index = (uint16_t)(e.index + 1);

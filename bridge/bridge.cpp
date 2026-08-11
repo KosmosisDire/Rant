@@ -819,8 +819,10 @@ static void op_entities(Conn *c, const json &seq){
 
 static void op_peer_entities(Conn *c, const json &req, const json &seq){
     uint32_t peer = (uint32_t)req.value("peer", 0);
+    bool include_dropped = req.value("include_dropped", false);   /* default: live peers only */
     json arr = json::array();
-    for (const dart::Entity &e : c->node->peer_entities(peer)) arr.push_back(entity_json(e));
+    for (const dart::Entity &e : c->node->peer_entities(peer, include_dropped))
+        arr.push_back(entity_json(e));
     reply_ok(c, seq, { {"peer", peer}, {"entities", arr} });
 }
 

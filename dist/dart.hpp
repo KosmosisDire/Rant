@@ -3868,16 +3868,19 @@ typedef struct {
     uint64_t          rsp_schema_hash;
 } DartEntityInfo;
 
-/* Iterator: zero-initialize, then call until 0. Internal walk state, not for direct use.
- * The peer walk keeps a persistent overlay cursor plus the previously walked entry, so
- * enumerating a peer's entities costs one pass over its interest list, not one pass per
- * yielded entity; pattern partners are created at adjacent indices, so the fold checks
- * hit the prev/peek fast paths and a full rescan is only the fallback. epoch keys the
- * cursor to dart_node_peer_interest_epoch: an interest change mid-walk reseeks safely. */
+/* Iterator: zero-initialize, then call until 0. include_dropped is the ONE input field
+ * (set it before the first call if you want it); the rest is internal walk state, not for
+ * direct use. The peer walk keeps a persistent overlay cursor plus the previously walked
+ * entry, so enumerating a peer's entities costs one pass over its interest list, not one
+ * pass per yielded entity; pattern partners are created at adjacent indices, so the fold
+ * checks hit the prev/peek fast paths and a full rescan is only the fallback. epoch keys
+ * the cursor to dart_node_peer_interest_epoch: an interest change mid-walk reseeks safely. */
 typedef struct {
     uint16_t next_index;
     uint8_t  phase;
     uint8_t  has_prev;
+    uint8_t  include_dropped;   /* peer walk: also serve a DROPPED (silent, resumable) peer's
+                                   last-known entities. Zero-init = refuse them (see below). */
     uint32_t epoch;
     DartInterestIter pos;
     DartTopicEntry   prev;
@@ -3887,7 +3890,14 @@ typedef struct {
  * channels fold (a function's @req/@rsp pair yields ONE function entity; a variable's @set
  * merges into its value entity as `writable`). Names and schemas come from the detail cache,
  * so an observer wanting full coverage runs with opts.fetch_details like the explorer does.
- * Returns 1 and fills *out, or 0 at the end / unknown peer. */
+ * Returns 1 and fills *out, or 0 at the end / unknown peer.
+ * A DROPPED peer (silent past peer_timeout_us, kept for a same-uuid resume until
+ * gone_timeout_us) is REFUSED by default: its slot still enumerates in dart_node_peers and
+ * this walk would happily serve its dead incarnation's cached names and schemas, so after
+ * every restart the ghost's stale entities would stand beside (and race) the live
+ * incarnation's until the ghost is promoted GONE. An observer that WANTS the last-known
+ * view of a silent peer (the explorer's ghost display) sets it->include_dropped = 1 before
+ * the first call and gates on liveness itself. */
 int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out);
 
 /* Walk the entities THIS node hosts (its own functions/variables/signals, then its plain
@@ -17149,6 +17159,9 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
     if (!n || !it || !out) return 0;
     p = i_dart_pat_peer(n, peer);
     if (!p) return 0;
+    /* a DROPPED peer's cached entities are its DEAD incarnation's: refused unless the
+       caller opted in (see core.h), so liveness gating cannot be forgotten */
+    if (p->liveness != DART_PEER_ACTIVE && !it->include_dropped) return 0;
     for (;;){
         if (!i_dart_pat_entry_from(p, it, &e)) return 0;
         it->next_index = (uint16_t)(e.index + 1);
@@ -19148,13 +19161,18 @@ public:
     /* What one peer advertises, folded into entities (a function's req/rsp pair is one
      * entity, a variable's set channel merges as `writable`). A copied snapshot. This
      * walks the peer's whole interest list and allocates per entity: an explicit,
-     * observer-grade call, deliberately not part of peers(). */
-    std::vector<Entity> peer_entities(uint32_t peer_id) const {
+     * observer-grade call, deliberately not part of peers(). A DROPPED (silent,
+     * resumable) peer yields an empty vector by default: its cached entities are its
+     * dead incarnation's, and after a restart they would stand beside the live
+     * incarnation's. include_dropped = true serves that last-known view anyway (a
+     * ghost display); gate on Peer::active yourself then. */
+    std::vector<Entity> peer_entities(uint32_t peer_id, bool include_dropped = false) const {
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
         detail::DartEntityIter it;
         std::memset(&it, 0, sizeof it);
+        it.include_dropped = include_dropped ? 1 : 0;
         detail::DartEntityInfo ei;
         while (detail::dart_node_peer_entity_next(impl_->node, peer_id, &it, &ei))
             out.push_back(entity_from(ei));

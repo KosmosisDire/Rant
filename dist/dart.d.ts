@@ -323,7 +323,7 @@ declare class DartNode {
     onLog(handler: (line: LogLine) => void, levels?: LogLevelName[]): Promise<void>;
     peers(): Promise<Peer[]>;
     entities(): Promise<Entity[]>;
-    peerEntities(peerId: number): Promise<Entity[]>;
+    peerEntities(peerId: number, includeDropped?: boolean): Promise<Entity[]>;
     meta(peerId: number, sections?: number): Promise<MetaSnapshot>;
     close(): void;
 }

@@ -4540,6 +4540,65 @@ static void retire_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
+/* ============ dropped-peer reflection gate (19e4) ============
+ * A DROPPED peer keeps its slot (same-uuid resume) and dart_node_peers deliberately
+ * still lists it, but the entity walk serving its DEAD incarnation's cached schemas is
+ * how every observer grows ghost entities that race the live incarnation after a
+ * restart. The walk must refuse dropped peers by default and serve them only on the
+ * explicit include_dropped opt-in (the explorer's ghost display). */
+static void reflect_dropped_checks(void){
+    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts ao, bo; DartNode *A, *B; DartDiscoveryAddr seed;
+    DartVariable *def; uint32_t pid = 0; int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+23; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    ao.discovery.announce_interval_us = 100000;   /* fast cadence so the drop is quick */
+    ao.discovery.peer_timeout_us      = 500000;
+    bo=ao;
+    bo.fetch_details = 1;   /* B is the observer: names + schemas in the detail cache */
+    A = dart_node_open(&aa, "ghost-host", NULL, NULL, &ao);
+    B = dart_node_open(&ba, "observer",   NULL, NULL, &bo);
+    ST_CHECK(A && B, "ghost: nodes open");
+    if (!(A && B)){ if(A)dart_node_close(A,0); if(B)dart_node_close(B,0); return; }
+
+    def = dart_node_create_variable_definition(A, "gdial", NULL, NULL);
+    ST_CHECK(def != NULL, "ghost: variable definition created");
+    { int ents = 0;
+      for (t=0;t<2000 && !ents;t++){
+          DartEntityIter eit; DartEntityInfo ei; const DartDiscoveryPeer *ps; uint16_t pc;
+          pf_pump(A,B,2);
+          ps = dart_node_peers(B, &pc);
+          if (!(ps && pc)) continue;
+          pid = ps[0].id;
+          memset(&eit,0,sizeof eit);
+          while (dart_node_peer_entity_next(B, pid, &eit, &ei)) ents++;
+      }
+      ST_CHECK(ents == 1, "ghost: live peer enumerates its entity (%d)", ents); }
+
+    dart_node_close(A, 0);   /* silent death, no BYE: B must DROP (not forget) the peer */
+    { uint64_t end = i_dart_plat_now_us() + 1200000u;   /* > peer_timeout */
+      while (i_dart_plat_now_us() < end) dart_node_poll(B, 5); }
+    { const DartDiscoveryPeer *ps; uint16_t pc, i; int dropped = 0;
+      ps = dart_node_peers(B, &pc);
+      for (i=0; ps && i<pc; i++)
+          if (ps[i].id == pid && ps[i].liveness == DART_PEER_DROPPED) dropped = 1;
+      ST_CHECK(dropped, "ghost: peer is DROPPED yet still listed (by design)"); }
+    { DartEntityIter eit; DartEntityInfo ei; int ents = 0;
+      memset(&eit,0,sizeof eit);
+      while (dart_node_peer_entity_next(B, pid, &eit, &ei)) ents++;
+      ST_CHECK(ents == 0, "ghost: dropped peer REFUSED by the default walk (%d)", ents); }
+    { DartEntityIter eit; DartEntityInfo ei; int ents = 0;
+      memset(&eit,0,sizeof eit);
+      eit.include_dropped = 1;
+      while (dart_node_peer_entity_next(B, pid, &eit, &ei)) ents++;
+      ST_CHECK(ents == 1, "ghost: include_dropped serves the last-known view (%d)", ents); }
+
+    dart_node_close(B,0);
+    dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+}
+
 /* ===================== match-wait checks (19f) ===========================
  * The send-path match wait (runtime.h "MATCH WAIT"): a first send racing the announce/
  * detail cycle must reach an already-present subscriber; a disabled wait must drop
@@ -5816,6 +5875,7 @@ static int selftest_main(void){
     metalog_checks();             /* 19e1. built-in @dart/log topics + the @dart/meta endpoint */
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     retire_checks();              /* 19e3. pattern retire: successor binds where a twin would shadow */
+    reflect_dropped_checks();     /* 19e4. entity walk refuses dropped peers unless opted in */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */
