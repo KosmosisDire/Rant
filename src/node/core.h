@@ -184,6 +184,20 @@ DartBytes       i_dart_node_core_meta(i_DartNodeCore *c);
 void            i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t topic_index,
                                                     const DartSchema *schema);
 
+/* Topic slot lifecycle (dart_transport_topic_retire / _reuse at the node level).
+ * retire_topic_schema drops the live schema pointers when a topic retires but KEEPS the
+ * hash as the slot's binding fingerprint; topic_schema_hash reads it back, so a later
+ * same-name create can tell an identical rebind (verdicts stay) from a retype (the slot
+ * rebinds under a bumped generation). topic_rebound purges the per-peer decode bindings,
+ * rebased views, and refusal reasons recorded for a slot's OLD occupant after a retype
+ * rebind. seen_version feeds a peer's uDTL-request version to the transport's rebind
+ * hold; returns 1 when the advance released a held writer lane (the interest event
+ * re-fired; the runtime invalidates its match memos). */
+void     i_dart_node_core_retire_topic_schema(i_DartNodeCore *c, uint16_t topic_index);
+uint64_t i_dart_node_core_topic_schema_hash(i_DartNodeCore *c, uint16_t topic_index);
+void     i_dart_node_core_topic_rebound(i_DartNodeCore *c, uint16_t topic_index);
+int      i_dart_node_core_seen_version(i_DartNodeCore *c, uint32_t peer, uint32_t version);
+
 /* Answer a peer's DETAIL_REQ ('uDTL', see the detail codec in transport/core.h): validate
  * kind + domain, build the response in the core's own grown buffer, and return it for the
  * runtime to send to the request's SOURCE address ({NULL,0} = not answerable: malformed,

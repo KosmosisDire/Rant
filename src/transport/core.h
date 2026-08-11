@@ -598,6 +598,47 @@ int       dart_transport_set_role(DartTransportState *st, uint16_t topic_index, 
  * memory. Re-advertise interest after (the node bumps its discovery announce). */
 int       dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, const DartTopicDef *def);
 
+/* Topic slot lifecycle: RETIRE a defined topic (park its slot for reuse), then REUSE the
+ * slot for a later define under the same position. Retire releases every lane and frees
+ * the history ring; the slot leaves the announce (it rides a hole run, so later indices
+ * stay stable) and can never match, verify, or demux again. Identity, name, kind and qos
+ * stay stored so reuse can compare the old binding. Returns 0 ok, -1 unknown/undefined/
+ * already retired. Re-advertise after (retire changes the announce).
+ *
+ * dart_transport_topic_reuse_find picks the slot a new define should reuse: 2 = a retired
+ * slot with the SAME identity and kind exists (*index_out set; if the caller's schema also
+ * matches, reuse it with binding_changed = 0), 1 = some other retired slot exists
+ * (*index_out set; reuse costs a rebind), 0 = none (define a fresh slot).
+ *
+ * dart_transport_topic_reuse re-defines a retired slot. binding_changed = 0 asserts the
+ * binding (name, kind, and the caller-level schema) is IDENTICAL to what the slot carried:
+ * peers' cached verdicts stay correct, so their next announce apply relinks with no round
+ * trip, and the writer's seqno line continues (a kept reader position stays valid even if
+ * a peer never observed the retired interval). binding_changed = 1 (a different name,
+ * kind, or schema) bumps the slot's announced GENERATION: every peer holding a verdict
+ * for this position re-pends it on its next apply and re-verifies via details, our own
+ * verdicts bound to the slot are re-pended here, and writer lanes stay under the REBIND
+ * HOLD until each peer's dart_transport_peer_seen_version reaches rebind_version -- proof
+ * its demux map can no longer bind our index to the old occupant. rebind_version is the
+ * announce-blob version this rebind is published under (the caller advertises right
+ * after); pass 0 only if no seen-version feed exists, accepting the stale-demux window.
+ * Returns 0 ok, -1 not retired / bad def / kind-collision, -4 out of memory.
+ *
+ * dart_transport_peer_seen_version records the highest OUR-blob version a peer has named
+ * in a uDTL request (detail or interest paging): proof it applied our announce at that
+ * version. Returns 1 when the advance released any held writer lane (matches changed). */
+int       dart_transport_topic_retire(DartTransportState *st, uint16_t topic_index);
+int       dart_transport_topic_reuse_find(DartTransportState *st, const char *name, uint8_t kind,
+                       uint16_t *index_out);
+int       dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
+                       const DartTopicDef *def, int binding_changed, uint32_t rebind_version);
+int       dart_transport_peer_seen_version(DartTransportState *st, uint32_t peer_id, uint32_t version);
+
+/* The topic's next write seqno: samples ever committed on this slot's line, which
+ * CONTINUES across a retire/reuse cycle (so a slot successor can seed its own monotonic
+ * counters above everything its predecessor published). */
+uint64_t  dart_transport_topic_seqno(DartTransportState *st, uint16_t topic_index);
+
 /* The topic's topic name ({NULL,0} if undefined or out of range), for surfacing it on a
  * delivered message. Not NUL-terminated: use .data/.len. The name is a local lookup; it is
  * never on the data path. */

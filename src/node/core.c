@@ -357,6 +357,22 @@ void i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t topic_index,
     c->chan_schemas[topic_index].wire = schema ? dart_schema_wire(schema) : dart_bytes(NULL, 0);
 }
 
+/* The topic is being RETIRED: drop the live schema pointers (the node frees the parsed
+ * copy) but KEEP the hash as the slot's binding fingerprint, so a later create of the
+ * same name can tell an identical rebind (reuse with cached verdicts intact) from a
+ * retype (reuse with a generation bump). The detail responder never answers a retired
+ * slot, so the stale hash is never served. */
+void i_dart_node_core_retire_topic_schema(i_DartNodeCore *c, uint16_t topic_index){
+    if (!c || topic_index >= c->n_topics) return;
+    c->chan_compiled[topic_index]     = NULL;
+    c->chan_schemas[topic_index].wire = dart_bytes(NULL, 0);
+}
+
+/* The retired slot's binding fingerprint (0 = it carried no schema). */
+uint64_t i_dart_node_core_topic_schema_hash(i_DartNodeCore *c, uint16_t topic_index){
+    return (c && topic_index < c->n_topics) ? c->chan_schemas[topic_index].hash : 0;
+}
+
 /* ---- the schema gate + delivery binding ---------------------------------------------- */
 
 /* a peer schema, parsed once per distinct hash. The claimed hash must equal the wire's
@@ -402,7 +418,12 @@ static DartSchema *i_dart_node_core_bind(i_DartNodeCore *c, uint64_t hash, uint1
 }
 
 /* the delivery map: which schema decodes (peer, topic). NULL entries are stored too
-   (they overwrite an older binding when a peer re-advertises without a schema). */
+   (they overwrite an older binding when a peer re-advertises without a schema). An entry
+   whose publisher's schema is IDENTICAL to ours stores this sentinel instead of the
+   compiled pointer, resolved to chan_compiled at read time: the compiled copy is freed
+   and re-parsed across a topic retire/reuse cycle, and a live pointer here would dangle
+   across it while the (kept) verdicts still expect the entry to decode. */
+#define i_DART_NODE_SCHEMA_OURS ((const DartSchema *)(uintptr_t)1)
 static void i_dart_node_core_peer_schema_set(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
                                              const DartSchema *schema){
     uint32_t i;
@@ -508,9 +529,43 @@ const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, 
     uint32_t i;
     if (!c) return NULL;
     for (i = 0; i < c->n_peer_schemas; i++)
-        if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index)
-            return c->peer_schemas[i].schema;
+        if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index){
+            const DartSchema *s = c->peer_schemas[i].schema;
+            if (s == i_DART_NODE_SCHEMA_OURS)   /* identical-schema entry: resolve live */
+                return topic_index < c->n_topics ? c->chan_compiled[topic_index] : NULL;
+            return s;
+        }
     return NULL;
+}
+
+/* The topic's slot was REBOUND to a different binding (topic reuse with a retype): every
+ * per-peer decode binding, rebased view, and refusal reason recorded for the old
+ * occupant is stale. The verdicts were re-pended in the transport, so these re-derive
+ * as details re-verify; here the caches just forget the old ones. */
+void i_dart_node_core_topic_rebound(i_DartNodeCore *c, uint16_t topic_index){
+    uint32_t i;
+    if (!c) return;
+    i = 0;
+    while (i < c->n_peer_schemas){
+        if (c->peer_schemas[i].topic == topic_index)
+            c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap-remove */
+        else i++;
+    }
+    i = 0;
+    while (i < c->n_binds){
+        if (c->binds[i].topic == topic_index){
+            if (c->binds[i].rebased) dart_schema_free(c->binds[i].rebased, c->alloc, c->alloc_user);
+            c->binds[i] = c->binds[--c->n_binds];
+        } else i++;
+    }
+#ifndef DART_NO_DIAG
+    i = 0;
+    while (i < c->n_schema_whys){
+        if (c->schema_whys[i].topic == topic_index)
+            c->schema_whys[i] = c->schema_whys[--c->n_schema_whys];
+        else i++;
+    }
+#endif
 }
 
 /* ---- the greedy detail cache (cfg.fetch_details) -------------------------------------- */
@@ -621,7 +676,7 @@ static int i_dart_node_core_schema_verdict(i_DartNodeCore *c, uint32_t peer, uin
             *p = '\0'; return 0;
         }
         if (hash == dart_schema_hash(ours)){            /* identical schema: our own view works */
-            i_dart_node_core_peer_schema_set(c, peer, topic_index, ours);
+            i_dart_node_core_peer_schema_set(c, peer, topic_index, i_DART_NODE_SCHEMA_OURS);
             return 1;
         }
         {   DartSchema *pub = i_dart_node_core_intern(c, hash, wire);   /* need the wire to verify */
@@ -885,6 +940,15 @@ void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t
         return;
     ex = i_dart_node_core_peer_extra(c, peer);
     if (!ex || !ex->added) return;
+    {   /* a response older than the blob we hold may describe a binding the peer has
+           since REBOUND (topic reuse): refuse it rather than cache a stale verdict; the
+           pending state re-asks and the fresh answer carries the current version.
+           (Bindings were immutable per entry before rebinds existed, which is why this
+           gate was never needed.) */
+        uint32_t held = 0;
+        dart_discovery_peer_meta(c->discovery, peer, &held);
+        if (held && dart_detail_meta_version(resp) < held) return;
+    }
     if (c->fetch_details){   /* observer mode: cache every fetched topic for the queries */
         DartDetailIter it; DartDetail dd;
         memset(&it, 0, sizeof it);
@@ -922,6 +986,17 @@ void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
 }
 
 int i_dart_node_core_detail_any(i_DartNodeCore *c){ return c ? c->detail_due_any : 0; }
+
+/* A uDTL request from `peer` named OUR blob version `version`: proof it applied our
+ * announce at that version. Feeds the transport's rebind hold; when the advance releases
+ * a held writer lane, the interest event re-fires (match counts changed) and the caller
+ * invalidates its match memos. Returns 1 exactly then. */
+int i_dart_node_core_seen_version(i_DartNodeCore *c, uint32_t peer, uint32_t version){
+    if (!c || !version) return 0;
+    if (!dart_transport_peer_seen_version(c->transport, peer, version)) return 0;
+    i_dart_node_core_fire_interest(c, peer);
+    return 1;
+}
 
 /* Unresolved candidates for one topic across active peers (see core.h). A peer counts
  * once while its interest is UNKNOWN: its blob has not arrived, or its external

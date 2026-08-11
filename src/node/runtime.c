@@ -1206,6 +1206,7 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
+    int reuse = 0;
     if (!n || !name) return NULL;
     if (!allow_at){   /* '@' is reserved for pattern channels (f@req, v@set, ...) */
         const char *s = name;
@@ -1218,6 +1219,11 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
            reserve; a full block (accounting drift) degrades to no builtin, never a grow */
         idx = (uint16_t)(n->builtin_lo + n->n_builtin);
         if (idx >= n->max_topics){ i_dart_node_unlock(n, acquired); return NULL; }
+    } else if ((reuse = dart_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
+        /* a RETIRED slot takes this create instead of appending, so retire/create churn
+           never grows the topic table or the announce. Same identity + kind (find = 2)
+           with the same schema relinks from peers' cached verdicts with no round trip;
+           anything else is a rebind under a bumped generation (peers re-verify). */
     } else {
         idx = n->n_created;
         if (n->n_builtin && idx >= n->builtin_lo)
@@ -1242,11 +1248,27 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     def.name = name; def.role = (uint8_t)role;
     def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.forceable = forceable;
     if (opts) def.qos = opts->qos;
-    if (dart_transport_topic_define(n->transport, idx, &def) != 0){
-        if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
-        i_dart_node_alloc(n, h, 0);
-        i_dart_node_unlock(n, acquired);
-        return NULL;
+    {   int rc;
+        if (reuse){
+            /* identical binding (same name, kind, and schema hash as the retired
+               occupant) rebinds silently; anything else bumps the slot's generation and
+               publishes the rebind under the version the advertise below will stamp */
+            uint64_t new_hash = h->schema ? dart_schema_hash(h->schema) : 0;
+            int changed = (reuse != 2)
+                       || (new_hash != i_dart_node_core_topic_schema_hash(n->core, idx));
+            uint32_t rb = changed
+                ? dart_discovery_meta_version(dart_discovery_state(n->discovery)) + 1u : 0u;
+            rc = dart_transport_topic_reuse(n->transport, idx, &def, changed, rb);
+            if (rc == 0 && changed) i_dart_node_core_topic_rebound(n->core, idx);
+        } else {
+            rc = dart_transport_topic_define(n->transport, idx, &def);
+        }
+        if (rc != 0){
+            if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
+            i_dart_node_alloc(n, h, 0);
+            i_dart_node_unlock(n, acquired);
+            return NULL;
+        }
     }
     h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
     /* a function-response prefix is followed by [u8 len][message] on the wire: derived
@@ -1263,7 +1285,9 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     }
     if (def.qos.queue_bytes)   /* queued from creation; best-effort on OOM (take retries) */
         (void)i_dart_node_queue_ensure(n, h, &def.qos);
-    if (h->schema)   /* advertise + gate matches with it (any non-INACTIVE role) */
+    if (h->schema || reuse)   /* advertise + gate matches with it (any non-INACTIVE role);
+                                 a reused slot must also CLEAR the retired occupant's
+                                 fingerprint when the new topic is untyped */
         i_dart_node_core_set_topic_schema(n->core, idx, h->schema);
     /* re-advertise our interest so peers match the new topic as the blob arrives, and
        replay known peers' interest so this topic matches what they already advertised */
@@ -1271,7 +1295,8 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
     dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
-    if (n->creating_builtin) n->n_builtin++; else n->n_created++;
+    if (n->creating_builtin) n->n_builtin++;
+    else if (!reuse) n->n_created++;   /* a reused slot is already inside the dense region */
     n->match_epoch++;   /* a new topic may raise fresh candidates: converged memos are stale */
     i_dart_node_kick(n);                       /* announce the new topic now; the replay above
                                                   queued any DETAIL_REQs, so the pass sends them */
@@ -1436,6 +1461,14 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                     DartBytes resp = i_dart_node_core_detail_respond(n->core, n->domain,
                                                                      dart_bytes(buf, (size_t)r));
                     if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                    {   /* the request names the OUR-blob version the peer applied: feed the
+                           rebind hold (a released writer lane stales the match memos) */
+                        uint32_t from;
+                        if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from)
+                            && i_dart_node_core_seen_version(n->core, from,
+                                   dart_detail_meta_version(dart_bytes(buf, (size_t)r))))
+                            n->match_epoch++;
+                    }
                 } else if (buf[4]==DART_DETAIL_RESP){
                     uint32_t from;
                     if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
@@ -1443,7 +1476,11 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                                                        dart_bytes(buf, (size_t)r));
                 } else if (buf[4]==DART_INTEREST_REQ){
                     /* external-interest paging: serve one byte-range page of our interest
-                       blob to the request's source (stateless, like the detail responder) */
+                       blob to the request's source (stateless, like the detail responder).
+                       NOT a rebind-hold confirmation: an INTEREST_REQ names the version the
+                       peer is still FETCHING, not one it has applied (a detail request is
+                       the applied-version signal, and an external peer's apply queues one
+                       whenever a rebind re-pended anything). */
                     DartBytes resp = i_dart_node_core_interest_respond(n->core, n->domain,
                                                                        dart_bytes(buf, (size_t)r));
                     if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
@@ -1960,6 +1997,10 @@ int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
     return r;
 }
 
+uint64_t i_dart_topic_seqno(DartTopic *topic){
+    return topic ? dart_transport_topic_seqno(topic->n->transport, topic->index) : 0;
+}
+
 void i_dart_topic_clear_sys(DartTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
@@ -2091,6 +2132,45 @@ int dart_topic_set_role(DartTopic *topic, DartRole role){
     }
     i_dart_node_unlock(topic->n, acquired);
     return r;
+}
+
+int dart_topic_retire(DartTopic *topic){
+    DartNode *n; int acquired; uint16_t idx;
+    if (!topic) return DART_ERR_NO_TOPIC;
+    n = topic->n;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return DART_ERR_STATE;   /* from a callback: lanes are live mid-delivery */
+    if (topic->sys_on_message                       /* a pattern channel: retire its pattern handle */
+        || i_dart_node_is_log_topic(n, topic->index)
+        || (n->n_builtin && topic->index >= n->builtin_lo
+            && topic->index < (uint16_t)(n->builtin_lo + n->n_builtin))
+        || (topic->q && topic->q->busy)){           /* mid-dispatch on another thread */
+        i_dart_node_unlock(n, acquired);
+        return DART_ERR_STATE;
+    }
+    idx = topic->index;
+    if (dart_transport_topic_retire(n->transport, idx) != 0){
+        i_dart_node_unlock(n, acquired);
+        return DART_ERR_STATE;
+    }
+    /* the slot keeps its schema HASH as the reuse fingerprint; the parsed copy goes */
+    i_dart_node_core_retire_topic_schema(n->core, idx);
+    if (topic->q){
+        if (topic->q->buf) i_dart_node_alloc(n, topic->q->buf, 0);
+        i_dart_node_alloc(n, topic->q, 0);
+        topic->q = NULL;
+    }
+    if (topic->schema) dart_schema_free(topic->schema, i_dart_node_alloc, n);
+    n->handles[idx] = NULL;
+    i_dart_node_alloc(n, topic, 0);         /* the handle is INVALID from here */
+    /* re-advertise: the slot rides the announce as a hole from the next blob on */
+    i_dart_node_core_build_meta(n->core);
+    dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
+    dart_discovery_replay(n->discovery);
+    n->match_epoch++;
+    i_dart_node_kick(n);
+    i_dart_node_unlock(n, acquired);
+    return DART_OK;
 }
 
 uint16_t dart_topic_index(const DartTopic *topic){ return topic ? topic->index : 0; }

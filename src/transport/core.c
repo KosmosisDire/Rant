@@ -90,6 +90,8 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint16_t **peer_index    = (uint16_t**)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint16_t*), 8);
       uint32_t *peer_index_len = (uint32_t*) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
       uint8_t **peer_astate    = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
+      uint8_t **peer_agen      = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
+      uint32_t *peer_seen_version = (uint32_t*)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
       name_pool = (char*)i_dart_bump_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
@@ -104,6 +106,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->peer_index=peer_index; st->peer_index_len=peer_index_len;
           st->peer_astate=peer_astate;
+          st->peer_agen=peer_agen; st->peer_seen_version=peer_seen_version;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_SIZE; }  /* set per peer on add */
 #ifdef DART_SHM
@@ -112,6 +115,8 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           memset(peer_index, 0, (size_t)max_peers*sizeof(uint16_t*));
           memset(peer_index_len, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_astate, 0, (size_t)max_peers*sizeof(uint8_t*));
+          memset(peer_agen, 0, (size_t)max_peers*sizeof(uint8_t*));
+          memset(peer_seen_version, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
           memset(lane_index,0xFF,(size_t)nlanes*sizeof(uint16_t));   /* all unmatched */
@@ -252,6 +257,8 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
         nw->peer_index[p]     = old->peer_index[p];   /* hook allocations: stable across the move */
         nw->peer_index_len[p] = old->peer_index_len[p];
         nw->peer_astate[p]    = old->peer_astate[p];
+        nw->peer_agen[p]      = old->peer_agen[p];
+        nw->peer_seen_version[p] = old->peer_seen_version[p];
     }
     /* scheduler is fresh/empty: re-enqueue every used lane, then force a full sweep
        next poll so timers re-arm and next_deadline is recomputed exactly */
@@ -278,11 +285,12 @@ i_DartTopic *i_dart_topic_at(DartTransportState *st, uint16_t topic_index, int *
 /* Find the local topic for a wire identity. An INACTIVE topic (declared but off) must
  * not shadow an active same-identity topic, so prefer a non-INACTIVE match; fall back to
  * the first match (e.g. all inactive) so resolution stays deterministic. Lets a caller hold
- * two topics of one identity (different QoS) and switch which is live by role. */
+ * two topics of one identity (different QoS) and switch which is live by role. A RETIRED
+ * slot is invisible here: it can never resolve, verify, or demux again. */
 static i_DartTopic *i_dart_topic_by_identity(DartTransportState *st, uint64_t identity, int *idx_out){
     uint16_t i; int first=-1;
     for (i=0;i<st->cfg.n_topics;i++){
-        if (st->topics[i].identity!=identity) continue;
+        if (st->topics[i].retired || st->topics[i].identity!=identity) continue;
         if (first<0) first=(int)i;
         if (st->topics[i].role!=DART_INACTIVE){ if(idx_out)*idx_out=(int)i; return &st->topics[i]; }
     }
@@ -445,7 +453,14 @@ static void i_dart_topic_rematch(DartTransportState *st, uint16_t c, uint16_t pe
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     int wuse = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY) && i_dart_bit_get(peer_sub_bitmap,c);
     int ruse = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY) && i_dart_bit_get(peer_pub_bitmap,c);
-    i_DartLane *l = i_dart_lane_at(st,c,peer_slot);
+    i_DartLane *l;
+    /* rebind hold (writer side only): until this peer proves it applied our announce at
+       the slot's rebind version (dart_transport_peer_seen_version), its demux map may
+       still bind our index to the OLD occupant, so nothing may be sent to it. Inbound
+       needs no hold: our own verdicts of its entries were re-pended at the rebind. */
+    if (wuse && topic->rebind_version && st->peer_seen_version[peer_slot] < topic->rebind_version)
+        wuse = 0;
+    l = i_dart_lane_at(st,c,peer_slot);
     int had = l && (l->w.used || l->r.used);
     if (!wuse && !ruse){
         if (!had) return;
@@ -488,7 +503,9 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
     if (st->peer_index[free] && st->peer_index_len[free]){   /* slot reuse: no stale mappings/verdicts */
         memset(st->peer_index[free],0xFF,(size_t)st->peer_index_len[free]*sizeof(uint16_t));
         if (st->peer_astate[free]) memset(st->peer_astate[free],0,st->peer_index_len[free]);
+        if (st->peer_agen[free])   memset(st->peer_agen[free],0,st->peer_index_len[free]);
     }
+    st->peer_seen_version[free]=0;   /* seen versions are per incarnation */
     /* nothing matches until dart_transport_apply_peer_interest feeds the peer's interest
        list (carried in its discovery announce) */
 }
@@ -509,8 +526,10 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
     if (st->peer_index[s]){                        /* the index + verdict maps go too */
         st->cfg.allocator(st->cfg.user, st->peer_index[s], 0);
         if (st->peer_astate[s]) st->cfg.allocator(st->cfg.user, st->peer_astate[s], 0);
-        st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_index_len[s]=0;
+        if (st->peer_agen[s])   st->cfg.allocator(st->cfg.user, st->peer_agen[s], 0);
+        st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_agen[s]=NULL; st->peer_index_len[s]=0;
     }
+    st->peer_seen_version[s]=0;
     st->peer_used[s]=0; st->peer_dormant[s]=0;
 #ifdef DART_SHM
     st->peer_shm[s]=0;
@@ -567,6 +586,7 @@ void dart_transport_destroy(DartTransportState *st){
     for (c=0;c<st->cfg.n_topics;c++){
         i_DartTopic *topic=&st->topics[c];     /* an undefined reserve slot: depth 0, no ring */
         uint16_t depth, d;
+        if (!topic->history) continue;         /* retired slot: ring already freed */
         depth = topic->qos.keep_last;
         for (d=0; d<depth; d++)
             if (topic->history[d].buf){ st->cfg.allocator(st->cfg.user, topic->history[d].buf, 0);
@@ -596,6 +616,10 @@ void dart_transport_destroy(DartTransportState *st){
                 st->cfg.allocator(st->cfg.user, st->peer_astate[p], 0);
                 st->peer_astate[p]=NULL;
             }
+            if (st->peer_agen[p]){
+                st->cfg.allocator(st->cfg.user, st->peer_agen[p], 0);
+                st->peer_agen[p]=NULL;
+            }
         }
     }
 }
@@ -608,16 +632,20 @@ void dart_transport_destroy(DartTransportState *st){
  * covered. */
 static uint16_t *i_dart_peer_index_ensure(DartTransportState *st, int peer_slot, uint32_t need){
     uint32_t have = st->peer_index_len[peer_slot];
-    uint16_t *nm; uint8_t *ns;
+    uint16_t *nm; uint8_t *ns, *ng;
     if (need <= have) return st->peer_index[peer_slot];
     nm = (uint16_t*)st->cfg.allocator(st->cfg.user, st->peer_index[peer_slot], (size_t)need*sizeof(uint16_t));
     if (!nm) return NULL;
     st->peer_index[peer_slot] = nm;                     /* len not yet raised: retryable on OOM below */
     ns = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_astate[peer_slot], (size_t)need);
     if (!ns) return NULL;
+    st->peer_astate[peer_slot] = ns;
+    ng = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_agen[peer_slot], (size_t)need);
+    if (!ng) return NULL;
     memset(nm + have, 0xFF, (size_t)(need-have)*sizeof(uint16_t));   /* grown tail: unmapped */
     memset(ns + have, 0, (size_t)(need-have));                       /* ...no verdicts */
-    st->peer_astate[peer_slot] = ns; st->peer_index_len[peer_slot] = need;
+    memset(ng + have, 0, (size_t)(need-have));                       /* ...generation 0 */
+    st->peer_agen[peer_slot] = ng; st->peer_index_len[peer_slot] = need;
     return nm;
 }
 
@@ -627,7 +655,7 @@ static uint16_t *i_dart_peer_index_ensure(DartTransportState *st, int peer_slot,
 static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx_out){
     uint16_t i; int first=-1, live=-1, n=0;
     for (i=0;i<st->cfg.n_topics;i++){
-        if (st->topics[i].name_len==0 || (uint32_t)st->topics[i].identity != h) continue;
+        if (!i_dart_topic_announced(&st->topics[i]) || (uint32_t)st->topics[i].identity != h) continue;
         n++;
         if (first<0) first=(int)i;
         if (live<0 && st->topics[i].role!=DART_INACTIVE) live=(int)i;
@@ -639,10 +667,12 @@ static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx
 
 /* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
  * one positional [u32 hash][u8 flags] entry per topic slot, plus the worst-case rate
- * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry) and
- * the worst-case no-timestamp section ([u16 n] + 2 B per opted-out topic). */
+ * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry),
+ * the worst-case no-timestamp section ([u16 n] + 2 B per opted-out topic), and the
+ * worst-case generation section ([u16 n] + 3 B per rebound topic). */
 size_t dart_interest_max(uint16_t n_topics){
-    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics + 2u + 2u * (size_t)n_topics;
+    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics + 2u + 2u * (size_t)n_topics
+         + 2u + 3u * (size_t)n_topics;
 }
 
 /* subscriber topics carrying a best-effort rate cap: the count for the interest rate
@@ -652,7 +682,7 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
     uint16_t c, r=0;
     for (c=0;c<n;c++){
         const i_DartTopic *t=&st->topics[c];
-        if (t->name_len && t->qos.max_rate_hz
+        if (i_dart_topic_announced(t) && t->qos.max_rate_hz
             && (t->role==DART_SUB_ONLY || t->role==DART_PUBSUB)) r++;
     }
     return r;
@@ -661,7 +691,7 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
 /* is this a topic we PUBLISH without the source stamp? (the no-timestamp section's
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_unstamped_pub(const i_DartTopic *t){
-    return t->name_len && t->qos.no_timestamp
+    return i_dart_topic_announced(t) && t->qos.no_timestamp
         && (t->role==DART_PUB_ONLY || t->role==DART_PUBSUB);
 }
 
@@ -673,39 +703,58 @@ static uint16_t i_dart_unstamped_count(DartTransportState *st, uint16_t n){
     return r;
 }
 
+/* announced topics whose slot was ever REBOUND (gen > 0): the count for the interest
+ * generation section. Zero until a retired slot is reused with a changed binding, so
+ * the section costs 2 bytes for a node that never rebinds. */
+static uint16_t i_dart_gen_count(DartTransportState *st, uint16_t n){
+    uint16_t c, r=0;
+    for (c=0;c<n;c++){
+        const i_DartTopic *t=&st->topics[c];
+        if (i_dart_topic_announced(t) && t->gen) r++;
+    }
+    return r;
+}
+
 
 /* Serialize our interest into out: [u16 n] (n = SLOTS, holes included), then one
- * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest defined slot
- * (position = index). A run of UNDEFINED reserve slots collapses to ONE entry flagged
- * DART__INT_HOLE_RUN whose hash field is the run length, so later indices stay stable
- * without a big reserve padding the announce to its full size. A defined-but-INACTIVE
- * topic still rides as a normal entry (its identity survives role flips). Then two SPARSE
- * sections: a rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber
- * topics that cap their best-effort delivery rate (see DartQos.max_rate_hz), and a
- * no-timestamp section [u16 n_unstamped][(u16 topic_index)]* for the PUBLISHED topics that
- * carry no source stamp (see DartQos.no_timestamp), which is what tells a receiver whether
- * a stream begins with DART_TIMESTAMP_BYTES. Both default to zero entries. Returns bytes
- * written, or 0 if cap is too small; size out via dart_interest_max. */
+ * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest announced slot
+ * (position = index). A run of UNDEFINED (or RETIRED) reserve slots collapses to ONE
+ * entry flagged DART__INT_HOLE_RUN whose hash field is the run length, so later indices
+ * stay stable without a big reserve padding the announce to its full size. A
+ * defined-but-INACTIVE topic still rides as a normal entry (its identity survives role
+ * flips). Then three SPARSE sections: a rate section
+ * [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics that cap their
+ * best-effort delivery rate (see DartQos.max_rate_hz), a no-timestamp section
+ * [u16 n_unstamped][(u16 topic_index)]* for the PUBLISHED topics that carry no source
+ * stamp (see DartQos.no_timestamp), which is what tells a receiver whether a stream
+ * begins with DART_TIMESTAMP_BYTES, and a generation section
+ * [u16 n_gens][(u16 topic_index)(u8 gen)]* naming every announced slot that was ever
+ * REBOUND to a different name/kind/schema (dart_transport_topic_reuse), so a receiver
+ * holding a verdict formed under an older generation re-verifies instead of applying it
+ * to the new occupant. All three default to zero entries. Returns bytes written, or 0 if
+ * cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
     uint8_t *o=(uint8_t*)out, *e, *rp;
-    uint16_t c, n=0, n_rates, n_unstamped; uint32_t cells=0; int in_hole=0;
-    for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    uint16_t c, n=0, n_rates, n_unstamped, n_gens; uint32_t cells=0; int in_hole=0;
+    for (c=0;c<st->cfg.n_topics;c++) if (i_dart_topic_announced(&st->topics[c])) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){                       /* exact cell count (runs collapse), so a buffer
                                                 sized by dart_transport_interest_size fits */
-        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        if (i_dart_topic_announced(&st->topics[c])){ cells++; in_hole=0; }
         else { if (!in_hole) cells++; in_hole=1; }
     }
     n_rates = i_dart_rate_count(st, n);
     n_unstamped = i_dart_unstamped_count(st, n);
-    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 2u*(size_t)n_unstamped)
+    n_gens = i_dart_gen_count(st, n);
+    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 2u*(size_t)n_unstamped
+            + 2u + 3u*(size_t)n_gens)
         return 0;
     i_dart_le_w16(o, n);
     e = o + 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
-        if (!topic->name_len){
+        if (!i_dart_topic_announced(topic)){
             uint32_t run = 1;
-            while ((uint16_t)(c+run) < n && st->topics[c+run].name_len==0) run++;
+            while ((uint16_t)(c+run) < n && !i_dart_topic_announced(&st->topics[c+run])) run++;
             i_dart_le_w32(e, run);
             e[4] = (uint8_t)(DART_INACTIVE | DART__INT_HOLE_RUN);
             e += 5u; c = (uint16_t)(c + run - 1u);
@@ -722,7 +771,7 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
     i_dart_le_w16(rp, n_rates); rp += 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
-        if (topic->name_len && topic->qos.max_rate_hz
+        if (i_dart_topic_announced(topic) && topic->qos.max_rate_hz
             && (topic->role==DART_SUB_ONLY || topic->role==DART_PUBSUB)){
             i_dart_le_w16(rp, c); i_dart_le_w16(rp+2, topic->qos.max_rate_hz); rp += 4u;
         }
@@ -730,6 +779,13 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
     i_dart_le_w16(rp, n_unstamped); rp += 2u;
     for (c=0;c<n;c++)
         if (i_dart_topic_unstamped_pub(&st->topics[c])){ i_dart_le_w16(rp, c); rp += 2u; }
+    i_dart_le_w16(rp, n_gens); rp += 2u;
+    for (c=0;c<n;c++){
+        const i_DartTopic *topic = &st->topics[c];
+        if (i_dart_topic_announced(topic) && topic->gen){
+            i_dart_le_w16(rp, c); rp[2] = topic->gen; rp += 3u;
+        }
+    }
     return (size_t)(rp - o);
 }
 
@@ -763,7 +819,7 @@ static uint32_t i_dart_interest_walk_len(const uint8_t *d, size_t len, uint16_t 
  * the publisher upgrades and re-advertises) and the cached schema verdict per
  * direction, each refusal fired as its event on every apply that would have used it. */
 void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
-    const uint8_t *d=blob.data, *e;
+    const uint8_t *d=blob.data, *e, *gp, *g_end;
     uint16_t n, c; uint32_t a, entries_len; int peer_slot=i_dart_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap, *peer_sub_reliable;
     uint16_t *amap; uint8_t *astate;
@@ -779,12 +835,43 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     memset(peer_sub_reliable,0,st->bitmap_len);
     amap   = n ? i_dart_peer_index_ensure(st, peer_slot, n) : NULL;
     astate = amap ? st->peer_astate[peer_slot] : NULL;
+    {   /* locate the generation section (entries, rate, no-timestamp, then gen); a blob
+           whose tail is truncated mid-section just has no generations (all zero) */
+        size_t off = (size_t)entries_len;
+        gp = g_end = NULL;
+        if (blob.len >= off + 2u){
+            uint16_t nr = i_dart_le_r16(d + off); off += 2u + (size_t)nr*4u;
+            if (blob.len >= off + 2u){
+                uint16_t nu = i_dart_le_r16(d + off); off += 2u + (size_t)nu*2u;
+                if (blob.len >= off + 2u){
+                    uint16_t ng = i_dart_le_r16(d + off); off += 2u;
+                    if (blob.len >= off + (size_t)ng*3u){ gp = d + off; g_end = gp + (size_t)ng*3u; }
+                }
+            }
+        }
+    }
     e = d + 2u;
     for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int their_pub, their_sub, rel;
         uint16_t cidx; i_DartTopic *topic;
         if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
+        if (astate && a < st->peer_index_len[peer_slot] && st->peer_agen[peer_slot]){
+            /* rebind generation gate: the peer rebound this position (a retired slot
+               reused with a different name/kind/schema) since our verdict was formed, so
+               the verdict describes the OLD occupant: back to pending, demux severed,
+               details re-verify the new binding. Runs for INACTIVE entries too, so a
+               rebind noticed while parked never wires stale state when the role returns.
+               The stored gen tracks the latest APPLIED blob either way, so a verdict
+               formed after this apply binds to the generation it was judged under. */
+            uint8_t g = 0;
+            while (gp && gp + 3 <= g_end && i_dart_le_r16(gp) < a) gp += 3;
+            if (gp && gp + 3 <= g_end && i_dart_le_r16(gp) == a) g = gp[2];
+            if (st->peer_agen[peer_slot][a] != g){
+                if (astate[a]){ astate[a] = 0; amap[a] = 0xFFFFu; }
+                st->peer_agen[peer_slot][a] = g;
+            }
+        }
         if (role == DART_INACTIVE) continue;
         if (!astate || a >= st->peer_index_len[peer_slot]){
             /* no verdict storage (the map allocation failed): this entry can never
@@ -797,15 +884,23 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
         cidx = amap[a];
         if (cidx >= st->cfg.n_topics) continue;      /* defensive: stale map */
         topic = &st->topics[cidx];
-        if (topic->role == DART_INACTIVE){
-            /* dual same-identity topics switched by role: the verdict (incl. its schema
-               gates) bound the then-live twin, so re-verify against the one live now */
+        if ((uint32_t)topic->identity != i_dart_le_r32(e)){
+            /* the entry's hash no longer names the identity this verdict bound: the
+               position was rebound to a different name (the gen gate's belt) */
+            astate[a] = 0; amap[a] = 0xFFFFu;
+            continue;
+        }
+        if (topic->role == DART_INACTIVE || topic->retired){
+            /* dual same-identity topics switched by role (or the bound slot retired):
+               the verdict (incl. its schema gates) bound the then-live twin, so
+               re-verify against the one live now */
             int resolved_index = (int)cidx;
             i_dart_topic_by_identity(st, topic->identity, &resolved_index);
             if ((uint16_t)resolved_index != cidx){
                 astate[a] = 0; amap[a] = 0xFFFFu;      /* pending again; wants() re-asks */
                 continue;
             }
+            if (topic->retired) continue;   /* no live successor yet: no bits, no lanes */
         }
         {   /* entity-kind gate: a name-verified peer that advertises this name under a
                different kind is a disjoint entity (a plain topic vs a function, etc.). Refuse
@@ -928,17 +1023,17 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
 #define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  17u                 /* what WE write (v16/17: no-timestamp interest section) */
+#define DART__META_VER  19u                 /* what WE write (v18/19: rebind generation section) */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  16u
+#define DART__META_VER  18u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= DART__META_BASE_NOSHM
         && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=16 && meta.data[2]<=17;
+        && meta.data[2]>=18 && meta.data[2]<=19;
 }
 /* base prefix through the iflags byte, by version (the odd one carries shm+host, the even
  * one doesn't). iflags is always the base's last byte. */
@@ -955,15 +1050,17 @@ uint16_t dart_meta_cap(uint16_t n_topics){
  * The same walk dart_transport_build_interest emits, byte for byte: defined slots cost
  * one 5 B entry each, every maximal run of undefined slots costs one. */
 uint32_t dart_transport_interest_size(DartTransportState *st){
-    uint16_t c, n=0, n_rates, n_unstamped; uint32_t cells=0; int in_hole=0;
-    for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    uint16_t c, n=0, n_rates, n_unstamped, n_gens; uint32_t cells=0; int in_hole=0;
+    for (c=0;c<st->cfg.n_topics;c++) if (i_dart_topic_announced(&st->topics[c])) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){
-        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        if (i_dart_topic_announced(&st->topics[c])){ cells++; in_hole=0; }
         else { if (!in_hole) cells++; in_hole=1; }
     }
     n_rates = i_dart_rate_count(st, n);
     n_unstamped = i_dart_unstamped_count(st, n);
-    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates + 2u + 2u*(uint32_t)n_unstamped;
+    n_gens = i_dart_gen_count(st, n);
+    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates + 2u + 2u*(uint32_t)n_unstamped
+         + 2u + 3u*(uint32_t)n_gens;
 }
 
 /* Exact overlay size the next INLINE dart_transport_meta_build will emit for the
@@ -1318,7 +1415,7 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     uint8_t *astate; uint32_t alen;
     int ours_pub, ours_sub;
     topic = i_dart_topic_at(st, topic_index, NULL);
-    if (!topic || topic->name_len==0 || !d || interest.len < 2) return 0;
+    if (!topic || !i_dart_topic_announced(topic) || !d || interest.len < 2) return 0;
     slot = i_dart_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
@@ -1335,9 +1432,18 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
         if (role == DART_INACTIVE) continue;
         if (i_dart_le_r32(e) != (uint32_t)topic->identity) continue;   /* not this topic */
         if (!astate || a >= alen) continue;                     /* unresolvable: never counted */
-        if (astate[a] & DART__AST_DETAILED) continue;           /* decided (matched or refused) */
         their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
         their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        if (astate[a] & DART__AST_DETAILED){
+            /* decided (matched or refused) -- but a verified subscriber whose writer lane
+               is under the REBIND HOLD is still resolving: it re-forms the moment the
+               peer's uDTL request confirms the rebind version, so a send-path match wait
+               must cover that window exactly like a pending verdict */
+            if (their_sub && ours_pub && (astate[a] & DART__AST_NAME_OK)
+                && topic->rebind_version
+                && st->peer_seen_version[slot] < topic->rebind_version) cnt++;
+            continue;
+        }
         if ((their_pub && ours_sub) || (their_sub && ours_pub)) cnt++;
     }
     }
@@ -1391,7 +1497,7 @@ int dart_transport_set_role(DartTransportState *st, uint16_t topic_index, uint8_
     i_DartTopic *topic; uint16_t p;
     if (role > DART_INACTIVE) return -1;
     topic = i_dart_topic_at(st, topic_index, NULL);
-    if (!topic) return -1;
+    if (!topic || topic->retired) return -1;   /* a retired slot only returns via reuse */
     if (topic->role == role) return 0;
     topic->role = role;
     for (p=0;p<st->cfg.max_peers;p++)
@@ -1413,10 +1519,12 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     if (topic->identity != 0 || topic->history) return -1;        /* slot already defined */
     {   /* same name under a different kind on ONE node: refuse at define. The per-peer alias
            maps bind an entry to one local topic by identity (kind-blind), so local cross-kind
-           twins would cross-bind and refuse forever; coexistence is a cross-node property. */
+           twins would cross-bind and refuse forever; coexistence is a cross-node property.
+           RETIRED slots are exempt: they are invisible to matching and either get reused by
+           this very name later or stay parked. */
         uint64_t id = dart_topic_identity(def); uint16_t c;
         for (c=0;c<st->cfg.n_topics;c++)
-            if (st->topics[c].name_len && st->topics[c].identity == id
+            if (i_dart_topic_announced(&st->topics[c]) && st->topics[c].identity == id
                 && st->topics[c].kind != def->kind) return -1;
     }
     q = def->qos; i_dart_qos_defaults(&q);
@@ -1449,6 +1557,173 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active topic to known peers */
         if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
     return 0;
+}
+
+
+/* Park a defined slot for reuse (see core.h). Every lane releases (rematch under
+ * INACTIVE+retired), the history ring and its sample buffers are freed, and the slot
+ * leaves the announce. Identity/name/kind/qos/gen/next_seqno stay: reuse compares the
+ * old binding against the new one, and an identical rebind continues the seqno line. */
+int dart_transport_topic_retire(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic; uint16_t p, d, depth;
+    if (!st) return -1;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic || topic->name_len == 0 || topic->retired) return -1;
+    topic->role = DART_INACTIVE; topic->retired = 1;
+    for (p=0;p<st->cfg.max_peers;p++)          /* both sides unmatch; every lane releases */
+        if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
+    depth = topic->qos.keep_last;
+    if (topic->history){
+        for (d=0; d<depth; d++)
+            if (topic->history[d].buf){
+                st->cfg.allocator(st->cfg.user, topic->history[d].buf, 0);
+                topic->history[d].buf = NULL; topic->history[d].cap = 0;
+            }
+        if (topic->history_owned){
+            st->cfg.allocator(st->cfg.user, topic->history, 0);
+            topic->history = NULL; topic->history_owned = 0;
+        } else {
+            memset(topic->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
+        }
+    }
+    topic->history_head = 0; topic->have_first = 0; topic->first_seqno = 0;
+    memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
+    /* caller re-advertises: the slot now rides the announce as a hole */
+    return 0;
+}
+
+
+/* The slot a new define should reuse (see core.h): 2 = retired slot with the same
+ * identity + kind (an identical-binding candidate), 1 = some retired slot (a rebind),
+ * 0 = none. */
+int dart_transport_topic_reuse_find(DartTransportState *st, const char *name, uint8_t kind,
+                                    uint16_t *index_out){
+    uint64_t id; uint16_t c; int any = -1;
+    if (!st || !name || !name[0]) return 0;
+    id = dart_topic_id(name);
+    for (c=0;c<st->cfg.n_topics;c++){
+        const i_DartTopic *t = &st->topics[c];
+        if (!t->retired) continue;
+        if (t->identity == id && t->kind == kind){ if (index_out) *index_out = c; return 2; }
+        if (any < 0) any = (int)c;
+    }
+    if (any >= 0){ if (index_out) *index_out = (uint16_t)any; return 1; }
+    return 0;
+}
+
+
+/* Rebind a retired slot to a (possibly new) definition (see core.h for the contract).
+ * The seqno line always CONTINUES: for an identical rebind a peer that never observed
+ * the retired interval keeps its reader position and sees an idle gap, not a restart;
+ * for a changed rebind every lane re-forms fresh anyway, so continuation is harmless. */
+int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
+                               const DartTopicDef *def, int binding_changed,
+                               uint32_t rebind_version){
+    i_DartTopic *topic; DartQos q; uint16_t depth, p; size_t nlen; uint64_t id;
+    if (!st || !def) return -1;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic || !topic->retired) return -1;
+    if (!def->name || !def->name[0]) return -1;
+    nlen = i_dart_name_len(def->name);
+    if (def->name[nlen]) return -1;                          /* longer than DART_TOPIC_NAME_MAX */
+    if (def->directed && def->qos.catch_up) return -1;       /* directed history never replays */
+    id = dart_topic_identity(def);
+    {   /* same name under a different kind on ONE node: refuse, exactly as at define
+           (other retired slots are exempt; this slot is the one being rebound) */
+        uint16_t c;
+        for (c=0;c<st->cfg.n_topics;c++)
+            if (c != topic_index && i_dart_topic_announced(&st->topics[c])
+                && st->topics[c].identity == id && st->topics[c].kind != def->kind) return -1;
+    }
+    if (!binding_changed && (topic->identity != id || topic->kind != def->kind))
+        return -1;                       /* asserted identical, but the stored binding differs */
+    q = def->qos; i_dart_qos_defaults(&q);
+    depth = q.keep_last;
+    if (topic->history && !topic->history_owned && depth <= topic->qos.keep_last){
+        /* an at-init arena ring that still fits: reuse it in place */
+        memset(topic->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
+    } else {
+        i_DartWriterSample *h = (i_DartWriterSample*)st->cfg.allocator(st->cfg.user, NULL,
+                                                     (size_t)depth*sizeof(i_DartWriterSample));
+        if (!h) return -4;                                   /* OOM: the slot stays retired */
+        memset(h, 0, (size_t)depth*sizeof(i_DartWriterSample));
+        topic->history = h; topic->history_owned = 1;
+    }
+    topic->qos = q;
+    topic->role = def->role;
+    topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
+    topic->forceable = def->forceable;
+    topic->identity = id;
+    memcpy((char*)topic->name, def->name, nlen); ((char*)topic->name)[nlen] = '\0';
+    topic->name_len = (uint8_t)nlen;
+    topic->history_head = 0; topic->have_first = 0; topic->first_seqno = 0;
+    memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
+    topic->retired = 0;
+    if (binding_changed){
+        topic->gen = (uint8_t)(topic->gen + 1u);   /* announced; peers compare equality only */
+        topic->rebind_version = rebind_version;
+        for (p=0;p<st->cfg.max_peers;p++){
+            uint32_t a;
+            if (!st->peer_used[p]) continue;
+            /* sever OUR bindings to the old occupant: verdicts of peer entries bound to
+               this slot re-pend (their announces re-verify against the new binding), and
+               the interest bits derived from them go too */
+            if (st->peer_index[p])
+                for (a=0;a<st->peer_index_len[p];a++)
+                    if (st->peer_index[p][a] == topic_index){
+                        st->peer_index[p][a] = 0xFFFFu;
+                        st->peer_astate[p][a] = 0;
+                    }
+            i_dart_bit_clr(&st->peer_pub_bitmap[(size_t)p*st->bitmap_len], topic_index);
+            i_dart_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
+            i_dart_bit_clr(&st->peer_sub_reliable[(size_t)p*st->bitmap_len], topic_index);
+            /* a DISSOLVED verdict is only as durable as the topic set it was judged
+               against (see dart_transport_topic_define), and that set just changed */
+            if (st->peer_astate[p]){
+                uint8_t *as = st->peer_astate[p];
+                for (a=0;a<st->peer_index_len[p];a++)
+                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)) as[a] = 0;
+            }
+        }
+    }
+    for (p=0;p<st->cfg.max_peers;p++)
+        if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
+    return 0;
+}
+
+
+/* A peer named OUR blob version `version` in a uDTL request: record it and release any
+ * writer lanes its advance takes out of the rebind hold. Returns 1 when a lane actually
+ * formed (the caller then re-fires its interest event / invalidates match memos). */
+int dart_transport_peer_seen_version(DartTransportState *st, uint32_t peer_id, uint32_t version){
+    int s; uint16_t c; uint32_t old; int changed = 0;
+    if (!st) return 0;
+    s = i_dart_peer_slot(st, peer_id);
+    if (s < 0) return 0;
+    old = st->peer_seen_version[s];
+    if (version <= old) return 0;
+    st->peer_seen_version[s] = version;
+    for (c=0;c<st->cfg.n_topics;c++){
+        i_DartTopic *t = &st->topics[c];
+        i_DartLane *l; int was;
+        if (!t->rebind_version || t->rebind_version <= old || t->rebind_version > version) continue;
+        if (!i_dart_topic_announced(t)) continue;
+        l = i_dart_lane_at(st, c, (uint32_t)s); was = l && l->w.used;
+        i_dart_topic_rematch(st, c, (uint16_t)s);
+        l = i_dart_lane_at(st, c, (uint32_t)s);
+        if ((l && l->w.used) != was) changed = 1;
+    }
+    return changed;
+}
+
+
+/* The topic's next write seqno (== samples ever committed on this slot's line, which
+ * CONTINUES across a retire/reuse cycle). A pattern layer seeds its own per-slot
+ * monotonic counters from it so a successor's first write never orders below its
+ * predecessor's last at a peer that kept state across the cycle. */
+uint64_t dart_transport_topic_seqno(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = st ? i_dart_topic_at(st, topic_index, NULL) : NULL;
+    return topic ? topic->next_seqno : 0;
 }
 
 

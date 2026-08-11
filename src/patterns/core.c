@@ -386,6 +386,7 @@ int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_
 
 int dart_function_retire(DartFunction *fn){
     i_DartPatterns *pm; DartFunction **pp; DartNode *n; int acquired, r;
+    DartTopic *req, *rsp;
     if (!fn) return DART_ERR_NO_TOPIC;
     pm = fn->pm; n = fn->n;
     if (pm && fn == pm->meta) return DART_ERR_STATE;   /* the builtin endpoint is node infrastructure */
@@ -405,10 +406,16 @@ int dart_function_retire(DartFunction *fn){
     if (pm)
         for (pp = &pm->funcs; *pp; pp = &(*pp)->next)
             if (*pp == fn){ *pp = fn->next; break; }
+    req = fn->req; rsp = fn->rsp;   /* outlive fn: a reap callback may still have used them */
     if (fn->sync_buf)  i_dart_node_sys_alloc(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_dart_node_sys_alloc(n, fn->dup_peers, 0);
     i_dart_node_sys_alloc(n, fn, 0);
     i_dart_node_sys_unlock(n, acquired);
+    /* release the channel slots for reuse: a re-created same-name function takes them
+       back (identical binding = a silent relink; a retyped one rebinds them) instead of
+       growing the announce by one parked entry per channel per cycle */
+    (void)dart_topic_retire(req);
+    (void)dart_topic_retire(rsp);
     return DART_OK;
 }
 
@@ -804,6 +811,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
                               (uint8_t)(owner && v->allow_force),   /* owner advertises whether force is permitted */
                               owner ? NULL : i_dart_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool-allocated: nothing routes into it yet */
+    if (owner)
+        /* seed write_seq from the slot's CONTINUING seqno line: a retired-and-recreated
+           definition's first write must order above its predecessor's last at an accessor
+           that kept its cache across the cycle (the accessor's stale-order guard compares
+           same-publisher seqs, and the publisher id survives a same-node re-create) */
+        v->write_seq = (uint32_t)i_dart_topic_seqno(v->value);
     if (make_set){
         memcpy(sn, name, nl); memcpy(sn + nl, "@set", 5);
         v->set = i_dart_node_create_pattern_topic(n, sn, owner ? DART_SUB_ONLY : DART_PUB_ONLY,
@@ -950,6 +963,7 @@ int dart_variable_forced(DartVariable *var){ return var ? var->forced : 0; }
 
 int dart_variable_retire(DartVariable *var){
     i_DartPatterns *pm; DartVariable **pp; DartNode *n; int acquired, r;
+    DartTopic *value, *set;
     if (!var) return DART_ERR_NO_TOPIC;
     pm = var->pm; n = var->n;
     r = dart_topic_set_role(var->value, DART_INACTIVE);   /* refused from a callback, nothing mutated */
@@ -961,11 +975,14 @@ int dart_variable_retire(DartVariable *var){
     if (pm)
         for (pp = &pm->vars; *pp; pp = &(*pp)->next)
             if (*pp == var){ *pp = var->next; break; }
+    value = var->value; set = var->set;
     if (var->store)     i_dart_node_sys_alloc(n, var->store, 0);
     if (var->shadow)    i_dart_node_sys_alloc(n, var->shadow, 0);
     if (var->dup_peers) i_dart_node_sys_alloc(n, var->dup_peers, 0);
     i_dart_node_sys_alloc(n, var, 0);
     i_dart_node_sys_unlock(n, acquired);
+    (void)dart_topic_retire(value);   /* release the slots for reuse (see function retire) */
+    if (set) (void)dart_topic_retire(set);
     return DART_OK;
 }
 
@@ -1060,6 +1077,7 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
 
 int dart_signal_retire(DartSignal *sig){
     i_DartPatterns *pm; DartSignal **pp; DartNode *n; int acquired, r;
+    DartTopic *topic;
     if (!sig) return DART_ERR_NO_TOPIC;
     pm = sig->pm; n = sig->n;
     r = dart_topic_set_role(sig->topic, DART_INACTIVE);   /* refused from a callback, nothing mutated */
@@ -1069,8 +1087,10 @@ int dart_signal_retire(DartSignal *sig){
     if (pm)
         for (pp = &pm->sigs; *pp; pp = &(*pp)->next)
             if (*pp == sig){ *pp = sig->next; break; }
+    topic = sig->topic;
     i_dart_node_sys_alloc(n, sig, 0);
     i_dart_node_sys_unlock(n, acquired);
+    (void)dart_topic_retire(topic);   /* release the slot for reuse (see function retire) */
     return DART_OK;
 }
 

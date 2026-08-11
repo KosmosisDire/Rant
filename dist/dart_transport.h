@@ -918,6 +918,47 @@ int       dart_transport_set_role(DartTransportState *st, uint16_t topic_index, 
  * memory. Re-advertise interest after (the node bumps its discovery announce). */
 int       dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, const DartTopicDef *def);
 
+/* Topic slot lifecycle: RETIRE a defined topic (park its slot for reuse), then REUSE the
+ * slot for a later define under the same position. Retire releases every lane and frees
+ * the history ring; the slot leaves the announce (it rides a hole run, so later indices
+ * stay stable) and can never match, verify, or demux again. Identity, name, kind and qos
+ * stay stored so reuse can compare the old binding. Returns 0 ok, -1 unknown/undefined/
+ * already retired. Re-advertise after (retire changes the announce).
+ *
+ * dart_transport_topic_reuse_find picks the slot a new define should reuse: 2 = a retired
+ * slot with the SAME identity and kind exists (*index_out set; if the caller's schema also
+ * matches, reuse it with binding_changed = 0), 1 = some other retired slot exists
+ * (*index_out set; reuse costs a rebind), 0 = none (define a fresh slot).
+ *
+ * dart_transport_topic_reuse re-defines a retired slot. binding_changed = 0 asserts the
+ * binding (name, kind, and the caller-level schema) is IDENTICAL to what the slot carried:
+ * peers' cached verdicts stay correct, so their next announce apply relinks with no round
+ * trip, and the writer's seqno line continues (a kept reader position stays valid even if
+ * a peer never observed the retired interval). binding_changed = 1 (a different name,
+ * kind, or schema) bumps the slot's announced GENERATION: every peer holding a verdict
+ * for this position re-pends it on its next apply and re-verifies via details, our own
+ * verdicts bound to the slot are re-pended here, and writer lanes stay under the REBIND
+ * HOLD until each peer's dart_transport_peer_seen_version reaches rebind_version -- proof
+ * its demux map can no longer bind our index to the old occupant. rebind_version is the
+ * announce-blob version this rebind is published under (the caller advertises right
+ * after); pass 0 only if no seen-version feed exists, accepting the stale-demux window.
+ * Returns 0 ok, -1 not retired / bad def / kind-collision, -4 out of memory.
+ *
+ * dart_transport_peer_seen_version records the highest OUR-blob version a peer has named
+ * in a uDTL request (detail or interest paging): proof it applied our announce at that
+ * version. Returns 1 when the advance released any held writer lane (matches changed). */
+int       dart_transport_topic_retire(DartTransportState *st, uint16_t topic_index);
+int       dart_transport_topic_reuse_find(DartTransportState *st, const char *name, uint8_t kind,
+                       uint16_t *index_out);
+int       dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
+                       const DartTopicDef *def, int binding_changed, uint32_t rebind_version);
+int       dart_transport_peer_seen_version(DartTransportState *st, uint32_t peer_id, uint32_t version);
+
+/* The topic's next write seqno: samples ever committed on this slot's line, which
+ * CONTINUES across a retire/reuse cycle (so a slot successor can seed its own monotonic
+ * counters above everything its predecessor published). */
+uint64_t  dart_transport_topic_seqno(DartTransportState *st, uint16_t topic_index);
+
 /* The topic's topic name ({NULL,0} if undefined or out of range), for surfacing it on a
  * delivered message. Not NUL-terminated: use .data/.len. The name is a local lookup; it is
  * never on the data path. */
@@ -1708,6 +1749,20 @@ DartBytes       i_dart_node_core_meta(i_DartNodeCore *c);
 void            i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t topic_index,
                                                     const DartSchema *schema);
 
+/* Topic slot lifecycle (dart_transport_topic_retire / _reuse at the node level).
+ * retire_topic_schema drops the live schema pointers when a topic retires but KEEPS the
+ * hash as the slot's binding fingerprint; topic_schema_hash reads it back, so a later
+ * same-name create can tell an identical rebind (verdicts stay) from a retype (the slot
+ * rebinds under a bumped generation). topic_rebound purges the per-peer decode bindings,
+ * rebased views, and refusal reasons recorded for a slot's OLD occupant after a retype
+ * rebind. seen_version feeds a peer's uDTL-request version to the transport's rebind
+ * hold; returns 1 when the advance released a held writer lane (the interest event
+ * re-fired; the runtime invalidates its match memos). */
+void     i_dart_node_core_retire_topic_schema(i_DartNodeCore *c, uint16_t topic_index);
+uint64_t i_dart_node_core_topic_schema_hash(i_DartNodeCore *c, uint16_t topic_index);
+void     i_dart_node_core_topic_rebound(i_DartNodeCore *c, uint16_t topic_index);
+int      i_dart_node_core_seen_version(i_DartNodeCore *c, uint32_t peer, uint32_t version);
+
 /* Answer a peer's DETAIL_REQ ('uDTL', see the detail codec in transport/core.h): validate
  * kind + domain, build the response in the core's own grown buffer, and return it for the
  * runtime to send to the request's SOURCE address ({NULL,0} = not answerable: malformed,
@@ -2106,9 +2161,30 @@ uint32_t     dart_node_evicted_unsent(DartNode *n);
  * topic's data schema (built via dart_schema_*), required and held by reference so it
  * must outlive the topic; pass NULL for a raw-bytes topic (no serialization). opts may
  * be NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_topics) is
- * full, the name is bad/too long, or out of memory. */
+ * full, the name is bad/too long, or out of memory.
+ * A create REUSES a retired slot when one exists (see dart_topic_retire), so
+ * retire/create churn never grows the topic table or the announce: an identical
+ * re-creation (same name, kind, and schema) relinks to peers' cached verdicts with no
+ * round trip and continues the slot's seqno line; a re-creation with a DIFFERENT
+ * schema/name rebinds the slot under a bumped generation, and peers re-verify before
+ * any data flows (the send-path match wait covers the window, so a first send after a
+ * retype still reaches re-verified subscribers). */
 DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
                                       const DartSchema *schema, const DartTopicOpts *opts);
+
+/* RETIRE a topic: the explicit lifecycle verb for "this node is done with this
+ * incarnation of the name" -- typically to re-create it with a different schema (a
+ * retype). The topic leaves the announce, every lane to every peer tears down, its
+ * history and consumer queue are freed, and the handle itself is freed: the pointer is
+ * INVALID after DART_OK (like a retired pattern handle). Any outstanding take view on
+ * the topic is invalidated; retiring a handle another thread is concurrently calling
+ * into is a lifetime bug, exactly like use-after-close. The slot is parked for reuse by
+ * a later create (see above), so retire/create cycles plateau instead of growing.
+ * Subscribers keep nothing: on the peers this looks like an unsubscribe/unpublish of
+ * just this topic (no peer-level churn). Refused with DART_ERR_STATE from a callback,
+ * for a pattern channel (retire the pattern handle instead), for a builtin (@dart/...)
+ * topic, and while a dispatch on this topic runs its callback. */
+int dart_topic_retire(DartTopic *topic);
 
 /* ---- consumer queues (take / dispatch) ----------------------------------------------
  * By default a topic's messages fire on_message on whichever thread polls, and a heavy
@@ -2373,6 +2449,10 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 /* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
  * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
 void i_dart_topic_clear_sys(DartTopic *topic);
+/* The topic's next transport seqno: its slot line CONTINUES across retire/reuse, so a
+ * pattern layer seeds its own monotonic counters (a variable's write_seq) from it and a
+ * slot successor's first write orders above its predecessor's last everywhere. */
+uint64_t i_dart_topic_seqno(DartTopic *topic);
 /* Bounded wait for a PUB pattern topic's forming match (the send path's match wait,
  * without its send and without DART_E_UNMATCHED_SEND: the caller derives its own
  * synchronous verdict). Returns the matched count. No wait from inside a callback, with
@@ -2801,11 +2881,11 @@ int  dart_function_match_count(DartFunction *fn);
  * the name against a successor and a new create under the same name binds cleanly where a
  * live twin would have been SHADOWED), cancel every outstanding call with one
  * DART_CALL_CANCELLED outcome, silence its callbacks, and free the handle: it is INVALID
- * after, like a closed node. The channels' announce entries stay for the node's lifetime
- * (indices are append-only), so each retire/create cycle grows the announce by one entry
- * per channel. Complete (or abandon) outstanding defer tokens BEFORE retiring a
- * definition. Returns DART_OK; DART_ERR_STATE from inside a callback (the role flip would
- * rematch lanes mid-delivery), and the handle then remains valid. */
+ * after, like a closed node. The channel SLOTS are released for reuse (dart_topic_retire):
+ * a re-created same-name entity takes them back, so retire/create cycles plateau instead
+ * of growing the announce. Complete (or abandon) outstanding defer tokens BEFORE retiring
+ * a definition. Returns DART_OK; DART_ERR_STATE from inside a callback (the role flip
+ * would rematch lanes mid-delivery), and the handle then remains valid. */
 int  dart_function_retire(DartFunction *fn);
 
 /* ---- the built-in @dart/meta introspection endpoint ----------------------------------
@@ -3350,6 +3430,20 @@ typedef struct {
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
                                dart_transport_topic_define), so dart_transport_destroy frees it */
+    uint8_t   retired;      /* parked for reuse (dart_transport_topic_retire): announced as a
+                               hole, never a match candidate; identity/name/kind/qos kept so
+                               dart_transport_topic_reuse can compare the old binding */
+    uint8_t   gen;          /* rebind generation, announced in the interest gen section while
+                               > 0. Bumped when a reused slot's BINDING (name/kind/schema)
+                               changed, so peers holding a verdict for this position re-verify
+                               instead of applying it to the new occupant. Identical reuse
+                               leaves it alone (the cached verdicts stay correct). */
+    uint32_t  rebind_version; /* our announce-blob version when this slot was last rebound with
+                                 a CHANGED binding (0 = never). A writer lane to a peer stays
+                                 unmatched until that peer's seen version reaches it: its uDTL
+                                 request at version >= this proves it applied the blob that
+                                 re-pended its old verdict, so its demux map can no longer
+                                 cross-wire our new topic under the old binding. */
     /* writer */
     i_DartWriterSample *history;       /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
@@ -3401,6 +3495,18 @@ struct DartTransportState {
        verdict + current flags with no round trip. 0 = no details yet (PENDING if a
        candidate). */
     uint8_t    **peer_astate;     /* [max_peers] -> verdict map (DART__AST_* bits) */
+    uint8_t    **peer_agen;       /* [max_peers] -> last APPLIED rebind generation per entry
+                                     (parallel to peer_astate). The interest gen section is
+                                     compared against this on every apply: a mismatch on a
+                                     verdicted entry means the peer rebound that position, so
+                                     the verdict re-pends and details re-verify the new
+                                     binding. Tracks the latest applied gen for pending
+                                     entries too, so a verdict formed next binds to it. */
+    uint32_t    *peer_seen_version; /* [max_peers] highest OUR-blob version this peer has named
+                                       in a uDTL request: proof it applied our announce at that
+                                       version (fed by the runtime via
+                                       dart_transport_peer_seen_version). Gates writer lanes of
+                                       rebound topics (see i_DartTopic.rebind_version). */
     i_DartTopic  *topics;     /* [n_topics] */
     /* matched-lane records (the proxies live inside): one hook allocation grown by
        doubling, records allocated per real match, lane_index maps (topic,peer)
@@ -3429,7 +3535,14 @@ typedef enum { DART_ORDER_OLD, DART_ORDER_GAP, DART_ORDER_ADOPTED, DART_ORDER_IN
 
 /* small shared helpers (kept inline so every fragment can use them) */
 static inline void i_dart_bit_set(uint8_t*bitmap,uint32_t i){bitmap[i>>3]|=(uint8_t)(1u<<(i&7));}
+static inline void i_dart_bit_clr(uint8_t*bitmap,uint32_t i){bitmap[i>>3]&=(uint8_t)~(1u<<(i&7));}
 static inline int  i_dart_bit_get(const uint8_t*bitmap,uint32_t i){return (bitmap[i>>3]>>(i&7))&1;}
+/* Does this slot occupy an announce entry? A defined topic does; an undefined reserve
+ * slot or a RETIRED one rides as a hole run instead (positions stay stable either way).
+ * Every announce walk (build, size, candidate scans) shares this one membership test. */
+static inline int i_dart_topic_announced(const i_DartTopic *t){
+    return t->name_len != 0 && !t->retired;
+}
 #ifdef DART_SHM
 /* where a sample's bytes live: the external chunk for SHM samples, else our buf */
 static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ return s->shm ? s->shm_buf : s->buf; }
@@ -4124,9 +4237,21 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
     if (!w || !w->used) return;
     if (w->reader_epoch != epoch){
         if (w->reader_epoch){
-            /* reader is a new incarnation (one-sided flap): our positions describe its
-               dead predecessor, so re-join the lane as if freshly matched */
-            w->sent_upto  = i_dart_topic_unicast_join_seqno(topic);
+            /* The reader re-incarnated while OUR lane survived: its side retired and
+               re-created the topic under the same slot (an identical reuse continues
+               the seqno line, and the far side may never even observe the retired
+               announce), or a one-sided flap. Re-join at the OLDER of the fresh-match
+               join point (so a catch_up window still replays to the new incarnation)
+               and the acked floor: everything past acked_upto was committed while the
+               lane was continuously matched from our view, so the successor gets the
+               un-acked window too (RESUME semantics). Joining at the head alone would
+               silently skip a sample committed between its re-create and this ACKNACK
+               -- a directed function response races exactly that window. A genuine
+               late joiner (unsubscribe, then resubscribe later) never lands here: its
+               announce change re-forms our proxy too (fresh, epoch 0 = first contact
+               below), keeping plain late-joiner semantics. */
+            uint64_t join = i_dart_topic_unicast_join_seqno(topic);
+            w->sent_upto  = w->acked_upto < join ? w->acked_upto : join;
             w->acked_upto = w->sent_upto;
             w->has_nack   = 0;
             w->hb_next_us = 0;
@@ -4829,6 +4954,8 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint16_t **peer_index    = (uint16_t**)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint16_t*), 8);
       uint32_t *peer_index_len = (uint32_t*) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
       uint8_t **peer_astate    = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
+      uint8_t **peer_agen      = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
+      uint32_t *peer_seen_version = (uint32_t*)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
       name_pool = (char*)i_dart_bump_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
@@ -4843,6 +4970,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->peer_index=peer_index; st->peer_index_len=peer_index_len;
           st->peer_astate=peer_astate;
+          st->peer_agen=peer_agen; st->peer_seen_version=peer_seen_version;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_SIZE; }  /* set per peer on add */
 #ifdef DART_SHM
@@ -4851,6 +4979,8 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           memset(peer_index, 0, (size_t)max_peers*sizeof(uint16_t*));
           memset(peer_index_len, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_astate, 0, (size_t)max_peers*sizeof(uint8_t*));
+          memset(peer_agen, 0, (size_t)max_peers*sizeof(uint8_t*));
+          memset(peer_seen_version, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
           memset(lane_index,0xFF,(size_t)nlanes*sizeof(uint16_t));   /* all unmatched */
@@ -4991,6 +5121,8 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
         nw->peer_index[p]     = old->peer_index[p];   /* hook allocations: stable across the move */
         nw->peer_index_len[p] = old->peer_index_len[p];
         nw->peer_astate[p]    = old->peer_astate[p];
+        nw->peer_agen[p]      = old->peer_agen[p];
+        nw->peer_seen_version[p] = old->peer_seen_version[p];
     }
     /* scheduler is fresh/empty: re-enqueue every used lane, then force a full sweep
        next poll so timers re-arm and next_deadline is recomputed exactly */
@@ -5017,11 +5149,12 @@ i_DartTopic *i_dart_topic_at(DartTransportState *st, uint16_t topic_index, int *
 /* Find the local topic for a wire identity. An INACTIVE topic (declared but off) must
  * not shadow an active same-identity topic, so prefer a non-INACTIVE match; fall back to
  * the first match (e.g. all inactive) so resolution stays deterministic. Lets a caller hold
- * two topics of one identity (different QoS) and switch which is live by role. */
+ * two topics of one identity (different QoS) and switch which is live by role. A RETIRED
+ * slot is invisible here: it can never resolve, verify, or demux again. */
 static i_DartTopic *i_dart_topic_by_identity(DartTransportState *st, uint64_t identity, int *idx_out){
     uint16_t i; int first=-1;
     for (i=0;i<st->cfg.n_topics;i++){
-        if (st->topics[i].identity!=identity) continue;
+        if (st->topics[i].retired || st->topics[i].identity!=identity) continue;
         if (first<0) first=(int)i;
         if (st->topics[i].role!=DART_INACTIVE){ if(idx_out)*idx_out=(int)i; return &st->topics[i]; }
     }
@@ -5184,7 +5317,14 @@ static void i_dart_topic_rematch(DartTransportState *st, uint16_t c, uint16_t pe
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     int wuse = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY) && i_dart_bit_get(peer_sub_bitmap,c);
     int ruse = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY) && i_dart_bit_get(peer_pub_bitmap,c);
-    i_DartLane *l = i_dart_lane_at(st,c,peer_slot);
+    i_DartLane *l;
+    /* rebind hold (writer side only): until this peer proves it applied our announce at
+       the slot's rebind version (dart_transport_peer_seen_version), its demux map may
+       still bind our index to the OLD occupant, so nothing may be sent to it. Inbound
+       needs no hold: our own verdicts of its entries were re-pended at the rebind. */
+    if (wuse && topic->rebind_version && st->peer_seen_version[peer_slot] < topic->rebind_version)
+        wuse = 0;
+    l = i_dart_lane_at(st,c,peer_slot);
     int had = l && (l->w.used || l->r.used);
     if (!wuse && !ruse){
         if (!had) return;
@@ -5227,7 +5367,9 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
     if (st->peer_index[free] && st->peer_index_len[free]){   /* slot reuse: no stale mappings/verdicts */
         memset(st->peer_index[free],0xFF,(size_t)st->peer_index_len[free]*sizeof(uint16_t));
         if (st->peer_astate[free]) memset(st->peer_astate[free],0,st->peer_index_len[free]);
+        if (st->peer_agen[free])   memset(st->peer_agen[free],0,st->peer_index_len[free]);
     }
+    st->peer_seen_version[free]=0;   /* seen versions are per incarnation */
     /* nothing matches until dart_transport_apply_peer_interest feeds the peer's interest
        list (carried in its discovery announce) */
 }
@@ -5248,8 +5390,10 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
     if (st->peer_index[s]){                        /* the index + verdict maps go too */
         st->cfg.allocator(st->cfg.user, st->peer_index[s], 0);
         if (st->peer_astate[s]) st->cfg.allocator(st->cfg.user, st->peer_astate[s], 0);
-        st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_index_len[s]=0;
+        if (st->peer_agen[s])   st->cfg.allocator(st->cfg.user, st->peer_agen[s], 0);
+        st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_agen[s]=NULL; st->peer_index_len[s]=0;
     }
+    st->peer_seen_version[s]=0;
     st->peer_used[s]=0; st->peer_dormant[s]=0;
 #ifdef DART_SHM
     st->peer_shm[s]=0;
@@ -5306,6 +5450,7 @@ void dart_transport_destroy(DartTransportState *st){
     for (c=0;c<st->cfg.n_topics;c++){
         i_DartTopic *topic=&st->topics[c];     /* an undefined reserve slot: depth 0, no ring */
         uint16_t depth, d;
+        if (!topic->history) continue;         /* retired slot: ring already freed */
         depth = topic->qos.keep_last;
         for (d=0; d<depth; d++)
             if (topic->history[d].buf){ st->cfg.allocator(st->cfg.user, topic->history[d].buf, 0);
@@ -5335,6 +5480,10 @@ void dart_transport_destroy(DartTransportState *st){
                 st->cfg.allocator(st->cfg.user, st->peer_astate[p], 0);
                 st->peer_astate[p]=NULL;
             }
+            if (st->peer_agen[p]){
+                st->cfg.allocator(st->cfg.user, st->peer_agen[p], 0);
+                st->peer_agen[p]=NULL;
+            }
         }
     }
 }
@@ -5347,16 +5496,20 @@ void dart_transport_destroy(DartTransportState *st){
  * covered. */
 static uint16_t *i_dart_peer_index_ensure(DartTransportState *st, int peer_slot, uint32_t need){
     uint32_t have = st->peer_index_len[peer_slot];
-    uint16_t *nm; uint8_t *ns;
+    uint16_t *nm; uint8_t *ns, *ng;
     if (need <= have) return st->peer_index[peer_slot];
     nm = (uint16_t*)st->cfg.allocator(st->cfg.user, st->peer_index[peer_slot], (size_t)need*sizeof(uint16_t));
     if (!nm) return NULL;
     st->peer_index[peer_slot] = nm;                     /* len not yet raised: retryable on OOM below */
     ns = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_astate[peer_slot], (size_t)need);
     if (!ns) return NULL;
+    st->peer_astate[peer_slot] = ns;
+    ng = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_agen[peer_slot], (size_t)need);
+    if (!ng) return NULL;
     memset(nm + have, 0xFF, (size_t)(need-have)*sizeof(uint16_t));   /* grown tail: unmapped */
     memset(ns + have, 0, (size_t)(need-have));                       /* ...no verdicts */
-    st->peer_astate[peer_slot] = ns; st->peer_index_len[peer_slot] = need;
+    memset(ng + have, 0, (size_t)(need-have));                       /* ...generation 0 */
+    st->peer_agen[peer_slot] = ng; st->peer_index_len[peer_slot] = need;
     return nm;
 }
 
@@ -5366,7 +5519,7 @@ static uint16_t *i_dart_peer_index_ensure(DartTransportState *st, int peer_slot,
 static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx_out){
     uint16_t i; int first=-1, live=-1, n=0;
     for (i=0;i<st->cfg.n_topics;i++){
-        if (st->topics[i].name_len==0 || (uint32_t)st->topics[i].identity != h) continue;
+        if (!i_dart_topic_announced(&st->topics[i]) || (uint32_t)st->topics[i].identity != h) continue;
         n++;
         if (first<0) first=(int)i;
         if (live<0 && st->topics[i].role!=DART_INACTIVE) live=(int)i;
@@ -5378,10 +5531,12 @@ static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx
 
 /* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
  * one positional [u32 hash][u8 flags] entry per topic slot, plus the worst-case rate
- * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry) and
- * the worst-case no-timestamp section ([u16 n] + 2 B per opted-out topic). */
+ * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry),
+ * the worst-case no-timestamp section ([u16 n] + 2 B per opted-out topic), and the
+ * worst-case generation section ([u16 n] + 3 B per rebound topic). */
 size_t dart_interest_max(uint16_t n_topics){
-    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics + 2u + 2u * (size_t)n_topics;
+    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics + 2u + 2u * (size_t)n_topics
+         + 2u + 3u * (size_t)n_topics;
 }
 
 /* subscriber topics carrying a best-effort rate cap: the count for the interest rate
@@ -5391,7 +5546,7 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
     uint16_t c, r=0;
     for (c=0;c<n;c++){
         const i_DartTopic *t=&st->topics[c];
-        if (t->name_len && t->qos.max_rate_hz
+        if (i_dart_topic_announced(t) && t->qos.max_rate_hz
             && (t->role==DART_SUB_ONLY || t->role==DART_PUBSUB)) r++;
     }
     return r;
@@ -5400,7 +5555,7 @@ static uint16_t i_dart_rate_count(DartTransportState *st, uint16_t n){
 /* is this a topic we PUBLISH without the source stamp? (the no-timestamp section's
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_unstamped_pub(const i_DartTopic *t){
-    return t->name_len && t->qos.no_timestamp
+    return i_dart_topic_announced(t) && t->qos.no_timestamp
         && (t->role==DART_PUB_ONLY || t->role==DART_PUBSUB);
 }
 
@@ -5412,39 +5567,58 @@ static uint16_t i_dart_unstamped_count(DartTransportState *st, uint16_t n){
     return r;
 }
 
+/* announced topics whose slot was ever REBOUND (gen > 0): the count for the interest
+ * generation section. Zero until a retired slot is reused with a changed binding, so
+ * the section costs 2 bytes for a node that never rebinds. */
+static uint16_t i_dart_gen_count(DartTransportState *st, uint16_t n){
+    uint16_t c, r=0;
+    for (c=0;c<n;c++){
+        const i_DartTopic *t=&st->topics[c];
+        if (i_dart_topic_announced(t) && t->gen) r++;
+    }
+    return r;
+}
+
 
 /* Serialize our interest into out: [u16 n] (n = SLOTS, holes included), then one
- * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest defined slot
- * (position = index). A run of UNDEFINED reserve slots collapses to ONE entry flagged
- * DART__INT_HOLE_RUN whose hash field is the run length, so later indices stay stable
- * without a big reserve padding the announce to its full size. A defined-but-INACTIVE
- * topic still rides as a normal entry (its identity survives role flips). Then two SPARSE
- * sections: a rate section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber
- * topics that cap their best-effort delivery rate (see DartQos.max_rate_hz), and a
- * no-timestamp section [u16 n_unstamped][(u16 topic_index)]* for the PUBLISHED topics that
- * carry no source stamp (see DartQos.no_timestamp), which is what tells a receiver whether
- * a stream begins with DART_TIMESTAMP_BYTES. Both default to zero entries. Returns bytes
- * written, or 0 if cap is too small; size out via dart_interest_max. */
+ * [u32 hash][u8 flags] entry per topic IN INDEX ORDER up to the highest announced slot
+ * (position = index). A run of UNDEFINED (or RETIRED) reserve slots collapses to ONE
+ * entry flagged DART__INT_HOLE_RUN whose hash field is the run length, so later indices
+ * stay stable without a big reserve padding the announce to its full size. A
+ * defined-but-INACTIVE topic still rides as a normal entry (its identity survives role
+ * flips). Then three SPARSE sections: a rate section
+ * [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics that cap their
+ * best-effort delivery rate (see DartQos.max_rate_hz), a no-timestamp section
+ * [u16 n_unstamped][(u16 topic_index)]* for the PUBLISHED topics that carry no source
+ * stamp (see DartQos.no_timestamp), which is what tells a receiver whether a stream
+ * begins with DART_TIMESTAMP_BYTES, and a generation section
+ * [u16 n_gens][(u16 topic_index)(u8 gen)]* naming every announced slot that was ever
+ * REBOUND to a different name/kind/schema (dart_transport_topic_reuse), so a receiver
+ * holding a verdict formed under an older generation re-verifies instead of applying it
+ * to the new occupant. All three default to zero entries. Returns bytes written, or 0 if
+ * cap is too small; size out via dart_interest_max. */
 size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t cap){
     uint8_t *o=(uint8_t*)out, *e, *rp;
-    uint16_t c, n=0, n_rates, n_unstamped; uint32_t cells=0; int in_hole=0;
-    for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    uint16_t c, n=0, n_rates, n_unstamped, n_gens; uint32_t cells=0; int in_hole=0;
+    for (c=0;c<st->cfg.n_topics;c++) if (i_dart_topic_announced(&st->topics[c])) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){                       /* exact cell count (runs collapse), so a buffer
                                                 sized by dart_transport_interest_size fits */
-        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        if (i_dart_topic_announced(&st->topics[c])){ cells++; in_hole=0; }
         else { if (!in_hole) cells++; in_hole=1; }
     }
     n_rates = i_dart_rate_count(st, n);
     n_unstamped = i_dart_unstamped_count(st, n);
-    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 2u*(size_t)n_unstamped)
+    n_gens = i_dart_gen_count(st, n);
+    if (cap < 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 2u*(size_t)n_unstamped
+            + 2u + 3u*(size_t)n_gens)
         return 0;
     i_dart_le_w16(o, n);
     e = o + 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
-        if (!topic->name_len){
+        if (!i_dart_topic_announced(topic)){
             uint32_t run = 1;
-            while ((uint16_t)(c+run) < n && st->topics[c+run].name_len==0) run++;
+            while ((uint16_t)(c+run) < n && !i_dart_topic_announced(&st->topics[c+run])) run++;
             i_dart_le_w32(e, run);
             e[4] = (uint8_t)(DART_INACTIVE | DART__INT_HOLE_RUN);
             e += 5u; c = (uint16_t)(c + run - 1u);
@@ -5461,7 +5635,7 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
     i_dart_le_w16(rp, n_rates); rp += 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
-        if (topic->name_len && topic->qos.max_rate_hz
+        if (i_dart_topic_announced(topic) && topic->qos.max_rate_hz
             && (topic->role==DART_SUB_ONLY || topic->role==DART_PUBSUB)){
             i_dart_le_w16(rp, c); i_dart_le_w16(rp+2, topic->qos.max_rate_hz); rp += 4u;
         }
@@ -5469,6 +5643,13 @@ size_t dart_transport_build_interest(DartTransportState *st, void *out, size_t c
     i_dart_le_w16(rp, n_unstamped); rp += 2u;
     for (c=0;c<n;c++)
         if (i_dart_topic_unstamped_pub(&st->topics[c])){ i_dart_le_w16(rp, c); rp += 2u; }
+    i_dart_le_w16(rp, n_gens); rp += 2u;
+    for (c=0;c<n;c++){
+        const i_DartTopic *topic = &st->topics[c];
+        if (i_dart_topic_announced(topic) && topic->gen){
+            i_dart_le_w16(rp, c); rp[2] = topic->gen; rp += 3u;
+        }
+    }
     return (size_t)(rp - o);
 }
 
@@ -5502,7 +5683,7 @@ static uint32_t i_dart_interest_walk_len(const uint8_t *d, size_t len, uint16_t 
  * the publisher upgrades and re-advertises) and the cached schema verdict per
  * direction, each refusal fired as its event on every apply that would have used it. */
 void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob){
-    const uint8_t *d=blob.data, *e;
+    const uint8_t *d=blob.data, *e, *gp, *g_end;
     uint16_t n, c; uint32_t a, entries_len; int peer_slot=i_dart_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap, *peer_sub_reliable;
     uint16_t *amap; uint8_t *astate;
@@ -5518,12 +5699,43 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     memset(peer_sub_reliable,0,st->bitmap_len);
     amap   = n ? i_dart_peer_index_ensure(st, peer_slot, n) : NULL;
     astate = amap ? st->peer_astate[peer_slot] : NULL;
+    {   /* locate the generation section (entries, rate, no-timestamp, then gen); a blob
+           whose tail is truncated mid-section just has no generations (all zero) */
+        size_t off = (size_t)entries_len;
+        gp = g_end = NULL;
+        if (blob.len >= off + 2u){
+            uint16_t nr = i_dart_le_r16(d + off); off += 2u + (size_t)nr*4u;
+            if (blob.len >= off + 2u){
+                uint16_t nu = i_dart_le_r16(d + off); off += 2u + (size_t)nu*2u;
+                if (blob.len >= off + 2u){
+                    uint16_t ng = i_dart_le_r16(d + off); off += 2u;
+                    if (blob.len >= off + (size_t)ng*3u){ gp = d + off; g_end = gp + (size_t)ng*3u; }
+                }
+            }
+        }
+    }
     e = d + 2u;
     for (a=0;a<n;a++,e+=5u){
         uint8_t flags = e[4], role = (uint8_t)(flags & DART__INT_ROLE_MASK);
         int their_pub, their_sub, rel;
         uint16_t cidx; i_DartTopic *topic;
         if (flags & DART__INT_HOLE_RUN){ a += i_dart_le_r32(e) - 1u; continue; }
+        if (astate && a < st->peer_index_len[peer_slot] && st->peer_agen[peer_slot]){
+            /* rebind generation gate: the peer rebound this position (a retired slot
+               reused with a different name/kind/schema) since our verdict was formed, so
+               the verdict describes the OLD occupant: back to pending, demux severed,
+               details re-verify the new binding. Runs for INACTIVE entries too, so a
+               rebind noticed while parked never wires stale state when the role returns.
+               The stored gen tracks the latest APPLIED blob either way, so a verdict
+               formed after this apply binds to the generation it was judged under. */
+            uint8_t g = 0;
+            while (gp && gp + 3 <= g_end && i_dart_le_r16(gp) < a) gp += 3;
+            if (gp && gp + 3 <= g_end && i_dart_le_r16(gp) == a) g = gp[2];
+            if (st->peer_agen[peer_slot][a] != g){
+                if (astate[a]){ astate[a] = 0; amap[a] = 0xFFFFu; }
+                st->peer_agen[peer_slot][a] = g;
+            }
+        }
         if (role == DART_INACTIVE) continue;
         if (!astate || a >= st->peer_index_len[peer_slot]){
             /* no verdict storage (the map allocation failed): this entry can never
@@ -5536,15 +5748,23 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
         cidx = amap[a];
         if (cidx >= st->cfg.n_topics) continue;      /* defensive: stale map */
         topic = &st->topics[cidx];
-        if (topic->role == DART_INACTIVE){
-            /* dual same-identity topics switched by role: the verdict (incl. its schema
-               gates) bound the then-live twin, so re-verify against the one live now */
+        if ((uint32_t)topic->identity != i_dart_le_r32(e)){
+            /* the entry's hash no longer names the identity this verdict bound: the
+               position was rebound to a different name (the gen gate's belt) */
+            astate[a] = 0; amap[a] = 0xFFFFu;
+            continue;
+        }
+        if (topic->role == DART_INACTIVE || topic->retired){
+            /* dual same-identity topics switched by role (or the bound slot retired):
+               the verdict (incl. its schema gates) bound the then-live twin, so
+               re-verify against the one live now */
             int resolved_index = (int)cidx;
             i_dart_topic_by_identity(st, topic->identity, &resolved_index);
             if ((uint16_t)resolved_index != cidx){
                 astate[a] = 0; amap[a] = 0xFFFFu;      /* pending again; wants() re-asks */
                 continue;
             }
+            if (topic->retired) continue;   /* no live successor yet: no bits, no lanes */
         }
         {   /* entity-kind gate: a name-verified peer that advertises this name under a
                different kind is a disjoint entity (a plain topic vs a function, etc.). Refuse
@@ -5667,17 +5887,17 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
 #define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  17u                 /* what WE write (v16/17: no-timestamp interest section) */
+#define DART__META_VER  19u                 /* what WE write (v18/19: rebind generation section) */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  16u
+#define DART__META_VER  18u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= DART__META_BASE_NOSHM
         && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=16 && meta.data[2]<=17;
+        && meta.data[2]>=18 && meta.data[2]<=19;
 }
 /* base prefix through the iflags byte, by version (the odd one carries shm+host, the even
  * one doesn't). iflags is always the base's last byte. */
@@ -5694,15 +5914,17 @@ uint16_t dart_meta_cap(uint16_t n_topics){
  * The same walk dart_transport_build_interest emits, byte for byte: defined slots cost
  * one 5 B entry each, every maximal run of undefined slots costs one. */
 uint32_t dart_transport_interest_size(DartTransportState *st){
-    uint16_t c, n=0, n_rates, n_unstamped; uint32_t cells=0; int in_hole=0;
-    for (c=0;c<st->cfg.n_topics;c++) if (st->topics[c].name_len) n=(uint16_t)(c+1u);
+    uint16_t c, n=0, n_rates, n_unstamped, n_gens; uint32_t cells=0; int in_hole=0;
+    for (c=0;c<st->cfg.n_topics;c++) if (i_dart_topic_announced(&st->topics[c])) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){
-        if (st->topics[c].name_len){ cells++; in_hole=0; }
+        if (i_dart_topic_announced(&st->topics[c])){ cells++; in_hole=0; }
         else { if (!in_hole) cells++; in_hole=1; }
     }
     n_rates = i_dart_rate_count(st, n);
     n_unstamped = i_dart_unstamped_count(st, n);
-    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates + 2u + 2u*(uint32_t)n_unstamped;
+    n_gens = i_dart_gen_count(st, n);
+    return 2u + 5u*cells + 2u + 4u*(uint32_t)n_rates + 2u + 2u*(uint32_t)n_unstamped
+         + 2u + 3u*(uint32_t)n_gens;
 }
 
 /* Exact overlay size the next INLINE dart_transport_meta_build will emit for the
@@ -6057,7 +6279,7 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     uint8_t *astate; uint32_t alen;
     int ours_pub, ours_sub;
     topic = i_dart_topic_at(st, topic_index, NULL);
-    if (!topic || topic->name_len==0 || !d || interest.len < 2) return 0;
+    if (!topic || !i_dart_topic_announced(topic) || !d || interest.len < 2) return 0;
     slot = i_dart_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
@@ -6074,9 +6296,18 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
         if (role == DART_INACTIVE) continue;
         if (i_dart_le_r32(e) != (uint32_t)topic->identity) continue;   /* not this topic */
         if (!astate || a >= alen) continue;                     /* unresolvable: never counted */
-        if (astate[a] & DART__AST_DETAILED) continue;           /* decided (matched or refused) */
         their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
         their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        if (astate[a] & DART__AST_DETAILED){
+            /* decided (matched or refused) -- but a verified subscriber whose writer lane
+               is under the REBIND HOLD is still resolving: it re-forms the moment the
+               peer's uDTL request confirms the rebind version, so a send-path match wait
+               must cover that window exactly like a pending verdict */
+            if (their_sub && ours_pub && (astate[a] & DART__AST_NAME_OK)
+                && topic->rebind_version
+                && st->peer_seen_version[slot] < topic->rebind_version) cnt++;
+            continue;
+        }
         if ((their_pub && ours_sub) || (their_sub && ours_pub)) cnt++;
     }
     }
@@ -6130,7 +6361,7 @@ int dart_transport_set_role(DartTransportState *st, uint16_t topic_index, uint8_
     i_DartTopic *topic; uint16_t p;
     if (role > DART_INACTIVE) return -1;
     topic = i_dart_topic_at(st, topic_index, NULL);
-    if (!topic) return -1;
+    if (!topic || topic->retired) return -1;   /* a retired slot only returns via reuse */
     if (topic->role == role) return 0;
     topic->role = role;
     for (p=0;p<st->cfg.max_peers;p++)
@@ -6152,10 +6383,12 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     if (topic->identity != 0 || topic->history) return -1;        /* slot already defined */
     {   /* same name under a different kind on ONE node: refuse at define. The per-peer alias
            maps bind an entry to one local topic by identity (kind-blind), so local cross-kind
-           twins would cross-bind and refuse forever; coexistence is a cross-node property. */
+           twins would cross-bind and refuse forever; coexistence is a cross-node property.
+           RETIRED slots are exempt: they are invisible to matching and either get reused by
+           this very name later or stay parked. */
         uint64_t id = dart_topic_identity(def); uint16_t c;
         for (c=0;c<st->cfg.n_topics;c++)
-            if (st->topics[c].name_len && st->topics[c].identity == id
+            if (i_dart_topic_announced(&st->topics[c]) && st->topics[c].identity == id
                 && st->topics[c].kind != def->kind) return -1;
     }
     q = def->qos; i_dart_qos_defaults(&q);
@@ -6188,6 +6421,173 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active topic to known peers */
         if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
     return 0;
+}
+
+
+/* Park a defined slot for reuse (see core.h). Every lane releases (rematch under
+ * INACTIVE+retired), the history ring and its sample buffers are freed, and the slot
+ * leaves the announce. Identity/name/kind/qos/gen/next_seqno stay: reuse compares the
+ * old binding against the new one, and an identical rebind continues the seqno line. */
+int dart_transport_topic_retire(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic; uint16_t p, d, depth;
+    if (!st) return -1;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic || topic->name_len == 0 || topic->retired) return -1;
+    topic->role = DART_INACTIVE; topic->retired = 1;
+    for (p=0;p<st->cfg.max_peers;p++)          /* both sides unmatch; every lane releases */
+        if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
+    depth = topic->qos.keep_last;
+    if (topic->history){
+        for (d=0; d<depth; d++)
+            if (topic->history[d].buf){
+                st->cfg.allocator(st->cfg.user, topic->history[d].buf, 0);
+                topic->history[d].buf = NULL; topic->history[d].cap = 0;
+            }
+        if (topic->history_owned){
+            st->cfg.allocator(st->cfg.user, topic->history, 0);
+            topic->history = NULL; topic->history_owned = 0;
+        } else {
+            memset(topic->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
+        }
+    }
+    topic->history_head = 0; topic->have_first = 0; topic->first_seqno = 0;
+    memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
+    /* caller re-advertises: the slot now rides the announce as a hole */
+    return 0;
+}
+
+
+/* The slot a new define should reuse (see core.h): 2 = retired slot with the same
+ * identity + kind (an identical-binding candidate), 1 = some retired slot (a rebind),
+ * 0 = none. */
+int dart_transport_topic_reuse_find(DartTransportState *st, const char *name, uint8_t kind,
+                                    uint16_t *index_out){
+    uint64_t id; uint16_t c; int any = -1;
+    if (!st || !name || !name[0]) return 0;
+    id = dart_topic_id(name);
+    for (c=0;c<st->cfg.n_topics;c++){
+        const i_DartTopic *t = &st->topics[c];
+        if (!t->retired) continue;
+        if (t->identity == id && t->kind == kind){ if (index_out) *index_out = c; return 2; }
+        if (any < 0) any = (int)c;
+    }
+    if (any >= 0){ if (index_out) *index_out = (uint16_t)any; return 1; }
+    return 0;
+}
+
+
+/* Rebind a retired slot to a (possibly new) definition (see core.h for the contract).
+ * The seqno line always CONTINUES: for an identical rebind a peer that never observed
+ * the retired interval keeps its reader position and sees an idle gap, not a restart;
+ * for a changed rebind every lane re-forms fresh anyway, so continuation is harmless. */
+int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
+                               const DartTopicDef *def, int binding_changed,
+                               uint32_t rebind_version){
+    i_DartTopic *topic; DartQos q; uint16_t depth, p; size_t nlen; uint64_t id;
+    if (!st || !def) return -1;
+    topic = i_dart_topic_at(st, topic_index, NULL);
+    if (!topic || !topic->retired) return -1;
+    if (!def->name || !def->name[0]) return -1;
+    nlen = i_dart_name_len(def->name);
+    if (def->name[nlen]) return -1;                          /* longer than DART_TOPIC_NAME_MAX */
+    if (def->directed && def->qos.catch_up) return -1;       /* directed history never replays */
+    id = dart_topic_identity(def);
+    {   /* same name under a different kind on ONE node: refuse, exactly as at define
+           (other retired slots are exempt; this slot is the one being rebound) */
+        uint16_t c;
+        for (c=0;c<st->cfg.n_topics;c++)
+            if (c != topic_index && i_dart_topic_announced(&st->topics[c])
+                && st->topics[c].identity == id && st->topics[c].kind != def->kind) return -1;
+    }
+    if (!binding_changed && (topic->identity != id || topic->kind != def->kind))
+        return -1;                       /* asserted identical, but the stored binding differs */
+    q = def->qos; i_dart_qos_defaults(&q);
+    depth = q.keep_last;
+    if (topic->history && !topic->history_owned && depth <= topic->qos.keep_last){
+        /* an at-init arena ring that still fits: reuse it in place */
+        memset(topic->history, 0, (size_t)depth*sizeof(i_DartWriterSample));
+    } else {
+        i_DartWriterSample *h = (i_DartWriterSample*)st->cfg.allocator(st->cfg.user, NULL,
+                                                     (size_t)depth*sizeof(i_DartWriterSample));
+        if (!h) return -4;                                   /* OOM: the slot stays retired */
+        memset(h, 0, (size_t)depth*sizeof(i_DartWriterSample));
+        topic->history = h; topic->history_owned = 1;
+    }
+    topic->qos = q;
+    topic->role = def->role;
+    topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
+    topic->forceable = def->forceable;
+    topic->identity = id;
+    memcpy((char*)topic->name, def->name, nlen); ((char*)topic->name)[nlen] = '\0';
+    topic->name_len = (uint8_t)nlen;
+    topic->history_head = 0; topic->have_first = 0; topic->first_seqno = 0;
+    memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
+    topic->retired = 0;
+    if (binding_changed){
+        topic->gen = (uint8_t)(topic->gen + 1u);   /* announced; peers compare equality only */
+        topic->rebind_version = rebind_version;
+        for (p=0;p<st->cfg.max_peers;p++){
+            uint32_t a;
+            if (!st->peer_used[p]) continue;
+            /* sever OUR bindings to the old occupant: verdicts of peer entries bound to
+               this slot re-pend (their announces re-verify against the new binding), and
+               the interest bits derived from them go too */
+            if (st->peer_index[p])
+                for (a=0;a<st->peer_index_len[p];a++)
+                    if (st->peer_index[p][a] == topic_index){
+                        st->peer_index[p][a] = 0xFFFFu;
+                        st->peer_astate[p][a] = 0;
+                    }
+            i_dart_bit_clr(&st->peer_pub_bitmap[(size_t)p*st->bitmap_len], topic_index);
+            i_dart_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
+            i_dart_bit_clr(&st->peer_sub_reliable[(size_t)p*st->bitmap_len], topic_index);
+            /* a DISSOLVED verdict is only as durable as the topic set it was judged
+               against (see dart_transport_topic_define), and that set just changed */
+            if (st->peer_astate[p]){
+                uint8_t *as = st->peer_astate[p];
+                for (a=0;a<st->peer_index_len[p];a++)
+                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)) as[a] = 0;
+            }
+        }
+    }
+    for (p=0;p<st->cfg.max_peers;p++)
+        if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
+    return 0;
+}
+
+
+/* A peer named OUR blob version `version` in a uDTL request: record it and release any
+ * writer lanes its advance takes out of the rebind hold. Returns 1 when a lane actually
+ * formed (the caller then re-fires its interest event / invalidates match memos). */
+int dart_transport_peer_seen_version(DartTransportState *st, uint32_t peer_id, uint32_t version){
+    int s; uint16_t c; uint32_t old; int changed = 0;
+    if (!st) return 0;
+    s = i_dart_peer_slot(st, peer_id);
+    if (s < 0) return 0;
+    old = st->peer_seen_version[s];
+    if (version <= old) return 0;
+    st->peer_seen_version[s] = version;
+    for (c=0;c<st->cfg.n_topics;c++){
+        i_DartTopic *t = &st->topics[c];
+        i_DartLane *l; int was;
+        if (!t->rebind_version || t->rebind_version <= old || t->rebind_version > version) continue;
+        if (!i_dart_topic_announced(t)) continue;
+        l = i_dart_lane_at(st, c, (uint32_t)s); was = l && l->w.used;
+        i_dart_topic_rematch(st, c, (uint16_t)s);
+        l = i_dart_lane_at(st, c, (uint32_t)s);
+        if ((l && l->w.used) != was) changed = 1;
+    }
+    return changed;
+}
+
+
+/* The topic's next write seqno (== samples ever committed on this slot's line, which
+ * CONTINUES across a retire/reuse cycle). A pattern layer seeds its own per-slot
+ * monotonic counters from it so a successor's first write never orders below its
+ * predecessor's last at a peer that kept state across the cycle. */
+uint64_t dart_transport_topic_seqno(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = st ? i_dart_topic_at(st, topic_index, NULL) : NULL;
+    return topic ? topic->next_seqno : 0;
 }
 
 
@@ -8638,6 +9038,22 @@ void i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t topic_index,
     c->chan_schemas[topic_index].wire = schema ? dart_schema_wire(schema) : dart_bytes(NULL, 0);
 }
 
+/* The topic is being RETIRED: drop the live schema pointers (the node frees the parsed
+ * copy) but KEEP the hash as the slot's binding fingerprint, so a later create of the
+ * same name can tell an identical rebind (reuse with cached verdicts intact) from a
+ * retype (reuse with a generation bump). The detail responder never answers a retired
+ * slot, so the stale hash is never served. */
+void i_dart_node_core_retire_topic_schema(i_DartNodeCore *c, uint16_t topic_index){
+    if (!c || topic_index >= c->n_topics) return;
+    c->chan_compiled[topic_index]     = NULL;
+    c->chan_schemas[topic_index].wire = dart_bytes(NULL, 0);
+}
+
+/* The retired slot's binding fingerprint (0 = it carried no schema). */
+uint64_t i_dart_node_core_topic_schema_hash(i_DartNodeCore *c, uint16_t topic_index){
+    return (c && topic_index < c->n_topics) ? c->chan_schemas[topic_index].hash : 0;
+}
+
 /* ---- the schema gate + delivery binding ---------------------------------------------- */
 
 /* a peer schema, parsed once per distinct hash. The claimed hash must equal the wire's
@@ -8683,7 +9099,12 @@ static DartSchema *i_dart_node_core_bind(i_DartNodeCore *c, uint64_t hash, uint1
 }
 
 /* the delivery map: which schema decodes (peer, topic). NULL entries are stored too
-   (they overwrite an older binding when a peer re-advertises without a schema). */
+   (they overwrite an older binding when a peer re-advertises without a schema). An entry
+   whose publisher's schema is IDENTICAL to ours stores this sentinel instead of the
+   compiled pointer, resolved to chan_compiled at read time: the compiled copy is freed
+   and re-parsed across a topic retire/reuse cycle, and a live pointer here would dangle
+   across it while the (kept) verdicts still expect the entry to decode. */
+#define i_DART_NODE_SCHEMA_OURS ((const DartSchema *)(uintptr_t)1)
 static void i_dart_node_core_peer_schema_set(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
                                              const DartSchema *schema){
     uint32_t i;
@@ -8789,9 +9210,43 @@ const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, 
     uint32_t i;
     if (!c) return NULL;
     for (i = 0; i < c->n_peer_schemas; i++)
-        if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index)
-            return c->peer_schemas[i].schema;
+        if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index){
+            const DartSchema *s = c->peer_schemas[i].schema;
+            if (s == i_DART_NODE_SCHEMA_OURS)   /* identical-schema entry: resolve live */
+                return topic_index < c->n_topics ? c->chan_compiled[topic_index] : NULL;
+            return s;
+        }
     return NULL;
+}
+
+/* The topic's slot was REBOUND to a different binding (topic reuse with a retype): every
+ * per-peer decode binding, rebased view, and refusal reason recorded for the old
+ * occupant is stale. The verdicts were re-pended in the transport, so these re-derive
+ * as details re-verify; here the caches just forget the old ones. */
+void i_dart_node_core_topic_rebound(i_DartNodeCore *c, uint16_t topic_index){
+    uint32_t i;
+    if (!c) return;
+    i = 0;
+    while (i < c->n_peer_schemas){
+        if (c->peer_schemas[i].topic == topic_index)
+            c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap-remove */
+        else i++;
+    }
+    i = 0;
+    while (i < c->n_binds){
+        if (c->binds[i].topic == topic_index){
+            if (c->binds[i].rebased) dart_schema_free(c->binds[i].rebased, c->alloc, c->alloc_user);
+            c->binds[i] = c->binds[--c->n_binds];
+        } else i++;
+    }
+#ifndef DART_NO_DIAG
+    i = 0;
+    while (i < c->n_schema_whys){
+        if (c->schema_whys[i].topic == topic_index)
+            c->schema_whys[i] = c->schema_whys[--c->n_schema_whys];
+        else i++;
+    }
+#endif
 }
 
 /* ---- the greedy detail cache (cfg.fetch_details) -------------------------------------- */
@@ -8902,7 +9357,7 @@ static int i_dart_node_core_schema_verdict(i_DartNodeCore *c, uint32_t peer, uin
             *p = '\0'; return 0;
         }
         if (hash == dart_schema_hash(ours)){            /* identical schema: our own view works */
-            i_dart_node_core_peer_schema_set(c, peer, topic_index, ours);
+            i_dart_node_core_peer_schema_set(c, peer, topic_index, i_DART_NODE_SCHEMA_OURS);
             return 1;
         }
         {   DartSchema *pub = i_dart_node_core_intern(c, hash, wire);   /* need the wire to verify */
@@ -9166,6 +9621,15 @@ void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t
         return;
     ex = i_dart_node_core_peer_extra(c, peer);
     if (!ex || !ex->added) return;
+    {   /* a response older than the blob we hold may describe a binding the peer has
+           since REBOUND (topic reuse): refuse it rather than cache a stale verdict; the
+           pending state re-asks and the fresh answer carries the current version.
+           (Bindings were immutable per entry before rebinds existed, which is why this
+           gate was never needed.) */
+        uint32_t held = 0;
+        dart_discovery_peer_meta(c->discovery, peer, &held);
+        if (held && dart_detail_meta_version(resp) < held) return;
+    }
     if (c->fetch_details){   /* observer mode: cache every fetched topic for the queries */
         DartDetailIter it; DartDetail dd;
         memset(&it, 0, sizeof it);
@@ -9203,6 +9667,17 @@ void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
 }
 
 int i_dart_node_core_detail_any(i_DartNodeCore *c){ return c ? c->detail_due_any : 0; }
+
+/* A uDTL request from `peer` named OUR blob version `version`: proof it applied our
+ * announce at that version. Feeds the transport's rebind hold; when the advance releases
+ * a held writer lane, the interest event re-fires (match counts changed) and the caller
+ * invalidates its match memos. Returns 1 exactly then. */
+int i_dart_node_core_seen_version(i_DartNodeCore *c, uint32_t peer, uint32_t version){
+    if (!c || !version) return 0;
+    if (!dart_transport_peer_seen_version(c->transport, peer, version)) return 0;
+    i_dart_node_core_fire_interest(c, peer);
+    return 1;
+}
 
 /* Unresolved candidates for one topic across active peers (see core.h). A peer counts
  * once while its interest is UNKNOWN: its blob has not arrived, or its external
@@ -10675,6 +11150,7 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
                               i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
+    int reuse = 0;
     if (!n || !name) return NULL;
     if (!allow_at){   /* '@' is reserved for pattern channels (f@req, v@set, ...) */
         const char *s = name;
@@ -10687,6 +11163,11 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
            reserve; a full block (accounting drift) degrades to no builtin, never a grow */
         idx = (uint16_t)(n->builtin_lo + n->n_builtin);
         if (idx >= n->max_topics){ i_dart_node_unlock(n, acquired); return NULL; }
+    } else if ((reuse = dart_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
+        /* a RETIRED slot takes this create instead of appending, so retire/create churn
+           never grows the topic table or the announce. Same identity + kind (find = 2)
+           with the same schema relinks from peers' cached verdicts with no round trip;
+           anything else is a rebind under a bumped generation (peers re-verify). */
     } else {
         idx = n->n_created;
         if (n->n_builtin && idx >= n->builtin_lo)
@@ -10711,11 +11192,27 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     def.name = name; def.role = (uint8_t)role;
     def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.forceable = forceable;
     if (opts) def.qos = opts->qos;
-    if (dart_transport_topic_define(n->transport, idx, &def) != 0){
-        if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
-        i_dart_node_alloc(n, h, 0);
-        i_dart_node_unlock(n, acquired);
-        return NULL;
+    {   int rc;
+        if (reuse){
+            /* identical binding (same name, kind, and schema hash as the retired
+               occupant) rebinds silently; anything else bumps the slot's generation and
+               publishes the rebind under the version the advertise below will stamp */
+            uint64_t new_hash = h->schema ? dart_schema_hash(h->schema) : 0;
+            int changed = (reuse != 2)
+                       || (new_hash != i_dart_node_core_topic_schema_hash(n->core, idx));
+            uint32_t rb = changed
+                ? dart_discovery_meta_version(dart_discovery_state(n->discovery)) + 1u : 0u;
+            rc = dart_transport_topic_reuse(n->transport, idx, &def, changed, rb);
+            if (rc == 0 && changed) i_dart_node_core_topic_rebound(n->core, idx);
+        } else {
+            rc = dart_transport_topic_define(n->transport, idx, &def);
+        }
+        if (rc != 0){
+            if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
+            i_dart_node_alloc(n, h, 0);
+            i_dart_node_unlock(n, acquired);
+            return NULL;
+        }
     }
     h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
     /* a function-response prefix is followed by [u8 len][message] on the wire: derived
@@ -10732,7 +11229,9 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     }
     if (def.qos.queue_bytes)   /* queued from creation; best-effort on OOM (take retries) */
         (void)i_dart_node_queue_ensure(n, h, &def.qos);
-    if (h->schema)   /* advertise + gate matches with it (any non-INACTIVE role) */
+    if (h->schema || reuse)   /* advertise + gate matches with it (any non-INACTIVE role);
+                                 a reused slot must also CLEAR the retired occupant's
+                                 fingerprint when the new topic is untyped */
         i_dart_node_core_set_topic_schema(n->core, idx, h->schema);
     /* re-advertise our interest so peers match the new topic as the blob arrives, and
        replay known peers' interest so this topic matches what they already advertised */
@@ -10740,7 +11239,8 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
     dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
-    if (n->creating_builtin) n->n_builtin++; else n->n_created++;
+    if (n->creating_builtin) n->n_builtin++;
+    else if (!reuse) n->n_created++;   /* a reused slot is already inside the dense region */
     n->match_epoch++;   /* a new topic may raise fresh candidates: converged memos are stale */
     i_dart_node_kick(n);                       /* announce the new topic now; the replay above
                                                   queued any DETAIL_REQs, so the pass sends them */
@@ -10905,6 +11405,14 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                     DartBytes resp = i_dart_node_core_detail_respond(n->core, n->domain,
                                                                      dart_bytes(buf, (size_t)r));
                     if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                    {   /* the request names the OUR-blob version the peer applied: feed the
+                           rebind hold (a released writer lane stales the match memos) */
+                        uint32_t from;
+                        if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from)
+                            && i_dart_node_core_seen_version(n->core, from,
+                                   dart_detail_meta_version(dart_bytes(buf, (size_t)r))))
+                            n->match_epoch++;
+                    }
                 } else if (buf[4]==DART_DETAIL_RESP){
                     uint32_t from;
                     if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
@@ -10912,7 +11420,11 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
                                                        dart_bytes(buf, (size_t)r));
                 } else if (buf[4]==DART_INTEREST_REQ){
                     /* external-interest paging: serve one byte-range page of our interest
-                       blob to the request's source (stateless, like the detail responder) */
+                       blob to the request's source (stateless, like the detail responder).
+                       NOT a rebind-hold confirmation: an INTEREST_REQ names the version the
+                       peer is still FETCHING, not one it has applied (a detail request is
+                       the applied-version signal, and an external peer's apply queues one
+                       whenever a rebind re-pended anything). */
                     DartBytes resp = i_dart_node_core_interest_respond(n->core, n->domain,
                                                                        dart_bytes(buf, (size_t)r));
                     if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
@@ -11429,6 +11941,10 @@ int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
     return r;
 }
 
+uint64_t i_dart_topic_seqno(DartTopic *topic){
+    return topic ? dart_transport_topic_seqno(topic->n->transport, topic->index) : 0;
+}
+
 void i_dart_topic_clear_sys(DartTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
@@ -11560,6 +12076,45 @@ int dart_topic_set_role(DartTopic *topic, DartRole role){
     }
     i_dart_node_unlock(topic->n, acquired);
     return r;
+}
+
+int dart_topic_retire(DartTopic *topic){
+    DartNode *n; int acquired; uint16_t idx;
+    if (!topic) return DART_ERR_NO_TOPIC;
+    n = topic->n;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return DART_ERR_STATE;   /* from a callback: lanes are live mid-delivery */
+    if (topic->sys_on_message                       /* a pattern channel: retire its pattern handle */
+        || i_dart_node_is_log_topic(n, topic->index)
+        || (n->n_builtin && topic->index >= n->builtin_lo
+            && topic->index < (uint16_t)(n->builtin_lo + n->n_builtin))
+        || (topic->q && topic->q->busy)){           /* mid-dispatch on another thread */
+        i_dart_node_unlock(n, acquired);
+        return DART_ERR_STATE;
+    }
+    idx = topic->index;
+    if (dart_transport_topic_retire(n->transport, idx) != 0){
+        i_dart_node_unlock(n, acquired);
+        return DART_ERR_STATE;
+    }
+    /* the slot keeps its schema HASH as the reuse fingerprint; the parsed copy goes */
+    i_dart_node_core_retire_topic_schema(n->core, idx);
+    if (topic->q){
+        if (topic->q->buf) i_dart_node_alloc(n, topic->q->buf, 0);
+        i_dart_node_alloc(n, topic->q, 0);
+        topic->q = NULL;
+    }
+    if (topic->schema) dart_schema_free(topic->schema, i_dart_node_alloc, n);
+    n->handles[idx] = NULL;
+    i_dart_node_alloc(n, topic, 0);         /* the handle is INVALID from here */
+    /* re-advertise: the slot rides the announce as a hole from the next blob on */
+    i_dart_node_core_build_meta(n->core);
+    dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
+    dart_discovery_replay(n->discovery);
+    n->match_epoch++;
+    i_dart_node_kick(n);
+    i_dart_node_unlock(n, acquired);
+    return DART_OK;
 }
 
 uint16_t dart_topic_index(const DartTopic *topic){ return topic ? topic->index : 0; }
@@ -12652,6 +13207,7 @@ int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_
 
 int dart_function_retire(DartFunction *fn){
     i_DartPatterns *pm; DartFunction **pp; DartNode *n; int acquired, r;
+    DartTopic *req, *rsp;
     if (!fn) return DART_ERR_NO_TOPIC;
     pm = fn->pm; n = fn->n;
     if (pm && fn == pm->meta) return DART_ERR_STATE;   /* the builtin endpoint is node infrastructure */
@@ -12671,10 +13227,16 @@ int dart_function_retire(DartFunction *fn){
     if (pm)
         for (pp = &pm->funcs; *pp; pp = &(*pp)->next)
             if (*pp == fn){ *pp = fn->next; break; }
+    req = fn->req; rsp = fn->rsp;   /* outlive fn: a reap callback may still have used them */
     if (fn->sync_buf)  i_dart_node_sys_alloc(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_dart_node_sys_alloc(n, fn->dup_peers, 0);
     i_dart_node_sys_alloc(n, fn, 0);
     i_dart_node_sys_unlock(n, acquired);
+    /* release the channel slots for reuse: a re-created same-name function takes them
+       back (identical binding = a silent relink; a retyped one rebinds them) instead of
+       growing the announce by one parked entry per channel per cycle */
+    (void)dart_topic_retire(req);
+    (void)dart_topic_retire(rsp);
     return DART_OK;
 }
 
@@ -13070,6 +13632,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
                               (uint8_t)(owner && v->allow_force),   /* owner advertises whether force is permitted */
                               owner ? NULL : i_dart_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool-allocated: nothing routes into it yet */
+    if (owner)
+        /* seed write_seq from the slot's CONTINUING seqno line: a retired-and-recreated
+           definition's first write must order above its predecessor's last at an accessor
+           that kept its cache across the cycle (the accessor's stale-order guard compares
+           same-publisher seqs, and the publisher id survives a same-node re-create) */
+        v->write_seq = (uint32_t)i_dart_topic_seqno(v->value);
     if (make_set){
         memcpy(sn, name, nl); memcpy(sn + nl, "@set", 5);
         v->set = i_dart_node_create_pattern_topic(n, sn, owner ? DART_SUB_ONLY : DART_PUB_ONLY,
@@ -13216,6 +13784,7 @@ int dart_variable_forced(DartVariable *var){ return var ? var->forced : 0; }
 
 int dart_variable_retire(DartVariable *var){
     i_DartPatterns *pm; DartVariable **pp; DartNode *n; int acquired, r;
+    DartTopic *value, *set;
     if (!var) return DART_ERR_NO_TOPIC;
     pm = var->pm; n = var->n;
     r = dart_topic_set_role(var->value, DART_INACTIVE);   /* refused from a callback, nothing mutated */
@@ -13227,11 +13796,14 @@ int dart_variable_retire(DartVariable *var){
     if (pm)
         for (pp = &pm->vars; *pp; pp = &(*pp)->next)
             if (*pp == var){ *pp = var->next; break; }
+    value = var->value; set = var->set;
     if (var->store)     i_dart_node_sys_alloc(n, var->store, 0);
     if (var->shadow)    i_dart_node_sys_alloc(n, var->shadow, 0);
     if (var->dup_peers) i_dart_node_sys_alloc(n, var->dup_peers, 0);
     i_dart_node_sys_alloc(n, var, 0);
     i_dart_node_sys_unlock(n, acquired);
+    (void)dart_topic_retire(value);   /* release the slots for reuse (see function retire) */
+    if (set) (void)dart_topic_retire(set);
     return DART_OK;
 }
 
@@ -13326,6 +13898,7 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
 
 int dart_signal_retire(DartSignal *sig){
     i_DartPatterns *pm; DartSignal **pp; DartNode *n; int acquired, r;
+    DartTopic *topic;
     if (!sig) return DART_ERR_NO_TOPIC;
     pm = sig->pm; n = sig->n;
     r = dart_topic_set_role(sig->topic, DART_INACTIVE);   /* refused from a callback, nothing mutated */
@@ -13335,8 +13908,10 @@ int dart_signal_retire(DartSignal *sig){
     if (pm)
         for (pp = &pm->sigs; *pp; pp = &(*pp)->next)
             if (*pp == sig){ *pp = sig->next; break; }
+    topic = sig->topic;
     i_dart_node_sys_alloc(n, sig, 0);
     i_dart_node_sys_unlock(n, acquired);
+    (void)dart_topic_retire(topic);   /* release the slot for reuse (see function retire) */
     return DART_OK;
 }
 

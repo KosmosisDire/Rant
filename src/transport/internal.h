@@ -220,6 +220,20 @@ typedef struct {
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
                                dart_transport_topic_define), so dart_transport_destroy frees it */
+    uint8_t   retired;      /* parked for reuse (dart_transport_topic_retire): announced as a
+                               hole, never a match candidate; identity/name/kind/qos kept so
+                               dart_transport_topic_reuse can compare the old binding */
+    uint8_t   gen;          /* rebind generation, announced in the interest gen section while
+                               > 0. Bumped when a reused slot's BINDING (name/kind/schema)
+                               changed, so peers holding a verdict for this position re-verify
+                               instead of applying it to the new occupant. Identical reuse
+                               leaves it alone (the cached verdicts stay correct). */
+    uint32_t  rebind_version; /* our announce-blob version when this slot was last rebound with
+                                 a CHANGED binding (0 = never). A writer lane to a peer stays
+                                 unmatched until that peer's seen version reaches it: its uDTL
+                                 request at version >= this proves it applied the blob that
+                                 re-pended its old verdict, so its demux map can no longer
+                                 cross-wire our new topic under the old binding. */
     /* writer */
     i_DartWriterSample *history;       /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
@@ -271,6 +285,18 @@ struct DartTransportState {
        verdict + current flags with no round trip. 0 = no details yet (PENDING if a
        candidate). */
     uint8_t    **peer_astate;     /* [max_peers] -> verdict map (DART__AST_* bits) */
+    uint8_t    **peer_agen;       /* [max_peers] -> last APPLIED rebind generation per entry
+                                     (parallel to peer_astate). The interest gen section is
+                                     compared against this on every apply: a mismatch on a
+                                     verdicted entry means the peer rebound that position, so
+                                     the verdict re-pends and details re-verify the new
+                                     binding. Tracks the latest applied gen for pending
+                                     entries too, so a verdict formed next binds to it. */
+    uint32_t    *peer_seen_version; /* [max_peers] highest OUR-blob version this peer has named
+                                       in a uDTL request: proof it applied our announce at that
+                                       version (fed by the runtime via
+                                       dart_transport_peer_seen_version). Gates writer lanes of
+                                       rebound topics (see i_DartTopic.rebind_version). */
     i_DartTopic  *topics;     /* [n_topics] */
     /* matched-lane records (the proxies live inside): one hook allocation grown by
        doubling, records allocated per real match, lane_index maps (topic,peer)
@@ -299,7 +325,14 @@ typedef enum { DART_ORDER_OLD, DART_ORDER_GAP, DART_ORDER_ADOPTED, DART_ORDER_IN
 
 /* small shared helpers (kept inline so every fragment can use them) */
 static inline void i_dart_bit_set(uint8_t*bitmap,uint32_t i){bitmap[i>>3]|=(uint8_t)(1u<<(i&7));}
+static inline void i_dart_bit_clr(uint8_t*bitmap,uint32_t i){bitmap[i>>3]&=(uint8_t)~(1u<<(i&7));}
 static inline int  i_dart_bit_get(const uint8_t*bitmap,uint32_t i){return (bitmap[i>>3]>>(i&7))&1;}
+/* Does this slot occupy an announce entry? A defined topic does; an undefined reserve
+ * slot or a RETIRED one rides as a hole run instead (positions stay stable either way).
+ * Every announce walk (build, size, candidate scans) shares this one membership test. */
+static inline int i_dart_topic_announced(const i_DartTopic *t){
+    return t->name_len != 0 && !t->retired;
+}
 #ifdef DART_SHM
 /* where a sample's bytes live: the external chunk for SHM samples, else our buf */
 static inline const uint8_t *i_dart_sample_buf(const i_DartWriterSample *s){ return s->shm ? s->shm_buf : s->buf; }

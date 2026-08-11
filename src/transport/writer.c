@@ -365,9 +365,21 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
     if (!w || !w->used) return;
     if (w->reader_epoch != epoch){
         if (w->reader_epoch){
-            /* reader is a new incarnation (one-sided flap): our positions describe its
-               dead predecessor, so re-join the lane as if freshly matched */
-            w->sent_upto  = i_dart_topic_unicast_join_seqno(topic);
+            /* The reader re-incarnated while OUR lane survived: its side retired and
+               re-created the topic under the same slot (an identical reuse continues
+               the seqno line, and the far side may never even observe the retired
+               announce), or a one-sided flap. Re-join at the OLDER of the fresh-match
+               join point (so a catch_up window still replays to the new incarnation)
+               and the acked floor: everything past acked_upto was committed while the
+               lane was continuously matched from our view, so the successor gets the
+               un-acked window too (RESUME semantics). Joining at the head alone would
+               silently skip a sample committed between its re-create and this ACKNACK
+               -- a directed function response races exactly that window. A genuine
+               late joiner (unsubscribe, then resubscribe later) never lands here: its
+               announce change re-forms our proxy too (fresh, epoch 0 = first contact
+               below), keeping plain late-joiner semantics. */
+            uint64_t join = i_dart_topic_unicast_join_seqno(topic);
+            w->sent_upto  = w->acked_upto < join ? w->acked_upto : join;
             w->acked_upto = w->sent_upto;
             w->has_nack   = 0;
             w->hb_next_us = 0;

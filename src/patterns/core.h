@@ -149,11 +149,11 @@ int  dart_function_match_count(DartFunction *fn);
  * the name against a successor and a new create under the same name binds cleanly where a
  * live twin would have been SHADOWED), cancel every outstanding call with one
  * DART_CALL_CANCELLED outcome, silence its callbacks, and free the handle: it is INVALID
- * after, like a closed node. The channels' announce entries stay for the node's lifetime
- * (indices are append-only), so each retire/create cycle grows the announce by one entry
- * per channel. Complete (or abandon) outstanding defer tokens BEFORE retiring a
- * definition. Returns DART_OK; DART_ERR_STATE from inside a callback (the role flip would
- * rematch lanes mid-delivery), and the handle then remains valid. */
+ * after, like a closed node. The channel SLOTS are released for reuse (dart_topic_retire):
+ * a re-created same-name entity takes them back, so retire/create cycles plateau instead
+ * of growing the announce. Complete (or abandon) outstanding defer tokens BEFORE retiring
+ * a definition. Returns DART_OK; DART_ERR_STATE from inside a callback (the role flip
+ * would rematch lanes mid-delivery), and the handle then remains valid. */
 int  dart_function_retire(DartFunction *fn);
 
 /* ---- the built-in @dart/meta introspection endpoint ----------------------------------

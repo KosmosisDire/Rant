@@ -265,9 +265,30 @@ uint32_t     dart_node_evicted_unsent(DartNode *n);
  * topic's data schema (built via dart_schema_*), required and held by reference so it
  * must outlive the topic; pass NULL for a raw-bytes topic (no serialization). opts may
  * be NULL for defaults. Returns a handle, or NULL if the reserve (opts.max_topics) is
- * full, the name is bad/too long, or out of memory. */
+ * full, the name is bad/too long, or out of memory.
+ * A create REUSES a retired slot when one exists (see dart_topic_retire), so
+ * retire/create churn never grows the topic table or the announce: an identical
+ * re-creation (same name, kind, and schema) relinks to peers' cached verdicts with no
+ * round trip and continues the slot's seqno line; a re-creation with a DIFFERENT
+ * schema/name rebinds the slot under a bumped generation, and peers re-verify before
+ * any data flows (the send-path match wait covers the window, so a first send after a
+ * retype still reaches re-verified subscribers). */
 DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
                                       const DartSchema *schema, const DartTopicOpts *opts);
+
+/* RETIRE a topic: the explicit lifecycle verb for "this node is done with this
+ * incarnation of the name" -- typically to re-create it with a different schema (a
+ * retype). The topic leaves the announce, every lane to every peer tears down, its
+ * history and consumer queue are freed, and the handle itself is freed: the pointer is
+ * INVALID after DART_OK (like a retired pattern handle). Any outstanding take view on
+ * the topic is invalidated; retiring a handle another thread is concurrently calling
+ * into is a lifetime bug, exactly like use-after-close. The slot is parked for reuse by
+ * a later create (see above), so retire/create cycles plateau instead of growing.
+ * Subscribers keep nothing: on the peers this looks like an unsubscribe/unpublish of
+ * just this topic (no peer-level churn). Refused with DART_ERR_STATE from a callback,
+ * for a pattern channel (retire the pattern handle instead), for a builtin (@dart/...)
+ * topic, and while a dispatch on this topic runs its callback. */
+int dart_topic_retire(DartTopic *topic);
 
 /* ---- consumer queues (take / dispatch) ----------------------------------------------
  * By default a topic's messages fire on_message on whichever thread polls, and a heavy
@@ -532,6 +553,10 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 /* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
  * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
 void i_dart_topic_clear_sys(DartTopic *topic);
+/* The topic's next transport seqno: its slot line CONTINUES across retire/reuse, so a
+ * pattern layer seeds its own monotonic counters (a variable's write_seq) from it and a
+ * slot successor's first write orders above its predecessor's last everywhere. */
+uint64_t i_dart_topic_seqno(DartTopic *topic);
 /* Bounded wait for a PUB pattern topic's forming match (the send path's match wait,
  * without its send and without DART_E_UNMATCHED_SEND: the caller derives its own
  * synchronous verdict). Returns the matched count. No wait from inside a callback, with
