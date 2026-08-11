@@ -4674,6 +4674,273 @@ static void varwait_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
+/* ============ retire/reuse churn soak (19e6) ============
+ * The anti-ballooning contract: retire/create cycles REUSE topic slots (identical
+ * binding = silent relink from cached verdicts, a retype = a generation-bumped rebind
+ * peers re-verify), so NOTHING grows over sustained churn: not the topic table, not the
+ * announce, not steady-state memory. Survivor nodes must keep their subscriptions
+ * delivering through every wave and converge to the current mesh state. Covers the case
+ * matrix: identical re-creation (silent), incompatible retype (loud refusal + adopted
+ * follow-up + catch-up), compatible retype (no subscriber action), untyped subscribers
+ * across every shape, rival same-name publishers (no cross-wiring), late joiners, and
+ * transient peer churn. */
+static volatile unsigned long ch_c_recv, ch_u_recv, ch_t_recv, ch_c_mismatch;
+static volatile uint32_t ch_c_last;
+static uint32_t ch_seq;
+static void ch_on_message(const DartMsg *m){
+    const char *who = (const char *)m->user;
+    if (!who || m->data.len < 4) return;
+    if      (who[0]=='C'){ ch_c_recv++; ch_c_last = i_dart_le_r32(m->data.data); }
+    else if (who[0]=='U') ch_u_recv++;
+    else if (who[0]=='T') ch_t_recv++;
+}
+static void ch_on_event(const DartEvent *ev){
+    if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH
+        && ev->user && ((const char*)ev->user)[0]=='C') ch_c_mismatch++;
+}
+static void ch_pump(DartNode **ns, int n, int ms){
+    uint64_t end = i_dart_plat_now_us() + (uint64_t)ms*1000u;
+    while (i_dart_plat_now_us() < end){
+        int i;
+        for (i=0;i<n;i++) if (ns[i]) dart_node_poll(ns[i], 1);
+    }
+}
+static void ch_send(DartTopic *beat, int nbytes){
+    uint8_t pb[8];
+    memset(pb, 0, sizeof pb);
+    i_dart_le_w32(pb, ++ch_seq);
+    dart_topic_send(beat, dart_bytes(pb, (size_t)nbytes));
+}
+
+static void churn_checks(void){
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, co2, uo; DartNode *P, *C, *U; DartDiscoveryAddr seed;
+    DartSchema *G1, *G2, *G3;
+    DartTopic *beat, *csub; DartTopicOpts topts;
+    DartNode *nodes[4];
+    uint16_t base_idx, c_idx, p_hi0=0, c_hi0=0;
+    uint32_t p_int0=0, c_int0=0;
+    size_t p_mem0=0, c_mem0=0, u_mem0=0, mem=0, peak=0; uint64_t calls=0;
+    int t, cyc, idx_ok=1;
+
+    ch_c_recv = ch_u_recv = ch_t_recv = ch_c_mismatch = 0;
+    ch_c_last = 0; ch_seq = 100;
+    G1 = dart_schema_compile(dart_allocator_alloc, &ma, "Beat { v: u32 }", NULL);
+    G2 = dart_schema_compile(dart_allocator_alloc, &ma, "Beat { w: u32 }", NULL);
+    G3 = dart_schema_compile(dart_allocator_alloc, &ma, "Beat { v: u32, extra: u32 }", NULL);
+    ST_CHECK(G1 && G2 && G3, "churn: schemas compile");
+    if (!(G1 && G2 && G3)){ dart_allocator_reset(&ma); return; }
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+33; po.discovery.max_peers=6;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    po.discovery.announce_interval_us = 100000;   /* fast cadence: rebinds re-verify quickly */
+    co2=po; uo=po;
+    po.user_data=(void*)"P"; co2.user_data=(void*)"C"; uo.user_data=(void*)"U";
+    P = dart_node_open(&pa, "churn-pub",     NULL,          ch_on_event, &po);
+    C = dart_node_open(&ca, "churn-typed",   ch_on_message, ch_on_event, &co2);
+    U = dart_node_open(&ua, "churn-untyped", ch_on_message, ch_on_event, &uo);
+    ST_CHECK(P && C && U, "churn: nodes open");
+    if (!(P && C && U)){
+        if(P)dart_node_close(P,0); if(C)dart_node_close(C,0); if(U)dart_node_close(U,0);
+        dart_allocator_reset(&pa); dart_allocator_reset(&ca); dart_allocator_reset(&ua);
+        dart_allocator_reset(&ma); return;
+    }
+    nodes[0]=P; nodes[1]=C; nodes[2]=U; nodes[3]=NULL;
+
+    memset(&topts,0,sizeof topts);
+    topts.qos.reliability = DART_RELIABLE; topts.qos.catch_up = 1;
+    beat = dart_node_create_topic(P, "beat", DART_PUB_ONLY, G1, &topts);
+    csub = dart_node_create_topic(C, "beat", DART_SUB_ONLY, G1, &topts);
+    (void)dart_node_create_topic(U, "beat", DART_SUB_ONLY, NULL, &topts);
+    ST_CHECK(beat && csub, "churn: survivor topics created");
+    base_idx = dart_topic_index(beat); c_idx = dart_topic_index(csub);
+
+    /* warmup: first delivery, then one identical retire/create cycle so every lazy
+       allocation (lane pool, detail buffers, peer maps) is in the baseline */
+    ch_send(beat, 4);
+    for (t=0;t<4000 && (ch_c_last != ch_seq || ch_u_recv == 0);t++) ch_pump(nodes,3,2);
+    ST_CHECK(ch_c_last == ch_seq && ch_u_recv > 0, "churn: warmup delivery (typed + untyped)");
+    ST_CHECK(dart_topic_retire(beat) == DART_OK, "churn: warmup retire");
+    beat = dart_node_create_topic(P, "beat", DART_PUB_ONLY, G1, &topts);
+    ST_CHECK(beat && dart_topic_index(beat) == base_idx,
+             "churn: identical re-create REUSES the slot (idx %u)", base_idx);
+    ch_send(beat, 4);
+    for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+    ST_CHECK(ch_c_last == ch_seq, "churn: delivery across the warmup cycle");
+    {   /* saturate the @dart/log/error KEEP_LAST ring (the DART_ERROR mirror publishes
+           every retype refusal there): its 16 slot buffers fill to high-water once and
+           then plateau, so the baselines must include them at full size or the first
+           mismatch lines read as growth */
+        char big[200]; int k;
+        memset(big, 'x', sizeof big - 1); big[sizeof big - 1] = 0;
+        for (k=0;k<20;k++){
+            dart_node_log(P, DART_LOG_ERROR, "%s", big);
+            dart_node_log(C, DART_LOG_ERROR, "%s", big);
+            dart_node_log(U, DART_LOG_ERROR, "%s", big);
+        }
+    }
+    dart_node_mem_stats(P, &p_mem0, &peak, &calls);
+    dart_node_mem_stats(C, &c_mem0, &peak, &calls);
+    dart_node_mem_stats(U, &u_mem0, &peak, &calls);
+    p_hi0 = i_dart_node_topic_count(P); c_hi0 = i_dart_node_topic_count(C);
+    p_int0 = dart_transport_interest_size(P->transport);
+    c_int0 = dart_transport_interest_size(C->transport);
+
+    /* A: identical-binding churn. Every cycle must reuse the slot, relink with no round
+       trip, and deliver; nothing may grow. */
+    { int deliver_ok = 1;
+      for (cyc=0;cyc<25;cyc++){
+          unsigned long u0 = ch_u_recv;
+          if (dart_topic_retire(beat) != DART_OK){ idx_ok = 0; break; }
+          beat = dart_node_create_topic(P, "beat", DART_PUB_ONLY, G1, &topts);
+          if (!beat || dart_topic_index(beat) != base_idx){ idx_ok = 0; break; }
+          ch_send(beat, 4);
+          for (t=0;t<4000 && (ch_c_last != ch_seq || ch_u_recv == u0);t++) ch_pump(nodes,3,2);
+          if (ch_c_last != ch_seq || ch_u_recv == u0){ deliver_ok = 0; break; }
+      }
+      ST_CHECK(idx_ok, "churn-A: 25 identical cycles reuse the slot");
+      ST_CHECK(deliver_ok, "churn-A: every cycle delivered (typed + untyped)");
+      dart_node_mem_stats(P, &mem, &peak, &calls);
+      ST_CHECK(mem <= p_mem0 + 1024, "churn-A: publisher memory plateaus (%u -> %u)",
+               (unsigned)p_mem0, (unsigned)mem);
+      dart_node_mem_stats(C, &mem, &peak, &calls);
+      ST_CHECK(mem <= c_mem0 + 1024, "churn-A: subscriber memory plateaus (%u -> %u)",
+               (unsigned)c_mem0, (unsigned)mem);
+      ST_CHECK(i_dart_node_topic_count(P) == p_hi0, "churn-A: topic table did not grow");
+      ST_CHECK(dart_transport_interest_size(P->transport) == p_int0,
+               "churn-A: announce size unchanged (%u)", p_int0); }
+
+    /* B: retype churn. The publisher rebinds the slot to an INCOMPATIBLE schema: the
+       typed subscriber refuses loudly and receives nothing of the new shape, the
+       untyped one follows every shape; the subscriber then adopts (retire + re-create
+       with the new schema) and the catch-up replay hands it the current value. */
+    { int deliver_ok = 1, u_ok = 1, mm_ok = 1, iso_ok = 1;
+      uint32_t p_int1 = 0, c_int1 = 0;
+      size_t p_memb = 0, c_memb = 0;   /* re-baselined once the retype caches warm */
+      for (cyc=0;cyc<10;cyc++){
+          DartSchema *ns = (cyc & 1) ? G1 : G2;
+          unsigned long mm0 = ch_c_mismatch, u0 = ch_u_recv, c0 = ch_c_recv;
+          if (dart_topic_retire(beat) != DART_OK){ idx_ok = 0; break; }
+          beat = dart_node_create_topic(P, "beat", DART_PUB_ONLY, ns, &topts);
+          if (!beat || dart_topic_index(beat) != base_idx){ idx_ok = 0; break; }
+          ch_send(beat, 4);
+          for (t=0;t<4000 && (ch_u_recv == u0 || ch_c_mismatch == mm0);t++) ch_pump(nodes,3,2);
+          if (ch_u_recv == u0) u_ok = 0;
+          if (ch_c_mismatch == mm0) mm_ok = 0;
+          if (ch_c_recv != c0) iso_ok = 0;   /* never a cross-schema delivery */
+          if (dart_topic_retire(csub) != DART_OK){ idx_ok = 0; break; }
+          csub = dart_node_create_topic(C, "beat", DART_SUB_ONLY, ns, &topts);
+          if (!csub || dart_topic_index(csub) != c_idx){ idx_ok = 0; break; }
+          for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+          if (ch_c_last != ch_seq){ deliver_ok = 0; break; }
+          if (cyc == 0){ p_int1 = dart_transport_interest_size(P->transport);
+                         c_int1 = dart_transport_interest_size(C->transport); }
+          if (cyc == 1){ dart_node_mem_stats(P, &p_memb, &peak, &calls);
+                         dart_node_mem_stats(C, &c_memb, &peak, &calls); }
+      }
+      ST_CHECK(idx_ok, "churn-B: retype cycles keep reusing both slots");
+      ST_CHECK(mm_ok, "churn-B: typed subscriber refuses each retype loudly");
+      ST_CHECK(iso_ok, "churn-B: no cross-schema delivery to the typed subscriber");
+      ST_CHECK(u_ok, "churn-B: untyped subscriber follows every shape");
+      ST_CHECK(deliver_ok, "churn-B: adopted re-create receives the current value (catch-up)");
+      ST_CHECK(p_int1 == p_int0 + 3 && dart_transport_interest_size(P->transport) == p_int1,
+               "churn-B: announce grows once by the 3 B gen entry, then holds (%u -> %u)",
+               p_int0, p_int1);
+      ST_CHECK(c_int1 == c_int0 + 3 && dart_transport_interest_size(C->transport) == c_int1,
+               "churn-B: subscriber announce likewise (%u -> %u)", c_int0, c_int1);
+      /* the plateau is judged against the warmed baseline (two full retype round trips
+         in: refusal-reason slots, rebased-view array reserves and the like are one-time
+         allocations, and the 8 cycles after it must add nothing) */
+      dart_node_mem_stats(P, &mem, &peak, &calls);
+      ST_CHECK(mem <= p_memb + 512, "churn-B: publisher memory plateaus (%u -> %u)",
+               (unsigned)p_memb, (unsigned)mem);
+      dart_node_mem_stats(C, &mem, &peak, &calls);
+      ST_CHECK(mem <= c_memb + 512, "churn-B: subscriber memory plateaus (%u -> %u)",
+               (unsigned)c_memb, (unsigned)mem); }
+
+    /* C: compatible retype. The publisher rebinds to a SUPERSET of the subscriber's
+       schema: the typed subscriber keeps receiving with no action and no refusal. */
+    { unsigned long mm0 = ch_c_mismatch;
+      ST_CHECK(dart_topic_retire(beat) == DART_OK, "churn-C: retire before the superset rebind");
+      beat = dart_node_create_topic(P, "beat", DART_PUB_ONLY, G3, &topts);
+      ST_CHECK(beat && dart_topic_index(beat) == base_idx, "churn-C: superset re-create reuses the slot");
+      ch_send(beat, 8);
+      for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+      ST_CHECK(ch_c_last == ch_seq, "churn-C: subset-compatible rebind keeps the typed subscriber");
+      ST_CHECK(ch_c_mismatch == mm0, "churn-C: no refusal fired for the compatible rebind"); }
+
+    /* D: transient-node waves. Odd waves bring a RIVAL publisher of the same name with a
+       different shape (the typed subscriber's stream must stay clean; the untyped one
+       hears both); even waves bring a late-joining subscriber that must catch up to the
+       current value. Survivor state must plateau across all of it. */
+    { int wave_ok = 1, cross_ok = 1, late_ok = 1, live_ok = 1;
+      size_t p_mem1 = 0, c_mem1 = 0, u_mem1 = 0;
+      for (cyc=0;cyc<6;cyc++){
+          DartAllocator ta = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+          DartNodeOpts to2 = po; DartNode *T; DartTopic *tt;
+          unsigned long u0 = ch_u_recv, t0c = ch_t_recv;
+          to2.user_data = (void*)"T";
+          T = dart_node_open(&ta, "churn-transient", ch_on_message, ch_on_event, &to2);
+          if (!T){ wave_ok = 0; dart_allocator_reset(&ta); break; }
+          nodes[3] = T;
+          if (cyc & 1){
+              tt = dart_node_create_topic(T, "beat", DART_PUB_ONLY, G2, &topts);
+              if (!tt){ wave_ok = 0; }
+              else {
+                  for (t=0;t<4000 && dart_topic_match_count(tt) < 1;t++) ch_pump(nodes,4,2);
+                  {   uint8_t pb[4]; i_dart_le_w32(pb, 0xBADBEEFu);   /* must never reach C */
+                      dart_topic_send(tt, dart_bytes(pb, 4)); }
+                  for (t=0;t<4000 && ch_u_recv == u0;t++) ch_pump(nodes,4,2);
+                  if (ch_u_recv == u0) wave_ok = 0;
+                  ch_send(beat, 8);   /* the survivor stream runs beside the rival */
+                  for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,4,2);
+                  if (ch_c_last != ch_seq) cross_ok = 0;
+              }
+          } else {
+              tt = dart_node_create_topic(T, "beat", DART_SUB_ONLY, NULL, &topts);
+              if (!tt) wave_ok = 0;
+              else {
+                  for (t=0;t<4000 && ch_t_recv == t0c;t++) ch_pump(nodes,4,2);
+                  if (ch_t_recv == t0c) late_ok = 0;   /* catch-up hands it the current value */
+              }
+          }
+          dart_node_close(T, 1);
+          nodes[3] = NULL;
+          dart_allocator_reset(&ta);
+          ch_send(beat, 8);   /* survivors deliver between waves */
+          for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+          if (ch_c_last != ch_seq) live_ok = 0;
+          if (cyc == 0){
+              dart_node_mem_stats(P, &p_mem1, &peak, &calls);
+              dart_node_mem_stats(C, &c_mem1, &peak, &calls);
+              dart_node_mem_stats(U, &u_mem1, &peak, &calls);
+          }
+      }
+      ST_CHECK(wave_ok, "churn-D: every wave node joined and exchanged data");
+      ST_CHECK(cross_ok, "churn-D: rival same-name publisher never cross-wires the typed stream");
+      ST_CHECK(late_ok, "churn-D: late joiners catch up to the current value");
+      ST_CHECK(live_ok, "churn-D: survivor subscriptions deliver through every wave");
+      dart_node_mem_stats(P, &mem, &peak, &calls);
+      ST_CHECK(mem <= p_mem1 + 512, "churn-D: publisher memory plateaus over peer churn (%u -> %u)",
+               (unsigned)p_mem1, (unsigned)mem);
+      dart_node_mem_stats(C, &mem, &peak, &calls);
+      ST_CHECK(mem <= c_mem1 + 512, "churn-D: typed subscriber memory plateaus (%u -> %u)",
+               (unsigned)c_mem1, (unsigned)mem);
+      dart_node_mem_stats(U, &mem, &peak, &calls);
+      ST_CHECK(mem <= u_mem1 + 512, "churn-D: untyped subscriber memory plateaus (%u -> %u)",
+               (unsigned)u_mem1, (unsigned)mem);
+      ST_CHECK(i_dart_node_topic_count(P) == p_hi0 && i_dart_node_topic_count(C) == c_hi0,
+               "churn-D: topic tables never grew"); }
+
+    dart_node_close(P,0); dart_node_close(C,0); dart_node_close(U,0);
+    dart_allocator_reset(&pa); dart_allocator_reset(&ca); dart_allocator_reset(&ua);
+    dart_allocator_reset(&ma);
+}
+
 /* ===================== match-wait checks (19f) ===========================
  * The send-path match wait (runtime.h "MATCH WAIT"): a first send racing the announce/
  * detail cycle must reach an already-present subscriber; a disabled wait must drop
@@ -5952,6 +6219,7 @@ static int selftest_main(void){
     retire_checks();              /* 19e3. pattern retire: successor binds where a twin would shadow */
     reflect_dropped_checks();     /* 19e4. entity walk refuses dropped peers unless opted in */
     varwait_checks();             /* 19e5. accessor first write rides the match wait */
+    churn_checks();               /* 19e6. retire/reuse churn soak: slots reuse, nothing balloons */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */
