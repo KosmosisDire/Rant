@@ -3815,9 +3815,13 @@ static void queue_checks(void){
 static volatile int   pf_reply_done;
 static DartCallStatus pf_reply_status;
 static uint32_t       pf_reply_val;
+static char           pf_reply_msg[DART_CALL_MSG_MAX + 1]; static size_t pf_reply_msg_len;
 static void pf_on_reply(const DartResponse *r){
     pf_reply_status = r->status;
     pf_reply_val = r->data.len>=4 ? i_dart_le_r32(r->data.data) : 0;
+    pf_reply_msg_len = r->message.len <= DART_CALL_MSG_MAX ? r->message.len : DART_CALL_MSG_MAX;
+    if (pf_reply_msg_len) memcpy(pf_reply_msg, r->message.data, pf_reply_msg_len);
+    pf_reply_msg[pf_reply_msg_len] = 0;
     pf_reply_done = 1;
 }
 static int pf_calls;
@@ -3829,6 +3833,16 @@ static void pf_add_handler(DartRequest *req, void *user){
     dart_request_reply(req, dart_bytes(out,4));
 }
 static void pf_empty_handler(DartRequest *req, void *user){ (void)req;(void)user; pf_calls++; /* no reply -> auto OK */ }
+/* fail with an over-long message (300 > DART_CALL_MSG_MAX) AND a structured payload: pins
+ * the wire-carried APP_ERROR text, the truncation-not-refusal cap, and that data still
+ * rides beside the message (it lives in the header, not the payload) */
+static void pf_fail_handler(DartRequest *req, void *user){
+    char big[301]; int i; uint8_t out[4]; (void)user; pf_calls++;
+    for (i=0;i<300;i++) big[i] = (char)('a' + i%26);
+    big[300] = 0;
+    i_dart_le_w32(out, 13);
+    dart_request_fail(req, big, dart_bytes(out,4));
+}
 /* second caller's reply capture (two-caller directed-isolation test) */
 static volatile int   pf_reply2_done;
 static DartCallStatus pf_reply2_status;
@@ -3880,7 +3894,7 @@ static void patterns_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartNodeOpts po, co; DartNode *P=NULL, *C=NULL; DartDiscoveryAddr seed;
-    DartFunction *prov, *call_add, *pe, *ce, *pd, *cd, *pnh, *cnh, *ghost;
+    DartFunction *prov, *call_add, *pe, *ce, *pd, *cd, *pnh, *cnh, *ghost, *pfm, *cfm;
     uint16_t dom = ST_DOMAIN+20; int t;
 
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -3902,7 +3916,10 @@ static void patterns_checks(void){
     pnh  = dart_node_create_function_definition(P, "nohd", NULL, NULL, NULL /* no handler */, NULL, NULL);
     cnh  = dart_node_create_remote_function(C, "nohd", NULL, NULL, NULL);
     ghost= dart_node_create_remote_function(C, "ghost",NULL, NULL, &(DartFunctionOpts){ .timeout_us = 150000u });
-    ST_CHECK(prov&&call_add&&pe&&ce&&pd&&cd&&pnh&&cnh&&ghost, "patterns: functions created/opened");
+    pfm  = dart_node_create_function_definition(P, "failm", NULL, NULL, pf_fail_handler, NULL, NULL);
+    cfm  = dart_node_create_remote_function(C, "failm", NULL, NULL, NULL);
+    ST_CHECK(prov&&call_add&&pe&&ce&&pd&&cd&&pnh&&cnh&&ghost&&pfm&&cfm, "patterns: functions created/opened");
+    (void)pfm;
     (void)pe;(void)ce;
 
     for (t=0;t<2000 && dart_function_match_count(call_add)==0;t++) pf_pump(P,C,2);
@@ -3923,7 +3940,25 @@ static void patterns_checks(void){
       dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==42,
-               "patterns: async add(41)=42 OK (done=%d st=%d val=%u)", pf_reply_done, pf_reply_status, pf_reply_val); }
+               "patterns: async add(41)=42 OK (done=%d st=%d val=%u)", pf_reply_done, pf_reply_status, pf_reply_val);
+      ST_CHECK(pf_reply_msg_len==0, "patterns: OK response message empty (len=%u)",
+               (unsigned)pf_reply_msg_len); }
+
+    /* fail with a message: APP_ERROR text rides the response header (truncated at the
+       255 cap, never refused) beside a structured payload */
+    { size_t i; int msg_ok;
+      pf_reply_done=0;
+      dart_function_call_async(cfm, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
+      for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
+      msg_ok = pf_reply_msg_len == DART_CALL_MSG_MAX;
+      for (i=0; msg_ok && i<pf_reply_msg_len; i++)
+          if (pf_reply_msg[i] != (char)('a' + i%26)) msg_ok = 0;
+      ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_APP_ERROR,
+               "patterns: fail -> APP_ERROR (done=%d st=%d)", pf_reply_done, pf_reply_status);
+      ST_CHECK(msg_ok, "patterns: 300-byte message truncated to cap, content intact (len=%u)",
+               (unsigned)pf_reply_msg_len);
+      ST_CHECK(pf_reply_val==13, "patterns: structured payload rides beside the message (val=%u)",
+               pf_reply_val); }
 
     /* empty-ack: handler returns without replying -> auto OK, empty payload */
     { pf_reply_done=0; pf_calls=0;
@@ -3938,24 +3973,30 @@ static void patterns_checks(void){
       for (t=0;t<800 && !pf_defer_token;t++) pf_pump(P,C,2);
       ST_CHECK(pf_defer_token!=0, "patterns: handler deferred (token=%llu)", (unsigned long long)pf_defer_token);
       { uint8_t out[4]; i_dart_le_w32(out,99);
-        dart_function_complete(pd, pf_defer_token, DART_CALL_OK, dart_bytes(out,4)); }
+        dart_function_complete(pd, pf_defer_token, DART_CALL_OK, "deferred done", dart_bytes(out,4)); }
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==99,
-               "patterns: deferred completion delivers 99 (done=%d val=%u)", pf_reply_done, pf_reply_val); }
+               "patterns: deferred completion delivers 99 (done=%d val=%u)", pf_reply_done, pf_reply_val);
+      ST_CHECK(pf_reply_msg_len==13 && memcmp(pf_reply_msg,"deferred done",13)==0,
+               "patterns: complete() message carried on OK (\"%s\")", pf_reply_msg); }
 
     /* no-handler: provider has NULL on_request -> NO_HANDLER */
     { pf_reply_done=0;
       dart_function_call_async(cnh, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_NO_HANDLER,
-               "patterns: no-handler -> NO_HANDLER (done=%d st=%d)", pf_reply_done, pf_reply_status); }
+               "patterns: no-handler -> NO_HANDLER (done=%d st=%d)", pf_reply_done, pf_reply_status);
+      ST_CHECK(pf_reply_msg_len==10 && memcmp(pf_reply_msg,"no handler",10)==0,
+               "patterns: empty wire message defaults to status text (\"%s\")", pf_reply_msg); }
 
     /* timeout: no provider for "ghost" -> client-synthesized TIMEOUT */
     { pf_reply_done=0;
       dart_function_call_async(ghost, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<400 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_TIMEOUT,
-               "patterns: no-provider -> TIMEOUT (done=%d st=%d)", pf_reply_done, pf_reply_status); }
+               "patterns: no-provider -> TIMEOUT (done=%d st=%d)", pf_reply_done, pf_reply_status);
+      ST_CHECK(pf_reply_msg_len==7 && memcmp(pf_reply_msg,"timeout",7)==0,
+               "patterns: synthesized outcome carries status text (\"%s\")", pf_reply_msg); }
 
     /* call BEFORE the match forms: open a fresh function pair and call immediately, before
        any pump could run the announce/detail cycle. The request must QUEUE and flush when
@@ -4034,10 +4075,12 @@ static void patterns_checks(void){
       rc = dart_function_call(cd, dart_bytes(NULL,0), &rep, 120, NULL);
       ST_CHECK(rc==0 && rep.status==DART_CALL_TIMEOUT,
                "patterns: sync local timeout (rc=%d st=%d)", rc, rep.status);
+      ST_CHECK(rep.message.len==7 && memcmp(rep.message.data,"timeout",7)==0,
+               "patterns: sync timeout carries status text");
       for (t=0;t<400 && !pf_defer_token;t++) dart_node_poll(C,2);
       ST_CHECK(pf_defer_token!=0, "patterns: deferred token arrived");
       if (pf_defer_token){ uint8_t out[4]; i_dart_le_w32(out,7);
-          dart_function_complete(pd, pf_defer_token, DART_CALL_OK, dart_bytes(out,4)); }
+          dart_function_complete(pd, pf_defer_token, DART_CALL_OK, NULL, dart_bytes(out,4)); }
       for (t=0;t<200;t++) dart_node_poll(C,2);   /* late reply arrives: must be dropped safely */
       pf_reply_done=0;
       { uint8_t req[4]; i_dart_le_w32(req,60);
@@ -4242,7 +4285,7 @@ static void patterns_checks(void){
             inc += ei.incomplete;
             for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
         }
-        ST_CHECK(fns==5 && vars==4 && sigs==2 && tops==0,
+        ST_CHECK(fns==6 && vars==4 && sigs==2 && tops==0,
                  "reflect: peer entities fold (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
         ST_CHECK(ats==0 && inc==0, "reflect: no internals leak (@bytes=%d incomplete=%d)", ats, inc);
         ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro);
@@ -4260,7 +4303,7 @@ static void patterns_checks(void){
             case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             } }
-        ST_CHECK(fns==5 && vars==4 && sigs==2 && tops==0,
+        ST_CHECK(fns==6 && vars==4 && sigs==2 && tops==0,
                  "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
         ST_CHECK(temp_forceable==1, "reflect: local forceability (temp allow_force=%d)", temp_forceable); } }
 

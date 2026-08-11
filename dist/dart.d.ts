@@ -113,6 +113,7 @@ type Response<Rsp = any> = {
     data: Uint8Array;
     provider: number;
     writtenUs: number;
+    message: string;
 };
 type RequestInfo = {
     caller: number;

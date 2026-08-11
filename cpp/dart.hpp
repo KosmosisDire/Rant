@@ -1545,15 +1545,23 @@ public:
     bool valid() const noexcept { return fn_ != nullptr && token_ != 0; }
     explicit operator bool() const noexcept { return valid(); }
 
-    bool complete(Bytes rsp = Bytes()) { return finish(detail::DART_CALL_OK, rsp); }
-    bool fail(Bytes rsp = Bytes())     { return finish(detail::DART_CALL_APP_ERROR, rsp); }
+    /* message: optional human-readable outcome text (ResponseView::message on the caller;
+     * truncated at DART_CALL_MSG_MAX). On fail it is what a generic consumer displays. */
+    bool complete(Bytes rsp = Bytes(), std::string_view message = {}) {
+        return finish(detail::DART_CALL_OK, message, rsp);
+    }
+    bool fail(std::string_view message = {}, Bytes rsp = Bytes()) {
+        return finish(detail::DART_CALL_APP_ERROR, message, rsp);
+    }
 
 private:
     Deferred(detail::DartFunction* fn, uint64_t token) : fn_(fn), token_(token) {}
-    bool finish(int status, Bytes rsp) {
+    bool finish(int status, std::string_view message, Bytes rsp) {
         if (!valid()) return false;
+        std::string m(message);   /* the C API takes a NUL-terminated string */
         int r = detail::dart_function_complete(fn_, token_,
-                    static_cast<detail::DartCallStatus>(status), priv::to_c(rsp));
+                    static_cast<detail::DartCallStatus>(status),
+                    m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
         fn_ = nullptr; token_ = 0;
         return r == 0;
     }
@@ -1575,7 +1583,13 @@ public:
     uint64_t         written_us()       const { return rq_->written_us; }   /* the caller's write stamp */
 
     void reply(Bytes rsp)       { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
-    void fail(Bytes rsp = {})   { detail::dart_request_fail (rq_, priv::to_c(rsp)); }
+    /* message: the human-readable failure reason (ResponseView::message on the caller,
+     * truncated at DART_CALL_MSG_MAX; empty = the default "app error"). rsp may still
+     * carry structured failure data beside it. */
+    void fail(std::string_view message = {}, Bytes rsp = {}) {
+        std::string m(message);
+        detail::dart_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
+    }
     /* Park the reply: suppresses the auto-ack and lets the handler return now; the
      * returned Deferred completes the call later, from any thread. */
     Deferred<> defer() { return Deferred<>(fn_, detail::dart_request_defer(rq_)); }
@@ -1600,6 +1614,10 @@ public:
     SendStatus send_status() const { return ss_; }
     uint64_t   written_us()     const { return written_; }   /* the provider's write stamp (0 = synthesized) */
     Bytes      data()        const { return { data_.data(), data_.size() }; }
+    /* human-readable outcome text (owned): the provider's message, or default status text
+     * ("timeout", ...) on any answered/synthesized non-OK outcome. Empty on OK with no
+     * message, and on a synchronous send refusal (send_status() carries that). */
+    std::string_view message() const { return message_; }
     /* the schema data decodes with (interned in the node, valid until node close) */
     const detail::DartSchema* raw_schema() const { return schema_; }
 
@@ -1609,6 +1627,7 @@ private:
     uint32_t                  provider_ = 0;
     uint64_t                  written_ = 0;
     std::vector<uint8_t>      data_;
+    std::string               message_;
     const detail::DartSchema* schema_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
 };
@@ -1620,6 +1639,9 @@ public:
     bool       ok()       const { return r_->status == detail::DART_CALL_OK; }
     uint32_t   provider() const { return r_->provider; }
     uint64_t   written_us()  const { return r_->written_us; }   /* the provider's write stamp */
+    /* human-readable outcome text (a view, callback lifetime): the provider's message, or
+     * default status text on any non-OK outcome; empty only on OK with no message. */
+    std::string_view message() const { return { r_->message.data, r_->message.len }; }
 
 private:
     explicit ResponseView(const detail::DartResponse* r)
@@ -2372,7 +2394,7 @@ private:
         Request<> r(rq, b->fn.load());
 #if defined(__cpp_exceptions)
         try { b->h(r); }
-        catch (...) { detail::dart_request_fail(rq, detail::dart_bytes(nullptr, 0)); }
+        catch (...) { detail::dart_request_fail(rq, "handler threw", detail::dart_bytes(nullptr, 0)); }
 #else
         b->h(r);
 #endif
@@ -2424,6 +2446,8 @@ public:
         } else if (rc < 0) {
             r.ss_ = static_cast<SendStatus>(rc);   /* status() stays Timeout: not answered */
         }
+        if (rc >= 0 && out.message.len)   /* answered or timed out: copy the outcome text */
+            r.message_.assign(out.message.data, out.message.len);
         return r;
     }
     /* Async form: returns as soon as the request is committed; on_response fires once
@@ -2815,7 +2839,7 @@ public:
         core_.reply(priv::encode(v, s));
     }
     void reply(Bytes raw)     { core_.reply(raw); }
-    void fail(Bytes raw = {}) { core_.fail(raw); }
+    void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
     Deferred<Rsp> defer()     { return Deferred<Rsp>(core_.defer()); }
 
 private:
@@ -2831,11 +2855,11 @@ public:
     Deferred& operator=(Deferred&&) noexcept = default;
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
-    bool complete(const Rsp& v) {
+    bool complete(const Rsp& v, std::string_view message = {}) {
         std::vector<uint8_t> s;
-        return core_.complete(priv::encode(v, s));
+        return core_.complete(priv::encode(v, s), message);
     }
-    bool fail() { return core_.fail(); }
+    bool fail(std::string_view message = {}) { return core_.fail(message); }
 private:
     Deferred<> core_;
 };
@@ -2849,15 +2873,18 @@ public:
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
     uint64_t   written_us()     const { return written_; }
+    /* human-readable outcome text (owned): see Response<>::message */
+    std::string_view message() const { return message_; }
     const Rsp& value()       const { return v_; }
     const Rsp& operator*()   const { return v_; }
     const Rsp* operator->()  const { return &v_; }
 private:
-    CallStatus st_ = CallStatus::Timeout;
-    SendStatus ss_ = SendStatus::Ok;
-    uint32_t   provider_ = 0;
-    uint64_t   written_ = 0;
-    Rsp        v_{};
+    CallStatus  st_ = CallStatus::Timeout;
+    SendStatus  ss_ = SendStatus::Ok;
+    uint32_t    provider_ = 0;
+    uint64_t    written_ = 0;
+    std::string message_;
+    Rsp         v_{};
     template <class A, class B> friend class RemoteFunction;
 };
 
@@ -2868,15 +2895,18 @@ public:
     bool       ok()         const { return st_ == CallStatus::Ok; }
     uint32_t   provider()   const { return provider_; }
     uint64_t   written_us()    const { return written_; }
+    /* human-readable outcome text (a view, callback lifetime): see ResponseView<>::message */
+    std::string_view message() const { return message_; }
     const Rsp& value()      const { return v_; }
     const Rsp& operator*()  const { return v_; }
     const Rsp* operator->() const { return &v_; }
 private:
     ResponseView() = default;
-    CallStatus st_ = CallStatus::Timeout;
-    uint32_t   provider_ = 0;
-    uint64_t   written_ = 0;
-    Rsp        v_{};
+    CallStatus       st_ = CallStatus::Timeout;
+    uint32_t         provider_ = 0;
+    uint64_t         written_ = 0;
+    std::string_view message_;
+    Rsp              v_{};
     template <class A, class B> friend class RemoteFunction;
 };
 
@@ -2905,7 +2935,7 @@ private:
         if constexpr (std::is_invocable_v<std::decay_t<H>&, const Req&, Request<Rsp>&>) {
             return [f = std::forward<H>(h)](Request<>& u) mutable {
                 Req q{};
-                if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail(); return; }
+                if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
                 Request<Rsp> tr(u);
                 f(q, tr);
             };
@@ -2915,7 +2945,7 @@ private:
                           "simple function handler must return Rsp");
             return [f = std::forward<H>(h)](Request<>& u) mutable {
                 Req q{};
-                if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail(); return; }
+                if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
                 Rsp r = f(q);
                 std::vector<uint8_t> s;
                 u.reply(priv::encode(r, s));
@@ -2949,6 +2979,7 @@ public:
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
+        r.message_.assign(ur.message());   /* own it: ur dies with this frame */
         if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
         return r;
     }
@@ -2959,6 +2990,7 @@ public:
             [cb = std::move(cb)](const ResponseView<>& uv) {
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
+                tv.message_ = uv.message();
                 if (uv.ok()) (void)priv::decode(tv.v_, uv.data(), uv.raw_schema());
                 cb(tv);
             }, opts);

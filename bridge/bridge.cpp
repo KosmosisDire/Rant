@@ -41,7 +41,7 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 6;
+static const int kProtoVersion = 7;
 
 /* Binary frame ops (byte 0). One value space, meaning per direction. EVERY server-to-client
  * data frame ends its header with [u64 written_us], the writer's wall clock at the moment it
@@ -910,29 +910,36 @@ static void on_call(Conn *c, const uint8_t *p, size_t n){
     Ent *e = ent_get(c, id, Ent::FnRemote);
     if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
     auto cb = [c, call](const dart::ResponseView<> &rv){
-        uint8_t hdr[18];
+        std::string_view m = rv.message();
+        size_t ml = m.size() > 255 ? 255 : m.size();   /* one length byte, like the wire */
+        uint8_t hdr[19 + 255];
         hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)rv.status();
         w32(hdr + 6, rv.provider());
         w64(hdr + 10, rv.written_us());
-        push_frame(c, hdr, 18, rv.data());
+        hdr[18] = (uint8_t)ml;
+        if (ml) memcpy(hdr + 19, m.data(), ml);
+        push_frame(c, hdr, 19 + ml, rv.data());
     };
     dart::SendStatus rc = e->fnrem.call_async(dart::Bytes(p + 7, n - 7), cb);
     if (rc != dart::SendStatus::Ok){
         /* the call never launched: answer Cancelled so the promise settles, and carry
          * the reason in a send_error event */
         send_error_event(c, "entity", id, rc);
-        uint8_t hdr[18];
+        uint8_t hdr[19];
         hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)dart::CallStatus::Cancelled;
         w32(hdr + 6, 0);
         w64(hdr + 10, 0);            /* synthesized outcome: no source stamp */
-        push_frame(c, hdr, 18, dart::Bytes());
+        hdr[18] = 0;                 /* no message: the client fills default status text */
+        push_frame(c, hdr, 19, dart::Bytes());
     }
 }
 
 static void on_request_reply(Conn *c, const uint8_t *p, size_t n){
-    if (n < 6) return;
+    if (n < 7) return;
     uint32_t req    = r32(p + 1);
     uint8_t  status = p[5];
+    size_t   ml     = p[6];
+    if (n < 7 + ml) return;   /* malformed message length */
     dart::Deferred<> d;
     {
         std::lock_guard<std::mutex> g(c->mu);
@@ -941,9 +948,10 @@ static void on_request_reply(Conn *c, const uint8_t *p, size_t n){
         d = std::move(it->second);
         c->parked.erase(it);
     }
-    dart::Bytes rsp(p + 6, n - 6);
-    if (status == 0) d.complete(rsp);
-    else             d.fail(rsp);
+    std::string_view msg((const char *)p + 7, ml);
+    dart::Bytes rsp(p + 7 + ml, n - 7 - ml);
+    if (status == 0) d.complete(rsp, msg);
+    else             d.fail(msg, rsp);
 }
 
 static void on_binary(Conn *c, const std::string &frame){
@@ -978,7 +986,7 @@ static void conn_close(const std::shared_ptr<Conn> &c){
         parked = std::move(c->parked);
         c->parked.clear();
     }
-    for (auto &kv : parked) kv.second.fail();
+    for (auto &kv : parked) kv.second.fail("bridge client disconnected");
     if (c->node){
         /* ~Node stops + joins the service thread first, so no handler can be mid-flight
            (touching c->ws) once it returns; it closes with a BYE and frees everything */

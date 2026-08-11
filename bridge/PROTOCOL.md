@@ -1,4 +1,4 @@
-# DART WebSocket bridge protocol (v6)
+# DART WebSocket bridge protocol (v7)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
@@ -81,7 +81,7 @@ request, only for a broken WebSocket.
                                   //   names resolve even for topics this node doesn't share
 ```
 
-Reply: `{ "ok": true, "proto": 6, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 7, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -444,7 +444,7 @@ matching thing in each direction. All headers little-endian.
 | `0x02` | `[u16 entity][u8 mode][payload]` | variable write: mode 0 = set, 1 = force, 2 = unforce (empty payload) |
 | `0x03` | `[u16 entity][payload]` | signal emit (payload may be empty) |
 | `0x04` | `[u16 entity][u32 call][payload]` | function call; `call` is a client-chosen correlation id |
-| `0x05` | `[u32 req][u8 status][payload]` | reply to a pushed request: status 0 = ok, 1 = app_error |
+| `0x05` | `[u32 req][u8 status][u8 msg_len][msg][payload]` | reply to a pushed request: status 0 = ok, 1 = app_error; `msg` = the response message (UTF-8, max 255 bytes, may be empty) |
 
 **Server to client:**
 
@@ -453,13 +453,13 @@ matching thing in each direction. All headers little-endian.
 | `0x01` | `[u16 topic][u32 publisher][u64 written_us][payload]` | topic delivery |
 | `0x02` | `[u16 entity][u8 flags][u64 written_us][payload]` | variable update; `flags` bit0 = forced (shadow source active), bit1 = write-event (an `on_write` push, not a change) |
 | `0x03` | `[u16 entity][u32 emitter][u64 written_us][payload]` | signal firing (listen entities only) |
-| `0x04` | `[u32 call][u8 status][u32 provider][u64 written_us][payload]` | function-call outcome for `call` |
+| `0x04` | `[u32 call][u8 status][u32 provider][u64 written_us][u8 msg_len][msg][payload]` | function-call outcome for `call`; `msg` = the response message (UTF-8, empty when the definition sent none: display the default status text then) |
 | `0x05` | `[u16 fn][u32 req][u64 written_us][payload]` | request payload (pairs with the `request` JSON push) |
 
-Every server-to-client frame carries `written_us` as the LAST header field,
-immediately before the payload: one rule for all five ops, so each frame's other
-fields keep their offsets and the payload starts at 15, 12, 15, 18, 15 bytes
-respectively. Client-to-server frames carry no stamp.
+Every server-to-client frame carries `written_us` as its last fixed header field;
+the call outcome (0x04) alone appends the variable `[u8 msg_len][msg]` after it.
+The payload starts at 15, 12, 15, 19 + msg_len, 15 bytes respectively.
+Client-to-server frames carry no stamp.
 
 **`written_us` is a SOURCE timestamp**: the writing node's wall clock in UTC
 microseconds, taken when its send committed, so a message repaired, replayed from
@@ -476,6 +476,12 @@ Call `status` is the DART `DartCallStatus`: 0 ok, 1 app_error, 2 no_handler,
 3 timeout, 4 peer_lost, 5 cancelled. A call the bridge refuses synchronously
 (out of memory, bad state) answers status 5 (cancelled) plus a `send_error`
 event carrying the reason, so the client's promise always settles.
+
+The call outcome's `msg` is the DART response message (`DartResponse.message`):
+human-readable failure text set by the definition (`dart_request_fail`, or a
+reply frame's `msg`, or -- in the reference client -- a thrown `Error`'s text).
+When it is empty on a non-ok status the client fills the default status text
+("timeout", "no handler", ...), so `message` is always displayable.
 
 **Variable updates** are pushed event-driven off the C `dart_variable_on_change`
 hook: an update frame goes out the moment a change applies (no poll latency),

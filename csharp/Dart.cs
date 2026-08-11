@@ -302,6 +302,7 @@ namespace Dart
         public uint provider;
         public IntPtr user;
         public ulong written_us;
+        public DartStringView message;         // outcome text (default status text if none sent)
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -509,11 +510,11 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_request_reply(IntPtr request, DartBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_request_fail(IntPtr request, DartBytes rsp);
+        internal static extern void dart_request_fail(IntPtr request, byte[] message, DartBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern ulong dart_request_defer(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_complete(IntPtr fn, ulong token, int status, DartBytes rsp);
+        internal static extern int dart_function_complete(IntPtr fn, ulong token, int status, byte[] message, DartBytes rsp);
 
         // patterns: variables
         [DllImport(LIB, CallingConvention = CC)]
@@ -1618,7 +1619,7 @@ namespace Dart
         internal static void AbandonAsync(long id)
         {
             AsyncCall c = TakeAsync(id);
-            if (c != null) c.Tcs.TrySetResult(new DartResponse { Status = CallStatus.Cancelled });
+            if (c != null) c.Tcs.TrySetResult(new DartResponse { Status = CallStatus.Cancelled, Message = "cancelled" });
         }
 
         // rooted delegates handed to native code
@@ -1638,8 +1639,9 @@ namespace Dart
                 try { box.Handler(r); }
                 catch (Exception e)
                 {
-                    // a thrown handler answers AppError; the exception never crosses into C
-                    r.FailQuiet();
+                    // a thrown handler answers AppError with the exception's text as the
+                    // response message; the exception never crosses into C
+                    r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
                     Console.Error.WriteLine("dart on_request: " + e);
                 }
                 finally { r.Expire(); }
@@ -1663,6 +1665,7 @@ namespace Dart
                     WrittenUs = o.written_us,
                     SchemaPtr = o.schema,
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
+                    Message = Codec.Str(o.message),
                 };
                 call.Tcs.TrySetResult(r);
             }
@@ -1766,11 +1769,14 @@ namespace Dart
             _done = true;
         }
 
-        /// <summary>Answer CallStatus.AppError (with an optional error payload).</summary>
-        public void Fail(byte[] rsp = null)
+        /// <summary>Answer CallStatus.AppError. message is the human-readable reason
+        /// (DartResponse.Message on the caller, truncated at 255 bytes; null/empty =
+        /// the default "app error"); rsp may still carry structured failure data.</summary>
+        public void Fail(string message = null, byte[] rsp = null)
         {
             Guard();
-            using (var p = new PinnedBytes(rsp)) Native.dart_request_fail(_ptr, p.B);
+            using (var p = new PinnedBytes(rsp))
+                Native.dart_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
             _done = true;
         }
 
@@ -1784,7 +1790,7 @@ namespace Dart
             return new Deferred(_fn, token);
         }
 
-        internal void FailQuiet() { if (_ptr != IntPtr.Zero && !_done) Fail(); }
+        internal void FailQuiet(string message = null) { if (_ptr != IntPtr.Zero && !_done) Fail(message); }
         internal void Expire() { _ptr = IntPtr.Zero; }
         private void Guard()
         {
@@ -1806,15 +1812,17 @@ namespace Dart
 
         public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
 
-        public bool Complete(byte[] rsp = null) => Finish(CallStatus.Ok, rsp);
-        public bool Fail(byte[] rsp = null) => Finish(CallStatus.AppError, rsp);
+        /// <summary>message as in DartRequest.Fail; also carried on Ok (debug/warning text).</summary>
+        public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
+        public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
 
-        private bool Finish(CallStatus status, byte[] rsp)
+        private bool Finish(CallStatus status, string message, byte[] rsp)
         {
             long token = Interlocked.Exchange(ref _token, 0);   // single-shot
             if (_fn == IntPtr.Zero || token == 0) return false;
             using (var p = new PinnedBytes(rsp))
-                return Native.dart_function_complete(_fn, (ulong)token, (int)status, p.B) == 0;
+                return Native.dart_function_complete(_fn, (ulong)token, (int)status,
+                    string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B) == 0;
         }
     }
 
@@ -1872,6 +1880,11 @@ namespace Dart
         /// <summary>The provider's wall clock when it sent the response (0 = synthesized).</summary>
         public ulong WrittenUs { get; internal set; }
         public byte[] Data { get; internal set; } = Array.Empty<byte>();
+        /// <summary>Human-readable outcome text, the one field to display on a failure:
+        /// the definition's message (Fail/Complete, or a thrown handler's text), else
+        /// default status text ("timeout", ...). Empty only on Ok with no message, and
+        /// on a synchronous send refusal (SendStatus carries that).</summary>
+        public string Message { get; internal set; } = "";
         internal IntPtr SchemaPtr;
 
         public bool Ok => Status == CallStatus.Ok;
@@ -1943,6 +1956,8 @@ namespace Dart
             {
                 r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
             }
+            if (rc >= 0)                        // answered or timed out: the outcome text is filled
+                r.Message = Codec.Str(o.message);
             return r;
         }
 
@@ -2236,7 +2251,7 @@ namespace Dart
         public bool Answered => _core.Answered;
 
         public void Reply(TRsp value) => _core.Reply(_rsp.Encode(value));
-        public void Fail() => _core.Fail();
+        public void Fail(string message = null) => _core.Fail(message);
         public Deferred<TRsp> Defer() => new Deferred<TRsp>(_core.Defer(), _rsp);
     }
 
@@ -2249,8 +2264,8 @@ namespace Dart
         internal Deferred(Deferred core, Schema rsp) { _core = core; _rsp = rsp; }
 
         public bool Valid => _core.Valid;
-        public bool Complete(TRsp value) => _core.Complete(_rsp.Encode(value));
-        public bool Fail() => _core.Fail();
+        public bool Complete(TRsp value, string message = null) => _core.Complete(_rsp.Encode(value), message);
+        public bool Fail(string message = null) => _core.Fail(message);
     }
 
     /// <summary>The typed implementation side. Simple form: the return value is the
@@ -2273,7 +2288,7 @@ namespace Dart
                 h = r =>
                 {
                     object q;
-                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail(); return; }
+                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail("request decode failed"); return; }
                     TRsp outv = handler((TReq)q);   // a throw answers AppError (trampoline catch)
                     if (!r.Answered) r.Reply(rsp.Encode(outv));
                 };
@@ -2293,7 +2308,7 @@ namespace Dart
                 h = r =>
                 {
                     object q;
-                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail(); return; }
+                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail("request decode failed"); return; }
                     handler((TReq)q, new DartRequest<TRsp>(r, rsp));
                 };
             }
@@ -2315,6 +2330,8 @@ namespace Dart
         public uint Provider => Core.Provider;
         public ulong WrittenUs => Core.WrittenUs;
         public SendStatus SendStatus => Core.SendStatus;
+        /// <summary>Human-readable outcome text (see DartResponse.Message).</summary>
+        public string Message => Core.Message;
 
         public TRsp Value
         {
@@ -2322,6 +2339,7 @@ namespace Dart
             {
                 if (!Ok)
                     throw new CallException(Status, "call did not complete Ok: status " + Status
+                        + (Core.Message.Length != 0 ? " (" + Core.Message + ")" : "")
                         + (Core.SendStatus != SendStatus.Ok ? " (send " + Core.SendStatus + ")" : ""));
                 object v;
                 if (!Patterns.TryDecode(RspSchema, Core.SchemaPtr, Core.Data, typeof(TRsp), out v))

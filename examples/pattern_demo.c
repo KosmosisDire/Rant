@@ -62,7 +62,7 @@ static void add_handler(DartRequest *req, void *user)
     int64_t x = dart_get_int(req->data, req->schema, "x");
     int64_t y = dart_get_int(req->data, req->schema, "y");
     uint8_t out[16]; (void)user;
-    if (!req->schema){ dart_request_fail(req, dart_bytes(NULL, 0)); return; }
+    if (!req->schema){ dart_request_fail(req, "untyped request refused", dart_bytes(NULL, 0)); return; }
     dart_schema_message_default(add_rsp_s, out, sizeof out);
     dart_set_int(out, sizeof out, add_rsp_s, "sum", x + y);
     dart_request_reply(req, dart_bytes(out, dart_schema_size(add_rsp_s)));

@@ -30,6 +30,11 @@ extern "C" {
 #define DART_CALL_TIMEOUT_US 5000000u      /* default client call timeout (5s) */
 #endif
 
+/* Max bytes of the human-readable response message (the wire carries its length in one
+ * byte, so this is fixed, not tunable). A longer message passed to dart_request_fail /
+ * dart_function_complete is truncated here, never refused. */
+#define DART_CALL_MSG_MAX 255u
+
 /* ---- FUNCTIONS ---------------------------------------------------------------------- */
 
 /* A call's outcome. OK/APP_ERROR/NO_HANDLER travel on the wire (the response status byte);
@@ -75,6 +80,14 @@ typedef struct {
     void             *user;      /* the user pointer passed to dart_function_call_async */
     uint64_t          written_us; /* the PROVIDER's wall clock when it wrote the response
                                      (DartMsg.written_us); 0 for a synthesized outcome */
+    DartString        message;   /* human-readable outcome text, the ONE field a generic
+                                    consumer (an HMI) displays on failure: the provider's
+                                    message when it sent one (dart_request_fail /
+                                    dart_function_complete, capped at DART_CALL_MSG_MAX),
+                                    else default status text ("timeout", "peer lost", ...)
+                                    for every non-OK outcome, wire-carried or synthesized.
+                                    Empty (len 0) only on OK with no message; .data is
+                                    never NULL. A view, same lifetime as data. */
 } DartResponse;
 typedef void (*DartResponseFn)(const DartResponse *response);
 
@@ -147,11 +160,16 @@ DartFunction *dart_node_meta_function(DartNode *n);   /* NULL when disabled / no
 
 /* ---- in the handler callback (DartRequestFn) ----------------------------------------- */
 void      dart_request_reply(DartRequest *request, DartBytes rsp);   /* answer OK */
-void      dart_request_fail (DartRequest *request, DartBytes rsp);   /* answer APP_ERROR */
+/* Answer APP_ERROR. message is the human-readable reason (NUL-terminated, NULL = none:
+ * the caller then sees the default "app error"; truncated at DART_CALL_MSG_MAX). It rides
+ * the response header, so rsp may still carry structured failure data beside it. */
+void      dart_request_fail (DartRequest *request, const char *message, DartBytes rsp);
 /* Defer the reply: returns a token (0 on failure), suppresses the auto-ack, and lets the
- * handler return now. Complete it later (from any thread) with dart_function_complete. */
+ * handler return now. Complete it later (from any thread) with dart_function_complete
+ * (message as in dart_request_fail; also carried on OK for warning/debug text). */
 uint64_t  dart_request_defer(DartRequest *request);
-int       dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus status, DartBytes rsp);
+int       dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus status,
+                                 const char *message, DartBytes rsp);
 
 /* ---- VARIABLES ---------------------------------------------------------------------- */
 

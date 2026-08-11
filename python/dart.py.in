@@ -467,6 +467,7 @@ class DartResponse(Structure):
         ("provider", c_uint32),
         ("user", c_void_p),
         ("written_us", c_uint64),
+        ("message", DartStringView),   # outcome text (default status text if none sent)
     ]
 
 
@@ -575,9 +576,9 @@ def _bind(lib):
     F("dart_function_call_async", [c_void_p, DartBytes, _RspFn, c_void_p, c_void_p], c_int)
     F("dart_function_match_count", [c_void_p], c_int)
     F("dart_request_reply", [POINTER(DartRequest), DartBytes], None)
-    F("dart_request_fail", [POINTER(DartRequest), DartBytes], None)
+    F("dart_request_fail", [POINTER(DartRequest), c_char_p, DartBytes], None)
     F("dart_request_defer", [POINTER(DartRequest)], c_uint64)
-    F("dart_function_complete", [c_void_p, c_uint64, c_int, DartBytes], c_int)
+    F("dart_function_complete", [c_void_p, c_uint64, c_int, c_char_p, DartBytes], c_int)
     F("dart_node_create_variable_definition", [c_void_p, c_char_p, c_void_p,
                                                POINTER(DartVariableOpts)], c_void_p)
     F("dart_node_create_remote_variable", [c_void_p, c_char_p, c_void_p,
@@ -2512,11 +2513,13 @@ class Request:
         del buf
         self._done = True
 
-    def fail(self, rsp=None):
-        """Answer CallStatus.APP_ERROR (with an optional error payload)."""
+    def fail(self, message=None, rsp=None):
+        """Answer CallStatus.APP_ERROR. message is the human-readable reason
+        (Response.message on the caller, truncated at 255 bytes; None/empty =
+        the default "app error"); rsp may still carry structured failure data."""
         self._guard()
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        _load().dart_request_fail(self._ptr, b)
+        _load().dart_request_fail(self._ptr, message.encode("utf-8") if message else None, b)
         del buf
         self._done = True
 
@@ -2557,21 +2560,23 @@ class Deferred:
     def valid(self):
         return self._token != 0
 
-    def complete(self, rsp=None):
-        """Answer CallStatus.OK with rsp. True if the completion was accepted."""
-        return self._finish(CallStatus.OK, rsp)
+    def complete(self, rsp=None, message=None):
+        """Answer CallStatus.OK with rsp. True if the completion was accepted.
+        message is optional debug/warning text (Response.message on the caller)."""
+        return self._finish(CallStatus.OK, message, rsp)
 
-    def fail(self, rsp=None):
-        """Answer CallStatus.APP_ERROR."""
-        return self._finish(CallStatus.APP_ERROR, rsp)
+    def fail(self, message=None, rsp=None):
+        """Answer CallStatus.APP_ERROR (message as in Request.fail)."""
+        return self._finish(CallStatus.APP_ERROR, message, rsp)
 
-    def _finish(self, status, rsp):
+    def _finish(self, status, message, rsp):
         with self._lock:
             token, self._token = self._token, 0
         if not token:
             return False
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        r = _load().dart_function_complete(self._fn, token, int(status), b)
+        r = _load().dart_function_complete(self._fn, token, int(status),
+                                           message.encode("utf-8") if message else None, b)
         del buf
         return r == 0
 
@@ -2581,7 +2586,8 @@ class Response:
     the call. status/send_status/data/provider never raise; reading .value when
     not ok raises CallError. send_status carries a synchronous refusal (status
     stays TIMEOUT then: the call never launched)."""
-    __slots__ = ("status", "send_status", "provider", "written_us", "data", "_value", "_decoded")
+    __slots__ = ("status", "send_status", "provider", "written_us", "data", "message",
+                 "_value", "_decoded")
 
     def __init__(self):
         self.status = CallStatus.TIMEOUT
@@ -2589,6 +2595,10 @@ class Response:
         self.provider = 0
         self.written_us = 0   # the provider's wall clock when it wrote the reply (0 = synthesized)
         self.data = b""
+        self.message = ""     # human-readable outcome text, the one field to display on a
+                              # failure: the definition's message (fail/complete, or a raising
+                              # handler's str(e)), else default status text ("timeout", ...).
+                              # "" only on OK with no message, and on a synchronous refusal.
         self._value = None
         self._decoded = False
 
@@ -2600,6 +2610,7 @@ class Response:
         self.provider = o.provider
         self.written_us = o.written_us
         self.data = string_at(o.data.data, o.data.len) if o.data.data and o.data.len else b""
+        self.message = _dstr(o.message)
         if self.status == CallStatus.OK:
             # decode NOW: the wire-schema view dies with the C callback/call
             self._value, self._decoded = _decode_payload(o.schema, rsp_schema, self.data)
@@ -2615,7 +2626,8 @@ class Response:
         pair). Raises CallError when the call did not complete OK."""
         if not self.ok:
             name = self.status.name if isinstance(self.status, CallStatus) else self.status
-            tail = "" if self.send_status == SendStatus.OK else " (send %s)" % self.send_status
+            tail = "" if not self.message else " (%s)" % self.message
+            tail += "" if self.send_status == SendStatus.OK else " (send %s)" % self.send_status
             raise CallError(self.status, self.send_status,
                             "call did not complete OK: %s%s" % (name, tail))
         if not self._decoded:
@@ -2646,7 +2658,7 @@ class _FnBox:
         try:
             val, ok = _decode_payload(r.schema, self.req_schema, data)
             if not ok:
-                request.fail()
+                request.fail("request decode failed")
                 return
             if self.arity == 1:
                 out = self.handler(val)
@@ -2654,12 +2666,13 @@ class _FnBox:
                     request.reply(out)
             else:
                 self.handler(val, request)
-        except Exception:
-            # a raising handler answers APP_ERROR; the exception never crosses into C
+        except Exception as e:
+            # a raising handler answers APP_ERROR with str(e) as the response message;
+            # the exception never crosses into C
             traceback.print_exc()
             if not request.answered:
                 try:
-                    request.fail()
+                    request.fail(str(e) or "handler threw")
                 except Exception:
                     pass
         finally:
@@ -2809,7 +2822,9 @@ class RemoteFunction:
             return Response._from_c(out, self._rsp_schema)
         r = Response()
         if rc < 0:
-            r.send_status = _send_status(rc)
+            r.send_status = _send_status(rc)   # never launched: message stays ""
+        else:
+            r.message = _dstr(out.message)     # timed out: the C fills "timeout"
         return r
 
     def call_async(self, req, on_response, provider=0):

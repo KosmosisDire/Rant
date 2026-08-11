@@ -179,6 +179,16 @@ type Response<Rsp = any> = {
     data: Uint8Array;         /* the raw reply payload */
     provider: number;         /* peer id of the answering node (0 if none) */
     writtenUs: number;           /* the provider's source stamp (see rdWrittenUs); 0 = synthesized */
+    message: string;          /* human-readable outcome text, the one field to display on a
+                                 failure: the definition's message (a throw's Error.message,
+                                 or the C side's dart_request_fail text), else default status
+                                 text ("timeout", ...). "" only on ok with no message. */
+};
+
+/* default Response.message per status when the definition sent no text (mirrors the C) */
+const CALL_STATUS_TEXT: Record<CallStatusName, string> = {
+    ok: "", app_error: "app error", no_handler: "no handler",
+    timeout: "timeout", peer_lost: "peer lost", cancelled: "cancelled",
 };
 
 type RequestInfo = { caller: number; callerName: string; writtenUs: number };
@@ -706,17 +716,22 @@ class FunctionDefinition<Req = any, Rsp = any> {
     async _handle(reqId: number, info: RequestInfo, payload: Uint8Array): Promise<void> {
         let status = 0;
         let rsp = new Uint8Array(0);
+        let msg = new Uint8Array(0);
         try {
             const out = await this._handler(this.reqLayout.decode(payload) as Req, info);
             rsp = this.rspLayout.encode(out);
-        } catch {
-            status = 1;   /* app_error */
+        } catch (e: any) {
+            status = 1;   /* app_error; the throw's text becomes the response message */
+            const t = typeof e?.message === "string" ? e.message : (typeof e === "string" ? e : "");
+            if (t) msg = enc.encode(t).subarray(0, 255);   /* one length byte, like the wire */
         }
-        const frame = new Uint8Array(6 + rsp.length);
+        const frame = new Uint8Array(7 + msg.length + rsp.length);
         frame[0] = OP_REQUEST;
         new DataView(frame.buffer).setUint32(1, reqId, true);
         frame[5] = status;
-        frame.set(rsp, 6);
+        frame[6] = msg.length;
+        frame.set(msg, 7);
+        frame.set(rsp, 7 + msg.length);
         this._node._ws.send(frame);
     }
 }
@@ -766,7 +781,8 @@ class RemoteFunction<Req = any, Rsp = any> {
                 p.timer = setTimeout(() => {
                     this._node._calls.delete(callId);
                     resolve({ ok: false, status: "timeout", value: undefined,
-                              data: new Uint8Array(0), provider: 0, writtenUs: 0 });
+                              data: new Uint8Array(0), provider: 0, writtenUs: 0,
+                              message: CALL_STATUS_TEXT.timeout });
                 }, timeoutMs);
             }
             this._node._calls.set(callId, p);
@@ -984,7 +1000,8 @@ class DartNode {
                 if (p.timer !== undefined) clearTimeout(p.timer);
                 if (this._closing)
                     p.resolve({ ok: false, status: "cancelled", value: undefined,
-                                data: new Uint8Array(0), provider: 0, writtenUs: 0 });
+                                data: new Uint8Array(0), provider: 0, writtenUs: 0,
+                                message: CALL_STATUS_TEXT.cancelled });
                 else
                     p.reject(new Error("connection closed"));
             }
@@ -1051,15 +1068,17 @@ class DartNode {
             if (s instanceof DartSignal) s._fire(view.getUint32(3, true), b.subarray(15), rdWrittenUs(view, 7));
             return;
         }
-        case OP_CALL: {                      /* [u32 call][u8 status][u32 provider][u64 written][payload] */
-            if (b.length < 18) return;
+        case OP_CALL: {                      /* [u32 call][u8 status][u32 provider][u64 written][u8 msg_len][msg][payload] */
+            if (b.length < 19) return;
             const callId = view.getUint32(1, true);
             const p = this._calls.get(callId);
             if (!p) return;                  /* client-side timeout already settled it */
             this._calls.delete(callId);
             if (p.timer !== undefined) clearTimeout(p.timer);
             const status = CALL_STATUS[b[5]] ?? "cancelled";
-            const data = b.subarray(18);
+            const ml = b[18];
+            if (b.length < 19 + ml) return;
+            const data = b.subarray(19 + ml);
             p.resolve({
                 ok: status === "ok",
                 status,
@@ -1067,6 +1086,7 @@ class DartNode {
                 data,
                 provider: view.getUint32(6, true),
                 writtenUs: rdWrittenUs(view, 10),
+                message: ml ? dec.decode(b.subarray(19, 19 + ml)) : CALL_STATUS_TEXT[status],
             });
             return;
         }

@@ -159,8 +159,9 @@ typedef struct {
                                         for the callback's duration. */
     DartString     topic_name;     /* topic name (not NUL-terminated; use .data/.len), or {NULL,0} */
     DartBytes      header;           /* pattern-header bytes in front of the payload (the patterns
-                                        layer's call-id/status/flags prefix); {NULL,0} on a plain
-                                        topic. A view valid for the callback / take view. */
+                                        layer's call-id/status/flags prefix; a function response
+                                        also carries its [u8 len][message] text here); {NULL,0} on
+                                        a plain topic. A view valid for the callback / take view. */
     DartBytes      data;             /* the message payload after the header (data.data, data.len) */
     const DartSchema *schema;        /* the schema data decodes with: this topic's fields bound
                                         to the publisher's layout (a typed topic), or the publisher's

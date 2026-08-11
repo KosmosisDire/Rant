@@ -70,6 +70,10 @@ struct DartTopic {   /* schema: node-owned copy */
                                            peers (0 = never computed; the epoch starts at 1) */
     uint8_t  prefix_bytes;              /* pattern-header bytes split off the front of each
                                            delivered payload into DartMsg.header (0 = plain topic) */
+    uint8_t  prefix_string;             /* the fixed prefix is followed by [u8 len][bytes] (a
+                                           response message), split into the header too. Wire
+                                           framing of the KIND (both ends derive it the same
+                                           way, like prefix_bytes itself), not pattern semantics */
     uint8_t  kind;                      /* DartTopicKind, mirrored from the def (reflection) */
     uint8_t  role;                      /* DartRole, mirrored at create + set_role (reflection) */
     uint8_t  name_len;                  /* stable topic-name copy: queued DartMsg views
@@ -384,11 +388,18 @@ static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *wri
     return dart_bytes(wire.data + DART_TIMESTAMP_BYTES, wire.len - DART_TIMESTAMP_BYTES);
 }
 
-/* Split a delivered wire payload into its pattern header (the first prefix_bytes) and the
- * user payload after it. A plain topic (or a wire shorter than the prefix) yields an empty
- * header and the whole payload, so plain delivery is unchanged. */
+/* Split a delivered wire payload into its pattern header (the first prefix_bytes, plus a
+ * [u8 len][bytes] message on a prefix_string topic) and the user payload after it, so the
+ * schema always validates a message-free payload. A plain topic (or a wire shorter than
+ * the prefix) yields an empty header and the whole payload, so plain delivery is
+ * unchanged. A malformed message length is clamped to the wire: never an over-read, the
+ * worst case is an all-header message with an empty (op-only) payload. */
 static void i_dart_node_split(DartTopic *h, DartBytes wire, DartBytes *hdr, DartBytes *payload){
-    uint8_t pfx = (h && (uint32_t)wire.len >= h->prefix_bytes) ? h->prefix_bytes : 0u;
+    size_t pfx = (h && (uint32_t)wire.len >= h->prefix_bytes) ? h->prefix_bytes : 0u;
+    if (pfx && h->prefix_string && wire.len > pfx){
+        size_t ml = wire.data[pfx], avail = wire.len - pfx - 1u;
+        pfx += 1u + (ml <= avail ? ml : avail);
+    }
     hdr->data = pfx ? wire.data : NULL; hdr->len = pfx;
     payload->data = wire.data + pfx; payload->len = wire.len - pfx;
 }
@@ -1238,6 +1249,10 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
         return NULL;
     }
     h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
+    /* a function-response prefix is followed by [u8 len][message] on the wire: derived
+       from the kind, exactly as prefix_bytes is derived from per-kind constants, so
+       every creator of the kind (patterns, the explorer's capture) splits alike */
+    h->prefix_string = (uint8_t)(kind == DART_KIND_FUNC_RSP);
     h->role = (uint8_t)role;
     h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* stable name copy: queued DartMsg views must not point into the relocatable arena */
