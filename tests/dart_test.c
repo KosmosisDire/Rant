@@ -4599,6 +4599,81 @@ static void reflect_dropped_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
+/* ============ variable-set match wait (19e5) ============
+ * A fresh accessor's FIRST write races the announce/detail cycle exactly like a first
+ * topic send or a first function call, but the accessor route used to fail it instantly
+ * with NO_TOPIC. It now rides the send path's match wait: while candidate verdicts are in
+ * flight the write waits (bounded by opts.match_wait_ms) and then derives the verdict, so
+ * NO_TOPIC means the owner is genuinely absent. Converged verdicts stay instant. */
+static void varwait_checks(void){
+    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts ao, bo; DartNode *P, *C; DartDiscoveryAddr seed;
+    DartVariable *vd; int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+31; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao;
+    P = dart_node_open(&aa, "vw-owner",    NULL, NULL, &ao);
+    C = dart_node_open(&ba, "vw-accessor", NULL, NULL, &bo);
+    ST_CHECK(P && C, "varwait: nodes open");
+    if (!(P && C)){ if(P)dart_node_close(P,0); if(C)dart_node_close(C,0); return; }
+
+    { uint8_t b[4]; i_dart_le_w32(b, 20);
+      vd = dart_node_create_variable_definition(P, "vw", NULL,
+               &(DartVariableOpts){ .initial = dart_bytes(b,4) });
+      ST_CHECK(vd != NULL, "varwait: definition created"); }
+
+    /* C must HOLD P's announce nominating vw before the accessor exists (candidates come
+       from the cached blob; without one the route legitimately concludes nobody offers
+       it). Verdicts are NOT yet fetched: C has no matching topic, so no detail request
+       has ever gone out for these entries. */
+    { uint32_t want = (uint32_t)dart_topic_id("vw"); int seen = 0;
+      for (t=0;t<2000 && !seen;t++){
+          const DartDiscoveryPeer *ps; uint16_t pc;
+          pf_pump(P,C,2);
+          ps = dart_node_peers(C,&pc);
+          if (ps && pc){ DartInterestIter it; DartTopicEntry e; memset(&it,0,sizeof it);
+              while (dart_node_peer_interest_next(&ps[0], &it, &e))
+                  if (e.hash==want){ seen=1; break; } }
+      }
+      ST_CHECK(seen, "varwait: C holds P's interest"); }
+
+    /* From here P answers only from its service thread; C is driven solely by the wait
+       nested inside the set call. Create the accessor and write IMMEDIATELY: the old
+       route failed this with NO_TOPIC every time. */
+    dart_node_start(P);
+    { DartVariable *va = dart_node_create_remote_variable(C, "vw", NULL, NULL);
+      uint8_t b[4]; int sr; DartBytes gv;
+      ST_CHECK(va != NULL, "varwait: accessor created");
+      i_dart_le_w32(b, 5);
+      sr = dart_variable_set(va, dart_bytes(b,4));
+      ST_CHECK(sr==DART_OK, "varwait: first write waits out the forming match (%d)", sr);
+      dart_node_stop(P);
+      for (t=0;t<2000;t++){ pf_pump(P,C,2);
+          if (dart_variable_get(vd,&gv)&&gv.len==4&&i_dart_le_r32(gv.data)==5) break; }
+      ST_CHECK(dart_variable_get(vd,&gv)&&gv.len==4&&i_dart_le_r32(gv.data)==5,
+               "varwait: the write reached the owner (5)"); }
+
+    /* converged verdicts stay instant: an owner nobody offers fails NO_TOPIC without
+       consuming the wait bound (the 1s default would show here as a stall). Let the
+       post-open gather latch first (a quiet ~400ms): a node THIS young otherwise pays
+       the gather window once, exactly as a first topic send does. */
+    pf_pump(P,C,400);
+    { DartVariable *orphan = dart_node_create_remote_variable(C, "vw-nobody", NULL, NULL);
+      uint8_t b[4]; int sr; uint64_t t0, dt_ms;
+      ST_CHECK(orphan != NULL, "varwait: orphan accessor created");
+      i_dart_le_w32(b, 1);
+      t0 = i_dart_plat_now_us();
+      sr = orphan ? dart_variable_set(orphan, dart_bytes(b,4)) : 0;
+      dt_ms = (i_dart_plat_now_us() - t0) / 1000u;
+      ST_CHECK(sr==DART_ERR_NO_TOPIC, "varwait: absent owner still NO_TOPIC (%d)", sr);
+      ST_CHECK(dt_ms < 250, "varwait: converged verdict is instant (%u ms)", (unsigned)dt_ms); }
+
+    dart_node_close(P,0); dart_node_close(C,0);
+    dart_allocator_reset(&aa); dart_allocator_reset(&ba);
+}
+
 /* ===================== match-wait checks (19f) ===========================
  * The send-path match wait (runtime.h "MATCH WAIT"): a first send racing the announce/
  * detail cycle must reach an already-present subscriber; a disabled wait must drop
@@ -5876,6 +5951,7 @@ static int selftest_main(void){
     dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
     retire_checks();              /* 19e3. pattern retire: successor binds where a twin would shadow */
     reflect_dropped_checks();     /* 19e4. entity walk refuses dropped peers unless opted in */
+    varwait_checks();             /* 19e5. accessor first write rides the match wait */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */

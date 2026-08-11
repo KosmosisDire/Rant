@@ -1682,8 +1682,10 @@ static int i_dart_node_topic_unsettled(DartNode *n, DartTopic *h, uint64_t now){
 /* Bounded wait for a forming match before a would-be-zero-subscriber send commits: sleep
  * on the poller's progress under a service thread, else pump the loop (both re-check the
  * clock on a short cadence: gather settling is partly time-driven, like settle). Returns
- * the matched count after the wait; a timeout fires DART_E_UNMATCHED_SEND, never silent. */
-static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *h){
+ * the matched count after the wait; with loud set a timeout fires DART_E_UNMATCHED_SEND,
+ * never silent (a routed pattern write passes 0: its caller returns a synchronous
+ * verdict instead of committing a drop). */
+static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *h, int loud){
     uint64_t now = i_dart_plat_now_us();
     uint64_t deadline = now + n->match_wait_us;
     int matched = 0, timed_out = 0;
@@ -1712,7 +1714,7 @@ static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *
         if (now >= deadline){ timed_out = 1; break; }
         i_dart_node_poll_locked(n, 1, 0);   /* nested tick: the lock stays held */
     }
-    if (timed_out){
+    if (timed_out && loud){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_UNMATCHED_SEND;
         e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
@@ -1755,7 +1757,7 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
         if (h && (h->role == DART_PUBSUB || h->role == DART_PUB_ONLY)
               && i_dart_node_topic_unsettled(n, h, i_dart_plat_now_us())){
             if (may_wait && n->match_wait_us){
-                matched = i_dart_node_match_wait(n, topic_index, h);
+                matched = i_dart_node_match_wait(n, topic_index, h, 1);
                 q = dart_transport_topic_qos(n->transport, topic_index);   /* the wait may have grown/moved the arena */
             } else {
                 DartEvent e; memset(&e, 0, sizeof e);
@@ -1962,6 +1964,24 @@ void i_dart_topic_clear_sys(DartTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
     topic->sys_msg_user = NULL;
+}
+
+int i_dart_topic_match_wait(DartTopic *topic){
+    DartNode *n; int acquired, matched;
+    if (!topic) return 0;
+    n = topic->n;
+    acquired = i_dart_node_lock(n);
+    matched = dart_transport_publisher_match_count(n->transport, topic->index);
+    /* wait only when it can help AND can run: a match still forming, the knob on, a
+       publishing role, and not from a callback (acquired == 0 there: no nested pump, no
+       cv wait). Converged matching returns immediately, so a verdict derived after this
+       is never premature and never stalls. */
+    if (acquired && !matched && n->match_wait_us
+        && (topic->role == DART_PUBSUB || topic->role == DART_PUB_ONLY)
+        && i_dart_node_topic_unsettled(n, topic, i_dart_plat_now_us()))
+        matched = i_dart_node_match_wait(n, topic->index, topic, 0);
+    i_dart_node_unlock(n, acquired);
+    return matched;
 }
 
 int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data){

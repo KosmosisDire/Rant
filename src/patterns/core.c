@@ -857,6 +857,21 @@ static int i_dart_var_accessor_route(DartVariable *var){
     return DART_OK;
 }
 
+/* The routed form every accessor write goes through: while the owner match is still
+ * FORMING (a fresh accessor's first write races the announce/detail cycle, exactly the
+ * window a first topic send and a first function call already cover), a NO_TOPIC or
+ * ERR_ROLE verdict is premature, so wait on the set channel like a first send does
+ * (bounded by opts.match_wait_ms; skipped from a callback, with the wait disabled, or
+ * once matching has converged) and re-derive. The verdict stays synchronous and
+ * truthful: a genuinely absent owner is still NO_TOPIC, a read-only owner ERR_ROLE,
+ * both without a stall (converged matching never waits). */
+static int i_dart_var_accessor_route_wait(DartVariable *var){
+    int r = i_dart_var_accessor_route(var);
+    if (r == DART_OK || !var->set) return r;
+    (void)i_dart_topic_match_wait(var->set);
+    return i_dart_var_accessor_route(var);
+}
+
 int dart_variable_set(DartVariable *var, DartBytes value){
     int acquired, r = DART_OK, publish = 0;
     uint32_t my_seq = 0;
@@ -889,7 +904,7 @@ int dart_variable_set(DartVariable *var, DartBytes value){
         i_dart_node_sys_unlock(var->n, acquired);
         return publish ? i_dart_topic_send_hdr(var->value, dart_bytes(hdr, DART__VAR_PREFIX), value) : r;
     }
-    r = i_dart_var_accessor_route(var);
+    r = i_dart_var_accessor_route_wait(var);
     if (r != DART_OK) return r;
     {   uint8_t op = 0;
         return i_dart_topic_send_hdr(var->set, dart_bytes(&op, 1), value);
@@ -907,7 +922,7 @@ int dart_variable_force(DartVariable *var, DartBytes value){
         i_dart_node_sys_unlock(var->n, acquired);
         return DART_OK;
     }
-    r = i_dart_var_accessor_route(var);
+    r = i_dart_var_accessor_route_wait(var);
     if (r != DART_OK) return r;
     {   uint8_t op = DART__SET_OP_FORCE;
         return i_dart_topic_send_hdr(var->set, dart_bytes(&op, 1), value);
@@ -924,7 +939,7 @@ int dart_variable_unforce(DartVariable *var){
         i_dart_node_sys_unlock(var->n, acquired);
         return DART_OK;
     }
-    r = i_dart_var_accessor_route(var);
+    r = i_dart_var_accessor_route_wait(var);
     if (r != DART_OK) return r;
     {   uint8_t op = DART__SET_OP_UNFORCE;
         return i_dart_topic_send_hdr(var->set, dart_bytes(&op, 1), dart_bytes(NULL,0));

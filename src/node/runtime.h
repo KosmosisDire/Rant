@@ -532,6 +532,12 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 /* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
  * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
 void i_dart_topic_clear_sys(DartTopic *topic);
+/* Bounded wait for a PUB pattern topic's forming match (the send path's match wait,
+ * without its send and without DART_E_UNMATCHED_SEND: the caller derives its own
+ * synchronous verdict). Returns the matched count. No wait from inside a callback, with
+ * the knob off (opts.match_wait_ms < 0), or once matching has converged, so calling it
+ * before a routing check never stalls a settled topology. Takes the node lock itself. */
+int  i_dart_topic_match_wait(DartTopic *topic);
 /* Register the patterns layer's node-wide event observer + per-poll tick + close hook
  * (NULL clears). The tick runs each poll pass with now_us and returns its next deadline,
  * folded into the poll wait cap so call timeouts fire on time with no traffic. The close

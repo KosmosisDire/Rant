@@ -3249,6 +3249,12 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 /* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
  * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
 void i_dart_topic_clear_sys(DartTopic *topic);
+/* Bounded wait for a PUB pattern topic's forming match (the send path's match wait,
+ * without its send and without DART_E_UNMATCHED_SEND: the caller derives its own
+ * synchronous verdict). Returns the matched count. No wait from inside a callback, with
+ * the knob off (opts.match_wait_ms < 0), or once matching has converged, so calling it
+ * before a routing check never stalls a settled topology. Takes the node lock itself. */
+int  i_dart_topic_match_wait(DartTopic *topic);
 /* Register the patterns layer's node-wide event observer + per-poll tick + close hook
  * (NULL clears). The tick runs each poll pass with now_us and returns its next deadline,
  * folded into the poll wait cap so call timeouts fire on time with no traffic. The close
@@ -3735,7 +3741,12 @@ int  dart_variable_get(DartVariable *var, DartBytes *out);
 /* Set the value. Definition: apply + publish immediately (absorbed into the shadow source
  * while forced). Remote: send over the set channel. Returns DART_OK; DART_ERR_NO_TOPIC when
  * no owner is matched at all; DART_ERR_ROLE when an owner is matched but advertises no set
- * channel (a read-only variable); or a negative DartResult from the send. */
+ * channel (a read-only variable); or a negative DartResult from the send. A fresh remote's
+ * FIRST write no longer races the forming match: while candidate verdicts are in flight it
+ * waits like a first topic send (bounded by opts.match_wait_ms; skipped from a callback or
+ * with the wait disabled) before deriving the verdict, so NO_TOPIC means the owner is
+ * genuinely absent, never merely still-matching. Converged matching never waits. The same
+ * routing (and wait) covers dart_variable_force / dart_variable_unforce. */
 int  dart_variable_set(DartVariable *var, DartBytes value);
 /* Force the value to `value`: writes are absorbed into the shadow source until unforce, which
  * restores the LATEST absorbed set. Definition: applies locally; returns DART_ERR_STATE unless
@@ -14676,8 +14687,10 @@ static int i_dart_node_topic_unsettled(DartNode *n, DartTopic *h, uint64_t now){
 /* Bounded wait for a forming match before a would-be-zero-subscriber send commits: sleep
  * on the poller's progress under a service thread, else pump the loop (both re-check the
  * clock on a short cadence: gather settling is partly time-driven, like settle). Returns
- * the matched count after the wait; a timeout fires DART_E_UNMATCHED_SEND, never silent. */
-static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *h){
+ * the matched count after the wait; with loud set a timeout fires DART_E_UNMATCHED_SEND,
+ * never silent (a routed pattern write passes 0: its caller returns a synchronous
+ * verdict instead of committing a drop). */
+static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *h, int loud){
     uint64_t now = i_dart_plat_now_us();
     uint64_t deadline = now + n->match_wait_us;
     int matched = 0, timed_out = 0;
@@ -14706,7 +14719,7 @@ static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *
         if (now >= deadline){ timed_out = 1; break; }
         i_dart_node_poll_locked(n, 1, 0);   /* nested tick: the lock stays held */
     }
-    if (timed_out){
+    if (timed_out && loud){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_UNMATCHED_SEND;
         e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
@@ -14749,7 +14762,7 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
         if (h && (h->role == DART_PUBSUB || h->role == DART_PUB_ONLY)
               && i_dart_node_topic_unsettled(n, h, i_dart_plat_now_us())){
             if (may_wait && n->match_wait_us){
-                matched = i_dart_node_match_wait(n, topic_index, h);
+                matched = i_dart_node_match_wait(n, topic_index, h, 1);
                 q = dart_transport_topic_qos(n->transport, topic_index);   /* the wait may have grown/moved the arena */
             } else {
                 DartEvent e; memset(&e, 0, sizeof e);
@@ -14956,6 +14969,24 @@ void i_dart_topic_clear_sys(DartTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
     topic->sys_msg_user = NULL;
+}
+
+int i_dart_topic_match_wait(DartTopic *topic){
+    DartNode *n; int acquired, matched;
+    if (!topic) return 0;
+    n = topic->n;
+    acquired = i_dart_node_lock(n);
+    matched = dart_transport_publisher_match_count(n->transport, topic->index);
+    /* wait only when it can help AND can run: a match still forming, the knob on, a
+       publishing role, and not from a callback (acquired == 0 there: no nested pump, no
+       cv wait). Converged matching returns immediately, so a verdict derived after this
+       is never premature and never stalls. */
+    if (acquired && !matched && n->match_wait_us
+        && (topic->role == DART_PUBSUB || topic->role == DART_PUB_ONLY)
+        && i_dart_node_topic_unsettled(n, topic, i_dart_plat_now_us()))
+        matched = i_dart_node_match_wait(n, topic->index, topic, 0);
+    i_dart_node_unlock(n, acquired);
+    return matched;
 }
 
 int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data){
@@ -16628,6 +16659,21 @@ static int i_dart_var_accessor_route(DartVariable *var){
     return DART_OK;
 }
 
+/* The routed form every accessor write goes through: while the owner match is still
+ * FORMING (a fresh accessor's first write races the announce/detail cycle, exactly the
+ * window a first topic send and a first function call already cover), a NO_TOPIC or
+ * ERR_ROLE verdict is premature, so wait on the set channel like a first send does
+ * (bounded by opts.match_wait_ms; skipped from a callback, with the wait disabled, or
+ * once matching has converged) and re-derive. The verdict stays synchronous and
+ * truthful: a genuinely absent owner is still NO_TOPIC, a read-only owner ERR_ROLE,
+ * both without a stall (converged matching never waits). */
+static int i_dart_var_accessor_route_wait(DartVariable *var){
+    int r = i_dart_var_accessor_route(var);
+    if (r == DART_OK || !var->set) return r;
+    (void)i_dart_topic_match_wait(var->set);
+    return i_dart_var_accessor_route(var);
+}
+
 int dart_variable_set(DartVariable *var, DartBytes value){
     int acquired, r = DART_OK, publish = 0;
     uint32_t my_seq = 0;
@@ -16660,7 +16706,7 @@ int dart_variable_set(DartVariable *var, DartBytes value){
         i_dart_node_sys_unlock(var->n, acquired);
         return publish ? i_dart_topic_send_hdr(var->value, dart_bytes(hdr, DART__VAR_PREFIX), value) : r;
     }
-    r = i_dart_var_accessor_route(var);
+    r = i_dart_var_accessor_route_wait(var);
     if (r != DART_OK) return r;
     {   uint8_t op = 0;
         return i_dart_topic_send_hdr(var->set, dart_bytes(&op, 1), value);
@@ -16678,7 +16724,7 @@ int dart_variable_force(DartVariable *var, DartBytes value){
         i_dart_node_sys_unlock(var->n, acquired);
         return DART_OK;
     }
-    r = i_dart_var_accessor_route(var);
+    r = i_dart_var_accessor_route_wait(var);
     if (r != DART_OK) return r;
     {   uint8_t op = DART__SET_OP_FORCE;
         return i_dart_topic_send_hdr(var->set, dart_bytes(&op, 1), value);
@@ -16695,7 +16741,7 @@ int dart_variable_unforce(DartVariable *var){
         i_dart_node_sys_unlock(var->n, acquired);
         return DART_OK;
     }
-    r = i_dart_var_accessor_route(var);
+    r = i_dart_var_accessor_route_wait(var);
     if (r != DART_OK) return r;
     {   uint8_t op = DART__SET_OP_UNFORCE;
         return i_dart_topic_send_hdr(var->set, dart_bytes(&op, 1), dart_bytes(NULL,0));

@@ -213,7 +213,12 @@ int  dart_variable_get(DartVariable *var, DartBytes *out);
 /* Set the value. Definition: apply + publish immediately (absorbed into the shadow source
  * while forced). Remote: send over the set channel. Returns DART_OK; DART_ERR_NO_TOPIC when
  * no owner is matched at all; DART_ERR_ROLE when an owner is matched but advertises no set
- * channel (a read-only variable); or a negative DartResult from the send. */
+ * channel (a read-only variable); or a negative DartResult from the send. A fresh remote's
+ * FIRST write no longer races the forming match: while candidate verdicts are in flight it
+ * waits like a first topic send (bounded by opts.match_wait_ms; skipped from a callback or
+ * with the wait disabled) before deriving the verdict, so NO_TOPIC means the owner is
+ * genuinely absent, never merely still-matching. Converged matching never waits. The same
+ * routing (and wait) covers dart_variable_force / dart_variable_unforce. */
 int  dart_variable_set(DartVariable *var, DartBytes value);
 /* Force the value to `value`: writes are absorbed into the shadow source until unforce, which
  * restores the LATEST absorbed set. Definition: applies locally; returns DART_ERR_STATE unless
