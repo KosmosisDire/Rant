@@ -1451,6 +1451,14 @@ public:
         return static_cast<SendStatus>(
             detail::dart_topic_set_role(ch_, static_cast<detail::DartRole>(r)));
     }
+    /* RETIRE the topic: the lifecycle verb for re-creating a name with a different
+     * schema (a retype). The topic leaves the announce, every lane tears down, and its
+     * slot parks for reuse by a later create, so retire/create cycles never grow the
+     * node. This handle (and every other handle sharing the slot) is INVALID after
+     * SendStatus::Ok; the wrapper's name cache forgets the name, so the next
+     * Topic(node, name, ...) creates fresh (with a new schema if desired). Refused with
+     * SendStatus::State from a callback, for builtin topics, and mid-dispatch. */
+    SendStatus retire();
     uint16_t index() const {
         if (!ch_) return 0xffff;
         return detail::dart_topic_index(ch_);
@@ -1521,8 +1529,10 @@ public:
     }
 
 private:
-    explicit Topic(detail::DartTopic* c) : ch_(c) {}
+    explicit Topic(detail::DartTopic* c, void* impl = nullptr) : ch_(c), impl_(impl) {}
     detail::DartTopic* ch_ = nullptr;
+    void* impl_ = nullptr;   /* the owning Node::Impl (Node is incomplete here), so
+                                retire() can forget the wrapper's name-cache entry */
     friend class Node;
 };
 
@@ -1857,7 +1867,7 @@ public:
     /* Recover an already-created topic handle by its creation index. */
     Topic topic(uint16_t index) const {
         if (!valid()) return Topic();
-        return Topic(detail::dart_node_topic(impl_->node, index));
+        return Topic(detail::dart_node_topic(impl_->node, index), impl_.get());
     }
 
     /* One loop tick: drives discovery, RX, timers, and flushes queued TX. Blocks
@@ -2034,7 +2044,7 @@ public:
     Topic log_topic(LogLevel level) {
         if (!valid()) return Topic();
         return Topic(detail::dart_node_log_topic(impl_->node,
-                     static_cast<detail::DartLogLevel>(level)));
+                     static_cast<detail::DartLogLevel>(level)), impl_.get());
     }
 
     /* Subscribe to a level's mesh-wide log stream: widens this node's own log handle to
@@ -2307,7 +2317,10 @@ private:
     template <class A> friend class Subscriber;
 };
 
-/* Topic constructor: create, or share the same-name slot with a widened role. */
+/* Topic constructor: create, or share the same-name slot with a widened role. A LIVE
+ * same-name topic with a different schema still refuses (two modules of one process
+ * disagreeing about a name is a bug worth surfacing); retire() the old one first to
+ * retype a name. */
 inline Topic::Topic(Node& node, std::string_view name, Role role,
                     const Schema* schema, const Qos& qos) {
     if (!node.valid()) { priv::raise_msg("dart::Topic: node is not valid"); return; }
@@ -2315,10 +2328,12 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
     std::lock_guard<std::mutex> g(impl->create_mu);
     std::string nm(name);
     uint64_t sh = schema ? schema->hash() : 0;
+    impl_ = impl;
     auto it = impl->topics.find(nm);
     if (it != impl->topics.end()) {
         if (sh && it->second.schema_hash && sh != it->second.schema_hash) {
-            priv::raise_msg("dart::Topic: same-name topic already exists with a different schema");
+            priv::raise_msg("dart::Topic: same-name topic already exists with a different schema"
+                            " (retire() it to retype the name)");
             return;
         }
         uint8_t bits = (uint8_t)(it->second.bits | priv::role_bits(role));
@@ -2336,6 +2351,32 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
               static_cast<detail::DartRole>(role), schema ? schema->raw() : nullptr, &co);
     if (!ch_) { priv::raise_last(impl->node, "dart::Topic create"); return; }
     impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh });
+}
+
+/* Topic retire (see the declaration): on success the C handle is freed, the name-cache
+ * entry and this topic's wrapper subscriptions are forgotten, and this handle (plus any
+ * same-name handle sharing the slot) goes invalid. */
+inline SendStatus Topic::retire() {
+    if (!ch_) return SendStatus::NoTopic;
+    Node::Impl* impl = static_cast<Node::Impl*>(impl_);
+    if (!impl) {   /* no registry back-pointer (default-constructed edge): C-level only */
+        int bare = detail::dart_topic_retire(ch_);
+        if (bare == 0) ch_ = nullptr;
+        return static_cast<SendStatus>(bare);
+    }
+    std::lock_guard<std::mutex> g(impl->create_mu);
+    uint16_t idx = detail::dart_topic_index(ch_);
+    int rc = detail::dart_topic_retire(ch_);
+    if (rc != 0) return static_cast<SendStatus>(rc);
+    for (auto it = impl->topics.begin(); it != impl->topics.end(); ++it)
+        if (it->second.ch == ch_) { impl->topics.erase(it); break; }
+    {   /* drop this index's message handlers: the slot may be reused by a different
+           topic, and stale handlers must never fire for the successor */
+        std::lock_guard<std::mutex> g2(impl->reg_mu);
+        impl->sub_handlers.erase(idx);
+    }
+    ch_ = nullptr;
+    return SendStatus::Ok;
 }
 
 inline Topic Node::create_topic(std::string_view name, Role role,
@@ -2796,6 +2837,7 @@ public:
     int  match_count()      const { return t_.match_count(); }
     int  pending_count()    const { return t_.pending_count(); }
     bool ready()            const { return t_.ready(); }
+    SendStatus retire()           { return t_.retire(); }   /* see Topic::retire */
     Topic& topic()                { return t_; }
 
 private:
@@ -2821,6 +2863,7 @@ public:
 
     std::optional<Message<>> take(int timeout_ms = 0) { return t_.take(timeout_ms); }
     int dispatch(int max_msgs = 0, int timeout_ms = 0) { return t_.dispatch(max_msgs, timeout_ms); }
+    SendStatus retire() { return t_.retire(); }   /* see Topic::retire */
     Topic& topic() { return t_; }
 
 private:
@@ -3234,6 +3277,7 @@ public:
     int  match_count()   const { return core_.match_count(); }
     int  pending_count() const { return core_.pending_count(); }
     bool ready()         const { return core_.ready(); }
+    SendStatus retire()        { return core_.retire(); }   /* see Topic::retire */
     Topic& topic()             { return core_.topic(); }
 
 private:
@@ -3277,6 +3321,7 @@ public:
         return m;
     }
     int dispatch(int max_msgs = 0, int timeout_ms = 0) { return core_.dispatch(max_msgs, timeout_ms); }
+    SendStatus retire() { return core_.retire(); }   /* see Topic::retire */
     Topic& topic() { return core_.topic(); }
 
 private:

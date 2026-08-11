@@ -117,7 +117,7 @@ _EXPORTS = [
     "dart_node_start", "dart_node_stop", "dart_node_is_started",
     "dart_node_evicted_unsent", "dart_last_error",
     "dart_node_create_topic", "dart_node_topic",
-    "dart_topic_send", "dart_topic_set_role", "dart_topic_index",
+    "dart_topic_send", "dart_topic_set_role", "dart_topic_retire", "dart_topic_index",
     "dart_topic_match_count", "dart_topic_drain",
     "dart_topic_take", "dart_topic_dispatch", "dart_node_dispatch",
     "dart_topic_queue_stats",
@@ -546,6 +546,7 @@ def _bind(lib):
     F("dart_node_topic", [c_void_p, c_uint16], c_void_p)
     F("dart_topic_send", [c_void_p, DartBytes], c_int)
     F("dart_topic_set_role", [c_void_p, c_int], c_int)
+    F("dart_topic_retire", [c_void_p], c_int)
     F("dart_topic_index", [c_void_p], c_uint16)
     F("dart_topic_match_count", [c_void_p], c_int)
     F("dart_topic_drain", [c_void_p, c_int], c_int)
@@ -2019,6 +2020,32 @@ class Topic:
 
     def set_role(self, role):
         return self._node._lib.dart_topic_set_role(self._h, int(role))
+
+    def retire(self):
+        """Retire the topic: the lifecycle verb for re-creating a name with a
+        different schema (a retype). The topic leaves the announce, every lane tears
+        down, and its slot parks for reuse by a later create, so retire/create cycles
+        never grow the node. On SendStatus.OK this handle is invalid (every call
+        returns NO_TOPIC) and the name may be created again, with a new schema if
+        desired. Refused (SendStatus.STATE) from a callback, for builtin topics, and
+        while a dispatch on this topic runs."""
+        node = self._node
+        with node._create_lock:
+            if not self._h:
+                return _send_status(-1)
+            idx = node._lib.dart_topic_index(self._h)
+            r = node._lib.dart_topic_retire(self._h)
+            if r == 0:
+                for nm, rec in list(node._topics_by_name.items()):
+                    if rec[0] == self._h:
+                        del node._topics_by_name[nm]
+                        break
+                # the slot may be reused by a different topic: its old decode spec and
+                # message handlers must never apply to the successor
+                node._topic_specs.pop(idx, None)
+                node._sub_handlers.pop(idx, None)
+                self._h = None
+            return _send_status(r)
 
     @property
     def index(self):

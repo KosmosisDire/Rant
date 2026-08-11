@@ -32,6 +32,7 @@ dart_node_create_remote_function
 dart_function_call
 dart_function_call_async
 dart_function_match_count
+dart_topic_retire
 dart_function_retire
 dart_request_reply
 dart_request_fail

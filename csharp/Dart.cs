@@ -398,6 +398,8 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_topic_set_role(IntPtr ch, int role);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_topic_retire(IntPtr ch);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern ushort dart_topic_index(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_topic_match_count(IntPtr ch);
@@ -929,7 +931,7 @@ namespace Dart
     public class Topic
     {
         internal readonly DartNode _node;
-        internal readonly IntPtr _handle;
+        internal IntPtr _handle;   // zeroed by Retire
         internal readonly Schema Schema;
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
@@ -1008,6 +1010,15 @@ namespace Dart
         {
             return (SendStatus)Native.dart_topic_set_role(_handle, (int)role);
         }
+
+        /// <summary>Retire the topic: the lifecycle verb for re-creating a name with a
+        /// different schema (a retype). The topic leaves the announce, every lane tears
+        /// down, and its slot parks for reuse by a later create, so retire/create
+        /// cycles never grow the node. On SendStatus.Ok this handle is invalid (calls
+        /// return NoTopic) and the name may be created again, with a new schema if
+        /// desired. Refused (SendStatus.State) from a callback, for builtin topics, and
+        /// while a Dispatch on this topic runs.</summary>
+        public SendStatus Retire() => _node.RetireTopic(this);
 
         public ushort Index => Native.dart_topic_index(_handle);
 
@@ -1272,7 +1283,8 @@ namespace Dart
                 {
                     if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
                         throw new InvalidOperationException(
-                            "topic '" + name + "' already exists on this node with a different schema");
+                            "topic '" + name + "' already exists on this node with a different schema"
+                            + " (Retire() it to retype the name)");
                     byte bits = (byte)(rec.Bits | RoleBits(role));
                     if (bits != rec.Bits)
                     {
@@ -1293,6 +1305,28 @@ namespace Dart
                 if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
                 _topicsByName[name] = new TopicRec { Handle = h, Bits = RoleBits(role), SchemaHash = sh };
                 return h;
+            }
+        }
+
+        // Topic.Retire: release the native slot for reuse and forget every wrapper
+        // registration for the index (a reused slot may carry a DIFFERENT topic, so a
+        // stale decode type or subscriber handler must never apply to the successor).
+        internal SendStatus RetireTopic(Topic t)
+        {
+            lock (_createLock)
+            {
+                if (t._handle == IntPtr.Zero) return SendStatus.NoTopic;
+                ushort idx = Native.dart_topic_index(t._handle);
+                int r = Native.dart_topic_retire(t._handle);
+                if (r != 0) return (SendStatus)r;
+                string dead = null;
+                foreach (var kv in _topicsByName)
+                    if (kv.Value.Handle == t._handle) { dead = kv.Key; break; }
+                if (dead != null) _topicsByName.Remove(dead);
+                _topicTypes.Remove(idx);
+                lock (_subLock) _subHandlers.Remove(idx);
+                t._handle = IntPtr.Zero;
+                return SendStatus.Ok;
             }
         }
 
