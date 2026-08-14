@@ -1156,8 +1156,7 @@ static int i_dart_pat_peer_claims(DartNode *n, const DartDiscoveryPeer *p, DartS
     while (dart_node_peer_interest_next(p, &it, &e)){
         int claims;
         if (e.hash != hash || e.kind != kind) continue;
-        claims = authority_is_pub ? (e.role == DART_PUB_ONLY || e.role == DART_PUBSUB)
-                                  : (e.role == DART_SUB_ONLY || e.role == DART_PUBSUB);
+        claims = authority_is_pub ? dart_role_pubs(e.role) : dart_role_subs(e.role);
         if (!claims) continue;
         {   /* the hash only nominates: confirm against the fetched name when we hold one */
             DartString nm = dart_node_peer_topic_name(n, p->id, e.index);
@@ -1409,8 +1408,8 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
     out->reliable = e->reliable;
     out->index = e->index;
     out->hash = e->hash;
-    out->provides = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_PUB_ONLY);
-    out->consumes = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_SUB_ONLY);
+    out->provides = (uint8_t)dart_role_pubs(e->role);
+    out->consumes = (uint8_t)dart_role_subs(e->role);
     out->forceable = e->forceable;   /* variable value channel: the owner advertised allow_force */
     out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
 }
@@ -1471,14 +1470,14 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                             i_dart_pat_strip(name, "@set", &base) ? base : name, &e);
             out->writable = 1; out->incomplete = 1;   /* a set channel with no value channel */
             /* a set channel's SUB side is the owner (it receives writes) */
-            out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
-            out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
+            out->provides = (uint8_t)dart_role_subs(e.role);
+            out->consumes = (uint8_t)dart_role_pubs(e.role);
             return 1;
         case DART_KIND_FUNC_REQ:
             i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION, name, &e);
             /* the req channel's SUB side is the provider */
-            out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
-            out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
+            out->provides = (uint8_t)dart_role_subs(e.role);
+            out->consumes = (uint8_t)dart_role_pubs(e.role);
             if (name.len && i_dart_pat_strip(name, "@req", &base)){
                 uint32_t want = i_dart_pat_hash32(base, "@rsp");
                 out->name = base;
@@ -1511,8 +1510,8 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                             i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
             out->incomplete = 1;
             /* the rsp channel's PUB side is the provider */
-            out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
-            out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
+            out->provides = (uint8_t)dart_role_pubs(e.role);
+            out->consumes = (uint8_t)dart_role_subs(e.role);
             out->rsp_schema = out->schema; out->rsp_schema_hash = out->schema_hash;
             out->schema = NULL; out->schema_hash = 0;
             return 1;
@@ -1577,8 +1576,8 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             out->kind = DART_ENTITY_SIGNAL;
             out->name = i_dart_topic_name(s->topic);
             { uint8_t role = i_dart_topic_role(s->topic);
-              out->provides = (uint8_t)(role == DART_PUBSUB || role == DART_PUB_ONLY);
-              out->consumes = (uint8_t)(role == DART_PUBSUB || role == DART_SUB_ONLY); }
+              out->provides = (uint8_t)dart_role_pubs(role);
+              out->consumes = (uint8_t)dart_role_subs(role); }
             out->reliable = 1;
             out->index = dart_topic_index(s->topic);
             out->schema = dart_topic_schema(s->topic);
@@ -1595,8 +1594,8 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
                 out->kind = DART_ENTITY_TOPIC;
                 out->name = i_dart_topic_name(t);
                 { uint8_t role = i_dart_topic_role(t);
-                  out->provides = (uint8_t)(role == DART_PUBSUB || role == DART_PUB_ONLY);
-                  out->consumes = (uint8_t)(role == DART_PUBSUB || role == DART_SUB_ONLY); }
+                  out->provides = (uint8_t)dart_role_pubs(role);
+                  out->consumes = (uint8_t)dart_role_subs(role); }
                 out->index = (uint16_t)(it->next_index - 1);
                 out->schema = dart_topic_schema(t);
                 return 1;

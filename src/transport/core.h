@@ -76,6 +76,11 @@ typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 /* DART_INACTIVE = declared but off (resources stay allocated; dart_transport_set_role flips it) */
 typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
                DART_INACTIVE = 3 } DartRole;
+/* Role direction tests, over our own role or a peer's advertised one (DartTopicEntry.role):
+ * shared by every matching, announce and reflection walk so a flipped predicate is
+ * impossible to misspell. Inline: a role byte test is never worth a call. */
+static inline int dart_role_pubs(uint8_t role){ return role == DART_PUBSUB || role == DART_PUB_ONLY; }
+static inline int dart_role_subs(uint8_t role){ return role == DART_PUBSUB || role == DART_SUB_ONLY; }
 
 /* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
  * layer (src/patterns/) builds functions, variables, and signals over dedicated kinds,

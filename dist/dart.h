@@ -1156,6 +1156,11 @@ typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 /* DART_INACTIVE = declared but off (resources stay allocated; dart_transport_set_role flips it) */
 typedef enum { DART_PUBSUB = 0, DART_PUB_ONLY = 1, DART_SUB_ONLY = 2,
                DART_INACTIVE = 3 } DartRole;
+/* Role direction tests, over our own role or a peer's advertised one (DartTopicEntry.role):
+ * shared by every matching, announce and reflection walk so a flipped predicate is
+ * impossible to misspell. Inline: a role byte test is never worth a call. */
+static inline int dart_role_pubs(uint8_t role){ return role == DART_PUBSUB || role == DART_PUB_ONLY; }
+static inline int dart_role_subs(uint8_t role){ return role == DART_PUBSUB || role == DART_SUB_ONLY; }
 
 /* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
  * layer (src/patterns/) builds functions, variables, and signals over dedicated kinds,
@@ -7681,27 +7686,16 @@ static void i_dart_writer_lane_advance(i_DartTopic *topic, i_DartWriterProxy *w,
 }
 
 
-/* append the filled head slot to history and wake the lanes that carry it */
-static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len){
-    i_DartTopic *topic = &st->topics[topic_index];
-    uint64_t base; uint16_t count;
-    i_dart_writer_seal(st, topic, len, DART__DEST_ALL, &base, &count);
-    { uint32_t li = topic->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
-      while (li != DART__NIL){
-          i_DartLane *l = &st->lanes[li];
-          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enqueue(st, li);
-          li = l->topic_next;
-      }
-    }
-}
-
-
-/* directed variant: the sample is stamped with its destination; only that lane is pushed
- * the data. Every other live lane derives its skip via i_dart_writer_lane_advance (a
+/* Append the filled head slot to history (stamped with dest_slot) and wake the lanes that
+ * carry it: O(matches), not O(max_peers).
+ * BROADCAST (dest_slot == DART__DEST_ALL): every live lane carries the sample, so each is
+ * simply enqueued and nothing below the branch is ever reached.
+ * DIRECTED (a peer slot, or DART__DEST_NONE for a peer nobody holds): only that lane is
+ * pushed the data. Every other live lane derives its skip via i_dart_writer_lane_advance (a
  * reliable one then owes the one-shot floor HB); dormant lanes need nothing here, they
  * derive their skips when they next advance after resume. */
-static void i_dart_writer_commit_directed(DartTransportState *st, uint16_t topic_index, size_t len,
-                                          uint32_t dest_slot){
+static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len,
+                                 uint32_t dest_slot){
     i_DartTopic *topic = &st->topics[topic_index];
     int reliable = (topic->qos.reliability==DART_RELIABLE);
     uint64_t base; uint16_t count;
@@ -7710,7 +7704,7 @@ static void i_dart_writer_commit_directed(DartTransportState *st, uint16_t topic
     for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l = &st->lanes[li];
         if (!l->w.used || st->peer_dormant[l->peer_slot]) continue;
-        if (l->peer_slot == dest_slot){ i_dart_lane_enqueue(st, li); continue; }
+        if (dest_slot == DART__DEST_ALL || l->peer_slot == dest_slot){ i_dart_lane_enqueue(st, li); continue; }
         i_dart_writer_lane_advance(topic, &l->w, l->peer_slot);
         if (reliable && l->w.reader_reliable && l->w.skip_hb) i_dart_lane_enqueue(st, li);
     }
@@ -7758,15 +7752,12 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
 }
 
 
-int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
-    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
-}
-
-
-int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+/* THE send: one prologue (topic lookup, wire cap, role gate, no-subscriber early-out) plus
+ * store + commit, shared by the broadcast and directed entry points. dest_slot is stamped
+ * onto the sample: DART__DEST_ALL = every matched lane, a peer slot = that lane only. */
+static int i_dart_writer_send(DartTransportState *st, uint16_t topic_index,
+                              DartBytes hdr, DartBytes data, uint32_t dest_slot){
     i_DartTopic *topic; size_t len; int r;
-    (void)now;
     topic = i_dart_topic_at(st, topic_index, NULL);                /* rejects the internal meta topic */
     if (!topic) return DART_ERR_NO_TOPIC;
     /* the source stamp is ordinary payload for every size rule: count it in the wire cap */
@@ -7779,28 +7770,30 @@ int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBy
     if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
     r = i_dart_writer_store(st, topic, hdr, data, &len);
     if (r != DART_OK) return r;
-    i_dart_writer_commit(st, (uint16_t)topic_index, len);
+    i_dart_writer_commit(st, topic_index, len, dest_slot);
     return DART_OK;
+}
+
+
+int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
+    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
+    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
+}
+
+
+int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+    (void)now;
+    return i_dart_writer_send(st, topic_index, hdr, data, DART__DEST_ALL);
 }
 
 
 int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
                            DartBytes hdr, DartBytes data, uint64_t now){
-    i_DartTopic *topic; size_t len; int r, peer_slot;
+    int peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown peer: the sample is addressed to
+                                                        nobody but still consumes its seqnos */
     (void)now;
-    topic = i_dart_topic_at(st, topic_index, NULL);
-    if (!topic) return DART_ERR_NO_TOPIC;
-    if (i_dart_writer_too_big(st, topic, i_dart_topic_ts_bytes(topic) + hdr.len + data.len))
-        return DART_ERR_TOO_BIG;
-    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
-    if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
-    r = i_dart_writer_store(st, topic, hdr, data, &len);
-    if (r != DART_OK) return r;
-    peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown peer: the sample is addressed to
-                                                    nobody but still consumes its seqnos */
-    i_dart_writer_commit_directed(st, (uint16_t)topic_index, len,
-                                  peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
-    return DART_OK;
+    return i_dart_writer_send(st, topic_index, hdr, data,
+                              peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
 }
 
 #ifdef DART_SHM
@@ -7822,7 +7815,7 @@ int dart_transport_send_shm(DartTransportState *st, uint16_t topic_index, DartBy
     slot->shm = 1;
     slot->shm_buf = chunk.data;
     memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
-    i_dart_writer_commit(st, (uint16_t)topic_index, len);
+    i_dart_writer_commit(st, topic_index, len, DART__DEST_ALL);
     return DART_OK;
 }
 #endif
@@ -8218,14 +8211,29 @@ int dart_transport_subscriber_progress(DartTransportState *st, uint16_t topic_in
 
 
 /* diagnostic: attribute each reader NACK-arm (a 0->1 transition of ack_pending) to
- * its cause -- a DATA/SHM-DATA arrival or a heartbeat. Pure counting, call it right
- * before any r->ack_pending=1 in the repair paths. arms_data tracks gap-triggered and
+ * its cause -- a DATA/SHM-DATA arrival or a heartbeat. Pure counting, done by
+ * i_dart_reader_ack_now before it sets r->ack_pending. arms_data tracks gap-triggered and
  * progress-refill arming; arms_hb tracks the writer's idle ping (which also drives the
  * tail-loss backstop). Read via dart_transport_repair_stats. (The self-clocked retransmit backstop
  * re-fires via nack_retransmit_us without a fresh arm, so it is not counted here. Resume/
  * position-report arms are control, not counted.) */
 static void i_dart_reader_arm(i_DartTopic *topic, i_DartReaderProxy *r, int is_hb){
     if (!r->ack_pending){ if (is_hb) topic->repair_stats.arms_hb++; else topic->repair_stats.arms_data++; }
+}
+
+/* Arm an immediate ACKNACK on this lane: attribute the arm, mark it pending and due NOW,
+ * optionally force it, then wake the lane so the next poll emits it. The attribution must
+ * run BEFORE ack_pending is set (that ordering is the whole point of the arm counter: it
+ * counts 0->1 transitions). force = this arm owes a cumulative ack even at an unchanged
+ * repair floor (delivery, skip, HB, (re)match); is_hb attributes it to the writer's ping.
+ * Every counted arm in this file goes through here; the control arms in transport/core.c
+ * (resume, position report) stay direct and uncounted on purpose. */
+static void i_dart_reader_ack_now(DartTransportState *st, i_DartTopic *topic, i_DartReaderProxy *r,
+                                  uint16_t topic_index, uint32_t peer_slot, int force, int is_hb){
+    i_dart_reader_arm(topic, r, is_hb);
+    r->ack_pending = 1; r->ack_due_us = 0;
+    if (force) r->ack_force = 1;
+    i_dart_lane_wake(st, topic_index, peer_slot);
 }
 
 static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int topic_index, int peer_slot,
@@ -8235,8 +8243,10 @@ static i_DartReaderOrder i_dart_reader_order_arrival(DartTransportState *st, int
     if (top > r->received_high) r->received_high = top;          /* proof these seqnos exist */
     if (base > r->deliver_upto){
         if (topic->qos.reliability==DART_RELIABLE && r->started){   /* gap: arm a repair NACK */
-            if (!r->ack_pending){ i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; }
-            i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+            /* an ALREADY-armed lane keeps its ack_due_us (re-arming would drop a paced
+               retransmit deadline back to now): just re-wake it */
+            if (r->ack_pending) i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+            else i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,0,0);
             return DART_ORDER_GAP;
         }
         if (r->started && !topic->directed){                     /* best-effort / first contact: adopt.
@@ -8283,10 +8293,8 @@ void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, c
         if (ok > 0){
             r->shm_fail = 0;
             r->deliver_upto = base + count;
-            if (reliable){                  /* ack now, AFTER delivery (zero-copy invariant) */
-                i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-                i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
-            }
+            if (reliable)                   /* ack now, AFTER delivery (zero-copy invariant) */
+                i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
             return;
         }
         if (ok < 0){                        /* refused downstream (consumer queue full) */
@@ -8315,13 +8323,13 @@ void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, c
             topic->repair_stats.msgs_skipped += count;
             r->shm_fail = 0;
             r->deliver_upto = base + count;             /* give up: skip past it, ack the new edge */
-            i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
+            i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
         } else if (reliable){                           /* leave the gap, NACK for a re-send */
-            i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
+            i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,0,0);
         } else {
             r->deliver_upto = base + count;             /* best-effort: no repair, drop it */
+            i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
         }
-        i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
     }
 }
 #endif
@@ -8369,10 +8377,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_TOO_BIG, (uint16_t)topic_index, st->peer_ids[peer_slot],
                       0, sample_len);
           r->deliver_upto = base + count; r->assembly_active = 0;
-          if (reliable){
-              i_dart_reader_arm(topic,r,0); r->ack_pending = 1; r->ack_due_us = 0; r->ack_force = 1;
-              i_dart_lane_wake(st, (uint16_t)topic_index, (uint32_t)peer_slot);
-          }
+          if (reliable) i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
           return;
       }
       buf_cap  = r->assembly_cap;
@@ -8421,13 +8426,10 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           r->assembly_active=0;
       }
       if (reliable){
-          if (done){
-              i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-              i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
-          } else if (new_frag && hole){           /* gap revealed, or repair advanced: request now */
-              i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
-              i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
-          }
+          if (done)
+              i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
+          else if (new_frag && hole)              /* gap revealed, or repair advanced: request now */
+              i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,0,0);
       }
     }
 }
@@ -8471,8 +8473,7 @@ void i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, co
        so emit lets the slow retransmit backstop chase up to it, never the fast gap path.
        The HB always owes a cumulative ack so a writer that lost ours stops re-pinging. */
     r->hb_last=last;
-    i_dart_reader_arm(topic,r,1); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-    i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+    i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,1);
 }
 
 
@@ -8580,8 +8581,7 @@ uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t topic_in
                        un-park, leave the gap, and let the normal repair path re-fetch
                        or skip it (re-sent descriptor / writer HB floor) */
                     r->parked = 0; r->parked_shm = 0; r->assembly_active = 0;
-                    i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0;
-                    i_dart_lane_wake(st,(uint16_t)topic_index,peer_slot);
+                    i_dart_reader_ack_now(st,topic,r,topic_index,peer_slot,0,0);
                     li = next; continue;
                 }
                 accepted = (ok > 0);
@@ -8600,10 +8600,8 @@ uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t topic_in
 #ifdef DART_SHM
                 r->parked_shm = 0; r->shm_fail = 0;
 #endif
-                if (topic->qos.reliability==DART_RELIABLE){   /* ack now, AFTER delivery */
-                    i_dart_reader_arm(topic,r,0); r->ack_pending=1; r->ack_due_us=0; r->ack_force=1;
-                    i_dart_lane_wake(st,(uint16_t)topic_index,peer_slot);
-                }
+                if (topic->qos.reliability==DART_RELIABLE)    /* ack now, AFTER delivery */
+                    i_dart_reader_ack_now(st,topic,r,topic_index,peer_slot,1,0);
             } else still++;
         }
         li = next;
@@ -9060,8 +9058,8 @@ static void i_dart_topic_rematch(DartTransportState *st, uint16_t c, uint16_t pe
     i_DartTopic *topic=&st->topics[c];
     const uint8_t *peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
-    int wuse = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY) && i_dart_bit_get(peer_sub_bitmap,c);
-    int ruse = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY) && i_dart_bit_get(peer_pub_bitmap,c);
+    int wuse = dart_role_pubs(topic->role) && i_dart_bit_get(peer_sub_bitmap,c);
+    int ruse = dart_role_subs(topic->role) && i_dart_bit_get(peer_pub_bitmap,c);
     i_DartLane *l;
     /* rebind hold (writer side only): until this peer proves it applied our announce at
        the slot's rebind version (dart_transport_peer_seen_version), its demux map may
@@ -9287,15 +9285,13 @@ size_t dart_interest_max(uint16_t n_topics){
 /* is this a topic we SUBSCRIBE with a best-effort rate cap? (the rate section's
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_rate_sub(const i_DartTopic *t){
-    return i_dart_topic_announced(t) && t->qos.max_rate_hz
-        && (t->role==DART_SUB_ONLY || t->role==DART_PUBSUB);
+    return i_dart_topic_announced(t) && t->qos.max_rate_hz && dart_role_subs(t->role);
 }
 
 /* is this a topic we PUBLISH without the source stamp? (the no-timestamp section's
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_unstamped_pub(const i_DartTopic *t){
-    return i_dart_topic_announced(t) && t->qos.no_timestamp
-        && (t->role==DART_PUB_ONLY || t->role==DART_PUBSUB);
+    return i_dart_topic_announced(t) && t->qos.no_timestamp && dart_role_pubs(t->role);
 }
 
 /* was this slot ever REBOUND to a different binding? (the generation section's membership
@@ -9530,11 +9526,11 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
                 continue;
             }
         }
-        their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
-        their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        their_pub = dart_role_pubs(role);
+        their_sub = dart_role_subs(role);
         rel       = (flags & DART__INT_RELIABLE) != 0;
         if (their_pub){                                /* their offered QoS vs our subscription */
-            int ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+            int ours_sub = dart_role_subs(topic->role);
             if (ours_sub && topic->qos.reliability==DART_RELIABLE && !rel){
                 i_dart_transport_fire_event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & DART__AST_READ_OK)){
@@ -9752,7 +9748,7 @@ int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry 
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
         out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
         out->hash     = i_dart_le_r32(interest.data + off);
-        if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
+        if (it->phase == 0 && dart_role_pubs(role)){
             out->is_pub = 1;
             if (role==DART_PUBSUB){ it->phase = 1; return 1; }   /* sub direction next call */
             it->left--; it->index++; it->off = off + 5u;
@@ -9994,8 +9990,8 @@ static int i_dart_interest_scan_next(i_DartInterestScan *s){
         if (flags & DART__INT_HOLE_RUN) continue;   /* a run of undefined reserve slots */
         if (role == DART_INACTIVE) continue;        /* declared but off: not advertised */
         s->pos = a; s->hash = i_dart_le_r32(e); s->flags = flags;
-        s->their_pub = (uint8_t)(role==DART_PUBSUB || role==DART_PUB_ONLY);
-        s->their_sub = (uint8_t)(role==DART_PUBSUB || role==DART_SUB_ONLY);
+        s->their_pub = (uint8_t)dart_role_pubs(role);
+        s->their_sub = (uint8_t)dart_role_subs(role);
         return 1;
     }
     return 0;
@@ -10025,8 +10021,8 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
         nc = i_dart_hash32_candidates(st, scan.hash, &cidx);
         if (!nc) continue;                                 /* no local topic: not a candidate */
         topic = &st->topics[cidx];
-        ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
-        ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+        ours_pub = dart_role_pubs(topic->role);
+        ours_sub = dart_role_subs(topic->role);
         if (!((scan.their_pub && ours_sub) || (scan.their_sub && ours_pub))) continue; /* roles never meet */
         if (out){
             if (cnt >= max_wants) break;
@@ -10059,8 +10055,8 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
     if (!i_dart_interest_walk_len(d, interest.len, n)) return 0;
-    ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
-    ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+    ours_pub = dart_role_pubs(topic->role);
+    ours_sub = dart_role_subs(topic->role);
     if (!ours_pub && !ours_sub) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
     i_dart_interest_scan_init(&scan, d, n);
@@ -18826,8 +18822,7 @@ static int i_dart_pat_peer_claims(DartNode *n, const DartDiscoveryPeer *p, DartS
     while (dart_node_peer_interest_next(p, &it, &e)){
         int claims;
         if (e.hash != hash || e.kind != kind) continue;
-        claims = authority_is_pub ? (e.role == DART_PUB_ONLY || e.role == DART_PUBSUB)
-                                  : (e.role == DART_SUB_ONLY || e.role == DART_PUBSUB);
+        claims = authority_is_pub ? dart_role_pubs(e.role) : dart_role_subs(e.role);
         if (!claims) continue;
         {   /* the hash only nominates: confirm against the fetched name when we hold one */
             DartString nm = dart_node_peer_topic_name(n, p->id, e.index);
@@ -19079,8 +19074,8 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
     out->reliable = e->reliable;
     out->index = e->index;
     out->hash = e->hash;
-    out->provides = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_PUB_ONLY);
-    out->consumes = (uint8_t)(e->role == DART_PUBSUB || e->role == DART_SUB_ONLY);
+    out->provides = (uint8_t)dart_role_pubs(e->role);
+    out->consumes = (uint8_t)dart_role_subs(e->role);
     out->forceable = e->forceable;   /* variable value channel: the owner advertised allow_force */
     out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
 }
@@ -19141,14 +19136,14 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                             i_dart_pat_strip(name, "@set", &base) ? base : name, &e);
             out->writable = 1; out->incomplete = 1;   /* a set channel with no value channel */
             /* a set channel's SUB side is the owner (it receives writes) */
-            out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
-            out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
+            out->provides = (uint8_t)dart_role_subs(e.role);
+            out->consumes = (uint8_t)dart_role_pubs(e.role);
             return 1;
         case DART_KIND_FUNC_REQ:
             i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION, name, &e);
             /* the req channel's SUB side is the provider */
-            out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
-            out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
+            out->provides = (uint8_t)dart_role_subs(e.role);
+            out->consumes = (uint8_t)dart_role_pubs(e.role);
             if (name.len && i_dart_pat_strip(name, "@req", &base)){
                 uint32_t want = i_dart_pat_hash32(base, "@rsp");
                 out->name = base;
@@ -19181,8 +19176,8 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                             i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
             out->incomplete = 1;
             /* the rsp channel's PUB side is the provider */
-            out->provides = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_PUB_ONLY);
-            out->consumes = (uint8_t)(e.role == DART_PUBSUB || e.role == DART_SUB_ONLY);
+            out->provides = (uint8_t)dart_role_pubs(e.role);
+            out->consumes = (uint8_t)dart_role_subs(e.role);
             out->rsp_schema = out->schema; out->rsp_schema_hash = out->schema_hash;
             out->schema = NULL; out->schema_hash = 0;
             return 1;
@@ -19247,8 +19242,8 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             out->kind = DART_ENTITY_SIGNAL;
             out->name = i_dart_topic_name(s->topic);
             { uint8_t role = i_dart_topic_role(s->topic);
-              out->provides = (uint8_t)(role == DART_PUBSUB || role == DART_PUB_ONLY);
-              out->consumes = (uint8_t)(role == DART_PUBSUB || role == DART_SUB_ONLY); }
+              out->provides = (uint8_t)dart_role_pubs(role);
+              out->consumes = (uint8_t)dart_role_subs(role); }
             out->reliable = 1;
             out->index = dart_topic_index(s->topic);
             out->schema = dart_topic_schema(s->topic);
@@ -19265,8 +19260,8 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
                 out->kind = DART_ENTITY_TOPIC;
                 out->name = i_dart_topic_name(t);
                 { uint8_t role = i_dart_topic_role(t);
-                  out->provides = (uint8_t)(role == DART_PUBSUB || role == DART_PUB_ONLY);
-                  out->consumes = (uint8_t)(role == DART_PUBSUB || role == DART_SUB_ONLY); }
+                  out->provides = (uint8_t)dart_role_pubs(role);
+                  out->consumes = (uint8_t)dart_role_subs(role); }
                 out->index = (uint16_t)(it->next_index - 1);
                 out->schema = dart_topic_schema(t);
                 return 1;

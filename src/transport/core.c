@@ -451,8 +451,8 @@ static void i_dart_topic_rematch(DartTransportState *st, uint16_t c, uint16_t pe
     i_DartTopic *topic=&st->topics[c];
     const uint8_t *peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
-    int wuse = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY) && i_dart_bit_get(peer_sub_bitmap,c);
-    int ruse = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY) && i_dart_bit_get(peer_pub_bitmap,c);
+    int wuse = dart_role_pubs(topic->role) && i_dart_bit_get(peer_sub_bitmap,c);
+    int ruse = dart_role_subs(topic->role) && i_dart_bit_get(peer_pub_bitmap,c);
     i_DartLane *l;
     /* rebind hold (writer side only): until this peer proves it applied our announce at
        the slot's rebind version (dart_transport_peer_seen_version), its demux map may
@@ -678,15 +678,13 @@ size_t dart_interest_max(uint16_t n_topics){
 /* is this a topic we SUBSCRIBE with a best-effort rate cap? (the rate section's
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_rate_sub(const i_DartTopic *t){
-    return i_dart_topic_announced(t) && t->qos.max_rate_hz
-        && (t->role==DART_SUB_ONLY || t->role==DART_PUBSUB);
+    return i_dart_topic_announced(t) && t->qos.max_rate_hz && dart_role_subs(t->role);
 }
 
 /* is this a topic we PUBLISH without the source stamp? (the no-timestamp section's
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_unstamped_pub(const i_DartTopic *t){
-    return i_dart_topic_announced(t) && t->qos.no_timestamp
-        && (t->role==DART_PUB_ONLY || t->role==DART_PUBSUB);
+    return i_dart_topic_announced(t) && t->qos.no_timestamp && dart_role_pubs(t->role);
 }
 
 /* was this slot ever REBOUND to a different binding? (the generation section's membership
@@ -921,11 +919,11 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
                 continue;
             }
         }
-        their_pub = (role==DART_PUBSUB || role==DART_PUB_ONLY);
-        their_sub = (role==DART_PUBSUB || role==DART_SUB_ONLY);
+        their_pub = dart_role_pubs(role);
+        their_sub = dart_role_subs(role);
         rel       = (flags & DART__INT_RELIABLE) != 0;
         if (their_pub){                                /* their offered QoS vs our subscription */
-            int ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+            int ours_sub = dart_role_subs(topic->role);
             if (ours_sub && topic->qos.reliability==DART_RELIABLE && !rel){
                 i_dart_transport_fire_event(st, DART_TRANSPORT_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & DART__AST_READ_OK)){
@@ -1143,7 +1141,7 @@ int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry 
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
         out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
         out->hash     = i_dart_le_r32(interest.data + off);
-        if (it->phase == 0 && (role==DART_PUBSUB || role==DART_PUB_ONLY)){
+        if (it->phase == 0 && dart_role_pubs(role)){
             out->is_pub = 1;
             if (role==DART_PUBSUB){ it->phase = 1; return 1; }   /* sub direction next call */
             it->left--; it->index++; it->off = off + 5u;
@@ -1385,8 +1383,8 @@ static int i_dart_interest_scan_next(i_DartInterestScan *s){
         if (flags & DART__INT_HOLE_RUN) continue;   /* a run of undefined reserve slots */
         if (role == DART_INACTIVE) continue;        /* declared but off: not advertised */
         s->pos = a; s->hash = i_dart_le_r32(e); s->flags = flags;
-        s->their_pub = (uint8_t)(role==DART_PUBSUB || role==DART_PUB_ONLY);
-        s->their_sub = (uint8_t)(role==DART_PUBSUB || role==DART_SUB_ONLY);
+        s->their_pub = (uint8_t)dart_role_pubs(role);
+        s->their_sub = (uint8_t)dart_role_subs(role);
         return 1;
     }
     return 0;
@@ -1416,8 +1414,8 @@ uint16_t dart_transport_detail_wants(DartTransportState *st, const DartMetaSchem
         nc = i_dart_hash32_candidates(st, scan.hash, &cidx);
         if (!nc) continue;                                 /* no local topic: not a candidate */
         topic = &st->topics[cidx];
-        ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
-        ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+        ours_pub = dart_role_pubs(topic->role);
+        ours_sub = dart_role_subs(topic->role);
         if (!((scan.their_pub && ours_sub) || (scan.their_sub && ours_pub))) continue; /* roles never meet */
         if (out){
             if (cnt >= max_wants) break;
@@ -1450,8 +1448,8 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     if (slot < 0) return 0;
     n = i_dart_le_r16(d);
     if (!i_dart_interest_walk_len(d, interest.len, n)) return 0;
-    ours_pub = (topic->role==DART_PUBSUB || topic->role==DART_PUB_ONLY);
-    ours_sub = (topic->role==DART_PUBSUB || topic->role==DART_SUB_ONLY);
+    ours_pub = dart_role_pubs(topic->role);
+    ours_sub = dart_role_subs(topic->role);
     if (!ours_pub && !ours_sub) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
     i_dart_interest_scan_init(&scan, d, n);

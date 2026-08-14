@@ -64,27 +64,16 @@ static void i_dart_writer_lane_advance(i_DartTopic *topic, i_DartWriterProxy *w,
 }
 
 
-/* append the filled head slot to history and wake the lanes that carry it */
-static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len){
-    i_DartTopic *topic = &st->topics[topic_index];
-    uint64_t base; uint16_t count;
-    i_dart_writer_seal(st, topic, len, DART__DEST_ALL, &base, &count);
-    { uint32_t li = topic->lane_head;       /* wake the matched lanes: O(matches), not O(max_peers) */
-      while (li != DART__NIL){
-          i_DartLane *l = &st->lanes[li];
-          if (l->w.used && !st->peer_dormant[l->peer_slot]) i_dart_lane_enqueue(st, li);
-          li = l->topic_next;
-      }
-    }
-}
-
-
-/* directed variant: the sample is stamped with its destination; only that lane is pushed
- * the data. Every other live lane derives its skip via i_dart_writer_lane_advance (a
+/* Append the filled head slot to history (stamped with dest_slot) and wake the lanes that
+ * carry it: O(matches), not O(max_peers).
+ * BROADCAST (dest_slot == DART__DEST_ALL): every live lane carries the sample, so each is
+ * simply enqueued and nothing below the branch is ever reached.
+ * DIRECTED (a peer slot, or DART__DEST_NONE for a peer nobody holds): only that lane is
+ * pushed the data. Every other live lane derives its skip via i_dart_writer_lane_advance (a
  * reliable one then owes the one-shot floor HB); dormant lanes need nothing here, they
  * derive their skips when they next advance after resume. */
-static void i_dart_writer_commit_directed(DartTransportState *st, uint16_t topic_index, size_t len,
-                                          uint32_t dest_slot){
+static void i_dart_writer_commit(DartTransportState *st, uint16_t topic_index, size_t len,
+                                 uint32_t dest_slot){
     i_DartTopic *topic = &st->topics[topic_index];
     int reliable = (topic->qos.reliability==DART_RELIABLE);
     uint64_t base; uint16_t count;
@@ -93,7 +82,7 @@ static void i_dart_writer_commit_directed(DartTransportState *st, uint16_t topic
     for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
         i_DartLane *l = &st->lanes[li];
         if (!l->w.used || st->peer_dormant[l->peer_slot]) continue;
-        if (l->peer_slot == dest_slot){ i_dart_lane_enqueue(st, li); continue; }
+        if (dest_slot == DART__DEST_ALL || l->peer_slot == dest_slot){ i_dart_lane_enqueue(st, li); continue; }
         i_dart_writer_lane_advance(topic, &l->w, l->peer_slot);
         if (reliable && l->w.reader_reliable && l->w.skip_hb) i_dart_lane_enqueue(st, li);
     }
@@ -141,15 +130,12 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
 }
 
 
-int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
-    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
-}
-
-
-int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+/* THE send: one prologue (topic lookup, wire cap, role gate, no-subscriber early-out) plus
+ * store + commit, shared by the broadcast and directed entry points. dest_slot is stamped
+ * onto the sample: DART__DEST_ALL = every matched lane, a peer slot = that lane only. */
+static int i_dart_writer_send(DartTransportState *st, uint16_t topic_index,
+                              DartBytes hdr, DartBytes data, uint32_t dest_slot){
     i_DartTopic *topic; size_t len; int r;
-    (void)now;
     topic = i_dart_topic_at(st, topic_index, NULL);                /* rejects the internal meta topic */
     if (!topic) return DART_ERR_NO_TOPIC;
     /* the source stamp is ordinary payload for every size rule: count it in the wire cap */
@@ -162,28 +148,30 @@ int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBy
     if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
     r = i_dart_writer_store(st, topic, hdr, data, &len);
     if (r != DART_OK) return r;
-    i_dart_writer_commit(st, (uint16_t)topic_index, len);
+    i_dart_writer_commit(st, topic_index, len, dest_slot);
     return DART_OK;
+}
+
+
+int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
+    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
+    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
+}
+
+
+int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+    (void)now;
+    return i_dart_writer_send(st, topic_index, hdr, data, DART__DEST_ALL);
 }
 
 
 int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
                            DartBytes hdr, DartBytes data, uint64_t now){
-    i_DartTopic *topic; size_t len; int r, peer_slot;
+    int peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown peer: the sample is addressed to
+                                                        nobody but still consumes its seqnos */
     (void)now;
-    topic = i_dart_topic_at(st, topic_index, NULL);
-    if (!topic) return DART_ERR_NO_TOPIC;
-    if (i_dart_writer_too_big(st, topic, i_dart_topic_ts_bytes(topic) + hdr.len + data.len))
-        return DART_ERR_TOO_BIG;
-    if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
-    if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
-    r = i_dart_writer_store(st, topic, hdr, data, &len);
-    if (r != DART_OK) return r;
-    peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown peer: the sample is addressed to
-                                                    nobody but still consumes its seqnos */
-    i_dart_writer_commit_directed(st, (uint16_t)topic_index, len,
-                                  peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
-    return DART_OK;
+    return i_dart_writer_send(st, topic_index, hdr, data,
+                              peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
 }
 
 #ifdef DART_SHM
@@ -205,7 +193,7 @@ int dart_transport_send_shm(DartTransportState *st, uint16_t topic_index, DartBy
     slot->shm = 1;
     slot->shm_buf = chunk.data;
     memcpy(slot->desc, desc, DART_SHM_DESC_BYTES);
-    i_dart_writer_commit(st, (uint16_t)topic_index, len);
+    i_dart_writer_commit(st, topic_index, len, DART__DEST_ALL);
     return DART_OK;
 }
 #endif
