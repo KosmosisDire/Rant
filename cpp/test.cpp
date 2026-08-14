@@ -384,11 +384,139 @@ static bool patterns_leg() {
     return g_failures == fails_at_entry;
 }
 
+/* ---- leg 5: STANDARD TYPES: the mirrors carry a wire NAME, so a Pose field matches
+ * only a Pose. The golden vectors are shared with the C, C# and Python bindings. ---- */
+static const uint64_t HASH_FLOAT3 = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
+
+struct Track {
+    dart::Pose      at;
+    dart::Uuid      id;
+    dart::Timestamp when;
+    dart::Color     tag;
+    dart::Float3    velocity;
+};
+DART_SCHEMA(Track, at, id, when, tag, velocity);
+
+static std::atomic<int> g_track_recv{0};
+static double  g_track_x = 0.0;
+static uint8_t g_track_id0 = 0;
+
+static bool stdtypes_leg() {
+    int fails_at_entry = g_failures;
+    dart::NodeOptions opts;
+    opts.domain = 46;
+    opts.multicast_interface = "127.0.0.1";
+    auto on_evt = [](const dart::Event& e) {
+        if (e.is_error() && e.error() != dart::ErrorKind::SchemaMismatch)
+            std::printf("event(std): %s\n", e.to_string().c_str());
+    };
+    dart::Node a("std-a", [](const dart::MessageView&) {}, on_evt, opts);
+    dart::Node b("std-b", [](const dart::MessageView&) {}, on_evt, opts);
+    chk("std: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    chk("std: A started", a.start());     /* A on its service thread, B pumped by wait_for */
+
+    /* the mirrors ARE the wire, so the memcpy fast path stays available */
+    chk("std: Pose is 56 bytes", sizeof(dart::Pose) == 56);
+    chk("std: Uuid is 16 bytes", sizeof(dart::Uuid) == 16);
+    chk("std: Color is 4 bytes", sizeof(dart::Color) == 4);
+
+    {   /* a standard type as a whole schema: its name, its canonical hash */
+        auto f3 = dart::Schema::compile("Float3");
+        chk("std: Float3 compiles by name alone", f3.has_value());
+        if (f3) {
+            chk("std: Float3 golden hash", f3->hash() == HASH_FLOAT3);
+            chk("std: Float3 is 12 message bytes", f3->size() == 12);
+        }
+        auto pose  = dart::Schema::compile("Pose");
+        auto twist = dart::Schema::compile("Twist");
+        chk("std: Twist and Pose are both 3+4 doubles, never mistaken for each other",
+            pose && twist && !twist->can_read(*pose) && !pose->can_read(*twist));
+        /* the name NARROWS: an anonymous field of the same shape reads a Pose field,
+           never the reverse (a struct ROOT's name stays strict-equal, as before) */
+        auto named_f = dart::Schema::compile("W { at: Pose }");
+        auto bare_f  = dart::Schema::compile(
+            "W { at: { position: { x: f64, y: f64, z: f64 },"
+            "          orientation: { x: f64, y: f64, z: f64, w: f64 } } }");
+        chk("std: an anonymous field of the same shape reads a Pose field",
+            named_f && bare_f && bare_f->can_read(*named_f) && !named_f->can_read(*bare_f));
+        if (pose) {
+            dart::Schema::Field f;
+            int i = pose->field_index("position");
+            chk("std: a named member reports its type name",
+                i >= 0 && pose->field_at((uint16_t)i, f) && f.type_name == "Double3");
+        }
+        auto cloud = dart::Schema::compile("Cloud { pts: Float3[], at: Pose }");
+        chk("std: named types nest and array", cloud.has_value());
+        if (cloud) {
+            dart::Schema::Field f;
+            int i = cloud->field_index("pts");
+            chk("std: an array element reports its type name",
+                i >= 0 && cloud->field_at((uint16_t)i, f)
+                       && f.elem_name == "Float3" && f.elem_size == 12);
+        }
+    }
+
+    {   /* the DART_SCHEMA codec emits the NAMES, never the inlined shapes */
+        dart::Publisher<Track> pub(a, "std/track");
+        const dart::Schema* sc = dart::priv::schema_of<Track>();
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("std: the codec spells named members by name",
+            txt.find("at: Pose") != std::string::npos &&
+            txt.find("id: Uuid") != std::string::npos &&
+            txt.find("when: Timestamp") != std::string::npos &&
+            txt.find("velocity: Float3") != std::string::npos);
+        chk("std: they print back as hoisted definitions, not inlined shapes",
+            txt.find("Pose = {") != std::string::npos &&
+            txt.find("Uuid = u8[16]") != std::string::npos);
+    }
+
+    {   /* end to end through the typed codec */
+        dart::Publisher<Track> pub(a, "std/track2");
+        dart::Subscriber<Track> sub(b, "std/track2", [](const Track& t) {
+            g_track_x = t.at.position.x;
+            g_track_id0 = t.id.bytes[0];
+            g_track_recv++;
+        });
+        chk("std: publisher and subscriber match",
+            wait_for(4000, [&] { return pub.match_count() == 1; }, &b));
+        Track t{};
+        t.at.position = { 4.5, -1.25, 9.0 };
+        t.at.orientation = dart::identity_rotation();
+        t.id.bytes[0] = 0xAB;
+        t.when = dart::now();
+        t.tag = dart::color_from_hex(0x112233FFu);
+        t.velocity = { 1.0f, 2.0f, 3.0f };
+        pub.send(t);
+        chk("std: a Track crosses whole",
+            wait_for(4000, [&] { return g_track_recv.load() > 0; }, &b)
+            && g_track_x == 4.5 && g_track_id0 == 0xAB);
+    }
+
+    {   /* the thin operations */
+        dart::Color c = dart::color_from_hex(0x11223344u);
+        chk("std: Color hex round-trips", c.r == 0x11 && c.a == 0x44
+                                          && dart::color_to_hex(c) == 0x11223344u);
+        chk("std: vector length", dart::length(dart::Double3{ 3.0, 4.0, 0.0 }) == 5.0);
+        dart::Double3 r = dart::rotate(dart::Quaternion{ 0.0, 0.0, 1.0, 0.0 },
+                                       dart::Double3{ 1.0, 0.0, 0.0 });
+        chk("std: quaternion rotate", r.x < -0.999 && r.x > -1.001);
+        dart::Uuid u1 = dart::new_uuid(), u2 = dart::new_uuid();
+        chk("std: new_uuid is random and version 4",
+            !dart::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0
+            && (u1.bytes[6] & 0xF0u) == 0x40u);
+        chk("std: now() is Unix-epoch microseconds", dart::now().us > 1600000000000000LL);
+        chk("std: duration helpers", dart::seconds_of(dart::milliseconds(1500)) == 1.5);
+    }
+    a.stop();
+    return g_failures == fails_at_entry;
+}
+
 /* ---- leg 4: BARE-TYPE roots (no DART_SCHEMA): the type IS the schema ------------- */
 /* The canonical wire of a bare type is its kind alone, so these hashes are the same in
  * every language binding (pinned in C by dart_test's schema-root phase). */
-static const uint64_t HASH_BOOL   = 0xb1edca4f3f7a622aULL;
-static const uint64_t HASH_F32ARR = 0xd166c4a8dcec317bULL;
+static const uint64_t HASH_BOOL   = 0xee90234f61d2520bULL;
+static const uint64_t HASH_F32ARR = 0x314844e3386a1fc4ULL;
 
 static bool value_root_leg() {
     int fails_at_entry = g_failures;
@@ -543,6 +671,11 @@ int main() {
     std::printf("value-root leg:\n");
     bool root_ok = value_root_leg();
     std::printf("%s\n", root_ok ? "PASS: bare-type roots" : "FAIL: value-root leg");
+
+    /* the standard type library */
+    std::printf("stdtypes leg:\n");
+    bool std_ok = stdtypes_leg();
+    std::printf("%s\n", std_ok ? "PASS: standard types" : "FAIL: stdtypes leg");
 
 #if defined(__cpp_exceptions)
     /* a failed constructor throws dart::Error (on_event is required) */

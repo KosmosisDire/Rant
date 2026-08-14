@@ -96,14 +96,74 @@ def round_trip():
 
 # The canonical wire of a bare type is its kind alone, so these hashes are the same in
 # every language binding (pinned in C by dart_test's schema-root phase).
-HASH_BOOL = 0xB1EDCA4F3F7A622A
-HASH_F32ARR = 0xD166C4A8DCEC317B
+HASH_BOOL = 0xEE90234F61D2520B
+HASH_F32ARR = 0x314844E3386A1FC4
 
 
 class Mode(_enum.IntEnum):
     IDLE = 0
     RUN = 1
     FAULT = 2
+
+
+# The Float3 schema is the shared cross-language golden vector: the same wire and the
+# same hash from C, C++, C# and Python (pinned in C by dart_test's stdtypes phase).
+HASH_FLOAT3 = 0x04AA9469CD08B1DD
+
+
+@dataclass
+class Track:
+    """Standard types as ordinary annotations: an ALIAS (Timestamp, Uuid) spells as its
+    name and carries plain int/bytes values; a COMPOSITE (Pose, Color) is a shipped
+    dataclass that names itself. Both NARROW matching, so this never binds to a
+    same-shaped schema that meant something else."""
+    at: dart.Pose = field(default_factory=dart.Pose)
+    when: dart.Timestamp = 0
+    tag: dart.Color = field(default_factory=dart.Color)
+    id: dart.Uuid = bytes(16)
+    velocity: dart.Float3 = field(default_factory=dart.Float3)
+
+
+def std_types():
+    """The standard type library: golden wire, name-narrowed matching, round trip."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    f3 = dart.Schema("Float3")
+    check("Float3 compiles by name alone, golden hash", f3.hash == HASH_FLOAT3)
+    check("Float3 is 12 message bytes", f3.size == 12)
+    check("the mirror dataclass IS that type", dart.Schema(dart.Float3).hash == HASH_FLOAT3)
+
+    # a name narrows: an anonymous field of the same shape reads a Pose field, never the
+    # reverse, and Pose/Twist are both 3+4 doubles yet never mistaken for each other
+    named = dart.Schema("W { at: Pose }")
+    bare = dart.Schema("W { at: { position: { x: f64, y: f64, z: f64 },"
+                       "         orientation: { x: f64, y: f64, z: f64, w: f64 } } }")
+    check("an anonymous field of the same shape reads a Pose field",
+          bare.can_read(named) and not named.can_read(bare))
+    check("Pose and Twist never cross-wire",
+          not dart.Schema("Twist").can_read(dart.Schema("Pose")))
+
+    sch = dart.Schema(Track)
+    text = " ".join(dart.dsl(Track).split())
+    check("the reflected schema spells the names, not the shapes",
+          text == "Track { at: Pose, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
+    check("its message is the sum of the wire shapes (56+8+4+16+12)", sch.size == 96)
+
+    t = Track(at=dart.Pose(position=dart.Double3(4.5, -1.25, 9.0)),
+              when=dart.timestamp_now(), tag=dart.Color(0x11, 0x22, 0x33, 0xFF),
+              id=bytes(range(16)), velocity=dart.Float3(1.0, 2.0, 3.0))
+    back = sch.decode(sch.encode(t))
+    check("a Track round-trips whole",
+          back.at.position.x == 4.5 and back.at.orientation.w == 1.0
+          and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
+          and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
+    check("timestamp_now is Unix-epoch microseconds", dart.timestamp_now() > 1600000000000000)
+    return ok
 
 
 def value_roots():
@@ -405,6 +465,8 @@ def main():
     if not round_trip():
         return 1
     if not value_roots():
+        return 1
+    if not std_types():
         return 1
     print("opening nodes (first run compiles the embedded C, please wait)...")
     sub = dart.Node("sub", on_message, on_event("sub"),

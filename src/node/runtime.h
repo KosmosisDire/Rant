@@ -8,6 +8,9 @@
 #include "../transport/core.h"
 #include "../discovery/core.h"    /* DartDiscoveryAddr (seed peers) */
 #include "../serialize/schema.h"  /* DartSchema (a topic's optional data schema) */
+#ifndef DART_NO_STDTYPES
+#include "../serialize/stdtypes.h" /* DartTimestamp / DartUuid (the two runtime helpers below) */
+#endif
 #include "../common/alloc.h"      /* DartAllocator (the node's memory) */
 #include "core.h"                 /* DartEvent / DartEventFn / dart_event_str (node's app event) */
 
@@ -259,6 +262,17 @@ void         dart_node_unlock(DartNode *n);
  * thread drives the node (and for the reliable backpressure path when it does not);
  * classic poll-it-yourself best-effort keeps plain KEEP_LAST overwrite semantics. */
 uint32_t     dart_node_evicted_unsent(DartNode *n);
+
+#ifndef DART_NO_STDTYPES
+/* The two standard-type values only a runtime can produce (serialize/ stays clock-free and
+ * entropy-free, so they live here rather than beside the type). dart_timestamp_now is the
+ * wall clock in the units a `Timestamp` field declares: microseconds since the Unix epoch,
+ * UTC, the same clock DartMsg.written_us is stamped from. dart_uuid_new fills a random
+ * (version 4) Uuid, falling back to the host's identity mix when the platform has no
+ * entropy source, exactly as a node's own discovery uuid does. Neither needs a node. */
+DartTimestamp dart_timestamp_now(void);
+void          dart_uuid_new(DartUuid *out);
+#endif
 
 /* Create a topic. name is the cross-peer identity (same on every node, copied
  * in). role is DART_PUBSUB / DART_PUB_ONLY / DART_SUB_ONLY / DART_INACTIVE. schema is this

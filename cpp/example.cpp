@@ -20,12 +20,18 @@
 #include <string>
 
 /* A tiny typed schema so deliveries decode through DartMsg.schema. Every node
- * that speaks this topic pastes the identical text. */
+ * that speaks this topic pastes the identical text.
+ *
+ * `Timestamp` and `Color` are STANDARD TYPES (docs/stdtypes.md): always in scope, no
+ * definition needed. The name rides the schema (never a message byte) and NARROWS
+ * matching, so `tint` binds only to another Color and `ts` reads as Unix-epoch
+ * microseconds everywhere, not as an anonymous u64 someone has to document. */
 static const char CHAT_SCHEMA[] =
     "Chat"
     "{"
-    "    ts:      u64,"
+    "    ts:      Timestamp,"     /* Unix-epoch microseconds, UTC */
     "    seq:     u32,"
+    "    tint:    Color,"         /* sRGB RGBA bytes */
     "    textLen: u16,"
     "    text:    u8[240]"
     "}";
@@ -35,12 +41,16 @@ static void handle_message(const dart::MessageView& m) {
     if (m.has_schema()) {
         dart::Bytes text = m.get_array("text");
         uint64_t n = m.get_uint("textLen");
+        int64_t ts = m.get_int("ts");        /* a Timestamp: Unix-epoch microseconds */
         if (n > text.size()) n = text.size();
-        std::printf("[%.*s] %.*s > %.*s  (#%llu)\n",
+        /* both clocks count the same microseconds, so this is one-way latency plus
+           clock skew (meaningful on one host, skew-bound across machines) */
+        std::printf("[%.*s] %.*s > %.*s  (#%llu, +%.2f ms)\n",
                     (int)m.publisher_name().size(),  m.publisher_name().data(),
                     (int)m.topic_name().size(), m.topic_name().data(),
                     (int)n, reinterpret_cast<const char*>(text.data()),
-                    (unsigned long long)m.get_uint("seq"));
+                    (unsigned long long)m.get_uint("seq"),
+                    (double)(dart::now().us - ts) / 1000.0);
     } else {
         std::printf("[%.*s] %.*s > %.*s\n",
                     (int)m.publisher_name().size(),  m.publisher_name().data(),
@@ -79,8 +89,12 @@ int main(int argc, char** argv) {
         size_t len = std::strcspn(line, "\n");
         if (!len) continue;
         if (len > 240) len = 240;
+        dart::Color tint = dart::color_from_hex(0x3080C0FFu);   /* 0xRRGGBBAA */
         dart::MessageBuilder msg(*schema);
-        msg.set_uint("seq", ++seq)
+        msg.set_int("ts", dart::now().us)
+           .set_uint("seq", ++seq)
+           .set_uint("tint.r", tint.r).set_uint("tint.g", tint.g)
+           .set_uint("tint.b", tint.b).set_uint("tint.a", tint.a)
            .set_uint("textLen", (uint64_t)len)
            .set_array("text", dart::Bytes(line, len));
         if (chat.send(msg) != dart::SendStatus::Ok)

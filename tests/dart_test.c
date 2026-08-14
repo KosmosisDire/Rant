@@ -2280,7 +2280,7 @@ static void schema_dsl_checks(void){
             "Pose { x: string[4] }",        /* a fixed string array needs its <cap> */
             "Pose { x: string<0> }",        /* zero cap */
             "Pose { x: string<12 }",        /* missing '>' */
-            "Pose { v: { y: u8[] } }",      /* variable field inside a nested struct */
+            "Pose { v: { y: u8[] }[2] }",   /* variable field inside an array element */
             "Pose { m: map[3] }",           /* a map has no element form */
             "Pose { m: enum<u8> { A=300 } }",  /* value out of the backing range */
             "Pose { m: enum<f32> { A=0 } }",   /* non-integer backing */
@@ -2633,8 +2633,8 @@ static void schema_bigenum_checks(void){
    roots' types: a bool writer and a u8 reader are refused, as is a struct against a bare
    type. Every root kind is covered: compile, print round-trip, empty-path get/set, and end
    to end over two nodes, including a raw (schema-less) reader decoding through the sender's. */
-static const uint64_t SR_HASH_BOOL  = 0xb1edca4f3f7a622aULL;   /* `bool`  canonical wire hash */
-static const uint64_t SR_HASH_F32ARR = 0xd166c4a8dcec317bULL;  /* `f32[]` canonical wire hash */
+static const uint64_t SR_HASH_BOOL  = 0xee90234f61d2520bULL;   /* `bool`  canonical wire hash */
+static const uint64_t SR_HASH_F32ARR = 0x314844e3386a1fc4ULL;  /* `f32[]` canonical wire hash */
 
 /* one bare-type spelling: compiles, prints back to the identical text, recompiles to the
    same wire, and reflects as a single anonymous field with the expected layout */
@@ -2799,18 +2799,26 @@ static void schema_root_checks(void){
     ST_CHECK(dart_schema_compile(dart_allocator_alloc, &ma, "Temperature: f32", NULL) == NULL
           && dart_schema_compile(dart_allocator_alloc, &ma, "bool bool", NULL) == NULL,
              "schema-root: a named bare root and trailing garbage are compile errors");
-    {   /* the wire: a bare root round-trips, and a NAMED one is not canonical (refused) */
+    {   /* the wire: a bare root round-trips; a named one is an ALIAS (v8), but the name
+           may only ride the header, so a NAMED type in root position stays refused */
         DartBytes w = dart_schema_wire(sarr);
         DartSchema *rt = dart_schema_parse(w.data, w.len, dart_allocator_alloc, &ma);
-        uint8_t named[4];
+        DartSchema *alias; uint8_t named[6];
         ST_CHECK(rt && dart_schema_hash(rt) == dart_schema_hash(sarr)
                  && dart_schema_field_count(rt) == 1,
                  "schema-root: a bare root parses back from its wire");
         if (rt) dart_schema_free(rt, dart_allocator_alloc, &ma);
         named[0] = (uint8_t)DART_SCHEMA_WIRE_VERSION;   /* [ver][namelen 1]['x'][BOOL] */
         named[1] = 1; named[2] = 'x'; named[3] = (uint8_t)DART_BOOL;
+        alias = dart_schema_parse(named, 4, dart_allocator_alloc, &ma);
+        ST_CHECK(alias && dart_schema_name(alias).len == 1
+                 && dart_schema_hash(alias) != dart_schema_hash(sb),
+                 "schema-root: a named bare root on the wire is an alias, distinct from `bool`");
+        if (alias) dart_schema_free(alias, dart_allocator_alloc, &ma);
+        named[1] = 0;                                   /* [ver][0][NAMED][1]['x'][BOOL] */
+        named[2] = (uint8_t)DART_NAMED; named[3] = 1; named[4] = 'x'; named[5] = (uint8_t)DART_BOOL;
         ST_CHECK(dart_schema_parse(named, sizeof named, dart_allocator_alloc, &ma) == NULL,
-                 "schema-root: a NAMED bare root on the wire is refused");
+                 "schema-root: a NAMED type in root position is refused (the header names it)");
     }
 
     {   /* empty-path and flat-index-0 access, every kind */
@@ -2960,6 +2968,484 @@ static void schema_root_checks(void){
 
     dart_node_close(P,1); dart_node_close(S,1); dart_node_close(Q,1);
     dart_allocator_reset(&ma);
+}
+
+/* (19a4) SCHEMA WIRE v8, pure (no sockets): NAMED types and the narrow-only matching they
+   buy, alias roots, struct-element arrays with indexed paths, variable members at any
+   struct depth (declaration nests, storage does not), and the refusals that keep an array
+   element's stride static. Everything round-trips through dart_schema_print, which now
+   hoists each named type as a leading definition, dependencies first. */
+static DartAllocator sv_ma;
+static DartSchema *sv(const char *text){                    /* compile, or NULL */
+    return dart_schema_compile(dart_allocator_alloc, &sv_ma, text, NULL);
+}
+static void sv_free(DartSchema *s){ if (s) dart_schema_free(s, dart_allocator_alloc, &sv_ma); }
+/* dart_schema_subset over two texts: 1 yes, 0 refused, -1 a text failed to compile */
+static int sv_sub(const char *sub, const char *pub){
+    DartSchema *a = sv(sub), *b = sv(pub); int r = -1;
+    if (a && b) r = dart_schema_subset(a, b);
+    sv_free(a); sv_free(b);
+    return r;
+}
+static int sv_roundtrip(const char *text){                  /* print -> recompile -> same wire */
+    DartSchema *a = sv(text), *b; char buf[2048]; int ok;
+    if (!a) return 0;
+    dart_schema_print(a, buf, sizeof buf);
+    b = sv(buf);
+    ok = b && dart_schema_hash(b) == dart_schema_hash(a)
+           && dart_schema_print(a, NULL, 0) == (uint32_t)strlen(buf);
+    sv_free(b); sv_free(a);
+    return ok;
+}
+static void schema_v8_checks(void){
+    sv_ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+
+    /* ---- named types NARROW: unnamed reads named, named demands the same name ---- */
+    {   DartSchema *c = sv("Celsius = f32"), *f = sv("Fahrenheit = f32"), *bare = sv("f32");
+        ST_CHECK(c && f && bare, "schema-v8: alias roots compile");
+        if (c && f && bare){
+            ST_CHECK(dart_schema_name(c).len == 7 && dart_schema_hash(c) != dart_schema_hash(f)
+                     && dart_schema_hash(c) != dart_schema_hash(bare),
+                     "schema-v8: an alias root carries its name and its own identity");
+            ST_CHECK(dart_schema_subset(bare, c) == 1 && dart_schema_subset(c, bare) == 0
+                     && dart_schema_subset(c, f) == 0 && dart_schema_subset(c, c) == 1,
+                     "schema-v8: alias roots narrow (unnamed reads named, never the reverse)");
+            ST_CHECK(dart_schema_size(c) == 4,
+                     "schema-v8: an alias costs no message bytes (%u)", dart_schema_size(c));
+        }
+        sv_free(c); sv_free(f); sv_free(bare);
+    }
+    ST_CHECK(sv_sub("A { t: f32 }", "Celsius = f32\nA { t: Celsius }") == 1,
+             "schema-v8: an unnamed field reads a named writer field (unwrap is free)");
+    ST_CHECK(sv_sub("Celsius = f32\nA { t: Celsius }", "A { t: f32 }") == 0,
+             "schema-v8: a named field refuses an unnamed writer field");
+    ST_CHECK(sv_sub("Celsius = f32\nA { t: Celsius }", "Fahrenheit = f32\nA { t: Fahrenheit }") == 0,
+             "schema-v8: two different names over one shape never cross-wire");
+    ST_CHECK(sv_sub("Celsius = f32\nA { t: Celsius }", "Celsius = f32\nA { t: Celsius, u: u8 }") == 1,
+             "schema-v8: subset stays top-level under named fields");
+    ST_CHECK(sv_sub("A { v: { a: f32 } }", "A { v: { a: f32, b: f32 } }") == 0,
+             "schema-v8: a nested struct still compares exactly");
+    ST_CHECK(sv_sub("A { m: enum<u8> { P } }", "A { m: enum<u8> { Q, R } }") == 1
+             && sv_sub("A { m: enum<u8> { P } }", "A { m: enum<u16> { P } }") == 0,
+             "schema-v8: enum option names stay advisory, the backing width gates");
+    ST_CHECK(sv_sub("A { x: f32 }", "B { x: f32 }") == 0,
+             "schema-v8: struct root names stay strict-equal");
+
+    /* ---- struct-element arrays: one element-0 template, indexed paths ---- */
+    {   DartSchema *s = sv("A { p: Float3[3], q: { m: i16 }[] }");
+        DartSchemaFieldInfo fi, fx;
+        uint8_t m[256]; DartBytes b; int xi;
+        ST_CHECK(s != NULL, "schema-v8: struct arrays compile");
+        if (s){
+            ST_CHECK(dart_schema_field_count(s) == 6,
+                     "schema-v8: a struct array flattens its element once (%u fields)",
+                     dart_schema_field_count(s));
+            dart_schema_field_at(s, 0, &fi);
+            dart_schema_field_at(s, 1, &fx);
+            ST_CHECK(fi.kind == DART_ARR && fi.elem == DART_STRUCT && fi.count == 3
+                     && fi.elem_size == 12 && fi.size == 36 && fi.elem_name.len == 6,
+                     "schema-v8: Float3[3] reports element kind, stride and name");
+            ST_CHECK(fx.depth == 1 && fx.arr_parent == 0 && fx.offset == 0,
+                     "schema-v8: its members point back at the array (arr_parent=%u)", fx.arr_parent);
+            ST_CHECK(dart_schema_size(s) == 36, "schema-v8: the fixed array packs inline (%u)",
+                     dart_schema_size(s));
+            xi = dart_schema_field_index(s, "p[2].z");
+            ST_CHECK(xi == dart_schema_field_index(s, "p.z") && xi > 0,
+                     "schema-v8: an indexed path resolves to the element template");
+            ST_CHECK(dart_schema_message_default(s, m, sizeof m), "schema-v8: default message");
+            ST_CHECK(dart_set_f32(m, sizeof m, s, "p[2].z", 7.25f)
+                     && dart_set_f32(m, sizeof m, s, "p[0].x", 1.5f)
+                     && dart_set_f32(m, sizeof m, s, "p[3].z", 1.0f) == 0,
+                     "schema-v8: fixed-array element writes land, out of range refuses");
+            ST_CHECK(dart_set_array_count(m, sizeof m, s, "q", 4)
+                     && dart_set_int(m, sizeof m, s, "q[3].m", -9)
+                     && dart_set_int(m, sizeof m, s, "q[4].m", 1) == 0,
+                     "schema-v8: a variable struct array grows, then bounds its elements");
+            b = dart_bytes(m, dart_schema_msg_len(s, m, sizeof m));
+            ST_CHECK(dart_get_f32(b, s, "p[2].z") == 7.25f && dart_get_f32(b, s, "p[0].x") == 1.5f
+                     && dart_get_f32(b, s, "p[1].x") == 0.0f,
+                     "schema-v8: fixed-array elements read back independently");
+            ST_CHECK(dart_get_int(b, s, "q[3].m") == -9 && dart_get_array_count(b, s, "q") == 4
+                     && dart_get_array_count(b, s, "p") == 3,
+                     "schema-v8: variable-array elements read back, counts report live");
+            ST_CHECK(dart_schema_validate(s, b), "schema-v8: the struct-array message validates");
+            {   DartValue v; int ok;
+                memset(&v, 0, sizeof v); v.kind = DART_F32; v.v.f = 4.5;
+                ok = dart_set_value_at(m, sizeof m, s, (uint16_t)xi, 1, &v)
+                     && dart_get_value_at(b, s, (uint16_t)xi, 1, &v) && v.v.f == 4.5
+                     && dart_array_count_at(b, s, 0) == 3;
+                ST_CHECK(ok, "schema-v8: reflection get/set_value_at index an element");
+            }
+        }
+        sv_free(s);
+    }
+
+    /* ---- variable members at depth: declaration nests, storage does not ---- */
+    {   DartSchema *s = sv("A { hdr: { n: u32, note: string, k: u32 }, tail: u8[] }");
+        DartSchemaFieldInfo fi; uint8_t m[256]; DartBytes b;
+        ST_CHECK(s != NULL, "schema-v8: a variable member inside a struct compiles");
+        if (s){
+            ST_CHECK(dart_schema_field_at(s, 0, &fi) && fi.kind == DART_STRUCT && fi.size == 8
+                     && dart_schema_size(s) == 8 && dart_schema_msg_min(s) == 16,
+                     "schema-v8: the struct's size is its FIXED part; the frame is top-level");
+            dart_schema_message_default(s, m, sizeof m);
+            ST_CHECK(dart_set_uint(m, sizeof m, s, "hdr.n", 7)
+                     && dart_set_uint(m, sizeof m, s, "hdr.k", 9)
+                     && dart_set_string(m, sizeof m, s, "hdr.note", dart_cstr("deep"))
+                     && dart_set_array(m, sizeof m, s, "tail", dart_bytes("abc", 3)),
+                     "schema-v8: nested variable member sets");
+            b = dart_bytes(m, dart_schema_msg_len(s, m, sizeof m));
+            ST_CHECK(dart_get_uint(b, s, "hdr.n") == 7 && dart_get_uint(b, s, "hdr.k") == 9
+                     && dart_get_string(b, s, "hdr.note").len == 4
+                     && dart_get_array(b, s, "tail").len == 3 && dart_schema_validate(s, b),
+                     "schema-v8: nested variable member reads back, message validates");
+        }
+        sv_free(s);
+    }
+    {   DartSchema *s = sv("A { a: string, g: { b: string, c: string }, d: string }");
+        uint8_t m[256]; DartBytes b;
+        ST_CHECK(s != NULL, "schema-v8: frames at mixed depths compile");
+        if (s){
+            dart_schema_message_default(s, m, sizeof m);
+            dart_set_string(m, sizeof m, s, "a", dart_cstr("1"));
+            dart_set_string(m, sizeof m, s, "g.b", dart_cstr("22"));
+            dart_set_string(m, sizeof m, s, "g.c", dart_cstr("333"));
+            dart_set_string(m, sizeof m, s, "d", dart_cstr("4444"));
+            b = dart_bytes(m, dart_schema_msg_len(s, m, sizeof m));
+            ST_CHECK(dart_get_string(b, s, "a").len == 1 && dart_get_string(b, s, "g.b").len == 2
+                     && dart_get_string(b, s, "g.c").len == 3 && dart_get_string(b, s, "d").len == 4,
+                     "schema-v8: frames sit in depth-first declaration order");
+        }
+        sv_free(s);
+    }
+
+    /* ---- rebase across nested frames and struct arrays ---- */
+    {   DartSchema *pub = sv("A { pad: u64, v: { a: f32, note: string }, p: Float3[2], t: string }");
+        DartSchema *sub = sv("A { v: { a: f32, note: string }, t: string }");
+        DartSchema *rb = NULL; uint8_t m[256]; DartBytes b;
+        if (pub && sub) rb = dart_schema_rebase(sub, pub, dart_allocator_alloc, &sv_ma);
+        ST_CHECK(rb != NULL, "schema-v8: rebase of a nested/array subset");
+        if (rb){
+            dart_schema_message_default(pub, m, sizeof m);
+            dart_set_f32(m, sizeof m, pub, "v.a", 3.5f);
+            dart_set_string(m, sizeof m, pub, "v.note", dart_cstr("nn"));
+            dart_set_string(m, sizeof m, pub, "t", dart_cstr("tt"));
+            b = dart_bytes(m, dart_schema_msg_len(pub, m, sizeof m));
+            ST_CHECK(dart_schema_validate(rb, b) && dart_get_f32(b, rb, "v.a") == 3.5f
+                     && dart_get_string(b, rb, "v.note").len == 2
+                     && dart_get_string(b, rb, "t").len == 2,
+                     "schema-v8: the rebased reader walks the writer's frames");
+        }
+        sv_free(rb); sv_free(pub); sv_free(sub);
+    }
+
+    /* ---- refusals: an array element's size must be static, and stay one level deep ---- */
+    {   static const char *bad[] = {
+            "A { p: { n: string }[4] }",        /* a variable member inside an element   */
+            "A { p: Image[2] }",                /* a standard type that has one          */
+            "A { p: f32[2][3] }",               /* an array of arrays                    */
+            "A { p: Uuid[2] }",                 /* a named alias that IS an array        */
+            "A { p: { q: { r: f32 }[2] }[2] }", /* a struct array inside an element      */
+            "A { m: enum<u8> { X }[2] }",       /* enum elements would hide the backing  */
+            "Float3 = { x: f32 }\nA { p: Float3 }",  /* a reserved name, a wrong shape   */
+            "Pose = { x: f32 }",                /* likewise as the last definition       */
+            "A { p: Nope }",                    /* an unknown type word                  */
+            "A { x: f32 }\nB { y: f32 }",       /* two roots                             */
+            "Temperature: f32"                  /* the old typedef spelling stays an error */
+        };
+        unsigned i, ok = 1;
+        for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
+            const char *ep = NULL;
+            DartSchema *s = dart_schema_compile(dart_allocator_alloc, &sv_ma, bad[i], &ep);
+            if (s){ ok = 0; sv_free(s); }
+            else if (!ep) ok = 0;
+        }
+        ST_CHECK(ok, "schema-v8: every malformed/misplaced form is refused with a position");
+    }
+    {   DartSchema *a = sv("Float3 = { x: f32, y: f32, z: f32 }\nA { p: Float3 }");
+        DartSchema *b = sv("Pose { x: f32 }");
+        DartSchema *c = sv("Color { r: f32, g: f32, b: f32, a: f32 }");
+        ST_CHECK(a != NULL, "schema-v8: redefining a standard type IDENTICALLY is allowed");
+        ST_CHECK(b != NULL && c != NULL,
+                 "schema-v8: a plain root name is not reserved (reflection names its class)");
+        sv_free(a); sv_free(b); sv_free(c);
+    }
+
+    /* ---- hostile wire ---- */
+    {   uint8_t w[8]; DartSchema *s;
+        w[0] = (uint8_t)DART_SCHEMA_WIRE_VERSION; w[1] = 0;
+        w[2] = (uint8_t)DART_NAMED; w[3] = 1; w[4] = 'A'; w[5] = (uint8_t)DART_NAMED;
+        w[6] = 1; w[7] = 'B';
+        ST_CHECK(dart_schema_parse(w, 8, dart_allocator_alloc, &sv_ma) == NULL,
+                 "schema-v8: a doubly-wrapped NAMED is refused");
+        w[2] = (uint8_t)DART_NAMED; w[3] = 0; w[4] = (uint8_t)DART_BOOL;
+        ST_CHECK(dart_schema_parse(w, 5, dart_allocator_alloc, &sv_ma) == NULL,
+                 "schema-v8: a NAMED with an empty name is refused");
+        w[2] = (uint8_t)DART_ARR; w[3] = 2; w[4] = 0; w[5] = (uint8_t)DART_VSTR;
+        ST_CHECK(dart_schema_parse(w, 6, dart_allocator_alloc, &sv_ma) == NULL,
+                 "schema-v8: a variable array element is refused on the wire");
+        w[5] = (uint8_t)DART_NAMED; w[6] = 1; w[7] = 'A';
+        s = dart_schema_parse(w, 8, dart_allocator_alloc, &sv_ma);
+        ST_CHECK(s == NULL, "schema-v8: a truncated NAMED element is refused");
+        sv_free(s);
+    }
+
+    /* ---- print: named definitions hoist, dependencies first, and recompile exactly ---- */
+    ST_CHECK(sv_roundtrip("Uuid = u8[16]") && sv_roundtrip("Pose") && sv_roundtrip("Image"),
+             "schema-v8: alias, composite and variable standard roots round-trip");
+    ST_CHECK(sv_roundtrip("A { x: f32, v: { a: u8, b: string<4> }, p: Float3[3],"
+                          "    q: { m: i16 }[2], s: string, e: enum<i16> { N = -1, Z } }"),
+             "schema-v8: a mixed schema round-trips through print");
+    ST_CHECK(sv_roundtrip("Cloud { at: Pose, when: Timestamp, pts: Float3[], meta: map }"),
+             "schema-v8: nested standard types round-trip");
+    {   DartSchema *s = sv("Cloud { at: Pose, pts: Float3[] }");
+        char buf[1024]; const char *d3, *q, *ps;
+        if (s){
+            dart_schema_print(s, buf, sizeof buf);
+            d3 = strstr(buf, "Double3 ="); q = strstr(buf, "Quaternion ="); ps = strstr(buf, "Pose =");
+            ST_CHECK(d3 && q && ps && d3 < ps && q < ps,
+                     "schema-v8: print emits each named type once, dependencies first");
+        }
+        sv_free(s);
+    }
+
+    /* ---- compile_env: another schema's root name becomes a type word ---- */
+    {   DartSchema *w = sv("Widget { id: u32, tag: Color }");
+        const DartSchema *env[1]; DartSchema *p = NULL;
+        env[0] = w;
+        if (w) p = dart_schema_compile_env(dart_allocator_alloc, &sv_ma,
+                                           "Panel { w: Widget, more: Widget[2] }", env, 1, NULL);
+        ST_CHECK(p != NULL, "schema-v8: compile_env resolves an environment schema by root name");
+        if (p){
+            ST_CHECK(dart_schema_size(p) == 24 && dart_schema_field_index(p, "w.tag.r") >= 0
+                     && dart_schema_field_index(p, "more[1].id") >= 0,
+                     "schema-v8: the environment type nests and arrays like any other");
+        }
+        ST_CHECK(sv("Panel { w: Widget }") == NULL,
+                 "schema-v8: without the environment that name does not resolve");
+        sv_free(p); sv_free(w);
+    }
+    dart_allocator_reset(&sv_ma);
+}
+
+/* (19a5) the STANDARD TYPE LIBRARY: names always in scope, canonical wire pinned by golden
+   bytes + hash (every wrapper round-trips the same vectors), recognition that verifies the
+   SHAPE as well as the name, and an end-to-end pair publishing Pose and Image. */
+static volatile long sd_pose_recv = 0, sd_img_recv = 0, sd_bad_recv = 0, sd_mismatch = 0;
+static double sd_px = 0.0, sd_qw = 0.0;
+static unsigned sd_iw = 0, sd_ih = 0, sd_ifmt = 0; static size_t sd_ilen = 0;
+static void sd_on_message(const DartMsg *m){
+    if (!m->schema) return;
+    if (dart_get_f64(m->data, m->schema, "position.x") != 0.0 ||
+        dart_schema_field_index(m->schema, "orientation.w") >= 0){
+        if (dart_schema_field_index(m->schema, "position.x") >= 0){
+            sd_px = dart_get_f64(m->data, m->schema, "position.x");
+            sd_qw = dart_get_f64(m->data, m->schema, "orientation.w");
+            sd_pose_recv++;
+            return;
+        }
+    }
+    if (dart_schema_field_index(m->schema, "width") >= 0){
+        sd_iw = (unsigned)dart_get_uint(m->data, m->schema, "width");
+        sd_ih = (unsigned)dart_get_uint(m->data, m->schema, "height");
+        sd_ifmt = (unsigned)dart_get_uint(m->data, m->schema, "format");
+        sd_ilen = dart_get_array(m->data, m->schema, "data").len;
+        sd_img_recv++;
+    }
+}
+static void sd_on_bad(const DartMsg *m){ (void)m; sd_bad_recv++; }
+static void sd_on_event(const DartEvent *ev, void *user){
+    (void)user;
+    if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sd_mismatch++;
+}
+static void stdtypes_checks(void){
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, so; DartNode *P = NULL, *S = NULL;
+    DartTopicOpts co; DartDiscoveryAddr seed;
+    DartTopic *ppose, *pimg, *pbad; DartSchema *SPose, *SImg, *SBad, *SBadSub;
+    int t;
+
+    /* the whole roster compiles by name alone, and each recognizes itself */
+    {   int i, ok = 1, rec = 1;
+        for (i = 1; i < (int)DART_STD_COUNT; i++){
+            DartSchema *s = dart_std_schema((DartStdType)i, dart_allocator_alloc, &ma);
+            DartString n;
+            if (!s){ ok = 0; continue; }
+            n = dart_schema_name(s);
+            if (n.len != strlen(dart_std_name((DartStdType)i))) ok = 0;
+            if (dart_std_recognize(s, dart_allocator_alloc, &ma) != (DartStdType)i) rec = 0;
+            dart_schema_free(s, dart_allocator_alloc, &ma);
+        }
+        ST_CHECK(ok, "stdtypes: every standard type compiles from its name alone");
+        ST_CHECK(rec, "stdtypes: every standard type recognizes itself");
+    }
+    /* GOLDEN BYTES: the canonical wire and hash of the composite every wrapper mirrors.
+       Change these only with a deliberate wire bump; every language pins the same pair. */
+    {   DartSchema *s = dart_std_schema(DART_STD_FLOAT3, dart_allocator_alloc, &ma);
+        static const uint8_t want[] = {
+            8, 6, 'F','l','o','a','t','3', 12, 3,
+            1, 'x', 8,  1, 'y', 8,  1, 'z', 8
+        };
+        DartBytes w = dart_schema_wire(s);
+        ST_CHECK(s && w.len == sizeof want && memcmp(w.data, want, sizeof want) == 0,
+                 "stdtypes: Float3 golden wire (%u bytes)", (unsigned)w.len);
+        ST_CHECK(s && dart_schema_hash(s) == 0x04aa9469cd08b1ddULL,
+                 "stdtypes: Float3 golden hash %016llx",
+                 (unsigned long long)dart_schema_hash(s));
+        ST_CHECK(s && dart_schema_size(s) == 12, "stdtypes: Float3 is 12 message bytes");
+        if (s) dart_schema_free(s, dart_allocator_alloc, &ma);
+    }
+    /* recognition verifies the SHAPE, so a peer's same-named impostor never converts */
+    {   DartSchema *good = dart_schema_compile(dart_allocator_alloc, &ma,
+            "A { at: Pose, id: Uuid, pts: Float3[], plain: f32 }", NULL);
+        DartSchema *bad = dart_schema_compile(dart_allocator_alloc, &ma,
+            "Uuid = u8[16]\nB { id: Uuid }", NULL);
+        DartSchema *lie = dart_schema_parse(bad ? dart_schema_wire(bad).data : NULL,
+                                            bad ? dart_schema_wire(bad).len : 0,
+                                            dart_allocator_alloc, &ma);
+        ST_CHECK(good && bad && lie, "stdtypes: recognition fixtures compile");
+        if (good){
+            ST_CHECK(dart_std_recognize_field(good, (uint16_t)dart_schema_field_index(good, "at"),
+                                              dart_allocator_alloc, &ma) == DART_STD_POSE
+                     && dart_std_recognize_field(good, (uint16_t)dart_schema_field_index(good, "id"),
+                                              dart_allocator_alloc, &ma) == DART_STD_UUID,
+                     "stdtypes: a named field recognizes by name AND shape");
+            ST_CHECK(dart_std_recognize_elem(good, (uint16_t)dart_schema_field_index(good, "pts"),
+                                             dart_allocator_alloc, &ma) == DART_STD_FLOAT3,
+                     "stdtypes: an array's ELEMENT recognizes");
+            ST_CHECK(dart_std_recognize_field(good, (uint16_t)dart_schema_field_index(good, "plain"),
+                                              dart_allocator_alloc, &ma) == DART_STD_NONE
+                     && dart_std_recognize(good, dart_allocator_alloc, &ma) == DART_STD_NONE,
+                     "stdtypes: an anonymous field and a user root are not standard types");
+        }
+        if (good) dart_schema_free(good, dart_allocator_alloc, &ma);
+        if (bad)  dart_schema_free(bad,  dart_allocator_alloc, &ma);
+        if (lie)  dart_schema_free(lie,  dart_allocator_alloc, &ma);
+    }
+    {   /* a hand-built wire that calls itself Uuid but is 15 bytes: refused by shape */
+        uint8_t w[10]; DartSchema *s;
+        w[0] = (uint8_t)DART_SCHEMA_WIRE_VERSION; w[1] = 4;
+        w[2] = 'U'; w[3] = 'u'; w[4] = 'i'; w[5] = 'd';
+        w[6] = (uint8_t)DART_ARR; w[7] = 15; w[8] = 0; w[9] = (uint8_t)DART_U8;
+        s = dart_schema_parse(w, sizeof w, dart_allocator_alloc, &ma);
+        ST_CHECK(s && dart_std_recognize(s, dart_allocator_alloc, &ma) == DART_STD_NONE,
+                 "stdtypes: a same-named wrong-shaped peer type is NOT recognized");
+        if (s) dart_schema_free(s, dart_allocator_alloc, &ma);
+    }
+    /* the C mirrors line up with the wire, byte for byte */
+    {   DartSchema *sp = dart_std_schema(DART_STD_POSE, dart_allocator_alloc, &ma);
+        DartPose p; uint8_t m[sizeof(DartPose)];
+        p.position = dart_double3(1.0, 2.0, 3.0);
+        p.orientation = dart_quaternion(0.0, 0.0, 0.0, 1.0);
+        memcpy(m, &p, sizeof p);
+        ST_CHECK(sp && sizeof(DartPose) == dart_schema_size(sp),
+                 "stdtypes: sizeof(DartPose) == the wire size (%u)",
+                 sp ? dart_schema_size(sp) : 0);
+        if (sp){
+            DartBytes b = dart_bytes(m, sizeof m);
+            ST_CHECK(dart_get_f64(b, sp, "position.y") == 2.0
+                     && dart_get_f64(b, sp, "orientation.w") == 1.0,
+                     "stdtypes: a memcpy'd DartPose reads back through the schema");
+        }
+        if (sp) dart_schema_free(sp, dart_allocator_alloc, &ma);
+    }
+    {   DartColor c = dart_color_from_hex(0x11223344u);
+        DartDouble3 v = dart_quaternion_rotate(dart_quaternion(0.0, 0.0, 1.0, 0.0),
+                                               dart_double3(1.0, 0.0, 0.0));
+        double len = dart_double3_length(dart_double3(3.0, 4.0, 0.0));
+        ST_CHECK(c.r == 0x11 && c.g == 0x22 && c.b == 0x33 && c.a == 0x44
+                 && dart_color_to_hex(c) == 0x11223344u,
+                 "stdtypes: Color hex round-trips as 0xRRGGBBAA");
+        ST_CHECK(len == 5.0, "stdtypes: vector length without libm (%g)", len);
+        ST_CHECK(v.x < -0.999 && v.x > -1.001 && v.y < 1e-9 && v.y > -1e-9,
+                 "stdtypes: a 180 degree rotation about z flips x (%g, %g)", v.x, v.y);
+    }
+    {   /* the two values that need a platform, hence the node runtime */
+        DartTimestamp t0 = dart_timestamp_now();
+        DartUuid u1, u2;
+        dart_uuid_new(&u1); dart_uuid_new(&u2);
+        ST_CHECK(t0 > 1600000000000000LL,       /* past 2020 in microseconds */
+                 "stdtypes: dart_timestamp_now is Unix-epoch microseconds (%lld)",
+                 (long long)t0);
+        ST_CHECK(!dart_uuid_is_nil(u1) && memcmp(u1.bytes, u2.bytes, 16) != 0
+                 && (u1.bytes[6] & 0xF0u) == 0x40u && (u1.bytes[8] & 0xC0u) == 0x80u,
+                 "stdtypes: dart_uuid_new makes distinct RFC 4122 version-4 ids");
+    }
+
+    /* ---- end to end: Pose and Image over two nodes, plus a shape impostor refused ---- */
+    SPose = dart_std_schema(DART_STD_POSE, dart_allocator_alloc, &ma);
+    SImg  = dart_std_schema(DART_STD_IMAGE, dart_allocator_alloc, &ma);
+    SBad  = dart_schema_compile(dart_allocator_alloc, &ma, "Twist", NULL);
+    SBadSub = dart_std_schema(DART_STD_POSE, dart_allocator_alloc, &ma);
+    ST_CHECK(SPose && SImg && SBad && SBadSub, "stdtypes: e2e schemas compile");
+    if (!(SPose && SImg && SBad && SBadSub)){ dart_allocator_reset(&ma); return; }
+
+    memset(&co,0,sizeof co); co.qos.keep_last=4; co.qos.reliability=DART_RELIABLE;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=ST_DOMAIN+23; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    sd_pose_recv=sd_img_recv=sd_bad_recv=sd_mismatch=0;
+    P = dart_node_open(&pa, "sd-pub", NULL,          sd_on_event, &po);
+    S = dart_node_open(&sa, "sd-sub", sd_on_message, sd_on_event, &so);
+    ST_CHECK(P&&S, "stdtypes: nodes open");
+    if (!(P&&S)){ if(P)dart_node_close(P,0); if(S)dart_node_close(S,0); dart_allocator_reset(&ma); return; }
+    ppose = dart_node_create_topic(P, "sd/pose", DART_PUB_ONLY, SPose, &co);
+    pimg  = dart_node_create_topic(P, "sd/img",  DART_PUB_ONLY, SImg,  &co);
+    pbad  = dart_node_create_topic(P, "sd/bad",  DART_PUB_ONLY, SBad,  &co);
+    dart_node_create_topic(S, "sd/pose", DART_SUB_ONLY, SPose, &co);
+    dart_node_create_topic(S, "sd/img",  DART_SUB_ONLY, SImg,  &co);
+    dart_node_create_topic(S, "sd/bad",  DART_SUB_ONLY, SBadSub, &co);   /* Twist writer: refused */
+    ST_CHECK(ppose && pimg && pbad, "stdtypes: topics created");
+
+    for (t=0;t<1200 && (dart_topic_match_count(ppose)==0 || dart_topic_match_count(pimg)==0);t++){
+        dart_node_poll(P,2); dart_node_poll(S,2);
+    }
+    ST_CHECK(dart_topic_match_count(ppose)==1 && dart_topic_match_count(pimg)==1,
+             "stdtypes: Pose and Image topics matched");
+    ST_CHECK(dart_topic_match_count(pbad)==0,
+             "stdtypes: a Pose reader refuses a same-shaped Twist writer");
+    ST_CHECK(sd_mismatch >= 1, "stdtypes: the refusal surfaced (%ld)", sd_mismatch);
+
+    {   uint8_t m[64]; DartPose p;
+        uint8_t *img; uint32_t need; size_t px = 64u*48u*3u;
+        p.position = dart_double3(4.5, -1.25, 9.0);
+        p.orientation = dart_quaternion(0.0, 0.0, 0.0, 1.0);
+        memcpy(m, &p, sizeof p);
+        dart_topic_send(ppose, dart_bytes(m, sizeof p));
+        need = dart_schema_msg_min(SImg) + (uint32_t)px;
+        img = (uint8_t *)i_dart_plat_realloc(NULL, need);
+        if (img){
+            size_t i;
+            uint8_t *pix = (uint8_t *)i_dart_plat_realloc(NULL, px);
+            dart_schema_message_default(SImg, img, need);
+            dart_set_uint(img, need, SImg, "width", 64);
+            dart_set_uint(img, need, SImg, "height", 48);
+            dart_set_uint(img, need, SImg, "stride", 0);
+            dart_set_enum(img, need, SImg, "format", "Rgb8");
+            if (pix){
+                for (i = 0; i < px; i++) pix[i] = (uint8_t)i;
+                dart_set_array(img, need, SImg, "data", dart_bytes(pix, px));
+                i_dart_plat_realloc(pix, 0);
+            }
+            dart_topic_send(pimg, dart_bytes(img, dart_schema_msg_len(SImg, img, need)));
+            i_dart_plat_realloc(img, 0);
+        }
+        for (t=0;t<1200 && (sd_pose_recv==0 || sd_img_recv==0);t++){
+            dart_node_poll(P,1); dart_node_poll(S,2);
+        }
+    }
+    ST_CHECK(sd_pose_recv==1 && sd_px==4.5 && sd_qw==1.0,
+             "stdtypes: Pose delivered (recv=%ld x=%g w=%g)", sd_pose_recv, sd_px, sd_qw);
+    ST_CHECK(sd_img_recv==1 && sd_iw==64 && sd_ih==48 && sd_ifmt==(unsigned)DART_IMAGE_RGB8
+             && sd_ilen==64u*48u*3u,
+             "stdtypes: Image delivered whole (%ux%u fmt=%u %u bytes)",
+             sd_iw, sd_ih, sd_ifmt, (unsigned)sd_ilen);
+    ST_CHECK(sd_bad_recv==0, "stdtypes: the refused topic delivered nothing");
+    dart_node_close(S,1); dart_node_close(P,1);
+    dart_allocator_reset(&ma); dart_allocator_reset(&pa); dart_allocator_reset(&sa);
 }
 
 /* (19b) pairwise detail codec ('uDTL', sans-IO): request build + header accessors, the
@@ -6207,6 +6693,8 @@ static int selftest_main(void){
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
     schema_bigenum_checks();      /* 19a2. 1024-option enum: u16 count, wire round-trip, value reaches a peer */
     schema_root_checks();         /* 19a3. primitive-rooted schemas: bare types, canonical hash, e2e */
+    schema_v8_checks();           /* 19a4. wire v8: named types, struct arrays, nested frames, print */
+    stdtypes_checks();            /* 19a5. the standard type library: golden bytes, recognition, e2e */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
     detail_paging_checks();       /* 19b2. detail paging fits one datagram + never wedges (force-first) */
     interest_codec_checks();      /* 19b3. interest paging codec + the external-overlay flag */

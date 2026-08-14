@@ -146,7 +146,7 @@ enum class ErrorKind {
  * that ride the message tail (offset/size report 0). */
 enum class FieldType : uint8_t {
     U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
-    VString, VArray, Map, Enum
+    VString, VArray, Map, Enum, Named
 };
 
 /* A function call's outcome (mirrors DartCallStatus). Ok/AppError/NoHandler travel on
@@ -172,6 +172,7 @@ static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum dr
 static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
 static_assert((int)FieldType::Enum == detail::DART_ENUM, "field-type enum drift");
+static_assert((int)FieldType::Named == detail::DART_NAMED, "field-type enum drift");
 #ifndef DART_NO_PATTERNS
 static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum drift");
 static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
@@ -467,24 +468,48 @@ public:
     uint32_t size() const { return detail::dart_schema_size(schema_); }
     uint64_t hash() const { return detail::dart_schema_hash(schema_); }
     uint16_t field_count() const { return detail::dart_schema_field_count(schema_); }
+    /* Flat index of a field by name; nested members by dotted path ("velocity.dx"),
+     * struct-array members by an indexed one ("corners[2].x"). -1 if unknown. */
+    int field_index(std::string_view path) const {
+        return detail::dart_schema_field_index(schema_, std::string(path).c_str());
+    }
+    /* Can a reader declaring THIS schema read messages written with `pub`? Type NAMES
+     * narrow: an anonymous type reads a named one, never the reverse. */
+    bool can_read(const Schema& pub) const {
+        return detail::dart_schema_subset(schema_, pub.schema_) != 0;
+    }
+    /* Spell the schema back as compile-ready DSL text (the inverse of compile), with
+     * every named type it uses hoisted to a leading `Name = type` definition. */
+    std::string to_dsl() const {
+        uint32_t n = detail::dart_schema_print(schema_, nullptr, 0);
+        std::string out(n, '\0');
+        if (n) detail::dart_schema_print(schema_, &out[0], n + 1);
+        return out;
+    }
 
     struct Field {
         std::string_view name;
-        FieldType kind;          /* the field's type */
+        std::string_view type_name;  /* the field type's NAME, empty when anonymous */
+        std::string_view elem_name;  /* an array ELEMENT type's name, empty when anonymous */
+        FieldType kind;          /* the field's type (a named type reports what it wraps) */
         FieldType elem;          /* array element type (Array), or enum backing type (Enum) */
         uint16_t  count, depth;  /* array/enum option count */
         uint16_t  str_cap;       /* string capacity (String fields and String-element arrays) */
+        uint16_t  arr_parent;    /* flat index of the enclosing struct ARRAY, 0xFFFF for none */
         uint32_t  offset, size;
+        uint32_t  elem_size;     /* bytes of one array element, else 0 */
     };
     bool field_at(uint16_t i, Field& out) const {
         detail::DartSchemaFieldInfo f;
         if (!detail::dart_schema_field_at(schema_, i, &f)) return false;
-        out.name   = { f.name.data, f.name.len };
+        out.name      = { f.name.data, f.name.len };
+        out.type_name = { f.type_name.data ? f.type_name.data : "", f.type_name.len };
+        out.elem_name = { f.elem_name.data ? f.elem_name.data : "", f.elem_name.len };
         out.kind   = static_cast<FieldType>(f.kind);
         out.elem   = static_cast<FieldType>(f.elem);
         out.count  = f.count; out.depth = f.depth;
-        out.str_cap = f.str_cap;
-        out.offset = f.offset; out.size = f.size;
+        out.str_cap = f.str_cap; out.arr_parent = f.arr_parent;
+        out.offset = f.offset; out.size = f.size; out.elem_size = f.elem_size;
         return true;
     }
 
@@ -1017,6 +1042,136 @@ template <uint16_t N> struct String {
     bool operator==(std::string_view s) const { return view() == s; }
 };
 
+/* ===========================================================================
+ *  STANDARD TYPES (see docs/stdtypes.md and src/serialize/stdtypes.h)
+ *
+ *  A wire type may carry a NAME, which rides the schema (never a message byte) and
+ *  NARROWS matching: a `Celsius` field never binds to a `Fahrenheit` one, while a
+ *  reader declaring the bare shape still reads either. The library below pre-names the
+ *  types applications keep re-inventing; the names are always in scope in the DSL.
+ *
+ *      struct Track { dart::Pose at; dart::Uuid id; dart::Timestamp when; };
+ *      DART_SCHEMA(Track, at, id, when);          // -> "Track { at: Pose, id: Uuid, ... }"
+ *
+ *  Each mirror is standard-layout and identical to the wire on a little-endian target,
+ *  so the usual memcpy fast path still fires. Give one of YOUR types a wire name the
+ *  same way the library does, by specializing std_type (see the two macros below).
+ *  Image / VideoFrame carry a variable member, so they have no fixed C++ mirror: reach
+ *  them through Schema + MessageOut/MessageIn, or name them in a DSL string.
+ * =========================================================================== */
+
+/* The naming hook: `name` is the wire type name, and `repr` is void for a type whose
+ * shape is a struct (its members are reflected) or the representation type for an ALIAS
+ * (`Uuid = u8[16]` reprs as uint8_t[16]). Unspecialized = an ordinary anonymous type. */
+template <class T> struct std_type { static constexpr const char* name = nullptr; using repr = void; };
+
+struct Float2  { float x, y; };
+struct Float3  { float x, y, z; };
+struct Float4  { float x, y, z, w; };
+struct Double2 { double x, y; };
+struct Double3 { double x, y, z; };
+struct Double4 { double x, y, z, w; };
+struct Int2    { int32_t x, y; };
+struct Int3    { int32_t x, y, z; };
+struct Int4    { int32_t x, y, z, w; };
+struct Quaternion { double x, y, z, w; };            /* stored x, y, z, w */
+struct Color   { uint8_t r, g, b, a; };              /* sRGB, straight alpha */
+struct Rect    { float x, y, w, h; };
+struct RectI   { int32_t x, y, w, h; };
+struct Pose    { Double3 position; Quaternion orientation; };   /* meters, radians */
+struct Twist   { Double3 linear, angular; };                    /* m/s, rad/s */
+struct GeoPoint{ double lat, lon, alt; };                       /* degrees, degrees, meters */
+struct Uuid    { uint8_t bytes[16]; };                          /* RFC 4122 byte order */
+struct Matrix3x3 { float m[9];  };                              /* row-major */
+struct Matrix4x4 { float m[16]; };                              /* row-major */
+struct Uri     { String<256> value; };
+/* microseconds since the Unix epoch, UTC -- the clock Message::written_us is stamped from */
+struct Timestamp { int64_t us = 0; };
+struct Duration  { int64_t us = 0; };
+
+inline bool operator==(Timestamp a, Timestamp b) { return a.us == b.us; }
+inline bool operator<(Timestamp a, Timestamp b) { return a.us < b.us; }
+inline Duration  operator-(Timestamp a, Timestamp b) { return Duration{ a.us - b.us }; }
+inline Timestamp operator+(Timestamp t, Duration d) { return Timestamp{ t.us + d.us }; }
+inline bool operator==(Duration a, Duration b) { return a.us == b.us; }
+inline Duration milliseconds(int64_t ms) { return Duration{ ms * 1000 }; }
+inline Duration seconds(double s) { return Duration{ (int64_t)(s * 1000000.0) }; }
+inline double seconds_of(Duration d) { return (double)d.us / 1000000.0; }
+/* 0xRRGGBBAA both ways, the order you read in CSS */
+inline Color color_from_hex(uint32_t rgba) {
+    return Color{ (uint8_t)(rgba >> 24), (uint8_t)(rgba >> 16), (uint8_t)(rgba >> 8), (uint8_t)rgba };
+}
+inline uint32_t color_to_hex(Color c) {
+    return ((uint32_t)c.r << 24) | ((uint32_t)c.g << 16) | ((uint32_t)c.b << 8) | c.a;
+}
+inline Double3 operator+(Double3 a, Double3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+inline Double3 operator-(Double3 a, Double3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+inline Double3 operator*(Double3 a, double k)  { return { a.x * k, a.y * k, a.z * k }; }
+inline double  dot(Double3 a, Double3 b)  { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline Double3 cross(Double3 a, Double3 b) {
+    return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+}
+inline double  length(Double3 a) { return detail::dart_double3_length({ a.x, a.y, a.z }); }
+inline Double3 normalize(Double3 a) {
+    detail::DartDouble3 n = detail::dart_double3_normalize({ a.x, a.y, a.z });
+    return { n.x, n.y, n.z };
+}
+inline Quaternion identity_rotation() { return { 0.0, 0.0, 0.0, 1.0 }; }
+inline Quaternion conjugate(Quaternion q) { return { -q.x, -q.y, -q.z, q.w }; }
+/* a then b: the rotation b applied after a */
+inline Quaternion operator*(Quaternion a, Quaternion b) {
+    return { b.w * a.x + b.x * a.w + b.y * a.z - b.z * a.y,
+             b.w * a.y - b.x * a.z + b.y * a.w + b.z * a.x,
+             b.w * a.z + b.x * a.y - b.y * a.x + b.z * a.w,
+             b.w * a.w - b.x * a.x - b.y * a.y - b.z * a.z };
+}
+inline Double3 rotate(Quaternion q, Double3 v) {
+    detail::DartDouble3 r = detail::dart_quaternion_rotate({ q.x, q.y, q.z, q.w }, { v.x, v.y, v.z });
+    return { r.x, r.y, r.z };
+}
+inline Pose identity_pose() { return { { 0.0, 0.0, 0.0 }, identity_rotation() }; }
+inline bool is_nil(const Uuid& u) {
+    for (int i = 0; i < 16; i++) if (u.bytes[i]) return false;
+    return true;
+}
+/* The two values that need a platform (the node runtime provides them). */
+inline Timestamp now() { return Timestamp{ detail::dart_timestamp_now() }; }
+inline Uuid      new_uuid() { Uuid u; detail::dart_uuid_new((detail::DartUuid*)&u); return u; }
+
+/* Give a struct-shaped type a wire name: reflect its members, then name it. */
+#define DART_STD_STRUCT(T, ...) \
+    template <> struct dart::reflect<dart::T> { \
+        using is_dart_schema = void; \
+        static constexpr const char* type_name = #T; \
+        template <class V> static void visit(V&& v) { DART_STD_MEMBERS_##T(v) } \
+    }; \
+    template <> struct dart::std_type<dart::T> { \
+        static constexpr const char* name = #T; using repr = void; }
+/* Give an ALIAS-shaped type a wire name: it copies as R (`Uuid = u8[16]`, R = uint8_t[16]). */
+#define DART_STD_ALIAS(T, R) \
+    template <> struct dart::std_type<dart::T> { \
+        static constexpr const char* name = #T; using repr = R; }
+
+#define DART_STD_F(T, f) v(::dart::field_tag<decltype(::dart::T::f)>{}, #f, offsetof(::dart::T, f));
+#define DART_STD_MEMBERS_Float2(v)  DART_STD_F(Float2,x)  DART_STD_F(Float2,y)
+#define DART_STD_MEMBERS_Float3(v)  DART_STD_F(Float3,x)  DART_STD_F(Float3,y)  DART_STD_F(Float3,z)
+#define DART_STD_MEMBERS_Float4(v)  DART_STD_F(Float4,x)  DART_STD_F(Float4,y)  DART_STD_F(Float4,z)  DART_STD_F(Float4,w)
+#define DART_STD_MEMBERS_Double2(v) DART_STD_F(Double2,x) DART_STD_F(Double2,y)
+#define DART_STD_MEMBERS_Double3(v) DART_STD_F(Double3,x) DART_STD_F(Double3,y) DART_STD_F(Double3,z)
+#define DART_STD_MEMBERS_Double4(v) DART_STD_F(Double4,x) DART_STD_F(Double4,y) DART_STD_F(Double4,z) DART_STD_F(Double4,w)
+#define DART_STD_MEMBERS_Int2(v)    DART_STD_F(Int2,x)    DART_STD_F(Int2,y)
+#define DART_STD_MEMBERS_Int3(v)    DART_STD_F(Int3,x)    DART_STD_F(Int3,y)    DART_STD_F(Int3,z)
+#define DART_STD_MEMBERS_Int4(v)    DART_STD_F(Int4,x)    DART_STD_F(Int4,y)    DART_STD_F(Int4,z)    DART_STD_F(Int4,w)
+#define DART_STD_MEMBERS_Quaternion(v) DART_STD_F(Quaternion,x) DART_STD_F(Quaternion,y) DART_STD_F(Quaternion,z) DART_STD_F(Quaternion,w)
+#define DART_STD_MEMBERS_Color(v)   DART_STD_F(Color,r)   DART_STD_F(Color,g)   DART_STD_F(Color,b)   DART_STD_F(Color,a)
+#define DART_STD_MEMBERS_Rect(v)    DART_STD_F(Rect,x)    DART_STD_F(Rect,y)    DART_STD_F(Rect,w)    DART_STD_F(Rect,h)
+#define DART_STD_MEMBERS_RectI(v)   DART_STD_F(RectI,x)   DART_STD_F(RectI,y)   DART_STD_F(RectI,w)   DART_STD_F(RectI,h)
+#define DART_STD_MEMBERS_Pose(v)    v(::dart::field_tag<::dart::Double3>{}, "position", offsetof(::dart::Pose, position)); \
+                                    v(::dart::field_tag<::dart::Quaternion>{}, "orientation", offsetof(::dart::Pose, orientation));
+#define DART_STD_MEMBERS_Twist(v)   v(::dart::field_tag<::dart::Double3>{}, "linear", offsetof(::dart::Twist, linear)); \
+                                    v(::dart::field_tag<::dart::Double3>{}, "angular", offsetof(::dart::Twist, angular));
+#define DART_STD_MEMBERS_GeoPoint(v) DART_STD_F(GeoPoint,lat) DART_STD_F(GeoPoint,lon) DART_STD_F(GeoPoint,alt)
+
 namespace priv {
 
 template <class> inline constexpr bool always_false = false;
@@ -1090,9 +1245,13 @@ struct SchemaBuilder {
     std::string       prefix;
     bool              first = true;
     bool              value_root = false;   /* the schema IS one bare type: no name, no braces */
+    int               quiet = 0;            /* > 0: emit leaves only (inside a NAMED type,
+                                               whose spelling is just its name) */
 
+    void put(const char* s)        { if (!quiet) dsl += s; }
+    void put(const std::string& s) { if (!quiet) dsl += s; }
     void sep(const char* name) {
-        if (value_root) return;             /* a bare type spells only itself */
+        if (value_root || quiet) return;    /* a bare type spells only itself */
         if (!first) dsl += ", ";
         first = false;
         dsl += name;
@@ -1103,8 +1262,8 @@ struct SchemaBuilder {
         static_assert(k >= 0, "DART_SCHEMA: field/element type is not a wire scalar");
         static_assert(!std::is_same_v<E, bool> || sizeof(bool) == 1, "bool must be one byte");
         sep(name);
-        dsl += scalar_kind_name(k);
-        if (arr) { dsl += "["; dsl += std::to_string(count); dsl += "]"; }
+        put(scalar_kind_name(k));
+        if (arr) { put("["); put(std::to_string(count)); put("]"); }
         Leaf l;
         l.struct_off = base + (uint32_t)off;
         l.kind = (uint8_t)k; l.is_array = arr ? 1 : 0;
@@ -1117,8 +1276,8 @@ struct SchemaBuilder {
     template <class E> void add_string(const char* name, size_t off, size_t count, bool arr) {
         constexpr uint16_t cap = is_dart_string<E>::cap;
         sep(name);
-        dsl += "string<"; dsl += std::to_string(cap); dsl += ">";
-        if (arr) { dsl += "["; dsl += std::to_string(count); dsl += "]"; }
+        put("string<"); put(std::to_string(cap)); put(">");
+        if (arr) { put("["); put(std::to_string(count)); put("]"); }
         Leaf l;
         l.struct_off = base + (uint32_t)off;
         l.kind = (uint8_t)detail::DART_STR; l.is_array = arr ? 1 : 0;
@@ -1135,14 +1294,14 @@ struct SchemaBuilder {
         static_assert(k >= 0 && k <= (int)detail::DART_I64,
                       "DART_ENUM: backing must be an integer type (u8..i64)");
         sep(name);
-        dsl += "enum<"; dsl += scalar_kind_name(k); dsl += "> { ";
+        put("enum<"); put(scalar_kind_name(k)); put("> { ");
         bool firstv = true;
         reflect_enum<E>::visit([&](int64_t value, const char* vn) {
-            if (!firstv) dsl += ", ";
+            if (!firstv) put(", ");
             firstv = false;
-            dsl += vn; dsl += "="; dsl += std::to_string(value);
+            put(vn); put("="); put(std::to_string(value));
         });
-        dsl += " }";
+        put(" }");
         Leaf l;
         l.struct_off = base + (uint32_t)off;
         l.kind = (uint8_t)k; l.is_enum = 1;
@@ -1179,6 +1338,25 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
         constexpr size_t n = is_std_array<U>::count;
         if constexpr (is_dart_string<E>::value) add_string<E>(name, off, n, true);
         else                                    add_scalar<E>(name, off, n, true);
+    } else if constexpr (std_type<U>::name != nullptr) {
+        /* a NAMED type: it spells as its name alone, but still contributes the leaves of
+           whatever it wraps, so the copy loops and the memcpy fast path are unchanged */
+        sep(name);
+        put(std_type<U>::name);
+        uint32_t    saved_base   = base;
+        std::string saved_prefix = prefix;
+        base = base + (uint32_t)off;
+        ++quiet;
+        if constexpr (std::is_void_v<typename std_type<U>::repr>) {
+            prefix = prefix + name + ".";          /* struct-shaped: its members are fields */
+            reflect<U>::visit(SchemaVisit{ this });
+        } else {
+            base = saved_base;                     /* alias-shaped: one leaf, at this offset */
+            add<typename std_type<U>::repr>(name, off);
+        }
+        --quiet;
+        base   = saved_base;
+        prefix = std::move(saved_prefix);
     } else if constexpr (is_reflected<U>::value) {
         /* nested reflected struct: inline its fields one level deeper */
         if (!first) dsl += ", ";
@@ -1319,11 +1497,19 @@ inline std::string strip_namespaces(const char* type_name) {
 }
 
 template <class T> TypeCodec* build_codec() {
-    static_assert(is_reflected<T>::value || is_value_type<T>(),
+    static_assert(std_type<T>::name != nullptr || is_reflected<T>::value || is_value_type<T>(),
                   "type has no DART_SCHEMA(T, fields...) declaration and is not a bare wire type");
     auto* c = new TypeCodec();
     SchemaBuilder b;
-    if constexpr (is_reflected<T>::value) {
+    if constexpr (std_type<T>::name != nullptr) {
+        b.dsl = std_type<T>::name;              /* the standard type IS the whole schema */
+        ++b.quiet;
+        if constexpr (std::is_void_v<typename std_type<T>::repr>)
+            reflect<T>::visit(SchemaVisit{ &b });          /* fields at the root: "position.x" */
+        else
+            b.add<typename std_type<T>::repr>("", 0);      /* an alias root: the empty path */
+        --b.quiet;
+    } else if constexpr (is_reflected<T>::value) {
         b.dsl = strip_namespaces(reflect<T>::type_name);
         b.dsl += " { ";
         reflect<T>::visit(SchemaVisit{ &b });
@@ -3464,6 +3650,22 @@ private:
             DART_PP_FOR_EACH(DART_ENUM_ITEM, E, __VA_ARGS__) \
         } \
     }
+
+/* ---- the standard type registrations (global scope: they specialize dart::reflect and
+ * dart::std_type). Each mirror declared near the top of this header gets its wire NAME
+ * here, so a member of one spells as `at: Pose` and matches only a Pose. */
+DART_STD_STRUCT(Float2);   DART_STD_STRUCT(Float3);   DART_STD_STRUCT(Float4);
+DART_STD_STRUCT(Double2);  DART_STD_STRUCT(Double3);  DART_STD_STRUCT(Double4);
+DART_STD_STRUCT(Int2);     DART_STD_STRUCT(Int3);     DART_STD_STRUCT(Int4);
+DART_STD_STRUCT(Quaternion);
+DART_STD_STRUCT(Color);    DART_STD_STRUCT(Rect);     DART_STD_STRUCT(RectI);
+DART_STD_STRUCT(Pose);     DART_STD_STRUCT(Twist);    DART_STD_STRUCT(GeoPoint);
+DART_STD_ALIAS(Uuid,      uint8_t[16]);
+DART_STD_ALIAS(Timestamp, int64_t);
+DART_STD_ALIAS(Duration,  int64_t);
+DART_STD_ALIAS(Matrix3x3, float[9]);
+DART_STD_ALIAS(Matrix4x4, float[16]);
+DART_STD_ALIAS(Uri,       dart::String<256>);
 
 #endif /* C++ consumer (not the implementation anchor) */
 #endif /* DART_HPP_INCLUDED */

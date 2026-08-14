@@ -1,4 +1,4 @@
-# DART WebSocket bridge protocol (v7)
+# DART WebSocket bridge protocol (v8)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
@@ -81,7 +81,7 @@ request, only for a broken WebSocket.
                                   //   names resolve even for topics this node doesn't share
 ```
 
-Reply: `{ "ok": true, "proto": 7, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 8, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -125,7 +125,7 @@ type name is empty (an anonymous root: a bare type's identity is its shape, so t
 same one from any language is the same bytes and the same `hash`):
 
 ```json
-{ "ok": true, "id": 0, "size": 1, "hash": "b1edca4f3f7a622a",
+{ "ok": true, "id": 0, "size": 1, "hash": "ee90234f61d2520b",
   "fields": [ { "path": "", "kind": "bool", "offset": 0, "size": 1 } ] }
 ```
 
@@ -150,13 +150,34 @@ schema has no variable fields, and where the variable tail begins when it does.
 | `varr`    | variable array; lives in the tail, live element count | `elem` (+ `cap` if `elem` is `string`) |
 | `map`     | self-describing tagged value tree; lives in the tail | -- |
 
+A field's type may also carry a NAME (`named`), which the schema wire carries and no
+message byte does. It NARROWS matching: a `Pose` field never binds to a same-shaped
+`Twist` one, while a reader declaring the bare shape reads either. The `kind` a row
+reports is always what the name WRAPS (a `Pose` reads as `struct`), so a decoder that
+ignores `named` is still correct; see docs/stdtypes.md for the standard names.
+
+| extra field | on | meaning |
+|-------------|----|---------|
+| `named`      | any row | the field type's name (`"Pose"`, `"Uuid"`, `"Timestamp"`) |
+| `elem_named` | `arr` / `varr` | the ELEMENT type's name (`"Float3"` for `Float3[4]`) |
+| `elem_size`  | `arr` / `varr` | bytes of one element |
+| `elem_struct`| `arr` / `varr` | the element is a struct: its element-0 template rows follow |
+| `in_array`   | any row | this row is a member of that array row's element template |
+
+An array whose element is a STRUCT (`Float3[4]`, `{ x: f32 }[]`) contributes ONE set of
+member rows, the element-0 template: each carries `in_array` naming its array row, and
+element *i* of a member sits at `offset + i * elem_size` (for a variable array, at that
+stride inside the array's tail frame). An element is always FIXED, so its stride is
+static.
+
 An **`enum`** is a fixed field carrying its `backing` integer (`u8`..`i64`); the
 `variants` array names the values, so a client reads/writes the number and resolves
 the label from `variants` (an unknown value has no name: forward-compatible). The
 reference client (`dart.ts`) exposes `Schema.enumName` / `Schema.enumValue`.
 
 The **variable kinds** (`vstring` / `varr` / `map`) have no fixed offset: each is
-one `[u32 len][payload]` frame in the message tail, the frames in schema order,
+one `[u32 len][payload]` frame in the message tail, the frames in depth-first
+declaration order (one declared inside a nested struct still claims a top-level frame),
 starting at `size`. To read variable field *k*, walk from `size` reading a u32
 length and hopping, *k* times. The `map` payload is a JSON-style tagged tree; the
 reference client (`dart.ts`) has the codec.

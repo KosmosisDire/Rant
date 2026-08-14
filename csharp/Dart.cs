@@ -89,9 +89,14 @@ namespace Dart
         Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
     }
 
+    // Schema field kinds for reflection; the value IS the wire kind byte. Array/String
+    // are FIXED (offset-based); VString/VArray/Map ride the message tail. Named is a
+    // nominal tag on another type -- reflection unwraps it into Field.TypeName, so a
+    // field never reports Named as its own Kind.
     public enum FieldType : byte
     {
-        U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String
+        U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
+        VString, VArray, Map, Enum, Named
     }
 
     // A function call's outcome. Ok/AppError/NoHandler travel on the wire;
@@ -247,13 +252,17 @@ namespace Dart
     internal struct DartSchemaFieldInfo
     {
         public DartStringView name;
+        public DartStringView type_name;   // the field type's NAME, empty when anonymous
+        public DartStringView elem_name;   // an array ELEMENT type's name, empty when anonymous
         public byte kind;
         public byte elem;
         public ushort count;
         public ushort depth;
         public ushort str_cap;
+        public ushort arr_parent;          // flat index of the enclosing struct ARRAY, 0xFFFF none
         public uint offset;
         public uint size;
+        public uint elem_size;             // bytes of one array element, else 0
     }
 
     [StructLayout(LayoutKind.Explicit)]
@@ -444,6 +453,17 @@ namespace Dart
         internal static extern ulong dart_schema_hash(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern DartStringView dart_schema_name(IntPtr s);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern uint dart_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_schema_subset(IntPtr sub, IntPtr pub);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_std_recognize(IntPtr s, DartAllocFn alloc, IntPtr user);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_std_recognize_field(IntPtr s, ushort field,
+                                                            DartAllocFn alloc, IntPtr user);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern long dart_timestamp_now();
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint dart_schema_size(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
@@ -648,6 +668,84 @@ namespace Dart
         public DartStringAttribute(int cap) { Cap = cap; }
     }
 
+    /// <summary>Name a field's TYPE with one of the STANDARD types (docs/stdtypes.md):
+    /// the name rides the schema (never a message byte) and NARROWS matching, so a Pose
+    /// field never binds to a same-shaped Twist one. Put it on a field whose type is the
+    /// standard type's shape -- <c>[DartTypeName("Timestamp")] public long When;</c>,
+    /// <c>[DartTypeName("Uuid")] [DartArray(16)] public byte[] Id;</c> -- or on a struct
+    /// declaration, as the shipped mirrors below do. The shape must be the canonical one
+    /// or compiling the schema fails, loudly.</summary>
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Struct | AttributeTargets.Class)]
+    public sealed class DartTypeNameAttribute : Attribute
+    {
+        public string Name;
+        public DartTypeNameAttribute(string name) { Name = name; }
+    }
+
+    // ---- the standard composites, as plain mirrors of their wire shape ----------------
+    // SI units throughout: meters, m/s, radians. A Timestamp/Duration is microseconds
+    // (Unix epoch, UTC for a Timestamp) and rides a plain long marked
+    // [DartTypeName("Timestamp")]; a Uuid is a 16-byte array in RFC 4122 order.
+    // The [DartField] overrides give the canonical lowercase wire names: a C# field is
+    // PascalCase by convention, and the wire name is what every language must agree on.
+    [DartTypeName("Float2")] public struct Float2
+    { [DartField("x")] public float X; [DartField("y")] public float Y; }
+    [DartTypeName("Float3")] public struct Float3
+    { [DartField("x")] public float X; [DartField("y")] public float Y;
+      [DartField("z")] public float Z; }
+    [DartTypeName("Float4")] public struct Float4
+    { [DartField("x")] public float X; [DartField("y")] public float Y;
+      [DartField("z")] public float Z; [DartField("w")] public float W; }
+    [DartTypeName("Double2")] public struct Double2
+    { [DartField("x")] public double X; [DartField("y")] public double Y; }
+    [DartTypeName("Double3")] public struct Double3
+    { [DartField("x")] public double X; [DartField("y")] public double Y;
+      [DartField("z")] public double Z; }
+    [DartTypeName("Double4")] public struct Double4
+    { [DartField("x")] public double X; [DartField("y")] public double Y;
+      [DartField("z")] public double Z; [DartField("w")] public double W; }
+    [DartTypeName("Int2")] public struct Int2
+    { [DartField("x")] public int X; [DartField("y")] public int Y; }
+    [DartTypeName("Int3")] public struct Int3
+    { [DartField("x")] public int X; [DartField("y")] public int Y; [DartField("z")] public int Z; }
+    [DartTypeName("Int4")] public struct Int4
+    { [DartField("x")] public int X; [DartField("y")] public int Y;
+      [DartField("z")] public int Z; [DartField("w")] public int W; }
+    [DartTypeName("Quaternion")] public struct Quaternion    // stored x, y, z, w
+    { [DartField("x")] public double X; [DartField("y")] public double Y;
+      [DartField("z")] public double Z; [DartField("w")] public double W; }
+    [DartTypeName("Color")] public struct Color              // sRGB, straight alpha
+    { [DartField("r")] public byte R; [DartField("g")] public byte G;
+      [DartField("b")] public byte B; [DartField("a")] public byte A; }
+    [DartTypeName("Rect")] public struct Rect
+    { [DartField("x")] public float X; [DartField("y")] public float Y;
+      [DartField("w")] public float W; [DartField("h")] public float H; }
+    [DartTypeName("RectI")] public struct RectI
+    { [DartField("x")] public int X; [DartField("y")] public int Y;
+      [DartField("w")] public int W; [DartField("h")] public int H; }
+    [DartTypeName("Pose")] public struct Pose
+    { [DartField("position")] public Double3 Position;
+      [DartField("orientation")] public Quaternion Orientation; }
+    [DartTypeName("Twist")] public struct Twist               // m/s and rad/s
+    { [DartField("linear")] public Double3 Linear; [DartField("angular")] public Double3 Angular; }
+    [DartTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
+    { [DartField("lat")] public double Lat; [DartField("lon")] public double Lon;
+      [DartField("alt")] public double Alt; }
+
+    /// <summary>The standard-type values that need a platform.</summary>
+    public static class Std
+    {
+        /// <summary>Now, in the units a Timestamp field declares: microseconds since the
+        /// Unix epoch, UTC -- the same clock a message's WrittenUs is stamped from.</summary>
+        public static long Now() => Native.dart_timestamp_now();
+        /// <summary>An identity Quaternion (w = 1).</summary>
+        public static Quaternion IdentityRotation() => new Quaternion { W = 1.0 };
+        /// <summary>A Color from 0xRRGGBBAA.</summary>
+        public static Color ColorFromHex(uint rgba)
+            => new Color { R = (byte)(rgba >> 24), G = (byte)(rgba >> 16),
+                           B = (byte)(rgba >> 8),  A = (byte)rgba };
+    }
+
     /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
     [AttributeUsage(AttributeTargets.Field)]
     public sealed class DartFieldAttribute : Attribute
@@ -721,6 +819,12 @@ namespace Dart
             }
         }
         private int _valueRoot = -1;
+
+        /// <summary>Can a reader declaring THIS schema read messages written with
+        /// <paramref name="pub"/>? Every field of ours must exist in pub under the same
+        /// name with a compatible type. Type NAMES narrow: an anonymous type reads a named
+        /// one of the same shape, never the reverse, and two names never match.</summary>
+        public bool CanRead(Schema pub) => Native.dart_schema_subset(Handle, pub.Handle) != 0;
 
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
         /// <summary>The decoded fields by name; a bare-type schema yields its one value
@@ -2676,7 +2780,8 @@ namespace Dart
         internal const byte U8 = 0, U16 = 1, U32 = 2, U64 = 3, I8 = 4, I16 = 5, I32 = 6,
             I64 = 7, F32 = 8, F64 = 9, BOOL = 10, ARR = 11, STRUCT = 12, STR = 13,
             VSTR = 14, VARR = 15, MAP = 16,   // the variable kinds (ride the message tail)
-            ENUM = 17;                        // named integer (wire = its backing scalar)
+            ENUM = 17,                        // named integer (wire = its backing scalar)
+            NAMED = 18;                       // a name on another type (reflection unwraps it)
 
         private static readonly string[] Token = { "u8", "u16", "u32", "u64", "i8", "i16",
             "i32", "i64", "f32", "f64", "bool" };
@@ -2786,6 +2891,7 @@ namespace Dart
             public int StrCap;
             public Type Nested;
             public Type EnumType;  // enum fields: the C# enum type (names/values via reflection)
+            public string TypeName; // a STANDARD type's name: the whole spelling
         }
         private sealed class TypeSpec { public string Name; public List<FieldPlan> Fields; }
         private static readonly Dictionary<Type, TypeSpec> s_specs = new Dictionary<Type, TypeSpec>();
@@ -2904,6 +3010,11 @@ namespace Dart
                         + " (use scalars, strings ([DartString] = capped, plain = variable), arrays "
                         + "([DartArray] = fixed, plain = variable), a Dictionary<string,object> map, "
                         + "or nested structs)");
+                    // a standard type names the field's type: on the field, or on its struct
+                    var tn = (DartTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(DartTypeNameAttribute));
+                    if (tn == null && plan.Nested != null)
+                        tn = (DartTypeNameAttribute)Attribute.GetCustomAttribute(plan.Nested, typeof(DartTypeNameAttribute));
+                    if (tn != null) plan.TypeName = tn.Name;
                     plans.Add(plan);
                 }
                 if (plans.Count == 0)
@@ -2934,6 +3045,7 @@ namespace Dart
         // one field's type in DSL form (the whole schema when the root is a bare type)
         private static string TypeToken(FieldPlan f)
         {
+            if (f.TypeName != null) return f.TypeName;   // a standard type: the name IS the spelling
             if (f.Kind == STRUCT)
             {
                 var nested = Spec(f.Nested).Fields;
@@ -2965,35 +3077,21 @@ namespace Dart
             return "{ " + string.Join(", ", parts) + " }";
         }
 
-        // --- DSL reconstruction from ANY compiled schema (flat depth-first table) ---
+        // --- DSL text of ANY compiled schema, straight from the C printer ---
+        // It spells named types and struct arrays, hoists each named type as a leading
+        // `Name = type` definition, and recompiles to identical wire, so there is exactly
+        // one implementation of the spelling across every binding.
         internal static string SchemaDsl(IntPtr s)
         {
-            var root = new List<object[]>();
-            var stack = new List<List<object[]>> { root };
-            ushort n = Native.dart_schema_field_count(s);
-            for (ushort i = 0; i < n; i++)
+            uint need = Native.dart_schema_print(s, IntPtr.Zero, UIntPtr.Zero);
+            if (need == 0) return "";
+            IntPtr buf = Marshal.AllocHGlobal((int)need + 1);
+            try
             {
-                DartSchemaFieldInfo info;
-                Native.dart_schema_field_at(s, i, out info);
-                var node = new object[] { Str(info.name), info.kind, info.elem, (int)info.count,
-                                          (int)info.str_cap, null,
-                                          info.kind == ENUM ? EnumBodyFromSchema(s, i) : null };
-                int d = info.depth;
-                stack[d].Add(node);
-                if (info.kind == STRUCT)
-                {
-                    var ch = new List<object[]>();
-                    node[5] = ch;
-                    while (stack.Count <= d + 1) stack.Add(null);
-                    stack[d + 1] = ch;
-                }
+                Native.dart_schema_print(s, buf, (UIntPtr)(need + 1));
+                return Marshal.PtrToStringAnsi(buf) ?? "";
             }
-            if (IsValueRoot(s)) return NodeType(root[0]) + "\n";   // a bare type: no name, no braces
-            var sb = new StringBuilder();
-            sb.Append(Str(Native.dart_schema_name(s))).Append("\n{\n");
-            EmitNodes(sb, root);
-            sb.Append("\n}\n");
-            return sb.ToString();
+            finally { Marshal.FreeHGlobal(buf); }
         }
 
         // True when a compiled schema is a BARE TYPE: an unnamed root of one anonymous field,

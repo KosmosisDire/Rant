@@ -2235,6 +2235,26 @@ uint32_t dart_node_evicted_unsent(DartNode *n){
     return v;
 }
 
+#ifndef DART_NO_STDTYPES
+/* The standard types that need a platform: the wall clock a `Timestamp` counts from, and
+ * a random `Uuid`. Both sit here rather than in serialize/ so that layer keeps needing
+ * nothing but memory (see the note in node/runtime.h). */
+DartTimestamp dart_timestamp_now(void){
+    return (DartTimestamp)i_dart_plat_wall_us();
+}
+
+void dart_uuid_new(DartUuid *out){
+    if (!out) return;
+    if (dart_discovery_make_uuid4(out->bytes)) return;    /* the CSPRNG path */
+    {   /* no entropy source: the same host-identity mix a node's own uuid falls back to */
+        char host[80];
+        size_t n = i_dart_plat_hostname(host, sizeof host);
+        uint64_t seed = (i_dart_plat_pid() << 32) ^ i_dart_plat_now_us();
+        dart_discovery_make_uuid(out->bytes, dart_bytes(host, n), seed);
+    }
+}
+#endif
+
 void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
     int acquired;
     if (!n) return;

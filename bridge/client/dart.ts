@@ -1,5 +1,5 @@
 /* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v6, see ../PROTOCOL.md). Zero runtime dependencies: runs
+ * through the bridge (protocol v8, see ../PROTOCOL.md). Zero runtime dependencies: runs
  * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
@@ -39,7 +39,12 @@ function rdWrittenUs(view: DataView, off: number): number {
 type Field = {
     path: string;
     kind: string;
+    named?: string;                                /* the field type's NAME ("Pose"), if any */
     elem?: string;
+    elem_named?: string;                           /* an array element type's name, if any */
+    elem_size?: number;                            /* bytes of one array element */
+    elem_struct?: boolean;                         /* the element-0 template rows follow this one */
+    in_array?: number;                             /* this row is a member of that array row */
     count?: number;
     cap?: number;
     backing?: string;                              /* enum: the wire scalar kind */

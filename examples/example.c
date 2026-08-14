@@ -31,15 +31,25 @@
 
 /* The ChatMsg schema, in the DSL every program using the topic pastes verbatim. It
  * deliberately exercises every serialization kind (all eleven scalars, a scalar array,
- * a capped string + string array, a nested struct, and the variable kinds: an unbounded
- * string, a variable array, a self-describing map): the typed line is the text field,
- * everything else is random filler so the explorer has structure to show. Every line
- * typed is encoded through it on send and decoded from DartMsg.schema on delivery;
- * fields are accessed by name (nested members by dotted path: "vel.dx"). */
+ * a capped string + string array, and the variable kinds: an unbounded string, a variable
+ * array, a self-describing map) plus several STANDARD TYPES (docs/stdtypes.md): the typed
+ * line is the text field, everything else is random filler so the explorer has structure
+ * to show. Every line typed is encoded through it on send and decoded from DartMsg.schema
+ * on delivery; fields are accessed by name (nested members by dotted path: "vel.x",
+ * "at.position.x").
+ *
+ * `Timestamp`, `Double3`, `Float2`, `Pose` and `Color` are STANDARD names: always in
+ * scope, no definition needed, and the name rides the schema (never a message byte) and
+ * NARROWS matching, so `at` only ever binds to another Pose. `Bearing = f32` shows the
+ * same mechanism for your OWN types: an alias defined right here, distinct from a plain
+ * f32 and from anyone else's differently-named f32. (Its `\n` matters: a definition ends
+ * where its type ends, so concatenated C literals would lex `f32ChatMsg` as one word.
+ * The field lines below self-delimit on their commas.) */
 static const char CHAT_SCHEMA[] =
+    "Bearing = f32\n"                    /* our own alias: degrees, not radians */
     "ChatMsg"
     "{"
-    "    ts:      u64,"
+    "    ts:      Timestamp,"            /* Unix-epoch microseconds, UTC */
     "    seq:     u32,"
     "    ttl:     u16,"
     "    hops:    u8,"
@@ -50,8 +60,11 @@ static const char CHAT_SCHEMA[] =
     "    ratio:   f32,"
     "    weight:  f64,"
     "    urgent:  bool,"
-    "    pos:     f64[3],"
-    "    vel:     { dx: f32, dy: f32 },"
+    "    heading: Bearing,"              /* our alias: never reads as a bare f32 */
+    "    pos:     Double3,"              /* meters */
+    "    vel:     Float2,"
+    "    at:      Pose,"                 /* position + orientation quaternion */
+    "    tint:    Color,"                /* sRGB RGBA bytes */
     "    tags:    string<8>[2],"
     "    path:    f32[],"                /* variable array: a live element count */
     "    text:    string,"               /* variable string: the typed line, unbounded */
@@ -65,10 +78,10 @@ static DartSchema *g_schema;
  * to send (variable fields make it per-message). */
 static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
     static uint32_t seq;
-    uint8_t pos_wire[24], path_wire[16], extras[64]; uint64_t bits; uint32_t fbits;
-    double p; int k, n; float pf; DartMapWriter w;
+    uint8_t path_wire[16], extras[64]; uint32_t fbits;
+    int k, n; float pf; DartMapWriter w;
     dart_schema_message_default(g_schema, buf, cap);
-    dart_set_uint(buf, cap, g_schema, "ts",     i_dart_plat_now_us());
+    dart_set_int (buf, cap, g_schema, "ts",     dart_timestamp_now());
     dart_set_uint(buf, cap, g_schema, "seq",    ++seq);
     dart_set_uint(buf, cap, g_schema, "ttl",    (uint64_t)(rand() & 0xFFFF));
     dart_set_uint(buf, cap, g_schema, "hops",   (uint64_t)(rand() & 0xFF));
@@ -79,13 +92,25 @@ static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t l
     dart_set_f32 (buf, cap, g_schema, "ratio",  (float)rand() / (float)RAND_MAX);
     dart_set_f64 (buf, cap, g_schema, "weight", 100.0 * (double)rand() / (double)RAND_MAX);
     dart_set_uint(buf, cap, g_schema, "urgent", (uint64_t)(rand() & 1));
-    for (k = 0; k < 3; k++){                             /* f64 array: LE element bytes */
-        p = (double)(rand() % 2001 - 1000) / 10.0;
-        memcpy(&bits, &p, 8); i_dart_le_w64(pos_wire + 8 * k, bits);
+    dart_set_f32 (buf, cap, g_schema, "heading", (float)(rand() % 3600) / 10.0f);
+    dart_set_f64 (buf, cap, g_schema, "pos.x",  (double)(rand() % 2001 - 1000) / 10.0);
+    dart_set_f64 (buf, cap, g_schema, "pos.y",  (double)(rand() % 2001 - 1000) / 10.0);
+    dart_set_f64 (buf, cap, g_schema, "pos.z",  (double)(rand() % 2001 - 1000) / 10.0);
+    dart_set_f32 (buf, cap, g_schema, "vel.x",  (float)(rand() % 100) / 10.0f);
+    dart_set_f32 (buf, cap, g_schema, "vel.y",  (float)(rand() % 100) / 10.0f);
+    {   /* a Pose is a struct of standard types, so its members nest by dotted path; the
+           C mirror DartPose has the identical layout if you would rather memcpy one in */
+        DartPose at = dart_pose_identity();
+        at.position = dart_double3((double)(rand() % 100) / 10.0, 0.0, 0.0);
+        dart_set_f64(buf, cap, g_schema, "at.position.x", at.position.x);
+        dart_set_f64(buf, cap, g_schema, "at.orientation.w", at.orientation.w);
     }
-    dart_set_array(buf, cap, g_schema, "pos", dart_bytes(pos_wire, sizeof pos_wire));
-    dart_set_f32 (buf, cap, g_schema, "vel.dx", (float)(rand() % 100) / 10.0f);
-    dart_set_f32 (buf, cap, g_schema, "vel.dy", (float)(rand() % 100) / 10.0f);
+    {   DartColor tint = dart_color_from_hex(0x3080C0FFu);   /* 0xRRGGBBAA */
+        dart_set_uint(buf, cap, g_schema, "tint.r", tint.r);
+        dart_set_uint(buf, cap, g_schema, "tint.g", tint.g);
+        dart_set_uint(buf, cap, g_schema, "tint.b", tint.b);
+        dart_set_uint(buf, cap, g_schema, "tint.a", tint.a);
+    }
     dart_set_string_at(buf, cap, g_schema, "tags", 0, dart_cstr((rand() & 1) ? "loud" : "quiet"));
     dart_set_string_at(buf, cap, g_schema, "tags", 1, dart_cstr((rand() & 1) ? "red" : "blue"));
     n = rand() % 4;                                      /* variable array: 0..3 live f32 */
@@ -161,15 +186,18 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
  * just reflects clock skew. A schema-less message (a raw publisher) prints as-is. */
 static void on_message(const DartMsg *msg){
     if (msg->schema){
-        uint64_t   ts   = dart_get_uint(msg->data, msg->schema, "ts");
+        int64_t    ts   = dart_get_int(msg->data, msg->schema, "ts");   /* a Timestamp */
         uint64_t   seq  = dart_get_uint(msg->data, msg->schema, "seq");
+        double     hdg  = dart_get_f32(msg->data, msg->schema, "heading");
         DartString text = dart_get_string(msg->data, msg->schema, "text");
-        printf("[%.*s] %.*s > %.*s  (#%llu, +%.2f ms)\n",
+        printf("[%.*s] %.*s > %.*s  (#%llu, %.1f deg, +%.2f ms)\n",
                (int)msg->publisher_name.len, msg->publisher_name.data,
                (int)msg->topic_name.len, msg->topic_name.data,
                (int)text.len, text.data ? text.data : "",
-               (unsigned long long)seq,
-               (double)(i_dart_plat_now_us() - ts) / 1000.0);
+               (unsigned long long)seq, hdg,
+               /* both clocks are Unix-epoch microseconds, so this is one-way latency plus
+                  clock skew (meaningful on one host, skew-bound across machines) */
+               (double)(dart_timestamp_now() - ts) / 1000.0);
     } else {
         printf("[%.*s] %.*s > %.*s\n", (int)msg->publisher_name.len, msg->publisher_name.data,
                (int)msg->topic_name.len, msg->topic_name.data,
@@ -228,7 +256,12 @@ int main(int argc, char **argv){
      * dart_node_close frees it: no explicit dart_schema_free. */
     DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     g_schema = dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, NULL);
-    if (!g_schema || dart_schema_msg_min(g_schema) > 128){ fprintf(stderr, "schema compile failed\n"); return 1; }
+    if (!g_schema || dart_schema_msg_min(g_schema) > 256){   /* the send buffer below is 512 */
+        const char *err = NULL;
+        if (!g_schema) dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, &err);
+        fprintf(stderr, "schema compile failed%s%.40s\n", err ? " near: " : "", err ? err : "");
+        return 1;
+    }
     srand((unsigned)i_dart_plat_now_us());   /* the filler fields are random per message */
 
     DartNode *n = dart_node_open(&mem, name, on_message, on_event,

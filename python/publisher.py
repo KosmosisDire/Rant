@@ -3,13 +3,19 @@ interface and domain (0), so any subscriber on the LAN (any language) can receiv
 Single-threaded: it drives the node with a manual poll in the send loop (no background
 thread). Uses the same schema/topic as csharp/publisher, so the two interoperate.
 
+The message is built from STANDARD TYPES (docs/stdtypes.md): `when` is a Timestamp
+(microseconds since the Unix epoch, UTC) and `at` a Pose (position in meters plus an
+orientation quaternion), so every language reads them as the same named types instead of
+a bare u64 and six loose doubles -- and a Pose field can never bind to a same-shaped
+Twist one.
+
     python python/publisher.py [seconds] [interface]   # seconds/interface optional
 """
 import math
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist"))
 import dart  # noqa: E402
@@ -20,8 +26,9 @@ HZ = 1000
 @dataclass
 class Tick:
     seq: dart.u64 = 0
-    t_us: dart.u64 = 0
+    when: dart.Timestamp = 0                                  # Unix-epoch microseconds, UTC
     value: dart.f64 = 0.0
+    at: dart.Pose = field(default_factory=dart.Pose)          # meters + a quaternion
 
 
 def main():
@@ -44,7 +51,10 @@ def main():
             now = time.perf_counter()
             due = int((now - start) / period)             # how many ticks should exist by now
             while seq < due:
-                ch.send(Tick(seq=seq, t_us=int(now * 1e6), value=math.sin(seq * 0.01)))
+                angle = seq * 0.01
+                ch.send(Tick(seq=seq, when=dart.timestamp_now(), value=math.sin(angle),
+                             at=dart.Pose(position=dart.Double3(math.cos(angle),
+                                                               math.sin(angle), 0.0))))
                 seq += 1
             node.poll(0)                                   # non-blocking: flush the burst + service RX
             if now - last_report >= 1.0:

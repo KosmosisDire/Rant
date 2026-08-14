@@ -3,6 +3,13 @@
 // it. Uses the same schema/topic as python/publisher.py, so the two interoperate
 // (the [DartField] overrides give lowercase wire names matching the Python fields).
 //
+// The message is built from STANDARD TYPES (docs/stdtypes.md): `when` is a Timestamp
+// (microseconds since the Unix epoch, UTC) and `at` a Pose (position in meters plus an
+// orientation quaternion), so every language reads them as the same named types instead
+// of a bare ulong and six loose doubles -- and a Pose field can never bind to a
+// same-shaped Twist one. An alias like Timestamp names a plain field's TYPE; a composite
+// like Pose is a shipped mirror struct that carries the name itself.
+//
 //   dotnet run --project csharp/publisher [-- <seconds>]
 
 using System;
@@ -13,8 +20,9 @@ using Dart;
 struct Tick
 {
     [DartField("seq")]   public ulong Seq;
-    [DartField("t_us")]  public ulong TUs;
+    [DartField("when")] [DartTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
     [DartField("value")] public double Value;
+    [DartField("at")]    public Pose At;                                // meters + a quaternion
 }
 
 static class Program
@@ -46,7 +54,11 @@ static class Program
             long due = (long)(now / period);                   // ticks that should exist by now
             while ((long)seq < due)
             {
-                ch.Send(new Tick { Seq = seq, TUs = (ulong)(now * 1e6), Value = Math.Sin(seq * 0.01) });
+                double angle = seq * 0.01;
+                ch.Send(new Tick {
+                    Seq = seq, When = Std.Now(), Value = Math.Sin(angle),
+                    At = new Pose { Position = new Double3 { X = Math.Cos(angle), Y = Math.Sin(angle) },
+                                    Orientation = Std.IdentityRotation() } });
                 seq++;
             }
             node.Poll(0);                                      // non-blocking: flush the burst + service RX

@@ -41,7 +41,7 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 7;
+static const int kProtoVersion = 8;
 
 /* Binary frame ops (byte 0). One value space, meaning per direction. EVERY server-to-client
  * data frame ends its header with [u64 written_us], the writer's wall clock at the moment it
@@ -132,6 +132,7 @@ static const char *kind_str(dart::FieldType kind){
     case dart::FieldType::VString: return "vstring"; case dart::FieldType::VArray: return "varr";
     case dart::FieldType::Map:     return "map";
     case dart::FieldType::Enum:    return "enum";
+    case dart::FieldType::Named:   return "named";
     default: return "?";
     }
 }
@@ -165,8 +166,17 @@ static json fields_json(const dart::Schema &s){
         path.append(f.name.data(), f.name.size());
         json row = { {"path", path}, {"kind", kind_str(f.kind)},
                      {"offset", f.offset}, {"size", f.size} };
+        /* a NAMED type is unwrapped: `kind` is what it wraps, `named` is the name it
+           carries (a Pose reads as a struct of Double3 + Quaternion, and says so) */
+        if (!f.type_name.empty()) row["named"] = std::string(f.type_name);
         if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
         if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);  /* live count, no bound */
+        if (f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray){
+            if (!f.elem_name.empty()) row["elem_named"] = std::string(f.elem_name);
+            if (f.elem_size) row["elem_size"] = f.elem_size;
+            if (f.elem == dart::FieldType::Struct) row["elem_struct"] = true;   /* element-0 template follows */
+        }
+        if (f.arr_parent != 0xFFFFu) row["in_array"] = f.arr_parent;            /* index it to read */
         if (f.kind == dart::FieldType::Enum){                                   /* backing + option table */
             row["backing"] = kind_str(f.elem);
             json opts = json::array();
@@ -178,7 +188,12 @@ static json fields_json(const dart::Schema &s){
         }
         if (f.str_cap) row["cap"] = f.str_cap;                                  /* string + string arrays */
         fields.push_back(row);
-        if (f.kind == dart::FieldType::Struct) parents.push_back(std::string(f.name.data(), f.name.size()));
+        /* a struct field, and a struct ARRAY (whose element-0 template follows it), both
+           open a path level */
+        if (f.kind == dart::FieldType::Struct ||
+            ((f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray)
+             && f.elem == dart::FieldType::Struct))
+            parents.push_back(std::string(f.name.data(), f.name.size()));
     }
     return fields;
 }

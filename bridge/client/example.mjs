@@ -14,12 +14,18 @@ import { DartNode, MetaSection } from "../../dist/dart.mjs";
 const url = process.argv[2] ?? "ws://127.0.0.1:7480";
 
 /* Schemas are DSL text, pasted identically on both ends: the wire carries no field
- * names, so a value's meaning is its position. */
-const TELEMETRY = `Telemetry { seq: u32, battery: f32, pos: { x: f64, y: f64 } }`;
+ * names, so a value's meaning is its position.
+ *
+ * `Timestamp`, `Double2` and `Color` are STANDARD TYPES (docs/stdtypes.md): always in
+ * scope, no import, no definition. The name rides the schema (never a message byte) and
+ * NARROWS matching, so `at` binds only to another Double2 and `when` reads as Unix-epoch
+ * microseconds everywhere. The bridge reports the name to the client as the field's
+ * `named` key, so a UI can render a Color as a swatch without guessing. */
+const TELEMETRY = `Telemetry { seq: u32, when: Timestamp, battery: f32, at: Double2 }`;
 const ADD_REQ   = `AddReq { a: i32, b: i32 }`;
 const ADD_RSP   = `AddRsp { sum: i32 }`;
 const CONFIG    = `Config { rate_hz: u32, label: string<24> }`;
-const ALERT     = `Alert { level: u8, what: string<48> }`;
+const ALERT     = `Alert { level: u8, what: string<48>, tint: Color }`;
 
 /* interface "127.0.0.1" pins discovery to loopback so the two same-host nodes find
  * each other quickly; drop it to run across a real network. */
@@ -49,7 +55,7 @@ const gotTelemetry = new Promise((res) => { sawTelemetry = res; });
 await dash.subscriber("telemetry", TELEMETRY, (v, msg) => {
     msgWrittenUs = msg.writtenUs;   /* the publisher's wall clock when it sent (0 = opted out) */
     console.log(`telemetry #${v.seq}  battery=${v.battery.toFixed(1)}%  ` +
-                `pos=(${v.pos.x}, ${v.pos.y})  from peer ${msg.publisher}`);
+                `at=(${v.at.x}, ${v.at.y})  when=${v.when}  from peer ${msg.publisher}`);
     sawTelemetry(v);
 });
 const addRemote = await dash.remoteFunction("add", ADD_REQ, ADD_RSP);
@@ -67,9 +73,9 @@ await robot.settle(5000);
 await dash.settle(5000);
 
 /* pub/sub */
-telemetry.send({ seq: 1, battery: 87.5, pos: { x: 1.5, y: -0.5 } });
+telemetry.send({ seq: 1, when: Date.now() * 1000, battery: 87.5, at: { x: 1.5, y: -0.5 } });
 const t = await gotTelemetry;
-if (t.seq !== 1 || t.pos.x !== 1.5) throw new Error("telemetry mismatch");
+if (t.seq !== 1 || t.at.x !== 1.5 || t.when === 0) throw new Error("telemetry mismatch");
 
 /* function: request/response with exactly one reply */
 const r = await addRemote.call({ a: 2, b: 3 });
@@ -86,7 +92,7 @@ if (config.get()?.rate_hz !== 100) throw new Error("variable set did not replica
 console.log(`owner sees rate_hz=${config.get().rate_hz} label="${config.get().label}"`);
 
 /* signal: fire-and-forget event, robot -> dashboard */
-alerts.emit({ level: 2, what: "low battery" });
+alerts.emit({ level: 2, what: "low battery", tint: { r: 0xF0, g: 0xA0, b: 0x20, a: 0xFF } });
 await gotAlert;
 
 /* ---- introspection: query the mesh through the bridge (pull-only) ----------------- */
@@ -150,7 +156,7 @@ console.log(`bare roots: estop=${flag}  temps=[${temps.join(", ")}]  ` +
             `estop schema hash=${flagPub.topic.layout.hash}`);
 if (flag !== true) throw new Error("bare bool did not arrive as true");
 if (temps.length !== 2 || Math.abs(temps[0] - 36.5) > 1e-3) throw new Error("bare f32[] mismatch");
-if (flagPub.topic.layout.hash !== "b1edca4f3f7a622a") throw new Error("bare `bool` hash is not canonical");
+if (flagPub.topic.layout.hash !== "ee90234f61d2520b") throw new Error("bare `bool` hash is not canonical");
 if (!(await gainRemote.wait(5000))) throw new Error("no bare-typed variable value");
 if (gainRemote.get() !== 1.25) throw new Error("bare-typed variable value mismatch");
 gainRemote.set(2.5);

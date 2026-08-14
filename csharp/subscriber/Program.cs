@@ -1,6 +1,10 @@
 // DART C# subscriber: subscribes to 'tick' and reports the received message rate.
 // Pair with csharp/publisher or python/publisher.py. Manual single-threaded poll.
 //
+// The schema is pasted from the publisher, standard types and all: `when` decodes to a
+// plain long of Unix-epoch microseconds and `at` to a Pose, so the one-second report can
+// print the sender's clock skew and position with no hand-written unpacking.
+//
 //   dotnet run --project csharp/subscriber [-- <seconds> <interface>]
 
 using System;
@@ -10,20 +14,22 @@ using Dart;
 struct Tick
 {
     [DartField("seq")]   public ulong Seq;
-    [DartField("t_us")]  public ulong TUs;
+    [DartField("when")] [DartTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
     [DartField("value")] public double Value;
+    [DartField("at")]    public Pose At;                                // meters + a quaternion
 }
 
 static class Program
 {
     static long _count = 0;
+    static Tick _last;
 
     static int Main(string[] args)
     {
         double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 => run forever
         string iface = args.Length > 1 ? args[1] : null;
 
-        var node = new DartNode("cs-subscriber", _ => _count++,
+        var node = new DartNode("cs-subscriber", m => { _count++; _last = m.As<Tick>(); },
             e => Console.Error.WriteLine("event: " + e), multicastInterface: iface);
         new Topic<Tick>(node, "tick", Role.SubOnly);
         Console.WriteLine("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)");
@@ -41,7 +47,12 @@ static class Program
             if (now - lastReport >= 1.0)
             {
                 double rate = (_count - lastCount) / (now - lastReport);
-                Console.WriteLine($"received={_count}  rate={rate:F0} Hz");
+                // `when` is the publisher's wall clock in the same units everywhere, so the
+                // difference against ours is one-way latency plus clock skew.
+                double ageMs = _last.When != 0 ? (Std.Now() - _last.When) / 1000.0 : 0.0;
+                var p = _last.At.Position;
+                Console.WriteLine($"received={_count}  rate={rate:F0} Hz  age={ageMs:F1} ms  " +
+                                  $"at=({p.X:F2}, {p.Y:F2}, {p.Z:F2})");
                 lastCount = _count; lastReport = now;
             }
             if (seconds > 0 && now >= seconds) break;

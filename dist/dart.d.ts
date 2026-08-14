@@ -1,7 +1,12 @@
 type Field = {
     path: string;
     kind: string;
+    named?: string;
     elem?: string;
+    elem_named?: string;
+    elem_size?: number;
+    elem_struct?: boolean;
+    in_array?: number;
     count?: number;
     cap?: number;
     backing?: string;

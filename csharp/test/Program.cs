@@ -281,10 +281,76 @@ static class Program
 
     // The canonical wire of a bare type is its kind alone, so these hashes are the same in
     // every language binding (pinned in C by dart_test's schema-root phase).
-    const ulong HashBool = 0xb1edca4f3f7a622aUL;
-    const ulong HashF32Arr = 0xd166c4a8dcec317bUL;
+    const ulong HashBool = 0xee90234f61d2520bUL;
+    const ulong HashF32Arr = 0x314844e3386a1fc4UL;
 
     enum Mode : byte { Idle = 0, Run = 1, Fault = 2 }
+
+    // The Float3 schema is the shared cross-language golden vector: the same wire and the
+    // same hash from C, C++, C# and Python (pinned in C by dart_test's stdtypes phase).
+    const ulong HashFloat3 = 0x04aa9469cd08b1ddUL;
+
+    // Standard types as ordinary fields: an ALIAS (Timestamp, Uuid) names a plain field's
+    // TYPE, a COMPOSITE (Pose, Color) is a shipped mirror struct that names itself. Both
+    // NARROW matching, so this never binds to a same-shaped schema that meant something else.
+    struct Track
+    {
+        [DartField("at")]   public Dart.Pose At;
+        [DartField("when")] [DartTypeName("Timestamp")] public long When;
+        [DartField("tag")]  public Dart.Color Tag;
+        [DartField("id")]   [DartTypeName("Uuid")] [DartArray(16)] public byte[] Id;
+        [DartField("velocity")] public Dart.Float3 Velocity;
+    }
+
+    static bool StdTypes()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        using (var f3 = new Schema("Float3"))
+        using (var mirror = new Schema(typeof(Dart.Float3)))
+        {
+            Check("Float3 compiles by name alone, golden hash", f3.Hash == HashFloat3);
+            Check("Float3 is 12 message bytes", f3.Size == 12);
+            Check("the mirror struct IS that type", mirror.Hash == HashFloat3);
+        }
+        // a name narrows: an anonymous field of the same shape reads a Pose field, never the
+        // reverse, and Pose/Twist are both 3+4 doubles yet never mistaken for each other
+        using (var named = new Schema("W { at: Pose }"))
+        using (var bare = new Schema("W { at: { position: { x: f64, y: f64, z: f64 }," +
+                                     "         orientation: { x: f64, y: f64, z: f64, w: f64 } } }"))
+        using (var pose = new Schema("Pose"))
+        using (var twist = new Schema("Twist"))
+        {
+            Check("an anonymous field of the same shape reads a Pose field",
+                  bare.CanRead(named) && !named.CanRead(bare));
+            Check("Pose and Twist never cross-wire", !twist.CanRead(pose));
+        }
+        using (var sch = new Schema(typeof(Track)))
+        {
+            string text = sch.Dsl;
+            Check("the reflected schema spells the names, not the shapes",
+                  text.Contains("at: Pose") && text.Contains("when: Timestamp")
+                  && text.Contains("id: Uuid") && text.Contains("velocity: Float3"));
+            Check("its message is the sum of the wire shapes (56+8+4+16+12)", sch.Size == 96);
+
+            var t = new Track {
+                At = new Dart.Pose { Position = new Dart.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
+                                Orientation = Std.IdentityRotation() },
+                When = Std.Now(),
+                Tag = Std.ColorFromHex(0x112233FFu),
+                Id = new byte[16],
+                Velocity = new Dart.Float3 { X = 1.0f, Y = 2.0f, Z = 3.0f } };
+            for (int i = 0; i < 16; i++) t.Id[i] = (byte)i;
+            var back = (Track)sch.Decode(sch.Encode(t));
+            Check("a Track round-trips whole",
+                  back.At.Position.X == 4.5 && back.At.Orientation.W == 1.0
+                  && back.When == t.When && back.Tag.R == 0x11 && back.Tag.A == 0xFF
+                  && back.Id != null && back.Id[15] == 15 && back.Velocity.Z == 3.0f);
+            Check("Std.Now is Unix-epoch microseconds", Std.Now() > 1600000000000000L);
+        }
+        return ok;
+    }
 
     // Bare types as whole schemas: no struct wrapper, plain values through Send/TryTake.
     static bool ValueRoots()
@@ -398,6 +464,7 @@ static class Program
     {
         if (!RoundTrip()) return 1;
         if (!ValueRoots()) return 1;
+        if (!StdTypes()) return 1;
         Console.WriteLine("opening nodes...");
 
         var sub = new DartNode("sub",

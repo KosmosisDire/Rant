@@ -140,7 +140,13 @@ _EXPORTS = [
     "dart_node_create_signal", "dart_signal_emit", "dart_signal_listener_count",
     "dart_signal_retire",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
-    "dart_schema_hash", "dart_schema_name", "dart_schema_size",
+    "dart_schema_hash", "dart_schema_name", "dart_schema_size", "dart_schema_print",
+    "dart_schema_field_type_wire", "dart_schema_subset", "dart_get_array_count",
+    "dart_set_array_count",
+    "dart_get_value_at", "dart_set_value_at", "dart_array_count_at",
+    "dart_schema_compile_env", "dart_std_name", "dart_std_text", "dart_std_by_name",
+    "dart_std_schema", "dart_std_recognize", "dart_std_recognize_field",
+    "dart_std_recognize_elem", "dart_timestamp_now", "dart_uuid_new",
     "dart_schema_field_count", "dart_schema_field_at", "dart_schema_field_index",
     "dart_schema_enum_count", "dart_schema_enum_variant", "dart_get_enum", "dart_set_enum",
     "dart_schema_message_default", "dart_schema_scalar_size",
@@ -419,13 +425,17 @@ class DartAllocator(Structure):
 class DartSchemaFieldInfo(Structure):
     _fields_ = [
         ("name", DartStringView),
+        ("type_name", DartStringView),   # the field type's NAME, empty when anonymous
+        ("elem_name", DartStringView),   # an array ELEMENT type's name, empty when anonymous
         ("kind", c_uint8),
         ("elem", c_uint8),
         ("count", c_uint16),
         ("depth", c_uint16),
         ("str_cap", c_uint16),
+        ("arr_parent", c_uint16),        # flat index of the enclosing struct ARRAY, 0xFFFF none
         ("offset", c_uint32),
         ("size", c_uint32),
+        ("elem_size", c_uint32),         # bytes of one array element, else 0
     ]
 
 
@@ -609,6 +619,14 @@ def _bind(lib):
     F("dart_schema_wire", [c_void_p], DartBytes)
     F("dart_schema_hash", [c_void_p], c_uint64)
     F("dart_schema_name", [c_void_p], DartStringView)
+    F("dart_schema_print", [c_void_p, c_char_p, c_size_t], c_uint32)
+    F("dart_schema_subset", [c_void_p, c_void_p], c_int)
+    F("dart_std_name", [c_int], c_char_p)
+    F("dart_std_by_name", [DartStringView], c_int)
+    F("dart_std_recognize", [c_void_p, _AllocFn, c_void_p], c_int)
+    F("dart_std_recognize_field", [c_void_p, c_uint16, _AllocFn, c_void_p], c_int)
+    F("dart_std_recognize_elem", [c_void_p, c_uint16, _AllocFn, c_void_p], c_int)
+    F("dart_timestamp_now", [], c_int64)
     F("dart_schema_size", [c_void_p], c_uint32)
     F("dart_schema_field_count", [c_void_p], c_uint16)
     F("dart_schema_field_at", [c_void_p, c_uint16, POINTER(DartSchemaFieldInfo)], c_int)
@@ -796,6 +814,7 @@ class FieldType(enum.IntEnum):
     VARRAY = 15    # variable array (`elem[]` / `string<C>[]`): live element count
     MAP = 16       # self-describing tagged map (`map`)
     ENUM = 17      # named integer (`enum<uN>{...}`): wire is just the backing scalar
+    NAMED = 18     # a nominal tag on another type; reflection reports it as Field.type_name
 
 
 # raw kind bytes (== FieldType, kept short for the codec below)
@@ -804,6 +823,7 @@ _I8, _I16, _I32, _I64 = 4, 5, 6, 7
 _F32, _F64, _BOOL, _ARR, _STRUCT, _STR = 8, 9, 10, 11, 12, 13
 _VSTR, _VARR, _MAP = 14, 15, 16    # the variable kinds (ride the message tail)
 _ENUM = 17                          # named integer (wire = its backing scalar)
+_NAMED = 18                         # a name on another type (unwrapped by the reflection API)
 _SIGNED = frozenset((_I8, _I16, _I32, _I64))
 _FLOATK = frozenset((_F32, _F64))
 _FMT = {_U8: "B", _U16: "H", _U32: "I", _U64: "Q", _I8: "b", _I16: "h",
@@ -981,7 +1001,11 @@ class Field:
     depth: int
     offset: int
     size: int
-    str_cap: int = 0   # string capacity (STRING fields and STRING-element arrays)
+    str_cap: int = 0     # string capacity (STRING fields and STRING-element arrays)
+    type_name: str = ""  # the field type's NAME ("Pose"), "" when anonymous
+    elem_name: str = ""  # an array ELEMENT type's name, "" when anonymous
+    elem_size: int = 0   # bytes of one array element, else 0
+    arr_parent: int = 0xFFFF   # flat index of the enclosing struct ARRAY, 0xFFFF for none
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1073,173 @@ def string(cap):
     return _String(cap)
 
 
+# ---------------------------------------------------------------------------
+# STANDARD TYPES (docs/stdtypes.md): the types applications keep re-inventing,
+# pre-named so two programs that both mean "a 3D point" say so with the same name
+# and the same bytes. A named type NARROWS matching -- a Pose field never binds to
+# a same-shaped Twist one -- and the name rides the schema, never a message byte.
+#
+#     @dataclasses.dataclass
+#     class Track:
+#         at:   dart.Pose      = dataclasses.field(default_factory=dart.Pose)
+#         when: dart.Timestamp = 0
+#         tag:  dart.Color     = dataclasses.field(default_factory=dart.Color)
+#
+# The names are always in scope in the schema DSL too, so a text schema can just say
+# `at: Pose`. Conventions are pinned: SI units, meters, m/s, radians; a Timestamp is
+# microseconds since the Unix epoch UTC; quaternions are x, y, z, w; Color is sRGB
+# RGBA bytes; a Uuid holds its 16 bytes in RFC 4122 order.
+# ---------------------------------------------------------------------------
+
+class _StdAlias:
+    """A standard type that is an ALIAS of one wire type (Timestamp = i64, Uuid =
+    u8[16]): it encodes exactly like `under` but spells as its NAME, so its values are
+    ordinary Python ints / bytes / str."""
+    def __init__(self, name, under):
+        self.name = name
+        self.under = under      # a _Type, _Array or _String
+
+    def __repr__(self):
+        return "dart." + self.name
+
+
+Timestamp = _StdAlias("Timestamp", i64)     # microseconds since the Unix epoch, UTC
+Duration  = _StdAlias("Duration", i64)      # microseconds
+Uuid      = _StdAlias("Uuid", u8[16])       # RFC 4122 byte order
+Matrix3x3 = _StdAlias("Matrix3x3", f32[9])  # row-major
+Matrix4x4 = _StdAlias("Matrix4x4", f32[16])
+Uri       = _StdAlias("Uri", _String(256))
+
+
+def _std(name):
+    """Class decorator: this class IS the standard type `name`, so a field of it spells
+    as the name (and must have the canonical shape, else compiling the schema fails)."""
+    def wrap(cls):
+        cls.__dart_std__ = name
+        return dataclasses.dataclass(cls)
+    return wrap
+
+
+@_std("Float2")
+class Float2:
+    x: f32 = 0.0
+    y: f32 = 0.0
+
+
+@_std("Float3")
+class Float3:
+    x: f32 = 0.0
+    y: f32 = 0.0
+    z: f32 = 0.0
+
+
+@_std("Float4")
+class Float4:
+    x: f32 = 0.0
+    y: f32 = 0.0
+    z: f32 = 0.0
+    w: f32 = 0.0
+
+
+@_std("Double2")
+class Double2:
+    x: f64 = 0.0
+    y: f64 = 0.0
+
+
+@_std("Double3")
+class Double3:
+    x: f64 = 0.0
+    y: f64 = 0.0
+    z: f64 = 0.0
+
+
+@_std("Double4")
+class Double4:
+    x: f64 = 0.0
+    y: f64 = 0.0
+    z: f64 = 0.0
+    w: f64 = 0.0
+
+
+@_std("Int2")
+class Int2:
+    x: i32 = 0
+    y: i32 = 0
+
+
+@_std("Int3")
+class Int3:
+    x: i32 = 0
+    y: i32 = 0
+    z: i32 = 0
+
+
+@_std("Int4")
+class Int4:
+    x: i32 = 0
+    y: i32 = 0
+    z: i32 = 0
+    w: i32 = 0
+
+
+@_std("Quaternion")
+class Quaternion:
+    x: f64 = 0.0
+    y: f64 = 0.0
+    z: f64 = 0.0
+    w: f64 = 1.0     # identity rotation
+
+
+@_std("Color")
+class Color:
+    r: u8 = 0
+    g: u8 = 0
+    b: u8 = 0
+    a: u8 = 255
+
+
+@_std("Rect")
+class Rect:
+    x: f32 = 0.0
+    y: f32 = 0.0
+    w: f32 = 0.0
+    h: f32 = 0.0
+
+
+@_std("RectI")
+class RectI:
+    x: i32 = 0
+    y: i32 = 0
+    w: i32 = 0
+    h: i32 = 0
+
+
+@_std("Pose")
+class Pose:
+    position: Double3 = dataclasses.field(default_factory=Double3)
+    orientation: Quaternion = dataclasses.field(default_factory=Quaternion)
+
+
+@_std("Twist")
+class Twist:
+    linear: Double3 = dataclasses.field(default_factory=Double3)    # m/s
+    angular: Double3 = dataclasses.field(default_factory=Double3)   # rad/s
+
+
+@_std("GeoPoint")
+class GeoPoint:
+    lat: f64 = 0.0      # degrees
+    lon: f64 = 0.0      # degrees
+    alt: f64 = 0.0      # meters
+
+
+def timestamp_now():
+    """The wall clock in the units a Timestamp field declares: microseconds since the
+    Unix epoch, UTC -- the same clock a message's written_us is stamped from."""
+    return int(_load().dart_timestamp_now())
+
+
 def _infer_enum_backing(cls):
     """Smallest scalar kind that fits every member value: unsigned when all >= 0, else
     signed. Cross-language matching wants an explicit backing (dart.enum(cls, dart.u8))."""
@@ -1088,10 +1279,12 @@ def enum(cls, backing=None):
 
 
 class _FieldSpec:
-    __slots__ = ("name", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls")
+    __slots__ = ("name", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls",
+                 "type_name")
 
     def __init__(self, name, kind, elem=0, count=0, str_cap=0, token=None, nested=None,
-                 enum_cls=None):
+                 enum_cls=None, type_name=None):
+        self.type_name = type_name   # a standard type's NAME: the whole spelling
         self.name = name
         self.kind = kind
         self.elem = elem
@@ -1150,6 +1343,10 @@ def _var_array_spec(name, elem):
 
 def _field_spec(name, ann, g):
     ann = _resolve(ann, g)
+    if isinstance(ann, _StdAlias):              # Timestamp / Uuid / Matrix4x4 / ...
+        f = _field_spec(name, ann.under, g)     # encodes as what it aliases...
+        f.type_name = ann.name                  # ...but spells as its name
+        return f
     if isinstance(ann, _Type):
         return _FieldSpec(name, ann.kind, token=ann.token)
     if isinstance(ann, _String):
@@ -1176,8 +1373,9 @@ def _field_spec(name, ann, g):
         return _FieldSpec(name, _ENUM, elem=ann.kind, enum_cls=ann.cls)
     if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):  # a bare enum class (backing inferred)
         return _FieldSpec(name, _ENUM, elem=_infer_enum_backing(ann), enum_cls=ann)
-    if isinstance(ann, type):
-        return _FieldSpec(name, _STRUCT, nested=_spec_of(ann))   # a nested schema class
+    if isinstance(ann, type):                                    # a nested schema class,
+        return _FieldSpec(name, _STRUCT, nested=_spec_of(ann),    # or a standard composite
+                          type_name=getattr(ann, "__dart_std__", None))
     raise SchemaError("dart schema: field %r has unsupported type %r (use dart.u8..f64, "
                       "dart.bool_, dart.string(N), dart.<t>[N], str, list[dart.<t>], dict, "
                       "a nested schema class, or int/float/bool)" % (name, ann))
@@ -1217,6 +1415,8 @@ def _elem_token(elem, str_cap):
 def _spec_text(spec):
     """The schema DSL text a spec compiles to (pure reflection; no native lib)."""
     def type_text(f):
+        if f.type_name:               # a standard type: the name IS the spelling
+            return f.type_name
         if f.kind == _STRUCT:
             return "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
         if f.kind == _ARR:
@@ -1262,47 +1462,16 @@ def _is_value_root(lib, s):
 
 
 def _schema_dsl(lib, s):
-    """Reconstruct the DSL text from ANY compiled schema (reflected, text-compiled,
-    or wire-parsed from a peer) by walking its flattened depth-first field table."""
-    root = []
-    stack = [root]                       # stack[d] = the field list at depth d
-    info = DartSchemaFieldInfo()
-    for i in range(lib.dart_schema_field_count(s)):
-        lib.dart_schema_field_at(s, i, byref(info))
-        node = [_dstr(info.name), info.kind, info.elem, info.count, info.str_cap, None]
-        if info.kind == _ENUM:
-            node[5] = _enum_body_from_schema(lib, s, i)   # the "{ ... }" option text
-        d = info.depth
-        stack[d].append(node)
-        if info.kind == _STRUCT:
-            node[5] = []
-            while len(stack) <= d + 1:
-                stack.append(None)
-            stack[d + 1] = node[5]
-
-    def type_text(f):
-        name, kind, elem, count, str_cap, children = f
-        if kind == _STRUCT:
-            return "{ %s }" % ", ".join(line(c) for c in children)
-        if kind == _ARR:
-            return "%s[%d]" % (_elem_token(elem, str_cap), count)
-        if kind == _VARR:
-            return "%s[]" % _elem_token(elem, str_cap)
-        if kind == _STR:
-            return "string<%d>" % str_cap
-        if kind == _VSTR:
-            return "string"
-        if kind == _MAP:
-            return "map"
-        if kind == _ENUM:
-            return "enum<%s> %s" % (_TOKEN[elem], children)   # children slot holds the body text
-        return _TOKEN[kind]
-    def line(f):
-        return "%s: %s" % (f[0], type_text(f))
-    if _is_value_root(lib, s):                # a bare type: no name, no braces
-        return type_text(root[0]) + "\n"
-    return (_dstr(lib.dart_schema_name(s)) + "\n{\n"
-            + ",\n".join("    " + line(f) for f in root) + "\n}\n")
+    """The DSL text of ANY compiled schema (reflected, text-compiled, or wire-parsed from
+    a peer), straight from the C printer: it spells named types and struct arrays, hoists
+    each named type as a leading `Name = type` definition, and recompiles to identical
+    wire, so there is exactly one implementation of the spelling."""
+    need = lib.dart_schema_print(s, None, 0)
+    if not need:
+        return ""
+    buf = ctypes.create_string_buffer(need + 1)
+    lib.dart_schema_print(s, buf, need + 1)
+    return buf.value.decode("utf-8", "replace")
 
 
 # ---------------------------------------------------------------------------
@@ -1382,6 +1551,13 @@ class Schema:
             self._vroot = _is_value_root(_load(), self._s)   # probed once
         return self._vroot
 
+    def can_read(self, pub):
+        """Can a reader declaring THIS schema read messages written with `pub`? Every field
+        of ours must exist in pub under the same name with a compatible type. Type NAMES
+        narrow: an anonymous type reads a named one of the same shape, never the reverse,
+        and two different names never match."""
+        return bool(_load().dart_schema_subset(self._s, pub._s))
+
     def fields(self):
         lib = _load()
         out = []
@@ -1390,7 +1566,9 @@ class Schema:
             if lib.dart_schema_field_at(self._s, i, byref(info)):
                 out.append(Field(_dstr(info.name), FieldType(info.kind),
                                  FieldType(info.elem), info.count, info.depth,
-                                 info.offset, info.size, info.str_cap))
+                                 info.offset, info.size, info.str_cap,
+                                 _dstr(info.type_name), _dstr(info.elem_name),
+                                 info.elem_size, info.arr_parent))
         return out
 
     def encode(self, value):
