@@ -1197,6 +1197,19 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
     return 1;
 }
 
+/* Our own interest changed (a topic created, retired, or its role flipped): re-advertise the
+ * rebuilt blob so peers rematch as it arrives, replay known peers' interest against our new
+ * state (so a topic matches interest advertised before it existed, and the replay queues any
+ * DETAIL_REQs the change needs), stale the topics' converged match memos, and kick so the
+ * announce goes out now, not at the next tick. Call with the node lock held. */
+static void i_dart_node_readvertise(DartNode *n){
+    i_dart_node_core_build_meta(n->core);
+    dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
+    dart_discovery_replay(n->discovery);
+    n->match_epoch++;
+    i_dart_node_kick(n);
+}
+
 /* Shared topic-create core: the public dart_node_create_topic and the patterns layer's
  * i_dart_node_create_pattern_topic both funnel here. kind/prefix_bytes/directed stamp the
  * entity (0/0/0 = a plain topic); sys_msg routes deliveries to the patterns layer; allow_at
@@ -1289,17 +1302,12 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
                                  a reused slot must also CLEAR the retired occupant's
                                  fingerprint when the new topic is untyped */
         i_dart_node_core_set_topic_schema(n->core, idx, h->schema);
-    /* re-advertise our interest so peers match the new topic as the blob arrives, and
-       replay known peers' interest so this topic matches what they already advertised */
-    i_dart_node_core_build_meta(n->core);
-    dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
-    dart_discovery_replay(n->discovery);
     n->handles[idx] = h;
     if (n->creating_builtin) n->n_builtin++;
     else if (!reuse) n->n_created++;   /* a reused slot is already inside the dense region */
-    n->match_epoch++;   /* a new topic may raise fresh candidates: converged memos are stale */
-    i_dart_node_kick(n);                       /* announce the new topic now; the replay above
-                                                  queued any DETAIL_REQs, so the pass sends them */
+    /* the handle is installed BEFORE we publish: the replay inside fires peer events into
+       the patterns layer and the app, which must never see a half-created topic */
+    i_dart_node_readvertise(n);
     i_dart_node_unlock(n, acquired);
     return h;
 }
@@ -1943,7 +1951,7 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
     if (!matched && topic_index < n->max_topics
         && !(q && q->reliability == DART_RELIABLE && q->catch_up > 0)){
         DartTopic *h = n->handles[topic_index];
-        if (h && (h->role == DART_PUBSUB || h->role == DART_PUB_ONLY)
+        if (h && dart_role_pubs(h->role)
               && i_dart_node_topic_unsettled(n, h, i_dart_plat_now_us())){
             if (may_wait && n->match_wait_us){
                 matched = i_dart_node_match_wait(n, topic_index, h, 1);
@@ -2128,7 +2136,7 @@ int i_dart_topic_match_wait(DartTopic *topic){
        cv wait). Converged matching returns immediately, so a verdict derived after this
        is never premature and never stalls. */
     if (acquired && !matched && n->match_wait_us
-        && (topic->role == DART_PUBSUB || topic->role == DART_PUB_ONLY)
+        && dart_role_pubs(topic->role)
         && i_dart_node_topic_unsettled(n, topic, i_dart_plat_now_us()))
         matched = i_dart_node_match_wait(n, topic->index, topic, 0);
     i_dart_node_unlock(n, acquired);
@@ -2228,17 +2236,13 @@ int dart_topic_set_role(DartTopic *topic, DartRole role){
        catch_up replay that lands the moment the match forms can never race the
        consumer's first take into the inline path (a NULL on_message would silently
        eat it; the replay is reliable and delivered exactly once). */
-    if ((role == DART_PUBSUB || role == DART_SUB_ONLY) && !topic->q
+    if (dart_role_subs((uint8_t)role) && !topic->q
         && i_dart_node_is_log_topic(topic->n, topic->index))
         (void)i_dart_node_queue_ensure(topic->n, topic, NULL);
     r = dart_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
-    if (r == 0) topic->role = (uint8_t)role;
-    if (r == 0){   /* re-advertise our interest: peers rematch as the new blob arrives */
-        i_dart_node_core_build_meta(topic->n->core);
-        dart_discovery_advertise(topic->n->discovery, i_dart_node_core_meta(topic->n->core));
-        dart_discovery_replay(topic->n->discovery);   /* re-apply peers' interest to our new role */
-        topic->n->match_epoch++;   /* a role flip may raise fresh candidates: memos are stale */
-        i_dart_node_kick(topic->n);                   /* announce the change now */
+    if (r == 0){
+        topic->role = (uint8_t)role;
+        i_dart_node_readvertise(topic->n);   /* a role flip may raise fresh candidates */
     }
     i_dart_node_unlock(topic->n, acquired);
     return r;
@@ -2273,12 +2277,8 @@ int dart_topic_retire(DartTopic *topic){
     if (topic->schema) dart_schema_free(topic->schema, i_dart_node_alloc, n);
     n->handles[idx] = NULL;
     i_dart_node_alloc(n, topic, 0);         /* the handle is INVALID from here */
-    /* re-advertise: the slot rides the announce as a hole from the next blob on */
-    i_dart_node_core_build_meta(n->core);
-    dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
-    dart_discovery_replay(n->discovery);
-    n->match_epoch++;
-    i_dart_node_kick(n);
+    /* the slot rides the announce as a hole from the next blob on */
+    i_dart_node_readvertise(n);
     i_dart_node_unlock(n, acquired);
     return DART_OK;
 }
@@ -2354,14 +2354,9 @@ DartTimestamp dart_timestamp_now(void){
 }
 
 void dart_uuid_new(DartUuid *out){
-    if (!out) return;
-    if (dart_discovery_make_uuid4(out->bytes)) return;    /* the CSPRNG path */
-    {   /* no entropy source: the same host-identity mix a node's own uuid falls back to */
-        char host[80];
-        size_t n = i_dart_plat_hostname(host, sizeof host);
-        uint64_t seed = (i_dart_plat_pid() << 32) ^ i_dart_plat_now_us();
-        dart_discovery_make_uuid(out->bytes, dart_bytes(host, n), seed);
-    }
+    /* one generator: the CSPRNG path, else the same host-identity mix a node's own
+       discovery uuid falls back to */
+    if (out) i_dart_discovery_auto_uuid(out->bytes);
 }
 #endif
 

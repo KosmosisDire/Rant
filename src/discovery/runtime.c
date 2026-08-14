@@ -221,7 +221,7 @@ int dart_discovery_make_uuid4(uint8_t out[16]){
     return 1;
 }
 
-static void i_dart_discovery_auto_uuid(uint8_t out[16]){
+void i_dart_discovery_auto_uuid(uint8_t out[16]){
     char host[80]; uint64_t seed; size_t hostname_len;
     if (dart_discovery_make_uuid4(out)) return;     /* normal path */
 

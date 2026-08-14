@@ -153,6 +153,10 @@ int        dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast
 /* ----------------------------------------------------------------------- UUID */
 /* Fill out[16] with a random RFC 9562 v4 UUID; 1 ok, 0 if no entropy source. */
 int        dart_discovery_make_uuid4(uint8_t out[16]);
+/* Internal: fill out[16] the way a node's own uuid is filled -- the CSPRNG path, else a
+ * best-effort host-identity fallback (hostname + pid + clock). Shared by the auto-generated
+ * discovery uuid and the node runtime's DartUuid, so both fall back identically. */
+void       i_dart_discovery_auto_uuid(uint8_t out[16]);
 
 /* Resolve an advertised peer name into out[cap]: the caller's want (clamped to cap-1 and
  * DART_DISCOVERY_NAME_MAX), or an auto-generated "node-XXXXXXXX" if want is NULL/empty.

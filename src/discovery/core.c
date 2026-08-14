@@ -329,6 +329,15 @@ static int i_dart_discovery_find(DartDiscoveryState *st, const uint8_t *uuid){
     return -1;
 }
 
+/* Free a peer slot as GONE: fire the event while the slot STILL EXISTS, so the handler can
+ * read its scratch (the IO layer frees the transport state from there), and only then drop
+ * it. Every path that reclaims a slot outright goes through here; a DROP (the peer merely
+ * fell silent) keeps the slot and is not this. */
+static void i_dart_discovery_peer_gone(DartDiscoveryState *st, i_DartDiscoveryPeer *peer){
+    i_dart_discovery_fire_down(st, peer->local_id, DART_DISCOVERY_GONE);
+    peer->used = 0;
+}
+
 /* a slot for a brand-new peer: a FREE one, else the oldest DROPPED one (evicted,
  * fired GONE so its state is freed). ACTIVE peers are never evicted; -1 = refuse. */
 static int i_dart_discovery_alloc(DartDiscoveryState *st){
@@ -340,8 +349,7 @@ static int i_dart_discovery_alloc(DartDiscoveryState *st){
         }
     }
     if (found < 0) return -1;   /* table full of ACTIVE peers: caller refuses + signals */
-    i_dart_discovery_fire_down(st, st->peers[victim].local_id, DART_DISCOVERY_GONE);
-    st->peers[victim].used = 0;
+    i_dart_discovery_peer_gone(st, &st->peers[victim]);
     return (int)victim;
 }
 
@@ -362,10 +370,8 @@ static void i_dart_discovery_evict_endpoint(DartDiscoveryState *st, const DartDi
         i_DartDiscoveryPeer *peer = &st->peers[i];
         if (!peer->used) continue;
         if (peer->relay_me || peer->obs_disc.ip_len || peer->obs_data.ip_len) continue;
-        if (peer->ip_len==addr->ip_len && peer->port==addr->port && memcmp(peer->ip, addr->ip, 16)==0){
-            i_dart_discovery_fire_down(st, peer->local_id, DART_DISCOVERY_GONE);   /* fire, then free */
-            peer->used = 0;
-        }
+        if (peer->ip_len==addr->ip_len && peer->port==addr->port && memcmp(peer->ip, addr->ip, 16)==0)
+            i_dart_discovery_peer_gone(st, peer);
     }
 }
 
@@ -385,10 +391,8 @@ static void i_dart_discovery_evict_observed(DartDiscoveryState *st, const uint8_
         i_DartDiscoveryPeer *peer = &st->peers[i];
         if (!peer->used) continue;
         if ((peer->obs_disc.ip_len && i_dart_discovery_addr_is(&peer->obs_disc, ip, ip_len, port)) ||
-            (peer->obs_data.ip_len && i_dart_discovery_addr_is(&peer->obs_data, ip, ip_len, port))){
-            i_dart_discovery_fire_down(st, peer->local_id, DART_DISCOVERY_GONE);
-            peer->used = 0;
-        }
+            (peer->obs_data.ip_len && i_dart_discovery_addr_is(&peer->obs_data, ip, ip_len, port)))
+            i_dart_discovery_peer_gone(st, peer);
     }
 }
 
@@ -580,12 +584,7 @@ void dart_discovery_on_datagram(DartDiscoveryState *st, const DartDiscoveryAddr 
     idx = i_dart_discovery_find(st, uuid);
 
     if (flags & DART_DISCOVERY_FLAG_BYE){
-        if (idx >= 0){
-            /* fire GONE while the slot still exists, so the handler can read its scratch,
-               then free it */
-            i_dart_discovery_fire_down(st, st->peers[idx].local_id, DART_DISCOVERY_GONE);
-            st->peers[idx].used = 0;
-        }
+        if (idx >= 0) i_dart_discovery_peer_gone(st, &st->peers[idx]);   /* a graceful exit is GONE */
         return;
     }
 
@@ -816,13 +815,11 @@ size_t dart_discovery_update(DartDiscoveryState *st, uint64_t now, void *out, si
         if (!st->peers[i].used) continue;
         if (st->peers[i].dropped){
             /* dropped and still silent past the gone timeout: a same-UUID return is no longer
-               expected, so promote to GONE -- free the transport state and reclaim the slot
-               (fire before free so the handler can still read it). 0 = never promote. */
+               expected, so promote to GONE -- free the transport state and reclaim the slot.
+               0 = never promote. */
             if (st->cfg.gone_timeout_us &&
-                now - st->peers[i].last_heard_us > (uint64_t)st->cfg.peer_timeout_us + st->cfg.gone_timeout_us){
-                i_dart_discovery_fire_down(st, st->peers[i].local_id, DART_DISCOVERY_GONE);
-                st->peers[i].used = 0;
-            }
+                now - st->peers[i].last_heard_us > (uint64_t)st->cfg.peer_timeout_us + st->cfg.gone_timeout_us)
+                i_dart_discovery_peer_gone(st, &st->peers[i]);
             continue;
         }
         if (st->peers[i].heard_direct &&
