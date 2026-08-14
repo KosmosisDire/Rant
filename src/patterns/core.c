@@ -32,7 +32,7 @@ static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us);
 static void     i_dart_patterns_on_close(void *user);
 /* pending-call reaper (defined with the manager hooks; retire cancels through it) */
 static uint64_t i_dart_func_reap(struct DartFunction *fn, uint64_t now,
-                                 DartCallStatus fail_status, int all);
+                                 DartCallStatus fail_status, int all, uint32_t dest);
 /* duplicate-authority sweep for a just-created provider/owner (defined with the rest of
  * the detection, after both entity structs) */
 static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
@@ -52,6 +52,80 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
     i_dart_node_set_sys_hooks(n, i_dart_patterns_on_event, i_dart_patterns_tick,
                               i_dart_patterns_on_close, pm);
     return pm;
+}
+
+/* ---- shared entity mechanics (create prologue + the three retire phases) ------------------
+ * Functions, variables and signals differ in what they OWN, not in how a handle is born or
+ * torn down. These carry the common sequence; every per-entity step (the meta refusal, the
+ * pending-call reap, which buffers to free) stays explicit at the call site. `secondary` is
+ * the optional second channel: NULL for a signal and for a read-only variable owner. */
+
+/* Create prologue: take the node lock, get (lazily create) the manager, allocate a ZEROED
+ * handle, release the lock. The lock must be released before the topics are created:
+ * i_dart_node_create_pattern_topic takes the node lock itself and refuses if it is already
+ * held (it reads that as a from-a-callback reentry). The handle must exist first so it can
+ * be the topics' sys_on_message user. NULL on OOM; *pm_out is then NULL too. Nothing can
+ * reach the handle until the caller links it into the manager list, so the caller fills its
+ * fields outside the lock. */
+static void *i_dart_pat_handle_new(DartNode *n, size_t size, i_DartPatterns **pm_out){
+    i_DartPatterns *pm; void *h; int acquired;
+    acquired = i_dart_node_sys_lock(n);
+    pm = i_dart_patterns_get(n);
+    h = pm ? i_dart_node_sys_alloc(n, NULL, size) : NULL;
+    if (h) memset(h, 0, size);
+    i_dart_node_sys_unlock(n, acquired);
+    *pm_out = h ? pm : NULL;
+    return h;
+}
+
+/* Partial create (the second channel failed): topics cannot be destroyed and the created
+ * half may already ROUTE deliveries into the handle, so the handle must stay allocated (the
+ * pool reclaims it at close). Deactivate the created half so it stops advertising; a stray
+ * delivery in the window finds valid memory and a reply through the NULL partner fails
+ * harmlessly. Returns NULL, the create's verdict. */
+static void *i_dart_pat_half_create_fail(DartTopic *created_half){
+    dart_topic_set_role(created_half, DART_INACTIVE);
+    return NULL;
+}
+
+/* Retire phase 1, BEFORE the node lock: park the channels (INACTIVE, re-advertised, so
+ * peers re-verify the name against a successor). set_role refuses from a callback with
+ * DART_ERR_STATE and NOTHING mutated, so the primary's verdict is the whole retire's
+ * verdict; on success it rematches under the node lock, so once both flips land nothing can
+ * deliver into the handle again. */
+static int i_dart_pat_park_channels(DartTopic *primary, DartTopic *secondary){
+    int r = dart_topic_set_role(primary, DART_INACTIVE);
+    if (r != 0) return r;
+    if (secondary) (void)dart_topic_set_role(secondary, DART_INACTIVE);
+    return 0;
+}
+
+/* Retire phase 2, node lock HELD: drop the per-topic delivery routing into the handle. */
+static void i_dart_pat_clear_channels(DartTopic *primary, DartTopic *secondary){
+    i_dart_topic_clear_sys(primary);
+    if (secondary) i_dart_topic_clear_sys(secondary);
+}
+
+/* Retire phase 3, node lock RELEASED: release the channel slots for reuse. A re-created
+ * same-name entity takes them back (identical binding = a silent relink; a retyped one
+ * rebinds them) instead of growing the announce by one parked entry per channel per cycle.
+ * The topics deliberately OUTLIVE the handle free: a reap callback fired under the lock may
+ * still have used them. */
+static void i_dart_pat_release_channels(DartTopic *primary, DartTopic *secondary){
+    (void)dart_topic_retire(primary);
+    if (secondary) (void)dart_topic_retire(secondary);
+}
+
+/* Unlink elem from a manager list threaded through the `next` pointer at next_off (one walk
+ * for all three entity lists; every object pointer has the same representation). Absent
+ * elem = a no-op. Node lock held. */
+static void i_dart_pat_unlink(void **head, void *elem, size_t next_off){
+    void **pp = head;
+    while (*pp){
+        void **next = (void**)((char*)*pp + next_off);
+        if (*pp == elem){ *pp = *next; return; }
+        pp = next;
+    }
 }
 
 /* ---- FUNCTIONS -------------------------------------------------------------------------- */
@@ -273,24 +347,14 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     topt.qos.keep_last = (mode == 2) ? 2 : 4;
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
-    /* Allocate + init the handle under the lock, then RELEASE it before creating the topics:
-       i_dart_node_create_pattern_topic takes the node lock itself and refuses if it is already
-       held (it reads that as a from-a-callback reentry). The handle must exist first so it can
-       be the topics' sys_on_message user. */
-    acquired = i_dart_node_sys_lock(n);
-    pm = i_dart_patterns_get(n);
-    fn = pm ? (DartFunction*)i_dart_node_sys_alloc(n, NULL, sizeof *fn) : NULL;
-    if (fn){
-        memset(fn, 0, sizeof *fn);
-        fn->n = n; fn->pm = pm; fn->is_provider = (uint8_t)(mode == 1);
-        fn->both = (uint8_t)(mode == 2);
-        fn->multi = (uint8_t)(opts && opts->multi);
-        fn->on_request = on_request; fn->on_request_user = user;
-        fn->timeout_us = (opts && opts->timeout_us) ? opts->timeout_us : DART_CALL_TIMEOUT_US;
-        fn->next_call_id = 1;
-    }
-    i_dart_node_sys_unlock(n, acquired);
+    fn = (DartFunction*)i_dart_pat_handle_new(n, sizeof *fn, &pm);
     if (!fn) return NULL;
+    fn->n = n; fn->pm = pm; fn->is_provider = (uint8_t)(mode == 1);
+    fn->both = (uint8_t)(mode == 2);
+    fn->multi = (uint8_t)(opts && opts->multi);
+    fn->on_request = on_request; fn->on_request_user = user;
+    fn->timeout_us = (opts && opts->timeout_us) ? opts->timeout_us : DART_CALL_TIMEOUT_US;
+    fn->next_call_id = 1;
 
     memcpy(rn, name, nl); memcpy(rn + nl, "@req", 5);   /* NUL included */
     fn->req = i_dart_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
@@ -299,14 +363,8 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     memcpy(rn + nl, "@rsp", 5);
     fn->rsp = i_dart_node_create_pattern_topic(n, rn, rsp_role, rsp_schema, &topt,
                               DART_KIND_FUNC_RSP, DART__FN_PREFIX, 1 /*directed*/, 0, rsp_cb, fn);
-    if (!fn->rsp){
-        /* Partial create: topics cannot be destroyed and fn->req still ROUTES deliveries to
-           fn, so the handle must stay allocated (the pool reclaims it at close). Deactivate
-           the half so it stops advertising; a stray delivery in the window finds valid
-           memory and a reply through the NULL rsp topic fails harmlessly. */
-        dart_topic_set_role(fn->req, DART_INACTIVE);
-        return NULL;
-    }
+    if (!fn->rsp)   /* fn->req already routes into fn: keep the handle, park the created half */
+        return (DartFunction*)i_dart_pat_half_create_fail(fn->req);
 
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list (tick/event fanout) */
     fn->next = pm->funcs; pm->funcs = fn;
@@ -385,37 +443,26 @@ int dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_
 }
 
 int dart_function_retire(DartFunction *fn){
-    i_DartPatterns *pm; DartFunction **pp; DartNode *n; int acquired, r;
+    i_DartPatterns *pm; DartNode *n; int acquired, r;
     DartTopic *req, *rsp;
     if (!fn) return DART_ERR_NO_TOPIC;
     pm = fn->pm; n = fn->n;
     if (pm && fn == pm->meta) return DART_ERR_STATE;   /* the builtin endpoint is node infrastructure */
-    /* Park the channels FIRST: set_role refuses from a callback (DART_ERR_STATE, nothing
-       mutated yet), and on success it rematches under the node lock, so once both flips
-       land nothing can deliver into fn again. */
-    r = dart_topic_set_role(fn->req, DART_INACTIVE);
+    r = i_dart_pat_park_channels(fn->req, fn->rsp);
     if (r != 0) return r;
-    (void)dart_topic_set_role(fn->rsp, DART_INACTIVE);
     acquired = i_dart_node_sys_lock(n);
-    i_dart_topic_clear_sys(fn->req);
-    i_dart_topic_clear_sys(fn->rsp);
+    i_dart_pat_clear_channels(fn->req, fn->rsp);
     /* every outstanding call gets its one outcome, CANCELLED, exactly as at close; a
        reentrant call made from a cancel callback queues (the channel is unmatched now)
        and the next round cancels it too */
-    while (fn->pending) i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1);
-    if (pm)
-        for (pp = &pm->funcs; *pp; pp = &(*pp)->next)
-            if (*pp == fn){ *pp = fn->next; break; }
+    while (fn->pending) i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1, 0);
+    if (pm) i_dart_pat_unlink((void**)&pm->funcs, fn, offsetof(DartFunction, next));
     req = fn->req; rsp = fn->rsp;   /* outlive fn: a reap callback may still have used them */
     if (fn->sync_buf)  i_dart_node_sys_alloc(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_dart_node_sys_alloc(n, fn->dup_peers, 0);
     i_dart_node_sys_alloc(n, fn, 0);
     i_dart_node_sys_unlock(n, acquired);
-    /* release the channel slots for reuse: a re-created same-name function takes them
-       back (identical binding = a silent relink; a retyped one rebinds them) instead of
-       growing the announce by one parked entry per channel per cycle */
-    (void)dart_topic_retire(req);
-    (void)dart_topic_retire(rsp);
+    i_dart_pat_release_channels(req, rsp);
     return DART_OK;
 }
 
@@ -793,18 +840,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
                                  only the repair window (0 would inherit the reliable default
                                  of 10 and pin 10x the value size); backpressure covers bursts */
 
-    acquired = i_dart_node_sys_lock(n);
-    pm = i_dart_patterns_get(n);
-    v = pm ? (DartVariable*)i_dart_node_sys_alloc(n, NULL, sizeof *v) : NULL;
-    if (v){
-        memset(v, 0, sizeof *v);
-        v->n = n; v->pm = pm; v->is_owner = (uint8_t)owner;
-        v->allow_force = (uint8_t)(opts && opts->allow_force);
-        v->readonly = (uint8_t)readonly;
-        v->cur_schema = schema;
-    }
-    i_dart_node_sys_unlock(n, acquired);
+    v = (DartVariable*)i_dart_pat_handle_new(n, sizeof *v, &pm);
     if (!v) return NULL;
+    v->n = n; v->pm = pm; v->is_owner = (uint8_t)owner;
+    v->allow_force = (uint8_t)(opts && opts->allow_force);
+    v->readonly = (uint8_t)readonly;
+    v->cur_schema = schema;
 
     v->value = i_dart_node_create_pattern_topic(n, name, owner ? DART_PUB_ONLY : DART_SUB_ONLY,
                               schema, &vopt, DART_KIND_VARIABLE, DART__VAR_PREFIX, 0,
@@ -822,12 +863,8 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
         v->set = i_dart_node_create_pattern_topic(n, sn, owner ? DART_SUB_ONLY : DART_PUB_ONLY,
                               schema, &sopt, DART_KIND_VAR_SET, DART__SET_PREFIX, 0, 0,
                               owner ? i_dart_var_on_set : NULL, v);
-        if (!v->set){
-            /* partial create: the value topic may route to v (accessor side), so keep the
-               handle allocated and deactivate the created half (see i_dart_function_new) */
-            dart_topic_set_role(v->value, DART_INACTIVE);
-            return NULL;
-        }
+        if (!v->set)   /* the value topic may route to v (accessor side): keep the handle */
+            return (DartVariable*)i_dart_pat_half_create_fail(v->value);
     }
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list */
     v->next = pm->vars; pm->vars = v;
@@ -962,27 +999,22 @@ int dart_variable_unforce(DartVariable *var){
 int dart_variable_forced(DartVariable *var){ return var ? var->forced : 0; }
 
 int dart_variable_retire(DartVariable *var){
-    i_DartPatterns *pm; DartVariable **pp; DartNode *n; int acquired, r;
+    i_DartPatterns *pm; DartNode *n; int acquired, r;
     DartTopic *value, *set;
     if (!var) return DART_ERR_NO_TOPIC;
     pm = var->pm; n = var->n;
-    r = dart_topic_set_role(var->value, DART_INACTIVE);   /* refused from a callback, nothing mutated */
+    r = i_dart_pat_park_channels(var->value, var->set);   /* set is NULL on a read-only owner */
     if (r != 0) return r;
-    if (var->set) (void)dart_topic_set_role(var->set, DART_INACTIVE);
     acquired = i_dart_node_sys_lock(n);
-    i_dart_topic_clear_sys(var->value);
-    if (var->set) i_dart_topic_clear_sys(var->set);
-    if (pm)
-        for (pp = &pm->vars; *pp; pp = &(*pp)->next)
-            if (*pp == var){ *pp = var->next; break; }
-    value = var->value; set = var->set;
+    i_dart_pat_clear_channels(var->value, var->set);
+    if (pm) i_dart_pat_unlink((void**)&pm->vars, var, offsetof(DartVariable, next));
+    value = var->value; set = var->set;   /* outlive var (see function retire) */
     if (var->store)     i_dart_node_sys_alloc(n, var->store, 0);
     if (var->shadow)    i_dart_node_sys_alloc(n, var->shadow, 0);
     if (var->dup_peers) i_dart_node_sys_alloc(n, var->dup_peers, 0);
     i_dart_node_sys_alloc(n, var, 0);
     i_dart_node_sys_unlock(n, acquired);
-    (void)dart_topic_retire(value);   /* release the slots for reuse (see function retire) */
-    if (set) (void)dart_topic_retire(set);
+    i_dart_pat_release_channels(value, set);
     return DART_OK;
 }
 
@@ -1060,12 +1092,9 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
     topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
-    acquired = i_dart_node_sys_lock(n);
-    pm = i_dart_patterns_get(n);
-    s = pm ? (DartSignal*)i_dart_node_sys_alloc(n, NULL, sizeof *s) : NULL;
-    if (s){ memset(s, 0, sizeof *s); s->n = n; s->pm = pm; s->on_signal = on_signal; s->user = user; }
-    i_dart_node_sys_unlock(n, acquired);
+    s = (DartSignal*)i_dart_pat_handle_new(n, sizeof *s, &pm);
     if (!s) return NULL;
+    s->n = n; s->pm = pm; s->on_signal = on_signal; s->user = user;
     s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
                               DART_KIND_SIGNAL, 0, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
     if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
@@ -1076,21 +1105,19 @@ DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSch
 }
 
 int dart_signal_retire(DartSignal *sig){
-    i_DartPatterns *pm; DartSignal **pp; DartNode *n; int acquired, r;
+    i_DartPatterns *pm; DartNode *n; int acquired, r;
     DartTopic *topic;
     if (!sig) return DART_ERR_NO_TOPIC;
     pm = sig->pm; n = sig->n;
-    r = dart_topic_set_role(sig->topic, DART_INACTIVE);   /* refused from a callback, nothing mutated */
+    r = i_dart_pat_park_channels(sig->topic, NULL);   /* one channel: no secondary */
     if (r != 0) return r;
     acquired = i_dart_node_sys_lock(n);
-    i_dart_topic_clear_sys(sig->topic);
-    if (pm)
-        for (pp = &pm->sigs; *pp; pp = &(*pp)->next)
-            if (*pp == sig){ *pp = sig->next; break; }
-    topic = sig->topic;
+    i_dart_pat_clear_channels(sig->topic, NULL);
+    if (pm) i_dart_pat_unlink((void**)&pm->sigs, sig, offsetof(DartSignal, next));
+    topic = sig->topic;   /* outlives sig (see function retire) */
     i_dart_node_sys_alloc(n, sig, 0);
     i_dart_node_sys_unlock(n, acquired);
-    (void)dart_topic_retire(topic);   /* release the slot for reuse (see function retire) */
+    i_dart_pat_release_channels(topic, NULL);
     return DART_OK;
 }
 
@@ -1216,14 +1243,21 @@ static void i_dart_pat_dup_forget_peer(i_DartPatterns *pm, uint32_t peer){
 
 /* ---- manager hooks: call timeouts (tick) + provider-loss (event) ------------------------ */
 
-/* fail-and-remove every pending call of fn past its deadline (or, when all!=0,
- * unconditionally: provider lost). Callbacks run after the unlink so a reentrant new call
- * is safe. Returns the earliest surviving deadline (0 = none). */
-static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus fail_status, int all){
+/* Fail-and-remove pending calls of fn, each with one synthesized fail_status outcome.
+ * Which calls, by the one filter:
+ *   dest != 0  ONLY the calls DIRECTED at that peer, whatever their deadline (a .provider
+ *              call can only ever be answered by that peer, so waiting out the timeout
+ *              serves nothing). `now` and `all` are then irrelevant.
+ *   all != 0   every call, unconditionally (provider lost, retire, node close).
+ *   otherwise  every call past `now`.
+ * Callbacks run AFTER the unlink so a reentrant new call is safe. Returns the earliest
+ * surviving deadline (0 = none), the tick's next wake. */
+static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus fail_status,
+                                 int all, uint32_t dest){
     i_DartPending **pp = &fn->pending, *p;
     uint64_t soonest = 0;
     while ((p = *pp) != NULL){
-        if (all || now >= p->deadline_us){
+        if (dest ? (p->dest == dest) : (all || now >= p->deadline_us)){
             *pp = p->next;
             {   DartResponse r; r.status = fail_status; r.data = dart_bytes(NULL,0);
                 r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
@@ -1239,32 +1273,13 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
     return soonest;
 }
 
-/* fail-and-remove the pending calls DIRECTED at a lost peer (a .provider call can only
- * ever be answered by that peer, so waiting out the timeout serves nothing) */
-static void i_dart_func_reap_dest(DartFunction *fn, uint32_t dest){
-    i_DartPending **pp = &fn->pending, *p;
-    while ((p = *pp) != NULL){
-        if (p->dest == dest){
-            *pp = p->next;
-            {   DartResponse r; r.status = DART_CALL_PEER_LOST; r.data = dart_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
-                r.message = i_dart_call_status_msg(DART_CALL_PEER_LOST);
-                if (p->on_response) p->on_response(&r);
-            }
-            i_dart_func_free_pending(fn, p);
-            continue;
-        }
-        pp = &p->next;
-    }
-}
-
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn; uint64_t soonest = 0;
     for (fn = pm->funcs; fn; fn = fn->next){
         uint64_t s;
         i_dart_func_flush_queued(fn);   /* backstop: the interest event is the fast path */
-        s = i_dart_func_reap(fn, now_us, DART_CALL_TIMEOUT, 0);
+        s = i_dart_func_reap(fn, now_us, DART_CALL_TIMEOUT, 0, 0);
         if (s && (!soonest || s < soonest)) soonest = s;
     }
     return soonest;   /* next timeout deadline for the poll wait cap */
@@ -1278,7 +1293,7 @@ static void i_dart_patterns_on_close(void *user){
     DartFunction *fn;
     for (fn = pm->funcs; fn; fn = fn->next)
         if (!fn->is_provider && fn->pending)
-            i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1);
+            i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1, 0);
 }
 
 static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
@@ -1308,9 +1323,9 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
        the dropped peer fails regardless of who else is alive. */
     for (fn = pm->funcs; fn; fn = fn->next){
         if (fn->is_provider || !fn->pending) continue;
-        i_dart_func_reap_dest(fn, ev->peer);
+        (void)i_dart_func_reap(fn, 0, DART_CALL_PEER_LOST, 0, ev->peer);   /* directed at it */
         if (fn->pending && i_dart_topic_live_match_count(fn->req) == 0)
-            i_dart_func_reap(fn, 0, DART_CALL_PEER_LOST, 1);
+            i_dart_func_reap(fn, 0, DART_CALL_PEER_LOST, 1, 0);
     }
 }
 
@@ -1328,7 +1343,6 @@ static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, DartEntityIter *it,
     uint32_t ep = dart_node_peer_interest_epoch(p);
     if (it->epoch != ep){
         memset(&it->pos, 0, sizeof it->pos);
-        it->has_prev = 0;
         it->epoch = ep;
     }
     while (dart_node_peer_interest_next(p, &it->pos, out))
@@ -1336,18 +1350,9 @@ static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, DartEntityIter *it,
     return 0;
 }
 
-/* peek the entry after index `from` through a copy of the persistent cursor: the
- * adjacent-partner fast path (pattern channel pairs are created back to back, so the
- * partner is almost always at from+1). A miss falls back to i_dart_pat_find_hash. */
-static int i_dart_pat_peek_next(const DartDiscoveryPeer *p, const DartEntityIter *it,
-                                uint16_t from, DartTopicEntry *out){
-    DartInterestIter pos = it->pos;
-    while (dart_node_peer_interest_next(p, &pos, out))
-        if (out->index > from) return 1;
-    return 0;
-}
-
-/* find an entry by (low-32 name hash, kind); 1 + *out on a hit */
+/* find an entry by (low-32 name hash, kind); 1 + *out on a hit. The ONE way a partner
+ * channel is located: correct wherever the peer ordered its topics, so the fold never
+ * depends on the pair having been created back to back. */
 static int i_dart_pat_find_hash(const DartDiscoveryPeer *p, uint32_t hash,
                                 uint8_t kind, DartTopicEntry *out){
     DartInterestIter it; DartTopicEntry e;
@@ -1416,9 +1421,8 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
 
 int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out){
     const DartDiscoveryPeer *p;
-    DartTopicEntry e, partner, prev_e;
+    DartTopicEntry e, partner;
     DartString name, base;
-    uint8_t had_prev;
     if (!n || !it || !out) return 0;
     p = i_dart_pat_peer(n, peer);
     if (!p) return 0;
@@ -1428,8 +1432,6 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
     for (;;){
         if (!i_dart_pat_entry_from(p, it, &e)) return 0;
         it->next_index = (uint16_t)(e.index + 1);
-        prev_e = it->prev; had_prev = it->has_prev;   /* the entry walked before e */
-        it->prev = e; it->has_prev = 1;
         if (i_dart_pat_hidden_hash(e.hash)) continue;   /* builtins never surface */
         name = dart_node_peer_topic_name(n, peer, e.index);   /* {NULL,0} until details arrive */
         switch (e.kind){
@@ -1443,14 +1445,9 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
             /* the value channel is the bare name: a same-peer "<name>@set" VAR_SET entry
                makes it writable (unknowable until the name is fetched: shown unwritable) */
-            if (name.len){
-                uint32_t want = i_dart_pat_hash32(name, "@set");
-                if (i_dart_pat_peek_next(p, it, e.index, &partner) && partner.index == e.index + 1
-                    && partner.kind == DART_KIND_VAR_SET && partner.hash == want)
-                    out->writable = 1;   /* adjacent partner: no rescan */
-                else
-                    out->writable = (uint8_t)i_dart_pat_find_hash(p, want, DART_KIND_VAR_SET, &partner);
-            }
+            if (name.len)
+                out->writable = (uint8_t)i_dart_pat_find_hash(p, i_dart_pat_hash32(name, "@set"),
+                                                              DART_KIND_VAR_SET, &partner);
             return 1;
         case DART_KIND_VAR_SET:
             /* secondary: consumed by its bare-name VARIABLE entry when both are advertised */
@@ -1459,13 +1456,9 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                 out->incomplete = 1;
                 return 1;
             }
-            if (i_dart_pat_strip(name, "@set", &base)){
-                uint32_t want = i_dart_pat_hash32(base, "");
-                if ((had_prev && prev_e.index + 1 == e.index && prev_e.kind == DART_KIND_VARIABLE
-                     && prev_e.hash == want)   /* adjacent partner: no rescan */
-                    || i_dart_pat_find_hash(p, want, DART_KIND_VARIABLE, &partner))
-                    continue;   /* folded into the value entity */
-            }
+            if (i_dart_pat_strip(name, "@set", &base)
+                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, ""), DART_KIND_VARIABLE, &partner))
+                continue;   /* folded into the value entity */
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE,
                             i_dart_pat_strip(name, "@set", &base) ? base : name, &e);
             out->writable = 1; out->incomplete = 1;   /* a set channel with no value channel */
@@ -1479,11 +1472,9 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
             out->provides = (uint8_t)dart_role_subs(e.role);
             out->consumes = (uint8_t)dart_role_pubs(e.role);
             if (name.len && i_dart_pat_strip(name, "@req", &base)){
-                uint32_t want = i_dart_pat_hash32(base, "@rsp");
                 out->name = base;
-                if ((i_dart_pat_peek_next(p, it, e.index, &partner) && partner.index == e.index + 1
-                     && partner.kind == DART_KIND_FUNC_RSP && partner.hash == want)   /* adjacent */
-                    || i_dart_pat_find_hash(p, want, DART_KIND_FUNC_RSP, &partner))
+                if (i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@rsp"), DART_KIND_FUNC_RSP,
+                                         &partner))
                     out->rsp_schema = dart_node_peer_topic_schema(n, peer, partner.index,
                                                                   &out->rsp_schema_hash);
                 else out->incomplete = 1;   /* half a function advertised */
@@ -1499,13 +1490,9 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
                 out->incomplete = 1;
                 return 1;
             }
-            if (i_dart_pat_strip(name, "@rsp", &base)){
-                uint32_t want = i_dart_pat_hash32(base, "@req");
-                if ((had_prev && prev_e.index + 1 == e.index && prev_e.kind == DART_KIND_FUNC_REQ
-                     && prev_e.hash == want)   /* adjacent partner: no rescan */
-                    || i_dart_pat_find_hash(p, want, DART_KIND_FUNC_REQ, &partner))
-                    continue;   /* folded into the function entity */
-            }
+            if (i_dart_pat_strip(name, "@rsp", &base)
+                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@req"), DART_KIND_FUNC_REQ, &partner))
+                continue;   /* folded into the function entity */
             i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION,
                             i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
             out->incomplete = 1;

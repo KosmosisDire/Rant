@@ -353,20 +353,21 @@ typedef struct {
 
 /* Iterator: zero-initialize, then call until 0. include_dropped is the ONE input field
  * (set it before the first call if you want it); the rest is internal walk state, not for
- * direct use. The peer walk keeps a persistent overlay cursor plus the previously walked
- * entry, so enumerating a peer's entities costs one pass over its interest list, not one
- * pass per yielded entity; pattern partners are created at adjacent indices, so the fold
- * checks hit the prev/peek fast paths and a full rescan is only the fallback. epoch keys
- * the cursor to dart_node_peer_interest_epoch: an interest change mid-walk reseeks safely. */
+ * direct use. The peer walk keeps a persistent overlay cursor, so enumerating a peer's
+ * entities costs one pass over its interest list, not one pass per yielded entity; a
+ * pattern partner is found by the low-32 hash of its expected name, wherever the peer
+ * ordered it. epoch keys the cursor to dart_node_peer_interest_epoch: an interest change
+ * mid-walk reseeks safely. */
 typedef struct {
     uint16_t next_index;
     uint8_t  phase;
-    uint8_t  has_prev;
+    uint8_t  has_prev;          /* unused walk scratch, kept so the struct layout stays
+                                   byte-exact for anything mirroring it by hand */
     uint8_t  include_dropped;   /* peer walk: also serve a DROPPED (silent, resumable) peer's
                                    last-known entities. Zero-init = refuse them (see below). */
     uint32_t epoch;
     DartInterestIter pos;
-    DartTopicEntry   prev;
+    DartTopicEntry   prev;      /* unused walk scratch (see has_prev) */
 } DartEntityIter;
 
 /* Walk the entities a PEER advertises, one per call: plain topics pass through, pattern
