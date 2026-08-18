@@ -5,8 +5,10 @@
  * async / fail / defer, variables, signals, typed pub/sub over DART_SCHEMA with the
  * memcpy, loop, and subset/rebase codec paths, entity reflection). Leg 4: bare-type
  * roots (bool / std::string / std::array / a bare-double variable, plus the dynamic API
- * through the empty path) and the canonical cross-language hashes. Single process,
- * discovery pinned to loopback on isolated domains (never 0). Exit 0 = PASS. */
+ * through the empty path) and the canonical cross-language hashes. Leg 5: standard
+ * types incl. the video family. Leg 6: variable members (std::vector / std::string
+ * tail frames, subset/rebase by path, bare vector roots). Single process, discovery
+ * pinned to loopback on isolated domains (never 0). Exit 0 = PASS. */
 #include "dart.hpp"
 #include <array>
 #include <atomic>
@@ -386,7 +388,10 @@ static bool patterns_leg() {
 
 /* ---- leg 5: STANDARD TYPES: the mirrors carry a wire NAME, so a Pose field matches
  * only a Pose. The golden vectors are shared with the C, C# and Python bindings. ---- */
-static const uint64_t HASH_FLOAT3 = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
+static const uint64_t HASH_FLOAT3    = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
+static const uint64_t HASH_IMAGE     = 0x83abed7b2c4e334cULL;
+static const uint64_t HASH_VIDEO     = 0x0e2cbafb5335f872ULL;   /* `VideoFrame` */
+static const uint64_t HASH_EXTSTREAM = 0xda5520ef946a2406ULL;   /* `ExternalVideoStream` */
 
 struct Track {
     dart::Pose      at;
@@ -491,6 +496,60 @@ static bool stdtypes_leg() {
         chk("std: a Track crosses whole",
             wait_for(4000, [&] { return g_track_recv.load() > 0; }, &b)
             && g_track_x == 4.5 && g_track_id0 == 0xAB);
+    }
+
+    {   /* the video family: mirrors with a variable member ride the codec's tail path */
+        const dart::Schema* im = dart::priv::schema_of<dart::Image>();
+        const dart::Schema* vf = dart::priv::schema_of<dart::VideoFrame>();
+        const dart::Schema* xs = dart::priv::schema_of<dart::ExternalVideoStream>();
+        auto imc = dart::Schema::compile("Image");
+        auto vfc = dart::Schema::compile("VideoFrame");
+        auto xsc = dart::Schema::compile("ExternalVideoStream");
+        chk("std: video codecs compile", im && vf && xs && imc && vfc && xsc);
+        chk("std: Image codec == canonical", im && imc && im->hash() == imc->hash());
+        chk("std: VideoFrame codec == canonical", vf && vfc && vf->hash() == vfc->hash());
+        chk("std: ExternalVideoStream codec == canonical", xs && xsc && xs->hash() == xsc->hash());
+        chk("std: video golden hashes (shared with every binding)",
+            imc && imc->hash() == HASH_IMAGE && vfc && vfc->hash() == HASH_VIDEO
+                && xsc && xsc->hash() == HASH_EXTSTREAM);
+
+        /* an Image end to end: the variable payload crosses beside the fixed fields */
+        std::atomic<int> img_recv{ 0 };
+        dart::Image img_got;
+        dart::Publisher<dart::Image> ipub(a, "std/frame");
+        dart::Subscriber<dart::Image> isub(b, "std/frame", [&](const dart::Image& i) {
+            img_got = i;
+            img_recv++;
+        });
+        chk("std: image pair matched",
+            wait_for(4000, [&] { return ipub.match_count() == 1 && ipub.ready(); }, &b));
+        dart::Image img;
+        img.width = 320; img.height = 4; img.stride = 320;
+        img.format = dart::ImageFormat::Mono8;
+        img.data.resize((size_t)img.stride * img.height);
+        for (size_t i = 0; i < img.data.size(); i++) img.data[i] = (uint8_t)(i * 7);
+        chk("std: image send", ipub.send(img) == dart::SendStatus::Ok);
+        chk("std: image crosses whole",
+            wait_for(4000, [&] { return img_recv.load() > 0; }, &b)
+            && img_got.width == 320 && img_got.format == dart::ImageFormat::Mono8
+            && img_got.data.size() == img.data.size()
+            && img_got.data == img.data);
+
+        /* ExternalVideoStream is fully fixed: the latched-variable use it exists for */
+        dart::VariableOptions<dart::ExternalVideoStream> vo;
+        dart::ExternalVideoStream st;
+        st.kind = dart::VideoStreamKind::Rtsp;
+        st.url.value.assign("rtsp://cam.local/main");
+        st.name.assign("front door");
+        vo.initial = st;
+        dart::VariableDefinition<dart::ExternalVideoStream> vdef(a, "std/stream", vo);
+        dart::RemoteVariable<dart::ExternalVideoStream>     vrem(b, "std/stream");
+        chk("std: stream variable replicates", wait_for(4000, [&] {
+                auto v = vrem.get();
+                return v && v->kind == dart::VideoStreamKind::Rtsp
+                         && v->url.value == "rtsp://cam.local/main"
+                         && v->name == "front door";
+            }, &b));
     }
 
     {   /* the thin operations */
@@ -609,6 +668,124 @@ static bool value_root_leg() {
     return g_failures == fails_at_entry;
 }
 
+/* ---- leg 6: VARIABLE members (std::vector<E> / std::string) as tail frames ------ */
+/* A DART_SCHEMA struct may now carry variable members: each rides the message tail as
+ * a length-framed section, packed and read by path through the C accessors, while the
+ * fixed fields keep the static leaf table. */
+
+/* same wire name ("Chunk"), the publisher's a superset in a different order with an
+ * EXTRA variable field ahead of the shared ones: the subscriber's rebased decode must
+ * find its frames by path, not by its own frame ordinals */
+namespace narrow { struct Chunk {
+    uint32_t           seq = 0;
+    std::vector<float> samples;
+    std::string        note;
+}; }
+DART_SCHEMA(narrow::Chunk, seq, samples, note);
+
+namespace wide { struct Chunk {
+    uint64_t           stamp = 0;
+    std::string        debug;
+    std::vector<float> samples;
+    uint32_t           seq = 0;
+    std::string        note;
+    float              gain = 0.f;
+}; }
+DART_SCHEMA(wide::Chunk, stamp, debug, samples, seq, note, gain);
+
+static bool tails_leg() {
+    int fails_at_entry = g_failures;
+
+    {   /* codec-level: spelling, roundtrip, and the bare-vector root pin */
+        const dart::Schema* sc = dart::priv::schema_of<narrow::Chunk>();
+        chk("tails: Chunk codec compiles", sc != nullptr);
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("tails: variable members spell as f32[] / string",
+            txt.find("samples: f32[]") != std::string::npos &&
+            txt.find("note: string") != std::string::npos);
+
+        narrow::Chunk in;
+        in.seq = 7;
+        in.samples = { 1.5f, -2.5f, 8.75f };
+        in.note = "a note well past any small-string buffer, to make the heap real";
+        std::vector<uint8_t> scratch;
+        dart::Bytes wire = dart::priv::encode(in, scratch);
+        chk("tails: encode produces a message", wire.size() > 0);
+        narrow::Chunk out;
+        chk("tails: decode roundtrips", dart::priv::decode(out, wire, nullptr)
+            && out.seq == 7 && out.samples == in.samples && out.note == in.note);
+
+        narrow::Chunk empty_in, empty_out;
+        empty_out.samples = { 9.f };            /* stale state must be overwritten */
+        empty_out.note = "stale";
+        dart::Bytes ewire = dart::priv::encode(empty_in, scratch);
+        chk("tails: empty vector and string roundtrip", ewire.size() > 0
+            && dart::priv::decode(empty_out, ewire, nullptr)
+            && empty_out.samples.empty() && empty_out.note.empty());
+
+        const dart::Schema* vr = dart::priv::schema_of<std::vector<float>>();
+        chk("tails: bare std::vector<float> root is canonical `f32[]`",
+            vr && vr->hash() == HASH_F32ARR);
+    }
+
+    dart::NodeOptions opts;
+    opts.domain = 47;
+    opts.multicast_interface = "127.0.0.1";
+    auto on_evt = [](const char* tag) {
+        return [tag](const dart::Event& e) {
+            if (e.is_error() && e.error() != dart::ErrorKind::SchemaMismatch)
+                std::printf("event(%s): %s\n", tag, e.to_string().c_str());
+        };
+    };
+    dart::Node a("TA", {}, on_evt("TA"), opts);
+    dart::Node b("TB", {}, on_evt("TB"), opts);
+    chk("tails: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    chk("tails: A started", a.start());   /* A on its service thread, B pumped by wait_for */
+    dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
+
+    {   /* subset/rebase: wide publisher, narrow subscriber, frames found by path */
+        std::atomic<int> got{ 0 };
+        narrow::Chunk seen;
+        dart::Publisher<wide::Chunk>    pub(a, "tails/chunk", rel);
+        dart::Subscriber<narrow::Chunk> sub(b, "tails/chunk", [&](const narrow::Chunk& c) {
+            seen = c;
+            got++;
+        }, rel);
+        chk("tails: subset pair matched",
+            wait_for(4000, [&] { return pub.match_count() == 1 && pub.ready(); }, &b));
+        wide::Chunk w;
+        w.stamp = 0x1122334455667788ULL;
+        w.debug = "an extra variable field the subscriber never declared";
+        w.samples = { 4.f, 5.f, 6.f, 7.f };
+        w.seq = 41;
+        w.note = "shared tail";
+        w.gain = 2.5f;
+        chk("tails: wide send", pub.send(w) == dart::SendStatus::Ok);
+        chk("tails: rebased decode reads the right frames",
+            wait_for(4000, [&] { return got.load() > 0; }, &b)
+            && seen.seq == 41 && seen.samples == w.samples && seen.note == "shared tail");
+    }
+
+    {   /* a bare vector root end to end */
+        std::atomic<int> got{ 0 };
+        std::vector<float> seen;
+        dart::Publisher<std::vector<float>>  pv(a, "tails/wave", rel);
+        dart::Subscriber<std::vector<float>> sv(b, "tails/wave",
+            [&](const std::vector<float>& v) { seen = v; got++; }, rel);
+        chk("tails: vector-root pair matched",
+            wait_for(4000, [&] { return pv.match_count() == 1 && pv.ready(); }, &b));
+        std::vector<float> wave(256);
+        for (size_t i = 0; i < wave.size(); i++) wave[i] = (float)i * 0.5f;
+        chk("tails: vector-root send", pv.send(wave) == dart::SendStatus::Ok);
+        chk("tails: vector-root round trip",
+            wait_for(4000, [&] { return got.load() > 0; }, &b) && seen == wave);
+    }
+
+    a.stop();
+    return g_failures == fails_at_entry;
+}
+
 int main() {
 #if defined(__cpp_exceptions)
   try {
@@ -676,6 +853,11 @@ int main() {
     std::printf("stdtypes leg:\n");
     bool std_ok = stdtypes_leg();
     std::printf("%s\n", std_ok ? "PASS: standard types" : "FAIL: stdtypes leg");
+
+    /* variable members as tail frames */
+    std::printf("tail-member leg:\n");
+    bool tl_ok = tails_leg();
+    std::printf("%s\n", tl_ok ? "PASS: variable members" : "FAIL: tail-member leg");
 
 #if defined(__cpp_exceptions)
     /* a failed constructor throws dart::Error (on_event is required) */

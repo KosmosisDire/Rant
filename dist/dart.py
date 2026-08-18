@@ -1073,6 +1073,47 @@ def string(cap):
     return _String(cap)
 
 
+# Enum fields come before the standard types below, which declare their own (the
+# video family's format / codec / kind).
+
+def _infer_enum_backing(cls):
+    """Smallest scalar kind that fits every member value: unsigned when all >= 0, else
+    signed. Cross-language matching wants an explicit backing (dart.enum(cls, dart.u8))."""
+    vals = [int(m.value) for m in cls] or [0]
+    lo, hi = min(vals), max(vals)
+    if lo >= 0:
+        return (_U8 if hi <= 0xFF else _U16 if hi <= 0xFFFF
+                else _U32 if hi <= 0xFFFFFFFF else _U64)
+    fits = lambda bits: lo >= -(1 << (bits - 1)) and hi <= (1 << (bits - 1)) - 1
+    return _I8 if fits(8) else _I16 if fits(16) else _I32 if fits(32) else _I64
+
+
+class _Enum:
+    """An enum field marker (a named integer). Wraps an enum.Enum subclass whose member
+    values ride the wire, plus the backing scalar kind."""
+    def __init__(self, cls, backing=None):
+        if not (isinstance(cls, type) and issubclass(cls, _pyenum.Enum)):
+            raise TypeError("dart.enum expects an enum.Enum subclass")
+        self.cls = cls
+        if isinstance(backing, _Type):
+            self.kind = backing.kind
+        elif backing is None:
+            self.kind = _infer_enum_backing(cls)
+        else:
+            raise TypeError("enum backing must be a dart scalar type, e.g. dart.u8")
+
+    def __repr__(self):
+        return "dart.enum(%s)" % self.cls.__name__
+
+
+def enum(cls, backing=None):
+    """A named-integer field from a Python enum.Enum (usually IntEnum): each member's value
+    is what rides the wire. Pass `backing` (dart.u8..dart.i64) to pin the wire width to what
+    another language uses; otherwise it is inferred from the values. A bare enum class as an
+    annotation is the same as dart.enum(cls) with an inferred backing."""
+    return _Enum(cls, backing)
+
+
 # ---------------------------------------------------------------------------
 # STANDARD TYPES (docs/stdtypes.md): the types applications keep re-inventing,
 # pre-named so two programs that both mean "a 3D point" say so with the same name
@@ -1234,48 +1275,71 @@ class GeoPoint:
     alt: f64 = 0.0      # meters
 
 
+# The video family. Each member value IS the wire value, so the names and numbers
+# below are the same in every binding.
+
+class ImageFormat(_pyenum.IntEnum):
+    """How an Image's data is laid out. A value >= 16 is a compressed container, so
+    `data` holds the file bytes rather than pixels."""
+    Mono8 = 0
+    Mono16 = 1
+    Rgb8 = 2
+    Rgba8 = 3
+    Bgr8 = 4
+    Yuyv = 5
+    Nv12 = 6
+    Jpeg = 16
+    Png = 17
+
+
+class VideoCodec(_pyenum.IntEnum):
+    """The codec a VideoFrame's data is encoded with."""
+    Mjpeg = 0
+    H264 = 1
+    H265 = 2
+    Av1 = 3
+
+
+class VideoStreamKind(_pyenum.IntEnum):
+    """The protocol an ExternalVideoStream's url speaks."""
+    Rtsp = 0
+    WebrtcWhep = 1
+    Hls = 2
+    Srt = 3
+    Rtp = 4
+    HttpMjpeg = 5
+    Other = 15
+
+
+@_std("Image")
+class Image:
+    width: u32 = 0
+    height: u32 = 0
+    stride: u32 = 0                             # bytes per row; 0 = tightly packed
+    format: enum(ImageFormat, u8) = ImageFormat.Mono8
+    data: list[u8] = b""                        # pixels, or the file bytes if compressed
+
+
+@_std("VideoFrame")
+class VideoFrame:
+    codec: enum(VideoCodec, u8) = VideoCodec.Mjpeg
+    keyframe: bool_ = False
+    pts: Timestamp = 0                          # presentation time, the Timestamp clock
+    data: list[u8] = b""
+
+
+# Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
+@_std("ExternalVideoStream")
+class ExternalVideoStream:
+    kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
+    url: Uri = ""
+    name: string(32) = ""
+
+
 def timestamp_now():
     """The wall clock in the units a Timestamp field declares: microseconds since the
     Unix epoch, UTC -- the same clock a message's written_us is stamped from."""
     return int(_load().dart_timestamp_now())
-
-
-def _infer_enum_backing(cls):
-    """Smallest scalar kind that fits every member value: unsigned when all >= 0, else
-    signed. Cross-language matching wants an explicit backing (dart.enum(cls, dart.u8))."""
-    vals = [int(m.value) for m in cls] or [0]
-    lo, hi = min(vals), max(vals)
-    if lo >= 0:
-        return (_U8 if hi <= 0xFF else _U16 if hi <= 0xFFFF
-                else _U32 if hi <= 0xFFFFFFFF else _U64)
-    fits = lambda bits: lo >= -(1 << (bits - 1)) and hi <= (1 << (bits - 1)) - 1
-    return _I8 if fits(8) else _I16 if fits(16) else _I32 if fits(32) else _I64
-
-
-class _Enum:
-    """An enum field marker (a named integer). Wraps an enum.Enum subclass whose member
-    values ride the wire, plus the backing scalar kind."""
-    def __init__(self, cls, backing=None):
-        if not (isinstance(cls, type) and issubclass(cls, _pyenum.Enum)):
-            raise TypeError("dart.enum expects an enum.Enum subclass")
-        self.cls = cls
-        if isinstance(backing, _Type):
-            self.kind = backing.kind
-        elif backing is None:
-            self.kind = _infer_enum_backing(cls)
-        else:
-            raise TypeError("enum backing must be a dart scalar type, e.g. dart.u8")
-
-    def __repr__(self):
-        return "dart.enum(%s)" % self.cls.__name__
-
-
-def enum(cls, backing=None):
-    """A named-integer field from a Python enum.Enum (usually IntEnum): each member's value
-    is what rides the wire. Pass `backing` (dart.u8..dart.i64) to pin the wire width to what
-    another language uses; otherwise it is inferred from the values. A bare enum class as an
-    annotation is the same as dart.enum(cls) with an inferred backing."""
-    return _Enum(cls, backing)
 
 
 class _FieldSpec:

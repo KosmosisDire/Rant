@@ -290,6 +290,12 @@ static class Program
     // same hash from C, C++, C# and Python (pinned in C by dart_test's stdtypes phase).
     const ulong HashFloat3 = 0x04aa9469cd08b1ddUL;
 
+    // The video family, same golden vectors (pinned in cpp/test.cpp too). A mirror whose
+    // enum member names, values or order drifted would hash differently, so this catches it.
+    const ulong HashImage = 0x83abed7b2c4e334cUL;
+    const ulong HashVideoFrame = 0x0e2cbafb5335f872UL;
+    const ulong HashExternalVideoStream = 0xda5520ef946a2406UL;
+
     // Standard types as ordinary fields: an ALIAS (Timestamp, Uuid) names a plain field's
     // TYPE, a COMPOSITE (Pose, Color) is a shipped mirror struct that names itself. Both
     // NARROW matching, so this never binds to a same-shaped schema that meant something else.
@@ -349,6 +355,113 @@ static class Program
                   && back.Id != null && back.Id[15] == 15 && back.Velocity.Z == 3.0f);
             Check("Std.Now is Unix-epoch microseconds", Std.Now() > 1600000000000000L);
         }
+        // the video family: the shipped mirror must compile to the canonical bytes, and the
+        // bare name must resolve to the same ones, so both forms are checked hash-exact
+        (string, Type, ulong)[] video =
+        {
+            ("Image", typeof(Dart.Image), HashImage),
+            ("VideoFrame", typeof(Dart.VideoFrame), HashVideoFrame),
+            ("ExternalVideoStream", typeof(Dart.ExternalVideoStream), HashExternalVideoStream),
+        };
+        foreach (var (name, clr, gold) in video)
+        {
+            using var text = new Schema(name);
+            using var mirror = new Schema(clr);
+            Console.WriteLine($"       {name}: text 0x{text.Hash:x16} mirror 0x{mirror.Hash:x16}");
+            Check(name + " compiles by name alone, golden hash", text.Hash == gold);
+            Check("the " + name + " mirror IS that type", mirror.Hash == gold);
+        }
+        return ok;
+    }
+
+    // The video family live: an Image (a variable payload beside fixed fields) crosses two
+    // nodes, and ExternalVideoStream is the latched variable it exists for.
+    static bool VideoLive()
+    {
+        Console.WriteLine("video live leg: two nodes, domain 46, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var a = new DartNode("MA", null, e => { if (e.IsError) Console.WriteLine("event(MA): " + e); },
+                             domain: 46, multicastInterface: "127.0.0.1");
+        var b = new DartNode("MB", null, e => { if (e.IsError) Console.WriteLine("event(MB): " + e); },
+                             domain: 46, multicastInterface: "127.0.0.1");
+        try
+        {
+            var pub = new Topic<Dart.Image>(a, "frame", Role.PubOnly, reliable: true, keepLast: 4);
+            var sub = new Topic<Dart.Image>(b, "frame", Role.SubOnly, reliable: true, keepLast: 4);
+            sub.TryTake(out Dart.Image _);   // switch to queued delivery
+            var initial = new Dart.ExternalVideoStream
+            {
+                Kind = Dart.VideoStreamKind.Rtsp,
+                Url = "rtsp://cam.local/main",
+                Name = "front door",
+            };
+            var vd = new VariableDefinition<Dart.ExternalVideoStream>(a, "stream", initial);
+            var rv = new RemoteVariable<Dart.ExternalVideoStream>(b, "stream");
+
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline
+                   && (pub.MatchCount() == 0 || !rv.TryGet(out Dart.ExternalVideoStream _)))
+            {
+                a.Poll(1);
+                b.Poll(1);
+            }
+            Check("image topic matched", pub.MatchCount() == 1);
+
+            var img = new Dart.Image
+            {
+                Width = 64, Height = 4, Stride = 64,
+                Format = Dart.ImageFormat.Mono8,
+                Data = new byte[256],
+            };
+            for (int i = 0; i < img.Data.Length; i++) img.Data[i] = (byte)(i * 7);
+            Check("image send", pub.Send(img) == SendStatus.Ok);
+
+            bool gotImage = false;
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline && !gotImage)
+            {
+                a.Poll(1);
+                b.Poll(1);
+                if (sub.TryTake(out Dart.Image got, 1))
+                    gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
+                               && got.Format == Dart.ImageFormat.Mono8
+                               && got.Data != null && got.Data.Length == img.Data.Length
+                               && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255];
+            }
+            Check("an Image crosses whole (fixed fields + the variable payload)", gotImage);
+
+            Check("stream variable replicated the initial",
+                  rv.TryGet(out Dart.ExternalVideoStream s0)
+                  && s0.Kind == Dart.VideoStreamKind.Rtsp
+                  && s0.Url == "rtsp://cam.local/main" && s0.Name == "front door");
+
+            Check("stream variable set accepted", rv.Set(new Dart.ExternalVideoStream
+            {
+                Kind = Dart.VideoStreamKind.WebrtcWhep,
+                Url = "https://gw.local/whep/cam1",
+                Name = "front door",
+            }) == SendStatus.Ok);
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline
+                   && !(vd.TryGet(out Dart.ExternalVideoStream v)
+                        && v.Kind == Dart.VideoStreamKind.WebrtcWhep))
+            {
+                a.Poll(1);
+                b.Poll(1);
+            }
+            Check("stream variable set converged at the owner",
+                  vd.TryGet(out Dart.ExternalVideoStream s1)
+                  && s1.Kind == Dart.VideoStreamKind.WebrtcWhep
+                  && s1.Url == "https://gw.local/whep/cam1");
+        }
+        finally
+        {
+            a.Close();
+            b.Close();
+        }
+        Console.WriteLine(ok ? "video live leg: PASS\n" : "video live leg: FAIL\n");
         return ok;
     }
 
@@ -556,6 +669,7 @@ static class Program
         sub.Close();
 
         if (ok) ok = ValueRootsLive();
+        if (ok) ok = VideoLive();
         if (ok) ok = Patterns();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;

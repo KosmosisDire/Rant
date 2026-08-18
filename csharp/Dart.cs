@@ -732,6 +732,34 @@ namespace Dart
     { [DartField("lat")] public double Lat; [DartField("lon")] public double Lon;
       [DartField("alt")] public double Alt; }
 
+    // The video family. A member's VALUE is the wire value and its NAME rides the schema,
+    // so the names and numbers below are the same in every binding.
+    /// <summary>How an Image's data is laid out. A value &gt;= 16 is a compressed
+    /// container, so `data` holds the file bytes rather than pixels.</summary>
+    public enum ImageFormat : byte
+    { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6,
+      Jpeg = 16, Png = 17 }
+    /// <summary>The codec a VideoFrame's data is encoded with.</summary>
+    public enum VideoCodec : byte { Mjpeg = 0, H264 = 1, H265 = 2, Av1 = 3 }
+    /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
+    public enum VideoStreamKind : byte
+    { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
+    [DartTypeName("Image")] public struct Image               // stride 0 = packed rows
+    { [DartField("width")] public uint Width; [DartField("height")] public uint Height;
+      [DartField("stride")] public uint Stride;
+      [DartField("format")] public ImageFormat Format;
+      [DartField("data")] public byte[] Data; }               // pixels, or the file bytes
+    [DartTypeName("VideoFrame")] public struct VideoFrame
+    { [DartField("codec")] public VideoCodec Codec;
+      [DartField("keyframe")] public bool Keyframe;
+      [DartField("pts")] [DartTypeName("Timestamp")] public long Pts;   // the Timestamp clock
+      [DartField("data")] public byte[] Data; }
+    // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
+    [DartTypeName("ExternalVideoStream")] public struct ExternalVideoStream
+    { [DartField("kind")] public VideoStreamKind Kind;
+      [DartField("url")] [DartTypeName("Uri")] [DartString(256)] public string Url;
+      [DartField("name")] [DartString(32)] public string Name; }
+
     /// <summary>The standard-type values that need a platform.</summary>
     public static class Std
     {

@@ -166,6 +166,85 @@ def std_types():
     return ok
 
 
+# The video family: golden wire shared with the C, C++ and C# bindings (pinned in
+# cpp/test.cpp and by dart_test's stdtypes phase).
+HASH_IMAGE = 0x83ABED7B2C4E334C
+HASH_VIDEO_FRAME = 0x0E2CBAFB5335F872
+HASH_EXT_STREAM = 0xDA5520EF946A2406
+
+
+@dataclass
+class Clip:
+    """The video mirrors used as FIELDS: each spells as its name, so the schema is the
+    same as the text form and needs no definition of its own."""
+    cover: dart.Image = field(default_factory=dart.Image)
+    live: dart.ExternalVideoStream = field(default_factory=dart.ExternalVideoStream)
+
+
+def video_types():
+    """The video family: golden wire from both spellings, an Image over two nodes, and
+    ExternalVideoStream as the latched stream URL it exists for."""
+    print("video leg: golden wire, then two nodes, domain 45, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    for name, cls, golden in (("Image", dart.Image, HASH_IMAGE),
+                              ("VideoFrame", dart.VideoFrame, HASH_VIDEO_FRAME),
+                              ("ExternalVideoStream", dart.ExternalVideoStream,
+                               HASH_EXT_STREAM)):
+        check("%s compiles by name alone, golden hash" % name,
+              dart.Schema(name).hash == golden)
+        check("the %s mirror IS that type" % name, dart.Schema(cls).hash == golden)
+    check("a video mirror nests as a named field",
+          dart.Schema(Clip).hash
+          == dart.Schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
+
+    got = {}
+    a = dart.Node("VidA", None, on_event("VidA"), domain=45, multicast_interface=IFACE)
+    b = dart.Node("VidB", None, on_event("VidB"), domain=45, multicast_interface=IFACE)
+    try:
+        qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=4)
+        pub = dart.Publisher[dart.Image](a, "frame", qos=qos)
+        dart.Subscriber[dart.Image](b, "frame", lambda i: got.setdefault("img", i), qos=qos)
+        stream = dart.ExternalVideoStream(kind=dart.VideoStreamKind.Rtsp,
+                                          url="rtsp://cam.local/main", name="front door")
+        vd = dart.VariableDefinition[dart.ExternalVideoStream](a, "stream", initial=stream)
+        rv = dart.RemoteVariable[dart.ExternalVideoStream](b, "stream")
+        check("handles created", all(h is not None for h in (pub, vd, rv)))
+        deadline = time.time() + 8.0
+        while time.time() < deadline and (pub.match_count() == 0 or rv.get() is None):
+            a.poll(1)
+            b.poll(1)
+        check("image pair matched", pub.match_count() == 1)
+
+        pixels = bytes((i * 7) & 0xFF for i in range(384))
+        img = dart.Image(width=32, height=4, stride=96,
+                         format=dart.ImageFormat.Rgb8, data=pixels)
+        check("image send", pub.send(img) == dart.SendStatus.OK)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and "img" not in got:
+            a.poll(1)
+            b.poll(1)
+        r = got.get("img")
+        check("an Image crosses whole",
+              r is not None and r.width == 32 and r.height == 4 and r.stride == 96
+              and r.format == dart.ImageFormat.Rgb8 and bytes(r.data) == pixels)
+
+        v = rv.get()
+        check("the stream variable replicated",
+              v is not None and v.kind == dart.VideoStreamKind.Rtsp
+              and v.url == "rtsp://cam.local/main" and v.name == "front door")
+    finally:
+        a.close()
+        b.close()
+    print("video family: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 def value_roots():
     """Bare types as whole schemas: encode/decode plain values, and the canonical hash."""
     ok = True
@@ -533,6 +612,8 @@ def main():
 
     if ok:
         ok = value_roots_live()
+    if ok:
+        ok = video_types()
     if ok:
         ok = patterns()
     return 0 if ok else 1

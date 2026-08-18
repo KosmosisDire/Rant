@@ -1003,15 +1003,23 @@ private:
  *  schema and cache the result, so the subset/rebase read stays cheap.
  *
  *  Wire types: sized integers, float/double, bool, T[N] / std::array<U,N> of
- *  those, dart::String<N> (the capped-string wire slot), and nested DART_SCHEMA
- *  structs. std::string / std::vector / pointers / maps are refused at compile
- *  time (variable-length fields belong to the dynamic Schema/MessageBuilder API).
+ *  those, dart::String<N> (the capped-string wire slot), nested DART_SCHEMA
+ *  structs, and the VARIABLE members std::vector<scalar> (`f32[]`-style) and
+ *  std::string (unbounded `string`). A variable member rides the message tail as
+ *  a length-framed section, so its struct offset never moves a fixed field: the
+ *  fixed leaves keep the static copy table, while each tail member is packed and
+ *  read through the C accessors by path (which also makes subset/rebase reads
+ *  work unchanged). A type with a tail member encodes into scratch (no zero-copy
+ *  struct view) and its decode allocates into the member; fixed-only types keep
+ *  the memcpy fast path exactly as before. Pointers, maps, std::vector<bool>
+ *  (bit-packed), and vectors of structs/strings are refused at compile time
+ *  (those shapes belong to the dynamic Schema/MessageBuilder API).
  *
  *  A BARE TYPE needs no DART_SCHEMA: any of those wire types used DIRECTLY as the
  *  handle's T (Publisher<bool>, RemoteVariable<float>, Signal<std::array<float,3>>,
- *  Subscriber<std::string>) is the whole schema, anonymous, so `bool` from any
- *  language is the same wire bytes and the same hash. std::string is allowed HERE
- *  (as a root it is the unbounded `string` type, one tail frame, not a fixed slot).
+ *  Subscriber<std::string>, Publisher<std::vector<float>>) is the whole schema,
+ *  anonymous, so `bool` (or `f32[]`) from any language is the same wire bytes and
+ *  the same hash.
  * =========================================================================== */
 
 template <class T> struct reflect;              /* specialized by DART_SCHEMA */
@@ -1053,11 +1061,12 @@ template <uint16_t N> struct String {
  *      struct Track { dart::Pose at; dart::Uuid id; dart::Timestamp when; };
  *      DART_SCHEMA(Track, at, id, when);          // -> "Track { at: Pose, id: Uuid, ... }"
  *
- *  Each mirror is standard-layout and identical to the wire on a little-endian target,
- *  so the usual memcpy fast path still fires. Give one of YOUR types a wire name the
- *  same way the library does, by specializing std_type (see the two macros below).
- *  Image / VideoFrame carry a variable member, so they have no fixed C++ mirror: reach
- *  them through Schema + MessageOut/MessageIn, or name them in a DSL string.
+ *  Each fixed mirror is standard-layout and identical to the wire on a little-endian
+ *  target, so the usual memcpy fast path still fires. Give one of YOUR types a wire
+ *  name the same way the library does, by specializing std_type (see the two macros
+ *  below). Image / VideoFrame carry a variable `data` member (a std::vector<uint8_t>,
+ *  a tail frame on the wire), so they encode through the codec's tail path instead of
+ *  the memcpy one, and they nest as a member but never as an array element.
  * =========================================================================== */
 
 /* The naming hook: `name` is the wire type name, and `repr` is void for a type whose
@@ -1088,6 +1097,30 @@ struct Uri     { String<256> value; };
 /* microseconds since the Unix epoch, UTC -- the clock Message::written_us is stamped from */
 struct Timestamp { int64_t us = 0; };
 struct Duration  { int64_t us = 0; };
+
+/* The video family (docs/stdtypes.md). The enum values are the wire values. */
+enum class ImageFormat : uint8_t { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12,
+                                   Jpeg = 16, Png = 17 };
+enum class VideoCodec : uint8_t { Mjpeg, H264, H265, Av1 };
+enum class VideoStreamKind : uint8_t { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
+                                       Other = 15 };
+struct Image {                    /* stride = bytes per row; data laid out per `format` */
+    uint32_t width = 0, height = 0, stride = 0;
+    ImageFormat format = ImageFormat::Mono8;
+    std::vector<uint8_t> data;
+};
+struct VideoFrame {
+    VideoCodec codec = VideoCodec::Mjpeg;
+    bool       keyframe = false;
+    Timestamp  pts;               /* presentation time, the Timestamp clock */
+    std::vector<uint8_t> data;
+};
+/* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. */
+struct ExternalVideoStream {
+    VideoStreamKind kind = VideoStreamKind::Rtsp;
+    Uri             url;
+    String<32>      name;
+};
 
 inline bool operator==(Timestamp a, Timestamp b) { return a.us == b.us; }
 inline bool operator<(Timestamp a, Timestamp b) { return a.us < b.us; }
@@ -1171,6 +1204,12 @@ inline Uuid      new_uuid() { Uuid u; detail::dart_uuid_new((detail::DartUuid*)&
 #define DART_STD_MEMBERS_Twist(v)   v(::dart::field_tag<::dart::Double3>{}, "linear", offsetof(::dart::Twist, linear)); \
                                     v(::dart::field_tag<::dart::Double3>{}, "angular", offsetof(::dart::Twist, angular));
 #define DART_STD_MEMBERS_GeoPoint(v) DART_STD_F(GeoPoint,lat) DART_STD_F(GeoPoint,lon) DART_STD_F(GeoPoint,alt)
+#define DART_STD_MEMBERS_Image(v)      DART_STD_F(Image,width) DART_STD_F(Image,height) \
+                                       DART_STD_F(Image,stride) DART_STD_F(Image,format) DART_STD_F(Image,data)
+#define DART_STD_MEMBERS_VideoFrame(v) DART_STD_F(VideoFrame,codec) DART_STD_F(VideoFrame,keyframe) \
+                                       DART_STD_F(VideoFrame,pts) DART_STD_F(VideoFrame,data)
+#define DART_STD_MEMBERS_ExternalVideoStream(v) DART_STD_F(ExternalVideoStream,kind) \
+                                       DART_STD_F(ExternalVideoStream,url) DART_STD_F(ExternalVideoStream,name)
 
 namespace priv {
 
@@ -1192,8 +1231,15 @@ template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_da
 template <class U, class = void> struct is_reg_enum : std::false_type {};
 template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_dart_enum>>
     : std::true_type {};
-/* std::string as a handle's T: the unbounded `string` root (a tail frame, not a slot) */
+/* std::string: the unbounded `string` type (a tail frame, not a slot); legal as a
+ * member and as a bare root */
 template <class U> struct is_var_string : std::is_same<U, std::string> {};
+/* std::vector<E>: the variable array `E[]` (a tail frame); legal as a member and as
+ * a bare root. E must be a wire scalar (vector<bool> is bit-packed and refused). */
+template <class U> struct is_std_vector : std::false_type {};
+template <class E> struct is_std_vector<std::vector<E>> : std::true_type {
+    using elem = E;
+};
 
 /* map a C++ scalar type onto the wire kind; -1 = not a wire scalar */
 template <class U> constexpr int scalar_kind_of() {
@@ -1238,9 +1284,84 @@ struct Leaf {
     std::string path;                           /* dotted path for by-name offset lookup */
 };
 
+/* one VARIABLE member (std::vector<E> / std::string): a length-framed section on the
+ * message tail, reached by dotted path through the C accessors (which own the frame
+ * walk, so subset/rebase and hostile-length handling come for free). Member access is
+ * type-erased through function pointers bound where the element type is known. */
+struct Tail {
+    uint32_t    struct_off = 0;
+    uint8_t     is_string = 0;                  /* std::string member (VSTR frame) */
+    uint8_t     elem_kind = 0;                  /* std::vector<E>: E's wire kind */
+    std::string path;
+    size_t (*extra)(const uint8_t* member) = nullptr;   /* payload bytes to reserve */
+    bool (*write)(const uint8_t* member, uint8_t* buf, size_t cap,
+                  const detail::DartSchema* s, const char* path) = nullptr;
+    bool (*read)(uint8_t* member, detail::DartBytes msg,
+                 const detail::DartSchema* s, const char* path) = nullptr;
+};
+
+inline void copy_swapped(uint8_t* dst, const uint8_t* src, size_t n);
+
+template <class E> struct vector_tail {
+    static size_t extra(const uint8_t* m) {
+        return reinterpret_cast<const std::vector<E>*>(m)->size() * sizeof(E);
+    }
+    static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
+                      const detail::DartSchema* s, const char* path) {
+        const std::vector<E>& v = *reinterpret_cast<const std::vector<E>*>(m);
+        size_t bytes = v.size() * sizeof(E);
+        if (host_le() || sizeof(E) == 1)
+            return detail::dart_set_array(buf, cap, s, path,
+                                          detail::dart_bytes(v.data(), bytes)) != 0;
+        std::vector<uint8_t> tmp(bytes);        /* big-endian host: the wire is LE */
+        for (size_t i = 0; i < v.size(); i++)
+            copy_swapped(tmp.data() + i * sizeof(E),
+                         reinterpret_cast<const uint8_t*>(&v[i]), sizeof(E));
+        return detail::dart_set_array(buf, cap, s, path,
+                                      detail::dart_bytes(tmp.data(), bytes)) != 0;
+    }
+    static bool read(uint8_t* m, detail::DartBytes msg,
+                     const detail::DartSchema* s, const char* path) {
+        std::vector<E>& v = *reinterpret_cast<std::vector<E>*>(m);
+        detail::DartBytes view = detail::dart_get_array(msg, s, path);
+        if (!view.data) return false;           /* empty is non-NULL; NULL = mismatch */
+        const uint8_t* src = view.data;
+        size_t n = view.len / sizeof(E);
+        v.resize(n);
+        if (host_le() || sizeof(E) == 1) {      /* memcpy: the view may be unaligned */
+            if (n) std::memcpy(v.data(), src, n * sizeof(E));
+        } else {
+            for (size_t i = 0; i < n; i++)
+                copy_swapped(reinterpret_cast<uint8_t*>(&v[i]), src + i * sizeof(E), sizeof(E));
+        }
+        return true;
+    }
+};
+
+struct string_tail {
+    static size_t extra(const uint8_t* m) {
+        return reinterpret_cast<const std::string*>(m)->size();
+    }
+    static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
+                      const detail::DartSchema* s, const char* path) {
+        const std::string& v = *reinterpret_cast<const std::string*>(m);
+        detail::DartString sv; sv.data = v.data(); sv.len = v.size();
+        return detail::dart_set_string(buf, cap, s, path, sv) != 0;
+    }
+    static bool read(uint8_t* m, detail::DartBytes msg,
+                     const detail::DartSchema* s, const char* path) {
+        std::string& v = *reinterpret_cast<std::string*>(m);
+        detail::DartString sv = detail::dart_get_string(msg, s, path);
+        if (!sv.data) return false;
+        v.assign(sv.data, sv.len);
+        return true;
+    }
+};
+
 struct SchemaBuilder {
     std::string       dsl;
     std::vector<Leaf> leaves;
+    std::vector<Tail> tails;
     uint32_t          base = 0;
     std::string       prefix;
     bool              first = true;
@@ -1310,6 +1431,36 @@ struct SchemaBuilder {
         l.path = prefix + name;
         leaves.push_back(std::move(l));
     }
+    /* a VARIABLE member: no fixed leaf, a Tail reached by path via the C accessors */
+    template <class E> void add_vector(const char* name, size_t off) {
+        constexpr int k = scalar_kind_of<E>();
+        static_assert(k >= 0, "DART_SCHEMA: std::vector element must be a wire scalar "
+                              "(no vectors of structs, strings, or vectors)");
+        static_assert(!std::is_same_v<E, bool>,
+                      "DART_SCHEMA: std::vector<bool> is bit-packed; use std::vector<uint8_t>");
+        sep(name);
+        put(scalar_kind_name(k)); put("[]");
+        Tail t;
+        t.struct_off = base + (uint32_t)off;
+        t.elem_kind  = (uint8_t)k;
+        t.path  = prefix + name;
+        t.extra = &vector_tail<E>::extra;
+        t.write = &vector_tail<E>::write;
+        t.read  = &vector_tail<E>::read;
+        tails.push_back(std::move(t));
+    }
+    void add_var_string(const char* name, size_t off) {
+        sep(name);
+        put("string");
+        Tail t;
+        t.struct_off = base + (uint32_t)off;
+        t.is_string  = 1;
+        t.path  = prefix + name;
+        t.extra = &string_tail::extra;
+        t.write = &string_tail::write;
+        t.read  = &string_tail::read;
+        tails.push_back(std::move(t));
+    }
     template <class U> void add(const char* name, size_t off);
 };
 
@@ -1373,10 +1524,15 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
         base   = saved_base;
         prefix = std::move(saved_prefix);
         first  = false;
+    } else if constexpr (is_std_vector<U>::value) {
+        add_vector<typename is_std_vector<U>::elem>(name, off);
+    } else if constexpr (is_var_string<U>::value) {
+        add_var_string(name, off);
     } else {
         static_assert(always_false<U>,
-            "DART_SCHEMA: unsupported field type (no std::string/std::vector/pointer/map; "
-            "use dart::String<N>, arrays, scalars, or a nested DART_SCHEMA struct)");
+            "DART_SCHEMA: unsupported field type (no pointers/maps; use scalars, "
+            "dart::String<N>, fixed arrays, std::vector<scalar>, std::string, or a "
+            "nested DART_SCHEMA struct)");
     }
 }
 
@@ -1400,6 +1556,23 @@ inline bool fill_offsets(const detail::DartSchema* s, std::vector<Leaf>& lv) {
             if (fi.kind != l.kind) return false;
         }
         l.wire_off = fi.offset;
+    }
+    return true;
+}
+
+/* verify every tail member resolves in a compiled schema with the matching variable
+ * kind (a tail needs no offset: the accessors walk the frames per message) */
+inline bool tails_resolve(const detail::DartSchema* s, const std::vector<Tail>& tv) {
+    for (const Tail& t : tv) {
+        int idx = detail::dart_schema_field_index(s, t.path.c_str());
+        if (idx < 0) return false;
+        detail::DartSchemaFieldInfo fi;
+        if (!detail::dart_schema_field_at(s, (uint16_t)idx, &fi)) return false;
+        if (t.is_string) {
+            if (fi.kind != (uint8_t)detail::DART_VSTR) return false;
+        } else {
+            if (fi.kind != (uint8_t)detail::DART_VARR || fi.elem != t.elem_kind) return false;
+        }
     }
     return true;
 }
@@ -1444,11 +1617,11 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
 }
 
 /* T is a BARE WIRE TYPE: usable as a handle's whole schema with no DART_SCHEMA, since a
- * bare type's identity is its shape. std::string is the unbounded `string` root, handled
- * on its own path (a tail frame has no fixed leaf). */
+ * bare type's identity is its shape. std::string is the unbounded `string` root and
+ * std::vector<E> the variable `E[]` root; both ride the tail path (no fixed leaf). */
 template <class U> constexpr bool is_value_type() {
     return scalar_kind_of<U>() >= 0 || std::is_enum_v<U> || is_dart_string<U>::value
-        || is_std_array<U>::value || is_var_string<U>::value;
+        || is_std_array<U>::value || is_std_vector<U>::value || is_var_string<U>::value;
 }
 
 /* the per-T registration: schema + copy table + rebase cache, built once, immortal */
@@ -1456,13 +1629,14 @@ struct TypeCodec {
     bool                      ok = false;
     bool                      memcpy_ok = false;      /* our own layout coincides with our wire */
     bool                      memcpy_capable = false; /* trivially copyable + little-endian host */
-    bool                      var_string = false;     /* T is std::string: the whole message is one frame */
     std::optional<Schema>     schema;
     const detail::DartSchema* raw = nullptr;
     uint64_t                  hash = 0;
-    uint32_t                  wire_size = 0;
+    uint32_t                  wire_size = 0;          /* the FIXED section (all of it when no tails) */
+    uint32_t                  msg_min = 0;            /* fixed section + one empty frame per tail */
     uint32_t                  struct_size = 0;
     std::vector<Leaf>         leaves;
+    std::vector<Tail>         tails;                  /* variable members, declaration order */
 
     /* one incoming schema pointer's resolved offsets. A rebased schema keeps the
      * SUBSCRIBER's wire (hence its hash) with the PUBLISHER's offsets, so the hash can
@@ -1478,7 +1652,7 @@ struct TypeCodec {
         if (it != rebased.end()) return &it->second;
         Rebased r;
         r.leaves = leaves;                    /* keep struct offsets, refill wire offsets */
-        r.ok     = fill_offsets(s, r.leaves);
+        r.ok     = fill_offsets(s, r.leaves) && tails_resolve(s, tails);
         r.size   = detail::dart_schema_size(s);
         if (r.ok && memcpy_capable && r.size >= struct_size) {
             bool co = true;
@@ -1514,23 +1688,23 @@ template <class T> TypeCodec* build_codec() {
         b.dsl += " { ";
         reflect<T>::visit(SchemaVisit{ &b });
         b.dsl += " }";
-    } else if constexpr (is_var_string<T>::value) {
-        b.dsl = "string";                       /* one tail frame: no fixed leaf to copy */
-        c->var_string = true;
     } else {
         b.value_root = true;                    /* a bare type: the schema is its spelling alone */
-        b.add<T>("", 0);
+        b.add<T>("", 0);                        /* (std::string / std::vector roots land a Tail) */
     }
     c->leaves = std::move(b.leaves);
+    c->tails  = std::move(b.tails);
     c->schema = Schema::compile(b.dsl);
     if (!c->schema) return c;
     c->raw         = c->schema->raw();
     c->hash        = c->schema->hash();
     c->wire_size   = detail::dart_schema_size(c->raw);
+    c->msg_min     = detail::dart_schema_msg_min(c->raw);
     c->struct_size = (uint32_t)sizeof(T);
     if (!fill_offsets(c->raw, c->leaves)) return c;
+    if (!tails_resolve(c->raw, c->tails)) return c;
     c->memcpy_capable = std::is_trivially_copyable<T>::value && host_le();
-    bool coincide = c->memcpy_capable && sizeof(T) == c->wire_size;
+    bool coincide = c->memcpy_capable && c->tails.empty() && sizeof(T) == c->wire_size;
     for (const Leaf& l : c->leaves)
         coincide = coincide && l.struct_off == l.wire_off && l.s_stride == l.w_stride;
     c->memcpy_ok = coincide;
@@ -1551,25 +1725,32 @@ template <class T> const Schema* schema_of() {
 }
 
 /* struct -> wire. The memcpy fast path returns a view of the struct itself (zero
- * copy); otherwise the field loop packs into scratch. Empty Bytes = codec invalid. */
+ * copy); otherwise the field loop packs into scratch. A type with tail members sizes
+ * scratch to the live payload, writes the frame skeleton (message_default), then the
+ * fixed leaves and each tail in declaration order. Empty Bytes = codec invalid. */
 template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return Bytes();
-    if constexpr (is_var_string<T>::value) {              /* `string` root: one [u32 len] frame */
-        scratch.assign((size_t)detail::dart_schema_msg_min(c.raw) + v.size(), 0);
-        detail::dart_schema_message_default(c.raw, scratch.data(), scratch.size());
-        detail::DartString sv; sv.data = v.data(); sv.len = v.size();
-        if (!detail::dart_set_string(scratch.data(), scratch.size(), c.raw, "", sv)) return Bytes();
-        return Bytes(scratch.data(),
-                     detail::dart_schema_msg_len(c.raw, scratch.data(), scratch.size()));
-    } else {
-        if (c.memcpy_ok) return Bytes(&v, sizeof(T));
+    if (c.memcpy_ok) return Bytes(&v, sizeof(T));
+    const bool le = host_le();
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(&v);
+    if (c.tails.empty()) {
         scratch.assign(c.wire_size, 0);
-        const bool le = host_le();
-        const uint8_t* base = reinterpret_cast<const uint8_t*>(&v);
         for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
         return Bytes(scratch.data(), scratch.size());
     }
+    size_t need = c.msg_min;
+    for (const Tail& t : c.tails) need += t.extra(base + t.struct_off);
+    scratch.assign(need, 0);
+    if (!detail::dart_schema_message_default(c.raw, scratch.data(), scratch.size()))
+        return Bytes();
+    for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
+    for (const Tail& t : c.tails)
+        if (!t.write(base + t.struct_off, scratch.data(), scratch.size(),
+                     c.raw, t.path.c_str()))
+            return Bytes();
+    return Bytes(scratch.data(),
+                 detail::dart_schema_msg_len(c.raw, scratch.data(), scratch.size()));
 }
 
 /* wire -> struct. Offsets always come from the delivered schema (deliveries arrive in
@@ -1580,34 +1761,38 @@ template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
 template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* schema) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return false;
-    if constexpr (is_var_string<T>::value) {              /* `string` root: read the frame */
-        detail::DartBytes mb; mb.data = data.data(); mb.len = data.size();
-        detail::DartString sv = detail::dart_get_string(mb, schema ? schema : c.raw, "");
-        if (!sv.data) { out.clear(); return false; }
-        out.assign(sv.data, sv.len);
-        return true;
-    } else {
-        const std::vector<Leaf>* lv = &c.leaves;
-        uint32_t need = c.wire_size;
-        bool fast = c.memcpy_ok;
-        if (schema && schema != c.raw) {
-            const TypeCodec::Rebased* rb = c.rebased_for(schema);
-            if (!rb->ok) return false;
-            lv = &rb->leaves;
-            need = rb->size;
-            fast = rb->coincide;
-        }
+    const detail::DartSchema* sch = c.raw;
+    const std::vector<Leaf>* lv = &c.leaves;
+    uint32_t need = c.wire_size;
+    bool fast = c.memcpy_ok;
+    if (schema && schema != c.raw) {
+        const TypeCodec::Rebased* rb = c.rebased_for(schema);
+        if (!rb->ok) return false;
+        lv   = &rb->leaves;
+        need = rb->size;
+        fast = rb->coincide;
+        sch  = schema;
+    }
+    if constexpr (std::is_trivially_copyable<T>::value) {   /* a tail type is never fast */
         if (fast) {
             if (data.size() < sizeof(T)) return false;
             std::memcpy(&out, data.data(), sizeof(T));
             return true;
         }
-        if (data.size() < need) return false;
-        const bool le = host_le();
-        uint8_t* base = reinterpret_cast<uint8_t*>(&out);
-        for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
-        return true;
+    } else {
+        (void)fast;
     }
+    if (data.size() < need) return false;
+    const bool le = host_le();
+    uint8_t* base = reinterpret_cast<uint8_t*>(&out);
+    for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
+    if (!c.tails.empty()) {                     /* frames walked per message, by path */
+        detail::DartBytes mb; mb.data = data.data(); mb.len = data.size();
+        for (const Tail& t : c.tails)
+            if (!t.read(base + t.struct_off, mb, sch, t.path.c_str()))
+                return false;
+    }
+    return true;
 }
 
 }   /* namespace priv */
@@ -3666,6 +3851,12 @@ DART_STD_ALIAS(Duration,  int64_t);
 DART_STD_ALIAS(Matrix3x3, float[9]);
 DART_STD_ALIAS(Matrix4x4, float[16]);
 DART_STD_ALIAS(Uri,       dart::String<256>);
+/* the video family: the enums are DART_ENUM-registered so a member of one (in these
+ * mirrors or in a user struct) ships as the canonical named integer */
+DART_ENUM(dart::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Jpeg, Png);
+DART_ENUM(dart::VideoCodec, Mjpeg, H264, H265, Av1);
+DART_ENUM(dart::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
+DART_STD_STRUCT(Image); DART_STD_STRUCT(VideoFrame); DART_STD_STRUCT(ExternalVideoStream);
 
 #endif /* C++ consumer (not the implementation anchor) */
 #endif /* DART_HPP_INCLUDED */
