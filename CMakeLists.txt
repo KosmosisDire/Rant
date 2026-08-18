@@ -9,6 +9,10 @@ project(dart C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Static CRT: binaries must run on a machine with no toolchain and no VC++
+# redistributable. Must come before any target or fetched subproject.
+include("${CMAKE_CURRENT_SOURCE_DIR}/tools/static_runtime.cmake")
+
 # Multi-config: default a bare build to Release (Ninja MC only; VS rejects the var
 # and its CLI hardcodes Debug, so the Windows build preset pins Release instead).
 if(CMAKE_CONFIGURATION_TYPES)
