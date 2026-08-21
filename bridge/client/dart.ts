@@ -1,5 +1,5 @@
 /* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v8, see ../PROTOCOL.md). Zero runtime dependencies: runs
+ * through the bridge (protocol v9, see ../PROTOCOL.md). Zero runtime dependencies: runs
  * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
@@ -9,7 +9,7 @@
  * Two API layers over one wire:
  *  - the dynamic form: node.topic(...) with flat dotted-path get/send (unchanged from v2);
  *  - the pattern factories: publisher/subscriber, functionDefinition/remoteFunction,
- *    variableDefinition/remoteVariable, signal. These speak decoded PLAIN OBJECTS
+ *    variableDefinition/remoteVariable. These speak decoded PLAIN OBJECTS
  *    (nested, mirroring the schema) and carry optional type parameters for TS callers.
  *
  *   const node = await DartNode.connect("ws://localhost:7480", { name: "dashboard" });
@@ -22,7 +22,6 @@
 /* binary frame ops (byte 0); meaning per direction, headers little-endian */
 const OP_DATA = 0x01;      /* publish / delivery */
 const OP_VAR = 0x02;       /* var set-force-unforce / var update */
-const OP_SIGNAL = 0x03;    /* signal emit / signal fired */
 const OP_CALL = 0x04;      /* call / call response */
 const OP_REQUEST = 0x05;   /* request reply / request */
 
@@ -126,7 +125,7 @@ type Peer = {
     fragmentSize: number;
 };
 
-type EntityKindName = "topic" | "function" | "variable" | "signal";
+type EntityKindName = "topic" | "function" | "variable";
 
 /* One network entity a node hosts or a peer advertises (pattern channels folded: a
  * function's req/rsp pair is one entity, a variable's set channel merges as `writable`).
@@ -197,11 +196,9 @@ const CALL_STATUS_TEXT: Record<CallStatusName, string> = {
 };
 
 type RequestInfo = { caller: number; callerName: string; writtenUs: number };
-type SignalInfo = { emitter: number; data: Uint8Array; writtenUs: number };
 
 type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
-type SignalHandler<T> = (value: T, info: SignalInfo) => void;
 
 type VariableDefOpts<T> = {
     initial?: T;
@@ -911,41 +908,7 @@ class RemoteVariable<T = any> extends VarHandle<T> {
     _match(m: any): void { this.hasDefinition = !!m.has_definition; }
 }
 
-/* A reliable fire-and-forget event: N emitters / N listeners, never latched. */
-class DartSignal<T = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
-    layout: Layout;
-    listenerCount: number;     /* listeners matched (from match pushes) */
-    _handler: SignalHandler<T> | null;
-
-    constructor(node: DartNode, name: string, r: any, handler: SignalHandler<T> | null) {
-        this._node = node;
-        this.id = r.id;
-        this.name = name;
-        this.layout = new Layout(r);
-        this.listenerCount = 0;
-        this._handler = handler;
-    }
-
-    /* emit to every matched listener (the payload may be empty) */
-    emit(value?: T): void {
-        const payload = value === undefined ? new Uint8Array(0) : this.layout.encode(value);
-        const frame = new Uint8Array(3 + payload.length);
-        frame[0] = OP_SIGNAL;
-        frame[1] = this.id & 0xff; frame[2] = this.id >> 8;
-        frame.set(payload, 3);
-        this._node._ws.send(frame);
-    }
-
-    _match(m: any): void { this.listenerCount = m.listeners; }
-    _fire(emitter: number, data: Uint8Array, writtenUs: number): void {
-        this._handler?.(this.layout.decode(data) as T, { emitter, data, writtenUs });
-    }
-}
-
-type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle | DartSignal;
+type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle;
 
 /* The node handle: one WebSocket connection = one DART node owned by the bridge. */
 class DartNode {
@@ -1067,12 +1030,6 @@ class DartNode {
             }
             return;
         }
-        case OP_SIGNAL: {                    /* [u16 ent][u32 emitter][u64 written][payload] */
-            if (b.length < 15) return;
-            const s = this._entities.get(view.getUint16(1, true));
-            if (s instanceof DartSignal) s._fire(view.getUint32(3, true), b.subarray(15), rdWrittenUs(view, 7));
-            return;
-        }
         case OP_CALL: {                      /* [u32 call][u8 status][u32 provider][u64 written][u8 msg_len][msg][payload] */
             if (b.length < 19) return;
             const callId = view.getUint32(1, true);
@@ -1190,20 +1147,6 @@ class DartNode {
         return v;
     }
 
-    /* A signal handle: pass a handler to listen (handler(value, {emitter, data}));
-     * every handle may emit. */
-    async signal<T = any>(name: string, schema: string | null,
-            handler?: SignalHandler<T>): Promise<DartSignal<T>> {
-        const r = await this._request({
-            op: "signal", name,
-            ...(schema ? { schema } : {}),
-            ...(handler ? { listen: true } : {}),
-        });
-        const s = new DartSignal<T>(this, name, r, handler ?? null);
-        this._entities.set(s.id, s);
-        return s;
-    }
-
     /* Block until discovery + matching settle for everything created so far. */
     async settle(timeoutMs: number = -1): Promise<boolean> {
         const r = await this._request({ op: "settle", timeout_ms: timeoutMs });
@@ -1238,7 +1181,7 @@ class DartNode {
             id: p.id, name: p.name, address: p.address, active: p.active, fragmentSize: p.fragment_size }));
     }
 
-    /* The entities THIS node hosts (its functions/variables/signals, then its topics). */
+    /* The entities THIS node hosts (its functions and variables, then its topics). */
     async entities(): Promise<Entity[]> {
         const r = await this._request({ op: "entities" });
         return (r.entities as any[]).map(toEntity);
@@ -1275,11 +1218,11 @@ export {
     DartNode, DartTopic, DartMessage, Layout,
     Publisher, Subscriber,
     FunctionDefinition, RemoteFunction,
-    VariableDefinition, RemoteVariable, DartSignal,
+    VariableDefinition, RemoteVariable,
     MetaSection,
     type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent,
-    type CallStatusName, type Response, type RequestInfo, type SignalInfo,
-    type SubscriberHandler, type FunctionHandler, type SignalHandler,
+    type CallStatusName, type Response, type RequestInfo,
+    type SubscriberHandler, type FunctionHandler,
     type VariableDefOpts, type RemoteVarOpts,
     type LogLevelName, type LogLine,
     type Peer, type Entity, type EntityKindName, type MetaSnapshot,

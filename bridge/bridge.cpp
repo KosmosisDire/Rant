@@ -41,7 +41,7 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 8;
+static const int kProtoVersion = 9;
 
 /* Binary frame ops (byte 0). One value space, meaning per direction. EVERY server-to-client
  * data frame ends its header with [u64 written_us], the writer's wall clock at the moment it
@@ -50,12 +50,11 @@ static const int kProtoVersion = 8;
  * offset. Client-to-server frames carry no stamp.
  *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][u64 written][payload])
  *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 flags][u64 written][payload]; flags bit0=forced bit1=write-event)
- *   0x03  signal emit (c->s: [u16 ent][payload])      signal fired (s->c: [u16 ent][u32 emitter][u64 written][payload])
+ *   0x03  unused (free for a future pattern)
  *   0x04  call (c->s: [u16 ent][u32 call][payload])   call response (s->c: [u32 call][u8 status][u32 provider][u64 written][payload])
  *   0x05  request reply (c->s: [u32 req][u8 status][payload])   request (s->c: [u16 ent][u32 req][u64 written][payload]) */
 static const uint8_t kOpData     = 0x01;
 static const uint8_t kOpVar      = 0x02;
-static const uint8_t kOpSignal   = 0x03;
 static const uint8_t kOpCall     = 0x04;
 static const uint8_t kOpRequest  = 0x05;
 
@@ -67,13 +66,12 @@ static int    g_verbose      = 0;
 /* One created pattern entity. Handles are thin and non-owning (the entity lives in the
  * node until close); Ent pointers are stable (unique_ptr, append-only until close). */
 struct Ent {
-    enum Kind { FnDef, FnRemote, VarDef, VarRemote, Sig } kind = FnDef;
+    enum Kind { FnDef, FnRemote, VarDef, VarRemote } kind = FnDef;
     uint16_t                   id = 0;
     dart::FunctionDefinition<> fndef;
     dart::RemoteFunction<>     fnrem;
     dart::VariableDefinition<> vardef;
     dart::RemoteVariable<>     varrem;
-    dart::Signal<>             sig;
     /* ticker state, guarded by Conn::mu */
     int                  last_match = -1;              /* match-state change detector */
 };
@@ -236,7 +234,6 @@ static const char *entity_kind_str(dart::EntityKind k){
     case dart::EntityKind::Topic:    return "topic";
     case dart::EntityKind::Function: return "function";
     case dart::EntityKind::Variable: return "variable";
-    case dart::EntityKind::Signal:   return "signal";
     default:                         return "?";
     }
 }
@@ -388,10 +385,6 @@ static void push_match_states(Conn *c){
         case Ent::VarRemote:
             m = e->varrem.has_definition() ? 1 : 0;
             j["type"] = "remote_variable"; j["has_definition"] = m != 0;
-            break;
-        case Ent::Sig:
-            m = e->sig.listener_count();
-            j["type"] = "signal"; j["listeners"] = m;
             break;
         }
         {
@@ -744,39 +737,6 @@ static void op_variable(Conn *c, const json &req, const json &seq, bool definiti
     }
 }
 
-static void op_signal(Conn *c, const json &req, const json &seq){
-    std::string name = req.value("name", "");
-    if (name.empty()){ reply_err(c, seq, "missing signal name"); return; }
-    std::optional<dart::Schema> sc;
-    if (!compile_schema(c, req, seq, "schema", &sc)) return;
-    bool listen = req.value("listen", false);
-
-    dart::SignalOptions o;
-    o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
-
-    Ent *e = ent_new(c, Ent::Sig);
-    uint16_t id = e->id;
-    try {
-        if (listen){
-            auto h = [c, id](const dart::MessageView &m){
-                uint8_t hdr[15];
-                hdr[0] = kOpSignal; w16(hdr + 1, id); w32(hdr + 3, m.publisher_id());
-                w64(hdr + 7, m.written_us());
-                push_frame(c, hdr, 15, m.data());
-            };
-            e->sig = dart::Signal<>(*c->node, name, sc ? &*sc : nullptr, h, o);
-        } else {
-            e->sig = dart::Signal<>(*c->node, name, sc ? &*sc : nullptr, o);
-        }
-    } catch (const dart::Error &err){
-        reply_err(c, seq, std::string("create failed: ") + err.what());
-        return;
-    }
-    json r = { {"id", id} };
-    if (sc){ r["size"] = sc->size(); r["hash"] = hex64(sc->hash()); r["fields"] = fields_json(*sc); }
-    reply_ok(c, seq, r);
-}
-
 /* ---- built-in logs (the @dart/log topics) ---------------------------------------- */
 
 /* publish a line on a level's log topic */
@@ -876,7 +836,6 @@ static void on_text(Conn *c, const std::string &raw){
     else if (op == "remote_function")     op_remote_function(c, req, seq);
     else if (op == "variable_definition") op_variable(c, req, seq, true);
     else if (op == "remote_variable")     op_variable(c, req, seq, false);
-    else if (op == "signal")              op_signal(c, req, seq);
     else if (op == "log")                 op_log(c, req, seq);
     else if (op == "log_subscribe")       op_log_subscribe(c, req, seq);
     else if (op == "meta")                op_meta(c, req, seq);
@@ -909,14 +868,6 @@ static void on_var_op(Conn *c, const uint8_t *p, size_t n){
                         : mode == 1 ? v.force(val)
                         : mode == 2 ? v.unforce()
                         : dart::SendStatus::NoSys;
-    if (rc != dart::SendStatus::Ok) send_error_event(c, "entity", id, rc);
-}
-
-static void on_signal_emit(Conn *c, const uint8_t *p, size_t n){
-    uint16_t id = r16(p + 1);
-    Ent *e = ent_get(c, id, Ent::Sig);
-    if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
-    dart::SendStatus rc = e->sig.emit(dart::Bytes(p + 3, n - 3));
     if (rc != dart::SendStatus::Ok) send_error_event(c, "entity", id, rc);
 }
 
@@ -975,14 +926,13 @@ static void on_binary(Conn *c, const std::string &frame){
     if (frame.size() < 3) return;
     const uint8_t *p = (const uint8_t *)frame.data();
     if (!c->node){
-        if (p[0] == kOpData || p[0] == kOpVar || p[0] == kOpSignal)
+        if (p[0] == kOpData || p[0] == kOpVar)
             send_error_event(c, "topic", r16(p + 1), dart::SendStatus::NoTopic);
         return;
     }
     switch (p[0]){
     case kOpData:    on_publish(c, p, frame.size());       break;
     case kOpVar:     on_var_op(c, p, frame.size());        break;
-    case kOpSignal:  on_signal_emit(c, p, frame.size());   break;
     case kOpCall:    on_call(c, p, frame.size());          break;
     case kOpRequest: on_request_reply(c, p, frame.size()); break;
     default: break;   /* reserved ops: drop */

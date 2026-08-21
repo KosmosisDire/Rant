@@ -1,4 +1,4 @@
-/* Example + E2E check: pub/sub, a function, a variable and a signal over the DART
+/* Example + E2E check: pub/sub, a function and a variable over the DART
  * WebSocket bridge from Node.
  *
  * Start the bridge, then run this:
@@ -25,7 +25,6 @@ const TELEMETRY = `Telemetry { seq: u32, when: Timestamp, battery: f32, at: Doub
 const ADD_REQ   = `AddReq { a: i32, b: i32 }`;
 const ADD_RSP   = `AddRsp { sum: i32 }`;
 const CONFIG    = `Config { rate_hz: u32, label: string<24> }`;
-const ALERT     = `Alert { level: u8, what: string<48>, tint: Color }`;
 
 /* interface "127.0.0.1" pins discovery to loopback so the two same-host nodes find
  * each other quickly; drop it to run across a real network. */
@@ -47,7 +46,6 @@ const add = await robot.functionDefinition("add", ADD_REQ, ADD_RSP,
                      return { sum: req.a + req.b }; });        /* return value = the reply */
 const config = await robot.variableDefinition("config", CONFIG,
     { initial: { rate_hz: 50, label: "default" } });
-const alerts = await robot.signal("alert", ALERT);            /* emit side */
 
 /* ---- the dashboard uses them ------------------------------------------------------ */
 let sawTelemetry, msgWrittenUs = 0;
@@ -60,13 +58,6 @@ await dash.subscriber("telemetry", TELEMETRY, (v, msg) => {
 });
 const addRemote = await dash.remoteFunction("add", ADD_REQ, ADD_RSP);
 const configRemote = await dash.remoteVariable("config", CONFIG);
-let sawAlert, alertWrittenUs = 0;
-const gotAlert = new Promise((res) => { sawAlert = res; });
-await dash.signal("alert", ALERT, (v, info) => {
-    alertWrittenUs = info.writtenUs;
-    console.log(`alert level ${v.level}: "${v.what}"`);
-    sawAlert(v);
-});
 
 /* let discovery + matching converge on both nodes before exercising anything */
 await robot.settle(5000);
@@ -90,10 +81,6 @@ for (let i = 0; i < 50 && config.get()?.rate_hz !== 100; i++)   /* owner-side ec
     await new Promise((res) => setTimeout(res, 100));
 if (config.get()?.rate_hz !== 100) throw new Error("variable set did not replicate");
 console.log(`owner sees rate_hz=${config.get().rate_hz} label="${config.get().label}"`);
-
-/* signal: fire-and-forget event, robot -> dashboard */
-alerts.emit({ level: 2, what: "low battery", tint: { r: 0xF0, g: 0xA0, b: 0x20, a: 0xFF } });
-await gotAlert;
 
 /* ---- introspection: query the mesh through the bridge (pull-only) ----------------- */
 const peers = await dash.peers();
@@ -167,7 +154,7 @@ console.log(`bare variable: gain=${gain.get()} (set through the remote)`);
 /* ---- source timestamps: every delivery surface carries the sender's wall clock ----- */
 const nowUs = Date.now() * 1000;
 const stamps = { message: msgWrittenUs, call: r.writtenUs, request: reqWrittenUs,
-                 signal: alertWrittenUs, variable: writeWrittenUs };
+                 variable: writeWrittenUs };
 console.log("written_us per surface: " + Object.entries(stamps)
     .map(([k, v]) => `${k}=${v ? `${((nowUs - v) / 1000).toFixed(1)}ms ago` : "0"}`).join("  "));
 for (const [what, us] of Object.entries(stamps)) {

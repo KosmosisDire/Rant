@@ -199,24 +199,7 @@ namespace Dart
             return e;
         }
 
-        // ---- patterns: signals / variables / functions ----------------------------
-
-        /// <summary>The scene-shared signal named <paramref name="name"/> (N emitters /
-        /// N listeners, never latched). Subscribe to listen, Emit to fire.</summary>
-        public static DartSignal<T> Signal<T>(string name)
-            => RequireMain().GetSignal<T>(name);
-
-        /// <summary>One-liner owner-bound signal subscribe.</summary>
-        public static DartSubscription OnSignal<T>(string name, Component owner, Action<T> handler)
-            => Signal<T>(name).Subscribe(owner, handler);
-
-        /// <summary>One-liner signal subscribe.</summary>
-        public static DartSubscription OnSignal<T>(string name, Action<T> handler)
-            => Signal<T>(name).Subscribe(handler);
-
-        /// <summary>One-liner emit on the scene node's signal named <paramref name="name"/>.</summary>
-        public static SendStatus Emit<T>(string name, T value)
-            => Signal<T>(name).Emit(value);
+        // ---- patterns: variables / functions --------------------------------------
 
         /// <summary>The scene-shared authoritative variable named <paramref name="name"/>
         /// (this node owns the value). One side per node: asking for a RemoteVariable of the
@@ -238,9 +221,6 @@ namespace Dart
         /// <summary>The scene-shared reference to a function defined on another node.</summary>
         public static DartRemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
             => RequireMain().GetRemoteFunction<TReq, TRsp>(name);
-
-        public DartSignal<T> GetSignal<T>(string name)
-            => GetOrCreatePattern("sig:", name, () => new DartSignal<T>(this, name));
 
         public DartVariableDefinition<T> GetVariableDefinition<T>(string name,
                 bool readOnly = false, bool allowForce = false, int catchUp = 0)

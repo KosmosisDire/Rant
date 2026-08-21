@@ -22,7 +22,7 @@
 // All optional configuration is named parameters (there are no options classes).
 // Beyond plain topics, the patterns layer is bound too: FunctionDefinition /
 // RemoteFunction (request/response), VariableDefinition / RemoteVariable
-// (replicated state, one owner), Signal (reliable fire-and-forget event), and
+// (replicated state, one owner), and
 // Publisher/Subscriber (side-named topic handles); each has an untyped (Schema +
 // byte[]) core and a typed generic layered on it.
 //
@@ -347,12 +347,6 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartSignalOpts
-    {
-        public uint backpressure_wait_us;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     internal struct DartCallOpts
     {
         public uint provider;   // direct a call at one definition by peer id (0 = undirected)
@@ -368,8 +362,6 @@ namespace Dart
     internal delegate void DartRequestFn(IntPtr request, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartResponseFn(IntPtr response);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartSignalFn(IntPtr msg, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartVariableUpdateFn(IntPtr update, IntPtr user);
 
@@ -567,17 +559,6 @@ namespace Dart
         internal static extern int dart_variable_on_change(IntPtr var, DartVariableUpdateFn on_change, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_on_write(IntPtr var, DartVariableUpdateFn on_write, IntPtr user);
-
-        // patterns: signals
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_signal(IntPtr node, byte[] name,
-            IntPtr schema, DartSignalFn on_signal, IntPtr user, ref DartSignalOpts opts);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_signal_emit(IntPtr sig, DartBytes payload);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_signal_listener_count(IntPtr sig);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_signal_retire(IntPtr sig);
     }
 
     // ---- config + reflection attributes -----------------------------------------
@@ -1747,11 +1728,6 @@ namespace Dart
             public Action<DartRequest> Handler;
             public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
         }
-        internal sealed class SignalBox
-        {
-            public Action<DartMessage> Handler;
-            public Type ClrType;
-        }
         internal sealed class VarBox
         {
             public Action<VariableUpdate> Handler;
@@ -1797,7 +1773,6 @@ namespace Dart
         // rooted delegates handed to native code
         internal static readonly DartRequestFn OnRequest = OnRequestTramp;
         internal static readonly DartResponseFn OnResponse = OnResponseTramp;
-        internal static readonly DartSignalFn OnSignal = OnSignalTramp;
         internal static readonly DartVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
 
         [MonoPInvokeCallback(typeof(DartRequestFn))]
@@ -1842,19 +1817,6 @@ namespace Dart
                 call.Tcs.TrySetResult(r);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_response: " + e); }
-        }
-
-        [MonoPInvokeCallback(typeof(DartSignalFn))]
-        private static void OnSignalTramp(IntPtr msgPtr, IntPtr user)
-        {
-            try
-            {
-                var box = GetBox((long)user) as SignalBox;
-                if (box == null) return;
-                var m = Marshal.PtrToStructure<DartMsg>(msgPtr);
-                box.Handler(DartMessage.FromNative(ref m, box.ClrType));
-            }
-            catch (Exception e) { Console.Error.WriteLine("dart on_signal: " + e); }
         }
 
         [MonoPInvokeCallback(typeof(DartVariableUpdateFn))]
@@ -2339,64 +2301,6 @@ namespace Dart
         public bool HasDefinition => RemoteCount > 0;
     }
 
-    // ---- patterns: signals ------------------------------------------------------
-
-    /// <summary>A reliable fire-and-forget event: N emitters / N listeners, NEVER
-    /// latched (a late joiner receives nothing emitted before it joined). Passing a
-    /// handler IS the subscription; every handle may emit.</summary>
-    public class Signal
-    {
-        internal IntPtr Sig;   // zeroed by Retire
-        internal readonly DartNode DartNode;
-
-        public Signal(DartNode node, string name, Schema schema = null,
-                      Action<DartMessage> handler = null, int backpressureWaitMs = 0)
-            : this(node, name, schema, handler, null, backpressureWaitMs) { }
-
-        internal Signal(DartNode node, string name, Schema schema, Action<DartMessage> handler,
-                        Type clrType, int backpressureWaitMs)
-        {
-            DartNode = node;
-            var co = new DartSignalOpts { backpressure_wait_us = (uint)backpressureWaitMs * 1000u };
-            long id = 0;
-            Patterns.SignalBox box = null;
-            if (handler != null)
-            {
-                box = new Patterns.SignalBox { Handler = handler, ClrType = clrType };
-                id = Patterns.AddBox(box);
-            }
-            Sig = Native.dart_node_create_signal(node.Handle, Codec.CStr(name),
-                schema != null ? schema.Handle : IntPtr.Zero,
-                box != null ? Patterns.OnSignal : null, (IntPtr)id, ref co);
-            if (Sig == IntPtr.Zero)
-            {
-                if (box != null) Patterns.DropBox(id);
-                throw new InvalidOperationException("signal create failed: " + node.LastError);
-            }
-            if (box != null) node.RegisterPatternBox(id);
-            node.RetainSchema(schema);
-        }
-
-        /// <summary>Emit to every matched listener (payload may be null/empty).</summary>
-        public SendStatus Emit(byte[] payload = null)
-        {
-            using (var p = new PinnedBytes(payload)) return (SendStatus)Native.dart_signal_emit(Sig, p.B);
-        }
-
-        /// <summary>Listeners currently matched (other nodes subscribed).</summary>
-        public int ListenerCount => Native.dart_signal_listener_count(Sig);
-
-        /// <summary>Retire the handle: park its channel and release the name so a
-        /// successor can bind. The handle is unusable after. Refused
-        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
-        public SendStatus Retire()
-        {
-            var rc = (SendStatus)Native.dart_signal_retire(Sig);
-            if (rc == SendStatus.Ok) Sig = IntPtr.Zero;
-            return rc;
-        }
-    }
-
     // ---- patterns: pub/sub handles ----------------------------------------------
 
     /// <summary>The publish-side handle over a (possibly shared) topic (untyped).
@@ -2694,41 +2598,6 @@ namespace Dart
         /// <summary>Owners currently matched.</summary>
         public int MatchCount => _core.RemoteCount;
         public bool HasDefinition => _core.RemoteCount > 0;
-    }
-
-    /// <summary>The typed signal. Constructing with a handler subscribes; every
-    /// handle may emit.</summary>
-    public sealed class Signal<T>
-    {
-        private readonly Signal _core;
-        private readonly Schema _schema;
-
-        /// <summary>Emit-only handle (no subscription).</summary>
-        public Signal(DartNode node, string name, int backpressureWaitMs = 0)
-        {
-            _schema = new Schema(typeof(T));
-            _core = new Signal(node, name, _schema, null, null, backpressureWaitMs);
-        }
-
-        public Signal(DartNode node, string name, Action<T> handler, int backpressureWaitMs = 0)
-        {
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            _schema = new Schema(typeof(T));
-            _core = new Signal(node, name, _schema,
-                m => { if (m.Value is T v) handler(v); }, typeof(T), backpressureWaitMs);
-        }
-
-        public Signal(DartNode node, string name, Action<T, DartMessage> handler, int backpressureWaitMs = 0)
-        {
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            _schema = new Schema(typeof(T));
-            _core = new Signal(node, name, _schema,
-                m => { if (m.Value is T v) handler(v, m); }, typeof(T), backpressureWaitMs);
-        }
-
-        public SendStatus Emit(T value) => _core.Emit(_schema.Encode(value));
-        public int ListenerCount => _core.ListenerCount;
-        public SendStatus Retire() => _core.Retire();
     }
 
     /// <summary>The typed publish side.</summary>

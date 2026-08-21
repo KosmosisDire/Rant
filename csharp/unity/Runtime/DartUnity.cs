@@ -55,7 +55,7 @@ namespace Dart
         public MessageInfo(string sender, ulong recvUs) { Sender = sender; RecvUs = recvUs; }
     }
 
-    /// <summary>A live subscription (to a topic, signal, or variable observer):
+    /// <summary>A live subscription (to a topic or variable observer):
     /// Dispose() unsubscribes. Owner-bound subscriptions dispose themselves when the
     /// owner is destroyed.</summary>
     public sealed class DartSubscription : IDisposable

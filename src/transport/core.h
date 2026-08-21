@@ -83,7 +83,7 @@ static inline int dart_role_pubs(uint8_t role){ return role == DART_PUBSUB || ro
 static inline int dart_role_subs(uint8_t role){ return role == DART_PUBSUB || role == DART_SUB_ONLY; }
 
 /* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
- * layer (src/patterns/) builds functions, variables, and signals over dedicated kinds,
+ * layer (src/patterns/) builds functions and variables over dedicated kinds,
  * each a distinct channel that only pairs with the same kind. The kind rides the announce
  * interest flags (bits 3-5, so 8 values) and gates matching like role/reliability: a same
  * name with a different kind is a disjoint entity, its pairing refused (KIND_MISMATCH), not
@@ -93,8 +93,7 @@ typedef enum {
     DART_KIND_FUNC_REQ = 1,   /* function request channel  (caller pubs, provider subs) */
     DART_KIND_FUNC_RSP = 2,   /* function response channel  (provider pubs, caller subs; directed) */
     DART_KIND_VARIABLE = 3,   /* variable value channel     (owner pubs, observers sub) */
-    DART_KIND_VAR_SET  = 4,   /* variable set channel       (writers pub, owner subs) */
-    DART_KIND_SIGNAL   = 5    /* signal channel             (emitters pub, listeners sub) */
+    DART_KIND_VAR_SET  = 4    /* variable set channel       (writers pub, owner subs) */
 } DartTopicKind;
 
 /* Every field except reliability is zero-means-default, so a reliable topic is

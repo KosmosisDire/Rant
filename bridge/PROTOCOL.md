@@ -1,10 +1,10 @@
-# DART WebSocket bridge protocol (v8)
+# DART WebSocket bridge protocol (v9)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
 service thread, and closes it (with a BYE) when the connection drops. Everything a
 native node needs -- **pub/sub** plus the pattern entities (**functions**,
-**variables**, **signals**) -- arrives over one socket, so a browser, a phone, or
+**variables**) -- arrives over one socket, so a browser, a phone, or
 any language with a WebSocket client is a first-class peer.
 
 This is a lean proxy. Introspection is **query-based and pull-only**: the client
@@ -22,7 +22,7 @@ Two planes, split by WebSocket frame type:
   exactly one reply echoing it. The server also pushes unsolicited `event`,
   `match`, and `request` messages.
 - **Binary frames = data plane.** Publish/delivery, variable writes/updates,
-  signal emits/firings, calls/responses: a fixed little-endian header of a few
+  calls/responses: a fixed little-endian header of a few
   bytes and the raw payload after it. No JSON, no base64: the hot path costs a
   memcpy.
 
@@ -81,7 +81,7 @@ request, only for a broken WebSocket.
                                   //   names resolve even for topics this node doesn't share
 ```
 
-Reply: `{ "ok": true, "proto": 8, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 9, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -277,19 +277,6 @@ With `on_write`, the bridge also pushes a variable-update frame on every applied
 write (flag bit1 set; see the data plane), so a client can observe writes that
 leave the value unchanged, not only state changes. Both sides may set it.
 
-**`signal`** -- a reliable fire-and-forget event, N emitters / N listeners,
-never latched (a late joiner receives nothing emitted before it joined).
-
-```json
-{ "op": "signal", "seq": 10, "name": "alert",
-  "schema": "Alert { level: u8 }",   // optional
-  "listen": true,                    // subscribe: firings are pushed as binary frames
-  "backpressure_wait_ms": 0 }
-```
-
-Reply: `{ "ok": true, "id": 2, size, hash, fields }`. Every signal handle may
-emit; only a `listen: true` one receives.
-
 ### Introspection (query-based, pull-only)
 
 Four request ops let a client ask what the node knows about the mesh. `peers`,
@@ -332,7 +319,7 @@ Each entity:
               "fields": [ { "path": "rate_hz", "kind": "u32", "offset": 0, "size": 4 } ] } }
 ```
 
-`kind` is `topic` | `function` | `variable` | `signal`. `provides`/`consumes` are
+`kind` is `topic` | `function` | `variable`. `provides`/`consumes` are
 the source/sink sides. `writable`/`forceable` appear on variables; `incomplete: true`
 marks a surfaced pattern half-pair. `hash` is the low-32 name hash; `schema_hash`
 (and `rsp_schema_hash` on functions) ride as hex, present only when typed and
@@ -416,7 +403,6 @@ pushed value, so steady state is silent). The client maintains its
 { "op": "match", "type": "remote_function",     "id": 1, "has_definition": true }
 { "op": "match", "type": "variable_definition", "id": 2, "remotes": 1 }
 { "op": "match", "type": "remote_variable",     "id": 3, "has_definition": true }
-{ "op": "match", "type": "signal",              "id": 4, "listeners": 1 }
 ```
 
 `type` picks the id space (`topic` = topic ids, everything else = entity ids).
@@ -467,7 +453,6 @@ matching thing in each direction. All headers little-endian.
 |----|-------|---------|
 | `0x01` | `[u16 topic][payload]` | publish on a topic |
 | `0x02` | `[u16 entity][u8 mode][payload]` | variable write: mode 0 = set, 1 = force, 2 = unforce (empty payload) |
-| `0x03` | `[u16 entity][payload]` | signal emit (payload may be empty) |
 | `0x04` | `[u16 entity][u32 call][payload]` | function call; `call` is a client-chosen correlation id |
 | `0x05` | `[u32 req][u8 status][u8 msg_len][msg][payload]` | reply to a pushed request: status 0 = ok, 1 = app_error; `msg` = the response message (UTF-8, max 255 bytes, may be empty) |
 
@@ -477,7 +462,6 @@ matching thing in each direction. All headers little-endian.
 |----|-------|---------|
 | `0x01` | `[u16 topic][u32 publisher][u64 written_us][payload]` | topic delivery |
 | `0x02` | `[u16 entity][u8 flags][u64 written_us][payload]` | variable update; `flags` bit0 = forced (shadow source active), bit1 = write-event (an `on_write` push, not a change) |
-| `0x03` | `[u16 entity][u32 emitter][u64 written_us][payload]` | signal firing (listen entities only) |
 | `0x04` | `[u32 call][u8 status][u32 provider][u64 written_us][u8 msg_len][msg][payload]` | function-call outcome for `call`; `msg` = the response message (UTF-8, empty when the definition sent none: display the default status text then) |
 | `0x05` | `[u16 fn][u32 req][u64 written_us][payload]` | request payload (pairs with the `request` JSON push) |
 
@@ -568,10 +552,6 @@ const cfg = await node.remoteVariable("config", "Config { rate_hz: u32 }");
 await cfg.wait(2000);
 cfg.set({ rate_hz: 100 });
 
-// signals: a handler is the subscription; every handle may emit
-const alert = await node.signal("alert", "Alert { level: u8 }", (v) => beep(v.level));
-alert.emit({ level: 2 });
-
 // logs: publish a line, and stream the whole mesh's lines (rosout-style)
 await node.logError("gripper stalled");
 await node.onLog((l) => console.log(`[${l.level}] ${l.node}: ${l.text}`));  // levels default to all
@@ -584,8 +564,8 @@ The factories take optional type parameters (`publisher<T>`,
 `remoteFunction<Req, Rsp>`, ...) defaulting to plain-object types, so JS callers
 see no difference. `node.topic(...)` remains the dynamic form with flat
 dotted-path `get`/`send` and raw bytes. Properties maintained from `match`
-pushes: `ready`, `matchCount`, `hasDefinition`, `callerCount`, `remoteCount`,
-`listenerCount`. `call(value, timeoutMs)` adds a client-side bound on top of the
+pushes: `ready`, `matchCount`, `hasDefinition`, `callerCount`, `remoteCount`.
+`call(value, timeoutMs)` adds a client-side bound on top of the
 bridge's wire timeout; `close()` cancels, a dropped connection rejects.
 `VariableDefinition.initial` is implemented as a set right after the create
 (encoding needs the field table the create returns).
@@ -598,8 +578,8 @@ variable created with `{ onWrite: true }` routes every applied write to its
 
 The source stamp reaches every delivery surface as `writtenUs` (microseconds, a
 plain number): `msg.writtenUs` on a topic message, the second argument's `writtenUs` on
-a variable `onChange`/`onWrite` handler and on a signal handler, `r.writtenUs` on a
-call result, and `info.writtenUs` on a function definition's request handler.
+a variable `onChange`/`onWrite` handler, `r.writtenUs` on a call result, and
+`info.writtenUs` on a function definition's request handler.
 
 ## Non-goals
 

@@ -1,13 +1,9 @@
-// DART patterns for Unity: signals, variables, and functions, shared by name through
+// DART patterns for Unity: variables and functions, shared by name through
 // the scene's DartNodeUnity component exactly like DartNodeUnity.Topic<T>. Every handler
 // is marshaled to the MAIN thread (the core patterns fire their callbacks inline on the
 // service thread, which is illegal for the Unity API), observers are Component-bound (they
 // die with the component and are skipped while it is disabled), and each handle survives
 // the native node closing and reopening (edit-mode toggles, inspector changes).
-//
-//   // signal: N emitters / N listeners, never latched
-//   DartNodeUnity.OnSignal<Ping>("estop", this, p => Halt());
-//   DartNodeUnity.Emit("estop", new Ping());
 //
 //   // variable: ONE owner (the definition), remotes reference it
 //   var speed = DartNodeUnity.VariableDefinition<float>("motor/speed");
@@ -26,7 +22,7 @@ namespace Dart
 {
     // ---- shared base + fan-out helper -------------------------------------------
 
-    /// <summary>Base for a scene-shared pattern handle (signal/variable/function). Holds
+    /// <summary>Base for a scene-shared pattern handle (variable/function). Holds
     /// its native core object across node close/reopen, recreating it lazily.</summary>
     public abstract class DartPatternEntity
     {
@@ -124,95 +120,6 @@ namespace Dart
         {
             var b = c as Behaviour;
             return b != null ? b.isActiveAndEnabled : c.gameObject.activeInHierarchy;
-        }
-    }
-
-    // ---- signal -----------------------------------------------------------------
-
-    /// <summary>A scene-shared signal: reliable fire-and-forget, N emitters / N listeners,
-    /// never latched. Passing a handler subscribes; any handle may Emit.</summary>
-    public sealed class DartSignal<T> : DartPatternEntity
-    {
-        private Signal<T> _core;
-        private readonly DartFanout<Envelope> _listeners = new DartFanout<Envelope>();
-
-        internal readonly struct Envelope
-        {
-            internal readonly T Value;
-            internal readonly MessageInfo Info;
-            internal Envelope(T value, MessageInfo info) { Value = value; Info = info; }
-        }
-
-        internal DartSignal(DartNodeUnity owner, string name) : base(owner, name) { }
-
-        internal override void EnsureNative()
-        {
-            if (_core != null) return;
-            DartNode node = Owner.NativeNode;
-            if (node == null) return;
-            // Always attach the dispatcher so a shared handle both emits and listens; a
-            // scene node listens to a signal whenever any component holds its handle.
-            _core = new Signal<T>(node, Name,
-                (v, m) => Owner.RunOnMain(() =>
-                    _listeners.Deliver(new Envelope(v, new MessageInfo(m.PublisherName, m.RecvUs)))));
-        }
-
-        internal override void DropNative() { _core = null; }
-        internal override void PruneDeadOwners() { _listeners.Prune(); }
-
-        /// <summary>Emit to every matched listener (payload may be default(T)).</summary>
-        public SendStatus Emit(T value)
-        {
-            EnsureNative();
-            if (_core == null) { WarnClosed(); return SendStatus.NoTopic; }
-            return _core.Emit(value);
-        }
-
-        public DartSubscription Subscribe(Action<T> handler)
-        {
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return Add(e => handler(e.Value), null, false);
-        }
-
-        public DartSubscription Subscribe(Action<T, MessageInfo> handler)
-        {
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return Add(e => handler(e.Value, e.Info), null, false);
-        }
-
-        /// <summary>Owner-bound: auto-unsubscribes when owner is destroyed, skipped while
-        /// it is disabled.</summary>
-        public DartSubscription Subscribe(Component owner, Action<T> handler)
-        {
-            if (owner == null) throw new ArgumentNullException(nameof(owner));
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return Add(e => handler(e.Value), owner, true);
-        }
-
-        /// <summary>Owner-bound, with per-emit metadata (sender name, arrival time).</summary>
-        public DartSubscription Subscribe(Component owner, Action<T, MessageInfo> handler)
-        {
-            if (owner == null) throw new ArgumentNullException(nameof(owner));
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return Add(e => handler(e.Value, e.Info), owner, true);
-        }
-
-        /// <summary>Listeners on other nodes matched to this signal.</summary>
-        public int ListenerCount => _core != null ? _core.ListenerCount : 0;
-
-        private DartSubscription Add(Action<Envelope> fn, Component owner, bool hasOwner)
-        {
-            EnsureNative();
-            var s = _listeners.Add(fn, owner, hasOwner);
-            return new DartSubscription(() => _listeners.Remove(s));
-        }
-
-        private bool _warned;
-        private void WarnClosed()
-        {
-            if (_warned) return;
-            _warned = true;
-            Debug.LogWarning("[DART] emit on signal '" + Name + "' dropped: no open DartNodeUnity");
         }
     }
 

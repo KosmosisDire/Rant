@@ -47,10 +47,9 @@ its shape), so the same one in any language is the same wire bytes and the same 
 Patterns layer over topic kinds, each subscriptable like Topic[T] for the typed
 form (untyped: explicit schema args, bytes payloads): FunctionDefinition /
 RemoteFunction (request/response, exactly one reply per call), VariableDefinition
-/ RemoteVariable (replicated state, one owner, optional force), Signal (reliable
-fire-and-forget event; a handler IS the subscription, every handle may emit), and
-the side-named Publisher / Subscriber topic handles (same-name constructions on
-one node share the topic slot with a widened role).
+/ RemoteVariable (replicated state, one owner, optional force), and the
+side-named Publisher / Subscriber topic handles (same-name constructions on one
+node share the topic slot with a widened role).
 
 Requires a C compiler on the machine at first use only (override with DART_CC).
 Every node/topic call is thread-safe (a node-level lock in the C core
@@ -126,7 +125,7 @@ _EXPORTS = [
     "dart_node_meta_function",
     "dart_node_settle", "dart_topic_ready", "dart_topic_pending_count",
     "dart_node_lock", "dart_node_unlock",
-    # patterns: functions / variables / signals
+    # patterns: functions / variables
     "dart_node_create_function_definition", "dart_node_create_remote_function",
     "dart_function_call", "dart_function_call_async", "dart_function_match_count",
     "dart_function_retire",
@@ -137,8 +136,6 @@ _EXPORTS = [
     "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
     "dart_variable_match_count", "dart_variable_retire",
     "dart_variable_on_change", "dart_variable_on_write",
-    "dart_node_create_signal", "dart_signal_emit", "dart_signal_listener_count",
-    "dart_signal_retire",
     "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size", "dart_schema_print",
     "dart_schema_field_type_wire", "dart_schema_subset", "dart_get_array_count",
@@ -516,10 +513,6 @@ class DartVariableUpdate(Structure):
     ]
 
 
-class DartSignalOpts(Structure):
-    _fields_ = [("backpressure_wait_us", c_uint32)]
-
-
 class DartCallOpts(Structure):
     # direct a call at one definition by peer id (0 = undirected, first answer wins)
     _fields_ = [("provider", c_uint32)]
@@ -532,10 +525,8 @@ _EvtFn = CFUNCTYPE(None, POINTER(DartEvent))
 _AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
 _ReqFn = CFUNCTYPE(None, POINTER(DartRequest), c_void_p)
 _RspFn = CFUNCTYPE(None, POINTER(DartResponse))
-_SigFn = CFUNCTYPE(None, POINTER(DartMsg), c_void_p)
 _VarFn = CFUNCTYPE(None, POINTER(DartVariableUpdate), c_void_p)
 _NULL_REQ_FN = cast(None, _ReqFn)   # a CFUNCTYPE argtype refuses a bare None
-_NULL_SIG_FN = cast(None, _SigFn)
 _NULL_VAR_FN = cast(None, _VarFn)
 
 
@@ -580,7 +571,7 @@ def _bind(lib):
     F("dart_topic_pending_count", [c_void_p], c_int)
     F("dart_node_lock", [c_void_p], None)
     F("dart_node_unlock", [c_void_p], None)
-    # patterns: functions / variables / signals
+    # patterns: functions / variables
     F("dart_node_create_function_definition", [c_void_p, c_char_p, c_void_p,
                                                c_void_p, _ReqFn, c_void_p,
                                                POINTER(DartFunctionOpts)], c_void_p)
@@ -608,11 +599,6 @@ def _bind(lib):
     F("dart_variable_retire", [c_void_p], c_int)
     F("dart_variable_on_change", [c_void_p, _VarFn, c_void_p], c_int)
     F("dart_variable_on_write", [c_void_p, _VarFn, c_void_p], c_int)
-    F("dart_node_create_signal", [c_void_p, c_char_p, c_void_p, _SigFn, c_void_p,
-                                  POINTER(DartSignalOpts)], c_void_p)
-    F("dart_signal_emit", [c_void_p, DartBytes], c_int)
-    F("dart_signal_listener_count", [c_void_p], c_int)
-    F("dart_signal_retire", [c_void_p], c_int)
     # serialize / schema
     F("dart_schema_compile", [_AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
     F("dart_schema_free", [c_void_p, _AllocFn, c_void_p], None)
@@ -2721,7 +2707,7 @@ class Node:
 
 
 # ---------------------------------------------------------------------------
-# Patterns: functions / variables / signals over topic kinds, plus the side-named
+# Patterns: functions / variables over topic kinds, plus the side-named
 # Publisher/Subscriber topic handles. Each subscripts like Topic[T] for the typed
 # form; untyped forms take explicit schema args (None = raw bytes).
 # ---------------------------------------------------------------------------
@@ -2964,15 +2950,6 @@ class _AsyncBox:
         self.on_response = on_response
         self.rsp_schema = rsp_schema
         self.id = 0
-
-
-class _SigBox:
-    __slots__ = ("handler", "arity", "spec")
-
-    def __init__(self, handler, spec):
-        self.handler = handler
-        self.arity = _arity(handler)
-        self.spec = spec
 
 
 class VariableUpdate:
@@ -3307,60 +3284,6 @@ class RemoteVariable(VariableDefinition):
         return self.remote_count() > 0
 
 
-class Signal:
-    """A reliable fire-and-forget event: N emitters / N listeners, never latched
-    (a late joiner receives nothing emitted before it joined). Passing a handler
-    IS the subscription -- (value) or (value, msg), arity dispatched -- and
-    every handle may emit. Signal[T](node, name, ...) is the typed shorthand;
-    untyped with no schema, emit() with no args is a payload-less event."""
-    __slots__ = ("_node", "_sig", "_schema")
-
-    def __init__(self, node, name, handler=None, schema=None, backpressure_wait_us=0):
-        self._node = node
-        sch = self._schema = _as_schema(schema)
-        co = DartSignalOpts(backpressure_wait_us)
-        box_id = 0
-        box = None
-        if handler is not None:
-            box = _SigBox(handler, sch._spec if sch else None)
-            box_id = _pbox_add(box)
-        h = node._lib.dart_node_create_signal(
-            node._h, name.encode("utf-8"), sch._s if sch else None,
-            _on_signal if box else _NULL_SIG_FN, c_void_p(box_id), byref(co))
-        if not h:
-            if box:
-                _pbox_pop(box_id)
-            raise RuntimeError("Signal(%r) create failed: %s" % (name, node.last_error()))
-        self._sig = h
-        if box:
-            node._register_box(box_id)
-        node._retain(sch)
-
-    def __class_getitem__(cls, item):
-        return _typed_pattern(cls, item, ("schema",))
-
-    def emit(self, value=None):
-        """Emit to every matched listener (no args = payload-less). SendStatus."""
-        b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.dart_signal_emit(self._sig, b)
-        del buf
-        return _send_status(r)
-
-    def listener_count(self):
-        """Listeners currently matched (other nodes subscribed to this signal)."""
-        return self._node._lib.dart_signal_listener_count(self._sig)
-
-    def retire(self):
-        """Retire the handle: park its channel and release the name so a
-        successor can bind. The handle is unusable after. Refused
-        (SendStatus.STATE) from inside a callback; the handle then stays
-        valid."""
-        rc = self._node._lib.dart_signal_retire(self._sig)
-        if rc == 0:
-            self._sig = None
-        return _send_status(rc)
-
-
 class Publisher:
     """The publish side of a topic (role PUB_ONLY). Same-name constructions on
     one node share the topic slot with a widened role. Publisher[T](node, name,
@@ -3467,7 +3390,7 @@ def _on_event(ev_ptr):
 
 # Pattern handler boxes: the C-side user pointer carries an id into this registry,
 # never a Python reference, and the trampolines below are module-lived ctypes
-# objects, so native code never holds a collectable callback. Handler/signal boxes
+# objects, so native code never holds a collectable callback. Handler boxes
 # live until their node closes; async-call boxes are per-call and released when
 # the response fires (including the CANCELLED one at close).
 _PBOXES = {}
@@ -3517,22 +3440,6 @@ def _on_response(rsp_ptr):
             box.on_response(resp)
         except Exception:
             traceback.print_exc()
-    except Exception:
-        traceback.print_exc()
-
-
-@_SigFn
-def _on_signal(msg_ptr, user):
-    try:
-        box = _pbox_get(user)
-        if box is None:
-            return
-        msg = Message._from_c(msg_ptr.contents, box.spec)
-        val = msg.value if msg.value is not None else msg.data
-        if box.arity == 1:
-            box.handler(val)
-        else:
-            box.handler(val, msg)
     except Exception:
         traceback.print_exc()
 

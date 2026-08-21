@@ -362,7 +362,7 @@ class Level:
 
 
 def patterns():
-    """Functions / variables / signals between two nodes on an isolated domain."""
+    """Functions and variables between two nodes on an isolated domain."""
     print("patterns leg: two nodes, domain 43, loopback")
     ok = True
 
@@ -390,8 +390,6 @@ def patterns():
         threading.Timer(0.05, lambda: d.complete(AddRsp(sum=q.a + q.b))).start()
     dart.FunctionDefinition[AddReq, AddRsp](srv, "late", _late)
 
-    sig_count = []
-    dart.Signal(srv, "estop", lambda v: sig_count.append(v))
     lvl_def = dart.VariableDefinition[Level](srv, "level", initial=Level(value=5),
                                              allow_force=True)
 
@@ -401,18 +399,15 @@ def patterns():
     add_r = dart.RemoteFunction[AddReq, AddRsp](cli, "add")
     boom_r = dart.RemoteFunction[AddReq, AddRsp](cli, "boom")
     late_r = dart.RemoteFunction[AddReq, AddRsp](cli, "late")
-    sig_out = dart.Signal(cli, "estop")
     lvl = dart.RemoteVariable[Level](cli, "level")
 
     deadline = time.time() + 8.0
     while time.time() < deadline and not (add_r.has_definition()
                                           and boom_r.has_definition()
-                                          and late_r.has_definition()
-                                          and sig_out.listener_count() > 0):
+                                          and late_r.has_definition()):
         cli.poll(5)
     check("definitions discovered", add_r.has_definition() and boom_r.has_definition()
           and late_r.has_definition())
-    check("signal listener matched", sig_out.listener_count() == 1)
 
     # blocking calls
     r = add_r.call(AddReq(a=2, b=3), 3000)
@@ -480,15 +475,6 @@ def patterns():
     lvl_def.on_change(None)
     lvl_def.on_write(None)
     lvl.on_change(None)
-
-    # signal: three payload-less emits, delivered on srv's service thread
-    check("emit accepted", sig_out.emit() == dart.SendStatus.OK)
-    sig_out.emit()
-    sig_out.emit()
-    deadline = time.time() + 5.0
-    while time.time() < deadline and len(sig_count) < 3:
-        cli.poll(5)
-    check("three signals delivered", len(sig_count) == 3)
 
     # async form: start cli's service thread, wait for the callback
     cli.start()

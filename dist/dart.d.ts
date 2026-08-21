@@ -81,7 +81,7 @@ type Peer = {
     active: boolean;
     fragmentSize: number;
 };
-type EntityKindName = "topic" | "function" | "variable" | "signal";
+type EntityKindName = "topic" | "function" | "variable";
 type Entity = {
     kind: EntityKindName;
     name: string;
@@ -125,14 +125,8 @@ type RequestInfo = {
     callerName: string;
     writtenUs: number;
 };
-type SignalInfo = {
-    emitter: number;
-    data: Uint8Array;
-    writtenUs: number;
-};
 type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
-type SignalHandler<T> = (value: T, info: SignalInfo) => void;
 type VariableDefOpts<T> = {
     initial?: T;
     readOnly?: boolean;
@@ -277,19 +271,7 @@ declare class RemoteVariable<T = any> extends VarHandle<T> {
     constructor(node: DartNode, name: string, r: any);
     _match(m: any): void;
 }
-declare class DartSignal<T = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
-    layout: Layout;
-    listenerCount: number;
-    _handler: SignalHandler<T> | null;
-    constructor(node: DartNode, name: string, r: any, handler: SignalHandler<T> | null);
-    emit(value?: T): void;
-    _match(m: any): void;
-    _fire(emitter: number, data: Uint8Array, writtenUs: number): void;
-}
-type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle | DartSignal;
+type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle;
 declare class DartNode {
     _ws: WebSocket;
     _seq: number;
@@ -319,7 +301,6 @@ declare class DartNode {
     remoteFunction<Req = any, Rsp = any>(name: string, reqSchema: string | null, rspSchema: string | null): Promise<RemoteFunction<Req, Rsp>>;
     variableDefinition<T = any>(name: string, schema: string | null, opts?: VariableDefOpts<T>): Promise<VariableDefinition<T>>;
     remoteVariable<T = any>(name: string, schema: string | null, opts?: RemoteVarOpts): Promise<RemoteVariable<T>>;
-    signal<T = any>(name: string, schema: string | null, handler?: SignalHandler<T>): Promise<DartSignal<T>>;
     settle(timeoutMs?: number): Promise<boolean>;
     log(level: LogLevelName, text: string): Promise<void>;
     logError(text: string): Promise<void>;
@@ -332,4 +313,4 @@ declare class DartNode {
     meta(peerId: number, sections?: number): Promise<MetaSnapshot>;
     close(): void;
 }
-export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, DartSignal, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SignalInfo, type SubscriberHandler, type FunctionHandler, type SignalHandler, type VariableDefOpts, type RemoteVarOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };
+export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SubscriberHandler, type FunctionHandler, type VariableDefOpts, type RemoteVarOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };

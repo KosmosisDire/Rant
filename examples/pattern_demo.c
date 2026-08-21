@@ -1,7 +1,7 @@
 /* Patterns showcase for the DART Explorer: one process runs a "server" node that owns a
- * FUNCTION, a VARIABLE, and a SIGNAL (plus a plain pub/sub topic), and a "client" node that
- * calls / observes / listens to them, so every pattern channel is live and MATCHED. Leave it
- * running and open the explorer on the same domain to see each channel with its own icon:
+ * FUNCTION and a VARIABLE (plus a plain pub/sub topic), and a "client" node that calls and
+ * observes them, so every pattern channel is live and MATCHED. Leave it running and open
+ * the explorer on the same domain to see each channel with its own icon:
  *
  *     ./pattern_demo                 # server + client on domain 0 (the explorer default)
  *     ./dart_explorer                # in another terminal
@@ -9,7 +9,6 @@
  * The explorer's Topics tab then shows, each with a type icon:
  *     compute/add@req, compute/add@rsp         -> function  (the square-function glyph)
  *     state/temperature, state/temperature@set -> variable  (the variable glyph)
- *     events/alarm                             -> signal    (the lightning glyph)
  *     sensors/lidar                            -> a plain topic (no type icon)
  *
  * Typed payloads go through the schema layer both ways: built with
@@ -36,7 +35,7 @@ static volatile sig_atomic_t g_run = 1;
 static void on_sigint(int s){ (void)s; g_run = 0; }
 
 /* the shared types, at file scope so the handlers can encode/decode with them */
-static DartSchema *add_req_s, *add_rsp_s, *temp_s, *alarm_s;
+static DartSchema *add_req_s, *add_rsp_s, *temp_s;
 
 /* raw little-endian helpers for the schema-less lidar topic only */
 static uint32_t rd32(DartBytes b){ return b.len >= 4 ? i_dart_le_r32(b.data) : 0; }
@@ -67,19 +66,13 @@ static void add_handler(DartRequest *req, void *user)
     dart_set_int(out, sizeof out, add_rsp_s, "sum", x + y);
     dart_request_reply(req, dart_bytes(out, dart_schema_size(add_rsp_s)));
 }
-/* client: log every call result and every signal / plain message */
+/* client: log every call result and every plain message */
 static void on_reply(const DartResponse *r){
     if (r->status == DART_CALL_OK && r->schema)
         printf("  call  compute/add -> sum=%lld\n",
                (long long)dart_get_int(r->data, r->schema, "sum"));
     else
         printf("  call  compute/add failed (status %d)\n", (int)r->status);
-}
-static void on_alarm(const DartMsg *m, void *user){
-    (void)user;   /* m->schema is the sender's schema, as on any typed topic */
-    printf("  signal events/alarm  code=%llu  from %.*s\n",
-           (unsigned long long)dart_get_uint(m->data, m->schema ? m->schema : alarm_s, "code"),
-           (int)m->publisher_name.len, m->publisher_name.data);
 }
 static void on_lidar(const DartMsg *m){
     printf("  topic sensors/lidar  #%u\n", rd32(m->data));
@@ -100,7 +93,6 @@ int main(int argc, char **argv){
     DartNode *server, *client;
     DartFunction *fn_def, *fn_remote;
     DartVariable *var_def, *var_remote;
-    DartSignal   *emitter, *listener;
     DartTopic    *lidar_pub;
     uint32_t tick = 0;
     setvbuf(stdout, NULL, _IONBF, 0);   /* keep output visible under redirect / on Ctrl-C */
@@ -115,27 +107,22 @@ int main(int argc, char **argv){
     add_req_s = dart_schema_compile(demo_alloc, NULL, "AddRequest { x: i32, y: i32 }", NULL);
     add_rsp_s = dart_schema_compile(demo_alloc, NULL, "AddResult { sum: i32 }", NULL);
     temp_s    = dart_schema_compile(demo_alloc, NULL, "Temperature { celsius: u32 }", NULL);
-    alarm_s   = dart_schema_compile(demo_alloc, NULL, "Alarm { code: u32 }", NULL);
-    if (!add_req_s || !add_rsp_s || !temp_s || !alarm_s){
+    if (!add_req_s || !add_rsp_s || !temp_s){
         fprintf(stderr, "schema compile failed\n"); return 1;
     }
 
-    /* server side: the definitions (the function body and the variable storage live here)
-       plus the emitting end of the signal (no handler passed: it emits, never listens) */
+    /* server side: the definitions (the function body and the variable storage live here) */
     fn_def    = dart_node_create_function_definition(server, "compute/add", add_req_s, add_rsp_s,
                                           add_handler, NULL, NULL);
     var_def   = dart_node_create_variable_definition(server, "state/temperature", temp_s,
                               &(DartVariableOpts){ .allow_force = 1 });
-    emitter   = dart_node_create_signal(server, "events/alarm", alarm_s, NULL, NULL, NULL);
     lidar_pub = dart_node_create_topic(server, "sensors/lidar", DART_PUB_ONLY, NULL, NULL);
 
-    /* client side: remotes (references to the server's definitions) plus the listening end
-       of the signal (passing on_alarm IS the subscription) */
+    /* client side: remotes (references to the server's definitions) */
     fn_remote = dart_node_create_remote_function(client, "compute/add", add_req_s, add_rsp_s, NULL);
     var_remote= dart_node_create_remote_variable(client, "state/temperature", temp_s, NULL);
-    listener  = dart_node_create_signal(client, "events/alarm", alarm_s, on_alarm, NULL, NULL);
     dart_node_create_topic(client, "sensors/lidar", DART_SUB_ONLY, NULL, NULL);
-    if (!fn_def || !var_def || !emitter || !lidar_pub || !fn_remote || !var_remote || !listener){
+    if (!fn_def || !var_def || !lidar_pub || !fn_remote || !var_remote){
         fprintf(stderr, "pattern setup failed\n"); return 1;
     }
 
@@ -157,7 +144,6 @@ int main(int argc, char **argv){
         dart_function_call_async(fn_remote, dart_bytes(buf, dart_schema_size(add_req_s)), on_reply, NULL, NULL);
 
         dart_variable_set(var_def, enc_u32(temp_s, "celsius", tick, buf, sizeof buf));
-        dart_signal_emit(emitter, enc_u32(alarm_s, "code", tick, buf, sizeof buf));
 
         wr32(raw, tick);                                   /* plain topic: raw bytes */
         dart_topic_send(lidar_pub, dart_bytes(raw, 4));

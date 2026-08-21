@@ -4347,8 +4347,6 @@ static void pf_on_reply_burst(const DartResponse *r){
 }
 static volatile uint64_t pf_defer_token;
 static void pf_defer_handler(DartRequest *req, void *user){ (void)user; pf_calls++; pf_defer_token = dart_request_defer(req); }
-static int pf_sig_count; static uint32_t pf_sig_last;
-static void pf_on_signal(const DartMsg *m, void *user){ (void)user; pf_sig_count++; pf_sig_last = m->data.len>=4 ? i_dart_le_r32(m->data.data) : 0; }
 /* variable on_change / on_write capture */
 typedef struct { int n; uint32_t val, seq, source; uint8_t forced; } PfVarEvt;
 static void pf_on_var_update(const DartVariableUpdate *u, void *user){
@@ -4701,46 +4699,6 @@ static void patterns_checks(void){
       for (t=0;t<600 && ac.n<5;t++) pf_pump(P,C,2);   /* drain the 70/71 echoes before the captures die */
       dart_variable_on_change(ea, NULL, NULL); dart_variable_on_write(ea, NULL, NULL); }
 
-    /* ---- signals: derived roles (handler = subscription), emit/receive, payload-less ---- */
-    { DartSignal *ps, *cs; uint8_t b[4]; int er;
-      ps = dart_node_create_signal(P, "evt", NULL, NULL,         NULL, NULL);  /* no handler: emit-only */
-      cs = dart_node_create_signal(C, "evt", NULL, pf_on_signal, NULL, NULL);  /* handler = subscription */
-      ST_CHECK(ps && cs, "sig: created");
-      for (t=0;t<2000 && dart_signal_listener_count(ps)==0;t++) pf_pump(P,C,2);
-      ST_CHECK(dart_signal_listener_count(ps)==1, "sig: listener matched (%d)", dart_signal_listener_count(ps));
-      ST_CHECK(dart_signal_listener_count(cs)==0, "sig: no listener subscribes to cs's emits (%d)",
-               dart_signal_listener_count(cs));
-      pf_sig_count=0; i_dart_le_w32(b,7); dart_signal_emit(ps, dart_bytes(b,4));
-      for (t=0;t<400 && pf_sig_count==0;t++) pf_pump(P,C,2);
-      ST_CHECK(pf_sig_count==1 && pf_sig_last==7, "sig: emit received (n=%d val=%u)", pf_sig_count, pf_sig_last);
-      pf_sig_count=0; pf_sig_last=123; dart_signal_emit(ps, dart_bytes(NULL,0));
-      for (t=0;t<400 && pf_sig_count==0;t++) pf_pump(P,C,2);
-      ST_CHECK(pf_sig_count==1 && pf_sig_last==0, "sig: payload-less received (n=%d)", pf_sig_count);
-      er = dart_signal_emit(cs, dart_bytes(b,4));   /* every handle may emit, even a listening one */
-      ST_CHECK(er==DART_OK, "sig: emit from a listening handle allowed (%d)", er); }
-
-    /* never latched + every handle both ways: P emits on "evt2" BEFORE C joins (must not be
-       replayed to the late joiner), then both sides emit and both receive */
-    { DartSignal *p2, *c2; uint8_t b[4];
-      p2 = dart_node_create_signal(P, "evt2", NULL, pf_on_signal, NULL, NULL);
-      ST_CHECK(p2 != NULL, "sig: evt2 created");
-      i_dart_le_w32(b,55); dart_signal_emit(p2, dart_bytes(b,4));   /* nobody listening yet */
-      pf_pump(P,C,50);
-      pf_sig_count=0;
-      c2 = dart_node_create_signal(C, "evt2", NULL, pf_on_signal, NULL, NULL);
-      ST_CHECK(c2 != NULL, "sig: late joiner created");
-      for (t=0;t<2000 && (dart_signal_listener_count(p2)==0 || dart_signal_listener_count(c2)==0);t++)
-          pf_pump(P,C,2);
-      ST_CHECK(dart_signal_listener_count(p2)==1 && dart_signal_listener_count(c2)==1,
-               "sig: both sides matched (%d/%d)",
-               dart_signal_listener_count(p2), dart_signal_listener_count(c2));
-      pf_pump(P,C,100);
-      ST_CHECK(pf_sig_count==0, "sig: late joiner replayed nothing (%d)", pf_sig_count);
-      i_dart_le_w32(b,40); dart_signal_emit(p2, dart_bytes(b,4));
-      i_dart_le_w32(b,41); dart_signal_emit(c2, dart_bytes(b,4));
-      for (t=0;t<800 && pf_sig_count<2;t++) pf_pump(P,C,2);
-      ST_CHECK(pf_sig_count==2, "sig: both directions received (%d)", pf_sig_count); }
-
 #ifdef DART_THREADS
     /* sync call: the provider answers from its own service thread while the caller's
        sync loop drives its node */
@@ -4753,15 +4711,15 @@ static void patterns_checks(void){
 #endif
 
     /* reflection: the entity walk folds P's channels into entities. P hosts 5 functions
-       (add/noop/defr/nohd/early), 3 variables (temp rw, rovar ro, ttemp), 2 signals
-       (evt, evt2): the peer walk from C and P's local walk must both yield exactly those,
-       with no '@' internals and no incomplete pairs. */
+       (add/noop/defr/nohd/early) and 3 variables (temp rw, rovar ro, ttemp): the peer walk
+       from C and P's local walk must both yield exactly those, with no '@' internals and
+       no incomplete pairs. */
     for (t=0;t<200;t++) pf_pump(P,C,2);   /* let any straggling detail fetches settle */
     { const DartDiscoveryPeer *ps; uint16_t pc = 0; uint32_t pid = 0;
       ps = dart_node_peers(C, &pc);
       if (ps && pc) pid = ps[0].id;
       { DartEntityIter eit; DartEntityInfo ei;
-        int fns=0,vars=0,sigs=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
+        int fns=0,vars=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
         memset(&eit,0,sizeof eit);
         while (dart_node_peer_entity_next(C, pid, &eit, &ei)){
             switch (ei.kind){
@@ -4771,19 +4729,18 @@ static void patterns_checks(void){
                 if (ei.name.len==4 && !memcmp(ei.name.data,"temp",4)) { temp_rw  = ei.writable; temp_forceable = ei.forceable; }
                 if (ei.name.len==5 && !memcmp(ei.name.data,"rovar",5)){ rovar_ro = !ei.writable; rovar_forceable = ei.forceable; }
                 break;
-            case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             }
             inc += ei.incomplete;
             for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
         }
-        ST_CHECK(fns==6 && vars==4 && sigs==2 && tops==0,
-                 "reflect: peer entities fold (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
+        ST_CHECK(fns==6 && vars==4 && tops==0,
+                 "reflect: peer entities fold (fn=%d var=%d top=%d)", fns, vars, tops);
         ST_CHECK(ats==0 && inc==0, "reflect: no internals leak (@bytes=%d incomplete=%d)", ats, inc);
         ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro);
         ST_CHECK(temp_forceable==1 && rovar_forceable==0,
                  "reflect: forceability (temp allow_force=%d, rovar=%d)", temp_forceable, rovar_forceable); }
-      { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,sigs=0,tops=0,temp_forceable=0;
+      { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,tops=0,temp_forceable=0;
         memset(&eit,0,sizeof eit);
         while (dart_node_entity_next(P, &eit, &ei)){
             switch (ei.kind){
@@ -4792,11 +4749,10 @@ static void patterns_checks(void){
                 vars++;
                 if (ei.name.len==4 && !memcmp(ei.name.data,"temp",4)) temp_forceable = ei.forceable;
                 break;
-            case DART_ENTITY_SIGNAL: sigs++; break;
             default: tops++; break;
             } }
-        ST_CHECK(fns==6 && vars==4 && sigs==2 && tops==0,
-                 "reflect: local entities (fn=%d var=%d sig=%d top=%d)", fns, vars, sigs, tops);
+        ST_CHECK(fns==6 && vars==4 && tops==0,
+                 "reflect: local entities (fn=%d var=%d top=%d)", fns, vars, tops);
         ST_CHECK(temp_forceable==1, "reflect: local forceability (temp allow_force=%d)", temp_forceable); } }
 
     { /* a reentrant set inside on_write publishes under the held lock, so it commits to
@@ -4999,28 +4955,6 @@ static void retire_checks(void){
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==42,
                "retire: successor remote calls (done=%d st=%d val=%u)",
                pf_reply_done, pf_reply_status, pf_reply_val); }
-
-    /* signal: retire the listening handle, recreate, emits reach the successor */
-    { DartSignal *em, *ls, *ls2; uint8_t b[4]; int rr;
-      em = dart_node_create_signal(A, "alarm", NULL, NULL,         NULL, NULL);
-      ls = dart_node_create_signal(B, "alarm", NULL, pf_on_signal, NULL, NULL);
-      ST_CHECK(em && ls, "retire: signal pair created");
-      for (t=0;t<2000 && dart_signal_listener_count(em)==0;t++) pf_pump(A,B,2);
-      rr = dart_signal_retire(ls);
-      ST_CHECK(rr==DART_OK, "retire: listener retired (%d)", rr);
-      for (t=0;t<2000 && dart_signal_listener_count(em)!=0;t++) pf_pump(A,B,2);
-      ST_CHECK(dart_signal_listener_count(em)==0, "retire: emitter lane torn (%d)",
-               dart_signal_listener_count(em));
-      ls2 = dart_node_create_signal(B, "alarm", NULL, pf_on_signal, NULL, NULL);
-      ST_CHECK(ls2 != NULL, "retire: successor listener created");
-      for (t=0;t<2000 && dart_signal_listener_count(em)==0;t++) pf_pump(A,B,2);
-      ST_CHECK(dart_signal_listener_count(em)==1, "retire: emitter re-matched the successor (%d)",
-               dart_signal_listener_count(em));
-      pf_sig_count = 0; i_dart_le_w32(b, 9);
-      dart_signal_emit(em, dart_bytes(b,4));
-      for (t=0;t<800 && pf_sig_count==0;t++) pf_pump(A,B,2);
-      ST_CHECK(pf_sig_count==1 && pf_sig_last==9,
-               "retire: successor listener receives (n=%d val=%u)", pf_sig_count, pf_sig_last); }
 
     dart_node_close(A,0); dart_node_close(B,0);
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
@@ -5507,8 +5441,8 @@ static void matchwait_checks(void){
 #endif
 
 #ifdef DART_THREADS
-    /* (b) FIRST SEND vs the forming match: a reliable catch_up=0 publish (signal-shaped:
-       retention exempt, so the wait applies) fired immediately after create_topic must
+    /* (b) FIRST SEND vs the forming match: a reliable catch_up=0 publish (retention
+       exempt, so the wait applies) fired immediately after create_topic must
        WAIT for the already-present subscriber's match, commit, and deliver. The
        subscriber runs its service thread so it can answer announces and detail requests
        while the sender's blocked send pumps only its own loop (in reality peers are
@@ -6366,7 +6300,7 @@ static void metalog_checks(void){
                  "metalog: entity walks hide the builtins (A=%d B=%d peerA=%d)", la, lb, pa); }
 
       /* the hidden namespace is reserved: a leading '@' is refused in every constructor */
-      { DartSignal *ev = dart_node_create_signal(A, "@dart/evil", NULL, NULL, NULL, NULL);
+      { DartVariable *ev = dart_node_create_variable_definition(A, "@dart/evil", NULL, NULL);
         DartTopic *tp = dart_node_create_topic(A, "a@b", DART_PUB_ONLY, NULL, NULL);
         ST_CHECK(ev == NULL && tp == NULL, "metalog: reserved '@' names refused"); } }
 

@@ -30,7 +30,7 @@
  *     node.start();                          // background service thread owns the loop
  *     for (;;) chat.send("hello");           // thread-safe; or skip start() and poll(1) yourself
  *
- * Typed patterns (functions / variables / signals / pub-sub) over DART_SCHEMA:
+ * Typed patterns (functions / variables / pub-sub) over DART_SCHEMA:
  *
  *     struct Pose { double x, y; };
  *     DART_SCHEMA(Pose, x, y);
@@ -157,7 +157,7 @@ enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLo
 
 /* What a network entity is (mirrors DartEntityKind): observers consume ENTITIES, never
  * raw channels; a function's req/rsp pair or a variable's set channel fold into one. */
-enum class EntityKind { Topic = 0, Function, Variable, Signal };
+enum class EntityKind { Topic = 0, Function, Variable };
 
 /* Severity of a built-in @dart/log line (mirrors DartLogLevel). */
 enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
@@ -178,7 +178,7 @@ static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum dri
 static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
 static_assert((int)CallStatus::Cancelled == detail::DART_CALL_CANCELLED, "call-status enum drift");
 static_assert((int)EntityKind::Topic == detail::DART_ENTITY_TOPIC, "entity enum drift");
-static_assert((int)EntityKind::Signal == detail::DART_ENTITY_SIGNAL, "entity enum drift");
+static_assert((int)EntityKind::Variable == detail::DART_ENTITY_VARIABLE, "entity enum drift");
 #endif
 static_assert((int)LogLevel::Info == detail::DART_LOG_INFO, "log-level enum drift");
 
@@ -194,7 +194,6 @@ template <class Req = void, class Rsp = void> class RemoteFunction;
 template <class T = void> class VariableDefinition;
 template <class T = void> class RemoteVariable;
 class VariableUpdate;
-template <class T = void> class Signal;
 template <class T = void> class Publisher;
 template <class T = void> class Subscriber;
 template <class Rsp = void> class Request;
@@ -400,9 +399,6 @@ struct NodeOptions {
 struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout; 0 = 5s */
-};
-struct SignalOptions {
-    uint32_t backpressure_wait_us = 0;   /* 0 = 1s */
 };
 /* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
  * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
@@ -849,7 +845,6 @@ private:
     explicit MessageView(const detail::DartMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
     const detail::DartMsg* msg_;
     friend class Node;
-    template <class A> friend class Signal;
 };
 
 /* Event: a peer / message-loss / error notification. Everything that goes wrong arrives
@@ -1016,7 +1011,7 @@ private:
  *  (those shapes belong to the dynamic Schema/MessageBuilder API).
  *
  *  A BARE TYPE needs no DART_SCHEMA: any of those wire types used DIRECTLY as the
- *  handle's T (Publisher<bool>, RemoteVariable<float>, Signal<std::array<float,3>>,
+ *  handle's T (Publisher<bool>, RemoteVariable<float>, Publisher<std::array<float,3>>,
  *  Subscriber<std::string>, Publisher<std::vector<float>>) is the whole schema,
  *  anonymous, so `bool` (or `f32[]`) from any language is the same wire bytes and
  *  the same hash.
@@ -2330,7 +2325,7 @@ public:
 #endif
 
 #ifndef DART_NO_PATTERNS
-    /* The entities THIS node hosts (its functions/variables/signals, then its plain
+    /* The entities THIS node hosts (its functions and variables, then its plain
      * topics), the same folded shape as peer_entities(). A copied snapshot. */
     std::vector<Entity> entities() const {
         std::vector<Entity> out;
@@ -2683,7 +2678,6 @@ private:
     template <class A, class B> friend class RemoteFunction;
     template <class A> friend class VariableDefinition;
     template <class A> friend class RemoteVariable;
-    template <class A> friend class Signal;
     template <class A> friend class Publisher;
     template <class A> friend class Subscriber;
 };
@@ -3112,83 +3106,6 @@ public:
     int  match_count()    const { return remote_count(); }
 };
 
-/* ====================== SIGNALS (untyped core) ============================== */
-
-/* Signal<> (untyped): a reliable fire-and-forget event, N emitters / N listeners,
- * never latched. Passing a handler IS the subscription; every handle may emit. */
-template <> class Signal<void> {
-public:
-    Signal() = default;
-    /* emit-only handle (no subscription) */
-    Signal(Node& n, std::string_view name, const Schema* schema = nullptr,
-           const SignalOptions& o = {}) {
-        init(n, name, schema, nullptr, o);
-    }
-    /* listening handle: on_signal fires for each signal from ANOTHER node */
-    Signal(Node& n, std::string_view name, const Schema* schema,
-           std::function<void(const MessageView&)> on_signal, const SignalOptions& o = {}) {
-        init(n, name, schema, std::move(on_signal), o);
-    }
-
-    bool valid() const noexcept { return sig_ != nullptr; }
-    explicit operator bool() const noexcept { return valid(); }
-
-    /* emit to every matched listener (payload may be empty) */
-    SendStatus emit(Bytes payload = Bytes()) {
-        if (!sig_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::dart_signal_emit(sig_, priv::to_c(payload)));
-    }
-    int listener_count() const { return sig_ ? detail::dart_signal_listener_count(sig_) : 0; }
-    /* Retire the handle: park its channel and release the name so a successor can bind
-     * (see dart_signal_retire). The handle is empty after; refused (State) from inside a
-     * callback, and the handle then stays valid. */
-    SendStatus retire() {
-        if (!sig_) return SendStatus::NoTopic;
-        int rc = detail::dart_signal_retire(sig_);
-        if (rc == 0) sig_ = nullptr;
-        return static_cast<SendStatus>(rc);
-    }
-
-private:
-    struct Box : priv::HandlerBox {
-        std::function<void(const MessageView&)> h;
-        Node::Impl* impl = nullptr;
-    };
-    static void tramp(const detail::DartMsg* m, void* user) {
-        Box* b = static_cast<Box*>(user);
-        MessageView msg(m);
-#if defined(__cpp_exceptions)
-        try { b->h(msg); } catch (...) { Node::report_handler_exception(b->impl); }
-#else
-        b->h(msg);
-#endif
-    }
-    void init(Node& n, std::string_view name, const Schema* schema,
-              std::function<void(const MessageView&)> h, const SignalOptions& o) {
-        if (!n.valid()) { priv::raise_msg("dart::Signal: node is not valid"); return; }
-        std::string nm(name);
-        detail::DartSignalOpts co;
-        std::memset(&co, 0, sizeof co);
-        co.backpressure_wait_us = o.backpressure_wait_us;
-        Box* box = nullptr;
-        if (h) { box = new Box(); box->h = std::move(h); box->impl = n.impl_.get(); }
-        sig_ = detail::dart_node_create_signal(n.impl_->node, nm.c_str(),
-                   schema ? schema->raw() : nullptr,
-                   box ? &Signal::tramp : nullptr, box, &co);
-        if (!sig_) {
-            delete box;
-            priv::raise_last(n.impl_->node, "dart::Signal create");
-            return;
-        }
-        if (box) {
-            std::lock_guard<std::mutex> g(n.impl_->reg_mu);
-            n.impl_->boxes.emplace_back(box);
-        }
-    }
-    detail::DartSignal* sig_ = nullptr;
-    template <class A> friend class Signal;
-};
-
 #endif /* !DART_NO_PATTERNS */
 
 /* ====================== PUB/SUB (untyped cores) ============================= */
@@ -3580,51 +3497,6 @@ private:
         };
     }
     RemoteVariable<> core_;
-};
-
-/* Signal<T>: the typed signal. Handler forms: void(const T&) or
- * void(const T&, const MessageView&). */
-template <class T> class Signal {
-public:
-    Signal() = default;
-    /* emit-only handle */
-    Signal(Node& n, std::string_view name, const SignalOptions& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Signal: DART_SCHEMA compile failed"); return; }
-        core_ = Signal<>(n, name, sc, o);
-    }
-    /* listening handle */
-    template <class H, class = std::enable_if_t<
-        std::is_invocable_v<std::decay_t<H>&, const T&> ||
-        std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
-    Signal(Node& n, std::string_view name, H&& handler, const SignalOptions& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Signal: DART_SCHEMA compile failed"); return; }
-        core_ = Signal<>(n, name, sc, adapt(std::forward<H>(handler)), o);
-    }
-    bool valid() const noexcept { return core_.valid(); }
-    explicit operator bool() const noexcept { return valid(); }
-
-    SendStatus emit(const T& v) {
-        std::vector<uint8_t> s;
-        return core_.emit(priv::encode(v, s));
-    }
-    int listener_count() const { return core_.listener_count(); }
-    SendStatus retire() { return core_.retire(); }
-
-private:
-    template <class H>
-    static std::function<void(const MessageView&)> adapt(H&& h) {
-        return [f = std::forward<H>(h)](const MessageView& m) mutable {
-            T v{};
-            if (!priv::decode(v, m.data(), m.raw_schema())) return;
-            if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>)
-                f(v, m);
-            else
-                f(v);
-        };
-    }
-    Signal<> core_;
 };
 
 #endif /* !DART_NO_PATTERNS */

@@ -81,10 +81,6 @@ var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<DartResponse<Ad
 var own = new VariableDefinition<Level>(node, "level", new Level { Value = 5 });
 var acc = new RemoteVariable<Level>(other, "level");     // acc.Value / acc.Set(...) / acc.Wait(...)
 
-// reliable fire-and-forget event: a handler IS the subscription, every handle may emit
-var sig = new Signal(node, "estop", handler: m => Stop());
-new Signal(other, "estop").Emit();
-
 // side-named topic handles (share the topic slot by name, widening the role)
 var pub = new Publisher<Pose>(node, "pose", reliable: true);
 var sub = new Subscriber<Pose>(other, "pose", p => Console.WriteLine(p.X));

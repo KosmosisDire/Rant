@@ -30,7 +30,7 @@
  *     node.start();                          // background service thread owns the loop
  *     for (;;) chat.send("hello");           // thread-safe; or skip start() and poll(1) yourself
  *
- * Typed patterns (functions / variables / signals / pub-sub) over DART_SCHEMA:
+ * Typed patterns (functions / variables / pub-sub) over DART_SCHEMA:
  *
  *     struct Pose { double x, y; };
  *     DART_SCHEMA(Pose, x, y);
@@ -1283,7 +1283,7 @@ static inline int dart_role_pubs(uint8_t role){ return role == DART_PUBSUB || ro
 static inline int dart_role_subs(uint8_t role){ return role == DART_PUBSUB || role == DART_SUB_ONLY; }
 
 /* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
- * layer (src/patterns/) builds functions, variables, and signals over dedicated kinds,
+ * layer (src/patterns/) builds functions and variables over dedicated kinds,
  * each a distinct channel that only pairs with the same kind. The kind rides the announce
  * interest flags (bits 3-5, so 8 values) and gates matching like role/reliability: a same
  * name with a different kind is a disjoint entity, its pairing refused (KIND_MISMATCH), not
@@ -1293,8 +1293,7 @@ typedef enum {
     DART_KIND_FUNC_REQ = 1,   /* function request channel  (caller pubs, provider subs) */
     DART_KIND_FUNC_RSP = 2,   /* function response channel  (provider pubs, caller subs; directed) */
     DART_KIND_VARIABLE = 3,   /* variable value channel     (owner pubs, observers sub) */
-    DART_KIND_VAR_SET  = 4,   /* variable set channel       (writers pub, owner subs) */
-    DART_KIND_SIGNAL   = 5    /* signal channel             (emitters pub, listeners sub) */
+    DART_KIND_VAR_SET  = 4    /* variable set channel       (writers pub, owner subs) */
 } DartTopicKind;
 
 /* Every field except reliability is zero-means-default, so a reliable topic is
@@ -2810,7 +2809,7 @@ typedef enum {
     DART_E_QOS_INCOMPATIBLE, /* a reliable subscriber refused a best-effort publisher (.topic, .peer,
                                 .topic_name): no silent downgrade; forms if the publisher upgrades */
     DART_E_KIND_MISMATCH,    /* a peer advertised this topic name under a different entity kind (a plain
-                                topic vs a function/variable/signal): the pairing is refused (.topic,
+                                topic vs a function/variable): the pairing is refused (.topic,
                                 .peer, .topic_name), never silently cross-wired */
     DART_E_SCHEMA_MISMATCH,  /* incompatible schemas: a match was refused, or a message that did not fit
                                 its publisher's schema was dropped (.topic, .peer, .topic_name) */
@@ -3632,12 +3631,12 @@ DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
 #define DART_META_PEERS  0x8u
 
 /* ---- internal hooks for the patterns layer (src/patterns) ---------------------------
- * The patterns layer (functions / variables / signals) builds on a node but needs three
+ * The patterns layer (functions / variables) builds on a node but needs three
  * node-internal seams the public API does not expose: create a topic carrying an entity
  * kind + payload prefix (and a reserved '@' name), route that topic's messages to a
  * pattern handler instead of the app's on_message, and observe node-wide events + a
  * per-poll tick for call timeouts. These are i_-prefixed and kind-agnostic; the node
- * knows nothing of what functions/variables/signals mean. */
+ * knows nothing of what functions/variables mean. */
 typedef void     (*i_DartSysMsgFn)(void *user, const DartMsg *msg);
 typedef void     (*i_DartSysEventFn)(void *user, const DartEvent *ev);
 typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns next deadline us (0 = none) */
@@ -3941,21 +3940,19 @@ int i_dart_shm_host_match(const uint8_t peer_host[16], const uint8_t our_host[16
 #pragma endregion
 #ifndef DART_NO_PATTERNS
 #pragma region patterns/core.h
-/* PATTERNS layer: functions, variables, and signals built over a DartNode. Each is a thin
+/* PATTERNS layer: functions and variables built over a DartNode. Each is a thin
  * interaction pattern over dedicated topic KINDS (transport/core.h DartTopicKind), so a
- * function/variable/signal never cross-wires with a plain topic or with each other even when
+ * function/variable never cross-wires with a plain topic or with each other even when
  * they share a name. Depends on node/runtime only; the node hooks it uses are kind-agnostic.
  * Compile it out with DART_NO_PATTERNS.
  *
  *   FUNCTION  request/response, exactly one reply per call, ONE handler (req/rsp channels)
  *   VARIABLE  replicated state, one owner, dumb writes + optional force (value/@set channels)
- *   SIGNAL    reliable fire-and-forget event, N emitters / N listeners, never latched
  *
  * API doctrine: every constructor is dart_node_create_*. A DEFINITION is where the body or
  * storage lives; a REMOTE is a reference to a definition on another node
  * (function_definition / remote_function, variable_definition / remote_variable: one node
- * cannot be both sides). A signal has no side to declare: passing a handler IS the
- * subscription, and every handle may emit. Bytes in C; the wrappers add typed ergonomics. */
+ * cannot be both sides). Bytes in C; the wrappers add typed ergonomics. */
 #ifndef DART_PATTERNS_H
 #define DART_PATTERNS_H
 
@@ -4081,8 +4078,8 @@ DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
 int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
                         const DartCallOpts *opts);
 /* The async form: returns as soon as the request is committed, then on_response (NULL =
- * fire-and-forget: use a signal instead if you truly do not care) fires once with the
- * outcome. opts may be NULL (undirected). Returns DART_OK, or a negative DartResult. */
+ * fire-and-forget: the outcome is discarded) fires once with the outcome. opts may be
+ * NULL (undirected). Returns DART_OK, or a negative DartResult. */
 int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
                               void *user, const DartCallOpts *opts);
 /* Providers matched (remote side) / callers matched (definition side). */
@@ -4223,38 +4220,10 @@ int  dart_variable_match_count(DartVariable *var);
  * contract as dart_function_retire. */
 int  dart_variable_retire(DartVariable *var);
 
-/* ---- SIGNALS ------------------------------------------------------------------------ */
-
-/* A reliable fire-and-forget event: N emitters, N listeners, NEVER latched (a late joiner
- * receives NOTHING published before it joined: the safety property). There is no role to
- * declare: passing a handler IS the subscription, and EVERY handle may emit. Emit interest
- * is advertised eagerly at create, so a first emit never pays an announce round trip (the
- * e-stop case). */
-typedef struct DartSignal DartSignal;
-typedef void (*DartSignalFn)(const DartMsg *msg, void *user);   /* a received signal */
-
-typedef struct {
-    uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
-} DartSignalOpts;
-
-/* Create a signal handle. schema may be NULL (untyped / payload-less). on_signal (NULL =
- * emit-only, no subscription) fires for each signal from ANOTHER node. Returns a handle
- * or NULL. */
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
-                              DartSignalFn on_signal, void *user, const DartSignalOpts *opts);
-/* Emit the signal to every matched listener (payload may be {NULL,0}). Any handle may emit.
- * Returns DART_OK, or a negative DartResult from the send. */
-int  dart_signal_emit(DartSignal *sig, DartBytes payload);
-/* Listeners currently matched (other nodes subscribed to this signal). */
-int  dart_signal_listener_count(DartSignal *sig);
-/* Retire the handle: park its channel, silence on_signal, free the handle (INVALID after).
- * Same contract as dart_function_retire. */
-int  dart_signal_retire(DartSignal *sig);
-
 /* ---- REFLECTION (entity enumeration) -------------------------------------------------
  * The canonical way to see what exists on the network. Observers consume ENTITIES, never
- * channels: pattern channels (f@req, v@set, ...) are folded back into the function/variable/
- * signal they implement and never escape this iterator as raw topics, so no tool ever
+ * channels: pattern channels (f@req, v@set, ...) are folded back into the function or
+ * variable they implement and never escape this iterator as raw topics, so no tool ever
  * reimplements the name-mangling or kind rules. Everything is derived from what the wire
  * already carries (kind bits in the announce, names + schemas from the detail cache): there
  * is no reflection protocol, and a peer built without the patterns layer reflects
@@ -4263,8 +4232,7 @@ int  dart_signal_retire(DartSignal *sig);
 typedef enum {
     DART_ENTITY_TOPIC = 0,
     DART_ENTITY_FUNCTION,
-    DART_ENTITY_VARIABLE,
-    DART_ENTITY_SIGNAL
+    DART_ENTITY_VARIABLE
 } DartEntityKind;
 
 /* One entity as advertised by a peer (or hosted locally). Views follow the same rules as
@@ -4275,8 +4243,8 @@ typedef struct {
     DartEntityKind    kind;
     DartString        name;
     uint8_t           provides;    /* they are the data source side: topic publisher / function
-                                      provider / variable owner / signal emitter */
-    uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor / listener */
+                                      provider / variable owner */
+    uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor */
     uint8_t           reliable;    /* the primary channel's advertised reliability */
     uint8_t           writable;    /* VARIABLE: a @set channel is advertised alongside the value */
     uint8_t           forceable;   /* VARIABLE: the owner permits force/unforce (allow_force); a
@@ -4326,7 +4294,7 @@ typedef struct {
  * the first call and gates on liveness itself. */
 int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out);
 
-/* Walk the entities THIS node hosts (its own functions/variables/signals, then its plain
+/* Walk the entities THIS node hosts (its own functions and variables, then its plain
  * topics), same shape. Local names/schemas are stable for the entity's lifetime. */
 int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out);
 
@@ -17779,7 +17747,7 @@ int dart_node_close(DartNode *n, int send_bye){
 #pragma endregion
 #ifndef DART_NO_PATTERNS
 #pragma region patterns/core.c
-/* PATTERNS layer implementation: functions, variables, signals, and the entity reflection
+/* PATTERNS layer implementation: functions, variables, and the entity reflection
  * walk. Built entirely on the node's public API plus the kind-agnostic i_dart_node_* seams
  * (create a pattern topic, send with a header / directed, observe events + a per-poll tick).
  * The node knows nothing of what these patterns mean.
@@ -17800,7 +17768,6 @@ typedef struct i_DartPatterns {
     DartNode            *n;
     struct DartFunction *funcs;   /* linked lists, for tick/event fanout + local reflection */
     struct DartVariable *vars;
-    struct DartSignal   *sigs;
     struct DartFunction *meta;    /* the built-in @dart/meta endpoint (both sides in one handle) */
     DartSchema          *meta_rsp_schema;   /* DartMeta { info: map } */
     uint8_t             *meta_msg; uint32_t meta_msg_cap;   /* reply scratch, grown on demand */
@@ -17834,10 +17801,10 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
 }
 
 /* ---- shared entity mechanics (create prologue + the three retire phases) ------------------
- * Functions, variables and signals differ in what they OWN, not in how a handle is born or
- * torn down. These carry the common sequence; every per-entity step (the meta refusal, the
+ * Functions and variables differ in what they OWN, not in how a handle is born or torn
+ * down. These carry the common sequence; every per-entity step (the meta refusal, the
  * pending-call reap, which buffers to free) stays explicit at the call site. `secondary` is
- * the optional second channel: NULL for a signal and for a read-only variable owner. */
+ * the optional second channel: NULL for a read-only variable owner. */
 
 /* Create prologue: take the node lock, get (lazily create) the manager, allocate a ZEROED
  * handle, release the lock. The lock must be released before the topics are created:
@@ -17896,7 +17863,7 @@ static void i_dart_pat_release_channels(DartTopic *primary, DartTopic *secondary
 }
 
 /* Unlink elem from a manager list threaded through the `next` pointer at next_off (one walk
- * for all three entity lists; every object pointer has the same representation). Absent
+ * for both entity lists; every object pointer has the same representation). Absent
  * elem = a no-op. Node lock held. */
 static void i_dart_pat_unlink(void **head, void *elem, size_t next_off){
     void **pp = head;
@@ -18842,75 +18809,6 @@ int dart_variable_match_count(DartVariable *var){
     return dart_topic_match_count(var->is_owner ? var->value : var->set);
 }
 
-/* ---- SIGNALS ---------------------------------------------------------------------------- */
-
-struct DartSignal {
-    DartNode       *n;
-    i_DartPatterns *pm;
-    struct DartSignal *next;    /* manager list */
-    DartTopic      *topic;      /* kind SIGNAL, reliable, catch_up 0 (never latched);
-                                   PUBSUB with a handler, else PUB_ONLY (emit always advertised) */
-    DartSignalFn    on_signal;
-    void           *user;
-};
-
-static void i_dart_signal_on_msg(void *user, const DartMsg *msg){
-    DartSignal *s = (DartSignal*)user;
-    if (s->on_signal) s->on_signal(msg, s->user);
-}
-
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
-                              DartSignalFn on_signal, void *user, const DartSignalOpts *opts){
-    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired;
-    /* the role is derived, never declared: a handler is the subscription, and the emit side
-       is EAGER for every handle so a first emit never pays an announce round trip (e-stop) */
-    DartRole role = on_signal ? DART_PUBSUB : DART_PUB_ONLY;
-    if (!n || !name || !name[0] || i_dart_pat_reserved(name)) return NULL;
-    memset(&topt, 0, sizeof topt);
-    topt.qos.reliability = DART_RELIABLE;
-    topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
-    topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
-                                                                         : DART_PATTERN_BP_WAIT_US;
-    s = (DartSignal*)i_dart_pat_handle_new(n, sizeof *s, &pm);
-    if (!s) return NULL;
-    s->n = n; s->pm = pm; s->on_signal = on_signal; s->user = user;
-    s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
-    if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
-    acquired = i_dart_node_sys_lock(n);
-    s->next = pm->sigs; pm->sigs = s;
-    i_dart_node_sys_unlock(n, acquired);
-    return s;
-}
-
-int dart_signal_retire(DartSignal *sig){
-    i_DartPatterns *pm; DartNode *n; int acquired, r;
-    DartTopic *topic;
-    if (!sig) return DART_ERR_NO_TOPIC;
-    pm = sig->pm; n = sig->n;
-    r = i_dart_pat_park_channels(sig->topic, NULL);   /* one channel: no secondary */
-    if (r != 0) return r;
-    acquired = i_dart_node_sys_lock(n);
-    i_dart_pat_clear_channels(sig->topic, NULL);
-    if (pm) i_dart_pat_unlink((void**)&pm->sigs, sig, offsetof(DartSignal, next));
-    topic = sig->topic;   /* outlives sig (see function retire) */
-    i_dart_node_sys_alloc(n, sig, 0);
-    i_dart_node_sys_unlock(n, acquired);
-    i_dart_pat_release_channels(topic, NULL);
-    return DART_OK;
-}
-
-int dart_signal_emit(DartSignal *sig, DartBytes payload){
-    if (!sig) return DART_ERR_NO_TOPIC;
-    return dart_topic_send(sig->topic, payload);   /* public path: backpressure engages */
-}
-
-/* Listeners this handle's emits reach. */
-int dart_signal_listener_count(DartSignal *sig){
-    if (!sig) return 0;
-    return dart_topic_match_count(sig->topic);
-}
-
 /* ---- duplicate-authority detection --------------------------------------------------------
  * The pattern contract expects exactly ONE handler per function and ONE owner per variable.
  * Two authorities never match each other (both hold the channel's authoritative direction,
@@ -19217,9 +19115,6 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
         case DART_KIND_TOPIC:
             i_dart_pat_fill(n, peer, out, DART_ENTITY_TOPIC, name, &e);
             return 1;
-        case DART_KIND_SIGNAL:
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_SIGNAL, name, &e);
-            return 1;
         case DART_KIND_VARIABLE:
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
             /* the value channel is the bare name: a same-peer "<name>@set" VAR_SET entry
@@ -19289,8 +19184,8 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
     }
 }
 
-/* local enumeration: this node's own entities (functions, variables, signals, then the
- * plain topics that are not pattern internals), from the manager lists + the handle table */
+/* local enumeration: this node's own entities (functions and variables, then the plain
+ * topics that are not pattern internals), from the manager lists + the handle table */
 int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
     i_DartPatterns *pm;
     uint16_t skip;
@@ -19330,23 +19225,6 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             out->forceable = (uint8_t)(v->is_owner && v->allow_force);
             out->index = dart_topic_index(v->value);
             out->schema = dart_topic_schema(v->value);
-            return 1;
-        }
-        case 2: {   /* signals */
-            DartSignal *s = pm ? pm->sigs : NULL;
-            for (skip = it->next_index; s && skip; skip--) s = s->next;
-            if (!s){ it->phase = 3; it->next_index = 0; continue; }
-            it->next_index++;
-            if (i_dart_pat_hidden_name(i_dart_topic_name(s->topic))) continue;
-            memset(out, 0, sizeof *out);
-            out->kind = DART_ENTITY_SIGNAL;
-            out->name = i_dart_topic_name(s->topic);
-            { uint8_t role = i_dart_topic_role(s->topic);
-              out->provides = (uint8_t)dart_role_pubs(role);
-              out->consumes = (uint8_t)dart_role_subs(role); }
-            out->reliable = 1;
-            out->index = dart_topic_index(s->topic);
-            out->schema = dart_topic_schema(s->topic);
             return 1;
         }
         default: {  /* plain topics (pattern channels are covered by the lists above) */
@@ -19418,7 +19296,7 @@ enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLo
 
 /* What a network entity is (mirrors DartEntityKind): observers consume ENTITIES, never
  * raw channels; a function's req/rsp pair or a variable's set channel fold into one. */
-enum class EntityKind { Topic = 0, Function, Variable, Signal };
+enum class EntityKind { Topic = 0, Function, Variable };
 
 /* Severity of a built-in @dart/log line (mirrors DartLogLevel). */
 enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
@@ -19439,7 +19317,7 @@ static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum dri
 static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
 static_assert((int)CallStatus::Cancelled == detail::DART_CALL_CANCELLED, "call-status enum drift");
 static_assert((int)EntityKind::Topic == detail::DART_ENTITY_TOPIC, "entity enum drift");
-static_assert((int)EntityKind::Signal == detail::DART_ENTITY_SIGNAL, "entity enum drift");
+static_assert((int)EntityKind::Variable == detail::DART_ENTITY_VARIABLE, "entity enum drift");
 #endif
 static_assert((int)LogLevel::Info == detail::DART_LOG_INFO, "log-level enum drift");
 
@@ -19455,7 +19333,6 @@ template <class Req = void, class Rsp = void> class RemoteFunction;
 template <class T = void> class VariableDefinition;
 template <class T = void> class RemoteVariable;
 class VariableUpdate;
-template <class T = void> class Signal;
 template <class T = void> class Publisher;
 template <class T = void> class Subscriber;
 template <class Rsp = void> class Request;
@@ -19661,9 +19538,6 @@ struct NodeOptions {
 struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout; 0 = 5s */
-};
-struct SignalOptions {
-    uint32_t backpressure_wait_us = 0;   /* 0 = 1s */
 };
 /* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
  * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
@@ -20110,7 +19984,6 @@ private:
     explicit MessageView(const detail::DartMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
     const detail::DartMsg* msg_;
     friend class Node;
-    template <class A> friend class Signal;
 };
 
 /* Event: a peer / message-loss / error notification. Everything that goes wrong arrives
@@ -20277,7 +20150,7 @@ private:
  *  (those shapes belong to the dynamic Schema/MessageBuilder API).
  *
  *  A BARE TYPE needs no DART_SCHEMA: any of those wire types used DIRECTLY as the
- *  handle's T (Publisher<bool>, RemoteVariable<float>, Signal<std::array<float,3>>,
+ *  handle's T (Publisher<bool>, RemoteVariable<float>, Publisher<std::array<float,3>>,
  *  Subscriber<std::string>, Publisher<std::vector<float>>) is the whole schema,
  *  anonymous, so `bool` (or `f32[]`) from any language is the same wire bytes and
  *  the same hash.
@@ -21591,7 +21464,7 @@ public:
 #endif
 
 #ifndef DART_NO_PATTERNS
-    /* The entities THIS node hosts (its functions/variables/signals, then its plain
+    /* The entities THIS node hosts (its functions and variables, then its plain
      * topics), the same folded shape as peer_entities(). A copied snapshot. */
     std::vector<Entity> entities() const {
         std::vector<Entity> out;
@@ -21944,7 +21817,6 @@ private:
     template <class A, class B> friend class RemoteFunction;
     template <class A> friend class VariableDefinition;
     template <class A> friend class RemoteVariable;
-    template <class A> friend class Signal;
     template <class A> friend class Publisher;
     template <class A> friend class Subscriber;
 };
@@ -22373,83 +22245,6 @@ public:
     int  match_count()    const { return remote_count(); }
 };
 
-/* ====================== SIGNALS (untyped core) ============================== */
-
-/* Signal<> (untyped): a reliable fire-and-forget event, N emitters / N listeners,
- * never latched. Passing a handler IS the subscription; every handle may emit. */
-template <> class Signal<void> {
-public:
-    Signal() = default;
-    /* emit-only handle (no subscription) */
-    Signal(Node& n, std::string_view name, const Schema* schema = nullptr,
-           const SignalOptions& o = {}) {
-        init(n, name, schema, nullptr, o);
-    }
-    /* listening handle: on_signal fires for each signal from ANOTHER node */
-    Signal(Node& n, std::string_view name, const Schema* schema,
-           std::function<void(const MessageView&)> on_signal, const SignalOptions& o = {}) {
-        init(n, name, schema, std::move(on_signal), o);
-    }
-
-    bool valid() const noexcept { return sig_ != nullptr; }
-    explicit operator bool() const noexcept { return valid(); }
-
-    /* emit to every matched listener (payload may be empty) */
-    SendStatus emit(Bytes payload = Bytes()) {
-        if (!sig_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::dart_signal_emit(sig_, priv::to_c(payload)));
-    }
-    int listener_count() const { return sig_ ? detail::dart_signal_listener_count(sig_) : 0; }
-    /* Retire the handle: park its channel and release the name so a successor can bind
-     * (see dart_signal_retire). The handle is empty after; refused (State) from inside a
-     * callback, and the handle then stays valid. */
-    SendStatus retire() {
-        if (!sig_) return SendStatus::NoTopic;
-        int rc = detail::dart_signal_retire(sig_);
-        if (rc == 0) sig_ = nullptr;
-        return static_cast<SendStatus>(rc);
-    }
-
-private:
-    struct Box : priv::HandlerBox {
-        std::function<void(const MessageView&)> h;
-        Node::Impl* impl = nullptr;
-    };
-    static void tramp(const detail::DartMsg* m, void* user) {
-        Box* b = static_cast<Box*>(user);
-        MessageView msg(m);
-#if defined(__cpp_exceptions)
-        try { b->h(msg); } catch (...) { Node::report_handler_exception(b->impl); }
-#else
-        b->h(msg);
-#endif
-    }
-    void init(Node& n, std::string_view name, const Schema* schema,
-              std::function<void(const MessageView&)> h, const SignalOptions& o) {
-        if (!n.valid()) { priv::raise_msg("dart::Signal: node is not valid"); return; }
-        std::string nm(name);
-        detail::DartSignalOpts co;
-        std::memset(&co, 0, sizeof co);
-        co.backpressure_wait_us = o.backpressure_wait_us;
-        Box* box = nullptr;
-        if (h) { box = new Box(); box->h = std::move(h); box->impl = n.impl_.get(); }
-        sig_ = detail::dart_node_create_signal(n.impl_->node, nm.c_str(),
-                   schema ? schema->raw() : nullptr,
-                   box ? &Signal::tramp : nullptr, box, &co);
-        if (!sig_) {
-            delete box;
-            priv::raise_last(n.impl_->node, "dart::Signal create");
-            return;
-        }
-        if (box) {
-            std::lock_guard<std::mutex> g(n.impl_->reg_mu);
-            n.impl_->boxes.emplace_back(box);
-        }
-    }
-    detail::DartSignal* sig_ = nullptr;
-    template <class A> friend class Signal;
-};
-
 #endif /* !DART_NO_PATTERNS */
 
 /* ====================== PUB/SUB (untyped cores) ============================= */
@@ -22841,51 +22636,6 @@ private:
         };
     }
     RemoteVariable<> core_;
-};
-
-/* Signal<T>: the typed signal. Handler forms: void(const T&) or
- * void(const T&, const MessageView&). */
-template <class T> class Signal {
-public:
-    Signal() = default;
-    /* emit-only handle */
-    Signal(Node& n, std::string_view name, const SignalOptions& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Signal: DART_SCHEMA compile failed"); return; }
-        core_ = Signal<>(n, name, sc, o);
-    }
-    /* listening handle */
-    template <class H, class = std::enable_if_t<
-        std::is_invocable_v<std::decay_t<H>&, const T&> ||
-        std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
-    Signal(Node& n, std::string_view name, H&& handler, const SignalOptions& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Signal: DART_SCHEMA compile failed"); return; }
-        core_ = Signal<>(n, name, sc, adapt(std::forward<H>(handler)), o);
-    }
-    bool valid() const noexcept { return core_.valid(); }
-    explicit operator bool() const noexcept { return valid(); }
-
-    SendStatus emit(const T& v) {
-        std::vector<uint8_t> s;
-        return core_.emit(priv::encode(v, s));
-    }
-    int listener_count() const { return core_.listener_count(); }
-    SendStatus retire() { return core_.retire(); }
-
-private:
-    template <class H>
-    static std::function<void(const MessageView&)> adapt(H&& h) {
-        return [f = std::forward<H>(h)](const MessageView& m) mutable {
-            T v{};
-            if (!priv::decode(v, m.data(), m.raw_schema())) return;
-            if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>)
-                f(v, m);
-            else
-                f(v);
-        };
-    }
-    Signal<> core_;
 };
 
 #endif /* !DART_NO_PATTERNS */

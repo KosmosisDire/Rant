@@ -1,18 +1,16 @@
-/* PATTERNS layer: functions, variables, and signals built over a DartNode. Each is a thin
+/* PATTERNS layer: functions and variables built over a DartNode. Each is a thin
  * interaction pattern over dedicated topic KINDS (transport/core.h DartTopicKind), so a
- * function/variable/signal never cross-wires with a plain topic or with each other even when
+ * function/variable never cross-wires with a plain topic or with each other even when
  * they share a name. Depends on node/runtime only; the node hooks it uses are kind-agnostic.
  * Compile it out with DART_NO_PATTERNS.
  *
  *   FUNCTION  request/response, exactly one reply per call, ONE handler (req/rsp channels)
  *   VARIABLE  replicated state, one owner, dumb writes + optional force (value/@set channels)
- *   SIGNAL    reliable fire-and-forget event, N emitters / N listeners, never latched
  *
  * API doctrine: every constructor is dart_node_create_*. A DEFINITION is where the body or
  * storage lives; a REMOTE is a reference to a definition on another node
  * (function_definition / remote_function, variable_definition / remote_variable: one node
- * cannot be both sides). A signal has no side to declare: passing a handler IS the
- * subscription, and every handle may emit. Bytes in C; the wrappers add typed ergonomics. */
+ * cannot be both sides). Bytes in C; the wrappers add typed ergonomics. */
 #ifndef DART_PATTERNS_H
 #define DART_PATTERNS_H
 
@@ -139,8 +137,8 @@ DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
 int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
                         const DartCallOpts *opts);
 /* The async form: returns as soon as the request is committed, then on_response (NULL =
- * fire-and-forget: use a signal instead if you truly do not care) fires once with the
- * outcome. opts may be NULL (undirected). Returns DART_OK, or a negative DartResult. */
+ * fire-and-forget: the outcome is discarded) fires once with the outcome. opts may be
+ * NULL (undirected). Returns DART_OK, or a negative DartResult. */
 int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
                               void *user, const DartCallOpts *opts);
 /* Providers matched (remote side) / callers matched (definition side). */
@@ -281,38 +279,10 @@ int  dart_variable_match_count(DartVariable *var);
  * contract as dart_function_retire. */
 int  dart_variable_retire(DartVariable *var);
 
-/* ---- SIGNALS ------------------------------------------------------------------------ */
-
-/* A reliable fire-and-forget event: N emitters, N listeners, NEVER latched (a late joiner
- * receives NOTHING published before it joined: the safety property). There is no role to
- * declare: passing a handler IS the subscription, and EVERY handle may emit. Emit interest
- * is advertised eagerly at create, so a first emit never pays an announce round trip (the
- * e-stop case). */
-typedef struct DartSignal DartSignal;
-typedef void (*DartSignalFn)(const DartMsg *msg, void *user);   /* a received signal */
-
-typedef struct {
-    uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
-} DartSignalOpts;
-
-/* Create a signal handle. schema may be NULL (untyped / payload-less). on_signal (NULL =
- * emit-only, no subscription) fires for each signal from ANOTHER node. Returns a handle
- * or NULL. */
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
-                              DartSignalFn on_signal, void *user, const DartSignalOpts *opts);
-/* Emit the signal to every matched listener (payload may be {NULL,0}). Any handle may emit.
- * Returns DART_OK, or a negative DartResult from the send. */
-int  dart_signal_emit(DartSignal *sig, DartBytes payload);
-/* Listeners currently matched (other nodes subscribed to this signal). */
-int  dart_signal_listener_count(DartSignal *sig);
-/* Retire the handle: park its channel, silence on_signal, free the handle (INVALID after).
- * Same contract as dart_function_retire. */
-int  dart_signal_retire(DartSignal *sig);
-
 /* ---- REFLECTION (entity enumeration) -------------------------------------------------
  * The canonical way to see what exists on the network. Observers consume ENTITIES, never
- * channels: pattern channels (f@req, v@set, ...) are folded back into the function/variable/
- * signal they implement and never escape this iterator as raw topics, so no tool ever
+ * channels: pattern channels (f@req, v@set, ...) are folded back into the function or
+ * variable they implement and never escape this iterator as raw topics, so no tool ever
  * reimplements the name-mangling or kind rules. Everything is derived from what the wire
  * already carries (kind bits in the announce, names + schemas from the detail cache): there
  * is no reflection protocol, and a peer built without the patterns layer reflects
@@ -321,8 +291,7 @@ int  dart_signal_retire(DartSignal *sig);
 typedef enum {
     DART_ENTITY_TOPIC = 0,
     DART_ENTITY_FUNCTION,
-    DART_ENTITY_VARIABLE,
-    DART_ENTITY_SIGNAL
+    DART_ENTITY_VARIABLE
 } DartEntityKind;
 
 /* One entity as advertised by a peer (or hosted locally). Views follow the same rules as
@@ -333,8 +302,8 @@ typedef struct {
     DartEntityKind    kind;
     DartString        name;
     uint8_t           provides;    /* they are the data source side: topic publisher / function
-                                      provider / variable owner / signal emitter */
-    uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor / listener */
+                                      provider / variable owner */
+    uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor */
     uint8_t           reliable;    /* the primary channel's advertised reliability */
     uint8_t           writable;    /* VARIABLE: a @set channel is advertised alongside the value */
     uint8_t           forceable;   /* VARIABLE: the owner permits force/unforce (allow_force); a
@@ -384,7 +353,7 @@ typedef struct {
  * the first call and gates on liveness itself. */
 int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out);
 
-/* Walk the entities THIS node hosts (its own functions/variables/signals, then its plain
+/* Walk the entities THIS node hosts (its own functions and variables, then its plain
  * topics), same shape. Local names/schemas are stable for the entity's lifetime. */
 int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out);
 

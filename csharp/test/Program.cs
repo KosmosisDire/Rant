@@ -1,5 +1,5 @@
 // DART C# test: two nodes, reliable typed pub/sub, on one host, plus a patterns
-// leg (functions / variables / signals). Exercises discovery/match, schema
+// leg (functions and variables). Exercises discovery/match, schema
 // reflection (capped strings, string arrays, maps), the consumer surface, and the
 // typed pattern handles. Exit 0 = all legs passed.
 //
@@ -137,7 +137,7 @@ static class Program
         return ok;
     }
 
-    // Functions / variables / signals between two nodes on an isolated domain.
+    // Functions and variables between two nodes on an isolated domain.
     static bool Patterns()
     {
         Console.WriteLine("patterns leg: two nodes, domain 43, loopback");
@@ -164,8 +164,6 @@ static class Program
                 d.Complete(new AddRsp { Sum = q.A + q.B });
             });
         });
-        int sigCount = 0;
-        var sigIn = new Signal(srv, "estop", null, m => Interlocked.Increment(ref sigCount));
         var lvlDef = new VariableDefinition<Level>(srv, "level", new Level { Value = 5 },
                                                    allowForce: true);
 
@@ -175,16 +173,13 @@ static class Program
         var addR = new RemoteFunction<AddReq, AddRsp>(cli, "add");
         var boomR = new RemoteFunction<AddReq, AddRsp>(cli, "boom");
         var lateR = new RemoteFunction<AddReq, AddRsp>(cli, "late");
-        var sigOut = new Signal(cli, "estop");
         var lvl = new RemoteVariable<Level>(cli, "level");
 
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline
-               && !(addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition
-                    && sigOut.ListenerCount > 0))
+               && !(addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition))
             cli.Poll(5);
         Check("definitions discovered", addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition);
-        Check("signal listener matched", sigOut.ListenerCount == 1);
 
         // blocking calls
         var r = addR.Call(new AddReq { A = 2, B = 3 }, 3000);
@@ -249,14 +244,6 @@ static class Program
         lvlDef.OnChange((Action<Level>)null);
         lvlDef.OnWrite((Action<Level>)null);
         lvl.OnChange((Action<Level>)null);
-
-        // signal: three payload-less emits (untyped form), delivered on srv's thread
-        Check("emit accepted", sigOut.Emit() == SendStatus.Ok);
-        sigOut.Emit();
-        sigOut.Emit();
-        deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline && Volatile.Read(ref sigCount) < 3) cli.Poll(5);
-        Check("three signals delivered", Volatile.Read(ref sigCount) == 3);
 
         // async form: start cli's service thread, await the Task (it never faults)
         cli.Start();

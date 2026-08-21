@@ -1,4 +1,4 @@
-/* PATTERNS layer implementation: functions, variables, signals, and the entity reflection
+/* PATTERNS layer implementation: functions, variables, and the entity reflection
  * walk. Built entirely on the node's public API plus the kind-agnostic i_dart_node_* seams
  * (create a pattern topic, send with a header / directed, observe events + a per-poll tick).
  * The node knows nothing of what these patterns mean.
@@ -21,7 +21,6 @@ typedef struct i_DartPatterns {
     DartNode            *n;
     struct DartFunction *funcs;   /* linked lists, for tick/event fanout + local reflection */
     struct DartVariable *vars;
-    struct DartSignal   *sigs;
     struct DartFunction *meta;    /* the built-in @dart/meta endpoint (both sides in one handle) */
     DartSchema          *meta_rsp_schema;   /* DartMeta { info: map } */
     uint8_t             *meta_msg; uint32_t meta_msg_cap;   /* reply scratch, grown on demand */
@@ -55,10 +54,10 @@ static i_DartPatterns *i_dart_patterns_get(DartNode *n){
 }
 
 /* ---- shared entity mechanics (create prologue + the three retire phases) ------------------
- * Functions, variables and signals differ in what they OWN, not in how a handle is born or
- * torn down. These carry the common sequence; every per-entity step (the meta refusal, the
+ * Functions and variables differ in what they OWN, not in how a handle is born or torn
+ * down. These carry the common sequence; every per-entity step (the meta refusal, the
  * pending-call reap, which buffers to free) stays explicit at the call site. `secondary` is
- * the optional second channel: NULL for a signal and for a read-only variable owner. */
+ * the optional second channel: NULL for a read-only variable owner. */
 
 /* Create prologue: take the node lock, get (lazily create) the manager, allocate a ZEROED
  * handle, release the lock. The lock must be released before the topics are created:
@@ -117,7 +116,7 @@ static void i_dart_pat_release_channels(DartTopic *primary, DartTopic *secondary
 }
 
 /* Unlink elem from a manager list threaded through the `next` pointer at next_off (one walk
- * for all three entity lists; every object pointer has the same representation). Absent
+ * for both entity lists; every object pointer has the same representation). Absent
  * elem = a no-op. Node lock held. */
 static void i_dart_pat_unlink(void **head, void *elem, size_t next_off){
     void **pp = head;
@@ -1063,75 +1062,6 @@ int dart_variable_match_count(DartVariable *var){
     return dart_topic_match_count(var->is_owner ? var->value : var->set);
 }
 
-/* ---- SIGNALS ---------------------------------------------------------------------------- */
-
-struct DartSignal {
-    DartNode       *n;
-    i_DartPatterns *pm;
-    struct DartSignal *next;    /* manager list */
-    DartTopic      *topic;      /* kind SIGNAL, reliable, catch_up 0 (never latched);
-                                   PUBSUB with a handler, else PUB_ONLY (emit always advertised) */
-    DartSignalFn    on_signal;
-    void           *user;
-};
-
-static void i_dart_signal_on_msg(void *user, const DartMsg *msg){
-    DartSignal *s = (DartSignal*)user;
-    if (s->on_signal) s->on_signal(msg, s->user);
-}
-
-DartSignal *dart_node_create_signal(DartNode *n, const char *name, const DartSchema *schema,
-                              DartSignalFn on_signal, void *user, const DartSignalOpts *opts){
-    i_DartPatterns *pm; DartSignal *s; DartTopicOpts topt; int acquired;
-    /* the role is derived, never declared: a handler is the subscription, and the emit side
-       is EAGER for every handle so a first emit never pays an announce round trip (e-stop) */
-    DartRole role = on_signal ? DART_PUBSUB : DART_PUB_ONLY;
-    if (!n || !name || !name[0] || i_dart_pat_reserved(name)) return NULL;
-    memset(&topt, 0, sizeof topt);
-    topt.qos.reliability = DART_RELIABLE;
-    topt.qos.catch_up = 0;   /* SEALED: a late joiner receives nothing published before it joined */
-    topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
-                                                                         : DART_PATTERN_BP_WAIT_US;
-    s = (DartSignal*)i_dart_pat_handle_new(n, sizeof *s, &pm);
-    if (!s) return NULL;
-    s->n = n; s->pm = pm; s->on_signal = on_signal; s->user = user;
-    s->topic = i_dart_node_create_pattern_topic(n, name, role, schema, &topt,
-                              DART_KIND_SIGNAL, 0, 0, 0, on_signal ? i_dart_signal_on_msg : NULL, s);
-    if (!s->topic) return NULL;   /* s stays pool-allocated: nothing routes into it */
-    acquired = i_dart_node_sys_lock(n);
-    s->next = pm->sigs; pm->sigs = s;
-    i_dart_node_sys_unlock(n, acquired);
-    return s;
-}
-
-int dart_signal_retire(DartSignal *sig){
-    i_DartPatterns *pm; DartNode *n; int acquired, r;
-    DartTopic *topic;
-    if (!sig) return DART_ERR_NO_TOPIC;
-    pm = sig->pm; n = sig->n;
-    r = i_dart_pat_park_channels(sig->topic, NULL);   /* one channel: no secondary */
-    if (r != 0) return r;
-    acquired = i_dart_node_sys_lock(n);
-    i_dart_pat_clear_channels(sig->topic, NULL);
-    if (pm) i_dart_pat_unlink((void**)&pm->sigs, sig, offsetof(DartSignal, next));
-    topic = sig->topic;   /* outlives sig (see function retire) */
-    i_dart_node_sys_alloc(n, sig, 0);
-    i_dart_node_sys_unlock(n, acquired);
-    i_dart_pat_release_channels(topic, NULL);
-    return DART_OK;
-}
-
-int dart_signal_emit(DartSignal *sig, DartBytes payload){
-    if (!sig) return DART_ERR_NO_TOPIC;
-    return dart_topic_send(sig->topic, payload);   /* public path: backpressure engages */
-}
-
-/* Listeners this handle's emits reach. */
-int dart_signal_listener_count(DartSignal *sig){
-    if (!sig) return 0;
-    return dart_topic_match_count(sig->topic);
-}
-
 /* ---- duplicate-authority detection --------------------------------------------------------
  * The pattern contract expects exactly ONE handler per function and ONE owner per variable.
  * Two authorities never match each other (both hold the channel's authoritative direction,
@@ -1438,9 +1368,6 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
         case DART_KIND_TOPIC:
             i_dart_pat_fill(n, peer, out, DART_ENTITY_TOPIC, name, &e);
             return 1;
-        case DART_KIND_SIGNAL:
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_SIGNAL, name, &e);
-            return 1;
         case DART_KIND_VARIABLE:
             i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
             /* the value channel is the bare name: a same-peer "<name>@set" VAR_SET entry
@@ -1510,8 +1437,8 @@ int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, D
     }
 }
 
-/* local enumeration: this node's own entities (functions, variables, signals, then the
- * plain topics that are not pattern internals), from the manager lists + the handle table */
+/* local enumeration: this node's own entities (functions and variables, then the plain
+ * topics that are not pattern internals), from the manager lists + the handle table */
 int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
     i_DartPatterns *pm;
     uint16_t skip;
@@ -1551,23 +1478,6 @@ int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
             out->forceable = (uint8_t)(v->is_owner && v->allow_force);
             out->index = dart_topic_index(v->value);
             out->schema = dart_topic_schema(v->value);
-            return 1;
-        }
-        case 2: {   /* signals */
-            DartSignal *s = pm ? pm->sigs : NULL;
-            for (skip = it->next_index; s && skip; skip--) s = s->next;
-            if (!s){ it->phase = 3; it->next_index = 0; continue; }
-            it->next_index++;
-            if (i_dart_pat_hidden_name(i_dart_topic_name(s->topic))) continue;
-            memset(out, 0, sizeof *out);
-            out->kind = DART_ENTITY_SIGNAL;
-            out->name = i_dart_topic_name(s->topic);
-            { uint8_t role = i_dart_topic_role(s->topic);
-              out->provides = (uint8_t)dart_role_pubs(role);
-              out->consumes = (uint8_t)dart_role_subs(role); }
-            out->reliable = 1;
-            out->index = dart_topic_index(s->topic);
-            out->schema = dart_topic_schema(s->topic);
             return 1;
         }
         default: {  /* plain topics (pattern channels are covered by the lists above) */

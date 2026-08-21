@@ -2,7 +2,7 @@
  * dynamic Schema/MessageBuilder API, node B receives and decodes it (v4 variable
  * kinds: capped + variable string, variable scalar array, map). Leg 2: the same
  * over service threads. Leg 3: the patterns layer (typed functions incl. blocking /
- * async / fail / defer, variables, signals, typed pub/sub over DART_SCHEMA with the
+ * async / fail / defer, variables, typed pub/sub over DART_SCHEMA with the
  * memcpy, loop, and subset/rebase codec paths, entity reflection). Leg 4: bare-type
  * roots (bool / std::string / std::array / a bare-double variable, plus the dynamic API
  * through the empty path) and the canonical cross-language hashes. Leg 5: standard
@@ -136,8 +136,6 @@ struct AddRsp { int64_t sum; };
 DART_SCHEMA(AddRsp, sum);
 struct Speed { int32_t v; };
 DART_SCHEMA(Speed, v);
-struct Alarm { uint32_t code; };
-DART_SCHEMA(Alarm, code);
 
 /* padding-free: offsets == wire offsets, sizeof == wire size -> memcpy path */
 struct Flat { uint32_t a; float b; };
@@ -293,30 +291,6 @@ static bool patterns_leg() {
     chk("var: remote change arrives", wait_for(3000, [&] { return rlast.load() == 51; }, &b));
     vd.on_change(nullptr); vd.on_write(nullptr); rv.on_change(nullptr);
 
-    /* ---- signals ---- */
-    std::atomic<uint32_t> alarm_code{ 0 };
-    dart::Signal<Alarm> emitter(a, "alarm");
-    dart::Signal<Alarm> listener(b, "alarm",
-        [&](const Alarm& s) { alarm_code = s.code; });
-    chk("sig: created", emitter.valid() && listener.valid());
-    chk("sig: listener matched", wait_for(4000,
-        [&] { return emitter.listener_count() >= 1; }, &b));
-    chk("sig: emit accepted", emitter.emit(Alarm{ 123 }) == dart::SendStatus::Ok);
-    chk("sig: typed payload received", wait_for(3000,
-        [&] { return alarm_code.load() == 123; }, &b));
-
-    /* payload-less signal through the untyped twin */
-    std::atomic<int> pings{ 0 };
-    dart::Signal<> ping(a, "ping");
-    dart::Signal<> pong(b, "ping", nullptr,
-        [&](const dart::MessageView& m) { (void)m; pings++; });
-    chk("sig: untyped pair created", ping.valid() && pong.valid());
-    chk("sig: untyped listener matched", wait_for(4000,
-        [&] { return ping.listener_count() >= 1; }, &b));
-    chk("sig: payload-less emit", ping.emit() == dart::SendStatus::Ok);
-    chk("sig: payload-less received", wait_for(3000,
-        [&] { return pings.load() >= 1; }, &b));
-
     /* ---- typed pub/sub: memcpy path (padding-free struct, identical schemas) ---- */
     dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
     std::atomic<bool> flat_ok{ false };
@@ -366,7 +340,6 @@ static bool patterns_leg() {
     auto local = a.entities();
     chk("reflect: local function folded",  find(local, dart::EntityKind::Function, "add") != nullptr);
     chk("reflect: local variable folded",  find(local, dart::EntityKind::Variable, "speed") != nullptr);
-    chk("reflect: local signal folded",    find(local, dart::EntityKind::Signal, "alarm") != nullptr);
     chk("reflect: local topic passes",     find(local, dart::EntityKind::Topic, "flat") != nullptr);
     const dart::Entity* var_ent = find(local, dart::EntityKind::Variable, "speed");
     chk("reflect: variable writable", var_ent && var_ent->writable);

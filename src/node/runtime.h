@@ -540,12 +540,12 @@ DartTopic   *dart_node_log_topic(DartNode *n, DartLogLevel level);
 #define DART_META_PEERS  0x8u
 
 /* ---- internal hooks for the patterns layer (src/patterns) ---------------------------
- * The patterns layer (functions / variables / signals) builds on a node but needs three
+ * The patterns layer (functions / variables) builds on a node but needs three
  * node-internal seams the public API does not expose: create a topic carrying an entity
  * kind + payload prefix (and a reserved '@' name), route that topic's messages to a
  * pattern handler instead of the app's on_message, and observe node-wide events + a
  * per-poll tick for call timeouts. These are i_-prefixed and kind-agnostic; the node
- * knows nothing of what functions/variables/signals mean. */
+ * knows nothing of what functions/variables mean. */
 typedef void     (*i_DartSysMsgFn)(void *user, const DartMsg *msg);
 typedef void     (*i_DartSysEventFn)(void *user, const DartEvent *ev);
 typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns next deadline us (0 = none) */
