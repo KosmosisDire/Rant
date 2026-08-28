@@ -37,9 +37,8 @@
 /* per-entry interest flags (the announce's hash list; see core.h "Interest exchange") */
 #define DART__INT_ROLE_MASK 0x03u /* bits 0-1: the advertiser's DartRole */
 #define DART__INT_RELIABLE  0x04u /* bit 2: offered (pub) / requested (sub) reliability */
-#define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
+#define DART__INT_KIND_MASK 0x78u /* bits 3-6: the advertiser's DartTopicKind (16 values) */
 #define DART__INT_KIND_SHIFT 3u
-#define DART__INT_FORCEABLE 0x40u /* bit 6: a per-topic patterns flag (variable value channel: owner permits force) */
 #define DART__INT_HOLE_RUN  0x80u /* bit 7: this entry is a RUN of undefined reserve slots; the
                                      hash field carries the run length. Later indices stay stable
                                      without shipping one 5 B hole per slot (builtins sit at the
@@ -172,8 +171,8 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                contiguous-received front); deliver_upto+assembly_low = first hole */
     uint8_t  used;
     uint8_t  no_timestamp;  /* this writer publishes the topic WITHOUT the source stamp: sourced
-                               from the peer's interest (the sparse opt-out section) on every
-                               apply, so the receiving side knows whether the sample begins with
+                               from the peer's cached detail attrs on every interest apply, so
+                               the receiving side knows whether the sample begins with
                                DART_TIMESTAMP_BYTES. 0 (a fresh match memsets it) = stamped. */
     uint8_t  started;       /* accepted any DATA from this writer yet */
     uint8_t  assembly_active;    /* received >=1 frag of current sample */
@@ -215,7 +214,9 @@ typedef struct {
     uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
     uint8_t   role;         /* DartRole */
     uint8_t   kind;         /* DartTopicKind: gates matching (same kind only) */
-    uint8_t   forceable;    /* patterns aux flag advertised in interest bit 6 (variable value channel: owner permits force) */
+    uint8_t   attrs;        /* DART_ATTR_* facts declared by the definer; served to peers in the
+                               DETAIL_RESP entry (NO_TIMESTAMP is derived from qos there, never
+                               stored here) */
     uint8_t   prefix_bytes; /* pattern-header bytes in front of each payload (0 = plain) */
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
@@ -292,6 +293,9 @@ struct DartTransportState {
                                      the verdict re-pends and details re-verify the new
                                      binding. Tracks the latest applied gen for pending
                                      entries too, so a verdict formed next binds to it. */
+    uint8_t    **peer_attrs;      /* [max_peers] -> the peer's advertised DART_ATTR_* byte per
+                                     entry (parallel to peer_astate: same length, lifetime, and
+                                     re-pend clears). Written at detail intake, 0 until then. */
     uint32_t    *peer_seen_version; /* [max_peers] highest OUR-blob version this peer has named
                                        in a uDTL request: proof it applied our announce at that
                                        version (fed by the runtime via

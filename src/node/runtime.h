@@ -552,13 +552,13 @@ typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns n
 typedef void     (*i_DartSysCloseFn)(void *user);   /* node closing: settle outstanding promises */
 
 /* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
- * per-payload prefix, the directed flag, and the forceable aux flag (advertised in interest
- * bit 6), permits '@' in the name (reserved for pattern channels), and routes this topic's
- * deliveries to on_msg (may be NULL) instead of the node's on_message. Never queued. Returns
- * a handle or NULL. */
+ * per-payload prefix, the directed flag, and the declared attrs byte (DART_ATTR_*, served
+ * to peers via the detail exchange), permits '@' in the name (reserved for pattern
+ * channels), and routes this topic's deliveries to on_msg (may be NULL) instead of the
+ * node's on_message. Never queued. Returns a handle or NULL. */
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn on_msg, void *on_msg_user);
 /* Publish hdr+payload on a pattern topic (broadcast to all matched subscribers). */
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
@@ -613,6 +613,9 @@ uint8_t    i_dart_topic_kind (const DartTopic *topic);   /* DartTopicKind */
 uint8_t    i_dart_topic_role (const DartTopic *topic);   /* DartRole (current) */
 DartString i_dart_topic_name (const DartTopic *topic);   /* the stable name copy */
 uint16_t   i_dart_node_topic_count(DartNode *n);         /* created topics (handles 0..count) */
+/* The DART_ATTR_* byte a peer advertised for ITS topic at their_index (0 until details
+ * arrive): the entity walk decodes DartEntityInfo's named flag fields from it. */
+uint8_t    i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index);
 /* Build the introspection snapshot for the DART_META_* mask (0 = all sections) into a
  * node-owned grown buffer: a serialize-layer MAP body (feed to dart_map_* or wrap in a
  * schema message). A view valid until the next call; {NULL,0} on OOM. The @dart/meta

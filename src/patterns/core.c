@@ -848,7 +848,7 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
 
     v->value = i_dart_node_create_pattern_topic(n, name, owner ? DART_PUB_ONLY : DART_SUB_ONLY,
                               schema, &vopt, DART_KIND_VARIABLE, DART__VAR_PREFIX, 0,
-                              (uint8_t)(owner && v->allow_force),   /* owner advertises whether force is permitted */
+                              (uint8_t)((owner && v->allow_force) ? DART_ATTR_FORCEABLE : 0u),
                               owner ? NULL : i_dart_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool-allocated: nothing routes into it yet */
     if (owner)
@@ -1345,7 +1345,9 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
     out->hash = e->hash;
     out->provides = (uint8_t)dart_role_pubs(e->role);
     out->consumes = (uint8_t)dart_role_subs(e->role);
-    out->forceable = e->forceable;   /* variable value channel: the owner advertised allow_force */
+    /* attrs ride the detail exchange (0 until details arrive, like the name) */
+    out->forceable = (uint8_t)((i_dart_node_peer_attrs(n, peer, e->index)
+                                & DART_ATTR_FORCEABLE) ? 1 : 0);
     out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
 }
 

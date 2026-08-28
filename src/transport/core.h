@@ -85,7 +85,7 @@ static inline int dart_role_subs(uint8_t role){ return role == DART_PUBSUB || ro
 /* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
  * layer (src/patterns/) builds functions and variables over dedicated kinds,
  * each a distinct channel that only pairs with the same kind. The kind rides the announce
- * interest flags (bits 3-5, so 8 values) and gates matching like role/reliability: a same
+ * interest flags (bits 3-6, so 16 values) and gates matching like role/reliability: a same
  * name with a different kind is a disjoint entity, its pairing refused (KIND_MISMATCH), not
  * silently cross-wired. Kind is immutable per topic (like name/schema). */
 typedef enum {
@@ -95,6 +95,16 @@ typedef enum {
     DART_KIND_VARIABLE = 3,   /* variable value channel     (owner pubs, observers sub) */
     DART_KIND_VAR_SET  = 4    /* variable set channel       (writers pub, owner subs) */
 } DartTopicKind;
+
+/* Per-topic ATTRS byte: descriptive immutable facts about a topic, served to peers in the
+ * DETAIL_RESP entry and cached per (peer, index) beside the verdicts (query the cache with
+ * dart_transport_peer_attrs). The definer declares them in DartTopicDef.attrs, except
+ * NO_TIMESTAMP, which the responder derives from DartQos.no_timestamp. */
+#define DART_ATTR_NO_TIMESTAMP 0x01u /* publisher sends no source stamp (DartQos.no_timestamp) */
+#define DART_ATTR_MULTI        0x02u /* authority kinds: duplicate authority is intended */
+#define DART_ATTR_FORCEABLE    0x04u /* variable value channel: the owner permits force */
+#define DART_ATTR_CANCELLABLE  0x08u /* task request channel: the provider honors cancel */
+#define DART_ATTR_EXCLUSIVE    0x10u /* task request channel: declared serialization */
 
 /* Every field except reliability is zero-means-default, so a reliable topic is
  * just { .reliability = DART_RELIABLE }. */
@@ -145,8 +155,8 @@ typedef struct {
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
     uint8_t  kind;     /* DartTopicKind; 0 = plain DART_KIND_TOPIC (the patterns layer sets the rest) */
-    uint8_t  forceable; /* patterns aux flag ridden in interest bit 6 (the variable value channel sets it
-                           when the owner permits force); opaque to the transport, 0 = plain topic. */
+    uint8_t  attrs;    /* DART_ATTR_* facts declared by the definer (NO_TIMESTAMP is derived from qos,
+                          never set here); served to peers via the detail exchange. 0 = plain topic. */
     uint8_t  prefix_bytes; /* pattern-header bytes prepended to every payload on this topic (the wire
                               carries hdr+payload as one message; the receiver splits at this offset and
                               validates the schema against the payload only). 0 = none. */
@@ -341,8 +351,7 @@ void      dart_transport_peer_set_frag(DartTransportState *st, uint32_t peer_id,
  *
  * Two SPARSE sections follow the positional entries, each defaulting to zero entries so a
  * plain node pays 4 bytes total: the best-effort rate caps (DartQos.max_rate_hz) and the
- * topics published WITHOUT a source timestamp (DartQos.no_timestamp), so a receiver knows
- * per writer whether the stream carries the 8-byte stamp. */
+ * rebind generations of ever-reused slots (dart_transport_topic_reuse). */
 size_t    dart_interest_max(uint16_t n_topics);
 size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_t cap);
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
@@ -352,10 +361,10 @@ void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t pe
  * byte, and (inline case) its hash-only interest list: the transport's OVERLAY, carried
  * opaquely inside discovery's announce blob (the node name lives in discovery's own
  * section, not here). Layout:
- *   v16: ['D','N',16, frag_lo, frag_hi, iflags,                <interest>]
- *   v17: ['D','N',17, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
- * frag sits at [3..4] in both; v17 adds the SHM byte + host. dart_transport_meta_build
- * writes v17 when DART_SHM is compiled, v16 otherwise. iflags bit 0 = INTEREST_EXTERNAL:
+ *   even ver (no SHM): ['D','N',ver, frag_lo, frag_hi, iflags,                <interest>]
+ *   odd ver  (SHM):    ['D','N',ver, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
+ * frag sits at [3..4] in both; the odd form adds the SHM byte + host. dart_transport_meta_build
+ * writes the odd version when DART_SHM is compiled, the even one otherwise. iflags bit 0 = INTEREST_EXTERNAL:
  * the interest list did NOT fit the announce datagram, nothing follows the base, and
  * peers pull the identical interest blob over the unicast 'uDTL' paging below
  * (DART_INTEREST_REQ/RESP). Clear = the inlined interest (even when empty) is
@@ -414,7 +423,6 @@ typedef struct {
                                topic yields twice, pub first, mirroring the old two-list walk) */
     uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
     uint8_t     kind;       /* the advertiser's DartTopicKind for this topic (0 = plain) */
-    uint8_t     forceable;  /* patterns aux flag (interest bit 6): the variable value channel's owner permits force */
     uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
 } DartTopicEntry;
 
@@ -453,10 +461,11 @@ int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
  * harmless and nobody stores requests; a lost response heals by the requester re-asking.
  * The node runtime routes these on its unicast data socket next to the transport
  * datagrams; sans-IO callers run the codec over their own pipe. Layout (LE):
- *   ['u','D','T','L'][kind][fam ver=1][u16 domain][u32 meta_version][u16 n][entries]
+ *   ['u','D','T','L'][kind][fam ver][u16 domain][u32 meta_version][u16 n][entries]
  *   REQ  entry: [u16 index][u64 schema_hash]     the REQUESTER's hash for its matching
  *               topic (0 = none), so the responder inlines the wire only on mismatch
- *   RESP entry: [u16 index][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ *   RESP entry: [u16 index][u8 attrs][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ *               attrs = the topic's DART_ATTR_* byte (NO_TIMESTAMP derived from its qos)
  * meta_version: on a REQ, the responder announce version the indices were read from; on
  * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
  * the requested indices the responder currently advertises, truncated at an entry
@@ -544,6 +553,7 @@ size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSc
  * source response (NOT NUL-terminated / not owned), so keep that buffer alive. */
 typedef struct {
     uint16_t   index;       /* the responder's local topic index */
+    uint8_t    attrs;       /* the topic's DART_ATTR_* byte */
     DartString name;        /* topic name (not NUL-terminated) */
     uint64_t   schema_hash; /* the responder's schema identity (0 = untyped) */
     DartBytes  schema_wire; /* canonical wire bytes, only when the request's hash differed
@@ -654,6 +664,11 @@ DartString dart_transport_topic_name(DartTransportState *st, uint16_t topic_inde
  * side asks per delivered message so it strips exactly what the writer prepended. */
 int       dart_transport_peer_timestamped(DartTransportState *st, uint16_t topic_index,
                        uint32_t peer_id);
+
+/* The DART_ATTR_* byte the peer advertised for ITS topic at their_index, from the cached
+ * detail exchange; 0 when the peer/index is unknown or details have not arrived. */
+uint8_t   dart_transport_peer_attrs(DartTransportState *st, uint32_t peer_id,
+                       uint16_t their_index);
 
 /* dart_transport_send / dart_transport_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {

@@ -405,7 +405,7 @@ static inline int dart_role_subs(uint8_t role){ return role == DART_PUBSUB || ro
 /* Entity kind: what a topic carries. Plain pub/sub is DART_KIND_TOPIC (0); the patterns
  * layer (src/patterns/) builds functions and variables over dedicated kinds,
  * each a distinct channel that only pairs with the same kind. The kind rides the announce
- * interest flags (bits 3-5, so 8 values) and gates matching like role/reliability: a same
+ * interest flags (bits 3-6, so 16 values) and gates matching like role/reliability: a same
  * name with a different kind is a disjoint entity, its pairing refused (KIND_MISMATCH), not
  * silently cross-wired. Kind is immutable per topic (like name/schema). */
 typedef enum {
@@ -415,6 +415,16 @@ typedef enum {
     DART_KIND_VARIABLE = 3,   /* variable value channel     (owner pubs, observers sub) */
     DART_KIND_VAR_SET  = 4    /* variable set channel       (writers pub, owner subs) */
 } DartTopicKind;
+
+/* Per-topic ATTRS byte: descriptive immutable facts about a topic, served to peers in the
+ * DETAIL_RESP entry and cached per (peer, index) beside the verdicts (query the cache with
+ * dart_transport_peer_attrs). The definer declares them in DartTopicDef.attrs, except
+ * NO_TIMESTAMP, which the responder derives from DartQos.no_timestamp. */
+#define DART_ATTR_NO_TIMESTAMP 0x01u /* publisher sends no source stamp (DartQos.no_timestamp) */
+#define DART_ATTR_MULTI        0x02u /* authority kinds: duplicate authority is intended */
+#define DART_ATTR_FORCEABLE    0x04u /* variable value channel: the owner permits force */
+#define DART_ATTR_CANCELLABLE  0x08u /* task request channel: the provider honors cancel */
+#define DART_ATTR_EXCLUSIVE    0x10u /* task request channel: declared serialization */
 
 /* Every field except reliability is zero-means-default, so a reliable topic is
  * just { .reliability = DART_RELIABLE }. */
@@ -465,8 +475,8 @@ typedef struct {
     DartQos   qos;
     uint8_t  role;     /* DartRole; 0 = pub+sub */
     uint8_t  kind;     /* DartTopicKind; 0 = plain DART_KIND_TOPIC (the patterns layer sets the rest) */
-    uint8_t  forceable; /* patterns aux flag ridden in interest bit 6 (the variable value channel sets it
-                           when the owner permits force); opaque to the transport, 0 = plain topic. */
+    uint8_t  attrs;    /* DART_ATTR_* facts declared by the definer (NO_TIMESTAMP is derived from qos,
+                          never set here); served to peers via the detail exchange. 0 = plain topic. */
     uint8_t  prefix_bytes; /* pattern-header bytes prepended to every payload on this topic (the wire
                               carries hdr+payload as one message; the receiver splits at this offset and
                               validates the schema against the payload only). 0 = none. */
@@ -661,8 +671,7 @@ void      dart_transport_peer_set_frag(DartTransportState *st, uint32_t peer_id,
  *
  * Two SPARSE sections follow the positional entries, each defaulting to zero entries so a
  * plain node pays 4 bytes total: the best-effort rate caps (DartQos.max_rate_hz) and the
- * topics published WITHOUT a source timestamp (DartQos.no_timestamp), so a receiver knows
- * per writer whether the stream carries the 8-byte stamp. */
+ * rebind generations of ever-reused slots (dart_transport_topic_reuse). */
 size_t    dart_interest_max(uint16_t n_topics);
 size_t    dart_transport_build_interest(DartTransportState *st, void *out, size_t cap);
 void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id, DartBytes blob);
@@ -672,10 +681,10 @@ void      dart_transport_apply_peer_interest(DartTransportState *st, uint32_t pe
  * byte, and (inline case) its hash-only interest list: the transport's OVERLAY, carried
  * opaquely inside discovery's announce blob (the node name lives in discovery's own
  * section, not here). Layout:
- *   v16: ['D','N',16, frag_lo, frag_hi, iflags,                <interest>]
- *   v17: ['D','N',17, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
- * frag sits at [3..4] in both; v17 adds the SHM byte + host. dart_transport_meta_build
- * writes v17 when DART_SHM is compiled, v16 otherwise. iflags bit 0 = INTEREST_EXTERNAL:
+ *   even ver (no SHM): ['D','N',ver, frag_lo, frag_hi, iflags,                <interest>]
+ *   odd ver  (SHM):    ['D','N',ver, frag_lo, frag_hi, shm, host[16], iflags, <interest>]
+ * frag sits at [3..4] in both; the odd form adds the SHM byte + host. dart_transport_meta_build
+ * writes the odd version when DART_SHM is compiled, the even one otherwise. iflags bit 0 = INTEREST_EXTERNAL:
  * the interest list did NOT fit the announce datagram, nothing follows the base, and
  * peers pull the identical interest blob over the unicast 'uDTL' paging below
  * (DART_INTEREST_REQ/RESP). Clear = the inlined interest (even when empty) is
@@ -734,7 +743,6 @@ typedef struct {
                                topic yields twice, pub first, mirroring the old two-list walk) */
     uint8_t     reliable;   /* offered (pub yield) / requested (sub yield) reliability */
     uint8_t     kind;       /* the advertiser's DartTopicKind for this topic (0 = plain) */
-    uint8_t     forceable;  /* patterns aux flag (interest bit 6): the variable value channel's owner permits force */
     uint32_t    hash;       /* low 32 bits of the topic's 64-bit name identity */
 } DartTopicEntry;
 
@@ -773,10 +781,11 @@ int       dart_meta_shm(DartBytes meta, uint8_t host[16]);
  * harmless and nobody stores requests; a lost response heals by the requester re-asking.
  * The node runtime routes these on its unicast data socket next to the transport
  * datagrams; sans-IO callers run the codec over their own pipe. Layout (LE):
- *   ['u','D','T','L'][kind][fam ver=1][u16 domain][u32 meta_version][u16 n][entries]
+ *   ['u','D','T','L'][kind][fam ver][u16 domain][u32 meta_version][u16 n][entries]
  *   REQ  entry: [u16 index][u64 schema_hash]     the REQUESTER's hash for its matching
  *               topic (0 = none), so the responder inlines the wire only on mismatch
- *   RESP entry: [u16 index][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ *   RESP entry: [u16 index][u8 attrs][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]
+ *               attrs = the topic's DART_ATTR_* byte (NO_TIMESTAMP derived from its qos)
  * meta_version: on a REQ, the responder announce version the indices were read from; on
  * a RESP, the responder's CURRENT version (what the details bind to). A RESP holds only
  * the requested indices the responder currently advertises, truncated at an entry
@@ -864,6 +873,7 @@ size_t    dart_transport_detail_respond(DartTransportState *st, const DartMetaSc
  * source response (NOT NUL-terminated / not owned), so keep that buffer alive. */
 typedef struct {
     uint16_t   index;       /* the responder's local topic index */
+    uint8_t    attrs;       /* the topic's DART_ATTR_* byte */
     DartString name;        /* topic name (not NUL-terminated) */
     uint64_t   schema_hash; /* the responder's schema identity (0 = untyped) */
     DartBytes  schema_wire; /* canonical wire bytes, only when the request's hash differed
@@ -974,6 +984,11 @@ DartString dart_transport_topic_name(DartTransportState *st, uint16_t topic_inde
  * side asks per delivered message so it strips exactly what the writer prepended. */
 int       dart_transport_peer_timestamped(DartTransportState *st, uint16_t topic_index,
                        uint32_t peer_id);
+
+/* The DART_ATTR_* byte the peer advertised for ITS topic at their_index, from the cached
+ * detail exchange; 0 when the peer/index is unknown or details have not arrived. */
+uint8_t   dart_transport_peer_attrs(DartTransportState *st, uint32_t peer_id,
+                       uint16_t their_index);
 
 /* dart_transport_send / dart_transport_send_shm result: 0 ok, negative on error (returned as int). */
 typedef enum {
@@ -2763,13 +2778,13 @@ typedef uint64_t (*i_DartSysTickFn)(void *user, uint64_t now_us);   /* returns n
 typedef void     (*i_DartSysCloseFn)(void *user);   /* node closing: settle outstanding promises */
 
 /* Create a pattern topic: like dart_node_create_topic, but stamps the entity kind, the
- * per-payload prefix, the directed flag, and the forceable aux flag (advertised in interest
- * bit 6), permits '@' in the name (reserved for pattern channels), and routes this topic's
- * deliveries to on_msg (may be NULL) instead of the node's on_message. Never queued. Returns
- * a handle or NULL. */
+ * per-payload prefix, the directed flag, and the declared attrs byte (DART_ATTR_*, served
+ * to peers via the detail exchange), permits '@' in the name (reserved for pattern
+ * channels), and routes this topic's deliveries to on_msg (may be NULL) instead of the
+ * node's on_message. Never queued. Returns a handle or NULL. */
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn on_msg, void *on_msg_user);
 /* Publish hdr+payload on a pattern topic (broadcast to all matched subscribers). */
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
@@ -2824,6 +2839,9 @@ uint8_t    i_dart_topic_kind (const DartTopic *topic);   /* DartTopicKind */
 uint8_t    i_dart_topic_role (const DartTopic *topic);   /* DartRole (current) */
 DartString i_dart_topic_name (const DartTopic *topic);   /* the stable name copy */
 uint16_t   i_dart_node_topic_count(DartNode *n);         /* created topics (handles 0..count) */
+/* The DART_ATTR_* byte a peer advertised for ITS topic at their_index (0 until details
+ * arrive): the entity walk decodes DartEntityInfo's named flag fields from it. */
+uint8_t    i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index);
 /* Build the introspection snapshot for the DART_META_* mask (0 = all sections) into a
  * node-owned grown buffer: a serialize-layer MAP body (feed to dart_map_* or wrap in a
  * schema message). A view valid until the next call; {NULL,0} on OOM. The @dart/meta
@@ -3546,9 +3564,8 @@ static inline uint64_t i_dart_fnv1a64_str(const char *s){
 /* per-entry interest flags (the announce's hash list; see core.h "Interest exchange") */
 #define DART__INT_ROLE_MASK 0x03u /* bits 0-1: the advertiser's DartRole */
 #define DART__INT_RELIABLE  0x04u /* bit 2: offered (pub) / requested (sub) reliability */
-#define DART__INT_KIND_MASK 0x38u /* bits 3-5: the advertiser's DartTopicKind */
+#define DART__INT_KIND_MASK 0x78u /* bits 3-6: the advertiser's DartTopicKind (16 values) */
 #define DART__INT_KIND_SHIFT 3u
-#define DART__INT_FORCEABLE 0x40u /* bit 6: a per-topic patterns flag (variable value channel: owner permits force) */
 #define DART__INT_HOLE_RUN  0x80u /* bit 7: this entry is a RUN of undefined reserve slots; the
                                      hash field carries the run length. Later indices stay stable
                                      without shipping one 5 B hole per slot (builtins sit at the
@@ -3681,8 +3698,8 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                contiguous-received front); deliver_upto+assembly_low = first hole */
     uint8_t  used;
     uint8_t  no_timestamp;  /* this writer publishes the topic WITHOUT the source stamp: sourced
-                               from the peer's interest (the sparse opt-out section) on every
-                               apply, so the receiving side knows whether the sample begins with
+                               from the peer's cached detail attrs on every interest apply, so
+                               the receiving side knows whether the sample begins with
                                DART_TIMESTAMP_BYTES. 0 (a fresh match memsets it) = stamped. */
     uint8_t  started;       /* accepted any DATA from this writer yet */
     uint8_t  assembly_active;    /* received >=1 frag of current sample */
@@ -3724,7 +3741,9 @@ typedef struct {
     uint8_t   name_len;     /* its length, stored so it is never re-derived (dart_transport_topic_name is per-delivery) */
     uint8_t   role;         /* DartRole */
     uint8_t   kind;         /* DartTopicKind: gates matching (same kind only) */
-    uint8_t   forceable;    /* patterns aux flag advertised in interest bit 6 (variable value channel: owner permits force) */
+    uint8_t   attrs;        /* DART_ATTR_* facts declared by the definer; served to peers in the
+                               DETAIL_RESP entry (NO_TIMESTAMP is derived from qos there, never
+                               stored here) */
     uint8_t   prefix_bytes; /* pattern-header bytes in front of each payload (0 = plain) */
     uint8_t   directed;     /* 1 = point-to-point sends; suppress the cross-lane skip MSG_LOST */
     uint8_t   history_owned;/* 1 = history ring was allocator-allocated (reserve-mode
@@ -3801,6 +3820,9 @@ struct DartTransportState {
                                      the verdict re-pends and details re-verify the new
                                      binding. Tracks the latest applied gen for pending
                                      entries too, so a verdict formed next binds to it. */
+    uint8_t    **peer_attrs;      /* [max_peers] -> the peer's advertised DART_ATTR_* byte per
+                                     entry (parallel to peer_astate: same length, lifetime, and
+                                     re-pend clears). Written at detail intake, 0 until then. */
     uint32_t    *peer_seen_version; /* [max_peers] highest OUR-blob version this peer has named
                                        in a uDTL request: proof it applied our announce at that
                                        version (fed by the runtime via
@@ -5247,6 +5269,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint32_t *peer_index_len = (uint32_t*) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
       uint8_t **peer_astate    = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
       uint8_t **peer_agen      = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
+      uint8_t **peer_attrs     = (uint8_t**) i_dart_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
       uint32_t *peer_seen_version = (uint32_t*)i_dart_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
       name_pool = (char*)i_dart_bump_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
@@ -5262,7 +5285,8 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
           st->peer_index=peer_index; st->peer_index_len=peer_index_len;
           st->peer_astate=peer_astate;
-          st->peer_agen=peer_agen; st->peer_seen_version=peer_seen_version;
+          st->peer_agen=peer_agen; st->peer_attrs=peer_attrs;
+          st->peer_seen_version=peer_seen_version;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=DART_FRAG_SIZE; }  /* set per peer on add */
 #ifdef DART_SHM
@@ -5272,6 +5296,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
           memset(peer_index_len, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_astate, 0, (size_t)max_peers*sizeof(uint8_t*));
           memset(peer_agen, 0, (size_t)max_peers*sizeof(uint8_t*));
+          memset(peer_attrs, 0, (size_t)max_peers*sizeof(uint8_t*));
           memset(peer_seen_version, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
@@ -5305,7 +5330,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
                 topic->qos=q;
                 topic->role=def->role;
                 topic->kind=def->kind; topic->prefix_bytes=def->prefix_bytes; topic->directed=def->directed;
-                topic->forceable=def->forceable;
+                topic->attrs=def->attrs;
                 topic->identity = dart_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
                 topic->name_len = (uint8_t)lane;
@@ -5414,6 +5439,7 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
         nw->peer_index_len[p] = old->peer_index_len[p];
         nw->peer_astate[p]    = old->peer_astate[p];
         nw->peer_agen[p]      = old->peer_agen[p];
+        nw->peer_attrs[p]     = old->peer_attrs[p];
         nw->peer_seen_version[p] = old->peer_seen_version[p];
     }
     /* scheduler is fresh/empty: re-enqueue every used lane, then force a full sweep
@@ -5660,6 +5686,7 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
         memset(st->peer_index[free],0xFF,(size_t)st->peer_index_len[free]*sizeof(uint16_t));
         if (st->peer_astate[free]) memset(st->peer_astate[free],0,st->peer_index_len[free]);
         if (st->peer_agen[free])   memset(st->peer_agen[free],0,st->peer_index_len[free]);
+        if (st->peer_attrs[free])  memset(st->peer_attrs[free],0,st->peer_index_len[free]);
     }
     st->peer_seen_version[free]=0;   /* seen versions are per incarnation */
     /* nothing matches until dart_transport_apply_peer_interest feeds the peer's interest
@@ -5683,7 +5710,9 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
         st->cfg.allocator(st->cfg.user, st->peer_index[s], 0);
         if (st->peer_astate[s]) st->cfg.allocator(st->cfg.user, st->peer_astate[s], 0);
         if (st->peer_agen[s])   st->cfg.allocator(st->cfg.user, st->peer_agen[s], 0);
-        st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_agen[s]=NULL; st->peer_index_len[s]=0;
+        if (st->peer_attrs[s])  st->cfg.allocator(st->cfg.user, st->peer_attrs[s], 0);
+        st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_agen[s]=NULL;
+        st->peer_attrs[s]=NULL; st->peer_index_len[s]=0;
     }
     st->peer_seen_version[s]=0;
     st->peer_used[s]=0; st->peer_dormant[s]=0;
@@ -5776,6 +5805,10 @@ void dart_transport_destroy(DartTransportState *st){
                 st->cfg.allocator(st->cfg.user, st->peer_agen[p], 0);
                 st->peer_agen[p]=NULL;
             }
+            if (st->peer_attrs[p]){
+                st->cfg.allocator(st->cfg.user, st->peer_attrs[p], 0);
+                st->peer_attrs[p]=NULL;
+            }
         }
     }
 }
@@ -5788,7 +5821,7 @@ void dart_transport_destroy(DartTransportState *st){
  * covered. */
 static uint16_t *i_dart_peer_index_ensure(DartTransportState *st, int peer_slot, uint32_t need){
     uint32_t have = st->peer_index_len[peer_slot];
-    uint16_t *nm; uint8_t *ns, *ng;
+    uint16_t *nm; uint8_t *ns, *ng, *na;
     if (need <= have) return st->peer_index[peer_slot];
     nm = (uint16_t*)st->cfg.allocator(st->cfg.user, st->peer_index[peer_slot], (size_t)need*sizeof(uint16_t));
     if (!nm) return NULL;
@@ -5798,10 +5831,15 @@ static uint16_t *i_dart_peer_index_ensure(DartTransportState *st, int peer_slot,
     st->peer_astate[peer_slot] = ns;
     ng = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_agen[peer_slot], (size_t)need);
     if (!ng) return NULL;
+    st->peer_agen[peer_slot] = ng;
+    na = (uint8_t*)st->cfg.allocator(st->cfg.user, st->peer_attrs[peer_slot], (size_t)need);
+    if (!na) return NULL;
+    st->peer_attrs[peer_slot] = na;
     memset(nm + have, 0xFF, (size_t)(need-have)*sizeof(uint16_t));   /* grown tail: unmapped */
     memset(ns + have, 0, (size_t)(need-have));                       /* ...no verdicts */
     memset(ng + have, 0, (size_t)(need-have));                       /* ...generation 0 */
-    st->peer_agen[peer_slot] = ng; st->peer_index_len[peer_slot] = need;
+    memset(na + have, 0, (size_t)(need-have));                       /* ...no attrs */
+    st->peer_index_len[peer_slot] = need;
     return nm;
 }
 
@@ -5823,11 +5861,10 @@ static int i_dart_hash32_candidates(DartTransportState *st, uint32_t h, int *idx
 
 /* Upper bound on dart_transport_build_interest output, for sizing the announce buffer:
  * one positional [u32 hash][u8 flags] entry per topic slot, plus the worst-case rate
- * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry),
- * the worst-case no-timestamp section ([u16 n] + 2 B per opted-out topic), and the
- * worst-case generation section ([u16 n] + 3 B per rebound topic). */
+ * section (every topic could advertise a max_rate_hz: [u16 n_rates] + 4 B per entry)
+ * and the worst-case generation section ([u16 n] + 3 B per rebound topic). */
 size_t dart_interest_max(uint16_t n_topics){
-    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics + 2u + 2u * (size_t)n_topics
+    return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics
          + 2u + 3u * (size_t)n_topics;
 }
 
@@ -5835,12 +5872,6 @@ size_t dart_interest_max(uint16_t n_topics){
  * membership test, shared by the count and the write walk so they cannot drift) */
 static int i_dart_topic_rate_sub(const i_DartTopic *t){
     return i_dart_topic_announced(t) && t->qos.max_rate_hz && dart_role_subs(t->role);
-}
-
-/* is this a topic we PUBLISH without the source stamp? (the no-timestamp section's
- * membership test, shared by the count and the write walk so they cannot drift) */
-static int i_dart_topic_unstamped_pub(const i_DartTopic *t){
-    return i_dart_topic_announced(t) && t->qos.no_timestamp && dart_role_pubs(t->role);
 }
 
 /* was this slot ever REBOUND to a different binding? (the generation section's membership
@@ -5857,34 +5888,29 @@ static int i_dart_topic_rebound(const i_DartTopic *t){
  * UNDEFINED (or RETIRED) reserve slots collapses to ONE entry flagged DART__INT_HOLE_RUN
  * whose hash field is the run length, so later indices stay stable without a big reserve
  * padding the announce to its full size. A defined-but-INACTIVE topic still rides as a
- * normal entry (its identity survives role flips). Then three SPARSE sections: a rate
+ * normal entry (its identity survives role flips). Then two SPARSE sections: a rate
  * section [u16 n_rates][(u16 topic_index)(u16 rate_hz)]* for the subscriber topics that
- * cap their best-effort delivery rate (see DartQos.max_rate_hz), a no-timestamp section
- * [u16 n_unstamped][(u16 topic_index)]* for the PUBLISHED topics that carry no source
- * stamp (see DartQos.no_timestamp), which is what tells a receiver whether a stream
- * begins with DART_TIMESTAMP_BYTES, and a generation section
+ * cap their best-effort delivery rate (see DartQos.max_rate_hz), and a generation section
  * [u16 n_gens][(u16 topic_index)(u8 gen)]* naming every announced slot that was ever
  * REBOUND to a different name/kind/schema (dart_transport_topic_reuse), so a receiver
  * holding a verdict formed under an older generation re-verifies instead of applying it
- * to the new occupant. All three default to zero entries, so each costs 2 bytes on a node
- * that caps no rate, stamps everything, and never rebinds. Returns the exact byte size
- * (measure), or the bytes written / 0 when cap is too small (build). */
+ * to the new occupant. Both default to zero entries, so each costs 2 bytes on a node
+ * that caps no rate and never rebinds. Returns the exact byte size (measure), or the
+ * bytes written / 0 when cap is too small (build). */
 static size_t i_dart_interest_emit(DartTransportState *st, uint8_t *out, size_t cap){
     uint8_t *e, *rp;
-    uint16_t c, n=0, n_rates=0, n_unstamped=0, n_gens=0;
+    uint16_t c, n=0, n_rates=0, n_gens=0;
     uint32_t cells=0; int in_hole=0; size_t len;
     for (c=0;c<st->cfg.n_topics;c++) if (i_dart_topic_announced(&st->topics[c])) n=(uint16_t)(c+1u);
     for (c=0;c<n;c++){                       /* one pass: exact cell count (runs collapse)
-                                                plus the three sparse section counts */
+                                                plus the two sparse section counts */
         const i_DartTopic *topic = &st->topics[c];
         if (i_dart_topic_announced(topic)){ cells++; in_hole=0; }
         else { if (!in_hole) cells++; in_hole=1; }
-        if (i_dart_topic_rate_sub(topic))      n_rates++;
-        if (i_dart_topic_unstamped_pub(topic)) n_unstamped++;
-        if (i_dart_topic_rebound(topic))       n_gens++;
+        if (i_dart_topic_rate_sub(topic)) n_rates++;
+        if (i_dart_topic_rebound(topic))  n_gens++;
     }
-    len = 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 2u*(size_t)n_unstamped
-        + 2u + 3u*(size_t)n_gens;
+    len = 2u + 5u*(size_t)cells + 2u + 4u*(size_t)n_rates + 2u + 3u*(size_t)n_gens;
     if (!out) return len;
     if (cap < len) return 0;
     i_dart_le_w16(out, n);
@@ -5902,8 +5928,7 @@ static size_t i_dart_interest_emit(DartTransportState *st, uint8_t *out, size_t 
         i_dart_le_w32(e, (uint32_t)topic->identity);
         e[4] = (uint8_t)((topic->role & DART__INT_ROLE_MASK)
              | (topic->qos.reliability==DART_RELIABLE ? DART__INT_RELIABLE : 0u)
-             | ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK)
-             | (topic->forceable ? DART__INT_FORCEABLE : 0u));
+             | ((topic->kind << DART__INT_KIND_SHIFT) & DART__INT_KIND_MASK));
         e += 5u;
     }
     rp = e;
@@ -5914,9 +5939,6 @@ static size_t i_dart_interest_emit(DartTransportState *st, uint8_t *out, size_t 
             i_dart_le_w16(rp, c); i_dart_le_w16(rp+2, topic->qos.max_rate_hz); rp += 4u;
         }
     }
-    i_dart_le_w16(rp, n_unstamped); rp += 2u;
-    for (c=0;c<n;c++)
-        if (i_dart_topic_unstamped_pub(&st->topics[c])){ i_dart_le_w16(rp, c); rp += 2u; }
     i_dart_le_w16(rp, n_gens); rp += 2u;
     for (c=0;c<n;c++){
         const i_DartTopic *topic = &st->topics[c];
@@ -5953,22 +5975,22 @@ static uint32_t i_dart_interest_walk_len(const uint8_t *d, size_t len, uint16_t 
     return (uint32_t)(e - d);
 }
 
-/* The three sparse sections that follow the entry stream, located in ONE pass: rate, then
- * no-timestamp, then generation. Each view points at that section's ENTRIES (past its
- * [u16 n] header) and spans n * entry_bytes. Sections are POSITIONAL, so one policy covers
- * all three: a section whose header or whose whole entry array does not fit inside len is
- * ABSENT ({NULL,0}), and so is every section after it (a truncated one leaves the rest
- * unlocatable). A well-formed blob yields all three exactly. */
-typedef struct { DartBytes rate, unstamped, gen; } i_DartInterestSections;
+/* The two sparse sections that follow the entry stream, located in ONE pass: rate, then
+ * generation. Each view points at that section's ENTRIES (past its [u16 n] header) and
+ * spans n * entry_bytes. Sections are POSITIONAL, so one policy covers both: a section
+ * whose header or whose whole entry array does not fit inside len is ABSENT ({NULL,0}),
+ * and so is every section after it (a truncated one leaves the rest unlocatable). A
+ * well-formed blob yields both exactly. */
+typedef struct { DartBytes rate, gen; } i_DartInterestSections;
 
 static i_DartInterestSections i_dart_interest_sections(const uint8_t *d, size_t len,
                                                        uint32_t entries_len){
-    static const uint8_t width[3] = { 4u, 2u, 3u };  /* (index,rate_hz) (index) (index,gen) */
-    i_DartInterestSections s; DartBytes *view[3];
+    static const uint8_t width[2] = { 4u, 3u };  /* (index,rate_hz) (index,gen) */
+    i_DartInterestSections s; DartBytes *view[2];
     size_t off = entries_len; int k;
-    s.rate = s.unstamped = s.gen = dart_bytes(NULL, 0);
-    view[0] = &s.rate; view[1] = &s.unstamped; view[2] = &s.gen;
-    for (k=0;k<3;k++){
+    s.rate = s.gen = dart_bytes(NULL, 0);
+    view[0] = &s.rate; view[1] = &s.gen;
+    for (k=0;k<2;k++){
         size_t bytes;
         if (len < off + 2u) break;                   /* no header: this one and the rest absent */
         bytes = (size_t)i_dart_le_r16(d + off) * width[k];
@@ -6010,7 +6032,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
     astate = amap ? st->peer_astate[peer_slot] : NULL;
     /* The sparse sections, located once, up front. The generation data must be in hand
        BEFORE the entry loop (its per-entry gate below consumes it with a merge cursor);
-       the rate and no-timestamp VALUES are applied after the rematch, once lanes exist. */
+       the rate VALUES are applied after the rematch, once lanes exist. */
     sec = i_dart_interest_sections(d, blob.len, entries_len);
     gp = g_end = NULL;
     if (sec.gen.data){ gp = sec.gen.data; g_end = gp + sec.gen.len; }
@@ -6032,7 +6054,10 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
             while (gp && gp + 3 <= g_end && i_dart_le_r16(gp) < a) gp += 3;
             if (gp && gp + 3 <= g_end && i_dart_le_r16(gp) == a) g = gp[2];
             if (st->peer_agen[peer_slot][a] != g){
-                if (astate[a]){ astate[a] = 0; amap[a] = 0xFFFFu; }
+                if (astate[a]){
+                    astate[a] = 0; amap[a] = 0xFFFFu;
+                    if (st->peer_attrs[peer_slot]) st->peer_attrs[peer_slot][a] = 0;
+                }
                 st->peer_agen[peer_slot][a] = g;
             }
         }
@@ -6052,6 +6077,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
             /* the entry's hash no longer names the identity this verdict bound: the
                position was rebound to a different name (the gen gate's belt) */
             astate[a] = 0; amap[a] = 0xFFFFu;
+            if (st->peer_attrs[peer_slot]) st->peer_attrs[peer_slot][a] = 0;
             continue;
         }
         if (topic->role == DART_INACTIVE || topic->retired){
@@ -6062,6 +6088,7 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
             i_dart_topic_by_identity(st, topic->identity, &resolved_index);
             if ((uint16_t)resolved_index != cidx){
                 astate[a] = 0; amap[a] = 0xFFFFu;      /* pending again; wants() re-asks */
+                if (st->peer_attrs[peer_slot]) st->peer_attrs[peer_slot][a] = 0;
                 continue;
             }
             if (topic->retired) continue;   /* no live successor yet: no bits, no lanes */
@@ -6101,10 +6128,10 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
         i_dart_transport_fire_event(st, DART_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     for (c=0;c<st->cfg.n_topics;c++) i_dart_topic_rematch(st,c,(uint16_t)peer_slot);
 
-    /* The two sparse VALUE sections (located up front), applied AFTER rematch so the lanes
-       exist, and re-applied on every announce: each value is immutable per topic, so a lane
-       re-formed by a role flip simply re-derives it (a fresh match memsets the proxy, so
-       nothing stale survives). */
+    /* Per-lane VALUES (the rate section + the cached detail attrs), applied AFTER rematch
+       so the lanes exist, and re-applied on every announce: each value is immutable per
+       topic, so a lane re-formed by a role flip simply re-derives it (a fresh match memsets
+       the proxy, so nothing stale survives). */
     if (amap && sec.rate.data){
         /* rate entries [(u16 their_index)(u16 rate_hz)]*: their best-effort delivery cap for
            a topic they SUBSCRIBE, so it paces our fire-and-forget writer lane (best-effort,
@@ -6121,15 +6148,16 @@ void dart_transport_apply_peer_interest(DartTransportState *st, uint32_t peer_id
                 w->rate_interval_us = rate_hz ? (1000000u / (uint32_t)rate_hz) : 0u;
         }
     }
-    if (amap && sec.unstamped.data){
-        /* no-timestamp entries [(u16 their_index)]*: topics they PUBLISH without the source
-           stamp, recorded on our reader lane so delivery strips exactly what the writer
-           prepended. Absent/unlisted = stamped (the default). */
-        const uint8_t *p = sec.unstamped.data, *end = p + sec.unstamped.len;
-        for (; p + 2u <= end; p += 2u){
-            uint16_t their_idx = i_dart_le_r16(p), cidx; i_DartReaderProxy *r;
-            if (their_idx >= st->peer_index_len[peer_slot]) continue;
-            cidx = amap[their_idx];
+    if (amap && st->peer_attrs[peer_slot]){
+        /* DART_ATTR_NO_TIMESTAMP from the detail cache onto our reader lane, so delivery
+           strips exactly what the writer prepended. Only a NAME_OK entry maps, and the
+           caller re-runs this apply after details land, so a lane never delivers before
+           its attrs are in hand. Unset = stamped (the default). */
+        const uint8_t *attrs = st->peer_attrs[peer_slot];
+        for (a=0;a<st->peer_index_len[peer_slot];a++){
+            uint16_t cidx; i_DartReaderProxy *r;
+            if (!(attrs[a] & DART_ATTR_NO_TIMESTAMP)) continue;
+            cidx = amap[a];
             if (cidx >= st->cfg.n_topics) continue;             /* unverified/unmapped */
             r = i_dart_reader_proxy_at(st, cidx, (uint32_t)peer_slot);
             if (r && r->used) r->no_timestamp = 1;
@@ -6146,6 +6174,16 @@ int dart_transport_peer_timestamped(DartTransportState *st, uint16_t topic_index
     if (peer_slot < 0) return 1;                       /* unknown peer: the default framing */
     r = i_dart_reader_proxy_at(st, topic_index, (uint32_t)peer_slot);
     return (r && r->no_timestamp) ? 0 : 1;
+}
+
+
+uint8_t dart_transport_peer_attrs(DartTransportState *st, uint32_t peer_id, uint16_t their_index){
+    int peer_slot;
+    if (!st) return 0;
+    peer_slot = i_dart_peer_slot(st, peer_id);
+    if (peer_slot < 0 || !st->peer_attrs[peer_slot]
+        || (uint32_t)their_index >= st->peer_index_len[peer_slot]) return 0;
+    return st->peer_attrs[peer_slot][their_index];
 }
 
 
@@ -6181,17 +6219,17 @@ void dart_transport_peer_match_counts(DartTransportState *st, uint32_t peer_id,
 #define DART__META_BASE_SHM   23u   /* 'D','N',ver, frag_lo, frag_hi, shm, host[16], iflags */
 #define DART__META_IFLAG_EXTERNAL 0x01u   /* iflags bit 0: interest not inlined, pull via uDTL */
 #ifdef DART_SHM
-#define DART__META_VER  19u                 /* what WE write (v18/19: rebind generation section) */
+#define DART__META_VER  21u                 /* what WE write (odd versions carry the SHM base) */
 #define DART__META_BASE DART__META_BASE_SHM
 #else
-#define DART__META_VER  18u
+#define DART__META_VER  20u
 #define DART__META_BASE DART__META_BASE_NOSHM
 #endif
 
 static int i_dart_meta_ok(DartBytes meta){
     return meta.data && meta.len >= DART__META_BASE_NOSHM
         && meta.data[0]=='D' && meta.data[1]=='N'
-        && meta.data[2]>=18 && meta.data[2]<=19;
+        && meta.data[2]>=20 && meta.data[2]<=21;
 }
 /* base prefix through the iflags byte, by version (the odd one carries shm+host, the even
  * one doesn't). iflags is always the base's last byte. */
@@ -6295,7 +6333,6 @@ int dart_interest_next(DartBytes interest, DartInterestIter *it, DartTopicEntry 
         out->role     = role;
         out->reliable = (uint8_t)((flags & DART__INT_RELIABLE) ? 1 : 0);
         out->kind     = (uint8_t)((flags & DART__INT_KIND_MASK) >> DART__INT_KIND_SHIFT);
-        out->forceable = (uint8_t)((flags & DART__INT_FORCEABLE) ? 1 : 0);
         out->hash     = i_dart_le_r32(interest.data + off);
         if (it->phase == 0 && dart_role_pubs(role)){
             out->is_pub = 1;
@@ -6328,7 +6365,7 @@ int dart_meta_shm(DartBytes meta, uint8_t host[16]){
    Parsing is fully bounds-checked: a malformed request or response is dropped wholesale,
    never trusted. The responder side is a pure read of topic + schema state. */
 #define DART__DETAIL_HDR 14u   /* magic(4) kind(1) ver(1) domain(2) meta_version(4) n(2) */
-#define DART__DETAIL_VER 1u
+#define DART__DETAIL_VER 2u
 
 static int i_dart_detail_hdr_ok(DartBytes d){
     return d.data && d.len >= DART__DETAIL_HDR
@@ -6447,7 +6484,7 @@ static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema 
         wire = dart_bytes(NULL, 0);
         if (hash && hash != req_hash && schemas[index].wire.len <= 0xFFFFu)
             wire = schemas[index].wire;    /* differs: inline for the subset check */
-        need = 2u + 1u + topic->name_len + 8u + 2u + wire.len;
+        need = 2u + 1u + 1u + topic->name_len + 8u + 2u + wire.len;
         /* One un-fragmented datagram per response: stop at cap, but ALWAYS include at least
            one entry (n_out>0 gate) so a lone entry larger than a datagram rides its own
            (fragmenting) page instead of wedging paging with an endless header-only reply.
@@ -6457,11 +6494,13 @@ static size_t i_dart_detail_answer(DartTransportState *st, const DartMetaSchema 
         if (out){
             uint8_t *e = out + len;
             i_dart_le_w16(e, index);
-            e[2] = topic->name_len;
-            memcpy(e+3, topic->name, topic->name_len);
-            i_dart_le_w64(e+3+topic->name_len, hash);
-            i_dart_le_w16(e+3+topic->name_len+8, (uint16_t)wire.len);
-            if (wire.len) memcpy(e+3+topic->name_len+10, wire.data, wire.len);
+            e[2] = (uint8_t)(topic->attrs
+                 | (topic->qos.no_timestamp ? DART_ATTR_NO_TIMESTAMP : 0u));
+            e[3] = topic->name_len;
+            memcpy(e+4, topic->name, topic->name_len);
+            i_dart_le_w64(e+4+topic->name_len, hash);
+            i_dart_le_w16(e+4+topic->name_len+8, (uint16_t)wire.len);
+            if (wire.len) memcpy(e+4+topic->name_len+10, wire.data, wire.len);
         }
         len += need;
         n_out++;
@@ -6493,17 +6532,18 @@ int dart_detail_next(DartBytes resp, DartDetailIter *it, DartDetail *out){
     }
     if (!it->left) return 0;
     off = it->off;
-    if ((size_t)off + 3u > resp.len){ it->left = 0; return 0; }        /* truncated: stop */
-    nlen = resp.data[off+2];
-    if ((size_t)off + 3u + nlen + 10u > resp.len){ it->left = 0; return 0; }
-    wlen = i_dart_le_r16(resp.data + off + 3u + nlen + 8u);
-    if ((size_t)off + 3u + nlen + 10u + wlen > resp.len){ it->left = 0; return 0; }
+    if ((size_t)off + 4u > resp.len){ it->left = 0; return 0; }        /* truncated: stop */
+    nlen = resp.data[off+3];
+    if ((size_t)off + 4u + nlen + 10u > resp.len){ it->left = 0; return 0; }
+    wlen = i_dart_le_r16(resp.data + off + 4u + nlen + 8u);
+    if ((size_t)off + 4u + nlen + 10u + wlen > resp.len){ it->left = 0; return 0; }
     out->index       = i_dart_le_r16(resp.data + off);
-    out->name        = dart_string((const char*)(resp.data + off + 3u), nlen);
-    out->schema_hash = i_dart_le_r64(resp.data + off + 3u + nlen);
-    out->schema_wire = wlen ? dart_bytes(resp.data + off + 3u + nlen + 10u, wlen)
+    out->attrs       = resp.data[off+2];
+    out->name        = dart_string((const char*)(resp.data + off + 4u), nlen);
+    out->schema_hash = i_dart_le_r64(resp.data + off + 4u + nlen);
+    out->schema_wire = wlen ? dart_bytes(resp.data + off + 4u + nlen + 10u, wlen)
                             : dart_bytes(NULL, 0);
-    it->off = off + 3u + nlen + 10u + wlen;
+    it->off = off + 4u + nlen + 10u + wlen;
     it->left--;
     return 1;
 }
@@ -6645,6 +6685,7 @@ uint16_t dart_transport_apply_peer_details(DartTransportState *st, uint32_t peer
             continue;   /* maps are sized at interest apply; an index we never saw is ignored
                            (a response that raced ahead of the announce re-resolves later) */
         if (astate[dd.index] & DART__AST_DETAILED) continue;
+        if (st->peer_attrs[slot]) st->peer_attrs[slot][dd.index] = dd.attrs;
         if (dd.name.len == 0){ astate[dd.index] = DART__AST_DETAILED; fresh++; continue; }
         id64 = i_dart_identity_hash((const uint8_t*)dd.name.data, dd.name.len);
         topic = i_dart_topic_by_identity(st, id64, &cidx);
@@ -6714,7 +6755,7 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
     topic->qos = q;
     topic->role = def->role;
     topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
-    topic->forceable = def->forceable;
+    topic->attrs = def->attrs;
     topic->identity = dart_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;
@@ -6729,7 +6770,10 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
         uint8_t *as = st->peer_astate[p]; uint32_t a, alen = st->peer_index_len[p];
         if (!st->peer_used[p] || !as) continue;
         for (a=0;a<alen;a++)
-            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)) as[a] = 0;
+            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)){
+                as[a] = 0;
+                if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
+            }
     }
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active topic to known peers */
         if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
@@ -6829,7 +6873,7 @@ int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
     topic->qos = q;
     topic->role = def->role;
     topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
-    topic->forceable = def->forceable;
+    topic->attrs = def->attrs;
     topic->identity = id;
     memcpy((char*)topic->name, def->name, nlen); ((char*)topic->name)[nlen] = '\0';
     topic->name_len = (uint8_t)nlen;
@@ -6850,6 +6894,7 @@ int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
                     if (st->peer_index[p][a] == topic_index){
                         st->peer_index[p][a] = 0xFFFFu;
                         st->peer_astate[p][a] = 0;
+                        if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
                     }
             i_dart_bit_clr(&st->peer_pub_bitmap[(size_t)p*st->bitmap_len], topic_index);
             i_dart_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
@@ -6859,7 +6904,10 @@ int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
             if (st->peer_astate[p]){
                 uint8_t *as = st->peer_astate[p];
                 for (a=0;a<st->peer_index_len[p];a++)
-                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)) as[a] = 0;
+                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)){
+                        as[a] = 0;
+                        if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
+                    }
             }
         }
     }
@@ -11597,8 +11645,9 @@ static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
 
 /* Strip the leading source timestamp a stamped publisher prepends to every sample (see
  * DART_TIMESTAMP_BYTES): fills *written_us and returns the rest of the wire. `stamped` comes
- * from the writer's advertised interest, so we strip exactly what it wrote; an unstamped
- * stream (or one too short to hold a stamp) yields written_us 0 and the bytes untouched.
+ * from the writer's advertisement (dart_transport_peer_timestamped), so we strip exactly what
+ * it wrote; an unstamped stream (or one too short to hold a stamp) yields written_us 0 and
+ * the bytes untouched.
  * THE single strip point: every delivery path (inline UDP, SHM, parked redelivery, the
  * consumer queue's enqueue) runs through here before the pattern-header split. */
 static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us){
@@ -12435,7 +12484,7 @@ static void i_dart_node_readvertise(DartNode *n){
  * permits the reserved '@' in the name (public topics may not use it). */
 static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
     int reuse = 0;
@@ -12478,7 +12527,7 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
-    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.forceable = forceable;
+    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.attrs = attrs;
     if (opts) def.qos = opts->qos;
     {   int rc;
         if (reuse){
@@ -12538,9 +12587,9 @@ DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
 
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn on_msg, void *on_msg_user){
-    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, forceable,
+    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, attrs,
                                    on_msg, on_msg_user, 1);
 }
 
@@ -13544,6 +13593,15 @@ const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16
     i_dart_node_core_topic_detail(n->core, peer, index, NULL, &sch, schema_hash);
     i_dart_node_unlock(n, acquired);
     return sch;
+}
+
+uint8_t i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index){
+    uint8_t a; int acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    a = dart_transport_peer_attrs(n->transport, peer, their_index);
+    i_dart_node_unlock(n, acquired);
+    return a;
 }
 
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){
@@ -15058,7 +15116,7 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
 
     v->value = i_dart_node_create_pattern_topic(n, name, owner ? DART_PUB_ONLY : DART_SUB_ONLY,
                               schema, &vopt, DART_KIND_VARIABLE, DART__VAR_PREFIX, 0,
-                              (uint8_t)(owner && v->allow_force),   /* owner advertises whether force is permitted */
+                              (uint8_t)((owner && v->allow_force) ? DART_ATTR_FORCEABLE : 0u),
                               owner ? NULL : i_dart_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool-allocated: nothing routes into it yet */
     if (owner)
@@ -15555,7 +15613,9 @@ static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, Dar
     out->hash = e->hash;
     out->provides = (uint8_t)dart_role_pubs(e->role);
     out->consumes = (uint8_t)dart_role_subs(e->role);
-    out->forceable = e->forceable;   /* variable value channel: the owner advertised allow_force */
+    /* attrs ride the detail exchange (0 until details arrive, like the name) */
+    out->forceable = (uint8_t)((i_dart_node_peer_attrs(n, peer, e->index)
+                                & DART_ATTR_FORCEABLE) ? 1 : 0);
     out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
 }
 

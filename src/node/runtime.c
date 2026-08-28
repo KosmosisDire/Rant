@@ -378,8 +378,9 @@ static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
 
 /* Strip the leading source timestamp a stamped publisher prepends to every sample (see
  * DART_TIMESTAMP_BYTES): fills *written_us and returns the rest of the wire. `stamped` comes
- * from the writer's advertised interest, so we strip exactly what it wrote; an unstamped
- * stream (or one too short to hold a stamp) yields written_us 0 and the bytes untouched.
+ * from the writer's advertisement (dart_transport_peer_timestamped), so we strip exactly what
+ * it wrote; an unstamped stream (or one too short to hold a stamp) yields written_us 0 and
+ * the bytes untouched.
  * THE single strip point: every delivery path (inline UDP, SHM, parked redelivery, the
  * consumer queue's enqueue) runs through here before the pattern-header split. */
 static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us){
@@ -1216,7 +1217,7 @@ static void i_dart_node_readvertise(DartNode *n){
  * permits the reserved '@' in the name (public topics may not use it). */
 static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
     DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
     int reuse = 0;
@@ -1259,7 +1260,7 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
-    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.forceable = forceable;
+    def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.attrs = attrs;
     if (opts) def.qos = opts->qos;
     {   int rc;
         if (reuse){
@@ -1319,9 +1320,9 @@ DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
 
 DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
                               const DartSchema *schema, const DartTopicOpts *opts,
-                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t forceable,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn on_msg, void *on_msg_user){
-    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, forceable,
+    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, attrs,
                                    on_msg, on_msg_user, 1);
 }
 
@@ -2325,6 +2326,15 @@ const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16
     i_dart_node_core_topic_detail(n->core, peer, index, NULL, &sch, schema_hash);
     i_dart_node_unlock(n, acquired);
     return sch;
+}
+
+uint8_t i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index){
+    uint8_t a; int acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    a = dart_transport_peer_attrs(n->transport, peer, their_index);
+    i_dart_node_unlock(n, acquired);
+    return a;
 }
 
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){
