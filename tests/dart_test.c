@@ -4797,6 +4797,186 @@ static void patterns_checks(void){
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
 }
 
+/* ============ task pattern smoke (19e7) ============
+ * A task is a function with progress and cancellation on the same handle. Smoke coverage:
+ * defer + RUNNING-first progress + ordered payloads + terminal OK with id_out, cancel
+ * honored (flag, on_cancel, wire CANCELLED both ways), .no_cancel refused locally, an
+ * inline reply, and the bare-return APP_ERROR synthesis. The exhaustive matrix
+ * (concurrency, retire mid-run, peer loss, backpressured chunk progress) is a later step. */
+static volatile int   tk_reply_done;
+static DartCallStatus tk_reply_status;
+static uint32_t       tk_reply_val;
+static char           tk_reply_msg[DART_CALL_MSG_MAX + 1]; static size_t tk_reply_msg_len;
+static void tk_on_reply(const DartResponse *r){
+    tk_reply_status = r->status;
+    tk_reply_val = r->data.len>=4 ? i_dart_le_r32(r->data.data) : 0;
+    tk_reply_msg_len = r->message.len <= DART_CALL_MSG_MAX ? r->message.len : DART_CALL_MSG_MAX;
+    if (tk_reply_msg_len) memcpy(tk_reply_msg, r->message.data, tk_reply_msg_len);
+    tk_reply_msg[tk_reply_msg_len] = 0;
+    tk_reply_done = 1;
+}
+/* progress capture: the RUNNING ack is the empty first update, payloads must ascend */
+static int tk_prog_n, tk_prog_first_empty, tk_prog_in_order;
+static uint32_t tk_prog_last_val, tk_prog_call_id;
+static void tk_on_progress(const DartProgress *p){
+    if (tk_prog_n == 0) tk_prog_first_empty = (p->data.len == 0);
+    if (p->data.len >= 4){
+        uint32_t v = i_dart_le_r32(p->data.data);
+        if (v <= tk_prog_last_val) tk_prog_in_order = 0;
+        tk_prog_last_val = v;
+    }
+    tk_prog_call_id = p->call_id;
+    tk_prog_n++;
+}
+static volatile uint64_t tk_token;
+static void tk_defer_handler(DartRequest *req, void *user){ (void)user; tk_token = dart_request_defer(req); }
+static void tk_inline_handler(DartRequest *req, void *user){
+    uint8_t out[4]; (void)user;
+    i_dart_le_w32(out, req->data.len>=4 ? i_dart_le_r32(req->data.data)+1 : 0);
+    dart_request_reply(req, dart_bytes(out,4));
+}
+static void tk_bare_handler(DartRequest *req, void *user){ (void)req; (void)user; }
+static volatile int tk_cancel_fired; static volatile uint64_t tk_cancel_token;
+static void tk_on_cancel_cb(uint64_t token, void *user){ (void)user; tk_cancel_token = token; tk_cancel_fired = 1; }
+
+static void task_checks(void){
+    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts po, co; DartNode *P=NULL, *C=NULL; DartDiscoveryAddr seed;
+    DartFunction *pxfer, *cxfer, *plong, *clong, *pnc, *cnc, *pinl, *cinl, *pbare, *cbare;
+    uint16_t dom = ST_DOMAIN+32; int t;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=dom; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    co=po;
+    P = dart_node_open(&pa, "task-prov", NULL, NULL, &po);
+    C = dart_node_open(&ca, "task-call", NULL, NULL, &co);
+    ST_CHECK(P && C, "task: nodes open");
+    if (!(P && C)){ if(P)dart_node_close(P,0); if(C)dart_node_close(C,0); return; }
+
+    pxfer = dart_node_create_task_definition(P, "xfer", NULL, NULL, NULL, tk_defer_handler, NULL, NULL);
+    cxfer = dart_node_create_remote_task(C, "xfer", NULL, NULL, NULL, NULL);
+    plong = dart_node_create_task_definition(P, "long", NULL, NULL, NULL, tk_defer_handler, NULL, NULL);
+    clong = dart_node_create_remote_task(C, "long", NULL, NULL, NULL, NULL);
+    pnc   = dart_node_create_task_definition(P, "nocan", NULL, NULL, NULL, tk_defer_handler, NULL,
+                                             &(DartTaskOpts){ .no_cancel = 1 });
+    cnc   = dart_node_create_remote_task(C, "nocan", NULL, NULL, NULL, NULL);
+    pinl  = dart_node_create_task_definition(P, "inl", NULL, NULL, NULL, tk_inline_handler, NULL, NULL);
+    cinl  = dart_node_create_remote_task(C, "inl", NULL, NULL, NULL, NULL);
+    pbare = dart_node_create_task_definition(P, "bare", NULL, NULL, NULL, tk_bare_handler, NULL, NULL);
+    cbare = dart_node_create_remote_task(C, "bare", NULL, NULL, NULL, NULL);
+    ST_CHECK(pxfer&&cxfer&&plong&&clong&&pnc&&cnc&&pinl&&cinl&&pbare&&cbare, "task: pairs created");
+
+    for (t=0;t<2000 && dart_function_match_count(cxfer)==0;t++) pf_pump(P,C,2);
+    ST_CHECK(dart_function_match_count(cxfer)==1, "task: provider matched (%d)",
+             dart_function_match_count(cxfer));
+
+    /* defer + 3 progress updates + terminal OK: RUNNING fires on_progress first (empty),
+       payloads arrive in order, id_out names the call */
+    { uint8_t req[4], pb[4]; uint32_t id = 0; int rc, i2;
+      i_dart_le_w32(req, 5);
+      tk_reply_done=0; tk_token=0;
+      tk_prog_n=0; tk_prog_first_empty=0; tk_prog_in_order=1; tk_prog_last_val=0; tk_prog_call_id=0;
+      rc = dart_function_call_async(cxfer, dart_bytes(req,4), tk_on_reply, NULL,
+              &(DartCallOpts){ .on_progress = tk_on_progress, .id_out = &id });
+      ST_CHECK(rc==DART_OK && id!=0, "task: call accepted, id_out filled (rc=%d id=%u)", rc, id);
+      for (t=0;t<2000 && !tk_token;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_token!=0, "task: handler deferred");
+      for (t=0;t<800 && tk_prog_n<1;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_prog_n>=1 && tk_prog_first_empty,
+               "task: RUNNING fired on_progress first, empty (n=%d empty=%d)",
+               tk_prog_n, tk_prog_first_empty);
+      for (i2=1;i2<=3;i2++){
+          int pr;   /* each update lands before the next is sent, pinning arrival order */
+          i_dart_le_w32(pb, (uint32_t)(100*i2));
+          pr = dart_function_progress(pxfer, tk_token, dart_bytes(pb,4));
+          ST_CHECK(pr==DART_OK, "task: progress %d sent (%d)", i2, pr);
+          for (t=0;t<400 && tk_prog_n < 1+i2;t++) pf_pump(P,C,2);
+      }
+      i_dart_le_w32(pb, 777);
+      rc = dart_function_complete(pxfer, tk_token, DART_CALL_OK, NULL, dart_bytes(pb,4));
+      ST_CHECK(rc==DART_OK, "task: complete OK sent (%d)", rc);
+      for (t=0;t<800 && !tk_reply_done;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_reply_done && tk_reply_status==DART_CALL_OK && tk_reply_val==777,
+               "task: terminal OK (done=%d st=%d val=%u)", tk_reply_done, tk_reply_status, tk_reply_val);
+      ST_CHECK(tk_prog_n==4 && tk_prog_in_order && tk_prog_last_val==300 && tk_prog_call_id==id,
+               "task: 3 payloads in order after RUNNING (n=%d order=%d last=%u call=%u want=%u)",
+               tk_prog_n, tk_prog_in_order, tk_prog_last_val, tk_prog_call_id, id);
+      { int sr = dart_function_cancelled(pxfer, tk_token);   /* completed: the token is stale */
+        ST_CHECK(sr==DART_ERR_STATE, "task: stale token refused (%d)", sr); } }
+
+    /* cancel honored: long task, dart_function_cancel, the definition sees the flag +
+       on_cancel, completes CANCELLED, the caller receives it */
+    { uint32_t id = 0; int rc;
+      tk_reply_done=0; tk_token=0; tk_cancel_fired=0; tk_cancel_token=0;
+      dart_function_on_cancel(plong, tk_on_cancel_cb, NULL);
+      rc = dart_function_call_async(clong, dart_bytes(NULL,0), tk_on_reply, NULL,
+              &(DartCallOpts){ .id_out = &id });
+      ST_CHECK(rc==DART_OK, "task: long call accepted (%d)", rc);
+      for (t=0;t<2000 && !tk_token;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_token!=0, "task: long deferred");
+      { int sr = dart_function_cancelled(plong, tk_token);
+        ST_CHECK(sr==0, "task: not yet cancelled (%d)", sr); }
+      rc = dart_function_cancel(clong, id);
+      ST_CHECK(rc==DART_OK, "task: cancel sent (%d)", rc);
+      for (t=0;t<800 && !tk_cancel_fired;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_cancel_fired && tk_cancel_token==tk_token,
+               "task: on_cancel fired with the token (fired=%d)", tk_cancel_fired);
+      { int sr = dart_function_cancelled(plong, tk_token);
+        ST_CHECK(sr==1, "task: cancelled flag set (%d)", sr); }
+      rc = dart_function_complete(plong, tk_token, DART_CALL_CANCELLED, "stopped", dart_bytes(NULL,0));
+      ST_CHECK(rc==DART_OK, "task: complete CANCELLED sent (%d)", rc);
+      for (t=0;t<800 && !tk_reply_done;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_reply_done && tk_reply_status==DART_CALL_CANCELLED
+               && tk_reply_msg_len==7 && memcmp(tk_reply_msg,"stopped",7)==0,
+               "task: caller sees wire CANCELLED \"stopped\" (st=%d msg=\"%s\")",
+               tk_reply_status, tk_reply_msg); }
+
+    /* .no_cancel: the caller's cancel refuses locally (DART_ERR_ROLE), nothing reaches the
+       definition, and the task still completes normally */
+    { uint32_t id = 0; int rc, cr;
+      tk_reply_done=0; tk_token=0; tk_cancel_fired=0;
+      dart_function_on_cancel(pnc, tk_on_cancel_cb, NULL);
+      rc = dart_function_call_async(cnc, dart_bytes(NULL,0), tk_on_reply, NULL,
+              &(DartCallOpts){ .id_out = &id });
+      for (t=0;t<2000 && !tk_token;t++) pf_pump(P,C,2);
+      ST_CHECK(rc==DART_OK && tk_token!=0, "task: no_cancel call running (rc=%d)", rc);
+      cr = dart_function_cancel(cnc, id);
+      ST_CHECK(cr==DART_ERR_ROLE, "task: cancel refused locally with DART_ERR_ROLE (%d)", cr);
+      pf_pump(P,C,60);
+      { int sr = dart_function_cancelled(pnc, tk_token);
+        ST_CHECK(!tk_cancel_fired && sr==0,
+                 "task: nothing reached the definition (fired=%d flag=%d)", tk_cancel_fired, sr); }
+      cr = dart_function_complete(pnc, tk_token, DART_CALL_OK, NULL, dart_bytes(NULL,0));
+      for (t=0;t<800 && !tk_reply_done;t++) pf_pump(P,C,2);
+      ST_CHECK(cr==DART_OK && tk_reply_done && tk_reply_status==DART_CALL_OK,
+               "task: no_cancel task completes OK (st=%d)", tk_reply_status); }
+
+    /* a task handler answering immediately via dart_request_reply works like a function */
+    { uint8_t req[4]; int rc; i_dart_le_w32(req, 41);
+      tk_reply_done=0;
+      rc = dart_function_call_async(cinl, dart_bytes(req,4), tk_on_reply, NULL, NULL);
+      ST_CHECK(rc==DART_OK, "task: inline call accepted (%d)", rc);
+      for (t=0;t<2000 && !tk_reply_done;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_reply_done && tk_reply_status==DART_CALL_OK && tk_reply_val==42,
+               "task: inline reply -> 42 OK (st=%d val=%u)", tk_reply_status, tk_reply_val); }
+
+    /* bare return: a task's return is not its answer */
+    { int rc;
+      tk_reply_done=0;
+      rc = dart_function_call_async(cbare, dart_bytes(NULL,0), tk_on_reply, NULL, NULL);
+      ST_CHECK(rc==DART_OK, "task: bare call accepted (%d)", rc);
+      for (t=0;t<2000 && !tk_reply_done;t++) pf_pump(P,C,2);
+      ST_CHECK(tk_reply_done && tk_reply_status==DART_CALL_APP_ERROR,
+               "task: bare return synthesizes APP_ERROR (st=%d)", tk_reply_status);
+      ST_CHECK(strcmp(tk_reply_msg, "handler returned no result")==0,
+               "task: synthesized message (\"%s\")", tk_reply_msg); }
+
+    dart_node_close(P,0); dart_node_close(C,0);
+    dart_allocator_reset(&pa); dart_allocator_reset(&ca);
+}
+
 /* ============ duplicate-authority diagnostic (19e2) ============
  * The pattern contract expects ONE provider per function and ONE owner per variable. Two
  * authorities never form a lane (their roles are pub/pub or sub/sub), so the conflict is
@@ -6642,6 +6822,7 @@ static int selftest_main(void){
     reflect_dropped_checks();     /* 19e4. entity walk refuses dropped peers unless opted in */
     varwait_checks();             /* 19e5. accessor first write rides the match wait */
     churn_checks();               /* 19e6. retire/reuse churn soak: slots reuse, nothing balloons */
+    task_checks();                /* 19e7. task pattern: progress, cancel, no_cancel, inline, bare return */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */

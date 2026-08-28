@@ -627,6 +627,9 @@ int          dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint
                              uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic UUID from a stable input (e.g. serial/MAC) + boot seed. RFC 9562 v8. NOT cryptographic. */
 void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t boot_seed);
+/* This instance's own 16-byte uuid (the identity every announce carries). A view into
+ * the state, valid for its lifetime; NULL only on a NULL state. */
+const uint8_t *dart_discovery_uuid(const DartDiscoveryState *st);
 
 #ifdef __cplusplus
 }
@@ -1283,6 +1286,10 @@ void dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t seed){
     }
     out[6] = (uint8_t)((out[6] & 0x0Fu) | 0x80u);  /* version 8 (custom) */
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x (RFC) */
+}
+
+const uint8_t *dart_discovery_uuid(const DartDiscoveryState *st){
+    return st ? st->cfg.uuid : NULL;
 }
 
 static uint16_t i_dart_discovery_meta_cap(const DartDiscoveryCoreConfig *cfg){

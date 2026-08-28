@@ -608,6 +608,12 @@ void     i_dart_node_sys_error (DartNode *n, DartErrorKind error, DartTopic *top
 int      i_dart_topic_live_match_count(DartTopic *topic);
 /* Matched publishers feeding this topic's subscription side (mirror of dart_topic_match_count). */
 int      i_dart_topic_source_match_count(DartTopic *topic);
+/* Peer id of the OLDEST live matched subscriber of a PUB pattern topic (0 = none): the
+ * task layer's auto-direct target for a call with no explicit provider. */
+uint32_t i_dart_topic_oldest_match(DartTopic *topic);
+/* This node's own 16-byte discovery uuid (the identity peers key us by): the task layer's
+ * progress demux filter. Stable for the node's lifetime. */
+const uint8_t *i_dart_node_uuid(DartNode *n);
 /* Reflection getters for the patterns layer's entity enumeration. */
 uint8_t    i_dart_topic_kind (const DartTopic *topic);   /* DartTopicKind */
 uint8_t    i_dart_topic_role (const DartTopic *topic);   /* DartRole (current) */

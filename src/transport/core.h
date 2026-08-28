@@ -93,7 +93,10 @@ typedef enum {
     DART_KIND_FUNC_REQ = 1,   /* function request channel  (caller pubs, provider subs) */
     DART_KIND_FUNC_RSP = 2,   /* function response channel  (provider pubs, caller subs; directed) */
     DART_KIND_VARIABLE = 3,   /* variable value channel     (owner pubs, observers sub) */
-    DART_KIND_VAR_SET  = 4    /* variable set channel       (writers pub, owner subs) */
+    DART_KIND_VAR_SET  = 4,   /* variable set channel       (writers pub, owner subs) */
+    DART_KIND_TASK_REQ = 5,   /* task request channel       (callers pub, provider subs; requests + cancel ops) */
+    DART_KIND_TASK_PRG = 6,   /* task progress channel      (provider pubs, broadcast) */
+    DART_KIND_TASK_RSP = 7    /* task response channel      (provider pubs, caller subs; directed) */
 } DartTopicKind;
 
 /* Per-topic ATTRS byte: descriptive immutable facts about a topic, served to peers in the
@@ -689,6 +692,9 @@ int       dart_transport_send(DartTransportState *st, uint16_t topic_index, Dart
  * dart_transport_publisher_match_count (which keeps counting a dropped-but-resumable peer).
  * O(matched lanes). */
 int       dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic_index);
+/* Peer id of the OLDEST live matched subscriber lane (0 = none): the patterns layer's
+ * auto-direct target for task requests. O(matched lanes). */
+uint32_t  dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t topic_index);
 /* Matched publishers feeding OUR subscription side of this topic (the mirror count). */
 int       dart_transport_subscriber_match_count(DartTransportState *st, uint16_t topic_index);
 

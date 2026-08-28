@@ -615,8 +615,13 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     i_dart_node_split(h, body, &hdr, &payload);
     /* a ZERO-LENGTH payload on a prefix-carrying (pattern) channel is an op-only message
        (a variable's unforce, an empty ack): the op byte is the content, so the payload
-       schema does not apply; the pattern layer judges it. Plain topics are unaffected. */
-    if (h && h->prefix_bytes && payload.len == 0) schema = NULL;
+       schema does not apply; the pattern layer judges it. Plain topics are unaffected.
+       A task request whose op byte is not CALL carries op data (a cancel's target
+       caller), never a request the schema covers: kind framing, like the split. */
+    if (h && h->prefix_bytes
+        && (payload.len == 0
+            || (h->kind == DART_KIND_TASK_REQ && hdr.len >= 5 && hdr.data[4] != 0)))
+        schema = NULL;
     if (schema && !dart_schema_validate(schema, payload)){
         DartEvent e; memset(&e, 0, sizeof e);
         e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
@@ -1285,10 +1290,10 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
         }
     }
     h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
-    /* a function-response prefix is followed by [u8 len][message] on the wire: derived
-       from the kind, exactly as prefix_bytes is derived from per-kind constants, so
-       every creator of the kind (patterns, the explorer's capture) splits alike */
-    h->prefix_string = (uint8_t)(kind == DART_KIND_FUNC_RSP);
+    /* a response prefix (function or task) is followed by [u8 len][message] on the wire:
+       derived from the kind, exactly as prefix_bytes is derived from per-kind constants,
+       so every creator of the kind (patterns, the explorer's capture) splits alike */
+    h->prefix_string = (uint8_t)(kind == DART_KIND_FUNC_RSP || kind == DART_KIND_TASK_RSP);
     h->role = (uint8_t)role;
     h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* stable name copy: queued DartMsg views must not point into the relocatable arena */
@@ -2202,6 +2207,20 @@ int i_dart_topic_source_match_count(DartTopic *topic){
     r = dart_transport_subscriber_match_count(topic->n->transport, topic->index);
     i_dart_node_unlock(topic->n, acquired);
     return r;
+}
+
+/* Oldest live matched subscriber's peer id (0 = none): the task layer's auto-direct target. */
+uint32_t i_dart_topic_oldest_match(DartTopic *topic){
+    uint32_t r; int acquired;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_publisher_oldest_match(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+
+const uint8_t *i_dart_node_uuid(DartNode *n){
+    return n ? dart_discovery_uuid(dart_discovery_state(n->discovery)) : NULL;
 }
 
 /* Reflection getters for the patterns layer's entity enumeration (read-only, stable). */

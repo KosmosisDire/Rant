@@ -166,6 +166,10 @@ void dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t seed){
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x (RFC) */
 }
 
+const uint8_t *dart_discovery_uuid(const DartDiscoveryState *st){
+    return st ? st->cfg.uuid : NULL;
+}
+
 static uint16_t i_dart_discovery_meta_cap(const DartDiscoveryCoreConfig *cfg){
     return cfg->meta_cap ? cfg->meta_cap : DART_DISCOVERY_META_MAX;
 }

@@ -5,6 +5,7 @@
  * Compile it out with DART_NO_PATTERNS.
  *
  *   FUNCTION  request/response, exactly one reply per call, ONE handler (req/rsp channels)
+ *   TASK      a function with progress and cancellation (req/prg/rsp channels, same handle)
  *   VARIABLE  replicated state, one owner, dumb writes + optional force (value/@set channels)
  *
  * API doctrine: every constructor is dart_node_create_*. A DEFINITION is where the body or
@@ -35,17 +36,23 @@ extern "C" {
 
 /* ---- FUNCTIONS ---------------------------------------------------------------------- */
 
-/* A call's outcome. OK/APP_ERROR/NO_HANDLER travel on the wire (the response status byte);
- * TIMEOUT/PEER_LOST are synthesized client-side when no response arrives. */
+/* A call's outcome. OK/APP_ERROR/NO_HANDLER/CANCELLED/RUNNING travel on the wire (the
+ * response status byte); TIMEOUT/PEER_LOST are synthesized client-side when no response
+ * arrives. */
 typedef enum {
     DART_CALL_OK        = 0,
     DART_CALL_APP_ERROR = 1,   /* the handler replied with dart_request_fail */
     DART_CALL_NO_HANDLER= 2,   /* the definition side has no on_request registered */
     DART_CALL_TIMEOUT   = 3,   /* client-synthesized: no response within the timeout */
     DART_CALL_PEER_LOST = 4,   /* client-synthesized: the handler node dropped mid-call */
-    DART_CALL_CANCELLED = 5    /* client-synthesized: the LOCAL node closed with the call still
-                                  pending (fired during dart_node_close, on the closing thread),
-                                  so every call gets exactly one outcome even at close */
+    DART_CALL_CANCELLED = 5,   /* wire-carried when a provider honors a cancel (or retires
+                                  mid-run); also synthesized locally when the node closes
+                                  or the handle retires with the call still pending, so
+                                  every call gets exactly one outcome */
+    DART_CALL_RUNNING   = 6    /* task, wire-carried, the ONLY non-terminal status: the
+                                  request was accepted and runs. The call stays pending,
+                                  its timeout is dropped, and the caller's on_progress
+                                  fires once with zero-length data. */
 } DartCallStatus;
 
 typedef struct DartFunction DartFunction;   /* opaque function handle */
@@ -106,13 +113,33 @@ typedef struct {
                                        the one-definition contract (leave it 0). */
 } DartFunctionOpts;
 
+/* One progress update as delivered to a task caller's on_progress. Views are valid for
+ * the callback only. The RUNNING acknowledgment fires it once with zero-length data. */
+typedef struct {
+    uint32_t          call_id;
+    uint32_t          provider;   /* the peer working the call */
+    DartBytes         data;       /* the progress payload (len 0 = the RUNNING ack) */
+    const DartSchema *schema;     /* prg schema (NULL = untyped or the RUNNING ack) */
+    uint64_t          written_us; /* the provider's wall clock (0 = unstamped) */
+    uint64_t          recv_us;    /* this node's monotonic clock at arrival */
+    void             *user;       /* DartCallOpts.progress_user */
+} DartProgress;
+typedef void (*DartProgressFn)(const DartProgress *progress);
+
 /* Optional per-call config (a trailing compound literal; NULL = defaults). */
 typedef struct {
     uint32_t provider;              /* peer id to DIRECT the call at: only that peer receives
                                        the request (found via dart_node_peers / PEER_UP). 0 =
                                        undirected: every matched definition receives it, the
                                        first answer wins. A directed call whose peer drops
-                                       fails with DART_CALL_PEER_LOST immediately. */
+                                       fails with DART_CALL_PEER_LOST immediately. A TASK
+                                       request is ALWAYS directed: 0 resolves to the oldest
+                                       matched provider at send time. */
+    DartProgressFn on_progress;     /* task: fires per progress update on the delivering
+                                       thread (the RUNNING ack fires it once with empty
+                                       data); NULL = updates are discarded */
+    void     *progress_user;        /* handed back as DartProgress.user */
+    uint32_t *id_out;               /* filled with the call id (for dart_function_cancel) */
 } DartCallOpts;
 
 /* Create the DEFINITION (the implementation lives here): subscribes requests, publishes
@@ -133,7 +160,10 @@ DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
  * NULL (undirected). Returns 1 (answered, read out->status: OK, APP_ERROR, NO_HANDLER, or
  * PEER_LOST), 0 (timed out, out->status = DART_CALL_TIMEOUT whether the local wait or the
  * pending deadline expired first), or a negative DartResult. Refused (DART_ERR_STATE) from
- * inside a callback or while a service thread owns the loop. */
+ * inside a callback or while a service thread owns the loop. On a TASK the timeout bounds
+ * only the wait for the FIRST response: once RUNNING (or progress) arrives it waits for
+ * the terminal outcome indefinitely, with opts->on_progress firing while it waits;
+ * impatience is dart_function_cancel from another thread. */
 int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
                         const DartCallOpts *opts);
 /* The async form: returns as soon as the request is committed, then on_response (NULL =
@@ -178,6 +208,75 @@ void      dart_request_fail (DartRequest *request, const char *message, DartByte
 uint64_t  dart_request_defer(DartRequest *request);
 int       dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus status,
                                  const char *message, DartBytes rsp);
+
+/* ---- TASKS ---------------------------------------------------------------------------
+ * A task is a FUNCTION with progress and cancellation: the same DartFunction handle, call
+ * ids, statuses, pending table and defer tokens, plus a broadcast progress channel
+ * (name+"@prg") and a cancel op on the request channel. One request, N progress updates,
+ * exactly one terminal response, from RUNNING to the end cancellable (cooperatively).
+ * The per-call timeout covers only the window until the FIRST response of any kind; after
+ * RUNNING a task runs as long as it runs and cancel is the caller's tool for impatience.
+ * A provider that drops mid-run fails the call with DART_CALL_PEER_LOST (requests are
+ * always directed, so the peer reap covers it); retire and node close answer every live
+ * deferred call with DART_CALL_CANCELLED while the channels are still up, so a RUNNING
+ * caller never hangs on a clean shutdown. Unlike a function, a task handler that returns
+ * without reply/fail/defer answers APP_ERROR "handler returned no result": an instant
+ * empty OK on a long-running operation would read as success that never ran. */
+typedef struct {
+    uint8_t  progress_best_effort;  /* progress-channel reliability: 0 = reliable. The
+                                       definition OFFERS, a remote REQUESTS (the RxO rule
+                                       composes them: an observer may tap a reliable
+                                       stream best-effort and can never stall the task) */
+    uint16_t progress_keep_last;    /* progress ring depth; 0 = the pattern default */
+    uint8_t  no_cancel;             /* definition: will not honor cancellation. Clears the
+                                       CANCELLABLE attrs bit, so remotes refuse
+                                       dart_function_cancel locally (DART_ERR_ROLE) */
+    uint8_t  exclusive;             /* definition: declared serialization; the handler
+                                       enforces it (answer "busy" via dart_request_fail) */
+    uint8_t  multi;                 /* redundant providers intended (DartFunctionOpts.multi);
+                                       each request still has exactly one executor */
+    uint32_t timeout_us;            /* remote: until-first-response bound; 0 = DART_CALL_TIMEOUT_US */
+    uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
+} DartTaskOpts;
+
+/* Create the DEFINITION (the implementation lives here) or a REMOTE, exactly as for a
+ * function; prg_schema types the progress channel (NULL = untyped). The handler answers
+ * inline (dart_request_reply / dart_request_fail) or dart_request_start +
+ * dart_request_defer + return, then works through the token from whatever thread the app
+ * owns. Returns a handle or NULL. */
+DartFunction *dart_node_create_task_definition(DartNode *n, const char *name,
+                    const DartSchema *req_schema, const DartSchema *prg_schema,
+                    const DartSchema *rsp_schema, DartRequestFn on_request, void *user,
+                    const DartTaskOpts *opts);
+DartFunction *dart_node_create_remote_task(DartNode *n, const char *name,
+                    const DartSchema *req_schema, const DartSchema *prg_schema,
+                    const DartSchema *rsp_schema, const DartTaskOpts *opts);
+
+/* In the handler: send RUNNING to the caller now (empty payload, non-terminal).
+ * Idempotent; dart_request_defer on a task implies it. DART_ERR_STATE on a plain
+ * function request or after a reply. */
+int dart_request_start(DartRequest *request);
+/* Token verbs (any thread, like dart_function_complete). Every token verb validates the
+ * token against the handle's live-defer registry first, so a stale token (completed, or
+ * cancelled away by retire/close) is DART_ERR_STATE, never UB; functions gain the same
+ * validation. progress broadcasts on the @prg channel (any observer may watch);
+ * cancelled answers 1 the moment a cancel for the call arrived. Cancellation is
+ * COOPERATIVE: honor it with dart_function_complete(DART_CALL_CANCELLED, ...), or run to
+ * completion anyway. Task-only (DART_ERR_STATE on a plain function). */
+int dart_function_progress (DartFunction *fn, uint64_t token, DartBytes progress);
+int dart_function_cancelled(DartFunction *fn, uint64_t token);
+/* Cancel notification, one slot per definition (re-register replaces, NULL clears):
+ * fires on the poll thread when a cancel lands on a live deferred call, under the usual
+ * callback restrictions. Optional: polling dart_function_cancelled alone is complete. */
+typedef void (*DartCancelFn)(uint64_t token, void *user);
+int dart_function_on_cancel(DartFunction *def, DartCancelFn on_cancel, void *user);
+/* Caller: request cancellation of the outstanding call call_id (from
+ * DartCallOpts.id_out). Cooperative and never acked: the terminal status is the answer
+ * (CANCELLED = honored or never started; a normal outcome = it completed anyway). A call
+ * still queued (no provider matched yet) cancels locally with one CANCELLED outcome.
+ * DART_ERR_ROLE when the provider declared no_cancel (checked against its cached attrs,
+ * nothing sent); DART_ERR_STATE when the call is not pending (already answered). */
+int dart_function_cancel(DartFunction *fn, uint32_t call_id);
 
 /* ---- VARIABLES ---------------------------------------------------------------------- */
 
@@ -281,17 +380,18 @@ int  dart_variable_retire(DartVariable *var);
 
 /* ---- REFLECTION (entity enumeration) -------------------------------------------------
  * The canonical way to see what exists on the network. Observers consume ENTITIES, never
- * channels: pattern channels (f@req, v@set, ...) are folded back into the function or
- * variable they implement and never escape this iterator as raw topics, so no tool ever
- * reimplements the name-mangling or kind rules. Everything is derived from what the wire
- * already carries (kind bits in the announce, names + schemas from the detail cache): there
- * is no reflection protocol, and a peer built without the patterns layer reflects
- * identically. A tool built WITHOUT this layer hides pattern internals by skipping interest
- * entries whose kind != DART_KIND_TOPIC. */
+ * channels: pattern channels (f@req, t@prg, v@set, ...) are folded back into the function,
+ * task or variable they implement and never escape this iterator as raw topics, so no tool
+ * ever reimplements the name-mangling or kind rules. Everything is derived from what the
+ * wire already carries (kind bits in the announce, names + schemas + attrs from the detail
+ * cache): there is no reflection protocol, and a peer built without the patterns layer
+ * reflects identically. A tool built WITHOUT this layer hides pattern internals by skipping
+ * interest entries whose kind != DART_KIND_TOPIC. */
 typedef enum {
     DART_ENTITY_TOPIC = 0,
     DART_ENTITY_FUNCTION,
-    DART_ENTITY_VARIABLE
+    DART_ENTITY_VARIABLE,
+    DART_ENTITY_TASK
 } DartEntityKind;
 
 /* One entity as advertised by a peer (or hosted locally). Views follow the same rules as
@@ -316,8 +416,13 @@ typedef struct {
                                       observer shows while name is still {NULL,0} (details paging) */
     const DartSchema *schema;      /* value/request/payload schema (NULL = untyped or unfetched) */
     uint64_t          schema_hash;
-    const DartSchema *rsp_schema;  /* FUNCTION only: the response schema */
+    const DartSchema *rsp_schema;  /* FUNCTION/TASK: the response schema */
     uint64_t          rsp_schema_hash;
+    const DartSchema *progress_schema;  /* TASK only: the @prg channel's schema */
+    uint64_t          progress_schema_hash;
+    uint8_t           cancellable; /* TASK: the provider honors cancel (attrs; default on) */
+    uint8_t           exclusive;   /* TASK: declared serialization (attrs) */
+    uint8_t           multi;       /* authority kinds: duplicate authority is intended (attrs) */
 } DartEntityInfo;
 
 /* Iterator: zero-initialize, then call until 0. include_dropped is the ONE input field
