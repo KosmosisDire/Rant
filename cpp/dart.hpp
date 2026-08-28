@@ -1128,10 +1128,11 @@ struct Uri     { String<256> value; };
 struct Timestamp { int64_t us = 0; };
 struct Duration  { int64_t us = 0; };
 
-/* The video family (docs/stdtypes.md). The enum values are the wire values. */
+/* The video family (docs/stdtypes.md). The enum values are the wire values;
+ * VideoCodec::Unknown is the unstated codec hint. */
 enum class ImageFormat : uint8_t { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12,
                                    Jpeg = 16, Png = 17 };
-enum class VideoCodec : uint8_t { Mjpeg, H264, H265, Av1 };
+enum class VideoCodec : uint8_t { Unknown, Mjpeg, H264, H265, Av1 };
 enum class VideoStreamKind : uint8_t { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
                                        Other = 15 };
 struct Image {                    /* stride = bytes per row; data laid out per `format` */
@@ -1139,15 +1140,20 @@ struct Image {                    /* stride = bytes per row; data laid out per `
     ImageFormat format = ImageFormat::Mono8;
     std::vector<uint8_t> data;
 };
-struct VideoFrame {
-    VideoCodec codec = VideoCodec::Mjpeg;
+struct VideoFrame {               /* width/height 0 = unstated (the bitstream rules) */
+    VideoCodec codec = VideoCodec::Unknown;
+    uint32_t   width = 0, height = 0;
     bool       keyframe = false;
     Timestamp  pts;               /* presentation time, the Timestamp clock */
     std::vector<uint8_t> data;
 };
-/* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. */
+/* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
+ * codec/width/height are HINTS for pickers (Unknown/0 = unstated): the stream itself
+ * stays authoritative once connected. */
 struct ExternalVideoStream {
     VideoStreamKind kind = VideoStreamKind::Rtsp;
+    VideoCodec      codec = VideoCodec::Unknown;
+    uint32_t        width = 0, height = 0;
     Uri             url;
     String<32>      name;
 };
@@ -1236,9 +1242,13 @@ inline Uuid      new_uuid() { Uuid u; detail::dart_uuid_new((detail::DartUuid*)&
 #define DART_STD_MEMBERS_GeoPoint(v) DART_STD_F(GeoPoint,lat) DART_STD_F(GeoPoint,lon) DART_STD_F(GeoPoint,alt)
 #define DART_STD_MEMBERS_Image(v)      DART_STD_F(Image,width) DART_STD_F(Image,height) \
                                        DART_STD_F(Image,stride) DART_STD_F(Image,format) DART_STD_F(Image,data)
-#define DART_STD_MEMBERS_VideoFrame(v) DART_STD_F(VideoFrame,codec) DART_STD_F(VideoFrame,keyframe) \
+#define DART_STD_MEMBERS_VideoFrame(v) DART_STD_F(VideoFrame,codec) \
+                                       DART_STD_F(VideoFrame,width) DART_STD_F(VideoFrame,height) \
+                                       DART_STD_F(VideoFrame,keyframe) \
                                        DART_STD_F(VideoFrame,pts) DART_STD_F(VideoFrame,data)
 #define DART_STD_MEMBERS_ExternalVideoStream(v) DART_STD_F(ExternalVideoStream,kind) \
+                                       DART_STD_F(ExternalVideoStream,codec) \
+                                       DART_STD_F(ExternalVideoStream,width) DART_STD_F(ExternalVideoStream,height) \
                                        DART_STD_F(ExternalVideoStream,url) DART_STD_F(ExternalVideoStream,name)
 
 namespace priv {
@@ -4348,7 +4358,7 @@ DART_STD_ALIAS(Uri,       dart::String<256>);
 /* the video family: the enums are DART_ENUM-registered so a member of one (in these
  * mirrors or in a user struct) ships as the canonical named integer */
 DART_ENUM(dart::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Jpeg, Png);
-DART_ENUM(dart::VideoCodec, Mjpeg, H264, H265, Av1);
+DART_ENUM(dart::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
 DART_ENUM(dart::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
 DART_STD_STRUCT(Image); DART_STD_STRUCT(VideoFrame); DART_STD_STRUCT(ExternalVideoStream);
 

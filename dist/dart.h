@@ -2572,14 +2572,16 @@ typedef struct { float m[16]; } DartMatrix4x4;               /* row-major */
 
 /* Image.format / VideoFrame.codec / ExternalVideoStream.kind, as the schema declares
  * them. An image format >= 16 is a compressed container (its `data` is the file bytes);
- * Image.stride 0 means tightly packed rows. */
+ * Image.stride 0 means tightly packed rows. DART_VIDEO_UNKNOWN is the unstated codec
+ * hint (ExternalVideoStream.codec, or a VideoFrame whose codec is not yet known). */
 typedef enum {
     DART_IMAGE_MONO8 = 0, DART_IMAGE_MONO16 = 1, DART_IMAGE_RGB8 = 2, DART_IMAGE_RGBA8 = 3,
     DART_IMAGE_BGR8 = 4, DART_IMAGE_YUYV = 5, DART_IMAGE_NV12 = 6,
     DART_IMAGE_JPEG = 16, DART_IMAGE_PNG = 17
 } DartImageFormat;
 typedef enum {
-    DART_VIDEO_MJPEG = 0, DART_VIDEO_H264 = 1, DART_VIDEO_H265 = 2, DART_VIDEO_AV1 = 3
+    DART_VIDEO_UNKNOWN = 0, DART_VIDEO_MJPEG = 1, DART_VIDEO_H264 = 2,
+    DART_VIDEO_H265 = 3, DART_VIDEO_AV1 = 4
 } DartVideoCodec;
 typedef enum {
     DART_STREAM_RTSP = 0, DART_STREAM_WEBRTC_WHEP = 1, DART_STREAM_HLS = 2,
@@ -13267,11 +13269,14 @@ static const i_DartStdEntry i_dart_std_table[] = {
                  "  format: enum<u8> { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3,"
                  "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Jpeg = 16, Png = 17 },"
                  "  data: u8[] }" },
-    { "VideoFrame", "{ codec: enum<u8> { Mjpeg = 0, H264 = 1, H265 = 2, Av1 = 3 },"
+    { "VideoFrame", "{ codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
+                 "  width: u32, height: u32,"
                  "  keyframe: bool, pts: Timestamp, data: u8[] }" },
     { "ExternalVideoStream",
                  "{ kind: enum<u8> { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3,"
                  "                   Rtp = 4, HttpMjpeg = 5, Other = 15 },"
+                 "  codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
+                 "  width: u32, height: u32,"
                  "  url: Uri, name: string<32> }" }
 };
 

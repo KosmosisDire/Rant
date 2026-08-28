@@ -35,11 +35,14 @@ static const i_DartStdEntry i_dart_std_table[] = {
                  "  format: enum<u8> { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3,"
                  "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Jpeg = 16, Png = 17 },"
                  "  data: u8[] }" },
-    { "VideoFrame", "{ codec: enum<u8> { Mjpeg = 0, H264 = 1, H265 = 2, Av1 = 3 },"
+    { "VideoFrame", "{ codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
+                 "  width: u32, height: u32,"
                  "  keyframe: bool, pts: Timestamp, data: u8[] }" },
     { "ExternalVideoStream",
                  "{ kind: enum<u8> { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3,"
                  "                   Rtp = 4, HttpMjpeg = 5, Other = 15 },"
+                 "  codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
+                 "  width: u32, height: u32,"
                  "  url: Uri, name: string<32> }" }
 };
 

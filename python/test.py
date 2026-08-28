@@ -169,8 +169,8 @@ def std_types():
 # The video family: golden wire shared with the C, C++ and C# bindings (pinned in
 # cpp/test.cpp and by dart_test's stdtypes phase).
 HASH_IMAGE = 0x83ABED7B2C4E334C
-HASH_VIDEO_FRAME = 0x0E2CBAFB5335F872
-HASH_EXT_STREAM = 0xDA5520EF946A2406
+HASH_VIDEO_FRAME = 0xF677BD147B513FBC
+HASH_EXT_STREAM = 0xAAE502077016AC13
 
 
 @dataclass
@@ -211,6 +211,8 @@ def video_types():
         pub = dart.Publisher[dart.Image](a, "frame", qos=qos)
         dart.Subscriber[dart.Image](b, "frame", lambda i: got.setdefault("img", i), qos=qos)
         stream = dart.ExternalVideoStream(kind=dart.VideoStreamKind.Rtsp,
+                                          codec=dart.VideoCodec.H264,
+                                          width=1920, height=1080,
                                           url="rtsp://cam.local/main", name="front door")
         vd = dart.VariableDefinition[dart.ExternalVideoStream](a, "stream", initial=stream)
         rv = dart.RemoteVariable[dart.ExternalVideoStream](b, "stream")
@@ -237,6 +239,8 @@ def video_types():
         v = rv.get()
         check("the stream variable replicated",
               v is not None and v.kind == dart.VideoStreamKind.Rtsp
+              and v.codec == dart.VideoCodec.H264
+              and v.width == 1920 and v.height == 1080
               and v.url == "rtsp://cam.local/main" and v.name == "front door")
     finally:
         a.close()

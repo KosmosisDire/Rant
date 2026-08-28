@@ -772,8 +772,9 @@ namespace Dart
     public enum ImageFormat : byte
     { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6,
       Jpeg = 16, Png = 17 }
-    /// <summary>The codec a VideoFrame's data is encoded with.</summary>
-    public enum VideoCodec : byte { Mjpeg = 0, H264 = 1, H265 = 2, Av1 = 3 }
+    /// <summary>The codec a VideoFrame's data is encoded with. Unknown is the unstated
+    /// codec hint (an ExternalVideoStream that does not state one).</summary>
+    public enum VideoCodec : byte { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 }
     /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
     public enum VideoStreamKind : byte
     { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
@@ -782,14 +783,19 @@ namespace Dart
       [DartField("stride")] public uint Stride;
       [DartField("format")] public ImageFormat Format;
       [DartField("data")] public byte[] Data; }               // pixels, or the file bytes
-    [DartTypeName("VideoFrame")] public struct VideoFrame
+    [DartTypeName("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
     { [DartField("codec")] public VideoCodec Codec;
+      [DartField("width")] public uint Width; [DartField("height")] public uint Height;
       [DartField("keyframe")] public bool Keyframe;
       [DartField("pts")] [DartTypeName("Timestamp")] public long Pts;   // the Timestamp clock
       [DartField("data")] public byte[] Data; }
     // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
+    // Codec/Width/Height are hints for pickers (Unknown/0 = unstated): the stream itself
+    // stays authoritative once connected.
     [DartTypeName("ExternalVideoStream")] public struct ExternalVideoStream
     { [DartField("kind")] public VideoStreamKind Kind;
+      [DartField("codec")] public VideoCodec Codec;
+      [DartField("width")] public uint Width; [DartField("height")] public uint Height;
       [DartField("url")] [DartTypeName("Uri")] [DartString(256)] public string Url;
       [DartField("name")] [DartString(32)] public string Name; }
 

@@ -1338,11 +1338,13 @@ class ImageFormat(_pyenum.IntEnum):
 
 
 class VideoCodec(_pyenum.IntEnum):
-    """The codec a VideoFrame's data is encoded with."""
-    Mjpeg = 0
-    H264 = 1
-    H265 = 2
-    Av1 = 3
+    """The codec a VideoFrame's data is encoded with. Unknown is the unstated
+    codec hint (an ExternalVideoStream that does not state one)."""
+    Unknown = 0
+    Mjpeg = 1
+    H264 = 2
+    H265 = 3
+    Av1 = 4
 
 
 class VideoStreamKind(_pyenum.IntEnum):
@@ -1367,16 +1369,23 @@ class Image:
 
 @_std("VideoFrame")
 class VideoFrame:
-    codec: enum(VideoCodec, u8) = VideoCodec.Mjpeg
+    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
+    width: u32 = 0                              # coded size; 0 = unstated (bitstream rules)
+    height: u32 = 0
     keyframe: bool_ = False
     pts: Timestamp = 0                          # presentation time, the Timestamp clock
     data: list[u8] = b""
 
 
 # Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
+# codec/width/height are hints for pickers (Unknown/0 = unstated): the stream itself
+# stays authoritative once connected.
 @_std("ExternalVideoStream")
 class ExternalVideoStream:
     kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
+    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
+    width: u32 = 0
+    height: u32 = 0
     url: Uri = ""
     name: string(32) = ""
 

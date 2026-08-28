@@ -425,8 +425,8 @@ static class Program
     // The video family, same golden vectors (pinned in cpp/test.cpp too). A mirror whose
     // enum member names, values or order drifted would hash differently, so this catches it.
     const ulong HashImage = 0x83abed7b2c4e334cUL;
-    const ulong HashVideoFrame = 0x0e2cbafb5335f872UL;
-    const ulong HashExternalVideoStream = 0xda5520ef946a2406UL;
+    const ulong HashVideoFrame = 0xf677bd147b513fbcUL;
+    const ulong HashExternalVideoStream = 0xaae502077016ac13UL;
 
     // Standard types as ordinary fields: an ALIAS (Timestamp, Uuid) names a plain field's
     // TYPE, a COMPOSITE (Pose, Color) is a shipped mirror struct that names itself. Both
@@ -526,6 +526,9 @@ static class Program
             var initial = new Dart.ExternalVideoStream
             {
                 Kind = Dart.VideoStreamKind.Rtsp,
+                Codec = Dart.VideoCodec.H264,
+                Width = 1920,
+                Height = 1080,
                 Url = "rtsp://cam.local/main",
                 Name = "front door",
             };
@@ -567,6 +570,8 @@ static class Program
             Check("stream variable replicated the initial",
                   rv.TryGet(out Dart.ExternalVideoStream s0)
                   && s0.Kind == Dart.VideoStreamKind.Rtsp
+                  && s0.Codec == Dart.VideoCodec.H264
+                  && s0.Width == 1920 && s0.Height == 1080
                   && s0.Url == "rtsp://cam.local/main" && s0.Name == "front door");
 
             Check("stream variable set accepted", rv.Set(new Dart.ExternalVideoStream

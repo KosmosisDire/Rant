@@ -365,8 +365,8 @@ static bool patterns_leg() {
  * only a Pose. The golden vectors are shared with the C, C# and Python bindings. ---- */
 static const uint64_t HASH_FLOAT3    = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
 static const uint64_t HASH_IMAGE     = 0x83abed7b2c4e334cULL;
-static const uint64_t HASH_VIDEO     = 0x0e2cbafb5335f872ULL;   /* `VideoFrame` */
-static const uint64_t HASH_EXTSTREAM = 0xda5520ef946a2406ULL;   /* `ExternalVideoStream` */
+static const uint64_t HASH_VIDEO     = 0xf677bd147b513fbcULL;   /* `VideoFrame` */
+static const uint64_t HASH_EXTSTREAM = 0xaae502077016ac13ULL;   /* `ExternalVideoStream` */
 
 struct Track {
     dart::Pose      at;
@@ -514,6 +514,8 @@ static bool stdtypes_leg() {
         dart::VariableOptions<dart::ExternalVideoStream> vo;
         dart::ExternalVideoStream st;
         st.kind = dart::VideoStreamKind::Rtsp;
+        st.codec = dart::VideoCodec::H264;
+        st.width = 1920; st.height = 1080;
         st.url.value.assign("rtsp://cam.local/main");
         st.name.assign("front door");
         vo.initial = st;
@@ -522,6 +524,8 @@ static bool stdtypes_leg() {
         chk("std: stream variable replicates", wait_for(4000, [&] {
                 auto v = vrem.get();
                 return v && v->kind == dart::VideoStreamKind::Rtsp
+                         && v->codec == dart::VideoCodec::H264
+                         && v->width == 1920 && v->height == 1080
                          && v->url.value == "rtsp://cam.local/main"
                          && v->name == "front door";
             }, &b));

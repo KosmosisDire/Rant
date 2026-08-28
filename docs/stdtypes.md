@@ -74,19 +74,41 @@ Image { width: u32, height: u32, stride: u32,
         format: enum<u8> { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12,
                            Jpeg = 16, Png = 17 },
         data: u8[] }
-VideoFrame { codec: enum<u8> { Mjpeg, H264, H265, Av1 },
+VideoFrame { codec: enum<u8> { Unknown, Mjpeg, H264, H265, Av1 },
+             width: u32, height: u32,
              keyframe: bool, pts: Timestamp, data: u8[] }
 ExternalVideoStream { kind: enum<u8> { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
                                        Other = 15 },
+                      codec: enum<u8> { Unknown, Mjpeg, H264, H265, Av1 },
+                      width: u32, height: u32,
                       url: Uri, name: string<32> }
 ```
 
 `Image.stride` 0 means tightly packed rows. A `format` >= 16 is a compressed container, so
 `data` holds the file bytes rather than pixels. `Image` and `VideoFrame` carry a variable
 member, which makes them topic/root types: they can nest as a struct member (the frame is
-hoisted to the message tail) but they cannot be array elements. `ExternalVideoStream` is
-fully fixed, so it nests anywhere and works as a latched variable -- it is how you hand a
-viewer a stream URL instead of pushing pixels through the middleware.
+hoisted to the message tail) but they cannot be array elements.
+
+`VideoFrame.width`/`height` is the coded frame size in pixels. Compressed bitstreams carry
+it in-band (the H.264 SPS, say), which is why some schemas omit it, but a consumer should
+not need a bitstream parser to size a canvas before the first decode. 0 = unstated: the
+bitstream is then the only source. `Unknown` plays the same role for a codec hint.
+
+`ExternalVideoStream` is fully fixed, so it nests anywhere and works as a latched
+variable: it is how you hand a viewer a stream URL instead of pushing pixels through the
+middleware. Its `codec`/`width`/`height` are HINTS for pickers and tiling UIs
+(`Unknown`/0 = unstated), never a contract: once a viewer connects, the stream itself is
+authoritative (an HLS master may carry several renditions, WebRTC negotiates).
+
+The descriptor deliberately carries NO transport or session fields (no SDP, no ICE
+candidates). It describes a STREAM: one latched value, many observers, replayed to late
+joiners. SDP offers and ICE candidates describe one SESSION between one viewer and the
+source, so they cannot live in a one-to-many descriptor, and every `kind` in the roster
+already makes the `url` a complete rendezvous (RTSP negotiates in-protocol, WHEP is
+exactly "signal WebRTC through this URL", HLS is plain HTTP). A system that wants to
+signal WebRTC through DART itself models it as the interaction it is: a function per
+source (offer text in, answer text out) with SDP and candidate lines carried as the
+opaque strings every signaling stack passes verbatim.
 
 ## Conventions
 
@@ -107,7 +129,9 @@ These are pinned, not suggestions. A number crossing DART in one of these types 
 
 Deliberately absent, for now: civil date/time, unit-annotated value types (SI by
 convention today; schema-level unit annotations are the future mechanism), IP addresses,
-the sensor tier (PointCloud, Imu, LaserScan), and any TF / frame_id story.
+the sensor tier (PointCloud, Imu, LaserScan), any TF / frame_id story, and WebRTC
+session signaling (SDP / ICE ride as opaque strings through an app-level function, see
+the media section).
 
 ## Using them from C
 
