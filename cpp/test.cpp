@@ -7,8 +7,10 @@
  * roots (bool / std::string / std::array / a bare-double variable, plus the dynamic API
  * through the empty path) and the canonical cross-language hashes. Leg 5: standard
  * types incl. the video family. Leg 6: variable members (std::vector / std::string
- * tail frames, subset/rebase by path, bare vector roots). Single process, discovery
- * pinned to loopback on isolated domains (never 0). Exit 0 = PASS. */
+ * tail frames, subset/rebase by path, bare vector roots). Leg 7: tasks (defer ->
+ * PendingTask on an app thread, typed progress, cancel, no_cancel refusal, retire
+ * mid-run, task entity reflection). Single process, discovery pinned to loopback on
+ * isolated domains (never 0). Exit 0 = PASS. */
 #include "dart.hpp"
 #include <array>
 #include <atomic>
@@ -759,6 +761,191 @@ static bool tails_leg() {
     return g_failures == fails_at_entry;
 }
 
+/* ---- leg 7: TASKS: a function with progress and cancellation --------------------- */
+
+struct MoveReq { double target; };
+DART_SCHEMA(MoveReq, target);
+struct MoveProgress { double remaining; };
+DART_SCHEMA(MoveProgress, remaining);
+struct MoveRsp { double final_position; };
+DART_SCHEMA(MoveRsp, final_position);
+
+static dart::PendingTask<MoveProgress, MoveRsp> g_move_pending;
+static std::mutex        g_move_mu;
+static std::atomic<int>  g_move_parked{ 0 };
+static dart::PendingTask<MoveProgress, MoveRsp> g_fixed_pending;
+static std::mutex        g_fixed_mu;
+static std::atomic<int>  g_fixed_parked{ 0 };
+
+static bool tasks_leg() {
+    int fails_at_entry = g_failures;
+    dart::NodeOptions opts;
+    opts.domain = 48;
+    opts.multicast_interface = "127.0.0.1";
+    opts.max_topics = 32;
+    opts.fetch_details = true;   /* the peer entity view resolves names, schemas, attrs */
+    auto on_evt = [](const char* tag) {
+        return [tag](const dart::Event& e) {
+            if (e.is_error()) std::printf("event(%s): %s\n", tag, e.to_string().c_str());
+        };
+    };
+    dart::Node a("KA", {}, on_evt("KA"), opts);
+    dart::Node b("KB", {}, on_evt("KB"), opts);
+    chk("task: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    chk("task: A started", a.start());   /* A on its service thread, B pumped from here */
+
+    /* the "move" handler parks every call for a thread the TEST owns */
+    dart::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_move(a, "move",
+        [](const MoveReq& q, dart::TaskRequest<MoveProgress, MoveRsp>& rq) {
+            (void)q;
+            std::lock_guard<std::mutex> g(g_move_mu);
+            g_move_pending = rq.defer();      /* implies RUNNING */
+            g_move_parked++;
+        });
+    dart::TaskOptions fixed_opts;
+    fixed_opts.no_cancel = true;
+    dart::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_fixed(a, "fixed",
+        [](const MoveReq& q, dart::TaskRequest<MoveProgress, MoveRsp>& rq) {
+            (void)q;
+            std::lock_guard<std::mutex> g(g_fixed_mu);
+            g_fixed_pending = rq.defer();
+            g_fixed_parked++;
+        }, fixed_opts);
+    chk("task: definitions created", def_move.valid() && def_fixed.valid());
+
+    std::atomic<uint64_t> cancel_token{ 0 };
+    def_move.on_cancel([&](uint64_t token) { cancel_token = token; });
+
+    dart::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_move(b, "move");
+    dart::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_fixed(b, "fixed");
+    chk("task: remotes created", rt_move.valid() && rt_fixed.valid());
+    chk("task: definition discovered", wait_for(4000,
+        [&] { return rt_move.has_definition() && rt_fixed.has_definition(); }, &b));
+    chk("task: settle", b.settle(4000));
+
+    /* blocking call with progress: the handler defers, the PendingTask moves into a
+       test thread that streams typed progress and completes; on_progress fires the
+       RUNNING ack first (has_value()==false), then the values in order */
+    std::atomic<int> worker_bad{ 0 };
+    std::atomic<int> stale_rc{ -1 };
+    std::thread worker([&] {
+        while (!g_move_parked.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        dart::PendingTask<MoveProgress, MoveRsp> pending;
+        { std::lock_guard<std::mutex> g(g_move_mu); pending = std::move(g_move_pending); }
+        if (!pending.valid()) worker_bad++;
+        if (pending.cancelled()) worker_bad++;       /* nobody cancelled this call */
+        for (int i = 3; i >= 1; i--)
+            if (pending.progress(MoveProgress{ (double)i }) != dart::SendStatus::Ok) worker_bad++;
+        if (pending.complete(MoveRsp{ 5.0 }, "arrived") != dart::SendStatus::Ok) worker_bad++;
+        stale_rc = (int)pending.complete(MoveRsp{ 0.0 });   /* the handle emptied: refused */
+    });
+    std::vector<std::pair<bool, double>> updates;   /* (has_value, value) in arrival order */
+    auto r1 = rt_move.call(MoveReq{ 5.0 },
+        [&](const dart::ProgressView<MoveProgress>& p) {
+            updates.emplace_back(p.has_value(), p.has_value() ? p.value().remaining : 0.0);
+        }, 8000);
+    worker.join();
+    chk("task: blocking call ends Ok", r1.ok() && r1->final_position == 5.0 && r1.provider() != 0);
+    chk("task: completion message carried", r1.message() == "arrived");
+    chk("task: RUNNING ack first (no value)", updates.size() >= 1 && !updates[0].first);
+    chk("task: typed progress in order", updates.size() == 4
+        && updates[1].first && updates[1].second == 3.0
+        && updates[2].first && updates[2].second == 2.0
+        && updates[3].first && updates[3].second == 1.0);
+    chk("task: every token verb accepted", worker_bad.load() == 0);
+    chk("task: an answered handle refuses a second complete",
+        stale_rc.load() == (int)dart::SendStatus::State);
+
+    /* reflection: the folded task entity carries the attrs and the progress schema */
+    auto find = [](const std::vector<dart::Entity>& es, dart::EntityKind k, const char* nm)
+                -> const dart::Entity* {
+        for (const auto& e : es) if (e.kind == k && e.name == nm) return &e;
+        return nullptr;
+    };
+    chk("reflect: local task folded",
+        find(a.entities(), dart::EntityKind::Task, "move") != nullptr);
+    bool peer_task = false, attrs_ok = false, no_cancel_ok = false, prg_schema_ok = false;
+    for (const auto& p : b.peers()) {
+        if (p.name != "KA") continue;
+        auto es = b.peer_entities(p.id);
+        const dart::Entity* mv = find(es, dart::EntityKind::Task, "move");
+        const dart::Entity* fx = find(es, dart::EntityKind::Task, "fixed");
+        peer_task     = mv && fx && mv->provides;
+        attrs_ok      = mv && mv->cancellable && !mv->exclusive;
+        no_cancel_ok  = fx && !fx->cancellable;
+        prg_schema_ok = mv && mv->progress_schema_hash != 0
+                        && !mv->progress_schema.empty()
+                        && mv->progress_schema.name == "MoveProgress";
+    }
+    chk("reflect: peer task entities fold", peer_task);
+    chk("reflect: cancellable attr surfaced", attrs_ok);
+    chk("reflect: no_cancel clears cancellable", no_cancel_ok);
+    chk("reflect: progress schema surfaced", prg_schema_ok);
+
+    /* cancel honored: async call, remote cancels, definition polls + answers Cancelled */
+    std::atomic<bool> cancel_done{ false };
+    std::atomic<int>  cancel_status{ -1 };
+    std::string       cancel_message;   /* written on the polling thread == this one */
+    auto tc = rt_move.call_async(MoveReq{ 9.0 }, {},
+        [&](const dart::ResponseView<MoveRsp>& rv) {
+            cancel_status = (int)rv.status();
+            cancel_message = std::string(rv.message());
+            cancel_done = true;
+        });
+    chk("task: call_async returns the id", tc.ok() && tc.id != 0);
+    chk("task: definition parked", wait_for(4000, [&] { return g_move_parked.load() >= 2; }, &b));
+    chk("task: cancel accepted", rt_move.cancel(tc.id) == dart::SendStatus::Ok);
+    chk("task: definition sees cancelled()", wait_for(4000, [&] {
+            std::lock_guard<std::mutex> g(g_move_mu);
+            return g_move_pending.cancelled();
+        }, &b));
+    chk("task: on_cancel slot fired", wait_for(2000, [&] { return cancel_token.load() != 0; }, &b));
+    {
+        std::lock_guard<std::mutex> g(g_move_mu);
+        chk("task: complete_cancelled accepted",
+            g_move_pending.complete_cancelled("stopped") == dart::SendStatus::Ok);
+    }
+    chk("task: caller sees Cancelled", wait_for(4000, [&] { return cancel_done.load(); }, &b)
+        && cancel_status.load() == (int)dart::CallStatus::Cancelled && cancel_message == "stopped");
+
+    /* no_cancel: cancel refused locally, the call still completes normally */
+    std::atomic<bool> fixed_done{ false };
+    std::atomic<int>  fixed_status{ -1 };
+    auto tf = rt_fixed.call_async(MoveReq{ 1.0 }, {},
+        [&](const dart::ResponseView<MoveRsp>& rv) { fixed_status = (int)rv.status(); fixed_done = true; });
+    chk("task: fixed call committed", tf.ok() && tf.id != 0);
+    chk("task: fixed parked", wait_for(4000, [&] { return g_fixed_parked.load() >= 1; }, &b));
+    chk("task: no_cancel refused locally (BadRole)",
+        rt_fixed.cancel(tf.id) == dart::SendStatus::BadRole);
+    {
+        std::lock_guard<std::mutex> g(g_fixed_mu);
+        chk("task: fixed completes Ok anyway",
+            g_fixed_pending.complete(MoveRsp{ 1.0 }) == dart::SendStatus::Ok);
+    }
+    chk("task: fixed caller sees Ok", wait_for(4000, [&] { return fixed_done.load(); }, &b)
+        && fixed_status.load() == (int)dart::CallStatus::Ok);
+
+    /* retire mid-run: the deferred call answers Cancelled while the channels are up */
+    std::atomic<bool> retired_done{ false };
+    std::atomic<int>  retired_status{ -1 };
+    auto tr = rt_move.call_async(MoveReq{ 2.0 }, {},
+        [&](const dart::ResponseView<MoveRsp>& rv) { retired_status = (int)rv.status(); retired_done = true; });
+    chk("task: retire-leg call committed", tr.ok());
+    chk("task: retire-leg parked", wait_for(4000, [&] { return g_move_parked.load() >= 3; }, &b));
+    {   /* the handle dies with the definition: DROP it before retiring */
+        std::lock_guard<std::mutex> g(g_move_mu);
+        g_move_pending = dart::PendingTask<MoveProgress, MoveRsp>();
+    }
+    chk("task: retire mid-run", def_move.retire() == dart::SendStatus::Ok);
+    chk("task: retire resolves the caller Cancelled",
+        wait_for(4000, [&] { return retired_done.load(); }, &b)
+        && retired_status.load() == (int)dart::CallStatus::Cancelled);
+
+    a.stop();
+    return g_failures == fails_at_entry;
+}
+
 int main() {
 #if defined(__cpp_exceptions)
   try {
@@ -831,6 +1018,11 @@ int main() {
     std::printf("tail-member leg:\n");
     bool tl_ok = tails_leg();
     std::printf("%s\n", tl_ok ? "PASS: variable members" : "FAIL: tail-member leg");
+
+    /* tasks: progress + cancellation over the function machinery */
+    std::printf("tasks leg:\n");
+    bool task_ok = tasks_leg();
+    std::printf("%s\n", task_ok ? "PASS: tasks" : "FAIL: tasks leg");
 
 #if defined(__cpp_exceptions)
     /* a failed constructor throws dart::Error (on_event is required) */

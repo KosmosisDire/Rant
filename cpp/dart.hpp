@@ -30,7 +30,7 @@
  *     node.start();                          // background service thread owns the loop
  *     for (;;) chat.send("hello");           // thread-safe; or skip start() and poll(1) yourself
  *
- * Typed patterns (functions / variables / pub-sub) over DART_SCHEMA:
+ * Typed patterns (functions / tasks / variables / pub-sub) over DART_SCHEMA:
  *
  *     struct Pose { double x, y; };
  *     DART_SCHEMA(Pose, x, y);
@@ -149,15 +149,18 @@ enum class FieldType : uint8_t {
     VString, VArray, Map, Enum, Named
 };
 
-/* A function call's outcome (mirrors DartCallStatus). Ok/AppError/NoHandler travel on
- * the wire; Timeout/PeerLost are synthesized client-side when no response arrives;
- * Cancelled is synthesized for calls still pending when the local node closes. */
+/* A call's outcome (mirrors DartCallStatus). Ok/AppError/NoHandler/Cancelled/Running
+ * travel on the wire; Timeout/PeerLost are synthesized client-side when no response
+ * arrives. Cancelled is wire-carried when a provider honors a cancel (or retires
+ * mid-run) and synthesized for calls still pending at local close/retire. Running is
+ * task-only and the ONE non-terminal status: the request was accepted and runs, the
+ * call's timeout is dropped, and on_progress fires once with has_value() == false. */
 enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4,
-                        Cancelled = 5 };
+                        Cancelled = 5, Running = 6 };
 
 /* What a network entity is (mirrors DartEntityKind): observers consume ENTITIES, never
  * raw channels; a function's req/rsp pair or a variable's set channel fold into one. */
-enum class EntityKind { Topic = 0, Function, Variable };
+enum class EntityKind { Topic = 0, Function, Variable, Task };
 
 /* Severity of a built-in @dart/log line (mirrors DartLogLevel). */
 enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
@@ -177,8 +180,10 @@ static_assert((int)FieldType::Named == detail::DART_NAMED, "field-type enum drif
 static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum drift");
 static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
 static_assert((int)CallStatus::Cancelled == detail::DART_CALL_CANCELLED, "call-status enum drift");
+static_assert((int)CallStatus::Running == detail::DART_CALL_RUNNING, "call-status enum drift");
 static_assert((int)EntityKind::Topic == detail::DART_ENTITY_TOPIC, "entity enum drift");
 static_assert((int)EntityKind::Variable == detail::DART_ENTITY_VARIABLE, "entity enum drift");
+static_assert((int)EntityKind::Task == detail::DART_ENTITY_TASK, "entity enum drift");
 #endif
 static_assert((int)LogLevel::Info == detail::DART_LOG_INFO, "log-level enum drift");
 
@@ -191,6 +196,8 @@ class Schema;
 template <class T = void> class Message;
 template <class Req = void, class Rsp = void> class FunctionDefinition;
 template <class Req = void, class Rsp = void> class RemoteFunction;
+template <class Req = void, class Prg = void, class Rsp = void> class TaskDefinition;
+template <class Req = void, class Prg = void, class Rsp = void> class RemoteTask;
 template <class T = void> class VariableDefinition;
 template <class T = void> class RemoteVariable;
 class VariableUpdate;
@@ -198,6 +205,9 @@ template <class T = void> class Publisher;
 template <class T = void> class Subscriber;
 template <class Rsp = void> class Request;
 template <class Rsp = void> class Deferred;
+template <class Prg = void, class Rsp = void> class TaskRequest;
+template <class Prg = void, class Rsp = void> class PendingTask;
+template <class Prg = void> class ProgressView;
 template <class Rsp = void> class Response;
 template <class Rsp = void> class ResponseView;
 
@@ -400,11 +410,31 @@ struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout; 0 = 5s */
 };
+/* Task options (mirrors DartTaskOpts). A task is a function with progress and
+ * cancellation; see TaskDefinition / RemoteTask. */
+struct TaskOptions {
+    bool     progress_best_effort = false; /* progress-channel reliability: false = reliable.
+                                              The definition OFFERS, a remote REQUESTS (RxO:
+                                              an observer may tap a reliable stream
+                                              best-effort and can never stall the task) */
+    uint16_t progress_keep_last   = 0;     /* progress ring depth; 0 = the pattern default */
+    bool     no_cancel            = false; /* definition: will not honor cancellation; remotes
+                                              then refuse cancel() locally (BadRole) */
+    bool     exclusive            = false; /* definition: declared serialization; the handler
+                                              enforces it (fail("busy")) */
+    bool     multi                = false; /* redundant providers intended; each request still
+                                              has exactly one executor */
+    uint32_t timeout_us           = 0;     /* remote: until-first-response bound; 0 = 5s */
+    uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
+};
 /* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
  * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
- * many host the same function, e.g. the @dart/meta endpoint (see Node::meta). */
+ * many host the same function, e.g. the @dart/meta endpoint (see Node::meta). A TASK
+ * request is always directed: 0 resolves to the oldest matched provider at send time. */
 struct CallOptions {
-    uint32_t provider = 0;
+    uint32_t  provider = 0;
+    uint32_t* id_out   = nullptr;   /* receives the call id at commit (before any wait): the
+                                       handle for RemoteTask::cancel from another thread */
 };
 /* VariableOptions<T> for the typed definition (initial is a typed value);
  * VariableOptions<> is the untyped twin (initial is raw Bytes). */
@@ -923,13 +953,18 @@ struct Entity {
     bool        reliable   = false;   /* the primary channel's advertised reliability */
     bool        writable   = false;   /* VARIABLE: a set channel is advertised alongside the value */
     bool        forceable  = false;   /* VARIABLE: the owner permits force/unforce (allow_force) */
+    bool        cancellable= false;   /* TASK: the provider honors cancel (default on) */
+    bool        exclusive  = false;   /* TASK: declared serialization (the handler enforces it) */
+    bool        multi      = false;   /* authority kinds: duplicate authority is intended */
     bool        incomplete = false;   /* a pattern half-pair: surfaced, never silently dropped */
     uint16_t    index = 0;            /* the primary channel's index at the peer */
     uint32_t    hash  = 0;            /* the primary channel's low-32 name hash (the placeholder) */
     uint64_t    schema_hash     = 0;  /* value/request/payload schema identity (0 = untyped/unfetched) */
-    uint64_t    rsp_schema_hash = 0;  /* FUNCTION only: the response schema identity */
+    uint64_t    rsp_schema_hash = 0;  /* FUNCTION/TASK: the response schema identity */
+    uint64_t    progress_schema_hash = 0;  /* TASK: the progress channel's schema identity */
     SchemaInfo  schema;               /* value/request/payload schema field table (empty = untyped/unfetched) */
-    SchemaInfo  rsp_schema;           /* FUNCTION only: the response schema field table */
+    SchemaInfo  rsp_schema;           /* FUNCTION/TASK: the response schema field table */
+    SchemaInfo  progress_schema;      /* TASK: the progress channel's schema field table */
 };
 
 /* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Peer
@@ -1978,6 +2013,98 @@ private:
     template <class A, class B> friend class FunctionDefinition;
 };
 
+/* PendingTask<> / PendingTask<Prg,Rsp>: a deferred task call in flight (from
+ * TaskRequest::defer). Movable, single-answer; made to be moved into whatever thread the
+ * app owns (the token verbs are thread-safe). progress() broadcasts an update any number
+ * of times; complete / fail / complete_cancelled answers exactly once and empties the
+ * handle (an emptied or stale handle gets SendStatus::State, never UB). cancelled() polls
+ * the caller's cancel request: cancellation is COOPERATIVE, honor it with
+ * complete_cancelled or run to completion anyway. Complete or DROP the handle BEFORE
+ * retiring the definition (retire answers its call Cancelled and frees what the verbs
+ * would reach). Dropping it unanswered leaves a RUNNING caller waiting for cancel or the
+ * provider's shutdown. */
+template <> class PendingTask<void, void> {
+public:
+    PendingTask() = default;
+    PendingTask(PendingTask&& o) noexcept : fn_(o.fn_), token_(o.token_) { o.fn_ = nullptr; o.token_ = 0; }
+    PendingTask& operator=(PendingTask&& o) noexcept {
+        if (this != &o) { fn_ = o.fn_; token_ = o.token_; o.fn_ = nullptr; o.token_ = 0; }
+        return *this;
+    }
+    PendingTask(const PendingTask&) = delete;
+    PendingTask& operator=(const PendingTask&) = delete;
+
+    bool valid() const noexcept { return fn_ != nullptr && token_ != 0; }
+    explicit operator bool() const noexcept { return valid(); }
+
+    /* one progress update, broadcast on the progress channel (any observer may watch) */
+    SendStatus progress(Bytes update) {
+        if (!valid()) return SendStatus::State;
+        return static_cast<SendStatus>(detail::dart_function_progress(fn_, token_, priv::to_c(update)));
+    }
+    /* true the moment a cancel for this call arrived (false on an emptied handle) */
+    bool cancelled() const {
+        return valid() && detail::dart_function_cancelled(fn_, token_) == 1;
+    }
+    /* message as on Deferred: optional outcome text (ResponseView::message on the caller) */
+    SendStatus complete(Bytes rsp = Bytes(), std::string_view message = {}) {
+        return finish(detail::DART_CALL_OK, message, rsp);
+    }
+    SendStatus fail(std::string_view message = {}, Bytes rsp = Bytes()) {
+        return finish(detail::DART_CALL_APP_ERROR, message, rsp);
+    }
+    /* honor a cancel: the caller's terminal status is CallStatus::Cancelled */
+    SendStatus complete_cancelled(std::string_view message = {}) {
+        return finish(detail::DART_CALL_CANCELLED, message, Bytes());
+    }
+
+private:
+    PendingTask(detail::DartFunction* fn, uint64_t token) : fn_(fn), token_(token) {}
+    SendStatus finish(int status, std::string_view message, Bytes rsp) {
+        if (!valid()) return SendStatus::State;
+        std::string m(message);   /* the C API takes a NUL-terminated string */
+        int r = detail::dart_function_complete(fn_, token_,
+                    static_cast<detail::DartCallStatus>(status),
+                    m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
+        fn_ = nullptr; token_ = 0;
+        return static_cast<SendStatus>(r);
+    }
+    detail::DartFunction* fn_ = nullptr;
+    uint64_t              token_ = 0;
+    template <class A, class B> friend class TaskRequest;
+};
+
+/* TaskRequest<> (untyped): the request as seen by a task definition's handler; as
+ * Request<>, plus the task verbs. Answer inline (reply/fail), or start() + defer() and
+ * return: the PendingTask then streams progress and answers from whatever thread the app
+ * owns. Returning without reply/fail/defer answers AppError "handler returned no result"
+ * (an instant empty OK on a long-running operation would read as success that never ran). */
+template <> class TaskRequest<void, void> : public FieldView {
+public:
+    std::string_view task_name()   const { return { rq_->function_name.data, rq_->function_name.len }; }
+    uint32_t         caller()      const { return rq_->caller; }
+    std::string_view caller_name() const { return { rq_->caller_name.data, rq_->caller_name.len }; }
+    uint64_t         recv_us()     const { return rq_->recv_us; }
+    uint64_t         written_us()  const { return rq_->written_us; }   /* the caller's write stamp */
+
+    void reply(Bytes rsp) { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
+    void fail(std::string_view message = {}, Bytes rsp = {}) {
+        std::string m(message);
+        detail::dart_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
+    }
+    /* send RUNNING to the caller now (empty, non-terminal); idempotent, defer() implies it */
+    SendStatus start() { return static_cast<SendStatus>(detail::dart_request_start(rq_)); }
+    /* park the call and return now: the returned PendingTask carries it to completion */
+    PendingTask<> defer() { return PendingTask<>(fn_, detail::dart_request_defer(rq_)); }
+
+private:
+    TaskRequest(detail::DartRequest* rq, detail::DartFunction* fn)
+        : FieldView(rq->data, rq->schema), rq_(rq), fn_(fn) {}
+    detail::DartRequest*  rq_;
+    detail::DartFunction* fn_;
+    template <class A, class B, class C> friend class TaskDefinition;
+};
+
 /* Response<> (untyped): an OWNING function-call outcome (from RemoteFunction<>::call);
  * the payload is copied out, so it outlives the call. send_status() carries a
  * synchronous refusal (a negative DartResult) when the call never launched. */
@@ -2006,6 +2133,7 @@ private:
     std::string               message_;
     const detail::DartSchema* schema_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
+    template <class A, class B, class C> friend class RemoteTask;
 };
 
 /* ResponseView<> (untyped): the async outcome, valid for the callback only. */
@@ -2024,14 +2152,35 @@ private:
         : FieldView(r->data, r->schema), r_(r) {}
     const detail::DartResponse* r_;
     template <class A, class B> friend class RemoteFunction;
+    template <class A, class B, class C> friend class RemoteTask;
+};
+
+/* ProgressView<> (untyped): one progress update handed to a task caller's on_progress;
+ * valid for the callback only. The RUNNING acknowledgment fires it once with
+ * has_value() == false (zero-length data): field reads are meaningful only when
+ * has_value(). */
+template <> class ProgressView<void> : public FieldView {
+public:
+    uint32_t call_id()    const { return p_->call_id; }
+    uint32_t provider()   const { return p_->provider; }   /* the peer working the call */
+    uint64_t written_us() const { return p_->written_us; } /* the provider's write stamp */
+    uint64_t recv_us()    const { return p_->recv_us; }
+    bool     has_value()  const { return p_->data.len != 0; }
+
+private:
+    explicit ProgressView(const detail::DartProgress* p) : FieldView(p->data, p->schema), p_(p) {}
+    const detail::DartProgress* p_;
+    template <class A, class B, class C> friend class RemoteTask;
 };
 
 namespace priv {
-/* one in-flight async call's callback; owned by the registry until the outcome fires */
+/* one in-flight async call's callbacks; owned by the registry until the ONE terminal
+ * outcome fires (task progress never frees it) */
 struct AsyncBox {
     std::function<void(const ResponseView<>&)> cb;
     std::mutex*                mu;     /* the node Impl's registry lock */
     std::unordered_set<void*>* live;   /* the node Impl's outstanding-box set */
+    std::function<void(const ProgressView<>&)> on_progress;   /* task calls only */
 };
 }
 
@@ -2610,13 +2759,18 @@ private:
         e.reliable   = ei.reliable != 0;
         e.writable   = ei.writable != 0;
         e.forceable  = ei.forceable != 0;
+        e.cancellable= ei.cancellable != 0;
+        e.exclusive  = ei.exclusive != 0;
+        e.multi      = ei.multi != 0;
         e.incomplete = ei.incomplete != 0;
         e.index = ei.index;
         e.hash  = ei.hash;
         e.schema_hash     = ei.schema_hash;
         e.rsp_schema_hash = ei.rsp_schema_hash;
+        e.progress_schema_hash = ei.progress_schema_hash;
         e.schema     = schema_info_from(ei.schema);
         e.rsp_schema = schema_info_from(ei.rsp_schema);
+        e.progress_schema = schema_info_from(ei.progress_schema);
         return e;
     }
 #endif
@@ -2676,6 +2830,8 @@ private:
     friend class Topic;
     template <class A, class B> friend class FunctionDefinition;
     template <class A, class B> friend class RemoteFunction;
+    template <class A, class B, class C> friend class TaskDefinition;
+    template <class A, class B, class C> friend class RemoteTask;
     template <class A> friend class VariableDefinition;
     template <class A> friend class RemoteVariable;
     template <class A> friend class Publisher;
@@ -2855,7 +3011,8 @@ public:
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::DartResponse out;
         std::memset(&out, 0, sizeof out);
-        detail::DartCallOpts co; std::memset(&co, 0, sizeof co); co.provider = opts.provider;
+        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        co.provider = opts.provider; co.id_out = opts.id_out;
         int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
@@ -2881,7 +3038,8 @@ public:
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
         }
-        detail::DartCallOpts co; std::memset(&co, 0, sizeof co); co.provider = opts.provider;
+        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        co.provider = opts.provider; co.id_out = opts.id_out;
         int rc = detail::dart_function_call_async(fn_, priv::to_c(req),
                                                   &RemoteFunction::async_tramp, box, &co);
         if (rc != 0) {
@@ -2950,6 +3108,287 @@ inline SendStatus Node::meta_request(uint32_t peer,
         cb(MetaSnapshot::decode(r));
     }, CallOptions{ peer });
 }
+
+/* ====================== TASKS (untyped cores) =============================== */
+
+/* What RemoteTask::call_async returns: the send status plus the call id, the handle for
+ * cancel(). id is 0 when the request never committed. */
+struct TaskCall {
+    SendStatus status = SendStatus::NoTopic;
+    uint32_t   id     = 0;
+    bool ok() const { return status == SendStatus::Ok; }
+};
+
+/* TaskDefinition<> (untyped): the implementation side of a task (a function with
+ * progress and cancellation: the same call ids and statuses, plus a broadcast progress
+ * channel and a cancel op). The handler fires on the poll thread and must be quick:
+ * answer inline, or start()/defer() and work through the PendingTask from a thread the
+ * app owns. ONE definition per name (TaskOptions::multi declares redundant providers). */
+template <> class TaskDefinition<void, void, void> {
+public:
+    using Handler = std::function<void(TaskRequest<>&)>;
+
+    TaskDefinition() = default;
+    /* handler == {} answers every call CallStatus::NoHandler (a declared stub). */
+    TaskDefinition(Node& n, std::string_view name, const Schema* req_schema,
+                   const Schema* prg_schema, const Schema* rsp_schema,
+                   Handler handler, const TaskOptions& o = {}) {
+        if (!n.valid()) { priv::raise_msg("dart::TaskDefinition: node is not valid"); return; }
+        std::string nm(name);
+        detail::DartTaskOpts co;
+        std::memset(&co, 0, sizeof co);
+        co.progress_best_effort = o.progress_best_effort ? 1 : 0;
+        co.progress_keep_last   = o.progress_keep_last;
+        co.no_cancel            = o.no_cancel ? 1 : 0;
+        co.exclusive            = o.exclusive ? 1 : 0;
+        co.multi                = o.multi ? 1 : 0;
+        co.timeout_us           = o.timeout_us;
+        co.backpressure_wait_us = o.backpressure_wait_us;
+        Box* box = nullptr;
+        if (handler) { box = new Box(); box->h = std::move(handler); }
+        fn_ = detail::dart_node_create_task_definition(n.impl_->node, nm.c_str(),
+                  req_schema ? req_schema->raw() : nullptr,
+                  prg_schema ? prg_schema->raw() : nullptr,
+                  rsp_schema ? rsp_schema->raw() : nullptr,
+                  box ? &TaskDefinition::tramp : nullptr, box, &co);
+        if (!fn_) {
+            delete box;
+            priv::raise_last(n.impl_->node, "dart::TaskDefinition create");
+            return;
+        }
+        impl_ = n.impl_.get();
+        if (box) {
+            box->fn.store(fn_);
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->boxes.emplace_back(box);
+        }
+    }
+
+    bool valid() const noexcept { return fn_ != nullptr; }
+    explicit operator bool() const noexcept { return valid(); }
+    /* callers currently matched to this definition */
+    int caller_count() const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+
+    /* Cancel notification, one slot (re-register replaces, {} clears): fires on the poll
+     * thread with the cancelled call's defer token, under the usual callback
+     * restrictions. Optional: polling PendingTask::cancelled alone is complete. */
+    void on_cancel(std::function<void(uint64_t token)> h) {
+        if (!fn_) return;
+        CancelBox* box = nullptr;
+        if (h) { box = new CancelBox(); box->h = std::move(h); }
+        detail::dart_function_on_cancel(fn_, box ? &TaskDefinition::cancel_tramp : nullptr, box);
+        if (box) {   /* kept alive until node close, like every handler box */
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->boxes.emplace_back(box);
+        }
+    }
+
+    /* Retire the definition (see dart_function_retire): every live deferred call answers
+     * Cancelled first, so a RUNNING caller never hangs. Complete or drop outstanding
+     * PendingTask handles BEFORE retiring. The handle is empty after; refused (State)
+     * from inside a callback, and the handle then stays valid. */
+    SendStatus retire() {
+        if (!fn_) return SendStatus::NoTopic;
+        int rc = detail::dart_function_retire(fn_);
+        if (rc == 0) fn_ = nullptr;
+        return static_cast<SendStatus>(rc);
+    }
+
+private:
+    struct Box : priv::HandlerBox {
+        Handler h;
+        std::atomic<detail::DartFunction*> fn{ nullptr };
+    };
+    struct CancelBox : priv::HandlerBox {
+        std::function<void(uint64_t)> h;
+    };
+    static void tramp(detail::DartRequest* rq, void* user) {
+        Box* b = static_cast<Box*>(user);
+        TaskRequest<> r(rq, b->fn.load());
+#if defined(__cpp_exceptions)
+        try { b->h(r); }
+        catch (...) {   /* a no-op if the handler already deferred: one answer per call */
+            detail::dart_request_fail(rq, "handler threw", detail::dart_bytes(nullptr, 0));
+        }
+#else
+        b->h(r);
+#endif
+    }
+    static void cancel_tramp(uint64_t token, void* user) {
+        CancelBox* b = static_cast<CancelBox*>(user);
+#if defined(__cpp_exceptions)
+        try { b->h(token); } catch (...) {}   /* never unwind into the C poll */
+#else
+        b->h(token);
+#endif
+    }
+    detail::DartFunction* fn_ = nullptr;
+    Node::Impl*           impl_ = nullptr;
+    template <class A, class B, class C> friend class TaskDefinition;
+};
+
+/* RemoteTask<> (untyped): a reference to a task definition on another node. A task
+ * request is always DIRECTED at one provider (CallOptions::provider; 0 = the oldest
+ * matched). The per-call timeout bounds only the wait for the FIRST response: once
+ * RUNNING (or progress) arrives the task runs as long as it runs, and cancel() is the
+ * caller's tool for impatience. */
+template <> class RemoteTask<void, void, void> {
+public:
+    using ProgressHandler = std::function<void(const ProgressView<>&)>;
+
+    RemoteTask() = default;
+    RemoteTask(Node& n, std::string_view name, const Schema* req_schema = nullptr,
+               const Schema* prg_schema = nullptr, const Schema* rsp_schema = nullptr,
+               const TaskOptions& o = {}) {
+        if (!n.valid()) { priv::raise_msg("dart::RemoteTask: node is not valid"); return; }
+        std::string nm(name);
+        detail::DartTaskOpts co;
+        std::memset(&co, 0, sizeof co);
+        co.progress_best_effort = o.progress_best_effort ? 1 : 0;
+        co.progress_keep_last   = o.progress_keep_last;
+        co.timeout_us           = o.timeout_us;
+        co.backpressure_wait_us = o.backpressure_wait_us;
+        fn_ = detail::dart_node_create_remote_task(n.impl_->node, nm.c_str(),
+                  req_schema ? req_schema->raw() : nullptr,
+                  prg_schema ? prg_schema->raw() : nullptr,
+                  rsp_schema ? rsp_schema->raw() : nullptr, &co);
+        if (!fn_) { priv::raise_last(n.impl_->node, "dart::RemoteTask create"); return; }
+        impl_ = n.impl_.get();
+    }
+
+    bool valid() const noexcept { return fn_ != nullptr; }
+    explicit operator bool() const noexcept { return valid(); }
+
+    /* BLOCKING call: drives the node loop until the terminal outcome. on_progress fires
+     * on THIS thread while it waits, once with has_value() == false for the RUNNING ack
+     * and then per update. timeout_ms (negative = the task's default) bounds only the
+     * wait for the FIRST response. Refused (send_status() == SendStatus::State) from
+     * inside a callback or while a service thread owns this node's loop; use call_async
+     * there. CallOptions::id_out receives the call id at commit, so another thread can
+     * cancel() while this one blocks. */
+    Response<> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
+                    const CallOptions& opts = {}) {
+        Response<> r;
+        if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
+        detail::DartResponse out;
+        std::memset(&out, 0, sizeof out);
+        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        co.provider = opts.provider; co.id_out = opts.id_out;
+        if (on_progress) {   /* fires only inside dart_function_call: the stack copy holds */
+            co.on_progress   = &RemoteTask::blocking_progress_tramp;
+            co.progress_user = &on_progress;
+        }
+        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
+        if (rc == 1) {
+            r.st_       = static_cast<CallStatus>(out.status);
+            r.provider_ = out.provider;
+            r.written_  = out.written_us;
+            r.schema_   = out.schema;
+            if (out.data.len) r.data_.assign(out.data.data, out.data.data + out.data.len);
+        } else if (rc < 0) {
+            r.ss_ = static_cast<SendStatus>(rc);   /* status() stays Timeout: not answered */
+        }
+        if (rc >= 0 && out.message.len)   /* answered or timed out: copy the outcome text */
+            r.message_.assign(out.message.data, out.message.len);
+        return r;
+    }
+    /* Async form: returns as soon as the request is committed, with the call id for
+     * cancel(). on_progress fires per update and on_response once with the terminal
+     * outcome (both on the polling thread); the per-call state is freed exactly at that
+     * one terminal outcome, which the C guarantees even at retire and close. */
+    TaskCall call_async(Bytes req, ProgressHandler on_progress,
+                        std::function<void(const ResponseView<>&)> on_response,
+                        const CallOptions& opts = {}) {
+        TaskCall tc;
+        if (!fn_) return tc;
+        priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
+                                                  &impl_->reg_mu, &impl_->async_live,
+                                                  std::move(on_progress) };
+        {
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->async_live.insert(box);
+        }
+        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        co.provider = opts.provider;
+        co.id_out   = &tc.id;
+        if (box->on_progress) {
+            co.on_progress   = &RemoteTask::async_progress_tramp;
+            co.progress_user = box;
+        }
+        int rc = detail::dart_function_call_async(fn_, priv::to_c(req),
+                                                  &RemoteTask::async_response_tramp, box, &co);
+        if (rc != 0) {
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->async_live.erase(box);
+            delete box;
+            tc.id = 0;
+        }
+        tc.status = static_cast<SendStatus>(rc);
+        if (opts.id_out) *opts.id_out = tc.id;
+        return tc;
+    }
+
+    /* Request cancellation of the outstanding call (TaskCall::id / CallOptions::id_out).
+     * Cooperative and never acked: the terminal status is the answer (Cancelled = honored
+     * or never started; a normal outcome = it completed anyway). BadRole when the
+     * provider declared no_cancel (checked locally against its cached attrs, nothing
+     * sent); State when the call is not pending (already answered). */
+    SendStatus cancel(uint32_t call_id) {
+        if (!fn_) return SendStatus::NoTopic;
+        return static_cast<SendStatus>(detail::dart_function_cancel(fn_, call_id));
+    }
+
+    int  match_count()    const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+    bool has_definition() const { return match_count() > 0; }
+    /* Retire the remote (see dart_function_retire): every outstanding call completes with
+     * CallStatus::Cancelled. The handle is empty after; refused (State) from inside a
+     * callback, and the handle then stays valid. */
+    SendStatus retire() {
+        if (!fn_) return SendStatus::NoTopic;
+        int rc = detail::dart_function_retire(fn_);
+        if (rc == 0) fn_ = nullptr;
+        return static_cast<SendStatus>(rc);
+    }
+
+private:
+    static void blocking_progress_tramp(const detail::DartProgress* p) {
+        ProgressHandler* h = static_cast<ProgressHandler*>(p->user);
+        ProgressView<> pv(p);
+#if defined(__cpp_exceptions)
+        try { (*h)(pv); } catch (...) {}   /* never unwind into the C poll */
+#else
+        (*h)(pv);
+#endif
+    }
+    static void async_progress_tramp(const detail::DartProgress* p) {
+        priv::AsyncBox* box = static_cast<priv::AsyncBox*>(p->user);
+        ProgressView<> pv(p);
+#if defined(__cpp_exceptions)
+        try { box->on_progress(pv); } catch (...) {}
+#else
+        box->on_progress(pv);
+#endif
+    }
+    static void async_response_tramp(const detail::DartResponse* r) {
+        priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
+        {
+            std::lock_guard<std::mutex> g(*box->mu);
+            box->live->erase(box);
+        }
+        if (box->cb) {
+            ResponseView<> rv(r);
+#if defined(__cpp_exceptions)
+            try { box->cb(rv); } catch (...) {}   /* never unwind into the C poll */
+#else
+            box->cb(rv);
+#endif
+        }
+        delete box;
+    }
+    detail::DartFunction* fn_ = nullptr;
+    Node::Impl*           impl_ = nullptr;
+    template <class A, class B, class C> friend class RemoteTask;
+};
 
 /* ====================== VARIABLES (untyped cores) =========================== */
 
@@ -3261,6 +3700,7 @@ private:
     std::string message_;
     Rsp         v_{};
     template <class A, class B> friend class RemoteFunction;
+    template <class A, class B, class C> friend class RemoteTask;
 };
 
 /* ResponseView<Rsp>: the typed async outcome; valid for the callback. */
@@ -3283,6 +3723,7 @@ private:
     std::string_view message_;
     Rsp              v_{};
     template <class A, class B> friend class RemoteFunction;
+    template <class A, class B, class C> friend class RemoteTask;
 };
 
 /* FunctionDefinition<Req,Rsp>: the typed implementation side. Two handler forms:
@@ -3378,6 +3819,180 @@ public:
 
 private:
     RemoteFunction<> core_;
+};
+
+/* TaskRequest<Prg,Rsp>: the typed view of a request inside a task handler. Wraps the
+ * untyped TaskRequest<> (reference; callback lifetime) and adds the typed verbs. */
+template <class Prg, class Rsp> class TaskRequest {
+public:
+    explicit TaskRequest(TaskRequest<>& core) : core_(core) {}
+    Bytes            data()        const { return core_.data(); }
+    uint32_t         caller()      const { return core_.caller(); }
+    std::string_view caller_name() const { return core_.caller_name(); }
+    std::string_view task_name()   const { return core_.task_name(); }
+    uint64_t         recv_us()     const { return core_.recv_us(); }
+    uint64_t         written_us()  const { return core_.written_us(); }
+
+    void reply(const Rsp& v) {
+        std::vector<uint8_t> s;
+        core_.reply(priv::encode(v, s));
+    }
+    void reply(Bytes raw) { core_.reply(raw); }
+    void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
+    SendStatus start() { return core_.start(); }
+    PendingTask<Prg, Rsp> defer() { return PendingTask<Prg, Rsp>(core_.defer()); }
+
+private:
+    TaskRequest<>& core_;
+};
+
+/* PendingTask<Prg,Rsp>: the typed deferred task (see the untyped core's contract). */
+template <class Prg, class Rsp> class PendingTask {
+public:
+    PendingTask() = default;
+    PendingTask(PendingTask<>&& core) : core_(std::move(core)) {}
+    PendingTask(PendingTask&&) noexcept = default;
+    PendingTask& operator=(PendingTask&&) noexcept = default;
+    bool valid() const noexcept { return core_.valid(); }
+    explicit operator bool() const noexcept { return valid(); }
+
+    SendStatus progress(const Prg& v) {
+        std::vector<uint8_t> s;
+        return core_.progress(priv::encode(v, s));
+    }
+    bool cancelled() const { return core_.cancelled(); }
+    SendStatus complete(const Rsp& v, std::string_view message = {}) {
+        std::vector<uint8_t> s;
+        return core_.complete(priv::encode(v, s), message);
+    }
+    SendStatus fail(std::string_view message = {}) { return core_.fail(message); }
+    SendStatus complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
+
+private:
+    PendingTask<> core_;
+};
+
+/* ProgressView<Prg>: the typed progress update; valid for the callback. value() is
+ * meaningful only when has_value() (the RUNNING ack carries none). */
+template <class Prg> class ProgressView {
+public:
+    uint32_t call_id()    const { return call_id_; }
+    uint32_t provider()   const { return provider_; }
+    uint64_t written_us() const { return written_; }
+    uint64_t recv_us()    const { return recv_; }
+    bool     has_value()  const { return has_; }
+    const Prg& value()      const { return v_; }
+    const Prg& operator*()  const { return v_; }
+    const Prg* operator->() const { return &v_; }
+
+private:
+    ProgressView() = default;
+    uint32_t call_id_ = 0, provider_ = 0;
+    uint64_t written_ = 0, recv_ = 0;
+    bool     has_ = false;
+    Prg      v_{};
+    template <class A, class B, class C> friend class RemoteTask;
+};
+
+/* TaskDefinition<Req,Prg,Rsp>: the typed implementation side. Handler form:
+ *   void(const Req&, TaskRequest<Prg,Rsp>&)     reply/fail inline, or start()/defer()
+ * A handler that throws answers CallStatus::AppError (never unwinds into the C). */
+template <class Req, class Prg, class Rsp> class TaskDefinition {
+public:
+    TaskDefinition() = default;
+    template <class H>
+    TaskDefinition(Node& n, std::string_view name, H&& handler, const TaskOptions& o = {}) {
+        const Schema* rq = priv::schema_of<Req>();
+        const Schema* pg = priv::schema_of<Prg>();
+        const Schema* rs = priv::schema_of<Rsp>();
+        if (!rq || !pg || !rs) { priv::raise_msg("dart::TaskDefinition: DART_SCHEMA compile failed"); return; }
+        core_ = TaskDefinition<>(n, name, rq, pg, rs, adapt(std::forward<H>(handler)), o);
+    }
+    bool valid() const noexcept { return core_.valid(); }
+    explicit operator bool() const noexcept { return valid(); }
+    int caller_count() const { return core_.caller_count(); }
+    void on_cancel(std::function<void(uint64_t token)> h) { core_.on_cancel(std::move(h)); }
+    SendStatus retire() { return core_.retire(); }
+
+private:
+    template <class H>
+    static typename TaskDefinition<>::Handler adapt(H&& h) {
+        static_assert(std::is_invocable_v<std::decay_t<H>&, const Req&, TaskRequest<Prg, Rsp>&>,
+                      "task handler must be void(const Req&, dart::TaskRequest<Prg,Rsp>&)");
+        return [f = std::forward<H>(h)](TaskRequest<>& u) mutable {
+            Req q{};
+            if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
+            TaskRequest<Prg, Rsp> tr(u);
+            f(q, tr);
+        };
+    }
+    TaskDefinition<> core_;
+};
+
+/* RemoteTask<Req,Prg,Rsp>: the typed caller side. */
+template <class Req, class Prg, class Rsp> class RemoteTask {
+public:
+    using ProgressHandler = std::function<void(const ProgressView<Prg>&)>;
+
+    RemoteTask() = default;
+    RemoteTask(Node& n, std::string_view name, const TaskOptions& o = {}) {
+        const Schema* rq = priv::schema_of<Req>();
+        const Schema* pg = priv::schema_of<Prg>();
+        const Schema* rs = priv::schema_of<Rsp>();
+        if (!rq || !pg || !rs) { priv::raise_msg("dart::RemoteTask: DART_SCHEMA compile failed"); return; }
+        core_ = RemoteTask<>(n, name, rq, pg, rs, o);
+    }
+    bool valid() const noexcept { return core_.valid(); }
+    explicit operator bool() const noexcept { return valid(); }
+
+    /* BLOCKING call (see RemoteTask<>::call); on_progress fires typed while it waits. */
+    Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
+                       int timeout_ms = -1, const CallOptions& opts = {}) {
+        std::vector<uint8_t> s;
+        Response<> ur = core_.call(priv::encode(req, s), adapt_progress(std::move(on_progress)),
+                                   timeout_ms, opts);
+        Response<Rsp> r;
+        r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
+        r.written_ = ur.written_us();
+        r.message_.assign(ur.message());   /* own it: ur dies with this frame */
+        if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
+        return r;
+    }
+    /* Async form (see RemoteTask<>::call_async): returns the send status + call id. */
+    TaskCall call_async(const Req& req, ProgressHandler on_progress,
+                        std::function<void(const ResponseView<Rsp>&)> on_response,
+                        const CallOptions& opts = {}) {
+        std::vector<uint8_t> s;
+        return core_.call_async(priv::encode(req, s), adapt_progress(std::move(on_progress)),
+            [cb = std::move(on_response)](const ResponseView<>& uv) {
+                if (!cb) return;
+                ResponseView<Rsp> tv;
+                tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
+                tv.message_ = uv.message();
+                if (uv.ok()) (void)priv::decode(tv.v_, uv.data(), uv.raw_schema());
+                cb(tv);
+            }, opts);
+    }
+    /* Cancel the outstanding call (see RemoteTask<>::cancel). */
+    SendStatus cancel(uint32_t call_id) { return core_.cancel(call_id); }
+
+    int  match_count()    const { return core_.match_count(); }
+    bool has_definition() const { return core_.has_definition(); }
+    SendStatus retire() { return core_.retire(); }
+
+private:
+    static RemoteTask<>::ProgressHandler adapt_progress(ProgressHandler h) {
+        if (!h) return {};
+        return [f = std::move(h)](const ProgressView<>& up) mutable {
+            ProgressView<Prg> tp;
+            tp.call_id_ = up.call_id(); tp.provider_ = up.provider();
+            tp.written_ = up.written_us(); tp.recv_ = up.recv_us();
+            tp.has_ = up.has_value();
+            if (tp.has_ && !priv::decode(tp.v_, up.data(), up.raw_schema())) return;
+            f(tp);
+        };
+    }
+    RemoteTask<> core_;
 };
 
 /* VariableDefinition<T>: the typed authoritative value. */
