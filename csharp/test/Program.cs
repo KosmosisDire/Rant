@@ -1,5 +1,5 @@
-// DART C# test: two nodes, reliable typed pub/sub, on one host, plus a patterns
-// leg (functions and variables). Exercises discovery/match, schema
+// DART C# test: two nodes, reliable typed pub/sub, on one host, plus pattern legs
+// (functions, variables, tasks). Exercises discovery/match, schema
 // reflection (capped strings, string arrays, maps), the consumer surface, and the
 // typed pattern handles. Exit 0 = all legs passed.
 //
@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using Dart;
 
 struct Twist { public float Dx; public float Dy; }
@@ -40,6 +41,20 @@ struct Pose
 struct AddReq { public int A; public int B; }
 struct AddRsp { public int Sum; }
 struct Level { public int Value; }
+
+// tasks leg types
+struct XferReq { public int Chunks; }
+struct XferPrg { public int Done; }
+struct XferRsp { public int Total; }
+
+// IProgress that reports inline on the delivering thread (System.Progress posts to a
+// SynchronizationContext, which a console app lacks, losing ordering).
+sealed class InlineProgress<T> : IProgress<T>
+{
+    private readonly Action<T> _fn;
+    public InlineProgress(Action<T> fn) { _fn = fn; }
+    public void Report(T value) { _fn(value); }
+}
 
 static class Program
 {
@@ -263,6 +278,136 @@ static class Program
         Check("pending CallAsync settles Cancelled at Close",
               tc.Wait(2000) && tc.Result.Status == CallStatus.Cancelled);
         Console.WriteLine(ok ? "patterns: PASS\n" : "patterns: FAIL\n");
+        return ok;
+    }
+
+    // Tasks between two nodes: async handlers, typed + untyped progress, RUNNING order,
+    // CancellationToken cancel, noCancel refusal, and the async function-handler overload.
+    static bool Tasks()
+    {
+        Console.WriteLine("tasks leg: two nodes, domain 47, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var srv = new DartNode("tsrv", null, e => { if (e.IsError) Console.WriteLine("event(tsrv): " + e); },
+                               domain: 47, multicastInterface: "127.0.0.1", maxTopics: 32);
+        var cli = new DartNode("tcli", null, e => { if (e.IsError) Console.WriteLine("event(tcli): " + e); },
+                               domain: 47, multicastInterface: "127.0.0.1", maxTopics: 32);
+        try
+        {
+            // a transfer that streams progress between awaits and honors its token
+            var xfer = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "xfer", async (q, ctx) =>
+            {
+                for (int i = 1; i <= q.Chunks; i++)
+                {
+                    await Task.Delay(20, ctx.CancellationToken).ConfigureAwait(false);
+                    ctx.Progress(new XferPrg { Done = i });
+                }
+                return new XferRsp { Total = q.Chunks };
+            });
+            // runs until cancelled through its token
+            var forever = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "forever", async (q, ctx) =>
+            {
+                await Task.Delay(Timeout.Infinite, ctx.CancellationToken).ConfigureAwait(false);
+                return new XferRsp();
+            });
+            // declares cancellation will not be honored
+            var stubborn = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "stubborn", async (q, ctx) =>
+            {
+                await Task.Delay(20).ConfigureAwait(false);
+                return new XferRsp { Total = 1 };
+            }, noCancel: true);
+            // a second transfer for the untyped leg: a same-name second handle on one node
+            // would be shadowed by the first (one name = one topic per node)
+            var xfer2 = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "xfer2", async (q, ctx) =>
+            {
+                for (int i = 1; i <= q.Chunks; i++)
+                {
+                    await Task.Delay(20, ctx.CancellationToken).ConfigureAwait(false);
+                    ctx.Progress(new XferPrg { Done = i });
+                }
+                return new XferRsp { Total = q.Chunks };
+            });
+            // the async FUNCTION handler overload
+            var amul = new FunctionDefinition<AddReq, AddRsp>(srv, "amul", async q =>
+            {
+                await Task.Delay(10).ConfigureAwait(false);
+                return new AddRsp { Sum = q.A * q.B };
+            });
+
+            srv.Start();
+
+            var xferR = new RemoteTask<XferReq, XferPrg, XferRsp>(cli, "xfer");
+            var foreverR = new RemoteTask<XferReq, XferPrg, XferRsp>(cli, "forever");
+            var stubbornR = new RemoteTask<XferReq, XferPrg, XferRsp>(cli, "stubborn");
+            var reqS = new Schema(typeof(XferReq));
+            var prgS = new Schema(typeof(XferPrg));
+            var rspS = new Schema(typeof(XferRsp));
+            var xferRaw = new RemoteTask(cli, "xfer2", reqS, prgS, rspS);
+            var amulR = new RemoteFunction<AddReq, AddRsp>(cli, "amul");
+
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline
+                   && !(xferR.HasDefinition && foreverR.HasDefinition && stubbornR.HasDefinition
+                        && xferRaw.HasDefinition && amulR.HasDefinition))
+                cli.Poll(5);
+            Check("definitions discovered", xferR.HasDefinition && foreverR.HasDefinition
+                  && stubbornR.HasDefinition && xferRaw.HasDefinition && amulR.HasDefinition);
+            cli.Start();   // CallAsync outcomes and progress fire on cli's service thread
+
+            // typed: progress values in order, terminal Ok with the decoded result
+            var seen = new List<int>();
+            var t1 = xferR.CallAsync(new XferReq { Chunks = 3 },
+                new InlineProgress<XferPrg>(p => { lock (seen) seen.Add(p.Done); }));
+            Check("typed task Ok", t1.Wait(10000) && t1.Result.Ok);
+            Check("typed result decoded", t1.Result.Ok && t1.Result.Value.Total == 3);
+            lock (seen)
+                Check("typed progress in order (no RUNNING ack)",
+                      seen.Count == 3 && seen[0] == 1 && seen[1] == 2 && seen[2] == 3);
+
+            // untyped info form: the RUNNING ack (null Value) first, then the values
+            var infos = new List<TaskProgress>();
+            var t2 = xferRaw.CallAsync(reqS.Encode(new XferReq { Chunks = 2 }),
+                new InlineProgress<TaskProgress>(p => { lock (infos) infos.Add(p); }));
+            Check("untyped task Ok", t2.Wait(10000) && t2.Result.Status == CallStatus.Ok);
+            lock (infos)
+            {
+                Check("RUNNING ack first (null Value)", infos.Count == 3 && infos[0].Value == null);
+                Check("then the progress values", infos.Count == 3
+                      && infos[1].Value != null && infos[2].Value != null
+                      && Convert.ToInt64(prgS.DecodeFields(infos[2].Value)["Done"]) == 2);
+                Check("info carries the provider", infos.Count == 3 && infos[1].Provider != 0);
+            }
+
+            // cancellation: the token ends the handler via ITS token, caller sees Cancelled
+            var cts = new CancellationTokenSource();
+            var t3 = foreverR.CallAsync(new XferReq(), null, cts.Token);
+            Thread.Sleep(300);   // let RUNNING land (the deadline is dropped)
+            cts.Cancel();
+            Check("cancel honored end to end", t3.Wait(10000)
+                  && t3.Result.Status == CallStatus.Cancelled);
+
+            // noCancel: refused locally with BadRole, the call completes anyway
+            uint sid;
+            var t4 = stubbornR.CallAsync(new XferReq(), out sid);
+            Check("call id delivered at commit", sid != 0);
+            Check("noCancel refused locally", stubbornR.Cancel(sid) == SendStatus.BadRole);
+            Check("noCancel call completes anyway", t4.Wait(10000) && t4.Result.Ok
+                  && t4.Result.Value.Total == 1);
+
+            // async function-handler overload round trip
+            var t5 = amulR.CallAsync(new AddReq { A = 6, B = 7 });
+            Check("async function handler", t5.Wait(10000) && t5.Result.Ok
+                  && t5.Result.Value.Sum == 42);
+
+            cli.Stop();
+        }
+        finally
+        {
+            srv.Close();
+            cli.Close();
+        }
+        Console.WriteLine(ok ? "tasks: PASS\n" : "tasks: FAIL\n");
         return ok;
     }
 
@@ -658,6 +803,7 @@ static class Program
         if (ok) ok = ValueRootsLive();
         if (ok) ok = VideoLive();
         if (ok) ok = Patterns();
+        if (ok) ok = Tasks();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;
     }

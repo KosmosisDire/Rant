@@ -38,6 +38,13 @@ dart_request_reply
 dart_request_fail
 dart_request_defer
 dart_function_complete
+dart_node_create_task_definition
+dart_node_create_remote_task
+dart_request_start
+dart_function_progress
+dart_function_cancelled
+dart_function_on_cancel
+dart_function_cancel
 dart_node_create_variable_definition
 dart_node_create_remote_variable
 dart_variable_get

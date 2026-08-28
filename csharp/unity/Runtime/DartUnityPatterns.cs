@@ -13,9 +13,16 @@
 //   // function: request/response, ONE definition
 //   DartNodeUnity.FunctionDefinition<int, int>("square", x => x * x);
 //   DartNodeUnity.RemoteFunction<int, int>("square").Call(7, r => Debug.Log(r.Value));  // 49, on the main thread
+//
+//   // task: a function with progress and cancellation, async handler on the main thread
+//   DartNodeUnity.TaskDefinition<int, int, int>("count", async (n, ctx) =>
+//   { for (int i = 1; i <= n; i++) { await Task.Delay(1000, ctx.CancellationToken); ctx.Progress(i); } return n; });
+//   var run = DartNodeUnity.RemoteTask<int, int, int>("count").Call(5, r => Debug.Log(r.Status), p => bar.value = p);
+//   run.Cancel();
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Dart
@@ -394,6 +401,131 @@ namespace Dart
                     catch (Exception e) { Debug.LogException(e); }
                 });
             });
+        }
+
+        /// <summary>Providers currently matched (the definition side present).</summary>
+        public int MatchCount => _core != null ? _core.MatchCount : 0;
+        public bool HasDefinition => _core != null && _core.HasDefinition;
+    }
+
+    // ---- task -------------------------------------------------------------------
+
+    /// <summary>One in-flight task call (from DartRemoteTask.Call). Cancel requests
+    /// cooperative cancellation: the outcome says whether it was honored.</summary>
+    public sealed class DartTaskRun
+    {
+        private readonly Func<SendStatus> _cancel;
+        /// <summary>The call id (0 = the request never committed).</summary>
+        public readonly uint CallId;
+
+        internal DartTaskRun(uint callId, Func<SendStatus> cancel) { CallId = callId; _cancel = cancel; }
+
+        public SendStatus Cancel() => _cancel != null ? _cancel() : SendStatus.NoTopic;
+    }
+
+    /// <summary>The implementation side of a task (a function with progress and
+    /// cancellation): ONE definition per name. The async handler runs on the MAIN thread
+    /// (the context's Progress and CancellationToken are thread-safe); its completion
+    /// answers the call: the result -> Ok, OperationCanceledException -> Cancelled, any
+    /// other exception -> AppError.</summary>
+    public sealed class DartTaskDefinition<TReq, TPrg, TRsp> : DartPatternEntity
+    {
+        private TaskDefinition<TReq, TPrg, TRsp> _core;
+        private readonly Func<TReq, TaskContext<TPrg>, Task<TRsp>> _handler;
+        private readonly bool _noCancel, _exclusive;
+
+        internal DartTaskDefinition(DartNodeUnity owner, string name,
+                                    Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+                                    bool noCancel, bool exclusive)
+            : base(owner, name)
+        {
+            _handler = handler ?? throw new ArgumentNullException(nameof(handler));
+            _noCancel = noCancel; _exclusive = exclusive;
+        }
+
+        internal override void EnsureNative()
+        {
+            if (_core != null) return;
+            DartNode node = Owner.NativeNode;
+            if (node == null) return;
+            _core = new TaskDefinition<TReq, TPrg, TRsp>(node, Name, (req, ctx) =>
+            {
+                // Hop to the frame; the returned Task's completion answers the call.
+                var tcs = new TaskCompletionSource<TRsp>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Owner.RunOnMain(async () =>
+                {
+                    try { tcs.TrySetResult(await _handler(req, ctx)); }
+                    catch (OperationCanceledException) { tcs.TrySetCanceled(); }
+                    catch (Exception e) { tcs.TrySetException(e); Debug.LogException(e); }
+                });
+                return tcs.Task;
+            }, noCancel: _noCancel, exclusive: _exclusive);
+        }
+
+        internal override void DropNative() { _core = null; }
+
+        /// <summary>Callers on other nodes matched to this definition.</summary>
+        public int CallerCount => _core != null ? _core.CallerCount : 0;
+    }
+
+    /// <summary>A reference to a task defined on another node. Call is non-blocking:
+    /// onProgress fires per update and onResult once with the terminal outcome, both on
+    /// the MAIN thread; the returned run handle cancels the run.</summary>
+    public sealed class DartRemoteTask<TReq, TPrg, TRsp> : DartPatternEntity
+    {
+        private RemoteTask<TReq, TPrg, TRsp> _core;
+
+        internal DartRemoteTask(DartNodeUnity owner, string name) : base(owner, name) { }
+
+        internal override void EnsureNative()
+        {
+            if (_core != null) return;
+            DartNode node = Owner.NativeNode;
+            if (node == null) return;
+            _core = new RemoteTask<TReq, TPrg, TRsp>(node, Name);
+        }
+
+        internal override void DropNative() { _core = null; }
+
+        private sealed class MainThreadProgress : IProgress<TPrg>
+        {
+            internal DartNodeUnity Owner;
+            internal Action<TPrg> Fn;
+            public void Report(TPrg value)
+                => Owner.RunOnMain(() =>
+                {
+                    try { Fn(value); }
+                    catch (Exception e) { Debug.LogException(e); }
+                });
+        }
+
+        /// <summary>Start the task; onResult fires once on the main thread (inspect
+        /// Status, never throws), onProgress per typed update.</summary>
+        public DartTaskRun Call(TReq request, Action<DartResponse<TRsp>> onResult,
+                                Action<TPrg> onProgress = null)
+        {
+            if (onResult == null) throw new ArgumentNullException(nameof(onResult));
+            EnsureNative();
+            RemoteTask<TReq, TPrg, TRsp> core = _core;
+            if (core == null)
+            {
+                onResult(new DartResponse<TRsp> { Core = new DartResponse { SendStatus = SendStatus.NoTopic } });
+                return new DartTaskRun(0, null);
+            }
+            IProgress<TPrg> prg = onProgress != null
+                ? new MainThreadProgress { Owner = Owner, Fn = onProgress } : null;
+            uint id;
+            core.CallAsync(request, out id, prg).ContinueWith(t =>
+            {
+                DartResponse<TRsp> res = t.Result;   // CallAsync never faults
+                Owner.RunOnMain(() =>
+                {
+                    try { onResult(res); }
+                    catch (Exception e) { Debug.LogException(e); }
+                });
+            });
+            uint cid = id;
+            return new DartTaskRun(id, () => core.Cancel(cid));
         }
 
         /// <summary>Providers currently matched (the definition side present).</summary>

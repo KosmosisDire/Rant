@@ -17,6 +17,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Dart
@@ -222,6 +223,17 @@ namespace Dart
         public static DartRemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
             => RequireMain().GetRemoteFunction<TReq, TRsp>(name);
 
+        /// <summary>The scene-shared task definition (a function with progress and
+        /// cancellation; ONE per name). The async handler runs on the main thread.</summary>
+        public static DartTaskDefinition<TReq, TPrg, TRsp> TaskDefinition<TReq, TPrg, TRsp>(
+                string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+                bool noCancel = false, bool exclusive = false)
+            => RequireMain().GetTaskDefinition<TReq, TPrg, TRsp>(name, handler, noCancel, exclusive);
+
+        /// <summary>The scene-shared reference to a task defined on another node.</summary>
+        public static DartRemoteTask<TReq, TPrg, TRsp> RemoteTask<TReq, TPrg, TRsp>(string name)
+            => RequireMain().GetRemoteTask<TReq, TPrg, TRsp>(name);
+
         public DartVariableDefinition<T> GetVariableDefinition<T>(string name,
                 bool readOnly = false, bool allowForce = false, int catchUp = 0)
             => GetOrCreatePattern("var:", name,
@@ -237,6 +249,15 @@ namespace Dart
 
         public DartRemoteFunction<TReq, TRsp> GetRemoteFunction<TReq, TRsp>(string name)
             => GetOrCreatePattern("fn:", name, () => new DartRemoteFunction<TReq, TRsp>(this, name));
+
+        public DartTaskDefinition<TReq, TPrg, TRsp> GetTaskDefinition<TReq, TPrg, TRsp>(
+                string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+                bool noCancel = false, bool exclusive = false)
+            => GetOrCreatePattern("task:", name,
+                   () => new DartTaskDefinition<TReq, TPrg, TRsp>(this, name, handler, noCancel, exclusive));
+
+        public DartRemoteTask<TReq, TPrg, TRsp> GetRemoteTask<TReq, TPrg, TRsp>(string name)
+            => GetOrCreatePattern("task:", name, () => new DartRemoteTask<TReq, TPrg, TRsp>(this, name));
 
         // Share a pattern handle by (kind, name): the first request builds it (and creates
         // the native object now if the node is open), later ones return it, and a mismatched

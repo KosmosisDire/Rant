@@ -21,8 +21,9 @@
 //
 // All optional configuration is named parameters (there are no options classes).
 // Beyond plain topics, the patterns layer is bound too: FunctionDefinition /
-// RemoteFunction (request/response), VariableDefinition / RemoteVariable
-// (replicated state, one owner), and
+// RemoteFunction (request/response), TaskDefinition / RemoteTask (a function with
+// progress and cancellation: async handlers, IProgress + CancellationToken on the
+// caller), VariableDefinition / RemoteVariable (replicated state, one owner), and
 // Publisher/Subscriber (side-named topic handles); each has an untyped (Schema +
 // byte[]) core and a typed generic layered on it.
 //
@@ -99,12 +100,13 @@ namespace Dart
         VString, VArray, Map, Enum, Named
     }
 
-    // A function call's outcome. Ok/AppError/NoHandler travel on the wire;
-    // Timeout/PeerLost are synthesized client-side; Cancelled is synthesized for
+    // A call's outcome. Ok/AppError/NoHandler/Cancelled/Running travel on the wire;
+    // Timeout/PeerLost are synthesized client-side; Cancelled is also synthesized for
     // calls still pending when the local node closes. Mirrors DartCallStatus.
     public enum CallStatus
     {
-        Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5
+        Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5,
+        Running = 6   // task, the one NON-terminal status: accepted and running
     }
 
     // Severity of a built-in @dart/log line. Mirrors DartLogLevel.
@@ -349,7 +351,34 @@ namespace Dart
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartCallOpts
     {
-        public uint provider;   // direct a call at one definition by peer id (0 = undirected)
+        public uint provider;        // direct a call at one definition by peer id (0 = undirected)
+        public IntPtr on_progress;   // DartProgressFn (task calls; null = updates discarded)
+        public IntPtr progress_user; // handed back as DartProgress.user
+        public IntPtr id_out;        // uint32_t*: filled with the call id at commit
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartTaskOpts
+    {
+        public byte progress_best_effort;
+        public ushort progress_keep_last;
+        public byte no_cancel;
+        public byte exclusive;
+        public byte multi;
+        public uint timeout_us;
+        public uint backpressure_wait_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartProgressNative
+    {
+        public uint call_id;
+        public uint provider;
+        public DartBytes data;
+        public IntPtr schema;                  // const DartSchema*
+        public ulong written_us;
+        public ulong recv_us;
+        public IntPtr user;                    // DartCallOpts.progress_user
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -364,6 +393,10 @@ namespace Dart
     internal delegate void DartResponseFn(IntPtr response);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DartVariableUpdateFn(IntPtr update, IntPtr user);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DartProgressFn(IntPtr progress);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DartCancelFn(ulong token, IntPtr user);
 
     // ---- native entry points ----------------------------------------------------
 
@@ -531,6 +564,25 @@ namespace Dart
         internal static extern ulong dart_request_defer(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_complete(IntPtr fn, ulong token, int status, byte[] message, DartBytes rsp);
+
+        // patterns: tasks
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_task_definition(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, DartRequestFn on_request,
+            IntPtr user, ref DartTaskOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_node_create_remote_task(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, ref DartTaskOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_request_start(IntPtr request);   // unused: Defer implies RUNNING
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_progress(IntPtr fn, ulong token, DartBytes progress);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_cancelled(IntPtr fn, ulong token);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_on_cancel(IntPtr fn, DartCancelFn on_cancel, IntPtr user);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_cancel(IntPtr fn, uint call_id);
 
         // patterns: variables
         [DllImport(LIB, CallingConvention = CC)]
@@ -1736,6 +1788,38 @@ namespace Dart
         {
             public TaskCompletionSource<DartResponse> Tcs;
             public DartNode DartNode;
+            public Action<TaskProgress> OnProgress;   // task calls only, else null
+        }
+
+        // Definition-side registry of one task's live calls: defer token -> the per-call
+        // CancellationTokenSource the C on_cancel slot fans out to. Cancel runs the user's
+        // token registrations inline under the lock (Monitor is reentrant, so a handler
+        // continuation that completes the call on this thread stays safe).
+        internal sealed class TaskCancelBox
+        {
+            private readonly Dictionary<ulong, CancellationTokenSource> _live =
+                new Dictionary<ulong, CancellationTokenSource>();
+
+            public void Add(ulong token, CancellationTokenSource cts)
+            {
+                lock (_live) _live[token] = cts;
+            }
+            public void Cancel(ulong token)
+            {
+                lock (_live)
+                {
+                    CancellationTokenSource cts;
+                    if (_live.TryGetValue(token, out cts))
+                        try { cts.Cancel(); }
+                        catch (Exception e) { Console.Error.WriteLine("dart on_cancel: " + e); }
+                }
+            }
+            public void Drop(ulong token)
+            {
+                CancellationTokenSource cts;
+                lock (_live) { if (_live.TryGetValue(token, out cts)) _live.Remove(token); }
+                if (cts != null) try { cts.Dispose(); } catch (Exception) { }
+            }
         }
 
         internal static long AddBox(object box)
@@ -1761,6 +1845,11 @@ namespace Dart
                 return c;
             }
         }
+        // Progress is non-terminal: look without removing.
+        internal static AsyncCall PeekAsync(long id)
+        {
+            lock (s_lock) { AsyncCall c; s_async.TryGetValue(id, out c); return c; }
+        }
         // Backstop only: the C fires every pending callback with CANCELLED during
         // dart_node_close, so this normally finds nothing. Completes any straggler
         // the same way instead of hanging its Task.
@@ -1774,6 +1863,12 @@ namespace Dart
         internal static readonly DartRequestFn OnRequest = OnRequestTramp;
         internal static readonly DartResponseFn OnResponse = OnResponseTramp;
         internal static readonly DartVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
+        internal static readonly DartProgressFn OnProgress = OnProgressTramp;
+        internal static readonly DartCancelFn OnCancel = OnCancelTramp;
+
+        // A thrown handler's response message.
+        internal static string FailText(Exception e)
+            => string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message;
 
         [MonoPInvokeCallback(typeof(DartRequestFn))]
         private static void OnRequestTramp(IntPtr reqPtr, IntPtr user)
@@ -1817,6 +1912,38 @@ namespace Dart
                 call.Tcs.TrySetResult(r);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_response: " + e); }
+        }
+
+        [MonoPInvokeCallback(typeof(DartProgressFn))]
+        private static void OnProgressTramp(IntPtr prgPtr)
+        {
+            try
+            {
+                var p = Marshal.PtrToStructure<DartProgressNative>(prgPtr);
+                AsyncCall call = PeekAsync((long)p.user);
+                if (call == null || call.OnProgress == null) return;
+                call.OnProgress(new TaskProgress
+                {
+                    CallId = p.call_id,
+                    Provider = p.provider,
+                    Value = (ulong)p.data.len != 0 ? Codec.Bytes(p.data) : null,   // null = the RUNNING ack
+                    WrittenUs = p.written_us,
+                    RecvUs = p.recv_us,
+                    SchemaPtr = p.schema,
+                });
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart on_progress: " + e); }
+        }
+
+        [MonoPInvokeCallback(typeof(DartCancelFn))]
+        private static void OnCancelTramp(ulong token, IntPtr user)
+        {
+            try
+            {
+                var box = GetBox((long)user) as TaskCancelBox;
+                if (box != null) box.Cancel(token);
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart on_cancel: " + e); }
         }
 
         [MonoPInvokeCallback(typeof(DartVariableUpdateFn))]
@@ -1949,6 +2076,11 @@ namespace Dart
         /// <summary>message as in DartRequest.Fail; also carried on Ok (debug/warning text).</summary>
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
         public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
+        /// <summary>Complete CallStatus.Cancelled: the cooperative honor of a task cancel.</summary>
+        public bool CompleteCancelled(string message = null) => Finish(CallStatus.Cancelled, message, null);
+
+        internal IntPtr Fn => _fn;
+        internal ulong Token => (ulong)Interlocked.Read(ref _token);
 
         private bool Finish(CallStatus status, string message, byte[] rsp)
         {
@@ -1997,6 +2129,36 @@ namespace Dart
             if (box != null) { box.Fn = Fn; node.RegisterPatternBox(id); }
             node.RetainSchema(requestSchema);
             node.RetainSchema(responseSchema);
+        }
+
+        /// <summary>Async-handler form: the returned Task's completion answers the call
+        /// (the result -> Ok, an exception -> AppError with its message). The handler runs
+        /// on the polling thread until its first await: CPU-bound work belongs in Task.Run.</summary>
+        public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Func<DartRequest, Task<byte[]>> handler,
+                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+            : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler),
+                   backpressureWaitMs, timeoutMs) { }
+
+        // Defer FIRST (a continuation may finish before the invocation returns), then the
+        // Task's completion answers through the Deferred.
+        internal static Action<DartRequest> AsyncAdapter(Func<DartRequest, Task<byte[]>> handler)
+        {
+            if (handler == null) return null;
+            return r =>
+            {
+                Deferred d = r.Defer();
+                Task<byte[]> t;
+                try { t = handler(r); }
+                catch (Exception e) { d.Fail(Patterns.FailText(e)); return; }
+                _ = FinishAsync(t, d);
+            };
+        }
+
+        private static async Task FinishAsync(Task<byte[]> t, Deferred d)
+        {
+            try { d.Complete(await t.ConfigureAwait(false)); }
+            catch (Exception e) { d.Fail(Patterns.FailText(e)); }
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
@@ -2139,6 +2301,297 @@ namespace Dart
         /// successor can bind; every outstanding call completes with
         /// CallStatus.Cancelled. The handle is unusable after. Refused
         /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        public SendStatus Retire()
+        {
+            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
+            return rc;
+        }
+    }
+
+    // ---- patterns: tasks --------------------------------------------------------
+
+    /// <summary>What a task handler works through while it runs: stream progress, observe
+    /// cancellation. Thread-safe and usable across awaits; once the call completes, a
+    /// Progress returns SendStatus.State.</summary>
+    public sealed class TaskContext
+    {
+        private readonly IntPtr _fn;
+        private readonly ulong _token;
+
+        /// <summary>Cancelled the moment a cancel for this call arrives. Cooperative:
+        /// honor it by throwing OperationCanceledException (the terminal status is then
+        /// Cancelled), or run to completion anyway.</summary>
+        public CancellationToken CancellationToken { get; }
+        public uint Caller { get; }
+        public string CallerName { get; }
+        public ulong RecvUs { get; }
+        public ulong WrittenUs { get; }
+
+        internal TaskContext(IntPtr fn, ulong token, CancellationToken ct, DartRequest r)
+        {
+            _fn = fn; _token = token;
+            CancellationToken = ct;
+            Caller = r.Caller; CallerName = r.CallerName;
+            RecvUs = r.RecvUs; WrittenUs = r.WrittenUs;
+        }
+
+        /// <summary>Broadcast one progress update on the task's progress channel (any
+        /// observer may watch; a reliable subscriber backpressures end to end).</summary>
+        public SendStatus Progress(byte[] value)
+        {
+            using (var p = new PinnedBytes(value))
+                return (SendStatus)Native.dart_function_progress(_fn, _token, p.B);
+        }
+
+        /// <summary>Convenience view of CancellationToken (with the native flag as a
+        /// backstop).</summary>
+        public bool Cancelled => CancellationToken.IsCancellationRequested
+            || Native.dart_function_cancelled(_fn, _token) == 1;
+    }
+
+    /// <summary>The implementation side of a task, a function with progress and
+    /// cancellation (untyped: Schema + byte[]). The handler is an ASYNC delegate: the call
+    /// is deferred and RUNNING sent before it is invoked, it runs on the polling thread
+    /// until its first await (CPU-bound work belongs in Task.Run), and the returned Task's
+    /// completion answers the call: the result -> Ok, OperationCanceledException ->
+    /// Cancelled, any other exception -> AppError with its message. A completion after
+    /// Retire/Close is refused by the C (the caller already got Cancelled) and swallowed.
+    /// A null handler answers every call NoHandler (a declared stub).</summary>
+    public class TaskDefinition
+    {
+        internal IntPtr Fn;   // zeroed by Retire
+        internal readonly DartNode DartNode;
+
+        public TaskDefinition(DartNode node, string name, Schema requestSchema, Schema progressSchema,
+                              Schema responseSchema, Func<DartRequest, TaskContext, Task<byte[]>> handler,
+                              bool progressBestEffort = false, int progressKeepLast = 0,
+                              bool noCancel = false, bool exclusive = false, bool multi = false,
+                              int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            DartNode = node;
+            var co = new DartTaskOpts
+            {
+                progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
+                progress_keep_last = (ushort)progressKeepLast,
+                no_cancel = (byte)(noCancel ? 1 : 0),
+                exclusive = (byte)(exclusive ? 1 : 0),
+                multi = (byte)(multi ? 1 : 0),
+                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
+                timeout_us = (uint)timeoutMs * 1000u,
+            };
+            long id = 0, cancelId = 0;
+            Patterns.RequestBox box = null;
+            Patterns.TaskCancelBox cancels = null;
+            if (handler != null)
+            {
+                cancels = new Patterns.TaskCancelBox();
+                cancelId = Patterns.AddBox(cancels);
+                var b = box = new Patterns.RequestBox();
+                var c = cancels;
+                box.Handler = r => RunCall(b, c, handler, r);
+                id = Patterns.AddBox(box);
+            }
+            Fn = Native.dart_node_create_task_definition(node.Handle, Codec.CStr(name),
+                requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
+                progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
+                responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
+                box != null ? Patterns.OnRequest : null, (IntPtr)id, ref co);
+            if (Fn == IntPtr.Zero)
+            {
+                if (box != null) { Patterns.DropBox(id); Patterns.DropBox(cancelId); }
+                throw new InvalidOperationException("task definition create failed: " + node.LastError);
+            }
+            if (box != null)
+            {
+                box.Fn = Fn;
+                node.RegisterPatternBox(id);
+                node.RegisterPatternBox(cancelId);
+                // the definition's ONE native cancel slot fans out to the per-call CTSes
+                Native.dart_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
+            }
+            node.RetainSchema(requestSchema);
+            node.RetainSchema(progressSchema);
+            node.RetainSchema(responseSchema);
+        }
+
+        // Poll thread: defer (implies RUNNING), arm the per-call CancellationTokenSource,
+        // invoke the async delegate; wherever its completion lands answers the call.
+        private static void RunCall(Patterns.RequestBox box, Patterns.TaskCancelBox cancels,
+                                    Func<DartRequest, TaskContext, Task<byte[]>> handler, DartRequest r)
+        {
+            Deferred d = r.Defer();
+            ulong token = d.Token;
+            var cts = new CancellationTokenSource();
+            cancels.Add(token, cts);
+            var ctx = new TaskContext(box.Fn, token, cts.Token, r);
+            Task<byte[]> t;
+            try { t = handler(r, ctx); }
+            catch (OperationCanceledException) { cancels.Drop(token); d.CompleteCancelled(); return; }
+            catch (Exception e) { cancels.Drop(token); d.Fail(Patterns.FailText(e)); return; }
+            _ = FinishCall(t, d, cancels, token);
+        }
+
+        private static async Task FinishCall(Task<byte[]> t, Deferred d,
+                                             Patterns.TaskCancelBox cancels, ulong token)
+        {
+            try { d.Complete(await t.ConfigureAwait(false)); }
+            catch (OperationCanceledException) { d.CompleteCancelled(); }
+            catch (Exception e) { d.Fail(Patterns.FailText(e)); }
+            finally { cancels.Drop(token); }
+        }
+
+        /// <summary>Callers currently matched to this definition.</summary>
+        public int CallerCount => Native.dart_function_match_count(Fn);
+
+        /// <summary>Retire the definition: every live deferred call answers Cancelled
+        /// while the channels are still up (a RUNNING caller never hangs), and a handler
+        /// completing after sees its token refused, silently. The handle is unusable
+        /// after. Refused (SendStatus.State) from inside a callback; the handle then
+        /// stays valid.</summary>
+        public SendStatus Retire()
+        {
+            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
+            return rc;
+        }
+    }
+
+    /// <summary>One task progress update (the untyped info form). Value is the payload,
+    /// fully copied out; null = the RUNNING acknowledgment.</summary>
+    public sealed class TaskProgress
+    {
+        public uint CallId { get; internal set; }
+        /// <summary>The peer working the call.</summary>
+        public uint Provider { get; internal set; }
+        public byte[] Value { get; internal set; }
+        /// <summary>The provider's wall clock when it sent the update (0 = unstamped).</summary>
+        public ulong WrittenUs { get; internal set; }
+        public ulong RecvUs { get; internal set; }
+        internal IntPtr SchemaPtr;
+    }
+
+    /// <summary>A reference to a task defined on another node (untyped). A task request
+    /// is always DIRECTED at one provider (provider 0 = the oldest matched, resolved at
+    /// send). The per-call timeout bounds only the wait for the FIRST response: once
+    /// RUNNING (or progress) arrives the task runs as long as it runs, and cancellation
+    /// is the caller's tool for impatience.</summary>
+    public class RemoteTask
+    {
+        internal IntPtr Fn;   // zeroed by Retire
+        internal readonly DartNode DartNode;
+
+        public RemoteTask(DartNode node, string name, Schema requestSchema = null,
+                          Schema progressSchema = null, Schema responseSchema = null,
+                          bool progressBestEffort = false, int progressKeepLast = 0,
+                          int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            DartNode = node;
+            var co = new DartTaskOpts
+            {
+                progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
+                progress_keep_last = (ushort)progressKeepLast,
+                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
+                timeout_us = (uint)timeoutMs * 1000u,
+            };
+            Fn = Native.dart_node_create_remote_task(node.Handle, Codec.CStr(name),
+                requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
+                progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
+                responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
+            if (Fn == IntPtr.Zero)
+                throw new InvalidOperationException("remote task create failed: " + node.LastError);
+            node.RetainSchema(requestSchema);
+            node.RetainSchema(progressSchema);
+            node.RetainSchema(responseSchema);
+        }
+
+        /// <summary>Start the task: the Task completes with the terminal outcome and NEVER
+        /// faults (inspect Status/SendStatus). progress fires per update on the delivering
+        /// thread, once with a null Value for the RUNNING ack. Cancelling cancellationToken
+        /// requests cooperative cancellation of the remote run: the outcome says whether it
+        /// was honored (Cancelled) or it completed anyway.</summary>
+        public Task<DartResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
+                                            CancellationToken cancellationToken = default, uint provider = 0)
+            => CallAsync(request, out _, progress, cancellationToken, provider);
+
+        /// <summary>As above; callId receives the call id at commit (before any response):
+        /// the handle for Cancel from anywhere. 0 when the request never committed.</summary>
+        public Task<DartResponse> CallAsync(byte[] request, out uint callId,
+                                            IProgress<TaskProgress> progress = null,
+                                            CancellationToken cancellationToken = default, uint provider = 0)
+        {
+            Action<TaskProgress> sink = null;
+            if (progress != null) { var pr = progress; sink = v => pr.Report(v); }
+            return CallCore(request, out callId, sink, cancellationToken, provider);
+        }
+
+        internal Task<DartResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
+                                             CancellationToken cancellationToken, uint provider)
+        {
+            var tcs = new TaskCompletionSource<DartResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            long id = Patterns.AddAsync(new Patterns.AsyncCall
+            {
+                Tcs = tcs, DartNode = DartNode, OnProgress = sink,
+            });
+            DartNode.RegisterAsync(id);
+            var opts = new DartCallOpts[1];
+            opts[0].provider = provider;
+            if (sink != null)
+            {
+                opts[0].on_progress = Marshal.GetFunctionPointerForDelegate(Patterns.OnProgress);
+                opts[0].progress_user = (IntPtr)id;
+            }
+            var idBox = new uint[1];
+            GCHandle idHandle = GCHandle.Alloc(idBox, GCHandleType.Pinned);
+            GCHandle optsHandle = GCHandle.Alloc(opts, GCHandleType.Pinned);
+            int rc;
+            try
+            {
+                opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit, before any wait
+                using (var p = new PinnedBytes(request))
+                    rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
+                                                         optsHandle.AddrOfPinnedObject());
+            }
+            finally
+            {
+                optsHandle.Free();
+                callId = idBox[0];
+                idHandle.Free();
+            }
+            if (rc != 0)
+            {
+                Patterns.TakeAsync(id);
+                DartNode.UnregisterAsync(id);
+                tcs.TrySetResult(new DartResponse { SendStatus = (SendStatus)rc });
+                return tcs.Task;
+            }
+            if (cancellationToken.CanBeCanceled)
+            {
+                uint cid = callId;
+                CancellationTokenRegistration reg = cancellationToken.Register(() => Cancel(cid));
+                // release the registration off the poll thread once the outcome lands (never
+                // from the response trampoline: Dispose can wait for a cancel callback that
+                // is itself waiting on the node lock)
+                tcs.Task.ContinueWith(_ => reg.Dispose(), CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            return tcs.Task;
+        }
+
+        /// <summary>Request cancellation of the outstanding call callId. Cooperative and
+        /// never acked: the terminal status is the answer (Cancelled = honored or never
+        /// started; a normal outcome = it completed anyway). SendStatus.BadRole when the
+        /// provider declared noCancel (checked locally, nothing sent); State when the call
+        /// is not pending (already answered).</summary>
+        public SendStatus Cancel(uint callId) => (SendStatus)Native.dart_function_cancel(Fn, callId);
+
+        /// <summary>Providers currently matched (the definition side present).</summary>
+        public int MatchCount => Native.dart_function_match_count(Fn);
+        public bool HasDefinition => MatchCount > 0;
+
+        /// <summary>Retire the remote: every outstanding call completes with Cancelled.
+        /// The handle is unusable after. Refused (SendStatus.State) from inside a
+        /// callback; the handle then stays valid.</summary>
         public SendStatus Retire()
         {
             var rc = (SendStatus)Native.dart_function_retire(Fn);
@@ -2415,6 +2868,30 @@ namespace Dart
             _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
         }
 
+        /// <summary>Async-handler form: the returned Task's completion is the reply (the
+        /// result -> Ok, an exception -> AppError with its message). The handler runs on
+        /// the polling thread until its first await; CPU-bound work belongs in Task.Run.</summary>
+        public FunctionDefinition(DartNode node, string name, Func<TReq, Task<TRsp>> handler,
+                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            _req = new Schema(typeof(TReq));
+            _rsp = new Schema(typeof(TRsp));
+            Func<DartRequest, Task<byte[]>> h = null;
+            if (handler != null)
+            {
+                Schema req = _req, rsp = _rsp;
+                h = async r =>
+                {
+                    object q;
+                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q))
+                        throw new Exception("request decode failed");
+                    TRsp outv = await handler((TReq)q).ConfigureAwait(false);
+                    return rsp.Encode(outv);
+                };
+            }
+            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
+        }
+
         public FunctionDefinition(DartNode node, string name, Action<TReq, DartRequest<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0)
         {
@@ -2494,6 +2971,124 @@ namespace Dart
             return new DartResponse<TRsp> { Core = core, RspSchema = _rsp };
         }
 
+        public int MatchCount => _core.MatchCount;
+        public bool HasDefinition => _core.HasDefinition;
+        public SendStatus Retire() => _core.Retire();
+    }
+
+    /// <summary>The typed task handler context: typed Progress over the untyped surface.</summary>
+    public sealed class TaskContext<TPrg>
+    {
+        private readonly TaskContext _core;
+        private readonly Schema _prg;
+
+        internal TaskContext(TaskContext core, Schema prg) { _core = core; _prg = prg; }
+
+        public SendStatus Progress(TPrg value) => _core.Progress(_prg.Encode(value));
+        public SendStatus Progress(byte[] value) => _core.Progress(value);
+        public CancellationToken CancellationToken => _core.CancellationToken;
+        public bool Cancelled => _core.Cancelled;
+        public uint Caller => _core.Caller;
+        public string CallerName => _core.CallerName;
+        public ulong RecvUs => _core.RecvUs;
+        public ulong WrittenUs => _core.WrittenUs;
+    }
+
+    /// <summary>The typed implementation side of a task. The async handler answers the
+    /// call by completing: the result -> Ok, OperationCanceledException (the cooperative
+    /// honor of the context's CancellationToken) -> Cancelled, any other exception ->
+    /// AppError with its message. It runs on the polling thread until its first await;
+    /// CPU-bound work belongs in Task.Run.</summary>
+    public sealed class TaskDefinition<TReq, TPrg, TRsp>
+    {
+        private readonly TaskDefinition _core;
+        private readonly Schema _req, _prg, _rsp;
+
+        public TaskDefinition(DartNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+                              bool progressBestEffort = false, int progressKeepLast = 0,
+                              bool noCancel = false, bool exclusive = false, bool multi = false,
+                              int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            _req = new Schema(typeof(TReq));
+            _prg = new Schema(typeof(TPrg));
+            _rsp = new Schema(typeof(TRsp));
+            Func<DartRequest, TaskContext, Task<byte[]>> h = null;
+            if (handler != null)
+            {
+                Schema req = _req, prg = _prg, rsp = _rsp;
+                h = async (r, ctx) =>
+                {
+                    object q;
+                    if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q))
+                        throw new Exception("request decode failed");
+                    TRsp outv = await handler((TReq)q, new TaskContext<TPrg>(ctx, prg)).ConfigureAwait(false);
+                    return rsp.Encode(outv);
+                };
+            }
+            _core = new TaskDefinition(node, name, _req, _prg, _rsp, h, progressBestEffort,
+                                       progressKeepLast, noCancel, exclusive, multi,
+                                       backpressureWaitMs, timeoutMs);
+        }
+
+        public int CallerCount => _core.CallerCount;
+        public SendStatus Retire() => _core.Retire();
+    }
+
+    /// <summary>The typed caller side of a task defined on another node.</summary>
+    public sealed class RemoteTask<TReq, TPrg, TRsp>
+    {
+        private readonly RemoteTask _core;
+        private readonly Schema _req, _prg, _rsp;
+
+        public RemoteTask(DartNode node, string name, bool progressBestEffort = false,
+                          int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0)
+        {
+            _req = new Schema(typeof(TReq));
+            _prg = new Schema(typeof(TPrg));
+            _rsp = new Schema(typeof(TRsp));
+            _core = new RemoteTask(node, name, _req, _prg, _rsp, progressBestEffort,
+                                   progressKeepLast, backpressureWaitMs, timeoutMs);
+        }
+
+        /// <summary>Start the task: the Task NEVER faults, inspect Status. progress fires
+        /// per typed update on the delivering thread (the RUNNING ack is skipped: it
+        /// carries no value; watch it through the untyped RemoteTask if needed).
+        /// Cancelling cancellationToken requests cooperative cancellation.</summary>
+        public Task<DartResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
+                                                  CancellationToken cancellationToken = default,
+                                                  uint provider = 0)
+            => CallAsync(request, out _, progress, cancellationToken, provider);
+
+        /// <summary>As above; callId receives the call id at commit: the handle for
+        /// Cancel from anywhere. 0 when the request never committed.</summary>
+        public Task<DartResponse<TRsp>> CallAsync(TReq request, out uint callId,
+                                                  IProgress<TPrg> progress = null,
+                                                  CancellationToken cancellationToken = default,
+                                                  uint provider = 0)
+        {
+            Action<TaskProgress> sink = null;
+            if (progress != null)
+            {
+                Schema prg = _prg;
+                IProgress<TPrg> pr = progress;
+                sink = info =>
+                {
+                    object v;
+                    if (info.Value == null) return;   // the RUNNING ack: no TPrg to decode
+                    if (Patterns.TryDecode(prg, info.SchemaPtr, info.Value, typeof(TPrg), out v))
+                        pr.Report((TPrg)v);
+                };
+            }
+            Task<DartResponse> core = _core.CallCore(_req.Encode(request), out callId, sink,
+                                                     cancellationToken, provider);
+            return Wrap(core);
+        }
+
+        private async Task<DartResponse<TRsp>> Wrap(Task<DartResponse> core)
+            => new DartResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
+
+        /// <summary>Cancel the outstanding call callId (see the untyped RemoteTask.Cancel).</summary>
+        public SendStatus Cancel(uint callId) => _core.Cancel(callId);
         public int MatchCount => _core.MatchCount;
         public bool HasDefinition => _core.HasDefinition;
         public SendStatus Retire() => _core.Retire();
