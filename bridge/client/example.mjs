@@ -1,4 +1,4 @@
-/* Example + E2E check: pub/sub, a function and a variable over the DART
+/* Example + E2E check: pub/sub, a function, a task and a variable over the DART
  * WebSocket bridge from Node.
  *
  * Start the bridge, then run this:
@@ -30,7 +30,7 @@ const CONFIG    = `Config { rate_hz: u32, label: string<24> }`;
  * each other quickly; drop it to run across a real network. */
 const net = { interface: "127.0.0.1" };
 
-const fail = setTimeout(() => { console.error("timeout: no progress in 20s (is the bridge running?)"); process.exit(1); }, 20000);
+const fail = setTimeout(() => { console.error("timeout: no progress in 30s (is the bridge running?)"); process.exit(1); }, 30000);
 
 const robot = await DartNode.connect(url, { name: "robot", ...net,
     onEvent: (e) => { if (e.event === "error") console.warn("robot:", e.text); } });
@@ -150,6 +150,53 @@ gainRemote.set(2.5);
 for (let i = 0; i < 50 && gain.get() !== 2.5; i++) await new Promise((res) => setTimeout(res, 100));
 if (gain.get() !== 2.5) throw new Error("bare-typed variable set did not replicate");
 console.log(`bare variable: gain=${gain.get()} (set through the remote)`);
+
+/* ---- tasks: a function with progress and cancellation ----------------------------- */
+const XREQ = `Xfer { total: u32, delay_ms: u32 }`;
+const XPRG = `Prog { done: u32 }`;
+const XRSP = `Sum { bytes: u32 }`;
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+await robot.taskDefinition("transfer", XREQ, XPRG, XRSP, async (req, ctx) => {
+    for (let i = 1; i <= req.total; i++) {
+        ctx.signal.throwIfAborted();          /* honor a cancel: throw its AbortError */
+        await sleep(req.delay_ms);
+        ctx.progress({ done: i });
+    }
+    return { bytes: req.total };              /* return value = the ok response */
+});
+await robot.taskDefinition("fixed", XREQ, XPRG, XRSP,
+    async (req) => { await sleep(50); return { bytes: req.total }; }, { no_cancel: true });
+const xfer  = await dash.remoteTask("transfer", XREQ, XPRG, XRSP);
+const fixed = await dash.remoteTask("fixed", XREQ, XPRG, XRSP);
+await robot.settle(5000);
+await dash.settle(5000);
+
+/* a full run: the RUNNING ack (null) first, progress in order, one ok result */
+const seen = [];
+const run1 = xfer.call({ total: 3, delay_ms: 20 });
+run1.onProgress((p) => seen.push(p === null ? "running" : p.done));
+const out1 = await run1.result;
+console.log(`transfer: progress=[${seen.join(", ")}] status=${out1.status} bytes=${out1.value?.bytes}`);
+if (!out1.ok || out1.value.bytes !== 3) throw new Error("task result mismatch");
+if (seen[0] !== "running") throw new Error("no RUNNING ack first");
+if (seen.slice(1).join(",") !== "1,2,3") throw new Error("progress out of order");
+
+/* cancel round trip: the handler observes ctx.signal, the caller sees "cancelled" */
+const run2 = xfer.call({ total: 1000, delay_ms: 50 });
+await new Promise((res) => run2.onProgress((p) => { if (p !== null) res(); }));   /* mid-run */
+const verdict = await run2.cancel();
+const out2 = await run2.result;
+console.log(`cancel: verdict=${verdict} status=${out2.status} message="${out2.message}"`);
+if (verdict !== "ok") throw new Error(`cancel not accepted: ${verdict}`);
+if (out2.status !== "cancelled") throw new Error("cancel was not honored");
+
+/* no_cancel: cancel is refused locally, the task still completes ok */
+const run3 = fixed.call({ total: 1, delay_ms: 50 });
+const refusal = await run3.cancel();
+const out3 = await run3.result;
+console.log(`no_cancel: verdict=${refusal} status=${out3.status}`);
+if (refusal !== "no_cancel") throw new Error(`expected a no_cancel refusal, got ${refusal}`);
+if (!out3.ok) throw new Error("no_cancel task did not complete ok");
 
 /* ---- source timestamps: every delivery surface carries the sender's wall clock ----- */
 const nowUs = Date.now() * 1000;

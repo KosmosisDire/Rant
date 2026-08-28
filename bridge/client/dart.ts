@@ -1,5 +1,5 @@
 /* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v9, see ../PROTOCOL.md). Zero runtime dependencies: runs
+ * through the bridge (protocol v10, see ../PROTOCOL.md). Zero runtime dependencies: runs
  * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
@@ -9,8 +9,9 @@
  * Two API layers over one wire:
  *  - the dynamic form: node.topic(...) with flat dotted-path get/send (unchanged from v2);
  *  - the pattern factories: publisher/subscriber, functionDefinition/remoteFunction,
- *    variableDefinition/remoteVariable. These speak decoded PLAIN OBJECTS
- *    (nested, mirroring the schema) and carry optional type parameters for TS callers.
+ *    taskDefinition/remoteTask, variableDefinition/remoteVariable. These speak decoded
+ *    PLAIN OBJECTS (nested, mirroring the schema) and carry optional type parameters for
+ *    TS callers.
  *
  *   const node = await DartNode.connect("ws://localhost:7480", { name: "dashboard" });
  *   const pub  = await node.publisher("pose", "Pose { x: f64, y: f64 }");
@@ -22,6 +23,7 @@
 /* binary frame ops (byte 0); meaning per direction, headers little-endian */
 const OP_DATA = 0x01;      /* publish / delivery */
 const OP_VAR = 0x02;       /* var set-force-unforce / var update */
+const OP_PROGRESS = 0x03;  /* task progress (definition streams / caller receives) */
 const OP_CALL = 0x04;      /* call / call response */
 const OP_REQUEST = 0x05;   /* request reply / request */
 
@@ -125,7 +127,7 @@ type Peer = {
     fragmentSize: number;
 };
 
-type EntityKindName = "topic" | "function" | "variable";
+type EntityKindName = "topic" | "function" | "task" | "variable";
 
 /* One network entity a node hosts or a peer advertises (pattern channels folded: a
  * function's req/rsp pair is one entity, a variable's set channel merges as `writable`).
@@ -138,14 +140,19 @@ type Entity = {
     reliable: boolean;
     writable?: boolean;     /* variable: a set channel is advertised */
     forceable?: boolean;    /* variable: the owner permits force/unforce */
+    cancellable?: boolean;  /* task: the provider honors cancel (default on) */
+    exclusive?: boolean;    /* task: declared serialization (the handler enforces it) */
+    multi?: boolean;        /* task: redundant providers intended */
     incomplete?: boolean;   /* a pattern half-pair, surfaced not dropped */
     index: number;          /* the primary channel's index at the peer */
     hash: number;           /* the primary channel's low-32 name hash */
     schemaHash?: string;    /* value/request/payload schema identity, hex (absent = untyped/unfetched) */
-    rspSchemaHash?: string; /* function only: the response schema identity, hex */
+    rspSchemaHash?: string; /* function/task: the response schema identity, hex */
+    progressSchemaHash?: string; /* task only: the progress schema identity, hex */
     schema?: SchemaBlock;   /* value/request/payload field table (present when the schema is known);
                                pass to `new Layout(e.schema)` to decode/inspect messages */
-    rspSchema?: SchemaBlock; /* function only: the response field table */
+    rspSchema?: SchemaBlock; /* function/task: the response field table */
+    progressSchema?: SchemaBlock; /* task only: the progress field table */
 };
 
 /* @dart/meta section mask (OR the bits; 0 = every section). Mirrors DART_META_*. */
@@ -168,11 +175,16 @@ function toEntity(e: any): Entity {
         reliable: !!e.reliable, index: e.index, hash: e.hash };
     if (e.writable !== undefined)   out.writable = !!e.writable;
     if (e.forceable !== undefined)  out.forceable = !!e.forceable;
+    if (e.cancellable !== undefined) out.cancellable = !!e.cancellable;
+    if (e.exclusive !== undefined)   out.exclusive = !!e.exclusive;
+    if (e.multi !== undefined)       out.multi = !!e.multi;
     if (e.incomplete)               out.incomplete = true;
     if (e.schema_hash !== undefined)     out.schemaHash = e.schema_hash;
     if (e.rsp_schema_hash !== undefined) out.rspSchemaHash = e.rsp_schema_hash;
+    if (e.progress_schema_hash !== undefined) out.progressSchemaHash = e.progress_schema_hash;
     if (e.schema) out.schema = e.schema;
     if (e.rsp)    out.rspSchema = e.rsp;
+    if (e.progress_schema) out.progressSchema = e.progress_schema;
     return out;
 }
 
@@ -199,6 +211,41 @@ type RequestInfo = { caller: number; callerName: string; writtenUs: number };
 
 type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
+
+/* What a task handler receives beside the request. progress() streams one update to
+ * every observer; signal aborts when the caller (or a third party) requests
+ * cancellation. Honor a cancel by throwing the signal's reason
+ * (ctx.signal.throwIfAborted()): the client answers status "cancelled". Any other throw
+ * answers "app_error"; a normal return always completes "ok", even after an abort (it
+ * ran to completion anyway). */
+type TaskContext<Prg = any> = {
+    progress: (value: Prg) => void;
+    signal: AbortSignal;
+    cancelled: boolean;      /* sugar for signal.aborted */
+    caller: number;
+    callerName: string;
+    writtenUs: number;
+};
+type TaskHandler<Req, Prg, Rsp> = (req: Req, ctx: TaskContext<Prg>) => Rsp | Promise<Rsp>;
+
+/* one decoded progress update on a task call; null value = the RUNNING acknowledgment */
+type TaskProgressHandler<Prg> = (value: Prg | null,
+                                 info: { provider: number; writtenUs: number }) => void;
+
+/* the cancel op's verdict: "ok" = cancel requested (the terminal status answers whether
+ * it was honored), "no_cancel" = the provider declared no_cancel (refused locally),
+ * "not_pending" = the call already answered, "error" = anything else */
+type CancelStatus = "ok" | "no_cancel" | "not_pending" | "error";
+
+type TaskOpts = {
+    progress_best_effort?: boolean;  /* progress-channel reliability: omit/false = reliable */
+    progress_keep_last?: number;     /* progress ring depth; 0 = the pattern default */
+    no_cancel?: boolean;             /* definition: will not honor cancellation */
+    exclusive?: boolean;             /* definition: declared serialization (handler enforces) */
+    multi?: boolean;                 /* definition: redundant providers intended */
+    timeout_ms?: number;             /* remote: until-first-response bound; 0 = 5s */
+    backpressure_wait_ms?: number;
+};
 
 type VariableDefOpts<T> = {
     initial?: T;
@@ -743,6 +790,8 @@ type PendingCall<Rsp> = {
     reject: (e: Error) => void;
     layout: Layout;
     timer: ReturnType<typeof setTimeout> | undefined;
+    /* task calls only: routes 0x03 progress frames to the run handle */
+    progress?: (data: Uint8Array, provider: number, writtenUs: number) => void;
 };
 
 /* A reference to a function definition on another node. call() resolves with the
@@ -790,6 +839,175 @@ class RemoteFunction<Req = any, Rsp = any> {
             this._node._calls.set(callId, p);
             this._node._ws.send(frame);
         });
+    }
+}
+
+/* The implementation side of a task: a function with progress and cancellation. The
+ * bridge defers every request here; the async handler streams ctx.progress(...) while it
+ * works and its settlement is the one terminal answer (return = "ok", throw the abort
+ * reason = "cancelled", any other throw = "app_error"). ONE definition per name (the
+ * multi option declares redundant providers). */
+class TaskDefinition<Req = any, Prg = any, Rsp = any> {
+    _node: DartNode;
+    id: number;
+    name: string;
+    reqLayout: Layout;
+    prgLayout: Layout;
+    rspLayout: Layout;
+    callerCount: number;       /* callers currently matched (from match pushes) */
+    _handler: TaskHandler<Req, Prg, Rsp>;
+    _aborts: Map<number, AbortController>;   /* req id -> its cancel signal */
+
+    constructor(node: DartNode, name: string, r: any, handler: TaskHandler<Req, Prg, Rsp>) {
+        this._node = node;
+        this.id = r.id;
+        this.name = name;
+        this.reqLayout = new Layout(r.req);
+        this.prgLayout = new Layout(r.prg);
+        this.rspLayout = new Layout(r.rsp);
+        this.callerCount = 0;
+        this._handler = handler;
+        this._aborts = new Map();
+    }
+
+    _match(m: any): void { this.callerCount = m.callers; }
+
+    /* an {op:"cancel"} push: abort the request's signal (default AbortError reason) */
+    _cancel(reqId: number): void { this._aborts.get(reqId)?.abort(); }
+
+    async _handle(reqId: number, info: RequestInfo, payload: Uint8Array): Promise<void> {
+        const ctrl = new AbortController();
+        this._aborts.set(reqId, ctrl);
+        let done = false;
+        const node = this._node;
+        const prg = this.prgLayout;
+        const ctx: TaskContext<Prg> = {
+            progress: (v: Prg) => {
+                if (done) throw new Error("task request already completed");
+                const p = prg.encode(v);
+                const frame = new Uint8Array(5 + p.length);
+                frame[0] = OP_PROGRESS;
+                new DataView(frame.buffer).setUint32(1, reqId, true);
+                frame.set(p, 5);
+                node._ws.send(frame);
+            },
+            signal: ctrl.signal,
+            get cancelled(): boolean { return ctrl.signal.aborted; },
+            caller: info.caller,
+            callerName: info.callerName,
+            writtenUs: info.writtenUs,
+        };
+        let status = 0;
+        let rsp = new Uint8Array(0);
+        let msg = new Uint8Array(0);
+        try {
+            const out = await this._handler(this.reqLayout.decode(payload) as Req, ctx);
+            rsp = this.rspLayout.encode(out);
+        } catch (e: any) {
+            /* the abort reason (or any AbortError) after a cancel = the handler honored
+             * it; anything else is an app error carrying the throw's text */
+            const honored = ctrl.signal.aborted && (e === ctrl.signal.reason || e?.name === "AbortError");
+            status = honored ? 5 : 1;
+            const t = typeof e?.message === "string" ? e.message : (typeof e === "string" ? e : "");
+            if (t) msg = enc.encode(t).subarray(0, 255);   /* one length byte, like the wire */
+        }
+        done = true;
+        this._aborts.delete(reqId);
+        const frame = new Uint8Array(7 + msg.length + rsp.length);
+        frame[0] = OP_REQUEST;
+        new DataView(frame.buffer).setUint32(1, reqId, true);
+        frame[5] = status;
+        frame[6] = msg.length;
+        frame.set(msg, 7);
+        frame.set(rsp, 7 + msg.length);
+        this._node._ws.send(frame);
+    }
+}
+
+/* One task invocation in flight, returned synchronously by RemoteTask.call. result is
+ * the one terminal Response (never rejecting on a status, only on connection loss);
+ * onProgress observes the updates (null = the RUNNING ack; updates arriving before
+ * registration are buffered and replayed); cancel() asks the provider to stop. */
+class TaskRun<Prg = any, Rsp = any> {
+    _node: DartNode;
+    _prgLayout: Layout;
+    callId: number;            /* the client correlation id (the cancel op's `call`) */
+    result: Promise<Response<Rsp>>;
+    _onProgress: TaskProgressHandler<Prg> | null;
+    _buffered: { value: Prg | null; info: { provider: number; writtenUs: number } }[];
+
+    constructor(node: DartNode, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>) {
+        this._node = node;
+        this._prgLayout = prgLayout;
+        this.callId = callId;
+        this.result = result;
+        this._onProgress = null;
+        this._buffered = [];
+    }
+
+    /* One handler (re-register replaces, null clears); buffered updates replay in order. */
+    onProgress(handler: TaskProgressHandler<Prg> | null): this {
+        this._onProgress = handler;
+        if (handler) { const b = this._buffered; this._buffered = []; for (const u of b) handler(u.value, u.info); }
+        return this;
+    }
+
+    /* Request cancellation. Cooperative and never acked on the wire: resolves with the
+     * local verdict, and the terminal result's status is the real answer. */
+    async cancel(): Promise<CancelStatus> {
+        const r = await this._node._request({ op: "cancel", call: this.callId });
+        return r.status as CancelStatus;
+    }
+
+    _push(data: Uint8Array, provider: number, writtenUs: number): void {
+        const value = data.length ? (this._prgLayout.decode(data) as Prg) : null;   /* empty = RUNNING */
+        if (this._onProgress) this._onProgress(value, { provider, writtenUs });
+        else this._buffered.push({ value, info: { provider, writtenUs } });
+    }
+}
+
+/* A reference to a task definition on another node. call() returns a TaskRun handle
+ * SYNCHRONOUSLY; the per-call timeout (remote_task's timeout_ms) bounds only the wait
+ * for the first response, so there is no client-side timer: after RUNNING a task runs
+ * as long as it runs and run.cancel() is the caller's tool for impatience. */
+class RemoteTask<Req = any, Prg = any, Rsp = any> {
+    _node: DartNode;
+    id: number;
+    name: string;
+    reqLayout: Layout;
+    prgLayout: Layout;
+    rspLayout: Layout;
+    hasDefinition: boolean;    /* a definition is matched (from match pushes) */
+
+    constructor(node: DartNode, name: string, r: any) {
+        this._node = node;
+        this.id = r.id;
+        this.name = name;
+        this.reqLayout = new Layout(r.req);
+        this.prgLayout = new Layout(r.prg);
+        this.rspLayout = new Layout(r.rsp);
+        this.hasDefinition = false;
+    }
+
+    _match(m: any): void { this.hasDefinition = !!m.has_definition; }
+
+    call(value: Req): TaskRun<Prg, Rsp> {
+        const payload = this.reqLayout.encode(value);
+        const callId = ++this._node._nextCall;
+        const frame = new Uint8Array(7 + payload.length);
+        frame[0] = OP_CALL;
+        frame[1] = this.id & 0xff; frame[2] = this.id >> 8;
+        new DataView(frame.buffer).setUint32(3, callId, true);
+        frame.set(payload, 7);
+        let run!: TaskRun<Prg, Rsp>;
+        const result = new Promise<Response<Rsp>>((resolve, reject) => {
+            const p: PendingCall<Rsp> = { resolve, reject, layout: this.rspLayout, timer: undefined,
+                progress: (data, provider, writtenUs) => run._push(data, provider, writtenUs) };
+            this._node._calls.set(callId, p);
+        });
+        run = new TaskRun<Prg, Rsp>(this._node, this.prgLayout, callId, result);
+        this._node._ws.send(frame);
+        return run;
     }
 }
 
@@ -908,7 +1126,7 @@ class RemoteVariable<T = any> extends VarHandle<T> {
     _match(m: any): void { this.hasDefinition = !!m.has_definition; }
 }
 
-type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle;
+type PatternEntity = FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
 
 /* The node handle: one WebSocket connection = one DART node owned by the bridge. */
 class DartNode {
@@ -1001,6 +1219,10 @@ class DartNode {
         } else if (m.op === "request") {
             /* meta first; the binary payload frame follows on the same ordered socket */
             this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "", writtenUs: 0 });
+        } else if (m.op === "cancel") {
+            /* cancellation requested on a parked task request: abort its signal */
+            const t = this._entities.get(m.task);
+            if (t instanceof TaskDefinition) t._cancel(m.req);
         } else if (m.op === "log") {
             this._onLog?.({ level: m.level, node: m.node, wallUs: m.wall_us,
                             monoUs: m.mono_us, recvUs: m.recv_us, writtenUs: m.written_us ?? 0,
@@ -1028,6 +1250,12 @@ class DartNode {
                 if (b[3] & 2) v._write(b.subarray(12), forced, writtenUs);
                 else          v._update(b.subarray(12), forced, writtenUs);
             }
+            return;
+        }
+        case OP_PROGRESS: {                  /* [u32 call][u32 provider][u64 written][payload]; empty payload = RUNNING */
+            if (b.length < 17) return;
+            const p = this._calls.get(view.getUint32(1, true));
+            p?.progress?.(b.subarray(17), view.getUint32(5, true), rdWrittenUs(view, 9));
             return;
         }
         case OP_CALL: {                      /* [u32 call][u8 status][u32 provider][u64 written][u8 msg_len][msg][payload] */
@@ -1059,7 +1287,8 @@ class DartNode {
             const info = this._reqMeta.get(reqId) ?? { caller: 0, callerName: "", writtenUs: 0 };
             info.writtenUs = rdWrittenUs(view, 7);   /* the caller's stamp rides the binary frame */
             this._reqMeta.delete(reqId);
-            if (fn instanceof FunctionDefinition) void fn._handle(reqId, info, b.subarray(15));
+            if (fn instanceof FunctionDefinition)   void fn._handle(reqId, info, b.subarray(15));
+            else if (fn instanceof TaskDefinition)  void fn._handle(reqId, info, b.subarray(15));
             return;
         }
         default: return;                     /* reserved ops: ignore */
@@ -1114,6 +1343,40 @@ class DartNode {
         const fn = new RemoteFunction<Req, Rsp>(this, name, r);
         this._entities.set(fn.id, fn);
         return fn;
+    }
+
+    /* Host a task (a function with progress and cancellation): handler(reqValue, ctx)
+     * streams ctx.progress(...) while it works; its (possibly async) settlement is the
+     * one terminal answer, and ctx.signal aborts when the caller requests cancellation.
+     * Schemas are DSL text (null = raw bytes) for request, progress and response. */
+    async taskDefinition<Req = any, Prg = any, Rsp = any>(name: string, reqSchema: string | null,
+            prgSchema: string | null, rspSchema: string | null, handler: TaskHandler<Req, Prg, Rsp>,
+            opts: TaskOpts = {}): Promise<TaskDefinition<Req, Prg, Rsp>> {
+        const r = await this._request({
+            op: "task_definition", name, ...opts,
+            ...(reqSchema ? { req_schema: reqSchema } : {}),
+            ...(prgSchema ? { prg_schema: prgSchema } : {}),
+            ...(rspSchema ? { rsp_schema: rspSchema } : {}),
+        });
+        const t = new TaskDefinition<Req, Prg, Rsp>(this, name, r, handler);
+        this._entities.set(t.id, t);
+        return t;
+    }
+
+    /* A reference to a task hosted elsewhere. task.call(req) returns a TaskRun handle
+     * synchronously: run.onProgress(cb), await run.result, run.cancel(). */
+    async remoteTask<Req = any, Prg = any, Rsp = any>(name: string, reqSchema: string | null,
+            prgSchema: string | null, rspSchema: string | null,
+            opts: TaskOpts = {}): Promise<RemoteTask<Req, Prg, Rsp>> {
+        const r = await this._request({
+            op: "remote_task", name, ...opts,
+            ...(reqSchema ? { req_schema: reqSchema } : {}),
+            ...(prgSchema ? { prg_schema: prgSchema } : {}),
+            ...(rspSchema ? { rsp_schema: rspSchema } : {}),
+        });
+        const t = new RemoteTask<Req, Prg, Rsp>(this, name, r);
+        this._entities.set(t.id, t);
+        return t;
     }
 
     /* Host a variable (this node holds the authoritative value). `initial` is applied
@@ -1218,11 +1481,13 @@ export {
     DartNode, DartTopic, DartMessage, Layout,
     Publisher, Subscriber,
     FunctionDefinition, RemoteFunction,
+    TaskDefinition, RemoteTask, TaskRun,
     VariableDefinition, RemoteVariable,
     MetaSection,
     type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent,
     type CallStatusName, type Response, type RequestInfo,
     type SubscriberHandler, type FunctionHandler,
+    type TaskContext, type TaskHandler, type TaskProgressHandler, type TaskOpts, type CancelStatus,
     type VariableDefOpts, type RemoteVarOpts,
     type LogLevelName, type LogLine,
     type Peer, type Entity, type EntityKindName, type MetaSnapshot,

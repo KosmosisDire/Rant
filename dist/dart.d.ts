@@ -81,7 +81,7 @@ type Peer = {
     active: boolean;
     fragmentSize: number;
 };
-type EntityKindName = "topic" | "function" | "variable";
+type EntityKindName = "topic" | "function" | "task" | "variable";
 type Entity = {
     kind: EntityKindName;
     name: string;
@@ -90,13 +90,18 @@ type Entity = {
     reliable: boolean;
     writable?: boolean;
     forceable?: boolean;
+    cancellable?: boolean;
+    exclusive?: boolean;
+    multi?: boolean;
     incomplete?: boolean;
     index: number;
     hash: number;
     schemaHash?: string;
     rspSchemaHash?: string;
+    progressSchemaHash?: string;
     schema?: SchemaBlock;
     rspSchema?: SchemaBlock;
+    progressSchema?: SchemaBlock;
 };
 declare const MetaSection: {
     readonly Node: 1;
@@ -127,6 +132,29 @@ type RequestInfo = {
 };
 type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
+type TaskContext<Prg = any> = {
+    progress: (value: Prg) => void;
+    signal: AbortSignal;
+    cancelled: boolean;
+    caller: number;
+    callerName: string;
+    writtenUs: number;
+};
+type TaskHandler<Req, Prg, Rsp> = (req: Req, ctx: TaskContext<Prg>) => Rsp | Promise<Rsp>;
+type TaskProgressHandler<Prg> = (value: Prg | null, info: {
+    provider: number;
+    writtenUs: number;
+}) => void;
+type CancelStatus = "ok" | "no_cancel" | "not_pending" | "error";
+type TaskOpts = {
+    progress_best_effort?: boolean;
+    progress_keep_last?: number;
+    no_cancel?: boolean;
+    exclusive?: boolean;
+    multi?: boolean;
+    timeout_ms?: number;
+    backpressure_wait_ms?: number;
+};
 type VariableDefOpts<T> = {
     initial?: T;
     readOnly?: boolean;
@@ -215,6 +243,7 @@ type PendingCall<Rsp> = {
     reject: (e: Error) => void;
     layout: Layout;
     timer: ReturnType<typeof setTimeout> | undefined;
+    progress?: (data: Uint8Array, provider: number, writtenUs: number) => void;
 };
 declare class RemoteFunction<Req = any, Rsp = any> {
     _node: DartNode;
@@ -226,6 +255,51 @@ declare class RemoteFunction<Req = any, Rsp = any> {
     constructor(node: DartNode, name: string, r: any);
     _match(m: any): void;
     call(value: Req, timeoutMs?: number): Promise<Response<Rsp>>;
+}
+declare class TaskDefinition<Req = any, Prg = any, Rsp = any> {
+    _node: DartNode;
+    id: number;
+    name: string;
+    reqLayout: Layout;
+    prgLayout: Layout;
+    rspLayout: Layout;
+    callerCount: number;
+    _handler: TaskHandler<Req, Prg, Rsp>;
+    _aborts: Map<number, AbortController>;
+    constructor(node: DartNode, name: string, r: any, handler: TaskHandler<Req, Prg, Rsp>);
+    _match(m: any): void;
+    _cancel(reqId: number): void;
+    _handle(reqId: number, info: RequestInfo, payload: Uint8Array): Promise<void>;
+}
+declare class TaskRun<Prg = any, Rsp = any> {
+    _node: DartNode;
+    _prgLayout: Layout;
+    callId: number;
+    result: Promise<Response<Rsp>>;
+    _onProgress: TaskProgressHandler<Prg> | null;
+    _buffered: {
+        value: Prg | null;
+        info: {
+            provider: number;
+            writtenUs: number;
+        };
+    }[];
+    constructor(node: DartNode, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>);
+    onProgress(handler: TaskProgressHandler<Prg> | null): this;
+    cancel(): Promise<CancelStatus>;
+    _push(data: Uint8Array, provider: number, writtenUs: number): void;
+}
+declare class RemoteTask<Req = any, Prg = any, Rsp = any> {
+    _node: DartNode;
+    id: number;
+    name: string;
+    reqLayout: Layout;
+    prgLayout: Layout;
+    rspLayout: Layout;
+    hasDefinition: boolean;
+    constructor(node: DartNode, name: string, r: any);
+    _match(m: any): void;
+    call(value: Req): TaskRun<Prg, Rsp>;
 }
 type VarWaiter = {
     res: (ok: boolean) => void;
@@ -271,7 +345,7 @@ declare class RemoteVariable<T = any> extends VarHandle<T> {
     constructor(node: DartNode, name: string, r: any);
     _match(m: any): void;
 }
-type PatternEntity = FunctionDefinition | RemoteFunction | VarHandle;
+type PatternEntity = FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
 declare class DartNode {
     _ws: WebSocket;
     _seq: number;
@@ -299,6 +373,8 @@ declare class DartNode {
     subscriber<T = any>(name: string, schema: string | null, handler: SubscriberHandler<T>, opts?: TopicOpts): Promise<Subscriber<T>>;
     functionDefinition<Req = any, Rsp = any>(name: string, reqSchema: string | null, rspSchema: string | null, handler: FunctionHandler<Req, Rsp>): Promise<FunctionDefinition<Req, Rsp>>;
     remoteFunction<Req = any, Rsp = any>(name: string, reqSchema: string | null, rspSchema: string | null): Promise<RemoteFunction<Req, Rsp>>;
+    taskDefinition<Req = any, Prg = any, Rsp = any>(name: string, reqSchema: string | null, prgSchema: string | null, rspSchema: string | null, handler: TaskHandler<Req, Prg, Rsp>, opts?: TaskOpts): Promise<TaskDefinition<Req, Prg, Rsp>>;
+    remoteTask<Req = any, Prg = any, Rsp = any>(name: string, reqSchema: string | null, prgSchema: string | null, rspSchema: string | null, opts?: TaskOpts): Promise<RemoteTask<Req, Prg, Rsp>>;
     variableDefinition<T = any>(name: string, schema: string | null, opts?: VariableDefOpts<T>): Promise<VariableDefinition<T>>;
     remoteVariable<T = any>(name: string, schema: string | null, opts?: RemoteVarOpts): Promise<RemoteVariable<T>>;
     settle(timeoutMs?: number): Promise<boolean>;
@@ -313,4 +389,4 @@ declare class DartNode {
     meta(peerId: number, sections?: number): Promise<MetaSnapshot>;
     close(): void;
 }
-export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, VariableDefinition, RemoteVariable, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SubscriberHandler, type FunctionHandler, type VariableDefOpts, type RemoteVarOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };
+export { DartNode, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, TaskDefinition, RemoteTask, TaskRun, VariableDefinition, RemoteVariable, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type CallStatusName, type Response, type RequestInfo, type SubscriberHandler, type FunctionHandler, type TaskContext, type TaskHandler, type TaskProgressHandler, type TaskOpts, type CancelStatus, type VariableDefOpts, type RemoteVarOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };

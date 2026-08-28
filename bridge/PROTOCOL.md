@@ -1,10 +1,10 @@
-# DART WebSocket bridge protocol (v9)
+# DART WebSocket bridge protocol (v10)
 
 The bridge turns a WebSocket connection into a full DART node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
 service thread, and closes it (with a BYE) when the connection drops. Everything a
 native node needs -- **pub/sub** plus the pattern entities (**functions**,
-**variables**) -- arrives over one socket, so a browser, a phone, or
+**tasks**, **variables**) -- arrives over one socket, so a browser, a phone, or
 any language with a WebSocket client is a first-class peer.
 
 This is a lean proxy. Introspection is **query-based and pull-only**: the client
@@ -20,9 +20,9 @@ Two planes, split by WebSocket frame type:
 - **Text frames = control plane, JSON.** Open the node, create topics and pattern
   entities, flip roles, drain, settle. Requests carry a `seq`; every request gets
   exactly one reply echoing it. The server also pushes unsolicited `event`,
-  `match`, and `request` messages.
+  `match`, `request`, `cancel`, and `log` messages.
 - **Binary frames = data plane.** Publish/delivery, variable writes/updates,
-  calls/responses: a fixed little-endian header of a few
+  calls/progress/responses: a fixed little-endian header of a few
   bytes and the raw payload after it. No JSON, no base64: the hot path costs a
   memcpy.
 
@@ -36,10 +36,10 @@ back-compat).
 1. Client connects: `ws://host:7480/`.
 2. Client sends `open` (must be the first message). The bridge creates the node.
 3. Client creates topics/entities, publishes, calls, receives, at will.
-4. Client closes the socket (or errors out): the bridge fails any function
-   requests still parked at the client (so remote callers get an answer now, not a
-   timeout), then closes the node with a BYE and frees everything. There is no
-   explicit close op.
+4. Client closes the socket (or errors out): the bridge answers any requests
+   still parked at the client (function requests fail, task requests complete
+   `cancelled`, so remote callers get an answer now, not a timeout), then closes
+   the node with a BYE and frees everything. There is no explicit close op.
 
 Any request before `open` (or a second `open`) gets an error reply. A binary
 frame before `open`, or on an unknown id, is dropped and reported with a
@@ -81,7 +81,7 @@ request, only for a broken WebSocket.
                                   //   names resolve even for topics this node doesn't share
 ```
 
-Reply: `{ "ok": true, "proto": 9, "name": "dashboard" }` (the actual node name,
+Reply: `{ "ok": true, "proto": 10, "name": "dashboard" }` (the actual node name,
 so an auto-generated one is visible).
 
 ### `topic` : create a topic
@@ -231,7 +231,7 @@ Reply `{ "ok": true }`.
 
 ### Pattern entities
 
-The four creates below return a dense per-connection **entity id** (its own id
+The creates below return a dense per-connection **entity id** (its own id
 space, separate from topic ids) plus the compiled field tables for every schema
 the entity carries. All schemas are optional DSL text; omitted = raw bytes.
 Entity ids appear in the pattern binary frames and in `match` pushes.
@@ -254,6 +254,60 @@ below. There is no bridge-side handler logic; the client is the implementation.
 **`remote_function`** -- a reference to a function hosted elsewhere. Same fields
 and reply shape as `function_definition` (no handler). `timeout_ms` sets the call
 timeout (0 = 5s): the answer the wire never delivers becomes status `timeout`.
+
+**`task_definition`** / **`remote_task`**: a task is a function with progress
+and cancellation. Same call ids and statuses, plus a broadcast progress channel
+and a cancel op. The create is `function_definition` / `remote_function` plus a
+third schema (`prg_schema`, the progress payload) and the task options:
+
+```json
+{ "op": "task_definition", "seq": 10, "name": "transfer",
+  "req_schema": "Xfer { total: u32 }",           // optional, as are the other two
+  "prg_schema": "Prog { done: u32 }",
+  "rsp_schema": "Sum { bytes: u32 }",
+  "progress_best_effort": false,   // progress-channel reliability: false = reliable
+  "progress_keep_last": 0,         // progress ring depth; 0 = the pattern default
+  "no_cancel": false,              // definition: will not honor cancellation; a remote's
+                                   //   cancel is then refused locally ("no_cancel")
+  "exclusive": false,              // definition: declared serialization (the handler enforces it)
+  "multi": false,                  // definition: redundant providers intended
+  "timeout_ms": 0,                 // remote: until-first-response bound; 0 = 5s
+  "backpressure_wait_ms": 0 }
+```
+
+Reply: `{ "ok": true, "id": 2, "req": {...}, "prg": {...}, "rsp": {...} }` (each
+block present only when that schema was given). On a `remote_task` only
+`progress_best_effort`, `progress_keep_last` and the timeouts apply.
+
+The definition side works like a function definition, deferred to the client: an
+incoming call pushes the `request` JSON (with `task` instead of `fn`) plus the
+binary `0x05` payload frame, and the bridge parks the call. Parking implies
+**RUNNING** to the caller (its call timeout is dropped: a task runs as long as it
+runs). While parked, the client streams progress with binary `0x03` frames (any
+number, in order) and finishes with the `0x05` reply frame, whose status for a
+task may also be 5 (`cancelled`: the handler honored a cancel; the payload is
+dropped on that status, so ship any partial result as a final progress update).
+When the caller (or a third party) requests cancellation, the bridge pushes
+`{ "op": "cancel", "task": 2, "req": 41 }` naming the parked request; honoring it
+is cooperative (finish with status 5) and a normal completion afterwards is
+equally valid (it ran to completion anyway).
+
+The caller side sends the same binary `0x04` call frame as a function; the bridge
+answers with zero or more `0x03` progress pushes (the RUNNING acknowledgment is
+one with an EMPTY payload) before the single `0x04` outcome. A task request is
+always directed at one provider (the oldest matched). To request cancellation the
+client sends the `cancel` request op with its own call id:
+
+```json
+{ "op": "cancel", "seq": 11, "call": 7 }
+```
+
+Reply: `{ "ok": true, "status": "ok" }` where `status` is the C verdict, a value
+and never a fault: `ok` (cancel requested; the terminal outcome answers whether
+it was honored), `no_cancel` (the provider declared `no_cancel`; refused locally,
+nothing sent), `not_pending` (the call already answered), `error` (anything
+else). There is no cancel acknowledgment on the wire: the terminal status is the
+answer (`cancelled` = honored or never started).
 
 **`variable_definition`** / **`remote_variable`** -- replicated state with ONE
 owner (the definition side holds the authoritative value).
@@ -319,21 +373,25 @@ Each entity:
               "fields": [ { "path": "rate_hz", "kind": "u32", "offset": 0, "size": 4 } ] } }
 ```
 
-`kind` is `topic` | `function` | `variable`. `provides`/`consumes` are
-the source/sink sides. `writable`/`forceable` appear on variables; `incomplete: true`
+`kind` is `topic` | `function` | `task` | `variable`. `provides`/`consumes` are
+the source/sink sides. `writable`/`forceable` appear on variables;
+`cancellable`/`exclusive`/`multi` appear on tasks; `incomplete: true`
 marks a surfaced pattern half-pair. `hash` is the low-32 name hash; `schema_hash`
-(and `rsp_schema_hash` on functions) ride as hex, present only when typed and
-fetched. `name` is a `"0x????????"` placeholder until the peer's details arrive --
+(with `rsp_schema_hash` on functions and tasks, and `progress_schema_hash` on
+tasks) ride as hex, present only when typed and fetched. `name` is a
+`"0x????????"` placeholder until the peer's details arrive --
 open with `fetch_details` to resolve names and schemas for topics this node does not
 itself share.
 
 When the schema is known, **`schema`** carries the full field table -- the exact
 `{ size, hash, fields }` block a `topic` create reply returns (see that op for the
 kind/offset/enum rules), so a client renders a discovered topic's types and can
-build a decoder for its live messages with no shared DSL. A `function` entity also
-carries **`rsp`** (the response field table). Both are absent for a raw/untyped
+build a decoder for its live messages with no shared DSL. A `function` or `task`
+entity also carries **`rsp`** (the response field table), and a `task` entity
+**`progress_schema`** (the progress field table). All are absent for a raw/untyped
 entity or one whose details have not been fetched. The reference client folds these
-into `Entity.schema` / `Entity.rspSchema`, ready for `new Layout(entity.schema)`.
+into `Entity.schema` / `Entity.rspSchema` / `Entity.progressSchema`, ready for
+`new Layout(entity.schema)`.
 
 **`meta`** -- fetch a peer's `@dart/meta` runtime snapshot (an async call; works
 under the bridge's service thread).
@@ -401,8 +459,10 @@ pushed value, so steady state is silent). The client maintains its
 { "op": "match", "type": "topic",               "id": 0, "matches": 2, "ready": true }
 { "op": "match", "type": "function_definition", "id": 0, "callers": 1 }
 { "op": "match", "type": "remote_function",     "id": 1, "has_definition": true }
-{ "op": "match", "type": "variable_definition", "id": 2, "remotes": 1 }
-{ "op": "match", "type": "remote_variable",     "id": 3, "has_definition": true }
+{ "op": "match", "type": "task_definition",     "id": 2, "callers": 1 }
+{ "op": "match", "type": "remote_task",         "id": 3, "has_definition": true }
+{ "op": "match", "type": "variable_definition", "id": 4, "remotes": 1 }
+{ "op": "match", "type": "remote_variable",     "id": 5, "has_definition": true }
 ```
 
 `type` picks the id space (`topic` = topic ids, everything else = entity ids).
@@ -425,7 +485,7 @@ nodes, and within JS safe-integer range); `mono_us` orders lines within one node
 message's source stamp (as on the binary frames). Low rate, so this rides the text
 plane as decoded JSON (no schema table needed).
 
-### `request` : an incoming function call (definition side)
+### `request` : an incoming function or task call (definition side)
 
 The bridge defers every call to the client as a pair of frames, JSON meta first,
 then the binary request payload (WebSocket frames are ordered, so the client can
@@ -433,13 +493,26 @@ correlate by `req`):
 
 ```json
 { "op": "request", "fn": 0, "req": 41, "caller": 2, "caller_name": "dashboard" }
+{ "op": "request", "task": 2, "req": 42, "caller": 2, "caller_name": "dashboard" }
 ```
 
 followed by binary `0x05` (below) carrying the same `req` id and the payload.
 The client answers with a binary `0x05` request-reply frame whenever it is ready
-(the call is parked bridge-side as a deferred reply; the caller's timeout still
-bounds the wait). Requests parked when the connection drops are failed
-(`app_error`) so callers are not left to their timeout.
+(the call is parked bridge-side as a deferred reply; a function caller's timeout
+still bounds the wait, a task caller saw RUNNING at the defer and waits without
+one). A task request may stream binary `0x03` progress frames before its reply.
+Requests parked when the connection drops are answered (functions `app_error`,
+tasks `cancelled`) so callers are not left to their timeout.
+
+### `cancel` : cancellation requested on a parked task request
+
+```json
+{ "op": "cancel", "task": 2, "req": 42 }
+```
+
+Pushed when the caller of a parked task request (or a third party) requests
+cancellation, at most once per request. Cooperative: the client either finishes
+the request with status 5 (`cancelled`) or lets it run to a normal completion.
 
 ## Data plane (binary frames)
 
@@ -453,8 +526,9 @@ matching thing in each direction. All headers little-endian.
 |----|-------|---------|
 | `0x01` | `[u16 topic][payload]` | publish on a topic |
 | `0x02` | `[u16 entity][u8 mode][payload]` | variable write: mode 0 = set, 1 = force, 2 = unforce (empty payload) |
-| `0x04` | `[u16 entity][u32 call][payload]` | function call; `call` is a client-chosen correlation id |
-| `0x05` | `[u32 req][u8 status][u8 msg_len][msg][payload]` | reply to a pushed request: status 0 = ok, 1 = app_error; `msg` = the response message (UTF-8, max 255 bytes, may be empty) |
+| `0x03` | `[u32 req][payload]` | one progress update on a parked task request (repeat at will, in order) |
+| `0x04` | `[u16 entity][u32 call][payload]` | function or task call; `call` is a client-chosen correlation id |
+| `0x05` | `[u32 req][u8 status][u8 msg_len][msg][payload]` | reply to a pushed request: status 0 = ok, 1 = app_error, 5 = cancelled (tasks only; the payload is dropped on 5); `msg` = the response message (UTF-8, max 255 bytes, may be empty) |
 
 **Server to client:**
 
@@ -462,12 +536,13 @@ matching thing in each direction. All headers little-endian.
 |----|-------|---------|
 | `0x01` | `[u16 topic][u32 publisher][u64 written_us][payload]` | topic delivery |
 | `0x02` | `[u16 entity][u8 flags][u64 written_us][payload]` | variable update; `flags` bit0 = forced (shadow source active), bit1 = write-event (an `on_write` push, not a change) |
-| `0x04` | `[u32 call][u8 status][u32 provider][u64 written_us][u8 msg_len][msg][payload]` | function-call outcome for `call`; `msg` = the response message (UTF-8, empty when the definition sent none: display the default status text then) |
-| `0x05` | `[u16 fn][u32 req][u64 written_us][payload]` | request payload (pairs with the `request` JSON push) |
+| `0x03` | `[u32 call][u32 provider][u64 written_us][payload]` | one progress update on a task call; an EMPTY payload is the RUNNING acknowledgment |
+| `0x04` | `[u32 call][u8 status][u32 provider][u64 written_us][u8 msg_len][msg][payload]` | call outcome for `call` (functions and tasks); `msg` = the response message (UTF-8, empty when the definition sent none: display the default status text then) |
+| `0x05` | `[u16 entity][u32 req][u64 written_us][payload]` | request payload (pairs with the `request` JSON push; the entity is the function or task definition id) |
 
 Every server-to-client frame carries `written_us` as its last fixed header field;
 the call outcome (0x04) alone appends the variable `[u8 msg_len][msg]` after it.
-The payload starts at 15, 12, 15, 19 + msg_len, 15 bytes respectively.
+The payload starts at 15, 12, 17, 19 + msg_len, 15 bytes respectively.
 Client-to-server frames carry no stamp.
 
 **`written_us` is a SOURCE timestamp**: the writing node's wall clock in UTC
@@ -484,7 +559,11 @@ drops them silently.
 Call `status` is the DART `DartCallStatus`: 0 ok, 1 app_error, 2 no_handler,
 3 timeout, 4 peer_lost, 5 cancelled. A call the bridge refuses synchronously
 (out of memory, bad state) answers status 5 (cancelled) plus a `send_error`
-event carrying the reason, so the client's promise always settles.
+event carrying the reason, so the client's promise always settles. The one
+non-terminal status, 6 (running), never rides an `0x04` outcome: it is the empty
+`0x03` progress push, after which a task call's timeout is dropped (`cancel` is
+the caller's tool for impatience) and exactly one terminal `0x04` still follows,
+even at provider retire or close.
 
 The call outcome's `msg` is the DART response message (`DartResponse.message`):
 human-readable failure text set by the definition (`dart_request_fail`, or a
@@ -547,6 +626,24 @@ const add = await node.remoteFunction("add", "A { a: i32, b: i32 }", "R { sum: i
 const r = await add.call({ a: 2, b: 3 });   // never rejects on status:
 if (r.ok) console.log(r.value.sum);         // { ok, status, value, data, provider }
 
+// tasks: a function with progress and cancellation. The async handler streams
+// ctx.progress(...) while it works; ctx.signal is an AbortSignal wired from the
+// caller's cancel.
+await node.taskDefinition("transfer", "X { total: u32 }", "P { done: u32 }", "S { bytes: u32 }",
+  async (req, ctx) => {
+    for (let i = 1; i <= req.total; i++) {
+      ctx.signal.throwIfAborted();          // honor a cancel: throw its AbortError
+      await doChunk(i);
+      ctx.progress({ done: i });
+    }
+    return { bytes: req.total };            // return value = the ok response
+  });
+const xfer = await node.remoteTask("transfer", "X { total: u32 }", "P { done: u32 }", "S { bytes: u32 }");
+const run = xfer.call({ total: 3 });        // synchronous run handle
+run.onProgress((p) => console.log(p === null ? "running" : p.done));  // null = the RUNNING ack
+const outcome = await run.result;           // one terminal Response, like fn.call()
+// run.cancel() resolves "ok" | "no_cancel" | "not_pending"; the terminal status answers
+
 // variables: client-cached latest, fed by pushed updates
 const cfg = await node.remoteVariable("config", "Config { rate_hz: u32 }");
 await cfg.wait(2000);
@@ -561,7 +658,8 @@ node.close();   // outstanding call promises settle with status "cancelled"
 ```
 
 The factories take optional type parameters (`publisher<T>`,
-`remoteFunction<Req, Rsp>`, ...) defaulting to plain-object types, so JS callers
+`remoteFunction<Req, Rsp>`, `taskDefinition<Req, Prg, Rsp>`, ...) defaulting to
+plain-object types, so JS callers
 see no difference. `node.topic(...)` remains the dynamic form with flat
 dotted-path `get`/`send` and raw bytes. Properties maintained from `match`
 pushes: `ready`, `matchCount`, `hasDefinition`, `callerCount`, `remoteCount`.
@@ -569,6 +667,19 @@ pushes: `ready`, `matchCount`, `hasDefinition`, `callerCount`, `remoteCount`.
 bridge's wire timeout; `close()` cancels, a dropped connection rejects.
 `VariableDefinition.initial` is implemented as a set right after the create
 (encoding needs the field table the create returns).
+
+Task cancellation maps to the platform primitive: a cancel arriving on a parked
+request aborts `ctx.signal` (an `AbortController` per request, default
+`AbortError` reason). The handler honors it the JS-native way: throw the
+signal's reason (`ctx.signal.throwIfAborted()`), which the client turns into the
+status 5 (`cancelled`) completion; any other throw answers `app_error` with the
+error's text, and a normal return always completes `ok`, even after an abort (it
+ran to completion anyway, mirroring the C contract). `ctx.cancelled` is sugar
+for `ctx.signal.aborted`. On the caller, `run.result` never rejects on a status
+(only on connection loss, like `call()`), `run.onProgress` replays updates
+buffered before its registration, and a task call takes no client-side
+`timeoutMs`: the until-first-response bound lives in the bridge
+(`remote_task.timeout_ms`), and after RUNNING there is no deadline by design.
 
 Introspection is `await node.peers()`, `await node.entities()`,
 `await node.peerEntities(peerId)`, and `await node.meta(peerId, MetaSection.All)`

@@ -41,7 +41,7 @@
 
 using json = nlohmann::json;
 
-static const int kProtoVersion = 9;
+static const int kProtoVersion = 10;
 
 /* Binary frame ops (byte 0). One value space, meaning per direction. EVERY server-to-client
  * data frame ends its header with [u64 written_us], the writer's wall clock at the moment it
@@ -50,11 +50,12 @@ static const int kProtoVersion = 9;
  * offset. Client-to-server frames carry no stamp.
  *   0x01  publish (c->s: [u16 topic][payload])        delivery (s->c: [u16 topic][u32 publisher][u64 written][payload])
  *   0x02  var op  (c->s: [u16 ent][u8 mode][payload]) var update (s->c: [u16 ent][u8 flags][u64 written][payload]; flags bit0=forced bit1=write-event)
- *   0x03  unused (free for a future pattern)
+ *   0x03  task progress (c->s: [u32 req][payload])    progress (s->c: [u32 call][u32 provider][u64 written][payload]; empty payload = the RUNNING ack)
  *   0x04  call (c->s: [u16 ent][u32 call][payload])   call response (s->c: [u32 call][u8 status][u32 provider][u64 written][payload])
  *   0x05  request reply (c->s: [u32 req][u8 status][payload])   request (s->c: [u16 ent][u32 req][u64 written][payload]) */
 static const uint8_t kOpData     = 0x01;
 static const uint8_t kOpVar      = 0x02;
+static const uint8_t kOpProgress = 0x03;
 static const uint8_t kOpCall     = 0x04;
 static const uint8_t kOpRequest  = 0x05;
 
@@ -66,14 +67,27 @@ static int    g_verbose      = 0;
 /* One created pattern entity. Handles are thin and non-owning (the entity lives in the
  * node until close); Ent pointers are stable (unique_ptr, append-only until close). */
 struct Ent {
-    enum Kind { FnDef, FnRemote, VarDef, VarRemote } kind = FnDef;
+    enum Kind { FnDef, FnRemote, VarDef, VarRemote, TaskDef, TaskRemote } kind = FnDef;
     uint16_t                   id = 0;
     dart::FunctionDefinition<> fndef;
     dart::RemoteFunction<>     fnrem;
     dart::VariableDefinition<> vardef;
     dart::RemoteVariable<>     varrem;
+    dart::TaskDefinition<>     taskdef;
+    dart::RemoteTask<>         taskrem;
     /* ticker state, guarded by Conn::mu */
     int                  last_match = -1;              /* match-state change detector */
+};
+
+/* One task request parked at the client (the bridge defers every task request; the
+ * PendingTask streams progress and answers when the client does). Shared: the WS thread
+ * completes it, the on_cancel scan (service thread) polls pt.cancelled(). The token verbs
+ * are thread-safe in the C and a stale token reads false/State, so the unsynchronized
+ * handle members are as safe as the file's other cross-thread pragmatism. */
+struct ParkedTask {
+    uint16_t            ent = 0;                /* the owning task definition's id */
+    dart::PendingTask<> pt;
+    std::atomic<bool>   cancel_pushed{ false }; /* one {op:"cancel"} push per request */
 };
 
 /* One WebSocket connection = one node. node/ws/name are written only by the
@@ -87,6 +101,11 @@ struct Conn {
     std::mutex mu;                    /* leaf lock: never call into dart while holding it */
     std::vector<std::unique_ptr<Ent>>              ents;
     std::unordered_map<uint32_t, dart::Deferred<>> parked;   /* req id -> parked function reply */
+    std::unordered_map<uint32_t, std::shared_ptr<ParkedTask>> parked_tasks; /* req id -> parked task */
+    /* client call id -> (remote-task ent, C call id): the handle for the cancel op.
+     * Inserted before call_async (so the terminal response, which erases, can never race
+     * an insert), erased at the one terminal response. */
+    std::unordered_map<uint32_t, std::pair<uint16_t, uint32_t>> task_calls;
     uint32_t                                       next_req = 0;
     std::vector<uint16_t>                          topic_ids;
     std::unordered_map<uint16_t, int>              topic_match;  /* topic id -> packed matches/ready */
@@ -234,6 +253,7 @@ static const char *entity_kind_str(dart::EntityKind k){
     case dart::EntityKind::Topic:    return "topic";
     case dart::EntityKind::Function: return "function";
     case dart::EntityKind::Variable: return "variable";
+    case dart::EntityKind::Task:     return "task";
     default:                         return "?";
     }
 }
@@ -280,11 +300,16 @@ static json entity_json(const dart::Entity &e){
                {"provides", e.provides}, {"consumes", e.consumes}, {"reliable", e.reliable},
                {"index", e.index}, {"hash", e.hash} };
     if (e.kind == dart::EntityKind::Variable){ j["writable"] = e.writable; j["forceable"] = e.forceable; }
+    if (e.kind == dart::EntityKind::Task){
+        j["cancellable"] = e.cancellable; j["exclusive"] = e.exclusive; j["multi"] = e.multi;
+    }
     if (e.incomplete)      j["incomplete"]     = true;
     if (e.schema_hash)     j["schema_hash"]    = hex64(e.schema_hash);
     if (e.rsp_schema_hash) j["rsp_schema_hash"] = hex64(e.rsp_schema_hash);
+    if (e.progress_schema_hash) j["progress_schema_hash"] = hex64(e.progress_schema_hash);
     if (!e.schema.empty())     j["schema"] = schemainfo_json(e.schema);
     if (!e.rsp_schema.empty()) j["rsp"]    = schemainfo_json(e.rsp_schema);
+    if (!e.progress_schema.empty()) j["progress_schema"] = schemainfo_json(e.progress_schema);
     return j;
 }
 
@@ -385,6 +410,14 @@ static void push_match_states(Conn *c){
         case Ent::VarRemote:
             m = e->varrem.has_definition() ? 1 : 0;
             j["type"] = "remote_variable"; j["has_definition"] = m != 0;
+            break;
+        case Ent::TaskDef:
+            m = e->taskdef.caller_count();
+            j["type"] = "task_definition"; j["callers"] = m;
+            break;
+        case Ent::TaskRemote:
+            m = e->taskrem.has_definition() ? 1 : 0;
+            j["type"] = "remote_task"; j["has_definition"] = m != 0;
             break;
         }
         {
@@ -688,6 +721,129 @@ static void op_remote_function(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, r);
 }
 
+static dart::TaskOptions task_opts(const json &req){
+    dart::TaskOptions o;
+    o.progress_best_effort = req.value("progress_best_effort", false);
+    o.progress_keep_last   = (uint16_t)req.value("progress_keep_last", 0);
+    o.no_cancel            = req.value("no_cancel", false);
+    o.exclusive            = req.value("exclusive", false);
+    o.multi                = req.value("multi", false);
+    o.timeout_us           = (uint32_t)req.value("timeout_ms", 0) * 1000u;
+    o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
+    return o;
+}
+
+/* `task_definition`: as function_definition plus the progress schema and the task
+ * options. Every request is DEFERRED to the client (the PendingTask implies RUNNING to
+ * the caller); the client streams 0x03 progress frames and answers with a 0x05 reply
+ * whose status may also be 5 (cancelled). A caller's cancel surfaces as an
+ * {op:"cancel"} push naming the request id, driven off the C on_cancel hook. */
+static void op_task_definition(Conn *c, const json &req, const json &seq){
+    std::string name = req.value("name", "");
+    if (name.empty()){ reply_err(c, seq, "missing task name"); return; }
+    std::optional<dart::Schema> rq, pg, rs;
+    if (!compile_schema(c, req, seq, "req_schema", &rq)) return;
+    if (!compile_schema(c, req, seq, "prg_schema", &pg)) return;
+    if (!compile_schema(c, req, seq, "rsp_schema", &rs)) return;
+
+    Ent *e = ent_new(c, Ent::TaskDef);
+    uint16_t id = e->id;
+    auto handler = [c, id](dart::TaskRequest<> &r){
+        uint32_t req_id;
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            req_id = ++c->next_req;
+        }
+        json meta = { {"op", "request"}, {"task", id}, {"req", req_id},
+                      {"caller", r.caller()}, {"caller_name", std::string(r.caller_name())} };
+        dart::Bytes data = r.data();
+        uint64_t written_us = r.written_us();   /* read before defer(): the request view is callback-lived */
+        auto tk = std::make_shared<ParkedTask>();
+        tk->ent = id;
+        tk->pt  = r.defer();                    /* implies RUNNING to the caller */
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            c->parked_tasks.emplace(req_id, tk);
+        }
+        send_json(c, meta);
+        uint8_t hdr[15];
+        hdr[0] = kOpRequest; w16(hdr + 1, id); w32(hdr + 3, req_id);
+        w64(hdr + 7, written_us);
+        push_frame(c, hdr, 15, data);
+    };
+    try {
+        e->taskdef = dart::TaskDefinition<>(*c->node, name,
+                         rq ? &*rq : nullptr, pg ? &*pg : nullptr, rs ? &*rs : nullptr,
+                         handler, task_opts(req));
+    } catch (const dart::Error &err){
+        reply_err(c, seq, std::string("create failed: ") + err.what());
+        return;
+    }
+    /* the token cannot name its request through the public wrapper, so scan this
+       definition's parked requests for the newly-cancelled one (flag set before the hook
+       fires; cancel_pushed dedupes) */
+    e->taskdef.on_cancel([c, id](uint64_t){
+        std::vector<std::pair<uint32_t, std::shared_ptr<ParkedTask>>> snap;
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            for (auto &kv : c->parked_tasks) if (kv.second->ent == id) snap.push_back(kv);
+        }
+        for (auto &pr : snap)
+            if (pr.second->pt.cancelled() && !pr.second->cancel_pushed.exchange(true))
+                send_json(c, { {"op", "cancel"}, {"task", id}, {"req", pr.first} });
+    });
+    json r = { {"id", id} };
+    if (rq) r["req"] = schema_json(*rq);
+    if (pg) r["prg"] = schema_json(*pg);
+    if (rs) r["rsp"] = schema_json(*rs);
+    reply_ok(c, seq, r);
+}
+
+static void op_remote_task(Conn *c, const json &req, const json &seq){
+    std::string name = req.value("name", "");
+    if (name.empty()){ reply_err(c, seq, "missing task name"); return; }
+    std::optional<dart::Schema> rq, pg, rs;
+    if (!compile_schema(c, req, seq, "req_schema", &rq)) return;
+    if (!compile_schema(c, req, seq, "prg_schema", &pg)) return;
+    if (!compile_schema(c, req, seq, "rsp_schema", &rs)) return;
+
+    Ent *e = ent_new(c, Ent::TaskRemote);
+    try {
+        e->taskrem = dart::RemoteTask<>(*c->node, name,
+                         rq ? &*rq : nullptr, pg ? &*pg : nullptr, rs ? &*rs : nullptr,
+                         task_opts(req));
+    } catch (const dart::Error &err){
+        reply_err(c, seq, std::string("create failed: ") + err.what());
+        return;
+    }
+    json r = { {"id", e->id} };
+    if (rq) r["req"] = schema_json(*rq);
+    if (pg) r["prg"] = schema_json(*pg);
+    if (rs) r["rsp"] = schema_json(*rs);
+    reply_ok(c, seq, r);
+}
+
+/* `cancel`: request cancellation of an outstanding task call by its client call id. The
+ * reply always carries the C verdict as `status`: cooperative cancel is never a fault. */
+static void op_cancel(Conn *c, const json &req, const json &seq){
+    uint32_t call = (uint32_t)req.value("call", 0);
+    uint16_t ent = 0; uint32_t cid = 0; bool found = false;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        auto it = c->task_calls.find(call);
+        if (it != c->task_calls.end()){ ent = it->second.first; cid = it->second.second; found = true; }
+    }
+    if (!found){ reply_ok(c, seq, { {"status", "not_pending"} }); return; }   /* already answered */
+    Ent *e = ent_get(c, ent, Ent::TaskRemote);
+    if (!e){ reply_err(c, seq, "no such task"); return; }
+    dart::SendStatus rc = e->taskrem.cancel(cid);
+    const char *s = rc == dart::SendStatus::Ok      ? "ok"
+                  : rc == dart::SendStatus::BadRole ? "no_cancel"     /* provider declared no_cancel */
+                  : rc == dart::SendStatus::State   ? "not_pending"
+                  :                                   "error";
+    reply_ok(c, seq, { {"status", s} });
+}
+
 static void op_variable(Conn *c, const json &req, const json &seq, bool definition){
     std::string name = req.value("name", "");
     if (name.empty()){ reply_err(c, seq, "missing variable name"); return; }
@@ -834,6 +990,9 @@ static void on_text(Conn *c, const std::string &raw){
     else if (op == "settle")              op_settle(c, req, seq);
     else if (op == "function_definition") op_function_definition(c, req, seq);
     else if (op == "remote_function")     op_remote_function(c, req, seq);
+    else if (op == "task_definition")     op_task_definition(c, req, seq);
+    else if (op == "remote_task")         op_remote_task(c, req, seq);
+    else if (op == "cancel")              op_cancel(c, req, seq);
     else if (op == "variable_definition") op_variable(c, req, seq, true);
     else if (op == "remote_variable")     op_variable(c, req, seq, false);
     else if (op == "log")                 op_log(c, req, seq);
@@ -871,35 +1030,101 @@ static void on_var_op(Conn *c, const uint8_t *p, size_t n){
     if (rc != dart::SendStatus::Ok) send_error_event(c, "entity", id, rc);
 }
 
+/* the one call-outcome frame both patterns answer with */
+static void push_response(Conn *c, uint32_t call, const dart::ResponseView<> &rv){
+    std::string_view m = rv.message();
+    size_t ml = m.size() > 255 ? 255 : m.size();   /* one length byte, like the wire */
+    uint8_t hdr[19 + 255];
+    hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)rv.status();
+    w32(hdr + 6, rv.provider());
+    w64(hdr + 10, rv.written_us());
+    hdr[18] = (uint8_t)ml;
+    if (ml) memcpy(hdr + 19, m.data(), ml);
+    push_frame(c, hdr, 19 + ml, rv.data());
+}
+
+/* a call the bridge refused synchronously: answer Cancelled so the promise settles */
+static void push_refused(Conn *c, uint32_t call){
+    uint8_t hdr[19];
+    hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)dart::CallStatus::Cancelled;
+    w32(hdr + 6, 0);
+    w64(hdr + 10, 0);            /* synthesized outcome: no source stamp */
+    hdr[18] = 0;                 /* no message: the client fills default status text */
+    push_frame(c, hdr, 19, dart::Bytes());
+}
+
 static void on_call(Conn *c, const uint8_t *p, size_t n){
     if (n < 7) return;
     uint16_t id   = r16(p + 1);
     uint32_t call = r32(p + 3);
     Ent *e = ent_get(c, id, Ent::FnRemote);
-    if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
-    auto cb = [c, call](const dart::ResponseView<> &rv){
-        std::string_view m = rv.message();
-        size_t ml = m.size() > 255 ? 255 : m.size();   /* one length byte, like the wire */
-        uint8_t hdr[19 + 255];
-        hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)rv.status();
-        w32(hdr + 6, rv.provider());
-        w64(hdr + 10, rv.written_us());
-        hdr[18] = (uint8_t)ml;
-        if (ml) memcpy(hdr + 19, m.data(), ml);
-        push_frame(c, hdr, 19 + ml, rv.data());
-    };
-    dart::SendStatus rc = e->fnrem.call_async(dart::Bytes(p + 7, n - 7), cb);
-    if (rc != dart::SendStatus::Ok){
-        /* the call never launched: answer Cancelled so the promise settles, and carry
-         * the reason in a send_error event */
-        send_error_event(c, "entity", id, rc);
-        uint8_t hdr[19];
-        hdr[0] = kOpCall; w32(hdr + 1, call); hdr[5] = (uint8_t)dart::CallStatus::Cancelled;
-        w32(hdr + 6, 0);
-        w64(hdr + 10, 0);            /* synthesized outcome: no source stamp */
-        hdr[18] = 0;                 /* no message: the client fills default status text */
-        push_frame(c, hdr, 19, dart::Bytes());
+    if (e){
+        auto cb = [c, call](const dart::ResponseView<> &rv){ push_response(c, call, rv); };
+        dart::SendStatus rc = e->fnrem.call_async(dart::Bytes(p + 7, n - 7), cb);
+        if (rc != dart::SendStatus::Ok){
+            /* the call never launched: carry the reason in a send_error event */
+            send_error_event(c, "entity", id, rc);
+            push_refused(c, call);
+        }
+        return;
     }
+    e = ent_get(c, id, Ent::TaskRemote);
+    if (!e){ send_error_event(c, "entity", id, dart::SendStatus::NoTopic); return; }
+    /* a task call: progress frames (empty payload = the RUNNING ack) before the one
+     * terminal response, which also releases the cancel mapping */
+    auto on_prog = [c, call](const dart::ProgressView<> &pv){
+        if (c->ws && c->ws->bufferedAmount() > g_max_buffered){
+            c->ws->close(1008, "slow consumer");   /* progress can be a data stream */
+            return;
+        }
+        uint8_t hdr[17];
+        hdr[0] = kOpProgress; w32(hdr + 1, call); w32(hdr + 5, pv.provider());
+        w64(hdr + 9, pv.written_us());
+        push_frame(c, hdr, 17, pv.data());
+    };
+    auto on_rsp = [c, call](const dart::ResponseView<> &rv){
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            c->task_calls.erase(call);
+        }
+        push_response(c, call, rv);
+    };
+    /* map the client call id before launch, so the terminal response can never race the
+     * insert; call_async fills the C call id through the pair in place */
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        c->task_calls.emplace(call, std::make_pair(id, 0u));
+    }
+    dart::TaskCall tc = e->taskrem.call_async(dart::Bytes(p + 7, n - 7), on_prog, on_rsp);
+    if (!tc.ok()){
+        {
+            std::lock_guard<std::mutex> g(c->mu);
+            c->task_calls.erase(call);
+        }
+        send_error_event(c, "entity", id, tc.status);
+        push_refused(c, call);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        auto it = c->task_calls.find(call);
+        if (it != c->task_calls.end()) it->second.second = tc.id;   /* absent = already answered */
+    }
+}
+
+/* 0x03 client->server: one progress update on a parked task request */
+static void on_progress(Conn *c, const uint8_t *p, size_t n){
+    if (n < 5) return;
+    uint32_t req = r32(p + 1);
+    std::shared_ptr<ParkedTask> tk;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        auto it = c->parked_tasks.find(req);
+        if (it != c->parked_tasks.end()) tk = it->second;
+    }
+    if (!tk) return;   /* completed/unknown: drop, like an unknown request reply */
+    dart::SendStatus rc = tk->pt.progress(dart::Bytes(p + 5, n - 5));
+    if (rc != dart::SendStatus::Ok) send_error_event(c, "entity", tk->ent, rc);
 }
 
 static void on_request_reply(Conn *c, const uint8_t *p, size_t n){
@@ -908,18 +1133,35 @@ static void on_request_reply(Conn *c, const uint8_t *p, size_t n){
     uint8_t  status = p[5];
     size_t   ml     = p[6];
     if (n < 7 + ml) return;   /* malformed message length */
+    std::string_view msg((const char *)p + 7, ml);
+    dart::Bytes rsp(p + 7 + ml, n - 7 - ml);
     dart::Deferred<> d;
     {
         std::lock_guard<std::mutex> g(c->mu);
         auto it = c->parked.find(req);
-        if (it == c->parked.end()) return;   /* unknown/duplicate: drop */
-        d = std::move(it->second);
-        c->parked.erase(it);
+        if (it != c->parked.end()){
+            d = std::move(it->second);
+            c->parked.erase(it);
+        }
     }
-    std::string_view msg((const char *)p + 7, ml);
-    dart::Bytes rsp(p + 7 + ml, n - 7 - ml);
-    if (status == 0) d.complete(rsp, msg);
-    else             d.fail(msg, rsp);
+    if (d.valid()){
+        if (status == 0) d.complete(rsp, msg);
+        else             d.fail(msg, rsp);
+        return;
+    }
+    /* a parked TASK: status 0 = ok, 5 = cancelled (the handler honored a cancel),
+     * anything else = app_error */
+    std::shared_ptr<ParkedTask> tk;
+    {
+        std::lock_guard<std::mutex> g(c->mu);
+        auto it = c->parked_tasks.find(req);
+        if (it == c->parked_tasks.end()) return;   /* unknown/duplicate: drop */
+        tk = it->second;
+        c->parked_tasks.erase(it);
+    }
+    if      (status == 0) tk->pt.complete(rsp, msg);
+    else if (status == 5) tk->pt.complete_cancelled(msg);
+    else                  tk->pt.fail(msg, rsp);
 }
 
 static void on_binary(Conn *c, const std::string &frame){
@@ -931,10 +1173,11 @@ static void on_binary(Conn *c, const std::string &frame){
         return;
     }
     switch (p[0]){
-    case kOpData:    on_publish(c, p, frame.size());       break;
-    case kOpVar:     on_var_op(c, p, frame.size());        break;
-    case kOpCall:    on_call(c, p, frame.size());          break;
-    case kOpRequest: on_request_reply(c, p, frame.size()); break;
+    case kOpData:     on_publish(c, p, frame.size());       break;
+    case kOpVar:      on_var_op(c, p, frame.size());        break;
+    case kOpProgress: on_progress(c, p, frame.size());      break;
+    case kOpCall:     on_call(c, p, frame.size());          break;
+    case kOpRequest:  on_request_reply(c, p, frame.size()); break;
     default: break;   /* reserved ops: drop */
     }
     /* no explicit flush: a send kicks the node's service thread awake */
@@ -945,15 +1188,19 @@ static void on_binary(Conn *c, const std::string &frame){
 static void conn_close(const std::shared_ptr<Conn> &c){
     c->stop = true;
     if (c->ticker.joinable()) c->ticker.join();
-    /* fail parked function requests while the node is still alive, so remote callers
-     * get an answer now instead of waiting out their timeout */
-    std::unordered_map<uint32_t, dart::Deferred<>> parked;
+    /* answer parked requests while the node is still alive, so remote callers get an
+     * answer now instead of waiting out their timeout: functions fail, tasks cancel */
+    std::unordered_map<uint32_t, dart::Deferred<>>            parked;
+    std::unordered_map<uint32_t, std::shared_ptr<ParkedTask>> parked_tasks;
     {
         std::lock_guard<std::mutex> g(c->mu);
-        parked = std::move(c->parked);
+        parked       = std::move(c->parked);
+        parked_tasks = std::move(c->parked_tasks);
         c->parked.clear();
+        c->parked_tasks.clear();
     }
-    for (auto &kv : parked) kv.second.fail("bridge client disconnected");
+    for (auto &kv : parked)       kv.second.fail("bridge client disconnected");
+    for (auto &kv : parked_tasks) kv.second->pt.complete_cancelled("bridge client disconnected");
     if (c->node){
         /* ~Node stops + joins the service thread first, so no handler can be mid-flight
            (touching c->ws) once it returns; it closes with a BYE and frees everything */
@@ -973,7 +1220,7 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v")) g_verbose = 1;
         else {
             printf("usage: dart_bridge [--port 7480] [--bind 0.0.0.0] [--max-buffered bytes] [--verbose]\n"
-                   "One WebSocket connection = one DART node; see bridge/PROTOCOL.md (v3).\n"
+                   "One WebSocket connection = one DART node; see bridge/PROTOCOL.md.\n"
                    "--bind 0.0.0.0 exposes the bridge (and full mesh access) beyond this host.\n");
             return strcmp(argv[i], "--help") && strcmp(argv[i], "-h") ? 1 : 0;
         }

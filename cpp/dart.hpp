@@ -2053,9 +2053,11 @@ public:
     SendStatus fail(std::string_view message = {}, Bytes rsp = Bytes()) {
         return finish(detail::DART_CALL_APP_ERROR, message, rsp);
     }
-    /* honor a cancel: the caller's terminal status is CallStatus::Cancelled */
-    SendStatus complete_cancelled(std::string_view message = {}) {
-        return finish(detail::DART_CALL_CANCELLED, message, Bytes());
+    /* honor a cancel: the caller's terminal status is CallStatus::Cancelled. rsp may
+     * carry a partial result (a stopped recording's file so far), which a function
+     * cannot express. */
+    SendStatus complete_cancelled(std::string_view message = {}, Bytes rsp = Bytes()) {
+        return finish(detail::DART_CALL_CANCELLED, message, rsp);
     }
 
 private:
@@ -3867,6 +3869,11 @@ public:
     }
     SendStatus fail(std::string_view message = {}) { return core_.fail(message); }
     SendStatus complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
+    /* honor a cancel and still carry a typed partial result */
+    SendStatus complete_cancelled(std::string_view message, const Rsp& partial) {
+        std::vector<uint8_t> s;
+        return core_.complete_cancelled(message, priv::encode(partial, s));
+    }
 
 private:
     PendingTask<> core_;
