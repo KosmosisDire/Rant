@@ -440,9 +440,9 @@ static int i_dart_pat_reserved(const char *name){ return name && name[0] == '@';
 
 /* Create the channels for a function or task; roles per mode. mode 1 = a pure DEFINITION
  * (SUB req / PUB rsp), 0 = a REMOTE (PUB req / SUB rsp), 2 = BOTH SIDES in one handle
- * (PUBSUB channels, a handler and a pending list: the @dart/meta shape). Both-sides
- * requests are DIRECTED, so a call aimed at one definition never wakes the others, and
- * the channels keep a shallow ring (calls carry no replay). topts non-NULL = the TASK
+ * (PUBSUB channels, a handler and a pending list: the @dart/meta shape). Request channels
+ * are DIRECTED in every mode, so a call aimed at one definition never wakes the others,
+ * and the channels keep a shallow ring (calls carry no replay). topts non-NULL = the TASK
  * shape: task kinds, a third broadcast progress channel (its QoS from topts), and the
  * definition's attrs byte on the req channel def. */
 static DartFunction *i_dart_function_new(DartNode *n, const char *name,
@@ -492,8 +492,14 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     }
 
     memcpy(rn, name, nl); memcpy(rn + nl, "@req", 5);   /* NUL included */
+    /* the req channel is DIRECTED: a DartCallOpts.provider call (and every task request)
+       must reach only its destination lane. Without the flag the transport neither skips
+       nor floor-advances the other lanes, so a directed request LEAKS to every other
+       matched provider when their lanes next wake (heartbeat sweep). Undirected calls
+       still broadcast (DEST_ALL reaches every lane), and a directed skip is silent at the
+       reader (no MSG_LOST). */
     fn->req = i_dart_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
-                              req_kind, DART__FN_PREFIX, (uint8_t)(mode == 2), req_attrs, req_cb, fn);
+                              req_kind, DART__FN_PREFIX, 1 /*directed*/, req_attrs, req_cb, fn);
     if (!fn->req) return NULL;   /* fn stays pool-allocated: nothing routes into it yet */
     if (topts){
         /* the broadcast progress channel: reliability is the definition's OFFER / the
@@ -658,9 +664,12 @@ int dart_function_retire(DartFunction *fn){
         i_dart_node_sys_unlock(n, acquired);
         return DART_ERR_STATE;
     }
-    /* live deferred calls answer CANCELLED while the channels are still up */
+    /* live deferred calls answer CANCELLED while the channels are still up; the replies
+       must then FLUSH to the wire before the park/retire below tears the lanes down (a
+       send only commits, and no poll pass runs in between) */
     i_dart_func_drain_defers(fn, "provider retired");
     i_dart_node_sys_unlock(n, acquired);
+    i_dart_node_flush_tx(n);
     r = i_dart_pat_park_channels(fn->req, fn->rsp);
     if (r != 0) return r;
     if (fn->prg) (void)dart_topic_set_role(fn->prg, DART_INACTIVE);
@@ -1544,6 +1553,31 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
     return soonest;
 }
 
+/* Fail every SENT pending call directed at `peer` whose destination lane no longer
+ * exists: the provider parked, retired or rebound the channel (its interest apply severed
+ * the lane), so no response can ever arrive, and the wire CANCELLED can be LOST to the
+ * very announce that severed the lane (the runtime services discovery before it drains
+ * the data socket, so the demux unmaps first and drops the queued reply). A RUNNING call
+ * has no deadline, so without this it would hang forever. Synthesized CANCELLED, same
+ * text as the retire drain; queued calls are exempt (they flush when the match forms).
+ * Lock held (the event hook). */
+static void i_dart_func_reap_severed(DartFunction *fn, uint32_t peer){
+    i_DartPending **pp = &fn->pending, *p;
+    while ((p = *pp) != NULL){
+        if (p->dest == peer && !p->queued_req && !i_dart_topic_peer_matched(fn->req, peer)){
+            *pp = p->next;
+            {   DartResponse r; r.status = DART_CALL_CANCELLED; r.data = dart_bytes(NULL,0);
+                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
+                r.message = dart_cstr("provider retired");
+                if (p->on_response) p->on_response(&r);
+            }
+            i_dart_func_free_pending(fn, p);
+            continue;
+        }
+        pp = &p->next;
+    }
+}
+
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn; uint64_t soonest = 0;
@@ -1574,6 +1608,9 @@ static void i_dart_patterns_on_close(void *user){
         if (!fn->is_provider && fn->pending)
             i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1, 0);
     }
+    /* the drained CANCELLED replies must leave before the node's socket closes: no poll
+       pass follows this hook */
+    i_dart_node_flush_tx(pm->n);
 }
 
 static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
@@ -1584,6 +1621,9 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
         /* a match may just have formed: flush calls queued while no provider was matched */
         for (fn = pm->funcs; fn; fn = fn->next)
             if (!fn->is_provider && fn->pending) i_dart_func_flush_queued(fn);
+        /* ...and one may just have been SEVERED: a directed call there can never resolve */
+        for (fn = pm->funcs; fn; fn = fn->next)
+            if (!fn->is_provider && fn->pending) i_dart_func_reap_severed(fn, ev->peer);
         /* an accessor whose owner just parked (retire) or left: disarm the stale-order
            guard in i_dart_var_on_value. A successor definition on the SAME node keeps the
            peer id while its write_seq restarts at 1, so without this the guard would drop

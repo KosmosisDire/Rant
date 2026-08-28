@@ -4801,8 +4801,8 @@ static void patterns_checks(void){
  * A task is a function with progress and cancellation on the same handle. Smoke coverage:
  * defer + RUNNING-first progress + ordered payloads + terminal OK with id_out, cancel
  * honored (flag, on_cancel, wire CANCELLED both ways), .no_cancel refused locally, an
- * inline reply, and the bare-return APP_ERROR synthesis. The exhaustive matrix
- * (concurrency, retire mid-run, peer loss, backpressured chunk progress) is a later step. */
+ * inline reply, and the bare-return APP_ERROR synthesis. The exhaustive matrix is
+ * taskx_checks (19e8). */
 static volatile int   tk_reply_done;
 static DartCallStatus tk_reply_status;
 static uint32_t       tk_reply_val;
@@ -4975,6 +4975,590 @@ static void task_checks(void){
 
     dart_node_close(P,0); dart_node_close(C,0);
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
+}
+
+/* ============ task matrix (19e8) ============
+ * The exhaustive coverage over the task smoke phase. The critical check is CONCURRENT
+ * CALLER DEMUX: call ids are per-caller counters, so two callers' first calls both carry
+ * call_id 1 and only the @prg header's caller_lo (the requester's uuid low-32) can tell
+ * their progress apart on the shared broadcast channel. Also covered: overlapping calls
+ * from one caller, provider selection (.multi + DartCallOpts.provider), peer loss
+ * mid-run, retire and close mid-run, third-party cancel + a raw progress tap (the
+ * explorer's wire path, crafted via i_dart_node_create_pattern_topic exactly like
+ * net_capture.c), file-transfer-shaped reliable progress, churn, and task reflection. */
+
+/* pump a node set (NULL entries skipped, e.g. a mid-phase closed provider) */
+static void txm_pump(DartNode **ns, int n, int ms){
+    uint64_t end = i_dart_plat_now_us() + (uint64_t)ms*1000u;
+    while (i_dart_plat_now_us() < end){
+        int i, first = 1;
+        for (i=0;i<n;i++) if (ns[i]){ dart_node_poll(ns[i], first ? 1 : 0); first = 0; }
+    }
+}
+
+/* caller-side progress capture (rides DartCallOpts.progress_user) */
+typedef struct {
+    int n, first_empty, payloads, wrong_tag, misattr;
+    uint32_t want_tag;        /* nonzero: every payload must carry this tag */
+    uint32_t tags_seen;       /* bitmask of payload tags */
+    uint32_t vals[4]; int nvals;   /* first payload values, arrival order */
+    uint32_t call_of_tag[8];  /* nonzero: a payload of tag i must carry this call_id */
+    const DartSchema *ps;     /* prg schema (NULL = raw le32 payload) */
+} TxmProg;
+static void txm_on_prog(const DartProgress *p){
+    TxmProg *c = (TxmProg*)p->user;
+    if (c->n == 0) c->first_empty = (p->data.len == 0);
+    c->n++;
+    if (!p->data.len) return;   /* the RUNNING ack */
+    c->payloads++;
+    {   uint32_t tag, v;
+        if (c->ps){ tag = (uint32_t)dart_get_uint(p->data, c->ps, "tag");
+                    v   = (uint32_t)dart_get_uint(p->data, c->ps, "v"); }
+        else      { tag = 0; v = p->data.len >= 4 ? i_dart_le_r32(p->data.data) : 0; }
+        if (tag < 32) c->tags_seen |= 1u << tag;
+        if (c->want_tag && tag != c->want_tag) c->wrong_tag++;
+        if (tag < 8 && c->call_of_tag[tag] && c->call_of_tag[tag] != p->call_id) c->misattr++;
+        if (c->nvals < 4) c->vals[c->nvals++] = v;
+    }
+}
+/* file-transfer capture: chunks must arrive complete and strictly ascending (1..n) */
+static int txm_file_n, txm_file_seq_ok;
+static void txm_on_file_prog(const DartProgress *p){
+    if (!p->data.len) return;
+    { uint32_t v = p->data.len >= 4 ? i_dart_le_r32(p->data.data) : 0;
+      if (v != (uint32_t)txm_file_n + 1) txm_file_seq_ok = 0;
+      txm_file_n++; }
+}
+/* caller-side response capture (rides the call's user pointer) */
+typedef struct {
+    volatile int done; DartCallStatus status; uint32_t provider;
+    uint32_t tag, v, raw32;
+    char msg[64]; size_t msg_len;
+    const DartSchema *rs;     /* rsp schema (NULL = raw le32 payload) */
+} TxmRsp;
+static void txm_on_rsp(const DartResponse *r){
+    TxmRsp *c = (TxmRsp*)r->user;
+    c->status = r->status; c->provider = r->provider;
+    if (r->data.len >= 4) c->raw32 = i_dart_le_r32(r->data.data);
+    if (c->rs && r->schema){ c->tag = (uint32_t)dart_get_uint(r->data, c->rs, "tag");
+                             c->v   = (uint32_t)dart_get_uint(r->data, c->rs, "v"); }
+    c->msg_len = r->message.len < sizeof c->msg - 1 ? r->message.len : sizeof c->msg - 1;
+    if (c->msg_len) memcpy(c->msg, r->message.data, c->msg_len);
+    c->msg[c->msg_len] = 0;
+    c->done = 1;
+}
+/* provider handlers */
+static volatile uint64_t txm_tok[8];   /* mix: live token per request tag */
+static void txm_mix_handler(DartRequest *req, void *user){
+    uint32_t tag = req->schema ? (uint32_t)dart_get_uint(req->data, req->schema, "tag") : 0;
+    (void)user;
+    if (tag < 8) txm_tok[tag] = dart_request_defer(req);
+}
+static void txm_defer_handler(DartRequest *req, void *user){
+    *(volatile uint64_t*)user = dart_request_defer(req);
+}
+static int txm_sel_p, txm_sel_p2;
+static void txm_sel_handler(DartRequest *req, void *user){
+    ++*(int*)user;
+    dart_request_reply(req, dart_bytes(NULL,0));
+}
+static volatile uint64_t txm_cancel_tok; static volatile int txm_cancel_n;
+static void txm_on_cancel(uint64_t token, void *user){ (void)user; txm_cancel_tok = token; txm_cancel_n++; }
+static volatile uint64_t txm_file_tok, txm_ret_tok, txm_shut_tok, txm_churn_tok, txm_drop_tok;
+/* raw @prg tap (the explorer's progress view): 8-byte [caller_lo][call_id] header */
+static int txm_tap_n, txm_tap_bad_hdr, txm_tap_nlo;
+static uint32_t txm_tap_lo[4];
+static void txm_tap_on_msg(void *user, const DartMsg *msg){
+    (void)user;
+    if (msg->header.len != 8){ txm_tap_bad_hdr++; return; }
+    { uint32_t lo = i_dart_le_r32(msg->header.data); int i;
+      for (i=0;i<txm_tap_nlo;i++) if (txm_tap_lo[i]==lo) break;
+      if (i==txm_tap_nlo && txm_tap_nlo<4) txm_tap_lo[txm_tap_nlo++] = lo; }
+    txm_tap_n++;
+}
+static uint32_t txm_peer_by_name(DartNode *n, const char *name){
+    uint16_t cnt, i; size_t nl = strlen(name);
+    const DartDiscoveryPeer *ps = dart_node_peers(n, &cnt);
+    if (!ps) return 0;
+    for (i=0;i<cnt;i++)
+        if (ps[i].name.len==nl && memcmp(ps[i].name.data,name,nl)==0) return ps[i].id;
+    return 0;
+}
+static DartBytes txm_enc(const DartSchema *s, uint32_t tag, uint32_t v, int has_v,
+                         uint8_t *buf, size_t cap){
+    dart_schema_message_default(s, buf, cap);
+    dart_set_uint(buf, cap, s, "tag", tag);
+    if (has_v) dart_set_uint(buf, cap, s, "v", v);
+    return dart_bytes(buf, dart_schema_size(s));
+}
+
+static void taskx_checks(void){
+    DartAllocator ap  = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ap2 = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ac1 = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ac2 = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ax  = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma  = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNodeOpts o; DartDiscoveryAddr seed;
+    DartNode *P, *P2, *C1, *C2, *X, *ns[5];
+    DartSchema *req_s, *prg_s, *rsp_s;
+    DartFunction *pmix, *pnoc, *pfile, *psel, *pret, *pret2, *psel2, *pshut;
+    DartFunction *cmix1, *csel, *cfile, *cret, *cret2, *cshut, *cmix2, *xmix;
+    DartTopic *xtap, *xreq;
+    uint32_t p2_id_c1, p_id_x;
+    int t;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=(uint16_t)(ST_DOMAIN+34); o.discovery.max_peers=6;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    P  = dart_node_open(&ap,  "txm-prov",  NULL, NULL, &o);
+    P2 = dart_node_open(&ap2, "txm-prov2", NULL, NULL, &o);
+    { DartNodeOpts o1 = o; o1.fetch_details = 1;   /* C1 doubles as the reflection observer */
+      C1 = dart_node_open(&ac1, "txm-c1", NULL, NULL, &o1); }
+    C2 = dart_node_open(&ac2, "txm-c2",  NULL, NULL, &o);
+    X  = dart_node_open(&ax,  "txm-obs", NULL, NULL, &o);
+    ST_CHECK(P && P2 && C1 && C2 && X, "taskx: nodes open");
+    if (!(P && P2 && C1 && C2 && X)){
+        if(P)dart_node_close(P,0); if(P2)dart_node_close(P2,0); if(C1)dart_node_close(C1,0);
+        if(C2)dart_node_close(C2,0); if(X)dart_node_close(X,0);
+        return;
+    }
+    ns[0]=P; ns[1]=P2; ns[2]=C1; ns[3]=C2; ns[4]=X;
+
+    /* three DISTINCT schemas so a crossed req/prg/rsp plumb cannot hide */
+    req_s = dart_schema_compile(dart_allocator_alloc, &ma, "TmReq { tag: u32 }", NULL);
+    prg_s = dart_schema_compile(dart_allocator_alloc, &ma, "TmPrg { tag: u32, v: u32 }", NULL);
+    rsp_s = dart_schema_compile(dart_allocator_alloc, &ma, "TmRsp { tag: u32, v: u32, note: u32 }", NULL);
+    ST_CHECK(req_s && prg_s && rsp_s, "taskx: schemas compiled");
+
+    /* X's raw wire, exactly the explorer's recipe. The tap is created BEFORE X's normal
+       remote handle: the per-peer demux binds a name to the OLDEST local topic, so this
+       order keeps the tap receiving while the remote's own prg twin is the shadowed one
+       (the explorer runs with no pattern handles at all, so it never faces the twin). */
+    { DartTopicOpts topt; memset(&topt,0,sizeof topt);
+      topt.qos.reliability = DART_RELIABLE; topt.qos.keep_last = 4;
+      txm_tap_n=0; txm_tap_bad_hdr=0; txm_tap_nlo=0;
+      xtap = i_dart_node_create_pattern_topic(X, "mix@prg", DART_SUB_ONLY, prg_s, &topt,
+                          DART_KIND_TASK_PRG, 8, 0, 0, txm_tap_on_msg, NULL);
+      xreq = i_dart_node_create_pattern_topic(X, "mix@req", DART_PUB_ONLY, req_s, &topt,
+                          DART_KIND_TASK_REQ, 5, 0, 0, NULL, NULL);
+      xmix = dart_node_create_remote_task(X, "mix", req_s, prg_s, rsp_s, NULL);
+      ST_CHECK(xtap && xmix && xreq, "taskx: raw tap + raw req + inert remote created"); }
+
+    pmix  = dart_node_create_task_definition(P, "mix", req_s, prg_s, rsp_s, txm_mix_handler, NULL, NULL);
+    pnoc  = dart_node_create_task_definition(P, "noc", NULL, NULL, NULL, NULL, NULL,
+                                             &(DartTaskOpts){ .no_cancel = 1, .exclusive = 1 });
+    pfile = dart_node_create_task_definition(P, "file", NULL, NULL, NULL, txm_defer_handler,
+                                             (void*)&txm_file_tok, NULL);
+    psel  = dart_node_create_task_definition(P, "sel", NULL, NULL, NULL, txm_sel_handler,
+                                             &txm_sel_p, &(DartTaskOpts){ .multi = 1 });
+    pret  = dart_node_create_task_definition(P, "ret", NULL, NULL, NULL, txm_defer_handler,
+                                             (void*)&txm_ret_tok, NULL);
+    pret2 = dart_node_create_task_definition(P, "ret2", NULL, NULL, NULL, txm_defer_handler,
+                                             (void*)&txm_ret_tok, NULL);
+    psel2 = dart_node_create_task_definition(P2, "sel", NULL, NULL, NULL, txm_sel_handler,
+                                             &txm_sel_p2, &(DartTaskOpts){ .multi = 1 });
+    pshut = dart_node_create_task_definition(P2, "shut", NULL, NULL, NULL, txm_defer_handler,
+                                             (void*)&txm_shut_tok, NULL);
+    cmix1 = dart_node_create_remote_task(C1, "mix", req_s, prg_s, rsp_s, NULL);
+    csel  = dart_node_create_remote_task(C1, "sel", NULL, NULL, NULL, &(DartTaskOpts){ .multi = 1 });
+    cfile = dart_node_create_remote_task(C1, "file", NULL, NULL, NULL, NULL);
+    cret  = dart_node_create_remote_task(C1, "ret", NULL, NULL, NULL, NULL);
+    cret2 = dart_node_create_remote_task(C1, "ret2", NULL, NULL, NULL, NULL);
+    cshut = dart_node_create_remote_task(C1, "shut", NULL, NULL, NULL, NULL);
+    cmix2 = dart_node_create_remote_task(C2, "mix", req_s, prg_s, rsp_s, NULL);
+    ST_CHECK(pmix&&pnoc&&pfile&&psel&&pret&&pret2&&psel2&&pshut&&cmix1&&csel&&cfile&&cret&&cret2
+             &&cshut&&cmix2, "taskx: entities created");
+    dart_function_on_cancel(pmix, txm_on_cancel, NULL);
+
+    for (t=0;t<3000 && !(dart_function_match_count(cmix1)==1 && dart_function_match_count(cmix2)==1
+           && dart_function_match_count(csel)==2 && dart_function_match_count(cfile)==1
+           && dart_function_match_count(cret)==1 && dart_function_match_count(cret2)==1
+           && dart_function_match_count(cshut)==1
+           && i_dart_topic_source_match_count(xtap)>=1 && dart_topic_match_count(xreq)>=1);t++)
+        txm_pump(ns,5,2);
+    ST_CHECK(dart_function_match_count(cmix1)==1 && dart_function_match_count(cmix2)==1
+             && dart_function_match_count(csel)==2 && i_dart_topic_source_match_count(xtap)>=1
+             && dart_topic_match_count(xreq)>=1,
+             "taskx: full mesh matched (mix=%d/%d sel=%d tap=%d raw=%d)",
+             dart_function_match_count(cmix1), dart_function_match_count(cmix2),
+             dart_function_match_count(csel), i_dart_topic_source_match_count(xtap),
+             dart_topic_match_count(xreq));
+    p2_id_c1 = txm_peer_by_name(C1, "txm-prov2");
+    p_id_x   = txm_peer_by_name(X,  "txm-prov");
+    ST_CHECK(p2_id_c1 && p_id_x, "taskx: provider peer ids resolved (%u/%u)", p2_id_c1, p_id_x);
+
+    /* 1. CONCURRENT CALLER DEMUX. C1 and C2 both fire their first call: both call ids are
+       1 (per-caller counters: the collision is real), P defers both and sends DISTINCT
+       tagged payloads per token; each caller must see ONLY its own, RUNNING ack first. */
+    { static TxmProg g1, g2; static TxmRsp r1, r2;
+      uint8_t b1[64], b2[64]; uint32_t id1=0, id2=0; int rc1, rc2;
+      memset(&g1,0,sizeof g1); memset(&g2,0,sizeof g2);
+      memset(&r1,0,sizeof r1); memset(&r2,0,sizeof r2);
+      g1.ps = prg_s; g1.want_tag = 1; g2.ps = prg_s; g2.want_tag = 2;
+      r1.rs = rsp_s; r2.rs = rsp_s;
+      txm_tok[1]=0; txm_tok[2]=0;
+      rc1 = dart_function_call_async(cmix1, txm_enc(req_s,1,0,0,b1,sizeof b1), txm_on_rsp, &r1,
+              &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g1, .id_out = &id1 });
+      rc2 = dart_function_call_async(cmix2, txm_enc(req_s,2,0,0,b2,sizeof b2), txm_on_rsp, &r2,
+              &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g2, .id_out = &id2 });
+      ST_CHECK(rc1==DART_OK && rc2==DART_OK && id1==1 && id2==1,
+               "taskx: first calls collide on call_id 1 (rc=%d/%d id=%u/%u)", rc1, rc2, id1, id2);
+      for (t=0;t<2000 && !(txm_tok[1] && txm_tok[2]);t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_tok[1] && txm_tok[2], "taskx: both requests deferred");
+      for (t=0;t<800 && !(g1.n>=1 && g2.n>=1);t++) txm_pump(ns,5,2);
+      ST_CHECK(g1.n>=1 && g1.first_empty && g2.n>=1 && g2.first_empty,
+               "taskx: both RUNNING acks fired on_progress first, empty (%d/%d)", g1.n, g2.n);
+      { static const uint32_t seq[4][2] = { {1,10},{2,11},{1,20},{2,21} };
+        uint8_t pb[64]; int i2, w1=0, w2=0, prs=1;
+        for (i2=0;i2<4;i2++){
+            uint32_t tg = seq[i2][0], v = seq[i2][1];
+            if (dart_function_progress(pmix, txm_tok[tg],
+                                       txm_enc(prg_s,tg,v,1,pb,sizeof pb)) != DART_OK) prs = 0;
+            if (tg==1) w1++; else w2++;
+            for (t=0;t<400 && !((tg==1?g1.payloads:g2.payloads) >= (tg==1?w1:w2));t++)
+                txm_pump(ns,5,2);
+        }
+        ST_CHECK(prs, "taskx: interleaved progress sends accepted"); }
+      ST_CHECK(g1.payloads==2 && g1.wrong_tag==0 && g1.tags_seen==(1u<<1)
+               && g1.vals[0]==10 && g1.vals[1]==20,
+               "taskx: C1 saw ONLY its own payloads (n=%d wrong=%u seen=%#x v=%u,%u)",
+               g1.payloads, g1.wrong_tag, g1.tags_seen, g1.vals[0], g1.vals[1]);
+      ST_CHECK(g2.payloads==2 && g2.wrong_tag==0 && g2.tags_seen==(1u<<2)
+               && g2.vals[0]==11 && g2.vals[1]==21,
+               "taskx: C2 saw ONLY its own payloads (n=%d wrong=%u seen=%#x v=%u,%u)",
+               g2.payloads, g2.wrong_tag, g2.tags_seen, g2.vals[0], g2.vals[1]);
+      { int c1r = dart_function_complete(pmix, txm_tok[1], DART_CALL_OK, NULL,
+                                         txm_enc(rsp_s,1,100,1,b1,sizeof b1));
+        int c2r = dart_function_complete(pmix, txm_tok[2], DART_CALL_OK, NULL,
+                                         txm_enc(rsp_s,2,200,1,b2,sizeof b2));
+        ST_CHECK(c1r==DART_OK && c2r==DART_OK, "taskx: both completes sent (%d/%d)", c1r, c2r); }
+      for (t=0;t<800 && !(r1.done && r2.done);t++) txm_pump(ns,5,2);
+      ST_CHECK(r1.done && r1.status==DART_CALL_OK && r1.tag==1 && r1.v==100,
+               "taskx: C1 terminal routed (st=%d tag=%u v=%u)", r1.status, r1.tag, r1.v);
+      ST_CHECK(r2.done && r2.status==DART_CALL_OK && r2.tag==2 && r2.v==200,
+               "taskx: C2 terminal routed (st=%d tag=%u v=%u)", r2.status, r2.tag, r2.v);
+      /* 8. the raw tap observed BOTH callers' progress with distinct caller_lo values
+         matching their uuids (RUNNING rides @rsp, so only payloads cross @prg). X's
+         normal remote handle has no outstanding call, so nothing can fire progress on
+         it: per-call registration + the caller_lo filter keep it inert by construction. */
+      txm_pump(ns,5,20);
+      { uint32_t lo1 = i_dart_le_r32(i_dart_node_uuid(C1)), lo2 = i_dart_le_r32(i_dart_node_uuid(C2));
+        int has1=0, has2=0, i2;
+        for (i2=0;i2<txm_tap_nlo;i2++){ if (txm_tap_lo[i2]==lo1) has1=1; if (txm_tap_lo[i2]==lo2) has2=1; }
+        ST_CHECK(txm_tap_n>=4 && txm_tap_bad_hdr==0 && txm_tap_nlo==2 && has1 && has2 && lo1!=lo2,
+                 "taskx: raw tap saw both callers' caller_lo (n=%d bad=%d nlo=%d)",
+                 txm_tap_n, txm_tap_bad_hdr, txm_tap_nlo); } }
+
+    /* 2. two OVERLAPPING calls from ONE caller: two live tokens on P, interleaved
+       progress attributed per call_id, both terminals */
+    { static TxmProg g; static TxmRsp r3, r4;
+      uint8_t b[64]; uint32_t id3=0, id4=0;
+      memset(&g,0,sizeof g); memset(&r3,0,sizeof r3); memset(&r4,0,sizeof r4);
+      g.ps = prg_s; r3.rs = rsp_s; r4.rs = rsp_s;
+      txm_tok[3]=0; txm_tok[4]=0;
+      dart_function_call_async(cmix2, txm_enc(req_s,3,0,0,b,sizeof b), txm_on_rsp, &r3,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id3 });
+      dart_function_call_async(cmix2, txm_enc(req_s,4,0,0,b,sizeof b), txm_on_rsp, &r4,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id4 });
+      ST_CHECK(id3 && id4 && id3!=id4, "taskx: overlapping ids distinct (%u/%u)", id3, id4);
+      g.call_of_tag[3]=id3; g.call_of_tag[4]=id4;
+      for (t=0;t<2000 && !(txm_tok[3] && txm_tok[4]);t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_tok[3] && txm_tok[4], "taskx: two live tokens on the provider");
+      { static const uint32_t seq[4][2] = { {3,30},{4,40},{3,31},{4,41} }; int i2;
+        for (i2=0;i2<4;i2++){
+            (void)dart_function_progress(pmix, txm_tok[seq[i2][0]],
+                                         txm_enc(prg_s,seq[i2][0],seq[i2][1],1,b,sizeof b));
+            for (t=0;t<400 && g.payloads < i2+1;t++) txm_pump(ns,5,2);
+        } }
+      ST_CHECK(g.payloads==4 && g.misattr==0 && g.tags_seen==((1u<<3)|(1u<<4)),
+               "taskx: interleaved progress attributed per call_id (n=%d misattr=%u)",
+               g.payloads, g.misattr);
+      dart_function_complete(pmix, txm_tok[3], DART_CALL_OK, NULL, txm_enc(rsp_s,3,300,1,b,sizeof b));
+      dart_function_complete(pmix, txm_tok[4], DART_CALL_APP_ERROR, "worked anyway",
+                             txm_enc(rsp_s,4,400,1,b,sizeof b));
+      for (t=0;t<800 && !(r3.done && r4.done);t++) txm_pump(ns,5,2);
+      ST_CHECK(r3.done && r3.status==DART_CALL_OK && r3.tag==3 && r3.v==300,
+               "taskx: first overlapped terminal (st=%d tag=%u)", r3.status, r3.tag);
+      ST_CHECK(r4.done && r4.status==DART_CALL_APP_ERROR && r4.tag==4 && r4.v==400
+               && strcmp(r4.msg,"worked anyway")==0,
+               "taskx: second overlapped terminal, message + data (st=%d msg=\"%s\")",
+               r4.status, r4.msg); }
+
+    /* 3. PROVIDER SELECTION: an explicit DartCallOpts.provider reaches exactly the chosen
+       provider; provider 0 auto-directs at the oldest matched (exactly one executor) */
+    { static TxmRsp r; int before;
+      memset(&r,0,sizeof r);
+      txm_sel_p=0; txm_sel_p2=0;
+      dart_function_call_async(csel, dart_bytes(NULL,0), txm_on_rsp, &r,
+          &(DartCallOpts){ .provider = p2_id_c1 });
+      for (t=0;t<800 && !r.done;t++) txm_pump(ns,5,2);
+      txm_pump(ns,5,20);   /* the unchosen provider must stay silent */
+      ST_CHECK(r.done && r.status==DART_CALL_OK && r.provider==p2_id_c1
+               && txm_sel_p2==1 && txm_sel_p==0,
+               "taskx: explicit provider reached only P2 (p=%d p2=%d prov=%u)",
+               txm_sel_p, txm_sel_p2, r.provider);
+      before = txm_sel_p + txm_sel_p2;
+      memset(&r,0,sizeof r);
+      dart_function_call_async(csel, dart_bytes(NULL,0), txm_on_rsp, &r, NULL);
+      for (t=0;t<800 && !r.done;t++) txm_pump(ns,5,2);
+      txm_pump(ns,5,20);
+      ST_CHECK(r.done && r.status==DART_CALL_OK && txm_sel_p + txm_sel_p2 == before+1,
+               "taskx: provider 0 auto-directed at ONE provider (p=%d p2=%d)",
+               txm_sel_p, txm_sel_p2); }
+
+    /* 7. THIRD-PARTY CANCEL, the explorer path: X crafts the raw CANCEL op with an
+       explicit [u32 caller_lo] payload naming C1, aimed at C1's live call. The provider's
+       on_cancel fires for exactly that call; honoring it lands CANCELLED at C1. C2's
+       concurrent call is untouched. */
+    { static TxmProg g5, g6; static TxmRsp r5, r6;
+      uint8_t b[64]; uint32_t id5=0, id6=0;
+      memset(&g5,0,sizeof g5); memset(&g6,0,sizeof g6);
+      memset(&r5,0,sizeof r5); memset(&r6,0,sizeof r6);
+      g5.ps=prg_s; g6.ps=prg_s; r5.rs=rsp_s; r6.rs=rsp_s;
+      txm_tok[5]=0; txm_tok[6]=0; txm_cancel_n=0; txm_cancel_tok=0;
+      dart_function_call_async(cmix1, txm_enc(req_s,5,0,0,b,sizeof b), txm_on_rsp, &r5,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g5, .id_out = &id5 });
+      dart_function_call_async(cmix2, txm_enc(req_s,6,0,0,b,sizeof b), txm_on_rsp, &r6,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g6, .id_out = &id6 });
+      for (t=0;t<2000 && !(txm_tok[5] && txm_tok[6]);t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_tok[5] && txm_tok[6] && id5!=0, "taskx: victim + bystander calls running");
+      { uint8_t hdr[5], pl[4]; int sr;
+        i_dart_le_w32(hdr, id5); hdr[4] = 1;   /* op 1 = CANCEL */
+        i_dart_le_w32(pl, i_dart_le_r32(i_dart_node_uuid(C1)));   /* the victim's caller_lo */
+        sr = i_dart_topic_send_to(xreq, p_id_x, dart_bytes(hdr,5), dart_bytes(pl,4));
+        ST_CHECK(sr==DART_OK, "taskx: raw third-party cancel sent (%d)", sr); }
+      for (t=0;t<800 && !txm_cancel_n;t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_cancel_n==1 && txm_cancel_tok==txm_tok[5],
+               "taskx: on_cancel fired for the victim call (n=%d)", txm_cancel_n);
+      { int c5 = dart_function_cancelled(pmix, txm_tok[5]);
+        int c6 = dart_function_cancelled(pmix, txm_tok[6]);
+        ST_CHECK(c5==1 && c6==0, "taskx: only the victim's flag set (%d/%d)", c5, c6); }
+      dart_function_complete(pmix, txm_tok[5], DART_CALL_CANCELLED, "stopped", dart_bytes(NULL,0));
+      dart_function_complete(pmix, txm_tok[6], DART_CALL_OK, NULL, txm_enc(rsp_s,6,600,1,b,sizeof b));
+      for (t=0;t<800 && !(r5.done && r6.done);t++) txm_pump(ns,5,2);
+      ST_CHECK(r5.done && r5.status==DART_CALL_CANCELLED && strcmp(r5.msg,"stopped")==0,
+               "taskx: victim caller sees CANCELLED (st=%d msg=\"%s\")", r5.status, r5.msg);
+      ST_CHECK(r6.done && r6.status==DART_CALL_OK && r6.v==600,
+               "taskx: bystander call unaffected (st=%d v=%u)", r6.status, r6.v); }
+
+    /* 5. RETIRE MID-RUN, both delivery paths. Round 1 drains the CALLER first, so the
+       retire drain's wire CANCELLED "provider retired" delivers before the retire
+       announce. Round 2 pumps the provider first: the announce SEVERS the demux before
+       the caller drains its data socket, the wire reply is dropped, and the caller-side
+       severed-lane backstop synthesizes the identical outcome (a RUNNING call has no
+       deadline, so without it the caller would hang forever). The retired handle itself
+       is FREED (invalid, like a closed node), so the app's still-held token is exercised
+       against ANOTHER live handle: registry membership is what makes a dead token a safe
+       DART_ERR_STATE instead of UB. */
+    { static TxmProg g; static TxmRsp r;
+      uint8_t b[8]; uint32_t id=0; uint64_t dead;
+      memset(&g,0,sizeof g); memset(&r,0,sizeof r);
+      txm_ret_tok = 0;
+      dart_function_call_async(cret, dart_bytes(NULL,0), txm_on_rsp, &r,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id });
+      for (t=0;t<2000 && !(txm_ret_tok && g.n>=1);t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_ret_tok && g.n>=1, "taskx: retire victim RUNNING");
+      dead = txm_ret_tok;
+      { int rr = dart_function_retire(pret);
+        ST_CHECK(rr==DART_OK, "taskx: definition retired mid-run (%d)", rr); }
+      pret = NULL;
+      for (t=0;t<400 && !r.done;t++) dart_node_poll(C1, 2);   /* caller first: the wire path */
+      ST_CHECK(r.done && r.status==DART_CALL_CANCELLED && strcmp(r.msg,"provider retired")==0,
+               "taskx: caller got wire CANCELLED \"provider retired\" (st=%d msg=\"%s\")",
+               r.done ? (int)r.status : -1, r.msg);
+      i_dart_le_w32(b, 0);
+      { int a = dart_function_progress (pmix, dead, dart_bytes(b,4));
+        int c = dart_function_cancelled(pmix, dead);
+        int d = dart_function_complete (pmix, dead, DART_CALL_OK, NULL, dart_bytes(NULL,0));
+        ST_CHECK(a==DART_ERR_STATE && c==DART_ERR_STATE && d==DART_ERR_STATE,
+                 "taskx: dead token refused everywhere (%d/%d/%d)", a, c, d); }
+      /* round 2: provider pumped first, so the retire announce beats the wire reply */
+      memset(&g,0,sizeof g); memset(&r,0,sizeof r);
+      txm_ret_tok = 0;
+      dart_function_call_async(cret2, dart_bytes(NULL,0), txm_on_rsp, &r,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id });
+      for (t=0;t<2000 && !(txm_ret_tok && g.n>=1);t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_ret_tok && g.n>=1, "taskx: second retire victim RUNNING");
+      { int rr = dart_function_retire(pret2);
+        ST_CHECK(rr==DART_OK, "taskx: second definition retired (%d)", rr); }
+      pret2 = NULL;
+      for (t=0;t<800 && !r.done;t++) txm_pump(ns,5,2);   /* P polls first each pass */
+      ST_CHECK(r.done && r.status==DART_CALL_CANCELLED && strcmp(r.msg,"provider retired")==0,
+               "taskx: severed lane still resolves CANCELLED (st=%d msg=\"%s\")",
+               r.done ? (int)r.status : -1, r.msg); }
+
+    /* 6. CLOSE MID-RUN: the provider node closes with the call RUNNING. No BYE is sent,
+       so the outcome can only be the close hook's CANCELLED "node closing" flushed by
+       the close TX pass: a RUNNING caller never hangs on a clean shutdown. */
+    { static TxmProg g; static TxmRsp r;
+      uint32_t id=0;
+      memset(&g,0,sizeof g); memset(&r,0,sizeof r);
+      txm_shut_tok = 0;
+      dart_function_call_async(cshut, dart_bytes(NULL,0), txm_on_rsp, &r,
+          &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id });
+      for (t=0;t<2000 && !(txm_shut_tok && g.n>=1);t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_shut_tok && g.n>=1, "taskx: close victim RUNNING");
+      dart_node_close(P2, 0);
+      ns[1] = NULL; P2 = NULL;
+      for (t=0;t<800 && !r.done;t++) txm_pump(ns,5,2);
+      ST_CHECK(r.done && r.status==DART_CALL_CANCELLED && strcmp(r.msg,"node closing")==0,
+               "taskx: caller resolved at provider close (st=%d msg=\"%s\")",
+               r.done ? (int)r.status : -1, r.msg); }
+
+    /* 9. FILE-TRANSFER SHAPE: 50 reliable 4-byte chunks as progress, one per app-loop
+       pass, then the terminal summary; reliable progress loses nothing and stays in
+       order */
+    { static TxmRsp r; uint8_t b[8]; uint32_t id=0; int i2, sent_ok=1;
+      memset(&r,0,sizeof r);
+      txm_file_tok=0; txm_file_n=0; txm_file_seq_ok=1;
+      dart_function_call_async(cfile, dart_bytes(NULL,0), txm_on_rsp, &r,
+          &(DartCallOpts){ .on_progress = txm_on_file_prog, .id_out = &id });
+      for (t=0;t<2000 && !txm_file_tok;t++) txm_pump(ns,5,2);
+      ST_CHECK(txm_file_tok!=0, "taskx: transfer deferred");
+      for (i2=1;i2<=50;i2++){
+          i_dart_le_w32(b, (uint32_t)i2);
+          if (dart_function_progress(pfile, txm_file_tok, dart_bytes(b,4)) != DART_OK) sent_ok = 0;
+          for (t=0;t<400 && txm_file_n < i2;t++) txm_pump(ns,5,2);
+      }
+      ST_CHECK(sent_ok, "taskx: every chunk send accepted");
+      ST_CHECK(txm_file_n==50 && txm_file_seq_ok,
+               "taskx: 50 chunks, strictly ascending (n=%d ok=%d)", txm_file_n, txm_file_seq_ok);
+      i_dart_le_w32(b, 50);
+      dart_function_complete(pfile, txm_file_tok, DART_CALL_OK, "done", dart_bytes(b,4));
+      for (t=0;t<800 && !r.done;t++) txm_pump(ns,5,2);
+      ST_CHECK(r.done && r.status==DART_CALL_OK && r.raw32==50 && strcmp(r.msg,"done")==0,
+               "taskx: terminal summary after the chunks (st=%d n=%u)", r.status, r.raw32); }
+
+    /* 10. TASK CHURN: retire remote and definition, re-create the SAME name, and a full
+       defer + progress + complete round trip works again, three cycles */
+    { int cyc;
+      for (cyc=0; cyc<3; cyc++){
+          DartFunction *d, *c; static TxmProg g; static TxmRsp r;
+          uint8_t b[8]; uint32_t id=0;
+          memset(&g,0,sizeof g); memset(&r,0,sizeof r);
+          txm_churn_tok = 0;
+          d = dart_node_create_task_definition(P, "churn", NULL, NULL, NULL,
+                  txm_defer_handler, (void*)&txm_churn_tok, NULL);
+          c = dart_node_create_remote_task(C1, "churn", NULL, NULL, NULL, NULL);
+          ST_CHECK(d && c, "taskx: churn cycle %d pair created", cyc);
+          if (!(d && c)) break;
+          for (t=0;t<2000 && dart_function_match_count(c)==0;t++) txm_pump(ns,5,2);
+          dart_function_call_async(c, dart_bytes(NULL,0), txm_on_rsp, &r,
+              &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id });
+          for (t=0;t<2000 && !txm_churn_tok;t++) txm_pump(ns,5,2);
+          if (txm_churn_tok){
+              i_dart_le_w32(b, (uint32_t)(cyc+1));
+              (void)dart_function_progress(d, txm_churn_tok, dart_bytes(b,4));
+              for (t=0;t<400 && g.payloads<1;t++) txm_pump(ns,5,2);
+              i_dart_le_w32(b, (uint32_t)(100+cyc));
+              dart_function_complete(d, txm_churn_tok, DART_CALL_OK, NULL, dart_bytes(b,4));
+          }
+          for (t=0;t<800 && !r.done;t++) txm_pump(ns,5,2);
+          ST_CHECK(r.done && r.status==DART_CALL_OK && r.raw32==(uint32_t)(100+cyc)
+                   && g.payloads==1,
+                   "taskx: churn cycle %d round trip (st=%d v=%u prg=%d)",
+                   cyc, r.done ? (int)r.status : -1, r.raw32, g.payloads);
+          dart_function_retire(c); dart_function_retire(d);
+      } }
+
+    /* 11. REFLECTION: from C1, one DART_ENTITY_TASK per task name on P (channels folded,
+       none escape as raw topics), attrs decoded, the three schema slots plumbed
+       distinctly. The retired names (ret, churn) must be gone. */
+    { uint32_t pid = txm_peer_by_name(C1, "txm-prov");
+      int tries, tasks=0, others=0, ats=0, inc=0;
+      int have_mix=0, have_sel=0, have_noc=0, have_file=0;
+      DartEntityInfo mix_e, sel_e, noc_e, file_e;
+      memset(&mix_e,0,sizeof mix_e); memset(&sel_e,0,sizeof sel_e);
+      memset(&noc_e,0,sizeof noc_e); memset(&file_e,0,sizeof file_e);
+      ST_CHECK(pid!=0, "taskx: provider peer visible at C1");
+      for (tries=0; tries<400; tries++){   /* let straggling detail fetches settle */
+          DartEntityIter it; DartEntityInfo ei; size_t k;
+          tasks=others=ats=inc=0; have_mix=have_sel=have_noc=have_file=0;
+          memset(&it,0,sizeof it);
+          while (dart_node_peer_entity_next(C1, pid, &it, &ei)){
+              if (ei.kind==DART_ENTITY_TASK) tasks++; else others++;
+              inc += ei.incomplete;
+              for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
+              if (ei.name.len==3 && !memcmp(ei.name.data,"mix",3)){ mix_e=ei; have_mix=1; }
+              if (ei.name.len==3 && !memcmp(ei.name.data,"sel",3)){ sel_e=ei; have_sel=1; }
+              if (ei.name.len==3 && !memcmp(ei.name.data,"noc",3)){ noc_e=ei; have_noc=1; }
+              if (ei.name.len==4 && !memcmp(ei.name.data,"file",4)){ file_e=ei; have_file=1; }
+          }
+          if (tasks==4 && others==0 && inc==0 && have_mix && have_sel && have_noc && have_file
+              && mix_e.schema && mix_e.rsp_schema && mix_e.progress_schema
+              && noc_e.exclusive) break;
+          txm_pump(ns,5,2);
+      }
+      ST_CHECK(tasks==4 && others==0 && ats==0 && inc==0,
+               "taskx: reflect: one task entity per name, folded (tasks=%d others=%d @=%d inc=%d)",
+               tasks, others, ats, inc);
+      ST_CHECK(have_mix && mix_e.provides && mix_e.cancellable==1 && mix_e.exclusive==0
+               && mix_e.multi==0,
+               "taskx: reflect: mix attrs default (cancel=%d excl=%d multi=%d)",
+               mix_e.cancellable, mix_e.exclusive, mix_e.multi);
+      ST_CHECK(have_noc && noc_e.cancellable==0 && noc_e.exclusive==1,
+               "taskx: reflect: .no_cancel + .exclusive mirrored (cancel=%d excl=%d)",
+               noc_e.cancellable, noc_e.exclusive);
+      ST_CHECK(have_sel && sel_e.multi==1 && sel_e.cancellable==1,
+               "taskx: reflect: .multi mirrored (multi=%d cancel=%d)", sel_e.multi, sel_e.cancellable);
+      ST_CHECK(have_mix && mix_e.schema && mix_e.rsp_schema && mix_e.progress_schema
+               && mix_e.schema_hash==dart_schema_hash(req_s)
+               && mix_e.rsp_schema_hash==dart_schema_hash(rsp_s)
+               && mix_e.progress_schema_hash==dart_schema_hash(prg_s),
+               "taskx: reflect: req/prg/rsp schemas plumbed distinctly "
+               "(req %llx/%llx prg %llx/%llx rsp %llx/%llx)",
+               (unsigned long long)mix_e.schema_hash, (unsigned long long)dart_schema_hash(req_s),
+               (unsigned long long)mix_e.progress_schema_hash, (unsigned long long)dart_schema_hash(prg_s),
+               (unsigned long long)mix_e.rsp_schema_hash, (unsigned long long)dart_schema_hash(rsp_s));
+      ST_CHECK(have_file && file_e.cancellable==1,
+               "taskx: reflect: untyped task cancellable by default (%d)", file_e.cancellable); }
+
+    dart_node_close(P,0); dart_node_close(C1,0); dart_node_close(C2,0); dart_node_close(X,0);
+    dart_allocator_reset(&ap); dart_allocator_reset(&ap2); dart_allocator_reset(&ac1);
+    dart_allocator_reset(&ac2); dart_allocator_reset(&ax);
+
+    /* 4. PEER LOSS MID-RUN, its own short-timeout pair: RUNNING dropped the deadline (the
+       remote's timeout is SHORTER than the discovery drop, so a deadline regression would
+       surface as TIMEOUT), then the provider stops pumping entirely; the caller's reap
+       must answer PEER_LOST. */
+    { DartAllocator apd = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator acd = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartNodeOpts od; DartNode *PD, *CD, *pair[2];
+      DartFunction *pd, *cd; static TxmProg g; static TxmRsp r;
+      uint32_t id=0; uint64_t give_up;
+      memset(&od,0,sizeof od); od.domain=(uint16_t)(ST_DOMAIN+36); od.discovery.max_peers=4;
+      od.discovery.announce_interval_us=100000; od.discovery.peer_timeout_us=600000;
+      od.net.multicast_interface="127.0.0.1"; od.net.seed_peers=&seed; od.net.n_seed_peers=1;
+      PD = dart_node_open(&apd, "txm-drop-p", NULL, NULL, &od);
+      CD = dart_node_open(&acd, "txm-drop-c", NULL, NULL, &od);
+      ST_CHECK(PD && CD, "taskx: drop pair open");
+      if (PD && CD){
+          txm_drop_tok = 0;
+          pd = dart_node_create_task_definition(PD, "goner", NULL, NULL, NULL,
+                  txm_defer_handler, (void*)&txm_drop_tok, NULL);
+          cd = dart_node_create_remote_task(CD, "goner", NULL, NULL, NULL,
+                  &(DartTaskOpts){ .timeout_us = 300000 });
+          ST_CHECK(pd && cd, "taskx: drop pair created");
+          memset(&g,0,sizeof g); memset(&r,0,sizeof r);
+          pair[0]=PD; pair[1]=CD;
+          for (t=0;t<2000 && dart_function_match_count(cd)==0;t++) txm_pump(pair,2,2);
+          dart_function_call_async(cd, dart_bytes(NULL,0), txm_on_rsp, &r,
+              &(DartCallOpts){ .on_progress = txm_on_prog, .progress_user = &g, .id_out = &id });
+          for (t=0;t<2000 && !(txm_drop_tok && g.n>=1);t++) txm_pump(pair,2,2);
+          ST_CHECK(txm_drop_tok && g.n>=1, "taskx: drop victim RUNNING (deadline dropped)");
+          /* the provider goes silent: only the caller's discovery reap can answer now */
+          give_up = i_dart_plat_now_us() + 3000000u;
+          while (!r.done && i_dart_plat_now_us() < give_up) dart_node_poll(CD, 5);
+          ST_CHECK(r.done && r.status==DART_CALL_PEER_LOST,
+                   "taskx: RUNNING call fails PEER_LOST on the drop, not TIMEOUT (st=%d)",
+                   r.done ? (int)r.status : -1);
+      }
+      if (PD) dart_node_close(PD,0);
+      if (CD) dart_node_close(CD,0);
+      dart_allocator_reset(&apd); dart_allocator_reset(&acd); }
+
+    dart_allocator_reset(&ma);
 }
 
 /* ============ duplicate-authority diagnostic (19e2) ============
@@ -6823,6 +7407,7 @@ static int selftest_main(void){
     varwait_checks();             /* 19e5. accessor first write rides the match wait */
     churn_checks();               /* 19e6. retire/reuse churn soak: slots reuse, nothing balloons */
     task_checks();                /* 19e7. task pattern: progress, cancel, no_cancel, inline, bare return */
+    taskx_checks();               /* 19e8. task matrix: caller demux, providers, loss, retire/close, raw wire, churn */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */

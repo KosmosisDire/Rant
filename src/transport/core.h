@@ -692,6 +692,11 @@ int       dart_transport_send(DartTransportState *st, uint16_t topic_index, Dart
  * dart_transport_publisher_match_count (which keeps counting a dropped-but-resumable peer).
  * O(matched lanes). */
 int       dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic_index);
+/* Is peer_id a matched subscriber lane of this topic? The patterns layer's directed-call
+ * backstop: an interest apply that severed the destination lane means the provider
+ * retired or rebound the channel. O(matched lanes). */
+int       dart_transport_publisher_peer_matched(DartTransportState *st, uint16_t topic_index,
+                                                uint32_t peer_id);
 /* Peer id of the OLDEST live matched subscriber lane (0 = none): the patterns layer's
  * auto-direct target for task requests. O(matched lanes). */
 uint32_t  dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t topic_index);

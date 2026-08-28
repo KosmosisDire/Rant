@@ -1587,15 +1587,16 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
        verdicts back to PENDING so the next interest apply re-requests and re-verifies
        them against the new identity. A NAME_OK verdict is bound to an immutable name and
        stays. Without this, an observer that fetched details before subscribing (the
-       explorer's flow) could never match a topic it learned about first. */
+       explorer's flow) could never match a topic it learned about first. The cached
+       attrs STAY: they describe the peer's binding (invalidated only by its generation
+       gate), and a fetch_details observer's greedy cache never re-asks a fetched index,
+       so clearing them here would lose a non-candidate entry's attrs for good. */
     for (p=0;p<st->cfg.max_peers;p++){
         uint8_t *as = st->peer_astate[p]; uint32_t a, alen = st->peer_index_len[p];
         if (!st->peer_used[p] || !as) continue;
         for (a=0;a<alen;a++)
-            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)){
+            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK))
                 as[a] = 0;
-                if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
-            }
     }
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active topic to known peers */
         if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
@@ -1722,14 +1723,13 @@ int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
             i_dart_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
             i_dart_bit_clr(&st->peer_sub_reliable[(size_t)p*st->bitmap_len], topic_index);
             /* a DISSOLVED verdict is only as durable as the topic set it was judged
-               against (see dart_transport_topic_define), and that set just changed */
+               against (see dart_transport_topic_define), and that set just changed.
+               Attrs stay, as there. */
             if (st->peer_astate[p]){
                 uint8_t *as = st->peer_astate[p];
                 for (a=0;a<st->peer_index_len[p];a++)
-                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)){
+                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK))
                         as[a] = 0;
-                        if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
-                    }
             }
         }
     }

@@ -100,6 +100,7 @@ if(DART_BUILD_TOOLS)
 
   dart_program(dart_test      tests/dart_test.c)
   dart_program(example        examples/example.c)
+  dart_program(pattern_demo   examples/pattern_demo.c)
   dart_program(pubsub         tools/pubsub.c)
   dart_program(if_probe_check tools/if_probe_check.c)
 

@@ -1,13 +1,14 @@
 /* Patterns showcase for the DART Explorer: one process runs a "server" node that owns a
- * FUNCTION and a VARIABLE (plus a plain pub/sub topic), and a "client" node that calls and
- * observes them, so every pattern channel is live and MATCHED. Leave it running and open
- * the explorer on the same domain to see each channel with its own icon:
+ * FUNCTION, a TASK and a VARIABLE (plus a plain pub/sub topic), and a "client" node that
+ * calls and observes them, so every pattern channel is live and MATCHED. Leave it running
+ * and open the explorer on the same domain to see each channel with its own icon:
  *
  *     ./pattern_demo                 # server + client on domain 0 (the explorer default)
  *     ./dart_explorer                # in another terminal
  *
  * The explorer's Topics tab then shows, each with a type icon:
  *     compute/add@req, compute/add@rsp         -> function  (the square-function glyph)
+ *     files/transfer@req/@prg/@rsp             -> task      (function + progress + cancel)
  *     state/temperature, state/temperature@set -> variable  (the variable glyph)
  *     sensors/lidar                            -> a plain topic (no type icon)
  *
@@ -66,6 +67,48 @@ static void add_handler(DartRequest *req, void *user)
     dart_set_int(out, sizeof out, add_rsp_s, "sum", x + y);
     dart_request_reply(req, dart_bytes(out, dart_schema_size(add_rsp_s)));
 }
+/* server: the files/transfer task, the canonical SUPERLOOP shape. The handler only
+ * DEFERS (poll thread, returns fast); the work runs in main's own loop through the
+ * token, one chunk per pass, honoring cancellation cooperatively. */
+static DartFunction *task_def;
+static struct { volatile uint64_t token; volatile int active; uint32_t sent, total; } g_xfer;
+static void transfer_handler(DartRequest *req, void *user){
+    (void)user;
+    g_xfer.total = rd32(req->data); if (!g_xfer.total) g_xfer.total = 8;
+    g_xfer.sent  = 0;
+    g_xfer.token = dart_request_defer(req);   /* implies RUNNING to the caller */
+    g_xfer.active = g_xfer.token != 0;
+}
+static void run_transfer_step(void){          /* one pass of the app's own loop */
+    uint8_t chunk[4];
+    if (!g_xfer.active) return;
+    if (dart_function_cancelled(task_def, g_xfer.token) == 1){
+        dart_function_complete(task_def, g_xfer.token, DART_CALL_CANCELLED, "stopped",
+                               dart_bytes(NULL, 0));
+        g_xfer.active = 0;
+        return;
+    }
+    wr32(chunk, ++g_xfer.sent);
+    dart_function_progress(task_def, g_xfer.token, dart_bytes(chunk, 4));
+    if (g_xfer.sent >= g_xfer.total){
+        wr32(chunk, g_xfer.sent);
+        dart_function_complete(task_def, g_xfer.token, DART_CALL_OK, "transfer complete",
+                               dart_bytes(chunk, 4));
+        g_xfer.active = 0;
+    }
+}
+/* client: watch progress, log the outcome; the first update is the empty RUNNING ack */
+static uint32_t g_xfer_call;
+static void on_task_progress(const DartProgress *p){
+    if (p->data.len) printf("  task  files/transfer  chunk %u\n", rd32(p->data));
+    else             printf("  task  files/transfer  running (call %u)\n", p->call_id);
+}
+static void on_task_reply(const DartResponse *r){
+    printf("  task  files/transfer -> %s (%.*s)\n",
+           r->status == DART_CALL_OK ? "ok"
+           : r->status == DART_CALL_CANCELLED ? "cancelled" : "failed",
+           (int)r->message.len, r->message.data);
+}
 /* client: log every call result and every plain message */
 static void on_reply(const DartResponse *r){
     if (r->status == DART_CALL_OK && r->schema)
@@ -91,7 +134,7 @@ int main(int argc, char **argv){
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartNode *server, *client;
-    DartFunction *fn_def, *fn_remote;
+    DartFunction *fn_def, *fn_remote, *task_remote;
     DartVariable *var_def, *var_remote;
     DartTopic    *lidar_pub;
     uint32_t tick = 0;
@@ -114,15 +157,18 @@ int main(int argc, char **argv){
     /* server side: the definitions (the function body and the variable storage live here) */
     fn_def    = dart_node_create_function_definition(server, "compute/add", add_req_s, add_rsp_s,
                                           add_handler, NULL, NULL);
+    task_def  = dart_node_create_task_definition(server, "files/transfer", NULL, NULL, NULL,
+                                          transfer_handler, NULL, NULL);
     var_def   = dart_node_create_variable_definition(server, "state/temperature", temp_s,
                               &(DartVariableOpts){ .allow_force = 1 });
     lidar_pub = dart_node_create_topic(server, "sensors/lidar", DART_PUB_ONLY, NULL, NULL);
 
     /* client side: remotes (references to the server's definitions) */
     fn_remote = dart_node_create_remote_function(client, "compute/add", add_req_s, add_rsp_s, NULL);
+    task_remote= dart_node_create_remote_task(client, "files/transfer", NULL, NULL, NULL, NULL);
     var_remote= dart_node_create_remote_variable(client, "state/temperature", temp_s, NULL);
     dart_node_create_topic(client, "sensors/lidar", DART_SUB_ONLY, NULL, NULL);
-    if (!fn_def || !var_def || !lidar_pub || !fn_remote || !var_remote){
+    if (!fn_def || !task_def || !var_def || !lidar_pub || !fn_remote || !task_remote || !var_remote){
         fprintf(stderr, "pattern setup failed\n"); return 1;
     }
 
@@ -147,6 +193,24 @@ int main(int argc, char **argv){
 
         wr32(raw, tick);                                   /* plain topic: raw bytes */
         dart_topic_send(lidar_pub, dart_bytes(raw, 4));
+
+        run_transfer_step();     /* task superloop, server side: one chunk per pass */
+
+        /* task client side: start a long transfer, lose patience, then a short one */
+        if (tick == 2){
+            wr32(raw, 40);       /* 40 chunks: too long, cancelled below */
+            dart_function_call_async(task_remote, dart_bytes(raw, 4), on_task_reply, NULL,
+                &(DartCallOpts){ .on_progress = on_task_progress, .id_out = &g_xfer_call });
+        }
+        if (tick == 6){
+            printf("  -- cancelling the transfer --\n");
+            dart_function_cancel(task_remote, g_xfer_call);
+        }
+        if (tick == 9){
+            wr32(raw, 5);        /* 5 chunks: runs to completion */
+            dart_function_call_async(task_remote, dart_bytes(raw, 4), on_task_reply, NULL,
+                &(DartCallOpts){ .on_progress = on_task_progress });
+        }
 
         if (tick % 4 == 0){
             DartBytes cur;

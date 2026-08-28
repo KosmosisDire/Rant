@@ -2125,6 +2125,20 @@ uint64_t i_dart_topic_seqno(DartTopic *topic){
     return topic ? dart_transport_topic_seqno(topic->n->transport, topic->index) : 0;
 }
 
+void i_dart_node_flush_tx(DartNode *n){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len;
+    int acquired;
+    if (!n || n->fd == DART_SOCK_BAD) return;
+    acquired = i_dart_node_lock(n);
+    if (n->tx_hold_len && i_dart_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
+        n->tx_hold_len = 0;
+    if (!n->tx_hold_len)
+        while (dart_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len,
+                                        i_dart_plat_now_us()))
+            if (!i_dart_node_tx(n, to, buf, out_len)) break;   /* TX buffer full: best-effort */
+    i_dart_node_unlock(n, acquired);
+}
+
 void i_dart_topic_clear_sys(DartTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
@@ -2194,6 +2208,14 @@ int i_dart_topic_live_match_count(DartTopic *topic){
     if (!topic) return 0;
     acquired = i_dart_node_lock(topic->n);
     r = dart_transport_publisher_live_matches(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+int i_dart_topic_peer_matched(DartTopic *topic, uint32_t peer){
+    int acquired, r;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_publisher_peer_matched(topic->n->transport, topic->index, peer);
     i_dart_node_unlock(topic->n, acquired);
     return r;
 }

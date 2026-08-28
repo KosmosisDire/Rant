@@ -567,6 +567,11 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 /* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
  * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
 void i_dart_topic_clear_sys(DartTopic *topic);
+/* Hand every committed-but-unsent transport datagram to the wire NOW (transmit only: no
+ * RX, no callbacks). A send only COMMITS; a poll pass transmits. The pattern layer's
+ * retire/close drains commit CANCELLED replies and then tear the channels down before any
+ * pass could run, so they flush here first. Takes the node lock itself; best-effort. */
+void i_dart_node_flush_tx(DartNode *n);
 /* The topic's next transport seqno: its slot line CONTINUES across retire/reuse, so a
  * pattern layer seeds its own monotonic counters (a variable's write_seq) from it and a
  * slot successor's first write orders above its predecessor's last everywhere. */
@@ -606,6 +611,8 @@ void     i_dart_node_sys_error (DartNode *n, DartErrorKind error, DartTopic *top
 /* Matched subscribers excluding dormant peers: the patterns layer's provider-liveness query
  * (dart_topic_match_count counts a dropped-but-resumable peer as still matched). */
 int      i_dart_topic_live_match_count(DartTopic *topic);
+/* Is `peer` a matched subscriber of this PUB topic? The directed-call severed-lane backstop. */
+int      i_dart_topic_peer_matched(DartTopic *topic, uint32_t peer);
 /* Matched publishers feeding this topic's subscription side (mirror of dart_topic_match_count). */
 int      i_dart_topic_source_match_count(DartTopic *topic);
 /* Peer id of the OLDEST live matched subscriber of a PUB pattern topic (0 = none): the

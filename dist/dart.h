@@ -1779,6 +1779,11 @@ int       dart_transport_send(DartTransportState *st, uint16_t topic_index, Dart
  * dart_transport_publisher_match_count (which keeps counting a dropped-but-resumable peer).
  * O(matched lanes). */
 int       dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic_index);
+/* Is peer_id a matched subscriber lane of this topic? The patterns layer's directed-call
+ * backstop: an interest apply that severed the destination lane means the provider
+ * retired or rebound the channel. O(matched lanes). */
+int       dart_transport_publisher_peer_matched(DartTransportState *st, uint16_t topic_index,
+                                                uint32_t peer_id);
 /* Peer id of the OLDEST live matched subscriber lane (0 = none): the patterns layer's
  * auto-direct target for task requests. O(matched lanes). */
 uint32_t  dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t topic_index);
@@ -3566,6 +3571,11 @@ int  i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dar
 /* Clear a pattern topic's per-topic delivery routing (retire: the handle it routes into is
  * about to be freed). Call under the node lock, after the topic went DART_INACTIVE. */
 void i_dart_topic_clear_sys(DartTopic *topic);
+/* Hand every committed-but-unsent transport datagram to the wire NOW (transmit only: no
+ * RX, no callbacks). A send only COMMITS; a poll pass transmits. The pattern layer's
+ * retire/close drains commit CANCELLED replies and then tear the channels down before any
+ * pass could run, so they flush here first. Takes the node lock itself; best-effort. */
+void i_dart_node_flush_tx(DartNode *n);
 /* The topic's next transport seqno: its slot line CONTINUES across retire/reuse, so a
  * pattern layer seeds its own monotonic counters (a variable's write_seq) from it and a
  * slot successor's first write orders above its predecessor's last everywhere. */
@@ -3605,6 +3615,8 @@ void     i_dart_node_sys_error (DartNode *n, DartErrorKind error, DartTopic *top
 /* Matched subscribers excluding dormant peers: the patterns layer's provider-liveness query
  * (dart_topic_match_count counts a dropped-but-resumable peer as still matched). */
 int      i_dart_topic_live_match_count(DartTopic *topic);
+/* Is `peer` a matched subscriber of this PUB topic? The directed-call severed-lane backstop. */
+int      i_dart_topic_peer_matched(DartTopic *topic, uint32_t peer);
 /* Matched publishers feeding this topic's subscription side (mirror of dart_topic_match_count). */
 int      i_dart_topic_source_match_count(DartTopic *topic);
 /* Peer id of the OLDEST live matched subscriber of a PUB pattern topic (0 = none): the
@@ -8015,6 +8027,21 @@ int dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic
 }
 
 
+int dart_transport_publisher_peer_matched(DartTransportState *st, uint16_t topic_index,
+                                          uint32_t peer_id){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    uint32_t li; int slot;
+    if (!topic) return 0;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return 0;
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->peer_slot == (uint32_t)slot) return 1;
+    }
+    return 0;
+}
+
+
 /* Peer id of the OLDEST live matched subscriber lane (0 = none). The topic chain is
  * newest-first (lanes head-insert at match), so the last live hit is the oldest. */
 uint32_t dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t topic_index){
@@ -10324,15 +10351,16 @@ int dart_transport_topic_define(DartTransportState *st, uint16_t topic_index, co
        verdicts back to PENDING so the next interest apply re-requests and re-verifies
        them against the new identity. A NAME_OK verdict is bound to an immutable name and
        stays. Without this, an observer that fetched details before subscribing (the
-       explorer's flow) could never match a topic it learned about first. */
+       explorer's flow) could never match a topic it learned about first. The cached
+       attrs STAY: they describe the peer's binding (invalidated only by its generation
+       gate), and a fetch_details observer's greedy cache never re-asks a fetched index,
+       so clearing them here would lose a non-candidate entry's attrs for good. */
     for (p=0;p<st->cfg.max_peers;p++){
         uint8_t *as = st->peer_astate[p]; uint32_t a, alen = st->peer_index_len[p];
         if (!st->peer_used[p] || !as) continue;
         for (a=0;a<alen;a++)
-            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)){
+            if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK))
                 as[a] = 0;
-                if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
-            }
     }
     for (p=0;p<st->cfg.max_peers;p++)        /* match the newly active topic to known peers */
         if (st->peer_used[p]) i_dart_topic_rematch(st, topic_index, p);
@@ -10459,14 +10487,13 @@ int dart_transport_topic_reuse(DartTransportState *st, uint16_t topic_index,
             i_dart_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
             i_dart_bit_clr(&st->peer_sub_reliable[(size_t)p*st->bitmap_len], topic_index);
             /* a DISSOLVED verdict is only as durable as the topic set it was judged
-               against (see dart_transport_topic_define), and that set just changed */
+               against (see dart_transport_topic_define), and that set just changed.
+               Attrs stay, as there. */
             if (st->peer_astate[p]){
                 uint8_t *as = st->peer_astate[p];
                 for (a=0;a<st->peer_index_len[p];a++)
-                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK)){
+                    if ((as[a] & DART__AST_DETAILED) && !(as[a] & DART__AST_NAME_OK))
                         as[a] = 0;
-                        if (st->peer_attrs[p]) st->peer_attrs[p][a] = 0;
-                    }
             }
         }
     }
@@ -13945,6 +13972,18 @@ static DartSchema *i_dart_node_core_intern(i_DartNodeCore *c, uint64_t hash, Dar
     uint32_t i; DartSchema *p;
     for (i = 0; i < c->n_interned; i++)
         if (c->interned[i].hash == hash) return c->interned[i].parsed;
+    if (!wire.data || wire.len == 0){
+        /* no wire inlined: identical hashes travel as ZERO bytes, so a channel whose
+           schema we also hold (a matched channel, greedily cached) can still intern.
+           Parse our OWN wire into a fresh copy: a topic retire frees its parsed schema,
+           an interned one lives until close. */
+        uint16_t t;
+        for (t = 0; t < c->n_topics; t++)
+            if (c->chan_schemas[t].hash == hash && c->chan_schemas[t].wire.len){
+                wire = c->chan_schemas[t].wire;
+                break;
+            }
+    }
     if (!wire.data || wire.len == 0 || !c->alloc) return NULL;
     p = dart_schema_parse(wire.data, wire.len, c->alloc, c->alloc_user);
     if (!p) return NULL;
@@ -16951,6 +16990,20 @@ uint64_t i_dart_topic_seqno(DartTopic *topic){
     return topic ? dart_transport_topic_seqno(topic->n->transport, topic->index) : 0;
 }
 
+void i_dart_node_flush_tx(DartNode *n){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len;
+    int acquired;
+    if (!n || n->fd == DART_SOCK_BAD) return;
+    acquired = i_dart_node_lock(n);
+    if (n->tx_hold_len && i_dart_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
+        n->tx_hold_len = 0;
+    if (!n->tx_hold_len)
+        while (dart_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len,
+                                        i_dart_plat_now_us()))
+            if (!i_dart_node_tx(n, to, buf, out_len)) break;   /* TX buffer full: best-effort */
+    i_dart_node_unlock(n, acquired);
+}
+
 void i_dart_topic_clear_sys(DartTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
@@ -17020,6 +17073,14 @@ int i_dart_topic_live_match_count(DartTopic *topic){
     if (!topic) return 0;
     acquired = i_dart_node_lock(topic->n);
     r = dart_transport_publisher_live_matches(topic->n->transport, topic->index);
+    i_dart_node_unlock(topic->n, acquired);
+    return r;
+}
+int i_dart_topic_peer_matched(DartTopic *topic, uint32_t peer){
+    int acquired, r;
+    if (!topic) return 0;
+    acquired = i_dart_node_lock(topic->n);
+    r = dart_transport_publisher_peer_matched(topic->n->transport, topic->index, peer);
     i_dart_node_unlock(topic->n, acquired);
     return r;
 }
@@ -18286,9 +18347,9 @@ static int i_dart_pat_reserved(const char *name){ return name && name[0] == '@';
 
 /* Create the channels for a function or task; roles per mode. mode 1 = a pure DEFINITION
  * (SUB req / PUB rsp), 0 = a REMOTE (PUB req / SUB rsp), 2 = BOTH SIDES in one handle
- * (PUBSUB channels, a handler and a pending list: the @dart/meta shape). Both-sides
- * requests are DIRECTED, so a call aimed at one definition never wakes the others, and
- * the channels keep a shallow ring (calls carry no replay). topts non-NULL = the TASK
+ * (PUBSUB channels, a handler and a pending list: the @dart/meta shape). Request channels
+ * are DIRECTED in every mode, so a call aimed at one definition never wakes the others,
+ * and the channels keep a shallow ring (calls carry no replay). topts non-NULL = the TASK
  * shape: task kinds, a third broadcast progress channel (its QoS from topts), and the
  * definition's attrs byte on the req channel def. */
 static DartFunction *i_dart_function_new(DartNode *n, const char *name,
@@ -18338,8 +18399,14 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     }
 
     memcpy(rn, name, nl); memcpy(rn + nl, "@req", 5);   /* NUL included */
+    /* the req channel is DIRECTED: a DartCallOpts.provider call (and every task request)
+       must reach only its destination lane. Without the flag the transport neither skips
+       nor floor-advances the other lanes, so a directed request LEAKS to every other
+       matched provider when their lanes next wake (heartbeat sweep). Undirected calls
+       still broadcast (DEST_ALL reaches every lane), and a directed skip is silent at the
+       reader (no MSG_LOST). */
     fn->req = i_dart_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
-                              req_kind, DART__FN_PREFIX, (uint8_t)(mode == 2), req_attrs, req_cb, fn);
+                              req_kind, DART__FN_PREFIX, 1 /*directed*/, req_attrs, req_cb, fn);
     if (!fn->req) return NULL;   /* fn stays pool-allocated: nothing routes into it yet */
     if (topts){
         /* the broadcast progress channel: reliability is the definition's OFFER / the
@@ -18504,9 +18571,12 @@ int dart_function_retire(DartFunction *fn){
         i_dart_node_sys_unlock(n, acquired);
         return DART_ERR_STATE;
     }
-    /* live deferred calls answer CANCELLED while the channels are still up */
+    /* live deferred calls answer CANCELLED while the channels are still up; the replies
+       must then FLUSH to the wire before the park/retire below tears the lanes down (a
+       send only commits, and no poll pass runs in between) */
     i_dart_func_drain_defers(fn, "provider retired");
     i_dart_node_sys_unlock(n, acquired);
+    i_dart_node_flush_tx(n);
     r = i_dart_pat_park_channels(fn->req, fn->rsp);
     if (r != 0) return r;
     if (fn->prg) (void)dart_topic_set_role(fn->prg, DART_INACTIVE);
@@ -19390,6 +19460,31 @@ static uint64_t i_dart_func_reap(DartFunction *fn, uint64_t now, DartCallStatus 
     return soonest;
 }
 
+/* Fail every SENT pending call directed at `peer` whose destination lane no longer
+ * exists: the provider parked, retired or rebound the channel (its interest apply severed
+ * the lane), so no response can ever arrive, and the wire CANCELLED can be LOST to the
+ * very announce that severed the lane (the runtime services discovery before it drains
+ * the data socket, so the demux unmaps first and drops the queued reply). A RUNNING call
+ * has no deadline, so without this it would hang forever. Synthesized CANCELLED, same
+ * text as the retire drain; queued calls are exempt (they flush when the match forms).
+ * Lock held (the event hook). */
+static void i_dart_func_reap_severed(DartFunction *fn, uint32_t peer){
+    i_DartPending **pp = &fn->pending, *p;
+    while ((p = *pp) != NULL){
+        if (p->dest == peer && !p->queued_req && !i_dart_topic_peer_matched(fn->req, peer)){
+            *pp = p->next;
+            {   DartResponse r; r.status = DART_CALL_CANCELLED; r.data = dart_bytes(NULL,0);
+                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
+                r.message = dart_cstr("provider retired");
+                if (p->on_response) p->on_response(&r);
+            }
+            i_dart_func_free_pending(fn, p);
+            continue;
+        }
+        pp = &p->next;
+    }
+}
+
 static uint64_t i_dart_patterns_tick(void *user, uint64_t now_us){
     i_DartPatterns *pm = (i_DartPatterns*)user;
     DartFunction *fn; uint64_t soonest = 0;
@@ -19420,6 +19515,9 @@ static void i_dart_patterns_on_close(void *user){
         if (!fn->is_provider && fn->pending)
             i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1, 0);
     }
+    /* the drained CANCELLED replies must leave before the node's socket closes: no poll
+       pass follows this hook */
+    i_dart_node_flush_tx(pm->n);
 }
 
 static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
@@ -19430,6 +19528,9 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
         /* a match may just have formed: flush calls queued while no provider was matched */
         for (fn = pm->funcs; fn; fn = fn->next)
             if (!fn->is_provider && fn->pending) i_dart_func_flush_queued(fn);
+        /* ...and one may just have been SEVERED: a directed call there can never resolve */
+        for (fn = pm->funcs; fn; fn = fn->next)
+            if (!fn->is_provider && fn->pending) i_dart_func_reap_severed(fn, ev->peer);
         /* an accessor whose owner just parked (retire) or left: disarm the stale-order
            guard in i_dart_var_on_value. A successor definition on the SAME node keeps the
            peer id while its write_seq restarts at 1, so without this the guard would drop

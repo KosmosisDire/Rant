@@ -277,6 +277,21 @@ int dart_transport_publisher_live_matches(DartTransportState *st, uint16_t topic
 }
 
 
+int dart_transport_publisher_peer_matched(DartTransportState *st, uint16_t topic_index,
+                                          uint32_t peer_id){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    uint32_t li; int slot;
+    if (!topic) return 0;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return 0;
+    for (li=topic->lane_head; li!=DART__NIL; li=st->lanes[li].topic_next){
+        i_DartLane *l=&st->lanes[li];
+        if (l->w.used && l->peer_slot == (uint32_t)slot) return 1;
+    }
+    return 0;
+}
+
+
 /* Peer id of the OLDEST live matched subscriber lane (0 = none). The topic chain is
  * newest-first (lanes head-insert at match), so the last live hit is the oldest. */
 uint32_t dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t topic_index){

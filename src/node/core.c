@@ -382,6 +382,18 @@ static DartSchema *i_dart_node_core_intern(i_DartNodeCore *c, uint64_t hash, Dar
     uint32_t i; DartSchema *p;
     for (i = 0; i < c->n_interned; i++)
         if (c->interned[i].hash == hash) return c->interned[i].parsed;
+    if (!wire.data || wire.len == 0){
+        /* no wire inlined: identical hashes travel as ZERO bytes, so a channel whose
+           schema we also hold (a matched channel, greedily cached) can still intern.
+           Parse our OWN wire into a fresh copy: a topic retire frees its parsed schema,
+           an interned one lives until close. */
+        uint16_t t;
+        for (t = 0; t < c->n_topics; t++)
+            if (c->chan_schemas[t].hash == hash && c->chan_schemas[t].wire.len){
+                wire = c->chan_schemas[t].wire;
+                break;
+            }
+    }
     if (!wire.data || wire.len == 0 || !c->alloc) return NULL;
     p = dart_schema_parse(wire.data, wire.len, c->alloc, c->alloc_user);
     if (!p) return NULL;
