@@ -46,10 +46,12 @@ its shape), so the same one in any language is the same wire bytes and the same 
 
 Patterns layer over topic kinds, each subscriptable like Topic[T] for the typed
 form (untyped: explicit schema args, bytes payloads): FunctionDefinition /
-RemoteFunction (request/response, exactly one reply per call), VariableDefinition
-/ RemoteVariable (replicated state, one owner, optional force), and the
-side-named Publisher / Subscriber topic handles (same-name constructions on one
-node share the topic slot with a widened role).
+RemoteFunction (request/response, exactly one reply per call), TaskDefinition /
+RemoteTask (a function with progress and cancellation; the handler runs on a
+dedicated worker thread per call), VariableDefinition / RemoteVariable
+(replicated state, one owner, optional force), and the side-named Publisher /
+Subscriber topic handles (same-name constructions on one node share the topic
+slot with a widened role).
 
 Requires a C compiler on the machine at first use only (override with DART_CC).
 Every node/topic call is thread-safe (a node-level lock in the C core
@@ -75,11 +77,11 @@ import tempfile
 import threading
 import traceback
 from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
-                    sizeof, string_at, c_char_p, c_void_p, c_int, c_int32,
-                    c_int64, c_uint8, c_uint16, c_uint32, c_uint64, c_size_t,
-                    c_double, c_float, c_ubyte)
+                    pointer, sizeof, string_at, c_char_p, c_void_p, c_int,
+                    c_int32, c_int64, c_uint8, c_uint16, c_uint32, c_uint64,
+                    c_size_t, c_double, c_float, c_ubyte)
 
-_WRAPPER_VERSION = "4"   # bump to force a recompile when this file's ABI view changes
+_WRAPPER_VERSION = "5"   # bump to force a recompile when this file's ABI view changes
 
 # ---------------------------------------------------------------------------
 # Embedded C source. The packer (tools/pack.cmake) replaces the single marker
@@ -131,6 +133,10 @@ _EXPORTS = [
     "dart_function_retire",
     "dart_request_reply", "dart_request_fail", "dart_request_defer",
     "dart_function_complete",
+    # patterns: tasks
+    "dart_node_create_task_definition", "dart_node_create_remote_task",
+    "dart_request_start", "dart_function_progress", "dart_function_cancelled",
+    "dart_function_on_cancel", "dart_function_cancel",
     "dart_node_create_variable_definition", "dart_node_create_remote_variable",
     "dart_variable_get", "dart_variable_set", "dart_variable_force",
     "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
@@ -513,9 +519,42 @@ class DartVariableUpdate(Structure):
     ]
 
 
+class DartTaskOpts(Structure):
+    _fields_ = [
+        ("progress_best_effort", c_uint8),
+        ("progress_keep_last", c_uint16),
+        ("no_cancel", c_uint8),
+        ("exclusive", c_uint8),
+        ("multi", c_uint8),
+        ("timeout_us", c_uint32),
+        ("backpressure_wait_us", c_uint32),
+    ]
+
+
+class DartProgress(Structure):
+    _fields_ = [
+        ("call_id", c_uint32),
+        ("provider", c_uint32),
+        ("data", DartBytes),      # len 0 = the RUNNING ack
+        ("schema", c_void_p),
+        ("written_us", c_uint64),
+        ("recv_us", c_uint64),
+        ("user", c_void_p),
+    ]
+
+
+_PrgFn = CFUNCTYPE(None, POINTER(DartProgress))
+
+
 class DartCallOpts(Structure):
-    # direct a call at one definition by peer id (0 = undirected, first answer wins)
-    _fields_ = [("provider", c_uint32)]
+    # direct a call at one definition by peer id (0 = undirected, first answer wins);
+    # the task fields (on_progress/progress_user/id_out) stay NULL on a plain call
+    _fields_ = [
+        ("provider", c_uint32),
+        ("on_progress", _PrgFn),
+        ("progress_user", c_void_p),
+        ("id_out", POINTER(c_uint32)),
+    ]
 
 
 _DART_ALLOCATOR_PAGE = 64 * 1024   # DART_ALLOCATOR_PAGE default
@@ -526,6 +565,7 @@ _AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
 _ReqFn = CFUNCTYPE(None, POINTER(DartRequest), c_void_p)
 _RspFn = CFUNCTYPE(None, POINTER(DartResponse))
 _VarFn = CFUNCTYPE(None, POINTER(DartVariableUpdate), c_void_p)
+_CancelFn = CFUNCTYPE(None, c_uint64, c_void_p)
 _NULL_REQ_FN = cast(None, _ReqFn)   # a CFUNCTYPE argtype refuses a bare None
 _NULL_VAR_FN = cast(None, _VarFn)
 
@@ -585,6 +625,17 @@ def _bind(lib):
     F("dart_request_fail", [POINTER(DartRequest), c_char_p, DartBytes], None)
     F("dart_request_defer", [POINTER(DartRequest)], c_uint64)
     F("dart_function_complete", [c_void_p, c_uint64, c_int, c_char_p, DartBytes], c_int)
+    # patterns: tasks
+    F("dart_node_create_task_definition", [c_void_p, c_char_p, c_void_p, c_void_p,
+                                           c_void_p, _ReqFn, c_void_p,
+                                           POINTER(DartTaskOpts)], c_void_p)
+    F("dart_node_create_remote_task", [c_void_p, c_char_p, c_void_p, c_void_p,
+                                       c_void_p, POINTER(DartTaskOpts)], c_void_p)
+    F("dart_request_start", [POINTER(DartRequest)], c_int)
+    F("dart_function_progress", [c_void_p, c_uint64, DartBytes], c_int)
+    F("dart_function_cancelled", [c_void_p, c_uint64], c_int)
+    F("dart_function_on_cancel", [c_void_p, _CancelFn, c_void_p], c_int)
+    F("dart_function_cancel", [c_void_p, c_uint32], c_int)
     F("dart_node_create_variable_definition", [c_void_p, c_char_p, c_void_p,
                                                POINTER(DartVariableOpts)], c_void_p)
     F("dart_node_create_remote_variable", [c_void_p, c_char_p, c_void_p,
@@ -716,16 +767,19 @@ class SendStatus(enum.IntEnum):
 
 
 class CallStatus(enum.IntEnum):
-    """A function call's outcome. OK/APP_ERROR/NO_HANDLER travel on the wire;
-    TIMEOUT/PEER_LOST are synthesized client-side; CANCELLED is synthesized for
-    calls still pending when the local node closes (fired during close, so every
-    call gets exactly one outcome). Mirrors DartCallStatus."""
+    """A call's outcome. OK/APP_ERROR/NO_HANDLER/CANCELLED/RUNNING travel on the
+    wire; TIMEOUT/PEER_LOST are synthesized client-side; CANCELLED is also
+    synthesized for calls still pending at close/retire, so every call gets
+    exactly one outcome. RUNNING (task) is the ONLY non-terminal status: the
+    request was accepted and runs; the call stays pending, its timeout is
+    dropped, and on_progress fires once with None. Mirrors DartCallStatus."""
     OK = 0
     APP_ERROR = 1
     NO_HANDLER = 2
     TIMEOUT = 3
     PEER_LOST = 4
     CANCELLED = 5
+    RUNNING = 6
 
 
 class LogLevel(enum.IntEnum):
@@ -831,6 +885,11 @@ class CallError(Exception):
         super().__init__(msg)
         self.status = status
         self.send_status = send_status
+
+
+class CancelledError(Exception):
+    """Raise from a task handler to complete the call CallStatus.CANCELLED (the
+    cooperative honor of a cancel). The exception text becomes Response.message."""
 
 
 # ---------------------------------------------------------------------------
@@ -2901,6 +2960,51 @@ class Response:
             len(self.data))
 
 
+class Progress:
+    """One task progress update as handed to an on_progress handler's 2-arg form:
+    value (decoded; None for the RUNNING ack), data (the raw payload), call_id,
+    provider (the peer working the call), written_us (the provider's wall clock;
+    0 = unstamped), recv_us (this node's monotonic clock at arrival)."""
+    __slots__ = ("value", "data", "call_id", "provider", "written_us", "recv_us")
+
+    def __repr__(self):
+        return "Progress(call=%d, from=%d, value=%r)" % (
+            self.call_id, self.provider, self.value)
+
+
+def _progress_cb(on_progress, prg_schema):
+    """A per-call ctypes progress trampoline: decodes and arity-dispatches
+    (1 arg = the value, None for the RUNNING ack; 2 args = value + a Progress).
+    The returned object must stay alive until the call's terminal outcome."""
+    arity = _arity(on_progress)
+
+    @_PrgFn
+    def cb(prg_ptr):
+        try:
+            p = prg_ptr.contents
+            data = string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
+            if not data:
+                val = None       # the RUNNING ack
+            else:
+                val, ok = _decode_payload(p.schema, prg_schema, data)
+                if not ok:
+                    val = data
+            if arity == 1:
+                on_progress(val)
+            else:
+                info = Progress()
+                info.value = val
+                info.data = data
+                info.call_id = p.call_id
+                info.provider = p.provider
+                info.written_us = p.written_us
+                info.recv_us = p.recv_us
+                on_progress(val, info)
+        except Exception:
+            traceback.print_exc()
+    return cb
+
+
 class _FnBox:
     """Handler-side state for one function definition (alive until node close)."""
     __slots__ = ("fn", "handler", "arity", "req_schema", "rsp_schema")
@@ -2940,16 +3044,134 @@ class _FnBox:
             request._expire()
 
 
+class TaskRequest:
+    """A task call as seen by the definition's handler, which runs on a dedicated
+    daemon worker thread (one per call, so long tasks run concurrently). Carries
+    value (the decoded request; raw bytes when untyped), data (the raw payload),
+    caller, caller_name, function_name, recv_us, written_us, plus the working
+    surface: progress(x) streams updates, cancelled / cancel_event observe a
+    cooperative cancel. Completion is the handler's RETURN: the return value
+    encodes via the rsp schema and completes CallStatus.OK (None = empty OK);
+    raising CancelledError completes CANCELLED; any other exception completes
+    APP_ERROR with its text."""
+    __slots__ = ("_fn", "_prg_schema", "_token", "cancel_event",
+                 "value", "data", "caller", "caller_name", "function_name",
+                 "recv_us", "written_us")
+
+    def __init__(self, fn, prg_schema, token, r, value, data):
+        self._fn = fn
+        self._prg_schema = prg_schema
+        self._token = token
+        self.cancel_event = threading.Event()   # set the moment a cancel arrives
+        self.value = value
+        self.data = data
+        self.caller = r.caller
+        self.caller_name = _dstr(r.caller_name)
+        self.function_name = _dstr(r.function_name)
+        self.recv_us = r.recv_us
+        self.written_us = r.written_us
+
+    def progress(self, value=None):
+        """Broadcast a progress update (typed value, mapping, or bytes/str;
+        encoded via the prg schema). Returns a SendStatus (STATE once the call
+        completed)."""
+        b, buf = _c_view(_payload_bytes(self._prg_schema, value))
+        r = _load().dart_function_progress(self._fn, self._token, b)
+        del buf
+        return _send_status(r)
+
+    @property
+    def cancelled(self):
+        """True once the caller (or a third party) requested cancellation.
+        Cooperative: honor it by raising CancelledError, or run to completion
+        anyway. cancel_event is the same signal as a waitable threading.Event."""
+        if self.cancel_event.is_set():
+            return True
+        if _load().dart_function_cancelled(self._fn, self._token) == 1:
+            self.cancel_event.set()   # backstop: a cancel that beat the C slot
+            return True
+        return False
+
+
+class _TaskBox:
+    """Definition-side state for one task (alive until node close). The C request
+    callback runs on the poll thread: decode, defer for the token, register the
+    per-token cancel Event, spawn a daemon worker thread PER CALL (two long tasks
+    must run concurrently; spawn cost is noise against seconds-to-hours work).
+    The definition's ONE C on_cancel slot fans out to the per-token Events."""
+    __slots__ = ("fn", "handler", "req_schema", "prg_schema", "rsp_schema",
+                 "cancel_events", "lock")
+
+    def __init__(self, handler, req_schema, prg_schema, rsp_schema):
+        self.fn = None            # set right after create (no callback before poll)
+        self.handler = handler
+        self.req_schema = req_schema
+        self.prg_schema = prg_schema
+        self.rsp_schema = rsp_schema
+        self.cancel_events = {}   # defer token -> threading.Event
+        self.lock = threading.Lock()
+
+    def dispatch(self, req_ptr):   # poll thread: copy what the views hold, return fast
+        lib = _load()
+        r = req_ptr.contents
+        data = string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
+        val, ok = _decode_payload(r.schema, self.req_schema, data)
+        if not ok:
+            lib.dart_request_fail(req_ptr, b"request decode failed", DartBytes())
+            return
+        token = lib.dart_request_defer(req_ptr)   # implies RUNNING to the caller
+        if not token:
+            lib.dart_request_fail(req_ptr, b"defer failed", DartBytes())
+            return
+        task = TaskRequest(self.fn, self.prg_schema, token, r, val, data)
+        with self.lock:
+            self.cancel_events[token] = task.cancel_event
+        threading.Thread(target=self._run, args=(task,), daemon=True).start()
+
+    def cancel(self, token):       # poll thread, from the C on_cancel slot
+        with self.lock:
+            ev = self.cancel_events.get(token)
+        if ev is not None:
+            ev.set()
+
+    def _run(self, task):          # the dedicated worker thread for one call
+        status, message, rsp = CallStatus.OK, None, None
+        try:
+            rsp = self.handler(task)
+        except CancelledError as e:
+            status, message, rsp = CallStatus.CANCELLED, str(e) or None, None
+        except Exception as e:
+            traceback.print_exc()
+            status, message, rsp = CallStatus.APP_ERROR, str(e) or "handler threw", None
+        try:
+            payload = _payload_bytes(self.rsp_schema, rsp)
+        except Exception as e:
+            traceback.print_exc()
+            status, message, payload = (CallStatus.APP_ERROR,
+                                        str(e) or "response encode failed", b"")
+        with self.lock:
+            self.cancel_events.pop(task._token, None)
+        b, buf = _c_view(payload)
+        # a stale token (the definition retired / node closed mid-run) returns
+        # STATE: swallowed, the caller already got its one CANCELLED outcome
+        _load().dart_function_complete(self.fn, task._token, int(status),
+                                       message.encode("utf-8") if message else None, b)
+        del buf
+
+
 class _AsyncBox:
     """One in-flight async call: released when its response fires (including the
-    CANCELLED one synthesized at node close, so no leak, no dead pointer)."""
-    __slots__ = ("node", "on_response", "rsp_schema", "id")
+    CANCELLED one synthesized at node close, so no leak, no dead pointer).
+    progress_cb (task calls) keeps the per-call ctypes progress trampoline alive
+    until that one terminal outcome, which the C guarantees even at retire/close."""
+    __slots__ = ("node", "on_response", "rsp_schema", "id", "progress_cb")
 
     def __init__(self, node, on_response, rsp_schema):
         self.node = node
         self.on_response = on_response
         self.rsp_schema = rsp_schema
         self.id = 0
+        self.progress_cb = None
 
 
 class VariableUpdate:
@@ -3120,6 +3342,221 @@ class RemoteFunction:
             except Exception:
                 traceback.print_exc()
         return st
+
+    def match_count(self):
+        """Providers currently matched (the definition side present)."""
+        return self._node._lib.dart_function_match_count(self._fn)
+
+    def has_definition(self):
+        return self.match_count() > 0
+
+    def retire(self):
+        """Retire the remote: park its channels and release the name so a
+        successor can bind; every outstanding call completes with
+        CallStatus.CANCELLED. The handle is unusable after. Refused
+        (SendStatus.STATE) from inside a callback; the handle then stays
+        valid."""
+        rc = self._node._lib.dart_function_retire(self._fn)
+        if rc == 0:
+            self._fn = None
+        return _send_status(rc)
+
+
+class TaskDefinition:
+    """The implementation side of a task: a function with progress and
+    cancellation (the same call ids and statuses, plus a broadcast progress
+    channel and a cancel op). The handler runs on a DEDICATED daemon worker
+    thread, one per call, receiving a TaskRequest: return the response value to
+    complete OK (None = empty OK), raise CancelledError to complete CANCELLED,
+    any other exception completes APP_ERROR with its text. handler=None answers
+    every call NO_HANDLER (a declared stub). no_cancel declares cancellation will
+    not be honored (remotes then refuse cancel() locally); exclusive declares
+    serialization the handler enforces (fail with "busy"); multi declares
+    redundant providers. TaskDefinition[Req, Prg, Rsp](node, name, handler) is
+    the typed shorthand; untyped, pass req_schema=/prg_schema=/rsp_schema=
+    (None = raw bytes)."""
+    __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema")
+
+    def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
+                 rsp_schema=None, progress_best_effort=False, progress_keep_last=0,
+                 no_cancel=False, exclusive=False, multi=False, timeout_us=0,
+                 backpressure_wait_us=0):
+        self._node = node
+        self._req_schema = _as_schema(req_schema)
+        self._prg_schema = _as_schema(prg_schema)
+        self._rsp_schema = _as_schema(rsp_schema)
+        co = DartTaskOpts()
+        memset(byref(co), 0, sizeof(co))
+        co.progress_best_effort = 1 if progress_best_effort else 0
+        co.progress_keep_last = progress_keep_last
+        co.no_cancel = 1 if no_cancel else 0
+        co.exclusive = 1 if exclusive else 0
+        co.multi = 1 if multi else 0
+        co.timeout_us = timeout_us
+        co.backpressure_wait_us = backpressure_wait_us
+        box_id = 0
+        box = None
+        if handler is not None:
+            box = _TaskBox(handler, self._req_schema, self._prg_schema,
+                           self._rsp_schema)
+            box_id = _pbox_add(box)
+        h = node._lib.dart_node_create_task_definition(
+            node._h, name.encode("utf-8"),
+            self._req_schema._s if self._req_schema else None,
+            self._prg_schema._s if self._prg_schema else None,
+            self._rsp_schema._s if self._rsp_schema else None,
+            _on_request if box else _NULL_REQ_FN, c_void_p(box_id), byref(co))
+        if not h:
+            if box:
+                _pbox_pop(box_id)
+            raise RuntimeError("TaskDefinition(%r) create failed: %s"
+                               % (name, node.last_error()))
+        self._fn = h
+        if box:
+            box.fn = h
+            node._register_box(box_id)
+            # the one C cancel slot: fans out to the per-call cancel Events
+            node._lib.dart_function_on_cancel(h, _on_task_cancel, c_void_p(box_id))
+        node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
+
+    def caller_count(self):
+        """Callers currently matched to this definition."""
+        return self._node._lib.dart_function_match_count(self._fn)
+
+    def retire(self):
+        """Retire the definition: park its channels and release the name so a
+        successor can bind; every live deferred call answers CANCELLED
+        ("provider retired") while the channels are still up, and worker threads
+        completing after see their token refused, silently. The handle is
+        unusable after. Refused (SendStatus.STATE) from inside a callback; the
+        handle then stays valid."""
+        rc = self._node._lib.dart_function_retire(self._fn)
+        if rc == 0:
+            self._fn = None
+        return _send_status(rc)
+
+
+class RemoteTask:
+    """A reference to a task defined on another node. A task request is always
+    DIRECTED at one provider (provider=0 resolves to the oldest matched at send
+    time). The per-call timeout bounds only the wait for the FIRST response:
+    once RUNNING (or progress) arrives the task runs as long as it runs, and
+    cancel() from another thread is the caller's tool for impatience.
+    on_progress handlers are arity dispatched: (value) with None for the RUNNING
+    ack, or (value, progress) with a Progress. RemoteTask[Req, Prg, Rsp](node,
+    name) is the typed shorthand."""
+    __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema")
+
+    def __init__(self, node, name, req_schema=None, prg_schema=None,
+                 rsp_schema=None, progress_best_effort=False,
+                 progress_keep_last=0, timeout_us=0, backpressure_wait_us=0):
+        self._node = node
+        self._req_schema = _as_schema(req_schema)
+        self._prg_schema = _as_schema(prg_schema)
+        self._rsp_schema = _as_schema(rsp_schema)
+        co = DartTaskOpts()
+        memset(byref(co), 0, sizeof(co))
+        co.progress_best_effort = 1 if progress_best_effort else 0
+        co.progress_keep_last = progress_keep_last
+        co.timeout_us = timeout_us
+        co.backpressure_wait_us = backpressure_wait_us
+        h = node._lib.dart_node_create_remote_task(
+            node._h, name.encode("utf-8"),
+            self._req_schema._s if self._req_schema else None,
+            self._prg_schema._s if self._prg_schema else None,
+            self._rsp_schema._s if self._rsp_schema else None, byref(co))
+        if not h:
+            raise RuntimeError("RemoteTask(%r) create failed: %s"
+                               % (name, node.last_error()))
+        self._fn = h
+        node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
+
+    def __class_getitem__(cls, item):
+        return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
+
+    def call(self, req=None, on_progress=None, timeout_ms=-1, provider=0):
+        """BLOCKING call: drives the node loop until the terminal outcome.
+        on_progress fires on THIS thread while it waits, once with None for the
+        RUNNING ack and then per update. timeout_ms (negative = the task's
+        default) bounds only the wait for the FIRST response; after RUNNING it
+        waits for the terminal outcome indefinitely (impatience = cancel() from
+        another thread, which needs the async form's call id). Refused
+        (send_status SendStatus.STATE, status stays TIMEOUT) from inside a
+        callback or while a service thread owns the loop: use call_async there.
+        Never raises on a failed call: inspect .status (reading .value raises
+        CallError)."""
+        b, buf = _c_view(_payload_bytes(self._req_schema, req))
+        out = DartResponse()
+        co = DartCallOpts()
+        co.provider = int(provider)
+        keep_cb = None
+        if on_progress is not None:
+            # fires only inside dart_function_call, so the local ref holds it
+            keep_cb = _progress_cb(on_progress, self._prg_schema)
+            co.on_progress = keep_cb
+        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms,
+                                                cast(byref(co), c_void_p))
+        del buf, keep_cb
+        if rc == 1:
+            return Response._from_c(out, self._rsp_schema)
+        r = Response()
+        if rc < 0:
+            r.send_status = _send_status(rc)   # never launched: message stays ""
+        else:
+            r.message = _dstr(out.message)     # timed out: the C fills "timeout"
+        return r
+
+    def call_async(self, req, on_response, on_progress=None, provider=0):
+        """Async call: returns the CALL ID (the handle for cancel(); 0 when the
+        request never committed) as soon as the request is committed.
+        on_progress fires per update (None first, the RUNNING ack) and
+        on_response exactly once with the terminal outcome, both from whichever
+        thread polls this node; the per-call state is released exactly at that
+        one terminal outcome, which the C guarantees even at retire and close.
+        A synchronous refusal arrives through on_response (send_status set) and
+        returns 0."""
+        if not callable(on_response):
+            raise TypeError("on_response must be callable")
+        box = _AsyncBox(self._node, on_response, self._rsp_schema)
+        box_id = _pbox_add(box)
+        box.id = box_id
+        self._node._register_async(box_id)
+        b, buf = _c_view(_payload_bytes(self._req_schema, req))
+        call_id = c_uint32(0)
+        co = DartCallOpts()
+        co.provider = int(provider)
+        co.id_out = pointer(call_id)
+        if on_progress is not None:
+            box.progress_cb = _progress_cb(on_progress, self._prg_schema)
+            co.on_progress = box.progress_cb
+        rc = self._node._lib.dart_function_call_async(self._fn, b, _on_response,
+                                                      c_void_p(box_id),
+                                                      cast(byref(co), c_void_p))
+        del buf
+        if rc != 0:
+            _pbox_pop(box_id)
+            self._node._drop_async(box_id)
+            r = Response()
+            r.send_status = _send_status(rc)
+            try:
+                on_response(r)
+            except Exception:
+                traceback.print_exc()
+            return 0
+        return call_id.value
+
+    def cancel(self, call_id):
+        """Request cancellation of the outstanding call (the id from
+        call_async). Cooperative and never acked: the terminal status is the
+        answer (CANCELLED = honored or never started; a normal outcome = it
+        completed anyway). Returns a SendStatus: BAD_ROLE when the provider
+        declared no_cancel (checked locally against its cached attrs, nothing
+        sent); STATE when the call is not pending (already answered)."""
+        return _send_status(self._node._lib.dart_function_cancel(self._fn,
+                                                                 int(call_id)))
 
     def match_count(self):
         """Providers currently matched (the definition side present)."""
@@ -3423,6 +3860,16 @@ def _on_request(req_ptr, user):
         box = _pbox_get(user)
         if box is not None:
             box.dispatch(req_ptr)
+    except Exception:
+        traceback.print_exc()
+
+
+@_CancelFn
+def _on_task_cancel(token, user):
+    try:
+        box = _pbox_get(user)
+        if box is not None:
+            box.cancel(token)
     except Exception:
         traceback.print_exc()
 

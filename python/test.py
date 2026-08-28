@@ -512,6 +512,148 @@ def patterns():
     return ok
 
 
+# tasks leg types
+@dataclass
+class JobReq:
+    count: dart.i32 = 0
+
+
+@dataclass
+class JobPrg:
+    done: dart.i32 = 0
+
+
+@dataclass
+class JobRsp:
+    total: dart.i32 = 0
+
+
+def tasks():
+    """Tasks between two nodes: progress ordering, cancel, no_cancel, blocking."""
+    print("tasks leg: two nodes, domain 46, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    srv = dart.Node("tsrv", None, on_event("tsrv"),
+                    domain=46, multicast_interface=IFACE, max_topics=32)
+    cli = dart.Node("tcli", None, on_event("tcli"),
+                    domain=46, multicast_interface=IFACE, max_topics=32)
+    try:
+        # work: streams progress then returns a result
+        def _work(task):
+            total = 0
+            for i in range(task.value.count):
+                total += i + 1
+                task.progress(JobPrg(done=i + 1))
+            return JobRsp(total=total)
+        work = dart.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "work", _work)
+
+        # grind: runs until cancelled, honors the cancel
+        def _grind(task):
+            task.progress(JobPrg(done=0))
+            if not task.cancel_event.wait(8.0) or not task.cancelled:
+                return JobRsp(total=-1)   # cancel never arrived: a visible failure
+            raise dart.CancelledError("stopped")
+        dart.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "grind", _grind)
+
+        # rigid: declares no_cancel, completes regardless
+        def _rigid(task):
+            task.progress(JobPrg(done=1))
+            time.sleep(0.3)
+            return JobRsp(total=7)
+        dart.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "rigid", _rigid,
+                                                    no_cancel=True)
+
+        srv.start()   # service thread owns srv's loop; workers spawn off it
+
+        work_r = dart.RemoteTask[JobReq, JobPrg, JobRsp](cli, "work")
+        grind_r = dart.RemoteTask[JobReq, JobPrg, JobRsp](cli, "grind")
+        rigid_r = dart.RemoteTask[JobReq, JobPrg, JobRsp](cli, "rigid")
+
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not (work_r.has_definition()
+                                              and grind_r.has_definition()
+                                              and rigid_r.has_definition()):
+            cli.poll(5)
+        check("definitions discovered", work_r.has_definition()
+              and grind_r.has_definition() and rigid_r.has_definition())
+
+        cli.start()   # async legs: progress + responses fire on cli's service thread
+
+        # async round trip: RUNNING ack first, then the values in order, terminal OK
+        prog, rsps = [], []
+        done = threading.Event()
+
+        def on_prog(v):   # 1-arg form: v is the decoded value, None for the ack
+            prog.append(None if v is None else v.done)
+
+        def on_rsp(r):
+            rsps.append(r)
+            done.set()
+        call_id = work_r.call_async(JobReq(count=3), on_rsp, on_progress=on_prog)
+        check("call id assigned", call_id != 0)
+        check("async task answered", done.wait(5.0))
+        check("terminal OK with the decoded result",
+              rsps and rsps[0].ok and rsps[0].value.total == 6)
+        check("RUNNING ack first, then values in order", prog == [None, 1, 2, 3])
+
+        # cancel honored: the handler observes it and raises CancelledError
+        ginfo, grsps = [], []
+        grunning, gdone = threading.Event(), threading.Event()
+
+        def gprog(v, p):   # 2-arg form: p is a Progress
+            ginfo.append((None if v is None else v.done, p.call_id, p.provider))
+            grunning.set()
+
+        def grsp(r):
+            grsps.append(r)
+            gdone.set()
+        gid = grind_r.call_async(JobReq(count=1), grsp, on_progress=gprog)
+        check("grind running", grunning.wait(5.0))
+        check("cancel accepted", grind_r.cancel(gid) == dart.SendStatus.OK)
+        check("terminal CANCELLED with the handler's message",
+              gdone.wait(5.0) and grsps[0].status == dart.CallStatus.CANCELLED
+              and grsps[0].message == "stopped")
+        check("progress carries the call id and provider",
+              bool(ginfo) and all(c == gid and p != 0 for _, c, p in ginfo))
+
+        # no_cancel: cancel refused locally, the task completes anyway
+        nrsps = []
+        nrunning, ndone = threading.Event(), threading.Event()
+        nid = rigid_r.call_async(JobReq(count=1),
+                                 lambda r: (nrsps.append(r), ndone.set()),
+                                 on_progress=lambda v: nrunning.set())
+        check("rigid running", nrunning.wait(5.0))
+        check("cancel refused (no_cancel)",
+              rigid_r.cancel(nid) == dart.SendStatus.BAD_ROLE)
+        check("rigid completes anyway",
+              ndone.wait(5.0) and nrsps[0].ok and nrsps[0].value.total == 7)
+
+        cli.stop()   # the blocking form drives the loop itself
+
+        # blocking call with on_progress firing on the calling thread
+        bprog, bthread = [], []
+
+        def bprg(v):
+            bprog.append(None if v is None else v.done)
+            bthread.append(threading.current_thread() is threading.main_thread())
+        br = work_r.call(JobReq(count=2), on_progress=bprg, timeout_ms=3000)
+        check("blocking task ok", br.ok and br.value.total == 3)
+        check("blocking progress on the calling thread, in order",
+              bprog == [None, 1, 2] and all(bthread))
+
+        check("caller count seen by the definition", work.caller_count() == 1)
+    finally:
+        srv.close()
+        cli.close()
+    print("tasks: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 got = threading.Event()
 received = []
 
@@ -602,6 +744,8 @@ def main():
         ok = video_types()
     if ok:
         ok = patterns()
+    if ok:
+        ok = tasks()
     return 0 if ok else 1
 
 
