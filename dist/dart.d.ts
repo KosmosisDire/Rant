@@ -160,6 +160,7 @@ type VariableDefOpts<T> = {
     readOnly?: boolean;
     allowForce?: boolean;
     catch_up?: number;
+    keep_last?: number;
     backpressure_wait_ms?: number;
     onWrite?: boolean;
 };

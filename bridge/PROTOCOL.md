@@ -319,7 +319,9 @@ owner (the definition side holds the authoritative value).
   "read_only": false,                    // no set channel: remote sets get refused
   "allow_force": false,                  // permit force (local + remote)
   "on_write": false,                     // also push EVERY applied write (not just changes)
-  "catch_up": 0, "backpressure_wait_ms": 0 }
+  "catch_up": 0,                         // how much a late remote replays
+  "keep_last": 0,                        // both channels' repair window; 0 = reliable default (10)
+  "backpressure_wait_ms": 0 }
 { "op": "remote_variable", "seq": 9, "name": "config", "schema": "...", "on_write": false }
 ```
 

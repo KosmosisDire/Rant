@@ -252,6 +252,7 @@ type VariableDefOpts<T> = {
     readOnly?: boolean;
     allowForce?: boolean;
     catch_up?: number;
+    keep_last?: number;          /* both channels' repair window; 0 = the reliable default (10) */
     backpressure_wait_ms?: number;
     onWrite?: boolean;   /* also push every applied write (route via VarHandle.onWrite) */
 };
@@ -1390,6 +1391,7 @@ class DartNode {
             ...(opts.readOnly ? { read_only: true } : {}),
             ...(opts.allowForce ? { allow_force: true } : {}),
             ...(opts.catch_up ? { catch_up: opts.catch_up } : {}),
+            ...(opts.keep_last ? { keep_last: opts.keep_last } : {}),
             ...(opts.backpressure_wait_ms ? { backpressure_wait_ms: opts.backpressure_wait_ms } : {}),
             ...(opts.onWrite ? { on_write: true } : {}),
         });

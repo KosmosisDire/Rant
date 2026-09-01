@@ -293,6 +293,11 @@ typedef struct {
     uint8_t   access;              /* DartVarAccess: a READONLY definition creates no set channel */
     uint8_t   allow_force;         /* definition: permit force (local + remote); off by default */
     uint16_t  catch_up;            /* value-channel catch_up; 0 = 1 (a late remote gets the latest) */
+    uint16_t  keep_last;           /* history depth of BOTH channels: the REPAIR window a burst of
+                                      writes rides in, not what a late remote replays (catch_up is
+                                      that). 0 = the reliable default (10). Raise it when writes
+                                      outrun repair, or when catch_up is deeper (a catch_up past the
+                                      ring truncates); lower it to pin less on a big value */
     uint32_t  backpressure_wait_us;/* 0 = DART_PATTERN_BP_WAIT_US */
 } DartVariableOpts;
 

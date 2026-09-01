@@ -1193,6 +1193,7 @@ class DartNode {
             ...(opts.readOnly ? { read_only: true } : {}),
             ...(opts.allowForce ? { allow_force: true } : {}),
             ...(opts.catch_up ? { catch_up: opts.catch_up } : {}),
+            ...(opts.keep_last ? { keep_last: opts.keep_last } : {}),
             ...(opts.backpressure_wait_ms ? { backpressure_wait_ms: opts.backpressure_wait_ms } : {}),
             ...(opts.onWrite ? { on_write: true } : {}),
         });

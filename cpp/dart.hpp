@@ -443,6 +443,7 @@ template <class T = void> struct VariableOptions {
     bool     read_only            = false;   /* no set channel: remote sets get BadRole */
     bool     allow_force          = false;   /* permit force (local + remote) */
     uint16_t catch_up             = 0;       /* value-channel catch_up; 0 = 1 (late remote gets latest) */
+    uint16_t keep_last            = 0;       /* both channels' repair window; 0 = the reliable default (10) */
     uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
 };
 template <> struct VariableOptions<void> {
@@ -450,6 +451,7 @@ template <> struct VariableOptions<void> {
     bool     read_only            = false;
     bool     allow_force          = false;
     uint16_t catch_up             = 0;
+    uint16_t keep_last            = 0;
     uint32_t backpressure_wait_us = 0;
 };
 #endif /* !DART_NO_PATTERNS */
@@ -3524,6 +3526,7 @@ protected:
         co.access      = o.read_only ? detail::DART_VAR_READONLY : detail::DART_VAR_READWRITE;
         co.allow_force = o.allow_force ? 1 : 0;
         co.catch_up    = o.catch_up;
+        co.keep_last   = o.keep_last;
         co.backpressure_wait_us = o.backpressure_wait_us;
         node_ = n.impl_->node;
         impl_ = n.impl_.get();

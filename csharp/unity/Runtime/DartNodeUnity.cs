@@ -206,12 +206,13 @@ namespace Dart
         /// (this node owns the value). One side per node: asking for a RemoteVariable of the
         /// same name throws.</summary>
         public static DartVariableDefinition<T> VariableDefinition<T>(string name,
-                bool readOnly = false, bool allowForce = false, int catchUp = 0)
-            => RequireMain().GetVariableDefinition<T>(name, readOnly, allowForce, catchUp);
+                bool readOnly = false, bool allowForce = false, int catchUp = 0, int keepLast = 0)
+            => RequireMain().GetVariableDefinition<T>(name, readOnly, allowForce, catchUp, keepLast);
 
         /// <summary>The scene-shared reference to a variable owned by another node.</summary>
-        public static DartRemoteVariable<T> RemoteVariable<T>(string name, int catchUp = 0)
-            => RequireMain().GetRemoteVariable<T>(name, catchUp);
+        public static DartRemoteVariable<T> RemoteVariable<T>(string name, int catchUp = 0,
+                int keepLast = 0)
+            => RequireMain().GetRemoteVariable<T>(name, catchUp, keepLast);
 
         /// <summary>The scene-shared function definition (this node implements it; ONE per
         /// name on the network). The handler runs on the main thread.</summary>
@@ -235,12 +236,13 @@ namespace Dart
             => RequireMain().GetRemoteTask<TReq, TPrg, TRsp>(name);
 
         public DartVariableDefinition<T> GetVariableDefinition<T>(string name,
-                bool readOnly = false, bool allowForce = false, int catchUp = 0)
+                bool readOnly = false, bool allowForce = false, int catchUp = 0, int keepLast = 0)
             => GetOrCreatePattern("var:", name,
-                   () => new DartVariableDefinition<T>(this, name, readOnly, allowForce, catchUp));
+                   () => new DartVariableDefinition<T>(this, name, readOnly, allowForce, catchUp, keepLast));
 
-        public DartRemoteVariable<T> GetRemoteVariable<T>(string name, int catchUp = 0)
-            => GetOrCreatePattern("var:", name, () => new DartRemoteVariable<T>(this, name, catchUp));
+        public DartRemoteVariable<T> GetRemoteVariable<T>(string name, int catchUp = 0, int keepLast = 0)
+            => GetOrCreatePattern("var:", name,
+                   () => new DartRemoteVariable<T>(this, name, catchUp, keepLast));
 
         public DartFunctionDefinition<TReq, TRsp> GetFunctionDefinition<TReq, TRsp>(
                 string name, Func<TReq, TRsp> handler)

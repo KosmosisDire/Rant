@@ -288,33 +288,33 @@ namespace Dart
     public sealed class DartVariableDefinition<T> : DartVariableBase<T>
     {
         private readonly bool _readOnly, _allowForce;
-        private readonly int _catchUp;
+        private readonly int _catchUp, _keepLast;
 
         internal DartVariableDefinition(DartNodeUnity owner, string name,
-                                        bool readOnly, bool allowForce, int catchUp)
+                                        bool readOnly, bool allowForce, int catchUp, int keepLast)
             : base(owner, name)
         {
-            _readOnly = readOnly; _allowForce = allowForce; _catchUp = catchUp;
+            _readOnly = readOnly; _allowForce = allowForce; _catchUp = catchUp; _keepLast = keepLast;
         }
 
         private protected override VariableDefinition<T> CreateCore(DartNode node)
-            => new VariableDefinition<T>(node, Name, _readOnly, _allowForce, _catchUp);
+            => new VariableDefinition<T>(node, Name, _readOnly, _allowForce, _catchUp, _keepLast);
     }
 
     /// <summary>A reference to a variable owned by another node: reads see the cached
     /// latest, writes go over the set channel (dumb writes, no response).</summary>
     public sealed class DartRemoteVariable<T> : DartVariableBase<T>
     {
-        private readonly int _catchUp;
+        private readonly int _catchUp, _keepLast;
 
-        internal DartRemoteVariable(DartNodeUnity owner, string name, int catchUp)
+        internal DartRemoteVariable(DartNodeUnity owner, string name, int catchUp, int keepLast)
             : base(owner, name)
         {
-            _catchUp = catchUp;
+            _catchUp = catchUp; _keepLast = keepLast;
         }
 
         private protected override VariableDefinition<T> CreateCore(DartNode node)
-            => new RemoteVariable<T>(node, Name, _catchUp);
+            => new RemoteVariable<T>(node, Name, _catchUp, _keepLast);
 
         /// <summary>Owners currently matched (0 = no owner present).</summary>
         public int MatchCount => RemoteCount;

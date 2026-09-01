@@ -1184,13 +1184,17 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     memset(&vopt, 0, sizeof vopt);
     vopt.qos.reliability = DART_RELIABLE;
     vopt.qos.catch_up = (opts && opts->catch_up) ? opts->catch_up : 1u;   /* a late accessor gets the latest */
-    vopt.qos.keep_last = vopt.qos.catch_up;
+    /* keep_last is the REPAIR window, not the replay window. Tying it to catch_up left a
+       reliable variable ONE slot deep: the next write overwrote the sample a lagging
+       accessor was about to NACK, the writer could only answer with its HB floor, and the
+       value was lost on a channel that promises not to. 0 = the reliable default (10). */
+    vopt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
+    if (vopt.qos.keep_last && vopt.qos.keep_last < vopt.qos.catch_up)
+        vopt.qos.keep_last = vopt.qos.catch_up;      /* the ring must hold what it replays */
     vopt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
-    sopt = vopt; sopt.qos.catch_up = 0;   /* set channel: no replay */
-    sopt.qos.keep_last = 2;   /* writes are last-write-wins state, not a stream: history is
-                                 only the repair window (0 would inherit the reliable default
-                                 of 10 and pin 10x the value size); backpressure covers bursts */
+    sopt = vopt; sopt.qos.catch_up = 0;   /* set channel: no replay, same repair depth (a remote
+                                             hammering writes needs the window just as much) */
 
     v = (DartVariable*)i_dart_pat_handle_new(n, sizeof *v, &pm);
     if (!v) return NULL;

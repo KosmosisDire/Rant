@@ -4375,6 +4375,27 @@ static void pf_on_var_reenter(const DartVariableUpdate *u, void *user){
     }
 }
 
+/* write burst from inside a callback: every set after the first runs reentrant (may_wait=0),
+ * so none of them can wait for a TX pass and the value channel's RING is the only thing
+ * between the burst and silent loss. The first on_write writes 1..PF_VBURST_N once. */
+#define PF_VBURST_N 8
+static DartVariable *pf_vburst_var; static int pf_vburst_ran;
+static void pf_on_var_burst(const DartVariableUpdate *u, void *user){
+    uint8_t b[4]; uint32_t i;
+    (void)u; (void)user;
+    if (pf_vburst_ran) return;
+    pf_vburst_ran = 1;
+    for (i=1;i<=PF_VBURST_N;i++){ i_dart_le_w32(b,i); dart_variable_set(pf_vburst_var, dart_bytes(b,4)); }
+}
+static uint32_t pf_vburst_seen;   /* bit per value observed at the remote */
+static void pf_on_var_burst_rx(const DartVariableUpdate *u, void *user){
+    uint32_t v;
+    (void)user;
+    if (u->value.len < 4) return;
+    v = i_dart_le_r32(u->value.data);
+    if (v>=1 && v<=PF_VBURST_N) pf_vburst_seen |= 1u << (v-1);
+}
+
 static void pf_pump(DartNode *a, DartNode *b, int ms){
     uint64_t end = i_dart_plat_now_us() + (uint64_t)ms*1000u;
     while (i_dart_plat_now_us() < end){ dart_node_poll(a,2); dart_node_poll(b,2); }
@@ -4782,6 +4803,31 @@ static void patterns_checks(void){
                  "var: stale outer publish skipped, remote stays newest (%u)",
                  (have && cur.len>=4) ? i_dart_le_r32(cur.data) : 0u); }
       dart_variable_on_write(ro, NULL, NULL); }
+
+    { /* THE RING IS THE REPAIR WINDOW, not the replay window. A reliable variable written
+         from inside a callback cannot wait for a TX pass, so every write of the burst must
+         fit the value channel's history or it is evicted before the remote can NACK it.
+         Tying keep_last to catch_up once left that ring ONE deep, so a burst collapsed to
+         its last value on a channel that promises delivery. */
+      DartVariable *bo, *ba; uint8_t b[4]; uint32_t ev0, want = (1u<<PF_VBURST_N) - 1u;
+      bo = dart_node_create_variable_definition(P, "bvar", NULL, NULL);
+      ba = dart_node_create_remote_variable(C, "bvar", NULL, NULL);
+      ST_CHECK(bo && ba, "var: burst pair created");
+      pf_vburst_var = bo; pf_vburst_ran = 0; pf_vburst_seen = 0;
+      dart_variable_on_write(ba, pf_on_var_burst_rx, NULL);
+      for (t=0;t<2000 && dart_variable_match_count(bo)==0;t++) pf_pump(P,C,2);
+      ST_CHECK(dart_variable_match_count(bo)==1, "var: burst remote matched (%d)",
+               dart_variable_match_count(bo));
+      ev0 = dart_node_evicted_unsent(P);
+      dart_variable_on_write(bo, pf_on_var_burst, NULL);
+      i_dart_le_w32(b,0); dart_variable_set(bo, dart_bytes(b,4));   /* fires the burst inline */
+      ST_CHECK(pf_vburst_ran, "var: burst ran inside on_write");
+      for (t=0;t<2000 && pf_vburst_seen!=want;t++) pf_pump(P,C,2);
+      ST_CHECK(pf_vburst_seen==want, "var: every reentrant write reached the remote (0x%02x of 0x%02x)",
+               pf_vburst_seen, want);
+      ST_CHECK(dart_node_evicted_unsent(P)==ev0, "var: burst evicted nothing unsent (%u)",
+               dart_node_evicted_unsent(P) - ev0);
+      dart_variable_on_write(bo, NULL, NULL); dart_variable_on_write(ba, NULL, NULL); }
 
     /* a call still pending when the node closes gets one synthesized CANCELLED outcome */
     { DartFunction *never = dart_node_create_remote_function(C, "never-served", NULL, NULL,

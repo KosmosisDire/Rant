@@ -854,6 +854,7 @@ static void op_variable(Conn *c, const json &req, const json &seq, bool definiti
     o.read_only            = req.value("read_only", false);
     o.allow_force          = req.value("allow_force", false);
     o.catch_up             = (uint16_t)req.value("catch_up", 0);
+    o.keep_last            = (uint16_t)req.value("keep_last", 0);
     o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
     std::vector<uint8_t> initial = req.value("initial", std::vector<uint8_t>{});   /* raw bytes */
     if (!initial.empty()) o.initial = dart::Bytes(initial.data(), initial.size());

@@ -501,6 +501,7 @@ class DartVariableOpts(Structure):
         ("access", c_uint8),
         ("allow_force", c_uint8),
         ("catch_up", c_uint16),
+        ("keep_last", c_uint16),
         ("backpressure_wait_us", c_uint32),
     ]
 
@@ -3595,7 +3596,7 @@ class VariableDefinition:
     _remote = False
 
     def __init__(self, node, name, schema=None, initial=None, read_only=False,
-                 allow_force=False, catch_up=0, backpressure_wait_us=0):
+                 allow_force=False, catch_up=0, keep_last=0, backpressure_wait_us=0):
         self._node = node
         self._name = name
         sch = self._schema = _as_schema(schema)
@@ -3604,6 +3605,7 @@ class VariableDefinition:
         co.access = 1 if read_only else 0
         co.allow_force = 1 if allow_force else 0
         co.catch_up = catch_up
+        co.keep_last = keep_last
         co.backpressure_wait_us = backpressure_wait_us
         b, buf = _c_view(_payload_bytes(sch, initial) if initial is not None else b"")
         co.initial = b
@@ -3718,9 +3720,10 @@ class RemoteVariable(VariableDefinition):
     is the typed shorthand."""
     _remote = True
 
-    def __init__(self, node, name, schema=None, catch_up=0, backpressure_wait_us=0):
+    def __init__(self, node, name, schema=None, catch_up=0, keep_last=0,
+                 backpressure_wait_us=0):
         super().__init__(node, name, schema, None, False, False, catch_up,
-                         backpressure_wait_us)
+                         keep_last, backpressure_wait_us)
 
     def match_count(self):
         """Owners currently matched (0 = no owner present)."""

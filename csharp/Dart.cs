@@ -331,6 +331,7 @@ namespace Dart
         public byte access;                    // DartVarAccess
         public byte allow_force;
         public ushort catch_up;
+        public ushort keep_last;
         public uint backpressure_wait_us;
     }
 
@@ -2634,12 +2635,13 @@ namespace Dart
 
         public VariableDefinition(DartNode node, string name, Schema schema, byte[] initial = null,
                                   bool readOnly = false, bool allowForce = false,
-                                  int catchUp = 0, int backpressureWaitMs = 0)
-            : this(node, name, schema, initial, readOnly, allowForce, catchUp, backpressureWaitMs, true) { }
+                                  int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0)
+            : this(node, name, schema, initial, readOnly, allowForce, catchUp, keepLast,
+                   backpressureWaitMs, true) { }
 
         private protected VariableDefinition(DartNode node, string name, Schema schema, byte[] initial,
                                              bool readOnly, bool allowForce, int catchUp,
-                                             int backpressureWaitMs, bool definition)
+                                             int keepLast, int backpressureWaitMs, bool definition)
         {
             DartNode = node;
             Name = name;
@@ -2648,6 +2650,7 @@ namespace Dart
                 access = (byte)(readOnly ? 1 : 0),
                 allow_force = (byte)(allowForce ? 1 : 0),
                 catch_up = (ushort)catchUp,
+                keep_last = (ushort)keepLast,
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
             };
             using (var p = new PinnedBytes(initial))
@@ -2752,8 +2755,9 @@ namespace Dart
     public class RemoteVariable : VariableDefinition
     {
         public RemoteVariable(DartNode node, string name, Schema schema = null,
-                              int catchUp = 0, int backpressureWaitMs = 0)
-            : base(node, name, schema, null, false, false, catchUp, backpressureWaitMs, false) { }
+                              int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0)
+            : base(node, name, schema, null, false, false, catchUp, keepLast,
+                   backpressureWaitMs, false) { }
 
         /// <summary>Owners currently matched.</summary>
         public int MatchCount => RemoteCount;
@@ -3111,20 +3115,23 @@ namespace Dart
         private protected VariableDefinition() { }
 
         public VariableDefinition(DartNode node, string name, bool readOnly = false,
-                                  bool allowForce = false, int catchUp = 0, int backpressureWaitMs = 0)
+                                  bool allowForce = false, int catchUp = 0, int keepLast = 0,
+                                  int backpressureWaitMs = 0)
         {
             _schema = new Schema(typeof(T));
             _core = new VariableDefinition(node, name, _schema, null, readOnly, allowForce,
-                                           catchUp, backpressureWaitMs);
+                                           catchUp, keepLast, backpressureWaitMs);
         }
 
         /// <summary>Overload with an initial value (the value before any set).</summary>
         public VariableDefinition(DartNode node, string name, T initial, bool readOnly = false,
-                                  bool allowForce = false, int catchUp = 0, int backpressureWaitMs = 0)
+                                  bool allowForce = false, int catchUp = 0, int keepLast = 0,
+                                  int backpressureWaitMs = 0)
         {
             _schema = new Schema(typeof(T));
             _core = new VariableDefinition(node, name, _schema, _schema.Encode(initial),
-                                           readOnly, allowForce, catchUp, backpressureWaitMs);
+                                           readOnly, allowForce, catchUp, keepLast,
+                                           backpressureWaitMs);
         }
 
         public T Value
@@ -3190,10 +3197,11 @@ namespace Dart
     /// HasDefinition/MatchCount.</summary>
     public sealed class RemoteVariable<T> : VariableDefinition<T>
     {
-        public RemoteVariable(DartNode node, string name, int catchUp = 0, int backpressureWaitMs = 0)
+        public RemoteVariable(DartNode node, string name, int catchUp = 0, int keepLast = 0,
+                              int backpressureWaitMs = 0)
         {
             _schema = new Schema(typeof(T));
-            _core = new RemoteVariable(node, name, _schema, catchUp, backpressureWaitMs);
+            _core = new RemoteVariable(node, name, _schema, catchUp, keepLast, backpressureWaitMs);
         }
 
         /// <summary>Owners currently matched.</summary>
