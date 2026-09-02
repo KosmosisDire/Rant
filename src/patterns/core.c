@@ -469,12 +469,14 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     if (nl == 0 || nl + 4 > DART_TOPIC_NAME_MAX) return NULL;   /* room for the "@req"/"@rsp"/"@prg" suffix */
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
-    topt.qos.catch_up = 0;
-    /* shallow ring: calls carry no replay (catch_up 0), so history is only the repair
-       window; a deep ring would pin keep_last x request/reply size per function. More
-       than keep_last un-acked in-flight calls engage backpressure, never loss. The
-       both-sides meta shape stays at 2; plain functions get room for small bursts. */
-    topt.qos.keep_last = (mode == 2) ? 2 : 4;
+    topt.qos.catch_up = 0;   /* calls carry no replay: history is purely the repair window */
+    /* An INLINE reply is a reentrant send (the handler runs under the node lock, so
+       may_wait=0) and can never wait for a TX pass, which makes this ring the only thing
+       between a batch drained in one RX pass and lost replies: at depth 4 a provider that
+       drained 12 requests answered only the last 4 and the rest timed out at their callers.
+       0 = the reliable default (10); a provider that drains deeper batches raises
+       opts.keep_last past its worst-case pass (the ring only grows as slots are used). */
+    topt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
     fn = (DartFunction*)i_dart_pat_handle_new(n, sizeof *fn, &pm);
@@ -552,6 +554,7 @@ static DartFunctionOpts i_dart_task_fn_opts(const DartTaskOpts *to){
     memset(&fo, 0, sizeof fo);
     fo.backpressure_wait_us = to->backpressure_wait_us;
     fo.timeout_us = to->timeout_us;
+    fo.keep_last = to->keep_last;
     fo.multi = to->multi;
     return fo;
 }

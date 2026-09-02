@@ -2369,6 +2369,97 @@ const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16
     return sch;
 }
 
+/* ---- the mesh's schema for a topic name (runtime.h has the ranking) ------------------- */
+
+/* a rival heard this much longer ago than the pick is the stale one (past one 3s announce
+   interval, well under the 12s peer_timeout that ages a dead peer out anyway) */
+#define I_DART_SCHEMA_STALE_US 5000000u
+
+const DartSchema *dart_node_mesh_schema(DartNode *n, const char *name, DartSchemaSource *src){
+    const DartDiscoveryPeer *peers;
+    const DartSchema *best = NULL;
+    DartSchemaSource sr;
+    size_t nlen = name ? strlen(name) : 0;
+    uint64_t best_heard = 0;
+    uint32_t want;
+    uint16_t n_peers = 0, s;
+    int acquired;
+    memset(&sr, 0, sizeof sr);
+    if (src) *src = sr;
+    if (!n || !nlen) return NULL;
+    want = (uint32_t)dart_topic_id(name);              /* the announce carries only this */
+    acquired = i_dart_node_lock(n);
+    peers = dart_node_peers(n, &n_peers);
+    for (s = 0; s < n_peers; s++){
+        const DartDiscoveryPeer *p = &peers[s];
+        DartInterestIter it;
+        DartTopicEntry e;
+        uint16_t last = 0xFFFF;
+        if (p->liveness != DART_PEER_ACTIVE) continue; /* a ghost's schema is a dead one's */
+        memset(&it, 0, sizeof it);
+        while (dart_node_peer_interest_next(p, &it, &e)){
+            DartString nm; const DartSchema *sch; uint64_t hash = 0;
+            int take = 0;
+            if (e.hash != want) continue;              /* cheap prefilter before the name lookup */
+            if (e.index == last) continue;             /* second direction of a PUBSUB entry */
+            last = e.index;
+            nm = dart_node_peer_topic_name(n, p->id, e.index);
+            if (nm.len != nlen || memcmp(nm.data, name, nlen) != 0) continue;
+            sch = dart_node_peer_topic_schema(n, p->id, e.index, &hash);
+            if (!hash) continue;                       /* untyped endpoint: nothing to adopt */
+            if (!sr.advertisers){                      /* first advertiser: adopt it */
+                sr.advertisers = 1; take = 1;
+            } else if (hash == sr.hash){               /* identical schema: they agree */
+                sr.advertisers++;
+                /* upgrade the reported source to a publisher, or hash-only to parsed */
+                take = (e.is_pub && !sr.is_pub) || (sch && !best);
+            } else if (best && sch){
+                int best_narrower = dart_schema_subset(best, sch);  /* sch is the wider one */
+                int new_narrower  = dart_schema_subset(sch, best);  /* best is the wider one */
+                if (!best_narrower && !new_narrower){   /* neither reads the other */
+                    sr.conflict = 1;
+                    take = (e.is_pub && !sr.is_pub)
+                        || (e.is_pub == sr.is_pub
+                            && p->last_heard_us > best_heard + I_DART_SCHEMA_STALE_US);
+                } else if (best_narrower != new_narrower){
+                    take = best_narrower;               /* strictly ordered: the wider wins */
+                } else {
+                    take = (e.is_pub && !sr.is_pub);    /* mutually readable: prefer the wire */
+                }
+                sr.advertisers++;
+            } else {                                   /* one side hash-only: cannot compare */
+                sr.conflict = 1;
+                continue;
+            }
+            if (take){
+                best = sch;
+                best_heard = p->last_heard_us;
+                sr.hash = hash; sr.peer = p->id; sr.index = e.index;
+                sr.from = p->name; sr.is_pub = e.is_pub;
+            }
+        }
+    }
+    i_dart_node_unlock(n, acquired);
+    if (src) *src = sr;
+    return best;
+}
+
+DartSchema *dart_node_mesh_schema_copy(DartNode *n, const char *name, DartSchemaSource *src,
+                                       DartAllocFn alloc, void *user){
+    const DartSchema *best;
+    DartSchema *copy = NULL;
+    int acquired;
+    if (!n || !alloc) return NULL;
+    acquired = i_dart_node_lock(n);   /* one bracket: the pick AND the wire it copies from */
+    best = dart_node_mesh_schema(n, name, src);
+    if (best){
+        DartBytes w = dart_schema_wire(best);
+        copy = dart_schema_parse(w.data, w.len, alloc, user);
+    }
+    i_dart_node_unlock(n, acquired);
+    return copy;
+}
+
 uint8_t i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index){
     uint8_t a; int acquired;
     if (!n) return 0;

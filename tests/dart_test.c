@@ -4340,9 +4340,10 @@ static void pf_on_reply2(const DartResponse *r){
 }
 /* burst capture: counts completions, sums returned values, flags any non-OK */
 static volatile int pf_burst_done; static uint32_t pf_burst_sum; static int pf_burst_bad;
+static DartCallStatus pf_burst_last_bad;
 static void pf_on_reply_burst(const DartResponse *r){
     if (r->status == DART_CALL_OK && r->data.len>=4) pf_burst_sum += i_dart_le_r32(r->data.data);
-    else pf_burst_bad++;
+    else { pf_burst_bad++; pf_burst_last_bad = r->status; }
     pf_burst_done++;
 }
 static volatile uint64_t pf_defer_token;
@@ -4828,6 +4829,61 @@ static void patterns_checks(void){
       ST_CHECK(dart_node_evicted_unsent(P)==ev0, "var: burst evicted nothing unsent (%u)",
                dart_node_evicted_unsent(P) - ev0);
       dart_variable_on_write(bo, NULL, NULL); dart_variable_on_write(ba, NULL, NULL); }
+
+    { /* PROVIDER-SIDE reply burst. An inline reply is a REENTRANT send (the handler runs
+         under the node lock, so may_wait=0): it can never wait for a TX pass, so the rsp
+         RING is the only thing between a batch drained in one poll pass and lost replies,
+         and a lost reply is invisible at the provider (ordinary KEEP_LAST, no event) and
+         a bare TIMEOUT at the caller. At the old depth of 4, a 12-request pass answered
+         only the LAST 4. Part 1: a burst inside the default depth is lossless. Part 2:
+         opts.keep_last carries a batch deeper than the default, which is the contract for
+         a provider whose poll pass drains more than that. */
+      uint8_t req[4]; int i2; uint32_t expect_sum, ev0;
+      DartFunction *deep_p, *deep_c;
+      pf_burst_done=0; pf_burst_sum=0; pf_burst_bad=0; expect_sum=0;
+      for (i2=0;i2<8;i2++){
+          i_dart_le_w32(req,(uint32_t)(2000+i2)); expect_sum += (uint32_t)(2000+i2+1);
+          dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply_burst, NULL, NULL);
+      }
+      for (i2=0;i2<50;i2++) dart_node_poll(C,0);   /* park every request: P has not polled */
+      ev0 = dart_node_evicted_unsent(P);
+      dart_node_poll(P,20);                        /* ONE pass: drain 8, reply inline to each */
+      for (t=0;t<2000 && pf_burst_done<8;t++) pf_pump(P,C,2);
+      ST_CHECK(pf_burst_done==8 && pf_burst_bad==0 && pf_burst_sum==expect_sum,
+               "patterns: 8 inline replies in one pass all returned (done=%d bad=%d sum=%u want=%u)",
+               pf_burst_done, pf_burst_bad, pf_burst_sum, expect_sum);
+      ST_CHECK(dart_node_evicted_unsent(P)==ev0, "patterns: reply burst evicted nothing unsent (%u)",
+               dart_node_evicted_unsent(P) - ev0);
+
+      deep_p = dart_node_create_function_definition(P, "deep", NULL, NULL, pf_add_handler, NULL,
+                              &(DartFunctionOpts){ .keep_last = 32 });
+      /* the CALLER needs the depth too: its req ring holds the burst while the provider
+         has not polled, and at the default depth calls past it stall in backpressure
+         (1s each) long enough for the un-polled provider to time out as a dead peer */
+      deep_c = dart_node_create_remote_function(C, "deep", NULL, NULL,
+                              &(DartFunctionOpts){ .keep_last = 32 });
+      ST_CHECK(deep_p && deep_c, "patterns: deep-ring function pair created");
+      /* BOTH lanes must be up: the caller's req match alone would let the first replies
+         commit before the provider's rsp lane exists, and they would simply have nowhere
+         to go (a burst is not a late joiner: rsp carries no catch_up) */
+      for (t=0;t<2000 && !(dart_function_match_count(deep_c) && dart_function_match_count(deep_p));t++)
+          pf_pump(P,C,2);
+      ST_CHECK(dart_function_match_count(deep_c) && dart_function_match_count(deep_p),
+               "patterns: deep-ring pair matched both ways (c=%d p=%d)",
+               dart_function_match_count(deep_c), dart_function_match_count(deep_p));
+      pf_pump(P,C,50);
+      { int before = pf_calls; (void)before;
+      pf_burst_done=0; pf_burst_sum=0; pf_burst_bad=0; expect_sum=0;
+      for (i2=0;i2<24;i2++){
+          i_dart_le_w32(req,(uint32_t)(3000+i2)); expect_sum += (uint32_t)(3000+i2+1);
+          dart_function_call_async(deep_c, dart_bytes(req,4), pf_on_reply_burst, NULL, NULL);
+      }
+      for (i2=0;i2<80;i2++) dart_node_poll(C,0);
+      dart_node_poll(P,20);
+      for (t=0;t<2000 && pf_burst_done<24;t++) pf_pump(P,C,2);
+      ST_CHECK(pf_burst_done==24 && pf_burst_bad==0 && pf_burst_sum==expect_sum,
+               "patterns: keep_last=32 carries a 24-reply pass (handled=%d done=%d bad=%d laststatus=%d sum=%u want=%u)",
+               pf_calls - before, pf_burst_done, pf_burst_bad, (int)pf_burst_last_bad, pf_burst_sum, expect_sum); } }
 
     /* a call still pending when the node closes gets one synthesized CANCELLED outcome */
     { DartFunction *never = dart_node_create_remote_function(C, "never-served", NULL, NULL,

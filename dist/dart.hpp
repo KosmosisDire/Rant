@@ -3508,6 +3508,44 @@ DartString        dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t
 const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t index,
                                               uint64_t *schema_hash);
 
+/* ---- the mesh's schema for a topic name -----------------------------------------------
+ * A tool with no type of its own (an explorer, a bridge, a CLI publisher) takes its shape
+ * from the mesh, and which advertiser to believe is not obvious once two disagree. This
+ * walks every ACTIVE peer advertising `name` (either direction) and returns the schema to
+ * adopt: node-owned, do NOT free, NULL when nobody advertises one. It reads the greedy
+ * detail cache, so open with opts.fetch_details to see topics this node does not share.
+ * A DROPPED peer never counts: its cached schema is a dead incarnation's. The ranking:
+ *   1. WIDER WINS, whatever the roles. When one schema reads the other (dart_schema_subset,
+ *      the matcher's own gate) and not the reverse, the wider one is what to WRITE with: it
+ *      satisfies every reader the narrower one does. This is what makes a NAMED field type
+ *      work. An anonymous struct reads a `Color` writer, but a `Color` reader refuses an
+ *      anonymous writer, so adopting an unnamed rival's shape makes the named endpoint
+ *      refuse our sends. It also stops a subscriber that declares a SUBSET of the fields
+ *      from narrowing what we publish.
+ *   2. Else a PUBLISHER beats a subscriber: it owns the actual wire bytes.
+ *   3. Else the endpoint heard more recently wins, so a crash-restarted node's dead
+ *      incarnation (ACTIVE-listed until peer_timeout, but silent) loses to the live one.
+ *      Same-role rivals both announce every interval, so the pick never flaps.
+ * *src is optional: where the winner came from, and how contested the name is. */
+typedef struct {
+    DartString from;        /* the winning endpoint's node name, {NULL,0} = nothing found */
+    uint32_t   peer;        /* its peer id, 0 = none */
+    uint16_t   index;       /* its topic index at that peer */
+    uint16_t   advertisers; /* endpoints advertising a schema for this name, 0 = untyped */
+    uint64_t   hash;        /* the winning schema's identity, 0 = none */
+    uint8_t    is_pub;      /* 1 = the winner publishes this topic, 0 = it subscribes */
+    uint8_t    conflict;    /* 1 = two advertisers cannot read each other, or one is still
+                               hash-only: the pick stands, but the mesh is mismatched */
+} DartSchemaSource;
+
+const DartSchema *dart_node_mesh_schema(DartNode *n, const char *name, DartSchemaSource *src);
+
+/* The same pick as a caller-owned COPY of the winner's canonical wire: safe to hold past
+ * the node lock (taken internally) and to hand to dart_node_create_topic. Free it with
+ * dart_schema_free and the same alloc/user. NULL when nothing is advertised, or on OOM. */
+DartSchema *dart_node_mesh_schema_copy(DartNode *n, const char *name, DartSchemaSource *src,
+                                       DartAllocFn alloc, void *user);
+
 /* Cumulative backpressure since open: us waited on slow subscribers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends);
@@ -4092,6 +4130,13 @@ typedef void (*DartRequestFn)(DartRequest *request, void *user);
 typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
     uint32_t timeout_us;            /* remote-side call timeout; 0 = DART_CALL_TIMEOUT_US */
+    uint16_t keep_last;             /* req + rsp history depth; 0 = the reliable default (10).
+                                       An inline reply is a REENTRANT send (the handler runs
+                                       under the node lock), so it can never wait for a TX
+                                       pass: this ring is the only thing holding a batch of
+                                       replies. Raise it above the most requests one poll pass
+                                       can drain, or replies past the depth are lost and the
+                                       callers see a timeout. */
     uint8_t  multi;                 /* many definitions of this function are EXPECTED, so the
                                        duplicate-authority diagnostic is suppressed for it.
                                        Direct a call at one definition with DartCallOpts
@@ -4225,6 +4270,8 @@ typedef struct {
                                        each request still has exactly one executor */
     uint32_t timeout_us;            /* remote: until-first-response bound; 0 = DART_CALL_TIMEOUT_US */
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
+    uint16_t keep_last;             /* req + rsp history depth, as DartFunctionOpts.keep_last
+                                       (progress_keep_last covers the prg channel) */
 } DartTaskOpts;
 
 /* Create the DEFINITION (the implementation lives here) or a REMOTE, exactly as for a
@@ -4281,6 +4328,11 @@ typedef struct {
     uint8_t   access;              /* DartVarAccess: a READONLY definition creates no set channel */
     uint8_t   allow_force;         /* definition: permit force (local + remote); off by default */
     uint16_t  catch_up;            /* value-channel catch_up; 0 = 1 (a late remote gets the latest) */
+    uint16_t  keep_last;           /* history depth of BOTH channels: the REPAIR window a burst of
+                                      writes rides in, not what a late remote replays (catch_up is
+                                      that). 0 = the reliable default (10). Raise it when writes
+                                      outrun repair, or when catch_up is deeper (a catch_up past the
+                                      ring truncates); lower it to pin less on a big value */
     uint32_t  backpressure_wait_us;/* 0 = DART_PATTERN_BP_WAIT_US */
 } DartVariableOpts;
 
@@ -17355,6 +17407,97 @@ const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16
     return sch;
 }
 
+/* ---- the mesh's schema for a topic name (runtime.h has the ranking) ------------------- */
+
+/* a rival heard this much longer ago than the pick is the stale one (past one 3s announce
+   interval, well under the 12s peer_timeout that ages a dead peer out anyway) */
+#define I_DART_SCHEMA_STALE_US 5000000u
+
+const DartSchema *dart_node_mesh_schema(DartNode *n, const char *name, DartSchemaSource *src){
+    const DartDiscoveryPeer *peers;
+    const DartSchema *best = NULL;
+    DartSchemaSource sr;
+    size_t nlen = name ? strlen(name) : 0;
+    uint64_t best_heard = 0;
+    uint32_t want;
+    uint16_t n_peers = 0, s;
+    int acquired;
+    memset(&sr, 0, sizeof sr);
+    if (src) *src = sr;
+    if (!n || !nlen) return NULL;
+    want = (uint32_t)dart_topic_id(name);              /* the announce carries only this */
+    acquired = i_dart_node_lock(n);
+    peers = dart_node_peers(n, &n_peers);
+    for (s = 0; s < n_peers; s++){
+        const DartDiscoveryPeer *p = &peers[s];
+        DartInterestIter it;
+        DartTopicEntry e;
+        uint16_t last = 0xFFFF;
+        if (p->liveness != DART_PEER_ACTIVE) continue; /* a ghost's schema is a dead one's */
+        memset(&it, 0, sizeof it);
+        while (dart_node_peer_interest_next(p, &it, &e)){
+            DartString nm; const DartSchema *sch; uint64_t hash = 0;
+            int take = 0;
+            if (e.hash != want) continue;              /* cheap prefilter before the name lookup */
+            if (e.index == last) continue;             /* second direction of a PUBSUB entry */
+            last = e.index;
+            nm = dart_node_peer_topic_name(n, p->id, e.index);
+            if (nm.len != nlen || memcmp(nm.data, name, nlen) != 0) continue;
+            sch = dart_node_peer_topic_schema(n, p->id, e.index, &hash);
+            if (!hash) continue;                       /* untyped endpoint: nothing to adopt */
+            if (!sr.advertisers){                      /* first advertiser: adopt it */
+                sr.advertisers = 1; take = 1;
+            } else if (hash == sr.hash){               /* identical schema: they agree */
+                sr.advertisers++;
+                /* upgrade the reported source to a publisher, or hash-only to parsed */
+                take = (e.is_pub && !sr.is_pub) || (sch && !best);
+            } else if (best && sch){
+                int best_narrower = dart_schema_subset(best, sch);  /* sch is the wider one */
+                int new_narrower  = dart_schema_subset(sch, best);  /* best is the wider one */
+                if (!best_narrower && !new_narrower){   /* neither reads the other */
+                    sr.conflict = 1;
+                    take = (e.is_pub && !sr.is_pub)
+                        || (e.is_pub == sr.is_pub
+                            && p->last_heard_us > best_heard + I_DART_SCHEMA_STALE_US);
+                } else if (best_narrower != new_narrower){
+                    take = best_narrower;               /* strictly ordered: the wider wins */
+                } else {
+                    take = (e.is_pub && !sr.is_pub);    /* mutually readable: prefer the wire */
+                }
+                sr.advertisers++;
+            } else {                                   /* one side hash-only: cannot compare */
+                sr.conflict = 1;
+                continue;
+            }
+            if (take){
+                best = sch;
+                best_heard = p->last_heard_us;
+                sr.hash = hash; sr.peer = p->id; sr.index = e.index;
+                sr.from = p->name; sr.is_pub = e.is_pub;
+            }
+        }
+    }
+    i_dart_node_unlock(n, acquired);
+    if (src) *src = sr;
+    return best;
+}
+
+DartSchema *dart_node_mesh_schema_copy(DartNode *n, const char *name, DartSchemaSource *src,
+                                       DartAllocFn alloc, void *user){
+    const DartSchema *best;
+    DartSchema *copy = NULL;
+    int acquired;
+    if (!n || !alloc) return NULL;
+    acquired = i_dart_node_lock(n);   /* one bracket: the pick AND the wire it copies from */
+    best = dart_node_mesh_schema(n, name, src);
+    if (best){
+        DartBytes w = dart_schema_wire(best);
+        copy = dart_schema_parse(w.data, w.len, alloc, user);
+    }
+    i_dart_node_unlock(n, acquired);
+    return copy;
+}
+
 uint8_t i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index){
     uint8_t a; int acquired;
     if (!n) return 0;
@@ -18497,12 +18640,14 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     if (nl == 0 || nl + 4 > DART_TOPIC_NAME_MAX) return NULL;   /* room for the "@req"/"@rsp"/"@prg" suffix */
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = DART_RELIABLE;
-    topt.qos.catch_up = 0;
-    /* shallow ring: calls carry no replay (catch_up 0), so history is only the repair
-       window; a deep ring would pin keep_last x request/reply size per function. More
-       than keep_last un-acked in-flight calls engage backpressure, never loss. The
-       both-sides meta shape stays at 2; plain functions get room for small bursts. */
-    topt.qos.keep_last = (mode == 2) ? 2 : 4;
+    topt.qos.catch_up = 0;   /* calls carry no replay: history is purely the repair window */
+    /* An INLINE reply is a reentrant send (the handler runs under the node lock, so
+       may_wait=0) and can never wait for a TX pass, which makes this ring the only thing
+       between a batch drained in one RX pass and lost replies: at depth 4 a provider that
+       drained 12 requests answered only the last 4 and the rest timed out at their callers.
+       0 = the reliable default (10); a provider that drains deeper batches raises
+       opts.keep_last past its worst-case pass (the ring only grows as slots are used). */
+    topt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
     fn = (DartFunction*)i_dart_pat_handle_new(n, sizeof *fn, &pm);
@@ -18580,6 +18725,7 @@ static DartFunctionOpts i_dart_task_fn_opts(const DartTaskOpts *to){
     memset(&fo, 0, sizeof fo);
     fo.backpressure_wait_us = to->backpressure_wait_us;
     fo.timeout_us = to->timeout_us;
+    fo.keep_last = to->keep_last;
     fo.multi = to->multi;
     return fo;
 }
@@ -19212,13 +19358,17 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     memset(&vopt, 0, sizeof vopt);
     vopt.qos.reliability = DART_RELIABLE;
     vopt.qos.catch_up = (opts && opts->catch_up) ? opts->catch_up : 1u;   /* a late accessor gets the latest */
-    vopt.qos.keep_last = vopt.qos.catch_up;
+    /* keep_last is the REPAIR window, not the replay window. Tying it to catch_up left a
+       reliable variable ONE slot deep: the next write overwrote the sample a lagging
+       accessor was about to NACK, the writer could only answer with its HB floor, and the
+       value was lost on a channel that promises not to. 0 = the reliable default (10). */
+    vopt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
+    if (vopt.qos.keep_last && vopt.qos.keep_last < vopt.qos.catch_up)
+        vopt.qos.keep_last = vopt.qos.catch_up;      /* the ring must hold what it replays */
     vopt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : DART_PATTERN_BP_WAIT_US;
-    sopt = vopt; sopt.qos.catch_up = 0;   /* set channel: no replay */
-    sopt.qos.keep_last = 2;   /* writes are last-write-wins state, not a stream: history is
-                                 only the repair window (0 would inherit the reliable default
-                                 of 10 and pin 10x the value size); backpressure covers bursts */
+    sopt = vopt; sopt.qos.catch_up = 0;   /* set channel: no replay, same repair depth (a remote
+                                             hammering writes needs the window just as much) */
 
     v = (DartVariable*)i_dart_pat_handle_new(n, sizeof *v, &pm);
     if (!v) return NULL;
@@ -20291,6 +20441,9 @@ struct NodeOptions {
 struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout; 0 = 5s */
+    uint16_t keep_last            = 0;   /* req + rsp ring depth; 0 = the reliable default (10).
+                                            An inline reply cannot wait for a TX pass, so this
+                                            must cover the most requests one poll pass drains */
 };
 /* Task options (mirrors DartTaskOpts). A task is a function with progress and
  * cancellation; see TaskDefinition / RemoteTask. */
@@ -20308,6 +20461,7 @@ struct TaskOptions {
                                               has exactly one executor */
     uint32_t timeout_us           = 0;     /* remote: until-first-response bound; 0 = 5s */
     uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
+    uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
 };
 /* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
  * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
@@ -20325,6 +20479,7 @@ template <class T = void> struct VariableOptions {
     bool     read_only            = false;   /* no set channel: remote sets get BadRole */
     bool     allow_force          = false;   /* permit force (local + remote) */
     uint16_t catch_up             = 0;       /* value-channel catch_up; 0 = 1 (late remote gets latest) */
+    uint16_t keep_last            = 0;       /* both channels' repair window; 0 = the reliable default (10) */
     uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
 };
 template <> struct VariableOptions<void> {
@@ -20332,6 +20487,7 @@ template <> struct VariableOptions<void> {
     bool     read_only            = false;
     bool     allow_force          = false;
     uint16_t catch_up             = 0;
+    uint16_t keep_last            = 0;
     uint32_t backpressure_wait_us = 0;
 };
 #endif /* !DART_NO_PATTERNS */
@@ -22822,6 +22978,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
+        co.keep_last            = o.keep_last;
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
         fn_ = detail::dart_node_create_function_definition(n.impl_->node, nm.c_str(),
@@ -22886,6 +23043,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
+        co.keep_last            = o.keep_last;
         fn_ = detail::dart_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
@@ -23033,6 +23191,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
+        co.keep_last            = o.keep_last;
         co.no_cancel            = o.no_cancel ? 1 : 0;
         co.exclusive            = o.exclusive ? 1 : 0;
         co.multi                = o.multi ? 1 : 0;
@@ -23140,6 +23299,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
+        co.keep_last            = o.keep_last;
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         fn_ = detail::dart_node_create_remote_task(n.impl_->node, nm.c_str(),
@@ -23406,6 +23566,7 @@ protected:
         co.access      = o.read_only ? detail::DART_VAR_READONLY : detail::DART_VAR_READWRITE;
         co.allow_force = o.allow_force ? 1 : 0;
         co.catch_up    = o.catch_up;
+        co.keep_last   = o.keep_last;
         co.backpressure_wait_us = o.backpressure_wait_us;
         node_ = n.impl_->node;
         impl_ = n.impl_.get();

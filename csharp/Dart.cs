@@ -321,6 +321,7 @@ namespace Dart
     {
         public uint backpressure_wait_us;
         public uint timeout_us;
+        public ushort keep_last;        // req + rsp ring depth; 0 = the reliable default (10)
         public byte multi;              // duplicate-authority diagnostic suppressed (@dart/meta)
     }
 
@@ -368,6 +369,7 @@ namespace Dart
         public byte multi;
         public uint timeout_us;
         public uint backpressure_wait_us;
+        public ushort keep_last;        // req + rsp ring depth; 0 = the reliable default (10)
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2109,13 +2111,15 @@ namespace Dart
         internal readonly DartNode DartNode;
 
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Action<DartRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0)
+                                  Action<DartRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
+                                  int keepLast = 0)
         {
             DartNode = node;
             var co = new DartFunctionOpts
             {
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
+                keep_last = (ushort)keepLast,
             };
             long id = 0;
             Patterns.RequestBox box = null;
@@ -2143,9 +2147,9 @@ namespace Dart
         /// on the polling thread until its first await: CPU-bound work belongs in Task.Run.</summary>
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
                                   Func<DartRequest, Task<byte[]>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+                                  int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
             : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler),
-                   backpressureWaitMs, timeoutMs) { }
+                   backpressureWaitMs, timeoutMs, keepLast) { }
 
         // Defer FIRST (a continuation may finish before the invocation returns), then the
         // Task's completion answers through the Deferred.
@@ -2211,13 +2215,15 @@ namespace Dart
         internal readonly DartNode DartNode;
 
         public RemoteFunction(DartNode node, string name, Schema requestSchema = null,
-                              Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0)
+                              Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0,
+                              int keepLast = 0)
         {
             DartNode = node;
             var co = new DartFunctionOpts
             {
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
+                keep_last = (ushort)keepLast,
             };
             Fn = Native.dart_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
@@ -2374,11 +2380,12 @@ namespace Dart
                               Schema responseSchema, Func<DartRequest, TaskContext, Task<byte[]>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
-                              int backpressureWaitMs = 0, int timeoutMs = 0)
+                              int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
         {
             DartNode = node;
             var co = new DartTaskOpts
             {
+                keep_last = (ushort)keepLast,
                 progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
                 progress_keep_last = (ushort)progressKeepLast,
                 no_cancel = (byte)(noCancel ? 1 : 0),
@@ -2491,11 +2498,12 @@ namespace Dart
         public RemoteTask(DartNode node, string name, Schema requestSchema = null,
                           Schema progressSchema = null, Schema responseSchema = null,
                           bool progressBestEffort = false, int progressKeepLast = 0,
-                          int backpressureWaitMs = 0, int timeoutMs = 0)
+                          int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
         {
             DartNode = node;
             var co = new DartTaskOpts
             {
+                keep_last = (ushort)keepLast,
                 progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
                 progress_keep_last = (ushort)progressKeepLast,
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,

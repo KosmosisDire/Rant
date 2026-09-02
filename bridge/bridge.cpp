@@ -651,6 +651,7 @@ static dart::FunctionOptions fn_opts(const json &req){
     dart::FunctionOptions o;
     o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
     o.timeout_us           = (uint32_t)req.value("timeout_ms", 0) * 1000u;
+    o.keep_last            = (uint16_t)req.value("keep_last", 0);
     return o;
 }
 
@@ -730,6 +731,7 @@ static dart::TaskOptions task_opts(const json &req){
     o.multi                = req.value("multi", false);
     o.timeout_us           = (uint32_t)req.value("timeout_ms", 0) * 1000u;
     o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
+    o.keep_last            = (uint16_t)req.value("keep_last", 0);
     return o;
 }
 

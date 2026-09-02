@@ -245,6 +245,9 @@ type TaskOpts = {
     multi?: boolean;                 /* definition: redundant providers intended */
     timeout_ms?: number;             /* remote: until-first-response bound; 0 = 5s */
     backpressure_wait_ms?: number;
+    keep_last?: number;              /* req + rsp ring depth; 0 = the reliable default (10).
+                                        An inline reply cannot wait for a TX pass, so this
+                                        must cover the biggest batch one poll pass drains */
 };
 
 type VariableDefOpts<T> = {

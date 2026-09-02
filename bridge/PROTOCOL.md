@@ -243,7 +243,10 @@ name on the network; exactly one reply per call).
 { "op": "function_definition", "seq": 7, "name": "add",
   "req_schema": "AddReq { a: i32, b: i32 }",     // optional
   "rsp_schema": "AddRsp { sum: i32 }",           // optional
-  "timeout_ms": 0, "backpressure_wait_ms": 0 }   // optional
+  "timeout_ms": 0, "backpressure_wait_ms": 0,    // optional
+  "keep_last": 0 }               // req + rsp ring depth; 0 = the reliable default (10).
+                                 //   An inline reply cannot wait for a TX pass, so this must
+                                 //   cover the biggest batch one poll pass drains.
 ```
 
 Reply: `{ "ok": true, "id": 0, "req": {size, hash, fields}, "rsp": {...} }`
@@ -272,7 +275,8 @@ third schema (`prg_schema`, the progress payload) and the task options:
   "exclusive": false,              // definition: declared serialization (the handler enforces it)
   "multi": false,                  // definition: redundant providers intended
   "timeout_ms": 0,                 // remote: until-first-response bound; 0 = 5s
-  "backpressure_wait_ms": 0 }
+  "backpressure_wait_ms": 0,
+  "keep_last": 0 }                 // req + rsp ring depth; 0 = the reliable default (10)
 ```
 
 Reply: `{ "ok": true, "id": 2, "req": {...}, "prg": {...}, "rsp": {...} }` (each

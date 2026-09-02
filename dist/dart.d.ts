@@ -154,6 +154,7 @@ type TaskOpts = {
     multi?: boolean;
     timeout_ms?: number;
     backpressure_wait_ms?: number;
+    keep_last?: number;
 };
 type VariableDefOpts<T> = {
     initial?: T;

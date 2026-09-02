@@ -409,6 +409,9 @@ struct NodeOptions {
 struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout; 0 = 5s */
+    uint16_t keep_last            = 0;   /* req + rsp ring depth; 0 = the reliable default (10).
+                                            An inline reply cannot wait for a TX pass, so this
+                                            must cover the most requests one poll pass drains */
 };
 /* Task options (mirrors DartTaskOpts). A task is a function with progress and
  * cancellation; see TaskDefinition / RemoteTask. */
@@ -426,6 +429,7 @@ struct TaskOptions {
                                               has exactly one executor */
     uint32_t timeout_us           = 0;     /* remote: until-first-response bound; 0 = 5s */
     uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
+    uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
 };
 /* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
  * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
@@ -2942,6 +2946,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
+        co.keep_last            = o.keep_last;
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
         fn_ = detail::dart_node_create_function_definition(n.impl_->node, nm.c_str(),
@@ -3006,6 +3011,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
+        co.keep_last            = o.keep_last;
         fn_ = detail::dart_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
@@ -3153,6 +3159,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
+        co.keep_last            = o.keep_last;
         co.no_cancel            = o.no_cancel ? 1 : 0;
         co.exclusive            = o.exclusive ? 1 : 0;
         co.multi                = o.multi ? 1 : 0;
@@ -3260,6 +3267,7 @@ public:
         std::memset(&co, 0, sizeof co);
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
+        co.keep_last            = o.keep_last;
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         fn_ = detail::dart_node_create_remote_task(n.impl_->node, nm.c_str(),

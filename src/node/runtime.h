@@ -386,6 +386,44 @@ DartString        dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t
 const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t index,
                                               uint64_t *schema_hash);
 
+/* ---- the mesh's schema for a topic name -----------------------------------------------
+ * A tool with no type of its own (an explorer, a bridge, a CLI publisher) takes its shape
+ * from the mesh, and which advertiser to believe is not obvious once two disagree. This
+ * walks every ACTIVE peer advertising `name` (either direction) and returns the schema to
+ * adopt: node-owned, do NOT free, NULL when nobody advertises one. It reads the greedy
+ * detail cache, so open with opts.fetch_details to see topics this node does not share.
+ * A DROPPED peer never counts: its cached schema is a dead incarnation's. The ranking:
+ *   1. WIDER WINS, whatever the roles. When one schema reads the other (dart_schema_subset,
+ *      the matcher's own gate) and not the reverse, the wider one is what to WRITE with: it
+ *      satisfies every reader the narrower one does. This is what makes a NAMED field type
+ *      work. An anonymous struct reads a `Color` writer, but a `Color` reader refuses an
+ *      anonymous writer, so adopting an unnamed rival's shape makes the named endpoint
+ *      refuse our sends. It also stops a subscriber that declares a SUBSET of the fields
+ *      from narrowing what we publish.
+ *   2. Else a PUBLISHER beats a subscriber: it owns the actual wire bytes.
+ *   3. Else the endpoint heard more recently wins, so a crash-restarted node's dead
+ *      incarnation (ACTIVE-listed until peer_timeout, but silent) loses to the live one.
+ *      Same-role rivals both announce every interval, so the pick never flaps.
+ * *src is optional: where the winner came from, and how contested the name is. */
+typedef struct {
+    DartString from;        /* the winning endpoint's node name, {NULL,0} = nothing found */
+    uint32_t   peer;        /* its peer id, 0 = none */
+    uint16_t   index;       /* its topic index at that peer */
+    uint16_t   advertisers; /* endpoints advertising a schema for this name, 0 = untyped */
+    uint64_t   hash;        /* the winning schema's identity, 0 = none */
+    uint8_t    is_pub;      /* 1 = the winner publishes this topic, 0 = it subscribes */
+    uint8_t    conflict;    /* 1 = two advertisers cannot read each other, or one is still
+                               hash-only: the pick stands, but the mesh is mismatched */
+} DartSchemaSource;
+
+const DartSchema *dart_node_mesh_schema(DartNode *n, const char *name, DartSchemaSource *src);
+
+/* The same pick as a caller-owned COPY of the winner's canonical wire: safe to hold past
+ * the node lock (taken internally) and to hand to dart_node_create_topic. Free it with
+ * dart_schema_free and the same alloc/user. NULL when nothing is advertised, or on OOM. */
+DartSchema *dart_node_mesh_schema_copy(DartNode *n, const char *name, DartSchemaSource *src,
+                                       DartAllocFn alloc, void *user);
+
 /* Cumulative backpressure since open: us waited on slow subscribers and how many sends
  * waited. Either out-pointer may be NULL. */
 void     dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends);

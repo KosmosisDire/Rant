@@ -104,6 +104,13 @@ typedef void (*DartRequestFn)(DartRequest *request, void *user);
 typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
     uint32_t timeout_us;            /* remote-side call timeout; 0 = DART_CALL_TIMEOUT_US */
+    uint16_t keep_last;             /* req + rsp history depth; 0 = the reliable default (10).
+                                       An inline reply is a REENTRANT send (the handler runs
+                                       under the node lock), so it can never wait for a TX
+                                       pass: this ring is the only thing holding a batch of
+                                       replies. Raise it above the most requests one poll pass
+                                       can drain, or replies past the depth are lost and the
+                                       callers see a timeout. */
     uint8_t  multi;                 /* many definitions of this function are EXPECTED, so the
                                        duplicate-authority diagnostic is suppressed for it.
                                        Direct a call at one definition with DartCallOpts
@@ -237,6 +244,8 @@ typedef struct {
                                        each request still has exactly one executor */
     uint32_t timeout_us;            /* remote: until-first-response bound; 0 = DART_CALL_TIMEOUT_US */
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
+    uint16_t keep_last;             /* req + rsp history depth, as DartFunctionOpts.keep_last
+                                       (progress_keep_last covers the prg channel) */
 } DartTaskOpts;
 
 /* Create the DEFINITION (the implementation lives here) or a REMOTE, exactly as for a
