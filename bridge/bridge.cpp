@@ -166,51 +166,79 @@ static const char *send_status_str(dart::SendStatus rc){
     }
 }
 
-/* The compiled schema as the protocol's field table: every field at every depth with a
- * dotted path and its absolute offset, so a client encodes/decodes with no codegen.
- * Fixed fields carry offset/size; the variable kinds (vstring/varr/map) report 0 and
- * live in the message tail after the fixed section (whose length is `size`). */
+/* One field of a schema, whatever we reflected it from: the compiled handle
+ * (dart::Schema::Field) or the owned peer snapshot (dart::SchemaField). Both build their
+ * rows through field_row_json, so the two tables can never drift apart again. They did:
+ * peer reflection used to omit `named`, so a client rebuilding a peer's type got an
+ * anonymous struct where the owner said Color, and every send was schema-refused. */
+struct FieldSrc {
+    std::string name, type_name, elem_name;
+    dart::FieldType kind = dart::FieldType::U8, elem = dart::FieldType::U8;
+    uint16_t count = 0, depth = 0, str_cap = 0, arr_parent = 0xFFFFu;
+    uint32_t offset = 0, size = 0, elem_size = 0;
+    json variants = json::array();      /* enum only: the option table, already built */
+};
+
+/* one row of the protocol's field table: a dotted path, the type, and its absolute offset,
+ * so a client encodes, decodes and rebuilds the type with no codegen. `parents` carries the
+ * enclosing struct names and is advanced here. Fixed fields carry offset/size; the variable
+ * kinds (vstring/varr/map) report 0 and live in the message tail after the fixed section
+ * (whose length is the schema's `size`). */
+static json field_row_json(const FieldSrc &f, std::vector<std::string> &parents){
+    parents.resize(f.depth);            /* leaving a struct shrinks the path */
+    std::string path;
+    for (const std::string &p : parents){ path += p; path += '.'; }
+    path += f.name;
+    json row = { {"path", path}, {"kind", kind_str(f.kind)},
+                 {"offset", f.offset}, {"size", f.size} };
+    /* a NAMED type is unwrapped: `kind` is what it wraps, `named` is the name it
+       carries (a Pose reads as a struct of Double3 + Quaternion, and says so) */
+    if (!f.type_name.empty()) row["named"] = f.type_name;
+    if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
+    if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);  /* live count, no bound */
+    if (f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray){
+        if (!f.elem_name.empty()) row["elem_named"] = f.elem_name;
+        if (f.elem_size) row["elem_size"] = f.elem_size;
+        if (f.elem == dart::FieldType::Struct) row["elem_struct"] = true;   /* element-0 template follows */
+    }
+    if (f.arr_parent != 0xFFFFu) row["in_array"] = f.arr_parent;            /* index it to read */
+    if (f.kind == dart::FieldType::Enum){                                   /* backing + option table */
+        row["backing"] = kind_str(f.elem);
+        row["variants"] = f.variants;
+    }
+    if (f.str_cap) row["cap"] = f.str_cap;                                  /* string + string arrays */
+    /* a struct field, and a struct ARRAY (whose element-0 template follows it), both
+       open a path level */
+    if (f.kind == dart::FieldType::Struct ||
+        ((f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray)
+         && f.elem == dart::FieldType::Struct))
+        parents.push_back(f.name);
+    return row;
+}
+
+/* the compiled schema as the protocol's field table: every field at every depth */
 static json fields_json(const dart::Schema &s){
     json fields = json::array();
-    std::vector<std::string> parents;   /* enclosing struct names, one per depth level */
+    std::vector<std::string> parents;
     uint16_t n = s.field_count();
     for (uint16_t i = 0; i < n; i++){
         dart::Schema::Field f;
+        FieldSrc r;
         if (!s.field_at(i, f)) break;
-        parents.resize(f.depth);        /* leaving a struct shrinks the path */
-        std::string path;
-        for (const std::string &p : parents){ path += p; path += '.'; }
-        path.append(f.name.data(), f.name.size());
-        json row = { {"path", path}, {"kind", kind_str(f.kind)},
-                     {"offset", f.offset}, {"size", f.size} };
-        /* a NAMED type is unwrapped: `kind` is what it wraps, `named` is the name it
-           carries (a Pose reads as a struct of Double3 + Quaternion, and says so) */
-        if (!f.type_name.empty()) row["named"] = std::string(f.type_name);
-        if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
-        if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);  /* live count, no bound */
-        if (f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray){
-            if (!f.elem_name.empty()) row["elem_named"] = std::string(f.elem_name);
-            if (f.elem_size) row["elem_size"] = f.elem_size;
-            if (f.elem == dart::FieldType::Struct) row["elem_struct"] = true;   /* element-0 template follows */
-        }
-        if (f.arr_parent != 0xFFFFu) row["in_array"] = f.arr_parent;            /* index it to read */
-        if (f.kind == dart::FieldType::Enum){                                   /* backing + option table */
-            row["backing"] = kind_str(f.elem);
-            json opts = json::array();
+        r.name.assign(f.name.data(), f.name.size());
+        r.type_name.assign(f.type_name.data(), f.type_name.size());
+        r.elem_name.assign(f.elem_name.data(), f.elem_name.size());
+        r.kind = f.kind; r.elem = f.elem;
+        r.count = f.count; r.depth = f.depth; r.str_cap = f.str_cap; r.arr_parent = f.arr_parent;
+        r.offset = f.offset; r.size = f.size; r.elem_size = f.elem_size;
+        if (f.kind == dart::FieldType::Enum){
             dart::Schema::EnumVariant ev;
             for (uint16_t k = 0; k < s.enum_count(i); k++)
                 if (s.enum_variant(i, k, ev))
-                    opts.push_back({ {"name", std::string(ev.name.data(), ev.name.size())}, {"value", ev.value} });
-            row["variants"] = opts;
+                    r.variants.push_back({ {"name", std::string(ev.name.data(), ev.name.size())},
+                                           {"value", ev.value} });
         }
-        if (f.str_cap) row["cap"] = f.str_cap;                                  /* string + string arrays */
-        fields.push_back(row);
-        /* a struct field, and a struct ARRAY (whose element-0 template follows it), both
-           open a path level */
-        if (f.kind == dart::FieldType::Struct ||
-            ((f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray)
-             && f.elem == dart::FieldType::Struct))
-            parents.push_back(std::string(f.name.data(), f.name.size()));
+        fields.push_back(field_row_json(r, parents));
     }
     return fields;
 }
@@ -258,35 +286,25 @@ static const char *entity_kind_str(dart::EntityKind k){
     }
 }
 
-/* a reflected schema's field table ({size, hash, fields}), same shape as a topic create
- * reply, from the owned SchemaInfo the wrapper hands back. Dotted paths are rebuilt from
- * the flat depth-first field list, so a client renders/decodes with no codegen. */
+/* a reflected PEER schema's field table ({name, size, hash, fields}): the same rows a topic
+ * create reply carries, from the owned SchemaInfo the wrapper hands back. */
 static json schemainfo_json(const dart::SchemaInfo &si){
     json fields = json::array();
-    std::vector<std::string> parents;   /* enclosing struct names, one per depth level */
+    std::vector<std::string> parents;
     for (const dart::SchemaField &f : si.fields){
-        parents.resize(f.depth);        /* leaving a struct shrinks the path */
-        std::string path;
-        for (const std::string &p : parents){ path += p; path += '.'; }
-        path += f.name;
-        json row = { {"path", path}, {"kind", kind_str(f.kind)},
-                     {"offset", f.offset}, {"size", f.size} };
-        if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
-        if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);
-        if (f.kind == dart::FieldType::Enum){
-            row["backing"] = kind_str(f.elem);
-            json opts = json::array();
-            for (const dart::SchemaField::Option &v : f.variants)
-                opts.push_back({ {"name", v.name}, {"value", v.value} });
-            row["variants"] = opts;
-        }
-        if (f.str_cap) row["cap"] = f.str_cap;
-        fields.push_back(row);
-        if (f.kind == dart::FieldType::Struct) parents.push_back(f.name);
+        FieldSrc r;
+        r.name = f.name; r.type_name = f.type_name; r.elem_name = f.elem_name;
+        r.kind = f.kind; r.elem = f.elem;
+        r.count = f.count; r.depth = f.depth; r.str_cap = f.str_cap; r.arr_parent = f.arr_parent;
+        r.offset = f.offset; r.size = f.size; r.elem_size = f.elem_size;
+        for (const dart::SchemaField::Option &v : f.variants)
+            r.variants.push_back({ {"name", v.name}, {"value", v.value} });
+        fields.push_back(field_row_json(r, parents));
     }
-    /* `name` is the schema's ROOT TYPE name: a client that reflects a peer's schema needs it
-       (with the field table) to reconstruct the exact DSL and create a matching typed handle,
-       so writing to a typed variable's set channel is accepted instead of schema-refused. */
+    /* `name` is the schema's ROOT TYPE name: a client that reflects a peer's schema needs it,
+       with the field table and its `named` rows, to reconstruct the exact DSL and create a
+       matching typed handle, so writing to a typed variable's set channel is accepted
+       instead of schema-refused. */
     return { {"name", si.name}, {"size", si.size}, {"hash", hex64(si.hash)}, {"fields", fields} };
 }
 

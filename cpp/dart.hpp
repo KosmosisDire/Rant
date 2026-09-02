@@ -917,17 +917,25 @@ private:
 };
 
 /* SchemaField: one field of a reflected schema, an OWNED copy (safe to keep). Mirrors
- * Schema::Field plus, for an enum, its option table. The flat depth-first order matches
- * Schema::field_at -- a struct's members directly follow it one depth deeper, and offsets
- * are message-absolute (0 for the variable-tail kinds vstring/varr/map). */
+ * Schema::Field field for field, plus an enum's option table. Keep it that way: a consumer
+ * that rebuilds a type from this table (the bridge's peer reflection, an HMI creating a
+ * matching typed handle) silently produces the WRONG type for anything this drops, and a
+ * dropped type_name turns `color: Color` into an anonymous struct that every named reader
+ * refuses. The flat depth-first order matches Schema::field_at: a struct's members directly
+ * follow it one depth deeper, and offsets are message-absolute (0 for the variable-tail
+ * kinds vstring/varr/map). */
 struct SchemaField {
     std::string name;
+    std::string type_name;                 /* the field type's NAME, empty when anonymous */
+    std::string elem_name;                 /* an array ELEMENT type's name, empty when anonymous */
     FieldType   kind    = FieldType::U8;
     FieldType   elem    = FieldType::U8;   /* Array element type, or Enum backing type */
     uint16_t    count   = 0;               /* Array element / Enum option count */
     uint16_t    depth   = 0;               /* 0 = top level; n = member of the struct n levels up */
     uint16_t    str_cap = 0;               /* String capacity (String fields and String-element arrays) */
+    uint16_t    arr_parent = 0xFFFFu;      /* flat index of the enclosing struct ARRAY, 0xFFFF for none */
     uint32_t    offset  = 0, size = 0;
+    uint32_t    elem_size = 0;             /* bytes of one array element, else 0 */
     struct Option { std::string name; int64_t value = 0; };
     std::vector<Option> variants;          /* Enum only: its named options, declaration order */
 };
@@ -2741,11 +2749,14 @@ private:
             detail::DartSchemaFieldInfo f;
             if (!detail::dart_schema_field_at(s, i, &f)) break;
             SchemaField sf;
-            if (f.name.data) sf.name.assign(f.name.data, f.name.len);
+            if (f.name.data)      sf.name.assign(f.name.data, f.name.len);
+            if (f.type_name.data) sf.type_name.assign(f.type_name.data, f.type_name.len);
+            if (f.elem_name.data) sf.elem_name.assign(f.elem_name.data, f.elem_name.len);
             sf.kind = static_cast<FieldType>(f.kind);
             sf.elem = static_cast<FieldType>(f.elem);
             sf.count = f.count; sf.depth = f.depth; sf.str_cap = f.str_cap;
-            sf.offset = f.offset; sf.size = f.size;
+            sf.arr_parent = f.arr_parent;
+            sf.offset = f.offset; sf.size = f.size; sf.elem_size = f.elem_size;
             if (sf.kind == FieldType::Enum) {
                 uint16_t vc = detail::dart_schema_enum_count(s, i);
                 sf.variants.reserve(vc);

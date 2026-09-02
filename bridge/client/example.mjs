@@ -107,6 +107,19 @@ for (const f of robotConfig.schema.fields)
 if (!robotConfig.schema.fields.some((f) => f.path === "rate_hz" && f.kind === "u32"))
     throw new Error("config schema fields did not reflect");
 
+/* A reflected peer schema carries the SAME rows a create reply does, `named` included.
+ * It has to: a client rebuilds a discovered type from this table, and a dropped name
+ * turns `at: Double2` into an anonymous struct that every named reader refuses. */
+const robotTelemetry = theirs.find((e) => e.kind === "topic" && e.name === "telemetry");
+if (!robotTelemetry?.schema) throw new Error("expected the robot's telemetry schema");
+const namedRows = robotTelemetry.schema.fields.filter((f) => f.named);
+console.log(`  telemetry named types: ` +
+            namedRows.map((f) => `${f.path}: ${f.named}`).join(", "));
+if (!robotTelemetry.schema.fields.some((f) => f.path === "when" && f.named === "Timestamp"))
+    throw new Error("peer reflection dropped the Timestamp name");
+if (!robotTelemetry.schema.fields.some((f) => f.path === "at" && f.named === "Double2"))
+    throw new Error("peer reflection dropped the Double2 name");
+
 const snap = await dash.meta(robotPeer.id, MetaSection.Node | MetaSection.Topics);
 console.log(`robot @dart/meta: status=${snap.status} valid=${snap.valid}` +
             (snap.valid ? `  name=${snap.info.node?.name} topics=${snap.info.node?.topics}` : ""));
