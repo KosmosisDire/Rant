@@ -759,6 +759,11 @@ static uint16_t st_domain_base = 33;
 #define ST_NCH      40
 
 static int st_fail = 0;
+/* the discovery peer table behind a node (raw announce checks; the public walk is
+   dart_node_peers_next) */
+static const DartDiscoveryPeer *st_peers(DartNode *n, uint16_t *count){
+    return dart_discovery_peers(n->discovery, count);
+}
 /* cond is evaluated exactly ONCE: a condition with side effects (a poll that drains
    state) must not run twice, or the second evaluation fails silently while the first
    printed ok -- an invisible st_fail with no FAIL line anywhere. */
@@ -2406,12 +2411,12 @@ static void schema_advert_checks(void){
     for (t=0;t<800 && dart_topic_match_count(pc)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(dart_topic_match_count(pc)>0, "announce: typed match formed via detail exchange");
 
-    peers = dart_node_peers(S, &n_peers);   /* S's view of P */
+    peers = st_peers(S, &n_peers);   /* S's view of P */
     ST_CHECK(peers && n_peers==1, "announce: subscriber sees one peer (%u)", n_peers);
     if (peers && n_peers==1){
         DartInterestIter it; DartTopicEntry tp;
         memset(&it,0,sizeof it);
-        while (dart_node_peer_interest_next(&peers[0], &it, &tp)){
+        while (i_dart_node_peer_interest_next(&peers[0], &it, &tp)){
             if (!tp.is_pub) continue;
             if (tp.index==0 && tp.hash==pose_h && tp.role==DART_PUB_ONLY) pose_ok=1;
             if (tp.index==1 && tp.hash==raw_h  && tp.role==DART_PUB_ONLY) raw_ok=1;
@@ -2424,18 +2429,18 @@ static void schema_advert_checks(void){
             ST_CHECK(lc!=NULL, "announce: inactive topic created");
             for (t=0;t<200;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
             {   DartInterestIter it2; DartTopicEntry tp2; int seen=0;
-                peers = dart_node_peers(S, &n_peers);
+                peers = st_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
-                while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
+                while (i_dart_node_peer_interest_next(&peers[0], &it2, &tp2))
                     if (tp2.hash==late_h) seen=1;
                 ST_CHECK(!seen, "announce: inactive topic not advertised");
             }
             dart_topic_set_role(lc, DART_PUB_ONLY);
             for (t=0;t<400;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
             {   DartInterestIter it2; DartTopicEntry tp2; uint16_t late_alias=0xFFFF;
-                peers = dart_node_peers(S, &n_peers);
+                peers = st_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
-                while (dart_node_peer_interest_next(&peers[0], &it2, &tp2))
+                while (i_dart_node_peer_interest_next(&peers[0], &it2, &tp2))
                     if (tp2.is_pub && tp2.hash==late_h) late_alias=tp2.index;
                 ST_CHECK(late_alias==2, "announce: role flip advertises the held position (index %u)",
                          late_alias);
@@ -3690,7 +3695,7 @@ static void detail_live_checks(void){
 
     /* the oracle: the publisher's locator, version, and advertised topics as its v9
        blob (held by the subscriber) states them */
-    {   uint16_t cnt=0, k; const DartDiscoveryPeer *ps = dart_node_peers(S, &cnt);
+    {   uint16_t cnt=0, k; const DartDiscoveryPeer *ps = st_peers(S, &cnt);
         const DartDiscoveryPeer *pp = NULL;
         for (k=0;k<cnt;k++) if (ps[k].name.len==6 && memcmp(ps[k].name.data,"dt-pub",6)==0) pp=&ps[k];
         ST_CHECK(pp!=NULL, "detail-live: publisher in the peer view");
@@ -3700,7 +3705,7 @@ static void detail_live_checks(void){
             memset(&it,0,sizeof it);
             /* v10 entries carry 32-bit hashes only: bind each announced entry to the
                topic we created on P by hash, and expect the RESP to fill in the rest */
-            while (nw<4 && dart_node_peer_interest_next(pp, &it, &tp)){
+            while (nw<4 && i_dart_node_peer_interest_next(pp, &it, &tp)){
                 if (!tp.is_pub) continue;
                 oalias[nw] = tp.index;
                 if (tp.hash == (uint32_t)dart_topic_id("dt/pose")){
@@ -3723,45 +3728,53 @@ static void detail_live_checks(void){
         ST_CHECK(O != NULL, "detail-obs: observer node opens");
         if (O){
             uint32_t pid = 0;
-            DartString n0 = dart_string(NULL,0), n1 = dart_string(NULL,0);
+            int have_pose = 0, have_plain = 0, pose_typed = 0, plain_raw = 0;
             for (t=0;t<800;t++){
                 uint16_t cnt=0, k; const DartDiscoveryPeer *ops;
+                DartIter it; DartEntityInfo ei;
                 dart_node_poll(O,2); dart_node_poll(P,1); dart_node_poll(S,1);
-                ops = dart_node_peers(O, &cnt);
+                ops = st_peers(O, &cnt);
                 pid = 0;
                 for (k=0;k<cnt;k++)
                     if (ops[k].name.len==6 && memcmp(ops[k].name.data,"dt-pub",6)==0) pid = ops[k].id;
                 if (!pid) continue;
-                n0 = dart_node_peer_topic_name(O, pid, 0);
-                n1 = dart_node_peer_topic_name(O, pid, 1);
-                if (n0.data && n1.data) break;
+                have_pose = have_plain = 0;
+                memset(&it,0,sizeof it);
+                while (dart_node_entities_next(O, pid, &it, &ei)){
+                    if (ei.name.len==7 && memcmp(ei.name.data,"dt/pose",7)==0){
+                        have_pose = 1;
+                        pose_typed = ei.schema && ei.schema_hash==dart_schema_hash(W)
+                                     && dart_schema_hash(ei.schema)==ei.schema_hash;
+                    }
+                    if (ei.name.len==8 && memcmp(ei.name.data,"dt/plain",8)==0){
+                        have_plain = 1; plain_raw = !ei.schema && ei.schema_hash==0;
+                    }
+                }
+                if (have_pose && have_plain) break;
             }
-            ST_CHECK(n0.data && n0.len==7 && memcmp(n0.data,"dt/pose",7)==0
-                  && n1.data && n1.len==8 && memcmp(n1.data,"dt/plain",8)==0,
-                     "detail-obs: greedy cache resolves both topic names");
-            {   uint64_t h0=0, h1=1;
-                const DartSchema *s0 = dart_node_peer_topic_schema(O, pid, 0, &h0);
-                const DartSchema *s1 = dart_node_peer_topic_schema(O, pid, 1, &h1);
-                ST_CHECK(s0 && h0==dart_schema_hash(W) && dart_schema_hash(s0)==h0,
-                         "detail-obs: typed topic's schema cached parsed (hash matches)");
-                ST_CHECK(!s1 && h1==0, "detail-obs: raw topic cached untyped");
-            }
+            ST_CHECK(have_pose && have_plain, "detail-obs: greedy cache resolves both topic names");
+            ST_CHECK(pose_typed, "detail-obs: typed topic's schema cached parsed (hash matches)");
+            ST_CHECK(plain_raw, "detail-obs: raw topic cached untyped");
             /* the SUBSCRIBER is authoritative about ITS schema too: the observer fetches a
                SUB_ONLY topic's schema exactly like a publisher's (v10 detail exchange is
                role-agnostic). A subscriber-in-charge topic must show its schema. */
-            {   uint32_t sid = 0; const DartSchema *ss = NULL; uint64_t hs = 0;
+            {   uint32_t sid = 0; int sub_typed = 0;
                 for (t=0;t<800;t++){
                     uint16_t cnt=0, k; const DartDiscoveryPeer *ops;
+                    DartIter it; DartEntityInfo ei;
                     dart_node_poll(O,2); dart_node_poll(P,1); dart_node_poll(S,1);
-                    ops = dart_node_peers(O, &cnt);
+                    ops = st_peers(O, &cnt);
                     sid = 0;
                     for (k=0;k<cnt;k++)
                         if (ops[k].name.len==6 && memcmp(ops[k].name.data,"dt-sub",6)==0) sid = ops[k].id;
                     if (!sid) continue;
-                    ss = dart_node_peer_topic_schema(O, sid, 0, &hs);
-                    if (ss) break;
+                    memset(&it,0,sizeof it);
+                    while (dart_node_entities_next(O, sid, &it, &ei))
+                        if (ei.schema && ei.schema_hash==dart_schema_hash(W)
+                            && dart_schema_hash(ei.schema)==ei.schema_hash) sub_typed = 1;
+                    if (sub_typed) break;
                 }
-                ST_CHECK(ss && hs==dart_schema_hash(W) && dart_schema_hash(ss)==hs,
+                ST_CHECK(sub_typed,
                          "detail-obs: subscriber-only topic's schema fetched (subscriber authoritative)");
             }
             /* observe THEN subscribe (the explorer's flow): the greedy fetch dissolved
@@ -4069,7 +4082,7 @@ static void threaded_checks(void){
           /* lock/unlock smoke: bracket a peer-view read while the services run */
           { uint16_t cnt = 0;
             dart_node_lock(w);
-            (void)dart_node_peers(w, &cnt);
+            (void)st_peers(w, &cnt);
             dart_node_unlock(w);
             ST_CHECK(cnt >= 1, "lock: bracketed peer view reads (%u peers)", cnt);
           }
@@ -4738,12 +4751,12 @@ static void patterns_checks(void){
        no incomplete pairs. */
     for (t=0;t<200;t++) pf_pump(P,C,2);   /* let any straggling detail fetches settle */
     { const DartDiscoveryPeer *ps; uint16_t pc = 0; uint32_t pid = 0;
-      ps = dart_node_peers(C, &pc);
+      ps = st_peers(C, &pc);
       if (ps && pc) pid = ps[0].id;
-      { DartEntityIter eit; DartEntityInfo ei;
+      { DartIter eit; DartEntityInfo ei;
         int fns=0,vars=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
         memset(&eit,0,sizeof eit);
-        while (dart_node_peer_entity_next(C, pid, &eit, &ei)){
+        while (dart_node_entities_next(C, pid, &eit, &ei)){
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
@@ -4762,9 +4775,9 @@ static void patterns_checks(void){
         ST_CHECK(temp_rw==1 && rovar_ro==1, "reflect: writability (temp rw=%d, rovar ro=%d)", temp_rw, rovar_ro);
         ST_CHECK(temp_forceable==1 && rovar_forceable==0,
                  "reflect: forceability (temp allow_force=%d, rovar=%d)", temp_forceable, rovar_forceable); }
-      { DartEntityIter eit; DartEntityInfo ei; int fns=0,vars=0,tops=0,temp_forceable=0;
+      { DartIter eit; DartEntityInfo ei; int fns=0,vars=0,tops=0,temp_forceable=0;
         memset(&eit,0,sizeof eit);
-        while (dart_node_entity_next(P, &eit, &ei)){
+        while (dart_node_entities_next(P, DART_SELF, &eit, &ei)){
             switch (ei.kind){
             case DART_ENTITY_FUNCTION: fns++; break;
             case DART_ENTITY_VARIABLE:
@@ -5180,7 +5193,7 @@ static void txm_tap_on_msg(void *user, const DartMsg *msg){
 }
 static uint32_t txm_peer_by_name(DartNode *n, const char *name){
     uint16_t cnt, i; size_t nl = strlen(name);
-    const DartDiscoveryPeer *ps = dart_node_peers(n, &cnt);
+    const DartDiscoveryPeer *ps = st_peers(n, &cnt);
     if (!ps) return 0;
     for (i=0;i<cnt;i++)
         if (ps[i].name.len==nl && memcmp(ps[i].name.data,name,nl)==0) return ps[i].id;
@@ -5575,10 +5588,10 @@ static void taskx_checks(void){
       memset(&noc_e,0,sizeof noc_e); memset(&file_e,0,sizeof file_e);
       ST_CHECK(pid!=0, "taskx: provider peer visible at C1");
       for (tries=0; tries<400; tries++){   /* let straggling detail fetches settle */
-          DartEntityIter it; DartEntityInfo ei; size_t k;
+          DartIter it; DartEntityInfo ei; size_t k;
           tasks=others=ats=inc=0; have_mix=have_sel=have_noc=have_file=0;
           memset(&it,0,sizeof it);
-          while (dart_node_peer_entity_next(C1, pid, &it, &ei)){
+          while (dart_node_entities_next(C1, pid, &it, &ei)){
               if (ei.kind==DART_ENTITY_TASK) tasks++; else others++;
               inc += ei.incomplete;
               for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
@@ -5697,9 +5710,9 @@ static void dup_authority_checks(void){
         for (t=0;t<2000 && !seen;t++){
             const DartDiscoveryPeer *ps; uint16_t pc;
             pf_pump(A,B,2);
-            ps = dart_node_peers(B,&pc);
+            ps = st_peers(B,&pc);
             if (ps && pc){ DartInterestIter it; DartTopicEntry e; memset(&it,0,sizeof it);
-                while (dart_node_peer_interest_next(&ps[0], &it, &e))
+                while (i_dart_node_peer_interest_next(&ps[0], &it, &e))
                     if (e.hash==want){ seen=1; break; } }
         }
         ST_CHECK(seen, "dup: B holds A's interest"); }
@@ -5853,13 +5866,13 @@ static void reflect_dropped_checks(void){
     ST_CHECK(def != NULL, "ghost: variable definition created");
     { int ents = 0;
       for (t=0;t<2000 && !ents;t++){
-          DartEntityIter eit; DartEntityInfo ei; const DartDiscoveryPeer *ps; uint16_t pc;
+          DartIter eit; DartEntityInfo ei; const DartDiscoveryPeer *ps; uint16_t pc;
           pf_pump(A,B,2);
-          ps = dart_node_peers(B, &pc);
+          ps = st_peers(B, &pc);
           if (!(ps && pc)) continue;
           pid = ps[0].id;
           memset(&eit,0,sizeof eit);
-          while (dart_node_peer_entity_next(B, pid, &eit, &ei)) ents++;
+          while (dart_node_entities_next(B, pid, &eit, &ei)) ents++;
       }
       ST_CHECK(ents == 1, "ghost: live peer enumerates its entity (%d)", ents); }
 
@@ -5867,19 +5880,18 @@ static void reflect_dropped_checks(void){
     { uint64_t end = i_dart_plat_now_us() + 1200000u;   /* > peer_timeout */
       while (i_dart_plat_now_us() < end) dart_node_poll(B, 5); }
     { const DartDiscoveryPeer *ps; uint16_t pc, i; int dropped = 0;
-      ps = dart_node_peers(B, &pc);
+      ps = st_peers(B, &pc);
       for (i=0; ps && i<pc; i++)
           if (ps[i].id == pid && ps[i].liveness == DART_PEER_DROPPED) dropped = 1;
       ST_CHECK(dropped, "ghost: peer is DROPPED yet still listed (by design)"); }
-    { DartEntityIter eit; DartEntityInfo ei; int ents = 0;
+    { DartIter eit; DartEntityInfo ei; int ents = 0, mesh = 0;
       memset(&eit,0,sizeof eit);
-      while (dart_node_peer_entity_next(B, pid, &eit, &ei)) ents++;
-      ST_CHECK(ents == 0, "ghost: dropped peer REFUSED by the default walk (%d)", ents); }
-    { DartEntityIter eit; DartEntityInfo ei; int ents = 0;
+      while (dart_node_entities_next(B, pid, &eit, &ei)) ents++;
+      ST_CHECK(ents == 1, "ghost: the per-node walk serves the dropped peer's last view (%d)", ents);
       memset(&eit,0,sizeof eit);
-      eit.include_dropped = 1;
-      while (dart_node_peer_entity_next(B, pid, &eit, &ei)) ents++;
-      ST_CHECK(ents == 1, "ghost: include_dropped serves the last-known view (%d)", ents); }
+      while (dart_node_mesh_next(B, &eit, &ei))
+          if (ei.name.len==5 && !memcmp(ei.name.data,"gdial",5)) mesh++;
+      ST_CHECK(mesh == 0, "ghost: the mesh walk never counts a dropped peer (%d)", mesh); }
 
     dart_node_close(B,0);
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
@@ -5918,9 +5930,9 @@ static void varwait_checks(void){
       for (t=0;t<2000 && !seen;t++){
           const DartDiscoveryPeer *ps; uint16_t pc;
           pf_pump(P,C,2);
-          ps = dart_node_peers(C,&pc);
+          ps = st_peers(C,&pc);
           if (ps && pc){ DartInterestIter it; DartTopicEntry e; memset(&it,0,sizeof it);
-              while (dart_node_peer_interest_next(&ps[0], &it, &e))
+              while (i_dart_node_peer_interest_next(&ps[0], &it, &e))
                   if (e.hash==want){ seen=1; break; } }
       }
       ST_CHECK(seen, "varwait: C holds P's interest"); }
@@ -6407,7 +6419,7 @@ static void rly_on_message(const DartMsg *msg){
 /* is `name` an ACTIVE peer of n? (the peer view is discovery's own, valid until the next poll) */
 static int rly_sees(DartNode *n, const char *name){
     uint16_t c = 0, i; size_t nl = strlen(name);
-    const DartDiscoveryPeer *p = dart_node_peers(n, &c);
+    const DartDiscoveryPeer *p = st_peers(n, &c);
     for (i=0;i<c;i++)
         if (p[i].liveness == DART_PEER_ACTIVE && p[i].name.len == nl &&
             memcmp(p[i].name.data, name, nl) == 0) return 1;
@@ -6634,7 +6646,7 @@ static void nat_checks(void){
  * the arrival source, and surviving a relay hop) are pinned in disc_core_checks. */
 static int sip_addr_of(DartNode *n, const char *name, DartDiscoveryAddr *out){
     uint16_t c = 0, i; size_t nl = strlen(name);
-    const DartDiscoveryPeer *p = dart_node_peers(n, &c);
+    const DartDiscoveryPeer *p = st_peers(n, &c);
     for (i=0;i<c;i++)
         if (p[i].liveness == DART_PEER_ACTIVE && p[i].name.len == nl &&
             memcmp(p[i].name.data, name, nl) == 0){ *out = p[i].addr; return 1; }
@@ -7012,17 +7024,17 @@ static void interest_external_checks(void){
            set even though its announce carried no interest at all. The interest EPOCH
            is the observer cache key: nonzero once anything applied. */
         uint16_t cnt, k; int ents = 0; uint32_t pid = 0, epoch = 0;
-        const DartDiscoveryPeer *ps = dart_node_peers(S, &cnt);
+        const DartDiscoveryPeer *ps = st_peers(S, &cnt);
         for (k=0;k<cnt;k++)
             if (ps && ps[k].name.len==6 && !memcmp(ps[k].name.data,"ix-pub",6)){
-                pid = ps[k].id; epoch = dart_node_peer_interest_epoch(&ps[k]);
+                pid = ps[k].id; epoch = i_dart_node_peer_interest_epoch(&ps[k]);
             }
         ST_CHECK(pid!=0, "interest: publisher visible in the peer view");
         ST_CHECK(epoch>0, "interest: interest epoch advanced on assembly (%u)", epoch);
         if (pid){
-            DartEntityIter eit; DartEntityInfo ei;
+            DartIter eit; DartEntityInfo ei;
             memset(&eit,0,sizeof eit);
-            while (dart_node_peer_entity_next(S, pid, &eit, &ei))
+            while (dart_node_entities_next(S, pid, &eit, &ei))
                 ents++;   /* the @dart/ builtins are hidden from the walk */
             ST_CHECK(ents==IX_TOPICS, "interest: reflection enumerates all %d external entities (%d)",
                      IX_TOPICS, ents);
@@ -7043,9 +7055,9 @@ static void interest_external_checks(void){
     {   /* the epoch is quiet in steady state too: an epoch-keyed observer cache
            (the explorer) re-walks only on real change, never per announce */
         uint16_t cnt, k; uint32_t epoch_now = 0;
-        const DartDiscoveryPeer *ps = dart_node_peers(S, &cnt);
+        const DartDiscoveryPeer *ps = st_peers(S, &cnt);
         for (k=0;k<cnt;k++)
-            if (ps && ps[k].id==ix_epoch_pid) epoch_now = dart_node_peer_interest_epoch(&ps[k]);
+            if (ps && ps[k].id==ix_epoch_pid) epoch_now = i_dart_node_peer_interest_epoch(&ps[k]);
         ST_CHECK(ix_epoch_pid && epoch_now==ix_epoch,
                  "interest: epoch stable across steady state (%u -> %u)", ix_epoch, epoch_now);
     }
@@ -7122,7 +7134,7 @@ static void metalog_checks(void){
        service thread while B blocks in the call */
     { const DartDiscoveryPeer *ps; uint16_t cnt=0; uint32_t idA=0;
       DartResponse rep; int rc;
-      ps = dart_node_peers(B, &cnt);
+      ps = st_peers(B, &cnt);
       for (i=0;i<(int)cnt;i++)
           if (ps[i].name.len==6 && memcmp(ps[i].name.data,"meta-a",6)==0) idA = ps[i].id;
       ST_CHECK(idA != 0, "metalog: found A's peer id (%u)", idA);
@@ -7155,13 +7167,13 @@ static void metalog_checks(void){
 
       /* the builtins are hidden from reflection too: A's walks see only mirror-src,
          B hosts nothing visible at all */
-      { DartEntityIter eit; DartEntityInfo ei; int la=0, lb=0, pa=0;
+      { DartIter eit; DartEntityInfo ei; int la=0, lb=0, pa=0;
         memset(&eit,0,sizeof eit);
-        while (dart_node_entity_next(A, &eit, &ei)) la++;
+        while (dart_node_entities_next(A, DART_SELF, &eit, &ei)) la++;
         memset(&eit,0,sizeof eit);
-        while (dart_node_entity_next(B, &eit, &ei)) lb++;
+        while (dart_node_entities_next(B, DART_SELF, &eit, &ei)) lb++;
         memset(&eit,0,sizeof eit);
-        while (dart_node_peer_entity_next(B, idA, &eit, &ei)) pa++;
+        while (dart_node_entities_next(B, idA, &eit, &ei)) pa++;
         ST_CHECK(la==1 && lb==0 && pa==1,
                  "metalog: entity walks hide the builtins (A=%d B=%d peerA=%d)", la, lb, pa); }
 

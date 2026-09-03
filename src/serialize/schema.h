@@ -278,6 +278,9 @@ DartSchema *dart_schema_finish(DartSchemaBuilder *b);
 DartSchema *dart_schema_parse(const void *wire, size_t wire_len, DartAllocFn alloc, void *user);
 /* Free a schema from dart_schema_finish / dart_schema_parse (same hook it was made with). */
 void        dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user);
+/* An owned copy of any schema (a node-owned one you hold under the node lock, a
+ * compiled one): safe to keep and to hand to create. Free with dart_schema_free. */
+DartSchema *dart_schema_copy(const DartSchema *s, DartAllocFn alloc, void *user);
 
 DartBytes   dart_schema_wire(const DartSchema *s);        /* canonical bytes (advertise these) */
 uint64_t    dart_schema_hash(const DartSchema *s);        /* 64-bit identity (FNV-1a over wire) */

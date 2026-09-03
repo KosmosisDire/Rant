@@ -738,6 +738,8 @@ uint16_t  dart_transport_topic_hist_head(DartTransportState *st, uint16_t topic_
 
 /* The topic's qos as stored at init; NULL if unknown. */
 const DartQos *dart_transport_topic_qos(DartTransportState *st, uint16_t topic_index);
+/* The DART_ATTR_* byte this node declared for its own topic (0 = none / undefined). */
+uint8_t   dart_transport_topic_attrs(DartTransportState *st, uint16_t topic_index);
 
 /* 1 if appending here would overwrite history not yet acked by every subscriber. A
  * publisher pumps while this is 1, then sends anyway after qos.backpressure_wait_us. */

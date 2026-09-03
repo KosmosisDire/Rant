@@ -34,19 +34,33 @@ static uint64_t i_dart_func_reap(struct DartFunction *fn, uint64_t now,
                                  DartCallStatus fail_status, int all, uint32_t dest);
 /* duplicate-authority sweep for a just-created provider/owner (defined with the rest of
  * the detection, after both entity structs) */
-static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
-                                 int authority_is_pub, uint32_t **ids, uint16_t *n_ids,
-                                 uint16_t *cap);
-/* peer lookup + partner-hash helpers (defined with the reflection fold below; the task
- * layer uses them for caller_lo derivation and the cancel attrs check) */
-static const DartDiscoveryPeer *i_dart_pat_peer(DartNode *n, uint32_t peer);
-static uint32_t i_dart_pat_hash32(DartString base, const char *suffix);
-static int i_dart_pat_find_hash(const DartDiscoveryPeer *p, uint32_t hash,
-                                uint8_t kind, DartTopicEntry *out);
+static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, DartEntityKind kind,
+                                 uint32_t **ids, uint16_t *n_ids, uint16_t *cap);
 /* a peer's uuid low-32 (LE of the first 4 bytes): the task wire's caller discriminator */
 static uint32_t i_dart_pat_peer_lo(DartNode *n, uint32_t peer){
-    const DartDiscoveryPeer *p = i_dart_pat_peer(n, peer);
-    return p ? i_dart_le_r32(p->uuid) : 0;
+    const uint8_t *u = i_dart_node_peer_uuid(n, peer);
+    return u ? i_dart_le_r32(u) : 0;
+}
+
+/* the entity `channel` belongs to, as `peer` advertises it (1 + *out), by kind + base name */
+static int i_dart_pat_peer_entity(DartNode *n, uint32_t peer, DartTopic *channel, DartEntityKind kind,
+                                  DartEntityInfo *out){
+    DartString nm = i_dart_topic_name(channel);
+    DartIter it; size_t len = nm.len;
+    char buf[DART_TOPIC_NAME_MAX + 1]; uint32_t hash;
+    memcpy(buf, nm.data, nm.len); buf[nm.len] = '\0';
+    hash = (uint32_t)dart_topic_id(buf);           /* the primary channel's announce hash */
+    if (len >= 5 && nm.data[len - 4] == '@') len -= 4;
+    memset(&it, 0, sizeof it);
+    while (dart_node_entities_next(n, peer, &it, out)){
+        if (out->kind != kind) continue;
+        /* rivals never exchange details (no lane forms between two authorities), so the
+           peer's name may never arrive: the hash decides then, the fetched name otherwise */
+        if (out->name.len ? (out->name.len == len && memcmp(out->name.data, nm.data, len) == 0)
+                          : out->hash == hash)
+            return 1;
+    }
+    return 0;
 }
 
 /* Lazily create the manager and register the node-wide sys hooks. Lock held (a create call
@@ -228,6 +242,8 @@ struct DartFunction {
     uint8_t         multi;          /* DartFunctionOpts.multi: duplicate authority expected */
     uint32_t       *dup_peers;      /* provider: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
+    uint8_t         reflect;        /* created with reflect_from_mesh */
+    uint64_t        generation;     /* the mesh generation the schemas were taken at */
 };
 
 /* the transient request handed to the provider's handler: the public read-only head
@@ -481,6 +497,20 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
                                                                          : DART_PATTERN_BP_WAIT_US;
     fn = (DartFunction*)i_dart_pat_handle_new(n, sizeof *fn, &pm);
     if (!fn) return NULL;
+    if (opts && opts->reflect_from_mesh){
+        /* the caller writes @req and reads @rsp / @prg; a definition the reverse */
+        DartEntityKind ek = topts ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION;
+        const DartSchema *ms;
+        fn->reflect = 1;
+        i_dart_node_reflect_pick(n, ek, name, 0, !handles_req, &ms, NULL, &fn->generation);
+        if (!req_schema) req_schema = ms;
+        i_dart_node_reflect_pick(n, ek, name, 1, handles_req, &ms, NULL, NULL);
+        if (!rsp_schema) rsp_schema = ms;
+        if (topts){
+            i_dart_node_reflect_pick(n, ek, name, 2, handles_req, &ms, NULL, NULL);
+            if (!prg_schema) prg_schema = ms;
+        }
+    }
     fn->n = n; fn->pm = pm; fn->is_provider = (uint8_t)(mode == 1);
     fn->both = (uint8_t)(mode == 2);
     fn->multi = (uint8_t)(opts && opts->multi);
@@ -528,7 +558,7 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list (tick/event fanout) */
     fn->next = pm->funcs; pm->funcs = fn;
     if (handles_req && !fn->multi)   /* a rival provider may already be on the network */
-        i_dart_pat_dup_sweep(n, fn->req, req_kind, 0,
+        i_dart_pat_dup_sweep(n, fn->req, topts ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION,
                              &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     i_dart_node_sys_unlock(n, acquired);
     return fn;
@@ -545,6 +575,17 @@ DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
                     const DartFunctionOpts *opts){
     if (i_dart_pat_reserved(name)) return NULL;
     return i_dart_function_new(n, name, req_schema, rsp_schema, NULL, NULL, opts, 0, NULL, NULL);
+}
+
+/* a pattern channel's entity name: the topic name minus its "@xxx" suffix, in a static scratch
+ * (the callers use it before any other call that could reuse it) */
+static const char *i_dart_pat_base_name(DartTopic *channel){
+    static char buf[DART_TOPIC_NAME_MAX + 1];
+    DartString nm = i_dart_topic_name(channel);
+    size_t len = nm.len;
+    if (len >= 5 && nm.data[len - 4] == '@') len -= 4;
+    memcpy(buf, nm.data, len); buf[len] = '\0';
+    return buf;
 }
 
 /* the shared function fields of DartTaskOpts, lifted so the task constructors reuse the
@@ -695,6 +736,35 @@ int dart_function_retire(DartFunction *fn){
     i_dart_pat_release_channels(req, rsp);
     if (prg) (void)dart_topic_retire(prg);
     return DART_OK;
+}
+
+int dart_function_refresh(DartFunction *fn){
+    DartNode *n; DartEntityKind ek; uint64_t gen = 0; int acquired, r;
+    const DartSchema *rq = NULL, *rs = NULL, *pg = NULL;
+    if (!fn) return DART_ERR_NO_TOPIC;
+    if (!fn->reflect) return DART_ERR_ROLE;
+    n = fn->n; ek = fn->is_task ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION;
+    if (!i_dart_node_reflect_pick(n, ek, i_dart_pat_base_name(fn->req), 0, !fn->is_provider, &rq, NULL, &gen)
+        || gen == fn->generation) return 0;
+    i_dart_node_reflect_pick(n, ek, i_dart_pat_base_name(fn->req), 1, fn->is_provider, &rs, NULL, NULL);
+    if (fn->prg) i_dart_node_reflect_pick(n, ek, i_dart_pat_base_name(fn->req), 2, fn->is_provider, &pg, NULL, NULL);
+    /* every outstanding call gets its one outcome before the lanes go */
+    acquired = i_dart_node_sys_lock(n);
+    if (!acquired){ i_dart_node_sys_unlock(n, acquired); return DART_ERR_STATE; }
+    i_dart_func_drain_defers(fn, "provider re-typed");
+    while (fn->pending) i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1, 0);
+    i_dart_node_sys_unlock(n, acquired);
+    i_dart_node_flush_tx(n);
+    r = i_dart_topic_retype(fn->req, rq, DART_RELIABLE);
+    if (r != 0) return r;
+    r = i_dart_topic_retype(fn->rsp, rs, DART_RELIABLE);
+    if (r != 0) return r;
+    if (fn->prg){
+        r = i_dart_topic_retype(fn->prg, pg, i_dart_topic_reliability(fn->prg));
+        if (r != 0) return r;
+    }
+    fn->generation = gen;
+    return 1;
 }
 
 /* blocking-call response capture: copy the payload into the function's scratch, mark done.
@@ -926,13 +996,10 @@ int dart_function_cancel(DartFunction *fn, uint32_t call_id){
     {   /* the provider's declared attrs gate cancel LOCALLY: no CANCELLABLE bit = refuse
            with nothing sent (the read-only variable precedent). Its req-channel index is
            found by the channel-name hash + kind, like any partner walk. */
-        const DartDiscoveryPeer *peer = i_dart_pat_peer(fn->n, dest);
-        DartTopicEntry e;
-        uint8_t attrs = 0;
-        if (peer && i_dart_pat_find_hash(peer, i_dart_pat_hash32(i_dart_topic_name(fn->req), ""),
-                                         DART_KIND_TASK_REQ, &e))
-            attrs = i_dart_node_peer_attrs(fn->n, dest, e.index);
-        if (!(attrs & DART_ATTR_CANCELLABLE)){
+        DartEntityInfo ei;
+        int cancellable = i_dart_pat_peer_entity(fn->n, dest, fn->req, DART_ENTITY_TASK, &ei)
+                          && ei.cancellable;
+        if (!cancellable){
             i_dart_node_sys_unlock(fn->n, acquired);
             return DART_ERR_ROLE;
         }
@@ -1036,6 +1103,8 @@ struct DartVariable {
     uint64_t        last_written_us;   /* the writer's wall clock for that write (0 = unstamped) */
     uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
+    uint8_t         reflect;        /* created with reflect_from_mesh */
+    uint64_t        generation;     /* the mesh generation the schema was taken at */
 };
 
 /* copy v into a grown buffer; 0 on OOM (buffer unchanged) */
@@ -1201,6 +1270,12 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
 
     v = (DartVariable*)i_dart_pat_handle_new(n, sizeof *v, &pm);
     if (!v) return NULL;
+    if (opts && opts->reflect_from_mesh){
+        const DartSchema *ms;
+        v->reflect = 1;
+        i_dart_node_reflect_pick(n, DART_ENTITY_VARIABLE, name, 0, owner, &ms, NULL, &v->generation);
+        if (!schema) schema = ms;
+    }
     v->n = n; v->pm = pm; v->is_owner = (uint8_t)owner;
     v->allow_force = (uint8_t)(opts && opts->allow_force);
     v->readonly = (uint8_t)readonly;
@@ -1228,7 +1303,7 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list */
     v->next = pm->vars; pm->vars = v;
     if (owner)      /* a rival owner may already be on the network */
-        i_dart_pat_dup_sweep(n, v->value, DART_KIND_VARIABLE, 1,
+        i_dart_pat_dup_sweep(n, v->value, DART_ENTITY_VARIABLE,
                              &v->dup_peers, &v->dup_n, &v->dup_cap);
     i_dart_node_sys_unlock(n, acquired);
     if (owner && opts && opts->initial.len)   /* seed the store + history so a late accessor catches up */
@@ -1377,6 +1452,25 @@ int dart_variable_retire(DartVariable *var){
     return DART_OK;
 }
 
+int dart_variable_refresh(DartVariable *var){
+    DartNode *n; uint64_t gen = 0; int r;
+    const DartSchema *ms = NULL;
+    if (!var) return DART_ERR_NO_TOPIC;
+    if (!var->reflect) return DART_ERR_ROLE;
+    n = var->n;
+    if (!i_dart_node_reflect_pick(n, DART_ENTITY_VARIABLE, i_dart_pat_base_name(var->value), 0,
+                                  var->is_owner, &ms, NULL, &gen)
+        || gen == var->generation) return 0;
+    r = i_dart_topic_retype(var->value, ms, DART_RELIABLE);
+    if (r != 0) return r;
+    if (var->set){
+        r = i_dart_topic_retype(var->set, ms, DART_RELIABLE);
+        if (r != 0) return r;
+    }
+    var->generation = gen;
+    return 1;
+}
+
 int dart_variable_on_change(DartVariable *var, DartVariableUpdateFn on_change, void *user){
     int acquired;
     if (!var) return DART_ERR_NO_TOPIC;
@@ -1460,66 +1554,42 @@ static void i_dart_pat_dup_drop(uint32_t *ids, uint16_t *n_ids, uint32_t peer){
         if (ids[i] == peer){ ids[i] = ids[--*n_ids]; return; }
 }
 
-/* does peer advertise the authoritative direction of (hash, kind)? authority_is_pub says
- * which direction is the authority on that channel (a variable's value channel: pub; a
- * function's req channel: sub). */
-static int i_dart_pat_peer_claims(DartNode *n, const DartDiscoveryPeer *p, DartString our_name,
-                                  uint32_t hash, uint8_t kind, int authority_is_pub){
-    DartInterestIter it; DartTopicEntry e;
-    memset(&it, 0, sizeof it);
-    while (dart_node_peer_interest_next(p, &it, &e)){
-        int claims;
-        if (e.hash != hash || e.kind != kind) continue;
-        claims = authority_is_pub ? dart_role_pubs(e.role) : dart_role_subs(e.role);
-        if (!claims) continue;
-        {   /* the hash only nominates: confirm against the fetched name when we hold one */
-            DartString nm = dart_node_peer_topic_name(n, p->id, e.index);
-            if (nm.len && (nm.len != our_name.len
-                           || memcmp(nm.data, our_name.data, nm.len) != 0)) continue;
-        }
-        return 1;
-    }
-    return 0;
+/* check ONE authority-side entity against ONE active peer; report a fresh claim exactly once */
+static void i_dart_pat_dup_check(DartNode *n, uint32_t peer, DartTopic *primary, DartEntityKind kind,
+                                 uint32_t **ids, uint16_t *n_ids, uint16_t *cap){
+    DartEntityInfo ei;
+    if (!primary) return;
+    if (i_dart_pat_dup_reported(*ids, *n_ids, peer)) return;
+    if (!i_dart_pat_peer_entity(n, peer, primary, kind, &ei) || !ei.provides) return;
+    i_dart_pat_dup_remember(n, ids, n_ids, cap, peer);
+    i_dart_node_sys_error(n, DART_E_DUPLICATE_AUTHORITY, primary, peer);
 }
 
-/* check ONE authority-side entity against ONE peer; report a fresh claim exactly once */
-static void i_dart_pat_dup_check(DartNode *n, const DartDiscoveryPeer *p, DartTopic *primary,
-                                 uint8_t kind, int authority_is_pub,
-                                 uint32_t **ids, uint16_t *n_ids, uint16_t *cap){
-    DartString nm;
-    if (!primary || p->liveness != DART_PEER_ACTIVE) return;
-    if (i_dart_pat_dup_reported(*ids, *n_ids, p->id)) return;
-    nm = i_dart_topic_name(primary);
-    if (!i_dart_pat_peer_claims(n, p, nm, i_dart_pat_hash32(nm, ""), kind, authority_is_pub))
-        return;
-    i_dart_pat_dup_remember(n, ids, n_ids, cap, p->id);
-    i_dart_node_sys_error(n, DART_E_DUPLICATE_AUTHORITY, primary, p->id);
+static DartEntityKind i_dart_pat_fn_entity_kind(const DartFunction *fn){
+    return fn->is_task ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION;
 }
 
 /* every authority-side entity vs one peer whose interest was just (re)applied */
 static void i_dart_pat_dup_check_peer(i_DartPatterns *pm, uint32_t peer){
-    const DartDiscoveryPeer *p = i_dart_pat_peer(pm->n, peer);
     DartFunction *fn; DartVariable *v;
-    if (!p) return;
     for (fn = pm->funcs; fn; fn = fn->next)
         if ((fn->is_provider || fn->both) && !fn->multi)   /* multi: rivals are the design */
-            i_dart_pat_dup_check(pm->n, p, fn->req, i_dart_topic_kind(fn->req), 0,
+            i_dart_pat_dup_check(pm->n, peer, fn->req, i_dart_pat_fn_entity_kind(fn),
                                  &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     for (v = pm->vars; v; v = v->next)
         if (v->is_owner)
-            i_dart_pat_dup_check(pm->n, p, v->value, DART_KIND_VARIABLE, 1,
+            i_dart_pat_dup_check(pm->n, peer, v->value, DART_ENTITY_VARIABLE,
                                  &v->dup_peers, &v->dup_n, &v->dup_cap);
 }
 
-/* a just-created authority-side entity vs every known peer (create-time sweep) */
-static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, uint8_t kind,
-                                 int authority_is_pub, uint32_t **ids, uint16_t *n_ids,
-                                 uint16_t *cap){
-    uint16_t cnt, i;
-    const DartDiscoveryPeer *ps = dart_node_peers(n, &cnt);
-    if (!ps) return;
-    for (i = 0; i < cnt; i++)
-        i_dart_pat_dup_check(n, &ps[i], primary, kind, authority_is_pub, ids, n_ids, cap);
+/* a just-created authority-side entity vs every active peer (create-time sweep) */
+static void i_dart_pat_dup_sweep(DartNode *n, DartTopic *primary, DartEntityKind kind,
+                                 uint32_t **ids, uint16_t *n_ids, uint16_t *cap){
+    DartIter it; DartPeerInfo p;
+    memset(&it, 0, sizeof it);
+    while (dart_node_peers_next(n, &it, &p))
+        if (p.liveness == DART_PEER_ACTIVE)
+            i_dart_pat_dup_check(n, p.id, primary, kind, ids, n_ids, cap);
 }
 
 static void i_dart_pat_dup_forget_peer(i_DartPatterns *pm, uint32_t peer){
@@ -1656,318 +1726,3 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
     }
 }
 
-/* ---- REFLECTION: the entity fold ---------------------------------------------------------
- * Observers consume entities, never channels. One raw interest entry per index (the walk's
- * pub/sub double-yield collapsed via entry.role); pattern channels fold by their kind plus
- * the @-suffix convention, with partners located by the LOW-32 HASH of the expected partner
- * name so pairing works from the announce alone once the primary's name is fetched. */
-
-/* the first entry with index >= it->next_index, resuming the walk's persistent cursor
- * (entries are yielded in index order; the pub/sub double-yield collapses because
- * entry.role already covers both directions). An interest change mid-walk (epoch bump)
- * reseeks from the front, matching the old restart-per-call behavior. */
-static int i_dart_pat_entry_from(const DartDiscoveryPeer *p, DartEntityIter *it, DartTopicEntry *out){
-    uint32_t ep = dart_node_peer_interest_epoch(p);
-    if (it->epoch != ep){
-        memset(&it->pos, 0, sizeof it->pos);
-        it->epoch = ep;
-    }
-    while (dart_node_peer_interest_next(p, &it->pos, out))
-        if (out->index >= it->next_index) return 1;
-    return 0;
-}
-
-/* find an entry by (low-32 name hash, kind); 1 + *out on a hit. The ONE way a partner
- * channel is located: correct wherever the peer ordered its topics, so the fold never
- * depends on the pair having been created back to back. */
-static int i_dart_pat_find_hash(const DartDiscoveryPeer *p, uint32_t hash,
-                                uint8_t kind, DartTopicEntry *out){
-    DartInterestIter it; DartTopicEntry e;
-    memset(&it, 0, sizeof it);
-    while (dart_node_peer_interest_next(p, &it, &e))
-        if (e.hash == hash && e.kind == kind){ *out = e; return 1; }
-    return 0;
-}
-
-/* low-32 identity hash of base+suffix (suffix may be "") */
-static uint32_t i_dart_pat_hash32(DartString base, const char *suffix){
-    char buf[DART_TOPIC_NAME_MAX + 1]; size_t sl = strlen(suffix);
-    if (base.len + sl > DART_TOPIC_NAME_MAX) return 0;
-    memcpy(buf, base.data, base.len);
-    memcpy(buf + base.len, suffix, sl + 1);
-    return (uint32_t)dart_topic_id(buf);
-}
-
-/* strip a 4-byte "@xxx" suffix; 1 + *out when name ends with it */
-static int i_dart_pat_strip(DartString name, const char *suffix, DartString *out){
-    if (name.len < 5 || memcmp(name.data + name.len - 4, suffix, 4) != 0) return 0;
-    out->data = name.data; out->len = name.len - 4;
-    return 1;
-}
-
-/* The "@dart/" builtins every node hosts (the log topics + the meta function) are
-   infrastructure, not application entities: both entity walks hide them. Peer entries
-   are filtered by channel hash so the verdict never depends on detail-fetch state;
-   local handles always have names. A leading '@' is refused in every public
-   constructor (create_impl already refuses '@' anywhere in a plain topic name), so
-   an application entity can never land in the hidden namespace. */
-static int i_dart_pat_hidden_name(DartString nm){
-    return nm.len >= 6 && memcmp(nm.data, "@dart/", 6) == 0;
-}
-static int i_dart_pat_hidden_hash(uint32_t h){
-    static const char *const nm[] = { "@dart/log/error", "@dart/log/warn", "@dart/log/info",
-                                      "@dart/meta@req", "@dart/meta@rsp" };
-    size_t i;
-    for (i = 0; i < sizeof nm / sizeof nm[0]; i++)
-        if (h == (uint32_t)dart_topic_id(nm[i])) return 1;
-    return 0;
-}
-
-static const DartDiscoveryPeer *i_dart_pat_peer(DartNode *n, uint32_t peer){
-    uint16_t cnt, i;
-    const DartDiscoveryPeer *ps = dart_node_peers(n, &cnt);
-    if (!ps) return NULL;
-    for (i = 0; i < cnt; i++)
-        if (ps[i].id == peer) return &ps[i];
-    return NULL;
-}
-
-static void i_dart_pat_fill(DartNode *n, uint32_t peer, DartEntityInfo *out, DartEntityKind kind,
-                            DartString name, const DartTopicEntry *e){
-    uint8_t attrs;
-    memset(out, 0, sizeof *out);
-    out->kind = kind;
-    out->name = name;
-    out->reliable = e->reliable;
-    out->index = e->index;
-    out->hash = e->hash;
-    out->provides = (uint8_t)dart_role_pubs(e->role);
-    out->consumes = (uint8_t)dart_role_subs(e->role);
-    /* attrs ride the detail exchange (0 until details arrive, like the name) */
-    attrs = i_dart_node_peer_attrs(n, peer, e->index);
-    out->forceable   = (uint8_t)((attrs & DART_ATTR_FORCEABLE)   ? 1 : 0);
-    out->cancellable = (uint8_t)((attrs & DART_ATTR_CANCELLABLE) ? 1 : 0);
-    out->exclusive   = (uint8_t)((attrs & DART_ATTR_EXCLUSIVE)   ? 1 : 0);
-    out->multi       = (uint8_t)((attrs & DART_ATTR_MULTI)       ? 1 : 0);
-    out->schema = dart_node_peer_topic_schema(n, peer, e->index, &out->schema_hash);
-}
-
-int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out){
-    const DartDiscoveryPeer *p;
-    DartTopicEntry e, partner;
-    DartString name, base;
-    if (!n || !it || !out) return 0;
-    p = i_dart_pat_peer(n, peer);
-    if (!p) return 0;
-    /* a DROPPED peer's cached entities are its DEAD incarnation's: refused unless the
-       caller opted in (see core.h), so liveness gating cannot be forgotten */
-    if (p->liveness != DART_PEER_ACTIVE && !it->include_dropped) return 0;
-    for (;;){
-        if (!i_dart_pat_entry_from(p, it, &e)) return 0;
-        it->next_index = (uint16_t)(e.index + 1);
-        if (i_dart_pat_hidden_hash(e.hash)) continue;   /* builtins never surface */
-        name = dart_node_peer_topic_name(n, peer, e.index);   /* {NULL,0} until details arrive */
-        switch (e.kind){
-        case DART_KIND_TOPIC:
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_TOPIC, name, &e);
-            return 1;
-        case DART_KIND_VARIABLE:
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
-            /* the value channel is the bare name: a same-peer "<name>@set" VAR_SET entry
-               makes it writable (unknowable until the name is fetched: shown unwritable) */
-            if (name.len)
-                out->writable = (uint8_t)i_dart_pat_find_hash(p, i_dart_pat_hash32(name, "@set"),
-                                                              DART_KIND_VAR_SET, &partner);
-            return 1;
-        case DART_KIND_VAR_SET:
-            /* secondary: consumed by its bare-name VARIABLE entry when both are advertised */
-            if (!name.len){   /* not yet identifiable: surface, never silently drop */
-                i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE, name, &e);
-                out->incomplete = 1;
-                return 1;
-            }
-            if (i_dart_pat_strip(name, "@set", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, ""), DART_KIND_VARIABLE, &partner))
-                continue;   /* folded into the value entity */
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_VARIABLE,
-                            i_dart_pat_strip(name, "@set", &base) ? base : name, &e);
-            out->writable = 1; out->incomplete = 1;   /* a set channel with no value channel */
-            /* a set channel's SUB side is the owner (it receives writes) */
-            out->provides = (uint8_t)dart_role_subs(e.role);
-            out->consumes = (uint8_t)dart_role_pubs(e.role);
-            return 1;
-        case DART_KIND_FUNC_REQ:
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION, name, &e);
-            /* the req channel's SUB side is the provider */
-            out->provides = (uint8_t)dart_role_subs(e.role);
-            out->consumes = (uint8_t)dart_role_pubs(e.role);
-            if (name.len && i_dart_pat_strip(name, "@req", &base)){
-                out->name = base;
-                if (i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@rsp"), DART_KIND_FUNC_RSP,
-                                         &partner))
-                    out->rsp_schema = dart_node_peer_topic_schema(n, peer, partner.index,
-                                                                  &out->rsp_schema_hash);
-                else out->incomplete = 1;   /* half a function advertised */
-            } else {
-                out->incomplete = 1;        /* name unfetched (partner unknowable yet), or a
-                                               FUNC_REQ kind without the @req convention */
-            }
-            return 1;
-        case DART_KIND_FUNC_RSP:
-            /* secondary: consumed by its @req twin when both are advertised */
-            if (!name.len){
-                i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION, name, &e);
-                out->incomplete = 1;
-                return 1;
-            }
-            if (i_dart_pat_strip(name, "@rsp", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@req"), DART_KIND_FUNC_REQ, &partner))
-                continue;   /* folded into the function entity */
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_FUNCTION,
-                            i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
-            out->incomplete = 1;
-            /* the rsp channel's PUB side is the provider */
-            out->provides = (uint8_t)dart_role_pubs(e.role);
-            out->consumes = (uint8_t)dart_role_subs(e.role);
-            out->rsp_schema = out->schema; out->rsp_schema_hash = out->schema_hash;
-            out->schema = NULL; out->schema_hash = 0;
-            return 1;
-        case DART_KIND_TASK_REQ:
-            /* the task's primary, as FUNC_REQ: the SUB side is the provider; the @rsp and
-               @prg partners fold in, a missing one marks the pair incomplete. The attrs
-               (cancellable/exclusive/multi) already decoded from this REQ index. */
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_TASK, name, &e);
-            out->provides = (uint8_t)dart_role_subs(e.role);
-            out->consumes = (uint8_t)dart_role_pubs(e.role);
-            if (name.len && i_dart_pat_strip(name, "@req", &base)){
-                out->name = base;
-                if (i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@rsp"), DART_KIND_TASK_RSP,
-                                         &partner))
-                    out->rsp_schema = dart_node_peer_topic_schema(n, peer, partner.index,
-                                                                  &out->rsp_schema_hash);
-                else out->incomplete = 1;
-                if (i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@prg"), DART_KIND_TASK_PRG,
-                                         &partner))
-                    out->progress_schema = dart_node_peer_topic_schema(n, peer, partner.index,
-                                                                       &out->progress_schema_hash);
-                else out->incomplete = 1;
-            } else {
-                out->incomplete = 1;   /* name unfetched, or a TASK_REQ without the convention */
-            }
-            return 1;
-        case DART_KIND_TASK_RSP:
-            /* secondary: consumed by its @req twin when both are advertised */
-            if (!name.len){
-                i_dart_pat_fill(n, peer, out, DART_ENTITY_TASK, name, &e);
-                out->incomplete = 1;
-                return 1;
-            }
-            if (i_dart_pat_strip(name, "@rsp", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@req"), DART_KIND_TASK_REQ, &partner))
-                continue;   /* folded into the task entity */
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_TASK,
-                            i_dart_pat_strip(name, "@rsp", &base) ? base : name, &e);
-            out->incomplete = 1;
-            out->provides = (uint8_t)dart_role_pubs(e.role);
-            out->consumes = (uint8_t)dart_role_subs(e.role);
-            out->rsp_schema = out->schema; out->rsp_schema_hash = out->schema_hash;
-            out->schema = NULL; out->schema_hash = 0;
-            return 1;
-        case DART_KIND_TASK_PRG:
-            /* secondary: consumed by its @req twin when both are advertised */
-            if (!name.len){
-                i_dart_pat_fill(n, peer, out, DART_ENTITY_TASK, name, &e);
-                out->incomplete = 1;
-                return 1;
-            }
-            if (i_dart_pat_strip(name, "@prg", &base)
-                && i_dart_pat_find_hash(p, i_dart_pat_hash32(base, "@req"), DART_KIND_TASK_REQ, &partner))
-                continue;   /* folded into the task entity */
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_TASK,
-                            i_dart_pat_strip(name, "@prg", &base) ? base : name, &e);
-            out->incomplete = 1;
-            /* the prg channel's PUB side is the provider */
-            out->provides = (uint8_t)dart_role_pubs(e.role);
-            out->consumes = (uint8_t)dart_role_subs(e.role);
-            out->progress_schema = out->schema; out->progress_schema_hash = out->schema_hash;
-            out->schema = NULL; out->schema_hash = 0;
-            return 1;
-        default:   /* an unknown future kind: surface it, do not render it as a plain topic */
-            i_dart_pat_fill(n, peer, out, DART_ENTITY_TOPIC, name, &e);
-            out->incomplete = 1;
-            return 1;
-        }
-    }
-}
-
-/* local enumeration: this node's own entities (functions and variables, then the plain
- * topics that are not pattern internals), from the manager lists + the handle table */
-int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out){
-    i_DartPatterns *pm;
-    uint16_t skip;
-    if (!n || !it || !out) return 0;
-    pm = (i_DartPatterns*)*i_dart_node_sys_slot(n);
-    for (;;){
-        switch (it->phase){
-        case 0: {   /* functions */
-            DartFunction *fn = pm ? pm->funcs : NULL;
-            for (skip = it->next_index; fn && skip; skip--) fn = fn->next;
-            if (!fn){ it->phase = 1; it->next_index = 0; continue; }
-            it->next_index++;
-            if (i_dart_pat_hidden_name(i_dart_topic_name(fn->req))) continue;
-            memset(out, 0, sizeof *out);
-            out->kind = fn->is_task ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION;
-            { DartString nm = i_dart_topic_name(fn->req), base;
-              out->name = i_dart_pat_strip(nm, "@req", &base) ? base : nm; }
-            out->provides = fn->is_provider; out->consumes = (uint8_t)!fn->is_provider;
-            out->reliable = 1;
-            out->index = dart_topic_index(fn->req);
-            out->schema = dart_topic_schema(fn->req);
-            out->rsp_schema = dart_topic_schema(fn->rsp);
-            if (fn->is_task){   /* the local handle's own declared facts */
-                out->progress_schema = fn->prg ? dart_topic_schema(fn->prg) : NULL;
-                out->cancellable = (uint8_t)!fn->no_cancel;
-                out->exclusive = fn->exclusive;
-            }
-            out->multi = fn->multi;
-            return 1;
-        }
-        case 1: {   /* variables */
-            DartVariable *v = pm ? pm->vars : NULL;
-            for (skip = it->next_index; v && skip; skip--) v = v->next;
-            if (!v){ it->phase = 2; it->next_index = 0; continue; }
-            it->next_index++;
-            if (i_dart_pat_hidden_name(i_dart_topic_name(v->value))) continue;
-            memset(out, 0, sizeof *out);
-            out->kind = DART_ENTITY_VARIABLE;
-            out->name = i_dart_topic_name(v->value);
-            out->provides = v->is_owner; out->consumes = (uint8_t)!v->is_owner;
-            out->reliable = 1;
-            out->writable = (uint8_t)(v->is_owner ? !v->readonly : 1);
-            out->forceable = (uint8_t)(v->is_owner && v->allow_force);
-            out->index = dart_topic_index(v->value);
-            out->schema = dart_topic_schema(v->value);
-            return 1;
-        }
-        default: {  /* plain topics (pattern channels are covered by the lists above) */
-            uint16_t count = i_dart_node_topic_count(n);
-            while (it->next_index < count){
-                DartTopic *t = dart_node_topic(n, it->next_index);
-                it->next_index++;
-                if (!t || i_dart_topic_kind(t) != DART_KIND_TOPIC
-                       || i_dart_pat_hidden_name(i_dart_topic_name(t))) continue;
-                memset(out, 0, sizeof *out);
-                out->kind = DART_ENTITY_TOPIC;
-                out->name = i_dart_topic_name(t);
-                { uint8_t role = i_dart_topic_role(t);
-                  out->provides = (uint8_t)dart_role_pubs(role);
-                  out->consumes = (uint8_t)dart_role_subs(role); }
-                out->index = (uint16_t)(it->next_index - 1);
-                out->schema = dart_topic_schema(t);
-                return 1;
-            }
-            return 0;
-        }
-        }
-    }
-}

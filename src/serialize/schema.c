@@ -803,6 +803,13 @@ DartSchema *dart_schema_parse(const void *wire, size_t wire_len, DartAllocFn all
     return s;
 }
 
+DartSchema *dart_schema_copy(const DartSchema *s, DartAllocFn alloc, void *user){
+    DartBytes w;
+    if (!s || !alloc) return NULL;
+    w = dart_schema_wire(s);
+    return dart_schema_parse(w.data, w.len, alloc, user);
+}
+
 void dart_schema_free(DartSchema *s, DartAllocFn alloc, void *user){
     if (s && alloc) alloc(user, (void *)s->wire.data, 0);    /* wire.data is the block base */
 }

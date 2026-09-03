@@ -111,6 +111,11 @@ typedef struct {
                                        replies. Raise it above the most requests one poll pass
                                        can drain, or replies past the depth are lost and the
                                        callers see a timeout. */
+    uint8_t  reflect_from_mesh;     /* NULL schemas take the entity's from the mesh (a caller
+                                       writes @req with the widest schema the provider accepts
+                                       and reads @rsp with the provider's); dart_function_refresh
+                                       re-types the handle when that moves. A schema you pass
+                                       always wins. */
     uint8_t  multi;                 /* many definitions of this function are EXPECTED, so the
                                        duplicate-authority diagnostic is suppressed for it.
                                        Direct a call at one definition with DartCallOpts
@@ -190,6 +195,10 @@ int  dart_function_match_count(DartFunction *fn);
  * a definition. Returns DART_OK; DART_ERR_STATE from inside a callback (the role flip
  * would rematch lanes mid-delivery), and the handle then remains valid. */
 int  dart_function_retire(DartFunction *fn);
+/* A reflect_from_mesh handle: re-read the mesh and, if the entity's generation moved, re-type
+ * every channel IN PLACE (same handle; outstanding calls are answered CANCELLED first).
+ * 1 = re-typed, 0 = current, negative on error (DART_ERR_ROLE without the flag). */
+int  dart_function_refresh(DartFunction *fn);
 
 /* ---- the built-in @dart/meta introspection endpoint ----------------------------------
  * Every node (patterns compiled in, opts.disable_meta off) hosts a "@dart/meta" function
@@ -246,6 +255,7 @@ typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = DART_PATTERN_BP_WAIT_US */
     uint16_t keep_last;             /* req + rsp history depth, as DartFunctionOpts.keep_last
                                        (progress_keep_last covers the prg channel) */
+    uint8_t  reflect_from_mesh;     /* as DartFunctionOpts.reflect_from_mesh, for all three channels */
 } DartTaskOpts;
 
 /* Create the DEFINITION (the implementation lives here) or a REMOTE, exactly as for a
@@ -308,6 +318,8 @@ typedef struct {
                                       outrun repair, or when catch_up is deeper (a catch_up past the
                                       ring truncates); lower it to pin less on a big value */
     uint32_t  backpressure_wait_us;/* 0 = DART_PATTERN_BP_WAIT_US */
+    uint8_t   reflect_from_mesh;   /* a NULL schema takes the variable's from the mesh (the owner's);
+                                      dart_variable_refresh re-types the handle when that moves */
 } DartVariableOpts;
 
 /* Create the DEFINITION (this node holds the authoritative value) or a REMOTE (the value
@@ -391,90 +403,8 @@ int  dart_variable_match_count(DartVariable *var);
  * index maps bind a name to ONE local topic, preferring the oldest active one). Same
  * contract as dart_function_retire. */
 int  dart_variable_retire(DartVariable *var);
-
-/* ---- REFLECTION (entity enumeration) -------------------------------------------------
- * The canonical way to see what exists on the network. Observers consume ENTITIES, never
- * channels: pattern channels (f@req, t@prg, v@set, ...) are folded back into the function,
- * task or variable they implement and never escape this iterator as raw topics, so no tool
- * ever reimplements the name-mangling or kind rules. Everything is derived from what the
- * wire already carries (kind bits in the announce, names + schemas + attrs from the detail
- * cache): there is no reflection protocol, and a peer built without the patterns layer
- * reflects identically. A tool built WITHOUT this layer hides pattern internals by skipping
- * interest entries whose kind != DART_KIND_TOPIC. */
-typedef enum {
-    DART_ENTITY_TOPIC = 0,
-    DART_ENTITY_FUNCTION,
-    DART_ENTITY_VARIABLE,
-    DART_ENTITY_TASK
-} DartEntityKind;
-
-/* One entity as advertised by a peer (or hosted locally). Views follow the same rules as
- * dart_node_peer_topic_name: valid until the next poll; bracket with dart_node_lock when a
- * poller runs on another thread. name is the BASE name with any @-mangling stripped;
- * {NULL,0} until the peer's details are fetched (show the hash-pending state, as for topics). */
-typedef struct {
-    DartEntityKind    kind;
-    DartString        name;
-    uint8_t           provides;    /* they are the data source side: topic publisher / function
-                                      provider / variable owner */
-    uint8_t           consumes;    /* they are the sink side: subscriber / caller / accessor */
-    uint8_t           reliable;    /* the primary channel's advertised reliability */
-    uint8_t           writable;    /* VARIABLE: a @set channel is advertised alongside the value */
-    uint8_t           forceable;   /* VARIABLE: the owner permits force/unforce (allow_force); a
-                                      writable variable without it silently absorbs force ops */
-    uint8_t           incomplete;  /* a pattern half-pair (partner channel missing or not yet
-                                      identifiable): surfaced, never silently dropped */
-    uint16_t          index;       /* the primary channel's index at the peer (the key for the
-                                      dart_node_peer_topic_* queries) */
-    uint32_t          hash;        /* the primary channel's low-32 name hash: the placeholder an
-                                      observer shows while name is still {NULL,0} (details paging) */
-    const DartSchema *schema;      /* value/request/payload schema (NULL = untyped or unfetched) */
-    uint64_t          schema_hash;
-    const DartSchema *rsp_schema;  /* FUNCTION/TASK: the response schema */
-    uint64_t          rsp_schema_hash;
-    const DartSchema *progress_schema;  /* TASK only: the @prg channel's schema */
-    uint64_t          progress_schema_hash;
-    uint8_t           cancellable; /* TASK: the provider honors cancel (attrs; default on) */
-    uint8_t           exclusive;   /* TASK: declared serialization (attrs) */
-    uint8_t           multi;       /* authority kinds: duplicate authority is intended (attrs) */
-} DartEntityInfo;
-
-/* Iterator: zero-initialize, then call until 0. include_dropped is the ONE input field
- * (set it before the first call if you want it); the rest is internal walk state, not for
- * direct use. The peer walk keeps a persistent overlay cursor, so enumerating a peer's
- * entities costs one pass over its interest list, not one pass per yielded entity; a
- * pattern partner is found by the low-32 hash of its expected name, wherever the peer
- * ordered it. epoch keys the cursor to dart_node_peer_interest_epoch: an interest change
- * mid-walk reseeks safely. */
-typedef struct {
-    uint16_t next_index;
-    uint8_t  phase;
-    uint8_t  has_prev;          /* unused walk scratch, kept so the struct layout stays
-                                   byte-exact for anything mirroring it by hand */
-    uint8_t  include_dropped;   /* peer walk: also serve a DROPPED (silent, resumable) peer's
-                                   last-known entities. Zero-init = refuse them (see below). */
-    uint32_t epoch;
-    DartInterestIter pos;
-    DartTopicEntry   prev;      /* unused walk scratch (see has_prev) */
-} DartEntityIter;
-
-/* Walk the entities a PEER advertises, one per call: plain topics pass through, pattern
- * channels fold (a function's @req/@rsp pair yields ONE function entity; a variable's @set
- * merges into its value entity as `writable`). Names and schemas come from the detail cache,
- * so an observer wanting full coverage runs with opts.fetch_details like the explorer does.
- * Returns 1 and fills *out, or 0 at the end / unknown peer.
- * A DROPPED peer (silent past peer_timeout_us, kept for a same-uuid resume until
- * gone_timeout_us) is REFUSED by default: its slot still enumerates in dart_node_peers and
- * this walk would happily serve its dead incarnation's cached names and schemas, so after
- * every restart the ghost's stale entities would stand beside (and race) the live
- * incarnation's until the ghost is promoted GONE. An observer that WANTS the last-known
- * view of a silent peer (the explorer's ghost display) sets it->include_dropped = 1 before
- * the first call and gates on liveness itself. */
-int dart_node_peer_entity_next(DartNode *n, uint32_t peer, DartEntityIter *it, DartEntityInfo *out);
-
-/* Walk the entities THIS node hosts (its own functions and variables, then its plain
- * topics), same shape. Local names/schemas are stable for the entity's lifetime. */
-int dart_node_entity_next(DartNode *n, DartEntityIter *it, DartEntityInfo *out);
+/* As dart_function_refresh, for a reflect_from_mesh variable. */
+int  dart_variable_refresh(DartVariable *var);
 
 #ifdef __cplusplus
 }

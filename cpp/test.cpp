@@ -350,7 +350,7 @@ static bool patterns_leg() {
     for (const auto& p : b.peers()) {
         if (p.name != "PA") continue;
         peer_seen = true;
-        auto es = b.peer_entities(p.id);
+        auto es = b.entities(p.id);
         const dart::Entity* e = find(es, dart::EntityKind::Function, "add");
         peer_fn = e && e->provides;
     }
@@ -872,15 +872,15 @@ static bool tasks_leg() {
     bool peer_task = false, attrs_ok = false, no_cancel_ok = false, prg_schema_ok = false;
     for (const auto& p : b.peers()) {
         if (p.name != "KA") continue;
-        auto es = b.peer_entities(p.id);
+        auto es = b.entities(p.id);
         const dart::Entity* mv = find(es, dart::EntityKind::Task, "move");
         const dart::Entity* fx = find(es, dart::EntityKind::Task, "fixed");
         peer_task     = mv && fx && mv->provides;
         attrs_ok      = mv && mv->cancellable && !mv->exclusive;
         no_cancel_ok  = fx && !fx->cancellable;
-        prg_schema_ok = mv && mv->progress_schema_hash != 0
+        prg_schema_ok = mv && mv->progress_schema.hash() != 0
                         && !mv->progress_schema.empty()
-                        && mv->progress_schema.name == "MoveProgress";
+                        && mv->progress_schema.name() == "MoveProgress";
     }
     chk("reflect: peer task entities fold", peer_task);
     chk("reflect: cancellable attr surfaced", attrs_ok);

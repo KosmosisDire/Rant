@@ -328,6 +328,12 @@ namespace priv {
 inline detail::DartBytes  to_c(Bytes b) { return detail::dart_bytes(b.data(), b.size()); }
 }
 
+/* reflect_from_mesh: pass it where a constructor takes a schema pointer, and the handle takes
+ * what you left unspecified from the mesh (a reader its provider's schema, a writer the widest
+ * every reader accepts, a zero reliability the provider's). refresh() re-types it later. */
+struct reflect_from_mesh_t { explicit reflect_from_mesh_t() = default; };
+inline constexpr reflect_from_mesh_t reflect_from_mesh{};
+
 /* Qos / NodeOptions: plain structs mirroring the C config, all zero = default. */
 struct Qos {
     Reliability reliability          = Reliability::BestEffort;
@@ -480,6 +486,20 @@ public:
         return compile_with(detail::dart_allocator_static(scratch, scratch_size), text, err);
     }
 
+    /* An EMPTY schema (empty() true, raw() null): what an untyped entity reports, and the
+     * state a default-constructed member holds until assigned. */
+    Schema() = default;
+    /* An owned copy of any compiled schema, ours or one reflected off the mesh. */
+    static Schema adopt(const detail::DartSchema* raw) {
+        Schema s;
+        if (!raw) return s;
+        s.alloc_ = detail::dart_allocator_dynamic(detail::i_dart_plat_realloc, 0);
+        s.schema_ = detail::dart_schema_copy(raw, detail::dart_allocator_alloc, &s.alloc_);
+        if (!s.schema_) detail::dart_allocator_reset(&s.alloc_);
+        return s;
+    }
+    Schema(const Schema& o) : Schema(adopt(o.schema_)) {}
+    Schema& operator=(const Schema& o) { if (this != &o) *this = adopt(o.schema_); return *this; }
     Schema(Schema&& o) noexcept : alloc_(o.alloc_), schema_(o.schema_) {
         std::memset(&o.alloc_, 0, sizeof o.alloc_);
         o.schema_ = nullptr;
@@ -489,17 +509,19 @@ public:
                           std::memset(&o.alloc_, 0, sizeof o.alloc_); o.schema_ = nullptr; }
         return *this;
     }
-    Schema(const Schema&) = delete;
-    Schema& operator=(const Schema&) = delete;
     ~Schema() { reset(); }
 
+    bool empty() const noexcept { return schema_ == nullptr; }
+    explicit operator bool() const noexcept { return schema_ != nullptr; }
+
     std::string_view name() const {
+        if (!schema_) return {};
         detail::DartString n = detail::dart_schema_name(schema_);
         return { n.data, n.len };
     }
-    uint32_t size() const { return detail::dart_schema_size(schema_); }
-    uint64_t hash() const { return detail::dart_schema_hash(schema_); }
-    uint16_t field_count() const { return detail::dart_schema_field_count(schema_); }
+    uint32_t size() const { return schema_ ? detail::dart_schema_size(schema_) : 0; }
+    uint64_t hash() const { return schema_ ? detail::dart_schema_hash(schema_) : 0; }
+    uint16_t field_count() const { return schema_ ? detail::dart_schema_field_count(schema_) : 0; }
     /* Flat index of a field by name; nested members by dotted path ("velocity.dx"),
      * struct-array members by an indexed one ("corners[2].x"). -1 if unknown. */
     int field_index(std::string_view path) const {
@@ -508,11 +530,20 @@ public:
     /* Can a reader declaring THIS schema read messages written with `pub`? Type NAMES
      * narrow: an anonymous type reads a named one, never the reverse. */
     bool can_read(const Schema& pub) const {
-        return detail::dart_schema_subset(schema_, pub.schema_) != 0;
+        return schema_ && pub.schema_ && detail::dart_schema_subset(schema_, pub.schema_) != 0;
+    }
+    /* Why this schema cannot read `pub`, one line ("field 'position': reader f32[8],
+     * writer f64[8]"); empty when it can. */
+    std::string why_not(const Schema& pub) const {
+        char buf[256];
+        if (!schema_ || !pub.schema_) return "no schema";
+        if (detail::dart_schema_subset_why(schema_, pub.schema_, buf, sizeof buf)) return {};
+        return buf;
     }
     /* Spell the schema back as compile-ready DSL text (the inverse of compile), with
      * every named type it uses hoisted to a leading `Name = type` definition. */
     std::string to_dsl() const {
+        if (!schema_) return {};
         uint32_t n = detail::dart_schema_print(schema_, nullptr, 0);
         std::string out(n, '\0');
         if (n) detail::dart_schema_print(schema_, &out[0], n + 1);
@@ -533,7 +564,7 @@ public:
     };
     bool field_at(uint16_t i, Field& out) const {
         detail::DartSchemaFieldInfo f;
-        if (!detail::dart_schema_field_at(schema_, i, &f)) return false;
+        if (!schema_ || !detail::dart_schema_field_at(schema_, i, &f)) return false;
         out.name      = { f.name.data, f.name.len };
         out.type_name = { f.type_name.data ? f.type_name.data : "", f.type_name.len };
         out.elem_name = { f.elem_name.data ? f.elem_name.data : "", f.elem_name.len };
@@ -543,6 +574,14 @@ public:
         out.str_cap = f.str_cap; out.arr_parent = f.arr_parent;
         out.offset = f.offset; out.size = f.size; out.elem_size = f.elem_size;
         return true;
+    }
+
+    /* The whole flat field table (views into this schema: keep it alive while you read). */
+    std::vector<Field> fields() const {
+        std::vector<Field> out;
+        Field f;
+        for (uint16_t i = 0; field_at(i, f); i++) out.push_back(f);
+        return out;
     }
 
     /* Enum options (by flat field index). One option of an Enum field. */
@@ -559,7 +598,6 @@ public:
     const detail::DartSchema* raw() const { return schema_; }
 
 private:
-    Schema() = default;
     static std::optional<Schema> compile_with(detail::DartAllocator a, std::string_view text, std::string* err) {
         Schema s;
         s.alloc_ = a;
@@ -916,81 +954,47 @@ private:
     friend class Node;
 };
 
-/* SchemaField: one field of a reflected schema, an OWNED copy (safe to keep). Mirrors
- * Schema::Field field for field, plus an enum's option table. Keep it that way: a consumer
- * that rebuilds a type from this table (the bridge's peer reflection, an HMI creating a
- * matching typed handle) silently produces the WRONG type for anything this drops, and a
- * dropped type_name turns `color: Color` into an anonymous struct that every named reader
- * refuses. The flat depth-first order matches Schema::field_at: a struct's members directly
- * follow it one depth deeper, and offsets are message-absolute (0 for the variable-tail
- * kinds vstring/varr/map). */
-struct SchemaField {
-    std::string name;
-    std::string type_name;                 /* the field type's NAME, empty when anonymous */
-    std::string elem_name;                 /* an array ELEMENT type's name, empty when anonymous */
-    FieldType   kind    = FieldType::U8;
-    FieldType   elem    = FieldType::U8;   /* Array element type, or Enum backing type */
-    uint16_t    count   = 0;               /* Array element / Enum option count */
-    uint16_t    depth   = 0;               /* 0 = top level; n = member of the struct n levels up */
-    uint16_t    str_cap = 0;               /* String capacity (String fields and String-element arrays) */
-    uint16_t    arr_parent = 0xFFFFu;      /* flat index of the enclosing struct ARRAY, 0xFFFF for none */
-    uint32_t    offset  = 0, size = 0;
-    uint32_t    elem_size = 0;             /* bytes of one array element, else 0 */
-    struct Option { std::string name; int64_t value = 0; };
-    std::vector<Option> variants;          /* Enum only: its named options, declaration order */
-};
-
-/* SchemaInfo: a reflected schema as an OWNED snapshot (safe to keep) -- its root name,
- * hash and fixed size, plus the flat field table. `empty()` when the entity is untyped
- * or its details are not yet fetched. This is what a mesh debugger renders per entity,
- * and what lets it decode live messages of a topic it merely discovered. */
-struct SchemaInfo {
-    std::string              name;
-    uint64_t                 hash = 0;   /* the schema identity (matches Entity::schema_hash) */
-    uint32_t                 size = 0;   /* fixed-section length; where the variable tail begins */
-    std::vector<SchemaField> fields;
-    bool empty() const { return fields.empty() && hash == 0; }
-};
-
-/* Entity: one network entity, as advertised by a peer or hosted locally. Pattern
- * channels are folded (a function's req/rsp pair is ONE function entity; a variable's
- * set channel merges into its value entity as `writable`); plain topics pass through.
- * A copied snapshot, safe to keep (including the schema field tables). `name` is the
- * base name with any @-mangling stripped; until the peer's details are fetched it is the
- * "0x????????" hash placeholder (details arrive within an RTT; NodeOptions::fetch_details
- * covers topics this node does not share, so a full mesh debugger sets it). */
+/* Entity: one network entity, folded (a function's req/rsp pair is ONE function, a task's
+ * three channels ONE task, a variable's set channel merges as `writable`). An owned
+ * snapshot, schemas included, safe to keep. From Node::entities(peer) the flags describe
+ * that one node; from Node::mesh() they describe every live node folded. `name` is the base
+ * name; until the peer's details arrive it is the "0x????????" hash placeholder. */
 struct Entity {
     EntityKind  kind = EntityKind::Topic;
     std::string name;
-    bool        provides   = false;   /* they are the source side: publisher / definition / owner / emitter */
-    bool        consumes   = false;   /* they are the sink side: subscriber / caller / accessor / listener */
-    bool        reliable   = false;   /* the primary channel's advertised reliability */
-    bool        writable   = false;   /* VARIABLE: a set channel is advertised alongside the value */
-    bool        forceable  = false;   /* VARIABLE: the owner permits force/unforce (allow_force) */
-    bool        cancellable= false;   /* TASK: the provider honors cancel (default on) */
-    bool        exclusive  = false;   /* TASK: declared serialization (the handler enforces it) */
-    bool        multi      = false;   /* authority kinds: duplicate authority is intended */
-    bool        incomplete = false;   /* a pattern half-pair: surfaced, never silently dropped */
-    uint16_t    index = 0;            /* the primary channel's index at the peer */
-    uint32_t    hash  = 0;            /* the primary channel's low-32 name hash (the placeholder) */
-    uint64_t    schema_hash     = 0;  /* value/request/payload schema identity (0 = untyped/unfetched) */
-    uint64_t    rsp_schema_hash = 0;  /* FUNCTION/TASK: the response schema identity */
-    uint64_t    progress_schema_hash = 0;  /* TASK: the progress channel's schema identity */
-    SchemaInfo  schema;               /* value/request/payload schema field table (empty = untyped/unfetched) */
-    SchemaInfo  rsp_schema;           /* FUNCTION/TASK: the response schema field table */
-    SchemaInfo  progress_schema;      /* TASK: the progress channel's schema field table */
+    uint32_t    hash = 0;             /* the primary channel's low-32 name hash (the placeholder) */
+    bool        provides   = false;   /* someone is on the source side: publisher / definition / owner */
+    bool        consumes   = false;   /* someone is on the sink side: subscriber / caller / accessor */
+    bool        reliable   = false;   /* the primary channel's reliability */
+    bool        writable   = false;   /* VARIABLE: a set channel is advertised */
+    bool        forceable  = false;   /* VARIABLE: the owner permits force */
+    bool        cancellable= false;   /* TASK: the provider honors cancel */
+    bool        exclusive  = false;   /* TASK: declared serialization */
+    bool        multi      = false;   /* duplicate authority is intended */
+    bool        incomplete = false;   /* a pattern half pair: surfaced, never silently dropped */
+    bool        conflict   = false;   /* mesh: live endpoints declare schemas that cannot read each other */
+    uint16_t    providers = 0;        /* live endpoints on each side */
+    uint16_t    consumers = 0;
+    uint32_t    provider = 0;         /* the ranked provider's peer id (Node::Self = this node); iff providers > 0 */
+    std::string from;                 /* the node the schemas were read from */
+    Schema      schema;               /* value / request / payload (empty() when untyped or unfetched) */
+    Schema      rsp_schema;           /* FUNCTION / TASK: the response */
+    Schema      progress_schema;      /* TASK: the progress channel */
+    uint64_t    generation = 0;       /* changes iff provider identity, any schema, or an attr changed */
 };
 
-/* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Peer
- * facts only: what a peer advertises is a separate, explicit Node::peer_entities(id)
- * call, so a peers() in a hot path (an event handler, a UI tick) never pays the
- * entity fold or its allocations. */
+/* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Dropped
+ * peers are listed (they may return under the same uuid): gate on `active`. */
 struct Peer {
-    uint32_t            id = 0;
-    std::string         name;
-    std::string         address;         /* "1.2.3.4:port" */
-    bool                active = false;
-    uint16_t            fragment_size = 0;
+    uint32_t                id = 0;
+    std::array<uint8_t, 16> uuid{};          /* the process instance: a restart is a new uuid */
+    std::string             name;
+    std::string             address;         /* "1.2.3.4:port" */
+    bool                    active = false;
+    uint64_t                last_heard_us = 0;
+    uint32_t                epoch = 0;       /* bumps on every reflected change at this peer */
+    bool                    catching_up = false;   /* it advertises newer state than we hold yet */
+    uint16_t                fragment_size = 0;
 };
 
 /* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
@@ -1862,8 +1866,13 @@ public:
      * -fno-exceptions: check valid()). schema is copied into the node. */
     Topic(Node& node, std::string_view name, Role role = Role::PubSub,
           const Schema* schema = nullptr, const Qos& qos = {});
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    Topic(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
 
     bool valid() const noexcept { return ch_ != nullptr; }
+    /* A reflect_from_mesh topic: re-read the mesh and re-type in place if what it took has
+     * moved (same handle). true = re-typed; false = current, or not a reflect handle. */
+    bool refresh() { return ch_ && detail::dart_topic_refresh(ch_) == 1; }
     explicit operator bool() const noexcept { return valid(); }
 
     SendStatus send(Bytes data) {
@@ -1954,6 +1963,8 @@ public:
     }
 
 private:
+    Topic(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos, bool reflect);
+
     explicit Topic(detail::DartTopic* c, void* impl = nullptr) : ch_(c), impl_(impl) {}
     detail::DartTopic* ch_ = nullptr;
     void* impl_ = nullptr;   /* the owning Node::Impl (Node is incomplete here), so
@@ -2402,6 +2413,7 @@ public:
     Node& on_event  (EventHandler   h) { if (impl_ && h) impl_->on_event = std::move(h); return *this; }
 
     /* Create (or share) a topic; equivalent to the Topic constructor. */
+    Topic create_topic(std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
     Topic create_topic(std::string_view name, Role role = Role::PubSub,
                        const Schema* schema = nullptr, const Qos& qos = {});
 
@@ -2448,72 +2460,73 @@ public:
         if (!valid()) return 0;
         uint16_t count = 0;
         LockGuard guard(impl_->node);
-        (void)detail::dart_node_peers(impl_->node, &count);
+        detail::DartIter it; std::memset(&it, 0, sizeof it);
+        detail::DartPeerInfo p;
+        while (detail::dart_node_peers_next(impl_->node, &it, &p)) count++;
         return count;
     }
 
-    /* A copied snapshot of the live peer table (safe to keep after the poll): peer
-     * facts only. Use peer_entities(id) for what a peer advertises. */
+    static constexpr uint32_t Self = 0;   /* the peer id that means this node */
+
+    /* "Who is here": every discovered peer, a copied snapshot. */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
         if (!valid()) return out;
-        uint16_t count = 0;
-        /* the C view is zero-copy: hold the node lock across the copy so a poller
-           on another thread cannot mutate it mid-read (no-op if we are that thread).
-           RAII so a bad_alloc mid-copy cannot leak the lock and stall the node. */
         LockGuard guard(impl_->node);
-        const detail::DartDiscoveryPeer* ps = detail::dart_node_peers(impl_->node, &count);
-        for (uint16_t i = 0; ps && i < count; i++) {
-            const detail::DartDiscoveryPeer& p = ps[i];
+        detail::DartIter it; std::memset(&it, 0, sizeof it);
+        detail::DartPeerInfo p;
+        while (detail::dart_node_peers_next(impl_->node, &it, &p)) {
             Peer peer;
-            peer.id            = p.id;
-            peer.name          = p.name.data ? std::string(p.name.data, p.name.len) : std::string();
-            peer.address       = addr_string(p.addr);
+            peer.id = p.id;
+            std::memcpy(peer.uuid.data(), p.uuid, 16);
+            if (p.name.data)    peer.name.assign(p.name.data, p.name.len);
+            if (p.address.data) peer.address.assign(p.address.data, p.address.len);
             peer.active        = (p.liveness == detail::DART_PEER_ACTIVE);
-            peer.fragment_size = detail::dart_node_peer_frag(&p);
+            peer.last_heard_us = p.last_heard_us;
+            peer.epoch         = p.epoch;
+            peer.catching_up   = p.catching_up != 0;
+            peer.fragment_size = p.fragment_size;
             out.push_back(std::move(peer));
         }
         return out;
     }
 
-#ifndef DART_NO_PATTERNS
-    /* What one peer advertises, folded into entities (a function's req/rsp pair is one
-     * entity, a variable's set channel merges as `writable`). A copied snapshot. This
-     * walks the peer's whole interest list and allocates per entity: an explicit,
-     * observer-grade call, deliberately not part of peers(). A DROPPED (silent,
-     * resumable) peer yields an empty vector by default: its cached entities are its
-     * dead incarnation's, and after a restart they would stand beside the live
-     * incarnation's. include_dropped = true serves that last-known view anyway (a
-     * ghost display); gate on Peer::active yourself then. */
-    std::vector<Entity> peer_entities(uint32_t peer_id, bool include_dropped = false) const {
+    /* "What a node offers": the entities one node advertises, Self for this one. An
+     * observer-grade call: it copies every schema. */
+    std::vector<Entity> entities(uint32_t peer = Self) const {
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
-        detail::DartEntityIter it;
-        std::memset(&it, 0, sizeof it);
-        it.include_dropped = include_dropped ? 1 : 0;
+        detail::DartIter it; std::memset(&it, 0, sizeof it);
         detail::DartEntityInfo ei;
-        while (detail::dart_node_peer_entity_next(impl_->node, peer_id, &it, &ei))
+        while (detail::dart_node_entities_next(impl_->node, peer, &it, &ei))
             out.push_back(entity_from(ei));
         return out;
     }
-#endif
 
-#ifndef DART_NO_PATTERNS
-    /* The entities THIS node hosts (its functions and variables, then its plain
-     * topics), the same folded shape as peer_entities(). A copied snapshot. */
-    std::vector<Entity> entities() const {
+    /* The whole mesh folded: one entity per (kind, name) across every active peer and this
+     * node, schemas from the provider, conflict when the endpoints disagree. */
+    std::vector<Entity> mesh() const {
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
-        detail::DartEntityIter it;
-        std::memset(&it, 0, sizeof it);
+        detail::DartIter it; std::memset(&it, 0, sizeof it);
         detail::DartEntityInfo ei;
-        while (detail::dart_node_entity_next(impl_->node, &it, &ei))
+        while (detail::dart_node_mesh_next(impl_->node, &it, &ei))
             out.push_back(entity_from(ei));
         return out;
     }
-#endif
+    std::optional<Entity> mesh_find(EntityKind kind, std::string_view name) const {
+        if (!valid()) return std::nullopt;
+        LockGuard guard(impl_->node);
+        detail::DartEntityInfo ei;
+        std::string nm(name);
+        if (!detail::dart_node_mesh_find(impl_->node, static_cast<detail::DartEntityKind>(kind),
+                                         nm.c_str(), &ei)) return std::nullopt;
+        return entity_from(ei);
+    }
+    /* Bumps on every reflected change anywhere in the mesh: re-walk iff it moved. */
+    uint32_t mesh_epoch() const { return valid() ? detail::dart_node_mesh_epoch(impl_->node) : 0; }
 
     struct MemoryStats { size_t in_use = 0, peak = 0; uint64_t alloc_calls = 0; };
     MemoryStats memory_stats() const {
@@ -2733,47 +2746,7 @@ private:
 #endif
     }
 
-#ifndef DART_NO_PATTERNS
-    /* Decode a node-owned schema (valid under the node lock the reflection call holds)
-     * into an owned SchemaInfo, so the returned Entity stays safe to keep. */
-    static SchemaInfo schema_info_from(const detail::DartSchema* s) {
-        SchemaInfo si;
-        if (!s) return si;
-        detail::DartString nm = detail::dart_schema_name(s);
-        if (nm.data) si.name.assign(nm.data, nm.len);
-        si.hash = detail::dart_schema_hash(s);
-        si.size = detail::dart_schema_size(s);
-        uint16_t n = detail::dart_schema_field_count(s);
-        si.fields.reserve(n);
-        for (uint16_t i = 0; i < n; i++) {
-            detail::DartSchemaFieldInfo f;
-            if (!detail::dart_schema_field_at(s, i, &f)) break;
-            SchemaField sf;
-            if (f.name.data)      sf.name.assign(f.name.data, f.name.len);
-            if (f.type_name.data) sf.type_name.assign(f.type_name.data, f.type_name.len);
-            if (f.elem_name.data) sf.elem_name.assign(f.elem_name.data, f.elem_name.len);
-            sf.kind = static_cast<FieldType>(f.kind);
-            sf.elem = static_cast<FieldType>(f.elem);
-            sf.count = f.count; sf.depth = f.depth; sf.str_cap = f.str_cap;
-            sf.arr_parent = f.arr_parent;
-            sf.offset = f.offset; sf.size = f.size; sf.elem_size = f.elem_size;
-            if (sf.kind == FieldType::Enum) {
-                uint16_t vc = detail::dart_schema_enum_count(s, i);
-                sf.variants.reserve(vc);
-                for (uint16_t k = 0; k < vc; k++) {
-                    int64_t val; detail::DartString vn;
-                    if (!detail::dart_schema_enum_variant(s, i, k, &val, &vn)) continue;
-                    SchemaField::Option o;
-                    o.value = val;
-                    if (vn.data) o.name.assign(vn.data, vn.len);
-                    sf.variants.push_back(std::move(o));
-                }
-            }
-            si.fields.push_back(std::move(sf));
-        }
-        return si;
-    }
-
+    /* one entity view (valid under the node lock the walk holds) into an owned Entity */
     static Entity entity_from(const detail::DartEntityInfo& ei) {
         Entity e;
         e.kind = static_cast<EntityKind>(ei.kind);
@@ -2783,6 +2756,7 @@ private:
             std::snprintf(hx, sizeof hx, "0x%08x", (unsigned)ei.hash);
             e.name = hx;
         }
+        e.hash       = ei.hash;
         e.provides   = ei.provides != 0;
         e.consumes   = ei.consumes != 0;
         e.reliable   = ei.reliable != 0;
@@ -2792,17 +2766,17 @@ private:
         e.exclusive  = ei.exclusive != 0;
         e.multi      = ei.multi != 0;
         e.incomplete = ei.incomplete != 0;
-        e.index = ei.index;
-        e.hash  = ei.hash;
-        e.schema_hash     = ei.schema_hash;
-        e.rsp_schema_hash = ei.rsp_schema_hash;
-        e.progress_schema_hash = ei.progress_schema_hash;
-        e.schema     = schema_info_from(ei.schema);
-        e.rsp_schema = schema_info_from(ei.rsp_schema);
-        e.progress_schema = schema_info_from(ei.progress_schema);
+        e.conflict   = ei.conflict != 0;
+        e.providers  = ei.providers;
+        e.consumers  = ei.consumers;
+        e.provider   = ei.provider;
+        if (ei.from.data) e.from.assign(ei.from.data, ei.from.len);
+        e.schema          = Schema::adopt(ei.schema);
+        e.rsp_schema      = Schema::adopt(ei.rsp_schema);
+        e.progress_schema = Schema::adopt(ei.progress_schema);
+        e.generation = ei.generation;
         return e;
     }
-#endif
 
     static detail::DartQos to_c(const Qos& q) {
         detail::DartQos c;
@@ -2821,14 +2795,6 @@ private:
         return c;
     }
 
-    static std::string addr_string(const detail::DartDiscoveryAddr& a) {
-        char b[64];
-        if (a.ip_len == 4)
-            std::snprintf(b, sizeof b, "%u.%u.%u.%u:%u", a.ip[0], a.ip[1], a.ip[2], a.ip[3], a.port);
-        else
-            std::snprintf(b, sizeof b, "[?]:%u", a.port);
-        return b;
-    }
 
     /* Parse "ip" or "ip:port" (IPv4) into a locator; port 0 = discovery_port.
      * Hand-rolled so no locale/CRT scanf (and its MSVC deprecation) is needed. */
@@ -2871,8 +2837,14 @@ private:
  * same-name topic with a different schema still refuses (two modules of one process
  * disagreeing about a name is a bug worth surfacing); retire() the old one first to
  * retype a name. */
+inline Topic::Topic(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos)
+    : Topic(node, name, role, nullptr, qos, /*reflect=*/true) {}
+
 inline Topic::Topic(Node& node, std::string_view name, Role role,
-                    const Schema* schema, const Qos& qos) {
+                    const Schema* schema, const Qos& qos) : Topic(node, name, role, schema, qos, false) {}
+
+inline Topic::Topic(Node& node, std::string_view name, Role role,
+                    const Schema* schema, const Qos& qos, bool reflect) {
     if (!node.valid()) { priv::raise_msg("dart::Topic: node is not valid"); return; }
     Node::Impl* impl = node.impl_.get();
     std::lock_guard<std::mutex> g(impl->create_mu);
@@ -2897,6 +2869,7 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
     detail::DartTopicOpts co;
     std::memset(&co, 0, sizeof co);
     co.qos = Node::to_c(qos);
+    co.reflect_from_mesh = reflect ? 1 : 0;
     ch_ = detail::dart_node_create_topic(impl->node, nm.c_str(),
               static_cast<detail::DartRole>(role), schema ? schema->raw() : nullptr, &co);
     if (!ch_) { priv::raise_last(impl->node, "dart::Topic create"); return; }
@@ -2933,6 +2906,9 @@ inline Topic Node::create_topic(std::string_view name, Role role,
                                 const Schema* schema, const Qos& qos) {
     return Topic(*this, name, role, schema, qos);
 }
+inline Topic Node::create_topic(std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos) {
+    return Topic(*this, name, role, reflect_from_mesh, qos);
+}
 
 #ifndef DART_NO_PATTERNS
 
@@ -2951,6 +2927,19 @@ public:
     FunctionDefinition(Node& n, std::string_view name,
                        const Schema* req_schema, const Schema* rsp_schema,
                        Handler handler, const FunctionOptions& o = {}) {
+        init(n, name, req_schema, rsp_schema, std::move(handler), o, false);
+    }
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    FunctionDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
+                       Handler handler, const FunctionOptions& o = {}) {
+        init(n, name, nullptr, nullptr, std::move(handler), o, true);
+    }
+    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
+    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+
+private:
+    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* rsp_schema,
+              Handler handler, const FunctionOptions& o, bool reflect) {
         if (!n.valid()) { priv::raise_msg("dart::FunctionDefinition: node is not valid"); return; }
         std::string nm(name);
         detail::DartFunctionOpts co;
@@ -2958,6 +2947,7 @@ public:
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
+        co.reflect_from_mesh    = reflect ? 1 : 0;
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
         fn_ = detail::dart_node_create_function_definition(n.impl_->node, nm.c_str(),
@@ -2975,6 +2965,7 @@ public:
             n.impl_->boxes.emplace_back(box);
         }
     }
+public:
 
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -3016,6 +3007,19 @@ public:
     RemoteFunction(Node& n, std::string_view name,
                    const Schema* req_schema = nullptr, const Schema* rsp_schema = nullptr,
                    const FunctionOptions& o = {}) {
+        init(n, name, req_schema, rsp_schema, o, false);
+    }
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    RemoteFunction(Node& n, std::string_view name, reflect_from_mesh_t, const FunctionOptions& o = {}) {
+        init(n, name, nullptr, nullptr, o, true);
+    }
+    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed;
+     * outstanding calls are answered Cancelled first). */
+    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+
+private:
+    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* rsp_schema,
+              const FunctionOptions& o, bool reflect) {
         if (!n.valid()) { priv::raise_msg("dart::RemoteFunction: node is not valid"); return; }
         std::string nm(name);
         detail::DartFunctionOpts co;
@@ -3023,12 +3027,14 @@ public:
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
+        co.reflect_from_mesh    = reflect ? 1 : 0;
         fn_ = detail::dart_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
         if (!fn_) { priv::raise_last(n.impl_->node, "dart::RemoteFunction create"); return; }
         impl_ = n.impl_.get();
     }
+public:
 
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -3164,6 +3170,19 @@ public:
     TaskDefinition(Node& n, std::string_view name, const Schema* req_schema,
                    const Schema* prg_schema, const Schema* rsp_schema,
                    Handler handler, const TaskOptions& o = {}) {
+        init(n, name, req_schema, prg_schema, rsp_schema, std::move(handler), o, false);
+    }
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    TaskDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
+                   Handler handler, const TaskOptions& o = {}) {
+        init(n, name, nullptr, nullptr, nullptr, std::move(handler), o, true);
+    }
+    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
+    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+
+private:
+    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
+              const Schema* rsp_schema, Handler handler, const TaskOptions& o, bool reflect) {
         if (!n.valid()) { priv::raise_msg("dart::TaskDefinition: node is not valid"); return; }
         std::string nm(name);
         detail::DartTaskOpts co;
@@ -3176,6 +3195,7 @@ public:
         co.multi                = o.multi ? 1 : 0;
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
+        co.reflect_from_mesh    = reflect ? 1 : 0;
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
         fn_ = detail::dart_node_create_task_definition(n.impl_->node, nm.c_str(),
@@ -3195,6 +3215,7 @@ public:
             impl_->boxes.emplace_back(box);
         }
     }
+public:
 
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -3272,6 +3293,19 @@ public:
     RemoteTask(Node& n, std::string_view name, const Schema* req_schema = nullptr,
                const Schema* prg_schema = nullptr, const Schema* rsp_schema = nullptr,
                const TaskOptions& o = {}) {
+        init(n, name, req_schema, prg_schema, rsp_schema, o, false);
+    }
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    RemoteTask(Node& n, std::string_view name, reflect_from_mesh_t, const TaskOptions& o = {}) {
+        init(n, name, nullptr, nullptr, nullptr, o, true);
+    }
+    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed;
+     * outstanding calls are answered Cancelled first). */
+    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+
+private:
+    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
+              const Schema* rsp_schema, const TaskOptions& o, bool reflect) {
         if (!n.valid()) { priv::raise_msg("dart::RemoteTask: node is not valid"); return; }
         std::string nm(name);
         detail::DartTaskOpts co;
@@ -3281,6 +3315,7 @@ public:
         co.keep_last            = o.keep_last;
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
+        co.reflect_from_mesh    = reflect ? 1 : 0;
         fn_ = detail::dart_node_create_remote_task(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   prg_schema ? prg_schema->raw() : nullptr,
@@ -3288,6 +3323,7 @@ public:
         if (!fn_) { priv::raise_last(n.impl_->node, "dart::RemoteTask create"); return; }
         impl_ = n.impl_.get();
     }
+public:
 
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -3454,8 +3490,16 @@ public:
     VariableDefinition(Node& n, std::string_view name, const Schema* schema,
                        const VariableOptions<>& o = {}) {
         if (!n.valid()) { priv::raise_msg("dart::VariableDefinition: node is not valid"); return; }
-        create(n, name, schema, o, /*definition=*/true);
+        create(n, name, schema, o, /*definition=*/true, false);
     }
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    VariableDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
+                       const VariableOptions<>& o = {}) {
+        if (!n.valid()) { priv::raise_msg("dart::VariableDefinition: node is not valid"); return; }
+        create(n, name, nullptr, o, /*definition=*/true, true);
+    }
+    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
+    bool refresh() { return var_ && detail::dart_variable_refresh(var_) == 1; }
 
     bool valid() const noexcept { return var_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -3537,7 +3581,7 @@ protected:
         }
     }
     void create(Node& n, std::string_view name, const Schema* schema,
-                const VariableOptions<>& o, bool definition) {
+                const VariableOptions<>& o, bool definition, bool reflect) {
         std::string nm(name);
         detail::DartVariableOpts co;
         std::memset(&co, 0, sizeof co);
@@ -3547,6 +3591,7 @@ protected:
         co.catch_up    = o.catch_up;
         co.keep_last   = o.keep_last;
         co.backpressure_wait_us = o.backpressure_wait_us;
+        co.reflect_from_mesh = reflect ? 1 : 0;
         node_ = n.impl_->node;
         impl_ = n.impl_.get();
         var_ = definition
@@ -3571,7 +3616,13 @@ public:
     RemoteVariable(Node& n, std::string_view name, const Schema* schema,
                    const VariableOptions<>& o = {}) {
         if (!n.valid()) { priv::raise_msg("dart::RemoteVariable: node is not valid"); return; }
-        create(n, name, schema, o, /*definition=*/false);
+        create(n, name, schema, o, /*definition=*/false, false);
+    }
+    /* The same, typed by the mesh (see reflect_from_mesh). */
+    RemoteVariable(Node& n, std::string_view name, reflect_from_mesh_t,
+                   const VariableOptions<>& o = {}) {
+        if (!n.valid()) { priv::raise_msg("dart::RemoteVariable: node is not valid"); return; }
+        create(n, name, nullptr, o, /*definition=*/false, true);
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
     bool wait(int timeout_ms) { return var_ && detail::dart_variable_wait(var_, timeout_ms) == 1; }

@@ -1786,6 +1786,11 @@ const DartQos *dart_transport_topic_qos(DartTransportState *st, uint16_t topic_i
     return topic ? &topic->qos : NULL;
 }
 
+uint8_t dart_transport_topic_attrs(DartTransportState *st, uint16_t topic_index){
+    i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);
+    return topic ? topic->attrs : 0;
+}
+
 
 void dart_transport_repair_stats(DartTransportState *st, uint16_t topic_index, DartRepairStats *out){
     i_DartTopic *topic = i_dart_topic_at(st, topic_index, NULL);

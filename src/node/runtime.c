@@ -76,6 +76,10 @@ struct DartTopic {   /* schema: node-owned copy */
                                            way, like prefix_bytes itself), not pattern semantics */
     uint8_t  kind;                      /* DartTopicKind, mirrored from the def (reflection) */
     uint8_t  role;                      /* DartRole, mirrored at create + set_role (reflection) */
+    uint8_t  attrs, directed;           /* the def's declared facts, kept so a refresh can redefine */
+    uint8_t  reflect;                   /* created with reflect_from_mesh: dart_topic_refresh applies */
+    uint64_t generation;                /* the mesh generation the schema was taken at */
+    DartQos  qos;
     uint8_t  name_len;                  /* stable topic-name copy: queued DartMsg views
                                            must not point into the (relocatable) arena */
     char     name[DART_TOPIC_NAME_MAX];
@@ -1079,6 +1083,7 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     }
     /* the node core delegates id<->address resolution + per-peer scratch to discovery's table */
     i_dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
+    i_dart_node_core_set_self_name(n->core, dart_string(n->name, strlen(n->name)));
 
     /* EVERY node sends its unicast discovery TX from its DATA socket (group sends stay
        on the joined multicast socket). Behind a NAT (rootless containers, slirp-class
@@ -1208,7 +1213,24 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
  * state (so a topic matches interest advertised before it existed, and the replay queues any
  * DETAIL_REQs the change needs), stale the topics' converged match memos, and kick so the
  * announce goes out now, not at the next tick. Call with the node lock held. */
+/* the local channel table behind DART_SELF reflection: every live handle, as a peer would see it */
+static void i_dart_node_reflect_self(DartNode *n){
+    uint16_t i;
+    i_dart_node_core_self_begin(n->core);
+    for (i = 0; i < n->max_topics; i++){
+        DartTopic *h = n->handles[i];
+        const DartQos *q;
+        if (!h) continue;
+        q = dart_transport_topic_qos(n->transport, i);
+        i_dart_node_core_self_channel(n->core, i, dart_string(h->name, h->name_len), h->kind, h->role,
+                                      (uint8_t)(q ? q->reliability : 0),
+                                      dart_transport_topic_attrs(n->transport, i), h->schema);
+    }
+    i_dart_node_core_self_end(n->core);
+}
+
 static void i_dart_node_readvertise(DartNode *n){
+    i_dart_node_reflect_self(n);
     i_dart_node_core_build_meta(n->core);
     dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
     dart_discovery_replay(n->discovery);
@@ -1258,6 +1280,17 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     h = (DartTopic*)i_dart_node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
     if (!h){ i_dart_node_unlock(n, acquired); return NULL; }
     memset(h, 0, sizeof *h);
+    if (opts) h->qos = opts->qos;
+    if (opts && opts->reflect_from_mesh && kind == DART_KIND_TOPIC){
+        /* fill what the caller left unspecified from the mesh: a reader takes the
+           provider's schema, a writer the widest every reader accepts */
+        const DartSchema *ms = NULL; uint8_t rel = 0;
+        h->reflect = 1;
+        i_dart_node_core_reflect_pick(n->core, DART_ENTITY_TOPIC, name, 0,
+                                      dart_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
+        if (!schema) schema = ms;
+        if (!h->qos.reliability) h->qos.reliability = rel ? DART_RELIABLE : DART_BEST_EFFORT;
+    }
     if (schema){   /* copy into node memory so the caller's schema need not outlive the topic */
         DartBytes w = dart_schema_wire(schema);
         h->schema = dart_schema_parse(w.data, w.len, i_dart_node_alloc, n);
@@ -1266,7 +1299,8 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
     def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.attrs = attrs;
-    if (opts) def.qos = opts->qos;
+    def.qos = h->qos;
+    h->attrs = attrs; h->directed = directed;
     {   int rc;
         if (reuse){
             /* identical binding (same name, kind, and schema hash as the retired
@@ -2248,6 +2282,19 @@ const uint8_t *i_dart_node_uuid(DartNode *n){
 /* Reflection getters for the patterns layer's entity enumeration (read-only, stable). */
 uint8_t    i_dart_topic_kind (const DartTopic *topic){ return topic ? topic->kind : 0; }
 uint8_t    i_dart_topic_role (const DartTopic *topic){ return topic ? topic->role : (uint8_t)DART_INACTIVE; }
+uint8_t    i_dart_topic_reliability(const DartTopic *topic){ return topic ? (uint8_t)topic->qos.reliability : 0; }
+const uint8_t *i_dart_node_peer_uuid(DartNode *n, uint32_t peer){
+    const DartDiscoveryState *st; uint16_t q, np; int acquired; const uint8_t *out = NULL;
+    DartDiscoveryPeer v;   /* uuid is a view into discovery state; the copy only carries it */
+    if (!n) return NULL;
+    acquired = i_dart_node_lock(n);
+    st = dart_discovery_state(n->discovery);
+    np = dart_discovery_max_peers(st);
+    for (q = 0; q < np; q++)
+        if (dart_discovery_peer_at(st, q, &v) && v.id == peer){ out = v.uuid; break; }
+    i_dart_node_unlock(n, acquired);
+    return out;
+}
 DartString i_dart_topic_name (const DartTopic *topic){
     return topic ? dart_string(topic->name, topic->name_len) : dart_string(NULL, 0);
 }
@@ -2343,130 +2390,112 @@ DartTopic *dart_node_topic(DartNode *n, uint16_t index){
  * dart_node_peer_frag / dart_node_peer_interest_next). So this just forwards. With a poller
  * on another thread, bracket the CALL AND THE USE with dart_node_lock/dart_node_unlock
  * (from inside a callback the view is already safe for the callback's duration). */
-const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count){
-    return dart_discovery_peers(n ? n->discovery : NULL, count);
-}
+/* ---- reflection (runtime.h): the walks read the core's tables under the node lock ---------- */
 
-/* Greedy detail-cache queries (opts.fetch_details): a peer topic's fetched name and
- * parsed schema by (peer id, index). Same view rules as dart_node_peers. */
-DartString dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t index){
-    DartString s = dart_string(NULL, 0); int acquired;
-    if (!n) return s;
-    acquired = i_dart_node_lock(n);
-    i_dart_node_core_topic_detail(n->core, peer, index, &s, NULL, NULL);
-    i_dart_node_unlock(n, acquired);
-    return s;
-}
-
-const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t index,
-                                              uint64_t *schema_hash){
-    const DartSchema *sch = NULL; int acquired;
-    if (schema_hash) *schema_hash = 0;
-    if (!n) return NULL;
-    acquired = i_dart_node_lock(n);
-    i_dart_node_core_topic_detail(n->core, peer, index, NULL, &sch, schema_hash);
-    i_dart_node_unlock(n, acquired);
-    return sch;
-}
-
-/* ---- the mesh's schema for a topic name (runtime.h has the ranking) ------------------- */
-
-/* a rival heard this much longer ago than the pick is the stale one (past one 3s announce
-   interval, well under the 12s peer_timeout that ages a dead peer out anyway) */
-#define I_DART_SCHEMA_STALE_US 5000000u
-
-const DartSchema *dart_node_mesh_schema(DartNode *n, const char *name, DartSchemaSource *src){
-    const DartDiscoveryPeer *peers;
-    const DartSchema *best = NULL;
-    DartSchemaSource sr;
-    size_t nlen = name ? strlen(name) : 0;
-    uint64_t best_heard = 0;
-    uint32_t want;
-    uint16_t n_peers = 0, s;
-    int acquired;
-    memset(&sr, 0, sizeof sr);
-    if (src) *src = sr;
-    if (!n || !nlen) return NULL;
-    want = (uint32_t)dart_topic_id(name);              /* the announce carries only this */
-    acquired = i_dart_node_lock(n);
-    peers = dart_node_peers(n, &n_peers);
-    for (s = 0; s < n_peers; s++){
-        const DartDiscoveryPeer *p = &peers[s];
-        DartInterestIter it;
-        DartTopicEntry e;
-        uint16_t last = 0xFFFF;
-        if (p->liveness != DART_PEER_ACTIVE) continue; /* a ghost's schema is a dead one's */
-        memset(&it, 0, sizeof it);
-        while (dart_node_peer_interest_next(p, &it, &e)){
-            DartString nm; const DartSchema *sch; uint64_t hash = 0;
-            int take = 0;
-            if (e.hash != want) continue;              /* cheap prefilter before the name lookup */
-            if (e.index == last) continue;             /* second direction of a PUBSUB entry */
-            last = e.index;
-            nm = dart_node_peer_topic_name(n, p->id, e.index);
-            if (nm.len != nlen || memcmp(nm.data, name, nlen) != 0) continue;
-            sch = dart_node_peer_topic_schema(n, p->id, e.index, &hash);
-            if (!hash) continue;                       /* untyped endpoint: nothing to adopt */
-            if (!sr.advertisers){                      /* first advertiser: adopt it */
-                sr.advertisers = 1; take = 1;
-            } else if (hash == sr.hash){               /* identical schema: they agree */
-                sr.advertisers++;
-                /* upgrade the reported source to a publisher, or hash-only to parsed */
-                take = (e.is_pub && !sr.is_pub) || (sch && !best);
-            } else if (best && sch){
-                int best_narrower = dart_schema_subset(best, sch);  /* sch is the wider one */
-                int new_narrower  = dart_schema_subset(sch, best);  /* best is the wider one */
-                if (!best_narrower && !new_narrower){   /* neither reads the other */
-                    sr.conflict = 1;
-                    take = (e.is_pub && !sr.is_pub)
-                        || (e.is_pub == sr.is_pub
-                            && p->last_heard_us > best_heard + I_DART_SCHEMA_STALE_US);
-                } else if (best_narrower != new_narrower){
-                    take = best_narrower;               /* strictly ordered: the wider wins */
-                } else {
-                    take = (e.is_pub && !sr.is_pub);    /* mutually readable: prefer the wire */
-                }
-                sr.advertisers++;
-            } else {                                   /* one side hash-only: cannot compare */
-                sr.conflict = 1;
-                continue;
-            }
-            if (take){
-                best = sch;
-                best_heard = p->last_heard_us;
-                sr.hash = hash; sr.peer = p->id; sr.index = e.index;
-                sr.from = p->name; sr.is_pub = e.is_pub;
-            }
-        }
-    }
-    i_dart_node_unlock(n, acquired);
-    if (src) *src = sr;
-    return best;
-}
-
-DartSchema *dart_node_mesh_schema_copy(DartNode *n, const char *name, DartSchemaSource *src,
-                                       DartAllocFn alloc, void *user){
-    const DartSchema *best;
-    DartSchema *copy = NULL;
-    int acquired;
-    if (!n || !alloc) return NULL;
-    acquired = i_dart_node_lock(n);   /* one bracket: the pick AND the wire it copies from */
-    best = dart_node_mesh_schema(n, name, src);
-    if (best){
-        DartBytes w = dart_schema_wire(best);
-        copy = dart_schema_parse(w.data, w.len, alloc, user);
-    }
-    i_dart_node_unlock(n, acquired);
-    return copy;
-}
-
-uint8_t i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index){
-    uint8_t a; int acquired;
+int dart_node_peers_next(DartNode *n, DartIter *it, DartPeerInfo *out){
+    int r, acquired;
     if (!n) return 0;
     acquired = i_dart_node_lock(n);
-    a = dart_transport_peer_attrs(n->transport, peer, their_index);
+    r = i_dart_node_core_peers_next(n->core, it, out);
     i_dart_node_unlock(n, acquired);
-    return a;
+    return r;
+}
+
+int dart_node_entities_next(DartNode *n, uint32_t peer, DartIter *it, DartEntityInfo *out){
+    int r, acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    r = i_dart_node_core_entities_next(n->core, peer, it, out);
+    i_dart_node_unlock(n, acquired);
+    return r;
+}
+
+int dart_node_mesh_next(DartNode *n, DartIter *it, DartEntityInfo *out){
+    int r, acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    r = i_dart_node_core_mesh_next(n->core, it, out);
+    i_dart_node_unlock(n, acquired);
+    return r;
+}
+
+int dart_node_mesh_find(DartNode *n, DartEntityKind kind, const char *name, DartEntityInfo *out){
+    int r, acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    r = i_dart_node_core_mesh_find(n->core, kind, name, out);
+    i_dart_node_unlock(n, acquired);
+    return r;
+}
+
+uint32_t dart_node_mesh_epoch(DartNode *n){
+    uint32_t e; int acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    e = i_dart_node_core_mesh_epoch(n->core);
+    i_dart_node_unlock(n, acquired);
+    return e;
+}
+
+/* Re-type a live topic IN PLACE: the transport slot is retired and reused at the same index
+ * under a bumped generation (peers re-verify), the node's schema copy is replaced, the handle
+ * and its queue stay. Node lock held by the caller. 0 ok, negative DartResult. */
+int i_dart_topic_retype(DartTopic *topic, const DartSchema *schema, uint8_t reliability){
+    DartNode *n = topic->n; DartTopicDef def; DartSchema *copy = NULL; uint16_t idx = topic->index;
+    uint32_t rb; int rc;
+    if (schema){
+        DartBytes w = dart_schema_wire(schema);
+        copy = dart_schema_parse(w.data, w.len, i_dart_node_alloc, n);
+        if (!copy) return DART_ERR_OOM;
+    }
+    if (dart_transport_topic_retire(n->transport, idx) != 0){
+        if (copy) dart_schema_free(copy, i_dart_node_alloc, n);
+        return DART_ERR_STATE;
+    }
+    i_dart_node_core_retire_topic_schema(n->core, idx);
+    if (topic->schema) dart_schema_free(topic->schema, i_dart_node_alloc, n);
+    topic->schema = copy;
+    topic->qos.reliability = (DartReliability)reliability;
+    memset(&def, 0, sizeof def);
+    def.name = topic->name; def.role = topic->role; def.kind = topic->kind;
+    def.prefix_bytes = topic->prefix_bytes; def.directed = topic->directed; def.attrs = topic->attrs;
+    def.qos = topic->qos;
+    rb = dart_discovery_meta_version(dart_discovery_state(n->discovery)) + 1u;
+    rc = dart_transport_topic_reuse(n->transport, idx, &def, 1, rb);
+    if (rc != 0) return rc == -4 ? DART_ERR_OOM : DART_ERR_STATE;
+    i_dart_node_core_topic_rebound(n->core, idx);
+    i_dart_node_core_set_topic_schema(n->core, idx, topic->schema);
+    i_dart_node_readvertise(n);
+    return DART_OK;
+}
+
+int dart_topic_refresh(DartTopic *topic){
+    DartNode *n; int acquired, r = 0;
+    const DartSchema *ms = NULL; uint8_t rel = 0; uint64_t gen = 0;
+    if (!topic) return DART_ERR_NO_TOPIC;
+    if (!topic->reflect) return DART_ERR_ROLE;
+    n = topic->n;
+    acquired = i_dart_node_lock(n);
+    if (!acquired) return DART_ERR_STATE;   /* from a callback: lanes are live mid-delivery */
+    if (i_dart_node_core_reflect_pick(n->core, DART_ENTITY_TOPIC, topic->name, 0,
+                                      dart_role_pubs(topic->role), &ms, &rel, &gen)
+        && gen != topic->generation){
+        r = i_dart_topic_retype(topic, ms, rel ? DART_RELIABLE : DART_BEST_EFFORT);
+        if (r == 0){ topic->generation = gen; r = 1; }
+    }
+    i_dart_node_unlock(n, acquired);
+    return r;
+}
+
+/* the patterns layer's reflect_from_mesh: the pick for one channel of an entity */
+int i_dart_node_reflect_pick(DartNode *n, DartEntityKind kind, const char *name, int which, int writer,
+                             const DartSchema **schema, uint8_t *reliable, uint64_t *generation){
+    int r, acquired;
+    if (!n) return 0;
+    acquired = i_dart_node_lock(n);
+    r = i_dart_node_core_reflect_pick(n->core, kind, name, which, writer, schema, reliable, generation);
+    i_dart_node_unlock(n, acquired);
+    return r;
 }
 
 void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){

@@ -140,6 +140,12 @@ typedef struct {
  */
 typedef struct {
     DartQos  qos;
+    uint8_t  reflect_from_mesh;  /* fill what you left unspecified from the mesh: a NULL schema
+                                    takes the entity's (a reader gets its provider's, a writer
+                                    the widest every reader accepts), a zero reliability follows
+                                    it too. Untyped when nobody advertises one, and
+                                    dart_topic_refresh re-types the handle later. A value you
+                                    pass always wins. */
 } DartTopicOpts;
 
 typedef struct DartNode    DartNode;
@@ -303,6 +309,12 @@ DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
  * for a pattern channel (retire the pattern handle instead), for a builtin (@dart/...)
  * topic, and while a dispatch on this topic runs its callback. */
 int dart_topic_retire(DartTopic *topic);
+/* A reflect_from_mesh topic: re-read the mesh and, if what the handle took has moved (the
+ * provider restarted, retyped, or appeared), re-type it IN PLACE: same handle, same index,
+ * peers re-verify. Returns 1 when it re-created, 0 when current, negative on error
+ * (DART_ERR_ROLE for a handle created without the flag). Never automatic: a retire is
+ * visible to peers, so the app picks the moment. */
+int dart_topic_refresh(DartTopic *topic);
 
 /* ---- consumer queues (take / dispatch) ----------------------------------------------
  * By default a topic's messages fire on_message on whichever thread polls, and a heavy
@@ -364,65 +376,41 @@ const DartSchema *dart_topic_schema(const DartTopic *topic);
  * out of range. Lets a caller use a handle without storing the create_topic result. */
 DartTopic *dart_node_topic(DartNode *n, uint16_t index);
 
-/* ---- read-only peer inspection (diagnostics / a discovery explorer) ----------------
- * The live peer table as a zero-copy array, valid until the next dart_node_poll. A node
- * peer IS a discovery peer: identity, locator, liveness, name, uuid, and the OPAQUE
- * announce overlay are exactly what discovery already holds, so this hands back discovery's
- * own view rather than copying into a parallel struct. The overlay's transport meaning (the
- * peer's UDP fragment size and pub/sub interest) is decoded on demand via dart_node_peer_frag
- * / dart_node_peer_interest_next (node/core.h), so a caller never touches dart_meta_*.
- * Returns the packed array + *count (used peers, ACTIVE or DROPPED); NULL if n is NULL. */
-const DartDiscoveryPeer *dart_node_peers(DartNode *n, uint16_t *count);
+/* ---- REFLECTION -----------------------------------------------------------------------
+ * Three walks answer everything a tool asks about the mesh, all over one zero-initialized
+ * DartIter (call until 0). Every view (a name, an address, a schema) points into node
+ * state and is valid until the next poll: bracket call + use with dart_node_lock /
+ * dart_node_unlock when a poller runs on another thread. Reflection reads TABLES the node
+ * fills as announces and details arrive, so a walk never hashes a name, rescans an
+ * interest list, or allocates. Nothing here needs the patterns layer: entity kinds ride
+ * the announce, so a node built without patterns reflects a peer's functions and tasks
+ * exactly like one built with them. */
+/* DartIter, DartPeerInfo, DART_SELF, DartEntityKind and DartEntityInfo are defined in
+ * node/core.h beside DartEvent. */
 
-/* A peer topic's full details from the greedy cache (opts.fetch_details; without it only
- * topics this node shares are ever fetched, so most queries yield nothing). Key by the
- * peer id and the index from the interest walk. topic_name returns {NULL,0} until the
- * peer's detail response arrives (the announce carries only hashes; show the hash until
- * then). topic_schema returns the parsed, node-owned schema the peer advertises (NULL =
- * untyped or not yet fetched; do NOT free) and fills the optional schema_hash out-param
- * (0 = untyped). Views into node state: with a poller on another thread bracket call + use
- * with dart_node_lock/dart_node_unlock, like dart_node_peers. */
-DartString        dart_node_peer_topic_name(DartNode *n, uint32_t peer, uint16_t index);
-const DartSchema *dart_node_peer_topic_schema(DartNode *n, uint32_t peer, uint16_t index,
-                                              uint64_t *schema_hash);
+/* "Who is here": one discovered peer per call. Dropped peers are included (they may
+ * return under the same uuid): gate on liveness. */
+int dart_node_peers_next(DartNode *n, DartIter *it, DartPeerInfo *out);
 
-/* ---- the mesh's schema for a topic name -----------------------------------------------
- * A tool with no type of its own (an explorer, a bridge, a CLI publisher) takes its shape
- * from the mesh, and which advertiser to believe is not obvious once two disagree. This
- * walks every ACTIVE peer advertising `name` (either direction) and returns the schema to
- * adopt: node-owned, do NOT free, NULL when nobody advertises one. It reads the greedy
- * detail cache, so open with opts.fetch_details to see topics this node does not share.
- * A DROPPED peer never counts: its cached schema is a dead incarnation's. The ranking:
- *   1. WIDER WINS, whatever the roles. When one schema reads the other (dart_schema_subset,
- *      the matcher's own gate) and not the reverse, the wider one is what to WRITE with: it
- *      satisfies every reader the narrower one does. This is what makes a NAMED field type
- *      work. An anonymous struct reads a `Color` writer, but a `Color` reader refuses an
- *      anonymous writer, so adopting an unnamed rival's shape makes the named endpoint
- *      refuse our sends. It also stops a subscriber that declares a SUBSET of the fields
- *      from narrowing what we publish.
- *   2. Else a PUBLISHER beats a subscriber: it owns the actual wire bytes.
- *   3. Else the endpoint heard more recently wins, so a crash-restarted node's dead
- *      incarnation (ACTIVE-listed until peer_timeout, but silent) loses to the live one.
- *      Same-role rivals both announce every interval, so the pick never flaps.
- * *src is optional: where the winner came from, and how contested the name is. */
-typedef struct {
-    DartString from;        /* the winning endpoint's node name, {NULL,0} = nothing found */
-    uint32_t   peer;        /* its peer id, 0 = none */
-    uint16_t   index;       /* its topic index at that peer */
-    uint16_t   advertisers; /* endpoints advertising a schema for this name, 0 = untyped */
-    uint64_t   hash;        /* the winning schema's identity, 0 = none */
-    uint8_t    is_pub;      /* 1 = the winner publishes this topic, 0 = it subscribes */
-    uint8_t    conflict;    /* 1 = two advertisers cannot read each other, or one is still
-                               hash-only: the pick stands, but the mesh is mismatched */
-} DartSchemaSource;
+/* "What a node offers": entities, never channels. A function's @req/@rsp pair is ONE
+ * function, a task's three channels ONE task, a variable's @set folds into its value
+ * entity as `writable`; the @dart/ builtins are hidden. Derived from what the wire
+ * already carries (kind bits in the announce, names + schemas + attrs from the detail
+ * exchange), so there is no reflection protocol. */
+/* The entities one node advertises: peer DART_SELF walks this node, a peer id walks that
+ * peer (a dropped peer serves its last known view; the mesh walk never counts it). */
+int dart_node_entities_next(DartNode *n, uint32_t peer, DartIter *it, DartEntityInfo *out);
 
-const DartSchema *dart_node_mesh_schema(DartNode *n, const char *name, DartSchemaSource *src);
+/* The whole mesh folded, one entity per (kind, name) across every ACTIVE peer and this
+ * node. provides/consumes say whether anyone live is on that side, the schemas are the
+ * provider's (a definition owns its type; the widest consumer's when no provider is live),
+ * conflict says the endpoints disagree. Rebuilt on the first call after a change. */
+int dart_node_mesh_next(DartNode *n, DartIter *it, DartEntityInfo *out);
+int dart_node_mesh_find(DartNode *n, DartEntityKind kind, const char *name, DartEntityInfo *out);
 
-/* The same pick as a caller-owned COPY of the winner's canonical wire: safe to hold past
- * the node lock (taken internally) and to hand to dart_node_create_topic. Free it with
- * dart_schema_free and the same alloc/user. NULL when nothing is advertised, or on OOM. */
-DartSchema *dart_node_mesh_schema_copy(DartNode *n, const char *name, DartSchemaSource *src,
-                                       DartAllocFn alloc, void *user);
+/* Bumps on every reflected change anywhere in the mesh (a peer up or down, an interest
+ * apply, names or verdicts paging in, this node's own topics): re-walk iff it moved. */
+uint32_t dart_node_mesh_epoch(DartNode *n);
 
 /* Cumulative backpressure since open: us waited on slow subscribers and how many sends
  * waited. Either out-pointer may be NULL. */
@@ -598,6 +586,11 @@ DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartR
                               const DartSchema *schema, const DartTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_DartSysMsgFn on_msg, void *on_msg_user);
+/* Re-type a live pattern channel in place (dart_topic_refresh's engine; node lock NOT held). */
+int  i_dart_topic_retype(DartTopic *topic, const DartSchema *schema, uint8_t reliability);
+/* The reflect_from_mesh pick for one channel (which: 0 primary, 1 rsp, 2 prg) of an entity. */
+int  i_dart_node_reflect_pick(DartNode *n, DartEntityKind kind, const char *name, int which, int writer,
+                              const DartSchema **schema, uint8_t *reliable, uint64_t *generation);
 /* Publish hdr+payload on a pattern topic (broadcast to all matched subscribers). */
 int  i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data);
 /* Publish hdr+payload to ONE peer, point-to-point (function replies). */
@@ -663,10 +656,9 @@ const uint8_t *i_dart_node_uuid(DartNode *n);
 uint8_t    i_dart_topic_kind (const DartTopic *topic);   /* DartTopicKind */
 uint8_t    i_dart_topic_role (const DartTopic *topic);   /* DartRole (current) */
 DartString i_dart_topic_name (const DartTopic *topic);   /* the stable name copy */
+uint8_t    i_dart_topic_reliability(const DartTopic *topic);   /* the create qos reliability */
+const uint8_t *i_dart_node_peer_uuid(DartNode *n, uint32_t peer);   /* NULL if unknown; a view */
 uint16_t   i_dart_node_topic_count(DartNode *n);         /* created topics (handles 0..count) */
-/* The DART_ATTR_* byte a peer advertised for ITS topic at their_index (0 until details
- * arrive): the entity walk decodes DartEntityInfo's named flag fields from it. */
-uint8_t    i_dart_node_peer_attrs(DartNode *n, uint32_t peer, uint16_t their_index);
 /* Build the introspection snapshot for the DART_META_* mask (0 = all sections) into a
  * node-owned grown buffer: a serialize-layer MAP body (feed to dart_map_* or wrap in a
  * schema message). A view valid until the next call; {NULL,0} on OOM. The @dart/meta

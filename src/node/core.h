@@ -130,6 +130,57 @@ typedef void (*DartEventFn)(const DartEvent *ev);
  * terse "error N" for DART_ERROR (the numeric fields still print). */
 const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
 
+/* ---- reflection types (the walks are in node/runtime.h) ------------------------------- */
+typedef struct { uint32_t a, b; uint16_t c, d; } DartIter;   /* walk state: zero-initialize */
+
+#define DART_SELF 0u   /* the peer id that means this node */
+
+typedef struct {
+    uint32_t         id;             /* handle, stable across a drop and return; never DART_SELF */
+    uint8_t          uuid[16];       /* the process instance: a restart is a new uuid, same name */
+    DartString       name;
+    DartString       address;        /* "ip:port" */
+    DartPeerLiveness liveness;
+    uint64_t         last_heard_us;
+    uint32_t         epoch;          /* bumps on every reflected change at this peer */
+    uint8_t          catching_up;    /* 1 = it advertises newer state than we hold yet */
+    uint16_t         fragment_size;  /* advertised UDP fragment size */
+} DartPeerInfo;
+
+typedef enum {
+    DART_ENTITY_TOPIC = 0,
+    DART_ENTITY_FUNCTION,
+    DART_ENTITY_VARIABLE,
+    DART_ENTITY_TASK
+} DartEntityKind;
+
+typedef struct {
+    DartEntityKind    kind;
+    DartString        name;          /* base name; {NULL,0} until the details arrive (show hash) */
+    uint32_t          hash;          /* the primary channel's low-32 name hash: the placeholder */
+    uint8_t           provides;      /* someone live is on the source side */
+    uint8_t           consumes;      /* someone live is on the sink side */
+    uint8_t           reliable;      /* the primary channel's reliability */
+    uint8_t           writable;      /* VARIABLE: a set channel is advertised */
+    uint8_t           forceable;     /* VARIABLE: the owner permits force */
+    uint8_t           cancellable;   /* TASK: the provider honors cancel */
+    uint8_t           exclusive;     /* TASK: declared serialization */
+    uint8_t           multi;         /* duplicate authority is intended */
+    uint8_t           incomplete;    /* a pattern half pair: surfaced, never silently dropped */
+    uint8_t           conflict;      /* MESH: live endpoints declare schemas that cannot read each other */
+    uint16_t          providers;     /* live endpoints on each side (a per-node walk reports 0 or 1) */
+    uint16_t          consumers;
+    uint32_t          provider;      /* the ranked provider's peer id (DART_SELF = this node); iff providers > 0 */
+    DartString        from;          /* the node the schemas below were read from */
+    const DartSchema *schema;        /* value / request / payload (NULL = untyped or unfetched) */
+    uint64_t          schema_hash;
+    const DartSchema *rsp_schema;    /* FUNCTION / TASK: the response */
+    uint64_t          rsp_schema_hash;
+    const DartSchema *progress_schema;   /* TASK: the progress channel */
+    uint64_t          progress_schema_hash;
+    uint64_t          generation;    /* changes iff provider identity, any schema, or an attr changed */
+} DartEntityInfo;
+
 /* Everything the core needs from the runtime, set once at init. The peer table itself
  * lives in the discovery core: the node core delegates id<->address resolution and peer
  * naming to it (dart_discovery_*), and stores its small per-peer transport-lifecycle
@@ -287,14 +338,6 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
  * match wait and dart_topic_pending_count read; cold-path only (walks peers). */
 int    i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index);
 
-/* The greedy detail cache (cfg.fetch_details): a peer topic's fetched name + parsed
- * schema by (peer id, index). name is a view of the cache's copy ({NULL,0} = not
- * fetched yet); *schema and *schema_hash (either may be NULL) get the interned parsed
- * schema and its identity (NULL/0 = untyped). Returns 1 on a cache hit. */
-int i_dart_node_core_topic_detail(i_DartNodeCore *c, uint32_t peer, uint16_t index,
-                                  DartString *name, const DartSchema **schema,
-                                  uint64_t *schema_hash);
-
 /* A peer's human-readable name, learned from its announce blob: a DartString viewing the
  * peer-table slot (not NUL-terminated; stable until the peer is evicted). Non-empty for any
  * known peer ("unknown-peer" if its announce carried none); .data is NULL only when id is
@@ -308,25 +351,36 @@ uint16_t i_dart_node_core_max_peers(i_DartNodeCore *c);
 int      i_dart_node_core_peer_at(i_DartNodeCore *c, uint16_t slot, uint32_t *id,
                                 uint8_t ip[16], uint8_t *ip_len, uint16_t *port);
 
-/* Decode helpers for a peer's announce overlay (the transport meta blob discovery carries
- * opaquely). The node owns the transport codec, so a diagnostics caller reads a peer's
- * fragment size + interest off a DartDiscoveryPeer (from dart_node_peers) without ever
- * touching dart_meta_*. Both read the peer's raw overlay pointer, valid until the next poll. */
-uint16_t dart_node_peer_frag(const DartDiscoveryPeer *peer);   /* advertised UDP fragment size; 0 if none/malformed */
-/* The peer's interest EPOCH: a per-incarnation counter bumped every time the peer's
- * REFLECTED state changes -- an interest apply, an external-interest assembly completing,
- * or fresh detail verdicts/names landing. Key any cached entity/interest walk on THIS
- * (walk again iff it changed), never on the announce meta_version alone: an external
- * peer's entities appear (and names page in) without any version bump. 0 = nothing
- * applied yet, so a zero-initialized cache key starts stale and walks once the first
- * interest lands. */
-uint32_t dart_node_peer_interest_epoch(const DartDiscoveryPeer *peer);
-/* Walk a peer's interest list one advertised direction at a time: zero a
- * DartInterestIter, then call until it returns 0. Fills *out with index/role/hash only:
- * the announce carries no topic names or schemas (fetch those via the detail exchange,
- * transport/core.h). 0 when the peer carries no overlay or at the end. */
-int      dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
+/* ---- reflection: the tables behind node/runtime.h's walks ------------------------------
+ * Per peer: a channel table dense by the peer's topic index (kind/role/reliable/hash from
+ * every interest apply, name/attrs/schema from every detail response), folded lazily into
+ * entities when read. The local node is one more channel source, rebuilt by the runtime
+ * through self_begin/channel/end on every topology change. The mesh table folds every
+ * ACTIVE peer plus self, one entity per (kind, name), rebuilt lazily after any change. */
+uint16_t i_dart_node_peer_frag(const DartDiscoveryPeer *peer);
+uint32_t i_dart_node_peer_interest_epoch(const DartDiscoveryPeer *peer);
+int      i_dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
                               DartInterestIter *it, DartTopicEntry *out);
+void     i_dart_node_core_set_self_name(i_DartNodeCore *c, DartString name);
+void     i_dart_node_core_self_begin(i_DartNodeCore *c);
+void     i_dart_node_core_self_channel(i_DartNodeCore *c, uint16_t index, DartString name,
+                              uint8_t kind, uint8_t role, uint8_t reliable, uint8_t attrs,
+                              const DartSchema *schema);
+void     i_dart_node_core_self_end(i_DartNodeCore *c);
+int      i_dart_node_core_peers_next(i_DartNodeCore *c, DartIter *it, DartPeerInfo *out);
+int      i_dart_node_core_entities_next(i_DartNodeCore *c, uint32_t peer, DartIter *it,
+                              DartEntityInfo *out);
+int      i_dart_node_core_mesh_next(i_DartNodeCore *c, DartIter *it, DartEntityInfo *out);
+int      i_dart_node_core_mesh_find(i_DartNodeCore *c, DartEntityKind kind, const char *name,
+                              DartEntityInfo *out);
+uint32_t i_dart_node_core_mesh_epoch(i_DartNodeCore *c);
+/* The create-time pick for ONE channel (which: 0 primary, 1 rsp, 2 prg) of an entity,
+ * over every live declaration: a writer takes the widest schema every reader accepts, a
+ * reader takes the provider's. reliable = the provider's offer for a reader, "any reader
+ * requests reliable" for a writer. 0 when nobody advertises the entity. */
+int      i_dart_node_core_reflect_pick(i_DartNodeCore *c, DartEntityKind kind, const char *name,
+                              int which, int writer, const DartSchema **schema,
+                              uint8_t *reliable, uint64_t *generation);
 
 #ifdef __cplusplus
 }
