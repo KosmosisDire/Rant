@@ -382,6 +382,13 @@ static i_DartLane *i_dart_lane_ensure(DartTransportState *st, uint16_t c, uint32
     return &st->lanes[li];
 }
 
+/* free one assembly slot's grown buffers (lane release / destroy) */
+static void i_dart_asm_free(DartTransportState *st, i_DartAssembly *a){
+    if (a->buf){ st->cfg.allocator(st->cfg.user, a->buf, 0); a->buf=NULL; a->cap=0; }
+    if (a->bitmap){ st->cfg.allocator(st->cfg.user, a->bitmap, 0); a->bitmap=NULL; a->bitmap_cap=0; }
+    a->active=0;
+}
+
 /* A lane with neither side matched leaves the topic chain; its grown reassembly
  * buffers are freed, any scheduler entry dropped (a recycled record must never sit
  * on another peer's dest list), and the record recycled. No-op while a side is matched. */
@@ -396,8 +403,7 @@ static void i_dart_lane_release(DartTransportState *st, uint16_t c, uint32_t pee
         if (*pp == li) *pp = l->topic_next;
     }
     l->topic_next = DART__NIL;
-    if (l->r.assembly_buf){ st->cfg.allocator(st->cfg.user, l->r.assembly_buf, 0); l->r.assembly_buf=NULL; l->r.assembly_cap=0; }
-    if (l->r.frag_bitmap){ st->cfg.allocator(st->cfg.user, l->r.frag_bitmap, 0); l->r.frag_bitmap=NULL; l->r.bitmap_cap=0; }
+    i_dart_asm_free(st, &l->r.cur); i_dart_asm_free(st, &l->r.next);
     i_dart_sched_drop(st, li);
     l->in_use = 0;
     l->sched_next = st->lane_free; st->lane_free = li;
@@ -428,10 +434,9 @@ static void i_dart_writer_unmatch(DartTransportState *st, uint16_t c, i_DartLane
 
 static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t peer_slot, i_DartLane *l){
     i_DartReaderProxy *r=&l->r;
-    uint8_t *assembly_buf=r->assembly_buf, *frag_bitmap=r->frag_bitmap;
-    uint32_t assembly_cap=r->assembly_cap, bitmap_cap=r->bitmap_cap;   /* keep grown buffers across rematch */
+    i_DartAssembly cur=r->cur, next=r->next;   /* keep grown buffers across rematch */
     memset(r,0,sizeof(*r));
-    r->assembly_buf=assembly_buf; r->frag_bitmap=frag_bitmap; r->assembly_cap=assembly_cap; r->bitmap_cap=bitmap_cap;
+    r->cur=cur; r->next=next; r->cur.active=0; r->next.active=0;
     r->epoch=st->reader_epoch_counter++;   /* new incarnation: writers re-join on seeing it */
     r->used=1;       /* started==0: first DATA adopts the writer's position */
     st->topics[c].matched_readers++;   /* only reached on a genuine 0->1 (rematch guards on !used) */
@@ -446,7 +451,7 @@ static void i_dart_reader_match(DartTransportState *st, uint16_t c, uint16_t pee
 
 static void i_dart_reader_unmatch(DartTransportState *st, uint16_t c, i_DartLane *l){
     if (l->r.used) st->topics[c].matched_readers--;   /* peer_remove calls this unconditionally */
-    l->r.used=0; l->r.assembly_active=0;
+    l->r.used=0; l->r.cur.active=0; l->r.next.active=0;
 }
 
 
@@ -653,8 +658,7 @@ void dart_transport_destroy(DartTransportState *st){
     for (li=0; li<st->lane_cap; li++){           /* live records' grown reassembly buffers */
         i_DartLane *l=&st->lanes[li];
         if (!l->in_use) continue;
-        if (l->r.assembly_buf){ st->cfg.allocator(st->cfg.user, l->r.assembly_buf, 0); l->r.assembly_buf=NULL; l->r.assembly_cap=0; }
-        if (l->r.frag_bitmap){ st->cfg.allocator(st->cfg.user, l->r.frag_bitmap, 0); l->r.frag_bitmap=NULL; l->r.bitmap_cap=0; }
+        i_dart_asm_free(st, &l->r.cur); i_dart_asm_free(st, &l->r.next);
     }
     if (st->lanes){                              /* the record pool itself (one hook allocation) */
         st->cfg.allocator(st->cfg.user, st->lanes, 0);

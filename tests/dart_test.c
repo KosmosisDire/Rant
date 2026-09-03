@@ -1130,6 +1130,172 @@ static void rtt_checks(void){
     dart_allocator_reset(&wa); dart_allocator_reset(&ra);
 }
 
+
+/* ---- one sample held AHEAD of the head (transport core, controlled clock) ----
+   The reader keeps one sample beyond the head while the head repairs, so a late resend no
+   longer throws away the message that arrived meanwhile (which then had to come back through
+   the repair window in serial pieces). Pins: the held sample delivers right behind the
+   repaired head with no refetch and in order; a second future sample is still dropped and
+   comes back in order; the hold fills while the consumer has the head parked; the writer's
+   floor landing on the held sample delivers it; a hold across a wholly-lost sample waits its
+   turn. Messages are 6 fragments, tagged with their number in the first payload byte. */
+static int ah_recv, ah_lost, ah_refuse, ah_order_bad; static unsigned ah_drop_mask, ah_tag, ah_last;
+static uint64_t ah_drop_lo, ah_drop_hi;             /* drop DATA with seqno in [lo, hi): a whole message + its resends */
+static uint64_t ah_clk, ah_first_base; static int ah_have_first;
+static DartTransportState *ah_W, *ah_R;
+static uint8_t ah_held[8][DART_DGRAM_MAX]; static size_t ah_hl[8]; static int ah_nh;
+static int ah_on_msg(void *u, uint16_t ch, uint32_t from, DartBytes d){
+    (void)u;(void)ch;(void)from;
+    if (ah_refuse) return 1;
+    {   unsigned tag = ((const unsigned char*)d.data)[DART_TIMESTAMP_BYTES];   /* the tag sits behind the source stamp */
+        if (tag <= ah_last) ah_order_bad++;              /* strictly increasing: never a duplicate or a step back */
+        ah_last = tag; }
+    ah_recv++; return 0;
+}
+static void ah_on_event(const DartTransportEvent *ev){
+    if (ev->kind==DART_TRANSPORT_MSG_LOST) ah_lost += (int)ev->lost_count;
+}
+static void ah_send(void){                       /* one 6-fragment message, tagged */
+    static unsigned char p[6*DART_FRAG_SIZE - 100];
+    p[0] = (unsigned char)++ah_tag;
+    dart_transport_send(ah_W, 0, dart_bytes(p, sizeof p), ah_clk);
+}
+static uint64_t ah_base_of(unsigned tag){ return ah_first_base + 6u * (uint64_t)(tag - 1u); }   /* message tag's frag-0 seqno */
+static void ah_collect_r(void){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
+    while (ah_nh<8 && dart_transport_poll_send(ah_R,&to,buf,sizeof buf,&ol,ah_clk)){
+        memcpy(ah_held[ah_nh], buf, ol); ah_hl[ah_nh++] = ol; }
+}
+static void ah_feed_w(void){
+    int i;
+    for (i=0;i<ah_nh;i++) dart_transport_on_datagram(ah_W, 2u, dart_bytes(ah_held[i], ah_hl[i]), ah_clk);
+    ah_nh = 0;
+}
+static void ah_flush_w(void){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
+    while (dart_transport_poll_send(ah_W,&to,buf,sizeof buf,&ol,ah_clk)){
+        size_t off=0;
+        if ((buf[0]&0x07u)==1u && !(buf[0]&DART_F_SINGLE)){
+            uint64_t seqno = i_dart_le_r64(buf+DART_OFFSET_SEQNO);
+            unsigned frag = (unsigned)buf[DART_OFFSET_FRAG] | ((unsigned)buf[DART_OFFSET_FRAG+1]<<8);
+            size_t sub = DART_HEADER_DATA_MULTI + ((size_t)buf[DART_OFFSET_PAYLOAD_LEN] | ((size_t)buf[DART_OFFSET_PAYLOAD_LEN+1]<<8));
+            int drop;
+            if (!ah_have_first){ ah_first_base = seqno - frag; ah_have_first = 1; }
+            drop = (ah_drop_mask & (1u<<frag)) || (seqno >= ah_drop_lo && seqno < ah_drop_hi);
+            if (frag==5) ah_drop_mask = 0;
+            if (drop) off = sub;
+        }
+        if (off < ol) dart_transport_on_datagram(ah_R, 1u, dart_bytes(buf+off, ol-off), ah_clk);
+    }
+}
+static void ah_pump(uint64_t dt){ ah_flush_w(); ah_collect_r(); ah_feed_w(); ah_clk += dt; }
+static void ah_run(int ms){ while (ms-- > 0) ah_pump(1000); }
+static void ahead_checks(void){
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartRepairStats ws, rs; uint64_t resent0, ahead0;
+    DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=4;
+    q.heartbeat_us=30000; q.repair_delay_us=50000;
+    memset(&cw,0,sizeof cw); cw.name="ahead"; cw.qos=q; cw.role=DART_PUB_ONLY;
+    memset(&cr,0,sizeof cr); cr.name="ahead"; cr.qos=q; cr.role=DART_SUB_ONLY;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
+    rc.on_message=ah_on_msg; rc.on_event=ah_on_event;
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); ah_W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); ah_R=dart_transport_init(mr,nr,&rc);
+    ah_clk=1000000; ah_nh=0; ah_drop_mask=0; ah_drop_lo=ah_drop_hi=0; ah_refuse=0;
+    ah_tag=0; ah_last=0; ah_order_bad=0; ah_have_first=0;
+    dart_transport_peer_add(ah_W,2u,DART_FRAG_SIZE); dart_transport_peer_add(ah_R,1u,DART_FRAG_SIZE);
+    st_apply_verified(ah_R, 1u, ah_W);
+    st_apply_verified(ah_W, 2u, ah_R);
+    ST_CHECK(dart_transport_publisher_match_count(ah_W,0)>0, "ahead: writer matched reader");
+
+    /* [a] baseline */
+    ah_recv=0; ah_lost=0; ah_send(); ah_pump(1000);
+    ST_CHECK(ah_recv==1 && ah_lost==0, "ahead: [a] a 6-fragment message delivers (recv=%d)", ah_recv);
+
+    /* [b] frag 2 of message 2 is lost and message 3 arrives whole before the resend: it is
+       HELD, not dropped, and delivers right behind the repaired head. One resend, in order. */
+    dart_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    dart_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    ah_recv=0; ah_drop_mask=(1u<<2);
+    ah_send(); ah_send(); ah_pump(1000);
+    dart_transport_repair_stats(ah_R,0,&rs);
+    ST_CHECK(ah_recv==0 && rs.frags_ahead==ahead0, "ahead: [b] the next message is held while the head repairs (recv=%d ahead=%llu)",
+             ah_recv, (unsigned long long)(rs.frags_ahead-ahead0));
+    ah_pump(1000);
+    dart_transport_repair_stats(ah_W,0,&ws);
+    ST_CHECK(ah_recv==2 && ah_order_bad==0 && ws.frags_resent-resent0==1,
+             "ahead: [b] one resend completes the head, the held message follows at once (recv=%d resent=%llu)",
+             ah_recv, (unsigned long long)(ws.frags_resent-resent0));
+
+    /* [c] two messages ahead: the first is held, the second is still dropped and comes back
+       in order through repair (6 resends), everything in order */
+    dart_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    dart_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    ah_recv=0; ah_drop_mask=(1u<<2);
+    ah_send(); ah_send(); ah_send(); ah_pump(1000);
+    dart_transport_repair_stats(ah_R,0,&rs);
+    ST_CHECK(ah_recv==0 && rs.frags_ahead-ahead0==6, "ahead: [c] the second future message is dropped (ahead=%llu)",
+             (unsigned long long)(rs.frags_ahead-ahead0));
+    ah_run(5);
+    dart_transport_repair_stats(ah_W,0,&ws);
+    ST_CHECK(ah_recv==3 && ah_order_bad==0 && ws.frags_resent-resent0==7,
+             "ahead: [c] head repaired, held one delivered, dropped one refetched (recv=%d resent=%llu)",
+             ah_recv, (unsigned long long)(ws.frags_resent-resent0));
+
+    /* [d] the consumer refuses the head (parked): the next message still fills the hold, and
+       an accepted retry delivers both with no resend */
+    dart_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    dart_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    ah_recv=0; ah_refuse=1;
+    ah_send(); ah_pump(1000);
+    ah_send(); ah_pump(1000);
+    dart_transport_repair_stats(ah_R,0,&rs);
+    ST_CHECK(ah_recv==0 && rs.frags_ahead==ahead0 && dart_transport_deliver_parked(ah_R,0,ah_clk)==1,
+             "ahead: [d] parked head, the next message held meanwhile (ahead=%llu)", (unsigned long long)(rs.frags_ahead-ahead0));
+    ah_refuse=0;
+    ST_CHECK(dart_transport_deliver_parked(ah_R,0,ah_clk)==0 && ah_recv==2 && ah_order_bad==0,
+             "ahead: [d] unpark delivers the head and the held message (recv=%d)", ah_recv);
+    ah_pump(1000);
+    dart_transport_repair_stats(ah_W,0,&ws);
+    ST_CHECK(ws.frags_resent==resent0, "ahead: [d] no resend was needed (resent=%llu)", (unsigned long long)(ws.frags_resent-resent0));
+
+    /* [e] a message is lost whole (resends too) and the next one is held; the writer evicts
+       the lost one, its floor lands ON the held message: delivered from the hold, one MSG_LOST
+       for the evicted one, the rest refetched in order */
+    ah_recv=0; ah_lost=0;
+    ah_drop_lo=ah_base_of(ah_tag+1u); ah_drop_hi=ah_drop_lo+6u;
+    ah_send(); ah_send(); ah_pump(1000);          /* 7 lost whole, 8 held */
+    ah_send(); ah_pump(1000); ah_send(); ah_pump(1000); ah_send(); ah_pump(1000);   /* 9..11: 7 evicted (keep_last 4) */
+    ah_run(120);
+    ST_CHECK(ah_recv==4 && ah_lost==6 && ah_order_bad==0,
+             "ahead: [e] the floor landed on the held message: delivered, one lost, rest refetched in order (recv=%d lost=%d)",
+             ah_recv, ah_lost);
+    ah_drop_lo=ah_drop_hi=0;
+
+    /* [f] a hold ACROSS a wholly-lost message: 12 has a hole, 13 is lost whole (once), 14 is
+       held. 12 repairs, 13 is fetched in order, 14 delivers from the hold: in order, 7 resends,
+       nothing dropped */
+    dart_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    dart_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    ah_recv=0; ah_lost=0; ah_drop_mask=(1u<<2);
+    ah_drop_lo=ah_base_of(ah_tag+2u); ah_drop_hi=ah_drop_lo+6u;
+    ah_send(); ah_send(); ah_send(); ah_pump(1000);
+    ah_drop_lo=ah_drop_hi=0;                     /* 13's resends get through */
+    ah_run(5);
+    dart_transport_repair_stats(ah_W,0,&ws); dart_transport_repair_stats(ah_R,0,&rs);
+    ST_CHECK(ah_recv==3 && ah_lost==0 && ah_order_bad==0 && ws.frags_resent-resent0==7 && rs.frags_ahead==ahead0,
+             "ahead: [f] hold across a lost message: repaired, fetched, delivered in order (recv=%d resent=%llu ahead=%llu)",
+             ah_recv, (unsigned long long)(ws.frags_resent-resent0), (unsigned long long)(rs.frags_ahead-ahead0));
+
+    dart_transport_destroy(ah_W); dart_transport_destroy(ah_R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
+}
+
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
@@ -7750,6 +7916,7 @@ static int selftest_main(void){
     rate_checks();                /* 17d. best-effort rate throttle: decimation, no false loss, real loss kept */
     lapped_checks();              /* 17e. reliable repair: NACK merge + a lapped reader rejoins at the head */
     rtt_checks();                 /* 17f. per-peer RTT estimate: writer + reader samples, adaptive backstop + tail HB */
+    ahead_checks();               /* 17g. one sample held ahead of the head while it repairs */
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */

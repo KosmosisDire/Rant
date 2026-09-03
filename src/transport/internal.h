@@ -161,6 +161,21 @@ typedef struct {        /* writer-side, per (topic,peer) */
     uint64_t rtt_probe_us;
 } i_DartWriterProxy;
 
+/* one sample's reassembly state (reader side). Buffers are hook-allocated and grown to
+ * fit, kept across rematch and rotation, freed with the lane. */
+typedef struct {
+    uint8_t *buf;           /* >= len bytes */
+    uint8_t *bitmap;        /* ceil(count/8): fragments held */
+    uint64_t base;          /* seqno of frag 0 */
+    uint32_t len;           /* message bytes */
+    uint32_t cap;           /* allocated bytes of buf */
+    uint32_t bitmap_cap;    /* allocated bytes of bitmap */
+    uint16_t count;         /* frag count */
+    uint16_t low;           /* lowest still-missing frag index (the contiguous-received front);
+                               base+low = first hole, low == count = complete */
+    uint8_t  active;        /* received >= 1 frag of this sample */
+} i_DartAssembly;
+
 typedef struct {        /* reader-side, per (topic,peer) */
     uint64_t deliver_upto;  /* base of current sample; all below delivered/skipped */
     uint64_t hb_last;       /* highest seqno the writer CLAIMS to hold (heartbeat only) */
@@ -171,27 +186,25 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                (nack_high, top] so in-flight repairs are not re-requested */
     uint64_t nack_retransmit_us;  /* earliest time to re-request a stalled floor (lost-repair backstop) */
     uint64_t ack_due_us;
-    uint8_t *assembly_buf;       /* >= assembly_len; hook-allocated, grown to fit */
-    uint8_t *frag_bitmap;       /* ceil(assembly_count/8) */
+    i_DartAssembly cur;     /* the head sample (base == deliver_upto while active) */
+    i_DartAssembly next;    /* ONE sample held ahead of the head: the one that follows it, or
+                               (while the head is unknown) any one later sample. It rotates
+                               into cur by struct swap when the head delivers or the writer's
+                               floor lands on it, and is dropped when the floor passes it.
+                               Fragments of any other future sample are still dropped (and
+                               repaired in order later), so the hold never moves the floor. */
     uint32_t epoch;         /* this incarnation's id, sent in every ACKNACK */
-    uint32_t assembly_len;
-    uint32_t assembly_cap;       /* allocated bytes of assembly_buf (dynamic grows it) */
-    uint32_t bitmap_cap;        /* allocated bytes of frag_bitmap */
-    uint16_t assembly_count;
-    uint16_t assembly_low;        /* lowest still-missing frag index of current sample (its
-                               contiguous-received front); deliver_upto+assembly_low = first hole */
     uint8_t  used;
     uint8_t  no_timestamp;  /* this writer publishes the topic WITHOUT the source stamp: sourced
                                from the peer's cached detail attrs on every interest apply, so
                                the receiving side knows whether the sample begins with
                                DART_TIMESTAMP_BYTES. 0 (a fresh match memsets it) = stamped. */
     uint8_t  started;       /* accepted any DATA from this writer yet */
-    uint8_t  assembly_active;    /* received >=1 frag of current sample */
     uint8_t  ack_force;     /* a delivery/skip/HB/(re)match owes the writer an ACKNACK even if
                                the repair floor did not move (avoids a stuck cumulative ack) */
     uint8_t  ack_pending;
     uint8_t  parked;        /* on_message/on_shm REFUSED the head sample: it is held (inline:
-                               assembled in assembly_buf; SHM: the descriptor copied there), with no
+                               assembled in cur.buf; SHM: the descriptor copied there), with no
                                advance, no ack and no repair traffic, so the writer's flow control
                                backpressures the publisher. dart_transport_deliver_parked retries;
                                a writer floor past it (HB) gives up and skips (bounded loss). */

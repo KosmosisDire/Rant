@@ -800,7 +800,9 @@ typedef struct {
        deliver_upto), so "recv 0" while the publisher floods can mean the fragments are
        landing but being rejected as old/ahead, not that they aren't arriving. */
     uint64_t frags_old;        /* base < deliver_upto: whole message already delivered/skipped */
-    uint64_t frags_ahead;      /* base > deliver_upto: a future message (no out-of-order buffer) */
+    uint64_t frags_ahead;      /* base > deliver_upto and NOT the one sample held ahead of the head:
+                                  dropped, fetched in order later (a subscriber holds one message
+                                  ahead while the head repairs; counts of it are frags_recv) */
     uint64_t frags_malformed;  /* count==0 || frag>=count, or not subscribed */
 } DartRepairStats;
 
