@@ -61,7 +61,7 @@
   const node = await DartNode.connect(`ws://${location.hostname || "localhost"}:7480`, {
     onEvent: (ev) => { if (ev.event === "error") console.warn("dart:", ev.text); },
   });
-  status.textContent = `connected as node "${node.name}"`;
+  status.textContent = `connected as node "${node.name}" (data over ${node.transport})`;
 
   /* A pubsub topic: this tab both publishes and receives. A node does not receive
    * its own messages, so open a second tab (or run example.mjs) to see traffic. */

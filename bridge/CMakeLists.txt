@@ -1,9 +1,11 @@
-# DART WebSocket bridge: one WS connection = one node on the mesh (see PROTOCOL.md).
-# CMake fetches IXWebSocket (BSD-3, TLS/zlib off = zero dependencies) and nlohmann/json
-# (control plane only); DART comes from ../dist. Builds standalone
-# (cmake -S bridge -B bridge/build) or from the root (-DDART_BUILD_BRIDGE=ON).
+# DART bridge: one WebSocket connection = one node on the mesh (see PROTOCOL.md), with
+# a WebRTC data path negotiated over that socket. CMake fetches IXWebSocket (BSD-3,
+# TLS/zlib off), nlohmann/json (control plane only), and for WebRTC libdatachannel
+# (MPL-2.0) with its bundled libjuice/usrsctp/libsrtp over MbedTLS: zero system deps.
+# DART comes from ../dist. Builds standalone (cmake -S bridge -B bridge/build) or from
+# the root (-DDART_BUILD_BRIDGE=ON).
 
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.21)
 project(dart_bridge C CXX)
 
 set(CMAKE_C_STANDARD 99)
@@ -13,6 +15,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Static CRT (see the module): a copied exe must run with no VC++ redistributable.
 include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/static_runtime.cmake")
+
+option(DART_BRIDGE_WEBRTC "WebRTC data path (fetches libdatachannel + MbedTLS)" ON)
 
 # Standalone: own the output dir and define a minimal `dart` -> ../dist. Under the
 # root build the `dart` target already exists (with dist include + regeneration).
@@ -52,11 +56,54 @@ FetchContent_Declare(nlohmann_json
 
 FetchContent_MakeAvailable(ixwebsocket nlohmann_json)
 
+if(DART_BRIDGE_WEBRTC)
+  # MbedTLS: the DTLS (and SRTP crypto) backend. Pure CMake, no perl/python at build
+  # time (the release tarball ships its generated sources). Static, no programs/tests.
+  set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_TESTING  OFF CACHE BOOL "" FORCE)
+  set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+  set(GEN_FILES OFF CACHE BOOL "" FORCE)
+  set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+  # the default config leaves DTLS-SRTP off; the user config re-enables it (PUBLIC define,
+  # so libdatachannel and libSRTP compile against the same configuration)
+  set(MBEDTLS_USER_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls_user_config.h" CACHE FILEPATH "" FORCE)
+  FetchContent_Declare(mbedtls
+    URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.4/mbedtls-3.6.4.tar.bz2
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  FetchContent_MakeAvailable(mbedtls)
+
+  # libdatachannel: WebRTC (ICE via libjuice, SCTP via usrsctp, SRTP via libSRTP), all
+  # bundled as git submodules, so this is a git fetch. Its WebSocket, examples and
+  # tests are off; media stays on for the video tracks. Our FindMbedTLS (cmake/)
+  # shadows the finders it and libSRTP ship, mapping them onto the fetched targets.
+  list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+  set(CMAKE_SKIP_INSTALL_RULES ON)   # nothing here installs, and its export set would name the fetched MbedTLS
+  set(BUILD_SHARED_LIBS OFF)
+  set(USE_MBEDTLS  ON  CACHE BOOL "" FORCE)
+  set(NO_WEBSOCKET ON  CACHE BOOL "" FORCE)
+  set(NO_EXAMPLES  ON  CACHE BOOL "" FORCE)
+  set(NO_TESTS     ON  CACHE BOOL "" FORCE)
+  set(NO_MEDIA     OFF CACHE BOOL "" FORCE)
+  set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(libdatachannel
+    GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+    GIT_TAG        v0.23.2
+    GIT_SHALLOW    TRUE
+    GIT_SUBMODULES "deps/libjuice" "deps/usrsctp" "deps/plog" "deps/libsrtp"
+    GIT_SUBMODULES_RECURSE FALSE)
+  FetchContent_MakeAvailable(libdatachannel)
+endif()
+
 # Two C++ TUs: bridge.cpp is the server; dart.cpp is the DART implementation anchor
 # (it defines DART_IMPLEMENTATION; the C library compiles cleanly as C++).
 add_executable(dart_bridge bridge.cpp dart.cpp)
 target_link_libraries(dart_bridge PRIVATE dart ixwebsocket::ixwebsocket
                       nlohmann_json::nlohmann_json)
+if(DART_BRIDGE_WEBRTC)
+  target_compile_definitions(dart_bridge PRIVATE DART_BRIDGE_WEBRTC=1)
+  target_link_libraries(dart_bridge PRIVATE LibDataChannel::LibDataChannelStatic)
+endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(dart_bridge PRIVATE Threads::Threads)

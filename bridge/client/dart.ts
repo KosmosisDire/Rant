@@ -1,40 +1,67 @@
-/* DART WebSocket bridge client: one DartNode = one full DART node on the mesh, spoken
- * through the bridge (protocol v10, see ../PROTOCOL.md). Zero runtime dependencies: runs
- * in browsers, Node (>= 22), Deno and Bun off the global WebSocket.
+/* DART bridge client: one DartNode = one full DART node on the mesh, spoken through the
+ * bridge (protocol v11, see ../PROTOCOL.md). Zero runtime dependencies: runs in browsers,
+ * Node (>= 22), Deno and Bun off the global WebSocket.
+ *
+ * The WebSocket is opened first and carries the JSON control plane. Data rides binary
+ * FRAMES (one header for every kind of traffic) over a WebRTC data channel per entity
+ * when WebRTC could be negotiated, and over the WebSocket otherwise: the API is the same
+ * either way, `node.transport` says which carrier won. A subscribed VideoFrame topic can
+ * arrive as a WebRTC video track (node.video), decoded by the browser.
  *
  * TypeScript source, compiled by pure type stripping to dist/dart.mjs (+ dart.d.ts and
  * the classic-script twin dist/dart.js); see build.mjs. The emitted JS reads like this
  * file: no enums, no namespaces, no parameter properties, no decorators.
- *
- * Two API layers over one wire:
- *  - the dynamic form: node.topic(...) with flat dotted-path get/send (unchanged from v2);
- *  - the pattern factories: publisher/subscriber, functionDefinition/remoteFunction,
- *    taskDefinition/remoteTask, variableDefinition/remoteVariable. These speak decoded
- *    PLAIN OBJECTS (nested, mirroring the schema) and carry optional type parameters for
- *    TS callers.
  *
  *   const node = await DartNode.connect("ws://localhost:7480", { name: "dashboard" });
  *   const pub  = await node.publisher("pose", "Pose { x: f64, y: f64 }");
  *   pub.send({ x: 1.5, y: 2.0 });
  *   const add  = await node.remoteFunction("add", "A { a: i32, b: i32 }", "R { sum: i32 }");
  *   const r    = await add.call({ a: 2, b: 3 });   // r.status === "ok", r.value.sum === 5
+ *   const cam  = await node.video("camera/front");  // videoEl.srcObject = cam.stream
+ *   view.attach(sub, "frame")                        // or any entity's VideoFrame field
  */
 
-/* binary frame ops (byte 0); meaning per direction, headers little-endian */
-const OP_DATA = 0x01;      /* publish / delivery */
-const OP_VAR = 0x02;       /* var set-force-unforce / var update */
-const OP_PROGRESS = 0x03;  /* task progress (definition streams / caller receives) */
-const OP_CALL = 0x04;      /* call / call response */
-const OP_REQUEST = 0x05;   /* request reply / request */
+/* Data-plane frame: ONE header for every op, both directions, little-endian:
+ *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u8 text_len][text][payload] */
+const OP_DATA = 1;       /* topic message (publish / delivery) */
+const OP_VAR = 2;        /* variable write / update */
+const OP_CALL = 3;       /* call a remote / a request for a definition */
+const OP_RESULT = 4;     /* call outcome / request reply */
+const OP_PROGRESS = 5;   /* task progress, either direction */
+const OP_CANCEL = 6;     /* server->client: cancel a parked request */
+const HDR = 21;
 
-/* Every SERVER-TO-CLIENT data frame ends its header with [u64 written_us], the sender's wall
- * clock (UTC microseconds) at the moment its send committed: a SOURCE stamp, so a repaired
- * or replayed message keeps the original value. 0 = the publisher opted out, or the frame is
- * a synthesized outcome. Surfaced as `writtenUs` wherever a delivery reaches the app; it is a
- * different clock from a log line's recvUs, so never mix them. Microseconds stay inside the
- * JS safe-integer range, so it reads as a plain number. */
-function rdWrittenUs(view: DataView, off: number): number {
-    return Number(view.getBigUint64(off, true));
+const LOSSY_BUFFER = 1 << 20;   /* a best-effort frame drops past this much unsent on its carrier */
+
+type Frame = {
+    op: number; flags: number; id: number; seq: number; peer: number;
+    writtenUs: number; text: string; payload: Uint8Array;
+};
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function buildFrame(op: number, flags: number, id: number, seq: number, text: string, payload: Uint8Array): Uint8Array {
+    let tb = text ? enc.encode(text) : new Uint8Array(0);
+    if (tb.length > 255) tb = tb.subarray(0, 255);   /* one length byte, like the wire */
+    const f = new Uint8Array(HDR + tb.length + payload.length);
+    const v = new DataView(f.buffer);
+    f[0] = op; f[1] = flags;
+    v.setUint16(2, id, true); v.setUint32(4, seq, true);   /* peer + written_us stay 0 from a client */
+    f[20] = tb.length;
+    f.set(tb, HDR);
+    f.set(payload, HDR + tb.length);
+    return f;
+}
+
+function parseFrame(b: Uint8Array): Frame | null {
+    if (b.length < HDR) return null;
+    const tl = b[20];
+    if (b.length < HDR + tl) return null;
+    const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    return { op: b[0], flags: b[1], id: v.getUint16(2, true), seq: v.getUint32(4, true),
+             peer: v.getUint32(8, true), writtenUs: Number(v.getBigUint64(12, true)),
+             text: tl ? dec.decode(b.subarray(HDR, HDR + tl)) : "", payload: b.subarray(HDR + tl) };
 }
 
 type Field = {
@@ -57,10 +84,16 @@ type Field = {
 
 type SchemaBlock = { name?: string; size?: number; hash?: string; fields?: Field[] };
 
+/* a VideoFrame, Image or ExternalVideoStream somewhere in a type (see Layout.mediaFields) */
+type MediaTypeName = "VideoFrame" | "Image" | "ExternalVideoStream";
+type MediaField = { path: string; type: MediaTypeName };
+const MEDIA_TYPES: Set<string> = new Set(["VideoFrame", "Image", "ExternalVideoStream"]);
+
 type Role = "pubsub" | "pub" | "sub" | "inactive";
 
 type TopicOpts = {
     schema?: string;
+    reflect?: boolean;      /* no schema: take the mesh's for this name (see Entity.refresh) */
     reliable?: boolean;
     keep_last?: number;
     catch_up?: number;
@@ -71,6 +104,8 @@ type TopicOpts = {
     shm_max_bytes?: number;
     max_rate_hz?: number;   /* subscriber, best-effort: cap delivery from each publisher */
 };
+
+type TransportName = "websocket" | "webrtc";
 
 type NodeOpts = {
     name?: string;
@@ -93,6 +128,9 @@ type NodeOpts = {
     disable_meta?: boolean;   /* do not host the @dart/meta endpoint */
     disable_error_logs?: boolean; /* suppress default mirroring onto @dart/log/error */
     fetch_details?: boolean;  /* resolve reflected entity names for topics this node does not share */
+    transport?: "auto" | "websocket";   /* auto (default): try WebRTC, fall back to the WebSocket */
+    rtcTimeoutMs?: number;    /* how long WebRTC may take to connect before falling back (4000) */
+    iceServers?: RTCIceServer[];   /* extra ICE servers beside the bridge's own (--ice) */
     onEvent?: (e: DartEvent) => void;
 };
 
@@ -118,7 +156,6 @@ const CALL_STATUS: CallStatusName[] = ["ok", "app_error", "no_handler", "timeout
 
 /* ---- introspection (query-based, see DartNode.peers / entities / meta) ------------ */
 
-/* A discovered peer, as DartNode.peers() snapshots it. */
 type Peer = {
     id: number;
     name: string;
@@ -135,9 +172,15 @@ type EntityKindName = "topic" | "function" | "task" | "variable";
 type Entity = {
     kind: EntityKindName;
     name: string;
-    provides: boolean;      /* source side: publisher / definition / owner / emitter */
-    consumes: boolean;      /* sink side: subscriber / caller / accessor / listener */
+    provides: boolean;      /* someone is on the source side: publisher / definition / owner */
+    consumes: boolean;      /* someone is on the sink side: subscriber / caller / accessor */
     reliable: boolean;
+    providers?: number;     /* live endpoints on each side (a per-node walk reports 0 or 1) */
+    consumers?: number;
+    provider?: number;      /* the ranked provider's peer id (0 = the bridge's own node) */
+    from?: string;          /* the node the schemas were read from */
+    conflict?: boolean;     /* mesh: live endpoints declare schemas that cannot read each other */
+    generation?: string;    /* changes iff the provider, a schema, or an attr changed (hex) */
     writable?: boolean;     /* variable: a set channel is advertised */
     forceable?: boolean;    /* variable: the owner permits force/unforce */
     cancellable?: boolean;  /* task: the provider honors cancel (default on) */
@@ -173,18 +216,24 @@ function toEntity(e: any): Entity {
     const out: Entity = {
         kind: e.kind, name: e.name, provides: !!e.provides, consumes: !!e.consumes,
         reliable: !!e.reliable, index: e.index, hash: e.hash };
-    if (e.writable !== undefined)   out.writable = !!e.writable;
-    if (e.forceable !== undefined)  out.forceable = !!e.forceable;
+    if (e.writable !== undefined)    out.writable = !!e.writable;
+    if (e.forceable !== undefined)   out.forceable = !!e.forceable;
     if (e.cancellable !== undefined) out.cancellable = !!e.cancellable;
     if (e.exclusive !== undefined)   out.exclusive = !!e.exclusive;
     if (e.multi !== undefined)       out.multi = !!e.multi;
-    if (e.incomplete)               out.incomplete = true;
-    if (e.schema_hash !== undefined)     out.schemaHash = e.schema_hash;
-    if (e.rsp_schema_hash !== undefined) out.rspSchemaHash = e.rsp_schema_hash;
+    if (e.incomplete)                out.incomplete = true;
+    if (e.providers !== undefined)   out.providers = e.providers;
+    if (e.consumers !== undefined)   out.consumers = e.consumers;
+    if (e.provider !== undefined)    out.provider = e.provider;
+    if (e.from)                      out.from = e.from;
+    if (e.conflict)                  out.conflict = true;
+    if (e.generation !== undefined)  out.generation = e.generation;
+    if (e.schema_hash !== undefined)          out.schemaHash = e.schema_hash;
+    if (e.rsp_schema_hash !== undefined)      out.rspSchemaHash = e.rsp_schema_hash;
     if (e.progress_schema_hash !== undefined) out.progressSchemaHash = e.progress_schema_hash;
     if (e.schema) out.schema = e.schema;
     if (e.rsp)    out.rspSchema = e.rsp;
-    if (e.progress_schema) out.progressSchema = e.progress_schema;
+    if (e.prg)    out.progressSchema = e.prg;
     return out;
 }
 
@@ -194,7 +243,7 @@ type Response<Rsp = any> = {
     value: Rsp | undefined;   /* decoded reply (typed functions, status "ok") */
     data: Uint8Array;         /* the raw reply payload */
     provider: number;         /* peer id of the answering node (0 if none) */
-    writtenUs: number;           /* the provider's source stamp (see rdWrittenUs); 0 = synthesized */
+    writtenUs: number;        /* the provider's source stamp; 0 = synthesized */
     message: string;          /* human-readable outcome text, the one field to display on a
                                  failure: the definition's message (a throw's Error.message,
                                  or the C side's dart_request_fail text), else default status
@@ -237,7 +286,15 @@ type TaskProgressHandler<Prg> = (value: Prg | null,
  * "not_pending" = the call already answered, "error" = anything else */
 type CancelStatus = "ok" | "no_cancel" | "not_pending" | "error";
 
+type FunctionOpts = {
+    timeout_ms?: number;             /* remote: the call timeout; 0 = 5s */
+    backpressure_wait_ms?: number;
+    keep_last?: number;              /* req + rsp ring depth; 0 = the reliable default (10) */
+    reflect?: boolean;               /* no schemas: take the mesh's for this name */
+};
+
 type TaskOpts = {
+    reflect?: boolean;               /* no schemas: take the mesh's for this name */
     progress_best_effort?: boolean;  /* progress-channel reliability: omit/false = reliable */
     progress_keep_last?: number;     /* progress ring depth; 0 = the pattern default */
     no_cancel?: boolean;             /* definition: will not honor cancellation */
@@ -258,18 +315,18 @@ type VariableDefOpts<T> = {
     keep_last?: number;          /* both channels' repair window; 0 = the reliable default (10) */
     backpressure_wait_ms?: number;
     onWrite?: boolean;   /* also push every applied write (route via VarHandle.onWrite) */
+    reflect?: boolean;   /* no schema: take the mesh's for this name */
 };
 
 type RemoteVarOpts = {
     onWrite?: boolean;   /* also push every applied write (route via VarHandle.onWrite) */
+    reflect?: boolean;   /* no schema: take the mesh's for this name */
 };
 
 const SCALAR_BYTES: Record<string, number> = {
     u8: 1, u16: 2, u32: 4, u64: 8, i8: 1, i16: 2, i32: 4, i64: 8, f32: 4, f64: 8, bool: 1,
 };
 const VARIABLE = new Set(["vstring", "varr", "map"]);
-const enc = new TextEncoder();
-const dec = new TextDecoder();
 
 function readScalar(view: DataView, kind: string, off: number): number | bigint | boolean {
     switch (kind) {
@@ -482,6 +539,7 @@ function encodeVarFrame(f: Field, v: any): Uint8Array {
         for (let i = 0; i < v.length; i++) writeCappedString(view, buf, i * slot, f.cap ?? 0, v[i]);
         return buf;
     }
+    if (f.elem === "u8" && v instanceof Uint8Array) return v;
     const elems = typeof v === "string" ? enc.encode(v) : v;
     const n = SCALAR_BYTES[f.elem!], buf = new Uint8Array(elems.length * n);
     const view = new DataView(buf.buffer);
@@ -510,6 +568,7 @@ function getPath(obj: any, path: string): any {
  * codec and the full-message encode/decode over plain nested objects. A layout with no
  * schema (raw entity) passes bytes through. */
 class Layout {
+    name: string | undefined;         /* the root type's name ("" when anonymous) */
     size: number | undefined;         /* fixed-section length; where the variable tail begins */
     hash: string | undefined;         /* 64-bit schema identity, hex */
     fields: Map<string, Field>;       /* dotted path -> field, in schema order */
@@ -517,6 +576,7 @@ class Layout {
     valueRoot: boolean;               /* a bare type: the whole message is one value */
 
     constructor(r: SchemaBlock | undefined) {
+        this.name = r?.name;
         this.size = r?.size;
         this.hash = r?.hash;
         const list = r?.fields ?? [];
@@ -528,6 +588,16 @@ class Layout {
     }
 
     get typed(): boolean { return this.size !== undefined; }
+
+    /* Every VideoFrame / Image in this type, by dotted path ("" = the message itself):
+     * what a VideoView can attach to, wherever it sits. */
+    mediaFields(): MediaField[] {
+        const out: MediaField[] = [];
+        if (this.name && MEDIA_TYPES.has(this.name)) out.push({ path: "", type: this.name as MediaTypeName });
+        for (const f of this.fields.values())
+            if (f.named && MEDIA_TYPES.has(f.named)) out.push({ path: f.path, type: f.named as MediaTypeName });
+        return out;
+    }
 
     /* one field by dotted path (see DartMessage.get) */
     getField(data: Uint8Array, view: DataView, path: string): any {
@@ -608,7 +678,7 @@ class DartMessage {
     topic: DartTopic | null;   /* the receiving topic (topic deliveries; null elsewhere) */
     publisher: number;         /* peer id of the sending node */
     data: Uint8Array;          /* the payload, verbatim */
-    writtenUs: number;            /* the publisher's source stamp (see rdWrittenUs); 0 = opted out */
+    writtenUs: number;         /* the publisher's source stamp (UTC us); 0 = opted out */
     _layout: Layout;
     _view: DataView;
 
@@ -628,8 +698,9 @@ class DartMessage {
      * Uint8Array view); structs return a Uint8Array view of their bytes. */
     get(path: string): any { return this._layout.getField(this.data, this._view, path); }
 
-    /* The whole message as a plain nested object (untyped: the raw bytes). */
-    value(): any { return this._layout.decode(this.data); }
+    /* The whole message as a plain nested object (untyped: the raw bytes); decoded once. */
+    value(): any { return this._value ?? (this._value = this._layout.decode(this.data)); }
+    _value: any;
 
     /* A u8 array field decoded as UTF-8 text, trailing NULs stripped (or up to
      * `lenField`'s value when given). Prefer a `string`/`vstring` field, which `get`
@@ -642,25 +713,61 @@ class DartMessage {
     }
 }
 
-/* One topic on the node (the dynamic form). Returned by DartNode.topic(). */
-class DartTopic {
+/* Everything created on a node: one client-chosen id (also its WebRTC data channel id),
+ * one match summary from the bridge's pushes, one frame inbox. */
+class DartEntity {
     _node: DartNode;
-    name: string;              /* the cross-peer topic identity */
-    id: number;                /* topic id in binary frames */
-    layout: Layout;
-    onMessage: ((msg: DartMessage) => void) | null;
+    id: number;
+    name: string;
+    reliable: boolean;         /* the frame path's reliability (the topic's QoS; patterns are reliable) */
+    reflected: boolean;        /* created with reflect: the types came from the mesh (see refresh) */
     matchCount: number;        /* matched remote endpoints (from match pushes) */
-    ready: boolean;            /* a send would not wait on a forming match */
+    ready: boolean;            /* a send/call now would not wait on a forming match */
+    _dc: RTCDataChannel | null;
+    _taps: ((value: any) => void)[];   /* VideoViews attached to this entity's stream */
 
-    constructor(node: DartNode, name: string, r: { id: number } & SchemaBlock) {
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
         this._node = node;
-        this.name = name;
         this.id = r.id;
-        this.layout = new Layout(r);
-        this.onMessage = null;
+        this.name = name;
+        this.reliable = !!r.reliable;
+        this.reflected = !!r.reflected;
         this.matchCount = 0;
         this.ready = false;
+        this._dc = dc;
+        this._taps = [];
     }
+
+    /* A reflect handle: re-type from the mesh if what it took has moved (the bridge
+     * re-types in place, the layouts here follow). Resolves true when the types changed. */
+    async refresh(): Promise<boolean> {
+        const r = await this._node._request({ op: "refresh", id: this.id });
+        this.reflected = !!r.reflected;
+        this._retype(r);
+        return !!r.retyped;
+    }
+
+    _match(m: any): void { this.matchCount = m.count; this.ready = !!m.ready; }
+    _frame(_f: Frame): void {}
+    _retype(_r: any): void {}
+    _tap(value: any): void { for (const t of this._taps) t(value); }
+    _send(op: number, flags: number, seq: number, text: string, payload: Uint8Array): void {
+        this._node._sendFrame(this, buildFrame(op, flags, this.id, seq, text, payload));
+    }
+}
+
+/* One topic on the node (the dynamic form). Returned by DartNode.topic(). */
+class DartTopic extends DartEntity {
+    layout: Layout;
+    onMessage: ((msg: DartMessage) => void) | null;
+
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+        super(node, name, r, dc);
+        this.layout = new Layout(r.schema);
+        this.onMessage = null;
+    }
+
+    _retype(r: any): void { this.layout = new Layout(r.schema); }
 
     /* fixed-section size / schema hash / field table (typed topics) */
     get size(): number | undefined { return this.layout.size; }
@@ -668,53 +775,26 @@ class DartTopic {
     get fields(): Map<string, Field> { return this.layout.fields; }
 
     /* Publish raw bytes. */
-    sendRaw(bytes: Uint8Array): void {
-        const frame = new Uint8Array(3 + bytes.length);
-        frame[0] = OP_DATA;
-        frame[1] = this.id & 0xff; frame[2] = this.id >> 8;
-        frame.set(bytes, 3);
-        this._node._ws.send(frame);
-    }
+    sendRaw(bytes: Uint8Array): void { this._send(OP_DATA, 0, 0, "", bytes); }
 
-    /* Typed publish: encode named fields (FLAT dotted paths, the v2 form) into a
-     * message and send it. Unset fixed fields are zero; unset variable fields are
-     * empty. For nested plain objects use a Publisher. A BARE-TYPE topic (`bool`,
-     * `f32[]`, ...) takes the value itself: send(true). */
-    send(values: Record<string, any> | any): void {
-        if (this.layout.size === undefined) throw new Error(`'${this.name}' is a raw topic: use sendRaw`);
-        if (this.layout.valueRoot) { this.sendRaw(this.layout.encode(values)); return; }
-        const fixed = new Uint8Array(this.layout.size);
-        const view = new DataView(fixed.buffer);
-        for (const [path, v] of Object.entries(values)) {
-            const f = this.layout.fields.get(path);
-            if (!f) throw new Error(`no field '${path}'`);
-            if (VARIABLE.has(f.kind)) continue;   /* handled in tail order below */
-            writeFixedField(view, fixed, f, v);
-        }
-        /* variable tail: one frame per variable field, in schema order */
-        const frames = this.layout.varFields.map((f) => encodeVarFrame(f, values[f.path]));
-        let total = this.layout.size;
-        for (const fr of frames) total += 4 + fr.length;
-        const buf = new Uint8Array(total);
-        buf.set(fixed, 0);
-        const dv = new DataView(buf.buffer);
-        let pos = this.layout.size;
-        for (const fr of frames) { dv.setUint32(pos, fr.length, true); pos += 4; buf.set(fr, pos); pos += fr.length; }
-        this.sendRaw(buf);
-    }
+    /* Typed publish: a plain nested object mirroring the schema (unset fixed fields are
+     * zero, unset variable fields empty); a BARE-TYPE topic takes the value itself. */
+    send(value: any): void { this.sendRaw(this.layout.encode(value)); }
 
     /* Flip this topic's role: "pubsub" | "pub" | "sub" | "inactive". */
-    setRole(role: Role): Promise<any> { return this._node._request({ op: "role", topic: this.id, role }); }
+    setRole(role: Role): Promise<any> { return this._node._request({ op: "role", id: this.id, role }); }
 
     /* Wait until every reader acked everything (reliable topics, before close). */
     async drain(timeout_ms: number = 1000): Promise<boolean> {
-        const r = await this._node._request({ op: "drain", topic: this.id, timeout_ms });
+        const r = await this._node._request({ op: "drain", id: this.id, timeout_ms });
         return r.drained as boolean;
     }
 
-    _match(m: any): void { this.matchCount = m.matches; this.ready = !!m.ready; }
-    _deliver(publisher: number, data: Uint8Array, writtenUs: number): void {
-        this.onMessage?.(new DartMessage(this.layout, this, publisher, data, writtenUs));
+    _frame(f: Frame): void {
+        if (f.op !== OP_DATA) return;
+        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs);
+        this.onMessage?.(msg);
+        if (this._taps.length) this._tap(msg.value());
     }
 }
 
@@ -724,7 +804,7 @@ class Publisher<T = any> {
 
     constructor(topic: DartTopic) { this.topic = topic; }
 
-    send(value: T): void { this.topic.sendRaw(this.topic.layout.encode(value)); }
+    send(value: T): void { this.topic.send(value); }
     sendRaw(bytes: Uint8Array): void { this.topic.sendRaw(bytes); }
     get matchCount(): number { return this.topic.matchCount; }
     get ready(): boolean { return this.topic.ready; }
@@ -742,50 +822,42 @@ class Subscriber<T = any> {
     get matchCount(): number { return this.topic.matchCount; }
 }
 
+/* the RESULT frame a definition answers a request with */
+function replyFrame(entity: DartEntity, reqId: number, status: number, err: any, rsp: Uint8Array): void {
+    const t = err === undefined ? "" : typeof err?.message === "string" ? err.message : (typeof err === "string" ? err : "");
+    entity._send(OP_RESULT, status, reqId, t, rsp);
+}
+
 /* The implementation side of a request/response function: the bridge defers every
  * request to this client; the handler's (possibly async) return value is the reply,
  * a throw answers "app_error". ONE definition per name on the network. */
-class FunctionDefinition<Req = any, Rsp = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
+class FunctionDefinition<Req = any, Rsp = any> extends DartEntity {
     reqLayout: Layout;
     rspLayout: Layout;
-    callerCount: number;       /* callers currently matched (from match pushes) */
     _handler: FunctionHandler<Req, Rsp>;
 
-    constructor(node: DartNode, name: string, r: any, handler: FunctionHandler<Req, Rsp>) {
-        this._node = node;
-        this.id = r.id;
-        this.name = name;
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null, handler: FunctionHandler<Req, Rsp>) {
+        super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.rspLayout = new Layout(r.rsp);
-        this.callerCount = 0;
         this._handler = handler;
     }
 
-    _match(m: any): void { this.callerCount = m.callers; }
+    get callerCount(): number { return this.matchCount; }   /* callers currently matched */
+
+    _retype(r: any): void { this.reqLayout = new Layout(r.req); this.rspLayout = new Layout(r.rsp); }
+
+    _frame(f: Frame): void {
+        if (f.op === OP_CALL) void this._handle(f.seq, { caller: f.peer, callerName: f.text, writtenUs: f.writtenUs }, f.payload);
+    }
 
     async _handle(reqId: number, info: RequestInfo, payload: Uint8Array): Promise<void> {
-        let status = 0;
-        let rsp = new Uint8Array(0);
-        let msg = new Uint8Array(0);
         try {
             const out = await this._handler(this.reqLayout.decode(payload) as Req, info);
-            rsp = this.rspLayout.encode(out);
+            replyFrame(this, reqId, 0, undefined, this.rspLayout.encode(out));
         } catch (e: any) {
-            status = 1;   /* app_error; the throw's text becomes the response message */
-            const t = typeof e?.message === "string" ? e.message : (typeof e === "string" ? e : "");
-            if (t) msg = enc.encode(t).subarray(0, 255);   /* one length byte, like the wire */
+            replyFrame(this, reqId, 1, e, new Uint8Array(0));   /* app_error + the throw's text */
         }
-        const frame = new Uint8Array(7 + msg.length + rsp.length);
-        frame[0] = OP_REQUEST;
-        new DataView(frame.buffer).setUint32(1, reqId, true);
-        frame[5] = status;
-        frame[6] = msg.length;
-        frame.set(msg, 7);
-        frame.set(rsp, 7 + msg.length);
-        this._node._ws.send(frame);
     }
 }
 
@@ -794,30 +866,25 @@ type PendingCall<Rsp> = {
     reject: (e: Error) => void;
     layout: Layout;
     timer: ReturnType<typeof setTimeout> | undefined;
-    /* task calls only: routes 0x03 progress frames to the run handle */
+    /* task calls only: routes PROGRESS frames to the run handle */
     progress?: (data: Uint8Array, provider: number, writtenUs: number) => void;
 };
 
 /* A reference to a function definition on another node. call() resolves with the
  * outcome and NEVER rejects on a status (only on connection loss). */
-class RemoteFunction<Req = any, Rsp = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
+class RemoteFunction<Req = any, Rsp = any> extends DartEntity {
     reqLayout: Layout;
     rspLayout: Layout;
-    hasDefinition: boolean;    /* a definition is matched (from match pushes) */
 
-    constructor(node: DartNode, name: string, r: any) {
-        this._node = node;
-        this.id = r.id;
-        this.name = name;
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+        super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.rspLayout = new Layout(r.rsp);
-        this.hasDefinition = false;
     }
 
-    _match(m: any): void { this.hasDefinition = !!m.has_definition; }
+    get hasDefinition(): boolean { return this.matchCount > 0; }   /* a definition is matched */
+
+    _retype(r: any): void { this.reqLayout = new Layout(r.req); this.rspLayout = new Layout(r.rsp); }
 
     /* Call the remote function. timeoutMs > 0 adds a CLIENT-side bound resolving with
      * status "timeout" (the bridge's own call timeout, default 5s, still answers with
@@ -825,11 +892,6 @@ class RemoteFunction<Req = any, Rsp = any> {
     call(value: Req, timeoutMs: number = 0): Promise<Response<Rsp>> {
         const payload = this.reqLayout.encode(value);
         const callId = ++this._node._nextCall;
-        const frame = new Uint8Array(7 + payload.length);
-        frame[0] = OP_CALL;
-        frame[1] = this.id & 0xff; frame[2] = this.id >> 8;
-        new DataView(frame.buffer).setUint32(3, callId, true);
-        frame.set(payload, 7);
         return new Promise<Response<Rsp>>((resolve, reject) => {
             const p: PendingCall<Rsp> = { resolve, reject, layout: this.rspLayout, timer: undefined };
             if (timeoutMs > 0) {
@@ -841,7 +903,7 @@ class RemoteFunction<Req = any, Rsp = any> {
                 }, timeoutMs);
             }
             this._node._calls.set(callId, p);
-            this._node._ws.send(frame);
+            this._send(OP_CALL, 0, callId, "", payload);
         });
     }
 }
@@ -851,49 +913,42 @@ class RemoteFunction<Req = any, Rsp = any> {
  * works and its settlement is the one terminal answer (return = "ok", throw the abort
  * reason = "cancelled", any other throw = "app_error"). ONE definition per name (the
  * multi option declares redundant providers). */
-class TaskDefinition<Req = any, Prg = any, Rsp = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
+class TaskDefinition<Req = any, Prg = any, Rsp = any> extends DartEntity {
     reqLayout: Layout;
     prgLayout: Layout;
     rspLayout: Layout;
-    callerCount: number;       /* callers currently matched (from match pushes) */
     _handler: TaskHandler<Req, Prg, Rsp>;
     _aborts: Map<number, AbortController>;   /* req id -> its cancel signal */
 
-    constructor(node: DartNode, name: string, r: any, handler: TaskHandler<Req, Prg, Rsp>) {
-        this._node = node;
-        this.id = r.id;
-        this.name = name;
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null, handler: TaskHandler<Req, Prg, Rsp>) {
+        super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.prgLayout = new Layout(r.prg);
         this.rspLayout = new Layout(r.rsp);
-        this.callerCount = 0;
         this._handler = handler;
         this._aborts = new Map();
     }
 
-    _match(m: any): void { this.callerCount = m.callers; }
+    get callerCount(): number { return this.matchCount; }
 
-    /* an {op:"cancel"} push: abort the request's signal (default AbortError reason) */
-    _cancel(reqId: number): void { this._aborts.get(reqId)?.abort(); }
+    _retype(r: any): void {
+        this.reqLayout = new Layout(r.req); this.prgLayout = new Layout(r.prg); this.rspLayout = new Layout(r.rsp);
+    }
+
+    _frame(f: Frame): void {
+        if (f.op === OP_CALL) void this._handle(f.seq, { caller: f.peer, callerName: f.text, writtenUs: f.writtenUs }, f.payload);
+        else if (f.op === OP_CANCEL) this._aborts.get(f.seq)?.abort();   /* default AbortError reason */
+    }
 
     async _handle(reqId: number, info: RequestInfo, payload: Uint8Array): Promise<void> {
         const ctrl = new AbortController();
         this._aborts.set(reqId, ctrl);
         let done = false;
-        const node = this._node;
         const prg = this.prgLayout;
         const ctx: TaskContext<Prg> = {
             progress: (v: Prg) => {
                 if (done) throw new Error("task request already completed");
-                const p = prg.encode(v);
-                const frame = new Uint8Array(5 + p.length);
-                frame[0] = OP_PROGRESS;
-                new DataView(frame.buffer).setUint32(1, reqId, true);
-                frame.set(p, 5);
-                node._ws.send(frame);
+                this._send(OP_PROGRESS, 0, reqId, "", prg.encode(v));
             },
             signal: ctrl.signal,
             get cancelled(): boolean { return ctrl.signal.aborted; },
@@ -901,30 +956,19 @@ class TaskDefinition<Req = any, Prg = any, Rsp = any> {
             callerName: info.callerName,
             writtenUs: info.writtenUs,
         };
-        let status = 0;
-        let rsp = new Uint8Array(0);
-        let msg = new Uint8Array(0);
         try {
             const out = await this._handler(this.reqLayout.decode(payload) as Req, ctx);
-            rsp = this.rspLayout.encode(out);
+            done = true;
+            this._aborts.delete(reqId);
+            replyFrame(this, reqId, 0, undefined, this.rspLayout.encode(out));
         } catch (e: any) {
             /* the abort reason (or any AbortError) after a cancel = the handler honored
              * it; anything else is an app error carrying the throw's text */
+            done = true;
+            this._aborts.delete(reqId);
             const honored = ctrl.signal.aborted && (e === ctrl.signal.reason || e?.name === "AbortError");
-            status = honored ? 5 : 1;
-            const t = typeof e?.message === "string" ? e.message : (typeof e === "string" ? e : "");
-            if (t) msg = enc.encode(t).subarray(0, 255);   /* one length byte, like the wire */
+            replyFrame(this, reqId, honored ? 5 : 1, e, new Uint8Array(0));
         }
-        done = true;
-        this._aborts.delete(reqId);
-        const frame = new Uint8Array(7 + msg.length + rsp.length);
-        frame[0] = OP_REQUEST;
-        new DataView(frame.buffer).setUint32(1, reqId, true);
-        frame[5] = status;
-        frame[6] = msg.length;
-        frame.set(msg, 7);
-        frame.set(rsp, 7 + msg.length);
-        this._node._ws.send(frame);
     }
 }
 
@@ -935,18 +979,22 @@ class TaskDefinition<Req = any, Prg = any, Rsp = any> {
 class TaskRun<Prg = any, Rsp = any> {
     _node: DartNode;
     _prgLayout: Layout;
+    id: number;                /* the remote task's entity id */
     callId: number;            /* the client correlation id (the cancel op's `call`) */
     result: Promise<Response<Rsp>>;
     _onProgress: TaskProgressHandler<Prg> | null;
     _buffered: { value: Prg | null; info: { provider: number; writtenUs: number } }[];
+    _taps: ((value: any) => void)[];   /* VideoViews attached to this call's progress */
 
-    constructor(node: DartNode, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>) {
+    constructor(node: DartNode, id: number, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>) {
         this._node = node;
         this._prgLayout = prgLayout;
+        this.id = id;
         this.callId = callId;
         this.result = result;
         this._onProgress = null;
         this._buffered = [];
+        this._taps = [];
     }
 
     /* One handler (re-register replaces, null clears); buffered updates replay in order. */
@@ -967,6 +1015,7 @@ class TaskRun<Prg = any, Rsp = any> {
         const value = data.length ? (this._prgLayout.decode(data) as Prg) : null;   /* empty = RUNNING */
         if (this._onProgress) this._onProgress(value, { provider, writtenUs });
         else this._buffered.push({ value, info: { provider, writtenUs } });
+        if (value !== null) for (const t of this._taps) t(value);
     }
 }
 
@@ -974,55 +1023,44 @@ class TaskRun<Prg = any, Rsp = any> {
  * SYNCHRONOUSLY; the per-call timeout (remote_task's timeout_ms) bounds only the wait
  * for the first response, so there is no client-side timer: after RUNNING a task runs
  * as long as it runs and run.cancel() is the caller's tool for impatience. */
-class RemoteTask<Req = any, Prg = any, Rsp = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
+class RemoteTask<Req = any, Prg = any, Rsp = any> extends DartEntity {
     reqLayout: Layout;
     prgLayout: Layout;
     rspLayout: Layout;
-    hasDefinition: boolean;    /* a definition is matched (from match pushes) */
 
-    constructor(node: DartNode, name: string, r: any) {
-        this._node = node;
-        this.id = r.id;
-        this.name = name;
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+        super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.prgLayout = new Layout(r.prg);
         this.rspLayout = new Layout(r.rsp);
-        this.hasDefinition = false;
     }
 
-    _match(m: any): void { this.hasDefinition = !!m.has_definition; }
+    get hasDefinition(): boolean { return this.matchCount > 0; }
+
+    _retype(r: any): void {
+        this.reqLayout = new Layout(r.req); this.prgLayout = new Layout(r.prg); this.rspLayout = new Layout(r.rsp);
+    }
 
     call(value: Req): TaskRun<Prg, Rsp> {
         const payload = this.reqLayout.encode(value);
         const callId = ++this._node._nextCall;
-        const frame = new Uint8Array(7 + payload.length);
-        frame[0] = OP_CALL;
-        frame[1] = this.id & 0xff; frame[2] = this.id >> 8;
-        new DataView(frame.buffer).setUint32(3, callId, true);
-        frame.set(payload, 7);
         let run!: TaskRun<Prg, Rsp>;
         const result = new Promise<Response<Rsp>>((resolve, reject) => {
             const p: PendingCall<Rsp> = { resolve, reject, layout: this.rspLayout, timer: undefined,
                 progress: (data, provider, writtenUs) => run._push(data, provider, writtenUs) };
             this._node._calls.set(callId, p);
         });
-        run = new TaskRun<Prg, Rsp>(this._node, this.prgLayout, callId, result);
-        this._node._ws.send(frame);
+        run = new TaskRun<Prg, Rsp>(this._node, this.id, this.prgLayout, callId, result);
+        this._send(OP_CALL, 0, callId, "", payload);
         return run;
     }
 }
 
 type VarWaiter = { res: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> | undefined };
-type VarChangeHandler<T> = (value: T, info: { forced: boolean; writtenUs: number }) => void;
+type VarChangeHandler<T> = (value: T, info: { forced: boolean; writtenUs: number; source: number }) => void;
 
 /* Shared variable-handle core: the client-cached latest value fed by pushed updates. */
-class VarHandle<T = any> {
-    _node: DartNode;
-    id: number;
-    name: string;
+class VarHandle<T = any> extends DartEntity {
     layout: Layout;
     forced: boolean;
     writtenUs: number;            /* source stamp of the last update pushed (0 = none/unstamped) */
@@ -1032,11 +1070,9 @@ class VarHandle<T = any> {
     _onChange: VarChangeHandler<T> | null;
     _onWrite: VarChangeHandler<T> | null;
 
-    constructor(node: DartNode, name: string, r: any) {
-        this._node = node;
-        this.id = r.id;
-        this.name = name;
-        this.layout = new Layout(r);
+    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+        super(node, name, r, dc);
+        this.layout = new Layout(r.schema);
         this.forced = false;
         this.writtenUs = 0;
         this._value = undefined;
@@ -1048,13 +1084,13 @@ class VarHandle<T = any> {
 
     /* the cached latest value as a plain object (undefined = none seen yet) */
     get(): T | undefined { return this._value; }
-    /* the cached latest raw payload */
-    raw(): Uint8Array | undefined { return this._raw; }
+    /* the cached latest value's raw bytes */
+    getRaw(): Uint8Array | undefined { return this._raw; }
 
-    /* Resolve true as soon as a value exists (immediately if cached), false at
-     * timeoutMs (negative = wait forever). */
+    /* Resolve true once a value is cached (immediately if one already is), false on
+     * timeout. timeoutMs < 0 waits indefinitely. */
     wait(timeoutMs: number = -1): Promise<boolean> {
-        if (this._raw !== undefined) return Promise.resolve(true);
+        if (this._value !== undefined) return Promise.resolve(true);
         return new Promise((res) => {
             const w: VarWaiter = { res, timer: undefined };
             if (timeoutMs >= 0) w.timer = setTimeout(() => { this._waiters.delete(w); res(false); }, timeoutMs);
@@ -1069,7 +1105,7 @@ class VarHandle<T = any> {
     onChange(handler: VarChangeHandler<T> | null): void {
         this._onChange = handler;
         if (handler && this._value !== undefined)
-            handler(this._value, { forced: this.forced, writtenUs: this.writtenUs });
+            handler(this._value, { forced: this.forced, writtenUs: this.writtenUs, source: 0 });
     }
 
     /* Observe EVERY applied write (not just state changes; no replay). Requires the
@@ -1077,78 +1113,541 @@ class VarHandle<T = any> {
      * handler (re-register replaces, null clears). */
     onWrite(handler: VarChangeHandler<T> | null): void { this._onWrite = handler; }
 
-    set(value: T): void { this._sendVar(0, this.layout.encode(value)); }
-    force(value: T): void { this._sendVar(1, this.layout.encode(value)); }
-    unforce(): void { this._sendVar(2, new Uint8Array(0)); }
+    set(value: T): void { this._send(OP_VAR, 0, 0, "", this.layout.encode(value)); }
+    force(value: T): void { this._send(OP_VAR, 1, 0, "", this.layout.encode(value)); }
+    unforce(): void { this._send(OP_VAR, 2, 0, "", new Uint8Array(0)); }
 
-    _sendVar(mode: number, payload: Uint8Array): void {
-        const frame = new Uint8Array(4 + payload.length);
-        frame[0] = OP_VAR;
-        frame[1] = this.id & 0xff; frame[2] = this.id >> 8;
-        frame[3] = mode;
-        frame.set(payload, 4);
-        this._node._ws.send(frame);
-    }
+    _retype(r: any): void { this.layout = new Layout(r.schema); }
 
-    _update(payload: Uint8Array, forced: boolean, writtenUs: number): void {
-        this._raw = payload;
-        this._value = this.layout.decode(payload) as T;
+    _frame(f: Frame): void {
+        if (f.op !== OP_VAR) return;
+        const forced = (f.flags & 1) !== 0;
+        const info = { forced, writtenUs: f.writtenUs, source: f.peer };
+        if (f.flags & 2) {                   /* a write event: no cache change */
+            this._onWrite?.(this.layout.decode(f.payload) as T, info);
+            return;
+        }
+        this._raw = f.payload;
+        this._value = this.layout.decode(f.payload) as T;
         this.forced = forced;
-        this.writtenUs = writtenUs;
+        this.writtenUs = f.writtenUs;
         for (const w of this._waiters) { if (w.timer !== undefined) clearTimeout(w.timer); w.res(true); }
         this._waiters.clear();
-        if (this._onChange) this._onChange(this._value, { forced, writtenUs });
+        this._onChange?.(this._value, info);
+        if (this._taps.length) this._tap(this._value);
     }
-    /* a write-event frame (bit1 set): fire onWrite only; the cache is maintained by the
-     * on_change frames, so a write is not double-counted. */
-    _write(payload: Uint8Array, forced: boolean, writtenUs: number): void {
-        if (this._onWrite) this._onWrite(this.layout.decode(payload) as T, { forced, writtenUs });
-    }
-    _match(_m: any): void {}
 }
 
-/* The authoritative value lives on THIS node (held by the bridge). */
+/* The owner side: this node holds the authoritative value. */
 class VariableDefinition<T = any> extends VarHandle<T> {
-    remoteCount: number;       /* remote accessors matched (from match pushes) */
-
-    constructor(node: DartNode, name: string, r: any) {
-        super(node, name, r);
-        this.remoteCount = 0;
-    }
-    _match(m: any): void { this.remoteCount = m.remotes; }
+    get remoteCount(): number { return this.matchCount; }   /* remotes currently matched */
 }
 
-/* The value lives on another node; reads see the cached latest, writes go over the
- * set channel (dumb writes, no response). */
+/* A reference to a variable owned elsewhere; set() round-trips through the owner. */
 class RemoteVariable<T = any> extends VarHandle<T> {
-    hasDefinition: boolean;    /* an owner is matched (from match pushes) */
-
-    constructor(node: DartNode, name: string, r: any) {
-        super(node, name, r);
-        this.hasDefinition = false;
-    }
-    _match(m: any): void { this.hasDefinition = !!m.has_definition; }
+    get hasDefinition(): boolean { return this.matchCount > 0; }
 }
 
-type PatternEntity = FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
+/* ---- media -------------------------------------------------------------------------- */
 
-/* The node handle: one WebSocket connection = one DART node owned by the bridge. */
+/* the standard media types (docs/stdtypes.md), always in scope by name */
+const VIDEO_FRAME = "VideoFrame";   /* { codec, width, height, keyframe, pts, data } */
+const IMAGE = "Image";              /* { width, height, stride, format, data } */
+
+const EXTERNAL_VIDEO_STREAM = "ExternalVideoStream";   /* { kind, codec, width, height, url, name } */
+
+const VideoCodec = { Unknown: 0, Mjpeg: 1, H264: 2, H265: 3, Av1: 4 } as const;
+const ImageFormat = { Mono8: 0, Mono16: 1, Rgb8: 2, Rgba8: 3, Bgr8: 4, Yuyv: 5, Nv12: 6, Jpeg: 16, Png: 17 } as const;
+const StreamKind = { Rtsp: 0, WebrtcWhep: 1, Hls: 2, Srt: 3, Rtp: 4, HttpMjpeg: 5, Other: 15 } as const;
+
+/* a decoded VideoFrame message (enum as its number, pts as bigint microseconds) */
+type VideoFrameValue = { codec: number; width: number; height: number; keyframe: boolean; pts: bigint; data: Uint8Array };
+/* a decoded Image message */
+type ImageValue = { width: number; height: number; stride: number; format: number; data: Uint8Array };
+/* a decoded ExternalVideoStream descriptor: a URL a viewer connects to itself */
+type ExternalVideoStreamValue = { kind: number; codec: number; width: number; height: number; url: string; name: string };
+type MediaValue = VideoFrameValue | ImageValue | ExternalVideoStreamValue;
+
+type VideoPath = "none" | "track" | "decoder";
+
+/* what a VideoView attaches to: an entity whose stream carries a VideoFrame or Image
+ * somewhere in its type (a topic's deliveries, a variable's updates, one task call's
+ * progress); a Subscriber stands for its topic */
+type MediaSource = DartTopic | Subscriber | VarHandle | TaskRun;
+type MediaAttachOpts = {
+    path?: string;       /* the VideoFrame / Image field, dotted ("" = the value itself; default: the first one) */
+    keepData?: boolean;  /* keep the pixels in the frames too while a WebRTC track carries them */
+};
+
+/* the WebCodecs codec string for an encoded VideoFrame; H264 reads its SPS so the
+ * decoder gets the real profile/level (in-band parameter sets, Annex B or length-prefixed) */
+function codecString(codec: number, data: Uint8Array): string {
+    if (codec === VideoCodec.H264) {
+        const n = data.length;
+        for (let i = 0; i + 4 < n; i++) {
+            if (data[i] === 0 && data[i + 1] === 0 && (data[i + 2] === 1 || (data[i + 2] === 0 && data[i + 3] === 1))) {
+                const h = i + (data[i + 2] === 1 ? 3 : 4);
+                if (h + 3 < n && (data[h] & 0x1f) === 7)
+                    return "avc1." + [data[h + 1], data[h + 2], data[h + 3]].map((b) => b.toString(16).padStart(2, "0")).join("");
+            }
+        }
+        if (n > 8 && (data[4] & 0x1f) === 7)   /* length-prefixed, SPS first */
+            return "avc1." + [data[5], data[6], data[7]].map((b) => b.toString(16).padStart(2, "0")).join("");
+        return "avc1.42e01e";
+    }
+    if (codec === VideoCodec.H265) return "hev1.1.6.L120.B0";
+    return "av01.0.08M.08";
+}
+
+/* raw pixels -> RGBA, for the formats a canvas cannot take directly */
+function toRgba(img: ImageValue): Uint8ClampedArray | null {
+    const { width: w, height: h, format } = img;
+    const src = img.data;
+    const out = new Uint8ClampedArray(w * h * 4);
+    const stride = img.stride || (format === ImageFormat.Mono16 ? w * 2 : format === ImageFormat.Mono8 ? w
+                 : format === ImageFormat.Rgb8 || format === ImageFormat.Bgr8 ? w * 3
+                 : format === ImageFormat.Rgba8 ? w * 4 : format === ImageFormat.Yuyv ? w * 2 : w);
+    const yuv = (y: number, u: number, v: number, o: number) => {
+        const c = y - 16, d = u - 128, e = v - 128;
+        out[o]     = (298 * c + 409 * e + 128) >> 8;
+        out[o + 1] = (298 * c - 100 * d - 208 * e + 128) >> 8;
+        out[o + 2] = (298 * c + 516 * d + 128) >> 8;
+        out[o + 3] = 255;
+    };
+    switch (format) {
+    case ImageFormat.Rgba8:
+        for (let y = 0; y < h; y++) out.set(src.subarray(y * stride, y * stride + w * 4), y * w * 4);
+        return out;
+    case ImageFormat.Rgb8: case ImageFormat.Bgr8: {
+        const swap = format === ImageFormat.Bgr8;
+        for (let y = 0; y < h; y++) for (let x = 0, s = y * stride, o = y * w * 4; x < w; x++, s += 3, o += 4) {
+            out[o] = src[swap ? s + 2 : s]; out[o + 1] = src[s + 1]; out[o + 2] = src[swap ? s : s + 2]; out[o + 3] = 255;
+        }
+        return out;
+    }
+    case ImageFormat.Mono8:
+        for (let y = 0; y < h; y++) for (let x = 0, s = y * stride, o = y * w * 4; x < w; x++, s++, o += 4) {
+            out[o] = out[o + 1] = out[o + 2] = src[s]; out[o + 3] = 255;
+        }
+        return out;
+    case ImageFormat.Mono16:
+        for (let y = 0; y < h; y++) for (let x = 0, s = y * stride, o = y * w * 4; x < w; x++, s += 2, o += 4) {
+            out[o] = out[o + 1] = out[o + 2] = src[s + 1]; out[o + 3] = 255;   /* the high byte */
+        }
+        return out;
+    case ImageFormat.Yuyv:
+        for (let y = 0; y < h; y++) for (let x = 0, s = y * stride, o = y * w * 4; x + 1 < w; x += 2, s += 4, o += 8) {
+            yuv(src[s], src[s + 1], src[s + 3], o); yuv(src[s + 2], src[s + 1], src[s + 3], o + 4);
+        }
+        return out;
+    case ImageFormat.Nv12: {
+        const uvOff = stride * h;
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            const u = src[uvOff + (y >> 1) * stride + (x & ~1)], v = src[uvOff + (y >> 1) * stride + (x & ~1) + 1];
+            yuv(src[y * stride + x], u, v, (y * w + x) * 4);
+        }
+        return out;
+    }
+    default:
+        return null;
+    }
+}
+
+/* A picture as a MediaStream, fed from anywhere. push() takes any VideoFrame, Image or
+ * ExternalVideoStream value (from a subscriber handler, a variable's onChange, a task's
+ * progress, a call's result) and shows it: WebCodecs for H264/H265/AV1, the image decoder
+ * for MJPEG/JPEG/PNG, a pixel converter for raw formats, onto a canvas whose capture is the
+ * stream; an ExternalVideoStream descriptor makes the view follow that URL itself (WHEP as
+ * a WebRTC session, HTTP MJPEG through an image, HLS through a media element where the
+ * browser plays it; RTSP / SRT / RTP cannot play in a browser and set externalState).
+ * attach() wires it to an entity's stream by field path and, over WebRTC, asks the bridge
+ * to carry a VideoFrame field on a real video track the browser decodes (the frames then
+ * arrive with the pixels emptied). Either way: videoEl.srcObject = view.stream. */
+class VideoView {
+    _node: DartNode;
+    stream: MediaStream | null;      /* the picture (null outside a browser) */
+    canvas: HTMLCanvasElement | null;/* the decode surface (null while a track carries the picture) */
+    path: VideoPath;                 /* "track" (WebRTC video track) or "decoder" (painted here) */
+    frames: number;                  /* frames painted here (the track path counts nothing) */
+    width: number;
+    height: number;
+    onFrame: ((value: MediaValue) => void) | null;   /* every value pushed */
+    source: DartTopic | VarHandle | TaskRun | null;   /* what attach() bound */
+    sourcePath: string;              /* the media field inside its type */
+    sourceType: MediaTypeName | "";  /* what that field is */
+    trackState: string;              /* "" (no track asked), "ok", or the bridge's refusal */
+    decodeState: string;             /* "" or why encoded frames cannot be decoded here (no WebCodecs) */
+    external: ExternalVideoStreamValue | null;   /* the descriptor the view follows, if any */
+    externalState: string;           /* "" / "connecting" / "playing" / an error, for `external` */
+    _extPc: RTCPeerConnection | null;            /* WHEP session */
+    _extResource: string;                        /* WHEP resource URL (DELETE on close) */
+    _extImg: HTMLImageElement | null;            /* HTTP MJPEG */
+    _extVideo: HTMLVideoElement | null;          /* HLS (native playback) */
+    _extTimer: number;                           /* the paint loop of the two above */
+    _tap: ((value: any) => void) | null;
+    _transceiver: RTCRtpTransceiver | null;   /* the offered recvonly video line */
+    _ctx: CanvasRenderingContext2D | null;
+    _canvasTrack: MediaStreamTrack | null;
+    _rtcTrack: MediaStreamTrack | null;
+    _decoder: any;
+    _decoderCodec: string;
+    _pendingBlob: { bytes: Uint8Array; mime: string } | null;
+    _blobBusy: boolean;
+    _closed: boolean;
+
+    constructor(node: DartNode) {
+        this._node = node;
+        this.stream = typeof MediaStream !== "undefined" ? new MediaStream() : null;
+        this.canvas = null;
+        this.path = "none";
+        this.frames = 0;
+        this.width = 0;
+        this.height = 0;
+        this.onFrame = null;
+        this.source = null;
+        this.sourcePath = "";
+        this.sourceType = "";
+        this.trackState = "";
+        this.decodeState = "";
+        this.external = null;
+        this.externalState = "";
+        this._extPc = null;
+        this._extResource = "";
+        this._extImg = null;
+        this._extVideo = null;
+        this._extTimer = 0;
+        this._tap = null;
+        this._transceiver = null;
+        this._ctx = null;
+        this._canvasTrack = null;
+        this._rtcTrack = null;
+        this._decoder = null;
+        this._decoderCodec = "";
+        this._pendingBlob = null;
+        this._blobBusy = false;
+        this._closed = false;
+        node._views.add(this);
+    }
+
+    /* Bind to an entity's stream: the VideoFrame / Image at `path` of every delivery (topic),
+     * update (variable) or progress value (task run) is pushed here, and over WebRTC the
+     * bridge carries an encoded VideoFrame field on a video track instead. Replaces a
+     * previous attachment. */
+    async attach(target: MediaSource, opts: MediaAttachOpts | string = {}): Promise<this> {
+        if (typeof opts === "string") opts = { path: opts };
+        this.detach();
+        const src = target instanceof Subscriber ? target.topic : target;
+        const layout = src instanceof TaskRun ? src._prgLayout : src.layout;
+        const fields = layout.mediaFields();
+        const field = opts.path === undefined ? fields[0] : fields.find((f) => f.path === opts.path);
+        const path = opts.path ?? field?.path ?? "";
+        this.source = src;
+        this.sourcePath = path;
+        this.sourceType = field?.type ?? "";
+        this._tap = (value: any) => {
+            const v = path ? getPath(value, path) : value;
+            if (!v) return;
+            if (v.url !== undefined) this.push(v);                /* a descriptor: follow it */
+            else if (v.data && v.data.length) this.push(v);       /* empty data = the track has the pixels */
+        };
+        src._taps.push(this._tap);
+        this._keepData = !!opts.keepData;
+        if (this._node._rtcUp) {
+            this._node._addVideoLine(this);
+            if (this._transceiver) await this._node._rtcOffer();
+        }
+        return this;
+    }
+    _keepData: boolean = false;
+
+    /* Unbind from the source (the view keeps painting whatever is pushed). */
+    detach(): void {
+        const src = this.source;
+        if (src && this._tap) src._taps = src._taps.filter((t) => t !== this._tap);
+        this.source = null;
+        this.sourcePath = "";
+        this._tap = null;
+        this.trackState = "";
+        if (this._transceiver) {
+            try { this._transceiver.stop(); } catch (_e) { /* not supported everywhere */ }
+            this._transceiver = null;
+            this._detachTrack();
+            if (this._node._rtcUp) void this._node._rtcOffer();   /* tell the bridge the line is gone */
+        }
+    }
+
+    /* Detach, stop every track, close the decoder, leave any external stream. */
+    close(): void {
+        this.detach();
+        this._stopExternal();
+        this._closed = true;
+        this._decoder?.close?.();
+        this._decoder = null;
+        this._canvasTrack?.stop();
+        if (this.stream) for (const t of this.stream.getTracks()) this.stream.removeTrack(t);
+        this._node._views.delete(this);
+    }
+
+    /* Show one value: a VideoFrame (by its codec), an Image (by its format), or an
+     * ExternalVideoStream (the view connects to its URL). */
+    push(value: MediaValue): void {
+        if (this._closed) return;
+        this.onFrame?.(value);
+        if (typeof document === "undefined") { this.frames++; return; }   /* no canvas outside a browser */
+        if ("url" in value) { this._follow(value); return; }
+        if ("codec" in value) {
+            if (value.codec === VideoCodec.Mjpeg) this._paintBlob(value.data, "image/jpeg");
+            else if (value.codec >= VideoCodec.H264) this._decode(value);
+        } else if ("format" in value) {
+            if (value.format === ImageFormat.Jpeg) this._paintBlob(value.data, "image/jpeg");
+            else if (value.format === ImageFormat.Png) this._paintBlob(value.data, "image/png");
+            else {
+                const rgba = toRgba(value);
+                if (rgba && this._surface(value.width, value.height)) {
+                    this._ctx!.putImageData(new ImageData(rgba, value.width, value.height), 0, 0);
+                    this._painted();
+                }
+            }
+        }
+    }
+
+    /* what the offer's `tracks` entry says about this view's line (VideoFrame fields only) */
+    _trackReq(): { id: number; path: string; call: number; keep_data: boolean } | null {
+        const s = this.source;
+        if (!s || this.sourceType !== "VideoFrame") return null;
+        return { id: s.id, path: this.sourcePath, call: s instanceof TaskRun ? s.callId : 0, keep_data: this._keepData };
+    }
+
+    /* an ExternalVideoStream descriptor: connect to it by kind (a same-URL repeat is a no-op) */
+    _follow(desc: ExternalVideoStreamValue): void {
+        if (this.external && this.external.url === desc.url && this.external.kind === desc.kind) return;
+        this._stopExternal();
+        this.external = desc;
+        this.externalState = "connecting";
+        if (desc.kind === StreamKind.WebrtcWhep) void this._whep(desc.url);
+        else if (desc.kind === StreamKind.HttpMjpeg) this._paintElement(Object.assign(new Image(), { src: desc.url, crossOrigin: "anonymous" }));
+        else if (desc.kind === StreamKind.Hls) {
+            const v = document.createElement("video");
+            v.muted = true; v.playsInline = true; v.crossOrigin = "anonymous"; v.src = desc.url;
+            v.onerror = () => { this.externalState = "this browser cannot play HLS natively"; };
+            void v.play().catch(() => {});
+            this._paintElement(v);
+        }
+        else this.externalState = `cannot play kind ${desc.kind} in a browser`;
+    }
+
+    _stopExternal(): void {
+        if (this._extPc) {
+            try { this._extPc.close(); } catch (_e) { /* already closed */ }
+            if (this._extResource) fetch(this._extResource, { method: "DELETE" }).catch(() => {});
+            this._extPc = null; this._extResource = "";
+        }
+        if (this._extTimer) { cancelAnimationFrame(this._extTimer); this._extTimer = 0; }
+        if (this._extImg) { this._extImg.src = ""; this._extImg = null; }
+        if (this._extVideo) { this._extVideo.pause(); this._extVideo.src = ""; this._extVideo = null; }
+        this._detachTrack();
+        this.external = null;
+        this.externalState = "";
+    }
+
+    /* WHEP (RFC draft-ietf-wish-whep): POST our offer, get the answer, receive the track */
+    async _whep(url: string): Promise<void> {
+        const pc = new RTCPeerConnection();
+        this._extPc = pc;
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.ontrack = (e) => { if (this._extPc === pc) { this._attachTrack(e.track); this.externalState = "playing"; } };
+        try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            await new Promise<void>((res) => {     /* gather (bounded), WHEP wants a complete offer */
+                if (pc.iceGatheringState === "complete") return res();
+                const t = setTimeout(res, 1500);
+                pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === "complete") { clearTimeout(t); res(); } };
+            });
+            const rsp = await fetch(url, { method: "POST", headers: { "content-type": "application/sdp" },
+                                           body: pc.localDescription?.sdp ?? offer.sdp });
+            if (!rsp.ok) throw new Error(`WHEP ${rsp.status}`);
+            const loc = rsp.headers.get("location");
+            if (loc) this._extResource = new URL(loc, url).toString();
+            await pc.setRemoteDescription({ type: "answer", sdp: await rsp.text() });
+        } catch (e: any) {
+            if (this._extPc === pc) { this.externalState = `WHEP failed: ${e?.message ?? e}`; pc.close(); this._extPc = null; }
+        }
+    }
+
+    /* paint a live <img> (MJPEG) or <video> (HLS) onto the canvas every frame */
+    _paintElement(el: HTMLImageElement | HTMLVideoElement): void {
+        if (el instanceof HTMLVideoElement) this._extVideo = el; else this._extImg = el;
+        const tick = () => {
+            if (this._closed || (this._extImg !== el && this._extVideo !== el)) return;
+            const w = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
+            const h = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight;
+            if (w && h && this._surface(w, h)) {
+                try { this._ctx!.drawImage(el, 0, 0); this._painted(); this.externalState = "playing"; }
+                catch (_e) { this.externalState = "cross-origin: the stream cannot be painted"; }
+            }
+            this._extTimer = requestAnimationFrame(tick);
+        };
+        this._extTimer = requestAnimationFrame(tick);
+    }
+
+    /* The WebRTC video track bound to this source (the receiver of the offered line). It
+     * shows once RTP flows (unmute); until then, and whenever pixels arrive on the frame
+     * path instead (MJPEG, a codec the browser did not offer, the link gone), the canvas
+     * shows. The stream carries exactly one of the two at a time. */
+    _attachTrack(track: MediaStreamTrack): void {
+        if (this._closed || !this.stream) return;
+        this._rtcTrack = track;
+        track.onended = () => { if (this._rtcTrack === track) this._detachTrack(); };
+        track.onunmute = () => { if (this._rtcTrack === track) this._showTrack(); };
+        if (!track.muted) this._showTrack();
+    }
+
+    _showTrack(): void {
+        const t = this._rtcTrack;
+        if (!t || !this.stream) return;
+        if (this._canvasTrack && this.stream.getTracks().includes(this._canvasTrack)) this.stream.removeTrack(this._canvasTrack);
+        if (!this.stream.getTracks().includes(t)) this.stream.addTrack(t);
+        this.path = "track";
+    }
+
+    _showCanvas(): void {
+        const ct = this._canvasTrack;
+        if (!ct || !this.stream) return;
+        if (this._rtcTrack && this.stream.getTracks().includes(this._rtcTrack)) this.stream.removeTrack(this._rtcTrack);
+        if (!this.stream.getTracks().includes(ct)) this.stream.addTrack(ct);
+        this.path = "decoder";
+    }
+
+    /* the track went away (line refused, link lost): the canvas shows what is painted */
+    _detachTrack(): void {
+        const track = this._rtcTrack;
+        if (!track) return;
+        this._rtcTrack = null;
+        if (this.stream && this.stream.getTracks().includes(track)) this.stream.removeTrack(track);
+        this.path = this._canvasTrack && this.stream?.getTracks().includes(this._canvasTrack) ? "decoder" : "none";
+    }
+
+    /* the canvas + its captured track, sized to the picture; false when unavailable */
+    _surface(w: number, h: number): boolean {
+        if (!w || !h) return false;
+        if (!this.canvas) {
+            this.canvas = document.createElement("canvas");
+            this._ctx = this.canvas.getContext("2d");
+        }
+        if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
+        this.width = w; this.height = h;
+        if (!this._canvasTrack && this.stream && (this.canvas as any).captureStream)
+            this._canvasTrack = (this.canvas as any).captureStream(0).getVideoTracks()[0];
+        return !!this._ctx;
+    }
+
+    _painted(): void {
+        this.frames++;
+        /* pixels are arriving here: show the canvas unless the track is live too (keepData) */
+        if (this.path !== "decoder" && (!this._rtcTrack || this._rtcTrack.muted)) this._showCanvas();
+        (this._canvasTrack as any)?.requestFrame?.();
+    }
+
+    /* JPEG / PNG through the browser's image decoder; the newest frame wins while one is decoding */
+    _paintBlob(bytes: Uint8Array, mime: string): void {
+        this._pendingBlob = { bytes, mime };
+        if (this._blobBusy) return;
+        const next = () => {
+            const p = this._pendingBlob;
+            this._pendingBlob = null;
+            if (!p || this._closed) { this._blobBusy = false; return; }
+            this._blobBusy = true;
+            createImageBitmap(new Blob([p.bytes], { type: p.mime })).then((bmp) => {
+                if (this._surface(bmp.width, bmp.height)) { this._ctx!.drawImage(bmp, 0, 0); this._painted(); }
+                bmp.close();
+                next();
+            }, () => next());
+        };
+        next();
+    }
+
+    /* H264 / H265 / AV1 through WebCodecs (no track: the WebSocket fallback, or a value pushed by hand) */
+    _decode(f: VideoFrameValue): void {
+        const VD = (globalThis as any).VideoDecoder;
+        const EVC = (globalThis as any).EncodedVideoChunk;
+        if (!VD || !EVC) {   /* WebCodecs lives in secure contexts only (https, localhost, file://) */
+            this.decodeState = "no WebCodecs VideoDecoder on this origin (https, localhost or file:// needed)";
+            return;
+        }
+        if (!f.data.length) return;
+        if (!this._decoder && !f.keyframe) return;           /* a decoder starts on a keyframe */
+        /* the codec string comes from the keyframe's parameter sets and holds for its deltas */
+        const codec = f.keyframe ? codecString(f.codec, f.data) : this._decoderCodec;
+        if (!this._decoder || this._decoderCodec !== codec) {
+            this._decoder?.close?.();
+            const d = new VD({
+                output: (frame: any) => {
+                    if (this._surface(frame.displayWidth, frame.displayHeight)) { this._ctx!.drawImage(frame, 0, 0); this._painted(); }
+                    frame.close();
+                },
+                error: () => { if (this._decoder === d) { this._decoder = null; } },
+            });
+            const cfg: any = { codec, optimizeForLatency: true };
+            if (f.width && f.height) { cfg.codedWidth = f.width; cfg.codedHeight = f.height; }
+            d.configure(cfg);
+            this._decoder = d;
+            this._decoderCodec = codec;
+        }
+        try {
+            this._decoder.decode(new EVC({ type: f.keyframe ? "key" : "delta",
+                                           timestamp: Number(f.pts) || this.frames * 33333, data: f.data }));
+        } catch (_e) {
+            this._decoder = null;   /* resync on the next keyframe */
+        }
+    }
+}
+
+/* ---- the node --------------------------------------------------------------------- */
+
+type AnyEntity = DartTopic | FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
+
+/* "stun:host:port" / "turn:user:pass@host:port" (the bridge's --ice syntax) -> RTCIceServer */
+function iceServerFromUrl(url: string): RTCIceServer {
+    const m = /^(stuns?|turns?):(?:([^:@]*):([^@]*)@)?(.*)$/.exec(url);
+    if (!m) return { urls: url };
+    const out: RTCIceServer = { urls: `${m[1]}:${m[4]}` };
+    if (m[2] !== undefined) { out.username = decodeURIComponent(m[2]); out.credential = decodeURIComponent(m[3] ?? ""); }
+    return out;
+}
+
 class DartNode {
+    /* the constant tables, reachable from the classic-script build (one global) */
+    static MetaSection = MetaSection;
+    static VideoCodec = VideoCodec;
+    static ImageFormat = ImageFormat;
+    static StreamKind = StreamKind;
+
     _ws: WebSocket;
     _seq: number;
     _pending: Map<number, { resolve: (r: any) => void; reject: (e: Error) => void }>;
-    _topics: Map<number, DartTopic>;
-    _entities: Map<number, PatternEntity>;
-    _reqMeta: Map<number, RequestInfo>;
+    _entities: Map<number, AnyEntity>;
+    _early: Map<number, Uint8Array[]>;           /* frames for an entity whose create reply is still in flight */
+    _nextId: number;
     _calls: Map<number, PendingCall<any>>;
     _nextCall: number;
     _closing: boolean;
-    name: string;                                /* this node's name (auto-generated if none given) */
-    onEvent: ((e: DartEvent) => void) | null;    /* every bridge event (errors, peer up/down, msg loss) */
+    _views: Set<VideoView>;                      /* every VideoView on this node (for the offers) */
+    _pc: RTCPeerConnection | null;
+    _rtcUp: boolean;
+    _rtcMax: number;                             /* the data channel message size limit */
+    _iceQueue: RTCIceCandidateInit[];            /* remote candidates that beat the offer */
+    _rtcChain: Promise<void>;                    /* serializes offer/answer rounds */
+    _rtcFail: ((why: string) => void) | null;    /* aborts the connect attempt in flight */
+    _anchor: RTCDataChannel | null;              /* channel 0: keeps the SCTP line in the offer */
+    name: string;                               /* this node's name (auto-generated if none given) */
+    transport: TransportName;                    /* the data carrier in use */
+    onEvent: ((e: DartEvent) => void) | null;    /* every bridge event (errors, peer up/down, msg loss, rtc) */
     onClose: ((e: CloseEvent) => void) | null;
     _onLog: ((l: LogLine) => void) | null;       /* mesh log-stream handler (set by onLog) */
 
-    /* Connect to a bridge and open the node. */
+    /* Connect to a bridge and open the node. WebRTC is tried first (opts.transport
+     * "auto", the default) and the WebSocket carries the data if it cannot connect. */
     static async connect(url: string, opts: NodeOpts = {}): Promise<DartNode> {
         const ws = new WebSocket(url);
         ws.binaryType = "arraybuffer";
@@ -1157,10 +1656,12 @@ class DartNode {
             ws.onerror = () => rej(new Error(`connect failed: ${url}`));
         });
         const c = new DartNode(ws);
-        const { onEvent, ...open } = opts;
+        const { onEvent, transport, rtcTimeoutMs, iceServers, ...open } = opts;
         if (onEvent) c.onEvent = onEvent;
         const r = await c._request({ op: "open", ...open });
         c.name = r.name as string;
+        if ((transport ?? "auto") !== "websocket" && r.webrtc && typeof RTCPeerConnection !== "undefined")
+            await c._rtcConnect(rtcTimeoutMs ?? 4000, iceServers ?? []);
         return c;
     }
 
@@ -1168,20 +1669,29 @@ class DartNode {
         this._ws = ws;
         this._seq = 0;
         this._pending = new Map();
-        this._topics = new Map();
         this._entities = new Map();
-        this._reqMeta = new Map();
+        this._early = new Map();
+        this._nextId = 0;
         this._calls = new Map();
         this._nextCall = 0;
         this._closing = false;
+        this._views = new Set();
+        this._pc = null;
+        this._rtcUp = false;
+        this._rtcMax = 65536;
+        this._iceQueue = [];
+        this._rtcChain = Promise.resolve();
+        this._rtcFail = null;
+        this._anchor = null;
         this.name = "";
+        this.transport = "websocket";
         this.onEvent = null;
         this.onClose = null;
         this._onLog = null;
 
         ws.onmessage = (e: MessageEvent) => {
             if (typeof e.data === "string") this._onText(JSON.parse(e.data));
-            else this._onBinary(e.data as ArrayBuffer);
+            else this._onFrame(new Uint8Array(e.data as ArrayBuffer));
         };
         ws.onclose = (e: CloseEvent) => {
             for (const p of this._pending.values()) p.reject(new Error("connection closed"));
@@ -1196,6 +1706,7 @@ class DartNode {
                     p.reject(new Error("connection closed"));
             }
             this._calls.clear();
+            this._rtcDrop();
             this.onClose?.(e);
         };
     }
@@ -1208,6 +1719,141 @@ class DartNode {
         });
     }
 
+    /* ---- WebRTC: we offer, the bridge answers; candidates trickle both ways ----------
+     * The client is always the offerer (first, and again for every video line it adds),
+     * which also makes the bridge the DTLS client: a browser's ClientHello is too big for
+     * a DTLS server that cannot reassemble it. */
+
+    async _rtcConnect(timeoutMs: number, extraIce: RTCIceServer[]): Promise<void> {
+        let pc: RTCPeerConnection | null = null;
+        try {
+            const r = await this._request({ op: "rtc" });
+            const ice = [...((r.ice_servers ?? []) as string[]).map(iceServerFromUrl), ...extraIce];
+            pc = new RTCPeerConnection({ iceServers: ice });
+            this._pc = pc;
+            pc.onicecandidate = (e) => {
+                if (e.candidate && e.candidate.candidate)
+                    this._request({ op: "rtc", candidate: e.candidate.candidate, mid: e.candidate.sdpMid ?? "" }).catch(() => {});
+            };
+            /* the anchor channel puts the SCTP line in the offer (entity ids start at 1) */
+            this._anchor = pc.createDataChannel("dart", { negotiated: true, id: 0 });
+            for (const v of this._views) this._addVideoLine(v);
+            const connected = new Promise<void>((res, rej) => {
+                const timer = setTimeout(() => rej(new Error("webrtc connect timeout")), timeoutMs);
+                const fail = (why: string) => { clearTimeout(timer); rej(new Error(`webrtc ${why}`)); };
+                this._rtcFail = fail;   /* the bridge's side can fail first (a DTLS refusal): fall back at once */
+                pc!.onconnectionstatechange = () => {
+                    const s = pc!.connectionState;
+                    if (s === "connected") { clearTimeout(timer); res(); }
+                    else if (s === "failed" || s === "closed") fail(s);
+                    this._rtcState();
+                };
+            });
+            await Promise.all([this._rtcOffer(), connected]);
+            this._rtcFail = null;
+            this._rtcUp = true;
+            this.transport = "webrtc";
+            const max = (pc as any).sctp?.maxMessageSize;
+            this._rtcMax = max && Number.isFinite(max) && max > 0 ? max : 65536;
+            for (const e of this._entities.values()) this._openChannel(e);
+        } catch (_e) {
+            this._rtcFail = null;
+            this._rtcDrop();   /* the WebSocket carries everything: same API, same wire */
+        }
+    }
+
+    /* one offer/answer round (the first, or a re-offer after a video line was added);
+     * `tracks` tells the bridge which media entity each offered video line is for */
+    _rtcOffer(): Promise<void> {
+        const pc = this._pc;
+        if (!pc) return Promise.resolve();
+        const step = async () => {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            const tracks: Record<string, any> = {};
+            const lines: [string, VideoView][] = [];
+            for (const v of this._views) {
+                const req = v._transceiver?.mid ? v._trackReq() : null;
+                if (req) { tracks[v._transceiver!.mid!] = req; lines.push([v._transceiver!.mid!, v]); }
+            }
+            const r = await this._request({ op: "rtc", sdp: pc.localDescription?.sdp ?? offer.sdp, tracks });
+            await pc.setRemoteDescription({ type: "answer", sdp: r.sdp as string });
+            for (const cand of this._iceQueue.splice(0)) await pc.addIceCandidate(cand).catch(() => {});
+            for (const [mid, v] of lines) {                  /* the bridge's verdict per line */
+                v.trackState = (r.tracks ?? {})[mid] ?? "no answer";
+                if (v.trackState !== "ok") { v._detachTrack(); v._transceiver = null; }
+            }
+        };
+        this._rtcChain = this._rtcChain.then(step, step);
+        return this._rtcChain;
+    }
+
+    /* a recvonly video line for a view's source; the bridge sends on it after the re-offer */
+    _addVideoLine(v: VideoView): void {
+        const pc = this._pc;
+        if (!pc || v._transceiver || !v.source) return;
+        try {
+            v._transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+            v._attachTrack(v._transceiver.receiver.track);
+        } catch (_e) {
+            v._transceiver = null;   /* frames it is, then */
+        }
+    }
+
+    _rtcState(): void {
+        const s = this._pc?.connectionState;
+        const up = s === "connected";
+        if (up === this._rtcUp) return;
+        this._rtcUp = up;
+        this.transport = up ? "webrtc" : "websocket";   /* a broken link falls back mid-session */
+        if (up) for (const e of this._entities.values()) this._openChannel(e);
+    }
+
+    _rtcDrop(): void {
+        this._rtcUp = false;
+        this.transport = "websocket";
+        const pc = this._pc;
+        this._pc = null;
+        this._anchor = null;
+        if (pc) { pc.onicecandidate = null; pc.onconnectionstatechange = null; try { pc.close(); } catch (_e) { /* already closed */ } }
+        for (const e of this._entities.values()) e._dc = null;
+        for (const v of this._views) { v._transceiver = null; v._detachTrack(); }
+    }
+
+    /* the entity's data channel: negotiated with id = entity id, so both ends open it
+     * without a round trip; ordering and retransmission follow the topic's reliability */
+    _makeChannel(id: number, reliable: boolean): RTCDataChannel | null {
+        const pc = this._pc;
+        if (!pc || !this._rtcUp) return null;
+        try {
+            const init: RTCDataChannelInit = reliable ? { negotiated: true, id, ordered: true }
+                                                      : { negotiated: true, id, ordered: false, maxRetransmits: 0 };
+            const dc = pc.createDataChannel(`d${id}`, init);
+            dc.binaryType = "arraybuffer";
+            dc.onmessage = (e: MessageEvent) => this._onFrame(new Uint8Array(e.data as ArrayBuffer));
+            return dc;
+        } catch (_e) {
+            return null;   /* the WebSocket carries this entity */
+        }
+    }
+
+    _openChannel(e: DartEntity): void {
+        if (e._dc) return;
+        e._dc = this._makeChannel(e.id, e.reliable);
+    }
+
+    /* the carrier per frame: the entity's open data channel when the frame fits it, else
+     * the WebSocket; a best-effort frame is dropped rather than queued behind a backlog */
+    _sendFrame(e: DartEntity, bytes: Uint8Array): void {
+        const dc = e._dc;
+        if (dc && dc.readyState === "open" && bytes.byteLength <= this._rtcMax) {
+            if (!e.reliable && dc.bufferedAmount > LOSSY_BUFFER) return;
+            try { dc.send(bytes); return; } catch (_e) { /* the WebSocket takes it */ }
+        }
+        if (!e.reliable && this._ws.bufferedAmount > LOSSY_BUFFER) return;
+        this._ws.send(bytes);
+    }
+
     _onText(m: any): void {
         if (m.op === "reply") {
             const p = this._pending.get(m.seq);
@@ -1216,96 +1862,78 @@ class DartNode {
             if (m.ok) p.resolve(m);
             else p.reject(new Error(m.error ?? "request failed"));
         } else if (m.op === "event") {
+            if (m.event === "rtc" && (m.state === "failed" || m.state === "closed")) this._rtcFail?.(m.state);
             this.onEvent?.(m as DartEvent);
         } else if (m.op === "match") {
-            if (m.type === "topic") this._topics.get(m.id)?._match(m);
-            else this._entities.get(m.id)?._match(m);
-        } else if (m.op === "request") {
-            /* meta first; the binary payload frame follows on the same ordered socket */
-            this._reqMeta.set(m.req, { caller: m.caller, callerName: m.caller_name ?? "", writtenUs: 0 });
-        } else if (m.op === "cancel") {
-            /* cancellation requested on a parked task request: abort its signal */
-            const t = this._entities.get(m.task);
-            if (t instanceof TaskDefinition) t._cancel(m.req);
+            this._entities.get(m.id)?._match(m);
         } else if (m.op === "log") {
             this._onLog?.({ level: m.level, node: m.node, wallUs: m.wall_us,
                             monoUs: m.mono_us, recvUs: m.recv_us, writtenUs: m.written_us ?? 0,
                             text: m.text });
+        } else if (m.op === "rtc" && typeof m.candidate === "string") {
+            const cand: RTCIceCandidateInit = { candidate: m.candidate, sdpMid: m.mid ?? "" };
+            if (this._pc?.remoteDescription) this._pc.addIceCandidate(cand).catch(() => {});
+            else this._iceQueue.push(cand);   /* the answer is still being applied */
         }
     }
 
-    _onBinary(buf: ArrayBuffer): void {
-        const b = new Uint8Array(buf);
-        if (b.length < 3) return;
-        const view = new DataView(buf);
-        switch (b[0]) {
-        case OP_DATA: {                      /* [u16 topic][u32 publisher][u64 written][payload] */
-            if (b.length < 15) return;
-            const ch = this._topics.get(view.getUint16(1, true));
-            ch?._deliver(view.getUint32(3, true), b.subarray(15), rdWrittenUs(view, 7));
-            return;
+    _onFrame(b: Uint8Array): void {
+        const f = parseFrame(b);
+        if (!f) return;
+        if (f.op === OP_RESULT || f.op === OP_PROGRESS) { this._onCallFrame(f); return; }
+        const e = this._entities.get(f.id);
+        if (e) e._frame(f);
+        else this._early.get(f.id)?.push(b);   /* its create reply is still in flight: replay after */
+    }
+
+    /* outcomes and progress route by call id (node-wide), not by entity */
+    _onCallFrame(f: Frame): void {
+        const p = this._calls.get(f.seq);
+        if (!p) return;                          /* a client-side timeout already settled it */
+        if (f.op === OP_PROGRESS) { p.progress?.(f.payload, f.peer, f.writtenUs); return; }
+        this._calls.delete(f.seq);
+        if (p.timer !== undefined) clearTimeout(p.timer);
+        const status = CALL_STATUS[f.flags] ?? "cancelled";
+        p.resolve({
+            ok: status === "ok",
+            status,
+            value: status === "ok" ? p.layout.decode(f.payload) : undefined,
+            data: f.payload,
+            provider: f.peer,
+            writtenUs: f.writtenUs,
+            message: f.text || CALL_STATUS_TEXT[status],
+        });
+    }
+
+    /* the one create round trip: pick the id, open its channel first (so nothing the
+     * bridge sends right after the create can miss it), ask, register, replay early frames */
+    async _create<E extends AnyEntity>(kind: string, name: string, reliable: boolean, fields: Record<string, any>,
+                                       make: (r: any, dc: RTCDataChannel | null) => E): Promise<E> {
+        const id = ++this._nextId;
+        if (id > 0xfffe) throw new Error("out of entity ids");
+        const dc = this._makeChannel(id, reliable);
+        this._early.set(id, []);
+        let r: any;
+        try {
+            r = await this._request({ op: "create", id, kind, name, ...fields });
+        } catch (e) {
+            this._early.delete(id);
+            dc?.close();
+            throw e;
         }
-        case OP_VAR: {                       /* [u16 ent][u8 flags][u64 written][payload]; flags bit0=forced bit1=write-event */
-            if (b.length < 12) return;
-            const v = this._entities.get(view.getUint16(1, true));
-            if (v instanceof VarHandle) {
-                const forced = (b[3] & 1) !== 0;
-                const writtenUs = rdWrittenUs(view, 4);
-                if (b[3] & 2) v._write(b.subarray(12), forced, writtenUs);
-                else          v._update(b.subarray(12), forced, writtenUs);
-            }
-            return;
-        }
-        case OP_PROGRESS: {                  /* [u32 call][u32 provider][u64 written][payload]; empty payload = RUNNING */
-            if (b.length < 17) return;
-            const p = this._calls.get(view.getUint32(1, true));
-            p?.progress?.(b.subarray(17), view.getUint32(5, true), rdWrittenUs(view, 9));
-            return;
-        }
-        case OP_CALL: {                      /* [u32 call][u8 status][u32 provider][u64 written][u8 msg_len][msg][payload] */
-            if (b.length < 19) return;
-            const callId = view.getUint32(1, true);
-            const p = this._calls.get(callId);
-            if (!p) return;                  /* client-side timeout already settled it */
-            this._calls.delete(callId);
-            if (p.timer !== undefined) clearTimeout(p.timer);
-            const status = CALL_STATUS[b[5]] ?? "cancelled";
-            const ml = b[18];
-            if (b.length < 19 + ml) return;
-            const data = b.subarray(19 + ml);
-            p.resolve({
-                ok: status === "ok",
-                status,
-                value: status === "ok" ? p.layout.decode(data) : undefined,
-                data,
-                provider: view.getUint32(6, true),
-                writtenUs: rdWrittenUs(view, 10),
-                message: ml ? dec.decode(b.subarray(19, 19 + ml)) : CALL_STATUS_TEXT[status],
-            });
-            return;
-        }
-        case OP_REQUEST: {                   /* [u16 ent][u32 req][u64 written][payload] */
-            if (b.length < 15) return;
-            const fn = this._entities.get(view.getUint16(1, true));
-            const reqId = view.getUint32(3, true);
-            const info = this._reqMeta.get(reqId) ?? { caller: 0, callerName: "", writtenUs: 0 };
-            info.writtenUs = rdWrittenUs(view, 7);   /* the caller's stamp rides the binary frame */
-            this._reqMeta.delete(reqId);
-            if (fn instanceof FunctionDefinition)   void fn._handle(reqId, info, b.subarray(15));
-            else if (fn instanceof TaskDefinition)  void fn._handle(reqId, info, b.subarray(15));
-            return;
-        }
-        default: return;                     /* reserved ops: ignore */
-        }
+        const ent = make(r, dc);
+        this._entities.set(id, ent);
+        const early = this._early.get(id) ?? [];
+        this._early.delete(id);
+        for (const b of early) this._onFrame(b);
+        return ent;
     }
 
     /* Create a topic (the dynamic form). Pass opts.schema (DSL text) for a typed
      * topic; omit it for a raw bytes topic. */
     async topic(name: string, role: Role = "pubsub", opts: TopicOpts = {}): Promise<DartTopic> {
-        const r = await this._request({ op: "topic", name, role, ...opts });
-        const ch = new DartTopic(this, name, r);
-        this._topics.set(ch.id, ch);
-        return ch;
+        return this._create("topic", name, !!opts.reliable, { role, ...opts },
+                            (r, dc) => new DartTopic(this, name, r, dc));
     }
 
     /* Typed publish side: schema is the DSL text (null = raw bytes). */
@@ -1322,31 +1950,40 @@ class DartNode {
         return new Subscriber<T>(t, handler);
     }
 
+    /* A picture sink: push VideoFrame / Image values into it from anywhere, or attach it to
+     * an entity's stream (see VideoView). videoEl.srcObject = view.stream. */
+    videoView(): VideoView { return new VideoView(this); }
+
+    /* Sugar: subscribe to a VideoFrame topic (best-effort unless opts say otherwise) and
+     * attach a view to it: over WebRTC an encoded stream arrives as a video track the
+     * browser decodes, else the frames decode client-side. */
+    async video(name: string, opts: TopicOpts = {}): Promise<VideoView> {
+        const t = await this.topic(name, "sub", { schema: VIDEO_FRAME, ...opts });
+        return new VideoView(this).attach(t);
+    }
+
+    /* Sugar: subscribe to an Image topic and attach a view (JPEG / PNG / raw pixels). */
+    async image(name: string, opts: TopicOpts = {}): Promise<VideoView> {
+        const t = await this.topic(name, "sub", { schema: IMAGE, ...opts });
+        return new VideoView(this).attach(t);
+    }
+
     /* Host a function: handler(reqValue) returns the reply value (may be async; a
      * throw answers "app_error"). Schemas are DSL text (null = raw bytes). */
     async functionDefinition<Req = any, Rsp = any>(name: string, reqSchema: string | null,
-            rspSchema: string | null, handler: FunctionHandler<Req, Rsp>): Promise<FunctionDefinition<Req, Rsp>> {
-        const r = await this._request({
-            op: "function_definition", name,
-            ...(reqSchema ? { req_schema: reqSchema } : {}),
-            ...(rspSchema ? { rsp_schema: rspSchema } : {}),
-        });
-        const fn = new FunctionDefinition<Req, Rsp>(this, name, r, handler);
-        this._entities.set(fn.id, fn);
-        return fn;
+            rspSchema: string | null, handler: FunctionHandler<Req, Rsp>,
+            opts: FunctionOpts = {}): Promise<FunctionDefinition<Req, Rsp>> {
+        return this._create("function_definition", name, true,
+            { ...opts, ...(reqSchema ? { req: reqSchema } : {}), ...(rspSchema ? { rsp: rspSchema } : {}) },
+            (r, dc) => new FunctionDefinition<Req, Rsp>(this, name, r, dc, handler));
     }
 
     /* A reference to a function hosted elsewhere. */
     async remoteFunction<Req = any, Rsp = any>(name: string, reqSchema: string | null,
-            rspSchema: string | null): Promise<RemoteFunction<Req, Rsp>> {
-        const r = await this._request({
-            op: "remote_function", name,
-            ...(reqSchema ? { req_schema: reqSchema } : {}),
-            ...(rspSchema ? { rsp_schema: rspSchema } : {}),
-        });
-        const fn = new RemoteFunction<Req, Rsp>(this, name, r);
-        this._entities.set(fn.id, fn);
-        return fn;
+            rspSchema: string | null, opts: FunctionOpts = {}): Promise<RemoteFunction<Req, Rsp>> {
+        return this._create("remote_function", name, true,
+            { ...opts, ...(reqSchema ? { req: reqSchema } : {}), ...(rspSchema ? { rsp: rspSchema } : {}) },
+            (r, dc) => new RemoteFunction<Req, Rsp>(this, name, r, dc));
     }
 
     /* Host a task (a function with progress and cancellation): handler(reqValue, ctx)
@@ -1356,15 +1993,10 @@ class DartNode {
     async taskDefinition<Req = any, Prg = any, Rsp = any>(name: string, reqSchema: string | null,
             prgSchema: string | null, rspSchema: string | null, handler: TaskHandler<Req, Prg, Rsp>,
             opts: TaskOpts = {}): Promise<TaskDefinition<Req, Prg, Rsp>> {
-        const r = await this._request({
-            op: "task_definition", name, ...opts,
-            ...(reqSchema ? { req_schema: reqSchema } : {}),
-            ...(prgSchema ? { prg_schema: prgSchema } : {}),
-            ...(rspSchema ? { rsp_schema: rspSchema } : {}),
-        });
-        const t = new TaskDefinition<Req, Prg, Rsp>(this, name, r, handler);
-        this._entities.set(t.id, t);
-        return t;
+        return this._create("task_definition", name, true,
+            { ...opts, ...(reqSchema ? { req: reqSchema } : {}), ...(prgSchema ? { prg: prgSchema } : {}),
+              ...(rspSchema ? { rsp: rspSchema } : {}) },
+            (r, dc) => new TaskDefinition<Req, Prg, Rsp>(this, name, r, dc, handler));
     }
 
     /* A reference to a task hosted elsewhere. task.call(req) returns a TaskRun handle
@@ -1372,15 +2004,10 @@ class DartNode {
     async remoteTask<Req = any, Prg = any, Rsp = any>(name: string, reqSchema: string | null,
             prgSchema: string | null, rspSchema: string | null,
             opts: TaskOpts = {}): Promise<RemoteTask<Req, Prg, Rsp>> {
-        const r = await this._request({
-            op: "remote_task", name, ...opts,
-            ...(reqSchema ? { req_schema: reqSchema } : {}),
-            ...(prgSchema ? { prg_schema: prgSchema } : {}),
-            ...(rspSchema ? { rsp_schema: rspSchema } : {}),
-        });
-        const t = new RemoteTask<Req, Prg, Rsp>(this, name, r);
-        this._entities.set(t.id, t);
-        return t;
+        return this._create("remote_task", name, true,
+            { ...opts, ...(reqSchema ? { req: reqSchema } : {}), ...(prgSchema ? { prg: prgSchema } : {}),
+              ...(rspSchema ? { rsp: rspSchema } : {}) },
+            (r, dc) => new RemoteTask<Req, Prg, Rsp>(this, name, r, dc));
     }
 
     /* Host a variable (this node holds the authoritative value). `initial` is applied
@@ -1388,8 +2015,7 @@ class DartNode {
      * the field table the create returns). */
     async variableDefinition<T = any>(name: string, schema: string | null,
             opts: VariableDefOpts<T> = {}): Promise<VariableDefinition<T>> {
-        const r = await this._request({
-            op: "variable_definition", name,
+        const v = await this._create("variable_definition", name, true, {
             ...(schema ? { schema } : {}),
             ...(opts.readOnly ? { read_only: true } : {}),
             ...(opts.allowForce ? { allow_force: true } : {}),
@@ -1397,9 +2023,8 @@ class DartNode {
             ...(opts.keep_last ? { keep_last: opts.keep_last } : {}),
             ...(opts.backpressure_wait_ms ? { backpressure_wait_ms: opts.backpressure_wait_ms } : {}),
             ...(opts.onWrite ? { on_write: true } : {}),
-        });
-        const v = new VariableDefinition<T>(this, name, r);
-        this._entities.set(v.id, v);
+            ...(opts.reflect ? { reflect: true } : {}),
+        }, (r, dc) => new VariableDefinition<T>(this, name, r, dc));
         if (opts.initial !== undefined) v.set(opts.initial);
         return v;
     }
@@ -1408,11 +2033,10 @@ class DartNode {
      * applied write (route it via RemoteVariable.onWrite). */
     async remoteVariable<T = any>(name: string, schema: string | null,
             opts: RemoteVarOpts = {}): Promise<RemoteVariable<T>> {
-        const r = await this._request({ op: "remote_variable", name,
-            ...(schema ? { schema } : {}), ...(opts.onWrite ? { on_write: true } : {}) });
-        const v = new RemoteVariable<T>(this, name, r);
-        this._entities.set(v.id, v);
-        return v;
+        return this._create("remote_variable", name, true,
+            { ...(schema ? { schema } : {}), ...(opts.onWrite ? { on_write: true } : {}),
+              ...(opts.reflect ? { reflect: true } : {}) },
+            (r, dc) => new RemoteVariable<T>(this, name, r, dc));
     }
 
     /* Block until discovery + matching settle for everything created so far. */
@@ -1465,6 +2089,20 @@ class DartNode {
         return (r.entities as any[]).map(toEntity);
     }
 
+    /* The whole mesh folded: one entity per (kind, name) across every active peer and the
+     * bridge's node, schemas from the provider, `conflict` when endpoints disagree. `epoch`
+     * moves on every change: re-read iff it moved. */
+    async mesh(): Promise<{ entities: Entity[]; epoch: number }> {
+        const r = await this._request({ op: "mesh" });
+        return { entities: (r.entities as any[]).map(toEntity), epoch: r.epoch ?? 0 };
+    }
+
+    /* One mesh entity by kind and name, or null. */
+    async meshFind(kind: EntityKindName, name: string): Promise<Entity | null> {
+        const r = await this._request({ op: "mesh_find", kind, name });
+        return r.entity ? toEntity(r.entity) : null;
+    }
+
     /* Fetch a peer's @dart/meta snapshot (an async directed call; works under the
      * bridge's service thread). Never rejects on status: inspect the returned `status`.
      * sections = OR of MetaSection (default All). */
@@ -1478,22 +2116,28 @@ class DartNode {
      * promises settle with status "cancelled". */
     close(): void {
         this._closing = true;
+        this._rtcDrop();
         this._ws.close();
     }
 }
 
 export {
-    DartNode, DartTopic, DartMessage, Layout,
+    DartNode, DartEntity, DartTopic, DartMessage, Layout,
     Publisher, Subscriber,
     FunctionDefinition, RemoteFunction,
     TaskDefinition, RemoteTask, TaskRun,
     VariableDefinition, RemoteVariable,
+    VideoView, VideoCodec, ImageFormat, StreamKind, VIDEO_FRAME, IMAGE, EXTERNAL_VIDEO_STREAM,
     MetaSection,
     type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent,
+    type TransportName,
     type CallStatusName, type Response, type RequestInfo,
     type SubscriberHandler, type FunctionHandler,
     type TaskContext, type TaskHandler, type TaskProgressHandler, type TaskOpts, type CancelStatus,
-    type VariableDefOpts, type RemoteVarOpts,
+    type VariableDefOpts, type RemoteVarOpts, type VarChangeHandler,
+    type VideoFrameValue, type ImageValue, type ExternalVideoStreamValue, type MediaValue, type MediaTypeName,
+    type VideoPath, type MediaSource, type MediaAttachOpts, type MediaField,
+    type FunctionOpts,
     type LogLevelName, type LogLine,
     type Peer, type Entity, type EntityKindName, type MetaSnapshot,
 };

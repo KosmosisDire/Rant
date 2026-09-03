@@ -36,7 +36,7 @@ const robot = await DartNode.connect(url, { name: "robot", ...net,
     onEvent: (e) => { if (e.event === "error") console.warn("robot:", e.text); } });
 const dash  = await DartNode.connect(url, { name: "dashboard", ...net, fetch_details: true,
     onEvent: (e) => { if (e.event === "error") console.warn("dash:", e.text); } });
-console.log(`connected to ${url}`);
+console.log(`connected to ${url} (data over ${robot.transport})`);
 
 /* ---- the robot hosts everything -------------------------------------------------- */
 const telemetry = await robot.publisher("telemetry", TELEMETRY, { reliable: true });
@@ -81,6 +81,27 @@ for (let i = 0; i < 50 && config.get()?.rate_hz !== 100; i++)   /* owner-side ec
     await new Promise((res) => setTimeout(res, 100));
 if (config.get()?.rate_hz !== 100) throw new Error("variable set did not replicate");
 console.log(`owner sees rate_hz=${config.get().rate_hz} label="${config.get().label}"`);
+
+/* ---- reflect: a handle typed by the mesh, no DSL on this end ---------------------- */
+let sawMirror;
+const gotMirror = new Promise((res) => { sawMirror = res; });
+const mirror = await dash.subscriber("telemetry", null, (v) => { if (v.seq === 2) sawMirror(v); }, { reflect: true });
+if (!mirror.topic.reflected) { await dash.settle(5000); await mirror.topic.refresh(); }   /* the provider was not matched yet */
+if (!mirror.topic.reflected) throw new Error("reflect found no telemetry schema on the mesh");
+console.log(`reflected telemetry: ${[...mirror.topic.layout.fields.keys()].join(", ")} (hash ${mirror.topic.layout.hash})`);
+if (mirror.topic.layout.hash !== telemetry.topic.layout.hash) throw new Error("reflected schema differs from the publisher's");
+telemetry.send({ seq: 2, when: Date.now() * 1000, battery: 80, at: { x: 2, y: 3 } });
+const mv = await gotMirror;
+if (mv.at.y !== 3 || mv.battery !== 80) throw new Error("reflected subscriber decoded wrong");
+
+/* ---- the mesh folded: every entity on the network with its provider's schema -------- */
+const mesh = await dash.mesh();
+const meshTelemetry = mesh.entities.find((e) => e.kind === "topic" && e.name === "telemetry");
+console.log(`mesh: ${mesh.entities.length} entities (epoch ${mesh.epoch}); telemetry providers=${meshTelemetry?.providers} ` +
+            `consumers=${meshTelemetry?.consumers} from=${meshTelemetry?.from}`);
+if (!meshTelemetry?.providers) throw new Error("the mesh does not show the telemetry provider");
+const foundConfig = await dash.meshFind("variable", "config");
+if (!foundConfig?.schema?.fields?.some((f) => f.path === "rate_hz")) throw new Error("meshFind config: no schema");
 
 /* ---- introspection: query the mesh through the bridge (pull-only) ----------------- */
 const peers = await dash.peers();
