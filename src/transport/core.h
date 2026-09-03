@@ -120,7 +120,11 @@ typedef struct {
                                     shm_max_bytes is 0. Buffers grow to fit any message up to
                                     the wire cap (DART_MESSAGE_MAX) regardless. */
     uint32_t heartbeat_us;       /* reliable: idle-publisher ping (repairs a lost final message). 0 = 250ms */
-    uint32_t repair_delay_us;    /* reliable: subscriber's delay before requesting a resend. 0 = 50ms */
+    uint32_t repair_delay_us;    /* reliable: how long a subscriber waits before asking AGAIN for a
+                                    resend it already requested once (its retransmit bound). 0 =
+                                    adaptive: the peer's measured round trip (smoothed + 4x deviation,
+                                    never under DART_RTO_MIN_US), 50 ms until the first sample. A
+                                    nonzero value pins it. See DartPeerRtt. */
     uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow subscriber before
                                     evicting un-acked history. 0 = none (pure KEEP_LAST) */
     uint32_t shm_max_bytes;      /* same-host SHM: pin this topic to one size class big enough for
@@ -803,6 +807,23 @@ typedef struct {
 /* Fill *out with the topic's cumulative repair counters (zeroed if topic is
  * out of range). Per-topic aggregate; a per-peer breakdown is a later extension. */
 void      dart_transport_repair_stats(DartTransportState *st, uint16_t topic_index, DartRepairStats *out);
+
+/* Per-peer round-trip estimate (RFC 6298 shape), fed by the reliable path itself, with no
+ * probe traffic and no wire change: a reader times a repair request to the resend it brings,
+ * a writer times the push of a sample's last fragment to the cumulative ack that covers it.
+ * Only unambiguous samples count (a seqno asked once, a sample never resent), so a
+ * retransmit never inflates it. ONE estimator per peer, shared by every lane in both
+ * directions. It drives the reader's re-ask backstop (qos.repair_delay_us = 0) and the
+ * writer's tail heartbeat. Microseconds; samples = 0 means no estimate yet. */
+typedef struct {
+    uint32_t rtt_us;         /* smoothed round trip */
+    uint32_t rtt_jitter_us;  /* mean deviation of the samples around it */
+    uint32_t rtt_min_us;     /* smallest sample seen: the path's floor */
+    uint32_t rtt_last_us;    /* the most recent sample */
+    uint32_t samples;        /* samples folded in so far */
+} DartPeerRtt;
+/* 1 and *out filled when the peer is known (samples may still be 0), else 0 and *out zeroed. */
+int       dart_transport_peer_rtt(DartTransportState *st, uint32_t peer_id, DartPeerRtt *out);
 
 /* Publisher-side: number of subscriber lanes on this topic with a pending repair NACK to
  * service. 0 => the publisher has nothing to resend right now (idle for lack of NACKs).

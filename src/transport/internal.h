@@ -54,8 +54,14 @@
 #define DART_QOS_DEF_KEEP_LAST_REL 10u   /* reliable: room for repair before overwrite */
 #define DART_QOS_DEF_HEARTBEAT_US 250000u   /* 250 ms idle writer heartbeat */
 #define DART_QOS_DEF_REPAIR_US    50000u    /* 50 ms reader repair-request delay */
+#ifndef DART_RTO_MIN_US
+#define DART_RTO_MIN_US   2000u  /* floor of every RTT-derived timer (the re-ask backstop, the tail
+                                    HB): under it a poll wait cannot fire on time anyway */
+#endif
+#define DART_RTO_GRAIN_US 1000u  /* RFC 6298 G: the deviation term never counts under one tick */
 #ifndef DART_HB_TAIL_US
-#define DART_HB_TAIL_US 20000u   /* tail heartbeat: when a lane's send queue drains, the next HB
+#define DART_HB_TAIL_US 20000u   /* tail heartbeat BEFORE the peer's RTT is known (then it is the
+                                    RTT bound, i_dart_rtt_rto): when a lane's send queue drains, the next HB
                                     comes this soon (not heartbeat_us) so a lost FINAL message is
                                     detected fast. The reader's immediate ack normally clears
                                     acked_upto first, suppressing it: no wire cost without loss. */
@@ -148,6 +154,11 @@ typedef struct {        /* writer-side, per (topic,peer) */
     uint8_t  skip_hb;    /* directed send: this non-destination lane owes a one-shot HB whose
                             first advertises the advanced floor, so its reader skips past the
                             seqno addressed to another peer (see dart_transport_send_to) */
+    uint8_t  rtt_probe;  /* an RTT probe is armed: rtt_probe_seq = the end of a sample whose last
+                            fragment was pushed at rtt_probe_us; the cumulative ack reaching it is
+                            one sample. Disarmed by any repair or resync in between (Karn). */
+    uint64_t rtt_probe_seq;
+    uint64_t rtt_probe_us;
 } i_DartWriterProxy;
 
 typedef struct {        /* reader-side, per (topic,peer) */
@@ -188,6 +199,11 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                consumer refused) and nothing was delivered since: the next such skip
                                rejoins at the writer's head instead of its oldest cached sample
                                (i_dart_reader_hb) */
+    uint8_t  rtt_probe;     /* an RTT probe is armed: rtt_probe_seq was asked for the FIRST time at
+                               rtt_probe_us; its arrival is one sample. A re-ask of it disarms
+                               (ambiguous), a floor past it disarms (stale). */
+    uint64_t rtt_probe_seq;
+    uint64_t rtt_probe_us;
 #ifdef DART_SHM
     uint8_t  parked_shm;    /* the parked hold is a descriptor, not an assembled sample */
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
@@ -263,6 +279,7 @@ struct DartTransportState {
     uint8_t     *peer_dormant;/* [max_peers] 1 = silent (discovery DROP): out of flow control,
                                  proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
+    DartPeerRtt *peer_rtt;  /* [max_peers] the round-trip estimator (core.h DartPeerRtt) */
     uint16_t     frag;      /* this node's fragment size: what we fragment our sends into */
 #ifdef DART_SHM
     uint8_t     *peer_shm;  /* [max_peers] 1 = peer can receive SHM-DATA (same host, attached) */
@@ -415,7 +432,11 @@ void   i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t p
 void   i_dart_lane_enqueue(DartTransportState *st, uint32_t li);   /* enqueue a lane record by index */
 void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
 size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p);
+void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+/* the per-peer RTT estimator (core.c): fold one sample; the retransmit bound it implies
+   (fallback_us until the first sample) */
+void     i_dart_rtt_sample(DartTransportState *st, uint32_t peer_slot, uint64_t sample_us);
+uint32_t i_dart_rtt_rto(DartTransportState *st, uint32_t peer_slot, uint32_t fallback_us);
 void   i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef DART_SHM
 void   i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);

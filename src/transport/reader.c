@@ -94,6 +94,10 @@ void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, c
         if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
     r->started = 1; r->assembly_active = 0;
+    if (r->rtt_probe && r->rtt_probe_seq >= base && r->rtt_probe_seq < base + count){
+        i_dart_rtt_sample(st, (uint32_t)peer_slot, now > r->rtt_probe_us ? now - r->rtt_probe_us : 0u);
+        r->rtt_probe = 0;
+    }
     /* in order (base == deliver_upto). Resolve the chunk; advance + ack ONLY if the
        node delivered. A failed resolve (recycled, or a transient unattachable segment)
        leaves the gap so the reliability layer repairs it (re-sent descriptor) or skips
@@ -214,6 +218,10 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           i_dart_bit_set(r->frag_bitmap,frag);
           if (frag==r->assembly_low)                          /* extended the contiguous-received front */
               while (r->assembly_low<count && i_dart_bit_get(r->frag_bitmap,r->assembly_low)) r->assembly_low++;
+          if (r->rtt_probe && seqno == r->rtt_probe_seq){     /* the resend our probe timed */
+              i_dart_rtt_sample(st, (uint32_t)peer_slot, now > r->rtt_probe_us ? now - r->rtt_probe_us : 0u);
+              r->rtt_probe = 0;
+          }
       } else topic->repair_stats.frags_dup++;                        /* already held: repair overlap / waste */
     }
     /* assembly_low is the contiguous front, so the sample is complete iff it reached the end.
@@ -288,7 +296,7 @@ void i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, co
                         r->deliver_upto, to - r->deliver_upto);
             topic->repair_stats.msgs_skipped += to - r->deliver_upto;
         }
-        r->deliver_upto=to; r->assembly_active=0;
+        r->deliver_upto=to; r->assembly_active=0; r->rtt_probe=0;
         r->parked=0;            /* the writer moved past the held sample: give it up */
 #ifdef DART_SHM
         r->parked_shm=0;
@@ -356,17 +364,31 @@ size_t i_dart_reader_emit(DartTransportState *st, int topic_index, int peer_slot
                backstop re-asks everything, so both ask from the floor. */
             uint64_t from = (due || !r->assembly_active) ? first_missing
                 : (r->nack_high > first_missing ? r->nack_high : first_missing); /* refill: only the new part */
-            uint64_t s;
+            uint64_t s, probe = 0, asked_high = r->nack_high;   /* at or past it = never asked before */
+            int have_probe = 0;
             for (s=from; s<top; s++){
                 int missing = r->assembly_active ? !i_dart_bit_get(r->frag_bitmap,(uint32_t)(s - r->deliver_upto)) : 1;
-                if (missing) bitmap |= (1u << (uint32_t)(s - first_missing));
+                if (missing){
+                    bitmap |= (1u << (uint32_t)(s - first_missing));
+                    if (!have_probe && s >= asked_high){ probe = s; have_probe = 1; }
+                }
             }
             if (bitmap){
+                /* the backstop: the peer's measured round trip unless the QoS pins it */
+                uint32_t rto = topic->qos.repair_delay_us ? topic->qos.repair_delay_us
+                             : i_dart_rtt_rto(st, (uint32_t)peer_slot, DART_QOS_DEF_REPAIR_US);
                 nbits = (uint16_t)(top - first_missing);
                 repair = 1;
                 topic->repair_stats.nacks_sent++;
                 if (top > r->nack_high) r->nack_high = top;
-                r->nack_retransmit_us = now + topic->qos.repair_delay_us;
+                r->nack_retransmit_us = now + rto;
+                /* RTT probe: time the FIRST ask of one seqno to the resend it brings. A probe
+                   asked again is ambiguous (Karn) and one the floor passed is stale: both
+                   disarm, and the lowest first-ask of this request arms the next. */
+                if (r->rtt_probe && (r->rtt_probe_seq < first_missing ||
+                    (r->rtt_probe_seq < top && ((bitmap >> (uint32_t)(r->rtt_probe_seq - first_missing)) & 1u))))
+                    r->rtt_probe = 0;
+                if (!r->rtt_probe && have_probe){ r->rtt_probe = 1; r->rtt_probe_seq = probe; r->rtt_probe_us = now; }
             }
         }
     } else r->nack_high = first_missing;                   /* caught up to received: end the episode */

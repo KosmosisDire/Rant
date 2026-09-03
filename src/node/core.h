@@ -145,6 +145,13 @@ typedef struct {
     uint32_t         epoch;          /* bumps on every reflected change at this peer */
     uint8_t          catching_up;    /* 1 = it advertises newer state than we hold yet */
     uint16_t         fragment_size;  /* advertised UDP fragment size */
+    /* the round trip to it as OUR reliable traffic measured it (transport DartPeerRtt): the
+       smoothed value, its jitter and floor, and how many samples went in (0 = no estimate
+       yet: nothing reliable has flowed, or the peer never answered a repair) */
+    uint32_t         rtt_us;
+    uint32_t         rtt_jitter_us;
+    uint32_t         rtt_min_us;
+    uint32_t         rtt_samples;
 } DartPeerInfo;
 
 typedef enum {

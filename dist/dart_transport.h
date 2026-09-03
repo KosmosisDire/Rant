@@ -440,7 +440,11 @@ typedef struct {
                                     shm_max_bytes is 0. Buffers grow to fit any message up to
                                     the wire cap (DART_MESSAGE_MAX) regardless. */
     uint32_t heartbeat_us;       /* reliable: idle-publisher ping (repairs a lost final message). 0 = 250ms */
-    uint32_t repair_delay_us;    /* reliable: subscriber's delay before requesting a resend. 0 = 50ms */
+    uint32_t repair_delay_us;    /* reliable: how long a subscriber waits before asking AGAIN for a
+                                    resend it already requested once (its retransmit bound). 0 =
+                                    adaptive: the peer's measured round trip (smoothed + 4x deviation,
+                                    never under DART_RTO_MIN_US), 50 ms until the first sample. A
+                                    nonzero value pins it. See DartPeerRtt. */
     uint32_t backpressure_wait_us;/* reliable: how long a send pauses for a slow subscriber before
                                     evicting un-acked history. 0 = none (pure KEEP_LAST) */
     uint32_t shm_max_bytes;      /* same-host SHM: pin this topic to one size class big enough for
@@ -1123,6 +1127,23 @@ typedef struct {
 /* Fill *out with the topic's cumulative repair counters (zeroed if topic is
  * out of range). Per-topic aggregate; a per-peer breakdown is a later extension. */
 void      dart_transport_repair_stats(DartTransportState *st, uint16_t topic_index, DartRepairStats *out);
+
+/* Per-peer round-trip estimate (RFC 6298 shape), fed by the reliable path itself, with no
+ * probe traffic and no wire change: a reader times a repair request to the resend it brings,
+ * a writer times the push of a sample's last fragment to the cumulative ack that covers it.
+ * Only unambiguous samples count (a seqno asked once, a sample never resent), so a
+ * retransmit never inflates it. ONE estimator per peer, shared by every lane in both
+ * directions. It drives the reader's re-ask backstop (qos.repair_delay_us = 0) and the
+ * writer's tail heartbeat. Microseconds; samples = 0 means no estimate yet. */
+typedef struct {
+    uint32_t rtt_us;         /* smoothed round trip */
+    uint32_t rtt_jitter_us;  /* mean deviation of the samples around it */
+    uint32_t rtt_min_us;     /* smallest sample seen: the path's floor */
+    uint32_t rtt_last_us;    /* the most recent sample */
+    uint32_t samples;        /* samples folded in so far */
+} DartPeerRtt;
+/* 1 and *out filled when the peer is known (samples may still be 0), else 0 and *out zeroed. */
+int       dart_transport_peer_rtt(DartTransportState *st, uint32_t peer_id, DartPeerRtt *out);
 
 /* Publisher-side: number of subscriber lanes on this topic with a pending repair NACK to
  * service. 0 => the publisher has nothing to resend right now (idle for lack of NACKs).
@@ -2059,6 +2080,13 @@ typedef struct {
     uint32_t         epoch;          /* bumps on every reflected change at this peer */
     uint8_t          catching_up;    /* 1 = it advertises newer state than we hold yet */
     uint16_t         fragment_size;  /* advertised UDP fragment size */
+    /* the round trip to it as OUR reliable traffic measured it (transport DartPeerRtt): the
+       smoothed value, its jitter and floor, and how many samples went in (0 = no estimate
+       yet: nothing reliable has flowed, or the peer never answered a repair) */
+    uint32_t         rtt_us;
+    uint32_t         rtt_jitter_us;
+    uint32_t         rtt_min_us;
+    uint32_t         rtt_samples;
 } DartPeerInfo;
 
 typedef enum {
@@ -3745,8 +3773,14 @@ static inline uint64_t i_dart_fnv1a64_str(const char *s){
 #define DART_QOS_DEF_KEEP_LAST_REL 10u   /* reliable: room for repair before overwrite */
 #define DART_QOS_DEF_HEARTBEAT_US 250000u   /* 250 ms idle writer heartbeat */
 #define DART_QOS_DEF_REPAIR_US    50000u    /* 50 ms reader repair-request delay */
+#ifndef DART_RTO_MIN_US
+#define DART_RTO_MIN_US   2000u  /* floor of every RTT-derived timer (the re-ask backstop, the tail
+                                    HB): under it a poll wait cannot fire on time anyway */
+#endif
+#define DART_RTO_GRAIN_US 1000u  /* RFC 6298 G: the deviation term never counts under one tick */
 #ifndef DART_HB_TAIL_US
-#define DART_HB_TAIL_US 20000u   /* tail heartbeat: when a lane's send queue drains, the next HB
+#define DART_HB_TAIL_US 20000u   /* tail heartbeat BEFORE the peer's RTT is known (then it is the
+                                    RTT bound, i_dart_rtt_rto): when a lane's send queue drains, the next HB
                                     comes this soon (not heartbeat_us) so a lost FINAL message is
                                     detected fast. The reader's immediate ack normally clears
                                     acked_upto first, suppressing it: no wire cost without loss. */
@@ -3839,6 +3873,11 @@ typedef struct {        /* writer-side, per (topic,peer) */
     uint8_t  skip_hb;    /* directed send: this non-destination lane owes a one-shot HB whose
                             first advertises the advanced floor, so its reader skips past the
                             seqno addressed to another peer (see dart_transport_send_to) */
+    uint8_t  rtt_probe;  /* an RTT probe is armed: rtt_probe_seq = the end of a sample whose last
+                            fragment was pushed at rtt_probe_us; the cumulative ack reaching it is
+                            one sample. Disarmed by any repair or resync in between (Karn). */
+    uint64_t rtt_probe_seq;
+    uint64_t rtt_probe_us;
 } i_DartWriterProxy;
 
 typedef struct {        /* reader-side, per (topic,peer) */
@@ -3879,6 +3918,11 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                consumer refused) and nothing was delivered since: the next such skip
                                rejoins at the writer's head instead of its oldest cached sample
                                (i_dart_reader_hb) */
+    uint8_t  rtt_probe;     /* an RTT probe is armed: rtt_probe_seq was asked for the FIRST time at
+                               rtt_probe_us; its arrival is one sample. A re-ask of it disarms
+                               (ambiguous), a floor past it disarms (stale). */
+    uint64_t rtt_probe_seq;
+    uint64_t rtt_probe_us;
 #ifdef DART_SHM
     uint8_t  parked_shm;    /* the parked hold is a descriptor, not an assembled sample */
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
@@ -3954,6 +3998,7 @@ struct DartTransportState {
     uint8_t     *peer_dormant;/* [max_peers] 1 = silent (discovery DROP): out of flow control,
                                  proxies + reader position preserved for a same-incarnation resume */
     uint16_t    *peer_frag; /* [max_peers] each peer's advertised fragment size (writer side) */
+    DartPeerRtt *peer_rtt;  /* [max_peers] the round-trip estimator (core.h DartPeerRtt) */
     uint16_t     frag;      /* this node's fragment size: what we fragment our sends into */
 #ifdef DART_SHM
     uint8_t     *peer_shm;  /* [max_peers] 1 = peer can receive SHM-DATA (same host, attached) */
@@ -4106,7 +4151,11 @@ void   i_dart_lane_wake(DartTransportState *st, uint16_t topic_index, uint32_t p
 void   i_dart_lane_enqueue(DartTransportState *st, uint32_t li);   /* enqueue a lane record by index */
 void   i_dart_sched_drop(DartTransportState *st, uint32_t rec);     /* unlink a record from its dest list */
 size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p);
+void   i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+/* the per-peer RTT estimator (core.c): fold one sample; the retransmit bound it implies
+   (fallback_us until the first sample) */
+void     i_dart_rtt_sample(DartTransportState *st, uint32_t peer_slot, uint64_t sample_us);
+uint32_t i_dart_rtt_rto(DartTransportState *st, uint32_t peer_slot, uint32_t fallback_us);
 void   i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef DART_SHM
 void   i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
@@ -4727,15 +4776,15 @@ static size_t i_dart_writer_hb(DartTransportState *st, i_DartTopic *topic, i_Dar
  * (a past hb_next_us is replaced too: it would fire in this same drain, coalesced). The
  * reader's immediate ack normally raises acked_upto before the window elapses, which
  * suppresses the HB at step 3, so healthy traffic sends nothing extra. */
-static void i_dart_writer_arm_tail(DartTransportState *st, i_DartWriterProxy *w, uint64_t now){
-    uint64_t tail = now + DART_HB_TAIL_US;
+static void i_dart_writer_arm_tail(DartTransportState *st, i_DartWriterProxy *w, uint32_t peer_slot, uint64_t now){
+    uint64_t tail = now + i_dart_rtt_rto(st, peer_slot, DART_HB_TAIL_US);   /* the ack is overdue past the RTT bound */
     if (w->hb_next_us <= now || w->hb_next_us > tail) w->hb_next_us = tail;
     i_dart_transport_arm_deadline(st, w->hb_next_us);
 }
 
 
 /* writer side: handle ACKNACK */
-void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p){
+void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
     i_DartTopic *topic=&st->topics[topic_index];
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,topic_index,peer_slot);
     uint64_t base=i_dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=i_dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=i_dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
@@ -4759,7 +4808,7 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
             uint64_t join = i_dart_topic_unicast_join_seqno(topic);
             w->sent_upto  = w->acked_upto < join ? w->acked_upto : join;
             w->acked_upto = w->sent_upto;
-            w->has_nack   = 0;
+            w->has_nack   = 0; w->rtt_probe = 0;
             w->hb_next_us = 0;
             i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
             w->reader_epoch = epoch;
@@ -4774,8 +4823,17 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
             w->sent_upto = w->acked_upto;
             i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
         }
+        w->rtt_probe = 0;
         return;                    /* no position information to apply */
     }
+    /* RTT sample: the cumulative ack reached the armed probe (a sample pushed once and never
+       resent since); a repair request in the same ACKNACK then disarms whatever is armed,
+       since the acks after a repair are ambiguous (Karn) */
+    if (w->rtt_probe && base >= w->rtt_probe_seq){
+        i_dart_rtt_sample(st, (uint32_t)peer_slot, now > w->rtt_probe_us ? now - w->rtt_probe_us : 0u);
+        w->rtt_probe = 0;
+    }
+    if (nbits>0 && bitmap!=0) w->rtt_probe = 0;
     if (base > w->acked_upto) w->acked_upto=base;
     /* directed: the ack may have made foreign samples contiguous from the new floor;
        step over them now and schedule the floor HB the reader is owed */
@@ -4929,8 +4987,10 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             if (st->peer_shm[peer_slot] && s->shm){
                 if (cap < DART_SHM_DATA_BYTES) return 0;
                 w->sent_upto = s->base + s->count;
-                if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
-                    i_dart_writer_arm_tail(st, w, now);
+                if (reliable && w->reader_reliable){
+                    if (!w->rtt_probe){ w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now; }
+                    if (w->sent_upto >= topic->next_seqno) i_dart_writer_arm_tail(st, w, (uint32_t)peer_slot, now);
+                }
                 return i_dart_wire_mk_shm(out,index,per_lane ? s->base - w->wire_skip : s->base,
                                           s->count,s->desc);
             }
@@ -4942,8 +5002,15 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             w->sent_upto++;
             topic->repair_stats.frags_sent++;                       /* new data (unicast lane) */
-            if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
-                i_dart_writer_arm_tail(st, w, now);              /* queue drained: fast tail HB */
+            if (reliable && w->reader_reliable){
+                /* the sample's LAST fragment arms the RTT probe: its immediate in-order ack
+                   comes one round trip after this push (a mid-sample push would also count
+                   the rest of the sample's serialization) */
+                if (!w->rtt_probe && w->sent_upto == s->base + s->count){
+                    w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now; }
+                if (w->sent_upto >= topic->next_seqno)
+                    i_dart_writer_arm_tail(st, w, (uint32_t)peer_slot, now);   /* queue drained: fast tail HB */
+            }
             return i_dart_wire_mk_data(out,index,per_lane ? seqno - w->wire_skip : seqno,
                                        s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
             }
@@ -4956,6 +5023,7 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             if (per_lane){ w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno); return 0; }
             if (cap < DART_HEADER_HB) return 0;
             w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno);
+            w->rtt_probe=0;
             return i_dart_writer_hb(st,topic,w,index,out,cap,now);
         }
     }
@@ -5065,6 +5133,10 @@ void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, c
         if (ord==DART_ORDER_OLD || ord==DART_ORDER_GAP) return;   /* old/dup, or repair armed for a gap */
     }
     r->started = 1; r->assembly_active = 0;
+    if (r->rtt_probe && r->rtt_probe_seq >= base && r->rtt_probe_seq < base + count){
+        i_dart_rtt_sample(st, (uint32_t)peer_slot, now > r->rtt_probe_us ? now - r->rtt_probe_us : 0u);
+        r->rtt_probe = 0;
+    }
     /* in order (base == deliver_upto). Resolve the chunk; advance + ack ONLY if the
        node delivered. A failed resolve (recycled, or a transient unattachable segment)
        leaves the gap so the reliability layer repairs it (re-sent descriptor) or skips
@@ -5185,6 +5257,10 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
           i_dart_bit_set(r->frag_bitmap,frag);
           if (frag==r->assembly_low)                          /* extended the contiguous-received front */
               while (r->assembly_low<count && i_dart_bit_get(r->frag_bitmap,r->assembly_low)) r->assembly_low++;
+          if (r->rtt_probe && seqno == r->rtt_probe_seq){     /* the resend our probe timed */
+              i_dart_rtt_sample(st, (uint32_t)peer_slot, now > r->rtt_probe_us ? now - r->rtt_probe_us : 0u);
+              r->rtt_probe = 0;
+          }
       } else topic->repair_stats.frags_dup++;                        /* already held: repair overlap / waste */
     }
     /* assembly_low is the contiguous front, so the sample is complete iff it reached the end.
@@ -5259,7 +5335,7 @@ void i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, co
                         r->deliver_upto, to - r->deliver_upto);
             topic->repair_stats.msgs_skipped += to - r->deliver_upto;
         }
-        r->deliver_upto=to; r->assembly_active=0;
+        r->deliver_upto=to; r->assembly_active=0; r->rtt_probe=0;
         r->parked=0;            /* the writer moved past the held sample: give it up */
 #ifdef DART_SHM
         r->parked_shm=0;
@@ -5327,17 +5403,31 @@ size_t i_dart_reader_emit(DartTransportState *st, int topic_index, int peer_slot
                backstop re-asks everything, so both ask from the floor. */
             uint64_t from = (due || !r->assembly_active) ? first_missing
                 : (r->nack_high > first_missing ? r->nack_high : first_missing); /* refill: only the new part */
-            uint64_t s;
+            uint64_t s, probe = 0, asked_high = r->nack_high;   /* at or past it = never asked before */
+            int have_probe = 0;
             for (s=from; s<top; s++){
                 int missing = r->assembly_active ? !i_dart_bit_get(r->frag_bitmap,(uint32_t)(s - r->deliver_upto)) : 1;
-                if (missing) bitmap |= (1u << (uint32_t)(s - first_missing));
+                if (missing){
+                    bitmap |= (1u << (uint32_t)(s - first_missing));
+                    if (!have_probe && s >= asked_high){ probe = s; have_probe = 1; }
+                }
             }
             if (bitmap){
+                /* the backstop: the peer's measured round trip unless the QoS pins it */
+                uint32_t rto = topic->qos.repair_delay_us ? topic->qos.repair_delay_us
+                             : i_dart_rtt_rto(st, (uint32_t)peer_slot, DART_QOS_DEF_REPAIR_US);
                 nbits = (uint16_t)(top - first_missing);
                 repair = 1;
                 topic->repair_stats.nacks_sent++;
                 if (top > r->nack_high) r->nack_high = top;
-                r->nack_retransmit_us = now + topic->qos.repair_delay_us;
+                r->nack_retransmit_us = now + rto;
+                /* RTT probe: time the FIRST ask of one seqno to the resend it brings. A probe
+                   asked again is ambiguous (Karn) and one the floor passed is stale: both
+                   disarm, and the lowest first-ask of this request arms the next. */
+                if (r->rtt_probe && (r->rtt_probe_seq < first_missing ||
+                    (r->rtt_probe_seq < top && ((bitmap >> (uint32_t)(r->rtt_probe_seq - first_missing)) & 1u))))
+                    r->rtt_probe = 0;
+                if (!r->rtt_probe && have_probe){ r->rtt_probe = 1; r->rtt_probe_seq = probe; r->rtt_probe_us = now; }
             }
         }
     } else r->nack_high = first_missing;                   /* caught up to received: end the episode */
@@ -5442,7 +5532,8 @@ static void i_dart_qos_defaults(DartQos *q){
                                                      ? DART_QOS_DEF_KEEP_LAST_REL
                                                      : DART_QOS_DEF_KEEP_LAST;
     if (q->heartbeat_us == 0)     q->heartbeat_us    = DART_QOS_DEF_HEARTBEAT_US;
-    if (q->repair_delay_us == 0)  q->repair_delay_us = DART_QOS_DEF_REPAIR_US;
+    /* repair_delay_us stays 0 = adaptive (the peer's RTT bound, DART_QOS_DEF_REPAIR_US before
+       the first sample); a nonzero value pins it. Resolved per NACK in i_dart_reader_emit. */
 }
 
 
@@ -5478,6 +5569,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint8_t  *peer_used = (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
       uint8_t  *peer_dormant= (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
       uint16_t *peer_frag = (uint16_t*)i_dart_bump_take(b, max_peers*sizeof(uint16_t), 2);
+      DartPeerRtt *peer_rtt = (DartPeerRtt*)i_dart_bump_take(b, max_peers*sizeof(DartPeerRtt), 8);
 #ifdef DART_SHM
       uint8_t  *peer_shm= (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
 #endif
@@ -5504,6 +5596,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
+          st->peer_rtt=peer_rtt; memset(peer_rtt, 0, max_peers*sizeof(DartPeerRtt));
           st->frag = dart_clamp_frag(cfg->frag_size);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
           st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
@@ -5631,6 +5724,7 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
     memcpy(nw->peer_used,    old->peer_used,    omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
     memcpy(nw->peer_frag,    old->peer_frag,    (size_t)omp*sizeof(uint16_t));
+    memcpy(nw->peer_rtt,     old->peer_rtt,     (size_t)omp*sizeof(DartPeerRtt));
 #ifdef DART_SHM
     memcpy(nw->peer_shm,     old->peer_shm,     omp);
 #endif
@@ -5903,6 +5997,7 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
     for (i=0;i<max_peers;i++) if(!st->peer_used[i]){free=(int)i;break;}
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
+    memset(&st->peer_rtt[free], 0, sizeof(DartPeerRtt));   /* a new peer starts unmeasured */
     st->peer_dormant[free]=0;
     st->peer_frag[free]=dart_clamp_frag(peer_frag);
 #ifdef DART_SHM
@@ -5945,9 +6040,51 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
     }
     st->peer_seen_version[s]=0;
     st->peer_used[s]=0; st->peer_dormant[s]=0;
+    memset(&st->peer_rtt[s], 0, sizeof(DartPeerRtt));
 #ifdef DART_SHM
     st->peer_shm[s]=0;
 #endif
+}
+
+/* ---- the per-peer round-trip estimator (core.h DartPeerRtt) ---------------------------- */
+
+/* Fold one sample in (RFC 6298: alpha 1/8 on the mean, beta 1/4 on the deviation; the
+ * first sample seeds both). Callers hand in only unambiguous samples: a seqno that was asked
+ * exactly once, a sample that was never resent. */
+void i_dart_rtt_sample(DartTransportState *st, uint32_t peer_slot, uint64_t sample_us){
+    DartPeerRtt *e = &st->peer_rtt[peer_slot];
+    uint32_t r = sample_us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)sample_us;
+    if (e->samples == 0){
+        e->rtt_us = r; e->rtt_jitter_us = r / 2u; e->rtt_min_us = r;
+    } else {
+        uint32_t diff = e->rtt_us > r ? e->rtt_us - r : r - e->rtt_us;
+        e->rtt_jitter_us = (uint32_t)((3ull * e->rtt_jitter_us + diff) / 4u);
+        e->rtt_us        = (uint32_t)((7ull * e->rtt_us + r) / 8u);
+        if (r < e->rtt_min_us) e->rtt_min_us = r;
+    }
+    e->rtt_last_us = r;
+    if (e->samples != 0xFFFFFFFFu) e->samples++;
+}
+
+/* The retransmit bound this peer's estimate implies: smoothed + max(one tick, 4 x deviation),
+ * never under DART_RTO_MIN_US; fallback_us (a QoS default) until the first sample. */
+uint32_t i_dart_rtt_rto(DartTransportState *st, uint32_t peer_slot, uint32_t fallback_us){
+    const DartPeerRtt *e = &st->peer_rtt[peer_slot];
+    uint64_t var, rto;
+    if (e->samples == 0) return fallback_us;
+    var = 4ull * e->rtt_jitter_us;
+    if (var < DART_RTO_GRAIN_US) var = DART_RTO_GRAIN_US;
+    rto = (uint64_t)e->rtt_us + var;
+    if (rto < DART_RTO_MIN_US) rto = DART_RTO_MIN_US;
+    return rto > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)rto;
+}
+
+int dart_transport_peer_rtt(DartTransportState *st, uint32_t peer_id, DartPeerRtt *out){
+    int s = st ? i_dart_peer_slot(st, peer_id) : -1;
+    if (out) memset(out, 0, sizeof *out);
+    if (s < 0) return 0;
+    if (out) *out = st->peer_rtt[s];
+    return 1;
 }
 
 
@@ -7239,7 +7376,7 @@ void dart_transport_on_datagram(DartTransportState *st, uint32_t from, DartBytes
 #endif
                                 i_dart_reader_data(st,topic_index,peer_slot,p,now); break;
                 case DART_HB:   i_dart_reader_hb  (st,topic_index,peer_slot,p,now); break;
-                case DART_NACK: i_dart_writer_nack(st,topic_index,peer_slot,p); break;
+                case DART_NACK: i_dart_writer_nack(st,topic_index,peer_slot,p,now); break;
             }
         }
         p+=sub; rem-=sub;
@@ -14591,6 +14728,13 @@ int dart_node_peers_next(DartNode *n, DartIter *it, DartPeerInfo *out){
     if (!n) return 0;
     acquired = i_dart_node_lock(n);
     r = i_dart_node_core_peers_next(n->core, it, out);
+    if (r){   /* the transport's measurement of the path, folded in here (the core is sans-transport) */
+        DartPeerRtt e;
+        if (dart_transport_peer_rtt(n->transport, out->id, &e)){
+            out->rtt_us = e.rtt_us; out->rtt_jitter_us = e.rtt_jitter_us;
+            out->rtt_min_us = e.rtt_min_us; out->rtt_samples = e.samples;
+        }
+    }
     i_dart_node_unlock(n, acquired);
     return r;
 }
@@ -14882,6 +15026,13 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
             dart_map_put_uint(w, "age_us", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
             dart_map_put_uint(w, "publish_to", pub_to);
             dart_map_put_uint(w, "receive_from", recv_from);
+            {   DartPeerRtt e;   /* the measured round trip; absent until the first sample */
+                if (dart_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
+                    dart_map_put_uint(w, "rtt_us", e.rtt_us);
+                    dart_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
+                    dart_map_put_uint(w, "rtt_min_us", e.rtt_min_us);
+                    dart_map_put_uint(w, "rtt_samples", e.samples);
+                } }
             dart_map_close(w);
         }
         dart_map_close(w);

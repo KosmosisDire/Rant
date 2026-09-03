@@ -162,6 +162,12 @@ type Peer = {
     address: string;        /* "1.2.3.4:port" */
     active: boolean;        /* heard within peer_timeout (vs a dormant/dropped peer) */
     fragmentSize: number;
+    /* the round trip to it as the bridge node's reliable traffic measured it (microseconds:
+       smoothed, jitter, floor); rttSamples 0 = no estimate yet */
+    rttUs: number;
+    rttJitterUs: number;
+    rttMinUs: number;
+    rttSamples: number;
 };
 
 type EntityKindName = "topic" | "function" | "task" | "variable";
@@ -2070,7 +2076,9 @@ class DartNode {
     async peers(): Promise<Peer[]> {
         const r = await this._request({ op: "peers" });
         return (r.peers as any[]).map((p) => ({
-            id: p.id, name: p.name, address: p.address, active: p.active, fragmentSize: p.fragment_size }));
+            id: p.id, name: p.name, address: p.address, active: p.active, fragmentSize: p.fragment_size,
+            rttUs: p.rtt_us ?? 0, rttJitterUs: p.rtt_jitter_us ?? 0, rttMinUs: p.rtt_min_us ?? 0,
+            rttSamples: p.rtt_samples ?? 0 }));
     }
 
     /* The entities THIS node hosts (its functions and variables, then its topics). */

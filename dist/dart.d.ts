@@ -100,6 +100,10 @@ type Peer = {
     address: string;
     active: boolean;
     fragmentSize: number;
+    rttUs: number;
+    rttJitterUs: number;
+    rttMinUs: number;
+    rttSamples: number;
 };
 type EntityKindName = "topic" | "function" | "task" | "variable";
 type Entity = {

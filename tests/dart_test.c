@@ -1018,6 +1018,118 @@ static void lapped_checks(void){
     dart_allocator_reset(&wa); dart_allocator_reset(&ra);
 }
 
+
+/* ---- per-peer RTT estimation (transport core, controlled clock, a one-way latency) ----
+   W -> R through a pump with a symmetric one-way delay L, so every round trip is 2L
+   exactly. Pins: the writer samples push-to-ack, the reader samples request-to-resend,
+   both feed the per-peer DartPeerRtt (RFC 6298 shape), the reader's re-ask backstop is the
+   50 ms default until the first sample and the RTT bound after it, and the writer's tail
+   heartbeat follows the same bound instead of the fixed DART_HB_TAIL_US. */
+static int rt_recv, rt_drop_all, rt_drop_ack; static unsigned rt_drop_mask, rt_drop_resend_of;
+static uint64_t rt_clk, rt_lat;
+static DartTransportState *rt_W, *rt_R;
+static int rt_hb_seen;
+static int rt_on_msg(void *u, uint16_t ch, uint32_t from, DartBytes d){
+    (void)u;(void)ch;(void)from;(void)d; rt_recv++; return 0;
+}
+static void rt_send(void){                       /* one 6-fragment message */
+    static unsigned char p[6*DART_FRAG_SIZE - 100];
+    dart_transport_send(rt_W, 0, dart_bytes(p, sizeof p), rt_clk);
+}
+/* one tick: W builds at clk and R hears it at clk+L; R answers at clk+L and W hears that at
+   clk+2L; the clock then sits at clk+2L. DATA fragments drop per the switches: rt_drop_mask
+   (frag index bits, the next message only), rt_drop_all, and rt_drop_resend_of (drop the
+   next RESEND of that frag index, once). rt_drop_ack drops R's ACKNACKs. */
+static void rt_pump(void){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
+    while (dart_transport_poll_send(rt_W,&to,buf,sizeof buf,&ol,rt_clk)){
+        size_t off=0;
+        if ((buf[0]&0x07u)==1u && !(buf[0]&DART_F_SINGLE)){
+            unsigned frag = (unsigned)buf[DART_OFFSET_FRAG] | ((unsigned)buf[DART_OFFSET_FRAG+1]<<8);
+            size_t sub = DART_HEADER_DATA_MULTI + ((size_t)buf[DART_OFFSET_PAYLOAD_LEN] | ((size_t)buf[DART_OFFSET_PAYLOAD_LEN+1]<<8));
+            int drop = rt_drop_all || (rt_drop_mask & (1u<<frag));
+            if (!drop && rt_drop_resend_of == frag + 1u){ drop = 1; rt_drop_resend_of = 0; }
+            if (frag==5) rt_drop_mask = 0;
+            if (drop) off = sub;
+        } else if ((buf[0]&0x07u)==2u) rt_hb_seen++;
+        if (off < ol) dart_transport_on_datagram(rt_R, 1u, dart_bytes(buf+off, ol-off), rt_clk + rt_lat);
+    }
+    while (dart_transport_poll_send(rt_R,&to,buf,sizeof buf,&ol,rt_clk + rt_lat)){
+        if (rt_drop_ack && (buf[0]&0x07u)==3u) continue;
+        dart_transport_on_datagram(rt_W, 2u, dart_bytes(buf, ol), rt_clk + 2u*rt_lat);
+    }
+    rt_clk += 2u*rt_lat;
+}
+static void rtt_checks(void){
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i, n;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartPeerRtt e;
+    DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
+    q.heartbeat_us=200000;                            /* idle HB far off: only the tail HB matters here */
+    memset(&cw,0,sizeof cw); cw.name="rtt"; cw.qos=q; cw.role=DART_PUB_ONLY;
+    memset(&cr,0,sizeof cr); cr.name="rtt"; cr.qos=q; cr.role=DART_SUB_ONLY;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
+    rc.on_message=rt_on_msg;
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); rt_W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); rt_R=dart_transport_init(mr,nr,&rc);
+    rt_clk=1000000; rt_lat=2500; rt_drop_all=0; rt_drop_mask=0; rt_drop_resend_of=0; rt_drop_ack=0;
+    dart_transport_peer_add(rt_W,2u,DART_FRAG_SIZE); dart_transport_peer_add(rt_R,1u,DART_FRAG_SIZE);
+    st_apply_verified(rt_R, 1u, rt_W);
+    st_apply_verified(rt_W, 2u, rt_R);
+    ST_CHECK(dart_transport_publisher_match_count(rt_W,0)>0, "rtt: writer matched reader");
+    ST_CHECK(dart_transport_peer_rtt(rt_W, 2u, &e) && e.samples==0, "rtt: a fresh peer has no estimate");
+    ST_CHECK(!dart_transport_peer_rtt(rt_W, 9u, &e), "rtt: an unknown peer answers 0");
+
+    /* [a] writer side: every clean sample is push-to-ack = one round trip = 2L */
+    rt_recv=0;
+    for (i=0;i<10;i++){ rt_send(); rt_pump(); rt_pump(); }
+    dart_transport_peer_rtt(rt_W, 2u, &e);
+    ST_CHECK(rt_recv==10 && e.samples==10 && e.rtt_us==5000 && e.rtt_min_us==5000 && e.rtt_last_us==5000,
+             "rtt: [a] writer samples push-to-ack (samples=%u rtt=%u min=%u last=%u)",
+             e.samples, e.rtt_us, e.rtt_min_us, e.rtt_last_us);
+    ST_CHECK(e.rtt_jitter_us < 500, "rtt: [a] jitter decays on a steady path (%u)", e.rtt_jitter_us);
+    dart_transport_peer_rtt(rt_R, 1u, &e);
+    ST_CHECK(e.samples==0, "rtt: [a] a reader that never repaired has no estimate (%u)", e.samples);
+
+    /* [b] reader side, first loss: frag 2 lost and its resend lost too. No reader estimate yet,
+       so the re-ask waits the 50 ms default: >= 10 ticks of 5 ms before delivery. The re-asked
+       seqno is ambiguous (which request did the arrival answer?), so it is no sample. */
+    rt_recv=0; rt_drop_mask=(1u<<2); rt_drop_resend_of=2u+1u;
+    rt_send();
+    for (n=0; n<40 && rt_recv==0; n++) rt_pump();
+    ST_CHECK(rt_recv==1 && n>=10 && n<=13, "rtt: [b] unmeasured reader re-asks at the 50 ms default (%d ticks)", n);
+    dart_transport_peer_rtt(rt_R, 1u, &e);
+    ST_CHECK(e.samples==0, "rtt: [b] a seqno asked twice yields no sample, Karn (samples=%u)", e.samples);
+
+    /* [c] a few clean repairs (one lost frag each) build the reader's estimate ... */
+    for (i=0;i<6;i++){ rt_recv=0; rt_drop_mask=(1u<<3); rt_send(); for (n=0;n<8 && rt_recv==0;n++) rt_pump(); }
+    dart_transport_peer_rtt(rt_R, 1u, &e);
+    ST_CHECK(e.samples==6 && e.rtt_us==5000 && e.rtt_jitter_us < 1000,
+             "rtt: [c] reader samples request-to-resend (samples=%u rtt=%u jitter=%u)", e.samples, e.rtt_us, e.rtt_jitter_us);
+    /* ... and the same double loss now re-asks at the RTT bound (5 ms + max(1 ms, 4 x jitter),
+       about 7 ms): delivered in 3 to 5 ticks of 5 ms instead of 12 */
+    rt_recv=0; rt_drop_mask=(1u<<2); rt_drop_resend_of=2u+1u;
+    rt_send();
+    for (n=0; n<40 && rt_recv==0; n++) rt_pump();
+    ST_CHECK(rt_recv==1 && n>=3 && n<=5, "rtt: [c] measured reader re-asks at the RTT bound (%d ticks)", n);
+
+    /* [d] the writer's tail heartbeat follows the RTT bound: drop the final ack, the HB that
+       chases it comes at ~6 ms (2 ticks), not the 20 ms DART_HB_TAIL_US (4 ticks) */
+    rt_recv=0; rt_drop_ack=1; rt_hb_seen=0;
+    rt_send(); rt_pump();
+    ST_CHECK(rt_recv==1 && rt_hb_seen==0, "rtt: [d] delivered, ack dropped, no HB yet (recv=%d hb=%d)", rt_recv, rt_hb_seen);
+    for (n=0; n<10 && rt_hb_seen==0; n++) rt_pump();
+    ST_CHECK(rt_hb_seen>=1 && n<=2, "rtt: [d] tail HB at the RTT bound, not the 20 ms default (%d ticks)", n);
+    rt_drop_ack=0; rt_pump(); rt_pump();
+
+    dart_transport_destroy(rt_W); dart_transport_destroy(rt_R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
+}
+
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
@@ -7637,6 +7749,7 @@ static int selftest_main(void){
     beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
     rate_checks();                /* 17d. best-effort rate throttle: decimation, no false loss, real loss kept */
     lapped_checks();              /* 17e. reliable repair: NACK merge + a lapped reader rejoins at the head */
+    rtt_checks();                 /* 17f. per-peer RTT estimate: writer + reader samples, adaptive backstop + tail HB */
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */

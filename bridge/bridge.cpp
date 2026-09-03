@@ -1474,7 +1474,9 @@ static void op_peers(Conn *c, const json &seq){
         arr.push_back({ {"id", p.id}, {"name", p.name}, {"address", p.address},
                         {"active", p.active}, {"fragment_size", p.fragment_size},
                         {"epoch", p.epoch}, {"last_heard_us", p.last_heard_us},
-                        {"catching_up", p.catching_up} });
+                        {"catching_up", p.catching_up},
+                        {"rtt_us", p.rtt_us}, {"rtt_jitter_us", p.rtt_jitter_us},
+                        {"rtt_min_us", p.rtt_min_us}, {"rtt_samples", p.rtt_samples} });
     reply_ok(c, seq, { {"peers", arr} });
 }
 

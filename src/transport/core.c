@@ -35,7 +35,8 @@ static void i_dart_qos_defaults(DartQos *q){
                                                      ? DART_QOS_DEF_KEEP_LAST_REL
                                                      : DART_QOS_DEF_KEEP_LAST;
     if (q->heartbeat_us == 0)     q->heartbeat_us    = DART_QOS_DEF_HEARTBEAT_US;
-    if (q->repair_delay_us == 0)  q->repair_delay_us = DART_QOS_DEF_REPAIR_US;
+    /* repair_delay_us stays 0 = adaptive (the peer's RTT bound, DART_QOS_DEF_REPAIR_US before
+       the first sample); a nonzero value pins it. Resolved per NACK in i_dart_reader_emit. */
 }
 
 
@@ -71,6 +72,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       uint8_t  *peer_used = (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
       uint8_t  *peer_dormant= (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
       uint16_t *peer_frag = (uint16_t*)i_dart_bump_take(b, max_peers*sizeof(uint16_t), 2);
+      DartPeerRtt *peer_rtt = (DartPeerRtt*)i_dart_bump_take(b, max_peers*sizeof(DartPeerRtt), 8);
 #ifdef DART_SHM
       uint8_t  *peer_shm= (uint8_t*) i_dart_bump_take(b, max_peers*sizeof(uint8_t), 1);
 #endif
@@ -97,6 +99,7 @@ static DartTransportState *i_dart_transport_build(i_DartBump *b, const DartConfi
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
+          st->peer_rtt=peer_rtt; memset(peer_rtt, 0, max_peers*sizeof(DartPeerRtt));
           st->frag = dart_clamp_frag(cfg->frag_size);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
           st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
@@ -224,6 +227,7 @@ DartTransportState *dart_transport_migrate(DartTransportState *old, void *new_me
     memcpy(nw->peer_used,    old->peer_used,    omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
     memcpy(nw->peer_frag,    old->peer_frag,    (size_t)omp*sizeof(uint16_t));
+    memcpy(nw->peer_rtt,     old->peer_rtt,     (size_t)omp*sizeof(DartPeerRtt));
 #ifdef DART_SHM
     memcpy(nw->peer_shm,     old->peer_shm,     omp);
 #endif
@@ -496,6 +500,7 @@ void dart_transport_peer_add(DartTransportState *st, uint32_t id, uint16_t peer_
     for (i=0;i<max_peers;i++) if(!st->peer_used[i]){free=(int)i;break;}
     if (free<0) return;
     st->peer_used[free]=1; st->peer_ids[free]=id;
+    memset(&st->peer_rtt[free], 0, sizeof(DartPeerRtt));   /* a new peer starts unmeasured */
     st->peer_dormant[free]=0;
     st->peer_frag[free]=dart_clamp_frag(peer_frag);
 #ifdef DART_SHM
@@ -538,9 +543,51 @@ void dart_transport_peer_remove(DartTransportState *st, uint32_t id){
     }
     st->peer_seen_version[s]=0;
     st->peer_used[s]=0; st->peer_dormant[s]=0;
+    memset(&st->peer_rtt[s], 0, sizeof(DartPeerRtt));
 #ifdef DART_SHM
     st->peer_shm[s]=0;
 #endif
+}
+
+/* ---- the per-peer round-trip estimator (core.h DartPeerRtt) ---------------------------- */
+
+/* Fold one sample in (RFC 6298: alpha 1/8 on the mean, beta 1/4 on the deviation; the
+ * first sample seeds both). Callers hand in only unambiguous samples: a seqno that was asked
+ * exactly once, a sample that was never resent. */
+void i_dart_rtt_sample(DartTransportState *st, uint32_t peer_slot, uint64_t sample_us){
+    DartPeerRtt *e = &st->peer_rtt[peer_slot];
+    uint32_t r = sample_us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)sample_us;
+    if (e->samples == 0){
+        e->rtt_us = r; e->rtt_jitter_us = r / 2u; e->rtt_min_us = r;
+    } else {
+        uint32_t diff = e->rtt_us > r ? e->rtt_us - r : r - e->rtt_us;
+        e->rtt_jitter_us = (uint32_t)((3ull * e->rtt_jitter_us + diff) / 4u);
+        e->rtt_us        = (uint32_t)((7ull * e->rtt_us + r) / 8u);
+        if (r < e->rtt_min_us) e->rtt_min_us = r;
+    }
+    e->rtt_last_us = r;
+    if (e->samples != 0xFFFFFFFFu) e->samples++;
+}
+
+/* The retransmit bound this peer's estimate implies: smoothed + max(one tick, 4 x deviation),
+ * never under DART_RTO_MIN_US; fallback_us (a QoS default) until the first sample. */
+uint32_t i_dart_rtt_rto(DartTransportState *st, uint32_t peer_slot, uint32_t fallback_us){
+    const DartPeerRtt *e = &st->peer_rtt[peer_slot];
+    uint64_t var, rto;
+    if (e->samples == 0) return fallback_us;
+    var = 4ull * e->rtt_jitter_us;
+    if (var < DART_RTO_GRAIN_US) var = DART_RTO_GRAIN_US;
+    rto = (uint64_t)e->rtt_us + var;
+    if (rto < DART_RTO_MIN_US) rto = DART_RTO_MIN_US;
+    return rto > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)rto;
+}
+
+int dart_transport_peer_rtt(DartTransportState *st, uint32_t peer_id, DartPeerRtt *out){
+    int s = st ? i_dart_peer_slot(st, peer_id) : -1;
+    if (out) memset(out, 0, sizeof *out);
+    if (s < 0) return 0;
+    if (out) *out = st->peer_rtt[s];
+    return 1;
 }
 
 
@@ -1832,7 +1879,7 @@ void dart_transport_on_datagram(DartTransportState *st, uint32_t from, DartBytes
 #endif
                                 i_dart_reader_data(st,topic_index,peer_slot,p,now); break;
                 case DART_HB:   i_dart_reader_hb  (st,topic_index,peer_slot,p,now); break;
-                case DART_NACK: i_dart_writer_nack(st,topic_index,peer_slot,p); break;
+                case DART_NACK: i_dart_writer_nack(st,topic_index,peer_slot,p,now); break;
             }
         }
         p+=sub; rem-=sub;

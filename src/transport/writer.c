@@ -366,15 +366,15 @@ static size_t i_dart_writer_hb(DartTransportState *st, i_DartTopic *topic, i_Dar
  * (a past hb_next_us is replaced too: it would fire in this same drain, coalesced). The
  * reader's immediate ack normally raises acked_upto before the window elapses, which
  * suppresses the HB at step 3, so healthy traffic sends nothing extra. */
-static void i_dart_writer_arm_tail(DartTransportState *st, i_DartWriterProxy *w, uint64_t now){
-    uint64_t tail = now + DART_HB_TAIL_US;
+static void i_dart_writer_arm_tail(DartTransportState *st, i_DartWriterProxy *w, uint32_t peer_slot, uint64_t now){
+    uint64_t tail = now + i_dart_rtt_rto(st, peer_slot, DART_HB_TAIL_US);   /* the ack is overdue past the RTT bound */
     if (w->hb_next_us <= now || w->hb_next_us > tail) w->hb_next_us = tail;
     i_dart_transport_arm_deadline(st, w->hb_next_us);
 }
 
 
 /* writer side: handle ACKNACK */
-void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p){
+void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
     i_DartTopic *topic=&st->topics[topic_index];
     i_DartWriterProxy *w=i_dart_writer_proxy_at(st,topic_index,peer_slot);
     uint64_t base=i_dart_le_r64(p+DART_OFFSET_SEQNO); uint16_t nbits=i_dart_le_r16(p+DART_OFFSET_NACK_NBITS); uint32_t bitmap=i_dart_le_r32(p+DART_OFFSET_NACK_BITMAP);
@@ -398,7 +398,7 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
             uint64_t join = i_dart_topic_unicast_join_seqno(topic);
             w->sent_upto  = w->acked_upto < join ? w->acked_upto : join;
             w->acked_upto = w->sent_upto;
-            w->has_nack   = 0;
+            w->has_nack   = 0; w->rtt_probe = 0;
             w->hb_next_us = 0;
             i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
             w->reader_epoch = epoch;
@@ -413,8 +413,17 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
             w->sent_upto = w->acked_upto;
             i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
         }
+        w->rtt_probe = 0;
         return;                    /* no position information to apply */
     }
+    /* RTT sample: the cumulative ack reached the armed probe (a sample pushed once and never
+       resent since); a repair request in the same ACKNACK then disarms whatever is armed,
+       since the acks after a repair are ambiguous (Karn) */
+    if (w->rtt_probe && base >= w->rtt_probe_seq){
+        i_dart_rtt_sample(st, (uint32_t)peer_slot, now > w->rtt_probe_us ? now - w->rtt_probe_us : 0u);
+        w->rtt_probe = 0;
+    }
+    if (nbits>0 && bitmap!=0) w->rtt_probe = 0;
     if (base > w->acked_upto) w->acked_upto=base;
     /* directed: the ack may have made foreign samples contiguous from the new floor;
        step over them now and schedule the floor HB the reader is owed */
@@ -568,8 +577,10 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             if (st->peer_shm[peer_slot] && s->shm){
                 if (cap < DART_SHM_DATA_BYTES) return 0;
                 w->sent_upto = s->base + s->count;
-                if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
-                    i_dart_writer_arm_tail(st, w, now);
+                if (reliable && w->reader_reliable){
+                    if (!w->rtt_probe){ w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now; }
+                    if (w->sent_upto >= topic->next_seqno) i_dart_writer_arm_tail(st, w, (uint32_t)peer_slot, now);
+                }
                 return i_dart_wire_mk_shm(out,index,per_lane ? s->base - w->wire_skip : s->base,
                                           s->count,s->desc);
             }
@@ -581,8 +592,15 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             if (cap < (size_t)(s->count==1?DART_HEADER_DATA_SINGLE:DART_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             w->sent_upto++;
             topic->repair_stats.frags_sent++;                       /* new data (unicast lane) */
-            if (reliable && w->reader_reliable && w->sent_upto >= topic->next_seqno)
-                i_dart_writer_arm_tail(st, w, now);              /* queue drained: fast tail HB */
+            if (reliable && w->reader_reliable){
+                /* the sample's LAST fragment arms the RTT probe: its immediate in-order ack
+                   comes one round trip after this push (a mid-sample push would also count
+                   the rest of the sample's serialization) */
+                if (!w->rtt_probe && w->sent_upto == s->base + s->count){
+                    w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now; }
+                if (w->sent_upto >= topic->next_seqno)
+                    i_dart_writer_arm_tail(st, w, (uint32_t)peer_slot, now);   /* queue drained: fast tail HB */
+            }
             return i_dart_wire_mk_data(out,index,per_lane ? seqno - w->wire_skip : seqno,
                                        s,frag_index,i_dart_sample_buf(s)+offset,payload_len);
             }
@@ -595,6 +613,7 @@ size_t i_dart_writer_emit(DartTransportState *st, int topic_index, int peer_slot
             if (per_lane){ w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno); return 0; }
             if (cap < DART_HEADER_HB) return 0;
             w->sent_upto=(topic->have_first?topic->first_seqno:topic->next_seqno);
+            w->rtt_probe=0;
             return i_dart_writer_hb(st,topic,w,index,out,cap,now);
         }
     }

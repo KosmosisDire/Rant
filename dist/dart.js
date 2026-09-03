@@ -1886,7 +1886,9 @@ class DartNode {
     async peers() {
         const r = await this._request({ op: "peers" });
         return r.peers.map((p) => ({
-            id: p.id, name: p.name, address: p.address, active: p.active, fragmentSize: p.fragment_size
+            id: p.id, name: p.name, address: p.address, active: p.active, fragmentSize: p.fragment_size,
+            rttUs: p.rtt_us ?? 0, rttJitterUs: p.rtt_jitter_us ?? 0, rttMinUs: p.rtt_min_us ?? 0,
+            rttSamples: p.rtt_samples ?? 0
         }));
     }
     /* The entities THIS node hosts (its functions and variables, then its topics). */

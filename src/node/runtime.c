@@ -2397,6 +2397,13 @@ int dart_node_peers_next(DartNode *n, DartIter *it, DartPeerInfo *out){
     if (!n) return 0;
     acquired = i_dart_node_lock(n);
     r = i_dart_node_core_peers_next(n->core, it, out);
+    if (r){   /* the transport's measurement of the path, folded in here (the core is sans-transport) */
+        DartPeerRtt e;
+        if (dart_transport_peer_rtt(n->transport, out->id, &e)){
+            out->rtt_us = e.rtt_us; out->rtt_jitter_us = e.rtt_jitter_us;
+            out->rtt_min_us = e.rtt_min_us; out->rtt_samples = e.samples;
+        }
+    }
     i_dart_node_unlock(n, acquired);
     return r;
 }
@@ -2688,6 +2695,13 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
             dart_map_put_uint(w, "age_us", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
             dart_map_put_uint(w, "publish_to", pub_to);
             dart_map_put_uint(w, "receive_from", recv_from);
+            {   DartPeerRtt e;   /* the measured round trip; absent until the first sample */
+                if (dart_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
+                    dart_map_put_uint(w, "rtt_us", e.rtt_us);
+                    dart_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
+                    dart_map_put_uint(w, "rtt_min_us", e.rtt_min_us);
+                    dart_map_put_uint(w, "rtt_samples", e.samples);
+                } }
             dart_map_close(w);
         }
         dart_map_close(w);

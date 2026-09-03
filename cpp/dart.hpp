@@ -341,7 +341,7 @@ struct Qos {
     uint16_t    catch_up             = 0;   /* recent messages a new subscriber replays */
     uint32_t    max_message_bytes    = 0;   /* 0 = one fragment, or grow-to-fit */
     uint32_t    heartbeat_us         = 0;   /* reliable idle-writer ping (0 = 100ms) */
-    uint32_t    repair_delay_us      = 0;   /* reliable reader's resend delay (0 = 20ms) */
+    uint32_t    repair_delay_us      = 0;   /* reliable reader's re-ask bound (0 = adaptive, the peer's RTT) */
     uint32_t    backpressure_wait_us = 0;   /* reliable: send pause for a slow reader (0 = none) */
     uint32_t    shm_max_bytes        = 0;   /* pin topic to one same-host SHM size class */
     uint32_t    queue_bytes          = 0;   /* consumer-queue cap for take()/dispatch(); 0 = the
@@ -995,6 +995,10 @@ struct Peer {
     uint32_t                epoch = 0;       /* bumps on every reflected change at this peer */
     bool                    catching_up = false;   /* it advertises newer state than we hold yet */
     uint16_t                fragment_size = 0;
+    uint32_t                rtt_us = 0;            /* measured round trip (smoothed); 0 samples = none yet */
+    uint32_t                rtt_jitter_us = 0;
+    uint32_t                rtt_min_us = 0;
+    uint32_t                rtt_samples = 0;
 };
 
 /* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
@@ -2486,6 +2490,10 @@ public:
             peer.epoch         = p.epoch;
             peer.catching_up   = p.catching_up != 0;
             peer.fragment_size = p.fragment_size;
+            peer.rtt_us        = p.rtt_us;
+            peer.rtt_jitter_us = p.rtt_jitter_us;
+            peer.rtt_min_us    = p.rtt_min_us;
+            peer.rtt_samples   = p.rtt_samples;
             out.push_back(std::move(peer));
         }
         return out;

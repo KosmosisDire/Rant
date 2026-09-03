@@ -313,7 +313,9 @@ endpoint. None of them push.
 ```
 
 `peers` replies `{ "peers": [ { "id": 2, "name": "gripper", "address": "192.168.1.9:47001",
-"active": true, "fragment_size": 1350 } ] }` (`active` is false for a dormant peer).
+"active": true, "fragment_size": 1350, "rtt_us": 1240, "rtt_jitter_us": 180, "rtt_min_us": 910,
+"rtt_samples": 57 } ] }` (`active` is false for a dormant peer; the `rtt_*` fields are the
+bridge node's own round-trip measurement to that peer, microseconds, `rtt_samples` 0 = none yet).
 `entities` / `peer_entities` reply `{ "entities": [...] }` (the latter echoes `peer`;
 a dropped peer answers `[]` unless `include_dropped`). **`mesh`** replies the whole mesh
 folded, one entity per (kind, name) across every active peer and the bridge's own node,
