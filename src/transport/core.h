@@ -226,7 +226,7 @@ typedef struct {
     uint32_t   peer;           /* peer id (0 = n/a) */
     uint16_t   topic;        /* local topic handle */
     uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
-    uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
+    uint64_t   lost_count;     /* MSG_LOST: seqnos skipped (fragments, not messages) */
     uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint8_t    peer_is_pub;    /* SCHEMA_MISMATCH: the refused direction, as in the

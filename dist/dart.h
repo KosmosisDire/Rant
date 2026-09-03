@@ -1313,7 +1313,7 @@ typedef struct {
     uint32_t   peer;           /* peer id (0 = n/a) */
     uint16_t   topic;        /* local topic handle */
     uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
-    uint64_t   lost_count;     /* MSG_LOST: number of messages skipped */
+    uint64_t   lost_count;     /* MSG_LOST: seqnos skipped (fragments, not messages) */
     uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
     uint64_t   identity;       /* NAME_COLLISION: the colliding 64-bit topic identity */
     uint8_t    peer_is_pub;    /* SCHEMA_MISMATCH: the refused direction, as in the
@@ -7303,6 +7303,10 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                advance, no ack and no repair traffic, so the writer's flow control
                                backpressures the publisher. dart_transport_deliver_parked retries;
                                a writer floor past it (HB) gives up and skips (bounded loss). */
+    uint8_t  lapped;        /* a writer floor skip took a sample we were still FETCHING (not one the
+                               consumer refused) and nothing was delivered since: the next such skip
+                               rejoins at the writer's head instead of its oldest cached sample
+                               (i_dart_reader_hb) */
 #ifdef DART_SHM
     uint8_t  parked_shm;    /* the parked hold is a descriptor, not an assembled sample */
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
@@ -8205,9 +8209,24 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
        step over them now and schedule the floor HB the reader is owed */
     i_dart_writer_lane_advance(topic, w, (uint32_t)peer_slot);
     if (w->skip_hb) i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+    /* The pending repair request is MERGED, never overwritten. The reader asks for each hole
+       once and re-asks only after repair_delay_us, and on a fast link its refill for the next
+       window lands before this pass has resent the previous one: replacing the bits would drop
+       that outstanding request and stall the sample on the backstop. base is the reader's
+       contiguous front (a cumulative ack), so first drop what it now acks, then fold the new
+       bits in; both bases then sit in one window (bits past it fall to the reader's backstop). */
+    if (w->has_nack && base > w->nack_base){
+        uint64_t d = base - w->nack_base;
+        w->nack_bits = d < DART_NACK_WINDOW ? w->nack_bits >> d : 0u;
+        w->nack_base = base;
+        if (!w->nack_bits) w->has_nack = 0;
+    }
     if (nbits>0 && bitmap!=0){
         topic->repair_stats.nacks_recv++;                           /* a repair request, not a bare ack */
-        w->has_nack=1; w->nack_base=base; w->nack_bits=bitmap;
+        if (w->has_nack){                                           /* nack_base >= base here */
+            uint64_t d = w->nack_base - base;
+            w->nack_bits |= d < DART_NACK_WINDOW ? bitmap >> d : 0u;
+        } else { w->has_nack=1; w->nack_base=base; w->nack_bits=bitmap; }
         i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
     }
 }
@@ -8483,7 +8502,7 @@ void i_dart_reader_shm(DartTransportState *st, int topic_index, int peer_slot, c
     {   int ok = st->cfg.on_shm ?
                  st->cfg.on_shm(st->cfg.user, (uint16_t)topic_index, st->peer_ids[peer_slot], desc) : 0;
         if (ok > 0){
-            r->shm_fail = 0;
+            r->shm_fail = 0; r->lapped = 0;
             r->deliver_upto = base + count;
             if (reliable)                   /* ack now, AFTER delivery (zero-copy invariant) */
                 i_dart_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
@@ -8576,8 +8595,10 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
       bitmap_bytes = bitmap_need;
       /* base == deliver_upto: current sample */
       if (!r->assembly_active){
+          /* nack_high is NOT reset here: a whole-message request made before this first frag
+             arrived is still in flight, and a fresh cursor would re-ask all of it. A stale low
+             cursor costs nothing, the refill asks from max(nack_high, first_missing). */
           r->assembly_active=1; r->assembly_count=count; r->assembly_len=sample_len; r->assembly_low=0;
-          r->nack_high=base;     /* in-flight dedup is per-message: start this one fresh */
           memset(r->frag_bitmap,0,bitmap_bytes);
       }
       if (count!=r->assembly_count) return;                  /* inconsistent, ignore */
@@ -8615,7 +8636,7 @@ void i_dart_reader_data(DartTransportState *st, int topic_index, int peer_slot, 
               return;
           }
           r->deliver_upto = base + count;
-          r->assembly_active=0;
+          r->assembly_active=0; r->lapped=0;
       }
       if (reliable){
           if (done)
@@ -8645,13 +8666,28 @@ void i_dart_reader_hb(DartTransportState *st, int topic_index, int peer_slot, co
        partial assembly, so the same mid-sample guard protects it from our own ack echo */
     if (r->started && first > r->deliver_upto &&
         (!(r->assembly_active || r->parked) || first >= r->deliver_upto + r->assembly_count)){
+        uint64_t to = first;
         if (!topic->directed){   /* directed: the floor advanced because a seqno was addressed
                                     to another peer, not real loss -- skip silently */
+            /* LAPPED: the floor passed a sample we were still FETCHING (not one the consumer
+               refused) for the second time with no delivery in between. Restarting at the
+               oldest cached sample is hopeless then: it is the next to be evicted, every one
+               of its fragments went by while we were behind, and all of them must come back
+               through the repair window before the writer's next commit. A reader that lost
+               that race once loses it every time, dropping every live message as ahead for as
+               long as the stream lasts. Rejoin at the writer's head instead: the cached window
+               is given up (reported below, never silent) and the next message arrives in order.
+               A parked skip is the consumer's stall, not the wire's, so it neither counts nor
+               resets; a delivery resets. */
+            if (!r->parked){
+                if (r->lapped && last + 1 > to) to = last + 1;
+                r->lapped = 1;
+            }
             i_dart_transport_fire_event(st, DART_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],   /* superseded before repair */
-                        r->deliver_upto, first - r->deliver_upto);
-            topic->repair_stats.msgs_skipped += first - r->deliver_upto;
+                        r->deliver_upto, to - r->deliver_upto);
+            topic->repair_stats.msgs_skipped += to - r->deliver_upto;
         }
-        r->deliver_upto=first; r->assembly_active=0;
+        r->deliver_upto=to; r->assembly_active=0;
         r->parked=0;            /* the writer moved past the held sample: give it up */
 #ifdef DART_SHM
         r->parked_shm=0;
@@ -8788,7 +8824,7 @@ uint32_t dart_transport_deliver_parked(DartTransportState *st, uint16_t topic_in
             if (accepted){
                 r->deliver_upto += r->assembly_count;
                 r->assembly_active = 0;
-                r->parked = 0;
+                r->parked = 0; r->lapped = 0;
 #ifdef DART_SHM
                 r->parked_shm = 0; r->shm_fail = 0;
 #endif

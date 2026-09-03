@@ -882,6 +882,142 @@ static void rate_checks(void){
     dart_allocator_reset(&wa); dart_allocator_reset(&ra);
 }
 
+
+/* ---- lapped reader + NACK merge (transport core, controlled clock) ----
+   A 6-fragment reliable stream W -> R through a pump that can drop DATA. Pins two
+   repair-path rules: (1) the writer MERGES a repair request into the one it still holds,
+   never overwrites it (two ACKNACKs landing in one pass are both served); (2) a reader
+   the writer's floor passes while it was still fetching a sample restarts at the oldest
+   cached sample ONCE, and on the next such skip with nothing delivered in between rejoins
+   at the writer's head (the cached window is given up, reported as MSG_LOST). Without (2)
+   a fragmented stream whose full-message repair takes longer than one inter-message
+   period starves such a reader forever (every live message is dropped as ahead). */
+static int lap_recv, lap_lost, lap_drop_all; static unsigned lap_drop_mask;
+static uint64_t lap_clk;
+static DartTransportState *lap_W, *lap_R;
+static uint8_t lap_held[8][DART_DGRAM_MAX]; static size_t lap_hl[8]; static int lap_nh;
+static int lap_on_msg(void *u, uint16_t ch, uint32_t from, DartBytes d){
+    (void)u;(void)ch;(void)from;(void)d; lap_recv++; return 0;
+}
+static void lap_on_event(const DartTransportEvent *ev){
+    if (ev->kind==DART_TRANSPORT_MSG_LOST) lap_lost += (int)ev->lost_count;
+}
+static void lap_send(void){                       /* one 6-fragment message */
+    static unsigned char p[6*DART_FRAG_SIZE - 100];
+    dart_transport_send(lap_W, 0, dart_bytes(p, sizeof p), lap_clk);
+}
+/* R -> W: collect now, feed later, so ACKNACKs armed at different points land in ONE pass */
+static void lap_collect_r(void){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
+    while (lap_nh<8 && dart_transport_poll_send(lap_R,&to,buf,sizeof buf,&ol,lap_clk)){
+        memcpy(lap_held[lap_nh], buf, ol); lap_hl[lap_nh++] = ol; }
+}
+static void lap_feed_w(void){
+    int i;
+    for (i=0;i<lap_nh;i++) dart_transport_on_datagram(lap_W, 2u, dart_bytes(lap_held[i], lap_hl[i]), lap_clk);
+    lap_nh = 0;
+}
+/* W -> R, dropping DATA per lap_drop_all / lap_drop_mask (frag index bits, one message);
+   a submessage batched behind a dropped DATA still gets through (HBs must). After
+   `split_after` DATA fragments were fed, R's pending ACKNACK is collected mid-stream. */
+static void lap_flush_w(int split_after){
+    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol; int fed=0;
+    while (dart_transport_poll_send(lap_W,&to,buf,sizeof buf,&ol,lap_clk)){
+        size_t off=0;
+        if ((buf[0]&0x07u)==1u && !(buf[0]&DART_F_SINGLE)){
+            unsigned frag = (unsigned)buf[DART_OFFSET_FRAG] | ((unsigned)buf[DART_OFFSET_FRAG+1]<<8);
+            size_t sub = DART_HEADER_DATA_MULTI + ((size_t)buf[DART_OFFSET_PAYLOAD_LEN] | ((size_t)buf[DART_OFFSET_PAYLOAD_LEN+1]<<8));
+            int drop = lap_drop_all || (lap_drop_mask & (1u<<frag));
+            if (frag==5) lap_drop_mask = 0;
+            if (drop) off = sub; else fed++;
+        }
+        if (off < ol) dart_transport_on_datagram(lap_R, 1u, dart_bytes(buf+off, ol-off), lap_clk);
+        if (split_after && fed==split_after){ lap_collect_r(); split_after=0; }
+    }
+}
+static void lap_pump(uint64_t dt){ lap_flush_w(0); lap_collect_r(); lap_feed_w(); lap_clk += dt; }
+static void lap_run(int ms){ while (ms-- > 0) lap_pump(1000); }   /* 1 ms steps: every timer fires on time */
+static void lapped_checks(void){
+    DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
+    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartRepairStats rs;
+    DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=4;
+    q.heartbeat_us=30000; q.repair_delay_us=50000;
+    memset(&cw,0,sizeof cw); cw.name="lapped"; cw.qos=q; cw.role=DART_PUB_ONLY;
+    memset(&cr,0,sizeof cr); cr.name="lapped"; cr.qos=q; cr.role=DART_SUB_ONLY;
+    memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
+    wc.allocator=dart_allocator_alloc; wc.user=&wa;
+    memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
+    rc.allocator=dart_allocator_alloc; rc.user=&ra;
+    rc.on_message=lap_on_msg; rc.on_event=lap_on_event;
+    nw=dart_transport_required_memory(&wc); mw=malloc(nw); lap_W=dart_transport_init(mw,nw,&wc);
+    nr=dart_transport_required_memory(&rc); mr=malloc(nr); lap_R=dart_transport_init(mr,nr,&rc);
+    lap_clk=1000000; lap_nh=0; lap_drop_all=0; lap_drop_mask=0;
+    dart_transport_peer_add(lap_W,2u,DART_FRAG_SIZE); dart_transport_peer_add(lap_R,1u,DART_FRAG_SIZE);
+    st_apply_verified(lap_R, 1u, lap_W);
+    st_apply_verified(lap_W, 2u, lap_R);
+    ST_CHECK(dart_transport_publisher_match_count(lap_W,0)>0, "lapped: writer matched reader");
+
+    /* [a] baseline */
+    lap_recv=0; lap_lost=0; lap_send(); lap_pump(1000);
+    ST_CHECK(lap_recv==1 && lap_lost==0, "lapped: [a] a 6-fragment message delivers (recv=%d)", lap_recv);
+
+    /* [b] NACK merge: frags 1 and 4 of one message are lost. Frag 2 reveals the first hole
+       (ACKNACK armed, collected mid-stream), frag 5 the second (a refill for the new part
+       only): two requests reach the writer in ONE pass. Both holes must be resent at once;
+       an overwrite would resend only frag 4 and leave frag 1 to the 50 ms backstop. */
+    lap_recv=0; lap_lost=0; lap_drop_mask=(1u<<1)|(1u<<4);
+    lap_send(); lap_flush_w(2); lap_collect_r();
+    ST_CHECK(lap_nh==2, "lapped: [b] two ACKNACKs collected in one pass (%d)", lap_nh);
+    lap_feed_w(); lap_pump(1000);
+    dart_transport_repair_stats(lap_W, 0, &rs);
+    ST_CHECK(lap_recv==1 && rs.frags_resent==2,
+             "lapped: [b] merged request: both holes resent at once, message complete (recv=%d resent=%llu)",
+             lap_recv, (unsigned long long)rs.frags_resent);
+
+    /* [c] the writer's floor passes a reader that heard nothing: it restarts at the oldest
+       cached sample and repairs the cached window (6 sent, keep_last 4: 2 lost, 4 recovered). */
+    lap_recv=0; lap_lost=0; lap_drop_all=1;
+    for (i=0;i<6;i++){ lap_send(); lap_pump(1000); }
+    lap_drop_all=0;
+    lap_run(120);     /* tail HB -> skip; the backstop (repair_delay) NACK -> resend */
+    ST_CHECK(lap_recv==4 && lap_lost==12,
+             "lapped: [c] one floor skip restarts at the oldest cached sample (recv=%d lost=%d)", lap_recv, lap_lost);
+
+    /* [d] lapped: a second floor skip with nothing delivered in between. The reader never
+       got the first window's resends (still dropped), two more sends evict it again: the
+       reader rejoins at the writer's head, the whole cached window is reported lost, and the
+       next message arrives in order without a single repair round. */
+    lap_recv=0; lap_lost=0; lap_drop_all=1;
+    for (i=0;i<6;i++){ lap_send(); lap_pump(1000); }
+    lap_run(30);                                       /* skip #1 (its resends stay dropped) */
+    ST_CHECK(lap_recv==0 && lap_lost==12, "lapped: [d] first skip (recv=%d lost=%d)", lap_recv, lap_lost);
+    lap_send(); lap_pump(1000); lap_send(); lap_pump(1000);
+    lap_run(30);                                       /* skip #2 while still fetching: lapped */
+    ST_CHECK(lap_recv==0 && lap_lost==48, "lapped: [d] second skip gives up the cached window (lost=%d)", lap_lost);
+    lap_drop_all=0;
+    dart_transport_repair_stats(lap_W, 0, &rs);
+    { unsigned long long resent0 = rs.frags_resent;
+      lap_send(); lap_run(5);
+      dart_transport_repair_stats(lap_W, 0, &rs);
+      ST_CHECK(lap_recv==1 && lap_lost==48 && rs.frags_resent==resent0,
+               "lapped: [d] rejoined at the head: next message in order, no repair (recv=%d lost=%d resent=%llu)",
+               lap_recv, lap_lost, (unsigned long long)(rs.frags_resent-resent0)); }
+    /* [e] a delivery resets the streak: the stream runs on, and one later skip restarts at
+       the floor again rather than the head */
+    for (i=0;i<3;i++){ lap_send(); lap_pump(1000); }
+    ST_CHECK(lap_recv==4, "lapped: [e] stream continues after the rejoin (recv=%d)", lap_recv);
+    lap_recv=0; lap_lost=0; lap_drop_all=1;
+    for (i=0;i<6;i++){ lap_send(); lap_pump(1000); }
+    lap_drop_all=0;
+    lap_run(120);
+    ST_CHECK(lap_recv==4 && lap_lost==12, "lapped: [e] streak reset: a later skip repairs the window again (recv=%d lost=%d)", lap_recv, lap_lost);
+
+    dart_transport_destroy(lap_W); dart_transport_destroy(lap_R); free(mw); free(mr);
+    dart_allocator_reset(&wa); dart_allocator_reset(&ra);
+}
+
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
@@ -7500,6 +7636,7 @@ static int selftest_main(void){
     qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
     beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
     rate_checks();                /* 17d. best-effort rate throttle: decimation, no false loss, real loss kept */
+    lapped_checks();              /* 17e. reliable repair: NACK merge + a lapped reader rejoins at the head */
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
     schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
     schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */

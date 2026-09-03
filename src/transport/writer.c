@@ -420,9 +420,24 @@ void i_dart_writer_nack(DartTransportState *st, int topic_index, int peer_slot, 
        step over them now and schedule the floor HB the reader is owed */
     i_dart_writer_lane_advance(topic, w, (uint32_t)peer_slot);
     if (w->skip_hb) i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+    /* The pending repair request is MERGED, never overwritten. The reader asks for each hole
+       once and re-asks only after repair_delay_us, and on a fast link its refill for the next
+       window lands before this pass has resent the previous one: replacing the bits would drop
+       that outstanding request and stall the sample on the backstop. base is the reader's
+       contiguous front (a cumulative ack), so first drop what it now acks, then fold the new
+       bits in; both bases then sit in one window (bits past it fall to the reader's backstop). */
+    if (w->has_nack && base > w->nack_base){
+        uint64_t d = base - w->nack_base;
+        w->nack_bits = d < DART_NACK_WINDOW ? w->nack_bits >> d : 0u;
+        w->nack_base = base;
+        if (!w->nack_bits) w->has_nack = 0;
+    }
     if (nbits>0 && bitmap!=0){
         topic->repair_stats.nacks_recv++;                           /* a repair request, not a bare ack */
-        w->has_nack=1; w->nack_base=base; w->nack_bits=bitmap;
+        if (w->has_nack){                                           /* nack_base >= base here */
+            uint64_t d = w->nack_base - base;
+            w->nack_bits |= d < DART_NACK_WINDOW ? bitmap >> d : 0u;
+        } else { w->has_nack=1; w->nack_base=base; w->nack_bits=bitmap; }
         i_dart_lane_wake(st,(uint16_t)topic_index,(uint32_t)peer_slot);
     }
 }

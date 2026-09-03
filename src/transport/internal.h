@@ -184,6 +184,10 @@ typedef struct {        /* reader-side, per (topic,peer) */
                                advance, no ack and no repair traffic, so the writer's flow control
                                backpressures the publisher. dart_transport_deliver_parked retries;
                                a writer floor past it (HB) gives up and skips (bounded loss). */
+    uint8_t  lapped;        /* a writer floor skip took a sample we were still FETCHING (not one the
+                               consumer refused) and nothing was delivered since: the next such skip
+                               rejoins at the writer's head instead of its oldest cached sample
+                               (i_dart_reader_hb) */
 #ifdef DART_SHM
     uint8_t  parked_shm;    /* the parked hold is a descriptor, not an assembled sample */
     uint8_t  shm_fail;      /* consecutive SHM-DATA resolve failures at deliver_upto */
