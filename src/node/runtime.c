@@ -185,6 +185,7 @@ struct DartNode {
                                           Allocation failure counts into log_pend_dropped. */
     /* @dart/meta snapshot scratch (i_dart_node_snapshot), grown on demand */
     uint8_t      *snap_buf; uint32_t snap_cap;
+    uint16_t     *snap_pend; uint16_t snap_pend_cap;   /* per-topic pending counts: one bulk walk per snapshot */
     char          name[DART_NODE_NAME_MAX + 1];   /* our advertised node name (the snapshot's) */
     uint8_t       name_len;
     void          *arena;      /* control-structs block (a freeable pool allocation); relocated on grow */
@@ -2634,6 +2635,21 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
 #endif
     if (sections & DART_META_TOPICS){
         uint16_t i, hi = i_dart_node_topic_hi(n);
+        const uint16_t *pend = NULL;
+        if (hi){
+            /* every topic's unresolved-candidate count in ONE walk of each peer's interest:
+               the per-topic query walks a peer's whole interest per topic, which made this
+               section O(topics x entries) per snapshot (quadratic for an observer polling a
+               node with thousands of topics). On OOM the per-topic query stands in. */
+            if (n->snap_pend_cap < hi){
+                uint16_t *nb = (uint16_t*)i_dart_node_alloc(n, n->snap_pend, (size_t)hi * sizeof *nb);
+                if (nb){ n->snap_pend = nb; n->snap_pend_cap = hi; }
+            }
+            if (n->snap_pend_cap >= hi){
+                i_dart_node_core_topics_unresolved(n->core, n->snap_pend, hi);
+                pend = n->snap_pend;
+            }
+        }
         dart_map_open_array(w, "topics");
         for (i = 0; i < hi; i++){
             DartTopic *h = n->handles[i];
@@ -2653,7 +2669,8 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
             dart_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
             dart_map_put_uint(w, "subs", (uint64_t)dart_transport_publisher_match_count(n->transport, i));
             dart_map_put_uint(w, "pubs", (uint64_t)dart_transport_subscriber_match_count(n->transport, i));
-            dart_map_put_uint(w, "pending", (uint64_t)i_dart_node_core_topic_unresolved(n->core, i));
+            dart_map_put_uint(w, "pending", pend ? (uint64_t)pend[i]
+                                                 : (uint64_t)i_dart_node_core_topic_unresolved(n->core, i));
             dart_map_put_uint(w, "tx_msgs", h->tx_msgs);
             dart_map_put_uint(w, "tx_bytes", h->tx_bytes);
             dart_map_put_uint(w, "rx_msgs", h->rx_msgs);

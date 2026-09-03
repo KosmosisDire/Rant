@@ -1811,6 +1811,13 @@ uint16_t  dart_transport_apply_peer_details(DartTransportState *st, uint32_t pee
  * node's send-path match wait and dart_topic_pending_count. */
 uint16_t  dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_index,
                        uint32_t peer_id, DartBytes interest);
+/* The bulk form, for a snapshot: every topic's unresolved count against ONE peer in a single
+ * walk of its interest (counts[i] += entries nominating topic i, for i < n; saturating). A
+ * decided entry costs O(1) (its verdict names the topic) and only a PENDING one still scans
+ * the topic table, so a converged peer costs O(entries) however many topics exist, where the
+ * per-topic form above costs O(entries) PER TOPIC. */
+void      dart_transport_peer_unresolved_fill(DartTransportState *st, uint32_t peer_id,
+                       DartBytes interest, uint16_t *counts, uint16_t n);
 
 /* Change a topic's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */
@@ -3164,6 +3171,10 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
  * 0 = matching has converged for everyone currently known. The runtime's send-path
  * match wait and dart_topic_pending_count read; cold-path only (walks peers). */
 int    i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index);
+/* The bulk form for the meta snapshot: counts[i] = the same count for every topic i < n at
+ * once, in ONE walk of each active peer's interest (O(peers x entries) in total, where the
+ * per-topic form costs that per topic; saturating at 0xFFFF). */
+void   i_dart_node_core_topics_unresolved(i_DartNodeCore *c, uint16_t *counts, uint16_t n);
 
 /* A peer's human-readable name, learned from its announce blob: a DartString viewing the
  * peer-table slot (not NUL-terminated; stable until the peer is evicted). Non-empty for any
@@ -10671,6 +10682,46 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     return cnt;
 }
 
+void dart_transport_peer_unresolved_fill(DartTransportState *st, uint32_t peer_id,
+                                         DartBytes interest, uint16_t *counts, uint16_t n){
+    const uint8_t *d=interest.data;
+    i_DartInterestScan scan;
+    uint16_t nent, c; int slot;
+    uint8_t *astate; uint16_t *amap; uint32_t alen;
+    if (!st || !counts || !n || !d || interest.len < 2) return;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return;
+    nent = i_dart_le_r16(d);
+    if (!i_dart_interest_walk_len(d, interest.len, nent)) return;
+    astate = st->peer_astate[slot]; amap = st->peer_index[slot]; alen = st->peer_index_len[slot];
+    if (!astate || !amap) return;                        /* unresolvable entries: never counted */
+    if (n > st->cfg.n_topics) n = (uint16_t)st->cfg.n_topics;
+    i_dart_interest_scan_init(&scan, d, nent);
+    while (i_dart_interest_scan_next(&scan)){
+        if (scan.pos >= alen) continue;
+        if (astate[scan.pos] & DART__AST_DETAILED){
+            /* decided: the verdict names the topic. Only a verified subscriber whose writer
+               lane sits under the REBIND HOLD still resolves (as in topic_unresolved) */
+            uint16_t cidx = amap[scan.pos];
+            const i_DartTopic *topic;
+            if (!(astate[scan.pos] & DART__AST_NAME_OK) || cidx >= n) continue;
+            topic = &st->topics[cidx];
+            if (scan.their_sub && dart_role_pubs(topic->role) && topic->rebind_version
+                && st->peer_seen_version[slot] < topic->rebind_version && counts[cidx] != 0xFFFFu)
+                counts[cidx]++;
+            continue;
+        }
+        for (c=0;c<n;c++){                               /* pending: every topic the hash nominates */
+            const i_DartTopic *topic = &st->topics[c];
+            int ours_pub, ours_sub;
+            if (!i_dart_topic_announced(topic) || (uint32_t)topic->identity != scan.hash) continue;
+            ours_pub = dart_role_pubs(topic->role); ours_sub = dart_role_subs(topic->role);
+            if (((scan.their_pub && ours_sub) || (scan.their_sub && ours_pub)) && counts[c] != 0xFFFFu)
+                counts[c]++;
+        }
+    }
+}
+
 /* Ingest a DETAIL_RESP: verify each entry (full identity from the name; the schema gate
  * per direction) and cache the verdict. Returns newly decided indices; the caller then
  * re-applies the peer's interest so the verdicts form their matches. Idempotent: decided
@@ -15730,6 +15781,33 @@ int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
     return cnt;
 }
 
+void i_dart_node_core_topics_unresolved(i_DartNodeCore *c, uint16_t *counts, uint16_t n){
+    uint16_t s, np, i;
+    if (!counts || !n) return;
+    memset(counts, 0, (size_t)n * sizeof *counts);
+    if (!c || !c->discovery) return;
+    np = dart_discovery_max_peers(c->discovery);
+    for (s=0;s<np;s++){
+        DartDiscoveryPeer v; i_DartNodePeerExtra *ex;
+        DartBytes interest = dart_bytes(NULL, 0); int all = 0;
+        if (!dart_discovery_peer_at(c->discovery, s, &v)) continue;
+        if (v.liveness != DART_PEER_ACTIVE) continue;
+        ex = (i_DartNodePeerExtra*)v.user;
+        if (!ex || !ex->added) continue;
+        if (!v.meta.data) all = 1;                        /* announce heard, blob still being fetched */
+        else {
+            interest = i_dart_node_core_interest_of(ex, v.meta, v.meta_version);
+            if (!interest.data && dart_meta_interest_external(v.meta)) all = 1;   /* fetch in flight */
+        }
+        if (all){   /* its interest is unknown, so it may nominate any topic */
+            for (i=0;i<n;i++) if (counts[i] != 0xFFFFu) counts[i]++;
+            continue;
+        }
+        if (!interest.data) continue;                     /* a blob with no interest: nothing to resolve */
+        dart_transport_peer_unresolved_fill(c->transport, v.id, interest, counts, n);
+    }
+}
+
 /* Drain one queued uDTL request: INTEREST_REQs first (an unassembled interest gates
    candidate discovery, so it outranks details), then DETAIL_REQs. Returns bytes (loop
    until 0); a peer whose pending work emptied (or that dropped) just clears its flag.
@@ -16154,6 +16232,7 @@ struct DartNode {
                                           Allocation failure counts into log_pend_dropped. */
     /* @dart/meta snapshot scratch (i_dart_node_snapshot), grown on demand */
     uint8_t      *snap_buf; uint32_t snap_cap;
+    uint16_t     *snap_pend; uint16_t snap_pend_cap;   /* per-topic pending counts: one bulk walk per snapshot */
     char          name[DART_NODE_NAME_MAX + 1];   /* our advertised node name (the snapshot's) */
     uint8_t       name_len;
     void          *arena;      /* control-structs block (a freeable pool allocation); relocated on grow */
@@ -18603,6 +18682,21 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
 #endif
     if (sections & DART_META_TOPICS){
         uint16_t i, hi = i_dart_node_topic_hi(n);
+        const uint16_t *pend = NULL;
+        if (hi){
+            /* every topic's unresolved-candidate count in ONE walk of each peer's interest:
+               the per-topic query walks a peer's whole interest per topic, which made this
+               section O(topics x entries) per snapshot (quadratic for an observer polling a
+               node with thousands of topics). On OOM the per-topic query stands in. */
+            if (n->snap_pend_cap < hi){
+                uint16_t *nb = (uint16_t*)i_dart_node_alloc(n, n->snap_pend, (size_t)hi * sizeof *nb);
+                if (nb){ n->snap_pend = nb; n->snap_pend_cap = hi; }
+            }
+            if (n->snap_pend_cap >= hi){
+                i_dart_node_core_topics_unresolved(n->core, n->snap_pend, hi);
+                pend = n->snap_pend;
+            }
+        }
         dart_map_open_array(w, "topics");
         for (i = 0; i < hi; i++){
             DartTopic *h = n->handles[i];
@@ -18622,7 +18716,8 @@ static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t se
             dart_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
             dart_map_put_uint(w, "subs", (uint64_t)dart_transport_publisher_match_count(n->transport, i));
             dart_map_put_uint(w, "pubs", (uint64_t)dart_transport_subscriber_match_count(n->transport, i));
-            dart_map_put_uint(w, "pending", (uint64_t)i_dart_node_core_topic_unresolved(n->core, i));
+            dart_map_put_uint(w, "pending", pend ? (uint64_t)pend[i]
+                                                 : (uint64_t)i_dart_node_core_topic_unresolved(n->core, i));
             dart_map_put_uint(w, "tx_msgs", h->tx_msgs);
             dart_map_put_uint(w, "tx_bytes", h->tx_bytes);
             dart_map_put_uint(w, "rx_msgs", h->rx_msgs);
@@ -19162,10 +19257,27 @@ int dart_node_close(DartNode *n, int send_bye){
 #include <stddef.h>            /* offsetof */
 
 /* ---- per-node manager: fans the node-wide event + tick out to every entity -------------- */
+
+/* one authority-side entity (a function/task definition, a variable owner) keyed the way a
+ * peer's announce names it, for the duplicate-authority check */
+typedef struct {
+    uint32_t    hash;        /* the primary channel's low-32 name hash */
+    uint8_t     kind;        /* DartEntityKind */
+    DartTopic  *primary;     /* the entity's primary channel: its name, and the diagnostic's topic */
+    uint32_t  **ids; uint16_t *n_ids, *cap;   /* the entity's reported-peers list */
+} i_DartPatAuth;
+
 typedef struct i_DartPatterns {
     DartNode            *n;
     struct DartFunction *funcs;   /* linked lists, for tick/event fanout + local reflection */
     struct DartVariable *vars;
+    /* the authorities above, sorted by (kind, hash) and rebuilt lazily after a create or a
+       retire: a peer's interest apply then costs one walk of ITS entities with a binary
+       search each, never a walk of its entities per local entity (that was quadratic:
+       hundreds of owned variables x a peer advertising hundreds of topics, on EVERY
+       announce change, which is what made an explorer subscribing to everything stall a
+       PLC for seconds) */
+    i_DartPatAuth       *auth; uint16_t auth_n, auth_cap; uint8_t auth_dirty;
     struct DartFunction *meta;    /* the built-in @dart/meta endpoint (both sides in one handle) */
     DartSchema          *meta_rsp_schema;   /* DartMeta { info: map } */
     uint8_t             *meta_msg; uint32_t meta_msg_cap;   /* reply scratch, grown on demand */
@@ -19701,7 +19813,7 @@ static DartFunction *i_dart_function_new(DartNode *n, const char *name,
     }
 
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list (tick/event fanout) */
-    fn->next = pm->funcs; pm->funcs = fn;
+    fn->next = pm->funcs; pm->funcs = fn; pm->auth_dirty = 1;
     if (handles_req && !fn->multi)   /* a rival provider may already be on the network */
         i_dart_pat_dup_sweep(n, fn->req, topts ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION,
                              &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
@@ -19872,7 +19984,7 @@ int dart_function_retire(DartFunction *fn){
        reentrant call made from a cancel callback queues (the channel is unmatched now)
        and the next round cancels it too */
     while (fn->pending) i_dart_func_reap(fn, 0, DART_CALL_CANCELLED, 1, 0);
-    if (pm) i_dart_pat_unlink((void**)&pm->funcs, fn, offsetof(DartFunction, next));
+    if (pm){ i_dart_pat_unlink((void**)&pm->funcs, fn, offsetof(DartFunction, next)); pm->auth_dirty = 1; }
     req = fn->req; rsp = fn->rsp; prg = fn->prg;   /* outlive fn: a reap callback may still have used them */
     if (fn->sync_buf)  i_dart_node_sys_alloc(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_dart_node_sys_alloc(n, fn->dup_peers, 0);
@@ -20446,7 +20558,7 @@ static DartVariable *i_dart_variable_new(DartNode *n, const char *name, const Da
             return (DartVariable*)i_dart_pat_half_create_fail(v->value);
     }
     acquired = i_dart_node_sys_lock(n);       /* publish into the manager list */
-    v->next = pm->vars; pm->vars = v;
+    v->next = pm->vars; pm->vars = v; pm->auth_dirty = 1;
     if (owner)      /* a rival owner may already be on the network */
         i_dart_pat_dup_sweep(n, v->value, DART_ENTITY_VARIABLE,
                              &v->dup_peers, &v->dup_n, &v->dup_cap);
@@ -20586,7 +20698,7 @@ int dart_variable_retire(DartVariable *var){
     if (r != 0) return r;
     acquired = i_dart_node_sys_lock(n);
     i_dart_pat_clear_channels(var->value, var->set);
-    if (pm) i_dart_pat_unlink((void**)&pm->vars, var, offsetof(DartVariable, next));
+    if (pm){ i_dart_pat_unlink((void**)&pm->vars, var, offsetof(DartVariable, next)); pm->auth_dirty = 1; }
     value = var->value; set = var->set;   /* outlive var (see function retire) */
     if (var->store)     i_dart_node_sys_alloc(n, var->store, 0);
     if (var->shadow)    i_dart_node_sys_alloc(n, var->shadow, 0);
@@ -20714,17 +20826,93 @@ static DartEntityKind i_dart_pat_fn_entity_kind(const DartFunction *fn){
     return fn->is_task ? DART_ENTITY_TASK : DART_ENTITY_FUNCTION;
 }
 
-/* every authority-side entity vs one peer whose interest was just (re)applied */
-static void i_dart_pat_dup_check_peer(i_DartPatterns *pm, uint32_t peer){
-    DartFunction *fn; DartVariable *v;
+/* (kind, hash) order for the authority index */
+static int i_dart_pat_auth_before(const i_DartPatAuth *a, const i_DartPatAuth *b){
+    return a->kind != b->kind ? a->kind < b->kind : a->hash < b->hash;
+}
+
+static void i_dart_pat_auth_put(i_DartPatterns *pm, uint32_t hash, DartEntityKind kind,
+                                DartTopic *primary, uint32_t **ids, uint16_t *n_ids, uint16_t *cap){
+    i_DartPatAuth *a = &pm->auth[pm->auth_n++];
+    a->hash = hash; a->kind = (uint8_t)kind; a->primary = primary;
+    a->ids = ids; a->n_ids = n_ids; a->cap = cap;
+}
+
+static uint32_t i_dart_pat_auth_hash(DartTopic *primary){
+    DartString nm = i_dart_topic_name(primary);
+    char buf[DART_TOPIC_NAME_MAX + 1];
+    memcpy(buf, nm.data, nm.len); buf[nm.len] = '\0';
+    return (uint32_t)dart_topic_id(buf);           /* what the announce carries for it */
+}
+
+/* rebuild the authority index from the entity lists (sorted; shell sort, no libc). 0 on OOM. */
+static int i_dart_pat_auth_rebuild(i_DartPatterns *pm){
+    DartFunction *fn; DartVariable *v; uint16_t want = 0, gap, i, j;
+    for (fn = pm->funcs; fn; fn = fn->next) if ((fn->is_provider || fn->both) && !fn->multi) want++;
+    for (v = pm->vars; v; v = v->next) if (v->is_owner) want++;
+    if (want > pm->auth_cap){
+        i_DartPatAuth *nb = (i_DartPatAuth*)i_dart_node_sys_alloc(pm->n, pm->auth,
+                                                                  (size_t)want * sizeof *nb);
+        if (!nb) return 0;
+        pm->auth = nb; pm->auth_cap = want;
+    }
+    pm->auth_n = 0;
     for (fn = pm->funcs; fn; fn = fn->next)
         if ((fn->is_provider || fn->both) && !fn->multi)   /* multi: rivals are the design */
-            i_dart_pat_dup_check(pm->n, peer, fn->req, i_dart_pat_fn_entity_kind(fn),
-                                 &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
+            i_dart_pat_auth_put(pm, i_dart_pat_auth_hash(fn->req), i_dart_pat_fn_entity_kind(fn),
+                                fn->req, &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     for (v = pm->vars; v; v = v->next)
         if (v->is_owner)
-            i_dart_pat_dup_check(pm->n, peer, v->value, DART_ENTITY_VARIABLE,
-                                 &v->dup_peers, &v->dup_n, &v->dup_cap);
+            i_dart_pat_auth_put(pm, i_dart_pat_auth_hash(v->value), DART_ENTITY_VARIABLE,
+                                v->value, &v->dup_peers, &v->dup_n, &v->dup_cap);
+    for (gap = pm->auth_n / 2u; gap > 0; gap /= 2u)
+        for (i = gap; i < pm->auth_n; i++){
+            i_DartPatAuth t = pm->auth[i];
+            for (j = i; j >= gap && i_dart_pat_auth_before(&t, &pm->auth[j - gap]); j -= gap)
+                pm->auth[j] = pm->auth[j - gap];
+            pm->auth[j] = t;
+        }
+    pm->auth_dirty = 0;
+    return 1;
+}
+
+/* the first index whose (kind, hash) is not below the key */
+static uint16_t i_dart_pat_auth_lower(const i_DartPatterns *pm, DartEntityKind kind, uint32_t hash){
+    uint16_t lo = 0, hi = pm->auth_n;
+    i_DartPatAuth key; key.kind = (uint8_t)kind; key.hash = hash;
+    while (lo < hi){
+        uint16_t mid = (uint16_t)(lo + (hi - lo) / 2u);
+        if (i_dart_pat_auth_before(&pm->auth[mid], &key)) lo = (uint16_t)(mid + 1u); else hi = mid;
+    }
+    return lo;
+}
+
+/* every authority-side entity vs one peer whose interest was just (re)applied: ONE walk
+ * of the peer's entities, each provider looked up in the index. The same verdict rule as
+ * i_dart_pat_peer_entity: the fetched name decides when it is known, the hash nominates
+ * otherwise. On OOM the index is skipped this time (the create-time sweep still covers a
+ * new entity; the next apply retries). */
+static void i_dart_pat_dup_check_peer(i_DartPatterns *pm, uint32_t peer){
+    DartIter it; DartEntityInfo ei;
+    if (pm->auth_dirty && !i_dart_pat_auth_rebuild(pm)) return;
+    if (!pm->auth_n) return;
+    memset(&it, 0, sizeof it);
+    while (dart_node_entities_next(pm->n, peer, &it, &ei)){
+        uint16_t k;
+        if (!ei.provides || ei.kind == DART_ENTITY_TOPIC) continue;
+        for (k = i_dart_pat_auth_lower(pm, ei.kind, ei.hash);
+             k < pm->auth_n && pm->auth[k].kind == (uint8_t)ei.kind && pm->auth[k].hash == ei.hash; k++){
+            i_DartPatAuth *a = &pm->auth[k];
+            if (ei.name.len){
+                DartString nm = i_dart_topic_name(a->primary); size_t len = nm.len;
+                if (len >= 5 && nm.data[len - 4] == '@') len -= 4;   /* the entity's base name */
+                if (ei.name.len != len || memcmp(ei.name.data, nm.data, len) != 0) continue;
+            }
+            if (i_dart_pat_dup_reported(*a->ids, *a->n_ids, peer)) continue;
+            i_dart_pat_dup_remember(pm->n, a->ids, a->n_ids, a->cap, peer);
+            i_dart_node_sys_error(pm->n, DART_E_DUPLICATE_AUTHORITY, a->primary, peer);
+        }
+    }
 }
 
 /* a just-created authority-side entity vs every active peer (create-time sweep) */

@@ -344,6 +344,10 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
  * 0 = matching has converged for everyone currently known. The runtime's send-path
  * match wait and dart_topic_pending_count read; cold-path only (walks peers). */
 int    i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index);
+/* The bulk form for the meta snapshot: counts[i] = the same count for every topic i < n at
+ * once, in ONE walk of each active peer's interest (O(peers x entries) in total, where the
+ * per-topic form costs that per topic; saturating at 0xFFFF). */
+void   i_dart_node_core_topics_unresolved(i_DartNodeCore *c, uint16_t *counts, uint16_t n);
 
 /* A peer's human-readable name, learned from its announce blob: a DartString viewing the
  * peer-table slot (not NUL-terminated; stable until the peer is evicted). Non-empty for any

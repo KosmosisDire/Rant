@@ -1707,6 +1707,33 @@ int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
     return cnt;
 }
 
+void i_dart_node_core_topics_unresolved(i_DartNodeCore *c, uint16_t *counts, uint16_t n){
+    uint16_t s, np, i;
+    if (!counts || !n) return;
+    memset(counts, 0, (size_t)n * sizeof *counts);
+    if (!c || !c->discovery) return;
+    np = dart_discovery_max_peers(c->discovery);
+    for (s=0;s<np;s++){
+        DartDiscoveryPeer v; i_DartNodePeerExtra *ex;
+        DartBytes interest = dart_bytes(NULL, 0); int all = 0;
+        if (!dart_discovery_peer_at(c->discovery, s, &v)) continue;
+        if (v.liveness != DART_PEER_ACTIVE) continue;
+        ex = (i_DartNodePeerExtra*)v.user;
+        if (!ex || !ex->added) continue;
+        if (!v.meta.data) all = 1;                        /* announce heard, blob still being fetched */
+        else {
+            interest = i_dart_node_core_interest_of(ex, v.meta, v.meta_version);
+            if (!interest.data && dart_meta_interest_external(v.meta)) all = 1;   /* fetch in flight */
+        }
+        if (all){   /* its interest is unknown, so it may nominate any topic */
+            for (i=0;i<n;i++) if (counts[i] != 0xFFFFu) counts[i]++;
+            continue;
+        }
+        if (!interest.data) continue;                     /* a blob with no interest: nothing to resolve */
+        dart_transport_peer_unresolved_fill(c->transport, v.id, interest, counts, n);
+    }
+}
+
 /* Drain one queued uDTL request: INTEREST_REQs first (an unassembled interest gates
    candidate discovery, so it outranks details), then DETAIL_REQs. Returns bytes (loop
    until 0); a peer whose pending work emptied (or that dropped) just clears its flag.

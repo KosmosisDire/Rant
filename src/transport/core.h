@@ -608,6 +608,13 @@ uint16_t  dart_transport_apply_peer_details(DartTransportState *st, uint32_t pee
  * node's send-path match wait and dart_topic_pending_count. */
 uint16_t  dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_index,
                        uint32_t peer_id, DartBytes interest);
+/* The bulk form, for a snapshot: every topic's unresolved count against ONE peer in a single
+ * walk of its interest (counts[i] += entries nominating topic i, for i < n; saturating). A
+ * decided entry costs O(1) (its verdict names the topic) and only a PENDING one still scans
+ * the topic table, so a converged peer costs O(entries) however many topics exist, where the
+ * per-topic form above costs O(entries) PER TOPIC. */
+void      dart_transport_peer_unresolved_fill(DartTransportState *st, uint32_t peer_id,
+                       DartBytes interest, uint16_t *counts, uint16_t n);
 
 /* Change a topic's role at runtime (rematches peers locally; caller re-advertises
  * interest). A (re)subscribe joins like a late joiner. Returns 0 ok, <0 unknown. */

@@ -1540,6 +1540,46 @@ uint16_t dart_transport_topic_unresolved(DartTransportState *st, uint16_t topic_
     return cnt;
 }
 
+void dart_transport_peer_unresolved_fill(DartTransportState *st, uint32_t peer_id,
+                                         DartBytes interest, uint16_t *counts, uint16_t n){
+    const uint8_t *d=interest.data;
+    i_DartInterestScan scan;
+    uint16_t nent, c; int slot;
+    uint8_t *astate; uint16_t *amap; uint32_t alen;
+    if (!st || !counts || !n || !d || interest.len < 2) return;
+    slot = i_dart_peer_slot(st, peer_id);
+    if (slot < 0) return;
+    nent = i_dart_le_r16(d);
+    if (!i_dart_interest_walk_len(d, interest.len, nent)) return;
+    astate = st->peer_astate[slot]; amap = st->peer_index[slot]; alen = st->peer_index_len[slot];
+    if (!astate || !amap) return;                        /* unresolvable entries: never counted */
+    if (n > st->cfg.n_topics) n = (uint16_t)st->cfg.n_topics;
+    i_dart_interest_scan_init(&scan, d, nent);
+    while (i_dart_interest_scan_next(&scan)){
+        if (scan.pos >= alen) continue;
+        if (astate[scan.pos] & DART__AST_DETAILED){
+            /* decided: the verdict names the topic. Only a verified subscriber whose writer
+               lane sits under the REBIND HOLD still resolves (as in topic_unresolved) */
+            uint16_t cidx = amap[scan.pos];
+            const i_DartTopic *topic;
+            if (!(astate[scan.pos] & DART__AST_NAME_OK) || cidx >= n) continue;
+            topic = &st->topics[cidx];
+            if (scan.their_sub && dart_role_pubs(topic->role) && topic->rebind_version
+                && st->peer_seen_version[slot] < topic->rebind_version && counts[cidx] != 0xFFFFu)
+                counts[cidx]++;
+            continue;
+        }
+        for (c=0;c<n;c++){                               /* pending: every topic the hash nominates */
+            const i_DartTopic *topic = &st->topics[c];
+            int ours_pub, ours_sub;
+            if (!i_dart_topic_announced(topic) || (uint32_t)topic->identity != scan.hash) continue;
+            ours_pub = dart_role_pubs(topic->role); ours_sub = dart_role_subs(topic->role);
+            if (((scan.their_pub && ours_sub) || (scan.their_sub && ours_pub)) && counts[c] != 0xFFFFu)
+                counts[c]++;
+        }
+    }
+}
+
 /* Ingest a DETAIL_RESP: verify each entry (full identity from the name; the schema gate
  * per direction) and cache the verdict. Returns newly decided indices; the caller then
  * re-applies the peer's interest so the verdicts form their matches. Idempotent: decided
