@@ -1,4 +1,4 @@
-﻿# Dart
+# Dart
 
 C# wrapper for **DART** (Discovery And Realtime Transport): peer discovery over UDP
 multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
@@ -30,7 +30,7 @@ sh          csharp/native/build.sh            # Linux   -> runtimes/linux-x64/na
 dotnet pack csharp/Dart.csproj -c Release -o nupkg
 ```
 
-The binaries are **not committed** to git; the build scripts (or a CI job) produce them
+The binaries are **not committed** to git. The build scripts (or a CI job) produce them
 before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Dart.dll` +
 `runtimes/<rid>/native/*`.
 
@@ -88,11 +88,11 @@ var sub = new Subscriber<Pose>(other, "pose", p => Console.WriteLine(p.X));
 
 Any struct/class with public fields is a message type: the fields become the schema in
 declaration order. `[DartArray(n)]` fixes an array's element count, `[DartString(cap)]`
-fixes a string's UTF-8 byte capacity (required on every string; combine both for a
+fixes a string's UTF-8 byte capacity (required on every string, combine both for a
 `string[]`), `[DartField("stamp")]` overrides a wire field name, and `[DartSchema("Name")]`
 optionally overrides the wire type name. Wire names must match on every node for a
 topic. `new Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
-Handlers fire on the service thread (never two at once for one node); from inside a
+Handlers fire on the service thread (never two at once for one node). From inside a
 handler, `Topic.Send` and read-only queries are allowed, Poll/topic
 create/SetRole/Drain/Start/Stop/Close are not. To keep handlers on one thread (e.g.
 Unity's main thread), skip `Start()` and call `Poll()` from that thread.

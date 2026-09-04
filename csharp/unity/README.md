@@ -33,9 +33,9 @@ powershell -File pack.ps1                # or: sh pack.sh
 sh mk-unitypackage.sh dart.unitypackage
 ```
 
-Then add it locally via Package Manager `+` -> "Add package from disk" -> `package.json`.
+Then add it locally via Package Manager `+`, then "Add package from disk", then `package.json`.
 In the plugin import settings, set each native lib to its platform + CPU (Unity usually
-auto-detects Standalone by extension: `.dll` -> Windows, `.so` -> Linux).
+auto-detects Standalone by extension: `.dll` is Windows, `.so` is Linux).
 
 ## Use
 
@@ -64,7 +64,7 @@ public class PoseReceiver : MonoBehaviour {
 ```
 
 - **Handlers always fire on the main thread.** The node runs the C service thread (the
-  wire never waits for a frame); every topic is queued and DartNodeUnity dispatches once
+  wire never waits for a frame). Every topic is queued and DartNodeUnity dispatches once
   per frame, before other scripts' `Update()`.
 - **Topics are shared by name**: every script asking for `"player/pose"` gets the same
   `DartTopic<Pose>`. Roles are automatic: created inactive, the first `Publish`
@@ -72,9 +72,9 @@ public class PoseReceiver : MonoBehaviour {
 - **Owner-bound subscriptions** (`Subscribe(name, this, handler)`) die with their
   component and are skipped while it is disabled. The ownerless overload returns a
   `DartSubscription`: dispose it yourself.
-- **Edit mode**: `DartNodeUnity` is `[ExecuteAlways]`; with Run In Edit Mode on (default) the
+- **Edit mode**: `DartNodeUnity` is `[ExecuteAlways]`. With Run In Edit Mode on (default) the
   node is live in the editor outside play. Whether your publishers/subscribers run at
-  edit time is up to them; a topic acquired while the node is closed goes live when it
+  edit time is up to them. A topic acquired while the node is closed goes live when it
   opens.
 - **Events** (peer up/down, message loss, errors) are logged to the Console (toggle on
   the component) and observable via `DartNodeUnity.Events`, on the main thread.
@@ -83,7 +83,7 @@ public class PoseReceiver : MonoBehaviour {
   DartNode(...)` + `Poll()`/`Start()`) remains fully usable without the component.
 
 Any struct/class with public fields is a message type. Wire field names are the C#
-field names (override with `[DartField("stamp")]`; `[DartString(cap)]` is required on
+field names (override with `[DartField("stamp")]`, and `[DartString(cap)]` is required on
 string fields, `[DartArray(n)]` on fixed arrays) and must match on every node for a
 topic. `Publish` is thread-safe from any thread.
 

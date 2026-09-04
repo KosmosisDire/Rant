@@ -43,7 +43,7 @@ id equals ours. A loopback address is not enough.
 ## Segments and size classes
 
 The payload lives in shared-memory segments outside the arena. The OS maps them. See
-docs/allocation.md for sizes.
+spec/allocation.md for sizes.
 
 There is one segment per size class. Class k holds chunks of
 `DART_SHM_CLASS_BASE << (k * DART_SHM_CLASS_SHIFT)` bytes. The defaults are 64K,
@@ -97,6 +97,15 @@ messages, same as best effort over UDP.
 ## Not supported yet
 
 - Zero copy read. The reader does one copy. Zero copy is a later read side mode.
+
+## Known limit
+
+Same host best effort with `keep_last` 1 and a lockstep send every tick loop silently
+skips every message: each descriptor's chunk is re stamped before the reader polls, the
+generation check fails, and best effort skips with no counter. Real cadences and reliable
+topics are fine. The reader attach cache is a growable array of stable states, so
+attachments survive a node grow. The module test suffixes segment names with the per
+process domain base so concurrent selftests do not collide.
 
 ## Build
 

@@ -71,7 +71,7 @@ request, only for a broken WebSocket.
   "max_peers": 16,
   "interface": "192.168.1.10",    // pin discovery to ONE interface; omit = all of them
   "seed_peers": ["10.0.0.7", "10.0.0.8:7400"],  // unicast discovery seeds
-  "unicast_only": false,          // no multicast: seeds + relaying (see CLAUDE.md)
+  "unicast_only": false,          // no multicast: seeds + relaying (see docs/discovery.md)
   "self_ip": "", "advertise_port": 0,   // state our locator outright
   "fragment_size": 0,             // UDP payload bytes per fragment; 0 = default
   "announce_interval_ms": 1000,
@@ -399,7 +399,7 @@ are per event:
 | `rtc`              | `state`                                         |
 
 Everything that goes wrong is one `error` event: `text` carries the message and
-`error` the numeric code (a `DartErrorKind`, see CLAUDE.md). `send_error` is the
+`error` the numeric code (a `DartErrorKind`, see docs/node.md). `send_error` is the
 bridge's own event for a frame refused synchronously (bad id, bad role, too big,
 backpressure timeout).
 

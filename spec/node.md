@@ -1,0 +1,156 @@
+# Node
+
+The node owns the sockets and the clock, drives discovery, and turns discovery into
+transport lifecycle. The user facing API is in docs/node.md.
+
+## Core and runtime
+
+`node/core.c` is sans-IO: the peer table (peer id to physical address) and the discovery
+to transport lifecycle. `node/runtime.c` owns the sockets, the clock, the route probe,
+the send and receive paths and the public `dart_node_*` API. The runtime resolves the
+transport core's abstract destination (a peer id) to a wire address. A second transport
+(serial, Bluetooth) is a new runtime over the same cores. See spec/transports.md.
+
+Three datagram families arrive on the data socket: the transport's, `uDSC` (discovery)
+and `uDTL` (details and interest pages). Every data datagram pays two linear peer scans
+(`id_for_addr` then the peer slot), the first thing to index if peer counts grow.
+
+## Threading
+
+One node level mutex at the API boundary, never held across a blocking wait. The sans-IO
+cores stay lock free. Per topic lock sharding is the future path and this design is a
+strict prefix of it.
+
+- `i_dart_node_poll_locked(n, timeout, outer)` is the one poll body. The public poll, the
+  service loop and the non started backpressure pump all run it. `outer = 1` drops the
+  lock around the platform poll over the data, waker and discovery descriptors. The wait
+  is capped by the transport's next deadline and discovery's next announce, so an idle
+  service thread wakes about once a second, and the service loop is capped at 250 ms so a
+  lost wakeup is bounded.
+- The waker is a self connected loopback UDP socket, the one self pipe pollable on both
+  Windows and POSIX. Mutating entry points kick it (coalesced) so a send hits the wire in
+  microseconds. A waker open failure degrades the open (kicks no op, next tick latency).
+  `pollers_sleeping` is a counter, since a flag lost kicks with several pollers.
+- Reentrancy is an owner thread id check, zeroed before release. From callbacks, send and
+  read only queries are legal. Poll, create topic, set role, drain, start, stop and close
+  are refused with `DART_ERR_STATE`: create would relocate the arena mid receive, set role
+  would replay interest into the proxy mid delivery, stop would self join. A callback that
+  sends to another node deadlocks (plain lock acquisition both ways). Forbidden in docs,
+  not enforced.
+- Backpressure: senders sleep on the node condvar, re stamping the lock owner after
+  reacquire, and the work pass tail broadcasts when waiters exist. Two predicates: unacked
+  reliable history (bounded by `qos.backpressure_wait_us`) and unsent history
+  (`dart_transport_send_would_evict_unsent`, bounded by `DART_UNSENT_WAIT_US`). The
+  unsent wait breaks early after one completed work pass only when a datagram is held in
+  `tx_hold` (socket bound, so evict). With no hold another sender refilled the ring, so it
+  re arms and keeps waiting. `DART_E_EVICTED_UNSENT` fires only after the send commits.
+- The five blocking waits (match wait, send backpressure, topic drain, node settle, queue
+  wait) share one `i_dart_node_wait_until` skeleton: predicate, periodic hook, outer flag.
+  Invariants it carries: waiter accounting, re derive arena pointers after any wait, exit
+  when the service thread stops, kick before sleep. The patterns layer's waits stay
+  separate.
+- `dart_node_stop` elects one joiner, broadcasts, kicks, unlocks, joins without the lock,
+  then clears the running flag and broadcasts a second time for waiters that re slept.
+- `DART_NO_THREADS` keeps the single threaded contract and `dart_node_start` returns
+  `DART_ERR_NOSYS`. Guards are `#ifdef DART_THREADS`.
+
+## Consumer queues
+
+A queued topic's messages are copied by the poll thread into a per topic byte ring
+(`i_DartMsgQueue`: a 16 byte record header, the copied sender name, an 8 aligned payload,
+records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
+value pre allocates the ring in full. One bigger message still fits.
+
+`take` returns a view valid until the topic's next take or dispatch. The viewed record
+pins the ring tail, so grow and eviction skip while viewing, and a held view degrades
+best effort to drop newest until the next take. `dispatch` runs `on_message` with the
+node lock released and a busy flag refusing nested take or dispatch on the same topic.
+`DartMsg.schema` is re resolved at take, since the delivery map can repoint. The sender
+name is copied into the record because discovery views die with the peer. One consumer
+thread per topic is documented, not enforced.
+
+At the cap the policy is the reliability QoS. Best effort overwrites the oldest and fires
+`DART_MSG_LOST`. Reliable PARKS delivery in the transport reader: `on_message` returns
+nonzero, no `deliver_upto` advance, no ack, no repair traffic, the message held in the
+assembly buffer (the SHM variant parks the descriptor). Incoming DATA of the next sample
+fills the one ahead hold, so an unpark delivers both with no resend. The writer's
+`acked_upto` stalls, its history fills, and the publisher's send blocks on normal flow
+control. Draining calls `dart_transport_deliver_parked` and kicks the waker. A writer HB
+floor past the held sample gives up with one `MSG_LOST`, the bounded loss escape. Any new
+sans-IO consumer of `DartMessageFn` must return 0.
+
+Size the queue at least `keep_last` times the message size, or the reader parks while
+the writer keeps bursting and heals only through the paced repair path (16.4 to 3.7 GB/s
+measured with a 4 MB queue against a 16 MB burst). A zero copy take (refcounted hold, ack
+on release) is the known escape for huge payloads, not built.
+
+## Timestamps
+
+`written_us` is 8 little endian bytes the writer prepends inside the sample ahead of any
+pattern header, stamped in `i_dart_writer_store` from the `DartConfig.source_time` hook
+(the node wires it to `i_dart_plat_wall_us`). A NULL hook still writes 8 zero bytes:
+framing is driven by the QoS alone, never by hook presence. The opt out
+(`qos.no_timestamp`) rides a sparse interest section of opted out publish topics, and the
+detail intake re applies the cached interest blob in the same call that forms proxies, so
+the receiver always knows before it can deliver. The node strips the stamp at one point
+before the pattern prefix split (the queue path strips at enqueue). `recv_us` is the
+node's monotonic clock at the moment the poll received the message, or at enqueue for a
+queued topic.
+
+## Errors
+
+One event kind, `DART_ERROR`, with a `DartErrorKind` code. The transport keeps its own
+typed event kinds (sans-IO) and discovery keeps a last error slot, so the node maps every
+lower layer event into `DART_ERROR` in one place per layer. Text is built on demand by
+`dart_event_str`, so the data path never touches it. `dart_last_error(n)` keeps the last
+error per node, and a process global slot keeps the failure of a `dart_node_open` that
+returned no handle. That failure also fires the `on_event` passed to open.
+
+`DartEvent.schema_detail` says exactly what was incompatible on a schema mismatch,
+recorded per (peer, topic, direction) at detail intake. `DartEvent.peer_name` is resolved
+once at the single emit point so `dart_event_str` never prints a bare id. `DartEvent` is
+returned by value, so every binding mirror must match it exactly (spec/bindings.md).
+Deferred on purpose: `DART_E_SHM` (needs once only dedup) and `DART_E_BAD_PACKET` (risks a
+flood from hostile traffic). Internal errors are mirrored to `@dart/log/error` through a
+fixed ring of 8 records (events fire mid receive where re entering the transport is
+unsafe, so the poll pass flushes them), duplicates coalesce into "(xN)", overflow becomes
+one summary line.
+
+## Built ins
+
+The builtins ride outside `opts.max_topics` in a block at the top of the reserve, so user
+topics keep dense 0 based indices. A `creating_builtin` flag routes open time allocation
+into the block and user creates step over it after a grow. Every handle iteration goes
+through `i_dart_node_topic_hi`.
+
+Builtins are hidden from every high level surface. Both entity walks skip them, the meta
+snapshot reports app topics only, and a leading `@` is refused in every public constructor
+so an app entity can never land in the hidden namespace. The raw interest walk still
+yields them. `dart_node_log_topic` and `dart_node_meta_function` are the way in.
+
+The three `@dart/log/{error,warn,info}` topics are reliable with `keep_last` = `catch_up` =
+16 (8 for info) and no backpressure wait, so a slow subscriber only loses old lines.
+Catch up replay is per writer lane, so a late subscriber gets each node's last lines per
+level. The record schema is `DartLog { wall_us: u64, mono_us: u64, text: string }`, and the
+text is capped at `DART_LOG_MAX` (512) bytes. A node never delivers to itself, so
+consuming a level means reading every other node's lines.
+`set_role` queues a log builtin before its subscribe side goes live, or its catch up
+replay could land in the inline callback path before the first take creates the queue.
+
+`@dart/meta` is one handle carrying both sides: PUBSUB channels, a handler plus a pending
+list, directed requests so a call aimed at one peer never wakes the rest, keep_last 2
+rings, created with `.multi`. The request is an optional 4 byte section mask (NODE, PROC,
+TOPICS, PEERS, empty = all). The response is `DartMeta { info: map }` with node, proc,
+topics and peers sections. The snapshot builder is node owned (grown scratch, retry on
+space). The per topic `pending` count is one bulk walk per peer, not a walk per topic. No
+self inspection, since a node never matches itself. An ordinary remote must never
+advertise the provider side (it would auto answer NO_HANDLER and race the real provider).
+
+Per node cost at rest is about 7 to 8 kB. Meta adds 4 to 8 kB only once queried.
+
+## Interfaces
+
+The runtime enumerates interfaces with `i_dart_plat_local_ifaces`, joins the group on
+each, and feeds its subnets to discovery for locator ranking. It re enumerates every 3 s
+in auto mode. Discovery's tick runs after the main wait off its revents, so a poll pass
+costs one poll syscall. See spec/discovery.md.
