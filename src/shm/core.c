@@ -1,6 +1,4 @@
-/* dart_shm: the portable segment-mapping + chunk module behind dart_shm.h. Pure
- * over dart_plat (shm mapping, host uuid, the generation atomic); no transport or
- * node knowledge. Compiles to nothing without DART_SHM. See dart_shm.h. */
+/* Segment mapping and chunks over the platform layer. Compiles to nothing without DART_SHM. */
 
 #include "core.h"
 #include "../common/bytes.h"
@@ -26,7 +24,6 @@ int i_dart_shm_desc_decode(i_DartShmDesc *d, const uint8_t *in, size_t len){
     return 1;
 }
 
-/* OS object name "/dart.shm.<16 hex>" -- valid on POSIX (leading /) and Windows. */
 void i_dart_shm_seg_name(char *buf, uint64_t segment_id){
     static const char hex_digits[] = "0123456789abcdef";
     const char prefix[] = "/dart.shm."; int i, k = 0;
@@ -39,7 +36,7 @@ uint32_t i_dart_shm_class_bytes(uint32_t k){ return DART_SHM_CLASS_BASE << (k*DA
 uint32_t i_dart_shm_class_for(uint32_t len){
     uint32_t k;
     for (k=0;k<DART_SHM_N_CLASSES;k++) if (i_dart_shm_class_bytes(k) >= len) return k;
-    return DART_SHM_N_CLASSES;   /* bigger than the top class -> caller sends inline */
+    return DART_SHM_N_CLASSES;   /* bigger than the top class, the caller sends inline */
 }
 
 struct i_DartShmPool {
@@ -50,7 +47,7 @@ struct i_DartShmPool {
     uint8_t *chunks;        /* base of the chunk region */
     uint32_t chunk_bytes;
     uint32_t n_chunks;
-    uint32_t stride;        /* per-chunk bytes incl. header */
+    uint32_t stride;        /* per chunk bytes including the header */
     int      is_creator;
 };
 
@@ -88,7 +85,7 @@ i_DartShmPool *i_dart_shm_create(void *pool_mem, const i_DartShmConfig *cfg){
     p->hdr = (i_DartShmSegHdr*)base;
     p->chunks = (uint8_t*)base + DART__SHM_HDR_SZ;
     p->chunk_bytes = chunk_bytes; p->n_chunks = n_chunks; p->stride = stride; p->is_creator = 1;
-    /* the segment starts zero-filled; stamp the header and clear generations */
+    /* the segment starts zero filled: stamp the header and clear the generations */
     p->hdr->magic = DART_SHM_MAGIC; p->hdr->version = DART_SHM_VERSION;
     p->hdr->segment_id = cfg->segment_id; p->hdr->chunk_bytes = chunk_bytes; p->hdr->n_chunks = n_chunks;
     p->hdr->owner_pid = i_dart_plat_pid();
@@ -102,9 +99,7 @@ i_DartShmPool *i_dart_shm_attach(void *pool_mem, const i_DartShmConfig *cfg){
     uint32_t chunk_bytes, n_chunks, stride; size_t map_bytes = 0, expect;
     void *handle = NULL, *base; uint8_t ours[16];
     if (!p || !cfg) return NULL;
-    /* map the whole OS object; its geometry (chunk_bytes/n_chunks) comes from the
-       header the writer stamped, so the reader needs to know nothing up front --
-       cfg's chunk_bytes/n_chunks are create-only. */
+    /* the geometry comes from the writer's header, cfg's create only fields are ignored */
     base = i_dart_plat_shm_attach(cfg->name, &map_bytes, &handle);
     if (!base) return NULL;
     memset(p, 0, sizeof *p);
@@ -113,7 +108,7 @@ i_DartShmPool *i_dart_shm_attach(void *pool_mem, const i_DartShmConfig *cfg){
     i_dart_plat_host_uuid(ours);
     chunk_bytes = p->hdr->chunk_bytes; n_chunks = p->hdr->n_chunks;
     i_dart_shm_geom(chunk_bytes, n_chunks, &stride, &expect);
-    /* reject a stale/foreign/mismatched/truncated segment -> caller falls back to UDP */
+    /* a stale, foreign, mismatched or truncated segment: the caller falls back to UDP */
     if (p->hdr->magic != DART_SHM_MAGIC || p->hdr->version != DART_SHM_VERSION ||
         memcmp(p->hdr->owner_host, ours, 16) != 0 ||
         chunk_bytes == 0 || n_chunks == 0 || expect > map_bytes){
@@ -138,7 +133,7 @@ void i_dart_shm_stamp(i_DartShmPool *p, uint32_t chunk, uint32_t len, i_DartShmD
     c = i_dart_shm_chunk_hdr(p, chunk);
     c->length = len;
     generation = c->generation + 1u;                       /* bump so a straggler sees the reuse */
-    i_dart_plat_atomic_store64(&c->generation, generation);  /* release: publishes the payload writes */
+    i_dart_plat_atomic_store64(&c->generation, generation);  /* release: publishes the payload */
     if (out){ out->segment_id = p->hdr->segment_id; out->chunk = chunk; out->length = len; out->generation = generation; }
 }
 

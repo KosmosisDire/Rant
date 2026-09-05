@@ -26,7 +26,7 @@ DartFunction *def = dart_node_create_function_definition(n, "add", req_schema, r
 DartFunction *fn  = dart_node_create_remote_function(n, "add", req_schema, rsp_schema, NULL);
 
 DartResponse rsp;
-if (dart_function_call(fn, req, &rsp, 1000, NULL) == DART_OK && rsp.status == DART_CALL_OK) ...
+if (dart_function_call(fn, req, &rsp, 1000, NULL) == 1 && rsp.status == DART_CALL_OK) ...
 dart_function_call_async(fn, req, on_response, user, NULL);
 ```
 
@@ -50,6 +50,12 @@ past the depth are lost and the callers see `DART_CALL_TIMEOUT`.
 `DartCallOpts`: `provider` (direct the call at one peer, 0 = every definition and the
 first answer wins), `on_progress` and `progress_user` (tasks), and `id_out` (the call id,
 for cancel).
+
+`dart_function_call` drives the node loop itself and returns 1 when answered, 0 on a
+timeout and a negative `DartResult` on error, so it is refused with `DART_ERR_STATE` from
+a callback or under a service thread, where `dart_function_call_async` is the tool. On a
+task the timeout bounds only the wait for the first response, then it waits for the
+terminal outcome and `dart_function_cancel` from another thread is the way out.
 
 A call from a fresh remote waits for its match like a first topic send (docs/topics.md).
 
@@ -96,6 +102,7 @@ after. From inside a callback the call is refused with `DART_ERR_STATE` and the 
 stays valid. A re created entity with the same name takes its old slots back. Do not
 create a second same name handle while the first lives: it is silently shadowed and
 receives nothing.
+Complete or abandon outstanding defer tokens before retiring a definition.
 
 ## Wrappers
 

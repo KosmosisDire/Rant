@@ -201,3 +201,35 @@ The interest codec measures and builds in one walk (a NULL out means measure). T
 wires all of it into discovery and its data socket. The transport's linear hash to topic
 scans run only per PENDING entry and cost about 25 us per announce at 1600 by 1600. A
 hash index is the next step only if thousands of pending entries show up in one pass.
+
+## Wire layouts
+
+The announce overlay is `['D','N'][ver][u16 frag][u8 shm][host 16][u8 iflags][interest]`.
+The version byte is 21 with SHM compiled in and 20 without, and the even form has no shm
+byte and no host. iflags bit 0 is INTEREST_EXTERNAL. A blob with another magic or version
+is rejected, never reinterpreted.
+
+The interest blob is `[u16 n]` then one `[u32 hash][u8 flags]` cell per slot up to the
+highest announced one, where a run of undefined or retired slots collapses to one cell
+flagged with bit 7 whose hash field is the run length. Then the rate section
+`[u16 n][(u16 index)(u16 rate_hz)]*` and the generation section
+`[u16 n][(u16 index)(u8 gen)]*`. `dart_interest_max` bounds it at 5 bytes per slot plus
+both sections at every topic.
+
+Every uDTL datagram starts with `['u','D','T','L'][u8 kind][u8 ver 2][u16 domain]
+[u32 meta_version][u16 n]`. A DETAIL_REQ entry is `[u16 index][u64 schema_hash]`, the
+requester's hash for its matching topic, and a DETAIL_RESP entry is
+`[u16 index][u8 attrs][u8 namelen][name][u64 schema_hash][u16 wire_len][wire]`. The
+interest paging kinds carry n = 0 and the bodies given above.
+
+## Kinds and twins
+
+One node cannot define the same name under two kinds. The per peer maps bind an entry to
+one local topic by identity, so local cross kind twins would cross bind and refuse
+forever. Across nodes a name verified peer that advertises the name under another kind is
+refused with `DART_E_KIND_MISMATCH`, never cross wired. Retired slots are exempt from the
+local check.
+
+A node may hold two topics of one identity with different QoS and switch which is live by
+role. Identity lookup prefers the non INACTIVE one, and a verdict bound to the parked twin
+re pends when the other goes live, so its schema gates are re judged against the live one.

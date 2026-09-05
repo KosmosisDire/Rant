@@ -180,6 +180,9 @@ its HB floor, with no cross delivery, no repair and no `MSG_LOST` on a directed 
 Known costs of the shared ring for directed reliable, accepted at RPC rates: cross peer
 backpressure coupling, O(peers) floor HB traffic per directed send, repair depth diluted
 by active destinations, and `catch_up` refused at define.
+A sample stores its destination as a peer slot, not an id. Slot reuse is safe because a
+directed topic never replays history and a new peer joins at the head, above every
+stamped sample.
 
 ## Peer resume
 

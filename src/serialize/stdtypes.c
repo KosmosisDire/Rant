@@ -1,11 +1,8 @@
 #include "stdtypes.h"
-#include <string.h>            /* memcpy, memcmp */
+#include <string.h>
 
-/* The roster: a name and the canonical spelling of its type, exactly as a user would
- * write it. These strings ARE the definition -- the DSL compiles them on demand (see
- * i_dart_std_lookup below), so there is one source of truth for the shape, the printed
- * text, and the wire bytes. Composite entries reference other entries by name, which is
- * why the order here does not matter: resolution is recursive. */
+/* The roster: a name and the canonical spelling of its type. These strings are the one
+ * definition, the DSL compiles them on demand. Order does not matter, resolution is recursive. */
 typedef struct { const char *name, *text; } i_DartStdEntry;
 
 static const i_DartStdEntry i_dart_std_table[] = {
@@ -46,7 +43,7 @@ static const i_DartStdEntry i_dart_std_table[] = {
                  "  url: Uri, name: string<32> }" }
 };
 
-/* the table is indexed by DartStdType - 1; a mismatch would silently shift every name */
+/* the table is indexed by DartStdType minus 1, a mismatch would shift every name */
 typedef char i_dart_std_table_check[
     (sizeof i_dart_std_table / sizeof i_dart_std_table[0] == (size_t)DART_STD_COUNT - 1u) ? 1 : -1];
 
@@ -70,8 +67,7 @@ DartStdType dart_std_by_name(DartString name){
     return DART_STD_NONE;
 }
 
-/* The one seam the schema DSL calls: a type word it does not recognize is looked up here
- * (and, when found, compiled from the text above as if the schema had defined it). */
+/* The one seam the DSL calls: an unknown type word is looked up here and compiled from its text. */
 const char *i_dart_std_lookup(const char *name){
     int i;
     if (!name) return 0;
@@ -86,8 +82,7 @@ DartSchema *dart_std_schema(DartStdType t, DartAllocFn alloc, void *user){
     return dart_schema_compile(alloc, user, n, 0);   /* the name alone resolves to the type */
 }
 
-/* ---- recognizing a standard type in someone else's schema ---------------------------- */
-/* The canonical type encoding of a standard type: its schema's root type bytes. */
+/* Does type match the canonical root type bytes of the standard type. */
 static int i_dart_std_shape_eq(DartStdType t, DartBytes type, DartAllocFn alloc, void *user){
     DartSchema *c = dart_std_schema(t, alloc, user);
     DartBytes w; DartString nm; size_t off; int ok = 0;
@@ -142,7 +137,7 @@ DartStdType dart_std_recognize_elem(const DartSchema *s, uint16_t field,
     size_t head;
     if (!dart_schema_field_at(s, field, &fi) || !type.data) return DART_STD_NONE;
     if (fi.kind == DART_ARR)       head = 3u;      /* [ARR][u16 count] */
-    else if (fi.kind == DART_VARR) head = 1u;      /* [VARR]           */
+    else if (fi.kind == DART_VARR) head = 1u;      /* [VARR] */
     else return DART_STD_NONE;
     if (head >= type.len) return DART_STD_NONE;
     if (!i_dart_std_peel(dart_bytes(type.data + head, type.len - head), &name, &inner))
@@ -150,10 +145,8 @@ DartStdType dart_std_recognize_elem(const DartSchema *s, uint16_t field,
     return i_dart_std_check(name, inner, alloc, user);
 }
 
-/* ---- the few operations that need a square root -------------------------------------- */
-/* No <math.h>: DART links against nothing, and a consumer's build line should not have to
- * grow an -lm for four helpers. Newton from the classic halve-the-exponent seed converges
- * to full double precision well within five steps. */
+/* No math.h, so a consumer's build line never grows an -lm. Newton from the halved
+ * exponent seed converges to full double precision within five steps. */
 static double i_dart_sqrt(double x){
     uint64_t b; double r; int i;
     if (!(x > 0.0)) return 0.0;                       /* 0, negatives and NaN alike */
@@ -180,7 +173,7 @@ DartQuaternion dart_quaternion_normalize(DartQuaternion q){
     return dart_quaternion(q.x * n, q.y * n, q.z * n, q.w * n);
 }
 
-/* v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v): the branch-free rotation form */
+/* v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v), the branch free rotation form */
 DartDouble3 dart_quaternion_rotate(DartQuaternion q, DartDouble3 v){
     DartDouble3 u = dart_double3(q.x, q.y, q.z);
     DartDouble3 t = dart_double3_cross(u, v);

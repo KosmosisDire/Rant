@@ -73,6 +73,9 @@ a remote unforce a typed variable.
   shared broadcast channel. `caller_lo` is the little endian u32 of the requester's uuid's
   first 4 bytes. It also gives any observer requester attribution, which is why there is
   no `@dart/meta` tasks section.
+- value: `[u8 flags][u32 write_seq]`, flag 0x01 = forced.
+- `v@set`: `[u8 op]`, op 0 set, 1 force, 2 unforce. A plain set with an empty payload is
+  ignored.
 
 Statuses `OK`, `APP_ERROR`, `NO_HANDLER`, `CANCELLED` and `RUNNING` are wire carried.
 `TIMEOUT` and `PEER_LOST` are synthesized on the caller. `RUNNING` is the one non terminal
@@ -88,6 +91,12 @@ flushed before teardown. A severed destination lane synthesizes CANCELLED at the
 A provider crash is the PEER_LOST reap. The per call timeout covers only the window until
 the first response of any kind (RUNNING or progress, whichever lands first, since they
 ride different lanes).
+
+A call made before any provider matched is not handed to the transport, since an unmatched
+reliable send is dropped. The request bytes queue in the pending entry and flush the moment
+the match forms, oldest first, and the call times out normally if none ever does. A cancel
+of a queued call is local. Request and response channels have `catch_up` 0, since calls
+carry no replay: their history is purely the repair window.
 
 Defer tokens live in a per handle registry. Every token verb validates membership first,
 so a stale token is `DART_ERR_STATE`, never undefined behavior. `dart_function_progress`,
@@ -152,6 +161,11 @@ A fresh remote's first write rides the send path match wait, so `DART_ERR_NO_TOP
 means the owner is genuinely absent. A node younger than the post open gather window pays
 the gather once even for an orphan set. The `varwait:` selftests pin it.
 
+`keep_last` is raised to `catch_up` so the ring holds what it replays. A set from inside an
+`on_change` or `on_write` callback commits first, so the outer set skips its own publish
+and history ends on the newest write. The accessor drops a same publisher value whose
+`write_seq` is behind the cached one (signed distance, wrap safe).
+
 A successor definition seeds its `write_seq` from the slot's continuing seqno line so its
 first write orders above the predecessor's last at every accessor. The accessor's stale
 order guard is disarmed on PEER_INTEREST when the source match count hits 0, or a same
@@ -168,12 +182,29 @@ against a sorted (kind, hash) index of the local authorities, rebuilt lazily aft
 create or retire. The old per authority walk made an explorer subscribing to everything
 cost a 602 ms poll pass at 800 owned variables. `.multi` suppresses it.
 
+## Locking
+
+Manager state mutates under the node lock, but every send happens outside it through the
+entry points that take the lock themselves, so a pattern send engages the normal flow
+control wait instead of committing reentrantly. The payload is always the application's
+buffer, never manager memory, so nothing the wait releases the lock around can move under
+the send. The exceptions publish under the held lock with no wait: replies built inside a
+delivery callback, and the owner's force and unforce republish from the shadow.
+
 ## Retire and shadowing
 
 Retire parks the channels (`DART_INACTIVE`, re advertised), answers every outstanding
 call CANCELLED (a definition answers its live deferred calls on the wire first), silences
 callbacks, unlinks the handle and frees it. It is refused with `DART_ERR_STATE` from
 inside a callback and the handle then stays valid. The builtin meta handle refuses retire.
+
+Retire runs in three phases: park the channels before taking the lock (`set_role` refuses
+from a callback with nothing mutated, so the primary's verdict is the whole retire's),
+clear the routing and free the handle under the lock, then release the slots after the
+lock, with the topics outliving the handle since a reap callback may have used them. A
+create whose second channel fails cannot destroy the first, since that half may already
+route deliveries into the handle: the half is parked INACTIVE and the handle stays
+allocated until close.
 
 The per peer index maps bind a name to one local topic, preferring the oldest active one,
 so a second same name handle created while the first lives is silently SHADOWED: it

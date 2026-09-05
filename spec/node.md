@@ -15,6 +15,38 @@ Three datagram families arrive on the data socket: the transport's, `uDSC` (disc
 and `uDTL` (details and interest pages). Every data datagram pays two linear peer scans
 (`id_for_addr` then the peer slot), the first thing to index if peer counts grow.
 
+Receive is drained until the socket is empty or `DART_RX_BUDGET_US` (5 ms) elapses, then
+discovery and send get their turn, so a slow `on_message` never starves them. A datagram
+the socket refuses is held in `tx_hold` and retried first next tick, never dropped. The
+data socket is bound before discovery opens so the announce carries the real port, with no
+address reuse, so a port collision fails loudly at open.
+
+## Delivery
+
+Every delivery path (inline UDP, shared memory, parked redelivery) runs one sequence:
+strip the source stamp, split the pattern header (`prefix_bytes`, plus a `[u8 len][bytes]`
+message on a response channel), validate the payload length against the publisher's
+schema, then queue or call back. A zero length payload on a pattern channel is an op only
+message and skips the schema, as does a task request whose op byte is not CALL. A message
+that fails validation is dropped and surfaced, never handed to the app.
+
+## Growth
+
+In dynamic mode a refused peer and an oversized peer blob are growth signals, not
+verdicts: the peer table or the accept bound grows at the next poll, between ticks, the
+peer is admitted on its next announce (a solicit asks for it), and the app never sees the
+refusal. Static mode surfaces both. A size that failed to allocate is remembered so the
+retry surfaces instead of spinning. See spec/allocation.md for the grow itself.
+
+## Settle
+
+`dart_node_settle` solicits, re sent four times a second, and returns once every active
+peer has been heard since the solicit, the topology has been quiet for one window (the
+announce interval capped at 300 ms), and one window has passed overall. With no peer heard
+at all only a full announce interval can rule out a slow one. The post open gather latch
+uses the same predicate anchored at open, so a first send's match wait knows the announce
+cache covers the peers that were already there.
+
 ## Threading
 
 One node level mutex at the API boundary, never held across a blocking wait. The sans-IO
@@ -57,8 +89,9 @@ strict prefix of it.
 ## Consumer queues
 
 A queued topic's messages are copied by the poll thread into a per topic byte ring
-(`i_DartMsgQueue`: a 16 byte record header, the copied sender name, an 8 aligned payload,
-records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
+(`i_DartMsgQueue`: a record header holding its size, the payload length, the two stamps and
+the publisher id and name length, then the copied sender name, then an 8 aligned payload.
+Records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
 value pre allocates the ring in full. One bigger message still fits.
 
 `take` returns a view valid until the topic's next take or dispatch. The viewed record
@@ -114,7 +147,9 @@ Deferred on purpose: `DART_E_SHM` (needs once only dedup) and `DART_E_BAD_PACKET
 flood from hostile traffic). Internal errors are mirrored to `@dart/log/error` through a
 fixed ring of 8 records (events fire mid receive where re entering the transport is
 unsafe, so the poll pass flushes them), duplicates coalesce into "(xN)", overflow becomes
-one summary line.
+one summary line. The ring is allocated on the first error, so a healthy node never pays
+for it. `DART_E_SEND` carries the datagram size and the first submessage's topic, so a
+starved link (an ESP32 out of WiFi buffers reports ENOMEM) says which topic and how big.
 
 ## Built ins
 
@@ -141,8 +176,8 @@ replay could land in the inline callback path before the first take creates the 
 list, directed requests so a call aimed at one peer never wakes the rest, keep_last 2
 rings, created with `.multi`. The request is an optional 4 byte section mask (NODE, PROC,
 TOPICS, PEERS, empty = all). The response is `DartMeta { info: map }` with node, proc,
-topics and peers sections. The snapshot builder is node owned (grown scratch, retry on
-space). The per topic `pending` count is one bulk walk per peer, not a walk per topic. No
+topics and peers sections. The snapshot builder is node owned: the buffer starts at 1 KB and doubles on
+overflow up to 4 MB. The per topic `pending` count is one bulk walk per peer, not a walk per topic. No
 self inspection, since a node never matches itself. An ordinary remote must never
 advertise the provider side (it would auto answer NO_HANDLER and race the real provider).
 

@@ -1,8 +1,4 @@
-/* Shared little-endian byte packing, used by the discovery, transport, and SHM
- * layers (each formerly carried its own copy). static inline: no link symbol and
- * no unused-function warning in a layer that doesn't use a given width. The
- * amalgamator emits this once per implementation TU; the local #include is for
- * standalone compilation of a single layer. */
+/* Little endian byte packing for every wire format. */
 #ifndef DART_BYTES_H
 #define DART_BYTES_H
 

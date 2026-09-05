@@ -91,7 +91,7 @@ and size), surfaced as `DartMsg.schema`, so reader code keeps its own indices. R
 both subtrees in lockstep, which handles nested frames and struct arrays.
 
 A raw reader accepts anything. A typed reader refuses an untyped or unverifiable writer.
-An identical hash skips the parse. Both directions advertise and run the same gate, so a
+An identical hash skips the parse. A peer schema is interned once per hash, and the claimed hash must equal the parsed wire's hash, or a lying peer could poison the intern for every honest one. Both directions advertise and run the same gate, so a
 refused pair forms no proxy on either side. The node validates the message length against
 the sender's schema before delivery and fires `DART_E_SCHEMA_MISMATCH` with a per field
 `schema_detail` from `dart_schema_subset_why`. There is deliberately no boot time
@@ -153,3 +153,37 @@ A standalone `dist/dart_serialize.h`. Eigen, GLM, numpy and Unity converters. In
 Python a standard type cannot be an array element and user named types are unsupported,
 since neither emitter can hoist a `Name = type` definition. C, C++ and DSL text handle
 both.
+
+## DSL grammar
+
+```
+schema := def* root?              with no root, the last def is the root
+def    := IDENT '=' type
+root   := IDENT '{' fields '}' | type
+field  := name ':' type (',')?    fields self delimit, commas are optional
+type   := base | base '[' count ']' | base '[' ']' | '{' fields '}' ('[' count? ']')?
+base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' options '}' | NAME
+```
+
+A type word that is not a built in resolves against the text's own definitions, then the
+environment schemas, then the standard library, and emits as a NAMED type. The parser is
+a thin front end over the builder, so every structural limit (name lengths, 255 fields
+per struct, nesting depth) is the builder's. A text holds at most 64 definitions and a
+standard type expands at most 8 levels deep. Enum values may be omitted and then count up
+from the previous one, starting at 0. A bare reference as the root (`Uuid`) is an alias
+root.
+
+## The flat table
+
+The compiled schema flattens every field at every depth into one depth first table. A
+struct array flattens its element once, as an element 0 template under the array field:
+its members' offsets are element 0's (message absolute for a fixed array, frame relative
+for a variable one) and `arr_parent` names the array, so element i sits at that offset
+plus i times the element size. The name based accessors spell the index in the path and
+the index based ones take it as an argument. A field's type encoding is kept as a wire
+offset and length, so two fields have the same type exactly when the bytes agree.
+
+The compiled block is the wire bytes, an 8 aligned handle and the field table. Statements
+compile into their own scratch builder first and are appended to one definition arena,
+so resolving a reference mid definition never interleaves bytes. `dart_schema_print`
+hoists at most 48 named type definitions, beyond that the tail spells by reference.

@@ -1,13 +1,10 @@
-/* sans-IO NODE core: peer table + the discovery->transport lifecycle. No platform
- * access; a runtime drives it (see node/runtime.c) and does the IO. See node/core.h. */
+/* The sans-IO node core. A runtime drives it and does the IO. The rules are in spec/node.md. */
 
 #include "core.h"
 #include "../common/arena.h"
 #include <string.h>
 
-/* dart_event_str + bounded appenders: format the node's app DartEvent as one line.
-   No stdio, so it stays in the sans-IO core. (It covers the union event, including the
-   peer/interest/mcast kinds the node adds; the transport keeps no formatter of its own.) */
+/* dart_event_str and its bounded appenders. No stdio, so it stays in the sans-IO core. */
 static char *i_dart_event_append_str(char *p, char *end, const char *s){
     if (!s) return p;
     while (*s && p < end) *p++ = *s++;
@@ -19,21 +16,24 @@ static char *i_dart_event_append_u64(char *p, char *end, uint64_t v){
     while (n && p < end) *p++ = tmp[--n];
     return p;
 }
-static char *i_dart_event_append_addr(char *p, char *end, const DartEvent *ev){   /* dotted quad + :port (IPv4 only) */
+/* dotted quad and port */
+static char *i_dart_event_append_addr(char *p, char *end, const DartEvent *ev){
     int i;
     for (i = 0; i < 4; i++){ if (i) p = i_dart_event_append_str(p,end,"."); p = i_dart_event_append_u64(p,end,ev->ip[i]); }
     p = i_dart_event_append_str(p,end,":"); return i_dart_event_append_u64(p,end,ev->port);
 }
-static char *i_dart_event_append_topic(char *p, char *end, const DartEvent *ev){   /* topic=<name> or topic=<index> */
+/* topic=name or topic=index */
+static char *i_dart_event_append_topic(char *p, char *end, const DartEvent *ev){
     p = i_dart_event_append_str(p,end,"topic=");
     if (ev->topic_name) return i_dart_event_append_str(p,end,ev->topic_name);
     return i_dart_event_append_u64(p,end,ev->topic);
 }
-static char *i_dart_event_append_peer(char *p, char *end, const DartEvent *ev){   /* the peer's node name, else id=<n> */
+/* the peer's name, else id=n */
+static char *i_dart_event_append_peer(char *p, char *end, const DartEvent *ev){
     if (ev->peer_name && ev->peer_name[0]) return i_dart_event_append_str(p,end,ev->peer_name);
     p = i_dart_event_append_str(p,end,"id="); return i_dart_event_append_u64(p,end,ev->peer);
 }
-#ifndef DART_NO_DIAG   /* only the verbose error body below uses these two */
+#ifndef DART_NO_DIAG   /* only the verbose error body uses these two */
 static char *i_dart_event_append_hex(char *p, char *end, uint64_t v){
     char tmp[16]; int n = 0;
     do { int d = (int)(v & 0xF); tmp[n++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; } while (v);
@@ -47,8 +47,7 @@ static char *i_dart_event_append_oserr(char *p, char *end, const DartEvent *ev){
 }
 #endif
 
-/* the DART_ERROR body, split out so the descriptive text can compile away under
-   DART_NO_DIAG (leaving only the numeric error code) with no other change. */
+/* the DART_ERROR body, split out so the text compiles away under DART_NO_DIAG */
 static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
 #ifdef DART_NO_DIAG
     p = i_dart_event_append_str(p,end,"error "); return i_dart_event_append_u64(p,end,(uint64_t)ev->error);
@@ -144,7 +143,7 @@ static char *i_dart_event_error_str(char *p, char *end, const DartEvent *ev){
 const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
     char *p, *end;
     if (!buf || !cap) return buf;
-    p = buf; end = buf + cap - 1;                  /* reserve one byte for the NUL */
+    p = buf; end = buf + cap - 1;                  /* one byte reserved for the NUL */
     switch (ev->kind){
     case DART_PEER_UP:
         p = i_dart_event_append_str(p,end,"peer-up "); p = i_dart_event_append_peer(p,end,ev);
@@ -169,38 +168,24 @@ const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap){
         p = i_dart_event_error_str(p, end, ev);
         break;
     }
-    *p = '\0';                                     /* p <= end = buf+cap-1, in range */
+    *p = '\0';                                     /* p is at most end, in range */
     return buf;
 }
 
-/* the node core's per-peer transport-lifecycle state, kept in the discovery peer's user
-   scratch (so the node holds NO peer table of its own). added = wired into the transport
-   yet (dart_transport_peer_add called); dormant = discovery DROPPED it, kept for a same-incarnation
-   resume; detail_due / interest_due = a DETAIL_REQ / INTEREST_REQ should go to this peer.
-   Discovery zeroes this when a new UUID takes the slot, preserves it on resume.
-
-   The interest_* fields are the EXTERNAL-interest fetch (a peer whose announce sets
-   INTEREST_EXTERNAL): interest_buf assembles the peer's paged interest blob (a hook
-   allocation, freed on peer GONE; at node close the pool reset reclaims it);
-   fetch_cursor/fetch_len walk it; fetch_version is the version being assembled (the
-   RESP stamp; a differing stamp restarts at 0); interest_version is the last version
-   FULLY assembled -- the dedup that keeps a steady-state announce from re-triggering
-   the fetch. For an inline-interest peer all of it stays zero. */
-/* Reflection tables (node/runtime.h's walks read these; nothing here allocates at query
-   time). One channel per advertised topic index; the fold pairs pattern channels into
-   entities by kind + the four-byte suffix convention. */
+/* The reflection tables: one channel per advertised topic index, folded into entities by
+   kind and the four byte suffix convention. See spec/reflection.md. */
 #define I_DART_NONE16   0xFFFFu
 #define I_DART_NAME_NONE 0xFFFFFFFFu
 typedef struct {
-    uint32_t hash;          /* low-32 name id from the announce */
-    uint32_t name_off;      /* into the names arena (NUL-terminated); NAME_NONE until details land */
-    const DartSchema *schema;   /* interned: lives until close */
+    uint32_t hash;          /* the low 32 name id from the announce */
+    uint32_t name_off;      /* into the names arena, NAME_NONE until details land */
+    const DartSchema *schema;   /* interned, lives until close */
     uint64_t schema_hash;
-    uint16_t entity;        /* entity slot, NONE16 until folded */
+    uint16_t entity;        /* the entity slot, NONE16 until folded */
     uint8_t  name_len, kind, role, reliable, attrs, present;
 } i_DartChannel;
 typedef struct {
-    uint64_t id;            /* dart_topic_id of the base name; 0 while the name is unfetched */
+    uint64_t id;            /* dart_topic_id of the base name, 0 while unfetched */
     uint32_t name_off, hash;
     uint16_t primary, rsp, prg, set;   /* channel indices, NONE16 where absent */
     uint8_t  name_len, kind, incomplete;
@@ -213,7 +198,7 @@ typedef struct {
     uint8_t  addr_len;
     char     addr[48];      /* "ip:port", formatted once at peer up */
 } i_DartReflect;
-/* one folded entity of the whole mesh (kind + 64-bit name id), see i_dart_node_core_mesh_build */
+/* one folded entity of the whole mesh, keyed by kind and the 64 bit name id */
 typedef struct {
     uint64_t id, generation;
     uint32_t from_peer, provider;
@@ -221,36 +206,27 @@ typedef struct {
     uint8_t  kind, conflict, has_provider;
 } i_DartMeshEntity;
 
+/* The core's per peer lifecycle state, kept in the discovery peer's user scratch so the
+   node holds no peer table of its own. The interest fields are the external fetch. */
 typedef struct {
     uint8_t  added; uint8_t dormant; uint8_t detail_due; uint8_t interest_due;
-    uint32_t interest_epoch;     /* bumped on EVERY reflected-interest change (interest apply,
-                                    external assembly, fresh detail verdicts/names): the ONE
-                                    cache key an observer needs (dart_node_peer_interest_epoch),
-                                    covering changes the announce version cannot see. 0 = nothing
-                                    applied yet. */
-    uint32_t interest_version;   /* last fully assembled external version (0 = none) */
-    uint32_t fetch_version;      /* version the cursor is assembling (0 = idle) */
+    uint32_t interest_epoch;     /* bumps on every reflected change, the observer cache key */
+    uint32_t interest_version;   /* the last fully assembled external version, 0 = none */
+    uint32_t fetch_version;      /* the version the cursor is assembling, 0 = idle */
     uint32_t fetch_cursor;       /* bytes assembled so far */
-    uint32_t fetch_len;          /* the blob's total_len (valid once the first page lands;
-                                    after assembly it is the retained blob's length) */
+    uint32_t fetch_len;          /* the blob's total length once the first page lands */
     uint8_t *interest_buf;
     uint32_t interest_cap;
     i_DartReflect refl;          /* what this peer advertises, as tables */
 } i_DartNodePeerExtra;
 
-/* schema state for the gate + delivery: peer schemas interned by hash (parsed once),
-   reader views cached per (peer schema, topic), and the per-(peer, topic) schema a
-   delivered message decodes with. All flat, linearly scanned (counts stay small), and
-   allocated through the injected hook so they survive an arena migrate untouched. An
-   interned/rebased schema lives until node close; a stale map pointer therefore never
-   dangles. */
+/* The schema state for the gate and delivery: schemas interned by hash, reader views per
+   (schema, topic), the decode map per (peer, topic). Flat, hook allocated, kept until close. */
 typedef struct { uint64_t hash; DartSchema *parsed; } i_DartNodeSchemaIntern;
 typedef struct { uint64_t hash; uint16_t topic; DartSchema *rebased; } i_DartNodeSchemaBind;
 typedef struct { uint32_t peer; uint16_t topic; const DartSchema *schema; } i_DartNodePeerSchema;
 #ifndef DART_NO_DIAG
-/* why the schema gate refused (peer, topic, direction): recorded at detail intake so
-   the SCHEMA_MISMATCH event (fired later, at every interest apply) can say what was
-   incompatible. Refusals are rare, so a flat scanned array; stripped by DART_NO_DIAG. */
+/* why the gate refused (peer, topic, direction), recorded at detail intake for the event */
 #define DART__SCHEMA_WHY_MAX 128
 typedef struct { uint32_t peer; uint16_t topic; uint8_t peer_is_pub;
                  char text[DART__SCHEMA_WHY_MAX]; } i_DartNodeSchemaWhy;
@@ -258,41 +234,39 @@ typedef struct { uint32_t peer; uint16_t topic; uint8_t peer_is_pub;
 
 struct i_DartNodeCore {
     DartTransportState           *transport;
-    DartDiscoveryState  *discovery;   /* the peer table (id<->addr, name, user scratch) we delegate to */
+    DartDiscoveryState  *discovery;   /* the peer table we delegate to */
     DartEventFn         on_event;
     void                 *user;
     int                   oob_capable;
     uint8_t               oob_host[16];
-    uint8_t              *meta_buf;    /* our outgoing discovery announce blob */
+    uint8_t              *meta_buf;    /* our announce overlay, hook allocated at its actual size */
     uint16_t              meta_cap;
     uint16_t              meta_len;
     uint16_t              frag_size;   /* baked into the overlay */
-    DartMetaSchema       *chan_schemas;  /* per-topic schema advertisement (hash 0 = none) */
-    const DartSchema    **chan_compiled; /* per-topic parsed schema (the gate's local side) */
-    uint16_t              n_topics;    /* sizes the per-topic arrays (and the meta buffer) */
-    DartAllocFn           alloc;         /* backs the schema state + announce blob (required) */
+    DartMetaSchema       *chan_schemas;  /* per topic schema advertisement, hash 0 = none */
+    const DartSchema    **chan_compiled; /* per topic parsed schema, the gate's local side */
+    uint16_t              n_topics;
+    DartAllocFn           alloc;         /* required */
     void                 *alloc_user;
-    uint8_t              *detail_buf;    /* detail-response scratch, hook-allocated + grown on
-                                            demand (stable across a migrate; pool reset frees it) */
+    uint8_t              *detail_buf;    /* detail response scratch, grown on demand */
     uint32_t              detail_cap;
-    uint8_t               detail_due_any;/* some peer's detail_due is set: the runtime drains
-                                            i_dart_node_core_detail_req_next this poll */
+    uint8_t               detail_due_any;/* some peer's request is due */
     i_DartNodeSchemaIntern *interned;     uint32_t n_interned,     cap_interned;
     i_DartNodeSchemaBind   *binds;        uint32_t n_binds,        cap_binds;
     i_DartNodePeerSchema   *peer_schemas; uint32_t n_peer_schemas, cap_peer_schemas;
-    uint8_t                 fetch_details; /* observer mode: fetch every advertised index */
-    i_DartReflect           self;          /* this node's own channels (runtime rebuilds it) */
+    uint8_t                 fetch_details; /* observer mode */
+    i_DartReflect           self;          /* this node's own channels */
     DartString              self_name;
     i_DartMeshEntity       *mesh; uint32_t n_mesh, cap_mesh;
     uint8_t                 mesh_dirty;
     uint32_t                mesh_epoch;
-    void                   *scratch; uint32_t scratch_cap;   /* fold + mesh build workspace */
+    void                   *scratch; uint32_t scratch_cap;   /* fold and mesh build workspace */
 #ifndef DART_NO_DIAG
     i_DartNodeSchemaWhy    *schema_whys;   uint32_t n_schema_whys,   cap_schema_whys;
 #endif
 };
 
-/* grow one of the flat schema arrays through the hook; 1 + *arr/cap updated, or 0 */
+/* grow one flat array through the hook. 1 with *arr and *cap updated, else 0 */
 static int i_dart_node_core_array_reserve(i_DartNodeCore *c, void **arr, uint32_t *cap,
                                           uint32_t need, size_t elem){
     void *na; uint32_t ncap;
@@ -309,9 +283,8 @@ static int i_dart_node_core_array_reserve(i_DartNodeCore *c, void **arr, uint32_
 uint16_t i_dart_node_core_peer_user_bytes(void){ return (uint16_t)sizeof(i_DartNodePeerExtra); }
 void i_dart_node_core_bind_discovery(i_DartNodeCore *c, DartDiscoveryState *discovery){ c->discovery = discovery; }
 
-/* arena layout: the core struct, then the per-topic schema registry (no peer table --
-   that lives in the discovery core; the announce blob is hook-allocated at its ACTUAL
-   size and grown at build time). One sequence so measure and build agree. */
+/* the arena layout: the core struct, then the per topic schema registry. One sequence so
+   measure and build agree */
 static void i_dart_node_core_layout(i_DartBump *b, uint16_t n_topics,
                               i_DartNodeCore **out_c,
                               DartMetaSchema **out_schemas, const DartSchema ***out_compiled){
@@ -340,13 +313,13 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
 
     memset(c, 0, sizeof *c);
     c->transport     = cfg->transport;
-    c->discovery     = cfg->discovery;     /* may be NULL now, bound via bind_discovery later */
+    c->discovery     = cfg->discovery;     /* may be NULL now, bound later */
     c->on_event      = cfg->on_event;      c->user = cfg->user;
     c->alloc         = cfg->alloc;         c->alloc_user = cfg->alloc_user;
     c->oob_capable   = cfg->oob_capable;
     c->fetch_details = cfg->fetch_details;
     memcpy(c->oob_host, cfg->oob_host, 16);
-    c->meta_buf      = NULL;                                /* hook-allocated at the first build */
+    c->meta_buf      = NULL;                                /* hook allocated at the first build */
     c->meta_cap      = 0;
     c->frag_size     = cfg->frag_size;
     c->chan_schemas  = schemas;
@@ -357,9 +330,8 @@ i_DartNodeCore *i_dart_node_core_init(void *mem, size_t cap, const i_DartNodeCor
     return c;
 }
 
-/* Relocate the sans-IO node core into a bigger block at grown counts. No peer table (it
- * lives in discovery); a struct copy carries the scalars. The transport, discovery, and
- * announce-blob pointers are re-pointed by the caller after those move. */
+/* A struct copy carries the scalars and the stable hook allocations. The caller re
+ * points the transport, discovery and blob after those move. */
 i_DartNodeCore *i_dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, size_t new_cap,
                                        uint16_t new_n_topics){
     i_DartBump b; i_DartNodeCore *c; uint8_t *base;
@@ -370,14 +342,10 @@ i_DartNodeCore *i_dart_node_core_migrate(i_DartNodeCore *old, void *new_mem, siz
     base = (uint8_t*)(((uintptr_t)new_mem + 15u) & ~(uintptr_t)15u);
     memset(&b, 0, sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
     i_dart_node_core_layout(&b, new_n_topics, &c, &schemas, &compiled);
-    *c = *old;                          /* scalars + transport/discovery ptrs (caller re-points);
-                                           the hook-allocated schema arrays and announce blob are
-                                           stable and ride along (the caller's rebuild grows the
-                                           blob if the new counts need more) */
+    *c = *old;
     keep = old->n_topics < new_n_topics ? old->n_topics : new_n_topics;
     memset(schemas, 0, (size_t)new_n_topics * sizeof *schemas);
-    memcpy(schemas, old->chan_schemas, (size_t)keep * sizeof *schemas);   /* wire views stay valid: the
-                                          DartSchema blocks live outside the arena and do not move */
+    memcpy(schemas, old->chan_schemas, (size_t)keep * sizeof *schemas);   /* views stay valid */
     memset(compiled, 0, (size_t)new_n_topics * sizeof *compiled);
     memcpy(compiled, old->chan_compiled, (size_t)keep * sizeof *compiled);
     c->chan_schemas  = schemas;
@@ -394,36 +362,30 @@ void i_dart_node_core_set_topic_schema(i_DartNodeCore *c, uint16_t topic_index,
     c->chan_schemas[topic_index].wire = schema ? dart_schema_wire(schema) : dart_bytes(NULL, 0);
 }
 
-/* The topic is being RETIRED: drop the live schema pointers (the node frees the parsed
- * copy) but KEEP the hash as the slot's binding fingerprint, so a later create of the
- * same name can tell an identical rebind (reuse with cached verdicts intact) from a
- * retype (reuse with a generation bump). The detail responder never answers a retired
- * slot, so the stale hash is never served. */
+/* Drops the live pointers but keeps the hash as the slot's fingerprint. The responder
+ * never answers a retired slot, so the stale hash is never served. */
 void i_dart_node_core_retire_topic_schema(i_DartNodeCore *c, uint16_t topic_index){
     if (!c || topic_index >= c->n_topics) return;
     c->chan_compiled[topic_index]     = NULL;
     c->chan_schemas[topic_index].wire = dart_bytes(NULL, 0);
 }
 
-/* The retired slot's binding fingerprint (0 = it carried no schema). */
+/* The retired slot's fingerprint, 0 = it carried no schema. */
 uint64_t i_dart_node_core_topic_schema_hash(i_DartNodeCore *c, uint16_t topic_index){
     return (c && topic_index < c->n_topics) ? c->chan_schemas[topic_index].hash : 0;
 }
 
-/* ---- the schema gate + delivery binding ---------------------------------------------- */
+/* the schema gate and the delivery binding */
 
-/* a peer schema, parsed once per distinct hash. The claimed hash must equal the wire's
-   real hash, or a lying peer could poison the intern for every honest one. NULL when the
-   wire is absent (hash-only advert) or malformed. */
+/* A peer schema parsed once per hash. The claimed hash must equal the wire's real hash,
+   or a lying peer could poison the intern for every honest one. */
 static DartSchema *i_dart_node_core_intern(i_DartNodeCore *c, uint64_t hash, DartBytes wire){
     uint32_t i; DartSchema *p;
     for (i = 0; i < c->n_interned; i++)
         if (c->interned[i].hash == hash) return c->interned[i].parsed;
     if (!wire.data || wire.len == 0){
-        /* no wire inlined: identical hashes travel as ZERO bytes, so a channel whose
-           schema we also hold (a matched channel, greedily cached) can still intern.
-           Parse our OWN wire into a fresh copy: a topic retire frees its parsed schema,
-           an interned one lives until close. */
+        /* identical hashes travel as zero bytes, so a schema we also hold interns from a
+           fresh parse of our own wire. A retire frees ours, an interned one lives on. */
         uint16_t t;
         for (t = 0; t < c->n_topics; t++)
             if (c->chan_schemas[t].hash == hash && c->chan_schemas[t].wire.len){
@@ -466,12 +428,8 @@ static DartSchema *i_dart_node_core_bind(i_DartNodeCore *c, uint64_t hash, uint1
     return rb;
 }
 
-/* the delivery map: which schema decodes (peer, topic). NULL entries are stored too
-   (they overwrite an older binding when a peer re-advertises without a schema). An entry
-   whose publisher's schema is IDENTICAL to ours stores this sentinel instead of the
-   compiled pointer, resolved to chan_compiled at read time: the compiled copy is freed
-   and re-parsed across a topic retire/reuse cycle, and a live pointer here would dangle
-   across it while the (kept) verdicts still expect the entry to decode. */
+/* The delivery map. An identical schema stores this sentinel, resolved at read time, since
+   our compiled copy is freed and re parsed across a retire and reuse. */
 #define i_DART_NODE_SCHEMA_OURS ((const DartSchema *)(uintptr_t)1)
 static void i_dart_node_core_peer_schema_set(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
                                              const DartSchema *schema){
@@ -490,17 +448,17 @@ static void i_dart_node_core_peer_schema_set(i_DartNodeCore *c, uint32_t peer, u
     c->n_peer_schemas++;
 }
 
-/* drop a peer's map entries (GONE, or its id recycled onto a new peer) */
+/* drop a peer's map entries, on GONE or when its id is recycled */
 static void i_dart_node_core_peer_schema_clear(i_DartNodeCore *c, uint32_t peer){
     uint32_t i = 0;
     while (i < c->n_peer_schemas){
         if (c->peer_schemas[i].peer == peer)
-            c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap-remove */
+            c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap remove */
         else i++;
     }
 }
 
-/* ---- why a schema gate refused (feeds DartEvent.schema_detail) ------------------------ */
+/* why a schema gate refused, feeding DartEvent.schema_detail */
 
 #ifndef DART_NO_DIAG
 static void i_dart_node_core_schema_why_set(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
@@ -525,7 +483,7 @@ static void i_dart_node_core_schema_why_drop(i_DartNodeCore *c, uint32_t peer, u
     while (i < c->n_schema_whys){
         if (c->schema_whys[i].peer == peer && c->schema_whys[i].topic == topic_index &&
             c->schema_whys[i].peer_is_pub == (uint8_t)peer_is_pub)
-            c->schema_whys[i] = c->schema_whys[--c->n_schema_whys];   /* swap-remove */
+            c->schema_whys[i] = c->schema_whys[--c->n_schema_whys];   /* swap remove */
         else i++;
     }
 }
@@ -580,24 +538,22 @@ const DartSchema *i_dart_node_core_msg_schema(i_DartNodeCore *c, uint32_t peer, 
     for (i = 0; i < c->n_peer_schemas; i++)
         if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index){
             const DartSchema *s = c->peer_schemas[i].schema;
-            if (s == i_DART_NODE_SCHEMA_OURS)   /* identical-schema entry: resolve live */
+            if (s == i_DART_NODE_SCHEMA_OURS)   /* an identical schema entry: resolve live */
                 return topic_index < c->n_topics ? c->chan_compiled[topic_index] : NULL;
             return s;
         }
     return NULL;
 }
 
-/* The topic's slot was REBOUND to a different binding (topic reuse with a retype): every
- * per-peer decode binding, rebased view, and refusal reason recorded for the old
- * occupant is stale. The verdicts were re-pended in the transport, so these re-derive
- * as details re-verify; here the caches just forget the old ones. */
+/* The slot was rebound with a retype: every binding, view and refusal reason recorded for
+ * the old occupant is stale. The verdicts re pended in the transport, so they re derive. */
 void i_dart_node_core_topic_rebound(i_DartNodeCore *c, uint16_t topic_index){
     uint32_t i;
     if (!c) return;
     i = 0;
     while (i < c->n_peer_schemas){
         if (c->peer_schemas[i].topic == topic_index)
-            c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap-remove */
+            c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap remove */
         else i++;
     }
     i = 0;
@@ -617,7 +573,7 @@ void i_dart_node_core_topic_rebound(i_DartNodeCore *c, uint16_t topic_index){
 #endif
 }
 
-/* ---- reflection tables ------------------------------------------------------------------ */
+/* the reflection tables */
 
 static DartBytes i_dart_node_core_interest_of(i_DartNodePeerExtra *ex, DartBytes meta,
                             uint32_t meta_version);
@@ -641,7 +597,7 @@ static void i_dart_node_core_mesh_bump(i_DartNodeCore *c){
     c->mesh_epoch++;
 }
 
-/* the channel record for `index`, growing the dense table (new slots absent) */
+/* the channel record for index, growing the dense table with new slots absent */
 static i_DartChannel *i_dart_reflect_channel(i_DartNodeCore *c, i_DartReflect *r, uint16_t index){
     if ((uint32_t)index >= r->n_chan){
         uint32_t i, need = (uint32_t)index + 1u;
@@ -657,7 +613,7 @@ static i_DartChannel *i_dart_reflect_channel(i_DartNodeCore *c, i_DartReflect *r
     return &r->chan[index];
 }
 
-/* append a NUL-terminated name copy; returns its offset, NAME_NONE on OOM */
+/* appends a NUL terminated name copy and returns its offset, NAME_NONE on OOM */
 static uint32_t i_dart_reflect_name(i_DartNodeCore *c, i_DartReflect *r, DartString name){
     uint32_t off = r->names_len, need = r->names_len + (uint32_t)name.len + 1u;
     if (!i_dart_node_core_array_reserve(c, (void**)&r->names, &r->names_cap, need, 1)) return I_DART_NAME_NONE;
@@ -667,7 +623,7 @@ static uint32_t i_dart_reflect_name(i_DartNodeCore *c, i_DartReflect *r, DartStr
     return off;
 }
 
-/* an interest apply: kind / role / reliable / hash per advertised index; absent slots clear */
+/* an interest apply: kind, role, reliability and hash per advertised index. Absent slots clear */
 static void i_dart_node_core_reflect_interest(i_DartNodeCore *c, i_DartNodePeerExtra *ex,
                                               DartBytes interest){
     i_DartReflect *r = &ex->refl;
@@ -684,7 +640,7 @@ static void i_dart_node_core_reflect_interest(i_DartNodeCore *c, i_DartNodePeerE
     r->dirty = 1;
 }
 
-/* a detail entry: the name, the attrs, and the interned schema for one index */
+/* a detail entry: the name, the attrs and the interned schema for one index */
 static void i_dart_node_core_reflect_detail(i_DartNodeCore *c, i_DartNodePeerExtra *ex,
                                             const DartDetail *d){
     i_DartReflect *r = &ex->refl;
@@ -730,10 +686,10 @@ static void i_dart_reflect_format_addr(i_DartReflect *r, const DartDiscoveryAddr
     r->addr_len = (uint8_t)(p - r->addr);
 }
 
-/* ---- the fold: channels -> entities --------------------------------------------------- */
+/* the fold: channels to entities */
 
-/* one row per DartTopicKind: what entity it belongs to, whether it is the entity's
-   primary channel, its name suffix, and which role is the provider (source) side */
+/* one row per DartTopicKind: its entity, whether it is the primary channel, its name
+   suffix, and which role is the provider side */
 typedef struct { uint8_t entity, primary, provider_pubs; const char *suffix; } i_DartKindRow;
 static const i_DartKindRow i_dart_kind_rows[8] = {
     { DART_ENTITY_TOPIC,    1, 1, ""     },   /* TOPIC    */
@@ -780,7 +736,7 @@ static void i_dart_hash_sort(i_DartHashPair *a, uint32_t n){   /* shell sort, no
         }
 }
 
-/* the channel of `kind` whose name hashes like base+suffix; NONE16 when absent */
+/* the channel of kind whose name hashes like base plus suffix, NONE16 when absent */
 static uint16_t i_dart_reflect_partner(const i_DartReflect *r, const i_DartHashPair *sorted,
                                        uint32_t n, const char *base, size_t base_len,
                                        const char *suffix, uint8_t kind){
@@ -793,7 +749,7 @@ static uint16_t i_dart_reflect_partner(const i_DartReflect *r, const i_DartHashP
     for (; lo < n && sorted[lo].hash == want; lo++){
         const i_DartChannel *ch = &r->chan[sorted[lo].index];
         if (ch->kind != kind) continue;
-        /* a fetched partner name must really be base+suffix (32-bit hashes can collide) */
+        /* a fetched partner name must really be base plus suffix, 32 bit hashes collide */
         if (ch->name_off != I_DART_NAME_NONE
             && (ch->name_len != base_len + sl || memcmp(r->names + ch->name_off, buf, base_len + sl) != 0))
             continue;
@@ -812,7 +768,7 @@ static i_DartPeerEntity *i_dart_reflect_entity_new(i_DartNodeCore *c, i_DartRefl
     return e;
 }
 
-/* attach channel index `idx` as the entity's partner of its kind */
+/* attaches channel idx as the entity's partner of its kind */
 static void i_dart_reflect_attach(i_DartReflect *r, i_DartPeerEntity *e, uint16_t idx, uint16_t slot){
     i_DartChannel *ch = &r->chan[idx];
     ch->entity = slot;
@@ -859,7 +815,7 @@ static void i_dart_reflect_fold(i_DartNodeCore *c, i_DartReflect *r){
         e->kind = row->entity; e->primary = (uint16_t)i; e->hash = ch->hash;
         ch->entity = slot;
         if (ch->name_off == I_DART_NAME_NONE){
-            if (row->suffix[0]) e->incomplete = 1;   /* partners unknowable until the name lands */
+            if (row->suffix[0]) e->incomplete = 1;   /* partners need the name */
             continue;
         }
         nm = r->names + ch->name_off; nl = ch->name_len;
@@ -888,7 +844,7 @@ static void i_dart_reflect_fold(i_DartNodeCore *c, i_DartReflect *r){
         default: break;
         }
     }
-    /* pass 2: an unclaimed partner is a half pair (or an unknown kind): surfaced incomplete */
+    /* pass 2: an unclaimed partner is a half pair or an unknown kind, surfaced incomplete */
     for (i = 0; i < r->n_chan; i++){
         i_DartChannel *ch = &r->chan[i];
         const i_DartKindRow *row;
@@ -914,7 +870,7 @@ static void i_dart_reflect_fold(i_DartNodeCore *c, i_DartReflect *r){
     }
 }
 
-/* the reflection record behind a peer id (DART_SELF = this node), NULL if unknown */
+/* the reflection record behind a peer id, DART_SELF is this node, NULL if unknown */
 static i_DartReflect *i_dart_node_core_reflect_of(i_DartNodeCore *c, uint32_t peer){
     i_DartNodePeerExtra *ex;
     if (peer == DART_SELF) return &c->self;
@@ -922,7 +878,7 @@ static i_DartReflect *i_dart_node_core_reflect_of(i_DartNodeCore *c, uint32_t pe
     return (ex && ex->added) ? &ex->refl : NULL;
 }
 
-/* the channel of an entity slot that `which` names (0 primary, 1 rsp, 2 prg) */
+/* the channel of an entity that which names: 0 primary, 1 rsp, 2 prg */
 static const i_DartChannel *i_dart_reflect_which(const i_DartReflect *r, const i_DartPeerEntity *e, int which){
     uint16_t idx = which == 1 ? e->rsp : which == 2 ? e->prg : e->primary;
     return idx != I_DART_NONE16 ? &r->chan[idx] : NULL;
@@ -955,7 +911,7 @@ static uint64_t i_dart_reflect_generation(const uint8_t uuid[16], const i_DartRe
     return h;
 }
 
-/* the uuid behind a peer id (NULL if unknown); DART_SELF = our own */
+/* the uuid behind a peer id, NULL if unknown. DART_SELF is our own */
 static const uint8_t *i_dart_node_core_uuid_of(i_DartNodeCore *c, uint32_t peer, DartDiscoveryPeer *scratch){
     uint16_t q, np;
     if (!c->discovery) return NULL;
@@ -966,7 +922,7 @@ static const uint8_t *i_dart_node_core_uuid_of(i_DartNodeCore *c, uint32_t peer,
     return NULL;
 }
 
-/* fill the public view of one entity slot at one node */
+/* fills the public view of one entity slot at one node */
 static void i_dart_reflect_info(i_DartNodeCore *c, uint32_t peer, const i_DartReflect *r,
                                 uint16_t slot, DartEntityInfo *out){
     const i_DartPeerEntity *e = &r->ent[slot];
@@ -1001,7 +957,7 @@ static void i_dart_reflect_info(i_DartNodeCore *c, uint32_t peer, const i_DartRe
     out->generation = i_dart_reflect_generation(i_dart_node_core_uuid_of(c, peer, &scratch), r, e);
 }
 
-/* ---- the mesh table ---------------------------------------------------------------------- */
+/* the mesh table */
 
 typedef struct {
     uint64_t id; uint64_t last_heard; uint64_t schema_hash; const DartSchema *schema;
@@ -1023,7 +979,7 @@ static void i_dart_mesh_sort(i_DartMeshRec *a, uint32_t n){
         }
 }
 
-/* one node's entities as records; last_heard orders rival providers by freshness */
+/* one node's entities as records. last_heard orders rival providers by freshness */
 static uint32_t i_dart_mesh_gather(i_DartNodeCore *c, i_DartMeshRec *recs, uint32_t n, uint32_t cap,
                                    uint32_t peer, i_DartReflect *r, uint64_t last_heard){
     uint32_t i;
@@ -1082,8 +1038,8 @@ static void i_dart_node_core_mesh_build(i_DartNodeCore *c){
         for (j = i; j < n && recs[j].kind == m->kind && recs[j].id == m->id; j++){
             const i_DartMeshRec *rec = &recs[j];
             if (rec->provides){
-                /* the first live provider takes the slot; a rival with a different schema is a
-                   conflict and wins only if heard more recently */
+                /* the first live provider takes the slot. A rival with a different schema
+                   is a conflict and wins only if heard more recently */
                 m->providers++;
                 if (!pick) pick = rec;
                 else if (rec->schema_hash != pick->schema_hash){
@@ -1095,7 +1051,7 @@ static void i_dart_node_core_mesh_build(i_DartNodeCore *c){
         }
         if (pick){ m->has_provider = 1; m->provider = pick->peer; m->provider_slot = pick->slot; }
         else if (first_consumer){
-            /* no provider live: the widest consumer declaration stands in */
+            /* no live provider: the widest consumer declaration stands in */
             pick = first_consumer;
             for (k = i; k < j; k++){
                 const i_DartMeshRec *rec = &recs[k];
@@ -1106,7 +1062,7 @@ static void i_dart_node_core_mesh_build(i_DartNodeCore *c){
         }
         if (pick){
             m->from_peer = pick->peer; m->from_slot = pick->slot;
-            /* a live endpoint that can neither read the pick nor be read by it: conflict */
+            /* a live endpoint that can neither read the pick nor be read by it is a conflict */
             for (k = i; k < j; k++){
                 const i_DartMeshRec *rec = &recs[k];
                 if (rec == pick || rec->schema_hash == pick->schema_hash || !rec->schema || !pick->schema) continue;
@@ -1134,7 +1090,7 @@ static void i_dart_mesh_info(i_DartNodeCore *c, const i_DartMeshEntity *m, DartE
     out->generation = m->generation;
 }
 
-/* ---- the seams node/runtime.h's walks call (node lock held by the caller) ------------------ */
+/* the seams the runtime's walks call, with the node lock held by the caller */
 
 void i_dart_node_core_set_self_name(i_DartNodeCore *c, DartString name){ if (c) c->self_name = name; }
 
@@ -1259,8 +1215,8 @@ int i_dart_node_core_reflect_pick(i_DartNodeCore *c, DartEntityKind kind, const 
             return 1;
         }
     }
-    /* a writer (or a reader with no provider): the widest live declaration, reliable if any
-       reader of the channel requests it */
+    /* a writer, or a reader with no provider: the widest live declaration, reliable if
+       any reader of the channel requests it */
     np = c->discovery ? dart_discovery_max_peers(c->discovery) : 0;
     for (s = 0; s <= np; s++){
         i_DartReflect *r; uint32_t i;
@@ -1292,10 +1248,8 @@ int i_dart_node_core_reflect_pick(i_DartNodeCore *c, DartEntityKind kind, const 
     return found;
 }
 
-/* Observer mode: append every advertised-but-uncached index to the want list (the
- * greedy superset of the transport's candidate wants). INACTIVE entries are skipped:
- * the responder would not answer them, which would re-request forever. Pass max_wants
- * n+1 with a scratch slot to just probe whether anything is missing. */
+/* Observer mode: appends every advertised but uncached index to the want list. INACTIVE
+ * entries are skipped, since the responder would not answer them. */
 static i_DartNodePeerExtra *i_dart_node_core_peer_extra(i_DartNodeCore *c, uint32_t id);
 static uint16_t i_dart_node_core_greedy_extend(i_DartNodeCore *c, uint32_t peer,
                             DartBytes interest, DartDetailWant *wants, uint16_t n,
@@ -1304,20 +1258,19 @@ static uint16_t i_dart_node_core_greedy_extend(i_DartNodeCore *c, uint32_t peer,
     uint16_t k;
     memset(&it, 0, sizeof it);
     while (n < max_wants && dart_interest_next(interest, &it, &e)){
-        /* the iterator skips INACTIVE entries and hole runs; a PUBSUB double-yield
-           dedupes against the want list below like any repeat */
+        /* the iterator skips INACTIVE entries and hole runs, a PUBSUB double yield dedupes below */
         {   i_DartNodePeerExtra *ex = i_dart_node_core_peer_extra(c, peer);
             if (ex && e.index < ex->refl.n_chan && ex->refl.chan[e.index].name_off != I_DART_NAME_NONE) continue; }
         for (k = 0; k < n; k++) if (wants[k].index == e.index) break;
         if (k < n) continue;
         wants[n].index = e.index;
-        wants[n].schema_hash = 0;   /* force the wire inline: we may not hold that schema */
+        wants[n].schema_hash = 0;   /* force the wire inline, we may not hold that schema */
         n++;
     }
     return n;
 }
 
-/* why i_dart_node_core_intern returned NULL, as text (shared by both directions) */
+/* why the intern returned NULL, as text */
 static char *i_dart_node_core_intern_why(i_DartNodeCore *c, DartBytes wire, char *p, char *end){
     if (!c->alloc)
         return i_dart_event_append_str(p, end, "no allocator here to parse peer schemas");
@@ -1330,28 +1283,28 @@ static char *i_dart_node_core_intern_why(i_DartNodeCore *c, DartBytes wire, char
     return i_dart_event_append_str(p, end, ")");
 }
 
-/* the verdict itself; a refusal writes its reason into [p, end] (end = last writable
- * byte; pass p == end for no text). The wrapper below records/clears the reason. */
+/* The verdict. A refusal writes its reason into [p, end], where end is the last writable
+ * byte, and p == end means no text. The wrapper below records or clears the reason. */
 static int i_dart_node_core_schema_verdict(i_DartNodeCore *c, uint32_t peer, uint16_t topic_index,
                                            int peer_is_pub, uint64_t hash, DartBytes wire,
                                            char *p, char *end){
     const DartSchema *ours = (topic_index < c->n_topics) ? c->chan_compiled[topic_index] : NULL;
-    int peer_has = hash != 0;   /* the peer's schema, from its detail response */
+    int peer_has = hash != 0;
     if (peer_is_pub){                                   /* their publish side: we would read */
-        if (!ours){                                     /* generic reader: accept, decode with theirs */
+        if (!ours){                                     /* a generic reader decodes with theirs */
             i_dart_node_core_peer_schema_set(c, peer, topic_index,
                 peer_has ? i_dart_node_core_intern(c, hash, wire) : NULL);
             return 1;
         }
-        if (!peer_has){                                 /* typed reader refuses an untyped writer */
+        if (!peer_has){                                 /* a typed reader refuses untyped */
             p = i_dart_event_append_str(p, end, "their writer has no schema, our typed reader refuses");
             *p = '\0'; return 0;
         }
-        if (hash == dart_schema_hash(ours)){            /* identical schema: our own view works */
+        if (hash == dart_schema_hash(ours)){            /* identical: our own view works */
             i_dart_node_core_peer_schema_set(c, peer, topic_index, i_DART_NODE_SCHEMA_OURS);
             return 1;
         }
-        {   DartSchema *pub = i_dart_node_core_intern(c, hash, wire);   /* need the wire to verify */
+        {   DartSchema *pub = i_dart_node_core_intern(c, hash, wire);   /* the wire verifies it */
             DartSchema *view;
             if (!pub){
                 p = i_dart_node_core_intern_why(c, wire, p, end);
@@ -1368,7 +1321,7 @@ static int i_dart_node_core_schema_verdict(i_DartNodeCore *c, uint32_t peer, uin
         }
     } else {                                            /* their subscribe side: we would write */
         if (!peer_has) return 1;                        /* a generic reader takes anything */
-        if (!ours){                                     /* typed reader refuses our raw topic */
+        if (!ours){                                     /* a typed reader refuses our raw topic */
             p = i_dart_event_append_str(p, end, "their reader is typed, our topic has no schema");
             *p = '\0'; return 0;
         }
@@ -1400,22 +1353,16 @@ int i_dart_node_core_schema_check(i_DartNodeCore *c, uint32_t peer, uint16_t top
 #endif
 }
 
-/* (Re)build our discovery OVERLAY (frag size + OOB host + interest) from the core's
-   current fields. The codec lives in the transport core; the OOB fields default to 0 in a
-   non-SHM build. The node NAME is not here: the runtime hands it to discovery directly. */
+/* Rebuilds our overlay from the core's fields. The whole announce must fit one datagram,
+   else the bootstrap form goes out and peers page the interest. See spec/interest.md. */
 uint16_t i_dart_node_core_build_meta(i_DartNodeCore *c){
     uint16_t need = dart_transport_meta_size(c->transport);
-    /* the ANNOUNCE BUDGET: the whole announce datagram (discovery framing + its locator/
-       name section + this overlay) must fit one un-fragmented datagram, so no receiver
-       ever depends on IP reassembly (lwIP commonly cannot). Over budget -> the bootstrap
-       form: INTEREST_EXTERNAL set, no interest inlined, peers pull the identical blob
-       over the uDTL interest paging (i_dart_node_core_interest_respond). */
     int external = ((size_t)DART_DISCOVERY_META_OFF + DART_DISCOVERY_DISC_MAX + need
                     > (size_t)DART_DGRAM_MAX);
     if (external) need = dart_transport_meta_bootstrap_size();
-    if (need > c->meta_cap){   /* (re)size the blob buffer to the exact content */
+    if (need > c->meta_cap){   /* size the blob buffer to the exact content */
         uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->meta_buf, need);
-        if (!nb) return c->meta_len;   /* OOM: keep the previous blob (stale but consistent) */
+        if (!nb) return c->meta_len;   /* OOM: keep the previous blob, stale but consistent */
         c->meta_buf = nb; c->meta_cap = need;
     }
     c->meta_len = dart_transport_meta_build(c->transport, c->meta_buf, c->meta_cap,
@@ -1427,26 +1374,13 @@ DartBytes i_dart_node_core_meta(i_DartNodeCore *c){
     return dart_bytes(c->meta_buf, c->meta_len);
 }
 
-/* Answer a peer's DETAIL_REQ: validate kind + domain, then build the response (the codec
-   is dart_transport_detail_* in the transport core) into the core's grown scratch buffer.
-   Stateless: a pure read of topic + schema state, idempotent under duplicate requests.
-   Returns the response bytes to send to the request's source, or {NULL,0} when not
-   answerable (malformed, wrong domain, no alloc hook, or OOM: the requester just
-   re-asks). An all-skipped response (header only) is still sent: it tells the requester
-   those indices are not advertised at our current version. */
+/* Answers a DETAIL_REQ into the core's grown scratch. One page per response, so it never
+   IP fragments. A header only response still tells the requester the indices are gone. */
 DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req){
     size_t need, len;
     if (!c || !c->alloc || !c->discovery) return dart_bytes(NULL, 0);
     if (dart_detail_kind(req) != DART_DETAIL_REQ || dart_detail_domain(req) != domain)
         return dart_bytes(NULL, 0);
-    /* resp_size already returns ONE page: dart_transport_detail_respond truncates the
-       response at a single un-fragmented datagram (DART_DGRAM_MAX) and the requester pages
-       the remainder, reply-clocked (a page's arrival re-arms the next request at once; the
-       periodic rearm is only the lost-datagram fallback). This is why a big-topology peer
-       must NOT be answered in one multi-KB blob: that blob IP-fragments, and a peer whose
-       OS or RX buffer cannot reassemble it drops the WHOLE thing, so those entries could
-       never resolve while single (one-at-a-time) requests still worked. A lone entry larger
-       than a datagram still rides its own page, so a big schema can never wedge paging. */
     need = dart_transport_detail_resp_size(c->transport, c->chan_schemas, req);
     if (!need) return dart_bytes(NULL, 0);
     if (need > c->detail_cap){
@@ -1461,9 +1395,8 @@ DartBytes i_dart_node_core_detail_respond(i_DartNodeCore *c, uint16_t domain, Da
 }
 
 #ifdef DART_SHM
-/* a peer can receive our out-of-band (SHM) payload iff we are OOB-capable, it
- * advertised an OOB host in its meta blob, and that host equals ours (same kernel).
- * Set the transport's per-peer flag. The core knows nothing of SHM beyond this. */
+/* A peer can receive our shared memory payload iff we are capable, it advertised a host
+ * id, and that host equals ours. The core knows nothing of SHM beyond this. */
 static void i_dart_node_core_set_peer_oob(i_DartNodeCore *c, uint32_t id, DartBytes meta){
     uint8_t host[16];
     int oob = c->oob_capable && dart_meta_shm(meta, host) &&
@@ -1474,7 +1407,7 @@ static void i_dart_node_core_set_peer_oob(i_DartNodeCore *c, uint32_t id, DartBy
 #define i_dart_node_core_set_peer_oob(c, id, meta) ((void)0)
 #endif
 
-/* fire an info peer event (PEER_UP / PEER_DOWN). */
+/* fires PEER_UP or PEER_DOWN */
 static void i_dart_node_core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_t id,
                             const DartDiscoveryAddr *addr){
     DartEvent ev;
@@ -1485,7 +1418,7 @@ static void i_dart_node_core_fire(i_DartNodeCore *c, DartEventKind kind, uint32_
     c->on_event(&ev);
 }
 
-/* fire a DART_ERROR event (err = which). too_big carries the OOM/meta-too-big byte count. */
+/* fires a DART_ERROR. too_big carries the OOM or meta too big byte count */
 static void i_dart_node_core_fire_error(i_DartNodeCore *c, DartErrorKind err, uint32_t id,
                             const DartDiscoveryAddr *addr, uint64_t too_big){
     DartEvent ev;
@@ -1496,11 +1429,8 @@ static void i_dart_node_core_fire_error(i_DartNodeCore *c, DartErrorKind err, ui
     c->on_event(&ev);
 }
 
-/* fired whenever a peer's interest list is (re)applied to the transport: reports how
- * many topics now flow each way, so an app/example can watch a connection form. Every
- * reflected-interest change funnels through here (inline apply, external assembly,
- * fresh detail verdicts re-applying), so this is also where the peer's interest EPOCH
- * bumps -- the observer cache key -- and it must bump even with no event handler. */
+/* Every reflected interest change funnels through here, so this is also where the peer's
+ * interest epoch bumps. It must bump even with no event handler. */
 static void i_dart_node_core_fire_interest(i_DartNodeCore *c, uint32_t id){
     DartEvent ev; uint16_t publish_to = 0, receive_from = 0;
     {   i_DartNodePeerExtra *ex = c->discovery
@@ -1521,17 +1451,13 @@ static void i_dart_node_core_fire_interest(i_DartNodeCore *c, uint32_t id){
     c->on_event(&ev);
 }
 
-/* the peer's transport-lifecycle state lives in the discovery peer's user scratch; the
- * node core keeps no table of its own. NULL only before discovery is bound (no events yet). */
+/* the peer's lifecycle state in the discovery scratch. NULL only before discovery is bound */
 static i_DartNodePeerExtra *i_dart_node_core_peer_extra(i_DartNodeCore *c, uint32_t id){
     return (i_DartNodePeerExtra*)dart_discovery_peer_user(c->discovery, id);
 }
 
-/* The peer's AUTHORITATIVE interest blob, wherever it lives: the announce's inline
- * section, or the assembled external fetch (only at the version the blob advertises),
- * or {NULL,0} while an external fetch is still in flight -- callers already treat a
- * missing blob as "interest unknown", which is exactly that state. The ONE read point,
- * so inline and external peers run identical apply/wants/unresolved logic. */
+/* The one read point for a peer's interest: the inline section, or the assembled external
+ * blob at the advertised version, or {NULL,0} while a fetch is in flight. */
 static DartBytes i_dart_node_core_interest_of(i_DartNodePeerExtra *ex, DartBytes meta,
                             uint32_t meta_version){
     if (!meta.data) return dart_bytes(NULL, 0);
@@ -1541,10 +1467,8 @@ static DartBytes i_dart_node_core_interest_of(i_DartNodePeerExtra *ex, DartBytes
     return dart_bytes(NULL, 0);
 }
 
-/* An external-interest peer whose blob we have not assembled at its current version:
- * queue an INTEREST_REQ (the runtime drains it with the detail requests). The
- * version dedup here is what makes a steady-state announce free: an already-assembled
- * version queues nothing. */
+/* Queues an INTEREST_REQ for an external peer whose blob is not assembled at its current
+ * version. The version dedup makes a steady state announce free. */
 static void i_dart_node_core_interest_check(i_DartNodeCore *c, i_DartNodePeerExtra *ex,
                             DartBytes meta, uint32_t meta_version){
     if (!ex || !meta.data || !dart_meta_interest_external(meta)) return;
@@ -1553,10 +1477,8 @@ static void i_dart_node_core_interest_check(i_DartNodeCore *c, i_DartNodePeerExt
     c->detail_due_any = 1;
 }
 
-/* After an interest apply: if unverified candidates remain (hash overlap, no verdict
-   yet), queue a DETAIL_REQ for the runtime to send (i_dart_node_core_detail_req_next).
-   Runs on EVERY apply, so a lost request or response heals on the peer's next announce:
-   the pending state itself is the retry state. */
+/* After an apply: queue a DETAIL_REQ while unverified candidates remain. Runs on every
+   apply, so the pending state is the retry state and a lost datagram heals. */
 static void i_dart_node_core_detail_check(i_DartNodeCore *c, i_DartNodePeerExtra *ex,
                             uint32_t id, DartBytes interest){
     DartDetailWant probe;
@@ -1575,14 +1497,14 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
     uint16_t frag = dart_meta_frag(meta);
     uint32_t meta_version = 0;
     DartBytes interest;
-    if (!ex) return;                                  /* discovery not bound / no scratch */
-    dart_discovery_peer_meta(c->discovery, id, &meta_version);   /* version of the blob we hold */
+    if (!ex) return;                                  /* discovery not bound */
+    dart_discovery_peer_meta(c->discovery, id, &meta_version);
     interest = i_dart_node_core_interest_of(ex, meta, meta_version);
-    if (!ex->added){                                  /* brand-new peer: wire it into the transport */
-        i_dart_node_core_peer_schema_clear(c, id);    /* its id may be recycled: no stale bindings */
+    if (!ex->added){                                  /* a new peer: wire it into the transport */
+        i_dart_node_core_peer_schema_clear(c, id);    /* a recycled id: no stale bindings */
         i_dart_reflect_free(c, &ex->refl);
         i_dart_node_core_schema_why_clear(c, id);
-        dart_transport_peer_add(c->transport, id, frag);          /* blob carries frag + pub/sub interest */
+        dart_transport_peer_add(c->transport, id, frag);
         ex->added = 1; ex->dormant = 0; ex->detail_due = 0;
         if (addr) i_dart_reflect_format_addr(&ex->refl, addr);
         i_dart_node_core_mesh_bump(c);
@@ -1591,7 +1513,7 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
         if (interest.data){ dart_transport_apply_peer_interest(c->transport, id, interest);
                        i_dart_node_core_fire_interest(c, id);
                        i_dart_node_core_detail_check(c, ex, id, interest); }
-    } else {                                          /* known peer: addr/interest update */
+    } else {                                          /* a known peer: an update */
         dart_transport_peer_set_frag(c->transport, id, frag);
         i_dart_node_core_set_peer_oob(c, id, meta);
         if (interest.data){ dart_transport_apply_peer_interest(c->transport, id, interest);
@@ -1599,19 +1521,16 @@ static void i_dart_node_core_peer_up(i_DartNodeCore *c, uint32_t id, const DartD
                        i_dart_node_core_detail_check(c, ex, id, interest); }
         if (ex->dormant){    /* a DROPPED peer's same incarnation returned: resume */
             ex->dormant = 0;
-            dart_transport_peer_resume(c->transport, id);   /* keeps reader position; writer fills any gap */
+            dart_transport_peer_resume(c->transport, id);
             i_dart_node_core_mesh_bump(c);
             i_dart_node_core_fire(c, DART_PEER_UP, id, addr);
         }
     }
-    i_dart_node_core_interest_check(c, ex, meta, meta_version);   /* external + stale: pull it */
+    i_dart_node_core_interest_check(c, ex, meta, meta_version);   /* external and stale: pull it */
 }
 
-/* Ingest a peer's DETAIL_RESP (routed here by the runtime off the data socket): validate
-   kind + domain, cache the verdicts, then re-apply the peer's CURRENT interest so the new
-   verdicts form their matches exactly as a fresh announce would (proxies, catch-up
-   replay, PEER_INTEREST event). A paged response leaves candidates pending: re-queue the
-   request for the remainder. Idempotent under duplicate/crossing responses. */
+/* Ingests a DETAIL_RESP: caches the verdicts, then re applies the peer's current interest
+   so they form their matches exactly as a fresh announce would. Idempotent. */
 void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
                             DartBytes resp){
     i_DartNodePeerExtra *ex;
@@ -1620,16 +1539,13 @@ void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t
         return;
     ex = i_dart_node_core_peer_extra(c, peer);
     if (!ex || !ex->added) return;
-    {   /* a response older than the blob we hold may describe a binding the peer has
-           since REBOUND (topic reuse): refuse it rather than cache a stale verdict; the
-           pending state re-asks and the fresh answer carries the current version.
-           (Bindings were immutable per entry before rebinds existed, which is why this
-           gate was never needed.) */
+    {   /* a response older than the blob we hold may describe a binding the peer has since
+           rebound: refuse it, the pending state re asks */
         uint32_t held = 0;
         dart_discovery_peer_meta(c->discovery, peer, &held);
         if (held && dart_detail_meta_version(resp) < held) return;
     }
-    {   /* every detail received feeds reflection (fetch_details only widens what we ask) */
+    {   /* every detail received feeds reflection */
         DartDetailIter it; DartDetail dd;
         memset(&it, 0, sizeof it);
         while (dart_detail_next(resp, &it, &dd)) i_dart_node_core_reflect_detail(c, ex, &dd);
@@ -1646,10 +1562,8 @@ void i_dart_node_core_apply_details(i_DartNodeCore *c, uint16_t domain, uint32_t
     i_dart_node_core_detail_check(c, ex, peer, interest);
 }
 
-/* Queue a DETAIL_REQ for every ACTIVE peer (and an INTEREST_REQ for every external
-   peer still unassembled): the runtime's periodic retry sweep, the lost-datagram
-   backstop for both cycles. Peers with nothing pending cost one wants() walk and
-   send nothing. */
+/* Queues a request for every active peer: the periodic retry sweep. A converged peer
+   costs one wants walk and sends nothing. */
 void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
     uint16_t s, n;
     if (!c || !c->discovery) return;
@@ -1668,10 +1582,8 @@ void i_dart_node_core_detail_rearm(i_DartNodeCore *c){
 
 int i_dart_node_core_detail_any(i_DartNodeCore *c){ return c ? c->detail_due_any : 0; }
 
-/* A uDTL request from `peer` named OUR blob version `version`: proof it applied our
- * announce at that version. Feeds the transport's rebind hold; when the advance releases
- * a held writer lane, the interest event re-fires (match counts changed) and the caller
- * invalidates its match memos. Returns 1 exactly then. */
+/* A request from peer named our blob version: proof it applied our announce at it. When
+ * the advance releases a held writer lane, the interest event re fires. */
 int i_dart_node_core_seen_version(i_DartNodeCore *c, uint32_t peer, uint32_t version){
     if (!c || !version) return 0;
     if (!dart_transport_peer_seen_version(c->transport, peer, version)) return 0;
@@ -1679,12 +1591,8 @@ int i_dart_node_core_seen_version(i_DartNodeCore *c, uint32_t peer, uint32_t ver
     return 1;
 }
 
-/* Unresolved candidates for one topic across active peers (see core.h). A peer counts
- * once while its interest is UNKNOWN: its blob has not arrived, or its external
- * interest fetch is still assembling (both self-heal: the blob and every fetch page
- * are single sub-MTU datagrams). Once known, it counts by its unresolved entries for
- * this topic. Dropped peers are skipped: they are not expected to answer, and waiting
- * on one would only ever time out. */
+/* A peer counts once while its interest is unknown (no blob yet, or a fetch in flight),
+ * else by its unresolved entries. Dropped peers are skipped, they will not answer. */
 int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
     uint16_t s, n; int cnt = 0;
     if (!c || !c->discovery) return 0;
@@ -1696,11 +1604,11 @@ int i_dart_node_core_topic_unresolved(i_DartNodeCore *c, uint16_t topic_index){
         if (v.liveness != DART_PEER_ACTIVE) continue;
         ex = (i_DartNodePeerExtra*)v.user;
         if (!ex || !ex->added) continue;
-        if (!v.meta.data){ cnt++; continue; }   /* announce heard, blob still being fetched */
+        if (!v.meta.data){ cnt++; continue; }   /* the blob is still being fetched */
         interest = i_dart_node_core_interest_of(ex, v.meta, v.meta_version);
         if (!interest.data){
-            if (dart_meta_interest_external(v.meta)) cnt++;   /* fetch in flight: resolving */
-            continue;                           /* else a blob with no interest: nothing to resolve */
+            if (dart_meta_interest_external(v.meta)) cnt++;   /* a fetch in flight: resolving */
+            continue;                           /* else no interest: nothing to resolve */
         }
         cnt += dart_transport_topic_unresolved(c->transport, topic_index, v.id, interest);
     }
@@ -1720,32 +1628,29 @@ void i_dart_node_core_topics_unresolved(i_DartNodeCore *c, uint16_t *counts, uin
         if (v.liveness != DART_PEER_ACTIVE) continue;
         ex = (i_DartNodePeerExtra*)v.user;
         if (!ex || !ex->added) continue;
-        if (!v.meta.data) all = 1;                        /* announce heard, blob still being fetched */
+        if (!v.meta.data) all = 1;                        /* the blob is still being fetched */
         else {
             interest = i_dart_node_core_interest_of(ex, v.meta, v.meta_version);
-            if (!interest.data && dart_meta_interest_external(v.meta)) all = 1;   /* fetch in flight */
+            if (!interest.data && dart_meta_interest_external(v.meta)) all = 1;   /* fetching */
         }
         if (all){   /* its interest is unknown, so it may nominate any topic */
             for (i=0;i<n;i++) if (counts[i] != 0xFFFFu) counts[i]++;
             continue;
         }
-        if (!interest.data) continue;                     /* a blob with no interest: nothing to resolve */
+        if (!interest.data) continue;                     /* no interest: nothing to resolve */
         dart_transport_peer_unresolved_fill(c->transport, v.id, interest, counts, n);
     }
 }
 
-/* Drain one queued uDTL request: INTEREST_REQs first (an unassembled interest gates
-   candidate discovery, so it outranks details), then DETAIL_REQs. Returns bytes (loop
-   until 0); a peer whose pending work emptied (or that dropped) just clears its flag.
-   Detail requests are capped at 128 wants: a bigger pending set converges over
-   successive request/response rounds (each response retires its indices from wants). */
+/* Drains one queued request: INTEREST_REQs first, since an unassembled interest gates
+   candidate discovery, then DETAIL_REQs, capped at 128 wants. Loop until 0. */
 size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
                             void *out, size_t cap, i_DartNodeDest *to){
     DartDetailWant wants[128];
     uint16_t s, n;
     if (!c || !c->discovery || cap < 24u) return 0;
     n = dart_discovery_max_peers(c->discovery);
-    for (s=0;s<n;s++){    /* interest pass: one INTEREST_REQ per due peer, cursor-driven */
+    for (s=0;s<n;s++){    /* the interest pass: one INTEREST_REQ per due peer, cursor driven */
         DartDiscoveryPeer v; i_DartNodePeerExtra *ex;
         uint32_t offset;
         if (!dart_discovery_peer_at(c->discovery, s, &v)) continue;
@@ -1753,7 +1658,7 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
         if (!ex || !ex->interest_due) continue;
         ex->interest_due = 0;
         if (!ex->added || v.liveness != DART_PEER_ACTIVE) continue;
-        if (!dart_meta_interest_external(v.meta)) continue;      /* flag cleared meanwhile */
+        if (!dart_meta_interest_external(v.meta)) continue;      /* the flag cleared meanwhile */
         if (ex->interest_version == v.meta_version) continue;    /* assembled meanwhile */
         offset = (ex->fetch_version == v.meta_version) ? ex->fetch_cursor : 0;
         if (!i_dart_node_core_resolve(c, v.id, to)) continue;
@@ -1787,12 +1692,8 @@ size_t i_dart_node_core_detail_req_next(i_DartNodeCore *c, uint16_t domain,
     return 0;
 }
 
-/* Answer a peer's INTEREST_REQ: build our current interest blob into the scratch
-   (after a page-header's worth of headroom) and return ONE page from the requested
-   offset. Stateless and idempotent, like the detail responder: the header is written
-   immediately before the chunk inside the scratch, so the page is returned zero-copy.
-   {NULL,0} when not answerable (malformed, wrong domain, or OOM: the requester
-   just re-asks). */
+/* Answers an INTEREST_REQ with one page of our interest blob, built into the scratch after
+   a header's worth of headroom so the page is returned without a copy. Stateless. */
 DartBytes i_dart_node_core_interest_respond(i_DartNodeCore *c, uint16_t domain, DartBytes req){
     uint32_t offset, total; size_t chunk, need, built;
     uint8_t *blob, *head;
@@ -1809,25 +1710,19 @@ DartBytes i_dart_node_core_interest_respond(i_DartNodeCore *c, uint16_t domain, 
     }
     blob  = c->detail_buf + DART_INTEREST_RESP_HEAD;
     built = dart_transport_build_interest(c->transport, blob, total);
-    if (built != total) return dart_bytes(NULL, 0);   /* size/build drifted: never serve garbage */
-    if (offset > total) offset = total;               /* clamp: a header-only page reports total */
+    if (built != total) return dart_bytes(NULL, 0);   /* drifted: never serve garbage */
+    if (offset > total) offset = total;               /* clamp: a header only page reports total */
     chunk = total - offset;
     if (chunk > (size_t)DART_DGRAM_MAX - DART_INTEREST_RESP_HEAD)
-        chunk = (size_t)DART_DGRAM_MAX - DART_INTEREST_RESP_HEAD;   /* one sub-datagram page */
-    head = blob + offset - DART_INTEREST_RESP_HEAD;   /* header right before the chunk (clobbers
-                                                         already-shipped bytes; rebuilt per request) */
+        chunk = (size_t)DART_DGRAM_MAX - DART_INTEREST_RESP_HEAD;   /* one sub datagram page */
+    head = blob + offset - DART_INTEREST_RESP_HEAD;   /* the header sits right before the chunk */
     dart_interest_resp_head(domain, dart_discovery_meta_version(c->discovery), total,
                             offset, (uint16_t)chunk, head, DART_INTEREST_RESP_HEAD);
     return dart_bytes(head, DART_INTEREST_RESP_HEAD + chunk);
 }
 
-/* Ingest one INTEREST_RESP page (routed here by the runtime off the data socket):
-   append it at the cursor, re-ask while incomplete (reply-clocked, the periodic sweep
-   is only the lost-datagram fallback), and on completion apply the assembled blob
-   exactly as an inline announce would (matches, PEER_INTEREST, detail cycle). The
-   version stamp drives everything: a duplicate of an assembled version is a no-op, a
-   stamp differing from the fetch in progress restarts the cursor (the peer's interest
-   changed mid-fetch). */
+/* Ingests one INTEREST_RESP page at the cursor, re asks while incomplete, and on completion
+   applies the blob as an inline announce would. A version change mid fetch restarts. */
 void i_dart_node_core_apply_interest_page(i_DartNodeCore *c, uint16_t domain, uint32_t peer,
                             DartBytes resp){
     i_DartNodePeerExtra *ex;
@@ -1837,15 +1732,15 @@ void i_dart_node_core_apply_interest_page(i_DartNodeCore *c, uint16_t domain, ui
     ex = i_dart_node_core_peer_extra(c, peer);
     if (!ex || !ex->added) return;
     if (!dart_interest_resp_parse(resp, &total, &offset, &chunk)) return;
-    if (total > dart_interest_max(0xFFFFu)) return;   /* absurd total: never a real blob */
+    if (total > dart_interest_max(0xFFFFu)) return;   /* an absurd total: never a real blob */
     resp_version = dart_detail_meta_version(resp);
-    if (ex->interest_buf && ex->interest_version == resp_version) return;   /* assembled: dup page */
-    if (ex->fetch_version != resp_version){           /* first page, or the version moved: restart */
+    if (ex->interest_buf && ex->interest_version == resp_version) return;   /* a dup page */
+    if (ex->fetch_version != resp_version){           /* first page, or the version moved */
         ex->fetch_version = resp_version;
         ex->fetch_cursor = 0; ex->fetch_len = total;
     }
-    if (total != ex->fetch_len){ ex->fetch_cursor = 0; ex->fetch_len = total; }  /* drifted: restart */
-    if (offset != ex->fetch_cursor){                  /* out-of-order/stale page: re-ask from cursor */
+    if (total != ex->fetch_len){ ex->fetch_cursor = 0; ex->fetch_len = total; }  /* drifted */
+    if (offset != ex->fetch_cursor){                  /* out of order: re ask from the cursor */
         ex->interest_due = 1; c->detail_due_any = 1;
         return;
     }
@@ -1858,35 +1753,34 @@ void i_dart_node_core_apply_interest_page(i_DartNodeCore *c, uint16_t domain, ui
     if (ex->fetch_cursor < total){
         if (chunk.len)                                /* progress: ask for the next page now */
             { ex->interest_due = 1; c->detail_due_any = 1; }
-        return;                                       /* an empty short page: the sweep re-asks */
+        return;                                       /* an empty short page: the sweep re asks */
     }
     ex->interest_version = resp_version;              /* assembled: the dedup that ends the cycle */
     ex->fetch_version = 0;
-    /* apply exactly as an inline announce would (idempotent; len is ex->fetch_len) */
     dart_transport_apply_peer_interest(c->transport, peer, dart_bytes(ex->interest_buf, total));
     i_dart_node_core_fire_interest(c, peer);
     i_dart_node_core_detail_check(c, ex, peer, dart_bytes(ex->interest_buf, total));
 }
 
 static void i_dart_node_core_peer_down(i_DartNodeCore *c, uint32_t id, DartDiscoveryDownReason reason){
-    i_DartNodePeerExtra *ex = i_dart_node_core_peer_extra(c, id);   /* discovery frees the slot AFTER this event */
+    i_DartNodePeerExtra *ex = i_dart_node_core_peer_extra(c, id);   /* freed after this event */
     if (reason == DART_DISCOVERY_DROP){
-        /* fell silent: keep transport state so a same-incarnation return resumes
-           losslessly; just stop flow-controlling it and tell the app once */
+        /* fell silent: keep the transport state for a same incarnation resume, drop the
+           peer from flow control and tell the app once */
         if (ex && ex->added && !ex->dormant){
             ex->dormant = 1;
             dart_transport_peer_dormant(c->transport, id);
             i_dart_node_core_mesh_bump(c);
             i_dart_node_core_fire(c, DART_PEER_DOWN, id, NULL);
         }
-    } else {   /* GONE: said BYE or its slot was reclaimed; free the transport state */
-        int notify = (ex && ex->added && !ex->dormant);   /* active->gone: app not yet told */
-        dart_transport_peer_remove(c->transport, id);   /* discovery zeroes the scratch on slot reuse */
+    } else {   /* GONE: free the transport state */
+        int notify = (ex && ex->added && !ex->dormant);   /* the app was not told yet */
+        dart_transport_peer_remove(c->transport, id);
         i_dart_node_core_peer_schema_clear(c, id);      /* the id may be reassigned */
         if (ex) i_dart_reflect_free(c, &ex->refl);
         i_dart_node_core_schema_why_clear(c, id);
         i_dart_node_core_mesh_bump(c);
-        if (ex && ex->interest_buf){                    /* retained external interest: hook memory */
+        if (ex && ex->interest_buf){                    /* the retained external interest */
             c->alloc(c->alloc_user, ex->interest_buf, 0);
             ex->interest_buf = NULL; ex->interest_cap = 0;
             ex->interest_version = 0; ex->fetch_version = 0;
@@ -1900,13 +1794,12 @@ static void i_dart_node_core_peer_refused(i_DartNodeCore *c, const DartDiscovery
     i_dart_node_core_fire_error(c, DART_E_PEER_REFUSED, 0, addr, 0);
 }
 
-/* The discovery core's on_event sink (cfg.user = this core): demux the generic
- * DartDiscoveryEvent into the lifecycle handlers above, which fire the app DartEvents. */
+/* The discovery core's event sink, demuxed into the lifecycle handlers above. */
 void i_dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
     i_DartNodeCore *c = (i_DartNodeCore*)ev->user;
     switch (ev->kind){
         case DART_DISCOVERY_PEER_UP:
-            i_dart_node_core_peer_up(c, ev->peer, &ev->addr, ev->meta);  /* name lives in discovery */
+            i_dart_node_core_peer_up(c, ev->peer, &ev->addr, ev->meta);
             break;
         case DART_DISCOVERY_PEER_DOWN:
             i_dart_node_core_peer_down(c, ev->peer, ev->reason);
@@ -1924,7 +1817,7 @@ void i_dart_node_core_on_disc_event(const DartDiscoveryEvent *ev){
 int i_dart_node_core_resolve(i_DartNodeCore *c, uint32_t to, i_DartNodeDest *out){
     DartDiscoveryAddr a;
     memset(out, 0, sizeof *out);
-    if (!dart_discovery_addr_of_id(c->discovery, to, &a)) return 0;   /* peer vanished */
+    if (!dart_discovery_addr_of_id(c->discovery, to, &a)) return 0;   /* the peer vanished */
     memcpy(out->ip, a.ip, 16);
     out->ip_len = a.ip_len;
     out->port   = a.port;
@@ -1937,7 +1830,7 @@ int i_dart_node_core_id_for_addr(i_DartNodeCore *c, const uint8_t ip[4], uint16_
 
 DartString i_dart_node_core_peer_name(i_DartNodeCore *c, uint32_t id){
     DartString name = dart_discovery_peer_name(c->discovery, id);
-    if (!name.data) return name;                          /* not a known peer: {NULL,0} */
+    if (!name.data) return name;                          /* not a known peer */
     if (name.len == 0) name = dart_cstr("unknown-peer");  /* known but unnamed */
     return name;
 }
@@ -1967,10 +1860,7 @@ uint32_t i_dart_node_peer_interest_epoch(const DartDiscoveryPeer *peer){
 int i_dart_node_peer_interest_next(const DartDiscoveryPeer *peer,
                                    DartInterestIter *it, DartTopicEntry *out){
     if (!peer || !peer->meta.data) return 0;
-    /* one read point for BOTH interest homes: the announce's inline section, or the
-       assembled external fetch (nothing while that fetch is still in flight, exactly
-       like a blob that has not arrived). Reflection (the entity fold), the patterns
-       authority check, and any app walk all resolve external peers through here. */
+    /* one read point for both interest homes, so every walk resolves external peers alike */
     return dart_interest_next(
         i_dart_node_core_interest_of((i_DartNodePeerExtra*)peer->user, peer->meta,
                                      peer->meta_version),

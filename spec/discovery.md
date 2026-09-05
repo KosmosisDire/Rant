@@ -29,7 +29,8 @@ The accept bound (the largest peer blob stored, first sized from our own topic c
 self heals. A bigger peer's announce, even one the OS truncated, fires
 `DART_E_PEER_META_TOO_BIG` internally. The node grows the bound and its receive buffers
 at the next poll and solicits a re announce. Per peer blobs are hook allocated at their
-actual length and reused across occupants.
+actual length and reused across occupants. The event carries the overlay when the
+datagram arrived whole and a NULL data pointer when the OS truncated it.
 
 Unicast discovery traffic leaves the DATA socket (`dart_discovery_set_tx_fd`). Group sends
 stay on the multicast socket. So each announce is identity plus return path in one
@@ -38,6 +39,35 @@ one, else the discovery port. A discovery only instance (no transport socket, su
 explorer's capture layer) binds its own unicast receive socket on an ephemeral port and
 advertises it, because sharing the discovery port with same host nodes handed unicast
 replies to an arbitrary socket.
+
+## Wire format
+
+Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the protocol
+version (`DART_DISCOVERY_PROTO_VERSION` = 5), a flags byte, the u16 domain and the
+sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
+the discovery section `[u16 data_port][u8 self_ip_len][self_ip][u8 name_len][name]`
+followed by the opaque overlay. A steady state announce carries meta_len 0 and only the
+version. The flags are BYE 0x01, REQ 0x02 (a solicit, recipients announce back now),
+RELAY_ME 0x04 and PROXIED 0x08. A proxied announce appends the relayer's uuid as a 16
+byte trailer after the blob, which meta_len excludes and parsers otherwise ignore. Version
+history: v3 added the versioned blob, v4 the relay flags, v5 observed sources. A datagram
+with another magic, version or domain is dropped, as is a malformed blob. The per peer
+overlay capacity defaults to `DART_DISCOVERY_META_MAX` (64) bytes and the name to
+`DART_DISCOVERY_NAME_MAX` (32).
+
+## Timing
+
+The first announce is phased by a hash of the uuid within one interval, so nodes do not
+announce in lockstep, and a solicit goes out at startup. Peer timeout sweeps run on the
+announce cadence, so detection lags by at most one interval. `dart_discovery_next_due_us`
+tells a driving loop when the next timer is due. The core defaults are a 3 s interval, a
+12 s peer timeout, a 2 min gone timeout and 32 peers (the node's default is 16). A BYE is
+sent three times (`DART_DISCOVERY_BYE_SENDS`), since one shot UDP may lose it and
+receivers dedup by uuid. The runtime drains a socket to empty on every pass, capped at
+2048 datagrams. One receive per poll would let a slow poller's backlog keep a dead peer
+alive. `dart_discovery_gather` re solicits four times a second until the peer set has been
+quiet for the asked time. Multicast loop stays on, since several instances on one host
+need it, and the uuid self filter drops the echoes.
 
 ## Peer lifecycle
 
@@ -58,7 +88,11 @@ the timeout. One helper fires PEER_DOWN then frees the slot for BYE, both evicti
 allocation eviction and GONE promotion.
 
 A new uuid announcing from an (ip, port) we already hold evicts the predecessor as GONE
-first: one socket is one process, so it is provably dead.
+first: one socket is one process, so it is provably dead. A port of 0 (a peer first seen
+through a blob less announce) is not an endpoint, so it never triggers the eviction, or
+several same host instances awaiting their blobs would evict each other. When a hook
+allocation for a bigger blob fails, the stale blob and version are kept and the
+advertised version stays ahead, so the re fetch path retries.
 
 Reflection respects the lifecycle. A DROPPED peer is still listed by
 `dart_node_peers_next` and its last known entities are served as a ghost view, but the
@@ -171,3 +205,5 @@ carry reliable data that outlives the introducer.
 
 The node name rides the announce blob once, never per message, capped at
 `DART_NODE_NAME_MAX` (32) bytes. `DartMsg.publisher_name` is a view into discovery state.
+A NULL or empty name becomes `node-` plus eight random hex digits, from the pid when
+there is no entropy source.

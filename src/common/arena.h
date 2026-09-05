@@ -1,10 +1,5 @@
-/* Bump allocator shared by the layers that pack sub-blocks into one caller-provided
- * arena (transport state, node). Measure mode (base==NULL): i_dart_bump_take returns NULL but
- * still advances offset, so the sizing pass and the build pass run the SAME code and
- * cannot drift. Build mode (base set): returns base + aligned offset, or sets oom and
- * returns NULL once the offset passes cap. static inline: no link symbol and no unused
- * warning in a layer that doesn't use it. The amalgamator emits this once per
- * implementation TU; the local #include is for standalone compilation of a layer. */
+/* Packs sub blocks into one arena. With base NULL it only measures, so the sizing pass
+ * and the build pass run the same code and cannot drift. */
 #ifndef DART_ARENA_H
 #define DART_ARENA_H
 
@@ -13,7 +8,7 @@
 
 typedef struct { uint8_t *base; size_t offset; size_t cap; int oom; } i_DartBump;
 
-/* round n up to the next multiple of align (a power of two): names the (x+15)&~15 idiom */
+/* align must be a power of two */
 static inline size_t i_dart_align_up(size_t n, size_t align){ return (n + (align - 1)) & ~(align - 1); }
 
 static inline void *i_dart_bump_take(i_DartBump *b, size_t n, size_t align){

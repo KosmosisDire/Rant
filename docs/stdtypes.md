@@ -124,6 +124,8 @@ this:
   comparisons are only as good as the hosts' clock sync. Never mix a `Timestamp` with the
   monotonic `DartMsg.recv_us`.
 - Quaternions are stored x, y, z, w, in that order.
+- `dart_quaternion_mul(a, b)` is the rotation a followed by b, the Hamilton product b times
+  a. `dart_color_from_hex` and `dart_color_to_hex` use 0xRRGGBBAA, the CSS order.
 - Matrices are row major `f32`.
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.

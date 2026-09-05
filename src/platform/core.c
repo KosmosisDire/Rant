@@ -1,9 +1,6 @@
-/* dart_plat: the Windows + POSIX implementation of the platform contract. This
- * is the only file in DART carrying an OS #ifdef. Port to a new platform by
- * adding a branch here (or a sibling file against dart_plat.h); BSD-socket
- * platforms are already covered. See dart_plat.h. */
+/* The Windows and POSIX implementation. The only file in DART with an OS ifdef. */
 
-/* feature-test macros must precede the first system header (POSIX only) */
+/* feature test macros must precede the first system header */
 #if !defined(_WIN32)
   #ifndef _POSIX_C_SOURCE
   #define _POSIX_C_SOURCE 200809L
@@ -15,7 +12,7 @@
 
 #include "core.h"
 #include <string.h>
-#include <stdlib.h>           /* malloc/realloc/free behind i_dart_plat_realloc */
+#include <stdlib.h>
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -24,12 +21,12 @@
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #include <windows.h>
-  #include <bcrypt.h>            /* BCryptGenRandom (CSPRNG) */
+  #include <bcrypt.h>            /* BCryptGenRandom */
   #include <mmsystem.h>          /* timeBeginPeriod */
   #ifndef PSAPI_VERSION
-  #define PSAPI_VERSION 2        /* GetProcessMemoryInfo from kernel32 (Win7+), no psapi.lib */
+  #define PSAPI_VERSION 2        /* GetProcessMemoryInfo from kernel32, no psapi.lib */
   #endif
-  #include <psapi.h>             /* i_dart_plat_proc_stats: working-set sizes */
+  #include <psapi.h>             /* GetProcessMemoryInfo */
   #ifdef _MSC_VER
     #pragma comment(lib, "ws2_32.lib")
     #pragma comment(lib, "bcrypt.lib")
@@ -45,12 +42,12 @@
   #include <netinet/in.h>
   #include <arpa/inet.h>
   #if !defined(ESP_PLATFORM)
-    #include <ifaddrs.h>         /* getifaddrs: enumerate local interfaces */
-    #include <net/if.h>          /* IFF_UP / IFF_LOOPBACK */
+    #include <ifaddrs.h>         /* getifaddrs */
+    #include <net/if.h>          /* IFF_UP and IFF_LOOPBACK */
   #endif
   #include <unistd.h>
   #if defined(ESP_PLATFORM)
-    #include <sys/poll.h>       /* the ESP (xtensa/riscv) newlib has no <poll.h>; poll() rides the VFS */
+    #include <sys/poll.h>       /* the ESP newlib has no poll.h */
   #else
     #include <poll.h>
   #endif
@@ -59,51 +56,49 @@
     #include <pthread.h>
     #if defined(ESP_PLATFORM)
       #include <freertos/FreeRTOS.h>
-      #include <freertos/task.h>   /* xTaskGetCurrentTaskHandle: a task id valid on ANY task */
+      #include <freertos/task.h>   /* xTaskGetCurrentTaskHandle */
     #endif
   #endif
   #include <fcntl.h>
   #include <errno.h>
   #include <stdio.h>
-  #include <stdlib.h>           /* arc4random_buf on macOS/BSD */
+  #include <stdlib.h>           /* arc4random_buf */
   #ifdef DART_PROC_STATS
     #if defined(ESP_PLATFORM)
-      #include <esp_heap_caps.h>  /* heap_caps_get_*: the ESP proc-stats source */
+      #include <esp_heap_caps.h>  /* heap_caps_get_* */
       #include <freertos/FreeRTOS.h>
-      #include <freertos/task.h>  /* optional run-time task statistics */
+      #include <freertos/task.h>  /* uxTaskGetSystemState */
     #else
-      #include <sys/resource.h>   /* getrusage: i_dart_plat_proc_stats */
+      #include <sys/resource.h>   /* getrusage */
       #if defined(__APPLE__)
-        #include <mach/mach.h>    /* task_info: current resident size */
+        #include <mach/mach.h>    /* task_info */
       #endif
     #endif
   #endif
   #if defined(ESP_PLATFORM)
-    #include <esp_random.h>     /* esp_fill_random (HW RNG) */
-    #include <esp_netif.h>      /* esp_netif_get_ip_info: the interface-IP enumeration */
+    #include <esp_random.h>     /* esp_fill_random */
+    #include <esp_netif.h>      /* esp_netif_get_ip_info */
     #if defined(__has_include) && __has_include(<esp_mac.h>)
-      #include <esp_mac.h>      /* IDF 5: esp_efuse_mac_get_default (the host identity) */
+      #include <esp_mac.h>      /* IDF 5: esp_efuse_mac_get_default */
     #else
-      #include <esp_system.h>   /* IDF 4: same declaration lives here */
+      #include <esp_system.h>   /* IDF 4: the same declaration */
     #endif
   #elif defined(__linux__)
-    #include <sys/random.h>     /* getrandom(2) */
+    #include <sys/random.h>     /* getrandom */
   #endif
   typedef socklen_t i_DartSocklen;
   #define DART__FD(s) ((int)(s))
 #endif
 
-/* ----------------------------------------------------------------- lifecycle */
+/* lifecycle */
 #ifdef _WIN32
-static LARGE_INTEGER i_dart_plat_qpc_freq;   /* set once in startup; lazy fallback */
+static LARGE_INTEGER i_dart_plat_qpc_freq;   /* set in startup, lazily elsewhere */
 int i_dart_plat_startup(void){
     WSADATA w;
-    /* WSAStartup and timeBeginPeriod are both refcounted by the OS per process,
-       so unconditional matched calls are safe from any thread (a hand-rolled
-       counter here would be the one racy global in DART). */
+    /* both calls are refcounted by the OS per process, so matched calls need no counter here */
     if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
   #ifndef DART_NO_HIGHRES_TIMER
-    timeBeginPeriod(1);  /* 1ms timer: default ~15.6ms throttles sub ACK/repair rate */
+    timeBeginPeriod(1);  /* the default 15.6 ms tick throttles ACK and repair rates */
   #endif
     QueryPerformanceFrequency(&i_dart_plat_qpc_freq);
     return 1;
@@ -119,7 +114,7 @@ int  i_dart_plat_startup(void){ return 1; }
 void i_dart_plat_cleanup(void){}
 #endif
 
-/* --------------------------------------------------------------------- clock */
+/* clock */
 uint64_t i_dart_plat_now_us(void){
 #ifdef _WIN32
     LARGE_INTEGER c;
@@ -132,31 +127,31 @@ uint64_t i_dart_plat_now_us(void){
 #endif
 }
 
-/* ------------------------------------------------------------ entropy / host */
+/* entropy and host */
 int i_dart_plat_random(void *buf, size_t len){
 #if defined(_WIN32)
-    /* NULL handle selects the system-preferred RNG. 0 == SUCCESS. */
+    /* a NULL handle selects the system preferred RNG, 0 is success */
     return BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
 #elif defined(ESP_PLATFORM)
-    esp_fill_random(buf, len);       /* HW RNG, true random while RF is up */
+    esp_fill_random(buf, len);       /* hardware RNG, true random while RF is up */
     return 1;
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
       defined(__NetBSD__) || defined(__DragonFly__)
-    arc4random_buf(buf, len);        /* CSPRNG, cannot fail */
+    arc4random_buf(buf, len);        /* cannot fail */
     return 1;
 #else
     {
         uint8_t *p = (uint8_t*)buf; size_t got = 0;
   #if defined(__linux__)
-        while (got < len){           /* getrandom(2) */
+        while (got < len){
             ssize_t r = getrandom(p + got, len - got, 0);
             if (r < 0){ if (errno == EINTR) continue; break; }
             got += (size_t)r;
         }
         if (got == len) return 1;
   #endif
-        {                            /* fallback: /dev/urandom */
+        {
             FILE *f = fopen("/dev/urandom", "rb");
             if (f){
                 size_t n = fread(p + got, 1, len - got, f);
@@ -173,9 +168,8 @@ size_t i_dart_plat_hostname(char *buf, size_t cap){
     if (!buf || cap == 0) return 0;
     buf[0] = 0;
 #if defined(ESP_PLATFORM)
-    /* lwIP has no gethostname (a device is not a host with a name), so identify the
-       chip by its factory MAC: unique per device and readable before any interface
-       comes up, which is exactly what the UUID fallback wants. */
+    /* lwIP has no gethostname. The factory MAC is unique and readable before any
+       interface is up, which is what the uuid fallback wants. */
     {   static const char hex[] = "0123456789abcdef";
         uint8_t mac[6]; size_t i;
         if (cap >= 17 && esp_efuse_mac_get_default(mac) == ESP_OK){
@@ -202,7 +196,7 @@ uint64_t i_dart_plat_pid(void){
 #endif
 }
 
-/* ------------------------------------------------------- process usage / wall */
+/* process usage and wall clock */
 #ifdef DART_PROC_STATS
 int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
                            int *have_cpu){
@@ -212,7 +206,7 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
     if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kern, &user)) return 0;
     uk.LowPart = kern.dwLowDateTime; uk.HighPart = kern.dwHighDateTime;
     uu.LowPart = user.dwLowDateTime; uu.HighPart = user.dwHighDateTime;
-    if (cpu_us) *cpu_us = (uk.QuadPart + uu.QuadPart) / 10u;   /* 100ns -> us */
+    if (cpu_us) *cpu_us = (uk.QuadPart + uu.QuadPart) / 10u;   /* 100 ns to us */
     if (have_cpu) *have_cpu = 1;
     pmc.cb = sizeof pmc;
     if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return 0;
@@ -220,11 +214,8 @@ int i_dart_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak
     if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)pmc.PeakWorkingSetSize;
     return 1;
 #elif defined(ESP_PLATFORM)
-    /* One firmware image is the whole "process": the RSS analog is heap in use
-       (total - free), and peak RSS is the free-heap low-water mark (total - the
-       minimum free ever). There is no per-process CPU accounting without FreeRTOS
-       run-time stats. When ESP Timer-backed FreeRTOS run-time stats are enabled,
-       accumulate non-idle task time across its cores; otherwise omit CPU entirely. */
+    /* The firmware image is the process: RSS is heap in use and peak RSS is the free heap
+       low water mark. CPU needs the ESP timer run time stats, else it is omitted. */
     {   size_t total   = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
         size_t freeb   = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
         size_t minfree = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
@@ -269,7 +260,7 @@ esp_cpu_done:
         if (have_cpu) *have_cpu = 1;
   #if defined(__APPLE__)
         if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss;         /* bytes on macOS */
-        if (rss_bytes){                                                       /* current: task_info */
+        if (rss_bytes){   /* current: task_info */
             struct mach_task_basic_info info; mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
             *rss_bytes = (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
                                     (task_info_t)&info, &cnt) == KERN_SUCCESS)
@@ -277,7 +268,7 @@ esp_cpu_done:
         }
   #elif defined(__linux__)
         if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss * 1024u; /* KB on Linux */
-        if (rss_bytes){                                                       /* current: statm field 2 */
+        if (rss_bytes){   /* current: statm field 2 */
             FILE *f = fopen("/proc/self/statm", "rb");
             unsigned long total_pages = 0, res_pages = 0;
             *rss_bytes = 0;
@@ -289,7 +280,7 @@ esp_cpu_done:
         }
   #else
         if (peak_rss_bytes) *peak_rss_bytes = (uint64_t)ru.ru_maxrss * 1024u; /* KB on the BSDs */
-        if (rss_bytes)      *rss_bytes      = 0;                              /* no cheap current-RSS read */
+        if (rss_bytes)      *rss_bytes      = 0;   /* no cheap current RSS read */
   #endif
         return 1;
     }
@@ -317,21 +308,19 @@ uint64_t i_dart_plat_wall_us(void){
     FILETIME ft; ULARGE_INTEGER u;
     GetSystemTimeAsFileTime(&ft);
     u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
-    return (u.QuadPart - 116444736000000000ull) / 10u;   /* FILETIME epoch -> Unix, 100ns -> us */
+    return (u.QuadPart - 116444736000000000ull) / 10u;   /* FILETIME epoch to Unix, 100 ns to us */
 #else
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 #endif
 }
 
-/* The one heap dependency, kept behind the platform layer so the node holds no
- * <stdlib.h>: ptr NULL = allocate, size 0 = free (returns NULL), else realloc. */
 void *i_dart_plat_realloc(void *ptr, size_t size){
     if (size == 0){ free(ptr); return NULL; }
     return realloc(ptr, size);
 }
 
-/* --------------------------------------------------------------- UDP sockets */
+/* UDP sockets */
 i_DartSock i_dart_plat_udp_open(void){
 #ifdef _WIN32
     SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -362,7 +351,7 @@ int i_dart_plat_bind(i_DartSock s, uint32_t if_naddr, uint16_t port, int reuse){
     }
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
-    a.sin_addr.s_addr = if_naddr;            /* 0 == INADDR_ANY */
+    a.sin_addr.s_addr = if_naddr;
     a.sin_port = htons(port);
     return bind(DART__FD(s), (struct sockaddr*)&a, sizeof a) == 0;
 }
@@ -399,7 +388,7 @@ void i_dart_plat_suppress_connreset(i_DartSock s){
 #endif
 }
 
-/* ----------------------------------------------------------------- multicast */
+/* multicast */
 void i_dart_plat_mcast_setif(i_DartSock s, uint32_t if_naddr){
     setsockopt(DART__FD(s), IPPROTO_IP, IP_MULTICAST_IF, (const char*)&if_naddr, sizeof if_naddr);
 }
@@ -418,7 +407,7 @@ int i_dart_plat_mcast_join(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr
     return setsockopt(DART__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
                       (const char*)&mr, sizeof mr) == 0;
 }
-/* Best-effort: an interface that went away may already have dropped its membership. */
+/* Best effort. An interface that went away may have dropped its membership already. */
 void i_dart_plat_mcast_leave(i_DartSock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
     mr.imr_multiaddr.s_addr = group_naddr;
@@ -426,7 +415,7 @@ void i_dart_plat_mcast_leave(i_DartSock s, uint32_t group_naddr, uint32_t if_nad
     setsockopt(DART__FD(s), IPPROTO_IP, IP_DROP_MEMBERSHIP, (const char*)&mr, sizeof mr);
 }
 
-/* --------------------------------------------------------------- datagram IO */
+/* datagram IO */
 int i_dart_plat_send(i_DartSock s, const void *buf, size_t len,
                    const uint8_t ip[4], uint16_t port){
     struct sockaddr_in d;
@@ -446,10 +435,8 @@ int i_dart_plat_recv(i_DartSock s, void *buf, size_t cap,
     n = (int)recvfrom(DART__FD(s), (char*)buf, (int)cap, 0,
                       (struct sockaddr*)&src, &sl);
 #ifdef _WIN32
-    /* an oversized datagram: Windows fills the buffer, then fails with WSAEMSGSIZE;
-       POSIX silently delivers the prefix. Deliver the prefix here too: discovery reads
-       the intact fixed header (which carries the blob's true length) and turns the
-       truncation into a grow-and-refetch instead of a hard recv error. */
+    /* Windows fails an oversized datagram with WSAEMSGSIZE after filling the buffer. POSIX
+       delivers the prefix. Deliver it here too, so discovery can grow and refetch. */
     if (n < 0 && WSAGetLastError() == WSAEMSGSIZE) n = (int)cap;
 #endif
     if (n > 0){
@@ -476,7 +463,7 @@ int i_dart_plat_last_socket_error(void){
 }
 
 int i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
-    /* callers poll one or two sockets; cap the on-stack translation buffer */
+    /* callers poll a few sockets, so the translation buffer lives on the stack */
 #ifdef _WIN32
     WSAPOLLFD p[8];
 #else
@@ -500,7 +487,7 @@ int i_dart_plat_poll(i_DartPollfd *fds, int n, int timeout_ms){
     return r;
 }
 
-/* ----------------------------------------------------------- address helpers */
+/* address helpers */
 uint32_t i_dart_plat_parse_ip(const char *dotted){
     return dotted ? (uint32_t)inet_addr(dotted) : 0;
 }
@@ -532,8 +519,7 @@ uint32_t i_dart_plat_route_src(uint32_t dst_naddr, uint16_t port){
 }
 
 #if defined(_WIN32)
-/* SIO_GET_INTERFACE_LIST flag values (mirrors the BSD IFF_* bits) if the SDK's
- * headers didn't define them for this WSAIoctl. */
+/* The SIO_GET_INTERFACE_LIST flag bits, when the SDK headers do not define them. */
 #ifndef IFF_UP
 #define IFF_UP 0x00000001
 #endif
@@ -563,9 +549,8 @@ int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     return n;
 }
 #elif defined(ESP_PLATFORM)
-/* lwIP has no getifaddrs, so name the netifs the IDF defines. Requires WiFi/Ethernet
- * already up (the node opens after); an ESP that is both STA and SoftAP reports both,
- * and discovery then joins and announces on each. */
+/* lwIP has no getifaddrs, so name the netifs the IDF defines. WiFi or Ethernet must be up
+ * before the node opens. */
 int i_dart_plat_local_ifaces(i_DartIface *out, int max){
     static const char *const keys[] = { "WIFI_STA_DEF", "ETH_DEF", "WIFI_AP_DEF" };
     int n = 0; unsigned i;
@@ -574,7 +559,7 @@ int i_dart_plat_local_ifaces(i_DartIface *out, int max){
         esp_netif_t *nif = esp_netif_get_handle_from_ifkey(keys[i]);
         esp_netif_ip_info_t info;
         if (nif && esp_netif_get_ip_info(nif, &info) == ESP_OK && info.ip.addr != 0){
-            out[n].addr = info.ip.addr;   /* esp_ip4_addr is network-order: our naddr convention */
+            out[n].addr = info.ip.addr;   /* esp_ip4_addr is network order, our naddr */
             out[n].mask = info.netmask.addr;
             n++;
         }
@@ -601,10 +586,10 @@ int i_dart_plat_local_ifaces(i_DartIface *out, int max){
 }
 #endif
 
-/* ------------------------------------------------------------------- threads */
+/* threads */
 #ifdef DART_THREADS
 
-/* The opaque header blobs must fit the real OS types (C99: no _Static_assert). */
+/* The opaque blobs must fit the real OS types. C99 has no _Static_assert. */
 #define DART__FITS(name, real, blob) \
     typedef char name[(sizeof(real) <= sizeof(blob)) ? 1 : -1]
 
@@ -635,9 +620,8 @@ void i_dart_plat_thread_join(i_DartThread *t){
 }
 uint64_t i_dart_plat_thread_id(void){ return (uint64_t)GetCurrentThreadId(); }
 
-/* SRWLOCK over CRITICAL_SECTION: pointer-sized, pairs with condvars, and
-   deliberately non-recursive (the condvar contract requires it; the node's
-   reentrancy is an owner-id check above this layer). */
+/* SRWLOCK is pointer sized, pairs with condvars and is not recursive, which the condvar
+   contract needs. Node reentrancy is an owner id check above this layer. */
 void i_dart_plat_mutex_init   (i_DartMutex *m){ InitializeSRWLock((PSRWLOCK)m); }
 void i_dart_plat_mutex_destroy(i_DartMutex *m){ (void)m; }
 void i_dart_plat_mutex_lock   (i_DartMutex *m){ AcquireSRWLockExclusive((PSRWLOCK)m); }
@@ -646,8 +630,7 @@ void i_dart_plat_mutex_unlock (i_DartMutex *m){ ReleaseSRWLockExclusive((PSRWLOC
 void i_dart_plat_cond_init   (i_DartCond *c){ InitializeConditionVariable((PCONDITION_VARIABLE)c); }
 void i_dart_plat_cond_destroy(i_DartCond *c){ (void)c; }
 void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
-    /* 64-bit round-up: (0xFFFFFFFF + 999) would wrap in 32 bits and turn the
-       longest waits into 1 ms spins */
+    /* round up in 64 bits: 0xFFFFFFFF + 999 would wrap and make the longest waits 1 ms spins */
     DWORD ms = (DWORD)(((uint64_t)timeout_us + 999u) / 1000u);
     SleepConditionVariableSRW((PCONDITION_VARIABLE)c, (PSRWLOCK)m, ms ? ms : 1, 0);
 }
@@ -675,9 +658,8 @@ void i_dart_plat_thread_join(i_DartThread *t){
 }
 uint64_t i_dart_plat_thread_id(void){
 #if defined(ESP_PLATFORM)
-    /* pthread_self() ABORTS on ESP-IDF when called from a task not created by
-       pthread_create (e.g. the Arduino loopTask that drives poll). The task
-       handle is a unique per-task id valid on both native tasks and pthreads. */
+    /* pthread_self aborts on ESP-IDF from a task not made by pthread_create, like the
+       Arduino loopTask. The task handle is a unique id on any task. */
     return (uint64_t)(uintptr_t)xTaskGetCurrentTaskHandle();
 #else
     return (uint64_t)(uintptr_t)pthread_self();
@@ -691,7 +673,7 @@ void i_dart_plat_mutex_unlock (i_DartMutex *m){ pthread_mutex_unlock((pthread_mu
 
 void i_dart_plat_cond_init(i_DartCond *c){
 #if defined(__linux__)
-    /* wait on the monotonic clock so a wall-clock step cannot stretch a timeout */
+    /* the monotonic clock, so a wall clock step cannot stretch a timeout */
     pthread_condattr_t a;
     pthread_condattr_init(&a);
     pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
@@ -709,8 +691,8 @@ void i_dart_plat_cond_wait(i_DartCond *c, i_DartMutex *m, uint32_t timeout_us){
     rel.tv_nsec = (long)(timeout_us % 1000000u) * 1000L;
     pthread_cond_timedwait_relative_np((pthread_cond_t *)c, (pthread_mutex_t *)m, &rel);
 #else
-    /* Linux: monotonic (set at init). Elsewhere: realtime; a wall-clock jump can
-       cut the wait short, which the caller's predicate-plus-deadline loop absorbs. */
+    /* Linux waits on the monotonic clock set at init. Elsewhere a wall clock jump can cut
+       the wait short, which the caller's predicate loop absorbs. */
     struct timespec ts;
   #if defined(__linux__)
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -727,8 +709,7 @@ void i_dart_plat_cond_broadcast(i_DartCond *c){ pthread_cond_broadcast((pthread_
 
 #endif /* _WIN32 */
 
-/* Waker: platform-neutral over the socket helpers above. Bound to loopback and
-   connected to itself, so only its own 1-byte signals ever arrive. */
+/* Bound to loopback and connected to itself, so only its own signals ever arrive. */
 int i_dart_plat_waker_open(i_DartWaker *w){
     struct sockaddr_in a; i_DartSocklen al = sizeof a;
     w->fd = i_dart_plat_udp_open();
@@ -761,15 +742,14 @@ void i_dart_plat_waker_close(i_DartWaker *w){
 
 #endif /* DART_THREADS */
 
-/* ------------------------------------------------------------- shared memory */
+/* shared memory */
 #ifdef DART_SHM
 #ifndef _WIN32
-  #include <sys/mman.h>            /* shm_open/mmap; fcntl/unistd/stdlib already in */
-  #include <sys/stat.h>            /* fstat: a reader learns a segment's size from the OS */
+  #include <sys/mman.h>            /* shm_open and mmap */
+  #include <sys/stat.h>            /* fstat */
 #endif
 
-/* 128-bit non-cryptographic id from a byte string: two FNV-1a passes with distinct
- * seeds. Stable per input, enough to pre-filter same-host (attach is the real gate). */
+/* A 128 bit id from bytes, two FNV-1a passes with distinct seeds. Not cryptographic. */
 static void i_dart_plat_hash16(const void *data, size_t len, uint8_t out[16]){
     const uint8_t *p = (const uint8_t*)data; size_t i;
     uint64_t a = 14695981039346656037ull, b = 1099511628211ull;
@@ -782,7 +762,7 @@ static void i_dart_plat_hash16(const void *data, size_t len, uint8_t out[16]){
 
 void i_dart_plat_host_uuid(uint8_t out[16]){
 #if defined(__linux__)
-    FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars = a 128-bit id */
+    FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars, a 128 bit id */
     if (f){
         char hx[32]; size_t n = fread(hx, 1, sizeof hx, f); int i, ok = (n == 32);
         fclose(f);
@@ -817,7 +797,7 @@ void *i_dart_plat_shm_attach(const char *name, size_t *out_bytes, void **handle)
     HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
     void *base; MEMORY_BASIC_INFORMATION mbi;
     if (!h) return NULL;
-    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 0);   /* 0 = the whole section */
+    base = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 0);   /* 0 maps the whole section */
     if (!base){ CloseHandle(h); return NULL; }
     if (out_bytes) *out_bytes = VirtualQuery(base, &mbi, sizeof mbi) ? (size_t)mbi.RegionSize : 0;
     *handle = h;

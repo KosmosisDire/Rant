@@ -1,13 +1,9 @@
-/* Self-contained <stdint.h> for toolchains that ship none. The Wind River /
- * Yaskawa MotoPlus GCC 4.3 for i586 VxWorks predates GCC's freestanding
- * stdint.h (4.5+) and its curated libc omits it, so DART supplies its own on
- * the include path. Fixed for the i586 ILP32 target it builds for: char 8,
- * short 16, int 32, long 32, long long 64, pointer 32. Not part of the
- * amalgamation; pack.c only inlines quoted includes, never this <angle> one. */
+/* A stdint.h for toolchains that ship none, like the VxWorks GCC 4.3 for i586. It assumes
+ * ILP32 with a 64 bit long long and is never amalgamated. See spec/platform.md. */
 #ifndef STDINT_H_
 #define STDINT_H_
 
-/* 7.18.1.1 exact-width */
+/* 7.18.1.1 exact width */
 typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef short              int16_t;
@@ -17,7 +13,7 @@ typedef unsigned int       uint32_t;
 typedef long long          int64_t;
 typedef unsigned long long uint64_t;
 
-/* 7.18.1.2 minimum-width / 7.18.1.3 fastest-width: same as exact here */
+/* 7.18.1.2 least and 7.18.1.3 fast widths, the same as exact here */
 typedef int8_t   int_least8_t;    typedef uint8_t   uint_least8_t;
 typedef int16_t  int_least16_t;   typedef uint16_t  uint_least16_t;
 typedef int32_t  int_least32_t;   typedef uint32_t  uint_least32_t;
@@ -27,7 +23,7 @@ typedef int32_t  int_fast16_t;    typedef uint32_t  uint_fast16_t;
 typedef int32_t  int_fast32_t;    typedef uint32_t  uint_fast32_t;
 typedef int64_t  int_fast64_t;    typedef uint64_t  uint_fast64_t;
 
-/* 7.18.1.4 pointer-holding / 7.18.1.5 greatest-width */
+/* 7.18.1.4 pointer and 7.18.1.5 greatest width */
 #ifdef __LP64__
 typedef long           intptr_t;  typedef unsigned long      uintptr_t;
 #else
@@ -104,7 +100,7 @@ typedef int64_t        intmax_t;  typedef uint64_t           uintmax_t;
 #define WINT_MIN INT32_MIN
 #define WINT_MAX INT32_MAX
 
-/* 7.18.4 constant-expression macros */
+/* 7.18.4 constant macros */
 #define INT8_C(v)   (v)
 #define INT16_C(v)  (v)
 #define INT32_C(v)  (v)

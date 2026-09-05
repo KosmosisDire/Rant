@@ -20,8 +20,10 @@ no per allocation free is required. In static mode both intents bump and free is
 
 Freed blocks go to a reuse pool in both modes and never back to the backing heap, so
 steady state churn cannot fragment the system heap. Size classes are quarter power of two
-(waste at most 25%), exact size above 4 kB. The page allocator halves its request on
-failure for fragmented heaps.
+(waste at most 25%), exact size above 4 kB. Static mode sizes every block exactly, since
+the buffer cannot grow. A pooled block is reused only when it is within twice the ask, so
+a big block is not spent on a small one. The runaway guard counts pooled memory as held.
+The page allocator halves its request on failure for fragmented heaps.
 
 ## The copied pool rule
 
@@ -90,6 +92,10 @@ Rules from the footprint work:
 - Our own announce blob is allocated at `dart_transport_meta_size`, which mirrors
   `meta_build` byte for byte. Keep the two in sync.
 - Peer removal frees the lane's assembly buffers and bitmaps.
+- The per lane and per sample structs are laid out widest field first, so they carry no
+  padding. They are allocated per match and per history slot, so padding multiplies.
+- The lane pool caps at 65535 records, the u16 ticket. A further match is refused until
+  a lane frees, and the peer's next announce retries.
 
 ## Sends larger than the wire cap
 

@@ -45,17 +45,21 @@ id equals ours. A loopback address is not enough.
 The payload lives in shared-memory segments outside the arena. The OS maps them. See
 spec/allocation.md for sizes.
 
-There is one segment per size class. Class k holds chunks of
-`DART_SHM_CLASS_BASE << (k * DART_SHM_CLASS_SHIFT)` bytes. The defaults are 64K,
+There is one segment per topic and size class, and its chunk count is the topic's
+`keep_last`, so history slot i binds chunk i and no free list is needed. Class k holds
+chunks of `DART_SHM_CLASS_BASE << (k * DART_SHM_CLASS_SHIFT)` bytes. The defaults are 64K,
 256K, 1M, 4M, 16M, 64M, 256M. A publish takes the smallest class that fits. There is
 no size based fallback to UDP. A message larger than the wire cap is refused on both
 paths. The wire cap is 65535 times the fragment size.
 
-Segments are lazy. The node creates a class segment only when a same-host SHM reader
-exists and a publish needs that class. A node with no same-host reader maps nothing.
+Segments are lazy. The node creates a segment only when a same host SHM reader exists
+and a publish needs that topic and class. A node with no same host reader maps nothing.
 
-The low 3 bits of the segment id are the class. The reader derives the chunk size
-from the class and attaches the segment on first use.
+The low 3 bits of the segment id are the class and the next 16 bits are the topic index.
+The rest is a per node base with the pid folded in. The OS object name is `/dart.shm.`
+plus the id in hex, valid on POSIX and Windows. The reader attaches the segment on first
+use and reads its geometry from the header the writer stamped, after checking the magic,
+version and host id.
 
 ## Chunk lifecycle
 
@@ -125,5 +129,5 @@ cc  -std=c99 -DDART_NO_SHM -Idist app.c -o app  # SHM off
 | DART_SHM_CLASS_BASE | 64K | smallest chunk |
 | DART_SHM_CLASS_SHIFT | 2 | class growth ratio |
 | DART_SHM_N_CLASSES | 7 | number of classes |
-| DART_SHM_CHUNKS_PER_CLASS | 4 | chunks per segment |
+| DART_SHM_CHUNKS | 4 | chunks per segment when the node gives no keep_last |
 | DART_SHM_MAX_RETRY | 8 | resolve tries before skip |

@@ -17,15 +17,21 @@ Entity kinds ride the announce, so the walks work with or without the patterns l
 
 An entity is never a channel. A function's `@req` and `@rsp` pair is one function, a
 task's three channels are one task, a variable's `@set` folds in as `writable`, and the
-`@dart/` builtins are hidden.
+`@dart/` builtins are hidden. Partners are found by hashing the base name plus the suffix
+and verified against the fetched name when it is known, since 32 bit hashes collide. A
+pattern primary missing a partner, or a partner missing its primary, is surfaced
+`incomplete`. The per peer tables are hook allocated and freed when the peer goes.
 
 ## The mesh entity
 
 The mesh entity's schemas are the PROVIDER's, because a definition owns its type. The
-widest consumer declaration stands in when no provider is live. `conflict` is set when
+widest consumer declaration stands in when no provider is live. Records sort by kind, name
+id and peer. The first live provider takes the slot, and a rival with a different schema
+marks a conflict and wins only if it was heard more recently. `conflict` is set when
 live endpoints declare schemas that cannot read each other. `generation` changes iff the
 provider's uuid, any of the three schemas, or an attr changed, so "retire and re create"
-is one compare.
+is one compare. It is an FNV hash of the provider uuid, the three schema hashes, the attrs,
+whether a set channel exists, and the kind.
 
 ## Adopting a schema
 
