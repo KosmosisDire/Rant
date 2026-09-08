@@ -1,16 +1,5 @@
-"""DART Python publisher: streams a typed 'tick' message at 1000 Hz on the DEFAULT
-interface and domain (0), so any subscriber on the LAN (any language) can receive it.
-Single-threaded: it drives the node with a manual poll in the send loop (no background
-thread). Uses the same schema/topic as csharp/publisher, so the two interoperate.
-
-The message is built from STANDARD TYPES (docs/stdtypes.md): `when` is a Timestamp
-(microseconds since the Unix epoch, UTC) and `at` a Pose (position in meters plus an
-orientation quaternion), so every language reads them as the same named types instead of
-a bare u64 and six loose doubles -- and a Pose field can never bind to a same-shaped
-Twist one.
-
-    python python/publisher.py [seconds] [interface]   # seconds/interface optional
-"""
+"""A typed 'tick' publisher at 1000 Hz on the default interface and domain, driven by a
+manual poll. It shares its schema with csharp/publisher. Args: [seconds] [interface]."""
 import math
 import os
 import sys
@@ -32,7 +21,7 @@ class Tick:
 
 
 def main():
-    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0   # 0 => run forever
+    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0   # 0 = run forever
     iface = sys.argv[2] if len(sys.argv) > 2 else None
     node = dart.Node("py-publisher", None,                       # default iface, domain 0
                      lambda e: print("event:", e, file=sys.stderr),

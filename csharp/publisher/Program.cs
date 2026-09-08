@@ -1,16 +1,5 @@
-// DART C# publisher: streams a typed 'tick' message at 1000 Hz on the DEFAULT
-// interface and domain (0), so any subscriber on the LAN (any language) can receive
-// it. Uses the same schema/topic as python/publisher.py, so the two interoperate
-// (the [DartField] overrides give lowercase wire names matching the Python fields).
-//
-// The message is built from STANDARD TYPES (docs/stdtypes.md): `when` is a Timestamp
-// (microseconds since the Unix epoch, UTC) and `at` a Pose (position in meters plus an
-// orientation quaternion), so every language reads them as the same named types instead
-// of a bare ulong and six loose doubles -- and a Pose field can never bind to a
-// same-shaped Twist one. An alias like Timestamp names a plain field's TYPE; a composite
-// like Pose is a shipped mirror struct that carries the name itself.
-//
-//   dotnet run --project csharp/publisher [-- <seconds>]
+// A typed 'tick' publisher at 1000 Hz on the default interface and domain, sharing its
+// schema with python/publisher.py. The [DartField] overrides give the lowercase wire names.
 
 using System;
 using System.Diagnostics;
@@ -31,7 +20,7 @@ static class Program
 
     static int Main(string[] args)
     {
-        double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 => run forever
+        double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 = run forever
         string iface = args.Length > 1 ? args[1] : null;                 // optional: pin the interface
         var node = new DartNode("cs-publisher", null, e => Console.Error.WriteLine("event: " + e),
                             multicastInterface: iface);

@@ -1,12 +1,5 @@
-"""DART Python subscriber: subscribes to 'tick' and reports the received message rate.
-Pair with python/publisher.py or csharp/publisher. Single-threaded manual poll.
-
-The schema is pasted from the publisher, standard types and all: `when` decodes to a plain
-int of Unix-epoch microseconds and `at` to a dart.Pose, so the one-second report can print
-the sender's clock skew and position without any hand-written unpacking.
-
-    python python/subscriber.py [seconds] [interface]
-"""
+"""A 'tick' subscriber reporting the received rate, the pair of python/publisher.py or
+csharp/publisher. Args: [seconds] [interface]."""
 import os
 import sys
 import time
@@ -47,7 +40,7 @@ def main():
     last_report, last_count = start, 0
     try:
         while True:
-            node.poll(1)                          # block up to 1ms; wakes on RX and delivers
+            node.poll(1)                          # block up to 1 ms, wakes on receive and delivers
             now = time.perf_counter()
             if now - last_report >= 1.0:
                 rate = (count - last_count) / (now - last_report)

@@ -1,8 +1,5 @@
-# Assemble the Unity package: copy the shared wrapper (csharp/Dart.cs) and the prebuilt
-# native libs into Runtime/ (both are gitignored here -- this keeps ONE Dart.cs and no
-# binaries in git). Build the native libs first (csharp/native/build.ps1 on Windows,
-# build.sh on Linux). Afterwards, add csharp/unity/ to a Unity project via Package
-# Manager -> "Add package from disk", or zip Runtime/ into a .unitypackage / .tgz.
+# Assemble the Unity package: copy csharp/Dart.cs and the prebuilt native libs into
+# Runtime/, both gitignored so git keeps one Dart.cs and no binaries. Build the libs first.
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
 Copy-Item (Join-Path $here "..\Dart.cs") (Join-Path $here "Runtime\Dart.cs") -Force

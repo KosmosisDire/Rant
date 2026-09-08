@@ -1,5 +1,5 @@
-/* throwaway: show the interfaces discovery joins and announces out of, plus what the OS
-   route table would have picked (which discovery no longer relies on) */
+/* A diagnostic: the interfaces discovery joins and announces out of, plus what the OS
+ * route table would have picked. spec/platform.md says why discovery ignores the latter. */
 #define DART_TRANSPORT_IMPLEMENTATION
 #define DART_NO_SHM
 #include "dart_transport.h"

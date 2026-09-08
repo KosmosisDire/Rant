@@ -1,23 +1,5 @@
-/* Patterns showcase for the DART Explorer: one process runs a "server" node that owns a
- * FUNCTION, a TASK and a VARIABLE (plus a plain pub/sub topic), and a "client" node that
- * calls and observes them, so every pattern channel is live and MATCHED. Leave it running
- * and open the explorer on the same domain to see each channel with its own icon:
- *
- *     ./pattern_demo                 # server + client on domain 0 (the explorer default)
- *     ./dart_explorer                # in another terminal
- *
- * The explorer's Topics tab then shows, each with a type icon:
- *     compute/add@req, compute/add@rsp         -> function  (the square-function glyph)
- *     files/transfer@req/@prg/@rsp             -> task      (function + progress + cancel)
- *     state/temperature, state/temperature@set -> variable  (the variable glyph)
- *     sensors/lidar                            -> a plain topic (no type icon)
- *
- * Typed payloads go through the schema layer both ways: built with
- * dart_schema_message_default + dart_set_* and read with dart_get_* by field name, exactly
- * as on a plain typed topic. Only the lidar topic is raw bytes (no schema attached).
- *
- *   POSIX  : cc  -std=c99 -Idist examples/pattern_demo.c -o pattern_demo -lrt -lpthread
- *   Windows: gcc -std=c99 -Idist examples/pattern_demo.c -o pattern_demo.exe -lws2_32 -lbcrypt -lwinmm */
+/* A patterns showcase for the explorer: a server node owns a function, a task and a
+ * variable next to a plain topic, and a client node calls and observes them. */
 #define DART_IMPLEMENTATION
 #include "dart.h"
 
@@ -35,10 +17,10 @@ static void sleep_ms(int ms){ struct timespec t; t.tv_sec = ms/1000; t.tv_nsec =
 static volatile sig_atomic_t g_run = 1;
 static void on_sigint(int s){ (void)s; g_run = 0; }
 
-/* the shared types, at file scope so the handlers can encode/decode with them */
+/* the shared types, at file scope so the handlers can encode and decode with them */
 static DartSchema *add_req_s, *add_rsp_s, *temp_s;
 
-/* raw little-endian helpers for the schema-less lidar topic only */
+/* raw little endian helpers for the schema less lidar topic only */
 static uint32_t rd32(DartBytes b){ return b.len >= 4 ? i_dart_le_r32(b.data) : 0; }
 static void     wr32(uint8_t *o, uint32_t v){ i_dart_le_w32(o, v); }
 
@@ -47,7 +29,7 @@ static void *demo_alloc(void *user, void *ptr, size_t size){
     (void)user; return i_dart_plat_realloc(ptr, size);
 }
 
-/* build a one-u32-field message in buf and return the bytes to send */
+/* build a one u32 field message in buf and return the bytes to send */
 static DartBytes enc_u32(const DartSchema *s, const char *field, uint32_t v,
                          uint8_t *buf, size_t cap){
     dart_schema_message_default(s, buf, cap);
@@ -55,8 +37,8 @@ static DartBytes enc_u32(const DartSchema *s, const char *field, uint32_t v,
     return dart_bytes(buf, dart_schema_size(s));
 }
 
-/* server: the compute/add provider, AddRequest { x, y } in, AddResult { sum } back.
- * req->schema is the caller's request schema, delivered like DartMsg.schema on a topic. */
+/* server: the compute/add provider, AddRequest in and AddResult back. req->schema is the
+ * caller's request schema, delivered like DartMsg.schema on a topic. */
 static void add_handler(DartRequest *req, void *user)
 {
     int64_t x = dart_get_int(req->data, req->schema, "x");
@@ -67,9 +49,8 @@ static void add_handler(DartRequest *req, void *user)
     dart_set_int(out, sizeof out, add_rsp_s, "sum", x + y);
     dart_request_reply(req, dart_bytes(out, dart_schema_size(add_rsp_s)));
 }
-/* server: the files/transfer task, the canonical SUPERLOOP shape. The handler only
- * DEFERS (poll thread, returns fast); the work runs in main's own loop through the
- * token, one chunk per pass, honoring cancellation cooperatively. */
+/* server: the files/transfer task in the superloop shape. The handler only defers and
+ * returns fast, and main's own loop does one chunk per pass through the token. */
 static DartFunction *task_def;
 static struct { volatile uint64_t token; volatile int active; uint32_t sent, total; } g_xfer;
 static void transfer_handler(DartRequest *req, void *user){
@@ -97,7 +78,7 @@ static void run_transfer_step(void){          /* one pass of the app's own loop 
         g_xfer.active = 0;
     }
 }
-/* client: watch progress, log the outcome; the first update is the empty RUNNING ack */
+/* client: watch progress and log the outcome. The first update is the empty RUNNING ack. */
 static uint32_t g_xfer_call;
 static void on_task_progress(const DartProgress *p){
     if (p->data.len) printf("  task  files/transfer  chunk %u\n", rd32(p->data));
@@ -120,9 +101,8 @@ static void on_reply(const DartResponse *r){
 static void on_lidar(const DartMsg *m){
     printf("  topic sensors/lidar  #%u\n", rd32(m->data));
 }
-/* both nodes: every lifecycle event and error on one line via dart_event_str. ev->user is
- * the label passed as opts.user_data; ev->kind == DART_ERROR is the one "did something
- * break?" test (dart_last_error(node) would return the same event). */
+/* both nodes: every lifecycle event and error on one line. ev->user is the label passed
+ * as user_data, and ev->kind == DART_ERROR is the one "did something break" test. */
 static void on_node_event(const DartEvent *ev){
     char text[192];
     printf("  event [%s%s] %s\n", (const char*)ev->user,
@@ -138,7 +118,7 @@ int main(int argc, char **argv){
     DartVariable *var_def, *var_remote;
     DartTopic    *lidar_pub;
     uint32_t tick = 0;
-    setvbuf(stdout, NULL, _IONBF, 0);   /* keep output visible under redirect / on Ctrl-C */
+    setvbuf(stdout, NULL, _IONBF, 0);   /* keep output visible under a redirect or on Ctrl-C */
 
     server = dart_node_open(&sa, "robot-server", NULL, on_node_event,
                             &(DartNodeOpts){ .domain = domain, .user_data = (void*)"server" });
@@ -154,7 +134,7 @@ int main(int argc, char **argv){
         fprintf(stderr, "schema compile failed\n"); return 1;
     }
 
-    /* server side: the definitions (the function body and the variable storage live here) */
+    /* server side: the definitions, where the function body and the variable storage live */
     fn_def    = dart_node_create_function_definition(server, "compute/add", add_req_s, add_rsp_s,
                                           add_handler, NULL, NULL);
     task_def  = dart_node_create_task_definition(server, "files/transfer", NULL, NULL, NULL,
@@ -163,7 +143,7 @@ int main(int argc, char **argv){
                               &(DartVariableOpts){ .allow_force = 1 });
     lidar_pub = dart_node_create_topic(server, "sensors/lidar", DART_PUB_ONLY, NULL, NULL);
 
-    /* client side: remotes (references to the server's definitions) */
+    /* client side: remotes, references to the server's definitions */
     fn_remote = dart_node_create_remote_function(client, "compute/add", add_req_s, add_rsp_s, NULL);
     task_remote= dart_node_create_remote_task(client, "files/transfer", NULL, NULL, NULL, NULL);
     var_remote= dart_node_create_remote_variable(client, "state/temperature", temp_s, NULL);
@@ -183,7 +163,7 @@ int main(int argc, char **argv){
         uint8_t buf[16], raw[4];
         ++tick;
 
-        /* function req/resp: a typed AddRequest, the reply decoded in on_reply */
+        /* function request and response: a typed AddRequest, the reply decoded in on_reply */
         dart_schema_message_default(add_req_s, buf, sizeof buf);
         dart_set_int(buf, sizeof buf, add_req_s, "x", (int64_t)tick);
         dart_set_int(buf, sizeof buf, add_req_s, "y", 1000);

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Build the DART native library into csharp/runtimes/<rid>/native/ from dist/dart.h.
-# Linux -> linux-x64/libdart.so, macOS -> osx-x64/libdart.dylib. The .nupkg and the
-# Unity package bundle it.
-#   sh csharp/native/build.sh
+# Build the native library into csharp/runtimes/<rid>/native/ from dist/dart.h: Linux
+# gives linux-x64/libdart.so, macOS osx-x64/libdart.dylib. The packages bundle it.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 dist="$here/../../dist"

@@ -1,24 +1,5 @@
-# DART amalgamator: combine the split src/ layers into the dist/ single-headers.
-# Pure-CMake port of the former tools/pack.c, so the build needs only a C
-# compiler (no separate amalgamator to build first). The main CMakeLists runs
-# this automatically whenever src/ changes; to run it by hand:
-#
-#   cmake -DSRC=<srcdir> -DOUT=<outdir> -P tools/pack.cmake   (defaults: src, dist)
-#
-# It generates into dist/: dart_discovery.h, dart_transport.h, and dart.h.
-# Layers are concatenated in dependency order, wrapped in feature guards, with
-# local  #include "..."  lines dropped (system <...> includes are kept).
-#
-# Flag scheme (<P> is DART_DISCOVERY or DART_TRANSPORT; DART, for the combined
-# header, maps onto both):
-#   <P>_IMPLEMENTATION   emit the implementation (define in exactly one TU)
-#   <P>_SANS_IO          strip the socket/runtime layer, leaving the core only
-#   DART_PLAT_CUSTOM     suppress ONLY the bundled platform/core.c implementation
-#                        (the i_dart_plat_* definitions), keeping the rest of the
-#                        runtime layer and platform/core.h's declarations, so a
-#                        caller can link in its own i_dart_plat_* implementation
-#                        without a duplicate-symbol clash or an unsupported OS
-#                        branch compiling in (e.g. a truncated embedded SDK)
+# The amalgamator: concatenates the src/ layers in dependency order into the dist/ headers
+# with local includes dropped. docs/building.md has the by hand command and the flags.
 
 cmake_minimum_required(VERSION 3.15)
 
@@ -37,8 +18,8 @@ set(BANNER [==[
  */
 ]==])
 
-# Foldable section markers: editors collapse #pragma region blocks. The guard
-# silences -Wunknown-pragmas on toolchains that don't recognize the markers.
+# Foldable section markers: editors collapse #pragma region blocks. The guard silences
+# -Wunknown-pragmas on toolchains that do not know the markers.
 set(REGION_GUARD [==[
 #if defined(__GNUC__)   /* let the section markers below fold quietly */
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
@@ -78,8 +59,8 @@ set(FLAGMAP [==[
 
 ]==])
 
-# POSIX feature-test preamble. Must precede the first system header so glibc
-# exposes the socket API.
+# POSIX feature test preamble. Must precede the first system header so glibc exposes the
+# socket API.
 function(dart_posix_preamble f impl sansio)
   set(t [==[
 #if defined(@IMPL@) && !defined(@SANSIO@) && !defined(_WIN32)
@@ -97,9 +78,8 @@ function(dart_posix_preamble f impl sansio)
   file(APPEND "${f}" "${t}")
 endfunction()
 
-# Append src/NAME to file F, wrapped in a foldable #pragma region, with local
-# #include "..." lines dropped. The strip is anchored to line start (matches a
-# leading newline) so a #include in a comment or string is never touched.
+# Append src/NAME to file F inside a foldable region with local includes dropped. The
+# strip is anchored to a line start, so an include in a comment or string is never touched.
 function(dart_emit f name)
   file(READ "${SRC}/${name}" c)
   string(REGEX REPLACE "\r" "" c "${c}")   # normalize CRLF -> LF, deterministic output
@@ -263,11 +243,8 @@ function(build_combined f)
   message(STATUS "wrote ${f}")
 endfunction()
 
-# dart.hpp: the C++ wrapper (cpp/dart.hpp) with dist/dart.h spliced in place of
-# its single @DART_EMBED@ marker include, so the shipped C++ header is one
-# self-contained file (no sibling dart.h needed). The wrapper picks C-vs-C++ at
-# compile time, so the same embedded copy serves both the namespaced C++
-# declarations and the C implementation TU.
+# dart.hpp: the C++ wrapper with dist/dart.h spliced in at its @DART_EMBED@ marker, so the
+# shipped header is one self contained file serving both the C++ and the C side.
 function(build_cpp f dart_h)
   set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../cpp/dart.hpp")
   file(READ "${tmpl}" hpp)
@@ -279,11 +256,8 @@ function(build_cpp f dart_h)
   message(STATUS "wrote ${f}")
 endfunction()
 
-# dart.py: the Python wrapper (python/dart.py.in) with dist/dart.h embedded as a
-# Python string in place of its single @DART_EMBED@ marker, so the shipped file is
-# one self-contained module that compiles the embedded C on first import. The C is
-# escaped into a string literal (backslash, quote, then newline -> \n) so any C
-# content is safe; the segment stays on one logical line.
+# dart.py: the Python wrapper with dist/dart.h embedded as a string at its @DART_EMBED@
+# marker. The C is escaped into one logical line so any content is safe.
 function(build_py f dart_h)
   set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../python/dart.py.in")
   file(READ "${dart_h}" dh)
@@ -298,8 +272,8 @@ function(build_py f dart_h)
   message(STATUS "wrote ${f}")
 endfunction()
 
-# The C# wrapper (csharp/Dart.cs) is a hand-written thin P/Invoke layer over the
-# prebuilt native library, so it is NOT generated here (no embedded C).
+# The C# wrapper is a hand written P/Invoke layer over the prebuilt native library, so
+# nothing is generated for it.
 
 build_discovery("${OUT}/dart_discovery.h")
 build_transport("${OUT}/dart_transport.h")

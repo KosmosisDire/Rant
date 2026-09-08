@@ -1,25 +1,5 @@
-/* DART bridge: one WebSocket connection = one full DART node on the mesh, with a WebRTC
- * data path negotiated over that socket.
- *
- * The WebSocket carries the JSON control plane (open the node, create entities, settle,
- * WebRTC signaling). Data rides binary FRAMES with one header for every kind of traffic
- * in both directions; a frame travels over the entity's WebRTC data channel when one is
- * open (its reliability follows the topic's QoS) and over the WebSocket otherwise, so a
- * client with no WebRTC at all is a full node with the same wire. A subscribed
- * VideoFrame topic marked `media` is packetized onto a WebRTC video track instead
- * (H264 / H265 / AV1: the browser decodes in hardware); MJPEG and everything else stay
- * frames. The browser offers, the bridge answers. PROTOCOL.md is the spec (kProtoVersion below).
- *
- * This is a LEAN proxy, not a mesh debugger. Built on the C++ wrapper (dart.hpp): the
- * Conn owns a dart::Node whose handlers (captured lambdas) format deliveries and events
- * straight onto the carriers. Patterns ride the wrapper's UNTYPED handles: payloads stay
- * raw bytes end to end, the client owns encode/decode.
- *
- * Threading: IXWebSocket runs each accepted connection on its own thread; the node runs
- * its own service thread (Node::start()); libdatachannel calls back from its own threads.
- * Every dart call is thread-safe. Discipline: never call into dart while holding
- * Conn::mu (a leaf lock), and take the Conn through its weak_ptr from any libdatachannel
- * callback (the connection may be closing). */
+/* The bridge: one WebSocket connection is one full node on the mesh, with a WebRTC data
+ * path negotiated over that socket. spec/bridge.md has the design, PROTOCOL.md the wire. */
 #include "dart.hpp"
 
 #include <ixwebsocket/IXNetSystem.h>
@@ -53,35 +33,23 @@ using json = nlohmann::json;
 
 static const int kProtoVersion = 11;
 
-/* Data-plane frame: ONE header for every op, both directions, little-endian:
- *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u8 text_len][text][payload]
- *   1 DATA      topic message. c->s: publish on `id`. s->c: delivery, peer = publisher.
- *   2 VAR       variable. c->s: flags = 0 set / 1 force / 2 unforce. s->c: update, flags
- *               bit0 forced + bit1 write-event, peer = source (0 = the owner itself).
- *   3 CALL      c->s: call remote `id`, seq = the client's call id. s->c: a request for
- *               definition `id`, seq = request id, peer = caller, text = caller name.
- *   4 RESULT    s->c: outcome of call seq: flags = status, peer = provider, text = message.
- *               c->s: the reply to request seq: flags = status, text = message.
- *   5 PROGRESS  s->c: on call seq (peer = provider; empty payload = the RUNNING ack).
- *               c->s: on request seq.
- *   6 CANCEL    s->c only: cancellation requested on parked request seq of definition id.
- * written_us is the writer's wall clock (0 = opted out / synthesized); a client sends 0. */
+/* The data plane frame, one header for every op in both directions (PROTOCOL.md).
+ * written_us is the writer's wall clock, 0 = opted out or synthesized. A client sends 0. */
 enum : uint8_t { OP_DATA = 1, OP_VAR = 2, OP_CALL = 3, OP_RESULT = 4, OP_PROGRESS = 5, OP_CANCEL = 6 };
 static const size_t kHdr = 21;
 
 static const int    kTickMs      = 30;         /* match-state poll cadence */
 static const size_t kLossyBuffer = 1u << 20;   /* best-effort frames drop past this much unsent */
 
-static size_t g_max_buffered = 8u << 20;       /* a reliable carrier this far behind = drop the client */
+static size_t g_max_buffered = 8u << 20;   /* a reliable carrier this far behind drops the client */
 static int    g_verbose      = 0;
 
 #if DART_BRIDGE_WEBRTC
 static int                      g_rtc_enabled = 1;
 static int                      g_rtc_debug   = 0;            /* libdatachannel's verbose log */
-static std::vector<std::string> g_ice;                        /* stun:/turn: urls, handed to the client too */
+static std::vector<std::string> g_ice;   /* stun and turn urls, handed to the client too */
 static uint16_t                 g_port_lo = 0, g_port_hi = 0; /* ICE port range (0 = any) */
-static size_t                   g_mtu = 1200;                 /* on-wire datagram bound: WebRTC sends with DF set,
-                                                                 so this must fit the smallest path (RFC 8261: 1200) */
+static size_t                   g_mtu = 1200;   /* datagram bound, WebRTC sets DF */
 #endif
 
 struct Frame {
@@ -107,21 +75,19 @@ struct TrackBinding {
     uint32_t    fixed = 0;              /* the message's fixed-section size */
     std::shared_ptr<rtc::Track>                  track;
     std::shared_ptr<rtc::RtpPacketizationConfig> rtp;
-    int     codec = 0, sep = -1;        /* the packetizer currently installed (stream thread only) */
+    int     codec = 0, sep = -1;   /* the packetizer currently installed, stream thread only */
     bool    keyed = false;              /* a keyframe opened the stream since the last (re)start */
-    uint8_t pt[5] = { 0, 0, 0, 0, 0 };  /* the browser's RTP payload type per VideoCodec (0 = not offered) */
+    uint8_t pt[5] = { 0, 0, 0, 0, 0 };   /* the browser's payload type per codec, 0 = not offered */
 };
 #endif
 
-/* One created entity: a topic or a pattern handle. Handles are thin and non-owning (the
- * entity lives in the node until close); Entity pointers are stable (unique_ptr, never
- * erased until close). `id` is CLIENT-CHOSEN (like a request seq), which is also the
- * WebRTC data channel id, so both ends open the channel without a round trip. */
+/* One created entity, a topic or a pattern handle. Pointers are stable until close. id is
+ * client chosen and doubles as the WebRTC data channel id, so both ends open it. */
 struct Entity {
     enum Kind { Topic, FnDef, FnRemote, TaskDef, TaskRemote, VarDef, VarRemote } kind = Topic;
     uint16_t id       = 0;
     std::string name;
-    bool     reliable = true;   /* the frame path's reliability (topic QoS; patterns are reliable) */
+    bool     reliable = true;   /* the topic QoS, patterns are reliable */
     dart::Topic                topic;
     dart::FunctionDefinition<> fndef;
     dart::RemoteFunction<>     fnrem;
@@ -129,8 +95,7 @@ struct Entity {
     dart::RemoteTask<>         taskrem;
     dart::VariableDefinition<> vardef;
     dart::RemoteVariable<>     varrem;
-    /* the stream's schema (a topic's or variable's value, a task's progress): what a video
-       line binds against; empty when untyped */
+    /* the stream's schema, what a video line binds against. Empty when untyped */
     dart::Schema value_schema, prg_schema;
     /* match-state change detector (packed count*2 + ready), guarded by Conn::mu */
     int last_match = -1;
@@ -143,19 +108,16 @@ struct Entity {
 #endif
 };
 
-/* One task request parked at the client (the bridge defers every task request; the
- * PendingTask streams progress and answers when the client does). Shared: the client's
- * frames complete it, the on_cancel scan (service thread) polls pt.cancelled(). */
+/* One task request parked at the client, since the bridge defers every task request.
+ * Shared: the client's frames complete it, the on_cancel scan polls pt.cancelled(). */
 struct ParkedTask {
     uint16_t            ent = 0;
     dart::PendingTask<> pt;
     std::atomic<bool>   cancel_pushed{ false };   /* one CANCEL frame per request */
 };
 
-/* One WebSocket connection = one node. node/ws/name are written only by the connection's
- * own thread; the node's service thread, the ticker and the WebRTC threads read them,
- * fenced by conn_close (WebRTC callbacks reset, ticker joined, then ~Node joins the
- * service thread). */
+/* One WebSocket connection is one node. node, ws and name are written only by the
+ * connection's own thread, the other threads read them fenced by conn_close. */
 struct Conn {
     std::optional<dart::Node> node;
     ix::WebSocket            *ws = nullptr;
@@ -164,12 +126,11 @@ struct Conn {
 
     std::mutex mu;                    /* leaf lock: never call into dart while holding it */
     std::unordered_map<uint16_t, std::unique_ptr<Entity>>     ents;
-    std::unordered_map<uint16_t, std::vector<Entity *>>       by_index;     /* topic index -> entities */
-    std::unordered_map<uint32_t, dart::Deferred<>>            parked;       /* req id -> parked function reply */
-    std::unordered_map<uint32_t, std::shared_ptr<ParkedTask>> parked_tasks; /* req id -> parked task */
-    /* client call id -> (remote-task ent, C call id): the handle for the cancel op.
-     * Inserted before call_async (so the terminal response, which erases, can never race
-     * an insert), erased at the one terminal response. */
+    std::unordered_map<uint16_t, std::vector<Entity *>>       by_index;   /* by topic index */
+    std::unordered_map<uint32_t, dart::Deferred<>>            parked;   /* replies by req id */
+    std::unordered_map<uint32_t, std::shared_ptr<ParkedTask>> parked_tasks;   /* by req id */
+    /* client call id to (remote task entity, C call id), the handle for the cancel op.
+     * Inserted before call_async so the terminal response, which erases, never races it. */
     std::unordered_map<uint32_t, std::pair<uint16_t, uint32_t>> task_calls;
     uint32_t next_req = 0;
     uint8_t  log_sub  = 0;            /* bit (1<<level) set once subscribed */
@@ -182,7 +143,7 @@ struct Conn {
     std::atomic<bool> rtc_up{ false };
     json              rtc_seq;          /* the client's offer awaiting our answer */
     bool              rtc_seq_pending = false;
-    std::unordered_map<std::string, TrackReq>    track_map;    /* offered video mid -> what it is for */
+    std::unordered_map<std::string, TrackReq>    track_map;   /* by offered video mid */
     std::unordered_map<std::string, std::string> track_result; /* per mid, for the answer reply */
 #endif
 };
@@ -260,9 +221,8 @@ static const char *send_status_str(dart::SendStatus rc){
     }
 }
 
-/* One field of a schema. Every schema, ours or a peer's reflected one, is a dart::Schema
- * now, so one row builder serves every table (two once drifted: peer reflection omitted
- * `named`, and every named reader then refused the sender). */
+/* One field of a schema. Every schema is a dart::Schema, so one row builder serves every
+ * table (two once drifted and every named reader then refused the sender). */
 struct FieldSrc {
     std::string name, type_name, elem_name;
     dart::FieldType kind = dart::FieldType::U8, elem = dart::FieldType::U8;
@@ -271,10 +231,8 @@ struct FieldSrc {
     json variants = json::array();      /* enum only: the option table, already built */
 };
 
-/* one row of the protocol's field table: a dotted path, the type, and its absolute offset,
- * so a client encodes, decodes and rebuilds the type with no codegen. `parents` carries the
- * enclosing struct names and is advanced here. The variable kinds (vstring/varr/map) report
- * offset/size 0 and live in the message tail after the fixed section (the schema's `size`). */
+/* one row of the protocol's field table: a dotted path, the type and its absolute offset.
+ * parents carries the enclosing struct names. The variable kinds report offset and size 0. */
 static json field_row_json(const FieldSrc &f, std::vector<std::string> &parents){
     parents.resize(f.depth);            /* leaving a struct shrinks the path */
     std::string path;
@@ -282,13 +240,13 @@ static json field_row_json(const FieldSrc &f, std::vector<std::string> &parents)
     path += f.name;
     json row = { {"path", path}, {"kind", kind_str(f.kind)},
                  {"offset", f.offset}, {"size", f.size} };
-    if (!f.type_name.empty()) row["named"] = f.type_name;   /* a named type reads as what it wraps */
+    if (!f.type_name.empty()) row["named"] = f.type_name;   /* named types read as what they wrap */
     if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
     if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);
     if (f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray){
         if (!f.elem_name.empty()) row["elem_named"] = f.elem_name;
         if (f.elem_size) row["elem_size"] = f.elem_size;
-        if (f.elem == dart::FieldType::Struct) row["elem_struct"] = true;   /* element-0 template follows */
+        if (f.elem == dart::FieldType::Struct) row["elem_struct"] = true;
     }
     if (f.arr_parent != 0xFFFFu) row["in_array"] = f.arr_parent;
     if (f.kind == dart::FieldType::Enum){
@@ -336,7 +294,7 @@ static json schema_json(const dart::Schema &s){
              {"fields", fields_json(s)} };
 }
 
-/* one decoded @dart/meta MapItem -> JSON (the whole self-describing snapshot body) */
+/* one decoded @dart/meta MapItem to JSON */
 static json mapitem_to_json(const dart::MapItem &m){
     if (m.is_bool())   return m.as_bool();
     if (m.is_uint())   return m.as_uint();
@@ -417,7 +375,7 @@ static uint64_t now_wall_us(){
     return (uint64_t)duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-/* ---- server -> client sends ------------------------------------------------------- */
+/* server to client sends */
 
 static void send_json(Conn *c, const json &j){
     if (c->ws) c->ws->send(j.dump(), false);
@@ -460,10 +418,8 @@ static void note_drop(Conn *c, Entity *e){
                    {"count", n}, {"text", "bridge dropped best-effort frames for a slow client"} });
 }
 
-/* Send one frame on the entity's best carrier: its WebRTC data channel when open (and the
- * frame fits its message size), else the WebSocket. A best-effort frame drops when the
- * carrier is already a buffer's worth behind; a reliable one that far behind means the
- * client cannot keep up at all, so the connection is closed rather than buffered forever. */
+/* Send one frame on the entity's best carrier: its open data channel when the frame fits,
+ * else the WebSocket. A best effort frame drops behind a backlog, a reliable one closes. */
 static void send_frame(Conn *c, Entity *e, const Frame &f){
     std::string bytes = frame_build(f);
     bool reliable = e ? e->reliable : true;
@@ -532,22 +488,20 @@ static void rtc_attach(Conn *c, Entity *e){
         if (!keep) return;
         std::lock_guard<std::mutex> g(keep->mu);
         auto it = keep->ents.find(id);
-        if (it != keep->ents.end()) it->second->dc.reset();   /* the WebSocket carries it from here */
+        if (it != keep->ents.end()) it->second->dc.reset();   /* the WebSocket carries it now */
     });
     std::lock_guard<std::mutex> g(c->mu);
     e->dc = dc;
 }
 
-/* A track binding = one recvonly video line the client offered for the VideoFrame at
- * `path` of one entity's stream (a topic's deliveries, a variable's updates, or one task
- * call's progress). Resolved when the offer arrives (rtc_on_track), used on the service
- * thread by media_route. */
+/* A track binding: one recvonly video line the client offered for the VideoFrame at path of
+ * one entity's stream. Resolved when the offer arrives, used by media_route. */
 static bool is_var_kind(dart::FieldType k){
     return k == dart::FieldType::VString || k == dart::FieldType::VArray || k == dart::FieldType::Map;
 }
 
-/* validate `path` as a VideoFrame inside `s` and fill the binding's field names; "" = the
- * message itself is a VideoFrame. Returns the reason it is not, or "" */
+/* validate path as a VideoFrame inside s and fill the binding's field names, "" = the
+ * message itself is one. Returns the reason it is not, or "" */
 static std::string bind_video_field(const dart::Schema &s, const std::string &path, TrackBinding &b){
     if (s.empty()) return "entity is untyped";
     std::string prefix;
@@ -575,10 +529,8 @@ static std::string bind_video_field(const dart::Schema &s, const std::string &pa
     return "";
 }
 
-/* The client offered a recvonly video line (`tracks` in its offer names the entity, the
- * field path and, for task progress, the call): claim it, stamp our SSRC into the
- * answer's m-line so the browser binds the stream, and read the browser's payload types.
- * Fires inside setRemoteDescription, before the answer is built. */
+/* The client offered a recvonly video line: claim it, stamp our SSRC into the answer's m
+ * line so the browser binds the stream, and read the browser's payload types. */
 static void rtc_on_track(Conn *c, std::shared_ptr<rtc::Track> track){
     std::string mid = track->mid();
     TrackReq req;
@@ -634,13 +586,8 @@ static void rtc_on_track(Conn *c, std::shared_ptr<rtc::Track> track){
     c->track_result[mid] = "ok";
 }
 
-/* `rtc`: bare = start (the reply carries the ICE servers the client should use), `sdp` =
- * an OFFER from the client (plus `tracks`: mid -> {id, path, call, keep_data} for the video
- * lines it added); the reply carries our answer and each line's verdict. `candidate` +
- * `mid` = one trickled remote candidate. The CLIENT always offers, first and on every
- * re-offer that adds a line, so there is one signaling flow and no glare, and the bridge
- * is the DTLS client (a browser's fragmented ClientHello is more than a DTLS server built
- * on MbedTLS takes). */
+/* rtc: bare = start and the reply carries the ICE servers, sdp = an offer plus tracks
+ * and the reply carries our answer, candidate plus mid = one trickled candidate. */
 static void op_rtc(Conn *c, const json &req, const json &seq){
     if (req.contains("sdp") || req.contains("candidate")){
         std::shared_ptr<rtc::PeerConnection> pc;
@@ -688,7 +635,7 @@ static void op_rtc(Conn *c, const json &req, const json &seq){
     cfg.disableAutoNegotiation = true;    /* every answer is ours to trigger */
     cfg.forceMediaTransport    = true;    /* video lines may arrive in a later offer */
     if (g_port_lo){ cfg.portRangeBegin = g_port_lo; cfg.portRangeEnd = g_port_hi; }
-    cfg.mtu = g_mtu;                      /* sizes DTLS + SCTP; the RTP packetizers follow it too */
+    cfg.mtu = g_mtu;   /* sizes DTLS and SCTP, the RTP packetizers follow it too */
     auto pc = std::make_shared<rtc::PeerConnection>(cfg);
     std::weak_ptr<Conn> w = c->self;
     pc->onLocalDescription([w](rtc::Description d){
@@ -754,10 +701,8 @@ static bool is_keyframe(int codec, const uint8_t *p, size_t n, bool flag){
     return false;
 }
 
-/* one encoded frame onto a binding's track. Returns true when the track is carrying this
- * stream (the frame went out, or was dropped while waiting for a keyframe), false when the
- * frame path must carry it (track down, codec not offered, MJPEG, unknown). Runs on the
- * thread that delivers the entity's stream, which serializes the packetizer state. */
+/* one encoded frame onto a binding's track. true when the track carries this stream, false
+ * when the frame path must. Runs on the thread delivering the stream, serializing state. */
 static bool media_send(Conn *c, Entity *e, TrackBinding *b, int codec, bool flag, int64_t pts,
                        const uint8_t *bs, size_t len, uint64_t written_us){
     if (!c->rtc_up || !b->track || !b->track->isOpen()) return false;
@@ -782,7 +727,7 @@ static bool media_send(Conn *c, Entity *e, TrackBinding *b, int codec, bool flag
         b->keyed = true;
     }
     uint64_t us = pts > 0 ? (uint64_t)pts : written_us ? written_us : now_wall_us();
-    b->rtp->timestamp = (uint32_t)(us * 9 / 100);          /* microseconds -> the 90 kHz clock */
+    b->rtp->timestamp = (uint32_t)(us * 9 / 100);          /* microseconds to the 90 kHz clock */
     try { b->track->send(reinterpret_cast<const std::byte *>(bs), len); }
     catch (const std::exception &){ return false; }
     return true;
@@ -806,10 +751,8 @@ static std::string strip_tail_frame(dart::Bytes data, uint32_t fixed, int ordina
     return out;
 }
 
-/* Route one stream sample of `e` (a delivery, an update, one call's progress) through its
- * track bindings: every VideoFrame a binding names goes onto its track, and the message
- * forwarded on the frame path has that field's pixels emptied (unless keep_data). Returns
- * the payload to forward (`scratch` holds a stripped copy when one was made). */
+/* Route one stream sample of e through its track bindings: every bound VideoFrame goes onto
+ * its track and the forwarded message has that field emptied. Returns the payload to forward. */
 static dart::Bytes media_route(Conn *c, Entity *e, uint32_t call, dart::Bytes data,
                                const dart::detail::DartSchema *schema, uint64_t written_us,
                                std::string &scratch){
@@ -855,10 +798,8 @@ static void rtc_teardown(Conn *c){
 }
 #endif
 
-/* ---- match-state push -------------------------------------------------------------
- * Recompute each entity's match summary (all read-only dart queries, legal from a
- * callback) and push {op:"match", id, count, ready} for the ones that changed. Runs on
- * the node's service thread (peer events) and on the ticker; the cache under mu dedupes. */
+/* The match state push: recompute each entity's match summary with read only queries and
+ * push the ones that changed. Runs on the service thread and the ticker, the cache dedupes. */
 static void push_match_states(Conn *c){
     if (!c->node || !c->ws) return;
     std::vector<Entity *> ents;
@@ -936,9 +877,8 @@ static void send_event(Conn *c, const dart::Event &ev){
         push_match_states(c);
 }
 
-/* Delivery: one DART message -> one DATA frame per entity bound to the topic index (or
- * the media track for a VideoFrame topic). Runs on the node's service thread. Pattern
- * channels never reach this handler (the patterns layer routes them). */
+/* Delivery: one message to one DATA frame per entity bound to the topic index, or the media
+ * track. Runs on the service thread. Pattern channels never reach this handler. */
 static void deliver_message(Conn *c, const dart::MessageView &m){
     if (!c->ws) return;
     std::vector<Entity *> targets;
@@ -986,14 +926,14 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.disable_error_logs   = req.value("disable_error_logs", false);
     o.fetch_details        = req.value("fetch_details", false);
     for (const auto &s : req.value("seed_peers", std::vector<std::string>{}))
-        o.seed_peers.push_back(s);   /* "ip" or "ip:port"; the wrapper parses + rejects bad ones */
+        o.seed_peers.push_back(s);   /* "ip" or "ip:port", the wrapper rejects bad ones */
     o.unicast_only         = req.value("unicast_only", false);
     o.self_ip              = req.value("self_ip", std::string());
     o.advertise_port       = (uint16_t)req.value("advertise_port", 0);
     if (o.max_topics == 0) o.max_topics = 8;
 
-    /* handlers capture the stable Conn*; the node's service thread owns them and the
-     * Conn always outlives its node (conn_close resets the node first). */
+    /* handlers capture the stable Conn*. The Conn always outlives its node, since
+     * conn_close resets the node first */
     auto on_msg = [c](const dart::MessageView &m){ deliver_message(c, m); };
     auto on_evt = [c](const dart::Event    &e){ send_event(c, e); };
 
@@ -1042,7 +982,7 @@ static void add_schema(json &r, const char *key, const std::optional<dart::Schem
     if (s) r[key] = schema_json(*s);
 }
 
-/* register a built entity (thread-safe insert; the pointer stays stable until close) */
+/* register a built entity. A thread safe insert, the pointer stays stable until close */
 static Entity *ent_add(Conn *c, std::unique_ptr<Entity> e){
     std::lock_guard<std::mutex> g(c->mu);
     Entity *raw = e.get();
@@ -1073,9 +1013,7 @@ static dart::TaskOptions task_opts(const json &req){
 }
 
 /* A reflect_from_mesh handle took its types from the mesh: read them back off this node's
- * own entity walk (the wrapper exposes no schema accessor on a handle) into the reply and
- * the entity, so the client codes against the adopted layout. Untyped when nobody
- * advertises the name yet: `refresh` re-reads later. */
+ * entity walk into the reply, so the client codes against the adopted layout. */
 static void fill_reflected(Conn *c, Entity *e, dart::EntityKind kind, const std::string &name, json &r){
     for (const dart::Entity &ent : c->node->entities()){
         if (ent.kind != kind || ent.name != name) continue;
@@ -1105,8 +1043,8 @@ static int entity_kind_from(const std::string &s, dart::EntityKind *out){
     return 0;
 }
 
-/* `refresh`: re-type a reflect_from_mesh handle in place when the mesh moved; the reply
- * carries the current tables either way (`retyped` says whether they changed) */
+/* refresh: re type a reflect_from_mesh handle in place when the mesh moved. The reply
+ * carries the current tables either way, retyped says whether they changed */
 static void op_refresh(Conn *c, const json &req, const json &seq){
     Entity *e = ent_get(c, (uint16_t)req.value("id", 0));
     if (!e){ reply_err(c, seq, "no such entity"); return; }
@@ -1126,8 +1064,8 @@ static void op_refresh(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, r);
 }
 
-/* `mesh` / `mesh_find`: the whole mesh folded, one entity per (kind, name) across every
- * active peer and this node, schemas from the provider; `epoch` moves on every change */
+/* mesh and mesh_find: the whole mesh folded, one entity per kind and name, schemas from
+ * the provider. epoch moves on every change */
 static void op_mesh(Conn *c, const json &req, const json &seq, bool find){
     if (find){
         dart::EntityKind kind;
@@ -1141,7 +1079,7 @@ static void op_mesh(Conn *c, const json &req, const json &seq, bool find){
     reply_ok(c, seq, { {"entities", arr}, {"epoch", c->node->mesh_epoch()} });
 }
 
-/* a definition's incoming request: the CALL frame carries the caller and its name; the
+/* a definition's incoming request: the CALL frame carries the caller and its name, and the
  * bridge parks the reply until the client's RESULT frame answers */
 static void push_request(Conn *c, Entity *e, uint32_t req_id, uint32_t caller,
                          std::string_view caller_name, uint64_t written_us, dart::Bytes data){
@@ -1191,8 +1129,8 @@ static void create_topic(Conn *c, const json &req, const json &seq, std::unique_
 #endif
 }
 
-/* function_definition: every request is DEFERRED to the client as a CALL frame; the
- * parked Deferred completes when the client's RESULT frame arrives (or at disconnect). */
+/* function_definition: every request is deferred to the client as a CALL frame. The parked
+ * Deferred completes when the RESULT frame arrives, or at disconnect. */
 static void create_function(Conn *c, const json &req, const json &seq, std::unique_ptr<Entity> e, bool definition){
     std::string name = req.value("name", "");
     std::optional<dart::Schema> rq, rs;
@@ -1209,7 +1147,7 @@ static void create_function(Conn *c, const json &req, const json &seq, std::uniq
                 dart::Bytes data = r.data();
                 uint32_t caller = r.caller();
                 std::string caller_name(r.caller_name());
-                uint64_t written_us = r.written_us();   /* read before defer(): the view is callback-lived */
+                uint64_t written_us = r.written_us();   /* read before defer() */
                 dart::Deferred<> d = r.defer();
                 { std::lock_guard<std::mutex> g(c->mu); c->parked.emplace(req_id, std::move(d)); }
                 push_request(c, ent, req_id, caller, caller_name, written_us, data);
@@ -1236,10 +1174,8 @@ static void create_function(Conn *c, const json &req, const json &seq, std::uniq
 #endif
 }
 
-/* task_definition: as a function plus the progress schema and the task options. Every
- * request is DEFERRED (the PendingTask implies RUNNING to the caller); the client streams
- * PROGRESS frames and answers with a RESULT frame whose status may be 5 (cancelled). A
- * caller's cancel surfaces as a CANCEL frame naming the request, off the C on_cancel hook. */
+/* task_definition: as a function plus the progress schema and options. Every request is
+ * deferred, the client streams PROGRESS and answers with RESULT, a cancel is a CANCEL frame. */
 static void create_task(Conn *c, const json &req, const json &seq, std::unique_ptr<Entity> e, bool definition){
     std::string name = req.value("name", "");
     std::optional<dart::Schema> rq, pg, rs;
@@ -1340,10 +1276,8 @@ static void create_variable(Conn *c, const json &req, const json &seq, std::uniq
     rtc_attach(c, ent);
 #endif
 
-    /* value updates are pushed event-driven: on_change fires only on an actual state
-       change (bytes or the forced flag), on_write (opt-in) on EVERY applied write, tagged
-       in the flag byte. Registered AFTER the create reply: the registration replays the
-       current value and the client must already know the id. */
+    /* value updates are pushed off the hooks: on_change on a state change, on_write on every
+     * write. Registered after the create reply, since the registration replays the value. */
     bool wants_write = req.value("on_write", false);
     auto push_var = [c, ent](const dart::VariableUpdate &u, uint8_t evbit){
         Frame f;
@@ -1364,8 +1298,8 @@ static void create_variable(Conn *c, const json &req, const json &seq, std::uniq
     }
 }
 
-/* `create`: the ONE constructor op. `id` is client-chosen (1..65534, unique per
- * connection) and doubles as the WebRTC data channel id; `kind` picks the entity. */
+/* create: the one constructor op. id is client chosen and doubles as the data channel id,
+ * kind picks the entity. */
 static void op_create(Conn *c, const json &req, const json &seq){
     int id = req.value("id", -1);
     if (id < 1 || id > 0xFFFE){ reply_err(c, seq, "bad id (1..65534)"); return; }
@@ -1406,8 +1340,8 @@ static void op_drain(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, { {"drained", e->topic.drain(req.value("timeout_ms", 1000))} });
 }
 
-/* Runs on the WS handler thread (blocks this connection's receives, nothing else);
- * the C wait machinery works under the node's service thread. */
+/* Runs on the WS handler thread and blocks only this connection's receives. The C wait
+ * machinery works under the node's service thread. */
 static void op_settle(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, { {"settled", c->node->settle(req.value("timeout_ms", -1))} });
 }
@@ -1427,7 +1361,7 @@ static void op_cancel(Conn *c, const json &req, const json &seq){
     if (!e || e->kind != Entity::TaskRemote){ reply_err(c, seq, "no such task"); return; }
     dart::SendStatus rc = e->taskrem.cancel(cid);
     const char *s = rc == dart::SendStatus::Ok      ? "ok"
-                  : rc == dart::SendStatus::BadRole ? "no_cancel"     /* provider declared no_cancel */
+                  : rc == dart::SendStatus::BadRole ? "no_cancel"   /* declared no_cancel */
                   : rc == dart::SendStatus::State   ? "not_pending"
                   :                                   "error";
     reply_ok(c, seq, { {"status", s} });
@@ -1443,8 +1377,8 @@ static void op_log(Conn *c, const json &req, const json &seq){
     reply_ok(c, seq, {});
 }
 
-/* subscribe to one or more levels' mesh-wide log stream; lines are pushed as
- * {op:"log", ...} text frames (low rate, so JSON). Idempotent per level. */
+/* subscribe to one or more levels' mesh wide log stream. Lines are pushed as JSON text
+ * frames, idempotent per level. */
 static void op_log_subscribe(Conn *c, const json &req, const json &seq){
     std::vector<std::string> levels = req.value("levels",
         std::vector<std::string>{ "error", "warn", "info" });
@@ -1489,14 +1423,13 @@ static void op_entities(Conn *c, const json &seq){
 static void op_peer_entities(Conn *c, const json &req, const json &seq){
     uint32_t peer = (uint32_t)req.value("peer", 0);
     json arr = json::array();
-    for (const dart::Entity &e : c->node->entities(peer))   /* a dropped peer serves its last view */
+    for (const dart::Entity &e : c->node->entities(peer))   /* a dropped peer gives its last view */
         arr.push_back(entity_json(e));
     reply_ok(c, seq, { {"peer", peer}, {"entities", arr} });
 }
 
-/* @dart/meta query: an async directed call to a peer's meta endpoint. The reply fires
- * later from the poll thread, still echoing the request's seq; it never faults, the
- * client inspects `status`. `sections` is an OR of DART_META_* (0 = every section). */
+/* @dart/meta query: an async directed call to a peer's endpoint. The reply fires later
+ * from the poll thread echoing the request's seq and never faults, the client reads status. */
 static void op_meta(Conn *c, const json &req, const json &seq){
     uint32_t peer     = (uint32_t)req.value("peer", 0);
     uint32_t sections = (uint32_t)req.value("sections", 0);
@@ -1585,8 +1518,8 @@ static void on_call(Conn *c, Entity *e, const Frame &f){
         { std::lock_guard<std::mutex> g(c->mu); c->task_calls.erase(call); }
         push_result(c, e, call, rv);
     };
-    /* map the client call id before launch, so the terminal response can never race the
-     * insert; call_async fills the C call id through the pair in place */
+    /* map the client call id before launch so the terminal response never races the
+     * insert. call_async fills the C call id through the pair in place */
     { std::lock_guard<std::mutex> g(c->mu); c->task_calls.emplace(call, std::make_pair(e->id, 0u)); }
     dart::TaskCall tc = e->taskrem.call_async(f.payload, on_prog, on_rsp);
     if (!tc.ok()){
@@ -1697,8 +1630,8 @@ static void conn_close(const std::shared_ptr<Conn> &c){
     for (auto &kv : parked)       kv.second.fail("bridge client disconnected");
     for (auto &kv : parked_tasks) kv.second->pt.complete_cancelled("bridge client disconnected");
     if (c->node){
-        /* ~Node stops + joins the service thread first, so no handler can be mid-flight
-           (touching c->ws) once it returns; it closes with a BYE and frees everything */
+        /* ~Node stops and joins the service thread first, so no handler is mid flight once it
+           returns. It closes with a BYE and frees everything */
         c->node.reset();
         if (g_verbose) printf("[bridge] node '%s' closed\n", c->name.c_str());
     }
@@ -1745,7 +1678,7 @@ int main(int argc, char **argv){
         }
     }
 
-    setvbuf(stdout, NULL, _IONBF, 0);   /* rare lifecycle prints; keep them visible when redirected */
+    setvbuf(stdout, NULL, _IONBF, 0);   /* rare lifecycle prints, kept visible when redirected */
     std::set_terminate([]{
         const char *what = "unknown";
         try { std::exception_ptr p = std::current_exception(); if (p) std::rethrow_exception(p); }

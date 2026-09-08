@@ -1,9 +1,5 @@
-# DART bridge: one WebSocket connection = one node on the mesh (see PROTOCOL.md), with
-# a WebRTC data path negotiated over that socket. CMake fetches IXWebSocket (BSD-3,
-# TLS/zlib off), nlohmann/json (control plane only), and for WebRTC libdatachannel
-# (MPL-2.0) with its bundled libjuice/usrsctp/libsrtp over MbedTLS: zero system deps.
-# DART comes from ../dist. Builds standalone (cmake -S bridge -B bridge/build) or from
-# the root (-DDART_BUILD_BRIDGE=ON).
+# The bridge: one WebSocket connection is one node on the mesh, with a WebRTC data path.
+# CMake fetches IXWebSocket, nlohmann/json and libdatachannel over MbedTLS (spec/bridge.md).
 
 cmake_minimum_required(VERSION 3.21)
 project(dart_bridge C CXX)
@@ -18,15 +14,15 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/static_runtime.cmake")
 
 option(DART_BRIDGE_WEBRTC "WebRTC data path (fetches libdatachannel + MbedTLS)" ON)
 
-# Standalone: own the output dir and define a minimal `dart` -> ../dist. Under the
-# root build the `dart` target already exists (with dist include + regeneration).
+# Standalone: own the output dir and define a minimal dart target over ../dist. Under the
+# root build the dart target already exists.
 if(NOT TARGET dart)
   if(CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Release;Debug;RelWithDebInfo;MinSizeRel"
         CACHE STRING "Build configs (Release first = the default)" FORCE)
   endif()
   get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
-  # land binaries in bin/, same as the root build; every config shares it (see docs/building.md)
+  # land binaries in bin/ like the root build, every config shares it (docs/building.md)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REPO_ROOT}/bin")
   foreach(_cfg ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER "${_cfg}" _CFG)
@@ -64,18 +60,16 @@ if(DART_BRIDGE_WEBRTC)
   set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
   set(GEN_FILES OFF CACHE BOOL "" FORCE)
   set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
-  # the default config leaves DTLS-SRTP off; the user config re-enables it (PUBLIC define,
-  # so libdatachannel and libSRTP compile against the same configuration)
+  # the default config leaves DTLS-SRTP off and the user config re enables it. A PUBLIC
+  # define, so libdatachannel and libSRTP compile against the same configuration
   set(MBEDTLS_USER_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls_user_config.h" CACHE FILEPATH "" FORCE)
   FetchContent_Declare(mbedtls
     URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.4/mbedtls-3.6.4.tar.bz2
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(mbedtls)
 
-  # libdatachannel: WebRTC (ICE via libjuice, SCTP via usrsctp, SRTP via libSRTP), all
-  # bundled as git submodules, so this is a git fetch. Its WebSocket, examples and
-  # tests are off; media stays on for the video tracks. Our FindMbedTLS (cmake/)
-  # shadows the finders it and libSRTP ship, mapping them onto the fetched targets.
+  # libdatachannel with its bundled libjuice, usrsctp and libSRTP as submodules. Its WebSocket,
+  # examples and tests are off, media stays on. Our FindMbedTLS shadows the finders it ships.
   list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   set(CMAKE_SKIP_INSTALL_RULES ON)   # nothing here installs, and its export set would name the fetched MbedTLS
   set(BUILD_SHARED_LIBS OFF)
@@ -95,8 +89,8 @@ if(DART_BRIDGE_WEBRTC)
   FetchContent_MakeAvailable(libdatachannel)
 endif()
 
-# Two C++ TUs: bridge.cpp is the server; dart.cpp is the DART implementation anchor
-# (it defines DART_IMPLEMENTATION; the C library compiles cleanly as C++).
+# Two C++ translation units: bridge.cpp is the server, dart.cpp is the implementation
+# anchor defining DART_IMPLEMENTATION.
 add_executable(dart_bridge bridge.cpp dart.cpp)
 target_link_libraries(dart_bridge PRIVATE dart ixwebsocket::ixwebsocket
                       nlohmann_json::nlohmann_json)

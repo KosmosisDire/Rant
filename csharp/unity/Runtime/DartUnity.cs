@@ -1,41 +1,5 @@
-// DART for Unity: shared, name-keyed topics handed out by the scene's DartNodeUnity
-// component (DartNodeUnity.cs: Unity only registers a MonoBehaviour whose class name
-// matches its file name, so the component lives there and this file holds the rest).
-//
-// Put ONE DartNodeUnity component in the scene. It owns the process node (name, domain,
-// lifecycle) and every other script publishes/subscribes through it, so components
-// never each open a node of their own:
-//
-//   public struct Pose { public float X, Y, Z; }
-//
-//   // publish from any component
-//   DartTopic<Pose> pose;
-//   void Start()  { pose = DartNodeUnity.Topic<Pose>("player/pose"); }
-//   void Update() { pose.Publish(new Pose { X = transform.position.x }); }
-//
-//   // subscribe from any other component: dies with the component, skipped while
-//   // it is disabled, and always fires on the main thread
-//   void Start() { DartNodeUnity.Subscribe<Pose>("player/pose", this, OnPose); }
-//   void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
-//
-// Topics are shared by name: every script asking for "player/pose" gets the same
-// DartTopic<Pose>, and its role is managed automatically (created inactive; the
-// first Publish advertises pub, the first Subscribe advertises sub, the last
-// unsubscribe withdraws it).
-//
-// Threading: the node runs the C service thread, so the wire never waits for a
-// frame; every topic is queued from creation and DartNodeUnity dispatches once per
-// frame, so ALL handlers fire on the main thread, where the Unity API is legal.
-// Events (peer up/down, errors) reach the main thread the same way and are logged
-// to the Console by default (DartNodeUnity.Events to observe them).
-//
-// Edit mode: the component is [ExecuteAlways]; with Run In Edit Mode on (default)
-// the node is live in the editor outside play, pumped from EditorApplication.update.
-// Whether publishers/subscribers exist at edit time is up to them: a topic
-// acquired while the node is closed simply goes live when it opens.
-//
-// The low-level wrapper stays fully available: DartNodeUnity.Main.Raw is the DartNode, and a
-// DartTopic's Raw is the underlying Dart.Topic (TryTake, Drain, QueueStats...).
+// DART for Unity: shared, name keyed topics handed out by the scene's DartNodeUnity
+// component, which lives in its own file. csharp/unity/README.md explains the model.
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
@@ -46,18 +10,16 @@ namespace Dart
     /// <summary>Per-message metadata for handlers that want more than the payload.</summary>
     public readonly struct MessageInfo
     {
-        /// <summary>The sending node's name (never null; "unknown-peer" fallback).</summary>
+        /// <summary>The sending node's name, never null.</summary>
         public readonly string Sender;
-        /// <summary>DartNode monotonic clock (microseconds) at ARRIVAL on the poll side,
-        /// not at dispatch: inter-arrival timing is real even when dispatch is
-        /// frame-paced.</summary>
+        /// <summary>The node's monotonic clock in microseconds at arrival on the poll side, not
+        /// at dispatch, so inter arrival timing is real under a frame paced dispatch.</summary>
         public readonly ulong RecvUs;
         public MessageInfo(string sender, ulong recvUs) { Sender = sender; RecvUs = recvUs; }
     }
 
-    /// <summary>A live subscription (to a topic or variable observer):
-    /// Dispose() unsubscribes. Owner-bound subscriptions dispose themselves when the
-    /// owner is destroyed.</summary>
+    /// <summary>A live subscription to a topic or a variable observer. Dispose() unsubscribes,
+    /// and an owner bound one disposes itself when the owner is destroyed.</summary>
     public sealed class DartSubscription : IDisposable
     {
         private Action _unsub;
@@ -70,9 +32,8 @@ namespace Dart
         }
     }
 
-    /// <summary>A shared, name-keyed topic on the scene's DartNodeUnity. One instance
-    /// exists per name; it survives the native node closing and reopening (edit
-    /// mode toggles, inspector changes) by re-creating its native topic lazily.</summary>
+    /// <summary>A shared, name keyed topic on the scene's DartNodeUnity, one instance per name.
+    /// It survives the native node closing and reopening by re creating its topic lazily.</summary>
     public abstract class DartTopicBase
     {
         internal sealed class Sub
@@ -99,7 +60,7 @@ namespace Dart
         }
 
         public string Name => _name;
-        /// <summary>The underlying wrapper Topic; null while the node is closed.</summary>
+        /// <summary>The underlying wrapper Topic, null while the node is closed.</summary>
         public Topic Raw => _raw;
         /// <summary>Matched remote endpoints (0 while the node is closed).</summary>
         public int Matches => _raw != null ? _raw.MatchCount() : 0;
@@ -108,9 +69,8 @@ namespace Dart
 
         internal abstract Topic CreateRaw(DartNode node, string name, Role role, Qos qos);
 
-        // The advertised role always mirrors actual local use: create the native
-        // topic on first use, flip the role on later changes (SetRole re-advertises
-        // immediately and peers rematch from cached verdicts, so this is cheap).
+        // The advertised role mirrors actual local use: create the native topic on first use and
+        // flip the role on later changes. SetRole re advertises at once, so this is cheap.
         internal void ApplyRole()
         {
             Role want = _wantPub ? (_live > 0 ? Role.PubSub : Role.PubOnly)
@@ -174,7 +134,7 @@ namespace Dart
         internal void Deliver(DartMessage m)
         {
             bool sawDead = false;
-            int n = _subs.Count;                    // additions during the loop wait for the next message
+            int n = _subs.Count;   // additions during the loop wait for the next message
             for (int i = 0; i < n; i++)
             {
                 Sub s = _subs[i];
@@ -247,8 +207,8 @@ namespace Dart
         }
     }
 
-    /// <summary>A typed shared topic: T's public fields are the schema, exactly as
-    /// in the core wrapper's Topic&lt;T&gt;.</summary>
+    /// <summary>A typed shared topic: T's public fields are the schema, as in the core
+    /// wrapper's Topic&lt;T&gt;.</summary>
     public sealed class DartTopic<T> : DartTopicBase
     {
         internal DartTopic(DartNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }

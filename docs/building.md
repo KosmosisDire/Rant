@@ -21,7 +21,8 @@ cmake --build --preset windows-debug   # Debug, overwrites Release in bin/
 Debug build.
 
 Targets: `dart_test`, `dart_test_noshm`, `example`, `pubsub`, `if_probe_check`, and
-`dist` (amalgamate only). To regenerate `dist/` without CMake:
+`dist` (amalgamate only). `pubsub --help` lists that tool's modes and flags. To regenerate
+`dist/` without CMake:
 
 ```sh
 cmake -DSRC=src -DOUT=dist -P tools/pack.cmake
@@ -47,6 +48,14 @@ gcc -std=c99 -Wall -Idist tests/dart_test.c  -o dart_test.exe -lws2_32 -lbcrypt 
 `example.c` uses the two header packaging. `dart_test.c` uses `dart.h` and needs the
 implementation in its own translation unit so its diagnostic `sendto` and `recvfrom`
 wrappers can intercept the transport's calls.
+
+The example is an interactive chat node. Type `sub`, `pub`, `pubsub` or `drop` plus a
+topic name to manage topics, and any other line is published as a ChatMsg to every topic
+you publish on. A first argument names the node. `--verbose` prints every discovery and
+transport event, `--if <ip>` pins multicast to an interface on a multihomed host, and
+`--peer <ip>` seeds discovery with one address over unicast where multicast is blocked.
+`pattern_demo` runs a server node owning a function, a task and a variable next to a
+client node that calls them, so the explorer shows every pattern kind live.
 
 ## Testing
 

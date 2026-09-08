@@ -80,6 +80,7 @@ split headers and `DART` for the combined one.
 |---|---|
 | `<P>_IMPLEMENTATION` | emit the implementation, in one file only |
 | `<P>_SANS_IO` | strip the runtime, keep the portable cores |
+| `DART_PLAT_CUSTOM` | drop only the bundled platform implementation, so a caller links its own `i_dart_plat_*` functions |
 | `DART_SHM` | same host shared memory path. Auto on for Windows, Linux, macOS and BSD |
 | `DART_NO_SHM` | force shared memory off. Drops the Linux `-lrt` |
 | `DART_THREADS` | node lock and service thread. Auto on for Windows and POSIX with pthreads |

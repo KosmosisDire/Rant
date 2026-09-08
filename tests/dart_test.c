@@ -1,17 +1,5 @@
-/* middleware test & diagnostic CLI.
- *
- * Subcommands: node (full-mesh latency/throughput node), sweep (spawns node
- * children per rate, aggregates into a table; --remote folds in results from
- * `serve` workers on other machines), serve (two-machine sweep worker),
- * selftest (on_gap, backpressure, dynamic-interest functional test),
- * sendbench (UDP send-cost microbench, Windows-only).
- *
- * Built against single-header dist/dart.h with DART_IMPLEMENTATION, so the diag
- * sendto/recvfrom wrappers below can intercept the transport's syscalls.
- *   build: run tools/pack first to generate dist/, then
- *     POSIX  : cc  -std=c99 -Wall -Idist tests/dart_test.c -o dart_test
- *     Windows: gcc -std=c99 -Wall -Idist tests/dart_test.c -o dart_test.exe -lws2_32 -lbcrypt -lwinmm
- */
+/* The test and benchmark CLI: selftest, sweep, serve, node and the benches. Built against
+ * dist/dart.h with DART_IMPLEMENTATION so the sendto and recvfrom wrappers can intercept. */
 #if !defined(_WIN32)
   #ifndef _POSIX_C_SOURCE
   #define _POSIX_C_SOURCE 200809L
@@ -32,9 +20,8 @@
   #include <time.h>        /* nanosleep            */
 #endif
 
-/* Syscall instrumentation (Windows): wraps the transport's sendto/recvfrom.
- * Two QPC reads per syscall are cheap enough to keep always on. On POSIX the
- * wrappers are absent and the counters stay zero. */
+/* Syscall instrumentation on Windows: wraps the transport's sendto and recvfrom. Two QPC
+ * reads per call are cheap enough to keep on. POSIX has no wrappers, the counters stay 0. */
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -50,19 +37,16 @@
 
 static unsigned long long g_tx_calls, g_tx_wouldblock, g_tx_reset, g_tx_err, g_tx_ticks;
 static unsigned long long g_rx_calls, g_rx_would,      g_rx_reset, g_rx_err, g_rx_ticks;
-/* selftest fault injection: force transport datagrams (submessage type byte 1..4) to
- * would-block, so the threaded phases can prove eviction is surfaced, never silent.
- * Discovery datagrams ('uDSC') pass. Windows only (the wrappers are absent on POSIX). */
+/* selftest fault injection: force transport datagrams (submessage type byte 1 to 4) to
+ * would block, so the threaded phases prove eviction is surfaced. Discovery passes. */
 static volatile int g_tx_block_data;
-/* swallow 'uDTL' DETAIL_RESP datagrams destined to this port (0 = off): the destination
- * node then never verifies its candidates while everyone else converges normally, which
- * is how the match-wait phases hold one side of the detail exchange open on demand. */
+/* swallow uDTL DETAIL_RESP datagrams to this port, 0 = off: that node never verifies its
+ * candidates, which is how the match wait phases hold one side of the exchange open. */
 static volatile unsigned g_tx_block_detail_resp_port;
-static unsigned long long g_tx_type[5], g_rx_type[5];   /* [0]=other/disc, 1=DATA 2=HB 3=NACK 4=GAP */
+static unsigned long long g_tx_type[5], g_rx_type[5];   /* by submessage type, 0 = other */
 static unsigned long long g_tx_data_ch[4], g_rx_data_ch[4];
-/* the under-one-MTU invariant: the largest datagram any layer handed to sendto since the
- * last reset, plus uDTL interest-paging counters (kind 3 = REQ). The interest phase
- * resets these, then asserts max <= DART_DGRAM_MAX and no steady-state re-fetch. */
+/* the under one MTU invariant: the largest datagram any layer handed to sendto since the
+ * last reset, plus the uDTL paging counters. The interest phase asserts on them. */
 static volatile int g_tx_max_len;
 static volatile unsigned long long g_tx_interest_req;
 static int g_trace = 0, g_trace_left = 24;
@@ -72,7 +56,7 @@ static LARGE_INTEGER g_qpf;
 
 static void diag_classify(const char *b, int len, unsigned long long *types,
                           unsigned long long *data_ch){
-    /* datagrams may carry several concatenated submessages; count each */
+    /* datagrams may carry several concatenated submessages, count each */
     int off = 0, counted = 0;
     while (len - off >= 4){
         unsigned t = (unsigned char)b[off];
@@ -172,11 +156,8 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #undef recvfrom
 #endif
 
-/* ===================== node-API test shims =============================
- * The public node API is handle-based (dart_node_create_topic -> DartTopic*,
- * dart_topic_send, ...). These test-internal helpers keep the index-based call
- * sites concise: dart_node_topic(n, i) maps a creation index back to its handle,
- * so the old (node, topic-index) call form maps straight onto the handle calls. */
+/* Test shims keeping the index based call sites concise: dart_node_topic maps a creation
+ * index back to its handle, so a (node, index) call form maps onto the handle calls. */
 #define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)))
 #define dart_node_set_role(n, idx, r)        dart_topic_set_role(dart_node_topic((n),(idx)), (r))
 #define dart_node_drain(n, idx, ms)          dart_topic_drain(dart_node_topic((n),(idx)), (ms))
@@ -185,9 +166,8 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #define dart_node_subscriber_progress(n, idx, p, b, h, t) \
         dart_topic_subscriber_progress(dart_node_topic((n),(idx)), (p),(b),(h),(t))
 
-/* Open a node and create its topics from a DartTopicDef array in index order, so
- * the array index is the topic handle index the shims above resolve. opts carries
- * everything that used to live in DartNodeConfig except topics/on_message. */
+/* Open a node and create its topics from a DartTopicDef array in index order, so the array
+ * index is the handle index the shims above resolve. */
 static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
                                DartEventFn on_event, DartNodeOpts opts, const DartTopicDef *chans, uint16_t nch){
     DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -253,10 +233,8 @@ static const char *g_name = "node";
 static uint32_t    g_tag  = 0;
 static uint64_t    g_report_ns = 0;   /* wall time spent inside print_report */
 static int         g_xch = 0;         /* extra topics declared              */
-static int         g_spread = 0;      /* 1 = load round-robins across them;
-                                         2 = same but extras are PUB_ONLY on
-                                         every node, so those writes have no
-                                         readers anywhere (local cost only)   */
+static int         g_spread = 0;      /* 1 = load round robins across them. 2 = the same, but extras
+                                         are PUB_ONLY on every node, so those writes have no readers */
 
 static size_t build_probe(uint8_t *o, uint8_t type, uint32_t tag, uint32_t seq,
                           uint64_t t, const char *name){
@@ -341,7 +319,7 @@ static void lat_on_message(const DartMsg *msg){
         } else if (type==PROBE_PONG && tag==g_tag){
             uint64_t rtt = now - t;
             if (rtt <= RTT_SANITY_NS){
-                if (e->rtt_n > 0){   /* RFC3550: J += (|D| - J)/16 */
+                if (e->rtt_n > 0){   /* RFC 3550: J += (|D| minus J) / 16 */
                     double d = (rtt > e->last_rtt_ns) ? (double)(rtt - e->last_rtt_ns)
                                                       : (double)(e->last_rtt_ns - rtt);
                     e->jit_ns += (d - e->jit_ns) / 16.0;
@@ -467,9 +445,8 @@ static int node_main(int argc, char **argv){
           if (g_spread==2) ch[2+i].role = DART_PUB_ONLY;   /* nobody subscribes */
       } }
 
-    /* meta_max_ids is gone: the core auto-raises it to 2*n_topics, which
-       already covers every extra topic here. disable_shm: the sweep measures the
-       UDP path, so don't let same-host peers silently switch to shared memory. */
+    /* disable_shm: the sweep measures the UDP path, so same host peers must not switch
+       to shared memory */
     DartNodeOpts opts = {
         .domain      = domain,
         .disable_shm = 1,
@@ -478,9 +455,7 @@ static int node_main(int argc, char **argv){
     if (if_ip)
         opts.net.multicast_interface = if_ip;       /* pin discovery to this one interface */
     else if (if_mode==1)
-        opts.net.multicast_interface = "127.0.0.1"; /* single-host test: loopback only, so the
-                                             run cannot see (or be seen by) the LAN. if_mode=2
-                                             leaves the default: every interface */
+        opts.net.multicast_interface = "127.0.0.1";   /* loopback only, off the LAN */
     DartDiscoveryAddr seed;
     if (peer_ip){                     /* bootstrap without multicast */
         uint32_t a4 = inet_addr(peer_ip);
@@ -512,10 +487,8 @@ static int node_main(int argc, char **argv){
     int rr = 0;                  /* spread round-robin cursor */
     unsigned long load_sent = 0, load_forgiven = 0;
     int wait_ms = (load_hz > 0) ? 1 : 20;   /* don't block long while loading */
-    /* stall detection: a loop gap far beyond wait_ms means we lost the CPU, so
-       big stalls make a run suspect. Voluntary backpressure waits
-       (qos.backpressure_wait_us) are subtracted so stall numbers mean INVOLUNTARY loss;
-       voluntary time is reported separately as blk_wait_ms. */
+    /* stall detection: a loop gap far beyond wait_ms means we lost the CPU. Voluntary
+       backpressure waits are subtracted and reported separately as blk_wait_ms. */
     uint64_t prev_iter = 0, max_gap = 0, stall_ns = 0, max_gap_at = 0;
     uint64_t prev_wait_us = 0;
     unsigned long nstalls = 0;
@@ -560,10 +533,8 @@ static int node_main(int argc, char **argv){
             int burst = 0;
             if (want > done && (unsigned long long)(want - done) > max_deficit)
                 max_deficit = want - done;
-            /* forgive backlog older than ~250 ms: repaying a long stall as one
-               mega-burst from every node overflows peers' RX buffers and reads
-               as drops. Forgiven samples never consume a seq, so receivers see
-               no gap, and the sent_hz dip still reports the stall. */
+            /* forgive backlog older than about 250 ms: repaying a stall as one burst from every
+               node overflows peers' receive buffers and reads as drops (spec/testing.md) */
             { unsigned long slack = (unsigned long)load_hz/4 + 1;
               if (want > done + slack){ load_forgiven += want - slack - done; done = want - slack; } }
             ph = now_ns();
@@ -596,9 +567,8 @@ static int node_main(int argc, char **argv){
         }
 
         now = now_ns();
-        /* periodic reports only in run-forever mode: stdout is unbuffered, so a
-           blocked write (e.g. a PowerShell redirect pipe nobody pumps) freezes
-           the node for seconds. Timed runs only need the SUMMARY. */
+        /* periodic reports only in run forever mode: stdout is unbuffered, so a blocked write
+           on an unpumped pipe freezes the node for seconds. Timed runs need only the SUMMARY. */
         if (duration_s == 0 && now - last_report >= REPORT_INTERVAL_NS){
             last_report = now;
             print_report();
@@ -678,9 +648,8 @@ static int sendbench_main(void){
     for (i=0;i<SB_N;i++) sendto(tx, buf, 1024, 0, (struct sockaddr*)&sa, sizeof sa);
     printf("unconnected sendto 1024B: %.2f us/call\n", sb_end(t0, SB_N));
 
-    /* multicast send cost vs number of local subscriber sockets. Windows
-       charges the SENDER per local fan-out delivery, so this scales with
-       joiner count. */
+    /* multicast send cost against the number of local subscriber sockets. Windows
+       charges the sender per local delivery, so this scales with the joiner count. */
     { int joiners[] = {0, 1, 5, 10};
       SOCKET js[10]; int nj = 0, k, ji;
       unsigned long lo = inet_addr("127.0.0.1");
@@ -723,28 +692,11 @@ static int sendbench_main(void){
 }
 #endif /* _WIN32 */
 
-/* ============ selftest: on_gap, backpressure, dynamic interest =========== *
- * Two nodes in ONE process (writer pub-only, reader sub-only) so the test
- * controls exactly when each side runs. Phases:
- *   1. JOIN     : reader joins mid-stream; on_gap must NOT fire.
- *   2. GAP      : writer stages a burst beyond keep_last without flushing,
- *                 so KEEP_LAST evicts and the reader gets one GAP plus the
- *                 surviving tail; on_gap count must equal the evicted span.
- *   3. BLOCKED  : on a backpressure_wait_us topic, sends that would evict un-acked
- *                 history wait ~backpressure_wait_us while the reader never acks, then
- *                 proceed (KEEP_LAST fallback, never refusal).
- *   4. RELEASED : same topic once the reader acks; sends are instant.
- *   4b SWEEP-ACK: a sub-only reader whose ACKNACK is timer-armed (nack_delay>0)
- *                 must flush it via the periodic sweep when the writer goes
- *                 quiet; backpressure must release with no data event to ride.
- *   5. DYNAMIC  : reader flips a topic inactive/subscribed at runtime;
- *                 each (re)subscribe replays cached history with no gap.
- *   6. SCALE    : 40 topics, past the old 31-id announce cap. */
+/* The selftest: two nodes in one process, a pub only writer and a sub only reader, so the
+ * test controls exactly when each side runs. spec/testing.md catalogues the phases. */
 
-/* Selftest domains are PER PROCESS: every phase offsets from this base, picked at
- * selftest entry from the clock so concurrent selftests (or a stray node, the
- * explorer, a sweep) land on disjoint domains instead of joining each other's
- * loopback multicast and polluting peer sets and counts. */
+/* Selftest domains are per process: every phase offsets from this base, picked from the
+ * clock at entry, so concurrent runs and stray nodes land on disjoint domains. */
 static uint16_t st_domain_base = 33;
 #define ST_DOMAIN   st_domain_base
 /* topic handles are array indices (declaration order in ch[]) */
@@ -759,14 +711,13 @@ static uint16_t st_domain_base = 33;
 #define ST_NCH      40
 
 static int st_fail = 0;
-/* the discovery peer table behind a node (raw announce checks; the public walk is
-   dart_node_peers_next) */
+/* the discovery peer table behind a node, for raw announce checks. The public walk is
+   dart_node_peers_next */
 static const DartDiscoveryPeer *st_peers(DartNode *n, uint16_t *count){
     return dart_discovery_peers(n->discovery, count);
 }
-/* cond is evaluated exactly ONCE: a condition with side effects (a poll that drains
-   state) must not run twice, or the second evaluation fails silently while the first
-   printed ok -- an invisible st_fail with no FAIL line anywhere. */
+/* cond is evaluated exactly once: a condition with side effects must not run twice, or
+   the second evaluation fails silently after the first printed ok */
 #define ST_CHECK(cond, ...) do { int st_ok_ = !!(cond); \
     printf(st_ok_ ? "  ok   " : "  FAIL "); printf(__VA_ARGS__); printf("\n"); \
     if (!st_ok_) st_fail = 1; } while (0)
@@ -797,10 +748,8 @@ static void st_pump(DartNode *a, DartNode *b, int ms){     /* run both nodes */
     while (i_dart_plat_now_us() < end){ dart_node_poll(a, 1); if (b) dart_node_poll(b, 0); }
 }
 
-/* v10 one-way link between RAW transports: hand src's interest to dst (which knows src
-   as peer src_id) and run the pairwise detail exchange by hand, exactly as the two
-   runtimes would. The announce only NOMINATES (32-bit hashes); the details verify; the
-   re-apply forms the matches. */
+/* A one way link between raw transports: hand src's interest to dst and run the pairwise
+   detail exchange by hand, as the runtimes would. The announce only nominates. */
 static void st_apply_verified(DartTransportState *dst, uint32_t src_id, DartTransportState *src){
     uint8_t ib[512], rq[512], rp[2048]; size_t il, rl, pl; uint16_t nw;
     DartDetailWant wl[16];
@@ -814,11 +763,8 @@ static void st_apply_verified(DartTransportState *dst, uint32_t src_id, DartTran
     dart_transport_apply_peer_interest(dst, src_id, dart_bytes(ib, il));
 }
 
-/* ---- best-effort rate throttle (transport core, controlled clock) ----
-   A subscriber advertises qos.max_rate_hz; the writer paces its fire-and-forget lane,
-   decimating to the newest sample each tick. The per-peer wire seqno keeps loss honest:
-   a paced skip is NOT loss, a dropped SENT sample IS. Deterministic (virtual clock);
-   the pump can drop a DATA datagram. */
+/* Best effort rate throttle on the transport core with a controlled clock. The writer
+   paces its lane to the subscriber's max_rate_hz (spec/testing.md). The pump can drop. */
 static int rate_recv, rate_lost, rate_drop;
 static uint64_t rate_clk;
 static DartTransportState *rate_W, *rate_R;
@@ -832,7 +778,7 @@ static void rate_send(void){
     static unsigned char p[16];
     dart_transport_send(rate_W, 0, dart_bytes(p, sizeof p), rate_clk);
 }
-static void rate_pump(uint64_t dt){   /* flush W -> R (dropping DATA per rate_drop), then advance the clock */
+static void rate_pump(uint64_t dt){   /* flush W to R, then advance the clock */
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
     while (dart_transport_poll_send(rate_W,&to,buf,sizeof buf,&ol,rate_clk)){
         if (rate_drop>0 && (buf[0]&0x07u)==1u){ rate_drop--; continue; }   /* drop this DATA */
@@ -868,8 +814,8 @@ static void rate_checks(void){
     ST_CHECK(rate_recv>=5 && rate_recv<=20, "rate: decimated to ~rate*time (%d of 200 delivered)", rate_recv);
     ST_CHECK(rate_lost==0, "rate: paced skips are not loss (lost=%d)", rate_lost);
 
-    /* a dropped SENT sample must still be reported: send + tick, DROP that DATA, then let
-       later ticks deliver -> the reader's per-peer seqno gap surfaces as one MSG_LOST. */
+    /* a dropped sent sample must still be reported: send and tick, drop that DATA, then
+       let later ticks deliver, so the reader's per peer seqno gap surfaces as one MSG_LOST */
     rate_recv=0; rate_lost=0;
     rate_send(); rate_clk += 20000u; rate_drop=1;   /* the next tick's DATA is dropped */
     rate_pump(20000u);
@@ -883,15 +829,8 @@ static void rate_checks(void){
 }
 
 
-/* ---- lapped reader + NACK merge (transport core, controlled clock) ----
-   A 6-fragment reliable stream W -> R through a pump that can drop DATA. Pins two
-   repair-path rules: (1) the writer MERGES a repair request into the one it still holds,
-   never overwrites it (two ACKNACKs landing in one pass are both served); (2) a reader
-   the writer's floor passes while it was still fetching a sample restarts at the oldest
-   cached sample ONCE, and on the next such skip with nothing delivered in between rejoins
-   at the writer's head (the cached window is given up, reported as MSG_LOST). Without (2)
-   a fragmented stream whose full-message repair takes longer than one inter-message
-   period starves such a reader forever (every live message is dropped as ahead). */
+/* Lapped reader and NACK merge on the transport core with a controlled clock: a six
+   fragment reliable stream through a pump that can drop DATA (spec/testing.md). */
 static int lap_recv, lap_lost, lap_drop_all; static unsigned lap_drop_mask;
 static uint64_t lap_clk;
 static DartTransportState *lap_W, *lap_R;
@@ -906,7 +845,7 @@ static void lap_send(void){                       /* one 6-fragment message */
     static unsigned char p[6*DART_FRAG_SIZE - 100];
     dart_transport_send(lap_W, 0, dart_bytes(p, sizeof p), lap_clk);
 }
-/* R -> W: collect now, feed later, so ACKNACKs armed at different points land in ONE pass */
+/* R to W: collect now, feed later, so ACKNACKs armed at different points land in one pass */
 static void lap_collect_r(void){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
     while (lap_nh<8 && dart_transport_poll_send(lap_R,&to,buf,sizeof buf,&ol,lap_clk)){
@@ -917,9 +856,8 @@ static void lap_feed_w(void){
     for (i=0;i<lap_nh;i++) dart_transport_on_datagram(lap_W, 2u, dart_bytes(lap_held[i], lap_hl[i]), lap_clk);
     lap_nh = 0;
 }
-/* W -> R, dropping DATA per lap_drop_all / lap_drop_mask (frag index bits, one message);
-   a submessage batched behind a dropped DATA still gets through (HBs must). After
-   `split_after` DATA fragments were fed, R's pending ACKNACK is collected mid-stream. */
+/* W to R, dropping DATA per the lap_drop switches, one message. After split_after DATA
+   fragments R's pending ACKNACK is collected mid stream. A batched HB still passes. */
 static void lap_flush_w(int split_after){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol; int fed=0;
     while (dart_transport_poll_send(lap_W,&to,buf,sizeof buf,&ol,lap_clk)){
@@ -936,7 +874,7 @@ static void lap_flush_w(int split_after){
     }
 }
 static void lap_pump(uint64_t dt){ lap_flush_w(0); lap_collect_r(); lap_feed_w(); lap_clk += dt; }
-static void lap_run(int ms){ while (ms-- > 0) lap_pump(1000); }   /* 1 ms steps: every timer fires on time */
+static void lap_run(int ms){ while (ms-- > 0) lap_pump(1000); }   /* 1 ms steps */
 static void lapped_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
     DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -963,10 +901,8 @@ static void lapped_checks(void){
     lap_recv=0; lap_lost=0; lap_send(); lap_pump(1000);
     ST_CHECK(lap_recv==1 && lap_lost==0, "lapped: [a] a 6-fragment message delivers (recv=%d)", lap_recv);
 
-    /* [b] NACK merge: frags 1 and 4 of one message are lost. Frag 2 reveals the first hole
-       (ACKNACK armed, collected mid-stream), frag 5 the second (a refill for the new part
-       only): two requests reach the writer in ONE pass. Both holes must be resent at once;
-       an overwrite would resend only frag 4 and leave frag 1 to the 50 ms backstop. */
+    /* [b] NACK merge: frags 1 and 4 of one message are lost, so two requests reach the
+       writer in one pass. Both holes must be resent at once, an overwrite would resend only 4. */
     lap_recv=0; lap_lost=0; lap_drop_mask=(1u<<1)|(1u<<4);
     lap_send(); lap_flush_w(2); lap_collect_r();
     ST_CHECK(lap_nh==2, "lapped: [b] two ACKNACKs collected in one pass (%d)", lap_nh);
@@ -981,14 +917,12 @@ static void lapped_checks(void){
     lap_recv=0; lap_lost=0; lap_drop_all=1;
     for (i=0;i<6;i++){ lap_send(); lap_pump(1000); }
     lap_drop_all=0;
-    lap_run(120);     /* tail HB -> skip; the backstop (repair_delay) NACK -> resend */
+    lap_run(120);     /* the tail HB skips, the backstop NACK resends */
     ST_CHECK(lap_recv==4 && lap_lost==12,
              "lapped: [c] one floor skip restarts at the oldest cached sample (recv=%d lost=%d)", lap_recv, lap_lost);
 
-    /* [d] lapped: a second floor skip with nothing delivered in between. The reader never
-       got the first window's resends (still dropped), two more sends evict it again: the
-       reader rejoins at the writer's head, the whole cached window is reported lost, and the
-       next message arrives in order without a single repair round. */
+    /* [d] lapped: a second floor skip with nothing delivered in between. The reader rejoins
+       at the writer's head, the cached window is reported lost, the next message is in order. */
     lap_recv=0; lap_lost=0; lap_drop_all=1;
     for (i=0;i<6;i++){ lap_send(); lap_pump(1000); }
     lap_run(30);                                       /* skip #1 (its resends stay dropped) */
@@ -1019,12 +953,8 @@ static void lapped_checks(void){
 }
 
 
-/* ---- per-peer RTT estimation (transport core, controlled clock, a one-way latency) ----
-   W -> R through a pump with a symmetric one-way delay L, so every round trip is 2L
-   exactly. Pins: the writer samples push-to-ack, the reader samples request-to-resend,
-   both feed the per-peer DartPeerRtt (RFC 6298 shape), the reader's re-ask backstop is the
-   50 ms default until the first sample and the RTT bound after it, and the writer's tail
-   heartbeat follows the same bound instead of the fixed DART_HB_TAIL_US. */
+/* Per peer RTT estimation on the transport core: W to R through a pump with a symmetric
+   one way delay L, so every round trip is exactly 2L (spec/testing.md). */
 static int rt_recv, rt_drop_all, rt_drop_ack; static unsigned rt_drop_mask, rt_drop_resend_of;
 static uint64_t rt_clk, rt_lat;
 static DartTransportState *rt_W, *rt_R;
@@ -1036,10 +966,8 @@ static void rt_send(void){                       /* one 6-fragment message */
     static unsigned char p[6*DART_FRAG_SIZE - 100];
     dart_transport_send(rt_W, 0, dart_bytes(p, sizeof p), rt_clk);
 }
-/* one tick: W builds at clk and R hears it at clk+L; R answers at clk+L and W hears that at
-   clk+2L; the clock then sits at clk+2L. DATA fragments drop per the switches: rt_drop_mask
-   (frag index bits, the next message only), rt_drop_all, and rt_drop_resend_of (drop the
-   next RESEND of that frag index, once). rt_drop_ack drops R's ACKNACKs. */
+/* one tick: W builds at clk, R hears it at clk plus L and answers, W hears that at clk
+   plus 2L. DATA fragments drop per the rt_drop switches, rt_drop_ack drops R's ACKNACKs. */
 static void rt_pump(void){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
     while (dart_transport_poll_send(rt_W,&to,buf,sizeof buf,&ol,rt_clk)){
@@ -1066,7 +994,7 @@ static void rtt_checks(void){
     DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartPeerRtt e;
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
-    q.heartbeat_us=200000;                            /* idle HB far off: only the tail HB matters here */
+    q.heartbeat_us=200000;   /* idle HB far off: only the tail HB matters here */
     memset(&cw,0,sizeof cw); cw.name="rtt"; cw.qos=q; cw.role=DART_PUB_ONLY;
     memset(&cr,0,sizeof cr); cr.name="rtt"; cr.qos=q; cr.role=DART_SUB_ONLY;
     memset(&wc,0,sizeof wc); wc.topics=&cw; wc.n_topics=1; wc.max_peers=2;
@@ -1095,9 +1023,8 @@ static void rtt_checks(void){
     dart_transport_peer_rtt(rt_R, 1u, &e);
     ST_CHECK(e.samples==0, "rtt: [a] a reader that never repaired has no estimate (%u)", e.samples);
 
-    /* [b] reader side, first loss: frag 2 lost and its resend lost too. No reader estimate yet,
-       so the re-ask waits the 50 ms default: >= 10 ticks of 5 ms before delivery. The re-asked
-       seqno is ambiguous (which request did the arrival answer?), so it is no sample. */
+    /* [b] reader side, first loss: frag 2 and its resend are lost. No estimate yet, so the
+       re ask waits the 50 ms default. The re asked seqno is ambiguous, so it is no sample. */
     rt_recv=0; rt_drop_mask=(1u<<2); rt_drop_resend_of=2u+1u;
     rt_send();
     for (n=0; n<40 && rt_recv==0; n++) rt_pump();
@@ -1131,24 +1058,18 @@ static void rtt_checks(void){
 }
 
 
-/* ---- one sample held AHEAD of the head (transport core, controlled clock) ----
-   The reader keeps one sample beyond the head while the head repairs, so a late resend no
-   longer throws away the message that arrived meanwhile (which then had to come back through
-   the repair window in serial pieces). Pins: the held sample delivers right behind the
-   repaired head with no refetch and in order; a second future sample is still dropped and
-   comes back in order; the hold fills while the consumer has the head parked; the writer's
-   floor landing on the held sample delivers it; a hold across a wholly-lost sample waits its
-   turn. Messages are 6 fragments, tagged with their number in the first payload byte. */
+/* One sample held ahead of the head on the transport core with a controlled clock
+   (spec/testing.md). Messages are 6 fragments, tagged with their number in byte 0. */
 static int ah_recv, ah_lost, ah_refuse, ah_order_bad; static unsigned ah_drop_mask, ah_tag, ah_last;
-static uint64_t ah_drop_lo, ah_drop_hi;             /* drop DATA with seqno in [lo, hi): a whole message + its resends */
+static uint64_t ah_drop_lo, ah_drop_hi;   /* drop DATA seqnos in [lo, hi), a message plus resends */
 static uint64_t ah_clk, ah_first_base; static int ah_have_first;
 static DartTransportState *ah_W, *ah_R;
 static uint8_t ah_held[8][DART_DGRAM_MAX]; static size_t ah_hl[8]; static int ah_nh;
 static int ah_on_msg(void *u, uint16_t ch, uint32_t from, DartBytes d){
     (void)u;(void)ch;(void)from;
     if (ah_refuse) return 1;
-    {   unsigned tag = ((const unsigned char*)d.data)[DART_TIMESTAMP_BYTES];   /* the tag sits behind the source stamp */
-        if (tag <= ah_last) ah_order_bad++;              /* strictly increasing: never a duplicate or a step back */
+    {   unsigned tag = ((const unsigned char*)d.data)[DART_TIMESTAMP_BYTES];
+        if (tag <= ah_last) ah_order_bad++;   /* strictly increasing, no dup or step back */
         ah_last = tag; }
     ah_recv++; return 0;
 }
@@ -1160,7 +1081,7 @@ static void ah_send(void){                       /* one 6-fragment message, tagg
     p[0] = (unsigned char)++ah_tag;
     dart_transport_send(ah_W, 0, dart_bytes(p, sizeof p), ah_clk);
 }
-static uint64_t ah_base_of(unsigned tag){ return ah_first_base + 6u * (uint64_t)(tag - 1u); }   /* message tag's frag-0 seqno */
+static uint64_t ah_base_of(unsigned tag){ return ah_first_base + 6u * (uint64_t)(tag - 1u); }
 static void ah_collect_r(void){
     uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t ol;
     while (ah_nh<8 && dart_transport_poll_send(ah_R,&to,buf,sizeof buf,&ol,ah_clk)){
@@ -1264,22 +1185,20 @@ static void ahead_checks(void){
     dart_transport_repair_stats(ah_W,0,&ws);
     ST_CHECK(ws.frags_resent==resent0, "ahead: [d] no resend was needed (resent=%llu)", (unsigned long long)(ws.frags_resent-resent0));
 
-    /* [e] a message is lost whole (resends too) and the next one is held; the writer evicts
-       the lost one, its floor lands ON the held message: delivered from the hold, one MSG_LOST
-       for the evicted one, the rest refetched in order */
+    /* [e] a message is lost whole and the next one is held. The writer evicts the lost one
+       and its floor lands on the held message: delivered from the hold, one MSG_LOST */
     ah_recv=0; ah_lost=0;
     ah_drop_lo=ah_base_of(ah_tag+1u); ah_drop_hi=ah_drop_lo+6u;
     ah_send(); ah_send(); ah_pump(1000);          /* 7 lost whole, 8 held */
-    ah_send(); ah_pump(1000); ah_send(); ah_pump(1000); ah_send(); ah_pump(1000);   /* 9..11: 7 evicted (keep_last 4) */
+    ah_send(); ah_pump(1000); ah_send(); ah_pump(1000); ah_send(); ah_pump(1000);
     ah_run(120);
     ST_CHECK(ah_recv==4 && ah_lost==6 && ah_order_bad==0,
              "ahead: [e] the floor landed on the held message: delivered, one lost, rest refetched in order (recv=%d lost=%d)",
              ah_recv, ah_lost);
     ah_drop_lo=ah_drop_hi=0;
 
-    /* [f] a hold ACROSS a wholly-lost message: 12 has a hole, 13 is lost whole (once), 14 is
-       held. 12 repairs, 13 is fetched in order, 14 delivers from the hold: in order, 7 resends,
-       nothing dropped */
+    /* [f] a hold across a wholly lost message: 12 has a hole, 13 is lost whole once, 14 is
+       held. 12 repairs, 13 is fetched in order, 14 delivers from the hold */
     dart_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
     dart_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
     ah_recv=0; ah_lost=0; ah_drop_mask=(1u<<2);
@@ -1317,16 +1236,15 @@ static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16
     memset(p+8, uid, 16);                         /* a distinct uuid per uid */
     p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
     p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    /* blob = discovery section [u16 data_port][u8 self_ip_len=0][u8 name_len=0]; no overlay.
-       self_ip_len 0 -> the receiver uses the datagram src ip; the port now rides here. */
+    /* blob = the discovery section [u16 data_port][u8 self_ip_len 0][u8 name_len 0], no
+       overlay. self_ip_len 0 means the receiver uses the datagram source ip. */
     b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=0;
     p[off-2]=4; p[off-1]=0;                        /* meta_len = 4 (the discovery section) */
     return off + 4;
 }
 
-/* craft an announce that STATES its locator: [u16 port][u8 ip_len=4][ip][u8 name_len=0].
-   flags 0x04 = RELAY_ME (sender cannot multicast), 0x08 = PROXIED (a relay speaking for
-   the origin, so the stated address is only where the RELAY sees it). */
+/* craft an announce that states its locator: [u16 port][u8 ip_len 4][ip][u8 name_len 0].
+   flags 0x04 = RELAY_ME, 0x08 = PROXIED (a relay speaking for the origin). */
 static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
                        uint32_t mver, const uint8_t ip[4]){
     size_t off = DART_DISCOVERY_META_OFF;
@@ -1345,8 +1263,8 @@ static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     return off + 8;
 }
 
-/* feed one crafted datagram to a core as if received from (ip, sport); via 0 = arrived
-   on the discovery socket, 1 = on the data-port socket (the two observed channels) */
+/* feed one crafted datagram to a core as if received from (ip, sport). via 0 = the
+   discovery socket, 1 = the data port socket */
 static void dc_feed(DartDiscoveryState *st, const uint8_t ip[4], uint16_t sport, int via,
                     const uint8_t *buf, size_t n, uint64_t now){
     DartDiscoveryAddr src;
@@ -1372,7 +1290,7 @@ static void disc_core_checks(void){
     if (!st) return;
     dart_discovery_update(st, 1000, out, sizeof out);   /* start */
 
-    /* 1. two peers announce -> two ups, both ACTIVE */
+    /* 1. two peers announce: two ups, both ACTIVE */
     dc_up_n=dc_down_n=dc_refused_n=0;
     n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2000); idA=dc_up_id;
     n=dc_mk(buf,2,0,99,5002,1); dc_feed(st,sb,7400,0,buf,n,2000); idB=dc_up_id;
@@ -1386,14 +1304,14 @@ static void disc_core_checks(void){
              "disc-core: refuse new peer when full of active (refused=%u up=%u count=%u)",
              dc_refused_n, dc_up_n, dart_discovery_peer_count(st));
 
-    /* 3. silence past timeout DROPS both (kept, not freed; excluded from count) */
+    /* 3. silence past the timeout drops both, kept but excluded from the count */
     dc_down_n=0;
     dart_discovery_update(st, 2002000, out, sizeof out);
     ST_CHECK(dc_down_n==2 && dc_down_reason==(int)DART_DISCOVERY_DROP && dart_discovery_peer_count(st)==0,
              "disc-core: timeout drops both (downs=%u reason=%d count=%u)",
              dc_down_n, dc_down_reason, dart_discovery_peer_count(st));
 
-    /* 4. same uuid returns -> RESUME under the SAME local_id */
+    /* 4. the same uuid returns: RESUME under the same local_id */
     dc_up_n=0;
     n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2100000);
     ST_CHECK(dc_up_n==1 && dc_up_id==idA && dart_discovery_peer_count(st)==1,
@@ -1415,10 +1333,8 @@ static void disc_core_checks(void){
              "disc-core: BYE is GONE (downs=%u sameid=%d reason=%d count=%u)",
              dc_down_n, dc_down_id==idA, dc_down_reason, dart_discovery_peer_count(st));
 
-    /* 7. a NEW uuid announcing from an (ip,port) we already hold = that endpoint's
-          process restarted; the predecessor is provably dead (one socket == one
-          process), so it must be evicted (GONE) rather than lingering to shadow the
-          newcomer's data (the writer-restart-with-address-reuse hole). */
+    /* 7. a new uuid announcing from an (ip, port) we already hold: that process restarted,
+       so the predecessor is evicted as GONE rather than shadowing the newcomer's data */
     { uint32_t idP;
       st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
       dart_discovery_update(st, 1000, out, sizeof out);
@@ -1432,9 +1348,8 @@ static void disc_core_checks(void){
                dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, dart_discovery_peer_count(st));
     }
 
-    /* 8. RELAY (the rules the loopback e2e phase cannot see, since every address there
-          is 127.0.0.1): who enlists us, one hop only, and a proxied locator losing to a
-          direct path we are still hearing. */
+    /* 8. RELAY, the rules the loopback phase cannot see: who enlists us, one hop only, and
+       a proxied locator losing to a direct path we still hear */
     { uint32_t id9; DartDiscoveryAddr a; size_t pn; uint16_t pport;
       st = dart_discovery_init(mem,sizeof mem,&c);            /* fresh receiver */
       dart_discovery_update(st, 1000, out, sizeof out);
@@ -1442,9 +1357,8 @@ static void disc_core_checks(void){
       n=dc_mk(buf,9,0x04,99,7001,1); dc_feed(st,sa,7400,0,buf,n,3000);
       id9=dc_up_id;
       pn = dart_discovery_poll_relay(st, out, sizeof out);
-      /* PROXIED is the loop stop (8b proves it defeats enlistment even with RELAY_ME set);
-         RELAY_ME rides along as origin info, so third parties know the origin's stated
-         locator is no endpoint identity (two NAT'd containers may state the same one) */
+      /* PROXIED is the loop stop, 8b proves it defeats enlistment even with RELAY_ME set.
+         RELAY_ME rides along as origin info, so a stated locator is no endpoint identity */
       ST_CHECK(pn > 0 && (out[5] & 0x08) && (out[5] & 0x04),
                "disc-core: relay-me peer is proxied PROXIED, origin's RELAY_ME carried (n=%u flags=0x%02X)",
                (unsigned)pn, (unsigned)(pn ? out[5] : 0));
@@ -1480,10 +1394,8 @@ static void disc_core_checks(void){
                a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
     }
 
-    /* 9. SELF-IP: a node whose reachable address is NOT the one its packets appear to
-          come from (a static 1:1 mapping) states its locator outright. It must ride our
-          own announce, and a relay must propagate the STATED address, not the source it
-          saw -- otherwise relaying would undo the override for every third party. */
+    /* 9. SELF-IP: a node states its locator outright. It must ride our own announce, and a
+       relay must propagate the stated address, not the source it saw. */
     { DartDiscoveryCoreConfig sc2; DartDiscoveryState *s2; DartDiscoveryAddr a;
       uint8_t pub_ip[4]={203,0,113,7}; uint32_t id12; size_t pn;
       sc2 = c;                                     /* same domain/timing, our own uuid */
@@ -1513,19 +1425,16 @@ static void disc_core_checks(void){
                "disc-core: the relay proxies the STATED locator, not the source it saw");
     }
 
-    /* 10. OBSERVED SOURCES (NAT). A unicast-only peer sends everything from its data
-       socket, and a NAT rewrites its source per flow: its advertised locator is fiction.
-       Its direct RELAY_ME announces carry uuid + the real return path, so the receiver
-       binds one observed source per local channel and routes everything there. */
+    /* 10. OBSERVED SOURCES: a unicast only peer behind a NAT advertises a fiction, so the
+       receiver binds one observed source per local channel and routes everything there. */
     { DartDiscoveryCoreConfig c4; DartDiscoveryAddr a; uint32_t id20, id21, id22, idX, idU;
       uint8_t na[4]={192,168,1,50}, sx[4]={192,168,1,200}, su[4]={192,168,1,51};
       size_t pn; int ex;
       c4 = c; c4.max_peers = 4;
       st = dart_discovery_init(mem,sizeof mem,&c4);
       dart_discovery_update(st, 1000, out, sizeof out);
-      /* (a) bind + route: announce (RELAY_ME, blob port 6000) arrives on our DATA channel
-         from (na, 33333). Data goes to the observed source, never the phantom locator;
-         attribution accepts the observed source and REFUSES the phantom. */
+      /* (a) bind and route: a RELAY_ME announce arrives on our data channel from (na, 33333).
+         Data goes to the observed source, attribution refuses the phantom locator. */
       dc_up_n=0;
       n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,33333,1,buf,n,5000); id20=dc_up_id;
       memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id20, &a);
@@ -1535,14 +1444,14 @@ static void disc_core_checks(void){
                !dart_discovery_id_for_addr(st,na,4,6000,NULL),
                "disc-core: attribution accepts the observed source, refuses the phantom locator");
       /* (b) the discovery channel binds independently: the same announce heard on our
-         discovery socket from another flow; discovery TX then hits exactly that endpoint */
+         discovery socket from another flow, so discovery TX hits exactly that endpoint */
       n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,44444,0,buf,n,5001);
       { int k = dart_discovery_peer_addr(st, 0, &a);
         ST_CHECK(k==2 && a.port==44444,
                  "disc-core: discovery TX targets the discovery-channel source exactly (k=%d port=%u)",
                  k, a.port); }
-      /* (c) QUIET rebind: the NAT expired and the next announce arrives from a new flow.
-         Sends follow at once; no peer_up refires (nothing about the peer changed). */
+      /* (c) quiet rebind: the NAT expired and the next announce arrives from a new flow.
+         Sends follow at once and no peer_up refires. */
       dc_up_n=0;
       n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,55555,1,buf,n,5002);
       memset(&a,0,sizeof a); dart_discovery_addr_of_id(st, id20, &a);
@@ -1580,8 +1489,8 @@ static void disc_core_checks(void){
       c4.max_peers = 6;
       st = dart_discovery_init(mem,sizeof mem,&c4);        /* fresh relayer */
       dart_discovery_update(st, 1000, out, sizeof out);
-      n=dc_mk(buf,30,0,99,7000,1); dc_feed(st,sx,7400,0,buf,n,6000); idX=dc_up_id;   /* normal peer X */
-      n=dc_mk(buf,31,0x04,99,6000,1); dc_feed(st,su,50001,1,buf,n,6001); idU=dc_up_id; /* relay-me U */
+      n=dc_mk(buf,30,0,99,7000,1); dc_feed(st,sx,7400,0,buf,n,6000); idX=dc_up_id;   /* peer X */
+      n=dc_mk(buf,31,0x04,99,6000,1); dc_feed(st,su,50001,1,buf,n,6001); idU=dc_up_id; /* relay U */
       pn = dart_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
       ST_CHECK(pn > 0 && out[8]==30 && ex==1 && a.port==50001 && memcmp(a.ip,su,4)==0,
                "disc-core: a new relay-me peer is introduced to everyone we hear (uuid=%u to=%u)",
@@ -1610,12 +1519,8 @@ static void disc_core_checks(void){
       (void)idX; (void)idU;
     }
 
-    /* 11. GHOST GATE: relaying is sustained by DIRECT liveness only. Every relay hears
-       the other relays' proxies (and its own multicast-looped echoes, which carry the
-       ORIGIN's uuid, so the self-filter never drops them); if those sustained the relay
-       decision, a dead unicast-only origin would be re-announced forever, mesh-wide
-       (each relay's proxies refreshing the others). Proxies still refresh plain
-       liveness, so the entry outlives the origin by one extra timeout, then dies. */
+    /* 11. GHOST GATE: relaying is sustained by direct liveness only. Proxies still refresh
+       plain liveness, so the entry outlives the origin by one timeout, then dies. */
     { DartDiscoveryCoreConfig c5; uint64_t t; size_t pn; int round, relayed;
       c5 = c; c5.max_peers = 4;
       st = dart_discovery_init(mem,sizeof mem,&c5);
@@ -1626,8 +1531,8 @@ static void disc_core_checks(void){
       dart_discovery_update(st, t, out, sizeof out);
       pn = dart_discovery_poll_relay(st, out, sizeof out);
       ST_CHECK(pn > 0 && out[8]==40, "disc-core: a directly heard relay-me peer is relayed");
-      /* the origin dies; other relays' PROXIED announces keep arriving every interval.
-         They keep the entry ALIVE, but must never keep US relaying it. */
+      /* the origin dies while other relays' PROXIED announces keep arriving. They keep the
+         entry alive but must never keep us relaying it. */
       relayed = 0;
       for (round = 0; round < 3; round++){
           t += 1000000;
@@ -1654,13 +1559,8 @@ static void disc_core_checks(void){
       ST_CHECK(dc_down_n>=1, "disc-core: the ghost dies once proxies cease (downs=%u)", dc_down_n);
     }
 
-    /* 12. A UNICAST-ONLY RECEIVER (cfg.relay_me): everything it hears arrived through
-       its OWN NAT. A published-port forward rewrites the source to the NAT's internal
-       gateway -- an address on the receiver's own subnet, which would WIN the locator
-       ranking against the peer's true routed address and silently black-hole every
-       send to that peer, permanently (each forwarded arrival refreshes the wrong
-       incumbent). So a source never overrides a held locator there; it binds as the
-       observed RETURN PATH instead, for every direct peer, not just relay-me ones. */
+    /* 12. A UNICAST-ONLY RECEIVER: a published port forward rewrites the source to the
+       gateway on our own subnet, so a source never overrides a held locator here. */
     { DartDiscoveryCoreConfig c6; DartDiscoverySubnet net; DartDiscoveryAddr a;
       DartDiscoveryPeer v; uint32_t id50, got;
       static const uint8_t gw[4]={10,0,2,2}, real_ip[4]={192,168,1,106};
@@ -1673,10 +1573,8 @@ static void disc_core_checks(void){
       /* (a) an introduction states the peer's true routed locator */
       n=dc_mk_ip(buf,50,0x08,99,5555,1,real_ip); dc_feed(st,sa,7400,0,buf,n,9000);
       id50=dc_up_id;
-      /* (b) its direct announce arrives through our published-port forward: source = the
-         gateway, on our own subnet (rank 2 vs the real address's rank 1). The locator
-         must NOT move -- without the guard the gateway wins the ranking and every send
-         to the peer goes to it instead of the peer. */
+      /* (b) its direct announce arrives through our port forward: the source is the gateway
+         on our own subnet, rank 2 against the real address's rank 1. The locator must not move. */
       n=dc_mk(buf,50,0,99,5555,2); dc_feed(st,gw,33445,1,buf,n,9001);
       { int have = dart_discovery_peer_at(st, 0, &v);
         ST_CHECK(have && memcmp(v.addr.ip,real_ip,4)==0 && v.addr.port==5555,
@@ -1693,12 +1591,8 @@ static void disc_core_checks(void){
                "disc-core: ...and attributes arrivals from that flow to the peer");
     }
 
-    /* 13. DUPLICATE SUPPRESSION: every direct hearer is a relay, but the mesh needs 2-3
-       active ones, not N. 2+ FOREIGN proxies for an origin heard within one announce
-       interval suppress our own periodic emission; our own multicast-looped echo (told
-       apart by the relayer-uuid trailer after the blob) never counts, or a lone relay
-       would suppress itself; and a CHANGED origin re-arms emission immediately, so news
-       always propagates and only steady-state repetition thins out. */
+    /* 13. DUPLICATE SUPPRESSION: two foreign proxies within one announce interval suppress
+       our own emission, our looped echo never counts, and a changed origin re arms it. */
     { DartDiscoveryCoreConfig c7; uint8_t mine[DART_DISCOVERY_WIRE_MAX];
       size_t mn, pn2;
       c7 = c; c7.max_peers = 4;
@@ -1739,19 +1633,16 @@ static void disc_core_checks(void){
     }
 }
 
-/* node-core peer lifecycle (sans-IO): drive dart_node_core_peer_up/down/refused
-   directly over a transport, with NO sockets, clock, or platform anywhere. Proves
-   the split: the peer table + discovery->transport wiring is testable in isolation. */
+/* node core peer lifecycle, sans IO: drive the peer up, down and refused hooks directly
+   over a transport with no sockets, clock or platform anywhere. */
 static uint32_t nc_up_n, nc_down_n, nc_refused_n, nc_up_id, nc_down_id;
 static void nc_event(const DartEvent *ev){
     if      (ev->kind==DART_PEER_UP)     { nc_up_n++;   nc_up_id=ev->peer; }
     else if (ev->kind==DART_PEER_DOWN)   { nc_down_n++; nc_down_id=ev->peer; }
     else if (ev->kind==DART_ERROR && ev->error==DART_E_PEER_REFUSED){ nc_refused_n++; }
 }
-/* feed the node core through a REAL (sans-IO) discovery core: build an announce datagram
-   (discovery section [u16 port][u8 self_ip_len=0][u8 name_len][name], no overlay) so
-   discovery populates its table and fires events INTO i_dart_node_core_on_disc_event.
-   flags 0x01 = BYE. */
+/* feed the node core through a real sans IO discovery core: build an announce datagram
+   with no overlay so discovery fires events into the node core. flags 0x01 = BYE. */
 static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
                        const char *name, uint32_t mver){
     size_t off = DART_DISCOVERY_META_OFF;
@@ -1766,16 +1657,14 @@ static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     memset(p+8, uid, 16);                          /* a distinct uuid per uid */
     p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
     p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=nl;   /* port, self_ip_len=0, name_len */
+    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=nl;   /* port, no self ip, name_len */
     if (nl) memcpy(b+4, name, nl);
     p[off-2]=(uint8_t)ml; p[off-1]=(uint8_t)(ml>>8);
     return off + ml;
 }
 
-/* node-core peer lifecycle, fully sans-IO: a transport + a real discovery core (no
-   sockets/clock/platform), the node core delegating its peer table to discovery. Proves
-   the collapse: id<->address resolution + naming + the transport lifecycle all ride
-   discovery's one peer table, with the node core's per-peer state in its user scratch. */
+/* node core peer lifecycle, fully sans IO: a transport plus a real discovery core, the
+   node core delegating its peer table to discovery. */
 static void node_core_checks(void){
     static uint8_t tmem[1<<18], cmem[4096], dmem[8192], amem[1<<16];
     uint8_t buf[256], out[DART_DISCOVERY_WIRE_MAX];
@@ -1803,7 +1692,7 @@ static void node_core_checks(void){
     if (!nc) return;
 
     /* the discovery core whose peer table the node core delegates to: reserve the node's
-       per-peer scratch via peer_user_bytes; wire its events into the node core */
+       per peer scratch via peer_user_bytes and wire its events into the node core */
     memset(&dcfg,0,sizeof dcfg); memset(dcfg.uuid,0xEE,16);
     dcfg.domain_id=99; dcfg.announce_interval_us=1000000; dcfg.peer_timeout_us=1000000; dcfg.max_peers=2;
     dcfg.peer_user_bytes=i_dart_node_core_peer_user_bytes();
@@ -1821,7 +1710,7 @@ static void node_core_checks(void){
         ST_CHECK(mb.len>=5 && dart_meta_frag(mb)==1200,
                  "node-core: builds overlay (frag=%u)", dart_meta_frag(mb)); }
 
-    /* 1. two peers announce -> two ups; discovery assigns the ids; resolve each way */
+    /* 1. two peers announce: two ups, discovery assigns the ids, resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
     n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,7400,0,buf,n,2000); idA=nc_up_id;
     n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,7400,0,buf,n,2000); idB=nc_up_id;
@@ -1834,7 +1723,7 @@ static void node_core_checks(void){
     ST_CHECK(i_dart_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
              "node-core: addr resolves to id (id=%u)", id);
 
-    /* a nameless announce -> the peer name falls back to "unknown-peer" (never empty/NULL) */
+    /* a nameless announce falls back to "unknown-peer", never empty or NULL */
     {   DartString pn;
         n=nc_dgram(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,7400,0,buf,n,2001);
         pn = i_dart_node_core_peer_name(nc, idA);
@@ -1842,7 +1731,7 @@ static void node_core_checks(void){
                  "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
         n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,7400,0,buf,n,2002); }
 
-    /* 2. a 3rd peer is REFUSED while the table is full of ACTIVE peers; the node forwards it */
+    /* 2. a third peer is REFUSED while the table is full of ACTIVE peers, the node forwards it */
     nc_refused_n=0;
     n=nc_dgram(buf,3,0,99,5003,"three",1); dc_feed(st,sc,7400,0,buf,n,2003);
     ST_CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
@@ -1853,12 +1742,12 @@ static void node_core_checks(void){
     ST_CHECK(nc_down_n==2, "node-core: timeout drops both (downs=%u)", nc_down_n);
     ST_CHECK(i_dart_node_core_resolve(nc,idA,&d)==1, "node-core: dropped peer kept (resolves)");
 
-    /* 4. the same uuid returns -> RESUME re-fires PEER_UP under the same id */
+    /* 4. the same uuid returns: RESUME re fires PEER_UP under the same id */
     nc_up_n=0;
     n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,7400,0,buf,n,1100000);
     ST_CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
-    /* 5. GONE (BYE) on the now-active peer: one PEER_DOWN, and it no longer resolves */
+    /* 5. GONE (BYE) on the active peer: one PEER_DOWN, and it does not resolve any more */
     nc_down_n=0;
     n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dc_feed(st,sa,7400,0,buf,n,1100001);
     ST_CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
@@ -1877,9 +1766,8 @@ static void shm_module_checks(void){
     const char msg[] = "hello shared memory";
     i_dart_plat_startup();
     memset(&cfg,0,sizeof cfg);
-    /* per-process segment name: the name is OS-global, so a fixed one lets a concurrent
-       selftest share (and re-stamp) this run's segment; suffix with the per-process
-       domain base like every other cross-process resource here */
+    /* per process segment name: the name is OS global, so a fixed one would let a concurrent
+       selftest share this run's segment. Suffixed with the per process domain base. */
 #ifdef _WIN32
     snprintf(cfg.name,sizeof cfg.name,"dart-shm-stmod-%u",(unsigned)st_domain_base);
 #else
@@ -1912,10 +1800,8 @@ static void shm_module_checks(void){
     i_dart_plat_cleanup();
 }
 
-/* (2) transport-core loss/repair: a mock on_shm whose success is controllable and a
-   pump that can drop SHM-DATA. Proves a failed resolve does NOT ack (so it repairs),
-   a dropped descriptor re-sends, and a persistently unresolvable descriptor is
-   skipped after the retry cap (MSG_LOST) without wedging the reader. */
+/* (2) transport core loss and repair over shared memory: a mock on_shm with controllable
+   success and a pump that can drop SHM-DATA (spec/testing.md). */
 static int shml_ok, shml_recv, shml_lost, shml_drop;
 static uint64_t shml_now;
 static DartTransportState *shml_W, *shml_R;
@@ -1991,7 +1877,7 @@ static DartNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **
     q.reliability=DART_RELIABLE; q.keep_last=4; q.catch_up=1;
     memset(d,0,sizeof *d); d->name="shmnode"; d->qos=q; d->role=is_pub?DART_PUB_ONLY:DART_SUB_ONLY;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
-    memset(&opts,0,sizeof opts); opts.domain=domain;   /* dynamic mode (test_node_open) is SHM-capable */
+    memset(&opts,0,sizeof opts); opts.domain=domain;   /* dynamic mode is SHM capable */
     opts.disable_shm = (uint8_t)(!shm_capable);   /* a non-SHM peer forces the inline UDP path */
     opts.discovery.max_peers=4;
     opts.net.multicast_interface="127.0.0.1"; opts.net.seed_peers=&seed; opts.net.n_seed_peers=1;
@@ -2006,8 +1892,8 @@ static void shm_node_checks(void){
     if (P&&S){
         for (i=0;i<800 && dart_node_publisher_match_count(P,0)==0;i++){ dart_node_poll(P,2); dart_node_poll(S,2); }
         ST_CHECK(dart_node_publisher_match_count(P,0)>0, "shm-node: matched");
-        /* sizes[0] fits one datagram (< frag) so it ships INLINE, not SHM; the two
-           larger ones would fragment, so they take the SHM path. */
+        /* sizes[0] fits one datagram so it ships inline, not SHM. The two larger ones would
+           fragment, so they take the SHM path. */
         sizes[0]=200; sizes[1]=300*1024; sizes[2]=4*1024*1024;
         for (i=0;i<3;i++){
             unsigned long want=0; size_t j; int before=shmn_recv, t;
@@ -2044,11 +1930,10 @@ static void shm_node_checks(void){
 
 #endif /* DART_SHM */
 
-/* Unit checks for the small pure helpers the Tier-1 cleanup touched: the fragment
- * clamp, the dart_transport_send result codes, and the shared little-endian byte packing.
- * These need no sockets, so they run straight against the transport core. */
+/* Unit checks for the small pure helpers: the fragment clamp, the send result codes and
+ * the shared little endian packing. No sockets, straight against the transport core. */
 static void unit_checks(void){
-    /* dart_clamp_frag: 0 -> default, otherwise clamp into [MIN, MAX] */
+    /* dart_clamp_frag: 0 = default, else clamp into [MIN, MAX] */
     ST_CHECK(dart_clamp_frag(0) == DART_FRAG_SIZE,
              "clamp: 0 -> default frag (%u)", (unsigned)dart_clamp_frag(0));
     ST_CHECK(dart_clamp_frag(65535) == DART_FRAG_SIZE_MAX,
@@ -2074,11 +1959,8 @@ static void unit_checks(void){
              && dart_topic_id("alpha") != dart_topic_id("beta"),
              "topic-id: deterministic and name-distinct");
 
-    /* dart_transport_send result codes (transport core, no sockets). The size check
-       (the 65535-fragment wire cap) precedes the role check, so an oversize send on the
-       pub topic is TOO_BIG even with no subscriber, while a valid-size send on the
-       sub-only topic is ROLE. An init with no allocator must refuse (the allocator is
-       the one memory model). */
+    /* send result codes on the transport core: the size check precedes the role check, and
+       an init with no allocator must refuse (spec/testing.md) */
     {   static uint8_t tmem[1<<16], amem[1<<12];
         DartTopicDef uch[2]; DartConfig tc; DartTransportState *ts; uint8_t buf[128];
         static DartAllocator A; A = dart_allocator_static(amem, sizeof amem);
@@ -2092,7 +1974,7 @@ static void unit_checks(void){
         ts = dart_transport_init(tmem, sizeof tmem, &tc);
         ST_CHECK(ts != NULL, "result: transport init");
         if (ts){
-            size_t wire_cap = 65535u * (size_t)dart_transport_frag(ts);   /* checked before any copy */
+            size_t wire_cap = 65535u * (size_t)dart_transport_frag(ts);   /* checked before copy */
             memset(buf, 0, sizeof buf);
             ST_CHECK(dart_transport_send(ts, 5, dart_bytes(buf, 16),  0) == DART_ERR_NO_TOPIC, "result: out-of-range topic -> NO_CHANNEL");
             ST_CHECK(dart_transport_send(ts, 1, dart_bytes(buf, 16),  0) == DART_ERR_ROLE,       "result: sub-only topic -> ROLE");
@@ -2102,10 +1984,8 @@ static void unit_checks(void){
     }
 }
 
-/* Exercise dart_node_open's staged-cleanup (goto fail) paths: force a failure at a
- * different stage each time so a distinct label runs, assert the open returns NULL,
- * then confirm a normal open still works -- proving cleanup left the platform balanced
- * (a missed i_dart_plat_cleanup unbalances the refcount; a missed close leaks the socket). */
+/* Exercise the staged cleanup paths of dart_node_open: force a failure at a different
+ * stage each time, assert NULL, then confirm a normal open still works. */
 /* open-failure event sink: capture the DART_ERROR kind fired during a failing open */
 static int of_seen_error;
 static void of_on_event(const DartEvent *ev){ if (ev->kind == DART_ERROR) of_seen_error = (int)ev->error; }
@@ -2115,8 +1995,8 @@ static void open_fail_checks(void){
     DartNode *n;
     of_seen_error = DART_E_NONE;
 
-    /* create-fail: an over-long topic name is rejected by dart_node_create_topic; the
-       node opened fine and stays usable (validation moved from init to topic create) */
+    /* create fail: an over long topic name is rejected by dart_node_create_topic. The node
+       opened fine and stays usable. */
     {   static char longname[DART_TOPIC_NAME_MAX + 8]; DartTopic *c;
         DartAllocator a = dart_allocator_static(mem, sizeof mem);
         memset(longname, 'x', sizeof longname - 1); longname[sizeof longname - 1] = 0;
@@ -2127,9 +2007,8 @@ static void open_fail_checks(void){
         if (n) dart_node_close(n, 0);
     }
 
-    /* a non-multicast discovery group makes discovery's IGMP join fail, so
-       dart_discovery_place returns NULL and the node unwinds through fail_sock.
-       dart_last_error(NULL) then names the step (MCAST_JOIN) with no handle to query. */
+    /* a non multicast discovery group fails the IGMP join, so the node unwinds through
+       fail_sock and dart_last_error(NULL) names MCAST_JOIN with no handle to query */
     {   DartAllocator a = dart_allocator_static(mem, sizeof mem);
         DartEvent err; char line[160];
         n = dart_node_open(&a, NULL, NULL, NULL,
@@ -2141,9 +2020,8 @@ static void open_fail_checks(void){
         if (n) dart_node_close(n, 0);
     }
 
-    /* fail_sock: occupy an ephemeral port, then aim the node's data socket at it; the
-       unicast data bind takes no reuse, so it collides and unwinds through fail_sock.
-       last_error names DART_E_BIND and carries the offending port + OS errno. */
+    /* fail_sock: occupy an ephemeral port, then aim the node's data socket at it. The bind
+       takes no reuse, so it collides and last_error names DART_E_BIND with port and errno. */
     {   i_DartSock occupy;
         i_dart_plat_startup();
         occupy = i_dart_plat_udp_open();
@@ -2182,20 +2060,15 @@ static void open_fail_checks(void){
     }
 }
 
-/* Bug-1 regression: in an SHM+allocator build the node rewraps the transport's app
- * callbacks (on_message/on_shm/allocator) to forward the app's user_data, and points
- * the transport's user at the node. A transport-fired event (MSG_LOST/TOO_BIG/
- * NAME_COLLISION) must reach the app's on_event with that SAME user_data, not the node
- * pointer. NAME_COLLISION is the deterministic transport event: open a subscriber in
- * dynamic mode (so the node is SHM-capable, taking the rewrap path) with a sentinel
- * user_data, drive a topic-hash collision, and assert on_event saw the sentinel. */
+/* An SHM capable node rewraps the transport callbacks to forward the app's user_data, so
+ * a transport fired event must reach on_event with that same user_data (spec/testing.md). */
 static void *evu_user; static int evu_collisions;
 static void evu_on_event(const DartEvent *ev){
     if (ev->kind == DART_ERROR && ev->error == DART_E_NAME_COLLISION){ evu_user = ev->user; evu_collisions++; }
 }
 static void event_user_checks(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
-    const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> one identity (see collide.c) */
+    const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both to one identity, see collide.c */
     DartTopicDef cw, cr; DartNodeOpts wo, ro; DartNode *w, *r;
     uint8_t payload[16]; int i; memset(payload,0x5A,sizeof payload);
     memset(&cw,0,sizeof cw);
@@ -2205,7 +2078,7 @@ static void event_user_checks(void){
     cr=cw; cr.name=B; cr.role=DART_SUB_ONLY;
     wo = (DartNodeOpts){ .domain=ST_DOMAIN+5, .discovery={ .max_peers=4 } };
     ro = wo;
-    ro.user_data=&sentinel;   /* dynamic mode (test_node_open) -> SHM-capable */
+    ro.user_data=&sentinel;   /* dynamic mode, so SHM capable */
     evu_user=NULL; evu_collisions=0;
     w=test_node_open(mem_w,sizeof mem_w,NULL,NULL,NULL,wo,&cw,1);
     r=test_node_open(mem_r,sizeof mem_r,NULL,NULL,evu_on_event,ro,&cr,1);
@@ -2220,11 +2093,8 @@ static void event_user_checks(void){
 }
 
 
-/* Dynamic growth: creating topics past the reserve relocates the whole node into a bigger
- * arena, carrying live reliable state across. Stream on topic 0, force several grows by
- * creating topics mid-stream, then keep streaming on the ORIGINAL handle and assert no
- * message was lost, duplicated or reordered -- i.e. the migration preserved reader/writer
- * position, the peer/discovery state and the user's handle. */
+/* Dynamic growth: creating topics past the reserve relocates the node into a bigger arena.
+ * Stream on topic 0 across several grows and assert nothing was lost, duplicated or reordered. */
 static int dg_recv[24]; static int dg_seq_ok; static int dg_next0;
 static void dg_on_message(const DartMsg *msg){
     if (msg->topic_index < 24) dg_recv[msg->topic_index]++;
@@ -2258,7 +2128,7 @@ static void dynamic_grow_checks(void){
     for (t=0;t<800 && dart_topic_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(dart_topic_match_count(pc0)>0, "dyn-grow: topic 0 matched");
     for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
-    /* create topics 1..11 on both -> several grows (max_topics 2 -> 4 -> 8 -> 16) */
+    /* create topics 1 to 11 on both: several grows, max_topics 2, 4, 8, 16 */
     for (i=1;i<12;i++){ dart_node_create_topic(P, names[i], DART_PUB_ONLY, NULL, &co);
                         dart_node_create_topic(S, names[i], DART_SUB_ONLY, NULL, &co);
                         dart_node_poll(P,1); dart_node_poll(S,1); }
@@ -2274,9 +2144,8 @@ static void dynamic_grow_checks(void){
     dart_node_close(P,1); dart_node_close(S,1);
 }
 
-/* (17) QoS RxO: a DART_RELIABLE subscriber must REFUSE a best-effort publisher (no
-   silent downgrade); every other direction matches. Sans-IO transport core, no data
-   pump: build the publisher's interest, apply it to the reader, read the match. */
+/* (17) QoS: a DART_RELIABLE subscriber must refuse a best effort publisher, every other
+   direction matches. Sans IO transport core: build the interest, apply, read the match. */
 static unsigned long qos_incompat_n;
 static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANSPORT_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
@@ -2316,9 +2185,8 @@ static void qos_match_checks(void){
     ST_CHECK(recv==1 && evt==0, "qos: best-effort sub matches best-effort pub (recv=%u evt=%lu)", recv, evt);
 }
 
-/* (17b) flow control: a best-effort reader matched to a RELIABLE writer must NOT count
-   toward backpressure (it never acks). Reliable writer + (rrel?reliable:best-effort)
-   reader; fill the history ring past keep_last with no acks, return would-evict. */
+/* (17b) flow control: a best effort reader matched to a reliable writer must not count
+   toward backpressure. Fill the history ring past keep_last with no acks. */
 static int beff_would_evict(int rrel){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint8_t payload[8]; int i, evict;
@@ -2337,7 +2205,7 @@ static int beff_would_evict(int rrel){
     dart_transport_peer_add(W,2u,DART_FRAG_SIZE); dart_transport_peer_add(R,1u,DART_FRAG_SIZE);
     st_apply_verified(W, 2u, R);   /* W learns (and verifies) that R subscribes */
     memset(payload,0x5A,sizeof payload);
-    for (i=0;i<5;i++) dart_transport_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);  /* 5 sends, keep_last=2: ring wraps */
+    for (i=0;i<5;i++) dart_transport_send(W,0,dart_bytes(payload,sizeof payload),1000u+(uint64_t)i);
     evict = dart_transport_send_would_evict(W,0);
     dart_transport_destroy(W); dart_transport_destroy(R); free(mw); free(mr);
     dart_allocator_reset(&wa); dart_allocator_reset(&ra);
@@ -2415,13 +2283,13 @@ static void schema_dsl_checks(void){
     }
     if (txt){   /* setters: build a message BY NAME, read it back through the getters */
         uint8_t m[49], uuid[16]; int i, ok;
-        memset(m, 0xAA, sizeof m);                  /* dirty: the set fields must fully determine it */
+        memset(m, 0xAA, sizeof m);   /* dirty: the set fields must fully determine it */
         for (i = 0; i < 16; i++) uuid[i] = (uint8_t)i;
         ok  = dart_set_uint (m, sizeof m, txt, "stamp", 42);
         ok &= dart_set_f64  (m, sizeof m, txt, "x", 1.5);
         ok &= dart_set_f64  (m, sizeof m, txt, "y", -2.5);
         ok &= dart_set_array(m, sizeof m, txt, "uuid", dart_bytes(uuid, 5));   /* short write */
-        ok &= dart_set_uint (m, sizeof m, txt, "tagCount", 300);               /* narrows like a cast */
+        ok &= dart_set_uint (m, sizeof m, txt, "tagCount", 300);   /* narrows like a cast */
         ok &= dart_set_f32  (m, sizeof m, txt, "velocity.dy", 7.5f);           /* nested by path */
         ST_CHECK(ok, "schema-dsl: setters accept (incl. nested path)");
         ST_CHECK(dart_get_uint(dart_bytes(m,sizeof m), txt, "stamp") == 42
@@ -2442,11 +2310,11 @@ static void schema_dsl_checks(void){
                      && dart_get_uint(dart_bytes(m,sizeof m), txt, "tagCount") == 9,
                      "schema-dsl: dart_set_value writes by index");
         }
-        ST_CHECK(!dart_set_uint (m, sizeof m, txt, "x", 1)                        /* f64: wrong family */
-              && !dart_set_f64  (m, sizeof m, txt, "velocity", 0.0)               /* struct: no setter */
-              && !dart_set_array(m, sizeof m, txt, "uuid", dart_bytes(uuid, 17))  /* overflow: refused */
+        ST_CHECK(!dart_set_uint (m, sizeof m, txt, "x", 1)   /* f64: wrong family */
+              && !dart_set_f64  (m, sizeof m, txt, "velocity", 0.0)   /* struct: no setter */
+              && !dart_set_array(m, sizeof m, txt, "uuid", dart_bytes(uuid, 17))   /* overflow */
               && !dart_set_uint (m, 8, txt, "x", 1)                               /* short buffer */
-              && !dart_set_uint (m, sizeof m, txt, "nope", 1),                    /* unknown field */
+              && !dart_set_uint (m, sizeof m, txt, "nope", 1),   /* unknown field */
                  "schema-dsl: bad sets refused");
     }
     {   /* strings: string<cap> and string<cap>[N] are fixed slots of [u16 len][cap bytes] */
@@ -2486,7 +2354,7 @@ static void schema_dsl_checks(void){
             ok &= dart_set_string(m, sizeof m, ts, "name", dart_string("robot-1", 7));
             ok &= dart_set_string_at(m, sizeof m, ts, "labels", 0, dart_string("fast", 4));
             ok &= dart_set_string_at(m, sizeof m, ts, "labels", 2, dart_string("red", 3));
-            ok &= dart_set_string(m, sizeof m, ts, "meta.note", dart_string("ok", 2));  /* nested by path */
+            ok &= dart_set_string(m, sizeof m, ts, "meta.note", dart_string("ok", 2));
             ST_CHECK(ok, "schema-dsl: string setters accept (incl. nested + indexed)");
             v = dart_get_string(dart_bytes(m,sizeof m), ts, "name");
             ST_CHECK(v.len == 7 && memcmp(v.data, "robot-1", 7) == 0,
@@ -2505,9 +2373,9 @@ static void schema_dsl_checks(void){
                          && dv.bytes.len == 7 && memcmp(dv.bytes.data, "robot-1", 7) == 0,
                          "schema-dsl: dart_get_value yields the live string");
             }
-            ST_CHECK(!dart_set_string(m, sizeof m, ts, "name", dart_string("a-name-too-long", 15)) /* > cap: refused */
-                  && !dart_set_string(m, sizeof m, ts, "id", dart_string("x", 1))                  /* not a string */
-                  && !dart_set_string_at(m, sizeof m, ts, "labels", 3, dart_string("x", 1)),       /* index >= count */
+            ST_CHECK(!dart_set_string(m, sizeof m, ts, "name", dart_string("a-name-too-long", 15))
+                  && !dart_set_string(m, sizeof m, ts, "id", dart_string("x", 1))   /* not string */
+                  && !dart_set_string_at(m, sizeof m, ts, "labels", 3, dart_string("x", 1)),
                      "schema-dsl: bad string sets refused");
             {   /* a hostile length prefix reads back clamped to the cap */
                 DartSchemaFieldInfo fi;
@@ -2524,8 +2392,8 @@ static void schema_dsl_checks(void){
                      "schema-dsl: string subset needs the same cap");
         }
     }
-    {   /* variable fields: `string` / `elem[]` / `string<cap>[]` / `map` ride the tail
-           as [u32 len] frames in schema order; fixed offsets are unaffected */
+    {   /* variable fields ride the tail as [u32 len] frames in schema order, fixed offsets
+           are unaffected */
         static const char VDSL[] =
             "Var { id: u32, note: string, samples: f32[], labels: string<6>[], extras: map, tail: u8 }";
         DartSchema *vs, *twin;
@@ -2695,7 +2563,7 @@ static void schema_dsl_checks(void){
             "Pose { x: u8[70000] }",        /* count > u16 */
             "Pose { x: f64 } y",            /* trailing garbage */
             "{ x: f64 }",                   /* missing root name */
-            "Pose { x: string[] }",         /* ragged: an array of unbounded strings is a map's job */
+            "Pose { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
             "Pose { x: string[4] }",        /* a fixed string array needs its <cap> */
             "Pose { x: string<0> }",        /* zero cap */
             "Pose { x: string<12 }",        /* missing '>' */
@@ -2714,9 +2582,8 @@ static void schema_dsl_checks(void){
         }
         ST_CHECK(ok, "schema-dsl: malformed text rejected with a position");
     }
-    {   /* schema-enum: a named integer is a FIXED field carrying its backing scalar;
-           the name table is schema-only, so an unknown value stays readable (forward-compat)
-           and the subset rule compares the backing WIDTH only (names are advisory). */
+    {   /* schema enum: a named integer is a fixed field carrying its backing scalar. The name
+           table is schema only, so an unknown value stays readable and subset compares the width. */
         static const char *EDSL =
             "Robot { id: u32,"
             " mode: enum<u8> { Idle=0, Running=1, Charging=2, Fault=3 },"
@@ -2764,11 +2631,12 @@ static void schema_dsl_checks(void){
                      && dv.kind == DART_ENUM && dv.elem == DART_U8 && dv.count == 4 && dv.v.i == 2,
                      "schema-enum: dart_get_value carries the number + backing/options");
 
-            schema_print_roundtrip(&ma, es, "Robot (enum fields)");   /* prints options, recompiles same hash */
+            schema_print_roundtrip(&ma, es, "Robot (enum fields)");   /* prints, recompiles */
 
-            {   /* subset: same width compatible despite a different option table; width mismatch refused */
+            {   /* subset: the same width is compatible despite a different option table, a width
+                   mismatch is refused */
                 DartSchema *rd = dart_schema_compile(dart_allocator_alloc, &ma,
-                    "Robot { mode: enum<u8> { Idle=0, Down=7 } }", NULL);     /* renamed/fewer options */
+                    "Robot { mode: enum<u8> { Idle=0, Down=7 } }", NULL);   /* fewer options */
                 DartSchema *bw = dart_schema_compile(dart_allocator_alloc, &ma,
                     "Robot { mode: enum<u16> { Idle=0 } }", NULL);            /* wrong width */
                 ST_CHECK(rd && dart_schema_subset(rd, es), "schema-enum: same-width subset (names advisory)");
@@ -2779,16 +2647,12 @@ static void schema_dsl_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (18) announce interest (v10): the blob carries one positional [u32 hash][u8 flags]
-   entry per topic slot, no names or schemas. The subscriber's peer view yields each
-   advertised direction with the right index (= the publisher's topic index) and the
-   low 32 bits of the topic identity; an INACTIVE topic is not yielded but HOLDS ITS
-   POSITION, so a later role flip advertises the same index. A typed match forming at
-   all proves the schema now travels via the detail exchange. */
+/* (18) announce interest: one positional [u32 hash][u8 flags] entry per topic slot. An
+   inactive topic is not yielded but holds its position (spec/testing.md). */
 static void schema_advert_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);   /* the caller-side schema */
+    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);   /* caller side schema */
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc;
     DartTopicOpts co; DartDiscoveryAddr seed; DartSchema *sch=NULL;
     uint32_t pose_h = (uint32_t)dart_topic_id("sch/pose");
@@ -2837,8 +2701,8 @@ static void schema_advert_checks(void){
         }
         ST_CHECK(pose_ok && raw_ok, "announce: positional indices carry the 32-bit hashes");
 
-        /* the runtime-flip flow (the example's): an INACTIVE topic holds its position
-           but is not yielded; flipping it to publish advertises the SAME index */
+        /* the runtime flip flow: an inactive topic holds its position but is not yielded,
+           flipping it to publish advertises the same index */
         {   DartTopic *lc = dart_node_create_topic(P, "sch/late", DART_INACTIVE, NULL, &co);
             ST_CHECK(lc!=NULL, "announce: inactive topic created");
             for (t=0;t<200;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
@@ -2865,11 +2729,8 @@ static void schema_advert_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (19) reader-side subset binding: a subscriber declaring a SUBSET of the publisher's
-   schema (by name, any order) matches; messages arrive with a rebased schema (the
-   reader's indices on the writer's layout) and a validated length. An incompatible
-   subscriber (same field, different kind) is refused on BOTH sides with
-   DART_SCHEMA_MISMATCH; a wrong-size message from a matched writer is dropped. */
+/* (19) reader side subset binding: a subset subscriber matches with a rebased schema, an
+   incompatible one is refused on both sides, a wrong size message is dropped. */
 static int      sb_recv, sb_schema_ok;
 static uint64_t sb_stamp; static double sb_y;
 static unsigned long sb_mismatch_n;
@@ -2890,13 +2751,13 @@ static void schema_bind_checks(void){
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL;
     DartTopic *pc, *pc_bad; DartTopicOpts co; DartDiscoveryAddr seed;
     DartSchema *W, *R, *WB, *RB; int t;
-    /* writer: full Pose; reader: a reordered subset of it */
+    /* writer: the full Pose. reader: a reordered subset of it */
     W  = dart_schema_compile(dart_allocator_alloc, &ma,
              "Pose { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
     R  = dart_schema_compile(dart_allocator_alloc, &ma,
              "Pose { y: f64, stamp: u64 }", NULL);
     WB = dart_schema_compile(dart_allocator_alloc, &ma, "Bad { v: u64 }", NULL);
-    RB = dart_schema_compile(dart_allocator_alloc, &ma, "Bad { v: f64 }", NULL);  /* kind conflict */
+    RB = dart_schema_compile(dart_allocator_alloc, &ma, "Bad { v: f64 }", NULL);
     ST_CHECK(W && R && WB && RB, "schema-bind: schemas compile");
     ST_CHECK(W && R && dart_schema_subset(R, W) && !dart_schema_subset(W, R),
              "schema-bind: subset is one-way (reader within writer)");
@@ -2923,8 +2784,8 @@ static void schema_bind_checks(void){
     ST_CHECK(dart_topic_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
     ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu DART_E_SCHEMA_MISMATCH)", sb_mismatch_n);
 
-    {   /* publish one Pose packed in the WRITER's layout; the reader decodes through
-           the rebased schema with its own indices */
+    {   /* publish one Pose packed in the writer's layout. The reader decodes through the
+           rebased schema with its own indices */
         uint8_t buf[25]; uint64_t bits; double x=1.5, y=-2.25;
         i_dart_le_w64(buf, 0x1122334455667788ULL);              /* stamp @0 */
         memcpy(&bits,&x,8); i_dart_le_w64(buf+8,  bits);        /* x     @8 */
@@ -2949,13 +2810,8 @@ static void schema_bind_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (19a2) a large procedurally-built enum (1024 options, u16 backing): the u16 option
-   count carries past the old 255 ceiling, the multi-KB schema round-trips through the
-   wire, and one value reaches a matched peer that resolves it to a human-readable name.
-   Both nodes define the identical list, so the hashes match and the detail exchange
-   sends NO schema wire: the everyday "same generated enum on every node" case, end to
-   end. (A differing large enum would inline the ~11 KB wire and IP-fragment; that path
-   is left for a later within-entry paging pass.) */
+/* (19a2) a large procedurally built enum, 1024 options with a u16 backing. Both nodes
+   define the identical list, so the hashes match and no schema wire is sent. */
 #define BE_N 1024
 static int be_recv; static int64_t be_val; static char be_label[32];
 static void be_on_message(const DartMsg *msg){
@@ -3045,13 +2901,8 @@ static void schema_bigenum_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (19a3) PRIMITIVE-ROOTED schemas: a schema may be ONE BARE TYPE instead of a struct, so a
-   topic that publishes a bool is `bool`. Such a root is anonymous (one field named "",
-   addressed by the empty path), the SAME bare type is byte-identical wire in any language
-   (the canonical hashes below are pinned for exactly that), and matching compares the two
-   roots' types: a bool writer and a u8 reader are refused, as is a struct against a bare
-   type. Every root kind is covered: compile, print round-trip, empty-path get/set, and end
-   to end over two nodes, including a raw (schema-less) reader decoding through the sender's. */
+/* (19a3) primitive rooted schemas: one bare type, anonymous, addressed by the empty path,
+   the same wire in any language (spec/testing.md). Every root kind is covered. */
 static const uint64_t SR_HASH_BOOL  = 0xee90234f61d2520bULL;   /* `bool`  canonical wire hash */
 static const uint64_t SR_HASH_F32ARR = 0x314844e3386a1fc4ULL;  /* `f32[]` canonical wire hash */
 
@@ -3218,8 +3069,8 @@ static void schema_root_checks(void){
     ST_CHECK(dart_schema_compile(dart_allocator_alloc, &ma, "Temperature: f32", NULL) == NULL
           && dart_schema_compile(dart_allocator_alloc, &ma, "bool bool", NULL) == NULL,
              "schema-root: a named bare root and trailing garbage are compile errors");
-    {   /* the wire: a bare root round-trips; a named one is an ALIAS (v8), but the name
-           may only ride the header, so a NAMED type in root position stays refused */
+    {   /* the wire: a bare root round trips, a named one is an alias, but the name may only
+           ride the header, so a named type in root position stays refused */
         DartBytes w = dart_schema_wire(sarr);
         DartSchema *rt = dart_schema_parse(w.data, w.len, dart_allocator_alloc, &ma);
         DartSchema *alias; uint8_t named[6];
@@ -3328,7 +3179,7 @@ static void schema_root_checks(void){
     dart_node_create_topic(S, "sr/extras",  DART_SUB_ONLY, smap,  &co);
     dart_node_create_topic(S, "sr/mode",    DART_SUB_ONLY, senum, &co);
     dart_node_create_topic(S, "sr/bad",     DART_SUB_ONLY, su8,   &co);   /* bool writer: refused */
-    dart_node_create_topic(S, "sr/wrap",    DART_SUB_ONLY, sb,    &co);   /* struct writer: refused */
+    dart_node_create_topic(S, "sr/wrap",    DART_SUB_ONLY, sb,    &co);   /* refused: a struct */
     dart_node_create_topic(Q, "sr/flag",    DART_SUB_ONLY, NULL,  &co);   /* raw reader */
     ST_CHECK(pflag && pnote && psamples && pextras && pmode && pbad && pwrap,
              "schema-root: topics created");
@@ -3389,11 +3240,8 @@ static void schema_root_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (19a4) SCHEMA WIRE v8, pure (no sockets): NAMED types and the narrow-only matching they
-   buy, alias roots, struct-element arrays with indexed paths, variable members at any
-   struct depth (declaration nests, storage does not), and the refusals that keep an array
-   element's stride static. Everything round-trips through dart_schema_print, which now
-   hoists each named type as a leading definition, dependencies first. */
+/* (19a4) the schema wire, pure: named types, alias roots, struct element arrays, variable
+   members at any depth, and the static stride refusals. Everything round trips print. */
 static DartAllocator sv_ma;
 static DartSchema *sv(const char *text){                    /* compile, or NULL */
     return dart_schema_compile(dart_allocator_alloc, &sv_ma, text, NULL);
@@ -3406,7 +3254,7 @@ static int sv_sub(const char *sub, const char *pub){
     sv_free(a); sv_free(b);
     return r;
 }
-static int sv_roundtrip(const char *text){                  /* print -> recompile -> same wire */
+static int sv_roundtrip(const char *text){                  /* print, recompile, the same wire */
     DartSchema *a = sv(text), *b; char buf[2048]; int ok;
     if (!a) return 0;
     dart_schema_print(a, buf, sizeof buf);
@@ -3647,9 +3495,8 @@ static void schema_v8_checks(void){
     dart_allocator_reset(&sv_ma);
 }
 
-/* (19a5) the STANDARD TYPE LIBRARY: names always in scope, canonical wire pinned by golden
-   bytes + hash (every wrapper round-trips the same vectors), recognition that verifies the
-   SHAPE as well as the name, and an end-to-end pair publishing Pose and Image. */
+/* (19a5) the standard type library: names always in scope, golden bytes and hash, shape
+   verifying recognition, and an end to end pair publishing Pose and Image. */
 static volatile long sd_pose_recv = 0, sd_img_recv = 0, sd_bad_recv = 0, sd_mismatch = 0;
 static double sd_px = 0.0, sd_qw = 0.0;
 static unsigned sd_iw = 0, sd_ih = 0, sd_ifmt = 0; static size_t sd_ilen = 0;
@@ -3700,8 +3547,8 @@ static void stdtypes_checks(void){
         ST_CHECK(ok, "stdtypes: every standard type compiles from its name alone");
         ST_CHECK(rec, "stdtypes: every standard type recognizes itself");
     }
-    /* GOLDEN BYTES: the canonical wire and hash of the composite every wrapper mirrors.
-       Change these only with a deliberate wire bump; every language pins the same pair. */
+    /* GOLDEN BYTES: the canonical wire and hash every wrapper mirrors. Change these only
+       with a deliberate wire bump. */
     {   DartSchema *s = dart_std_schema(DART_STD_FLOAT3, dart_allocator_alloc, &ma);
         static const uint8_t want[] = {
             8, 6, 'F','l','o','a','t','3', 12, 3,
@@ -3867,10 +3714,8 @@ static void stdtypes_checks(void){
     dart_allocator_reset(&ma); dart_allocator_reset(&pa); dart_allocator_reset(&sa);
 }
 
-/* (19b) pairwise detail codec ('uDTL', sans-IO): request build + header accessors, the
-   stateless responder (advertised indices answered, INACTIVE/unknown skipped), schema
-   wire inlined ONLY on hash mismatch, entry-boundary truncation (the paging seam), and
-   wholesale rejection of malformed input. No sockets: the codec is called directly. */
+/* (19b) the pairwise detail codec, sans IO: request build, the stateless responder, schema
+   wire only on a hash mismatch, entry boundary truncation, malformed input rejected whole. */
 static void detail_codec_checks(void){
     static uint8_t tmem[1<<18];
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -3973,14 +3818,8 @@ static void detail_codec_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (19b2) detail paging never IP-fragments and never wedges. A big-topology peer answered
-   in one multi-KB datagram would IP-fragment, and a peer whose OS / RX buffer cannot
-   reassemble it drops the WHOLE thing -- so a response must fit ONE datagram and the
-   requester pages the rest. Two properties:
-     (a) many long-named typed topics resolve across several single-datagram pages, each
-         <= DART_DGRAM_MAX (proving both the cap and that paging converges), and
-     (b) a lone entry whose schema wire alone exceeds a datagram is still emitted (force
-         first), so it rides its own page instead of an endless header-only reply. */
+/* (19b2) detail paging never IP fragments and never wedges: a response fits one datagram
+   and the requester pages the rest (spec/testing.md). */
 static void detail_paging_checks(void){
 #define DP_N 40
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -4008,8 +3847,8 @@ static void detail_paging_checks(void){
         schemas[i].hash = dart_schema_hash(S); schemas[i].wire = dart_schema_wire(S);
     }
 
-    /* the requester's paging loop: ask for the still-unresolved indices, take one page,
-       mark what it carried, repeat -- exactly what dart_transport_detail_wants drives live */
+    /* the requester's paging loop: ask for the unresolved indices, take one page, mark what
+       it carried, repeat. Exactly what dart_transport_detail_wants drives live. */
     memset(done, 0, sizeof done);
     for (rounds = 0, resolved = 0; resolved < DP_N && rounds < DP_N; rounds++){
         uint16_t nw = 0; size_t rl, page, len; DartDetailIter it; DartDetail dd; int got = 0;
@@ -4031,9 +3870,8 @@ static void detail_paging_checks(void){
              "detail-paging: every page stayed within one datagram (max=%u)", (unsigned)max_page);
     dart_allocator_reset(&ma);
 
-    /* (b) force-first: one topic whose schema wire alone exceeds a datagram. resp_size must
-       return the whole (over-a-datagram) entry, and respond must emit exactly it -- never a
-       header-only reply that would re-ask forever. */
+    /* (b) force first: one topic whose schema wire alone exceeds a datagram. respond must
+       emit exactly that whole entry, never a header only reply that re asks forever. */
     {   DartAllocator mb = dart_allocator_dynamic(i_dart_plat_realloc, 0);
         DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &mb, "Big");
         DartTransportState *t2; DartConfig c2; DartMetaSchema sc; DartDetailWant w; DartSchema *B;
@@ -4051,7 +3889,7 @@ static void detail_paging_checks(void){
             memset(&d, 0, sizeof d); d.name = "big/schema"; d.role = DART_PUB_ONLY;
             dart_transport_topic_define(t2, 0, &d);
             memset(&sc, 0, sizeof sc); sc.hash = dart_schema_hash(B); sc.wire = dart_schema_wire(B);
-            w.index = 0; w.schema_hash = 0;              /* requester untyped: forces the wire inline */
+            w.index = 0; w.schema_hash = 0;   /* requester untyped: forces the wire inline */
             rl2 = dart_detail_req_build(3, 1, &w, 1, rq, sizeof rq);
             page2 = dart_transport_detail_resp_size(t2, &sc, dart_bytes(rq, rl2));
             ST_CHECK(page2 > DART_DGRAM_MAX, "detail-paging: the oversize entry is measured whole (%u)", (unsigned)page2);
@@ -4069,12 +3907,8 @@ static void detail_paging_checks(void){
 #undef DP_N
 }
 
-/* (19c) live 'uDTL' routing: a DETAIL_REQ at a node's data socket is answered to the
-   request's SOURCE address even though the requester is a bare socket, never a peer
-   (the stateless-responder contract the explorer will rely on). The peer's v9 announce
-   blob, read from a second node's peer view, is the oracle the response must match.
-   Duplicate requests are idempotent; wrong-domain and garbage uDTL datagrams are
-   ignored without wedging the node. */
+/* (19c) live uDTL routing: a DETAIL_REQ at the data socket is answered to its source even
+   from a bare socket. Duplicates are idempotent, wrong domain and garbage are ignored. */
 static void detail_live_checks(void){
     DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -4169,9 +4003,8 @@ static void detail_live_checks(void){
             ST_CHECK(have_pose && have_plain, "detail-obs: greedy cache resolves both topic names");
             ST_CHECK(pose_typed, "detail-obs: typed topic's schema cached parsed (hash matches)");
             ST_CHECK(plain_raw, "detail-obs: raw topic cached untyped");
-            /* the SUBSCRIBER is authoritative about ITS schema too: the observer fetches a
-               SUB_ONLY topic's schema exactly like a publisher's (v10 detail exchange is
-               role-agnostic). A subscriber-in-charge topic must show its schema. */
+            /* the subscriber is authoritative about its schema too: the observer fetches a SUB_ONLY
+               topic's schema exactly like a publisher's */
             {   uint32_t sid = 0; int sub_typed = 0;
                 for (t=0;t<800;t++){
                     uint16_t cnt=0, k; const DartDiscoveryPeer *ops;
@@ -4191,9 +4024,8 @@ static void detail_live_checks(void){
                 ST_CHECK(sub_typed,
                          "detail-obs: subscriber-only topic's schema fetched (subscriber authoritative)");
             }
-            /* observe THEN subscribe (the explorer's flow): the greedy fetch dissolved
-               these indices against a topic-less node, so creating the topic must
-               send them back to pending, re-verify, and form the match */
+            /* observe then subscribe, the explorer's flow: the greedy fetch dissolved these indices
+               against a topic less node, so creating the topic must re pend and re verify them */
             {   DartTopic *osub = dart_node_create_topic(O, "dt/pose", DART_SUB_ONLY, W, &co);
                 unsigned long a0 = st_any;
                 ST_CHECK(osub != NULL, "detail-obs: late subscribe topic created");
@@ -4279,7 +4111,7 @@ static void detail_live_checks(void){
                      "detail-live: duplicate requests answer byte-identically");
         }
 
-        /* a RESP and garbage 'uDTL' bytes at the node are ignored; it still answers */
+        /* a RESP and garbage uDTL bytes at the node are ignored, it still answers */
         if (n1>0) i_dart_plat_send(q, r1, (size_t)n1, pip, pport);
         {   uint8_t junk[6]={'u','D','T','L',0x7F,0x00};
             i_dart_plat_send(q, junk, sizeof junk, pip, pport); }
@@ -4296,22 +4128,8 @@ static void detail_live_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* ============ threaded: service thread, condvar flow control, waker ======== *
- * 20. RELIABLE   : both nodes on service threads, 3 sender threads x 1000 reliable
- *                  messages; exactly-once, per-thread ordered, no loss, no unsent
- *                  eviction, drain completes. No dart_node_poll anywhere.
- * 21. BURST      : best-effort keep_last 4; 64 back-to-back sends from one thread
- *                  must ALL reach the wire (the unsent guard closes the burst-
- *                  between-ticks overwrite race).
- * 21b HOSTILE    : (Windows) TX forced to would-block; the guard must surface
- *                  DART_EVICTED_UNSENT instead of silence, and every send is either
- *                  delivered or accounted an eviction.
- * 22. WAKER      : an idle started pair delivers a single send within ms, not at
- *                  the next announce-capped wakeup.
- * 23. REENTRANT  : a callback send (echo) works; create_channel/set_role from a
- *                  callback and poll from a foreign thread are refused loudly.
- * 24. STOP-UNDER-LOAD: stop with hammer threads mid-send and senders parked in the
- *                  backpressure wait; everything unblocks, close never hangs. */
+/* The threaded phases: service threads, condvar flow control and the waker. Phases 20 to
+ * 24 are catalogued in spec/testing.md. */
 #ifdef DART_THREADS
 
 static void sw_sleep_ms(int ms);   /* defined with the sweep helpers below */
@@ -4416,7 +4234,7 @@ static void threaded_checks(void){
           }
           { int drained = dart_node_drain(w, 0, 10000);
             ST_CHECK(drained == 1, "threaded: drain completes"); }
-          { uint64_t end = i_dart_plat_now_us() + 3000000u;    /* delivered before acked; settle */
+          { uint64_t end = i_dart_plat_now_us() + 3000000u;    /* delivered before acked, settle */
             while (th_recv < (unsigned long)TH_SENDERS*TH_MSGS && i_dart_plat_now_us() < end)
                 sw_sleep_ms(5); }
           dart_node_stop(r); dart_node_stop(w);                /* join: counters now settled */
@@ -4460,9 +4278,8 @@ static void threaded_checks(void){
           ST_CHECK(dart_node_evicted_unsent(w) == 0, "burst: nothing evicted unsent (%u)",
                    dart_node_evicted_unsent(w));
 
-          /* 22. WAKER: quiesce, then one send must land well inside the ~1s
-             announce-capped sleep (only the waker explains that). Typical is
-             sub-ms; the margin absorbs a loaded CI box losing the CPU. */
+          /* 22. WAKER: quiesce, then one send must land well inside the announce capped sleep.
+             Typical is sub ms, the margin absorbs a loaded CI box losing the CPU. */
           sw_sleep_ms(300);
           { unsigned long r0 = th_recv; uint64_t t0 = i_dart_plat_now_us(), dt;
             dart_node_send(w, 0, payload, sizeof payload);
@@ -4473,10 +4290,8 @@ static void threaded_checks(void){
           }
 
 #ifdef _WIN32
-          /* 21b. HOSTILE: transport TX forced to would-block. The first emit pass
-             parks one datagram in tx_hold (a safe copy, delivered later); past that
-             the burst overwrites truly unsent history, which must surface as
-             DART_EVICTED_UNSENT, and every send is delivered or accounted evicted. */
+          /* 21b. HOSTILE: transport TX forced to would block. The first pass parks one datagram in
+             tx_hold, past that the burst overwrites unsent history, which must surface as evicted. */
           { unsigned long r0 = th_recv; uint32_t e0 = dart_node_evicted_unsent(w);
             uint32_t evicted;
             g_tx_block_data = 1;
@@ -4484,8 +4299,8 @@ static void threaded_checks(void){
             evicted = dart_node_evicted_unsent(w) - e0;
             ST_CHECK(evicted >= 1, "hostile: blocked TX surfaces DART_E_EVICTED_UNSENT (%u)", evicted);
             g_tx_block_data = 0;
-            /* the service retries the held datagram + drains the ring on its next
-               pass; announce cadence bounds it, so give it time */
+            /* the service retries the held datagram and drains the ring on its next pass, which
+               the announce cadence bounds */
             { uint64_t end = i_dart_plat_now_us() + 3000000u;
               while (th_recv - r0 + evicted < 64 && i_dart_plat_now_us() < end) sw_sleep_ms(10); }
             ST_CHECK(th_recv - r0 + (unsigned long)evicted == 64,
@@ -4504,11 +4319,8 @@ static void threaded_checks(void){
       }
     }
 
-    /* 23. REENTRANT: echo from the callback; forbidden calls refuse loudly.
-       The ring must be deeper than the request burst: a reentrant send can never
-       wait (it runs inside the service pass), so if all 10 requests batch into one
-       RX drain the 10 replies commit with no TX pass between them, and a shallower
-       ring would (correctly, counted) evict the overflow. */
+    /* 23. REENTRANT: echo from the callback, forbidden calls refuse loudly. The ring must be
+       deeper than the request burst since a reentrant send never waits for a TX pass. */
     { DartTopicDef ca[2], cb[2]; DartNodeOpts o; DartNode *a, *b;
       memset(ca, 0, sizeof ca);
       ca[0].name = "th/req"; ca[0].role = DART_PUB_ONLY;
@@ -4542,9 +4354,8 @@ static void threaded_checks(void){
       }
     }
 
-    /* 24. STOP-UNDER-LOAD: hammer threads parked in the backpressure wait (a
-       matched reader that never acks) while stop broadcasts them loose; repeat.
-       The whole phase under a watchdog: a hang here is the deadlock detector. */
+    /* 24. STOP-UNDER-LOAD: hammer threads parked in the backpressure wait while stop
+       broadcasts them loose, repeated under a watchdog. A hang here is the deadlock detector. */
     { uint64_t phase_t0 = i_dart_plat_now_us(); int iter;
       for (iter=0; iter<3; iter++){
           DartTopicDef cd[1]; DartNodeOpts o; DartNode *w, *r;
@@ -4582,14 +4393,8 @@ static void threaded_checks(void){
 }
 #endif /* DART_THREADS */
 
-/* ===================== consumer queues: take / dispatch ==================
- * One manually-pumped pair (pub-only A, sub-only B). Q1 proves lazy enablement
- * and that a timeout-take drives the poll loop itself; Q2 the best-effort
- * overwrite-oldest policy at a hard cap (DART_MSG_LOST, newest survive); Q3 the
- * reliable park: a full queue withholds acks (writer not drained), yet a slow
- * take loop receives every message in order with zero skips; Q4 dispatch runs
- * the node callback on the calling thread; Q5 (threads) the cv-wait take path
- * alongside service threads. */
+/* The consumer queue phases Q1 to Q5 over one manually pumped pair, a pub only A and a
+ * sub only B (spec/testing.md). */
 static unsigned long qc_dispatched;
 static void qc_on_message(const DartMsg *msg){ (void)msg; qc_dispatched++; }
 
@@ -4635,7 +4440,7 @@ static void queue_checks(void){
     ST_CHECK(dart_node_publisher_match_count(a,0)==1 && dart_node_publisher_match_count(a,2)==1,
              "queue: matches formed");
 
-    /* Q1: the first take enables the queue; a timeout-take pumps the loop itself */
+    /* Q1: the first take enables the queue, a timeout take pumps the loop itself */
     r = dart_topic_take(lazy, &m, 0);
     ST_CHECK(r == 0, "queue: first take is empty (rc=%d) and enables queued delivery", r);
     qc_dispatched = 0;
@@ -4670,8 +4475,8 @@ static void queue_checks(void){
       ST_CHECK(st_gap_calls[1]>0, "queue: BE queue loss fired DART_MSG_LOST (%lu)", st_gap_calls[1]);
     }
 
-    /* Q3: reliable + tiny queue parks (no acks) instead of losing; a slow take loop
-       still receives everything in order via unpark + the normal repair machinery */
+    /* Q3: reliable plus a tiny queue parks instead of losing. A slow take loop still
+       receives everything in order via unpark and the normal repair machinery */
     got=0;
     for (i=0;i<12;i++){ put32(payload,(uint32_t)i); dart_node_send(a, 2, payload, 400); st_pump(a,b,2); }
     st_pump(a,b,30);
@@ -4720,11 +4525,8 @@ static void queue_checks(void){
     dart_node_close(a, 1);
 }
 
-/* ============ patterns layer: FUNCTIONS ============ *
- * A provider node and a caller node in one process. Exercises match, async call/reply,
- * empty-ack (no rsp schema, handler just returns), deferred completion, NO_HANDLER (a
- * provider with no handler), TIMEOUT (no provider), and (threaded) a synchronous call
- * answered by the provider's service thread. */
+/* The function phases: a provider node and a caller node in one process
+ * (spec/testing.md). */
 static volatile int   pf_reply_done;
 static DartCallStatus pf_reply_status;
 static uint32_t       pf_reply_val;
@@ -4745,10 +4547,9 @@ static void pf_add_handler(DartRequest *req, void *user){
     i_dart_le_w32(out, v+1);
     dart_request_reply(req, dart_bytes(out,4));
 }
-static void pf_empty_handler(DartRequest *req, void *user){ (void)req;(void)user; pf_calls++; /* no reply -> auto OK */ }
-/* fail with an over-long message (300 > DART_CALL_MSG_MAX) AND a structured payload: pins
- * the wire-carried APP_ERROR text, the truncation-not-refusal cap, and that data still
- * rides beside the message (it lives in the header, not the payload) */
+static void pf_empty_handler(DartRequest *req, void *user){ (void)req;(void)user; pf_calls++; }
+/* fail with an over long message and a structured payload: pins the wire carried
+ * APP_ERROR text, the truncating cap, and that data still rides beside the message */
 static void pf_fail_handler(DartRequest *req, void *user){
     char big[301]; int i; uint8_t out[4]; (void)user; pf_calls++;
     for (i=0;i<300;i++) big[i] = (char)('a' + i%26);
@@ -4803,9 +4604,8 @@ static void pf_on_var_reenter(const DartVariableUpdate *u, void *user){
     }
 }
 
-/* write burst from inside a callback: every set after the first runs reentrant (may_wait=0),
- * so none of them can wait for a TX pass and the value channel's RING is the only thing
- * between the burst and silent loss. The first on_write writes 1..PF_VBURST_N once. */
+/* a write burst from inside a callback: every set after the first runs reentrant, so the
+ * value channel's ring is the only thing between the burst and silent loss */
 #define PF_VBURST_N 8
 static DartVariable *pf_vburst_var; static int pf_vburst_ran;
 static void pf_on_var_burst(const DartVariableUpdate *u, void *user){
@@ -4865,16 +4665,15 @@ static void patterns_checks(void){
     ST_CHECK(dart_function_match_count(call_add)==1, "patterns: provider matched (%d)",
              dart_function_match_count(call_add));
 
-    /* settle: the startup idiom solicits and blocks until every live peer answered and the
-       topology went quiet. The peer must be able to ANSWER while we block, so P runs its
-       service thread for the duration (in reality peers are independent processes). */
+    /* settle solicits and blocks until every live peer answered. The peer must answer while
+       we block, so P runs its service thread for the duration. */
     { int sr;
       dart_node_start(P);
       sr = dart_node_settle(C, 3000);
       dart_node_stop(P);
       ST_CHECK(sr == 1, "patterns: dart_node_settle settles (%d)", sr); }
 
-    /* async call: add(41) -> 42, status OK */
+    /* async call: add(41) gives 42, status OK */
     { uint8_t req[4]; i_dart_le_w32(req,41); pf_reply_done=0;
       dart_function_call_async(call_add, dart_bytes(req,4), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
@@ -4899,7 +4698,7 @@ static void patterns_checks(void){
       ST_CHECK(pf_reply_val==13, "patterns: structured payload rides beside the message (val=%u)",
                pf_reply_val); }
 
-    /* empty-ack: handler returns without replying -> auto OK, empty payload */
+    /* empty ack: the handler returns without replying, auto OK with an empty payload */
     { pf_reply_done=0; pf_calls=0;
       dart_function_call_async(ce, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
@@ -4919,7 +4718,7 @@ static void patterns_checks(void){
       ST_CHECK(pf_reply_msg_len==13 && memcmp(pf_reply_msg,"deferred done",13)==0,
                "patterns: complete() message carried on OK (\"%s\")", pf_reply_msg); }
 
-    /* no-handler: provider has NULL on_request -> NO_HANDLER */
+    /* no handler: the provider has a NULL on_request, NO_HANDLER */
     { pf_reply_done=0;
       dart_function_call_async(cnh, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<800 && !pf_reply_done;t++) pf_pump(P,C,2);
@@ -4928,7 +4727,7 @@ static void patterns_checks(void){
       ST_CHECK(pf_reply_msg_len==10 && memcmp(pf_reply_msg,"no handler",10)==0,
                "patterns: empty wire message defaults to status text (\"%s\")", pf_reply_msg); }
 
-    /* timeout: no provider for "ghost" -> client-synthesized TIMEOUT */
+    /* timeout: no provider for "ghost", a client synthesized TIMEOUT */
     { pf_reply_done=0;
       dart_function_call_async(ghost, dart_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<400 && !pf_reply_done;t++) pf_pump(P,C,2);
@@ -4937,26 +4736,22 @@ static void patterns_checks(void){
       ST_CHECK(pf_reply_msg_len==7 && memcmp(pf_reply_msg,"timeout",7)==0,
                "patterns: synthesized outcome carries status text (\"%s\")", pf_reply_msg); }
 
-    /* call BEFORE the match forms: open a fresh function pair and call immediately, before
-       any pump could run the announce/detail cycle. The request must QUEUE and flush when
-       the provider matches, never silently drop into a timeout. */
+    /* call before the match forms: a fresh function pair called immediately. The request
+       must queue and flush when the provider matches, never drop into a timeout. */
     { DartFunction *pe2, *ce2; int cr; uint8_t req[4];
       pe2 = dart_node_create_function_definition(P, "early", NULL, NULL, pf_add_handler, NULL, NULL);
       ce2 = dart_node_create_remote_function(C, "early", NULL, NULL, NULL);
       ST_CHECK(pe2 && ce2, "patterns: early function pair created");
       i_dart_le_w32(req, 6); pf_reply_done = 0;
-      cr = dart_function_call_async(ce2, dart_bytes(req,4), pf_on_reply, NULL, NULL);   /* unmatched right now */
+      cr = dart_function_call_async(ce2, dart_bytes(req,4), pf_on_reply, NULL, NULL);
       ST_CHECK(cr==DART_OK, "patterns: early call accepted (%d)", cr);
       for (t=0;t<2000 && !pf_reply_done;t++) pf_pump(P,C,2);
       ST_CHECK(pf_reply_done && pf_reply_status==DART_CALL_OK && pf_reply_val==7,
                "patterns: early call flushed on match -> 7 (done=%d st=%d val=%u)",
                pf_reply_done, pf_reply_status, pf_reply_val); }
 
-    /* two callers answered in ONE provider tick: both requests drain in one RX pass, both
-       replies commit back-to-back before any TX runs. Each caller must receive ITS OWN
-       reply (the directed-send regression: the second commit used to jump the first
-       caller's un-emitted reply, and a leaked reply is accepted cross-caller because call
-       ids are per-caller counters). */
+    /* two callers answered in one provider tick: both replies commit back to back before any
+       TX runs, and each caller must receive its own, since call ids are per caller counters */
     { DartAllocator c2a = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts c2o = co; DartNode *C2 = dart_node_open(&c2a, "fn-call2", NULL, NULL, &c2o);
       DartFunction *call2 = C2 ? dart_node_create_remote_function(C2, "add", NULL, NULL, NULL) : NULL;
@@ -4985,9 +4780,8 @@ static void patterns_checks(void){
       dart_allocator_reset(&c2a); }
 
 #ifdef DART_THREADS
-    /* burst past keep_last (10): with the provider on its own service thread, the caller's
-       sends engage backpressure (the pattern layer must NOT pre-hold the node lock across
-       the send) and every call completes: nothing evicted, nothing timed out. */
+    /* a burst past keep_last with the provider on its own service thread: the caller's sends
+       engage backpressure without the pattern layer holding the node lock, every call completes */
     { uint8_t req[4]; int i2; uint32_t expect_sum=0;
       dart_node_start(P);
       pf_burst_done=0; pf_burst_sum=0; pf_burst_bad=0;
@@ -5005,9 +4799,8 @@ static void patterns_checks(void){
                dart_node_evicted_unsent(C));
       dart_node_stop(P); }
 
-    /* sync call that times out locally, then the deferred reply lands LATE: the pending
-       entry must have been unlinked (no write into the dead stack frame) and the late
-       reply dropped; a subsequent sync call still works. */
+    /* a sync call that times out locally, then the deferred reply lands late: the pending
+       entry must be unlinked, the late reply dropped, and a later sync call still works */
     { DartResponse rep; int rc;
       dart_node_start(P);
       pf_defer_token=0;
@@ -5069,9 +4862,8 @@ static void patterns_checks(void){
       ST_CHECK(orphan != NULL, "var: orphan accessor opens");
       sr = orphan ? dart_variable_set(orphan, dart_bytes(b,4)) : 0;
       ST_CHECK(sr==DART_ERR_NO_TOPIC, "var: set with no owner -> NO_TOPIC (%d)", sr); }
-    { /* TYPED variable, remote force/unforce: the op-only (zero-payload) unforce must pass
-         the schema gate (the empty-payload exemption on prefix channels), and remote sets
-         while forced absorb into the shadow */
+    { /* typed variable, remote force and unforce: the op only unforce must pass the schema
+         gate through the empty payload exemption, and remote sets while forced absorb */
       DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartSchema *ts = dart_schema_compile(dart_allocator_alloc, &ma, "T { v: u32 }", NULL);
       DartVariable *to, *ta; DartBytes gv; uint8_t b[4]; int fr, ur;
@@ -5087,14 +4879,13 @@ static void patterns_checks(void){
       for (t=0;t<600;t++){ pf_pump(P,C,2); if (dart_variable_forced(ta)&&dart_variable_get(ta,&gv)&&i_dart_le_r32(gv.data)==777) break; }
       ST_CHECK(dart_variable_forced(ta)&&dart_variable_get(ta,&gv)&&i_dart_le_r32(gv.data)==777,
                "var: typed force pins (777, forced)");
-      ur = dart_variable_unforce(ta);                                        /* remote, op-only payload */
+      ur = dart_variable_unforce(ta);   /* remote, op only payload */
       ST_CHECK(ur==DART_OK, "var: typed remote unforce sent (%d)", ur);
       for (t=0;t<600;t++){ pf_pump(P,C,2); if (!dart_variable_forced(ta)) break; }
       ST_CHECK(!dart_variable_forced(ta), "var: typed remote unforce applies (op-only payload)");
       dart_allocator_reset(&ma); }
-    { /* on_change / on_write: change dedup, write-every-write, replay at registration,
-         force transitions (a flag flip alone is a change), absorbed writes stay silent,
-         and the source peer stamp */
+    { /* on_change and on_write: change dedup, every write, replay at registration, force
+         transitions, absorbed writes stay silent, and the source peer stamp */
       PfVarEvt oc, ow, ac, aw;   /* owner / accessor, change / write */
       DartVariable *eo, *ea; uint8_t b[4]; int rr;
       memset(&oc,0,sizeof oc); memset(&ow,0,sizeof ow); memset(&ac,0,sizeof ac); memset(&aw,0,sizeof aw);
@@ -5114,7 +4905,7 @@ static void patterns_checks(void){
       ST_CHECK(ac.n==1 && aw.n==1 && ac.val==5,
                "var: accessor first value fires (change=%d write=%d val=%u)", ac.n, aw.n, ac.val);
       ST_CHECK(ac.source!=0, "var: accessor source = the owner peer (%u)", ac.source);
-      i_dart_le_w32(b,6); dart_variable_set(eo, dart_bytes(b,4));   /* local set: inline, source 0 */
+      i_dart_le_w32(b,6); dart_variable_set(eo, dart_bytes(b,4));   /* local set, source 0 */
       ST_CHECK(oc.n==2 && ow.n==1 && oc.val==6 && oc.source==0,
                "var: local set fires inline on the caller (change=%d write=%d src=%u)", oc.n, ow.n, oc.source);
       dart_variable_set(eo, dart_bytes(b,4));               /* byte-identical re-set */
@@ -5123,7 +4914,7 @@ static void patterns_checks(void){
       for (t=0;t<600 && aw.n<3;t++) pf_pump(P,C,2);
       ST_CHECK(aw.n==3 && ac.n==2 && ac.val==6,
                "var: accessor saw 3 writes / 2 changes (w=%d c=%d val=%u)", aw.n, ac.n, ac.val);
-      dart_variable_force(eo, dart_bytes(b,4));   /* same bytes: the forced flip alone is a change */
+      dart_variable_force(eo, dart_bytes(b,4));   /* same bytes: the forced flip is a change */
       ST_CHECK(oc.n==3 && oc.forced==1 && ow.n==3,
                "var: force with identical bytes still a change (n=%d forced=%u)", oc.n, oc.forced);
       for (t=0;t<600 && ac.n<3;t++) pf_pump(P,C,2);
@@ -5145,7 +4936,7 @@ static void patterns_checks(void){
       dart_variable_on_change(eo, NULL, NULL); dart_variable_on_write(eo, NULL, NULL);
       i_dart_le_w32(b,71); dart_variable_set(eo, dart_bytes(b,4));
       ST_CHECK(oc.n==5 && ow.n==5, "var: cleared callbacks stay silent (c=%d w=%d)", oc.n, ow.n);
-      for (t=0;t<600 && ac.n<5;t++) pf_pump(P,C,2);   /* drain the 70/71 echoes before the captures die */
+      for (t=0;t<600 && ac.n<5;t++) pf_pump(P,C,2);   /* drain the echoes before the captures die */
       dart_variable_on_change(ea, NULL, NULL); dart_variable_on_write(ea, NULL, NULL); }
 
 #ifdef DART_THREADS
@@ -5159,10 +4950,8 @@ static void patterns_checks(void){
       dart_node_stop(P); }
 #endif
 
-    /* reflection: the entity walk folds P's channels into entities. P hosts 5 functions
-       (add/noop/defr/nohd/early) and 3 variables (temp rw, rovar ro, ttemp): the peer walk
-       from C and P's local walk must both yield exactly those, with no '@' internals and
-       no incomplete pairs. */
+    /* reflection: the entity walk folds P's channels. P hosts 5 functions and 3 variables,
+       and the peer walk from C and P's local walk must both yield exactly those. */
     for (t=0;t<200;t++) pf_pump(P,C,2);   /* let any straggling detail fetches settle */
     { const DartDiscoveryPeer *ps; uint16_t pc = 0; uint32_t pid = 0;
       ps = st_peers(C, &pc);
@@ -5204,10 +4993,8 @@ static void patterns_checks(void){
                  "reflect: local entities (fn=%d var=%d top=%d)", fns, vars, tops);
         ST_CHECK(temp_forceable==1, "reflect: local forceability (temp allow_force=%d)", temp_forceable); } }
 
-    { /* a reentrant set inside on_write publishes under the held lock, so it commits to
-         transport history BEFORE the outer set's deferred send: the owner must SKIP the
-         stale outer publish (else catch_up replays 100 as newest) and the remote's
-         write_seq guard drops any stale same-owner value that still slips through */
+    { /* a reentrant set inside on_write commits to transport history before the outer set's
+         deferred send, so the owner must skip the stale outer publish (spec/patterns.md) */
       DartVariable *ro, *ra; uint8_t b[4]; DartBytes cur;
       ro = dart_node_create_variable_definition(P, "rvar", NULL, NULL);
       ra = dart_node_create_remote_variable(C, "rvar", NULL, NULL);
@@ -5232,11 +5019,8 @@ static void patterns_checks(void){
                  (have && cur.len>=4) ? i_dart_le_r32(cur.data) : 0u); }
       dart_variable_on_write(ro, NULL, NULL); }
 
-    { /* THE RING IS THE REPAIR WINDOW, not the replay window. A reliable variable written
-         from inside a callback cannot wait for a TX pass, so every write of the burst must
-         fit the value channel's history or it is evicted before the remote can NACK it.
-         Tying keep_last to catch_up once left that ring ONE deep, so a burst collapsed to
-         its last value on a channel that promises delivery. */
+    { /* the ring is the repair window, not the replay window: a reliable write from a callback
+         cannot wait for a TX pass, so every write of the burst must fit the value channel's history */
       DartVariable *bo, *ba; uint8_t b[4]; uint32_t ev0, want = (1u<<PF_VBURST_N) - 1u;
       bo = dart_node_create_variable_definition(P, "bvar", NULL, NULL);
       ba = dart_node_create_remote_variable(C, "bvar", NULL, NULL);
@@ -5257,14 +5041,8 @@ static void patterns_checks(void){
                dart_node_evicted_unsent(P) - ev0);
       dart_variable_on_write(bo, NULL, NULL); dart_variable_on_write(ba, NULL, NULL); }
 
-    { /* PROVIDER-SIDE reply burst. An inline reply is a REENTRANT send (the handler runs
-         under the node lock, so may_wait=0): it can never wait for a TX pass, so the rsp
-         RING is the only thing between a batch drained in one poll pass and lost replies,
-         and a lost reply is invisible at the provider (ordinary KEEP_LAST, no event) and
-         a bare TIMEOUT at the caller. At the old depth of 4, a 12-request pass answered
-         only the LAST 4. Part 1: a burst inside the default depth is lossless. Part 2:
-         opts.keep_last carries a batch deeper than the default, which is the contract for
-         a provider whose poll pass drains more than that. */
+    { /* provider side reply burst: an inline reply is a reentrant send, so the rsp ring is the
+         only thing between a batch drained in one pass and lost replies (spec/testing.md) */
       uint8_t req[4]; int i2; uint32_t expect_sum, ev0;
       DartFunction *deep_p, *deep_c;
       pf_burst_done=0; pf_burst_sum=0; pf_burst_bad=0; expect_sum=0;
@@ -5284,15 +5062,13 @@ static void patterns_checks(void){
 
       deep_p = dart_node_create_function_definition(P, "deep", NULL, NULL, pf_add_handler, NULL,
                               &(DartFunctionOpts){ .keep_last = 32 });
-      /* the CALLER needs the depth too: its req ring holds the burst while the provider
-         has not polled, and at the default depth calls past it stall in backpressure
-         (1s each) long enough for the un-polled provider to time out as a dead peer */
+      /* the caller needs the depth too: its req ring holds the burst while the provider has
+         not polled, and at the default depth calls past it stall in backpressure */
       deep_c = dart_node_create_remote_function(C, "deep", NULL, NULL,
                               &(DartFunctionOpts){ .keep_last = 32 });
       ST_CHECK(deep_p && deep_c, "patterns: deep-ring function pair created");
-      /* BOTH lanes must be up: the caller's req match alone would let the first replies
-         commit before the provider's rsp lane exists, and they would simply have nowhere
-         to go (a burst is not a late joiner: rsp carries no catch_up) */
+      /* both lanes must be up: the caller's req match alone would let the first replies
+         commit before the provider's rsp lane exists, and rsp carries no catch_up */
       for (t=0;t<2000 && !(dart_function_match_count(deep_c) && dart_function_match_count(deep_p));t++)
           pf_pump(P,C,2);
       ST_CHECK(dart_function_match_count(deep_c) && dart_function_match_count(deep_p),
@@ -5326,12 +5102,8 @@ static void patterns_checks(void){
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
 }
 
-/* ============ task pattern smoke (19e7) ============
- * A task is a function with progress and cancellation on the same handle. Smoke coverage:
- * defer + RUNNING-first progress + ordered payloads + terminal OK with id_out, cancel
- * honored (flag, on_cancel, wire CANCELLED both ways), .no_cancel refused locally, an
- * inline reply, and the bare-return APP_ERROR synthesis. The exhaustive matrix is
- * taskx_checks (19e8). */
+/* The task smoke phase (19e7): defer, RUNNING first progress, cancel both ways, no_cancel
+ * refused locally, an inline reply and the bare return APP_ERROR. The matrix is 19e8. */
 static volatile int   tk_reply_done;
 static DartCallStatus tk_reply_status;
 static uint32_t       tk_reply_val;
@@ -5506,15 +5278,8 @@ static void task_checks(void){
     dart_allocator_reset(&pa); dart_allocator_reset(&ca);
 }
 
-/* ============ task matrix (19e8) ============
- * The exhaustive coverage over the task smoke phase. The critical check is CONCURRENT
- * CALLER DEMUX: call ids are per-caller counters, so two callers' first calls both carry
- * call_id 1 and only the @prg header's caller_lo (the requester's uuid low-32) can tell
- * their progress apart on the shared broadcast channel. Also covered: overlapping calls
- * from one caller, provider selection (.multi + DartCallOpts.provider), peer loss
- * mid-run, retire and close mid-run, third-party cancel + a raw progress tap (the
- * explorer's wire path, crafted via i_dart_node_create_pattern_topic exactly like
- * net_capture.c), file-transfer-shaped reliable progress, churn, and task reflection. */
+/* The task matrix (19e8): concurrent caller demux, overlapping calls, provider selection,
+ * peer loss, retire and close mid run, third party cancel, churn and reflection. */
 
 /* pump a node set (NULL entries skipped, e.g. a mid-phase closed provider) */
 static void txm_pump(DartNode **ns, int n, int ms){
@@ -5660,10 +5425,8 @@ static void taskx_checks(void){
     rsp_s = dart_schema_compile(dart_allocator_alloc, &ma, "TmRsp { tag: u32, v: u32, note: u32 }", NULL);
     ST_CHECK(req_s && prg_s && rsp_s, "taskx: schemas compiled");
 
-    /* X's raw wire, exactly the explorer's recipe. The tap is created BEFORE X's normal
-       remote handle: the per-peer demux binds a name to the OLDEST local topic, so this
-       order keeps the tap receiving while the remote's own prg twin is the shadowed one
-       (the explorer runs with no pattern handles at all, so it never faces the twin). */
+    /* X's raw wire, the explorer's recipe. The tap is created before X's normal remote
+       handle, since the per peer demux binds a name to the oldest local topic. */
     { DartTopicOpts topt; memset(&topt,0,sizeof topt);
       topt.qos.reliability = DART_RELIABLE; topt.qos.keep_last = 4;
       txm_tap_n=0; txm_tap_bad_hdr=0; txm_tap_nlo=0;
@@ -5717,9 +5480,8 @@ static void taskx_checks(void){
     p_id_x   = txm_peer_by_name(X,  "txm-prov");
     ST_CHECK(p2_id_c1 && p_id_x, "taskx: provider peer ids resolved (%u/%u)", p2_id_c1, p_id_x);
 
-    /* 1. CONCURRENT CALLER DEMUX. C1 and C2 both fire their first call: both call ids are
-       1 (per-caller counters: the collision is real), P defers both and sends DISTINCT
-       tagged payloads per token; each caller must see ONLY its own, RUNNING ack first. */
+    /* 1. CONCURRENT CALLER DEMUX: C1 and C2 both fire their first call, so both call ids are
+       1. P defers both with distinct payloads and each caller must see only its own. */
     { static TxmProg g1, g2; static TxmRsp r1, r2;
       uint8_t b1[64], b2[64]; uint32_t id1=0, id2=0; int rc1, rc2;
       memset(&g1,0,sizeof g1); memset(&g2,0,sizeof g2);
@@ -5767,10 +5529,8 @@ static void taskx_checks(void){
                "taskx: C1 terminal routed (st=%d tag=%u v=%u)", r1.status, r1.tag, r1.v);
       ST_CHECK(r2.done && r2.status==DART_CALL_OK && r2.tag==2 && r2.v==200,
                "taskx: C2 terminal routed (st=%d tag=%u v=%u)", r2.status, r2.tag, r2.v);
-      /* 8. the raw tap observed BOTH callers' progress with distinct caller_lo values
-         matching their uuids (RUNNING rides @rsp, so only payloads cross @prg). X's
-         normal remote handle has no outstanding call, so nothing can fire progress on
-         it: per-call registration + the caller_lo filter keep it inert by construction. */
+      /* 8. the raw tap observed both callers' progress with distinct caller_lo values. X's
+         normal remote handle has no outstanding call, so nothing can fire progress on it. */
       txm_pump(ns,5,20);
       { uint32_t lo1 = i_dart_le_r32(i_dart_node_uuid(C1)), lo2 = i_dart_le_r32(i_dart_node_uuid(C2));
         int has1=0, has2=0, i2;
@@ -5815,7 +5575,7 @@ static void taskx_checks(void){
                r4.status, r4.msg); }
 
     /* 3. PROVIDER SELECTION: an explicit DartCallOpts.provider reaches exactly the chosen
-       provider; provider 0 auto-directs at the oldest matched (exactly one executor) */
+       provider, provider 0 auto directs at the oldest matched */
     { static TxmRsp r; int before;
       memset(&r,0,sizeof r);
       txm_sel_p=0; txm_sel_p2=0;
@@ -5836,10 +5596,8 @@ static void taskx_checks(void){
                "taskx: provider 0 auto-directed at ONE provider (p=%d p2=%d)",
                txm_sel_p, txm_sel_p2); }
 
-    /* 7. THIRD-PARTY CANCEL, the explorer path: X crafts the raw CANCEL op with an
-       explicit [u32 caller_lo] payload naming C1, aimed at C1's live call. The provider's
-       on_cancel fires for exactly that call; honoring it lands CANCELLED at C1. C2's
-       concurrent call is untouched. */
+    /* 7. THIRD-PARTY CANCEL, the explorer path: X crafts the raw CANCEL op naming C1's live
+       call. The provider's on_cancel fires for exactly that call, C2's call is untouched. */
     { static TxmProg g5, g6; static TxmRsp r5, r6;
       uint8_t b[64]; uint32_t id5=0, id6=0;
       memset(&g5,0,sizeof g5); memset(&g6,0,sizeof g6);
@@ -5871,15 +5629,8 @@ static void taskx_checks(void){
       ST_CHECK(r6.done && r6.status==DART_CALL_OK && r6.v==600,
                "taskx: bystander call unaffected (st=%d v=%u)", r6.status, r6.v); }
 
-    /* 5. RETIRE MID-RUN, both delivery paths. Round 1 drains the CALLER first, so the
-       retire drain's wire CANCELLED "provider retired" delivers before the retire
-       announce. Round 2 pumps the provider first: the announce SEVERS the demux before
-       the caller drains its data socket, the wire reply is dropped, and the caller-side
-       severed-lane backstop synthesizes the identical outcome (a RUNNING call has no
-       deadline, so without it the caller would hang forever). The retired handle itself
-       is FREED (invalid, like a closed node), so the app's still-held token is exercised
-       against ANOTHER live handle: registry membership is what makes a dead token a safe
-       DART_ERR_STATE instead of UB. */
+    /* 5. RETIRE MID-RUN through both delivery paths: the wire CANCELLED, and the caller side
+       severed lane backstop when the announce arrives first (spec/testing.md). */
     { static TxmProg g; static TxmRsp r;
       uint8_t b[8]; uint32_t id=0; uint64_t dead;
       memset(&g,0,sizeof g); memset(&r,0,sizeof r);
@@ -5917,9 +5668,8 @@ static void taskx_checks(void){
                "taskx: severed lane still resolves CANCELLED (st=%d msg=\"%s\")",
                r.done ? (int)r.status : -1, r.msg); }
 
-    /* 6. CLOSE MID-RUN: the provider node closes with the call RUNNING. No BYE is sent,
-       so the outcome can only be the close hook's CANCELLED "node closing" flushed by
-       the close TX pass: a RUNNING caller never hangs on a clean shutdown. */
+    /* 6. CLOSE MID-RUN: the provider closes with the call RUNNING. No BYE is sent, so the
+       outcome can only be the close hook's CANCELLED "node closing". */
     { static TxmProg g; static TxmRsp r;
       uint32_t id=0;
       memset(&g,0,sizeof g); memset(&r,0,sizeof r);
@@ -5935,9 +5685,8 @@ static void taskx_checks(void){
                "taskx: caller resolved at provider close (st=%d msg=\"%s\")",
                r.done ? (int)r.status : -1, r.msg); }
 
-    /* 9. FILE-TRANSFER SHAPE: 50 reliable 4-byte chunks as progress, one per app-loop
-       pass, then the terminal summary; reliable progress loses nothing and stays in
-       order */
+    /* 9. FILE-TRANSFER SHAPE: 50 reliable 4 byte chunks as progress, one per app loop pass,
+       then the terminal summary. Reliable progress loses nothing and stays in order. */
     { static TxmRsp r; uint8_t b[8]; uint32_t id=0; int i2, sent_ok=1;
       memset(&r,0,sizeof r);
       txm_file_tok=0; txm_file_n=0; txm_file_seq_ok=1;
@@ -5991,9 +5740,8 @@ static void taskx_checks(void){
           dart_function_retire(c); dart_function_retire(d);
       } }
 
-    /* 11. REFLECTION: from C1, one DART_ENTITY_TASK per task name on P (channels folded,
-       none escape as raw topics), attrs decoded, the three schema slots plumbed
-       distinctly. The retired names (ret, churn) must be gone. */
+    /* 11. REFLECTION: from C1, one DART_ENTITY_TASK per task name on P, attrs decoded, the
+       three schema slots plumbed distinctly. The retired names must be gone. */
     { uint32_t pid = txm_peer_by_name(C1, "txm-prov");
       int tries, tasks=0, others=0, ats=0, inc=0;
       int have_mix=0, have_sel=0, have_noc=0, have_file=0;
@@ -6047,10 +5795,8 @@ static void taskx_checks(void){
     dart_allocator_reset(&ap); dart_allocator_reset(&ap2); dart_allocator_reset(&ac1);
     dart_allocator_reset(&ac2); dart_allocator_reset(&ax);
 
-    /* 4. PEER LOSS MID-RUN, its own short-timeout pair: RUNNING dropped the deadline (the
-       remote's timeout is SHORTER than the discovery drop, so a deadline regression would
-       surface as TIMEOUT), then the provider stops pumping entirely; the caller's reap
-       must answer PEER_LOST. */
+    /* 4. PEER LOSS MID-RUN on a short timeout pair: RUNNING dropped the deadline, then the
+       provider stops pumping. The caller's reap must answer PEER_LOST. */
     { DartAllocator apd = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartAllocator acd = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts od; DartNode *PD, *CD, *pair[2];
@@ -6090,13 +5836,8 @@ static void taskx_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* ============ duplicate-authority diagnostic (19e2) ============
- * The pattern contract expects ONE provider per function and ONE owner per variable. Two
- * authorities never form a lane (their roles are pub/pub or sub/sub), so the conflict is
- * detected off the announce interest and surfaced as DART_E_DUPLICATE_AUTHORITY, once per
- * (entity, peer), on BOTH rivals: the side creating second detects at create (the rival's
- * interest is already cached), the first detects when the rival's announce arrives.
- * Accessors/callers are not authorities and must never fire it. */
+/* The duplicate authority diagnostic (19e2): one provider per function and one owner per
+ * variable, the conflict detected off the announce interest on both rivals. */
 static void dup_on_event(const DartEvent *ev){
     if (ev->kind == DART_ERROR && ev->error == DART_E_DUPLICATE_AUTHORITY)
         ++*(int*)ev->user;
@@ -6154,13 +5895,8 @@ static void dup_authority_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
-/* ============ pattern retire (19e3) ============
- * The re-create lifecycle. The per-peer index maps bind a name to ONE local topic
- * (preferring the oldest active one), so a second same-name handle on one node is
- * silently SHADOWED while the first lives: it receives nothing and its writes collide
- * with the twin's seqno line. dart_*_retire parks the predecessor (INACTIVE, verdicts
- * re-pend, peers re-verify against the successor), so a re-created handle receives and
- * writes where the twin would have been deaf. */
+/* The pattern retire lifecycle (19e3): a second same name handle is shadowed while the
+ * first lives, and retire parks the predecessor so a re created handle receives. */
 static void retire_checks(void){
     DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -6221,7 +5957,7 @@ static void retire_checks(void){
       { DartBytes chk; ST_CHECK(dart_variable_get(def,&chk)==1,
                "retire: handle survives the refused attempt"); } }
 
-    /* function: an outstanding call cancels at retire; a retired-then-recreated remote calls */
+    /* function: an outstanding call cancels at retire, a retired then recreated remote calls */
     { DartFunction *fdef, *rem, *rem2, *never; uint8_t req[4]; int rr;
       fdef = dart_node_create_function_definition(A, "calc", NULL, NULL, pf_add_handler, NULL, NULL);
       rem  = dart_node_create_remote_function(B, "calc", NULL, NULL, NULL);
@@ -6253,12 +5989,8 @@ static void retire_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
-/* ============ dropped-peer reflection gate (19e4) ============
- * A DROPPED peer keeps its slot (same-uuid resume) and dart_node_peers deliberately
- * still lists it, but the entity walk serving its DEAD incarnation's cached schemas is
- * how every observer grows ghost entities that race the live incarnation after a
- * restart. The walk must refuse dropped peers by default and serve them only on the
- * explicit include_dropped opt-in (the explorer's ghost display). */
+/* The dropped peer reflection gate (19e4): the entity walk must refuse dropped peers
+ * unless include_dropped is set, or observers grow ghost entities after a restart. */
 static void reflect_dropped_checks(void){
     DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -6311,12 +6043,8 @@ static void reflect_dropped_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
-/* ============ variable-set match wait (19e5) ============
- * A fresh accessor's FIRST write races the announce/detail cycle exactly like a first
- * topic send or a first function call, but the accessor route used to fail it instantly
- * with NO_TOPIC. It now rides the send path's match wait: while candidate verdicts are in
- * flight the write waits (bounded by opts.match_wait_ms) and then derives the verdict, so
- * NO_TOPIC means the owner is genuinely absent. Converged verdicts stay instant. */
+/* The variable set match wait (19e5): a fresh accessor's first write rides the send path's
+ * match wait, so NO_TOPIC means the owner is genuinely absent. */
 static void varwait_checks(void){
     DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -6336,10 +6064,8 @@ static void varwait_checks(void){
                &(DartVariableOpts){ .initial = dart_bytes(b,4) });
       ST_CHECK(vd != NULL, "varwait: definition created"); }
 
-    /* C must HOLD P's announce nominating vw before the accessor exists (candidates come
-       from the cached blob; without one the route legitimately concludes nobody offers
-       it). Verdicts are NOT yet fetched: C has no matching topic, so no detail request
-       has ever gone out for these entries. */
+    /* C must hold P's announce nominating vw before the accessor exists, since candidates
+       come from the cached blob. Verdicts are not yet fetched. */
     { uint32_t want = (uint32_t)dart_topic_id("vw"); int seen = 0;
       for (t=0;t<2000 && !seen;t++){
           const DartDiscoveryPeer *ps; uint16_t pc;
@@ -6351,9 +6077,8 @@ static void varwait_checks(void){
       }
       ST_CHECK(seen, "varwait: C holds P's interest"); }
 
-    /* From here P answers only from its service thread; C is driven solely by the wait
-       nested inside the set call. Create the accessor and write IMMEDIATELY: the old
-       route failed this with NO_TOPIC every time. */
+    /* From here P answers only from its service thread and C is driven solely by the wait
+       inside the set call. Create the accessor and write immediately. */
     dart_node_start(P);
     { DartVariable *va = dart_node_create_remote_variable(C, "vw", NULL, NULL);
       uint8_t b[4]; int sr; DartBytes gv;
@@ -6368,9 +6093,7 @@ static void varwait_checks(void){
                "varwait: the write reached the owner (5)"); }
 
     /* converged verdicts stay instant: an owner nobody offers fails NO_TOPIC without
-       consuming the wait bound (the 1s default would show here as a stall). Let the
-       post-open gather latch first (a quiet ~400ms): a node THIS young otherwise pays
-       the gather window once, exactly as a first topic send does. */
+       consuming the wait bound. Let the post open gather latch first, about 400 ms. */
     pf_pump(P,C,400);
     { DartVariable *orphan = dart_node_create_remote_variable(C, "vw-nobody", NULL, NULL);
       uint8_t b[4]; int sr; uint64_t t0, dt_ms;
@@ -6386,16 +6109,8 @@ static void varwait_checks(void){
     dart_allocator_reset(&aa); dart_allocator_reset(&ba);
 }
 
-/* ============ retire/reuse churn soak (19e6) ============
- * The anti-ballooning contract: retire/create cycles REUSE topic slots (identical
- * binding = silent relink from cached verdicts, a retype = a generation-bumped rebind
- * peers re-verify), so NOTHING grows over sustained churn: not the topic table, not the
- * announce, not steady-state memory. Survivor nodes must keep their subscriptions
- * delivering through every wave and converge to the current mesh state. Covers the case
- * matrix: identical re-creation (silent), incompatible retype (loud refusal + adopted
- * follow-up + catch-up), compatible retype (no subscriber action), untyped subscribers
- * across every shape, rival same-name publishers (no cross-wiring), late joiners, and
- * transient peer churn. */
+/* The retire and reuse churn soak (19e6): retire and create cycles reuse slots, so
+ * nothing grows over sustained churn (spec/testing.md lists the case matrix). */
 static volatile unsigned long ch_c_recv, ch_u_recv, ch_t_recv, ch_c_mismatch;
 static volatile uint32_t ch_c_last;
 static uint32_t ch_seq;
@@ -6483,10 +6198,8 @@ static void churn_checks(void){
     ch_send(beat, 4);
     for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
     ST_CHECK(ch_c_last == ch_seq, "churn: delivery across the warmup cycle");
-    {   /* saturate the @dart/log/error KEEP_LAST ring (the DART_ERROR mirror publishes
-           every retype refusal there): its 16 slot buffers fill to high-water once and
-           then plateau, so the baselines must include them at full size or the first
-           mismatch lines read as growth */
+    {   /* saturate the @dart/log/error keep_last ring, which mirrors every retype refusal: its
+           16 slots fill once and plateau, so the baselines must include them at full size */
         char big[200]; int k;
         memset(big, 'x', sizeof big - 1); big[sizeof big - 1] = 0;
         for (k=0;k<20;k++){
@@ -6502,8 +6215,8 @@ static void churn_checks(void){
     p_int0 = dart_transport_interest_size(P->transport);
     c_int0 = dart_transport_interest_size(C->transport);
 
-    /* A: identical-binding churn. Every cycle must reuse the slot, relink with no round
-       trip, and deliver; nothing may grow. */
+    /* A: identical binding churn. Every cycle must reuse the slot, relink with no round
+       trip, and deliver. Nothing may grow. */
     { int deliver_ok = 1;
       for (cyc=0;cyc<25;cyc++){
           unsigned long u0 = ch_u_recv;
@@ -6526,10 +6239,8 @@ static void churn_checks(void){
       ST_CHECK(dart_transport_interest_size(P->transport) == p_int0,
                "churn-A: announce size unchanged (%u)", p_int0); }
 
-    /* B: retype churn. The publisher rebinds the slot to an INCOMPATIBLE schema: the
-       typed subscriber refuses loudly and receives nothing of the new shape, the
-       untyped one follows every shape; the subscriber then adopts (retire + re-create
-       with the new schema) and the catch-up replay hands it the current value. */
+    /* B: retype churn. The publisher rebinds the slot to an incompatible schema: the typed
+       subscriber refuses loudly, the untyped one follows, then the subscriber adopts. */
     { int deliver_ok = 1, u_ok = 1, mm_ok = 1, iso_ok = 1;
       uint32_t p_int1 = 0, c_int1 = 0;
       size_t p_memb = 0, c_memb = 0;   /* re-baselined once the retype caches warm */
@@ -6564,9 +6275,8 @@ static void churn_checks(void){
                p_int0, p_int1);
       ST_CHECK(c_int1 == c_int0 + 3 && dart_transport_interest_size(C->transport) == c_int1,
                "churn-B: subscriber announce likewise (%u -> %u)", c_int0, c_int1);
-      /* the plateau is judged against the warmed baseline (two full retype round trips
-         in: refusal-reason slots, rebased-view array reserves and the like are one-time
-         allocations, and the 8 cycles after it must add nothing) */
+      /* the plateau is judged against the warmed baseline two full retype round trips in,
+         after the one time allocations, and the 8 cycles after it must add nothing */
       dart_node_mem_stats(P, &mem, &peak, &calls);
       ST_CHECK(mem <= p_memb + 512, "churn-B: publisher memory plateaus (%u -> %u)",
                (unsigned)p_memb, (unsigned)mem);
@@ -6585,10 +6295,8 @@ static void churn_checks(void){
       ST_CHECK(ch_c_last == ch_seq, "churn-C: subset-compatible rebind keeps the typed subscriber");
       ST_CHECK(ch_c_mismatch == mm0, "churn-C: no refusal fired for the compatible rebind"); }
 
-    /* D: transient-node waves. Odd waves bring a RIVAL publisher of the same name with a
-       different shape (the typed subscriber's stream must stay clean; the untyped one
-       hears both); even waves bring a late-joining subscriber that must catch up to the
-       current value. Survivor state must plateau across all of it. */
+    /* D: transient node waves. Odd waves bring a rival same name publisher of another shape,
+       even waves a late joining subscriber. Survivor state must plateau across all of it. */
     { int wave_ok = 1, cross_ok = 1, late_ok = 1, live_ok = 1;
       size_t p_mem1 = 0, c_mem1 = 0, u_mem1 = 0;
       for (cyc=0;cyc<6;cyc++){
@@ -6653,13 +6361,8 @@ static void churn_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* ===================== match-wait checks (19f) ===========================
- * The send-path match wait (runtime.h "MATCH WAIT"): a first send racing the announce/
- * detail cycle must reach an already-present subscriber; a disabled wait must drop
- * LOUDLY (DART_E_UNMATCHED_SEND); a topic nobody consumes must not stall; and delivery
- * must be WRITER-AUTHORITATIVE: a sample committed after our side matched but before the
- * peer verified us heals through reliable repair once its verdict lands (the property
- * the whole design leans on). */
+/* The match wait checks (19f): a first send racing the announce and detail cycle, a
+ * disabled wait dropping loudly, and writer authoritative delivery (spec/testing.md). */
 static volatile unsigned long mw_recv, mw_lost, mw_unmatched;
 static char mw_last[64];
 static void mw_on_message(const DartMsg *m){
@@ -6677,12 +6380,8 @@ static void matchwait_checks(void){
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
 
 #ifdef _WIN32
-    /* (a) WRITER-AUTHORITATIVE HEAL: B (sub, fixed port) never receives DETAIL_RESPs, so
-       it cannot verify A's pub entry, while A verifies B normally and matches. A's send
-       commits onto the formed lane; B drops the DATA (unverified index cannot demux).
-       Unblocking lets B's re-ask (on A's next announce) verify A, and the reliable
-       HB/NACK path must then deliver the ORIGINAL sample: our-side verdicts are
-       sufficient for delivery, reader-side lateness heals. */
+    /* (a) WRITER-AUTHORITATIVE HEAL: B never receives DETAIL_RESPs, so it cannot verify A
+       while A matches B. Unblocking lets B verify and repair must deliver the original sample. */
     { /* per-process fixed port, like the domain base: concurrent selftests must not
          collide on the bind (the phase needs it fixed only to intercept by port) */
       const uint16_t MW_PORT = (uint16_t)(40000u + st_domain_base % 20000u);
@@ -6733,12 +6432,8 @@ static void matchwait_checks(void){
 #endif
 
 #ifdef DART_THREADS
-    /* (b) FIRST SEND vs the forming match: a reliable catch_up=0 publish (retention
-       exempt, so the wait applies) fired immediately after create_topic must
-       WAIT for the already-present subscriber's match, commit, and deliver. The
-       subscriber runs its service thread so it can answer announces and detail requests
-       while the sender's blocked send pumps only its own loop (in reality peers are
-       independent processes). */
+    /* (b) FIRST SEND against the forming match: a catch_up 0 publish fired right after
+       create_topic must wait for the present subscriber's match, commit and deliver. */
     { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts o; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
@@ -6782,10 +6477,8 @@ static void matchwait_checks(void){
     }
 #endif
 
-    /* (c) CONTROL, wait DISABLED (match_wait_ms < 0): the same racing send commits
-       immediately to zero subscribers and is gone for good (catch_up 0: nothing
-       replays when the match forms a beat later), but LOUDLY: DART_E_UNMATCHED_SEND
-       fires on the way out. */
+    /* (c) CONTROL, the wait disabled: the same racing send commits at once to zero
+       subscribers and is gone, but DART_E_UNMATCHED_SEND fires on the way out. */
     { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts o, ao; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
@@ -6816,13 +6509,8 @@ static void matchwait_checks(void){
     }
 }
 
-/* ============ relay: DISCOVERY FOR A NODE THAT CANNOT MULTICAST ============ *
- * U opens unicast_only (joins no group, announces only to its seeds + peers it already
- * knows) with ONE seeded address: R's data port. R can multicast; B can multicast but
- * knows nothing of U and can never hear U's announces, because U sends to nobody but R.
- * So every U<->B fact below arrives through R's PROXIED announces -- and once introduced
- * the two sustain each other directly (announces already go unicast to every known peer),
- * which the relay-death phase pins. Loopback-pinned + own domain, like the other phases. */
+/* The relay phase: discovery for a node that cannot multicast. U opens unicast_only with
+ * one seed, R's data port, and every U to B fact arrives through R's proxied announces. */
 static unsigned long rly_recv = 0;
 static char rly_last[64];
 static void rly_on_message(const DartMsg *msg){
@@ -6924,8 +6612,8 @@ static void relay_checks(void){
       dart_allocator_reset(&ua); dart_allocator_reset(&ra); dart_allocator_reset(&ba);
     }
 
-    /* (b) CONTROL: the same unicast-only node with NOBODY to relay it (no seed, no peer)
-       is unreachable in both directions -- so (a) measured the relay, not the loopback. */
+    /* (b) CONTROL: the same unicast only node with nobody to relay it is unreachable in
+       both directions, so (a) measured the relay, not the loopback */
     { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts uo, bo; DartNode *U=NULL, *B=NULL;
@@ -6948,17 +6636,8 @@ static void relay_checks(void){
     }
 }
 
-/* ============ nat: A UNICAST-ONLY NODE BEHIND AN OUTBOUND-ONLY NAT ============ *
- * The relay phase's unicast-only node still had a real, reachable locator on loopback,
- * so third parties could simply dial the address the relay proxied. Behind a slirp-class
- * NAT (a rootless container) that locator is FICTION: nothing dials in, and only flows
- * the NAT'd node itself opened can carry replies. Simulate exactly the lethal part on
- * loopback by having U ADVERTISE a black-holed port (bound by the test, never read):
- * anything sent to U's advertised locator now vanishes, like a real NAT, and U is
- * reachable only at the sources it actually speaks from. What must then carry the mesh,
- * end to end: U's announces leave its DATA socket (identity + return path in one
- * datagram), every peer binds its sends to that OBSERVED source instead of the locator,
- * and R INTRODUCES its directly heard peers to U so U can speak first to each. */
+/* The NAT phase: a unicast only node behind an outbound only NAT. U advertises a black
+ * holed port, so only the observed sources can carry the mesh (spec/testing.md). */
 static void nat_checks(void){
     const uint16_t R2_PORT = (uint16_t)(21000u + st_domain_base % 15000u);
     uint16_t DEAD_PORT = 0;
@@ -6966,9 +6645,8 @@ static void nat_checks(void){
     i_DartSock bh;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4; seed.port=R2_PORT;
 
-    /* the black hole: owns U's advertised port so nothing else answers there, and never
-       reads it, so every datagram sent to U's locator disappears exactly like a NAT drop.
-       OS-assigned, so it can never collide with a reserved or in-use port. */
+    /* the black hole owns U's advertised port and never reads it, so every datagram sent to
+       U's locator disappears like a NAT drop. OS assigned, so it never collides. */
     i_dart_plat_startup();          /* raw socket outside any node: needs the net stack up */
     bh = i_dart_plat_udp_open();
     if (bh != DART_SOCK_BAD){
@@ -7050,14 +6728,8 @@ static void nat_checks(void){
     i_dart_plat_cleanup();
 }
 
-/* ============ selfip: STATING OUR OWN LOCATOR ============ *
- * By default an announce carries no address and each peer records the source it arrived
- * from. opts.net.self_ip / advertise_port override that with a locator we assert, for a
- * static 1:1 mapping (an elastic IP, a container published on another port) or to pin
- * which address a multihomed host advertises. A single-host test can only truthfully
- * state loopback, so the ADVERTISED PORT carries the proof here: it is deliberately not
- * the port A bound. The override's semantics against real, distinct addresses (beating
- * the arrival source, and surviving a relay hop) are pinned in disc_core_checks. */
+/* The self ip phase: stating our own locator. On one host the advertised port carries
+ * the proof, it is deliberately not the port A bound. */
 static int sip_addr_of(DartNode *n, const char *name, DartDiscoveryAddr *out){
     uint16_t c = 0, i; size_t nl = strlen(name);
     const DartDiscoveryPeer *p = st_peers(n, &c);
@@ -7091,9 +6763,8 @@ static void selfip_checks(void){
       if (B) dart_node_close(B,1);
       dart_allocator_reset(&aa); dart_allocator_reset(&ba);
     }
-    /* (b) an unparseable locator is a config error, never a silent fallback to the
-       default: a node advertising an address nobody can reach would look healthy and
-       receive nothing. */
+    /* (b) an unparseable locator is a config error, never a silent fallback to the default:
+       a node advertising an unreachable address would look healthy and receive nothing */
     { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
       DartNodeOpts o; DartNode *n; DartEvent err; char line[160];
       memset(&o,0,sizeof o); o.domain=ST_DOMAIN+29; o.net.multicast_interface="127.0.0.1";
@@ -7108,14 +6779,8 @@ static void selfip_checks(void){
     }
 }
 
-/* ============ writets: the per-message SOURCE TIMESTAMP ============ *
- * Every published message carries the writer's wall clock (DartMsg.written_us) unless the
- * topic opts out with qos.no_timestamp. A publisher node and a subscriber node on their own
- * domain cover: a delivered stamp inside [wall before send, wall after delivery]; the
- * opt-out (stamp 0, payload byte-identical); catch_up replay to a LATE joiner keeping the
- * ORIGINAL stamp; the queued take path surfacing the same value an inline callback would;
- * a fragmenting payload (the SHM path where compiled in); and the patterns layer (a
- * request's and a variable write's stamp). */
+/* The source timestamp phase: every message carries the writer's wall clock unless the
+ * topic opts out. Delivery, opt out, replay, the queued path and the patterns are covered. */
 #define TS_CH_PLAIN  0   /* reliable, catch_up 2: the stamp + the late-joiner replay */
 #define TS_CH_OFF    1   /* publisher sets qos.no_timestamp: stamp 0, bytes untouched */
 #define TS_CH_QUEUED 2   /* the subscriber drains it with dart_topic_take */
@@ -7325,9 +6990,8 @@ static void ts_checks(void){
     }
 }
 
-/* (19b3) interest paging codec + the external-overlay flag: build both overlay forms,
-   page a blob by byte ranges, and reject malformed pages. Sans-IO, codec only (the
-   requester/responder cycle is proven end-to-end by interest_external_checks). */
+/* (19b3) the interest paging codec and the external overlay flag: build both forms, page
+   a blob by byte range, reject malformed pages. Sans IO, codec only. */
 static void interest_codec_checks(void){
     static uint8_t tmem[1<<16];
     DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -7389,13 +7053,8 @@ static void interest_codec_checks(void){
     dart_allocator_reset(&ma);
 }
 
-/* (19b4) EXTERNAL interest end-to-end: a ~300-topic publisher's announce cannot inline
-   its interest list, so it ships as a sub-MTU bootstrap (INTEREST_EXTERNAL) and the
-   subscriber pulls the blob over uDTL byte-range paging (2 pages at this size). Pins
-   the invariant that NO datagram ever exceeds DART_DGRAM_MAX (no reliance on IP
-   reassembly: the ESP32/lwIP failure mode), that the match still forms and delivers
-   through the fetch, and that steady-state announces trigger no re-fetch (the per-peer
-   version dedup). */
+/* (19b4) external interest end to end: a 300 topic publisher ships a sub MTU bootstrap
+   and the subscriber pulls the blob by byte range paging (spec/testing.md). */
 #define IX_TOPICS 300
 static int ix_recv;
 static uint32_t ix_epoch_pid, ix_epoch;
@@ -7433,10 +7092,8 @@ static void interest_external_checks(void){
     if (pub) dart_topic_send(pub, dart_bytes(payload,sizeof payload));
     for (t=0;t<800 && ix_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
     ST_CHECK(ix_recv>=1, "interest: delivery across the external match (%d)", ix_recv);
-    {   /* reflection reads the ASSEMBLED interest, not the announce: the subscriber's
-           entity fold (the explorer's view) must enumerate the external peer's whole
-           set even though its announce carried no interest at all. The interest EPOCH
-           is the observer cache key: nonzero once anything applied. */
+    {   /* reflection reads the assembled interest, not the announce: the entity fold must
+           enumerate the external peer's whole set. The interest epoch is the observer cache key. */
         uint16_t cnt, k; int ents = 0; uint32_t pid = 0, epoch = 0;
         const DartDiscoveryPeer *ps = st_peers(S, &cnt);
         for (k=0;k<cnt;k++)
@@ -7478,10 +7135,8 @@ static void interest_external_checks(void){
     dart_node_close(P,1); dart_node_close(S,1);
 }
 
-/* ============ metalog: the built-in @dart/log topics + the @dart/meta endpoint ========
- * A logs before anyone listens (KEEP_LAST history), triggers a mirrored internal error,
- * then B late-joins the error level (catch_up replay) and reads both; finally B calls
- * A's @dart/meta directed at A's peer id and decodes the snapshot map. */
+/* The metalog phase: A logs before anyone listens and triggers a mirrored error, B late
+ * joins the error level and reads both, then calls A's @dart/meta directed at A. */
 static void metalog_checks(void){
     DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -7507,7 +7162,7 @@ static void metalog_checks(void){
     /* log BEFORE any subscriber exists: the lines land in KEEP_LAST history and a late
        joiner replays them (catch_up = keep_last) */
     for (i=0;i<3;i++){
-        int lr = dart_node_log(A, DART_LOG_ERROR, "boom %d", i);   /* hoisted: ST_CHECK double-evals */
+        int lr = dart_node_log(A, DART_LOG_ERROR, "boom %d", i);   /* hoisted out of ST_CHECK */
         ST_CHECK(lr == DART_OK, "metalog: log %d accepted (%d)", i, lr);
     }
     { uint64_t txm=0;
@@ -7544,8 +7199,8 @@ static void metalog_checks(void){
                "metalog: replay + mirrored error received (n=%d boom0=%d mirror=%d)",
                n_got, got_boom0, got_mirror); }
 
-    /* @dart/meta: B calls A's endpoint, DIRECTED at A's peer id; A answers on its
-       service thread while B blocks in the call */
+    /* @dart/meta: B calls A's endpoint directed at A's peer id. A answers on its service
+       thread while B blocks in the call */
     { const DartDiscoveryPeer *ps; uint16_t cnt=0; uint32_t idA=0;
       DartResponse rep; int rc;
       ps = st_peers(B, &cnt);
@@ -7620,10 +7275,8 @@ static int selftest_main(void){
     ch[3] = ch[0]; ch[3].name = "st/block2";
     ch[3].qos.backpressure_wait_us = ST_BLOCK_US; ch[3].qos.repair_delay_us = ST_NACK_US;
 
-    /* disable_shm: phases 2-4b exercise the UDP reliability path (ring eviction,
-       in-flight delivery, backpressure, sweep-ack). The same-host SHM fast path has
-       its own coverage (shm_*_checks), and its chunk-recycle semantics differ, so the
-       general transport phases stay on UDP -- as they did before. */
+    /* disable_shm: phases 2 to 4b exercise the UDP reliability path. The same host SHM path
+       has its own coverage and its chunk recycle semantics differ. */
     DartNodeOpts wo = { .domain = ST_DOMAIN, .disable_shm = 1 };
     { DartNodeOpts ro = wo; DartTopicDef chr[4]; DartNode *w, *r;
       memcpy(chr, ch, sizeof ch);
@@ -7635,8 +7288,8 @@ static int selftest_main(void){
       r = test_node_open(mem_r, sizeof mem_r, NULL, st_on_message, st_on_event, ro, chr, 4);
       if (!w || !r){ fprintf(stderr, "node open failed\n"); return 1; }
 
-      /* 1. JOIN: writer streams while discovery completes; the reader must
-            adopt the stream head silently (no gap for a late joiner) */
+      /* 1. JOIN: the writer streams while discovery completes. The reader must adopt the
+         stream head silently, no gap for a late joiner */
       { uint64_t end = i_dart_plat_now_us() + 5000000u;
         while (st_samples[ST_CH_GAP]==0 && i_dart_plat_now_us() < end){
             dart_node_send(w, ST_CH_GAP, payload, sizeof payload);
@@ -7645,8 +7298,8 @@ static int selftest_main(void){
       ST_CHECK(st_samples[ST_CH_GAP] > 0, "join: reader receives (got %lu)", st_samples[ST_CH_GAP]);
       ST_CHECK(st_gap_calls[ST_CH_GAP] == 0, "join: no on_gap for late join (calls=%lu)", st_gap_calls[ST_CH_GAP]);
 
-      /* 2. GAP: stage 50 samples with no flush in between; only the last
-            ST_DEPTH survive, the rest must arrive as exactly one gap */
+      /* 2. GAP: stage 50 samples with no flush in between. Only the last ST_DEPTH survive,
+         the rest must arrive as exactly one gap */
       st_pump(w, r, 200);                           /* settle acks */
       { unsigned long s0 = st_samples[ST_CH_GAP];
         for (i=0;i<50;i++) dart_node_send(w, ST_CH_GAP, payload, sizeof payload);
@@ -7662,7 +7315,7 @@ static int selftest_main(void){
             reader never runs: each eviction-send must wait ~ST_BLOCK_US */
       st_pump(w, r, 200);
       for (i=0;i<ST_DEPTH;i++) dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);
-      st_pump(w, NULL, 50);                         /* flush; reader silent, no acks */
+      st_pump(w, NULL, 50);                         /* flush. The reader is silent, no acks */
       { uint64_t t0 = i_dart_plat_now_us(), dt;
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);   /* evicts un-acked */
         dt = i_dart_plat_now_us() - t0;
@@ -7670,32 +7323,26 @@ static int selftest_main(void){
                  "blocked: send waited ~backpressure_wait_us (%.1f ms)", dt/1000.0);
       }
 
-      /* 4. RELEASED: let the reader catch up and ack; sends are instant */
+      /* 4. RELEASED: let the reader catch up and ack. Sends are instant */
       st_pump(w, r, 300);
       { uint64_t t0 = i_dart_plat_now_us(), dt;
         dart_node_send(w, ST_CH_BLOCK, payload, sizeof payload);
         dt = i_dart_plat_now_us() - t0;
         ST_CHECK(dt < 20000, "released: acked ring sends instantly (%.1f ms)", dt/1000.0);
         st_pump(w, r, 100);
-        /* the blocked-phase eviction dropped only history already in flight to
-           the reader's socket, so nothing was lost: every send must have been
-           delivered and no gap reported */
+        /* the blocked phase eviction dropped only history already in flight to the reader's
+           socket, so every send must have been delivered and no gap reported */
         ST_CHECK(st_gap_calls[ST_CH_BLOCK] == 0 && st_samples[ST_CH_BLOCK] == ST_DEPTH+2,
                  "blocked: in-flight eviction loses nothing (gaps=%lu, samples=%lu/%u)",
                  st_gap_calls[ST_CH_BLOCK], st_samples[ST_CH_BLOCK], ST_DEPTH+2);
       }
 
-      /* 4b. SWEEP-ACK: ST_CH_BLOCK2 has nack_delay>0, so the reader's ACKNACK is
-            timer-armed and, once a burst fills the ring and the writer goes
-            quiet, can be flushed ONLY by the periodic sweep, not a data event.
-            A sub-only reader's data topic never advances next_seqno, so a
-            sweep that skips next_seqno==0 topics starves that ack and every
-            later send waits the full backpressure_wait_us. Fill the ring, go quiet long
-            enough for the sweep, then a send that would evict must NOT block. */
+      /* 4b. SWEEP-ACK: ST_CH_BLOCK2 has nack_delay > 0, so the reader's ACKNACK is timer armed
+         and flushed only by the sweep once the writer goes quiet (spec/testing.md). */
       st_pump(w, r, 200);                              /* match + settle */
       { unsigned long s0 = st_samples[ST_CH_BLOCK2];
         for (i=0;i<ST_DEPTH;i++) dart_node_send(w, ST_CH_BLOCK2, payload, sizeof payload);
-        st_pump(w, r, 200);                            /* reader drains burst; sweep must ack */
+        st_pump(w, r, 200);   /* the reader drains the burst, the sweep must ack */
         ST_CHECK(st_samples[ST_CH_BLOCK2]-s0 == ST_DEPTH, "sweep-ack: ring delivered (%lu, want %u)",
                  st_samples[ST_CH_BLOCK2]-s0, ST_DEPTH);
         { uint64_t t0 = i_dart_plat_now_us(), dt;
@@ -7706,9 +7353,8 @@ static int selftest_main(void){
         }
       }
 
-      /* 5. DYNAMIC: ST_CH_DYN is inactive on the reader; subscribe replays
-            the cached ring, unsubscribe goes silent at the writer, resubscribe
-            replays again. All joins are gap-free. */
+      /* 5. DYNAMIC: ST_CH_DYN is inactive on the reader. Subscribe replays the cached ring,
+         unsubscribe goes silent at the writer, resubscribe replays again, all gap free. */
       st_pump(w, r, 200);
       for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
       st_pump(w, r, 300);
@@ -7735,14 +7381,8 @@ static int selftest_main(void){
       ST_CHECK(st_gap_calls[ST_CH_DYN] == 0, "dynamic: joins are silent (gaps=%lu)",
                st_gap_calls[ST_CH_DYN]);
 
-      /* 5b. FLAP / EPOCH GUARD: the reader rebuilds its transport state for the
-            writer (a one-sided flap: only one side saw the peer go down). The
-            writer's lanes still describe the dead incarnation; the changed reader
-            EPOCH in the first ACKNACK must make every writer lane re-join and replay
-            history. This is the regression guard for the epoch itself (also covers a
-            reader restart that reuses its ip:port before discovery learns the new
-            uuid). Re-applying the writer's interest stands in for the announce that
-            re-discovery would deliver. */
+      /* 5b. FLAP and EPOCH GUARD: a one sided flap where the reader rebuilt its state. The
+         changed reader epoch in the first ACKNACK must make every writer lane re join. */
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN];
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
@@ -7751,9 +7391,8 @@ static int selftest_main(void){
         dart_transport_peer_add(r->transport, wid,DART_FRAG_SIZE);
         il = dart_transport_build_interest(w->transport, ib, sizeof ib);
         dart_transport_apply_peer_interest(r->transport, wid, dart_bytes(ib, il));
-        /* v10: the apply only NOMINATES (peer_remove dropped the cached verdicts with
-           the rest of the peer state); run the sans-IO detail exchange by hand, exactly
-           as a runtime would, so the flapped reader re-verifies and rematches */
+        /* the apply only nominates, since peer_remove dropped the cached verdicts. Run the sans
+           IO detail exchange by hand so the flapped reader re verifies and rematches */
         {   DartDetailWant wl[8]; uint8_t rq[256], rp[1024]; uint16_t nw2, verified; size_t rl2, pl2;
             nw2 = dart_transport_detail_wants(r->transport, NULL, wid, dart_bytes(ib, il), wl, 8);
             ST_CHECK(nw2 > 0, "flap: re-added peer nominates pending candidates (%u)", nw2);
@@ -7771,19 +7410,14 @@ static int selftest_main(void){
                  st_gap_calls[ST_CH_DYN]);
       }
 
-      /* 5c. RESUME: a discovery blip DROPS the peer on both sides without tearing
-            down transport state. Dormant peers leave flow control, so new sends are
-            withheld (the writer won't push to a dropped reader); a same-incarnation
-            resume keeps the reader's deliver position, so the withheld backlog
-            replays with no gap and no dup. This is the resume-model primitive that
-            dart_transport_peer_dormant/dart_transport_peer_resume expose (the node drives them off
-            discovery DROP/return). */
+      /* 5c. RESUME: a discovery blip drops the peer on both sides without tearing down
+         transport state. A same incarnation resume replays the withheld backlog with no gap. */
       st_pump(w, r, 200);
       { unsigned long s0 = st_samples[ST_CH_DYN], g0 = st_gap_calls[ST_CH_DYN];
         uint32_t wid = 0, rid = 0; uint16_t k;
         for (k=0;k<i_dart_node_core_max_peers(r->core);k++) if (i_dart_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
         for (k=0;k<i_dart_node_core_max_peers(w->core);k++) if (i_dart_node_core_peer_at(w->core,k,&rid,NULL,NULL,NULL)) break;
-        dart_transport_peer_dormant(w->transport, rid);   /* writer drops the reader from flow control */
+        dart_transport_peer_dormant(w->transport, rid);   /* drops the reader from flow control */
         dart_transport_peer_dormant(r->transport, wid);   /* reader stops acking the writer */
         for (i=0;i<3;i++) dart_node_send(w, ST_CH_DYN, payload, sizeof payload);
         st_pump(w, r, 300);
@@ -7803,8 +7437,7 @@ static int selftest_main(void){
       dart_node_close(w, 1);
     }
 
-    /* 6. SCALE: 40 topics; the full interest list rides one discovery announce
-          blob (IP-fragmented if large), matched at peer_up */
+    /* 6. SCALE: 40 topics. The full interest list rides one announce blob, matched at peer_up */
     { static uint8_t mem_a[1<<20], mem_b[1<<20];
       static DartTopicDef cha[ST_NCH], chb[ST_NCH];
       static char snames[ST_NCH][12];     /* "scale/0".."scale/39" */
@@ -7837,10 +7470,8 @@ static int selftest_main(void){
       }
     }
 
-    /* 7. NAMED: the cross-peer identity is the topic NAME (its 64-bit hash),
-          independent of each node's local topic handle. A matching name matches
-          across differing handles; a distinct name never cross-wires; and clean
-          names raise no false collision. */
+    /* 7. NAMED: the cross peer identity is the topic name hash, independent of each node's
+       local handle. A distinct name never cross wires and clean names raise no collision. */
     { static uint8_t mem_nw[1<<20], mem_nr[1<<20];
       DartTopicDef nw[1], nr[2];
       DartNodeOpts wo2, ro2; DartNode *w2, *r2;
@@ -7872,13 +7503,10 @@ static int selftest_main(void){
       }
     }
 
-    /* 8. COLLISION: two distinct names with the SAME 64-bit identity, found by
-          Pollard's rho (see examples/collide.c). A publishes one, B subscribes
-          the other; DART must fire on_collision and refuse the match, never
-          cross-wiring. The pair is tied to the FNV-1a dart_topic_id: if that
-          ever changes, the first check fails loudly (regenerate via collide). */
+    /* 8. COLLISION: two names with the same 64 bit identity, found by Pollard's rho against
+       FNV-1a. DART must fire on_collision and refuse the match, never cross wire. */
     { static uint8_t mem_cw[1<<20], mem_cr[1<<20];
-      const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both -> 23f58aa8628b1cce */
+      const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both hash to 23f58aa8628b1cce */
       DartTopicDef cw, cr; DartNodeOpts wo3, ro3; DartNode *w3, *r3;
       ST_CHECK(dart_topic_id(A)==dart_topic_id(B) && strcmp(A,B)!=0,
                "collision: test pair still shares one identity (else regen via collide)");
@@ -7910,52 +7538,50 @@ static int selftest_main(void){
     unit_checks();        /* 12. pure-helper unit checks: clamp, result codes, byte packing */
     open_fail_checks();   /* 13. dart_node_open staged-cleanup (goto fail) paths             */
     event_user_checks();  /* 14. transport-fired event reaches on_event with the app user_data */
-    dynamic_grow_checks();        /* 16. dynamic-mode grow: relocate mid-stream, lose nothing       */
-    qos_match_checks();           /* 17. QoS RxO: reliable sub refuses best-effort pub (no downgrade) */
-    beff_flow_checks();           /* 17b. best-effort reader stays out of a reliable writer's flow control */
-    rate_checks();                /* 17d. best-effort rate throttle: decimation, no false loss, real loss kept */
-    lapped_checks();              /* 17e. reliable repair: NACK merge + a lapped reader rejoins at the head */
-    rtt_checks();                 /* 17f. per-peer RTT estimate: writer + reader samples, adaptive backstop + tail HB */
+    dynamic_grow_checks();        /* 16. dynamic grow: relocate mid stream, lose nothing */
+    qos_match_checks();           /* 17. QoS: a reliable sub refuses a best effort pub */
+    beff_flow_checks();           /* 17b. a best effort reader stays out of flow control */
+    rate_checks();                /* 17d. best effort rate throttle, no false loss */
+    lapped_checks();              /* 17e. NACK merge, a lapped reader rejoins at the head */
+    rtt_checks();                 /* 17f. per peer RTT: adaptive backstop and tail HB */
     ahead_checks();               /* 17g. one sample held ahead of the head while it repairs */
     schema_dsl_checks();          /* 17c. schema DSL: text == builder wire, layout, rejects */
-    schema_advert_checks();       /* 18. topic schema rides the announce; peer reads it back */
-    schema_bind_checks();         /* 19. subset reader binds to the writer's layout; conflicts refused */
-    schema_bigenum_checks();      /* 19a2. 1024-option enum: u16 count, wire round-trip, value reaches a peer */
-    schema_root_checks();         /* 19a3. primitive-rooted schemas: bare types, canonical hash, e2e */
-    schema_v8_checks();           /* 19a4. wire v8: named types, struct arrays, nested frames, print */
-    stdtypes_checks();            /* 19a5. the standard type library: golden bytes, recognition, e2e */
+    schema_advert_checks();       /* 18. the topic schema rides the announce */
+    schema_bind_checks();         /* 19. a subset reader binds to the writer's layout */
+    schema_bigenum_checks();      /* 19a2. a 1024 option enum round trips to a peer */
+    schema_root_checks();         /* 19a3. primitive rooted schemas: bare types, hashes */
+    schema_v8_checks();           /* 19a4. the schema wire: named types, arrays, print */
+    stdtypes_checks();            /* 19a5. the standard type library: golden bytes, e2e */
     detail_codec_checks();        /* 19b. pairwise detail codec: responder, wire inlining, paging */
-    detail_paging_checks();       /* 19b2. detail paging fits one datagram + never wedges (force-first) */
+    detail_paging_checks();       /* 19b2. detail paging fits one datagram, never wedges */
     interest_codec_checks();      /* 19b3. interest paging codec + the external-overlay flag */
-    interest_external_checks();   /* 19b4. >MTU interest end-to-end: bootstrap announce + paged fetch */
+    interest_external_checks();   /* 19b4. external interest: bootstrap plus paged fetch */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
-    queue_checks();               /* 19d. consumer queues: take/dispatch, BE overwrite, reliable park */
-    patterns_checks();            /* 19e. patterns layer: functions (req/resp, defer, timeout, sync) */
+    queue_checks();               /* 19d. consumer queues: take, dispatch, overwrite, park */
+    patterns_checks();            /* 19e. functions: request, reply, defer, timeout, sync */
     metalog_checks();             /* 19e1. built-in @dart/log topics + the @dart/meta endpoint */
-    dup_authority_checks();       /* 19e2. duplicate provider/owner diagnostic (both rivals, deduped) */
-    retire_checks();              /* 19e3. pattern retire: successor binds where a twin would shadow */
+    dup_authority_checks();       /* 19e2. duplicate provider or owner, both rivals */
+    retire_checks();              /* 19e3. pattern retire: a successor binds, no shadow */
     reflect_dropped_checks();     /* 19e4. entity walk refuses dropped peers unless opted in */
     varwait_checks();             /* 19e5. accessor first write rides the match wait */
     churn_checks();               /* 19e6. retire/reuse churn soak: slots reuse, nothing balloons */
-    task_checks();                /* 19e7. task pattern: progress, cancel, no_cancel, inline, bare return */
-    taskx_checks();               /* 19e8. task matrix: caller demux, providers, loss, retire/close, raw wire, churn */
+    task_checks();                /* 19e7. tasks: progress, cancel, no_cancel, bare return */
+    taskx_checks();               /* 19e8. task matrix: demux, providers, loss, retire, churn */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
-    nat_checks();                 /* 19f2b. unicast-only node behind an outbound-only NAT (dead locator) */
+    nat_checks();                 /* 19f2b. a unicast only node behind an outbound only NAT */
     selfip_checks();              /* 19f3. stating our own locator (self_ip / advertise_port) */
-    ts_checks();                  /* 19g. per-message source timestamp: stamp, opt-out, replay, queue */
+    ts_checks();                  /* 19g. the source timestamp: stamp, opt out, replay, queue */
 #ifdef DART_THREADS
-    threaded_checks();            /* 20-24. service thread, condvar flow control, unsent guard, waker */
+    threaded_checks();            /* 20 to 24. service thread, flow control, unsent guard, waker */
 #endif
 
     printf(st_fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
     return st_fail;
 }
 
-/* ===================== sweep: cross-platform latency sweep =============== *
- * Spawns N "dart_test node" children per rate (stdout to a temp file), waits
- * for their self-exit, and aggregates the SUMMARY (+SUMMARY2) lines into a
- * table. Pure C process orchestration: no shell, runs on Windows and POSIX. */
+/* The sweep: spawns N node children per rate with stdout to a temp file, waits for their
+ * exit, and aggregates the SUMMARY lines into a table. Pure C, Windows and POSIX. */
 
 #define SW_MAX_NODES 64
 
@@ -8081,11 +7707,8 @@ static int sw_spawn(sw_child *c, const char *self, const char *name,
 #endif
 }
 
-/* wait for children to self-exit, pumping the control node (if any) so the
- * control-plane discovery and result topic stay live meanwhile; kill
- * stragglers at the deadline. cmd (optional) is re-published every 2s so a
- * worker that lost the control plane and recovered still hears about the run
- * (workers dedup by run nonce). */
+/* wait for the children to self exit, pumping the control node so the control plane
+ * stays live, and kill stragglers at the deadline. cmd is re published every 2 s. */
 static void sw_wait_pump(sw_child *cs, int n, int timeout_ms, DartNode *ctl, const char *cmd){
     uint64_t deadline = now_ns() + (uint64_t)timeout_ms*1000000ull;
     uint64_t next_cmd = 0;
@@ -8120,18 +7743,8 @@ static void sw_wait_pump(sw_child *cs, int n, int timeout_ms, DartNode *ctl, con
     }
 }
 
-/* ---- control plane: two-machine sweeps over DART itself ----------------- *
- * dart_test serve            on the other machine(s): a worker that waits on
- * a control domain, spawns the same node children the coordinator does, and
- * publishes each child's raw SUMMARY lines back.
- * dart_test sweep --remote   the coordinator: per rate it publishes one kv
- * command (reliable CMD topic, catch_up 0 so stale commands never replay
- * to late workers) and collects results (reliable RES topic, catch_up =
- * depth so results survive a control-peer flap; entries are tagged with
- * domain + run nonce so replays of older runs are filtered, not recounted).
- * Workers HELLO at startup so the coordinator knows how many results to
- * expect. Test nodes themselves discover each other over the LAN as usual:
- * both machines must share a subnet (announce TTL is 1). */
+/* The control plane for two machine sweeps over DART itself: serve workers spawn the
+ * same node children and publish their SUMMARY lines back (spec/testing.md). */
 static char g_ctl_cmd[512];
 static int  g_ctl_cmd_new = 0;
 static char g_ctl_res[SW_MAX_RESULTS][CTL_RES_MAX];
@@ -8145,9 +7758,8 @@ static void ctl_on_message(const DartMsg *msg){
     if (ch==CTL_CMD && len < sizeof g_ctl_cmd){
         memcpy(g_ctl_cmd, d, len); g_ctl_cmd[len]=0; g_ctl_cmd_new=1;
     } else if (ch==CTL_RES){
-        /* every control-peer flap replays the worker's whole RES history (by
-           design: that is how results survive an outage). Old-rate replays
-           must not eat inbox slots, so filter by the rate's domain up front. */
+        /* every control peer flap replays the worker's whole RES history by design. Old rate
+           replays must not eat inbox slots, so filter by the rate's domain up front. */
         if (g_ctl_dom_filter >= 0 && len > 7 && !memcmp(d, "RESULT ", 7)){
             char head[48]; int dd = -1;
             size_t hl = len < sizeof head-1 ? len : sizeof head-1;
@@ -8183,9 +7795,7 @@ static DartNode *ctl_open(uint16_t domain, int coordinator,
     opts = (DartNodeOpts){
         .domain     = domain,
         .net  = { .multicast_interface = if_ip },     /* pin on multihomed hosts */
-        .discovery = { .announce_interval_us = 500000, /* control plane must ride through
-                                              data floods: announce harder and tolerate
-                                              longer announce gaps */
+        .discovery = { .announce_interval_us = 500000,   /* ride through data floods */
                        .peer_timeout_us  = 10000000 },
     };
     if (peer_ip){                      /* bootstrap without multicast */
@@ -8199,8 +7809,7 @@ static DartNode *ctl_open(uint16_t domain, int coordinator,
     return test_node_open(mem, sizeof mem, NULL, ctl_on_message, NULL, opts, ch, 2);
 }
 
-/* IP of the first control peer (the other machine), for seeding the test
- * children; NULL if none known yet */
+/* the IP of the first control peer, for seeding the test children. NULL if none yet */
 static const char *ctl_peer_ip(DartNode *ctl, char out[20]){
     uint16_t i;
     for (i=0;i<i_dart_node_core_max_peers(ctl->core);i++){
@@ -8228,8 +7837,8 @@ static void ctl_watch(const char *who, DartNode *ctl){
     }
 }
 
-/* consume new inbox entries: HELLOs grow the worker set; RESULTs matching
- * (domain, run) parse into sum/sum2 at *count. Returns results consumed. */
+/* consume new inbox entries: HELLOs grow the worker set, RESULTs matching (domain, run)
+ * parse into sum and sum2 at *count. Returns the results consumed. */
 static int ctl_drain(int domain, unsigned long run, sw_kv *sum, sw_kv *sum2, int *count){
     int got = 0;
     for (; g_ctl_done < g_ctl_res_n; g_ctl_done++){
@@ -8563,12 +8172,8 @@ static int sweep_main(int argc, char **argv){
 }
 
 /* ============================== dispatch ================================ */
-/* ===================== memscale: in-process memory/alloc scale test ===========
- * Spins up 1 reliable publisher + N subscribers on loopback and, for a grid of payload
- * size / keep_last / subscriber count, reports peak message-buffer memory, how many heap
- * (re)allocations happen during warmup vs steady state, end-to-end msg/s, and the cost of
- * a send call cold (allocating a new ring slot) vs warm (reusing it). The point: steady
- * state must be alloc-free (steady_alloc ~ 0) and warm sends must not pay an alloc cost. */
+/* memscale: one reliable publisher and N subscribers on loopback over a grid of payload
+ * size, keep_last and subscriber count. Steady state must be alloc free (spec/testing.md). */
 static int g_ms_rx;
 static void ms_on_message(const DartMsg *m){ (void)m; g_ms_rx++; }
 
@@ -8611,7 +8216,7 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
     a1=ms_allocs(P,S,nsubs);                              /* allocs after warmup */
-    g_ms_rx=0; t0=(double)i_dart_plat_now_us();             /* steady: buffers sized -> must not alloc */
+    g_ms_rx=0; t0=(double)i_dart_plat_now_us();   /* steady: the buffers are sized, so no alloc */
     for (i=0;i<nsteady;i++){
         double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
         warm_sum += s1-s0;
@@ -8635,8 +8240,8 @@ static void ms_grid(int disable_shm){
         "payload","keep","subs","pub_peak_kB","sub_peak_kB","warm_alloc","steady_alloc","msg/s","cold_us","warm_us");
     ms_run(64,8,1,disable_shm); ms_run(1024,8,1,disable_shm);
     ms_run(65536,8,1,disable_shm); ms_run(1048576,8,1,disable_shm);              /* payload sweep */
-    ms_run(1024,1,1,disable_shm); ms_run(1024,16,1,disable_shm); ms_run(1024,256,1,disable_shm); /* history */
-    ms_run(1024,8,4,disable_shm); ms_run(1024,8,16,disable_shm);                 /* subscriber sweep */
+    ms_run(1024,1,1,disable_shm); ms_run(1024,16,1,disable_shm); ms_run(1024,256,1,disable_shm);
+    ms_run(1024,8,4,disable_shm); ms_run(1024,8,16,disable_shm);   /* subscriber sweep */
 }
 static int memscale_main(void){
     setvbuf(stdout,NULL,_IONBF,0);
@@ -8647,15 +8252,8 @@ static int memscale_main(void){
     return 0;
 }
 
-/* ============ threadbench: threaded send-path cost + drain backpressure ===== *
- * One started pub node, one started sub node, one sender thread (this one). For
- * each target rate (0 = flat out) send paced 32B best-effort messages for 2s and
- * report: achieved rate, how many sends slept in the drain/backpressure wait, the
- * time those waits ate (absolute + % of wall), unsent evictions, and delivery.
- * keep_last 64 so the drain guard (not ack flow control) is what engages. Runs
- * the UDP path (and the SHM path when compiled in), then a naive single-threaded
- * send+poll(0) baseline for comparison. Backpressure only ever engages flat-out:
- * paced rates should show wait% ~0 and delivery 100. */
+/* threadbench: the threaded send path cost and the drain backpressure, one started pub
+ * node, one started sub node and this sender thread per target rate (spec/testing.md). */
 #ifdef DART_THREADS
 
 static volatile unsigned long g_tb_recv;
@@ -8789,16 +8387,8 @@ static int threadbench_main(void){
     return 0;
 }
 
-/* ============ queuebench: consumer-queue cost vs inline callbacks ============ *
- * One started pub node + one started sub node on loopback, per payload size and
- * mode. Flat-out RELIABLE stream (keep_last 64, backpressure-paced: lossless, so
- * the number IS the sustainable end-to-end goodput), 2s per run:
- *   inline : the pre-queue model; the sub's on_message counts deliveries on its
- *            SERVICE thread (zero-copy view, no ring).
- *   queued : the sub topic owns a 4 MB consumer queue; THIS thread drains it
- *            with dart_topic_take (adds the one ring memcpy per message).
- * The shm_rx column verifies which path carried the payload (SHM section: it must
- * track delivered; UDP section: 0). */
+/* queuebench: the consumer queue cost against inline callbacks, one started pair on
+ * loopback per payload size and mode, flat out reliable (spec/testing.md). */
 static volatile unsigned long g_qb_recv;
 static void qb_on_message(const DartMsg *m){ (void)m; g_qb_recv++; }
 
@@ -8831,15 +8421,14 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     if (!w || !r){ fprintf(stderr, "queuebench: open failed\n"); exit(1); }
     memset(&co, 0, sizeof co);
     co.qos.reliability = DART_RELIABLE;
-    co.qos.keep_last = (uint16_t)(size >= 262144u ? 8 : 64);   /* realistic: shallow history for huge messages */
+    co.qos.keep_last = (uint16_t)(size >= 262144u ? 8 : 64);   /* shallow history when huge */
     co.qos.backpressure_wait_us = 200000;   /* lossless: the sender paces to the consumer */
     co.qos.heartbeat_us = 20000;
     co.qos.repair_delay_us = 5000;
     co.qos.shm_max_bytes = size;            /* pin one SHM size class per run */
     cw = dart_node_create_topic(w, "qb/t", DART_PUB_ONLY, NULL, &co);
-    /* the queue must cover the writer's in-flight burst (keep_last x size), else the
-       reader PARKS while the writer keeps bursting and the overrun heals through the
-       paced repair path -- a sizing bug, not steady-state cost. 2x burst, min 4 MB. */
+    /* the queue must cover the writer's in flight burst, else the reader parks and the
+       overrun heals through the paced repair path. Twice the burst, at least 4 MB. */
     {   uint32_t qb = 2u * co.qos.keep_last * size;
         if (qb < (4u << 20)) qb = 4u << 20;
         co.qos.queue_bytes = queued ? qb : 0;

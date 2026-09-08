@@ -1,8 +1,5 @@
-# MbedTLS is fetched and built as part of this tree (see ../CMakeLists.txt), never
-# looked up on the system. libdatachannel wants the MbedTLS::MbedTLS / MbedCrypto /
-# MbedX509 imported targets and libSRTP the MBEDTLS_INCLUDE_DIRS / MBEDTLS_LIBRARIES
-# variables: both are mapped onto the fetched targets here. First on CMAKE_MODULE_PATH,
-# so it shadows the finders both projects ship.
+# MbedTLS is fetched and built in this tree, never looked up on the system. This maps the
+# imported targets libdatachannel wants and the variables libSRTP wants onto the fetched ones.
 if(NOT TARGET mbedtls)
   message(FATAL_ERROR "FindMbedTLS: the fetched mbedtls target is missing (fetch it first)")
 endif()

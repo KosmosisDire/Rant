@@ -1,7 +1,5 @@
-# Shared Unity .meta bodies + deterministic GUID scheme, sourced by both the .unitypackage
-# builder (mk-unitypackage.sh) and the upm git-branch builder (mk-upm.sh). A GUID is the
-# md5 of the asset's import path, so it is stable across releases: an upgrade keeps the same
-# GUIDs and any references to them stay intact.
+# The shared Unity .meta bodies and the deterministic GUID scheme, sourced by both package
+# builders. A GUID is the md5 of the asset's import path, so upgrades keep references.
 guid() { printf '%s' "$1" | md5sum | cut -c1-32; }
 
 folder_meta='folderAsset: yes

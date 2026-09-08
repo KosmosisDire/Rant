@@ -1,16 +1,5 @@
-/* Two-node test for dart.hpp. Leg 1: node A publishes a typed message through the
- * dynamic Schema/MessageBuilder API, node B receives and decodes it (v4 variable
- * kinds: capped + variable string, variable scalar array, map). Leg 2: the same
- * over service threads. Leg 3: the patterns layer (typed functions incl. blocking /
- * async / fail / defer, variables, typed pub/sub over DART_SCHEMA with the
- * memcpy, loop, and subset/rebase codec paths, entity reflection). Leg 4: bare-type
- * roots (bool / std::string / std::array / a bare-double variable, plus the dynamic API
- * through the empty path) and the canonical cross-language hashes. Leg 5: standard
- * types incl. the video family. Leg 6: variable members (std::vector / std::string
- * tail frames, subset/rebase by path, bare vector roots). Leg 7: tasks (defer ->
- * PendingTask on an app thread, typed progress, cancel, no_cancel refusal, retire
- * mid-run, task entity reflection). Single process, discovery pinned to loopback on
- * isolated domains (never 0). Exit 0 = PASS. */
+/* The two node test for dart.hpp. spec/testing.md lists the legs. Single process,
+ * discovery pinned to loopback on isolated domains, never 0. Exit 0 = PASS. */
 #include "dart.hpp"
 #include <array>
 #include <atomic>
@@ -36,7 +25,7 @@ static bool wait_for(int timeout_ms, const std::function<bool()>& pred,
     return pred();
 }
 
-/* ---- leg 1 + 2: the dynamic schema API (renamed surface) ------------------------- */
+/* leg 1 and 2: the dynamic schema API */
 
 static const char SCHEMA[] =
     "Sensor{ seq: u32, name: string<16>, note: string, samples: f32[], extras: map }";
@@ -44,7 +33,7 @@ static const char SCHEMA[] =
 static const char NOTE[]    = "a long unbounded note well over sixteen bytes";
 static const float SAMPLES[] = { 1.5f, -2.25f, 3.75f };
 
-/* build + send one message; returns false if a setter was refused or the send failed */
+/* build and send one message. false if a setter was refused or the send failed */
 static bool send_one(dart::Topic& pub, const dart::Schema& schema, uint32_t seq) {
     dart::MessageBuilder s(schema);
     dart::MapWriter mw;
@@ -130,7 +119,7 @@ static bool verify_dynamic() {
     return g_failures == 0;
 }
 
-/* ---- leg 3: typed schemas for the patterns layer --------------------------------- */
+/* leg 3: typed schemas for the patterns layer */
 
 struct AddReq { int32_t x; int32_t y; };
 DART_SCHEMA(AddReq, x, y);
@@ -139,10 +128,10 @@ DART_SCHEMA(AddRsp, sum);
 struct Speed { int32_t v; };
 DART_SCHEMA(Speed, v);
 
-/* padding-free: offsets == wire offsets, sizeof == wire size -> memcpy path */
+/* padding free: offsets and size equal the wire, the memcpy path */
 struct Flat { uint32_t a; float b; };
 DART_SCHEMA(Flat, a, b);
-/* padded (compiler inserts gaps; wire is packed) + a capped string -> loop path */
+/* padded by the compiler while the wire is packed, plus a capped string: the loop path */
 struct Padded {
     uint8_t         a;
     uint32_t        b;
@@ -154,9 +143,8 @@ DART_SCHEMA(Padded, a, b, c, d, tag);
 static_assert(sizeof(Flat) == 8, "Flat must be padding-free for the memcpy-path leg");
 static_assert(sizeof(Padded) > 1 + 4 + 2 + 8 + 9, "Padded must carry padding for the loop-path leg");
 
-/* same wire name ("Telemetry"), different field sets: the subscriber's schema is a
- * SUBSET of the publisher's in a different order, so the hashes differ and the
- * delivery decodes through the subset/rebase path. */
+/* the same wire name with a different field set: the subscriber's schema is a subset of
+ * the publisher's in another order, so the hashes differ and the rebase path decodes */
 namespace pubside { struct Telemetry { uint32_t seq; float volts; uint16_t flags; }; }
 DART_SCHEMA(pubside::Telemetry, seq, volts, flags);
 namespace subside { struct Telemetry { uint16_t flags; uint32_t seq; }; }
@@ -172,7 +160,7 @@ static bool patterns_leg() {
     opts.domain = 43;
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
-    opts.fetch_details = true;   /* observer behavior: peer entity NAMES resolve (else hash placeholders) */
+    opts.fetch_details = true;   /* observer: peer entity names resolve, else hash placeholders */
 
     auto on_evt = [](const char* tag) {
         return [tag](const dart::Event& e) {
@@ -186,11 +174,11 @@ static bool patterns_leg() {
     chk("patterns: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
 
-    /* A runs on its service thread; B is pumped from this thread (so the blocking
-     * call/wait forms, which drive the caller's loop themselves, are exercised). */
+    /* A runs on its service thread, B is pumped from this thread so the blocking
+     * call and wait forms, which drive the caller's loop, are exercised */
     chk("patterns: A started", a.start());
 
-    /* ---- functions ---- */
+    /* functions */
     dart::FunctionDefinition<AddReq, AddRsp> def_add(a, "add",
         [](const AddReq& q) { return AddRsp{ (int64_t)q.x + q.y }; });
     dart::FunctionDefinition<AddReq, AddRsp> def_chk(a, "chk",
@@ -214,8 +202,8 @@ static bool patterns_leg() {
 
     chk("patterns: definition discovered", wait_for(4000,
         [&] { return rf_add.has_definition() && rf_chk.has_definition() && rf_defer.has_definition(); }, &b));
-    /* settle B so the rsp lanes (A pub -> B sub) are also formed before the first
-     * blocking call; has_definition only proves the req direction */
+    /* settle B so the rsp lanes from A to B are formed before the first blocking
+     * call, since has_definition proves only the req direction */
     chk("patterns: settle", b.settle(4000));
 
     /* blocking round trip (memcpy-path structs both ways) */
@@ -227,7 +215,7 @@ static bool patterns_leg() {
     auto r2 = rf_chk.call(AddReq{ 6, 7 }, 3000);
     chk("patterns: full-form reply 6*7=42", r2.ok() && r2->sum == 42);
 
-    /* full-form handler failing -> AppError */
+    /* full form handler failing: AppError */
     auto r3 = rf_chk.call(AddReq{ -1, 0 }, 3000);
     chk("patterns: fail() -> AppError", !r3.ok() && r3.status() == dart::CallStatus::AppError);
 
@@ -256,7 +244,7 @@ static bool patterns_leg() {
 
     chk("patterns: caller_count >= 1", def_add.caller_count() >= 1);
 
-    /* ---- variables ---- */
+    /* variables */
     dart::VariableOptions<Speed> vo;
     vo.initial = Speed{ 7 };
     vo.allow_force = true;
@@ -293,7 +281,7 @@ static bool patterns_leg() {
     chk("var: remote change arrives", wait_for(3000, [&] { return rlast.load() == 51; }, &b));
     vd.on_change(nullptr); vd.on_write(nullptr); rv.on_change(nullptr);
 
-    /* ---- typed pub/sub: memcpy path (padding-free struct, identical schemas) ---- */
+    /* typed pub sub, memcpy path: a padding free struct and identical schemas */
     dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
     std::atomic<bool> flat_ok{ false };
     dart::Publisher<Flat>  pf(a, "flat", rel);
@@ -304,7 +292,7 @@ static bool patterns_leg() {
     chk("codec: flat send", pf.send(Flat{ 7, 2.5f }) == dart::SendStatus::Ok);
     chk("codec: memcpy-path round trip", wait_for(3000, [&] { return flat_ok.load(); }, &b));
 
-    /* ---- typed pub/sub: loop path (padded struct + string) via typed take() ---- */
+    /* typed pub sub, loop path: a padded struct plus a string, via the typed take() */
     dart::Publisher<Padded>  pp(a, "padded", rel);
     dart::Subscriber<Padded> sp(b, "padded", rel);
     chk("codec: padded pair created", pp.valid() && sp.valid());
@@ -323,7 +311,7 @@ static bool patterns_leg() {
     chk("codec: taken envelope", tm.has_value() && tm->publisher_name() == "PA"
         && tm->topic_name() == "padded");
 
-    /* ---- typed pub/sub: schema-hash mismatch (subset subscriber, rebase decode) ---- */
+    /* typed pub sub, schema hash mismatch: a subset subscriber, rebase decode */
     std::atomic<bool> tele_ok{ false };
     dart::Publisher<pubside::Telemetry>  tp(a, "tele", rel);
     dart::Subscriber<subside::Telemetry> ts(b, "tele",
@@ -333,7 +321,7 @@ static bool patterns_leg() {
     chk("codec: telemetry send", tp.send(pubside::Telemetry{ 31337, 12.6f, 5 }) == dart::SendStatus::Ok);
     chk("codec: subset/rebase round trip", wait_for(3000, [&] { return tele_ok.load(); }, &b));
 
-    /* ---- reflection: local + peer entities ---- */
+    /* reflection: local and peer entities */
     auto find = [](const std::vector<dart::Entity>& es, dart::EntityKind k, const char* nm)
                 -> const dart::Entity* {
         for (const auto& e : es) if (e.kind == k && e.name == nm) return &e;
@@ -361,8 +349,8 @@ static bool patterns_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* ---- leg 5: STANDARD TYPES: the mirrors carry a wire NAME, so a Pose field matches
- * only a Pose. The golden vectors are shared with the C, C# and Python bindings. ---- */
+/* leg 5: standard types. The mirrors carry a wire name, so a Pose field matches only a
+ * Pose. The golden vectors are shared with the C, C# and Python bindings. */
 static const uint64_t HASH_FLOAT3    = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
 static const uint64_t HASH_IMAGE     = 0x83abed7b2c4e334cULL;
 static const uint64_t HASH_VIDEO     = 0xf677bd147b513fbcULL;   /* `VideoFrame` */
@@ -550,7 +538,7 @@ static bool stdtypes_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* ---- leg 4: BARE-TYPE roots (no DART_SCHEMA): the type IS the schema ------------- */
+/* leg 4: bare type roots with no DART_SCHEMA, the type is the schema */
 /* The canonical wire of a bare type is its kind alone, so these hashes are the same in
  * every language binding (pinned in C by dart_test's schema-root phase). */
 static const uint64_t HASH_BOOL   = 0xee90234f61d2520bULL;
@@ -647,14 +635,12 @@ static bool value_root_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* ---- leg 6: VARIABLE members (std::vector<E> / std::string) as tail frames ------ */
-/* A DART_SCHEMA struct may now carry variable members: each rides the message tail as
- * a length-framed section, packed and read by path through the C accessors, while the
- * fixed fields keep the static leaf table. */
+/* leg 6: variable members, std::vector<E> and std::string, as tail frames */
+/* A DART_SCHEMA struct may carry variable members: each rides the message tail as a
+ * length framed section read by path, while the fixed fields keep the static table. */
 
-/* same wire name ("Chunk"), the publisher's a superset in a different order with an
- * EXTRA variable field ahead of the shared ones: the subscriber's rebased decode must
- * find its frames by path, not by its own frame ordinals */
+/* the same wire name, the publisher a superset in another order with an extra variable
+ * field ahead of the shared ones, so the rebased decode must find frames by path */
 namespace narrow { struct Chunk {
     uint32_t           seq = 0;
     std::vector<float> samples;
@@ -765,7 +751,7 @@ static bool tails_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* ---- leg 7: TASKS: a function with progress and cancellation --------------------- */
+/* leg 7: tasks, a function with progress and cancellation */
 
 struct MoveReq { double target; };
 DART_SCHEMA(MoveReq, target);
@@ -828,9 +814,8 @@ static bool tasks_leg() {
         [&] { return rt_move.has_definition() && rt_fixed.has_definition(); }, &b));
     chk("task: settle", b.settle(4000));
 
-    /* blocking call with progress: the handler defers, the PendingTask moves into a
-       test thread that streams typed progress and completes; on_progress fires the
-       RUNNING ack first (has_value()==false), then the values in order */
+    /* blocking call with progress: the handler defers to a test thread that streams typed
+       progress and completes. on_progress sees the RUNNING ack first, then the values */
     std::atomic<int> worker_bad{ 0 };
     std::atomic<int> stale_rc{ -1 };
     std::thread worker([&] {
@@ -991,7 +976,7 @@ int main() {
     bool dyn_ok = verify_dynamic();
     std::printf("%s\n", dyn_ok ? "PASS: variable kinds crossed and decoded" : "FAIL: decoded value mismatch");
 
-    /* threaded mode: both nodes on their service threads; send without any poll() from us */
+    /* threaded mode: both nodes on their service threads, no poll() from us */
     if (!a.start() || !b.start()) { std::printf("FAIL: start\n"); return 3; }
     if (a.poll(0) != (int)dart::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
     g.received = false;

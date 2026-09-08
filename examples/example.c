@@ -1,25 +1,5 @@
-/* Interactive node: manage topics at runtime by typing commands, then chat.
- *   sub    <topic>   subscribe   (start seeing messages on that topic)
- *   pub    <topic>   publish     (your typed lines get pushed to that topic)
- *   pubsub <topic>   do both
- *   drop   <topic>   stop pub and sub on that topic
- * Any other line is encoded as a ChatMsg (the schema below) and published to every
- * topic you currently publish on; deliveries decode through DartMsg.schema.
- * Run two copies (one host, or two on a LAN) and type in each; pass a node name
- * (e.g. ./node alice) to label who a message came from, --verbose to print
- * discovery/transport events, --if <ip> to pin multicast to a given interface
- * (rarely needed: the interface is auto-detected, but pin it on a multihomed host
- * where the wrong NIC is chosen), and --peer <ip> to seed discovery with a known
- * peer's address over unicast (bootstraps a connection even where multicast is
- * blocked; the peer only needs the IP, discovery replies with its data port). All
- * defaults: best-effort, domain 0, unicast data, multicast discovery.
- *
- * DART runs its own background service thread (dart_node_start), so the main thread
- * just reads stdin with a normal blocking fgets and calls the node directly: every
- * dart_* call is thread-safe, and a send is flushed immediately (the service thread
- * is woken, no tick to wait for).
- *   POSIX  : cc  -std=c99 -Idist examples/example.c -o node -lrt -lpthread
- *   Windows: gcc -std=c99 -Idist examples/example.c -o example.exe -lws2_32 -lbcrypt -lwinmm */
+/* An interactive chat node. Type sub, pub, pubsub or drop plus a topic name to manage
+ * topics, any other line is published as a ChatMsg. docs/building.md lists the flags. */
 #define DART_IMPLEMENTATION
 #include "dart.h"
 
@@ -29,27 +9,13 @@
 
 #define MAX_TOPICS 32
 
-/* The ChatMsg schema, in the DSL every program using the topic pastes verbatim. It
- * deliberately exercises every serialization kind (all eleven scalars, a scalar array,
- * a capped string + string array, and the variable kinds: an unbounded string, a variable
- * array, a self-describing map) plus several STANDARD TYPES (docs/stdtypes.md): the typed
- * line is the text field, everything else is random filler so the explorer has structure
- * to show. Every line typed is encoded through it on send and decoded from DartMsg.schema
- * on delivery; fields are accessed by name (nested members by dotted path: "vel.x",
- * "at.position.x").
- *
- * `Timestamp`, `Double3`, `Float2`, `Pose` and `Color` are STANDARD names: always in
- * scope, no definition needed, and the name rides the schema (never a message byte) and
- * NARROWS matching, so `at` only ever binds to another Pose. `Bearing = f32` shows the
- * same mechanism for your OWN types: an alias defined right here, distinct from a plain
- * f32 and from anyone else's differently-named f32. (Its `\n` matters: a definition ends
- * where its type ends, so concatenated C literals would lex `f32ChatMsg` as one word.
- * The field lines below self-delimit on their commas.) */
+/* The ChatMsg schema, pasted verbatim by every program on the topic. It exercises every
+ * serialization kind and several standard types, so the explorer has structure to show. */
 static const char CHAT_SCHEMA[] =
-    "Bearing = f32\n"                    /* our own alias: degrees, not radians */
+    "Bearing = f32\n"   /* our alias. The newline ends it: a definition ends at its type */
     "ChatMsg"
     "{"
-    "    ts:      Timestamp,"            /* Unix-epoch microseconds, UTC */
+    "    ts:      Timestamp,"            /* Unix epoch microseconds, UTC */
     "    seq:     u32,"
     "    ttl:     u16,"
     "    hops:    u8,"
@@ -63,19 +29,17 @@ static const char CHAT_SCHEMA[] =
     "    heading: Bearing,"              /* our alias: never reads as a bare f32 */
     "    pos:     Double3,"              /* meters */
     "    vel:     Float2,"
-    "    at:      Pose,"                 /* position + orientation quaternion */
+    "    at:      Pose,"                 /* position plus an orientation quaternion */
     "    tint:    Color,"                /* sRGB RGBA bytes */
     "    tags:    string<8>[2],"
     "    path:    f32[],"                /* variable array: a live element count */
     "    text:    string,"               /* variable string: the typed line, unbounded */
-    "    extras:  map"                   /* self-describing tagged values */
+    "    extras:  map"                   /* self describing tagged values */
     "}";
 static DartSchema *g_schema;
 
-/* pack one ChatMsg: the typed line plus every other kind, filled with random values.
- * Start from the canonical default (all zero, empty frames), then set what we care
- * about, all BY NAME (nested struct members by dotted path). Returns the live length
- * to send (variable fields make it per-message). */
+/* Pack one ChatMsg: the typed line plus every other kind filled with random values, all
+ * set by name from the canonical default. Returns the live length to send. */
 static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t len){
     static uint32_t seq;
     uint8_t path_wire[16], extras[64]; uint32_t fbits;
@@ -98,8 +62,8 @@ static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t l
     dart_set_f64 (buf, cap, g_schema, "pos.z",  (double)(rand() % 2001 - 1000) / 10.0);
     dart_set_f32 (buf, cap, g_schema, "vel.x",  (float)(rand() % 100) / 10.0f);
     dart_set_f32 (buf, cap, g_schema, "vel.y",  (float)(rand() % 100) / 10.0f);
-    {   /* a Pose is a struct of standard types, so its members nest by dotted path; the
-           C mirror DartPose has the identical layout if you would rather memcpy one in */
+    {   /* a Pose is a struct of standard types, so its members nest by dotted path. The C
+           mirror DartPose has the identical layout if you would rather memcpy one in. */
         DartPose at = dart_pose_identity();
         at.position = dart_double3((double)(rand() % 100) / 10.0, 0.0, 0.0);
         dart_set_f64(buf, cap, g_schema, "at.position.x", at.position.x);
@@ -113,7 +77,7 @@ static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t l
     }
     dart_set_string_at(buf, cap, g_schema, "tags", 0, dart_cstr((rand() & 1) ? "loud" : "quiet"));
     dart_set_string_at(buf, cap, g_schema, "tags", 1, dart_cstr((rand() & 1) ? "red" : "blue"));
-    n = rand() % 4;                                      /* variable array: 0..3 live f32 */
+    n = rand() % 4;                                      /* variable array: 0 to 3 live f32 */
     for (k = 0; k < n; k++){
         pf = (float)(rand() % 1000) / 10.0f;
         memcpy(&fbits, &pf, 4); i_dart_le_w32(path_wire + 4 * k, fbits);
@@ -127,11 +91,10 @@ static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t l
     return dart_schema_msg_len(g_schema, buf, cap);
 }
 
-static int g_verbose = 0;     /* --verbose: print discovery/transport events */
+static int g_verbose = 0;     /* --verbose: print discovery and transport events */
 
-/* One topic the user has touched. We track the pub/sub bits locally because the
- * transport role enum has no getter, and we keep the handle to send/re-role it.
- * Only the input thread touches this table, so it needs no lock of its own. */
+/* One topic the user has touched. The pub and sub bits live here because the role enum
+ * has no getter. Only the input thread touches this table, so it needs no lock. */
 typedef struct {
     char         name[DART_TOPIC_NAME_MAX + 1];
     DartTopic *ch;
@@ -155,7 +118,7 @@ static Topic *find_topic(const char *name){
     return NULL;
 }
 
-/* Find the topic, or create it on the node the first time it's named. */
+/* Find the topic, or create it on the node the first time it is named. */
 static Topic *get_topic(DartNode *n, const char *name){
     Topic *t = find_topic(name);
     if (t) return t;
@@ -171,7 +134,7 @@ static Topic *get_topic(DartNode *n, const char *name){
     return t;
 }
 
-/* Apply a pub/sub change to a topic and push the new role to the transport. */
+/* Apply a pub or sub change to a topic and push the new role to the transport. */
 static void set_role(DartNode *n, const char *name, int pub, int sub){
     Topic *t = get_topic(n, name);
     if (!t) return;
@@ -181,9 +144,8 @@ static void set_role(DartNode *n, const char *name, int pub, int sub){
     printf("  [%s] %s\n", s, name);
 }
 
-/* decode a ChatMsg through the schema the message arrived with (its length is already
- * validated against it). The one-way age is meaningful on one host; across machines it
- * just reflects clock skew. A schema-less message (a raw publisher) prints as-is. */
+/* Decode a ChatMsg through the schema it arrived with, its length already validated.
+ * A schema less message from a raw publisher prints as is. */
 static void on_message(const DartMsg *msg){
     if (msg->schema){
         int64_t    ts   = dart_get_int(msg->data, msg->schema, "ts");   /* a Timestamp */
@@ -195,8 +157,8 @@ static void on_message(const DartMsg *msg){
                (int)msg->topic_name.len, msg->topic_name.data,
                (int)text.len, text.data ? text.data : "",
                (unsigned long long)seq, hdg,
-               /* both clocks are Unix-epoch microseconds, so this is one-way latency plus
-                  clock skew (meaningful on one host, skew-bound across machines) */
+               /* both clocks are Unix epoch microseconds, so this is one way latency plus
+                  clock skew: meaningful on one host, skew bound across machines */
                (double)(dart_timestamp_now() - ts) / 1000.0);
     } else {
         printf("[%.*s] %.*s > %.*s\n", (int)msg->publisher_name.len, msg->publisher_name.data,
@@ -210,7 +172,7 @@ static void on_event(const DartEvent *ev){
     if (g_verbose) printf("  <event> %s\n", dart_event_str(ev, line, sizeof line));
 }
 
-/* Handle a command line. Returns 1 if it was a command, 0 if it's plain chat. */
+/* Handle a command line. Returns 1 if it was a command, 0 if it is plain chat. */
 static int handle_command(DartNode *n, char *line){
     char verb[16], topic[DART_TOPIC_NAME_MAX + 1];
     int got = sscanf(line, "%15s %64s", verb, topic);
@@ -224,8 +186,8 @@ static int handle_command(DartNode *n, char *line){
     return 1;
 }
 
-/* parse a dotted-quad IPv4 address into 4 bytes; no dependency on platform socket
- * headers just for this. Returns 1 on success, 0 if malformed. */
+/* Parse a dotted quad IPv4 address into 4 bytes without the platform socket headers.
+ * Returns 1 on success, 0 if malformed. */
 static int parse_ipv4(const char *s, uint8_t out[4]){
     int a, b, c, d, n;
     if (sscanf(s, "%d.%d.%d.%d%n", &a, &b, &c, &d, &n) != 4 || s[n] != '\0') return 0;
@@ -235,8 +197,8 @@ static int parse_ipv4(const char *s, uint8_t out[4]){
 }
 
 int main(int argc, char **argv){
-    const char *name = NULL;   /* optional node name; NULL => auto "node-XXXXXXXX" */
-    const char *ifc  = NULL;   /* --if <ip>: pin multicast to this interface (multihomed hosts) */
+    const char *name = NULL;   /* optional node name, NULL = auto "node-XXXXXXXX" */
+    const char *ifc  = NULL;   /* --if <ip>: pin multicast to this interface on a multihomed host */
     const char *peer = NULL;   /* --peer <ip>: seed discovery with this address over unicast */
     for (int i = 1; i < argc; i++){
         if      (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) g_verbose = 1;
@@ -250,10 +212,8 @@ int main(int argc, char **argv){
         seed.ip_len = 4;   /* port 0 = discovery_port */
         if (!parse_ipv4(peer, seed.ip)){ fprintf(stderr, "--peer: bad address '%s'\n", peer); return 1; }
     }
-    /* compile the shared ChatMsg schema from the allocator the node is about to own
-     * (dart_allocator_alloc is a DartAllocFn; pass &mem as its user). The node copies mem
-     * by value at open, so the schema's page rides along and the pool reset in
-     * dart_node_close frees it: no explicit dart_schema_free. */
+    /* compile the shared ChatMsg schema from the allocator the node is about to own. The
+     * node copies mem by value at open, so the pool reset in close frees the schema too. */
     DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
     g_schema = dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, NULL);
     if (!g_schema || dart_schema_msg_min(g_schema) > 256){   /* the send buffer below is 512 */
@@ -275,7 +235,7 @@ int main(int argc, char **argv){
            "any other line is published to every topic you pub on. ctrl-d / ctrl-z to quit.\n"
            "%s", g_verbose ? "" : "(run with --verbose to print discovery/transport events)\n");
 
-    dart_node_start(n);   /* the node's service thread drives discovery/RX/timers/TX */
+    dart_node_start(n);   /* the service thread drives discovery, receive, timers and send */
 
     char line[256];
     while (fgets(line, sizeof line, stdin)){          /* normal blocking input */
@@ -284,9 +244,9 @@ int main(int argc, char **argv){
         if (!len) continue;
         if (handle_command(n, line)) continue;
 
-        /* plain chat: encode a ChatMsg and publish it to every topic we publish on
-           (thread-safe; each send wakes the service thread, so TX flushes now) */
-        uint8_t buf[512];   /* >= msg_min + this line's variable content, checked at startup */
+        /* plain chat: encode a ChatMsg and publish it to every topic we publish on. Each
+           send wakes the service thread, so it flushes now. */
+        uint8_t buf[512];   /* msg_min plus this line's variable content, checked at startup */
         int sent = 0;
         uint32_t msg_len = chat_encode(buf, sizeof buf, line, len);
         for (int i = 0; i < g_n_topics; i++)

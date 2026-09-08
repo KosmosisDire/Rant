@@ -1,24 +1,5 @@
-// DART patterns for Unity: variables and functions, shared by name through
-// the scene's DartNodeUnity component exactly like DartNodeUnity.Topic<T>. Every handler
-// is marshaled to the MAIN thread (the core patterns fire their callbacks inline on the
-// service thread, which is illegal for the Unity API), observers are Component-bound (they
-// die with the component and are skipped while it is disabled), and each handle survives
-// the native node closing and reopening (edit-mode toggles, inspector changes).
-//
-//   // variable: ONE owner (the definition), remotes reference it
-//   var speed = DartNodeUnity.VariableDefinition<float>("motor/speed");
-//   speed.Set(1.5f);
-//   DartNodeUnity.RemoteVariable<float>("motor/speed").OnChange(this, v => label.text = v.ToString());
-//
-//   // function: request/response, ONE definition
-//   DartNodeUnity.FunctionDefinition<int, int>("square", x => x * x);
-//   DartNodeUnity.RemoteFunction<int, int>("square").Call(7, r => Debug.Log(r.Value));  // 49, on the main thread
-//
-//   // task: a function with progress and cancellation, async handler on the main thread
-//   DartNodeUnity.TaskDefinition<int, int, int>("count", async (n, ctx) =>
-//   { for (int i = 1; i <= n; i++) { await Task.Delay(1000, ctx.CancellationToken); ctx.Progress(i); } return n; });
-//   var run = DartNodeUnity.RemoteTask<int, int, int>("count").Call(5, r => Debug.Log(r.Status), p => bar.value = p);
-//   run.Cancel();
+// The patterns for Unity: variables, functions and tasks shared by name through the scene's
+// DartNodeUnity component. Every handler is marshaled to the main thread (unity/README.md).
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
@@ -49,8 +30,8 @@ namespace Dart
         internal void OnNodeClosed() { DropNative(); }
         internal virtual void PruneDeadOwners() { }
 
-        // Create the native core object if the node is open and it does not exist yet;
-        // drop the (now dead) reference when the node closes.
+        // Create the native core object if the node is open and it does not exist yet, and drop
+        // the dead reference when the node closes.
         internal abstract void EnsureNative();
         internal abstract void DropNative();
     }
@@ -97,7 +78,7 @@ namespace Dart
         internal void Deliver(TArg arg)
         {
             bool sawDead = false;
-            int n = _subs.Count;                    // additions during the loop wait for the next event
+            int n = _subs.Count;   // additions during the loop wait for the next message
             for (int i = 0; i < n; i++)
             {
                 Sub s = _subs[i];
@@ -132,9 +113,8 @@ namespace Dart
 
     // ---- variable ---------------------------------------------------------------
 
-    /// <summary>Shared base for a scene variable handle. A DEFINITION owns the value; a
-    /// REMOTE references one owned elsewhere. OnChange/OnWrite observers are owner-bound
-    /// and fire on the main thread.</summary>
+    /// <summary>The shared base of a scene variable handle. A definition owns the value, a
+    /// remote references one owned elsewhere. Observers run on the main thread.</summary>
     public abstract class DartVariableBase<T> : DartPatternEntity
     {
         /// <summary>What an OnChange/OnWrite observer receives: the decoded value plus the
@@ -154,7 +134,7 @@ namespace Dart
 
         internal DartVariableBase(DartNodeUnity owner, string name) : base(owner, name) { }
 
-        // Subclasses build the core definition/remote; base wires the observers onto it.
+        // Subclasses build the core definition or remote, the base wires the observers onto it.
         private protected abstract VariableDefinition<T> CreateCore(DartNode node);
 
         internal override void EnsureNative()
@@ -171,9 +151,8 @@ namespace Dart
         internal override void DropNative() { _coreVar = null; _hasCache = false; }
         internal override void PruneDeadOwners() { _change.Prune(); _write.Prune(); }
 
-        // The core replays the current value synchronously at registration (on this, the
-        // main thread), so the first observer sees it via the fan-out below; ongoing
-        // changes fire on the service thread and are posted to the frame.
+        // The core replays the current value synchronously at registration on this, the main
+        // thread, so the first observer sees it through the fan out. Later changes post to it.
         private void RegisterChange()
             => _coreVar.OnChange((v, u) => Owner.RunOnMain(() => DeliverChange(new Update(v, u))));
         private void RegisterWrite()
@@ -181,8 +160,8 @@ namespace Dart
 
         private void DeliverChange(Update e) { _cache = e; _hasCache = true; _change.Deliver(e); }
 
-        /// <summary>Read the current value, fully copied out (definition: the store;
-        /// remote: the cached latest). False when no value exists yet or the node is closed.</summary>
+        /// <summary>Read the current value copied out, the store or the cached latest. False when
+        /// no value exists yet or the node is closed.</summary>
         public bool TryGet(out T value)
         {
             if (_coreVar != null) return _coreVar.TryGet(out value);
@@ -190,9 +169,8 @@ namespace Dart
             return false;
         }
 
-        /// <summary>The current value; throws if none exists yet. Set publishes (definition)
-        /// or sends over the set channel (remote); a refused set logs a warning (use Set for
-        /// the status-returning form).</summary>
+        /// <summary>The current value, throws if none exists yet. Set publishes or sends over the
+        /// set channel, and a refused set logs a warning. Set() returns the status.</summary>
         public T Value
         {
             get
@@ -228,9 +206,8 @@ namespace Dart
         public SendStatus Unforce() => _coreVar != null ? _coreVar.Unforce() : SendStatus.NoTopic;
         public bool Forced => _coreVar != null && _coreVar.Forced;
 
-        /// <summary>Observe state CHANGES (first value, different bytes, or a forced flip; a
-        /// byte-identical re-set stays silent). Replays the current value once at
-        /// registration so it can never be missed.</summary>
+        /// <summary>Observe state changes: the first value, different bytes or a forced flip.
+        /// Replays the current value once at registration.</summary>
         public DartSubscription OnChange(Action<T> handler)
             => AddChange(e => handler(e.Value), null, false);
         public DartSubscription OnChange(Action<T, Update> handler)
@@ -251,7 +228,7 @@ namespace Dart
         public DartSubscription OnWrite(Component owner, Action<T, Update> handler)
             => AddWrite(e => handler(e.Value, e), owner, true);
 
-        /// <summary>Peers matched (definition: remotes; remote: owners, 0 = none present).</summary>
+        /// <summary>Peers matched: remotes for a definition, owners for a remote.</summary>
         public int RemoteCount => _coreVar != null ? _coreVar.RemoteCount : 0;
 
         private DartSubscription AddChange(Action<Update> fn, Component owner, bool hasOwner)
@@ -261,7 +238,7 @@ namespace Dart
             if (!_wantChange)
             {
                 _wantChange = true;
-                if (_coreVar != null) RegisterChange();   // synchronous replay fans out to this observer
+                if (_coreVar != null) RegisterChange();   // the replay fans out to this one
             }
             else if (_hasCache)
             {
@@ -323,10 +300,8 @@ namespace Dart
 
     // ---- function ---------------------------------------------------------------
 
-    /// <summary>The implementation side of a request/response function: ONE definition per
-    /// name on the network. The handler runs on the MAIN thread (the reply is parked on
-    /// the service thread and completed from the frame), and a THROWN handler fails the
-    /// call with CallStatus.AppError.</summary>
+    /// <summary>The implementation side of a function, one definition per name. The handler
+    /// runs on the main thread and a thrown handler fails the call with AppError.</summary>
     public sealed class DartFunctionDefinition<TReq, TRsp> : DartPatternEntity
     {
         private FunctionDefinition<TReq, TRsp> _core;
@@ -361,9 +336,8 @@ namespace Dart
         public int CallerCount => _core != null ? _core.CallerCount : 0;
     }
 
-    /// <summary>A reference to a function defined on another node. Call is non-blocking:
-    /// the result callback fires on the MAIN thread (the blocking core Call is illegal
-    /// under Unity's service thread).</summary>
+    /// <summary>A reference to a function defined elsewhere. Call is non blocking and the
+    /// result callback fires on the main thread.</summary>
     public sealed class DartRemoteFunction<TReq, TRsp> : DartPatternEntity
     {
         private RemoteFunction<TReq, TRsp> _core;
@@ -380,8 +354,8 @@ namespace Dart
 
         internal override void DropNative() { _core = null; }
 
-        /// <summary>Call the remote function; onResult fires once on the main thread with the
-        /// outcome (inspect Status, never throws; reading Value when !Ok throws).</summary>
+        /// <summary>Call the remote function. onResult fires once on the main thread with the
+        /// outcome: inspect Status, and reading Value when not Ok throws.</summary>
         public void Call(TReq request, Action<DartResponse<TRsp>> onResult)
         {
             if (onResult == null) throw new ArgumentNullException(nameof(onResult));
@@ -423,11 +397,8 @@ namespace Dart
         public SendStatus Cancel() => _cancel != null ? _cancel() : SendStatus.NoTopic;
     }
 
-    /// <summary>The implementation side of a task (a function with progress and
-    /// cancellation): ONE definition per name. The async handler runs on the MAIN thread
-    /// (the context's Progress and CancellationToken are thread-safe); its completion
-    /// answers the call: the result -> Ok, OperationCanceledException -> Cancelled, any
-    /// other exception -> AppError.</summary>
+    /// <summary>The implementation side of a task, one definition per name. The async handler
+    /// runs on the main thread and its completion answers the call (docs/csharp.md).</summary>
     public sealed class DartTaskDefinition<TReq, TPrg, TRsp> : DartPatternEntity
     {
         private TaskDefinition<TReq, TPrg, TRsp> _core;
@@ -450,7 +421,7 @@ namespace Dart
             if (node == null) return;
             _core = new TaskDefinition<TReq, TPrg, TRsp>(node, Name, (req, ctx) =>
             {
-                // Hop to the frame; the returned Task's completion answers the call.
+                // Hop to the frame. The returned Task's completion answers the call.
                 var tcs = new TaskCompletionSource<TRsp>(TaskCreationOptions.RunContinuationsAsynchronously);
                 Owner.RunOnMain(async () =>
                 {
@@ -468,9 +439,8 @@ namespace Dart
         public int CallerCount => _core != null ? _core.CallerCount : 0;
     }
 
-    /// <summary>A reference to a task defined on another node. Call is non-blocking:
-    /// onProgress fires per update and onResult once with the terminal outcome, both on
-    /// the MAIN thread; the returned run handle cancels the run.</summary>
+    /// <summary>A reference to a task defined elsewhere. Call is non blocking, onProgress and
+    /// onResult fire on the main thread, and the returned run handle cancels.</summary>
     public sealed class DartRemoteTask<TReq, TPrg, TRsp> : DartPatternEntity
     {
         private RemoteTask<TReq, TPrg, TRsp> _core;
@@ -499,8 +469,8 @@ namespace Dart
                 });
         }
 
-        /// <summary>Start the task; onResult fires once on the main thread (inspect
-        /// Status, never throws), onProgress per typed update.</summary>
+        /// <summary>Start the task. onResult fires once on the main thread, onProgress per typed
+        /// update. Inspect Status, it never throws.</summary>
         public DartTaskRun Call(TReq request, Action<DartResponse<TRsp>> onResult,
                                 Action<TPrg> onProgress = null)
         {

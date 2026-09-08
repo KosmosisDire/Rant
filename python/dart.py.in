@@ -1,66 +1,5 @@
-"""DART Python wrapper: one self-contained file, compiled on first import.
-
-DART = Discovery And Realtime Transport, a dependency-free C99 middleware.
-This module embeds the DART C amalgamation and, on first use, compiles it into a
-cached shared library with your system C compiler (cc / clang / gcc, or clang-cl /
-cl on Windows), then binds it via ctypes. Later imports load the cached library.
-Drop this single file into your project; no pip install, no sibling library.
-
-The API mirrors the C# wrapper (csharp/Dart.cs): everything you create uses a
-constructor (Node / Topic / Schema), and a typed topic is Topic[T] over a
-plain annotated class -- no decorators. Config is keyword args or the Qos /
-NodeOptions dataclasses; payloads are plain bytes/str or typed objects.
-
-    from dataclasses import dataclass
-    import dart
-
-    @dataclass
-    class Pose:
-        stamp: dart.u64 = 0
-        x:     dart.f64 = 0.0
-        y:     dart.f64 = 0.0
-        frame: dart.string(16) = ""      # a capped UTF-8 string (string<16>)
-
-    node = dart.Node("robot1",
-                     on_message=lambda m: print(m.value),     # m.value is a decoded Pose
-                     on_event=lambda e: print("event:", e),   # wired up before the ctor returns
-                     domain=7)
-    ch = dart.Topic[Pose](node, "pose",
-                            qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
-    node.start()                                    # C-level service thread owns the loop
-    ch.send(Pose(stamp=1, x=1.0, y=2.0, frame="map"))   # thread-safe from any thread
-    ...                                             # or skip start() and drive node.poll(1)
-
-Schemas come straight from the class: annotated public fields become the wire
-fields, in declaration order. Use dart.u8..dart.f64 / dart.bool_ for scalars,
-dart.string(cap) for a capped string, dart.<scalar>[n] or dart.string(cap)[n] for
-a fixed array, and a nested annotated class for a sub-struct. Set an optional
-__dart_name__ on the class to override the wire type name (defaults to the class
-name). A plain class works too; @dataclass just gives you a handy constructor.
-
-A BARE TYPE is a schema of its own, for a topic whose payload is a single value:
-dart.Topic[dart.bool_](node, "estop") sends and receives plain True/False, and so do
-dart.u8..dart.f64, dart.string(N), dart.<scalar>[n], list[dart.f32], str, dict, an
-enum class, and int/float/bool. Such a root is anonymous (a bare type's identity is
-its shape), so the same one in any language is the same wire bytes and the same hash.
-
-Patterns layer over topic kinds, each subscriptable like Topic[T] for the typed
-form (untyped: explicit schema args, bytes payloads): FunctionDefinition /
-RemoteFunction (request/response, exactly one reply per call), TaskDefinition /
-RemoteTask (a function with progress and cancellation; the handler runs on a
-dedicated worker thread per call), VariableDefinition / RemoteVariable
-(replicated state, one owner, optional force), and the side-named Publisher /
-Subscriber topic handles (same-name constructions on one node share the topic
-slot with a widened role).
-
-Requires a C compiler on the machine at first use only (override with DART_CC).
-Every node/topic call is thread-safe (a node-level lock in the C core
-serializes them). Drive a node either with node.start() (a C background service
-thread runs the loop; handlers fire on it, never two at once) or by calling
-node.poll() from your own loop. From inside on_message/on_event, topic.send and
-read-only queries are allowed; poll, create, set_role, drain, start, stop, and
-close are refused (SendStatus.STATE / None / False), never corrupting.
-"""
+"""The DART Python wrapper: one self contained module compiled on the first Node and bound
+through ctypes. docs/python.md explains how to use it."""
 
 import ctypes
 import dataclasses
@@ -83,11 +22,8 @@ from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
 
 _WRAPPER_VERSION = "5"   # bump to force a recompile when this file's ABI view changes
 
-# ---------------------------------------------------------------------------
-# Embedded C source. The packer (tools/pack.cmake) replaces the single marker
-# below with the escaped contents of dist/dart.h. In-tree (unpacked) the marker
-# is left intact and _source() falls back to reading dist/dart.h from disk.
-# ---------------------------------------------------------------------------
+# The embedded C source. The packer replaces the marker with the escaped dist/dart.h. In
+# tree the marker stays and _source() reads dist/dart.h from disk.
 _DART_C_SOURCE = "@DART_EMBED@"
 _EMBED_MARKER = "@DART_" + "EMBED@"   # split so the packer never rewrites this copy
 
@@ -105,13 +41,11 @@ def _source():
                        "(run the packer, or keep dart.py next to dist/dart.h)")
 
 
-# ---------------------------------------------------------------------------
-# Compile-on-import: find a compiler, build a shared lib from the embedded
-# source once, cache it by content hash, and load it via ctypes.
-# ---------------------------------------------------------------------------
+# Compile on import: find a compiler, build a shared library from the embedded source
+# once, cache it by content hash, and load it via ctypes.
 
-# Symbols the wrapper binds. MSVC-style compilers export nothing from a DLL by
-# default, so we hand them this list as a .def; GNU compilers auto-export.
+# The symbols the wrapper binds. MSVC style compilers export nothing from a DLL by
+# default, so they get this list as a .def. GNU compilers auto export.
 _EXPORTS = [
     "i_dart_plat_realloc",
     "dart_node_open", "dart_node_poll", "dart_node_close",
@@ -265,16 +199,14 @@ def _ensure_library():
     return out_lib
 
 
-# ---------------------------------------------------------------------------
-# ctypes type layouts (must mirror the C structs exactly).
-# ---------------------------------------------------------------------------
+# The ctypes layouts, which must mirror the C structs exactly (spec/bindings.md).
 
 class DartBytes(Structure):
     _fields_ = [("data", c_void_p), ("len", c_size_t)]
 
 
-# the C DartString (a non-NUL length-carrying view); named *View here so the
-# public string field marker owns the plain `dart.string` name.
+# the C DartString, a length carrying view. Named View so the public string field
+# marker owns the plain dart.string name
 class DartStringView(Structure):
     _fields_ = [("data", c_void_p), ("len", c_size_t)]
 
@@ -303,7 +235,7 @@ class DartDiscoveryAddr(Structure):
     _fields_ = [
         ("ip", c_uint8 * 16),   # network-order bytes
         ("ip_len", c_uint8),    # 4 = IPv4, 16 = IPv6
-        ("port", c_uint16),     # host order; 0 = the discovery port
+        ("port", c_uint16),     # host order, 0 = the discovery port
     ]
 
 
@@ -378,7 +310,7 @@ class DartMsg(Structure):
         ("publisher_id", c_uint32),
         ("publisher_name", DartStringView),
         ("topic_name", DartStringView),
-        ("header", DartBytes),   # pattern-header prefix view ({None,0} on a plain topic); layout mirror of the C DartMsg
+        ("header", DartBytes),   # the pattern header view, None on a plain topic
         ("data", DartBytes),
         ("schema", c_void_p),
         ("recv_us", c_uint64),
@@ -457,11 +389,10 @@ class DartValue(Structure):
     ]
 
 
-# ---- pattern struct mirrors (src/patterns/core.h; field order/types EXACT) ----
+# the pattern struct mirrors of src/patterns/core.h, field order and types exact
 
-# The public head of the C DartRequest. Only ever touched through the callback's
-# pointer: the reply machinery lives BEHIND the struct, so the exact pointer
-# (never a copy) is what dart_request_reply/fail/defer take.
+# The public head of the C DartRequest, only ever touched through the callback's pointer:
+# the reply machinery lives behind the struct, so the exact pointer is what reply takes.
 class DartRequest(Structure):
     _fields_ = [
         ("node", c_void_p),
@@ -550,8 +481,8 @@ _PrgFn = CFUNCTYPE(None, POINTER(DartProgress))
 
 
 class DartCallOpts(Structure):
-    # direct a call at one definition by peer id (0 = undirected, first answer wins);
-    # the task fields (on_progress/progress_user/id_out) stay NULL on a plain call
+    # direct a call at one definition by peer id, 0 = first answer wins. The task fields
+    # stay NULL on a plain call
     _fields_ = [
         ("provider", c_uint32),
         ("on_progress", _PrgFn),
@@ -714,10 +645,8 @@ def _load():
     return _LIB
 
 
-# The schema layer needs a realloc-style hook (DartAllocFn). The natural one,
-# dart_allocator_alloc, is static-inline (not exported), so we back it with the C
-# runtime's realloc/free. Every schema alloc/free routes through this one hook, so
-# it never mixes allocators with DART itself.
+# The schema layer needs a realloc style hook. dart_allocator_alloc is static inline and
+# not exported, so the C runtime's realloc and free back it. Every schema alloc uses it.
 _CRT = None
 
 
@@ -743,9 +672,7 @@ def _schema_alloc(user, ptr, size):
     return crt.realloc(ptr, size)
 
 
-# ---------------------------------------------------------------------------
-# Enums (values match the C wire; names mirror the C# wrapper).
-# ---------------------------------------------------------------------------
+# The enums. Values match the C wire, names mirror the C# wrapper.
 
 class Reliability(enum.IntEnum):
     BEST_EFFORT = 0
@@ -770,12 +697,8 @@ class SendStatus(enum.IntEnum):
 
 
 class CallStatus(enum.IntEnum):
-    """A call's outcome. OK/APP_ERROR/NO_HANDLER/CANCELLED/RUNNING travel on the
-    wire; TIMEOUT/PEER_LOST are synthesized client-side; CANCELLED is also
-    synthesized for calls still pending at close/retire, so every call gets
-    exactly one outcome. RUNNING (task) is the ONLY non-terminal status: the
-    request was accepted and runs; the call stays pending, its timeout is
-    dropped, and on_progress fires once with None. Mirrors DartCallStatus."""
+    """A call's outcome, mirrors DartCallStatus. TIMEOUT and PEER_LOST are synthesized on the
+        caller, RUNNING is task only and the one non terminal status (docs/tasks.md)."""
     OK = 0
     APP_ERROR = 1
     NO_HANDLER = 2
@@ -793,8 +716,7 @@ class LogLevel(enum.IntEnum):
 
 
 class MetaSection(enum.IntFlag):
-    """A @dart/meta request's section mask (OR the bits; ALL/0 = every section).
-    Mirrors DART_META_*."""
+    """A @dart/meta request's section mask, OR the bits. ALL or 0 = every section."""
     NODE = 0x1
     PROC = 0x2
     TOPICS = 0x4
@@ -807,7 +729,7 @@ class EventKind(enum.IntEnum):
     PEER_DOWN = 1
     PEER_INTEREST = 2
     MSG_LOST = 3
-    ERROR = 4       # something went wrong; read Event.error (an ErrorKind)
+    ERROR = 4       # something went wrong, read Event.error
 
 
 class ErrorKind(enum.IntEnum):
@@ -857,7 +779,7 @@ class FieldType(enum.IntEnum):
     VARRAY = 15    # variable array (`elem[]` / `string<C>[]`): live element count
     MAP = 16       # self-describing tagged map (`map`)
     ENUM = 17      # named integer (`enum<uN>{...}`): wire is just the backing scalar
-    NAMED = 18     # a nominal tag on another type; reflection reports it as Field.type_name
+    NAMED = 18     # a nominal tag on another type, reported as Field.type_name
 
 
 # raw kind bytes (== FieldType, kept short for the codec below)
@@ -895,9 +817,7 @@ class CancelledError(Exception):
     cooperative honor of a cancel). The exception text becomes Response.message."""
 
 
-# ---------------------------------------------------------------------------
-# Config + value dataclasses (mirror the C++ structs; zero = default).
-# ---------------------------------------------------------------------------
+# The config and value dataclasses, mirroring the C++ structs. Zero = default.
 
 @dataclasses.dataclass
 class Qos:
@@ -909,9 +829,8 @@ class Qos:
     repair_delay_us: int = 0
     backpressure_wait_us: int = 0
     shm_max_bytes: int = 0
-    queue_bytes: int = 0   # consumer-queue cap for take()/dispatch(); 0 = lazy, 1 MB cap
-    max_rate_hz: int = 0   # SUBSCRIBER, best-effort: cap delivery from each publisher to this
-                           # many samples/sec (the publisher decimates to the newest); 0 = unlimited
+    queue_bytes: int = 0   # take and dispatch queue cap, 0 = lazy with a 1 MB cap
+    max_rate_hz: int = 0   # best effort sub: kept samples per second, 0 = all
     no_timestamp: bool = False  # PUBLISHER: send without the per-message source timestamp, so
                                 # receivers read msg.written_us == 0. Default stamps every message
 
@@ -922,7 +841,7 @@ class NodeOptions:
     max_topics: int = 0
     disable_shm: bool = False
     fetch_details: bool = False   # greedily fetch every peer topic's name + schema (observer UIs)
-    match_wait_ms: int = 0        # send-path match wait; 0 = default (1s), negative = disabled
+    match_wait_ms: int = 0        # send path match wait, 0 = 1 s, negative = disabled
     disable_logs: bool = False    # strip the built-in @dart/log/{error,warn,info} topics
     disable_meta: bool = False    # do not host the built-in @dart/meta introspection endpoint
     disable_error_logs: bool = False # suppress default error mirroring onto @dart/log/error
@@ -934,14 +853,10 @@ class NodeOptions:
     seed_peers: list = dataclasses.field(default_factory=list)
                                   # "ip" or "ip:port" strings to also unicast announces to, so
                                   # discovery works where multicast is filtered
-    unicast_only: bool = False    # this node cannot multicast at all: join no group, announce only
-                                  # to seed_peers + peers already known, and ask whoever hears us to
-                                  # RE-ANNOUNCE us on their paths. Seeding ONE reachable node then
-                                  # makes us discoverable mesh-wide (data is unicast either way).
-    self_ip: str = ""             # state THIS address as our locator instead of letting each peer
-                                  # learn it from the datagram source (the default). For a static
-                                  # 1:1 mapping (elastic IP, -p 7400:7400) or multihomed pinning;
-                                  # one locator reaches every peer, and it opens no inbound path.
+    unicast_only: bool = False    # join no group, announce to seed peers and ask them to relay us
+                                  # (docs/discovery.md)
+    self_ip: str = ""             # advertise this locator to every peer instead of letting each
+                                  # learn it from the datagram source, for a static 1:1 mapping
     advertise_port: int = 0       # advertise THIS data port instead of the one we bound (0 = bound)
     fragment_size: int = 0
     announce_interval_us: int = 0
@@ -951,9 +866,8 @@ class NodeOptions:
 
 @dataclasses.dataclass
 class LogLine:
-    """One decoded @dart/log line handed to a Node.on_log handler. wall_us is epoch
-    micros (comparable across nodes); mono_us is the publisher's monotonic clock
-    (orders within one node); recv_us is this node's clock when the poll received it."""
+    """One decoded @dart/log line for a Node.on_log handler. wall_us is epoch us, mono_us the
+        publisher's monotonic clock and recv_us this node's clock at receipt."""
     level: LogLevel
     node: str           # the publishing node's name
     node_id: int        # the publishing peer id
@@ -966,10 +880,8 @@ class LogLine:
 
 @dataclasses.dataclass
 class MetaSnapshot:
-    """A decoded @dart/meta reply (see Node.meta / Node.meta_async). The common "node"
-    and "proc" scalars are pulled out as fields; `info` holds the full self-describing
-    body (including the topics/peers arrays) for anything else. Absent sections leave
-    their fields at 0 (have_proc stays False where the platform can't measure)."""
+    """A decoded @dart/meta reply. The node and proc scalars are fields, the full body stays
+        in info. Absent sections leave zeros and have_proc False."""
     valid: bool = False
     status: CallStatus = CallStatus.TIMEOUT
     provider: int = 0           # the peer that answered
@@ -992,7 +904,7 @@ class MetaSnapshot:
     shm_rx: int = 0
     last_error: int = 0
     last_error_text: str = ""
-    # proc section (per process; have_proc False where unmeasured)
+    # the proc section, have_proc False where unmeasured
     have_proc: bool = False
     have_cpu: bool = False
     pid: int = 0
@@ -1056,9 +968,7 @@ class Field:
     arr_parent: int = 0xFFFF   # flat index of the enclosing struct ARRAY, 0xFFFF for none
 
 
-# ---------------------------------------------------------------------------
-# Reflection: field-type markers and lazy per-class schema specs.
-# ---------------------------------------------------------------------------
+# Reflection: the field type markers and the lazy per class schema specs.
 
 class _Type:
     """A DART scalar field-type marker (dart.u8 ... dart.f64, dart.bool_)."""
@@ -1076,8 +986,8 @@ class _Type:
 
 
 class _String:
-    """A capped-string field marker: dart.string(16) -> string<16>. Subscript it for
-    a fixed array of them: dart.string(8)[4] -> string<8>[4]."""
+    """A capped string field marker: dart.string(16) is string<16>. Subscript it for a
+        fixed array: dart.string(8)[4]."""
     def __init__(self, cap):
         if not isinstance(cap, int) or cap <= 0:
             raise TypeError("string cap must be a positive int, e.g. dart.string(16)")
@@ -1115,9 +1025,8 @@ bool_ = _Type(_BOOL, "bool")
 
 
 def string(cap):
-    """A capped UTF-8 string field: dart.string(16) is string<16> in the DSL. Every
-    string field needs a cap (its fixed byte capacity). For a fixed array of strings,
-    subscript it: dart.string(8)[4]."""
+    """A capped UTF-8 string field: dart.string(16) is string<16> in the DSL. Every string
+        field needs a cap, and dart.string(8)[4] is a fixed array of them."""
     return _String(cap)
 
 
@@ -1155,35 +1064,17 @@ class _Enum:
 
 
 def enum(cls, backing=None):
-    """A named-integer field from a Python enum.Enum (usually IntEnum): each member's value
-    is what rides the wire. Pass `backing` (dart.u8..dart.i64) to pin the wire width to what
-    another language uses; otherwise it is inferred from the values. A bare enum class as an
-    annotation is the same as dart.enum(cls) with an inferred backing."""
+    """A named integer field from an enum.Enum. Each member's value rides the wire. backing
+        pins the wire width, else it is inferred. A bare enum annotation is the same."""
     return _Enum(cls, backing)
 
 
-# ---------------------------------------------------------------------------
-# STANDARD TYPES (docs/stdtypes.md): the types applications keep re-inventing,
-# pre-named so two programs that both mean "a 3D point" say so with the same name
-# and the same bytes. A named type NARROWS matching -- a Pose field never binds to
-# a same-shaped Twist one -- and the name rides the schema, never a message byte.
-#
-#     @dataclasses.dataclass
-#     class Track:
-#         at:   dart.Pose      = dataclasses.field(default_factory=dart.Pose)
-#         when: dart.Timestamp = 0
-#         tag:  dart.Color     = dataclasses.field(default_factory=dart.Color)
-#
-# The names are always in scope in the schema DSL too, so a text schema can just say
-# `at: Pose`. Conventions are pinned: SI units, meters, m/s, radians; a Timestamp is
-# microseconds since the Unix epoch UTC; quaternions are x, y, z, w; Color is sRGB
-# RGBA bytes; a Uuid holds its 16 bytes in RFC 4122 order.
-# ---------------------------------------------------------------------------
+# The standard types (docs/stdtypes.md): pre named so two programs that both mean a 3D
+# point say so with the same name and the same bytes. The names narrow matching.
 
 class _StdAlias:
-    """A standard type that is an ALIAS of one wire type (Timestamp = i64, Uuid =
-    u8[16]): it encodes exactly like `under` but spells as its NAME, so its values are
-    ordinary Python ints / bytes / str."""
+    """A standard type that is an alias of one wire type: it encodes like under but spells
+        as its name, so its values are ordinary Python ints, bytes or str."""
     def __init__(self, name, under):
         self.name = name
         self.under = under      # a _Type, _Array or _String
@@ -1365,7 +1256,7 @@ class VideoStreamKind(_pyenum.IntEnum):
 class Image:
     width: u32 = 0
     height: u32 = 0
-    stride: u32 = 0                             # bytes per row; 0 = tightly packed
+    stride: u32 = 0                             # bytes per row, 0 = tightly packed
     format: enum(ImageFormat, u8) = ImageFormat.Mono8
     data: list[u8] = b""                        # pixels, or the file bytes if compressed
 
@@ -1373,16 +1264,15 @@ class Image:
 @_std("VideoFrame")
 class VideoFrame:
     codec: enum(VideoCodec, u8) = VideoCodec.Unknown
-    width: u32 = 0                              # coded size; 0 = unstated (bitstream rules)
+    width: u32 = 0                              # the coded size, 0 = unstated
     height: u32 = 0
     keyframe: bool_ = False
     pts: Timestamp = 0                          # presentation time, the Timestamp clock
     data: list[u8] = b""
 
 
-# Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
-# codec/width/height are hints for pickers (Unknown/0 = unstated): the stream itself
-# stays authoritative once connected.
+# Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. codec,
+# width and height are hints for pickers, the stream stays authoritative once connected.
 @_std("ExternalVideoStream")
 class ExternalVideoStream:
     kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
@@ -1394,8 +1284,8 @@ class ExternalVideoStream:
 
 
 def timestamp_now():
-    """The wall clock in the units a Timestamp field declares: microseconds since the
-    Unix epoch, UTC -- the same clock a message's written_us is stamped from."""
+    """The wall clock in Timestamp units, microseconds since the Unix epoch UTC, the clock a
+        message's written_us uses."""
     return int(_load().dart_timestamp_now())
 
 
@@ -1431,8 +1321,7 @@ _SPECS_LOCK = threading.RLock()   # reentrant: nested-struct reflection recurses
 
 
 def _spec_of(cls):
-    """The reflected schema spec of a class, built once and cached. Any class with
-    annotated fields works; no decorator needed."""
+    """The reflected schema spec of a class, built once and cached. Any annotated class works."""
     with _SPECS_LOCK:
         spec = _SPECS.get(cls)
         if spec is None:
@@ -1492,7 +1381,7 @@ def _field_spec(name, ann, g):
         return _FieldSpec(name, _BOOL, token="bool")
     if isinstance(ann, _Enum):                                  # dart.enum(cls[, backing])
         return _FieldSpec(name, _ENUM, elem=ann.kind, enum_cls=ann.cls)
-    if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):  # a bare enum class (backing inferred)
+    if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):   # a bare enum
         return _FieldSpec(name, _ENUM, elem=_infer_enum_backing(ann), enum_cls=ann)
     if isinstance(ann, type):                                    # a nested schema class,
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann),    # or a standard composite
@@ -1513,11 +1402,8 @@ def _build_spec(cls):
 
 
 def _value_spec(ann):
-    """A spec for a BARE type used as the whole schema (dart.bool_, dart.u8[16],
-    dart.string(16), list[dart.f32], dict, str, int, float, bool, an enum class): the root
-    is anonymous, one field named "". None if ann is not a bare type. A bare type has no
-    name because its identity is its shape, so the same one in any language is the same
-    wire bytes and the same hash."""
+    """A spec for a bare type used as the whole schema: the root is anonymous, one field
+        named "". None if ann is not a bare type."""
     if isinstance(ann, (_Type, _String, _Array, _Enum)):
         return _Spec(None, [_field_spec("", ann, {})], None)
     if getattr(ann, "__origin__", None) in (list, tuple, dict):   # list[...] IS a type: check first
@@ -1534,7 +1420,7 @@ def _elem_token(elem, str_cap):
 
 
 def _spec_text(spec):
-    """The schema DSL text a spec compiles to (pure reflection; no native lib)."""
+    """The schema DSL text a spec compiles to. Pure reflection, no native lib."""
     def type_text(f):
         if f.type_name:               # a standard type: the name IS the spelling
             return f.type_name
@@ -1583,10 +1469,8 @@ def _is_value_root(lib, s):
 
 
 def _schema_dsl(lib, s):
-    """The DSL text of ANY compiled schema (reflected, text-compiled, or wire-parsed from
-    a peer), straight from the C printer: it spells named types and struct arrays, hoists
-    each named type as a leading `Name = type` definition, and recompiles to identical
-    wire, so there is exactly one implementation of the spelling."""
+    """The DSL text of any compiled schema, straight from the C printer, so there is exactly
+        one implementation of the spelling."""
     need = lib.dart_schema_print(s, None, 0)
     if not need:
         return ""
@@ -1595,10 +1479,8 @@ def _schema_dsl(lib, s):
     return buf.value.decode("utf-8", "replace")
 
 
-# ---------------------------------------------------------------------------
-# Schema: a compiled message schema + encode/decode. Build with Schema(text) or
-# Schema(cls); Topic[T] / Topic(node, name, T) build one for you.
-# ---------------------------------------------------------------------------
+# Schema: a compiled message schema plus encode and decode. Build with Schema(text) or
+# Schema(cls), and Topic[T] builds one for you.
 
 def _dstr(s):
     return string_at(s.data, s.len).decode("utf-8", "replace") if s.data and s.len else ""
@@ -1615,11 +1497,8 @@ def _compile_dsl(text):
 
 
 class Schema:
-    """A compiled DART message schema. Construct from DSL text -- Schema("Pose { x:
-    f32, frame: string<16> }") -- from a schema class -- Schema(Pose) -- whose annotated
-    public fields become the wire fields, in declaration order, or from a BARE TYPE --
-    Schema(dart.bool_), Schema(list[dart.f32]), Schema(str), Schema(dict) -- whose message
-    is that one value (encode/decode take and give it directly)."""
+    """A compiled schema from DSL text, a schema class whose annotated fields are the wire
+        fields, or a bare type whose message is that one value (docs/python.md)."""
 
     __slots__ = ("_s", "_spec", "_vroot")
 
@@ -1673,10 +1552,8 @@ class Schema:
         return self._vroot
 
     def can_read(self, pub):
-        """Can a reader declaring THIS schema read messages written with `pub`? Every field
-        of ours must exist in pub under the same name with a compatible type. Type NAMES
-        narrow: an anonymous type reads a named one of the same shape, never the reverse,
-        and two different names never match."""
+        """Can a reader declaring this schema read messages written with pub? Type names
+                narrow: an anonymous type reads a named one of the same shape, never the reverse."""
         return bool(_load().dart_schema_subset(self._s, pub._s))
 
     def fields(self):
@@ -1719,9 +1596,8 @@ def _as_schema(schema_arg):
 
 
 def dsl(x):
-    """The DSL text for a schema source: a schema class or bare type (no lib load needed),
-    a compiled Schema, or DSL text (returned as-is). Use it to display a schema or hand
-    it to a C/C++ node for interop."""
+    """The DSL text for a schema source: a class or bare type with no lib load, a compiled
+        Schema, or DSL text returned as is. For display or for a C node."""
     if isinstance(x, str):
         return x
     if isinstance(x, Schema):
@@ -1734,14 +1610,12 @@ def dsl(x):
     raise TypeError("dsl() expects a schema class, a bare type, a Schema, or DSL text")
 
 
-# ---------------------------------------------------------------------------
-# Encode / decode: walk the compiled schema's flattened depth-first field table,
-# so both work for ANY schema (reflected, text-compiled, or a peer's).
-# ---------------------------------------------------------------------------
+# Encode and decode walk the compiled schema's flat depth first field table, so both
+# work for any schema, reflected, text compiled or a peer's.
 
 def _get(container, name):
     if isinstance(container, dict):
-        return container.get(name)          # missing -> None -> keep the zeroed default
+        return container.get(name)          # missing is None, which keeps the zeroed default
     return getattr(container, name, None)
 
 
@@ -1777,11 +1651,8 @@ def _pack_string_slots(strings, cap):
     return bytes(out)
 
 
-# ---- map: the self-describing tagged value tree (`map` fields) -----------------
-# Body wire (little-endian): [u16 n] entry*n; entry := [u8 keylen][key] value;
-# value := [u8 kind] payload -- scalars store their raw bytes, VSTR is [u16 len][bytes],
-# VARR is [u16 n] value*n, MAP is a nested body. Built/parsed here (managed) rather
-# than mirroring the C DartMapWriter struct; dart_set_map validates the body we build.
+# The map body, the self describing tagged value tree of a map field, built and parsed
+# here rather than mirroring the C writer. spec/schema.md has the wire, the C validates.
 
 def _map_int_bytes(v):
     if v < 0:
@@ -1821,7 +1692,7 @@ def _encode_map_body(d):
     parts = []
     for key, val in d.items():
         if val is None:
-            continue                    # a map has no null kind; omit the key
+            continue                    # a map has no null kind, omit the key
         kb = str(key).encode("utf-8")
         if len(kb) > 255:
             raise SchemaError("dart map: key too long (max 255 bytes): %r" % key)
@@ -1849,7 +1720,7 @@ def _encode(lib, s, src):
         if info.kind == _STRUCT:
             while len(srcs) <= d + 1:
                 srcs.append(None)
-            srcs[d + 1] = val            # None -> the whole subtree keeps its zeroed default
+            srcs[d + 1] = val            # None keeps the whole subtree at its zeroed default
             continue
         if val is None:
             continue                     # null field: keep the zeroed default
@@ -1870,8 +1741,8 @@ def _encode(lib, s, src):
         else:
             ops.append((kind, elem, count, cap, path, val))
 
-    # msg_min is the fixed section plus one empty frame per variable field; each
-    # variable frame then grows by exactly its payload length.
+    # msg_min is the fixed section plus one empty frame per variable field, and each
+    # variable frame then grows by exactly its payload length
     size = lib.dart_schema_msg_min(s) + var_bytes
     buf = (c_ubyte * (size or 1))()
     lib.dart_schema_message_default(s, buf, size)
@@ -1919,8 +1790,8 @@ def _encode(lib, s, src):
     return bytes(buf)[:lib.dart_schema_msg_len(s, buf, size)]
 
 
-# string-array slots are [u16 len][cap bytes] each; clamp len like the C reader so a
-# hostile message can never over-read.
+# string array slots are [u16 len][cap bytes] each. Clamp len like the C reader so a
+# hostile message can never over read
 def _unpack_string_array(raw, count, cap):
     out = []
     slot = 2 + cap
@@ -2015,7 +1886,7 @@ def _value_to_py(val):
     if k in _FLOATK:
         return val.v.f
     if k == _ENUM:
-        return val.v.i          # the number; _to_obj maps it to the enum member for typed decode
+        return val.v.i          # the number. _to_obj maps it to the enum member for a typed decode
     if k in _SIGNED:
         return val.v.i
     if k == _BOOL:
@@ -2077,9 +1948,8 @@ def _to_obj(spec, d):
 
 
 def _from_decoded(spec, d):
-    """Apply a spec's typing to what _decode produced: a class instance for a struct
-    spec, the bare value (an enum member where the spec names one) for a bare-type spec,
-    or the plain decoded form when there is no spec."""
+    """Apply a spec's typing to what _decode produced: a class instance, the bare value (an
+        enum member where the spec names one), or the plain form with no spec."""
     if spec is None:
         return d
     if spec.name is None:                       # a bare type: d IS the value
@@ -2093,17 +1963,14 @@ def _from_decoded(spec, d):
     return _to_obj(spec, d)
 
 
-# ---------------------------------------------------------------------------
-# Public runtime API.
-# ---------------------------------------------------------------------------
+# The public runtime API.
 
 def _send_status(r):
     return SendStatus(r) if r in SendStatus._value2member_map_ else r
 
 
 def _c_view(payload):
-    """(DartBytes, keepalive buffer) over a bytes payload; hold the buffer across
-    the native call."""
+    """(DartBytes, keepalive buffer) over a bytes payload. Hold the buffer across the call."""
     b = DartBytes()
     buf = None
     if payload:
@@ -2114,10 +1981,8 @@ def _c_view(payload):
 
 
 def _payload_bytes(sch, value):
-    """Encode a payload per the wrapper's send conventions: bytes/str pass
-    through, None = empty, anything else is encoded by the schema. A bare-type schema
-    (`string`, `string<16>`) encodes a str through the schema instead: its message is a
-    framed value, not loose text."""
+    """Encode a payload: bytes and str pass through, None = empty, anything else goes through
+        the schema. A bare string schema encodes a str as a framed value, not loose text."""
     if value is None:
         return b""
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -2131,9 +1996,8 @@ def _payload_bytes(sch, value):
 
 
 def _decode_payload(wire_schema, local, data):
-    """Decode payload bytes: the wire schema (the sender's layout bound to ours)
-    wins, else the local Schema; no schema at all passes the raw bytes through.
-    Returns (value, ok); a typed local schema yields its class instance."""
+    """Decode payload bytes: the wire schema wins, else the local Schema, else the raw bytes
+        pass through. Returns (value, ok). A typed local schema yields its class instance."""
     sp = wire_schema or (local._s if local is not None else None)
     if not sp:
         return data, True
@@ -2145,8 +2009,8 @@ def _decode_payload(wire_schema, local, data):
 
 
 def _arity(fn):
-    """1 or 2: how many positional args a handler accepts (bound methods drop
-    self; *args counts as the 2-arg form)."""
+    """1 or 2: how many positional args a handler accepts. Bound methods drop self and
+        *args counts as the 2 arg form."""
     try:
         params = inspect.signature(fn).parameters.values()
     except (TypeError, ValueError):
@@ -2160,7 +2024,7 @@ def _arity(fn):
     return 2 if n >= 2 else 1
 
 
-# role <-> pub/sub bit pair (bit 0 = pub, bit 1 = sub) for same-name role widening
+# role to pub and sub bit pair, bit 0 = pub, bit 1 = sub, for same name role widening
 def _role_bits(role):
     role = int(role)
     return (3 if role == Role.PUBSUB else 1 if role == Role.PUB_ONLY
@@ -2173,14 +2037,8 @@ def _role_from_bits(bits):
 
 
 class Message:
-    """A delivered message. Views are copied out, so it outlives the callback.
-    For a typed topic, `.value` is the decoded object and `.fields` the dict; for a
-    bare-type schema both are that one value.
-    recv_us is the node's monotonic clock (microseconds) when the poll RECEIVED the
-    message (queued topics stamp at enqueue), so a paced consumer measures true
-    arrival times, never its own cadence. written_us is the WRITER's wall clock (UTC
-    microseconds) when it WROTE the message: a source stamp, kept across repair and
-    replay, 0 when the publisher opted out (qos.no_timestamp). Never mix the two."""
+    """A delivered message, copied out so it outlives the callback. value is the decoded
+        object and fields the dict. recv_us and written_us are explained in docs/node.md."""
     __slots__ = ("topic_index", "publisher_id", "publisher_name", "topic_name",
                  "data", "recv_us", "written_us", "fields", "value")
 
@@ -2214,9 +2072,8 @@ class Message:
 
 
 class Event:
-    """A peer / message-loss / error notification. Everything that went wrong arrives as
-    kind == EventKind.ERROR with .error set to the specific ErrorKind; str(event) is the
-    human-readable message either way."""
+    """A peer, message loss or error notification. Everything that went wrong arrives as
+        EventKind.ERROR with error set, and str(event) is the text either way."""
     __slots__ = ("kind", "error", "topic_name", "peer", "topic", "os_error",
                  "lost_first", "lost_count", "too_big_bytes", "identity",
                  "publish_topics", "receive_topics", "schema_detail", "peer_name", "_line")
@@ -2272,10 +2129,8 @@ class _TypedTopic:
 
 
 class Topic:
-    """A topic handle (owned by the Node, stable for its life). Construct it directly:
-    Topic(node, name) is a raw bytes/str topic; pass a schema (a Schema, a schema class,
-    a bare type, or DSL text) for a typed one; Topic[T](node, name, ...) is the typed
-    shorthand (T = a schema class or a bare type like dart.bool_)."""
+    """A topic handle owned by the Node. Topic(node, name) is raw, a schema argument makes
+        it typed, and Topic[T](node, name) is the typed shorthand."""
     __slots__ = ("_node", "_h", "_schema")
 
     def __init__(self, node, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
@@ -2298,10 +2153,8 @@ class Topic:
         return _TypedTopic(item)
 
     def send(self, data):
-        """Publish. `data` may be bytes/str (raw), or a mapping/object for a typed
-        topic (encoded via its schema; a bare-type schema takes the bare value, so a
-        `string` root encodes a str instead of sending it as loose text). Returns a
-        SendStatus."""
+        """Publish. data is bytes or str for raw, else a mapping or object encoded by the
+                schema. A bare string schema takes a str. Returns a SendStatus."""
         if isinstance(data, (bytes, bytearray, memoryview)):
             payload = bytes(data)
         elif isinstance(data, str) and (self._schema is None
@@ -2321,13 +2174,8 @@ class Topic:
         return self._node._lib.dart_topic_set_role(self._h, int(role))
 
     def retire(self):
-        """Retire the topic: the lifecycle verb for re-creating a name with a
-        different schema (a retype). The topic leaves the announce, every lane tears
-        down, and its slot parks for reuse by a later create, so retire/create cycles
-        never grow the node. On SendStatus.OK this handle is invalid (every call
-        returns NO_TOPIC) and the name may be created again, with a new schema if
-        desired. Refused (SendStatus.STATE) from a callback, for builtin topics, and
-        while a dispatch on this topic runs."""
+        """Retire the topic so the name can be re created with another schema (docs/topics.md).
+                On OK this handle is invalid. Refused with STATE from a callback."""
         node = self._node
         with node._create_lock:
             if not self._h:
@@ -2354,16 +2202,13 @@ class Topic:
         return self._node._lib.dart_topic_match_count(self._h)
 
     def ready(self):
-        """True when a send would not wait on the match wait: a matched subscriber
-        exists, or matching has converged so there is nobody to wait for. The async
-        form for GUIs: disable the wait (match_wait_ms < 0), park payloads while
-        False, flush when it flips."""
+        """True when a send would not wait on the match wait: a subscriber is matched, or
+                matching has converged. For a GUI: disable the wait, park payloads while False."""
         return self._node._lib.dart_topic_ready(self._h) == 1
 
     def pending_count(self):
-        """Unresolved candidate matches right now: peers whose announces nominate
-        this topic but whose name/schema verdicts are still in flight. 0 = matching
-        has converged for everyone currently known."""
+        """Unresolved candidate matches right now. 0 = matching has converged for every known
+                peer."""
         return self._node._lib.dart_topic_pending_count(self._h)
 
     def drain(self, timeout_ms):
@@ -2371,15 +2216,8 @@ class Topic:
         return self._node._lib.dart_topic_drain(self._h, timeout_ms) == 1
 
     def take(self, timeout_ms=0):
-        """Pop the next queued message as a Message (copied out), or None if nothing
-        arrived within timeout_ms (0 = just check, negative = wait indefinitely).
-        The FIRST take/dispatch switches this topic to QUEUED delivery: messages
-        then queue here instead of firing on_message on the poll thread, so exactly
-        one thread of your choosing consumes them (per topic). The queue grows on
-        demand to qos queue_bytes (0 = 1 MB); at the cap best-effort overwrites
-        oldest (an EventKind.MSG_LOST fires), reliable backpressures the publisher.
-        The wait sleeps beside a running service thread and drives the poll loop
-        itself otherwise."""
+        """Pop the next queued message, copied out, or None if nothing arrived in timeout_ms
+                (0 = check, negative = forever). The first take or dispatch queues the topic."""
         m = DartMsg()
         r = self._node._lib.dart_topic_take(self._h, byref(m), timeout_ms)
         if r < 0:
@@ -2390,24 +2228,20 @@ class Topic:
         return Message._from_c(m, self._node._topic_specs.get(m.topic_index))
 
     def dispatch(self, max_msgs=0, timeout_ms=0):
-        """Drain the queue by running on_message on the CALLING thread, oldest first:
-        up to max_msgs of those queued at entry (0 = all), waiting up to timeout_ms
-        for the first like take. Returns the number dispatched. Unlike poll-thread
-        callbacks these run without the node lock, so they may use the whole API."""
+        """Drain the queue by running on_message on the calling thread, oldest first, up to
+                max_msgs (0 = all), waiting like take. These run without the node lock."""
         return self._node._lib.dart_topic_dispatch(self._h, max_msgs, timeout_ms)
 
     def queue_stats(self):
-        """(messages, bytes, capacity, dropped) of the consumer queue; zeros when
-        the topic is not queued."""
+        """(messages, bytes, capacity, dropped) of the consumer queue, zeros when not queued."""
         m, b, c, d = c_uint32(), c_uint32(), c_uint32(), c_uint32()
         self._node._lib.dart_topic_queue_stats(self._h, byref(m), byref(b),
                                                  byref(c), byref(d))
         return m.value, b.value, c.value, d.value
 
     def counts(self):
-        """(tx_msgs, tx_bytes, rx_msgs, rx_bytes): cumulative traffic this node
-        committed to the topic (tx) and delivered from it (rx). Always on; also in
-        the @dart/meta snapshot."""
+        """(tx_msgs, tx_bytes, rx_msgs, rx_bytes), the cumulative traffic this node committed to
+                the topic and delivered from it. Always on."""
         tm, tb, rm, rb = c_uint64(), c_uint64(), c_uint64(), c_uint64()
         self._node._lib.dart_topic_counts(self._h, byref(tm), byref(tb),
                                            byref(rm), byref(rb))
@@ -2427,13 +2261,8 @@ class Node:
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock")
 
     def __init__(self, name, on_message, on_event, options=None, **opts):
-        """Open a node. name is a human-readable label synced via discovery (None or ""
-        => an auto "node-XXXXXXXX"). on_message may be None (per-Subscriber handlers
-        and take()/dispatch() cover consumption); on_event is REQUIRED and may not be
-        None -- it carries diagnostics (errors, peer changes) that must never be
-        missed. Both are wired in before the constructor returns, so no early event
-        slips by. Pass other config as keyword args (domain=7, max_peers=32, ...) or
-        as options=NodeOptions(...)."""
+        """Open a node. An empty name is auto generated. on_message may be None, on_event is
+                required. Other config is keyword args or options=NodeOptions(...)."""
         self._lib = None
         self._h = None
         self._id = None
@@ -2442,9 +2271,9 @@ class Node:
         self._on_evt = on_event
         self._topic_specs = {}
         self._schemas = []       # compiled schemas kept alive for the node's life
-        self._topics_by_name = {}   # name -> [handle, role bits, schema hash]
+        self._topics_by_name = {}   # name to [handle, role bits, schema hash]
         self._create_lock = threading.Lock()
-        self._sub_handlers = {}     # topic index -> [Message handlers] (Subscriber)
+        self._sub_handlers = {}     # topic index to [Message handlers], for Subscriber
         self._pattern_boxes = []    # pattern handler box ids (reaped at close)
         self._async_live = set()    # in-flight async-call box ids
         self._pat_lock = threading.Lock()
@@ -2480,7 +2309,7 @@ class Node:
         co.net.multicast_interface = (options.multicast_interface.encode()
                                       if options.multicast_interface else None)
         co.net.multicast_ttl = options.multicast_ttl
-        seeds, n_seeds = _seed_addrs(options.seed_peers)   # copied by open; alive for the call
+        seeds, n_seeds = _seed_addrs(options.seed_peers)   # copied by open, alive for the call
         if n_seeds:
             co.net.seed_peers = cast(seeds, c_void_p)
             co.net.n_seed_peers = n_seeds
@@ -2520,9 +2349,8 @@ class Node:
         self._on_evt = fn
         return self
 
-    # The create behind every Topic-carrying constructor. Same-name creates on this
-    # node SHARE the native slot: the role is widened (set_role re-advertises, peers
-    # rematch from cached verdicts) and a different schema is refused.
+    # The create behind every Topic carrying constructor. Same name creates on this node
+    # share the native slot with a widened role, and a different schema is refused.
     def _create_or_share(self, name, role, sch, qos, qos_kwargs):
         if not name:
             raise ValueError("topic name required")
@@ -2581,45 +2409,37 @@ class Node:
         return h
 
     def poll(self, timeout_ms=0):
-        """One loop tick: drives discovery, RX, timers, and flushes queued TX.
-        timeout_ms blocks up to that long in the socket wait (0 = non-blocking; a send
-        from another thread wakes it early). Returns SendStatus.STATE while start()
-        runs (the service thread owns the loop then)."""
+        """One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout_ms
+                in the socket wait, 0 = non blocking. Returns STATE while start() runs."""
         return self._lib.dart_node_poll(self._h, timeout_ms)
 
     def start(self):
-        """Run the C-level background service thread: it owns the loop and fires the
-        handlers (ctypes re-acquires the GIL for them; never two at once for one
-        node). Every node/topic call stays safe from any thread, and a send is
-        flushed immediately (a waker cuts the service's socket wait short).
-        Returns True on success."""
+        """Run the C service thread. Handlers fire on it under the GIL, never two at once, and
+                every call stays safe from any thread. Returns True on success."""
         return self._lib.dart_node_start(self._h) == 0
 
     def stop(self):
-        """Stop and join the service thread (idempotent; implied by close)."""
+        """Stop and join the service thread. Idempotent, implied by close."""
         self._lib.dart_node_stop(self._h)
 
     def is_started(self):
         return self._lib.dart_node_is_started(self._h) == 1
 
     def dispatch(self, max_msgs=0, timeout_ms=0):
-        """Dispatch every already-queued topic on the calling thread (see
-        Topic.take/dispatch): the one-liner for a frame-paced consumer that owns
-        all the queues. Waits up to timeout_ms for any queued topic to hold data."""
+        """Dispatch every queued topic on the calling thread, waiting up to timeout_ms for any
+                to hold data. The one liner for a frame paced consumer."""
         return self._lib.dart_node_dispatch(self._h, max_msgs, timeout_ms)
 
     def settle(self, timeout_ms=-1):
-        """Block until discovery + matching settle: everything now sent reaches
-        everyone already on the network. Call AFTER creating your topics; most
-        apps never need it (the per-send match wait covers the window lazily).
-        timeout_ms < 0 = 3 announce intervals. True when settled."""
+        """Block until discovery and matching settle, so everything sent now reaches everyone.
+                Call after creating the topics. timeout_ms < 0 = 3 announce intervals."""
         return self._lib.dart_node_settle(self._h, timeout_ms) == 1
 
     # ---- built-in logs (the @dart/log/{error,warn,info} topics) ----
 
     def log(self, level, text):
-        """Publish a line on a level's log topic (formatted in Python; truncated at
-        DART_LOG_MAX). Returns a SendStatus (NOSYS if logs are disabled). Thread-safe."""
+        """Publish a formatted line on a level's log topic, truncated at DART_LOG_MAX. Returns
+                a SendStatus, NOSYS when logs are disabled."""
         b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         return _send_status(self._lib.dart_node_log_text(self._h, int(level), b, len(b)))
 
@@ -2639,10 +2459,8 @@ class Node:
         return Topic._from_handle(self, h) if h else None
 
     def on_log(self, level, handler):
-        """Subscribe to a level's mesh-wide log stream: widens this node's own log
-        handle to PUBSUB and delivers every OTHER node's lines at that level (never
-        your own) as a LogLine. Late-join history replays on match. Handlers fire on
-        the polling thread. Returns False when logs are disabled."""
+        """Subscribe to a level's mesh wide log stream: every other node's lines at that level
+                as a LogLine, on the polling thread. Returns False when logs are disabled."""
         h = self._lib.dart_node_log_topic(self._h, int(level))
         if not h:
             return False
@@ -2669,9 +2487,8 @@ class Node:
         return RemoteFunction._from_handle(self, h) if h else None
 
     def meta(self, peer, sections=MetaSection.ALL, timeout_ms=1000):
-        """BLOCKING: direct a @dart/meta call at `peer` and decode the reply into a
-        MetaSnapshot. Drives the loop, so do NOT call it under start() or from a
-        callback (use meta_async there). sections = a MetaSection mask (ALL = all)."""
+        """Blocking: a @dart/meta call directed at peer, decoded into a MetaSnapshot. Drives the
+                loop, so never under start() or from a callback. sections is a MetaSection mask."""
         fn = self.meta_function()
         if fn is None:
             return MetaSnapshot(status=CallStatus.NO_HANDLER)
@@ -2679,9 +2496,8 @@ class Node:
         return MetaSnapshot._from_response(fn.call(req, timeout_ms, provider=peer))
 
     def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
-        """Async: direct a @dart/meta call at `peer`; on_snapshot fires once with a
-        MetaSnapshot from whichever thread polls this node. Works under start().
-        Returns the launch SendStatus."""
+        """Async: a @dart/meta call directed at peer. on_snapshot fires once from the polling
+                thread. Works under start(). Returns the launch SendStatus."""
         fn = self.meta_function()
         if fn is None:
             on_snapshot(MetaSnapshot(status=CallStatus.NO_HANDLER))
@@ -2736,18 +2552,16 @@ class Node:
         return us.value, n.value
 
     def close(self, send_bye=True):
-        """Stop the service thread (if running) and tear the node down. Returns True.
-        Refused from inside a handler (returns False, node and handle stay live):
-        close from another thread instead."""
+        """Stop the service thread and tear the node down. Returns True, or False when refused
+                from inside a handler, where the node stays live."""
         if self._h:
             if self._lib.dart_node_close(self._h, 1 if send_bye else 0) != 0:
                 return False
             self._h = None
         with _REG_LOCK:
             _NODES.pop(self._id, None)
-        # Reap this node's pattern handler boxes; backstop any async call the C did
-        # not cancel (it fires every pending on_response with CANCELLED during
-        # dart_node_close, so the straggler loop normally finds nothing).
+        # Reap this node's handler boxes and backstop any async call the C did not cancel. The C
+        # fires every pending on_response with CANCELLED at close, so the loop normally finds none.
         with self._pat_lock:
             boxes, self._pattern_boxes = self._pattern_boxes, []
             stragglers, self._async_live = list(self._async_live), set()
@@ -2777,11 +2591,8 @@ class Node:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Patterns: functions / variables over topic kinds, plus the side-named
-# Publisher/Subscriber topic handles. Each subscripts like Topic[T] for the typed
-# form; untyped forms take explicit schema args (None = raw bytes).
-# ---------------------------------------------------------------------------
+# The patterns over topic kinds plus the side named Publisher and Subscriber handles.
+# Each subscripts like Topic[T] for the typed form, untyped forms take schema args.
 
 class _TypedPattern:
     """The result of Handle[T]: a factory bound to schema class(es), callable like
@@ -2790,7 +2601,7 @@ class _TypedPattern:
 
     def __init__(self, cls, schemas):
         self._cls = cls
-        self._schemas = schemas   # schema kwarg name -> schema class
+        self._schemas = schemas   # schema kwarg name to schema class
 
     def __call__(self, *args, **kwargs):
         for k in self._schemas:
@@ -2812,16 +2623,13 @@ def _typed_pattern(cls, item, kw_names):
 
 
 class Request:
-    """A function call as seen by the definition's handler (the full form's second
-    arg): the request metadata plus the reply surface. Valid only while the handler
-    runs: reply/fail there, or defer() and complete later from any thread; after
-    the handler returns they raise RuntimeError. Returning without answering
-    auto-acks CallStatus.OK with an empty payload."""
+    """A function call as seen by the definition's full form handler: the request metadata
+        plus the reply surface, valid only while the handler runs (docs/python.md)."""
     __slots__ = ("_ptr", "_fn", "_rsp_schema", "_done",
                  "data", "caller", "caller_name", "function_name", "recv_us", "written_us")
 
     def __init__(self, ptr, fn, rsp_schema, r, data):
-        self._ptr = ptr           # the EXACT native pointer; dropped at expiry
+        self._ptr = ptr           # the exact native pointer, dropped at expiry
         self._fn = fn
         self._rsp_schema = rsp_schema
         self._done = False
@@ -2846,9 +2654,8 @@ class Request:
         self._done = True
 
     def fail(self, message=None, rsp=None):
-        """Answer CallStatus.APP_ERROR. message is the human-readable reason
-        (Response.message on the caller, truncated at 255 bytes; None/empty =
-        the default "app error"); rsp may still carry structured failure data."""
+        """Answer APP_ERROR. message is the text shown on the caller, truncated at 255 bytes,
+                empty = the default. rsp may still carry structured failure data."""
         self._guard()
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
         _load().dart_request_fail(self._ptr, message.encode("utf-8") if message else None, b)
@@ -2877,9 +2684,8 @@ class Request:
 
 
 class Deferred:
-    """A parked function reply (from Request.defer): complete()/fail() exactly
-    once, from any thread (a second call returns False). Dropping it leaves the
-    caller to its timeout."""
+    """A parked function reply from Request.defer: complete or fail exactly once, from any
+        thread. Dropping it leaves the caller to its timeout."""
     __slots__ = ("_fn", "_rsp_schema", "_token", "_lock")
 
     def __init__(self, fn, rsp_schema, token):
@@ -2914,10 +2720,8 @@ class Deferred:
 
 
 class Response:
-    """An owning function-call outcome: the payload is copied out, so it outlives
-    the call. status/send_status/data/provider never raise; reading .value when
-    not ok raises CallError. send_status carries a synchronous refusal (status
-    stays TIMEOUT then: the call never launched)."""
+    """An owning call outcome, the payload copied out. status and data never raise, reading
+        value when not ok raises CallError. send_status carries a synchronous refusal."""
     __slots__ = ("status", "send_status", "provider", "written_us", "data", "message",
                  "_value", "_decoded")
 
@@ -2927,10 +2731,8 @@ class Response:
         self.provider = 0
         self.written_us = 0   # the provider's wall clock when it wrote the reply (0 = synthesized)
         self.data = b""
-        self.message = ""     # human-readable outcome text, the one field to display on a
-                              # failure: the definition's message (fail/complete, or a raising
-                              # handler's str(e)), else default status text ("timeout", ...).
-                              # "" only on OK with no message, and on a synchronous refusal.
+        self.message = ""     # the outcome text to display on a failure: the definition's message,
+                              # else the default status text. "" only on OK with no message
         self._value = None
         self._decoded = False
 
@@ -2954,8 +2756,8 @@ class Response:
 
     @property
     def value(self):
-        """The decoded reply (a typed instance / dict; raw bytes for an untyped
-        pair). Raises CallError when the call did not complete OK."""
+        """The decoded reply, a typed instance or dict, raw bytes for an untyped pair. Raises
+                CallError when the call did not complete OK."""
         if not self.ok:
             name = self.status.name if isinstance(self.status, CallStatus) else self.status
             tail = "" if not self.message else " (%s)" % self.message
@@ -2973,10 +2775,8 @@ class Response:
 
 
 class Progress:
-    """One task progress update as handed to an on_progress handler's 2-arg form:
-    value (decoded; None for the RUNNING ack), data (the raw payload), call_id,
-    provider (the peer working the call), written_us (the provider's wall clock;
-    0 = unstamped), recv_us (this node's monotonic clock at arrival)."""
+    """One task progress update for an on_progress handler's 2 arg form: value (None for the
+        RUNNING ack), data, call_id, provider, written_us and recv_us."""
     __slots__ = ("value", "data", "call_id", "provider", "written_us", "recv_us")
 
     def __repr__(self):
@@ -2985,9 +2785,8 @@ class Progress:
 
 
 def _progress_cb(on_progress, prg_schema):
-    """A per-call ctypes progress trampoline: decodes and arity-dispatches
-    (1 arg = the value, None for the RUNNING ack; 2 args = value + a Progress).
-    The returned object must stay alive until the call's terminal outcome."""
+    """A per call ctypes progress trampoline that decodes and arity dispatches. The object
+        must stay alive until the call's terminal outcome."""
     arity = _arity(on_progress)
 
     @_PrgFn
@@ -3044,8 +2843,8 @@ class _FnBox:
             else:
                 self.handler(val, request)
         except Exception as e:
-            # a raising handler answers APP_ERROR with str(e) as the response message;
-            # the exception never crosses into C
+            # a raising handler answers APP_ERROR with str(e) as the message. The exception never
+            # crosses into C
             traceback.print_exc()
             if not request.answered:
                 try:
@@ -3057,15 +2856,8 @@ class _FnBox:
 
 
 class TaskRequest:
-    """A task call as seen by the definition's handler, which runs on a dedicated
-    daemon worker thread (one per call, so long tasks run concurrently). Carries
-    value (the decoded request; raw bytes when untyped), data (the raw payload),
-    caller, caller_name, function_name, recv_us, written_us, plus the working
-    surface: progress(x) streams updates, cancelled / cancel_event observe a
-    cooperative cancel. Completion is the handler's RETURN: the return value
-    encodes via the rsp schema and completes CallStatus.OK (None = empty OK);
-    raising CancelledError completes CANCELLED; any other exception completes
-    APP_ERROR with its text."""
+    """A task call as seen by the definition's handler on its own worker thread. Returning
+        completes OK, CancelledError completes CANCELLED, any other exception APP_ERROR."""
     __slots__ = ("_fn", "_prg_schema", "_token", "cancel_event",
                  "value", "data", "caller", "caller_name", "function_name",
                  "recv_us", "written_us")
@@ -3084,9 +2876,8 @@ class TaskRequest:
         self.written_us = r.written_us
 
     def progress(self, value=None):
-        """Broadcast a progress update (typed value, mapping, or bytes/str;
-        encoded via the prg schema). Returns a SendStatus (STATE once the call
-        completed)."""
+        """Broadcast a progress update, encoded via the prg schema. Returns a SendStatus, STATE
+                once the call completed."""
         b, buf = _c_view(_payload_bytes(self._prg_schema, value))
         r = _load().dart_function_progress(self._fn, self._token, b)
         del buf
@@ -3094,9 +2885,8 @@ class TaskRequest:
 
     @property
     def cancelled(self):
-        """True once the caller (or a third party) requested cancellation.
-        Cooperative: honor it by raising CancelledError, or run to completion
-        anyway. cancel_event is the same signal as a waitable threading.Event."""
+        """True once the caller or a third party requested cancellation. Honor it by raising
+                CancelledError, or run to completion. cancel_event is the same signal."""
         if self.cancel_event.is_set():
             return True
         if _load().dart_function_cancelled(self._fn, self._token) == 1:
@@ -3106,11 +2896,8 @@ class TaskRequest:
 
 
 class _TaskBox:
-    """Definition-side state for one task (alive until node close). The C request
-    callback runs on the poll thread: decode, defer for the token, register the
-    per-token cancel Event, spawn a daemon worker thread PER CALL (two long tasks
-    must run concurrently; spawn cost is noise against seconds-to-hours work).
-    The definition's ONE C on_cancel slot fans out to the per-token Events."""
+    """Definition side state for one task, alive until node close. The C callback on the poll
+        thread defers and spawns a daemon worker per call, and on_cancel fans out to Events."""
     __slots__ = ("fn", "handler", "req_schema", "prg_schema", "rsp_schema",
                  "cancel_events", "lock")
 
@@ -3120,7 +2907,7 @@ class _TaskBox:
         self.req_schema = req_schema
         self.prg_schema = prg_schema
         self.rsp_schema = rsp_schema
-        self.cancel_events = {}   # defer token -> threading.Event
+        self.cancel_events = {}   # defer token to threading.Event
         self.lock = threading.Lock()
 
     def dispatch(self, req_ptr):   # poll thread: copy what the views hold, return fast
@@ -3172,10 +2959,8 @@ class _TaskBox:
 
 
 class _AsyncBox:
-    """One in-flight async call: released when its response fires (including the
-    CANCELLED one synthesized at node close, so no leak, no dead pointer).
-    progress_cb (task calls) keeps the per-call ctypes progress trampoline alive
-    until that one terminal outcome, which the C guarantees even at retire/close."""
+    """One in flight async call, released when its response fires, including the CANCELLED
+        one synthesized at node close. progress_cb keeps the trampoline alive until then."""
     __slots__ = ("node", "on_response", "rsp_schema", "id", "progress_cb")
 
     def __init__(self, node, on_response, rsp_schema):
@@ -3187,11 +2972,8 @@ class _AsyncBox:
 
 
 class VariableUpdate:
-    """The state just applied to a variable, as handed to on_change/on_write
-    handlers: value (decoded; raw bytes when untyped), data (the raw payload),
-    name, forced, write_seq, source (peer id the write arrived from; 0 = a
-    local call on this node), recv_us, and written_us (the writer's wall clock for
-    this write; this node's own for a local one)."""
+    """The state just applied to a variable, for on_change and on_write handlers: value,
+        data, name, forced, write_seq, source (0 = local), recv_us and written_us."""
     __slots__ = ("name", "data", "value", "forced", "write_seq", "source", "recv_us",
                  "written_us")
 
@@ -3210,14 +2992,8 @@ class _VarBox:
 
 
 class FunctionDefinition:
-    """The implementation side of a request/response function: exactly one reply
-    per call, ONE definition per name on the network (a rival fires
-    ErrorKind.DUPLICATE_AUTHORITY on both). handler forms, arity dispatched:
-    (req) -> rsp auto-replies OK, and raising answers APP_ERROR (the exception
-    never crosses into C); (req, request) is the full form (request.reply/fail/
-    defer). handler=None answers every call NO_HANDLER (a declared stub).
-    FunctionDefinition[Req, Rsp](node, name, handler) is the typed shorthand;
-    untyped, pass req_schema=/rsp_schema= (None = raw bytes)."""
+    """The implementation side of a function: one reply per call, one definition per name.
+        Handler forms and the typed shorthand are in docs/python.md. None answers NO_HANDLER."""
     __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema")
 
     def __init__(self, node, name, handler, req_schema=None, rsp_schema=None,
@@ -3255,11 +3031,8 @@ class FunctionDefinition:
         return self._node._lib.dart_function_match_count(self._fn)
 
     def retire(self):
-        """Retire the definition: park its channels and release the name so a
-        successor can bind (a re-created same-name handle is otherwise silently
-        shadowed by the live twin). The handle is unusable after. Refused
-        (SendStatus.STATE) from inside a callback; the handle then stays
-        valid."""
+        """Retire the definition: park its channels and release the name for a successor. The
+                handle is unusable after. Refused with STATE from a callback."""
         rc = self._node._lib.dart_function_retire(self._fn)
         if rc == 0:
             self._fn = None
@@ -3302,13 +3075,8 @@ class RemoteFunction:
         return self
 
     def call(self, req=None, timeout_ms=-1, provider=0):
-        """BLOCKING call: drives the node loop until the response arrives or
-        timeout_ms elapses (negative = the function's default timeout). Refused
-        from inside a callback or while a service thread owns the loop:
-        send_status is then SendStatus.STATE while status stays TIMEOUT (use
-        call_async there). Never raises on a failed call: inspect .status
-        (reading .value raises CallError). provider directs the call at one
-        definition by peer id (0 = undirected, first answer wins)."""
+        """Blocking call: drives the loop until the response or timeout_ms, negative = the
+                default. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = DartResponse()
         co = DartCallOpts(int(provider)) if provider else None
@@ -3325,12 +3093,8 @@ class RemoteFunction:
         return r
 
     def call_async(self, req, on_response, provider=0):
-        """Async call: returns as soon as the request is committed; on_response
-        then fires EXACTLY once with an owning Response, from whichever thread
-        polls this node (or the closing thread, with CallStatus.CANCELLED, if the
-        node closes first). A synchronous refusal also arrives through
-        on_response (send_status set). Returns the launch SendStatus. provider
-        directs the call at one definition by peer id (0 = undirected)."""
+        """Async call: returns the launch SendStatus once the request is committed, and
+                on_response fires exactly once with an owning Response from the polling thread."""
         if not callable(on_response):
             raise TypeError("on_response must be callable")
         box = _AsyncBox(self._node, on_response, self._rsp_schema)
@@ -3363,11 +3127,8 @@ class RemoteFunction:
         return self.match_count() > 0
 
     def retire(self):
-        """Retire the remote: park its channels and release the name so a
-        successor can bind; every outstanding call completes with
-        CallStatus.CANCELLED. The handle is unusable after. Refused
-        (SendStatus.STATE) from inside a callback; the handle then stays
-        valid."""
+        """Retire the remote: park its channels and release the name. Every outstanding call
+                completes CANCELLED. Unusable after, refused with STATE from a callback."""
         rc = self._node._lib.dart_function_retire(self._fn)
         if rc == 0:
             self._fn = None
@@ -3375,18 +3136,8 @@ class RemoteFunction:
 
 
 class TaskDefinition:
-    """The implementation side of a task: a function with progress and
-    cancellation (the same call ids and statuses, plus a broadcast progress
-    channel and a cancel op). The handler runs on a DEDICATED daemon worker
-    thread, one per call, receiving a TaskRequest: return the response value to
-    complete OK (None = empty OK), raise CancelledError to complete CANCELLED,
-    any other exception completes APP_ERROR with its text. handler=None answers
-    every call NO_HANDLER (a declared stub). no_cancel declares cancellation will
-    not be honored (remotes then refuse cancel() locally); exclusive declares
-    serialization the handler enforces (fail with "busy"); multi declares
-    redundant providers. TaskDefinition[Req, Prg, Rsp](node, name, handler) is
-    the typed shorthand; untyped, pass req_schema=/prg_schema=/rsp_schema=
-    (None = raw bytes)."""
+    """The implementation side of a task. The handler runs on a worker thread per call with a
+        TaskRequest (docs/python.md). None answers NO_HANDLER, the options mirror DartTaskOpts."""
     __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema")
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
@@ -3440,12 +3191,8 @@ class TaskDefinition:
         return self._node._lib.dart_function_match_count(self._fn)
 
     def retire(self):
-        """Retire the definition: park its channels and release the name so a
-        successor can bind; every live deferred call answers CANCELLED
-        ("provider retired") while the channels are still up, and worker threads
-        completing after see their token refused, silently. The handle is
-        unusable after. Refused (SendStatus.STATE) from inside a callback; the
-        handle then stays valid."""
+        """Retire the definition: every live deferred call answers CANCELLED while the channels
+                are up, a later worker completion is refused silently. Refused from a callback."""
         rc = self._node._lib.dart_function_retire(self._fn)
         if rc == 0:
             self._fn = None
@@ -3453,14 +3200,8 @@ class TaskDefinition:
 
 
 class RemoteTask:
-    """A reference to a task defined on another node. A task request is always
-    DIRECTED at one provider (provider=0 resolves to the oldest matched at send
-    time). The per-call timeout bounds only the wait for the FIRST response:
-    once RUNNING (or progress) arrives the task runs as long as it runs, and
-    cancel() from another thread is the caller's tool for impatience.
-    on_progress handlers are arity dispatched: (value) with None for the RUNNING
-    ack, or (value, progress) with a Progress. RemoteTask[Req, Prg, Rsp](node,
-    name) is the typed shorthand."""
+    """A reference to a task defined elsewhere. A request is always directed at one
+        provider, and the timeout bounds only the first response (docs/tasks.md)."""
     __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema")
 
     def __init__(self, node, name, req_schema=None, prg_schema=None,
@@ -3493,16 +3234,8 @@ class RemoteTask:
         return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
 
     def call(self, req=None, on_progress=None, timeout_ms=-1, provider=0):
-        """BLOCKING call: drives the node loop until the terminal outcome.
-        on_progress fires on THIS thread while it waits, once with None for the
-        RUNNING ack and then per update. timeout_ms (negative = the task's
-        default) bounds only the wait for the FIRST response; after RUNNING it
-        waits for the terminal outcome indefinitely (impatience = cancel() from
-        another thread, which needs the async form's call id). Refused
-        (send_status SendStatus.STATE, status stays TIMEOUT) from inside a
-        callback or while a service thread owns the loop: use call_async there.
-        Never raises on a failed call: inspect .status (reading .value raises
-        CallError)."""
+        """Blocking call: drives the loop until the terminal outcome, with on_progress on this
+                thread. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = DartResponse()
         co = DartCallOpts()
@@ -3525,14 +3258,8 @@ class RemoteTask:
         return r
 
     def call_async(self, req, on_response, on_progress=None, provider=0):
-        """Async call: returns the CALL ID (the handle for cancel(); 0 when the
-        request never committed) as soon as the request is committed.
-        on_progress fires per update (None first, the RUNNING ack) and
-        on_response exactly once with the terminal outcome, both from whichever
-        thread polls this node; the per-call state is released exactly at that
-        one terminal outcome, which the C guarantees even at retire and close.
-        A synchronous refusal arrives through on_response (send_status set) and
-        returns 0."""
+        """Async call: returns the call id for cancel(), 0 when never committed. on_progress
+                fires per update and on_response exactly once, from the polling thread."""
         if not callable(on_response):
             raise TypeError("on_response must be callable")
         box = _AsyncBox(self._node, on_response, self._rsp_schema)
@@ -3564,12 +3291,8 @@ class RemoteTask:
         return call_id.value
 
     def cancel(self, call_id):
-        """Request cancellation of the outstanding call (the id from
-        call_async). Cooperative and never acked: the terminal status is the
-        answer (CANCELLED = honored or never started; a normal outcome = it
-        completed anyway). Returns a SendStatus: BAD_ROLE when the provider
-        declared no_cancel (checked locally against its cached attrs, nothing
-        sent); STATE when the call is not pending (already answered)."""
+        """Request cancellation of the call. Cooperative and never acked, the terminal status
+                answers. BAD_ROLE when the provider declared no_cancel, STATE when not pending."""
         return _send_status(self._node._lib.dart_function_cancel(self._fn,
                                                                  int(call_id)))
 
@@ -3581,11 +3304,8 @@ class RemoteTask:
         return self.match_count() > 0
 
     def retire(self):
-        """Retire the remote: park its channels and release the name so a
-        successor can bind; every outstanding call completes with
-        CallStatus.CANCELLED. The handle is unusable after. Refused
-        (SendStatus.STATE) from inside a callback; the handle then stays
-        valid."""
+        """Retire the remote: every outstanding call completes CANCELLED. Unusable after,
+                refused with STATE from a callback."""
         rc = self._node._lib.dart_function_retire(self._fn)
         if rc == 0:
             self._fn = None
@@ -3593,10 +3313,8 @@ class RemoteTask:
 
 
 class VariableDefinition:
-    """Replicated state, ONE owner: this node holds the authoritative value.
-    Methods only, so every write returns its SendStatus.
-    VariableDefinition[T](node, name, initial=..., ...) is the typed shorthand;
-    untyped, pass schema= (None = raw bytes) and a bytes initial."""
+    """Replicated state with one owner: this node holds the authoritative value. Methods
+        only, so every write returns its SendStatus. VariableDefinition[T] is the typed form."""
     __slots__ = ("_node", "_var", "_schema", "_name")
     _remote = False
 
@@ -3628,8 +3346,8 @@ class VariableDefinition:
         return _typed_pattern(cls, item, ("schema",))
 
     def get(self):
-        """The current value (definition: the store; remote: the cached latest),
-        fully copied out under the node lock; None when no value exists yet."""
+        """The current value, the store or the cached latest, copied out under the node lock.
+                None when no value exists yet."""
         lib = self._node._lib
         lib.dart_node_lock(self._node._h)
         try:
@@ -3645,18 +3363,16 @@ class VariableDefinition:
         return val if ok else data
 
     def set(self, value):
-        """Set the value (definition: apply + publish; remote: send over the set
-        channel). SendStatus.NO_TOPIC = no owner matched at all; SendStatus.BAD_ROLE
-        = the owner advertises no set channel (a read-only variable)."""
+        """Set the value: apply and publish, or send over the set channel. NO_TOPIC = no owner
+                matched, BAD_ROLE = the owner advertises no set channel."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
         r = self._node._lib.dart_variable_set(self._var, b)
         del buf
         return _send_status(r)
 
     def force(self, value):
-        """Force the value: sets are absorbed into the shadow source until
-        unforce(), which restores the latest absorbed set. The definition must
-        have been created with allow_force (SendStatus.STATE otherwise)."""
+        """Force the value: sets are absorbed into the shadow source until unforce restores the
+                latest absorbed set. Needs allow_force on the definition, else STATE."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
         r = self._node._lib.dart_variable_force(self._var, b)
         del buf
@@ -3666,14 +3382,13 @@ class VariableDefinition:
         return _send_status(self._node._lib.dart_variable_unforce(self._var))
 
     def forced(self):
-        """True while forced (definition: authoritative; remote: the last
-        received value's FORCED flag)."""
+        """True while forced: authoritative on the definition, the last received flag on a
+                remote."""
         return self._node._lib.dart_variable_forced(self._var) == 1
 
     def wait(self, timeout_ms):
-        """Block driving the node loop until a value exists, or timeout_ms
-        elapses (negative = forever-ish). Refused (False) from a callback or
-        while a service thread owns the loop."""
+        """Block driving the loop until a value exists or timeout_ms elapses. Refused from a
+                callback or under a service thread."""
         return self._node._lib.dart_variable_wait(self._var, timeout_ms) == 1
 
     def remote_count(self):
@@ -3681,19 +3396,13 @@ class VariableDefinition:
         return self._node._lib.dart_variable_match_count(self._var)
 
     def on_change(self, handler):
-        """Observe changes. Fires only when the observed state actually changes
-        (the first value, different bytes, or a forced flip; a byte-identical
-        re-set stays silent), and replays the current value once at registration
-        so it can never be missed. Handler forms, arity dispatched: (value) or
-        (value, update) with a VariableUpdate. Runs inline on the thread that
-        applied the write (the service thread for anything off the wire); None
-        clears."""
+        """Observe changes: fires on every state change and replays the current value at
+                registration, inline on the thread that applied the write. None clears."""
         self._observe(handler, True)
 
     def on_write(self, handler):
-        """Observe every applied write, byte-identical or not (no replay at
-        registration: writes are events, not state). Same handler forms and
-        threading as on_change; None clears."""
+        """Observe every applied write, identical bytes or not, with no replay at registration.
+                The same forms and threading as on_change. None clears."""
         self._observe(handler, False)
 
     def _observe(self, handler, change):
@@ -3707,11 +3416,8 @@ class VariableDefinition:
         reg(self._var, _on_var_update, c_void_p(box_id))
 
     def retire(self):
-        """Retire the handle: park its channels and release the name so a
-        successor can bind (a re-created same-name handle is otherwise silently
-        shadowed by the live twin). The handle is unusable after. Refused
-        (SendStatus.STATE) from inside a callback; the handle then stays
-        valid."""
+        """Retire the handle: park its channels and release the name, else a re created same
+                name handle is shadowed by the live twin. Refused with STATE from a callback."""
         rc = self._node._lib.dart_variable_retire(self._var)
         if rc == 0:
             self._var = None
@@ -3719,10 +3425,8 @@ class VariableDefinition:
 
 
 class RemoteVariable(VariableDefinition):
-    """A reference to a variable owned by another node: reads see the cached
-    latest, writes go over the set channel (dumb writes, no response; the
-    definition decides write/force permissions). RemoteVariable[T](node, name)
-    is the typed shorthand."""
+    """A reference to a variable owned elsewhere: reads see the cached latest, writes go
+        over the set channel with no response. RemoteVariable[T] is the typed form."""
     _remote = True
 
     def __init__(self, node, name, schema=None, catch_up=0, keep_last=0,
@@ -3739,9 +3443,8 @@ class RemoteVariable(VariableDefinition):
 
 
 class Publisher:
-    """The publish side of a topic (role PUB_ONLY). Same-name constructions on
-    one node share the topic slot with a widened role. Publisher[T](node, name,
-    ...) is the typed shorthand; qos as keyword args or qos=Qos(...)."""
+    """The publish side of a topic. Same name constructions on one node share the slot with
+        a widened role. Publisher[T] is the typed form, qos as keyword args or qos=Qos()."""
     __slots__ = ("topic",)
 
     def __init__(self, node, name, schema=None, qos=None, **qos_kwargs):
@@ -3765,11 +3468,8 @@ class Publisher:
 
 
 class Subscriber:
-    """The subscribe side (role SUB_ONLY). handler, arity dispatched -- (value)
-    or (value, msg) -- fires per message on the polling thread INSTEAD of the
-    node's on_message; or consume with take()/dispatch() on a thread of your
-    choosing. value is the decoded object (a dict for untyped-with-schema, bytes
-    for raw). Subscriber[T](node, name, handler) is the typed shorthand."""
+    """The subscribe side. The arity dispatched handler fires per message on the polling
+        thread instead of on_message, or consume with take and dispatch. Subscriber[T] is typed."""
     __slots__ = ("topic", "_schema")
 
     def __init__(self, node, name, handler=None, schema=None, qos=None, **qos_kwargs):
@@ -3786,10 +3486,8 @@ class Subscriber:
         return _typed_pattern(cls, item, ("schema",))
 
     def take(self, timeout_ms=0):
-        """Typed take: pops the next queued message and returns its decoded value
-        (the whole Message for a schema-less subscriber); None when nothing
-        arrived in time. First use switches the topic to queued delivery (see
-        Topic.take)."""
+        """Typed take: the next queued message's decoded value, the whole Message without a
+                schema, None when nothing arrived in time. The first use queues the topic."""
         m = self.topic.take(timeout_ms)
         if m is None or self._schema is None:
             return m
@@ -3801,11 +3499,8 @@ class Subscriber:
         return self.topic.dispatch(max_msgs, timeout_ms)
 
 
-# ---------------------------------------------------------------------------
-# Callback dispatch. DartMsgFn/DartEventFn carry no user pointer, but every
-# DartMsg/DartEvent carries .user (== the node id we stashed). One trampoline
-# per module serves all nodes.
-# ---------------------------------------------------------------------------
+# Callback dispatch. The C callbacks carry no user pointer, but every DartMsg and
+# DartEvent carries the node id stashed in user. One trampoline per module serves all.
 _NODES = {}
 _REG_LOCK = threading.Lock()
 _NEXT_ID = 1
@@ -3842,11 +3537,8 @@ def _on_event(ev_ptr):
         traceback.print_exc()
 
 
-# Pattern handler boxes: the C-side user pointer carries an id into this registry,
-# never a Python reference, and the trampolines below are module-lived ctypes
-# objects, so native code never holds a collectable callback. Handler boxes
-# live until their node closes; async-call boxes are per-call and released when
-# the response fires (including the CANCELLED one at close).
+# Pattern handler boxes: the C side user pointer carries an id into this registry, never
+# a Python reference, so native code never holds a collectable callback.
 _PBOXES = {}
 _PBOX_LOCK = threading.Lock()
 _PBOX_NEXT = 1

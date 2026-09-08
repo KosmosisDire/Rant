@@ -1,11 +1,5 @@
-// DART C# subscriber: subscribes to 'tick' and reports the received message rate.
-// Pair with csharp/publisher or python/publisher.py. Manual single-threaded poll.
-//
-// The schema is pasted from the publisher, standard types and all: `when` decodes to a
-// plain long of Unix-epoch microseconds and `at` to a Pose, so the one-second report can
-// print the sender's clock skew and position with no hand-written unpacking.
-//
-//   dotnet run --project csharp/subscriber [-- <seconds> <interface>]
+// A 'tick' subscriber reporting the received rate, the pair of csharp/publisher or
+// python/publisher.py, driven by a manual poll. Args: [seconds] [interface].
 
 using System;
 using System.Diagnostics;
@@ -26,7 +20,7 @@ static class Program
 
     static int Main(string[] args)
     {
-        double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 => run forever
+        double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 = run forever
         string iface = args.Length > 1 ? args[1] : null;
 
         var node = new DartNode("cs-subscriber", m => { _count++; _last = m.As<Tick>(); },
@@ -42,7 +36,7 @@ static class Program
         double lastReport = 0;
         while (!stop)
         {
-            node.Poll(1);                       // block up to 1ms; wakes on RX, yields the CPU
+            node.Poll(1);                       // block up to 1 ms, wakes on receive and yields the CPU
             double now = sw.Elapsed.TotalSeconds;
             if (now - lastReport >= 1.0)
             {

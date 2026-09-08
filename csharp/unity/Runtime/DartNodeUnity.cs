@@ -1,18 +1,5 @@
-// The DartNodeUnity component: the scene's shared DART node. Lives in its own file
-// because Unity only registers a MonoBehaviour whose class name matches the file
-// name. The topic/subscription API it hands out is in DartUnity.cs.
-//
-//   public struct Pose { public float X, Y, Z; }
-//
-//   // publish from any component
-//   DartTopic<Pose> pose;
-//   void Start()  { pose = DartNodeUnity.Topic<Pose>("player/pose"); }
-//   void Update() { pose.Publish(new Pose { X = transform.position.x }); }
-//
-//   // subscribe from any other component: dies with the component, skipped while
-//   // it is disabled, and always fires on the main thread
-//   void Start() { DartNodeUnity.Subscribe<Pose>("player/pose", this, OnPose); }
-//   void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
+// The DartNodeUnity component, the scene's shared node. It lives in its own file because
+// Unity registers only a MonoBehaviour whose class name matches the file name.
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
@@ -22,9 +9,8 @@ using UnityEngine;
 
 namespace Dart
 {
-    /// <summary>The scene's shared DART node. Add exactly one to the scene; every
-    /// other script reaches it through the static API (DartNodeUnity.Topic&lt;T&gt;,
-    /// DartNodeUnity.Subscribe). Runs in edit mode too when Run In Edit Mode is on.</summary>
+    /// <summary>The scene's shared node. Add exactly one, every other script reaches it through
+    /// the static API. Runs in edit mode too when Run In Edit Mode is on.</summary>
     [ExecuteAlways]
     [DefaultExecutionOrder(-1000)]   // dispatch before other scripts' Update
     [DisallowMultipleComponent]
@@ -55,10 +41,10 @@ namespace Dart
         private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
         private readonly Dictionary<string, DartPatternEntity> _patterns = new Dictionary<string, DartPatternEntity>();
         private readonly Dictionary<ushort, DartTopicBase> _byIndex = new Dictionary<ushort, DartTopicBase>();
-        private readonly List<DartEvent> _pending = new List<DartEvent>();   // service thread -> main
+        private readonly List<DartEvent> _pending = new List<DartEvent>();   // service to main
         private readonly List<DartEvent> _drain = new List<DartEvent>();
         private readonly object _pendingLock = new object();
-        private readonly List<Action> _mainActions = new List<Action>();     // pattern callbacks -> main
+        private readonly List<Action> _mainActions = new List<Action>();   // callbacks to main
         private readonly List<Action> _mainDrain = new List<Action>();
         private readonly object _mainLock = new object();
         private int _mainThreadId;
@@ -81,8 +67,8 @@ namespace Dart
             }
         }
 
-        /// <summary>The underlying wrapper DartNode; null while closed. Escape hatch to
-        /// the full API (peers via events, MemoryStats, extra topics...).</summary>
+        /// <summary>The underlying wrapper DartNode, null while closed. The escape hatch to the
+        /// full API.</summary>
         public DartNode Raw => _node;
         public bool IsOpen => _node != null;
         internal DartNode NativeNode => _node;
@@ -90,10 +76,8 @@ namespace Dart
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
         public static event Action<DartEvent> Events;
 
-        /// <summary>The shared topic named <paramref name="name"/> on the scene
-        /// node, created on first request. The QoS parameters apply only to that
-        /// first request (defaults = reliable + queued); later callers share the
-        /// existing topic.</summary>
+        /// <summary>The shared topic of this name on the scene node, created on first request. The
+        /// QoS parameters apply only to that first request, later callers share it.</summary>
         public static DartTopic<T> Topic<T>(string name, bool reliable = true, int keepLast = 0,
                                             int catchUp = 0, int queueBytes = 0)
             => RequireMain().GetTopic<T>(name, reliable, keepLast, catchUp, queueBytes);
@@ -127,7 +111,7 @@ namespace Dart
         public static SendStatus Publish(string name, string text, bool reliable = true)
             => RequireMain().GetTopic(name, reliable).Publish(text);
 
-        /// <summary>Instance form of the static Topic&lt;T&gt;().</summary>
+        /// <summary>The instance form of the static Topic&lt;T&gt;().</summary>
         public DartTopic<T> GetTopic<T>(string name, bool reliable = true, int keepLast = 0,
                                         int catchUp = 0, int queueBytes = 0)
         {
@@ -184,9 +168,8 @@ namespace Dart
             return m;
         }
 
-        // Reliable by default, and always queued from creation: with the service
-        // thread owning the wire, only a queued topic keeps its handlers off that
-        // thread (they then fire from the per-frame Dispatch, on the main thread).
+        // Reliable by default and always queued from creation: with the service thread owning
+        // the wire, only a queued topic keeps its handlers off that thread.
         private static Qos EffectiveQos(bool reliable, int keepLast, int catchUp, int queueBytes)
         {
             var e = new Qos
@@ -202,9 +185,8 @@ namespace Dart
 
         // ---- patterns: variables / functions --------------------------------------
 
-        /// <summary>The scene-shared authoritative variable named <paramref name="name"/>
-        /// (this node owns the value). One side per node: asking for a RemoteVariable of the
-        /// same name throws.</summary>
+        /// <summary>The scene shared authoritative variable of this name. One side per node, so
+        /// asking for a RemoteVariable of the same name throws.</summary>
         public static DartVariableDefinition<T> VariableDefinition<T>(string name,
                 bool readOnly = false, bool allowForce = false, int catchUp = 0, int keepLast = 0)
             => RequireMain().GetVariableDefinition<T>(name, readOnly, allowForce, catchUp, keepLast);
@@ -214,8 +196,8 @@ namespace Dart
                 int keepLast = 0)
             => RequireMain().GetRemoteVariable<T>(name, catchUp, keepLast);
 
-        /// <summary>The scene-shared function definition (this node implements it; ONE per
-        /// name on the network). The handler runs on the main thread.</summary>
+        /// <summary>The scene shared function definition, one per name on the network. The
+        /// handler runs on the main thread.</summary>
         public static DartFunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(
                 string name, Func<TReq, TRsp> handler)
             => RequireMain().GetFunctionDefinition<TReq, TRsp>(name, handler);
@@ -224,8 +206,8 @@ namespace Dart
         public static DartRemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
             => RequireMain().GetRemoteFunction<TReq, TRsp>(name);
 
-        /// <summary>The scene-shared task definition (a function with progress and
-        /// cancellation; ONE per name). The async handler runs on the main thread.</summary>
+        /// <summary>The scene shared task definition, one per name. The async handler runs on the
+        /// main thread.</summary>
         public static DartTaskDefinition<TReq, TPrg, TRsp> TaskDefinition<TReq, TPrg, TRsp>(
                 string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
                 bool noCancel = false, bool exclusive = false)
@@ -261,9 +243,8 @@ namespace Dart
         public DartRemoteTask<TReq, TPrg, TRsp> GetRemoteTask<TReq, TPrg, TRsp>(string name)
             => GetOrCreatePattern("task:", name, () => new DartRemoteTask<TReq, TPrg, TRsp>(this, name));
 
-        // Share a pattern handle by (kind, name): the first request builds it (and creates
-        // the native object now if the node is open), later ones return it, and a mismatched
-        // kind/type on the same name is a hard error (as for topics).
+        // Share a pattern handle by kind and name: the first request builds it, later ones return
+        // it, and a mismatched kind or type on the same name is a hard error, as for topics.
         private TEntity GetOrCreatePattern<TEntity>(string kind, string name, Func<TEntity> make)
             where TEntity : DartPatternEntity
         {
@@ -324,9 +305,8 @@ namespace Dart
             Pump();
         }
 
-        // The service thread must never survive into a new domain: its trampolines
-        // point at delegates the reload collects. OnDisable covers the normal paths;
-        // this is the backstop.
+        // The service thread must never survive into a new domain, since its trampolines point
+        // at delegates the reload collects. OnDisable covers the normal paths, this backstops.
         [UnityEditor.InitializeOnLoadMethod]
         private static void EditorReloadGuard()
         {
@@ -393,7 +373,7 @@ namespace Dart
             if (_node == null) return;
             DrainEvents();
             if (_pollFallback) _node.Poll(0);
-            _node.Dispatch();                   // every queued topic -> this thread
+            _node.Dispatch();                   // every queued topic to this thread
             DrainMainActions();                 // pattern callbacks parked by the service thread
             if ((++_frame & 0xFF) == 0)
             {
@@ -407,9 +387,8 @@ namespace Dart
             lock (_byIndex) _byIndex[index] = ch;
         }
 
-        // Pattern callbacks fire on the service thread; hand them to the frame. When we are
-        // already on the main thread (poll fallback, or the core's synchronous OnChange
-        // replay at registration) run inline so ordering is preserved.
+        // Pattern callbacks fire on the service thread, so hand them to the frame. Already on the
+        // main thread (the poll fallback, the synchronous OnChange replay) they run inline.
         internal bool OnMainThread => Thread.CurrentThread.ManagedThreadId == _mainThreadId;
 
         internal void Post(Action a)
@@ -439,9 +418,8 @@ namespace Dart
             _mainDrain.Clear();
         }
 
-        // Runs on whichever thread dispatches. Our topics are all queued, so this
-        // is the main thread; a locked lookup keeps a user's own extra (non-queued)
-        // topic on Raw from racing the table, it just isn't routed.
+        // Runs on whichever thread dispatches, the main thread since our topics are all queued. A
+        // locked lookup keeps a user's own extra topic on Raw from racing the table.
         private void RouteMessage(DartMessage m)
         {
             DartTopicBase ch;

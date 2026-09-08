@@ -87,6 +87,16 @@ field names (override with `[DartField("stamp")]`, and `[DartString(cap)]` is re
 string fields, `[DartArray(n)]` on fixed arrays) and must match on every node for a
 topic. `Publish` is thread-safe from any thread.
 
+## Patterns
+
+Variables, functions and tasks are shared by name the same way:
+`DartNodeUnity.VariableDefinition<float>("motor/speed")`, `RemoteVariable<float>(...)
+.OnChange(this, v => ...)`, `FunctionDefinition<int, int>("square", x => x * x)`,
+`RemoteFunction<int, int>("square").Call(7, r => ...)`, and `TaskDefinition` with an async
+handler over a context that carries `Progress` and a `CancellationToken`. `RemoteTask.Call`
+returns a run handle that cancels. Every handler and callback fires on the main thread,
+observers are component bound, and each handle survives the node closing and reopening.
+
 ## IL2CPP / AOT
 
 The wrapper is IL2CPP-safe: native callbacks are static and marked `[MonoPInvokeCallback]`.

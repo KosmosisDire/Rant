@@ -1,33 +1,18 @@
-/* Example + E2E check: pub/sub, a function, a task and a variable over the DART
- * WebSocket bridge from Node.
- *
- * Start the bridge, then run this:
- *   dart_bridge --bind 127.0.0.1 &
- *   node example.mjs                 (or: node example.mjs ws://host:7480)
- *
- * It opens two nodes on the mesh through the bridge (a "robot" hosting the
- * definitions and a "dashboard" using them), exercises every pattern, prints the
- * results, and exits 0 on success. One WebSocket connection = one DART node, so
- * this is exactly what two separate machines would do. */
+/* The example and end to end check: pub sub, a function, a task and a variable over the
+ * bridge from Node. Start dart_bridge --bind 127.0.0.1, then node example.mjs [ws url]. */
 import { DartNode, MetaSection } from "../../dist/dart.mjs";
 
 const url = process.argv[2] ?? "ws://127.0.0.1:7480";
 
-/* Schemas are DSL text, pasted identically on both ends: the wire carries no field
- * names, so a value's meaning is its position.
- *
- * `Timestamp`, `Double2` and `Color` are STANDARD TYPES (docs/stdtypes.md): always in
- * scope, no import, no definition. The name rides the schema (never a message byte) and
- * NARROWS matching, so `at` binds only to another Double2 and `when` reads as Unix-epoch
- * microseconds everywhere. The bridge reports the name to the client as the field's
- * `named` key, so a UI can render a Color as a swatch without guessing. */
+/* Schemas are DSL text pasted identically on both ends. Timestamp, Double2 and Color are
+ * standard types (docs/stdtypes.md), reported to the client as the field's named key. */
 const TELEMETRY = `Telemetry { seq: u32, when: Timestamp, battery: f32, at: Double2 }`;
 const ADD_REQ   = `AddReq { a: i32, b: i32 }`;
 const ADD_RSP   = `AddRsp { sum: i32 }`;
 const CONFIG    = `Config { rate_hz: u32, label: string<24> }`;
 
-/* interface "127.0.0.1" pins discovery to loopback so the two same-host nodes find
- * each other quickly; drop it to run across a real network. */
+/* interface "127.0.0.1" pins discovery to loopback so the two same host nodes find each
+ * other quickly. Drop it to run across a real network. */
 const net = { interface: "127.0.0.1" };
 
 const fail = setTimeout(() => { console.error("timeout: no progress in 30s (is the bridge running?)"); process.exit(1); }, 30000);
@@ -86,7 +71,7 @@ console.log(`owner sees rate_hz=${config.get().rate_hz} label="${config.get().la
 let sawMirror;
 const gotMirror = new Promise((res) => { sawMirror = res; });
 const mirror = await dash.subscriber("telemetry", null, (v) => { if (v.seq === 2) sawMirror(v); }, { reflect: true });
-if (!mirror.topic.reflected) { await dash.settle(5000); await mirror.topic.refresh(); }   /* the provider was not matched yet */
+if (!mirror.topic.reflected) { await dash.settle(5000); await mirror.topic.refresh(); }
 if (!mirror.topic.reflected) throw new Error("reflect found no telemetry schema on the mesh");
 console.log(`reflected telemetry: ${[...mirror.topic.layout.fields.keys()].join(", ")} (hash ${mirror.topic.layout.hash})`);
 if (mirror.topic.layout.hash !== telemetry.topic.layout.hash) throw new Error("reflected schema differs from the publisher's");
@@ -128,9 +113,8 @@ for (const f of robotConfig.schema.fields)
 if (!robotConfig.schema.fields.some((f) => f.path === "rate_hz" && f.kind === "u32"))
     throw new Error("config schema fields did not reflect");
 
-/* A reflected peer schema carries the SAME rows a create reply does, `named` included.
- * It has to: a client rebuilds a discovered type from this table, and a dropped name
- * turns `at: Double2` into an anonymous struct that every named reader refuses. */
+/* A reflected peer schema carries the same rows a create reply does, named included, or a
+ * client would rebuild at: Double2 as an anonymous struct every named reader refuses. */
 const robotTelemetry = theirs.find((e) => e.kind === "topic" && e.name === "telemetry");
 if (!robotTelemetry?.schema) throw new Error("expected the robot's telemetry schema");
 const namedRows = robotTelemetry.schema.fields.filter((f) => f.named);

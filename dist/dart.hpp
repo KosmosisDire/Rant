@@ -1,70 +1,10 @@
-/* DART C++ wrapper: a small, header-only OOP layer over the C single-header
- * (dart.h). Include this from C++; the raw C API is pulled into a private
- * `dart::detail` namespace so it is not visible at global scope.
- *
- * The shipped dist/dart.hpp is fully self-contained: the C single-header is
- * embedded inside it, so this one file is all a consumer needs.
- *
- * Usage: include "dart.hpp" from your C++ code for the wrapper API, and in
- * exactly ONE translation unit define DART_IMPLEMENTATION before including it
- * to emit the library implementation:
- *
- *     #define DART_IMPLEMENTATION
- *     #include "dart.hpp"          // the one implementation-anchor TU
- *
- * The DART library compiles cleanly as both C and C++, so that anchor may be a
- * .cpp (a pure C++ project needs no C toolchain) or a .c (a .c that just
- * #includes "dart.hpp" is auto-treated as the anchor). The anchor emits only
- * the implementation; use the wrapper from your other TUs.
- *
- *     dart::Node node("robot1",
- *         [](const dart::MessageView& m){
- *             std::printf("%.*s > %.*s\n",
- *                 (int)m.publisher_name().size(), m.publisher_name().data(),
- *                 (int)m.text().size(),           m.text().data());
- *         },
- *         [](const dart::Event& e){ std::fprintf(stderr, "event: %s\n", e.to_string().c_str()); },
- *         { .domain = 7 });                  // throws dart::Error on failure
- *     dart::Topic chat(node, "chat", dart::Role::PubSub, nullptr,
- *                      { .reliability = dart::Reliability::Reliable });
- *     node.start();                          // background service thread owns the loop
- *     for (;;) chat.send("hello");           // thread-safe; or skip start() and poll(1) yourself
- *
- * Typed patterns (functions / tasks / variables / pub-sub) over DART_SCHEMA:
- *
- *     struct Pose { double x, y; };
- *     DART_SCHEMA(Pose, x, y);
- *     dart::Publisher<Pose> pub(node, "pose");
- *     pub.send({ 1.0, 2.0 });
- *     dart::FunctionDefinition<Pose, Pose> mirror(node, "mirror",
- *         [](const Pose& p){ return Pose{ -p.x, -p.y }; });
- *
- * Every failed constructor throws dart::Error; built with -fno-exceptions the
- * object is `!valid()` instead and construction never throws. Data-path results
- * stay SendStatus / status enums in both modes, never exceptions.
- */
+/* The C++ wrapper: a header only layer over the C library, with the C API hidden inside
+ * dart::detail. docs/cpp.md explains how to use it. */
 #ifndef DART_HPP_INCLUDED
 #define DART_HPP_INCLUDED
 
-/* ------------------------------------------------------------------------- *
- *  Implementation dispatch.
- *
- *  dart.h is embedded below EXACTLY ONCE (the packer splices it in for the
- *  shipped dist/dart.hpp; in-tree it resolves through the include path). Where
- *  that single copy lands is chosen at compile time:
- *
- *   - DART_IMPLEMENTATION defined (in one anchor TU, .c OR .cpp): emitted at
- *     global scope, producing the C99 implementation. The library compiles
- *     cleanly as BOTH C and C++, so the anchor may be either -- a pure C++
- *     project needs no C toolchain. dart.h's extern "C" keeps the symbols' C
- *     linkage either way, so the namespaced declarations below link to them.
- *
- *   - a normal C++ consumer TU: emitted inside `namespace dart::detail`,
- *     declarations only, so no raw C symbol reaches global scope; the OOP
- *     wrapper follows. (As with any single-header lib, the one anchor TU emits
- *     only the implementation -- put DART_IMPLEMENTATION in a dedicated TU.)
- *
- *  A .c TU with nothing defined is treated as the implementation anchor. */
+/* dart.h is embedded below exactly once. With DART_IMPLEMENTATION it lands at global scope
+ * as the implementation, else inside namespace dart::detail as declarations only. */
 #if !defined(DART_IMPLEMENTATION) && !defined(__cplusplus)
 #define DART_IMPLEMENTATION
 #endif
@@ -97,9 +37,8 @@
 #include <span>
 #endif
 
-/* Pre-include the (only) C std headers dart.h's declaration side pulls, so
- * their include guards are set before the embed and no std name (size_t,
- * uint8_t, ...) gets dragged into `dart::detail`. */
+/* Pre include the C std headers dart.h pulls, so their guards are set before the embed
+ * and no std name is dragged into dart::detail. */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -18013,11 +17952,11 @@ static void i_dart_patterns_on_event(void *user, const DartEvent *ev){
 #if defined(__cplusplus) && !defined(DART_IMPLEMENTATION)
 }   /* namespace detail */
 
-/* Enums (1:1 with the C enums by value; asserted below). */
+/* Enums, 1:1 with the C enums by value and asserted below. */
 enum class Reliability { BestEffort = 0, Reliable = 1 };
 enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
-/* dart_topic_send / create result. Ok is 0; the rest mirror DartResult. */
+/* dart_topic_send and create result. Ok is 0, the rest mirror DartResult. */
 enum class SendStatus  { Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
                          State = -5, NoSys = -6 };
 
@@ -18025,8 +17964,7 @@ enum class EventKind {
     PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
 };
 
-/* The specific error carried by an EventKind::Error event (Event::error()); mirrors
-   DartErrorKind. Everything that goes wrong is EventKind::Error + one of these. */
+/* The error carried by an EventKind::Error event, mirrors DartErrorKind. */
 enum class ErrorKind {
     None = 0,
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
@@ -18035,25 +17973,20 @@ enum class ErrorKind {
     Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
 };
 
-/* Schema field kinds for reflection (Schema::Field); values match the C wire.
- * Array/String are FIXED (offset-based); VString/VArray/Map are the VARIABLE kinds
- * that ride the message tail (offset/size report 0). */
+/* Schema field kinds for reflection, the C wire values. Array and String are fixed,
+ * VString, VArray and Map ride the message tail and report offset and size 0. */
 enum class FieldType : uint8_t {
     U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
     VString, VArray, Map, Enum, Named
 };
 
-/* A call's outcome (mirrors DartCallStatus). Ok/AppError/NoHandler/Cancelled/Running
- * travel on the wire; Timeout/PeerLost are synthesized client-side when no response
- * arrives. Cancelled is wire-carried when a provider honors a cancel (or retires
- * mid-run) and synthesized for calls still pending at local close/retire. Running is
- * task-only and the ONE non-terminal status: the request was accepted and runs, the
- * call's timeout is dropped, and on_progress fires once with has_value() == false. */
+/* A call's outcome, mirrors DartCallStatus. Timeout and PeerLost are synthesized on the
+ * caller. Running is task only and the one non terminal status (docs/tasks.md). */
 enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4,
                         Cancelled = 5, Running = 6 };
 
-/* What a network entity is (mirrors DartEntityKind): observers consume ENTITIES, never
- * raw channels; a function's req/rsp pair or a variable's set channel fold into one. */
+/* What a network entity is, mirrors DartEntityKind. Observers see folded entities, never
+ * raw channels (docs/reflection.md). */
 enum class EntityKind { Topic = 0, Function, Variable, Task };
 
 /* Severity of a built-in @dart/log line (mirrors DartLogLevel). */
@@ -18105,11 +18038,8 @@ template <class Prg = void> class ProgressView;
 template <class Rsp = void> class Response;
 template <class Rsp = void> class ResponseView;
 
-/* Error: the one exception type. Thrown by FAILED CONSTRUCTORS only (Node, Topic, and
- * the pattern handles); data-path results stay SendStatus / status enums. Carries the
- * DartEvent error info: the machine-readable kind, the OS errno for socket faults, and
- * the formatted one-line text as what(). With -fno-exceptions nothing throws and a
- * failed construction leaves the object `!valid()` instead. */
+/* The one exception type, thrown by failed constructors only. Carries the error kind, the
+ * OS errno of a socket fault and the formatted text. Never thrown under -fno-exceptions. */
 #if defined(__cpp_exceptions)
 class Error : public std::runtime_error {
 public:
@@ -18163,14 +18093,8 @@ struct HandlerBox { virtual ~HandlerBox() = default; };
 
 }   /* namespace priv */
 
-/* Bytes: a non-owning (pointer + length) view of a payload. It is a proper
- * contiguous range (begin/end/operator[], usable in range-for and algorithms)
- * and interops with the standard library both ways: construct it from a
- * string_view / std::string / const char*, or from any contiguous range of
- * byte-sized elements (std::vector / std::array / std::span of uint8_t, char, or
- * std::byte); convert it to std::string_view, std::string, std::vector, or
- * (with C++20) std::span. Multi-byte element types are rejected -- pass their
- * raw bytes explicitly via Bytes(ptr, len). */
+/* A non owning view of a payload and a contiguous range. It converts from and to the
+ * standard string and byte containers (docs/cpp.md). */
 class Bytes {
 public:
     using value_type     = uint8_t;
@@ -18185,9 +18109,8 @@ public:
     Bytes(const std::string& s) noexcept : Bytes(std::string_view(s)) {}
     Bytes(const char* s) noexcept : Bytes(std::string_view(s ? s : "")) {}
 
-    /* Any contiguous range of byte-sized elements. Strings are handled by the
-     * overloads above (excluded here), so this covers vector/array/span/... of
-     * uint8_t / char / std::byte without ambiguity. */
+    /* any contiguous range of byte sized elements. Strings take the overloads above, so
+     * this covers vector, array and span of uint8_t, char or std::byte without ambiguity */
     template <class C,
               class E = std::remove_reference_t<decltype(*std::data(std::declval<const C&>()))>,
               class = std::enable_if_t<
@@ -18222,9 +18145,8 @@ namespace priv {
 inline detail::DartBytes  to_c(Bytes b) { return detail::dart_bytes(b.data(), b.size()); }
 }
 
-/* reflect_from_mesh: pass it where a constructor takes a schema pointer, and the handle takes
- * what you left unspecified from the mesh (a reader its provider's schema, a writer the widest
- * every reader accepts, a zero reliability the provider's). refresh() re-types it later. */
+/* Pass it where a constructor takes a schema pointer and the handle types itself from the
+ * mesh (docs/reflection.md). refresh() re types it later. */
 struct reflect_from_mesh_t { explicit reflect_from_mesh_t() = default; };
 inline constexpr reflect_from_mesh_t reflect_from_mesh{};
 
@@ -18235,34 +18157,22 @@ struct Qos {
     uint16_t    catch_up             = 0;   /* recent messages a new subscriber replays */
     uint32_t    max_message_bytes    = 0;   /* 0 = one fragment, or grow-to-fit */
     uint32_t    heartbeat_us         = 0;   /* reliable idle-writer ping (0 = 100ms) */
-    uint32_t    repair_delay_us      = 0;   /* reliable reader's re-ask bound (0 = adaptive, the peer's RTT) */
+    uint32_t    repair_delay_us      = 0;   /* reader re ask bound, 0 = adaptive from the RTT */
     uint32_t    backpressure_wait_us = 0;   /* reliable: send pause for a slow reader (0 = none) */
     uint32_t    shm_max_bytes        = 0;   /* pin topic to one same-host SHM size class */
-    uint32_t    queue_bytes          = 0;   /* consumer-queue cap for take()/dispatch(); 0 = the
-                                               queue appears lazily on first use, 1 MB cap */
-    uint16_t    max_rate_hz          = 0;   /* SUBSCRIBER, best-effort: cap delivery from each
-                                               publisher to this many samples/sec (it decimates
-                                               to the newest); 0 = unlimited */
-    bool        no_timestamp         = false;/* PUBLISHER: send without the per-message source
-                                               timestamp, so receivers read written_us() == 0.
-                                               Default (false) stamps every message */
+    uint32_t    queue_bytes          = 0;   /* take and dispatch queue cap, 0 = 1 MB */
+    uint16_t    max_rate_hz          = 0;   /* best effort sub: kept samples per second, 0 = all */
+    bool        no_timestamp         = false;   /* omit the source stamp, written_us() reads 0 */
 };
 
 struct NodeOptions {
     uint16_t                 domain               = 0;   /* logical-network selector */
     uint16_t                 max_topics           = 8;   /* how many topics may be created */
     bool                     disable_shm          = false;
-    bool                     fetch_details        = false; /* greedily fetch every peer topic's
-                                                              name + schema (observer UIs): fills
-                                                              peer_entities() names via the cache */
-    int32_t                  match_wait_ms        = 0;   /* send-path match wait: a send that would
-                                                            reach ZERO subscribers while a match is
-                                                            still resolving blocks up to this long
-                                                            for it to form. 0 = default (1s);
-                                                            negative = disabled (drop loudly:
-                                                            ErrorKind::UnmatchedSend). */
+    bool                     fetch_details        = false;   /* fetch every peer topic's schema */
+    int32_t                  match_wait_ms        = 0;   /* 0 = 1 s, negative = drop loudly */
     /* networking (all optional) */
-    /* built-in observability (all default on; see Node::log / Node::on_log / Node::meta) */
+    /* built in observability, all on by default (Node::log, Node::on_log, Node::meta) */
     bool                     disable_logs         = false; /* strip the @dart/log/{error,warn,info}
                                                               topics (saves their history memory) */
     bool                     disable_meta         = false; /* do not host the @dart/meta endpoint */
@@ -18271,35 +18181,21 @@ struct NodeOptions {
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
     uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
-    std::string              multicast_interface;        /* empty = auto; "127.0.0.1" = single-host */
+    std::string              multicast_interface;   /* empty = auto, "127.0.0.1" = single host */
     uint8_t                  multicast_ttl        = 0;   /* 0 = 1 hop */
-    std::vector<std::string> seed_peers;                 /* "ip" or "ip:port", unicast announce targets */
-    bool                     unicast_only         = false; /* this node cannot multicast at all: join
-                                                   no group, announce only to seed_peers + peers already
-                                                   known, and ask whoever hears us to RE-ANNOUNCE us on
-                                                   their paths. Seeding ONE reachable node then makes us
-                                                   discoverable mesh-wide (data stays unicast either
-                                                   way). Pair with seed_peers, or be seeded by a peer. */
+    std::vector<std::string> seed_peers;   /* "ip" or "ip:port", unicast announce targets */
+    bool                     unicast_only         = false;   /* no group join, seeds relay us */
     uint16_t                 fragment_size        = 0;   /* UDP payload bytes per fragment */
-    /* State our locator outright instead of letting each peer learn it from the datagram
-     * source (the default, and right for multihomed hosts). For a STATIC 1:1 mapping (a
-     * cloud elastic IP, a container published with -p 7400:7400) or to pin which of our
-     * addresses to advertise. One locator goes to EVERY peer, so it suits a 1:1 mapping
-     * and not a split inside/outside view; and it creates no inbound path by itself. */
-    std::string              self_ip;                    /* "203.0.113.7"; empty = learn per path */
+    /* Advertise this locator to every peer instead of letting each learn it from the datagram
+     * source. For a static 1:1 mapping such as a cloud IP or a published container port. */
+    std::string              self_ip;   /* "203.0.113.7", empty = learn per path */
     uint16_t                 advertise_port       = 0;   /* 0 = the port we actually bound */
     /* discovery cadence */
     uint32_t                 announce_interval_us = 0;   /* 0 = 1s */
     uint32_t                 peer_timeout_us      = 0;   /* 0 = 3.5s */
     uint16_t                 max_peers            = 0;   /* 0 = 16 */
-    /* Memory. Leave `memory` null for the default dynamic allocator (grows on
-     * demand). Set it to a fixed buffer for STATIC allocation: the node draws
-     * ALL its memory from there, with no heap and no growth (and the same-host
-     * SHM fast path off, since it needs a growable allocator). The buffer must
-     * outlive the node and be big enough for the configured max_peers /
-     * max_topics plus message buffers; construction fails if it is too
-     * small. A typed topic copies its schema into this buffer, so pair it with
-     * Schema::compile(text, scratch, size) for a fully heap-free node. */
+    /* Leave memory null for the dynamic allocator. A fixed buffer means static mode: no heap,
+     * no growth, shared memory off, and construction fails if it is too small (docs/cpp.md). */
     void*                    memory      = nullptr;
     size_t                   memory_size = 0;
 };
@@ -18308,46 +18204,35 @@ struct NodeOptions {
 /* Per-pattern options (all zero = defaults). */
 struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
-    uint32_t timeout_us           = 0;   /* remote call timeout; 0 = 5s */
-    uint16_t keep_last            = 0;   /* req + rsp ring depth; 0 = the reliable default (10).
-                                            An inline reply cannot wait for a TX pass, so this
-                                            must cover the most requests one poll pass drains */
+    uint32_t timeout_us           = 0;   /* remote call timeout, 0 = 5 s */
+    uint16_t keep_last            = 0;   /* req and rsp ring depth, 0 = 10 */
 };
-/* Task options (mirrors DartTaskOpts). A task is a function with progress and
- * cancellation; see TaskDefinition / RemoteTask. */
+/* Task options, mirrors DartTaskOpts (docs/tasks.md). */
 struct TaskOptions {
-    bool     progress_best_effort = false; /* progress-channel reliability: false = reliable.
-                                              The definition OFFERS, a remote REQUESTS (RxO:
-                                              an observer may tap a reliable stream
-                                              best-effort and can never stall the task) */
-    uint16_t progress_keep_last   = 0;     /* progress ring depth; 0 = the pattern default */
-    bool     no_cancel            = false; /* definition: will not honor cancellation; remotes
-                                              then refuse cancel() locally (BadRole) */
-    bool     exclusive            = false; /* definition: declared serialization; the handler
-                                              enforces it (fail("busy")) */
-    bool     multi                = false; /* redundant providers intended; each request still
-                                              has exactly one executor */
-    uint32_t timeout_us           = 0;     /* remote: until-first-response bound; 0 = 5s */
+    bool     progress_best_effort = false;   /* the definition offers, a remote requests */
+    uint16_t progress_keep_last   = 0;   /* progress ring depth, 0 = the pattern default */
+    bool     no_cancel            = false;   /* cancel not honored, remotes get BadRole */
+    bool     exclusive            = false;   /* declared serialization, handler enforced */
+    bool     multi                = false;   /* redundant providers, one executor each */
+    uint32_t timeout_us           = 0;   /* remote: bound until the first response, 0 = 5 s */
     uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
     uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
 };
-/* Per-call options (mirrors DartCallOpts). provider directs a call at ONE definition by
- * its peer id (0 = undirected, first answer wins): the way to reach a specific node when
- * many host the same function, e.g. the @dart/meta endpoint (see Node::meta). A TASK
- * request is always directed: 0 resolves to the oldest matched provider at send time. */
+/* Per call options, mirrors DartCallOpts. provider directs a call at one definition by peer
+ * id, 0 = first answer wins. A task request is always directed, 0 = the oldest provider. */
 struct CallOptions {
     uint32_t  provider = 0;
     uint32_t* id_out   = nullptr;   /* receives the call id at commit (before any wait): the
                                        handle for RemoteTask::cancel from another thread */
 };
-/* VariableOptions<T> for the typed definition (initial is a typed value);
- * VariableOptions<> is the untyped twin (initial is raw Bytes). */
+/* VariableOptions<T> for the typed definition, VariableOptions<> the untyped twin whose
+ * initial value is raw Bytes. */
 template <class T = void> struct VariableOptions {
     std::optional<T> initial{};              /* the value before any set */
     bool     read_only            = false;   /* no set channel: remote sets get BadRole */
     bool     allow_force          = false;   /* permit force (local + remote) */
-    uint16_t catch_up             = 0;       /* value-channel catch_up; 0 = 1 (late remote gets latest) */
-    uint16_t keep_last            = 0;       /* both channels' repair window; 0 = the reliable default (10) */
+    uint16_t catch_up             = 0;   /* value channel catch_up, 0 = 1 */
+    uint16_t keep_last            = 0;   /* both channels' repair window, 0 = 10 */
     uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
 };
 template <> struct VariableOptions<void> {
@@ -18363,17 +18248,13 @@ template <> struct VariableOptions<void> {
 /* Schema: an owned, compiled message schema (see the DSL in schema.h). */
 class Schema {
 public:
-    /* Compile a schema from its text form (see the DSL in schema.h). Returns
-     * nullopt on error; if `err` is non-null it receives a short message
-     * pointing near the offending text. Uses an internal dynamic (heap)
-     * allocator for the compiled schema, freed when the Schema is destroyed. */
+    /* Compile a schema from DSL text. nullopt on error, and err receives a short message
+     * pointing near the offending text. The compiled schema is freed with the Schema. */
     static std::optional<Schema> compile(std::string_view text, std::string* err = nullptr) {
         return compile_with(detail::dart_allocator_dynamic(detail::i_dart_plat_realloc, 0), text, err);
     }
-    /* Zero-heap variant: compile into your fixed `scratch` buffer instead of the
-     * heap (for a static-memory deployment). The buffer must outlive this Schema;
-     * once a topic create has copied the schema into the node, the Schema and its
-     * scratch may be dropped or reused. Returns nullopt if the buffer is too small. */
+    /* Zero heap variant: compile into scratch, which must outlive this Schema. Once a create
+     * has copied the schema into the node the scratch may be reused. nullopt if too small. */
     static std::optional<Schema> compile(std::string_view text, void* scratch, size_t scratch_size,
                                          std::string* err = nullptr) {
         if (!scratch || scratch_size == 0) { if (err) *err = "scratch buffer missing"; return std::nullopt; }
@@ -18416,8 +18297,8 @@ public:
     uint32_t size() const { return schema_ ? detail::dart_schema_size(schema_) : 0; }
     uint64_t hash() const { return schema_ ? detail::dart_schema_hash(schema_) : 0; }
     uint16_t field_count() const { return schema_ ? detail::dart_schema_field_count(schema_) : 0; }
-    /* Flat index of a field by name; nested members by dotted path ("velocity.dx"),
-     * struct-array members by an indexed one ("corners[2].x"). -1 if unknown. */
+    /* Flat index of a field by name, nested members by dotted path ("velocity.dx") and struct
+     * array members by index ("corners[2].x"). -1 if unknown. */
     int field_index(std::string_view path) const {
         return detail::dart_schema_field_index(schema_, std::string(path).c_str());
     }
@@ -18426,8 +18307,7 @@ public:
     bool can_read(const Schema& pub) const {
         return schema_ && pub.schema_ && detail::dart_schema_subset(schema_, pub.schema_) != 0;
     }
-    /* Why this schema cannot read `pub`, one line ("field 'position': reader f32[8],
-     * writer f64[8]"); empty when it can. */
+    /* Why this schema cannot read pub, one line. Empty when it can. */
     std::string why_not(const Schema& pub) const {
         char buf[256];
         if (!schema_ || !pub.schema_) return "no schema";
@@ -18488,7 +18368,7 @@ public:
         return true;
     }
 
-    /* The raw compiled schema (opaque to the wrapper's consumers; the create calls use it). */
+    /* The raw compiled schema, opaque to consumers. The create calls use it. */
     const detail::DartSchema* raw() const { return schema_; }
 
 private:
@@ -18510,20 +18390,15 @@ private:
     detail::DartSchema*   schema_ = nullptr;
 };
 
-/* ---- map: the self-describing tagged value tree (a `map` field's content) ------
- * Thin OOP over the C map codec (the real DartMapWriter / dart_map_* live in the
- * embedded library, so this wraps them directly -- no reimplementation). Write a
- * body with MapWriter, hand it to MessageBuilder::set_map; read one from
- * MessageView::get_map as a MapReader, or decode a whole map into an owning std::map
- * (MapReader::to_map -> MapDict of MapItem) that outlives the handler. */
+/* The self describing tagged value tree of a map field: a thin layer over the C map codec.
+ * Write with MapWriter, read with MapReader, or decode whole with MapReader::to_map. */
 class MapReader;
 class MapItem;
 using MapList = std::vector<MapItem>;             /* a decoded array value's elements */
 using MapDict = std::map<std::string, MapItem>;   /* a decoded map: the std::map readback */
 
-/* Builds a map body into a fixed internal buffer (grow via the ctor arg). Key order
- * is yours; array elements are keyless (pass nullptr). finish() returns the body bytes
- * (empty if the buffer overflowed -- check ok()). */
+/* Builds a map body into a fixed internal buffer sized by the ctor arg. Key order is yours,
+ * array elements pass a null key. finish() returns empty on overflow, so check ok(). */
 class MapWriter {
 public:
     explicit MapWriter(size_t capacity = 512) : buf_(capacity ? capacity : 1) {
@@ -18586,9 +18461,8 @@ public:
         return true;
     }
     Bytes body() const { return { body_.data, body_.len }; }
-    /* Decode the whole map (recursively) into an owning std::map<std::string, MapItem>,
-     * copied out of the message so it stays valid after the handler returns. Keys are
-     * sorted (std::map). Empty for a non-map / mismatched field. */
+    /* Decode the whole map into an owning std::map, copied out of the message so it outlives
+     * the handler. Keys are sorted. Empty for a mismatched field. */
     MapDict to_map() const;
 
 private:
@@ -18597,10 +18471,8 @@ private:
 
 inline MapReader MapValue::as_map() const { return MapReader(Bytes{ v_.bytes.data, v_.bytes.len }); }
 
-/* One node of a decoded map (MapReader::to_map): an owning scalar / string / array
- * (MapList) / nested map (MapDict). Numeric getters coerce between uint/int/double, so a
- * schema-less map -- where an integer arrives as whatever kind fit -- reads back cleanly.
- * All accessors are no-throw: a type mismatch yields the zero value / empty container. */
+/* One node of a decoded map: an owning scalar, string, MapList or MapDict. Numeric getters
+ * coerce between kinds and a mismatch yields the zero value, nothing throws. */
 class MapItem {
 public:
     using Value = std::variant<std::monostate, bool, uint64_t, int64_t, double,
@@ -18686,11 +18558,8 @@ inline MapDict MapReader::to_map() const {
     return out;
 }
 
-/* MessageBuilder: a mutable message buffer bound to a Schema, for typed encoding.
- * Set fields by name (nested members by dotted path, e.g. "vel.dx"), then
- * pass it straight to Topic::send (it converts to Bytes). Variable-length fields
- * (`string`, `elem[]`, `map`) grow the buffer as needed; over-cap on a capped field
- * is refused and flips ok() to false (never a silent truncation). */
+/* A mutable message buffer bound to a Schema. Set fields by name or dotted path, then pass
+ * it to Topic::send. Variable fields grow the buffer, an over cap value flips ok() false. */
 class MessageBuilder {
 public:
     explicit MessageBuilder(const Schema& s) : schema_(s.raw()), buf_(detail::dart_schema_msg_min(s.raw())) {
@@ -18714,8 +18583,8 @@ public:
         ok_ &= detail::dart_set_string_at(buf_.data(), buf_.size(), schema_, field, index, detail::dart_string(v.data(), v.size())) != 0;
         return *this;
     }
-    /* a fixed OR variable array (raw element bytes; for a string array, whole
-       [u16 len][cap] slots) */
+    /* a fixed or variable array as raw element bytes. A string array takes whole
+       [u16 len][cap] slots */
     MessageBuilder& set_array(const char* field, Bytes elems) {
         grow_for(elems.size());
         ok_ &= detail::dart_set_array(buf_.data(), buf_.size(), schema_, field, detail::dart_bytes(elems.data(), elems.size())) != 0;
@@ -18728,7 +18597,7 @@ public:
         return *this;
     }
     MessageBuilder& set_map(const char* field, MapWriter& w) { return set_map(field, w.finish()); }
-    /* an `enum` field by its number, or by option name (unknown name is refused -> ok() false) */
+    /* an enum field by number or by option name. An unknown name is refused, ok() false */
     MessageBuilder& set_enum(const char* field, int64_t value) {
         ok_ &= detail::dart_set_int(buf_.data(), buf_.size(), schema_, field, value) != 0;
         return *this;
@@ -18757,32 +18626,29 @@ private:
     bool                      ok_ = true;
 };
 
-/* FieldView: the shared read surface over (payload bytes, schema). Every delivered
- * form derives it -- MessageView (handler view), Message<> (taken message), Request<>
- * (function request), ResponseView<> (async response) -- so typed field reads look the
- * same everywhere. Reads are only meaningful when has_schema(). */
+/* The shared read surface over payload bytes and a schema, derived by MessageView,
+ * Message<>, Request<> and ResponseView<>. Reads are meaningful only when has_schema(). */
 class FieldView {
 public:
     Bytes            data() const { return { d_.data, d_.len }; }
     std::string_view text() const { return { reinterpret_cast<const char*>(d_.data), d_.len }; }
     bool             has_schema() const { return s_ != nullptr; }
-    /* the raw compiled schema the payload decodes with (internal; feeds the typed codec) */
+    /* the raw compiled schema the payload decodes with, feeds the typed codec */
     const detail::DartSchema* raw_schema() const { return s_; }
 
-    /* Typed field reads (only meaningful when has_schema()); by name / dotted path. */
+    /* Typed field reads by name or dotted path, meaningful only when has_schema(). */
     uint64_t get_uint (const char* field) const { return detail::dart_get_uint (d_, s_, field); }
     int64_t  get_int  (const char* field) const { return detail::dart_get_int  (d_, s_, field); }
     double   get_f64  (const char* field) const { return detail::dart_get_f64  (d_, s_, field); }
     float    get_f32  (const char* field) const { return detail::dart_get_f32  (d_, s_, field); }
     bool     get_bool (const char* field) const { return detail::dart_get_uint (d_, s_, field) != 0; }
     Bytes    get_array(const char* field) const { auto a = detail::dart_get_array(d_, s_, field); return { a.data, a.len }; }
-    /* capped OR variable string; empty view on a mismatch */
+    /* a capped or variable string, an empty view on a mismatch */
     std::string_view get_string(const char* field) const { auto s = detail::dart_get_string(d_, s_, field); return { s.data, s.len }; }
     std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::dart_get_string_at(d_, s_, field, index); return { s.data, s.len }; }
     /* a `map` field, as a reader over its body (valid while the view is) */
     MapReader get_map(const char* field) const { auto b = detail::dart_get_map(d_, s_, field); return MapReader(Bytes{ b.data, b.len }); }
-    /* an `enum` field: its number is get_int/get_uint; this is the current value's option
-     * name ({} if the stored number has no option, i.e. an unknown/newer value) */
+    /* an enum field's current option name, {} when the stored number has no option */
     std::string_view get_enum_name(const char* field) const { auto s = detail::dart_get_enum(d_, s_, field); return { s.data, s.len }; }
 
 protected:
@@ -18792,7 +18658,7 @@ protected:
     const detail::DartSchema* s_ = nullptr;
 };
 
-/* MessageView: a delivered message. Non-owning; valid only inside the handler. */
+/* A delivered message. Non owning, valid only inside the handler. */
 class MessageView : public FieldView {
 public:
     std::string_view publisher_name() const { return { msg_->publisher_name.data,  msg_->publisher_name.len  }; }
@@ -18804,9 +18670,8 @@ public:
     /* node monotonic us when the poll RECEIVED it (queued: at enqueue), so paced
      * consumers measure true arrival times, never their own cadence */
     uint64_t         recv_us()        const { return msg_->recv_us; }
-    /* the WRITER's wall clock (UTC us) at the moment it wrote the message: a source stamp,
-     * kept across repair and replay. 0 = the publisher opted out (Qos::no_timestamp).
-     * Never mix it with the monotonic recv_us. */
+    /* the writer's wall clock in UTC us when it wrote the message, kept across repair and
+     * replay. 0 = the publisher opted out. Never mix it with the monotonic recv_us. */
     uint64_t         written_us()        const { return msg_->written_us; }
 
 private:
@@ -18815,16 +18680,16 @@ private:
     friend class Node;
 };
 
-/* Event: a peer / message-loss / error notification. Everything that goes wrong arrives
-   as kind() == EventKind::Error with error() set; to_string() formats any of them. */
+/* A peer, message loss or error notification. Everything that goes wrong arrives as
+ * EventKind::Error with error() set, and to_string() formats any of them. */
 class Event {
 public:
     EventKind        kind()           const { return static_cast<EventKind>(ev_->kind); }
     ErrorKind        error()          const { return static_cast<ErrorKind>(ev_->error); }
     bool             is_error()       const { return ev_->kind == detail::DART_ERROR; }
     uint32_t         peer()           const { return ev_->peer; }
-    /* the peer's human-readable node name for peer-scoped events (empty when unknown);
-       prefer it over peer() in messages, an id means nothing to a human */
+    /* the peer's node name for peer scoped events, empty when unknown. Prefer it over
+       peer() in messages, an id means nothing to a human */
     std::string_view peer_name()      const { return ev_->peer_name ? std::string_view(ev_->peer_name) : std::string_view{}; }
     uint16_t         topic()          const { return ev_->topic; }
     /* our topic name for topic-scoped events, else empty */
@@ -18848,17 +18713,14 @@ private:
     friend class Node;
 };
 
-/* Entity: one network entity, folded (a function's req/rsp pair is ONE function, a task's
- * three channels ONE task, a variable's set channel merges as `writable`). An owned
- * snapshot, schemas included, safe to keep. From Node::entities(peer) the flags describe
- * that one node; from Node::mesh() they describe every live node folded. `name` is the base
- * name; until the peer's details arrive it is the "0x????????" hash placeholder. */
+/* One folded network entity as an owned snapshot, schemas included (docs/reflection.md).
+ * name is the base name, a "0x????????" placeholder until the peer's details arrive. */
 struct Entity {
     EntityKind  kind = EntityKind::Topic;
     std::string name;
     uint32_t    hash = 0;             /* the primary channel's low-32 name hash (the placeholder) */
-    bool        provides   = false;   /* someone is on the source side: publisher / definition / owner */
-    bool        consumes   = false;   /* someone is on the sink side: subscriber / caller / accessor */
+    bool        provides   = false;   /* a publisher, definition or owner is present */
+    bool        consumes   = false;   /* a subscriber, caller or accessor is present */
     bool        reliable   = false;   /* the primary channel's reliability */
     bool        writable   = false;   /* VARIABLE: a set channel is advertised */
     bool        forceable  = false;   /* VARIABLE: the owner permits force */
@@ -18866,15 +18728,15 @@ struct Entity {
     bool        exclusive  = false;   /* TASK: declared serialization */
     bool        multi      = false;   /* duplicate authority is intended */
     bool        incomplete = false;   /* a pattern half pair: surfaced, never silently dropped */
-    bool        conflict   = false;   /* mesh: live endpoints declare schemas that cannot read each other */
+    bool        conflict   = false;   /* mesh: live schemas that cannot read each other */
     uint16_t    providers = 0;        /* live endpoints on each side */
     uint16_t    consumers = 0;
-    uint32_t    provider = 0;         /* the ranked provider's peer id (Node::Self = this node); iff providers > 0 */
+    uint32_t    provider = 0;   /* the ranked provider's peer id, Self = us, iff providers > 0 */
     std::string from;                 /* the node the schemas were read from */
-    Schema      schema;               /* value / request / payload (empty() when untyped or unfetched) */
+    Schema      schema;   /* value, request or payload. empty() when untyped or unfetched */
     Schema      rsp_schema;           /* FUNCTION / TASK: the response */
     Schema      progress_schema;      /* TASK: the progress channel */
-    uint64_t    generation = 0;       /* changes iff provider identity, any schema, or an attr changed */
+    uint64_t    generation = 0;   /* changes iff the provider, a schema or an attr changed */
 };
 
 /* Peer: a copied snapshot of a discovered peer (safe to keep after the poll). Dropped
@@ -18889,17 +18751,14 @@ struct Peer {
     uint32_t                epoch = 0;       /* bumps on every reflected change at this peer */
     bool                    catching_up = false;   /* it advertises newer state than we hold yet */
     uint16_t                fragment_size = 0;
-    uint32_t                rtt_us = 0;            /* measured round trip (smoothed); 0 samples = none yet */
+    uint32_t                rtt_us = 0;   /* the smoothed round trip, 0 samples = none yet */
     uint32_t                rtt_jitter_us = 0;
     uint32_t                rtt_min_us = 0;
     uint32_t                rtt_samples = 0;
 };
 
-/* LogLine: one decoded @dart/log line handed to a Node::on_log handler. The `node` and
- * `text` views are valid for the callback only (copy them to keep them). wall_us is epoch
- * micros (comparable across nodes); mono_us is the publisher's monotonic clock (orders
- * within one node); recv_us is this node's clock when the poll received it; written_us is the
- * transport's source stamp for the carrying message (see MessageView::written_us). */
+/* One decoded @dart/log line for a Node::on_log handler. The views are valid for the
+ * callback only. wall_us is epoch us, mono_us the publisher's monotonic clock, recv_us ours. */
 struct LogLine {
     LogLevel         level = LogLevel::Info;
     std::string_view node;         /* the publishing node's name */
@@ -18911,11 +18770,8 @@ struct LogLine {
     std::string_view text;
 };
 
-/* Message<T> / Message<>: a message popped from a topic's consumer queue.
- * Message<> (untyped, from Topic::take / Subscriber<>::take) owns the envelope struct
- * by value; its data/name views point into the topic's ring and stay valid until the
- * NEXT take/dispatch on that topic. Message<T> (typed, from Subscriber<T>::take) owns
- * the decoded T plus copied envelope strings, so it is valid indefinitely. */
+/* A message popped from a consumer queue. Message<> owns the envelope while its views point
+ * into the ring until the next take or dispatch. Message<T> owns the decoded T outright. */
 template <> class Message<void> : public FieldView {
 public:
     Message() = default;
@@ -18926,8 +18782,8 @@ public:
     std::string_view topic_name()     const { return { m_.topic_name.data, m_.topic_name.len }; }
     uint16_t         topic_index()    const { return m_.topic_index; }
     Bytes            header()         const { return { m_.header.data, m_.header.len }; }
-    uint64_t         recv_us()        const { return m_.recv_us; }   /* arrival stamp (see MessageView) */
-    uint64_t         written_us()        const { return m_.written_us; }   /* source stamp (see MessageView) */
+    uint64_t         recv_us()        const { return m_.recv_us; }   /* arrival stamp */
+    uint64_t         written_us()        const { return m_.written_us; }   /* source stamp */
 private:
     void bind() { d_ = m_.data; s_ = m_.schema; ok_ = true; }
     detail::DartMsg m_{};
@@ -18935,46 +18791,15 @@ private:
     friend class Topic;
 };
 
-/* =========================================================================== *
- *  DART_SCHEMA reflection + the typed codec.
- *
- *  DART_SCHEMA(T, fields...) (at global scope, after the struct) specializes
- *  dart::reflect<T> with the field list. On first use the codec synthesizes the
- *  schema DSL text from it, compiles it through the C compiler (which stays the
- *  single source of wire truth), and builds a flat copy table. When the struct
- *  is padding-free (every member lands exactly at its wire offset on a
- *  little-endian host) encode/decode are a single memcpy; otherwise a per-field
- *  loop runs. Deliveries whose schema hash differs from ours (a compatible
- *  publisher with more/other fields) rebuild the wire offsets from the incoming
- *  schema and cache the result, so the subset/rebase read stays cheap.
- *
- *  Wire types: sized integers, float/double, bool, T[N] / std::array<U,N> of
- *  those, dart::String<N> (the capped-string wire slot), nested DART_SCHEMA
- *  structs, and the VARIABLE members std::vector<scalar> (`f32[]`-style) and
- *  std::string (unbounded `string`). A variable member rides the message tail as
- *  a length-framed section, so its struct offset never moves a fixed field: the
- *  fixed leaves keep the static copy table, while each tail member is packed and
- *  read through the C accessors by path (which also makes subset/rebase reads
- *  work unchanged). A type with a tail member encodes into scratch (no zero-copy
- *  struct view) and its decode allocates into the member; fixed-only types keep
- *  the memcpy fast path exactly as before. Pointers, maps, std::vector<bool>
- *  (bit-packed), and vectors of structs/strings are refused at compile time
- *  (those shapes belong to the dynamic Schema/MessageBuilder API).
- *
- *  A BARE TYPE needs no DART_SCHEMA: any of those wire types used DIRECTLY as the
- *  handle's T (Publisher<bool>, RemoteVariable<float>, Publisher<std::array<float,3>>,
- *  Subscriber<std::string>, Publisher<std::vector<float>>) is the whole schema,
- *  anonymous, so `bool` (or `f32[]`) from any language is the same wire bytes and
- *  the same hash.
- * =========================================================================== */
+/* The DART_SCHEMA reflection and the typed codec. DART_SCHEMA specializes dart::reflect<T>,
+ * and the codec synthesizes the DSL, compiles it and builds a copy table (docs/cpp.md). */
 
 template <class T> struct reflect;              /* specialized by DART_SCHEMA */
 template <class E> struct reflect_enum;         /* specialized by DART_ENUM */
 template <class U> struct field_tag {};         /* visitor dispatch tag */
 
-/* String<N>: exactly the capped-string wire slot, [u16 live-length][N bytes].
- * assign() refuses (returns false) over capacity, never truncates; view() clamps a
- * hostile length so it can never over-read. */
+/* The capped string wire slot, [u16 live length][N bytes]. assign() refuses over capacity
+ * rather than truncating, view() clamps a hostile length. */
 template <uint16_t N> struct String {
     uint16_t len = 0;
     char     data[N] = {};
@@ -18996,28 +18821,11 @@ template <uint16_t N> struct String {
     bool operator==(std::string_view s) const { return view() == s; }
 };
 
-/* ===========================================================================
- *  STANDARD TYPES (see docs/stdtypes.md and src/serialize/stdtypes.h)
- *
- *  A wire type may carry a NAME, which rides the schema (never a message byte) and
- *  NARROWS matching: a `Celsius` field never binds to a `Fahrenheit` one, while a
- *  reader declaring the bare shape still reads either. The library below pre-names the
- *  types applications keep re-inventing; the names are always in scope in the DSL.
- *
- *      struct Track { dart::Pose at; dart::Uuid id; dart::Timestamp when; };
- *      DART_SCHEMA(Track, at, id, when);          // -> "Track { at: Pose, id: Uuid, ... }"
- *
- *  Each fixed mirror is standard-layout and identical to the wire on a little-endian
- *  target, so the usual memcpy fast path still fires. Give one of YOUR types a wire
- *  name the same way the library does, by specializing std_type (see the two macros
- *  below). Image / VideoFrame carry a variable `data` member (a std::vector<uint8_t>,
- *  a tail frame on the wire), so they encode through the codec's tail path instead of
- *  the memcpy one, and they nest as a member but never as an array element.
- * =========================================================================== */
+/* The standard types (docs/stdtypes.md). A wire name rides the schema and narrows matching.
+ * Each fixed mirror is identical to the wire, so the memcpy path applies. */
 
-/* The naming hook: `name` is the wire type name, and `repr` is void for a type whose
- * shape is a struct (its members are reflected) or the representation type for an ALIAS
- * (`Uuid = u8[16]` reprs as uint8_t[16]). Unspecialized = an ordinary anonymous type. */
+/* The naming hook: name is the wire type name, repr is void for a struct shaped type and the
+ * representation type for an alias. Unspecialized means an ordinary anonymous type. */
 template <class T> struct std_type { static constexpr const char* name = nullptr; using repr = void; };
 
 struct Float2  { float x, y; };
@@ -19040,18 +18848,18 @@ struct Uuid    { uint8_t bytes[16]; };                          /* RFC 4122 byte
 struct Matrix3x3 { float m[9];  };                              /* row-major */
 struct Matrix4x4 { float m[16]; };                              /* row-major */
 struct Uri     { String<256> value; };
-/* microseconds since the Unix epoch, UTC -- the clock Message::written_us is stamped from */
+/* microseconds since the Unix epoch, UTC, the clock Message::written_us uses */
 struct Timestamp { int64_t us = 0; };
 struct Duration  { int64_t us = 0; };
 
-/* The video family (docs/stdtypes.md). The enum values are the wire values;
+/* The video family (docs/stdtypes.md). The enum values are the wire values, and
  * VideoCodec::Unknown is the unstated codec hint. */
 enum class ImageFormat : uint8_t { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12,
                                    Jpeg = 16, Png = 17 };
 enum class VideoCodec : uint8_t { Unknown, Mjpeg, H264, H265, Av1 };
 enum class VideoStreamKind : uint8_t { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
                                        Other = 15 };
-struct Image {                    /* stride = bytes per row; data laid out per `format` */
+struct Image {   /* stride = bytes per row, data laid out per format */
     uint32_t width = 0, height = 0, stride = 0;
     ImageFormat format = ImageFormat::Mono8;
     std::vector<uint8_t> data;
@@ -19063,9 +18871,8 @@ struct VideoFrame {               /* width/height 0 = unstated (the bitstream ru
     Timestamp  pts;               /* presentation time, the Timestamp clock */
     std::vector<uint8_t> data;
 };
-/* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
- * codec/width/height are HINTS for pickers (Unknown/0 = unstated): the stream itself
- * stays authoritative once connected. */
+/* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. codec,
+ * width and height are hints for pickers, the stream stays authoritative once connected. */
 struct ExternalVideoStream {
     VideoStreamKind kind = VideoStreamKind::Rtsp;
     VideoCodec      codec = VideoCodec::Unknown;
@@ -19187,17 +18994,16 @@ template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_da
 template <class U, class = void> struct is_reg_enum : std::false_type {};
 template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_dart_enum>>
     : std::true_type {};
-/* std::string: the unbounded `string` type (a tail frame, not a slot); legal as a
- * member and as a bare root */
+/* std::string: the unbounded string type, a tail frame. Legal as a member and a bare root. */
 template <class U> struct is_var_string : std::is_same<U, std::string> {};
-/* std::vector<E>: the variable array `E[]` (a tail frame); legal as a member and as
- * a bare root. E must be a wire scalar (vector<bool> is bit-packed and refused). */
+/* std::vector<E>: the variable array E[], a tail frame. Legal as a member and a bare root.
+ * E must be a wire scalar, and vector<bool> is bit packed so it is refused. */
 template <class U> struct is_std_vector : std::false_type {};
 template <class E> struct is_std_vector<std::vector<E>> : std::true_type {
     using elem = E;
 };
 
-/* map a C++ scalar type onto the wire kind; -1 = not a wire scalar */
+/* map a C++ scalar type onto the wire kind, -1 = not a wire scalar */
 template <class U> constexpr int scalar_kind_of() {
     if constexpr (std::is_same_v<U, bool>) return (int)detail::DART_BOOL;
     else if constexpr (std::is_integral_v<U>) {
@@ -19232,18 +19038,16 @@ inline bool host_le() {
  * wire, and how to copy it. Arrays are one leaf with count > 1 (per-element strides). */
 struct Leaf {
     uint32_t    struct_off = 0, wire_off = 0;
-    uint8_t     kind = 0;                       /* scalar kind, DART_STR, or (enum) the backing kind */
+    uint8_t     kind = 0;   /* scalar kind, DART_STR, or the enum backing kind */
     uint8_t     is_array = 0;
-    uint8_t     is_enum = 0;                     /* wire kind is ENUM; copies as its backing integer (kind) */
-    uint16_t    count = 1, cap = 0;             /* elements; string capacity */
+    uint8_t     is_enum = 0;   /* wire kind ENUM, copied as its backing integer */
+    uint16_t    count = 1, cap = 0;   /* elements, or the string capacity */
     uint32_t    s_stride = 0, w_stride = 0;     /* per-element byte strides */
     std::string path;                           /* dotted path for by-name offset lookup */
 };
 
-/* one VARIABLE member (std::vector<E> / std::string): a length-framed section on the
- * message tail, reached by dotted path through the C accessors (which own the frame
- * walk, so subset/rebase and hostile-length handling come for free). Member access is
- * type-erased through function pointers bound where the element type is known. */
+/* One variable member, a length framed section on the message tail reached by dotted path
+ * through the C accessors. Access is type erased through function pointers. */
 struct Tail {
     uint32_t    struct_off = 0;
     uint8_t     is_string = 0;                  /* std::string member (VSTR frame) */
@@ -19280,7 +19084,7 @@ template <class E> struct vector_tail {
                      const detail::DartSchema* s, const char* path) {
         std::vector<E>& v = *reinterpret_cast<std::vector<E>*>(m);
         detail::DartBytes view = detail::dart_get_array(msg, s, path);
-        if (!view.data) return false;           /* empty is non-NULL; NULL = mismatch */
+        if (!view.data) return false;   /* empty is non NULL, NULL = mismatch */
         const uint8_t* src = view.data;
         size_t n = view.len / sizeof(E);
         v.resize(n);
@@ -19431,8 +19235,8 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
     if constexpr (scalar_kind_of<U>() >= 0) {
         add_scalar<U>(name, off, 1, false);
     } else if constexpr (std::is_enum_v<U>) {
-        if constexpr (is_reg_enum<U>::value) add_enum<U>(name, off);   /* named options on the wire */
-        else add_scalar<std::underlying_type_t<U>>(name, off, 1, false); /* plain int (no DART_ENUM) */
+        if constexpr (is_reg_enum<U>::value) add_enum<U>(name, off);   /* named options */
+        else add_scalar<std::underlying_type_t<U>>(name, off, 1, false); /* a plain int */
     } else if constexpr (is_dart_string<U>::value) {
         add_string<U>(name, off, 1, false);
     } else if constexpr (std::is_array_v<U>) {
@@ -19492,9 +19296,8 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
     }
 }
 
-/* resolve every leaf's wire offset by dotted-path lookup in a compiled schema,
- * verifying the kinds match. Used on our own schema at registration and on an
- * incoming (publisher-layout) schema for the subset/rebase decode. */
+/* resolve every leaf's wire offset by dotted path in a compiled schema, verifying the kinds.
+ * Used on our own schema at registration and on an incoming one for the rebase decode. */
 inline bool fill_offsets(const detail::DartSchema* s, std::vector<Leaf>& lv) {
     for (Leaf& l : lv) {
         int idx = detail::dart_schema_field_index(s, l.path.c_str());
@@ -19502,7 +19305,7 @@ inline bool fill_offsets(const detail::DartSchema* s, std::vector<Leaf>& lv) {
         detail::DartSchemaFieldInfo fi;
         if (!detail::dart_schema_field_at(s, (uint16_t)idx, &fi)) return false;
         if (l.is_enum) {
-            if (fi.kind != (uint8_t)detail::DART_ENUM || fi.elem != l.kind) return false;  /* same backing width */
+            if (fi.kind != (uint8_t)detail::DART_ENUM || fi.elem != l.kind) return false;
         } else if (l.is_array) {
             if (fi.kind != (uint8_t)detail::DART_ARR || fi.elem != l.kind || fi.count != l.count) return false;
             if (l.kind == (uint8_t)detail::DART_STR && fi.str_cap != l.cap) return false;
@@ -19572,9 +19375,8 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
     }
 }
 
-/* T is a BARE WIRE TYPE: usable as a handle's whole schema with no DART_SCHEMA, since a
- * bare type's identity is its shape. std::string is the unbounded `string` root and
- * std::vector<E> the variable `E[]` root; both ride the tail path (no fixed leaf). */
+/* T is a bare wire type, usable as a handle's whole schema with no DART_SCHEMA. std::string
+ * is the unbounded string root and std::vector<E> the E[] root, both on the tail path. */
 template <class U> constexpr bool is_value_type() {
     return scalar_kind_of<U>() >= 0 || std::is_enum_v<U> || is_dart_string<U>::value
         || is_std_array<U>::value || is_std_vector<U>::value || is_var_string<U>::value;
@@ -19588,16 +19390,14 @@ struct TypeCodec {
     std::optional<Schema>     schema;
     const detail::DartSchema* raw = nullptr;
     uint64_t                  hash = 0;
-    uint32_t                  wire_size = 0;          /* the FIXED section (all of it when no tails) */
+    uint32_t                  wire_size = 0;   /* the fixed section, all of it when no tails */
     uint32_t                  msg_min = 0;            /* fixed section + one empty frame per tail */
     uint32_t                  struct_size = 0;
     std::vector<Leaf>         leaves;
     std::vector<Tail>         tails;                  /* variable members, declaration order */
 
-    /* one incoming schema pointer's resolved offsets. A rebased schema keeps the
-     * SUBSCRIBER's wire (hence its hash) with the PUBLISHER's offsets, so the hash can
-     * never discriminate layouts: offsets are always re-resolved per schema pointer,
-     * and the memcpy fast path fires per pointer when they coincide with the struct. */
+    /* one incoming schema pointer's resolved offsets. A rebased schema keeps our hash with the
+     * publisher's offsets, so offsets are resolved per pointer and never chosen by hash. */
     struct Rebased { std::vector<Leaf> leaves; uint32_t size = 0; bool ok = false, coincide = false; };
     std::mutex                                       mu;
     std::map<const detail::DartSchema*, Rebased>     rebased;
@@ -19673,17 +19473,15 @@ template <class T> TypeCodec& type_codec() {
     return *c;
 }
 
-/* the compiled Schema for T (registers on first use); nullptr if the synthesized
- * DSL failed to compile (a codec bug, surfaced by the handle constructors) */
+/* the compiled Schema for T, registered on first use. nullptr if the synthesized DSL failed
+ * to compile, a codec bug the handle constructors surface */
 template <class T> const Schema* schema_of() {
     TypeCodec& c = type_codec<T>();
     return c.ok ? &*c.schema : nullptr;
 }
 
-/* struct -> wire. The memcpy fast path returns a view of the struct itself (zero
- * copy); otherwise the field loop packs into scratch. A type with tail members sizes
- * scratch to the live payload, writes the frame skeleton (message_default), then the
- * fixed leaves and each tail in declaration order. Empty Bytes = codec invalid. */
+/* struct to wire. The memcpy path returns a view of the struct itself, else the field loop
+ * packs into scratch, tails in declaration order. Empty Bytes = codec invalid. */
 template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return Bytes();
@@ -19709,11 +19507,8 @@ template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
                  detail::dart_schema_msg_len(c.raw, scratch.data(), scratch.size()));
 }
 
-/* wire -> struct. Offsets always come from the delivered schema (deliveries arrive in
- * the PUBLISHER's layout via the subset/rebase reader, and a rebased schema keeps our
- * hash, so the hash can never pick the layout); resolutions are cached per schema
- * pointer, with the memcpy fast path enabled per pointer when that layout coincides
- * with the struct. schema == nullptr assumes our own layout. */
+/* wire to struct. Offsets always come from the delivered schema and are cached per schema
+ * pointer, with the memcpy path when that layout matches. nullptr assumes our own layout. */
 template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* schema) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return false;
@@ -19753,10 +19548,8 @@ template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* sch
 
 }   /* namespace priv */
 
-/* Topic: the untyped dynamic topic (explicit role, Bytes payloads). The typed
- * Publisher<T>/Subscriber<T> sugar is built over it. Handles are thin and non-owning:
- * the topic itself lives in the Node until close. Same-name constructions on one node
- * share the underlying topic slot and the role widens (the node keys topics by name). */
+/* The untyped topic with an explicit role and Bytes payloads, the base of Publisher<T> and
+ * Subscriber<T>. Thin and non owning. Same name constructions share the slot. */
 class Topic {
 public:
     Topic() = default;
@@ -19768,8 +19561,8 @@ public:
     Topic(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
 
     bool valid() const noexcept { return ch_ != nullptr; }
-    /* A reflect_from_mesh topic: re-read the mesh and re-type in place if what it took has
-     * moved (same handle). true = re-typed; false = current, or not a reflect handle. */
+    /* A reflect_from_mesh topic: re read the mesh and re type in place if what it took has
+     * moved. true = re typed, false = current or not a reflect handle. */
     bool refresh() { return ch_ && detail::dart_topic_refresh(ch_) == 1; }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -19783,13 +19576,8 @@ public:
         return static_cast<SendStatus>(
             detail::dart_topic_set_role(ch_, static_cast<detail::DartRole>(r)));
     }
-    /* RETIRE the topic: the lifecycle verb for re-creating a name with a different
-     * schema (a retype). The topic leaves the announce, every lane tears down, and its
-     * slot parks for reuse by a later create, so retire/create cycles never grow the
-     * node. This handle (and every other handle sharing the slot) is INVALID after
-     * SendStatus::Ok; the wrapper's name cache forgets the name, so the next
-     * Topic(node, name, ...) creates fresh (with a new schema if desired). Refused with
-     * SendStatus::State from a callback, for builtin topics, and mid-dispatch. */
+    /* Retire the topic so the name can be re created with another schema (docs/topics.md).
+     * Every handle sharing the slot is invalid after Ok. Refused with State from a callback. */
     SendStatus retire();
     uint16_t index() const {
         if (!ch_) return 0xffff;
@@ -19799,8 +19587,7 @@ public:
         if (!ch_) return 0;
         return detail::dart_topic_match_count(ch_);
     }
-    /* Unresolved candidate matches right now (peers nominated by hash whose verdicts
-     * are still in flight); 0 = matching has converged for everyone currently known. */
+    /* Unresolved candidate matches right now. 0 = matching has converged for every known peer. */
     int pending_count() const {
         if (!ch_) return 0;
         return detail::dart_topic_pending_count(ch_);
@@ -19818,28 +19605,19 @@ public:
         return detail::dart_topic_drain(ch_, timeout_ms) == 1;
     }
 
-    /* ---- consumer queue (take / dispatch) ------------------------------------------
-     * The first take()/dispatch() switches this topic to QUEUED delivery: its
-     * messages then queue instead of firing the node handler on the poll thread, and
-     * exactly one thread of your choosing consumes them here (per topic). The queue
-     * grows on demand to Qos::queue_bytes (0 = 1 MB); at the cap a best-effort topic
-     * overwrites oldest (Event MsgLost), a reliable one backpressures the publisher.
-     * Waiting works everywhere: alongside start()/a poller it sleeps, otherwise it
-     * drives the poll loop itself. */
+    /* The consumer queue. The first take or dispatch switches the topic to queued delivery,
+     * consumed by one thread of your choosing (docs/node.md). */
 
-    /* Pop the next queued message. timeout_ms: 0 = just check, >0 = wait up to that
-     * long, negative = wait indefinitely. Empty optional = nothing arrived in time.
-     *     while (auto msg = scan.take()) render(msg->data()); */
+    /* Pop the next queued message. timeout_ms 0 = just check, positive = wait that long,
+     * negative = wait indefinitely. An empty optional = nothing arrived in time. */
     std::optional<Message<>> take(int timeout_ms = 0) {
         Message<> t;
         if (!ch_ || detail::dart_topic_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
         t.bind();
         return t;
     }
-    /* Drain the queue by running the node's message handler on the CALLING thread,
-     * oldest first: up to max_msgs of those queued at entry (0 = all), waiting up to
-     * timeout_ms for the first like take. Returns messages dispatched. Unlike
-     * poll-thread handlers, these run without the node lock and may use the full API. */
+    /* Drain the queue by running the node's handler on the calling thread, oldest first, up to
+     * max_msgs (0 = all), waiting like take. These handlers run without the node lock. */
     int dispatch(int max_msgs = 0, int timeout_ms = 0) {
         if (!ch_) return 0;
         return detail::dart_topic_dispatch(ch_, max_msgs, timeout_ms);
@@ -19872,9 +19650,8 @@ private:
 
 #ifndef DART_NO_PATTERNS
 
-/* Deferred<Rsp> / Deferred<>: a parked function reply (from Request::defer). Movable,
- * single-shot; complete()/fail() may be called from any thread. Dropping it without
- * completing leaves the caller to its timeout. */
+/* A parked function reply from Request::defer. Movable and single shot, completed from any
+ * thread. Dropping it leaves the caller to its timeout. */
 template <> class Deferred<void> {
 public:
     Deferred() = default;
@@ -19889,8 +19666,8 @@ public:
     bool valid() const noexcept { return fn_ != nullptr && token_ != 0; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* message: optional human-readable outcome text (ResponseView::message on the caller;
-     * truncated at DART_CALL_MSG_MAX). On fail it is what a generic consumer displays. */
+    /* message: optional outcome text, ResponseView::message on the caller, truncated at
+     * DART_CALL_MSG_MAX. On fail it is what a generic consumer displays. */
     bool complete(Bytes rsp = Bytes(), std::string_view message = {}) {
         return finish(detail::DART_CALL_OK, message, rsp);
     }
@@ -19914,28 +19691,24 @@ private:
     template <class R> friend class Request;
 };
 
-/* Request<> (untyped): the request as seen by a function definition's handler. Wraps
- * the exact DartRequest the callback received; views are valid for the callback only.
- * Reply exactly once (reply/fail), or defer() and complete later; returning without
- * replying auto-acks CallStatus::Ok with an empty payload. */
+/* The untyped request seen by a function handler, valid for the callback only. Reply once,
+ * or defer() and complete later. Returning without a reply acknowledges Ok empty. */
 template <> class Request<void> : public FieldView {
 public:
     std::string_view function_name() const { return { rq_->function_name.data, rq_->function_name.len }; }
     uint32_t         caller()        const { return rq_->caller; }
     std::string_view caller_name()   const { return { rq_->caller_name.data, rq_->caller_name.len }; }
     uint64_t         recv_us()       const { return rq_->recv_us; }
-    uint64_t         written_us()       const { return rq_->written_us; }   /* the caller's write stamp */
+    uint64_t         written_us()       const { return rq_->written_us; }   /* the caller's stamp */
 
     void reply(Bytes rsp)       { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
-    /* message: the human-readable failure reason (ResponseView::message on the caller,
-     * truncated at DART_CALL_MSG_MAX; empty = the default "app error"). rsp may still
-     * carry structured failure data beside it. */
+    /* message: the failure text, ResponseView::message on the caller, truncated at
+     * DART_CALL_MSG_MAX. Empty = the default "app error". rsp may carry data beside it. */
     void fail(std::string_view message = {}, Bytes rsp = {}) {
         std::string m(message);
         detail::dart_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
     }
-    /* Park the reply: suppresses the auto-ack and lets the handler return now; the
-     * returned Deferred completes the call later, from any thread. */
+    /* Park the reply and return now. The Deferred completes the call later from any thread. */
     Deferred<> defer() { return Deferred<>(fn_, detail::dart_request_defer(rq_)); }
 
 private:
@@ -19946,16 +19719,8 @@ private:
     template <class A, class B> friend class FunctionDefinition;
 };
 
-/* PendingTask<> / PendingTask<Prg,Rsp>: a deferred task call in flight (from
- * TaskRequest::defer). Movable, single-answer; made to be moved into whatever thread the
- * app owns (the token verbs are thread-safe). progress() broadcasts an update any number
- * of times; complete / fail / complete_cancelled answers exactly once and empties the
- * handle (an emptied or stale handle gets SendStatus::State, never UB). cancelled() polls
- * the caller's cancel request: cancellation is COOPERATIVE, honor it with
- * complete_cancelled or run to completion anyway. Complete or DROP the handle BEFORE
- * retiring the definition (retire answers its call Cancelled and frees what the verbs
- * would reach). Dropping it unanswered leaves a RUNNING caller waiting for cancel or the
- * provider's shutdown. */
+/* A deferred task call in flight from TaskRequest::defer, movable into any thread the app
+ * owns. The verb contract is in docs/cpp.md and docs/tasks.md. */
 template <> class PendingTask<void, void> {
 public:
     PendingTask() = default;
@@ -19986,9 +19751,8 @@ public:
     SendStatus fail(std::string_view message = {}, Bytes rsp = Bytes()) {
         return finish(detail::DART_CALL_APP_ERROR, message, rsp);
     }
-    /* honor a cancel: the caller's terminal status is CallStatus::Cancelled. rsp may
-     * carry a partial result (a stopped recording's file so far), which a function
-     * cannot express. */
+    /* honor a cancel: the caller's terminal status is Cancelled. rsp may carry a partial
+     * result, which a function cannot express. */
     SendStatus complete_cancelled(std::string_view message = {}, Bytes rsp = Bytes()) {
         return finish(detail::DART_CALL_CANCELLED, message, rsp);
     }
@@ -20009,25 +19773,22 @@ private:
     template <class A, class B> friend class TaskRequest;
 };
 
-/* TaskRequest<> (untyped): the request as seen by a task definition's handler; as
- * Request<>, plus the task verbs. Answer inline (reply/fail), or start() + defer() and
- * return: the PendingTask then streams progress and answers from whatever thread the app
- * owns. Returning without reply/fail/defer answers AppError "handler returned no result"
- * (an instant empty OK on a long-running operation would read as success that never ran). */
+/* The untyped request seen by a task handler: Request<> plus the task verbs. Answer inline,
+ * or start() and defer() and return. Returning with nothing answers AppError. */
 template <> class TaskRequest<void, void> : public FieldView {
 public:
     std::string_view task_name()   const { return { rq_->function_name.data, rq_->function_name.len }; }
     uint32_t         caller()      const { return rq_->caller; }
     std::string_view caller_name() const { return { rq_->caller_name.data, rq_->caller_name.len }; }
     uint64_t         recv_us()     const { return rq_->recv_us; }
-    uint64_t         written_us()  const { return rq_->written_us; }   /* the caller's write stamp */
+    uint64_t         written_us()  const { return rq_->written_us; }   /* the caller's stamp */
 
     void reply(Bytes rsp) { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
     void fail(std::string_view message = {}, Bytes rsp = {}) {
         std::string m(message);
         detail::dart_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
     }
-    /* send RUNNING to the caller now (empty, non-terminal); idempotent, defer() implies it */
+    /* send RUNNING to the caller now, idempotent. defer() implies it */
     SendStatus start() { return static_cast<SendStatus>(detail::dart_request_start(rq_)); }
     /* park the call and return now: the returned PendingTask carries it to completion */
     PendingTask<> defer() { return PendingTask<>(fn_, detail::dart_request_defer(rq_)); }
@@ -20040,9 +19801,8 @@ private:
     template <class A, class B, class C> friend class TaskDefinition;
 };
 
-/* Response<> (untyped): an OWNING function-call outcome (from RemoteFunction<>::call);
- * the payload is copied out, so it outlives the call. send_status() carries a
- * synchronous refusal (a negative DartResult) when the call never launched. */
+/* An owning function call outcome from RemoteFunction<>::call. send_status() carries a
+ * synchronous refusal when the call never launched. */
 template <> class Response<void> {
 public:
     Response() = default;
@@ -20050,11 +19810,10 @@ public:
     bool       ok()          const { return st_ == CallStatus::Ok; }
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
-    uint64_t   written_us()     const { return written_; }   /* the provider's write stamp (0 = synthesized) */
+    uint64_t   written_us()     const { return written_; }   /* provider stamp, 0 = synthesized */
     Bytes      data()        const { return { data_.data(), data_.size() }; }
-    /* human-readable outcome text (owned): the provider's message, or default status text
-     * ("timeout", ...) on any answered/synthesized non-OK outcome. Empty on OK with no
-     * message, and on a synchronous send refusal (send_status() carries that). */
+    /* the outcome text, owned: the provider's message or the default status text on any
+     * non OK outcome. Empty on OK with no message and on a synchronous send refusal. */
     std::string_view message() const { return message_; }
     /* the schema data decodes with (interned in the node, valid until node close) */
     const detail::DartSchema* raw_schema() const { return schema_; }
@@ -20078,8 +19837,8 @@ public:
     bool       ok()       const { return r_->status == detail::DART_CALL_OK; }
     uint32_t   provider() const { return r_->provider; }
     uint64_t   written_us()  const { return r_->written_us; }   /* the provider's write stamp */
-    /* human-readable outcome text (a view, callback lifetime): the provider's message, or
-     * default status text on any non-OK outcome; empty only on OK with no message. */
+    /* the outcome text as a view for the callback: the provider's message, else the default
+     * status text. Empty only on OK with no message. */
     std::string_view message() const { return { r_->message.data, r_->message.len }; }
 
 private:
@@ -20090,10 +19849,8 @@ private:
     template <class A, class B, class C> friend class RemoteTask;
 };
 
-/* ProgressView<> (untyped): one progress update handed to a task caller's on_progress;
- * valid for the callback only. The RUNNING acknowledgment fires it once with
- * has_value() == false (zero-length data): field reads are meaningful only when
- * has_value(). */
+/* One progress update for a task caller's on_progress, valid for the callback only. The
+ * RUNNING ack fires it once with has_value() false, and field reads need has_value(). */
 template <> class ProgressView<void> : public FieldView {
 public:
     uint32_t call_id()    const { return p_->call_id; }
@@ -20109,8 +19866,8 @@ private:
 };
 
 namespace priv {
-/* one in-flight async call's callbacks; owned by the registry until the ONE terminal
- * outcome fires (task progress never frees it) */
+/* one in flight async call's callbacks, owned by the registry until the one terminal
+ * outcome fires. Task progress never frees it. */
 struct AsyncBox {
     std::function<void(const ResponseView<>&)> cb;
     std::mutex*                mu;     /* the node Impl's registry lock */
@@ -20128,10 +19885,8 @@ enum MetaSection : uint32_t {
     MetaPeers  = 0x8u    /* per-peer array: id, name, address, match counts */
 };
 
-/* MetaSnapshot: a decoded @dart/meta reply, owned so it outlives the callback. The common
- * "node" and "proc" scalars are pulled out; the full self-describing body (including the
- * topics[] and peers[] arrays) stays in `info` as a MapDict for anything else. Absent
- * sections leave their fields zero (proc.have stays false where unmeasured). */
+/* A decoded @dart/meta reply, owned so it outlives the callback. The node and proc scalars
+ * are pulled out, the full body stays in info as a MapDict. Absent sections leave zeros. */
 struct MetaSnapshot {
     bool       valid    = false;                 /* a CallStatus::Ok reply decoded */
     CallStatus status   = CallStatus::Timeout;
@@ -20215,24 +19970,15 @@ struct MetaSnapshot {
 
 #endif /* !DART_NO_PATTERNS */
 
-/* Node: owns the DartNode, its memory, and the user callbacks.
- *
- * Thread-safe: every call is serialized by a node-level lock inside the C core.
- * Drive it either by calling poll() from your own loop, or via start(): a C-level
- * background service thread owns the loop and handlers then fire on it (never two
- * at once for one node). From inside a handler, send() and read-only queries are
- * allowed; poll/topic create/set_role/drain/stop are refused (SendStatus::State
- * / no-op), never corrupting. */
+/* Owns the DartNode, its memory and the user callbacks. Every call is serialized by the C
+ * node lock. The threading and callback rules are in docs/cpp.md and docs/node.md. */
 class Node {
 public:
     using MessageHandler = std::function<void(const MessageView&)>;
     using EventHandler   = std::function<void(const Event&)>;
 
-    /* Open a node. name = a human-readable label synced via discovery (empty =>
-     * an auto "node-XXXXXXXX"). on_message may be empty ({}: only per-subscriber
-     * handlers and take/dispatch deliver); on_event is REQUIRED so no early
-     * peer/error event is ever missed. Throws dart::Error on failure (with
-     * -fno-exceptions: check valid() and last_open_error()). */
+    /* Open a node. An empty name is auto generated. on_message may be empty, on_event is
+     * required. Throws dart::Error, or under -fno-exceptions check valid(). */
     Node(std::string_view name, MessageHandler on_message,
          EventHandler on_event, const NodeOptions& o = {}) {
         if (!on_event) { priv::raise_msg("dart::Node: an on_event handler is required"); return; }
@@ -20303,14 +20049,14 @@ public:
     Node& operator=(Node&&) noexcept = default;
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
-    ~Node() = default;   /* teardown lives in Impl::~Impl (so a move-assign tears down correctly too);
-                            it stops the service thread and closes with a BYE */
+    ~Node() = default;   /* teardown lives in Impl::~Impl so a move assign tears down too. It stops
+                            the service thread and closes with a BYE */
 
     /* Rebind a handler set at construction. Rarely needed. */
     Node& on_message(MessageHandler h) { if (impl_) impl_->on_msg = std::move(h);   return *this; }
     Node& on_event  (EventHandler   h) { if (impl_ && h) impl_->on_event = std::move(h); return *this; }
 
-    /* Create (or share) a topic; equivalent to the Topic constructor. */
+    /* Create or share a topic, the same as the Topic constructor. */
     Topic create_topic(std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
     Topic create_topic(std::string_view name, Role role = Role::PubSub,
                        const Schema* schema = nullptr, const Qos& qos = {});
@@ -20321,33 +20067,27 @@ public:
         return Topic(detail::dart_node_topic(impl_->node, index), impl_.get());
     }
 
-    /* One loop tick: drives discovery, RX, timers, and flushes queued TX. Blocks
-     * up to timeout_ms in the socket wait (wakes early on RX or a send from another
-     * thread; 0 = non-blocking). Not needed (and refused) while start() runs. */
+    /* One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout_ms in
+     * the socket wait, 0 = non blocking. Refused while start() runs. */
     int poll(int timeout_ms = 0) {
         if (!valid()) return (int)SendStatus::State;
         return detail::dart_node_poll(impl_->node, timeout_ms);
     }
 
-    /* Run the C-level background service thread: it owns the loop and fires the
-     * handlers; every Node/Topic call stays safe from any thread, and a send is
-     * flushed immediately (a waker cuts the service's socket wait short). */
+    /* Run the C service thread. Every call stays safe from any thread and a send wakes it. */
     bool start() { return valid() && detail::dart_node_start(impl_->node) == 0; }
-    /* Stop and join the service thread (idempotent; implied by node teardown). */
+    /* Stop and join the service thread. Idempotent, implied by teardown. */
     void stop()  { if (valid()) detail::dart_node_stop(impl_->node); }
     bool is_started() const { return valid() && detail::dart_node_is_started(impl_->node) == 1; }
 
-    /* Block until discovery + matching settle: everything now sent reaches everyone
-     * already on the network. Call AFTER creating your topics. Most apps never need
-     * it (the per-send match wait covers the same window lazily). timeout_ms < 0 =
-     * 3 announce intervals. Returns true when settled, false on timeout. */
+    /* Block until discovery and matching settle, so everything sent now reaches everyone on
+     * the network. Call after creating the topics. timeout_ms < 0 = 3 announce intervals. */
     bool settle(int timeout_ms = -1) {
         return valid() && detail::dart_node_settle(impl_->node, timeout_ms) == 1;
     }
 
-    /* Dispatch every already-queued topic on the calling thread (see Topic::take/
-     * dispatch): the one-liner for a frame-paced consumer that owns all the queues.
-     * Waits up to timeout_ms for any queued topic to hold data. */
+    /* Dispatch every queued topic on the calling thread, waiting up to timeout_ms for any to
+     * hold data. The one liner for a frame paced consumer. */
     int dispatch(int max_msgs = 0, int timeout_ms = 0) {
         if (!valid()) return 0;
         return detail::dart_node_dispatch(impl_->node, max_msgs, timeout_ms);
@@ -20456,9 +20196,8 @@ public:
         return static_cast<ErrorKind>(detail::dart_last_error(valid() ? impl_->node : nullptr).error);
     }
 
-    /* ---- built-in logs (the @dart/log/{error,warn,info} topics) ---------------------
-     * Publish a line on a level's topic. Already-formatted text (format in your own
-     * code); truncated at DART_LOG_MAX. SendStatus::NoSys when logs are disabled. */
+    /* Publish an already formatted line on a level's built in log topic, truncated at
+     * DART_LOG_MAX. SendStatus::NoSys when logs are disabled. */
     SendStatus log(LogLevel level, std::string_view text) {
         if (!valid()) return SendStatus::State;
         return static_cast<SendStatus>(detail::dart_node_log_text(
@@ -20469,9 +20208,8 @@ public:
     SendStatus log_warn (std::string_view t) { return log(LogLevel::Warn,  t); }
     SendStatus log_info (std::string_view t) { return log(LogLevel::Info,  t); }
 
-    /* printf-style overloads. They preserve the C log API's bounded formatting:
-     * output is truncated at DART_LOG_MAX, and a formatting failure publishes an empty
-     * line. A plain string literal may use either overload and has the same result. */
+    /* printf style overloads with the C log API's bounded formatting: truncated at
+     * DART_LOG_MAX, and a formatting failure publishes an empty line. */
     template <class... Args>
     SendStatus log(LogLevel level, const char* fmt, Args&&... args) {
         if (!valid()) return SendStatus::State;
@@ -20503,11 +20241,8 @@ public:
                      static_cast<detail::DartLogLevel>(level)), impl_.get());
     }
 
-    /* Subscribe to a level's mesh-wide log stream: widens this node's own log handle to
-     * PubSub and delivers every OTHER node's lines at that level (never your own),
-     * decoded to a LogLine. Late-join history (keep_last per writer) replays on match.
-     * The handler fires on the polling thread like any subscription. Returns false when
-     * logs are disabled. Call it once per level from your setup (not from a callback). */
+    /* Subscribe to a level's mesh wide log stream: every other node's lines, decoded to a
+     * LogLine, on the polling thread. Call it once per level from setup. false when disabled. */
     bool on_log(LogLevel level, std::function<void(const LogLine&)> cb) {
         if (!valid() || !cb) return false;
         detail::DartTopic* ch = detail::dart_node_log_topic(
@@ -20537,16 +20272,11 @@ public:
     }
 
 #ifndef DART_NO_PATTERNS
-    /* ---- @dart/meta introspection --------------------------------------------------
-     * The local @dart/meta caller handle. Call it directed at a peer id to fetch that
-     * peer's snapshot, e.g. node.meta().call_async(req, cb, {peer_id}). Invalid when
-     * meta is disabled. Most callers want meta_request. (Defined out-of-line below:
-     * RemoteFunction<> is completed after Node.) */
+    /* The local @dart/meta caller handle, invalid when meta is disabled. Direct it at a peer
+     * id to fetch that peer's snapshot. Most callers want meta_request. */
     RemoteFunction<> meta();
-    /* Fetch a peer's snapshot: directs a @dart/meta call at `peer` and decodes the reply
-     * into an owning MetaSnapshot. Async, so it works under start() (unlike a blocking
-     * call). cb fires once, on the polling thread. sections = OR of MetaSection (0 = all).
-     * Returns the send status of the request. */
+    /* Fetch a peer's snapshot: a directed @dart/meta call decoded into an owning MetaSnapshot.
+     * cb fires once on the polling thread. sections is a MetaSection mask, 0 = all. */
     SendStatus meta_request(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
                             uint32_t sections = 0);
 #endif
@@ -20563,12 +20293,11 @@ private:
         std::string              self_ip;
         std::vector<detail::DartDiscoveryAddr> seeds;
 
-        /* wrapper-level registries. create_mu serializes wrapper-side creates (held
-         * across C create calls; NEVER taken from a callback). reg_mu is a leaf lock
-         * (never call into C while holding it; safe from callbacks). */
+        /* wrapper registries. create_mu serializes wrapper side creates and is never taken from
+         * a callback. reg_mu is a leaf lock, never call into C while holding it. */
         std::mutex               create_mu;
         std::mutex               reg_mu;
-        std::map<std::string, TopicRec, std::less<>> topics;   /* name -> shared slot */
+        std::map<std::string, TopicRec, std::less<>> topics;   /* name to shared slot */
         std::unordered_map<uint16_t,
             std::shared_ptr<const std::vector<MessageHandler>>> sub_handlers;
         std::vector<std::unique_ptr<priv::HandlerBox>> boxes;  /* pattern handler boxes */
@@ -20698,8 +20427,8 @@ private:
     }
 
 
-    /* Parse "ip" or "ip:port" (IPv4) into a locator; port 0 = discovery_port.
-     * Hand-rolled so no locale/CRT scanf (and its MSVC deprecation) is needed. */
+    /* Parse "ip" or "ip:port" into a locator, port 0 = discovery_port. Hand rolled so no
+     * locale bound scanf is needed. */
     static bool parse_addr(const std::string& s, detail::DartDiscoveryAddr& out) {
         unsigned oct[4] = {0}, port = 0;
         size_t i = 0, n = s.size();
@@ -20735,10 +20464,8 @@ private:
     template <class A> friend class Subscriber;
 };
 
-/* Topic constructor: create, or share the same-name slot with a widened role. A LIVE
- * same-name topic with a different schema still refuses (two modules of one process
- * disagreeing about a name is a bug worth surfacing); retire() the old one first to
- * retype a name. */
+/* Create, or share the same name slot with a widened role. A live same name topic with a
+ * different schema refuses, since two modules disagreeing is a bug. retire() first. */
 inline Topic::Topic(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos)
     : Topic(node, name, role, nullptr, qos, /*reflect=*/true) {}
 
@@ -20778,9 +20505,8 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
     impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh });
 }
 
-/* Topic retire (see the declaration): on success the C handle is freed, the name-cache
- * entry and this topic's wrapper subscriptions are forgotten, and this handle (plus any
- * same-name handle sharing the slot) goes invalid. */
+/* Retire: on success the C handle is freed, the name cache entry and this topic's wrapper
+ * subscriptions are forgotten, and every handle sharing the slot goes invalid. */
 inline SendStatus Topic::retire() {
     if (!ch_) return SendStatus::NoTopic;
     Node::Impl* impl = static_cast<Node::Impl*>(impl_);
@@ -20816,10 +20542,8 @@ inline Topic Node::create_topic(std::string_view name, Role role, reflect_from_m
 
 /* ====================== FUNCTIONS (untyped cores) =========================== */
 
-/* FunctionDefinition<> (untyped): the implementation side of a request/response
- * function. Exactly one reply per call; ONE definition per name on the network
- * (a rival fires ErrorKind::DuplicateAuthority on both). Handles are thin and
- * non-owning; the function lives in the Node until close. */
+/* The untyped implementation side of a function. One reply per call, one definition per
+ * name on the network. Thin and non owning, the function lives in the node until close. */
 template <> class FunctionDefinition<void, void> {
 public:
     using Handler = std::function<void(Request<>&)>;
@@ -20873,9 +20597,8 @@ public:
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
     int caller_count() const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
-    /* Retire the definition: park its channels and release the name so a successor can
-     * bind (see dart_function_retire). The handle is empty after; refused (State) from
-     * inside a callback, and the handle then stays valid. */
+    /* Retire the definition: park its channels and release the name for a successor. The
+     * handle is empty after. Refused with State from a callback, and it stays valid then. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
         int rc = detail::dart_function_retire(fn_);
@@ -20915,8 +20638,8 @@ public:
     RemoteFunction(Node& n, std::string_view name, reflect_from_mesh_t, const FunctionOptions& o = {}) {
         init(n, name, nullptr, nullptr, o, true);
     }
-    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed;
-     * outstanding calls are answered Cancelled first). */
+    /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
+     * outstanding calls are answered Cancelled first. */
     bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
 
 private:
@@ -20941,10 +20664,8 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* BLOCKING call: drives the node loop until the response arrives or timeout_ms
-     * elapses (negative = the function's default timeout). Refused (send_status()
-     * == SendStatus::State) from inside a callback or while a service thread owns
-     * this node's loop; use call_async there. */
+    /* Blocking call: drives the node loop until the response or timeout_ms, negative = the
+     * default. Refused with State from a callback or under a service thread, use call_async. */
     Response<> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
         Response<> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
@@ -20966,8 +20687,8 @@ public:
             r.message_.assign(out.message.data, out.message.len);
         return r;
     }
-    /* Async form: returns as soon as the request is committed; on_response fires once
-     * with the outcome (on the polling thread). */
+    /* Async form: returns once the request is committed. on_response fires once with the
+     * outcome on the polling thread. */
     SendStatus call_async(Bytes req, std::function<void(const ResponseView<>&)> on_response,
                           const CallOptions& opts = {}) {
         if (!fn_) return SendStatus::NoTopic;
@@ -20991,10 +20712,8 @@ public:
 
     int  match_count()    const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
     bool has_definition() const { return match_count() > 0; }
-    /* Retire the remote: park its channels and release the name so a successor can bind
-     * (see dart_function_retire); every outstanding call completes with
-     * CallStatus::Cancelled. The handle is empty after; refused (State) from inside a
-     * callback, and the handle then stays valid. */
+    /* Retire the remote: park its channels and release the name. Every outstanding call
+     * completes Cancelled. The handle is empty after. Refused with State from a callback. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
         int rc = detail::dart_function_retire(fn_);
@@ -21058,11 +20777,8 @@ struct TaskCall {
     bool ok() const { return status == SendStatus::Ok; }
 };
 
-/* TaskDefinition<> (untyped): the implementation side of a task (a function with
- * progress and cancellation: the same call ids and statuses, plus a broadcast progress
- * channel and a cancel op). The handler fires on the poll thread and must be quick:
- * answer inline, or start()/defer() and work through the PendingTask from a thread the
- * app owns. ONE definition per name (TaskOptions::multi declares redundant providers). */
+/* The untyped implementation side of a task (docs/tasks.md). The handler fires on the poll
+ * thread and must be quick: answer inline or defer to a PendingTask. One definition per name. */
 template <> class TaskDefinition<void, void, void> {
 public:
     using Handler = std::function<void(TaskRequest<>&)>;
@@ -21124,9 +20840,8 @@ public:
     /* callers currently matched to this definition */
     int caller_count() const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
 
-    /* Cancel notification, one slot (re-register replaces, {} clears): fires on the poll
-     * thread with the cancelled call's defer token, under the usual callback
-     * restrictions. Optional: polling PendingTask::cancelled alone is complete. */
+    /* Cancel notification, one slot, {} clears. Fires on the poll thread with the cancelled
+     * call's defer token. Optional, since polling PendingTask::cancelled is complete alone. */
     void on_cancel(std::function<void(uint64_t token)> h) {
         if (!fn_) return;
         CancelBox* box = nullptr;
@@ -21138,10 +20853,8 @@ public:
         }
     }
 
-    /* Retire the definition (see dart_function_retire): every live deferred call answers
-     * Cancelled first, so a RUNNING caller never hangs. Complete or drop outstanding
-     * PendingTask handles BEFORE retiring. The handle is empty after; refused (State)
-     * from inside a callback, and the handle then stays valid. */
+    /* Retire the definition. Every live deferred call answers Cancelled first, so a RUNNING
+     * caller never hangs. Complete or drop PendingTask handles before. Refused from a callback. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
         int rc = detail::dart_function_retire(fn_);
@@ -21182,11 +20895,8 @@ private:
     template <class A, class B, class C> friend class TaskDefinition;
 };
 
-/* RemoteTask<> (untyped): a reference to a task definition on another node. A task
- * request is always DIRECTED at one provider (CallOptions::provider; 0 = the oldest
- * matched). The per-call timeout bounds only the wait for the FIRST response: once
- * RUNNING (or progress) arrives the task runs as long as it runs, and cancel() is the
- * caller's tool for impatience. */
+/* The untyped reference to a task definition elsewhere. A request is always directed at
+ * one provider. The timeout bounds only the first response, cancel() is the tool after. */
 template <> class RemoteTask<void, void, void> {
 public:
     using ProgressHandler = std::function<void(const ProgressView<>&)>;
@@ -21201,8 +20911,8 @@ public:
     RemoteTask(Node& n, std::string_view name, reflect_from_mesh_t, const TaskOptions& o = {}) {
         init(n, name, nullptr, nullptr, nullptr, o, true);
     }
-    /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed;
-     * outstanding calls are answered Cancelled first). */
+    /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
+     * outstanding calls are answered Cancelled first. */
     bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
 
 private:
@@ -21230,13 +20940,8 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* BLOCKING call: drives the node loop until the terminal outcome. on_progress fires
-     * on THIS thread while it waits, once with has_value() == false for the RUNNING ack
-     * and then per update. timeout_ms (negative = the task's default) bounds only the
-     * wait for the FIRST response. Refused (send_status() == SendStatus::State) from
-     * inside a callback or while a service thread owns this node's loop; use call_async
-     * there. CallOptions::id_out receives the call id at commit, so another thread can
-     * cancel() while this one blocks. */
+    /* Blocking call: drives the loop until the terminal outcome, with on_progress on this
+     * thread. Refused from a callback or under a service thread. id_out allows a cancel(). */
     Response<> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
                     const CallOptions& opts = {}) {
         Response<> r;
@@ -21263,10 +20968,8 @@ public:
             r.message_.assign(out.message.data, out.message.len);
         return r;
     }
-    /* Async form: returns as soon as the request is committed, with the call id for
-     * cancel(). on_progress fires per update and on_response once with the terminal
-     * outcome (both on the polling thread); the per-call state is freed exactly at that
-     * one terminal outcome, which the C guarantees even at retire and close. */
+    /* Async form: returns once committed, with the call id for cancel(). on_progress fires
+     * per update and on_response once, on the polling thread, which frees the call state. */
     TaskCall call_async(Bytes req, ProgressHandler on_progress,
                         std::function<void(const ResponseView<>&)> on_response,
                         const CallOptions& opts = {}) {
@@ -21299,11 +21002,8 @@ public:
         return tc;
     }
 
-    /* Request cancellation of the outstanding call (TaskCall::id / CallOptions::id_out).
-     * Cooperative and never acked: the terminal status is the answer (Cancelled = honored
-     * or never started; a normal outcome = it completed anyway). BadRole when the
-     * provider declared no_cancel (checked locally against its cached attrs, nothing
-     * sent); State when the call is not pending (already answered). */
+    /* Request cancellation of the call. Cooperative and never acked: the terminal status is
+     * the answer. BadRole when the provider declared no_cancel, State when not pending. */
     SendStatus cancel(uint32_t call_id) {
         if (!fn_) return SendStatus::NoTopic;
         return static_cast<SendStatus>(detail::dart_function_cancel(fn_, call_id));
@@ -21311,9 +21011,8 @@ public:
 
     int  match_count()    const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
     bool has_definition() const { return match_count() > 0; }
-    /* Retire the remote (see dart_function_retire): every outstanding call completes with
-     * CallStatus::Cancelled. The handle is empty after; refused (State) from inside a
-     * callback, and the handle then stays valid. */
+    /* Retire the remote. Every outstanding call completes Cancelled. The handle is empty
+     * after, and refused with State from a callback. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
         int rc = detail::dart_function_retire(fn_);
@@ -21437,19 +21136,13 @@ public:
     /* remotes currently matched to this definition */
     int remote_count() const { return var_ ? detail::dart_variable_match_count(var_) : 0; }
 
-    /* Observe this variable. on_change fires only when the observed state actually
-     * changes (the first value, different bytes, or a forced flip), and replays the
-     * current value once at registration so it can never be missed; on_write fires on
-     * every applied write, byte-identical or not. Handlers run inline on the thread
-     * that applied the write (the poll / service thread for anything off the wire),
-     * like a subscriber handler. One handler each; pass {} to clear. */
+    /* Observe. on_change replays the current value at registration and fires on every state
+     * change, on_write on every applied write, both inline on the applying thread. {} clears. */
     void on_change(std::function<void(const VariableUpdate&)> h) { observe(std::move(h), true); }
     void on_write (std::function<void(const VariableUpdate&)> h) { observe(std::move(h), false); }
 
-    /* Retire the handle: park its channels and release the name so a successor can bind
-     * (see dart_variable_retire; without it a re-created same-name handle is silently
-     * shadowed by the live twin). The handle is empty after; refused (State) from inside
-     * a callback, and the handle then stays valid. */
+    /* Retire the handle: park its channels and release the name, else a re created same name
+     * handle is shadowed by the live twin. Empty after, refused with State from a callback. */
     SendStatus retire() {
         if (!var_) return SendStatus::NoTopic;
         int rc = detail::dart_variable_retire(var_);
@@ -21510,8 +21203,8 @@ protected:
     template <class A> friend class VariableDefinition;
 };
 
-/* RemoteVariable<> (untyped): the value lives on another node; reads see the cached
- * latest, writes go over the set channel (dumb writes, no response). */
+/* The untyped accessor of a value owned elsewhere: reads see the cached latest, writes go
+ * over the set channel with no response. */
 template <> class RemoteVariable<void> : public VariableDefinition<void> {
 public:
     RemoteVariable() = default;
@@ -21558,8 +21251,8 @@ private:
     Topic t_;
 };
 
-/* Subscriber<> (untyped): the subscribe-side handle. A handler fires per message on
- * the polling thread; or consume via take()/dispatch() on a thread of your choosing. */
+/* The untyped subscribe side. A handler fires per message on the polling thread, or
+ * consume with take() and dispatch() on a thread of your choosing. */
 template <> class Subscriber<void> {
 public:
     Subscriber() = default;
@@ -21594,10 +21287,8 @@ private:
     template <class A> friend class Subscriber;
 };
 
-/* =========================================================================== *
- *  Typed sugar: thin template layers over the untyped cores, using the
- *  DART_SCHEMA codec for the payloads. All handles stay thin and non-owning.
- * =========================================================================== */
+/* Typed sugar: thin template layers over the untyped cores using the DART_SCHEMA codec.
+ * Every handle stays thin and non owning. */
 
 /* Message<T>: an owning taken message (decoded value + copied envelope). */
 template <class T> class Message {
@@ -21623,8 +21314,8 @@ private:
 
 #ifndef DART_NO_PATTERNS
 
-/* Request<Rsp>: the typed view of a request inside a full-form function handler.
- * Wraps the untyped Request<> (reference; callback lifetime) and adds the typed reply. */
+/* The typed view of a request inside a full form function handler. Wraps the untyped
+ * Request<> for the callback lifetime and adds the typed reply. */
 template <class Rsp> class Request {
 public:
     explicit Request(Request<>& core) : core_(core) {}
@@ -21690,7 +21381,7 @@ private:
     template <class A, class B, class C> friend class RemoteTask;
 };
 
-/* ResponseView<Rsp>: the typed async outcome; valid for the callback. */
+/* The typed async outcome, valid for the callback. */
 template <class Rsp> class ResponseView {
 public:
     CallStatus status()     const { return st_; }
@@ -21713,10 +21404,8 @@ private:
     template <class A, class B, class C> friend class RemoteTask;
 };
 
-/* FunctionDefinition<Req,Rsp>: the typed implementation side. Two handler forms:
- *   Rsp(const Req&)                       simple: the return value is the reply
- *   void(const Req&, Request<Rsp>&)       full: reply/fail/defer explicitly
- * A handler that throws answers CallStatus::AppError (never unwinds into the C). */
+/* The typed implementation side. Handler forms: Rsp(const Req&), the return value is the
+ * reply, or void(const Req&, Request<Rsp>&). A throwing handler answers AppError. */
 template <class Req, class Rsp> class FunctionDefinition {
 public:
     FunctionDefinition() = default;
@@ -21776,7 +21465,7 @@ public:
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* BLOCKING call (see RemoteFunction<>::call); decodes into the owning Response. */
+    /* Blocking call, see RemoteFunction<>::call. Decodes into the owning Response. */
     Response<Rsp> call(const Req& req, int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         Response<> ur = core_.call(priv::encode(req, s), timeout_ms, opts);
@@ -21808,8 +21497,8 @@ private:
     RemoteFunction<> core_;
 };
 
-/* TaskRequest<Prg,Rsp>: the typed view of a request inside a task handler. Wraps the
- * untyped TaskRequest<> (reference; callback lifetime) and adds the typed verbs. */
+/* The typed view of a request inside a task handler. Wraps the untyped TaskRequest<> for
+ * the callback lifetime and adds the typed verbs. */
 template <class Prg, class Rsp> class TaskRequest {
 public:
     explicit TaskRequest(TaskRequest<>& core) : core_(core) {}
@@ -21864,8 +21553,8 @@ private:
     PendingTask<> core_;
 };
 
-/* ProgressView<Prg>: the typed progress update; valid for the callback. value() is
- * meaningful only when has_value() (the RUNNING ack carries none). */
+/* The typed progress update, valid for the callback. value() is meaningful only when
+ * has_value(), the RUNNING ack carries none. */
 template <class Prg> class ProgressView {
 public:
     uint32_t call_id()    const { return call_id_; }
@@ -21886,9 +21575,8 @@ private:
     template <class A, class B, class C> friend class RemoteTask;
 };
 
-/* TaskDefinition<Req,Prg,Rsp>: the typed implementation side. Handler form:
- *   void(const Req&, TaskRequest<Prg,Rsp>&)     reply/fail inline, or start()/defer()
- * A handler that throws answers CallStatus::AppError (never unwinds into the C). */
+/* The typed implementation side. Handler form: void(const Req&, TaskRequest<Prg,Rsp>&),
+ * answering inline or through start() and defer(). A throwing handler answers AppError. */
 template <class Req, class Prg, class Rsp> class TaskDefinition {
 public:
     TaskDefinition() = default;
@@ -21937,7 +21625,7 @@ public:
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* BLOCKING call (see RemoteTask<>::call); on_progress fires typed while it waits. */
+    /* Blocking call, see RemoteTask<>::call. on_progress fires typed while it waits. */
     Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
                        int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
@@ -22018,8 +21706,8 @@ public:
     bool forced()          const { return core_.forced(); }
     int  remote_count()    const { return core_.remote_count(); }
 
-    /* Observe (see the untyped core for the change/write contract). Handler forms:
-     * void(const T&) or void(const T&, const VariableUpdate&); nullptr clears. */
+    /* Observe, see the untyped core for the contract. Handler forms: void(const T&) or
+     * void(const T&, const VariableUpdate&). nullptr clears. */
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
@@ -22077,8 +21765,8 @@ public:
     bool has_definition()  const { return core_.has_definition(); }
     int  match_count()     const { return core_.match_count(); }
 
-    /* Observe (see the untyped core for the change/write contract). Handler forms:
-     * void(const T&) or void(const T&, const VariableUpdate&); nullptr clears. */
+    /* Observe, see the untyped core for the contract. Handler forms: void(const T&) or
+     * void(const T&, const VariableUpdate&). nullptr clears. */
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
@@ -22134,8 +21822,8 @@ private:
     Publisher<> core_;
 };
 
-/* Subscriber<T>: the typed subscribe side. Handler forms: void(const T&) or
- * void(const T&, const MessageView&); or consume with the typed take(). */
+/* The typed subscribe side. Handler forms: void(const T&) or void(const T&, const
+ * MessageView&), or consume with the typed take(). */
 template <class T> class Subscriber {
 public:
     Subscriber() = default;
@@ -22191,15 +21879,8 @@ private:
 
 }   /* namespace dart */
 
-/* ---- DART_SCHEMA(T, fields...): reflect a struct for the typed codec -------------
- * Invoke at GLOBAL scope (or any namespace enclosing ::dart), after the struct
- * definition, listing up to 64 non-static data members in wire order:
- *
- *     struct Pose { double x, y; dart::String<16> frame; };
- *     DART_SCHEMA(Pose, x, y, frame);
- *
- * The schema's wire name is the type name with namespace qualifiers stripped, so
- * matching structs in different namespaces (or languages) interoperate. */
+/* DART_SCHEMA(T, fields...): reflect a struct for the typed codec. Invoke at global scope
+ * after the struct with up to 64 members in wire order (docs/cpp.md). */
 #define DART_PP_EXPAND(x) x
 #define DART_PP_CAT2(a, b) a##b
 #define DART_PP_CAT(a, b) DART_PP_CAT2(a, b)
@@ -22294,16 +21975,8 @@ private:
         } \
     }
 
-/* ---- DART_ENUM(E, options...): register a C++ `enum class` so a member of it ships as a
- * NAMED integer (wire kind `enum<uN>`, N the enum's underlying type) instead of a bare int.
- * Invoke at global scope after the enum, listing its enumerators; the wire value of each is
- * the enum's own value, so two ends agree without repeating numbers:
- *
- *     enum class Mode : uint8_t { Idle, Running, Fault };
- *     DART_ENUM(Mode, Idle, Running, Fault);
- *
- * An enum member WITHOUT a DART_ENUM still works, shipping as its plain backing integer (so
- * it cross-matches an `enum<uN>` only by width, not name). */
+/* DART_ENUM(E, options...): register an enum class so a member ships as a named enum<uN>
+ * with these enumerators. An unregistered enum ships as its backing integer. */
 #define DART_ENUM_ITEM(E, x) dart_v((int64_t)(E::x), #x);
 #define DART_ENUM(E, ...) \
     template <> struct dart::reflect_enum<E> { \
@@ -22315,9 +21988,8 @@ private:
         } \
     }
 
-/* ---- the standard type registrations (global scope: they specialize dart::reflect and
- * dart::std_type). Each mirror declared near the top of this header gets its wire NAME
- * here, so a member of one spells as `at: Pose` and matches only a Pose. */
+/* The standard type registrations at global scope: each mirror gets its wire name here,
+ * so a member spells as at: Pose and matches only a Pose. */
 DART_STD_STRUCT(Float2);   DART_STD_STRUCT(Float3);   DART_STD_STRUCT(Float4);
 DART_STD_STRUCT(Double2);  DART_STD_STRUCT(Double3);  DART_STD_STRUCT(Double4);
 DART_STD_STRUCT(Int2);     DART_STD_STRUCT(Int3);     DART_STD_STRUCT(Int4);

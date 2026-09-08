@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Assemble the UPM package tree (package.json + README.md + Runtime/) that CI force-pushes to
-# the `upm` branch for git-URL install. A git-URL package lands in Unity's IMMUTABLE package
-# cache, where Unity will NOT synthesize .meta files, so every file and folder must already
-# carry one or the asset is ignored. This walks the assembled tree and writes a .meta per
-# entry, importer chosen by extension, GUID = md5(package-relative path) so upgrades keep
-# their references. Run pack.sh first (stages Dart.cs + native libs into Runtime/).
-# Usage: mk-upm.sh <outdir>
+# Assemble the UPM package tree CI pushes to the upm branch. Unity's immutable package
+# cache synthesizes no .meta files, so every entry gets one here. Usage: mk-upm.sh <outdir>
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/metas.sh"                                    # guid() + the .meta bodies

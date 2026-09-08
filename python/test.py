@@ -1,12 +1,5 @@
-"""DART Python test: two nodes, reliable typed pub/sub, on one host.
-
-Exercises the compile-on-import path, discovery/match, and schema reflection
-(encode a Python object on one node, decode it back on the other), including
-capped strings and string arrays. Exit 0 = the message crossed and decoded to
-the expected values.
-
-    python python/test.py
-"""
+"""The Python binding test: two nodes on one host over reliable typed pub sub, the
+patterns and the standard types. Exit 0 = pass (spec/testing.md)."""
 import enum as _enum
 import os
 import sys
@@ -23,7 +16,7 @@ DOMAIN = 42
 IFACE = "127.0.0.1"   # pin discovery to loopback for a single-host run
 
 
-# Any annotated class is a schema (no decorator); @dataclass just gives a handy ctor.
+# any annotated class is a schema, @dataclass just gives a handy constructor
 @dataclass
 class Twist:
     dx: dart.f32 = 0.0
@@ -54,7 +47,7 @@ class Sensor:
 
 
 def round_trip():
-    """Encode -> decode round-trip of the variable kinds (no networking)."""
+    """Encode and decode round trip of the variable kinds, no networking."""
     ok = True
 
     def check(name, cond):
@@ -113,10 +106,8 @@ HASH_FLOAT3 = 0x04AA9469CD08B1DD
 
 @dataclass
 class Track:
-    """Standard types as ordinary annotations: an ALIAS (Timestamp, Uuid) spells as its
-    name and carries plain int/bytes values; a COMPOSITE (Pose, Color) is a shipped
-    dataclass that names itself. Both NARROW matching, so this never binds to a
-    same-shaped schema that meant something else."""
+    """Standard types as ordinary annotations: an alias spells as its name and carries a
+        plain value, a composite is a shipped dataclass. Both narrow matching."""
     at: dart.Pose = field(default_factory=dart.Pose)
     when: dart.Timestamp = 0
     tag: dart.Color = field(default_factory=dart.Color)
@@ -380,8 +371,8 @@ def patterns():
     cli = dart.Node("cli", None, on_event("cli"),
                     domain=43, multicast_interface=IFACE, max_topics=32)
 
-    # definitions on srv: simple form (return = reply), a raiser (-> APP_ERROR),
-    # and a full form that defers and completes off-thread
+    # definitions on srv: the simple form, a raiser giving APP_ERROR, and a full form that
+    # defers and completes off thread
     add = dart.FunctionDefinition[AddReq, AddRsp](srv, "add",
                                                   lambda q: AddRsp(sum=q.a + q.b))
 
@@ -397,7 +388,7 @@ def patterns():
     lvl_def = dart.VariableDefinition[Level](srv, "level", initial=Level(value=5),
                                              allow_force=True)
 
-    srv.start()   # service thread owns srv's loop; handlers fire on it
+    srv.start()   # the service thread owns srv's loop, handlers fire on it
 
     # remotes on cli (manual poll: blocking calls drive cli's loop themselves)
     add_r = dart.RemoteFunction[AddReq, AddRsp](cli, "add")
@@ -444,7 +435,7 @@ def patterns():
     check("set round-trips to the remote", lvl.get().value == 9)
     check("definition applied it", lvl_def.get().value == 9)
 
-    # force overrides with a shadow source; unforce restores the latest set
+    # force overrides with a shadow source, unforce restores the latest set
     check("force", lvl_def.force(Level(value=99)) == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
@@ -572,7 +563,7 @@ def tasks():
         dart.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "rigid", _rigid,
                                                     no_cancel=True)
 
-        srv.start()   # service thread owns srv's loop; workers spawn off it
+        srv.start()   # the service thread owns srv's loop, workers spawn off it
 
         work_r = dart.RemoteTask[JobReq, JobPrg, JobRsp](cli, "work")
         grind_r = dart.RemoteTask[JobReq, JobPrg, JobRsp](cli, "grind")
@@ -720,8 +711,8 @@ def main():
         except dart.SchemaError:
             print("PASS: over-cap string refused")
 
-    # Threaded: both nodes on their C-level service threads; send from this thread,
-    # delivery arrives with no poll() anywhere.
+    # threaded: both nodes on their service threads, sent from this thread, delivered
+    # with no poll() anywhere
     if ok:
         if not pub.start() or not sub.start():
             print("FAIL: start")

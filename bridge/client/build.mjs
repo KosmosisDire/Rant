@@ -1,10 +1,5 @@
-/* Build the JS client distributables from dart.ts (committed like the rest of dist/):
- *   dist/dart.mjs   ES module (pure type stripping by tsc)
- *   dist/dart.d.ts  type declarations
- *   dist/dart.js    classic-script twin: the export block replaced with ONE global
- *                   (globalThis.DartNode), for a plain <script src> tag
- * Run standalone:  node bridge/client/build.mjs      (needs node + npx; tsc pinned 5.5)
- * Or via CMake:    cmake -DDART_BUILD_JS_CLIENT=ON ... */
+/* Build the JS client distributables from dart.ts into dist/: dart.mjs by pure type
+ * stripping, dart.d.ts, and dart.js as the classic script twin with one global. */
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

@@ -12,7 +12,15 @@ Linux: rt) plus Threads.
   packer strips `\r` after read so its logic is deterministic, and `.gitattributes` pins
   every text file to LF so the committed headers do not churn between machines.
 - The packer strips local `#include "..."` lines with a newline anchored regex, so an
-  include inside a comment or string is never touched.
+  include inside a comment or string is never touched. Each source file is wrapped in
+  `#pragma region` markers so editors fold it, with `-Wunknown-pragmas` silenced on GCC.
+- `tools/static_runtime.cmake` links the C and C++ runtime statically so a copied binary
+  runs with no redistributable. MSVC's default `/MD` needs VCRUNTIME140.dll and the debug
+  runtime ships only with Visual Studio, which is the "vcruntime dll not found" a copied
+  explorer hits. It must be included before any target or FetchContent subproject so every
+  object agrees on one runtime, and it forces policy CMP0091 NEW because vendored freetype
+  asks for cmake 3.0 and would otherwise build `/MD` from the legacy flags. MinGW takes a
+  full `-static`, other GNU toolchains static libgcc and libstdc++ with glibc shared.
 - `CMakePresets.json` has `windows` and `linux` configure presets, both with the explorer
   on and `binaryDir` `build`. The Windows preset pins no generator and no architecture so
   it works with any installed Visual Studio. Build presets `windows` and `linux` pin

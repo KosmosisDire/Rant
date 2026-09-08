@@ -1,9 +1,5 @@
-// DART C# test: two nodes, reliable typed pub/sub, on one host, plus pattern legs
-// (functions, variables, tasks). Exercises discovery/match, schema
-// reflection (capped strings, string arrays, maps), the consumer surface, and the
-// typed pattern handles. Exit 0 = all legs passed.
-//
-//   dotnet run --project csharp/test
+// The C# binding test: two nodes on one host over reliable typed pub sub, the consumer
+// surface and the pattern legs. Exit 0 = pass (spec/testing.md).
 
 using System;
 using System.Collections.Generic;
@@ -61,7 +57,7 @@ static class Program
     static readonly ManualResetEventSlim Got = new ManualResetEventSlim(false);
     static DartMessage Received;
 
-    // Encode -> decode round-trip of the v4 variable kinds (no networking).
+    // Encode and decode round trip of the variable kinds, no networking.
     static bool RoundTrip()
     {
         bool ok = true;
@@ -116,8 +112,8 @@ static class Program
         Check("empty labels", o2.Labels != null && o2.Labels.Length == 0);
         Check("empty map", o2.Extras != null && o2.Extras.Count == 0);
 
-        // decode-to-dict (the reflection path bridges/observers use) must surface the
-        // new kinds too: variable string -> string, variable array -> typed array, map -> dict
+        // decode to dict, the reflection path bridges and observers use, must surface the
+        // variable kinds too: a string, a typed array and a dictionary
         var fd = s.DecodeFields(raw);
         Check("fields note", (string)fd["Note"] == src.Note);
         Check("fields samples", fd["Samples"] is float[] fs && fs.Length == 3);
@@ -164,8 +160,8 @@ static class Program
         var cli = new DartNode("cli", null, e => Console.WriteLine("event(cli): " + e),
                            domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
 
-        // definitions on srv: simple form (return = reply), a thrower (-> AppError),
-        // and a full form that defers off-thread
+        // definitions on srv: the simple form, a thrower giving AppError, and a full form that
+        // defers off thread
         var add = new FunctionDefinition<AddReq, AddRsp>(srv, "add",
             q => new AddRsp { Sum = q.A + q.B });
         var boom = new FunctionDefinition<AddReq, AddRsp>(srv, "boom",
@@ -182,7 +178,7 @@ static class Program
         var lvlDef = new VariableDefinition<Level>(srv, "level", new Level { Value = 5 },
                                                    allowForce: true);
 
-        srv.Start();   // service thread owns srv's loop; handlers fire on it
+        srv.Start();   // the service thread owns srv's loop, handlers fire on it
 
         // remotes on cli (manual poll: blocking calls drive cli's loop themselves)
         var addR = new RemoteFunction<AddReq, AddRsp>(cli, "add");
@@ -223,7 +219,7 @@ static class Program
         Check("set round-trips to the remote", lvl.Value.Value == 9);
         Check("definition applied it", lvlDef.Value.Value == 9);
 
-        // force overrides with a shadow source; unforce restores the latest set
+        // force overrides with a shadow source, unforce restores the latest set
         Check("force", lvlDef.Force(new Level { Value = 99 }) == SendStatus.Ok);
         deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 99)) cli.Poll(5);
@@ -428,9 +424,8 @@ static class Program
     const ulong HashVideoFrame = 0xf677bd147b513fbcUL;
     const ulong HashExternalVideoStream = 0xaae502077016ac13UL;
 
-    // Standard types as ordinary fields: an ALIAS (Timestamp, Uuid) names a plain field's
-    // TYPE, a COMPOSITE (Pose, Color) is a shipped mirror struct that names itself. Both
-    // NARROW matching, so this never binds to a same-shaped schema that meant something else.
+    // Standard types as ordinary fields: an alias names a plain field's type, a composite is
+    // a shipped mirror struct that names itself. Both narrow matching.
     struct Track
     {
         [DartField("at")]   public Dart.Pose At;
@@ -783,8 +778,8 @@ static class Program
             catch (SchemaException) { Console.WriteLine("PASS: over-cap string refused"); }
         }
 
-        // Threaded: both nodes on their C-level service threads; send from this thread,
-        // delivery arrives with no Poll() anywhere.
+        // threaded: both nodes on their service threads, sent from this thread, delivered with
+        // no Poll() anywhere
         if (ok)
         {
             if (!pub.Start() || !sub.Start()) { Console.WriteLine("FAIL: Start"); ok = false; }

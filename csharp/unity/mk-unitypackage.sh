@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Build a .unitypackage from the assembled Runtime/ (Dart.cs + native plugins) WITHOUT a
-# Unity install: it fabricates the deterministic GUID + .meta entries and the tar layout
-# a .unitypackage uses. Run pack.sh first (copies Dart.cs + built libs into Runtime/).
-# Imports into Assets/Dart/. Native plugins are marked "Any platform" so DllImport("dart")
-# loads dart.dll / libdart.so by name per OS. Usage: mk-unitypackage.sh <out.unitypackage>
+# Build a .unitypackage from the assembled Runtime/ without a Unity install: it fabricates
+# the GUIDs, .meta entries and tar layout. Run pack.sh first. Usage: mk-unitypackage.sh <out>
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/metas.sh"                                    # guid() + the .meta bodies

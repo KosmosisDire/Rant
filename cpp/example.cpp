@@ -1,35 +1,16 @@
-/* Minimal C++ node demo over the dart.hpp wrapper. Mirrors examples/example.c
- * but with the OOP API: construct a node, declare a typed "chat" topic, run a
- * background poller, and pub/sub short text lines.
- *
- * Run two copies (optionally with a name):  ./example alice   /   ./example bob
- * Type a line to publish it; lines from peers print as they arrive. Ctrl-D/Z quits.
- *
- * Build (pure C++: the implementation anchor is dart_impl.cpp, no C compiler):
- *   Windows (MinGW):
- *     g++ -std=c++17 -Icpp -Idist cpp/example.cpp cpp/dart_impl.cpp \
- *         -o example.exe -lws2_32 -lbcrypt -lwinmm
- *   POSIX:
- *     g++ -std=c++17 -Icpp -Idist cpp/example.cpp cpp/dart_impl.cpp \
- *         -o example -lrt -lpthread
- * (Consumers of the shipped dist/dart.hpp need only -Idist and that one file.)
- */
+/* A minimal chat node over dart.hpp, the C++ twin of examples/example.c. Run two copies
+ * with a name each and type lines. docs/cpp.md has the build lines. */
 #include "dart.hpp"
 
 #include <cstdio>
 #include <string>
 
-/* A tiny typed schema so deliveries decode through DartMsg.schema. Every node
- * that speaks this topic pastes the identical text.
- *
- * `Timestamp` and `Color` are STANDARD TYPES (docs/stdtypes.md): always in scope, no
- * definition needed. The name rides the schema (never a message byte) and NARROWS
- * matching, so `tint` binds only to another Color and `ts` reads as Unix-epoch
- * microseconds everywhere, not as an anonymous u64 someone has to document. */
+/* A tiny typed schema pasted by every node on the topic. Timestamp and Color are standard
+ * types (docs/stdtypes.md), so their names narrow matching and need no definition. */
 static const char CHAT_SCHEMA[] =
     "Chat"
     "{"
-    "    ts:      Timestamp,"     /* Unix-epoch microseconds, UTC */
+    "    ts:      Timestamp,"     /* Unix epoch microseconds, UTC */
     "    seq:     u32,"
     "    tint:    Color,"         /* sRGB RGBA bytes */
     "    textLen: u16,"
@@ -41,10 +22,10 @@ static void handle_message(const dart::MessageView& m) {
     if (m.has_schema()) {
         dart::Bytes text = m.get_array("text");
         uint64_t n = m.get_uint("textLen");
-        int64_t ts = m.get_int("ts");        /* a Timestamp: Unix-epoch microseconds */
+        int64_t ts = m.get_int("ts");        /* a Timestamp: Unix epoch microseconds */
         if (n > text.size()) n = text.size();
-        /* both clocks count the same microseconds, so this is one-way latency plus
-           clock skew (meaningful on one host, skew-bound across machines) */
+        /* both clocks count the same microseconds, so this is one way latency plus
+           clock skew: meaningful on one host, skew bound across machines */
         std::printf("[%.*s] %.*s > %.*s  (#%llu, +%.2f ms)\n",
                     (int)m.publisher_name().size(),  m.publisher_name().data(),
                     (int)m.topic_name().size(), m.topic_name().data(),
@@ -79,7 +60,7 @@ int main(int argc, char** argv) {
 
     dart::Topic chat(node, "chat", dart::Role::PubSub, &*schema,
                      { dart::Reliability::Reliable });
-    node.start();   /* background poll thread; sends/creates are now thread-safe */
+    node.start();   /* background poll thread. Sends and creates are thread safe now */
 
     std::printf("typed chat on topic 'chat'. type a line to publish; ctrl-d/z to quit.\n");
 

@@ -1,45 +1,5 @@
-// DART C# wrapper: a thin P/Invoke layer over the prebuilt native library.
-//
-// DART = Discovery And Realtime Transport, a dependency-free C99 middleware.
-// The API mirrors the C++/Python wrappers (DartNode / Topic / Schema / Qos ...),
-// is IL2CPP-safe (static callbacks dispatched by id, blittable structs), and
-// P/Invokes a native library named "dart" (dart.dll / libdart.so / libdart.dylib):
-//
-//   - Plain .NET: get it from the NuGet package (bundled under runtimes/<rid>/native/)
-//     or place it next to the assembly. Build it with csharp/native/build.{ps1,sh}.
-//   - Unity (UNITY_5_3_OR_NEWER): the same native library, placed in Assets/Plugins;
-//     the only Unity-specific bit is [MonoPInvokeCallback] on the callbacks (AOT).
-//
-//   struct Pose { public double X; [DartString(16)] public string Frame; }
-//
-//   var node = new Dart.DartNode("robot1",
-//                            onMessage: m => Console.WriteLine(m.Value),  // decoded Pose for a typed topic
-//                            onEvent: e => Console.Error.WriteLine(e));   // wired up before the ctor returns
-//   var ch = new Dart.Topic<Pose>(node, "pose", reliable: true);
-//   node.Start();                                      // C-level service thread owns the loop
-//   ch.Send(new Pose { X = 1, Frame = "map" });        // thread-safe from any thread
-//
-// All optional configuration is named parameters (there are no options classes).
-// Beyond plain topics, the patterns layer is bound too: FunctionDefinition /
-// RemoteFunction (request/response), TaskDefinition / RemoteTask (a function with
-// progress and cancellation: async handlers, IProgress + CancellationToken on the
-// caller), VariableDefinition / RemoteVariable (replicated state, one owner), and
-// Publisher/Subscriber (side-named topic handles); each has an untyped (Schema +
-// byte[]) core and a typed generic layered on it.
-//
-// Schemas come straight from the type: public fields become the wire fields, in
-// declaration order. [DartArray(n)] fixes an array's element count, [DartString(cap)]
-// fixes a string's byte capacity, [DartField("name")] overrides a wire name, and
-// [DartSchema("Name")] optionally overrides the wire type name (the class name by
-// default). Nested structs/classes just work.
-//
-// Threading: every DartNode/Topic call is thread-safe (a node-level lock in the C
-// core serializes them). Drive a node either with Start() (a C background service
-// thread runs the loop; handlers fire on it, never two at once) or by calling
-// Poll() from your own loop (Unity: Poll(0) from Update() keeps handlers on the
-// main thread). From inside OnMessage/OnEvent, Topic.Send and read-only
-// queries are allowed; Poll/topic create/SetRole/Drain/Start/Stop/Close are
-// refused (SendStatus.State / exception), never corrupting.
+// The C# wrapper: a P/Invoke layer over the prebuilt native library, IL2CPP safe with
+// static callbacks dispatched by id. docs/csharp.md explains how to use it.
 
 using System;
 using System.Collections.Generic;
@@ -56,8 +16,8 @@ using MonoPInvokeCallbackAttribute = AOT.MonoPInvokeCallbackAttribute;
 namespace Dart
 {
 #if !UNITY_5_3_OR_NEWER
-    // Off Unity we synthesize this attribute; it is a no-op but keeps the callback
-    // methods annotated identically to the Unity/IL2CPP build.
+    // Off Unity this attribute is synthesized as a no op, so the callback methods stay
+    // annotated identically to the Unity IL2CPP build.
     [AttributeUsage(AttributeTargets.Method)]
     internal sealed class MonoPInvokeCallbackAttribute : Attribute
     {
@@ -79,8 +39,7 @@ namespace Dart
         PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
     }
 
-    // The specific error carried by an EventKind.Error event (DartEvent.Error / DartNode.LastError).
-    // Mirrors DartErrorKind in node/core.h.
+    // The error carried by an EventKind.Error event, DartEvent.Error and DartNode.LastError.
     public enum ErrorKind
     {
         None = 0,
@@ -90,19 +49,16 @@ namespace Dart
         Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
     }
 
-    // Schema field kinds for reflection; the value IS the wire kind byte. Array/String
-    // are FIXED (offset-based); VString/VArray/Map ride the message tail. Named is a
-    // nominal tag on another type -- reflection unwraps it into Field.TypeName, so a
-    // field never reports Named as its own Kind.
+    // Schema field kinds for reflection, the value is the wire kind byte. Named is a nominal
+    // tag reflection unwraps into Field.TypeName, so a field never reports it as its Kind.
     public enum FieldType : byte
     {
         U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
         VString, VArray, Map, Enum, Named
     }
 
-    // A call's outcome. Ok/AppError/NoHandler/Cancelled/Running travel on the wire;
-    // Timeout/PeerLost are synthesized client-side; Cancelled is also synthesized for
-    // calls still pending when the local node closes. Mirrors DartCallStatus.
+    // A call's outcome, mirrors DartCallStatus. Timeout and PeerLost are synthesized on the
+    // caller, and Cancelled also for calls still pending when the node closes.
     public enum CallStatus
     {
         Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5,
@@ -112,7 +68,7 @@ namespace Dart
     // Severity of a built-in @dart/log line. Mirrors DartLogLevel.
     public enum LogLevel { Error = 0, Warn = 1, Info = 2 }
 
-    // A @dart/meta request's section mask (OR the bits; 0 = every section). Mirrors DART_META_*.
+    // A @dart/meta request's section mask, OR the bits. 0 = every section. Mirrors DART_META_*.
     [Flags]
     public enum MetaSection : uint { Node = 0x1, Proc = 0x2, Topics = 0x4, Peers = 0x8, All = 0 }
 
@@ -121,8 +77,8 @@ namespace Dart
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartBytes { public IntPtr data; public UIntPtr len; }
 
-    // the C DartString (a non-NUL length-carrying view); named *View here so the
-    // [DartString] attribute owns the public name
+    // the C DartString, a length carrying view. Named View so the [DartString] attribute
+    // owns the public name
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartStringView { public IntPtr data; public UIntPtr len; }
 
@@ -168,7 +124,7 @@ namespace Dart
     {
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
         public byte ip_len;                    // 4 = IPv4, 16 = IPv6
-        public ushort port;                    // host order; 0 = the discovery port
+        public ushort port;                    // host order, 0 = the discovery port
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -187,10 +143,10 @@ namespace Dart
         public IntPtr user_data;
         public byte disable_shm;
         public byte fetch_details;
-        public int match_wait_ms;              // send-path match wait; 0 = default (1s), <0 = off
+        public int match_wait_ms;              // send path match wait, 0 = 1 s, negative = off
         public byte disable_logs;              // strip the built-in @dart/log topics
         public byte disable_meta;              // do not host the @dart/meta endpoint
-        public byte disable_error_logs;        // suppress default error mirroring onto @dart/log/error
+        public byte disable_error_logs;   // no error mirroring onto @dart/log/error
         public DartNodeNet net;
         public DartNodeDiscovery discovery;
     }
@@ -204,7 +160,7 @@ namespace Dart
         public uint publisher_id;
         public DartStringView publisher_name;
         public DartStringView topic_name;
-        public DartBytes header;   // pattern-header prefix view ({null,0} on a plain topic); layout mirror of the C DartMsg
+        public DartBytes header;   // the pattern header view, null on a plain topic
         public DartBytes data;
         public IntPtr schema;
         public ulong recv_us;
@@ -216,7 +172,7 @@ namespace Dart
     {
         public int kind;
         public int error;                      // DartErrorKind (Error events)
-        public IntPtr topic_name;            // const char* (topic-scoped events; else null)
+        public IntPtr topic_name;            // const char*, topic scoped events only
         public IntPtr user;
         public uint peer;
         public ushort topic;
@@ -230,8 +186,8 @@ namespace Dart
         public ulong identity;
         public ushort publish_topics;
         public ushort receive_topics;
-        public IntPtr schema_detail;           // const char* (SchemaMismatch: what was incompatible; else null)
-        public IntPtr peer_name;               // const char* (peer-scoped events: the peer's node name; else null)
+        public IntPtr schema_detail;           // const char*, SchemaMismatch: what was incompatible
+        public IntPtr peer_name;   // const char*, the peer's node name
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -286,11 +242,10 @@ namespace Dart
         public DartBytes bytes;
     }
 
-    // ---- pattern struct mirrors (src/patterns/core.h; field order/types EXACT) --
+    // the pattern struct mirrors of src/patterns/core.h, field order and types exact
 
-    // The public head of the C DartRequestNative. Only ever read through the callback's
-    // pointer; the reply machinery lives BEHIND the struct, so the exact pointer
-    // (never a copy) is what dart_request_reply/fail/defer take.
+    // The public head of the C DartRequest, only ever read through the callback's pointer:
+    // the reply machinery lives behind the struct, so the exact pointer is what reply takes.
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartRequestNative
     {
@@ -321,7 +276,7 @@ namespace Dart
     {
         public uint backpressure_wait_us;
         public uint timeout_us;
-        public ushort keep_last;        // req + rsp ring depth; 0 = the reliable default (10)
+        public ushort keep_last;        // req and rsp ring depth, 0 = 10
         public byte multi;              // duplicate-authority diagnostic suppressed (@dart/meta)
     }
 
@@ -354,7 +309,7 @@ namespace Dart
     internal struct DartCallOpts
     {
         public uint provider;        // direct a call at one definition by peer id (0 = undirected)
-        public IntPtr on_progress;   // DartProgressFn (task calls; null = updates discarded)
+        public IntPtr on_progress;   // DartProgressFn for task calls, null = updates discarded
         public IntPtr progress_user; // handed back as DartProgress.user
         public IntPtr id_out;        // uint32_t*: filled with the call id at commit
     }
@@ -369,7 +324,7 @@ namespace Dart
         public byte multi;
         public uint timeout_us;
         public uint backpressure_wait_us;
-        public ushort keep_last;        // req + rsp ring depth; 0 = the reliable default (10)
+        public ushort keep_last;        // req and rsp ring depth, 0 = 10
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -577,7 +532,7 @@ namespace Dart
         internal static extern IntPtr dart_node_create_remote_task(IntPtr node, byte[] name,
             IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, ref DartTaskOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_request_start(IntPtr request);   // unused: Defer implies RUNNING
+        internal static extern int dart_request_start(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_progress(IntPtr fn, ulong token, DartBytes progress);
         [DllImport(LIB, CallingConvention = CC)]
@@ -618,8 +573,8 @@ namespace Dart
 
     // ---- config + reflection attributes -----------------------------------------
 
-    // Internal QoS carrier: the PUBLIC surface is named constructor parameters
-    // (reliable, keepLast, ...); this just plumbs them to the native DartQos.
+    // The internal QoS carrier. The public surface is named constructor parameters, this
+    // just plumbs them to the native DartQos.
     internal sealed class Qos
     {
         public Reliability Reliability = Reliability.BestEffort;
@@ -673,9 +628,8 @@ namespace Dart
         }
     }
 
-    /// <summary>Optional: override the wire type name of a message struct/class
-    /// (defaults to the class name). Any struct/class with public fields works as
-    /// a message type; this attribute is never required.</summary>
+    /// <summary>Override the wire type name of a message struct or class, the class name by
+    /// default. Never required.</summary>
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
     public sealed class DartSchemaAttribute : Attribute
     {
@@ -683,9 +637,8 @@ namespace Dart
         public DartSchemaAttribute(string name = null) { Name = name; }
     }
 
-    /// <summary>A fixed-length array field: the element count on the wire. Omit it on
-    /// an array field to get a VARIABLE array (`elem[]`), whose length rides the message
-    /// tail (a live element count).</summary>
+    /// <summary>A fixed length array field with this element count. Without it an array
+    /// field is a variable array whose length rides the message tail.</summary>
     [AttributeUsage(AttributeTargets.Field)]
     public sealed class DartArrayAttribute : Attribute
     {
@@ -693,10 +646,8 @@ namespace Dart
         public DartArrayAttribute(int count) { Count = count; }
     }
 
-    /// <summary>A capped string field: the max UTF-8 byte length on the wire. Omit it on
-    /// a plain string field to get a VARIABLE string (`string`, unbounded, in the message
-    /// tail). On a string[] its presence (without [DartArray]) makes a variable
-    /// `string&lt;cap&gt;[]`; with [DartArray] it makes a fixed array of capped strings.</summary>
+    /// <summary>A capped string field, the max UTF-8 byte length. Without it a string is
+    /// unbounded. On a string[] it makes a variable array, with [DartArray] a fixed one.</summary>
     [AttributeUsage(AttributeTargets.Field)]
     public sealed class DartStringAttribute : Attribute
     {
@@ -704,13 +655,8 @@ namespace Dart
         public DartStringAttribute(int cap) { Cap = cap; }
     }
 
-    /// <summary>Name a field's TYPE with one of the STANDARD types (docs/stdtypes.md):
-    /// the name rides the schema (never a message byte) and NARROWS matching, so a Pose
-    /// field never binds to a same-shaped Twist one. Put it on a field whose type is the
-    /// standard type's shape -- <c>[DartTypeName("Timestamp")] public long When;</c>,
-    /// <c>[DartTypeName("Uuid")] [DartArray(16)] public byte[] Id;</c> -- or on a struct
-    /// declaration, as the shipped mirrors below do. The shape must be the canonical one
-    /// or compiling the schema fails, loudly.</summary>
+    /// <summary>Name a field's type with a standard type (docs/stdtypes.md), so the name
+    /// narrows matching. The shape must be the canonical one or compiling fails.</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Struct | AttributeTargets.Class)]
     public sealed class DartTypeNameAttribute : Attribute
     {
@@ -718,12 +664,8 @@ namespace Dart
         public DartTypeNameAttribute(string name) { Name = name; }
     }
 
-    // ---- the standard composites, as plain mirrors of their wire shape ----------------
-    // SI units throughout: meters, m/s, radians. A Timestamp/Duration is microseconds
-    // (Unix epoch, UTC for a Timestamp) and rides a plain long marked
-    // [DartTypeName("Timestamp")]; a Uuid is a 16-byte array in RFC 4122 order.
-    // The [DartField] overrides give the canonical lowercase wire names: a C# field is
-    // PascalCase by convention, and the wire name is what every language must agree on.
+    // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). The
+    // [DartField] overrides give the canonical lowercase wire names every language agrees on.
     [DartTypeName("Float2")] public struct Float2
     { [DartField("x")] public float X; [DartField("y")] public float Y; }
     [DartTypeName("Float3")] public struct Float3
@@ -768,10 +710,8 @@ namespace Dart
     { [DartField("lat")] public double Lat; [DartField("lon")] public double Lon;
       [DartField("alt")] public double Alt; }
 
-    // The video family. A member's VALUE is the wire value and its NAME rides the schema,
-    // so the names and numbers below are the same in every binding.
-    /// <summary>How an Image's data is laid out. A value &gt;= 16 is a compressed
-    /// container, so `data` holds the file bytes rather than pixels.</summary>
+    /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
+    /// container, so data holds the file bytes rather than pixels.</summary>
     public enum ImageFormat : byte
     { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6,
       Jpeg = 16, Png = 17 }
@@ -792,9 +732,8 @@ namespace Dart
       [DartField("keyframe")] public bool Keyframe;
       [DartField("pts")] [DartTypeName("Timestamp")] public long Pts;   // the Timestamp clock
       [DartField("data")] public byte[] Data; }
-    // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels.
-    // Codec/Width/Height are hints for pickers (Unknown/0 = unstated): the stream itself
-    // stays authoritative once connected.
+    // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
+    // Width and Height are hints for pickers, the stream stays authoritative once connected.
     [DartTypeName("ExternalVideoStream")] public struct ExternalVideoStream
     { [DartField("kind")] public VideoStreamKind Kind;
       [DartField("codec")] public VideoCodec Codec;
@@ -805,8 +744,8 @@ namespace Dart
     /// <summary>The standard-type values that need a platform.</summary>
     public static class Std
     {
-        /// <summary>Now, in the units a Timestamp field declares: microseconds since the
-        /// Unix epoch, UTC -- the same clock a message's WrittenUs is stamped from.</summary>
+        /// <summary>Now in Timestamp units, microseconds since the Unix epoch UTC, the clock a
+        /// message's WrittenUs uses.</summary>
         public static long Now() => Native.dart_timestamp_now();
         /// <summary>An identity Quaternion (w = 1).</summary>
         public static Quaternion IdentityRotation() => new Quaternion { W = 1.0 };
@@ -829,8 +768,8 @@ namespace Dart
         public SchemaException(string m) : base(m) { }
     }
 
-    /// <summary>A DART call was refused (a non-Ok SendStatus surfaced through a
-    /// throwing surface, e.g. the VariableDefinition&lt;T&gt;.Value setter).</summary>
+    /// <summary>A call was refused: a non Ok SendStatus surfaced through a throwing surface
+    /// such as the VariableDefinition&lt;T&gt;.Value setter.</summary>
     public class DartException : Exception
     {
         public SendStatus Status;
@@ -851,7 +790,7 @@ namespace Dart
         internal IntPtr Handle;
         internal Type ClrType;   // set for reflection-built schemas (decode target)
 
-        /// <summary>Compile schema DSL text (e.g. "Pose { x: f32, frame: string&lt;16&gt; }").</summary>
+        /// <summary>Compile schema DSL text such as "Pose { x: f32 }".</summary>
         public Schema(string text)
         {
             IntPtr err;
@@ -861,11 +800,8 @@ namespace Dart
             Handle = h;
         }
 
-        /// <summary>Reflect a type into a compiled schema: public fields become the
-        /// wire fields (class -> DSL -> compile). A BARE TYPE (bool, int, float, string,
-        /// float[], Dictionary&lt;string,object&gt;, an enum) is the whole schema instead: an
-        /// anonymous root whose message is that one value, byte-identical in every
-        /// language.</summary>
+        /// <summary>Reflect a type into a compiled schema: public fields become the wire fields.
+        /// A bare type is the whole schema, an anonymous root whose message is one value.</summary>
         public Schema(Type t) : this(Codec.TypeDsl(t)) { ClrType = t; }
 
         public string Name => Codec.Str(Native.dart_schema_name(Handle));
@@ -890,15 +826,13 @@ namespace Dart
         }
         private int _valueRoot = -1;
 
-        /// <summary>Can a reader declaring THIS schema read messages written with
-        /// <paramref name="pub"/>? Every field of ours must exist in pub under the same
-        /// name with a compatible type. Type NAMES narrow: an anonymous type reads a named
-        /// one of the same shape, never the reverse, and two names never match.</summary>
+        /// <summary>Can a reader declaring this schema read messages written with pub? Type
+        /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
         public bool CanRead(Schema pub) => Native.dart_schema_subset(Handle, pub.Handle) != 0;
 
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
-        /// <summary>The decoded fields by name; a bare-type schema yields its one value
-        /// under the empty name.</summary>
+        /// <summary>The decoded fields by name. A bare type schema yields its one value under
+        /// the empty name.</summary>
         public Dictionary<string, object> DecodeFields(byte[] data) => Codec.DecodeDict(Handle, data);
         public object Decode(byte[] data)
         {
@@ -927,13 +861,11 @@ namespace Dart
         public string PublisherName;
         public string TopicName;
         public byte[] Data;
-        /// <summary>DartNode monotonic clock (microseconds) when the poll RECEIVED the message
-        /// (a queued topic stamps at enqueue), so a frame-paced consumer measures true
-        /// arrival times, never its own cadence.</summary>
+        /// <summary>The node's monotonic clock in microseconds when the poll received the
+        /// message, at enqueue for a queued topic (docs/node.md).</summary>
         public ulong RecvUs;
-        /// <summary>The SENDER's wall clock (UTC microseconds) when its send committed: a
-        /// source timestamp, kept across repair and replay. 0 = the publisher opted out
-        /// (noTimestamp). Never mix it with the monotonic RecvUs.</summary>
+        /// <summary>The sender's wall clock in UTC microseconds when its send committed, kept
+        /// across repair and replay. 0 = opted out. Never mix it with RecvUs.</summary>
         public ulong WrittenUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
         public object Value;                          // typed instance for a typed topic, the bare
@@ -974,7 +906,7 @@ namespace Dart
     public sealed class DartEvent
     {
         public EventKind Kind;
-        public ErrorKind Error;         // the specific error when Kind == EventKind.Error, else None
+        public ErrorKind Error;   // the error when Kind == EventKind.Error, else None
         public string TopicName;      // our topic's name for topic-scoped events, else null
         public uint Peer;
         public ushort Topic;
@@ -983,10 +915,10 @@ namespace Dart
         public ulong LostCount;
         public ulong TooBigBytes;
         public string SchemaDetail;     // SchemaMismatch: what exactly was incompatible, else null
-        public string PeerName;         // peer-scoped events: the peer's human-readable node name, else null
+        public string PeerName;   // peer scoped events: the peer's node name, else null
         private string _line;
 
-        /// <summary>True if this event reports something going wrong (Kind == EventKind.Error).</summary>
+        /// <summary>True if this event reports something going wrong.</summary>
         public bool IsError => Kind == EventKind.Error;
 
         // format an event returned BY VALUE (dart_last_error): dart_event_str wants a
@@ -1022,9 +954,8 @@ namespace Dart
         public override string ToString() => _line;
     }
 
-    /// <summary>One decoded @dart/log line handed to a DartNode.OnLog handler. WallUs is
-    /// epoch micros (comparable across nodes); MonoUs is the publisher's monotonic clock
-    /// (orders within one node); RecvUs is this node's clock when the poll received it.</summary>
+    /// <summary>One decoded @dart/log line for a DartNode.OnLog handler. WallUs is epoch us,
+    /// MonoUs the publisher's monotonic clock, RecvUs this node's clock at receipt.</summary>
     public sealed class DartLogLine
     {
         public LogLevel Level;
@@ -1040,10 +971,8 @@ namespace Dart
         public override string ToString() => $"[{Level}] {Node}: {Text}";
     }
 
-    /// <summary>A decoded @dart/meta reply (see DartNode.MetaAsync). The common "node" and
-    /// "proc" scalars are pulled out as fields; Info holds the full self-describing body
-    /// (including the topics/peers arrays) for anything else. Absent sections leave their
-    /// fields zero (HaveProc stays false where the platform can't measure).</summary>
+    /// <summary>A decoded @dart/meta reply. The node and proc scalars are fields, the full
+    /// body stays in Info. Absent sections leave zeros and HaveProc false.</summary>
     public sealed class DartMetaSnapshot
     {
         public bool Valid;
@@ -1058,7 +987,7 @@ namespace Dart
         public ulong Peers, MaxPeers, Topics, MaxTopics, ShmTx, ShmRx, LastError;
         public string LastErrorText;
 
-        // proc section (per process; HaveProc false where unmeasured)
+        // the proc section, HaveProc false where unmeasured
         public bool HaveProc, HaveCpu;
         public ulong Pid, CpuUs, Rss, PeakRss, HeapTotal, HeapFree, HeapMinFree, HeapLargestFreeBlock;
 
@@ -1118,8 +1047,8 @@ namespace Dart
                    maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
                    shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
 
-        /// <summary>Create a typed topic with an explicit Schema (compiled from DSL or
-        /// reflected). Topic&lt;T&gt; is the shorthand for the reflected case.</summary>
+        /// <summary>Create a typed topic with an explicit Schema. Topic&lt;T&gt; is the shorthand
+        /// for the reflected case.</summary>
         public Topic(DartNode node, string name, Schema schema, Role role = Role.PubSub,
                      bool reliable = false, int keepLast = 0, int catchUp = 0,
                      int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
@@ -1185,13 +1114,8 @@ namespace Dart
             return (SendStatus)Native.dart_topic_set_role(_handle, (int)role);
         }
 
-        /// <summary>Retire the topic: the lifecycle verb for re-creating a name with a
-        /// different schema (a retype). The topic leaves the announce, every lane tears
-        /// down, and its slot parks for reuse by a later create, so retire/create
-        /// cycles never grow the node. On SendStatus.Ok this handle is invalid (calls
-        /// return NoTopic) and the name may be created again, with a new schema if
-        /// desired. Refused (SendStatus.State) from a callback, for builtin topics, and
-        /// while a Dispatch on this topic runs.</summary>
+        /// <summary>Retire the topic so the name can be re created with another schema
+        /// (docs/topics.md). On Ok this handle is invalid. Refused from a callback.</summary>
         public SendStatus Retire() => _node.RetireTopic(this);
 
         public ushort Index => Native.dart_topic_index(_handle);
@@ -1201,14 +1125,12 @@ namespace Dart
             return Native.dart_topic_match_count(_handle);
         }
 
-        /// <summary>1-liner form of the send-path match wait for GUIs: true when a send
-        /// would not wait (a matched subscriber exists, or matching has converged so
-        /// there is nobody to wait for). Park payloads while false, flush on true.</summary>
+        /// <summary>True when a send would not wait on the match wait: a subscriber is matched
+        /// or matching has converged. For a GUI: park payloads while false.</summary>
         public bool Ready => Native.dart_topic_ready(_handle) == 1;
 
-        /// <summary>Unresolved candidate matches right now: peers whose announces
-        /// nominate this topic but whose name/schema verdicts are still in flight.
-        /// 0 = matching has converged for everyone currently known.</summary>
+        /// <summary>Unresolved candidate matches right now. 0 = matching has converged for
+        /// every known peer.</summary>
         public int PendingCount => Native.dart_topic_pending_count(_handle);
 
         public bool Drain(int timeoutMs)
@@ -1216,15 +1138,8 @@ namespace Dart
             return Native.dart_topic_drain(_handle, timeoutMs) == 1;
         }
 
-        /// <summary>Pop the next queued message, fully copied out. The FIRST
-        /// TryTake/Dispatch switches this topic to QUEUED delivery: its messages then
-        /// queue instead of firing the node handler on the poll thread, and exactly one
-        /// thread of your choosing consumes them here (per topic). The queue grows on
-        /// demand to Qos.QueueBytes (0 = 1 MB); at the cap a best-effort topic
-        /// overwrites oldest (EventKind.MsgLost fires), a reliable one backpressures the
-        /// publisher. timeoutMs: 0 = just check, &gt;0 = wait up to that long, negative =
-        /// wait indefinitely (the wait sleeps beside a running service thread and drives
-        /// the poll loop itself otherwise).</summary>
+        /// <summary>Pop the next queued message, fully copied out. The first TryTake or Dispatch
+        /// queues the topic (docs/node.md). timeoutMs 0 = check, negative = forever.</summary>
         public bool TryTake(out DartMessage message, int timeoutMs = 0)
         {
             message = null;
@@ -1234,24 +1149,20 @@ namespace Dart
             return true;
         }
 
-        /// <summary>Drain the queue by running the node's OnMessage handler on the
-        /// CALLING thread, oldest first: up to maxMsgs of those queued at entry (0 =
-        /// all), first waiting up to timeoutMs like TryTake. Returns the number
-        /// dispatched. Unlike poll-thread callbacks these run without the node lock,
-        /// so they may use the whole API.</summary>
+        /// <summary>Drain the queue by running OnMessage on the calling thread, oldest first, up
+        /// to maxMsgs (0 = all), waiting like TryTake. These run without the node lock.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
             => Native.dart_topic_dispatch(_handle, maxMsgs, timeoutMs);
 
-        /// <summary>Consumer-queue observability; all zeros when not queued.</summary>
+        /// <summary>Consumer queue observability, all zeros when not queued.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
             Native.dart_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
             return (m, b, c, d);
         }
 
-        /// <summary>Cumulative traffic counters (always on): messages/bytes this node
-        /// committed to the topic (Tx) and delivered from it (Rx). Also in the @dart/meta
-        /// snapshot.</summary>
+        /// <summary>The cumulative traffic this node committed to the topic and delivered from
+        /// it. Always on, and in the @dart/meta snapshot.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
         {
             Native.dart_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
@@ -1259,11 +1170,8 @@ namespace Dart
         }
     }
 
-    /// <summary>A typed topic: T's public fields are the schema ([DartArray] /
-    /// [DartString] / [DartField] refine them), or, when T is a BARE TYPE (bool, int,
-    /// float, string, float[], Dictionary&lt;string,object&gt;, an enum), T itself is the
-    /// schema and Send/TryTake carry the plain value. Delivered messages decode to T
-    /// (DartMessage.Value / DartMessage.As&lt;T&gt;()).</summary>
+    /// <summary>A typed topic: T's public fields are the schema, or a bare T is the schema
+    /// itself and Send and TryTake carry the plain value (docs/csharp.md).</summary>
     public sealed class Topic<T> : Topic
     {
         public Topic(DartNode node, string name, Role role = Role.PubSub,
@@ -1303,12 +1211,12 @@ namespace Dart
         private Action<DartEvent> _onEvt;
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
-        // same-name topic sharing (role widening); serialized by the ctor path's lock
+        // same name topic sharing with role widening, serialized by the ctor path's lock
         private sealed class TopicRec { public IntPtr Handle; public byte Bits; public ulong SchemaHash; }
         private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
         private readonly object _createLock = new object();
-        // per-topic subscriber handlers (Subscriber ctor); copy-on-write arrays so the
-        // poll-thread read never takes more than a volatile fetch
+        // per topic subscriber handlers, copy on write arrays so the poll thread read never
+        // takes more than a volatile fetch
         private readonly Dictionary<ushort, Action<DartMessage>[]> _subHandlers = new Dictionary<ushort, Action<DartMessage>[]>();
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
@@ -1323,20 +1231,8 @@ namespace Dart
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
-        /// <summary>Open a node. onMessage may be null (per-Subscriber handlers and
-        /// TryTake/Dispatch still deliver); onEvent is REQUIRED (it carries the
-        /// diagnostics: null throws) and is wired in before the constructor returns,
-        /// so no early peer/error event is ever missed. Everything else is optional
-        /// named parameters (0/null = the C default).
-        /// seedPeers are "ip" or "ip:port" strings to also unicast announces to, so
-        /// discovery works where multicast is filtered. unicastOnly says this node
-        /// cannot multicast AT ALL: it joins no group, announces only to seedPeers and
-        /// peers it already knows, and asks whoever hears it to re-announce it on their
-        /// paths, so seeding one reachable node makes it discoverable mesh-wide.
-        /// selfIp/advertisePort state our locator outright ("203.0.113.7") instead of
-        /// letting each peer learn it from the datagram source: for a static 1:1 mapping
-        /// (elastic IP, a container published with -p 7400:7400) or multihomed pinning.
-        /// One locator goes to every peer, and neither opens an inbound path by itself.</summary>
+        /// <summary>Open a node. onMessage may be null, onEvent is required and both are wired
+        /// before the constructor returns. Options are named parameters (docs/csharp.md).</summary>
         public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
@@ -1443,9 +1339,8 @@ namespace Dart
         /// constructor already requires an initial one.</summary>
         public DartNode OnEvent(Action<DartEvent> fn) { _onEvt = fn; return this; }
 
-        // The native create behind the Topic constructors. Same-name creates on this
-        // node SHARE the native slot: the role is widened (SetRole re-advertises, peers
-        // rematch from cached verdicts) and a different schema is refused.
+        // The native create behind the Topic constructors. Same name creates on this node share
+        // the native slot with a widened role, and a different schema is refused.
         internal IntPtr CreateOrShareTopic(string name, Role role, Schema schema, Qos qos)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
@@ -1482,9 +1377,8 @@ namespace Dart
             }
         }
 
-        // Topic.Retire: release the native slot for reuse and forget every wrapper
-        // registration for the index (a reused slot may carry a DIFFERENT topic, so a
-        // stale decode type or subscriber handler must never apply to the successor).
+        // Topic.Retire: release the native slot for reuse and forget every wrapper registration
+        // for the index, since a reused slot may carry a different topic.
         internal SendStatus RetireTopic(Topic t)
         {
             lock (_createLock)
@@ -1504,15 +1398,15 @@ namespace Dart
             }
         }
 
-        // role <-> pub/sub bit pair (bit 0 = pub, bit 1 = sub) for role widening
+        // role to pub and sub bit pair, bit 0 = pub, bit 1 = sub, for role widening
         private static byte RoleBits(Role r)
             => r == Role.PubSub ? (byte)3 : r == Role.PubOnly ? (byte)1
              : r == Role.SubOnly ? (byte)2 : (byte)0;
         private static Role RoleFromBits(byte b)
             => b == 3 ? Role.PubSub : b == 1 ? Role.PubOnly : b == 2 ? Role.SubOnly : Role.Inactive;
 
-        // Subscriber handlers: per-topic-index, copy-on-write; when any exist for an
-        // index they receive the message INSTEAD of the node-wide onMessage.
+        // Subscriber handlers per topic index, copy on write. When any exist for an index they
+        // receive the message instead of the node wide onMessage.
         internal void AddSubHandler(ushort index, Action<DartMessage> fn)
         {
             lock (_subLock)
@@ -1542,44 +1436,33 @@ namespace Dart
         internal void RegisterAsync(long id) { lock (PatternLock) _asyncLive.Add(id); }
         internal void UnregisterAsync(long id) { lock (PatternLock) _asyncLive.Remove(id); }
 
-        /// <summary>One loop tick: drives discovery, RX, timers, and flushes queued TX.
-        /// timeoutMs blocks up to that long in the socket wait (0 = non-blocking; a send
-        /// from another thread wakes it early). Returns SendStatus.State (as int) while
-        /// Start() runs -- the service thread owns the loop then.</summary>
+        /// <summary>One loop tick: discovery, receive, timers and queued sends. Blocks up to
+        /// timeoutMs in the socket wait, 0 = non blocking. State while Start() runs.</summary>
         public int Poll(int timeoutMs = 0)
         {
             return Native.dart_node_poll(_handle, timeoutMs);
         }
 
-        /// <summary>Run the C-level background service thread: it owns the loop and fires
-        /// the handlers (never two at once for one node); every DartNode/Topic call stays
-        /// safe from any thread, and a send is flushed immediately. Handlers run on the
-        /// service thread -- to keep them on a specific thread (Unity: the main thread),
-        /// skip Start() and call Poll() from that thread instead. Returns false if
-        /// already started or threads are compiled out.</summary>
+        /// <summary>Run the C service thread. Handlers fire on it, never two at once, and every
+        /// call stays safe from any thread. False if already started or threads are out.</summary>
         public bool Start()
         {
             return Native.dart_node_start(_handle) == 0;
         }
 
-        /// <summary>Stop and join the service thread (idempotent; implied by Close).</summary>
+        /// <summary>Stop and join the service thread. Idempotent, implied by Close.</summary>
         public void Stop() => Native.dart_node_stop(_handle);
 
         public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
 
-        /// <summary>Block until discovery + matching settle: everything now sent reaches
-        /// everyone already on the network. Call AFTER creating your topics. Most apps
-        /// never need it (the per-send match wait covers the same window lazily).
-        /// timeoutMs &lt; 0 = 3 announce intervals. True when settled.</summary>
+        /// <summary>Block until discovery and matching settle, so everything sent now reaches
+        /// everyone. Call after creating the topics. timeoutMs &lt; 0 = 3 intervals.</summary>
         public bool Settle(int timeoutMs = -1) => Native.dart_node_settle(_handle, timeoutMs) == 1;
 
         internal IntPtr Handle => _handle;
 
-        /// <summary>Dispatch every already-queued topic on the calling thread (see
-        /// Topic.TryTake/Dispatch): with Start() running, this in a Unity Update() (or
-        /// any UI frame) keeps every queued handler on that thread while the service
-        /// thread owns the network. Waits up to timeoutMs for any queued topic to hold
-        /// data; returns the number of messages dispatched.</summary>
+        /// <summary>Dispatch every queued topic on the calling thread, waiting up to timeoutMs
+        /// for any to hold data. Per frame in Unity, so every queued handler runs there.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
             => Native.dart_node_dispatch(_handle, maxMsgs, timeoutMs);
 
@@ -1604,10 +1487,8 @@ namespace Dart
             return ch == IntPtr.Zero ? null : new Topic(this, ch);
         }
 
-        /// <summary>Subscribe to a level's mesh-wide log stream: widens this node's own log
-        /// handle to PubSub and delivers every OTHER node's lines at that level (never your
-        /// own), decoded to a DartLogLine. Late-join history replays on match. Handlers fire
-        /// on the polling thread like any subscription. False when logs are disabled.</summary>
+        /// <summary>Subscribe to a level's mesh wide log stream: every other node's lines at that
+        /// level as a DartLogLine, on the polling thread. False when logs are disabled.</summary>
         public bool OnLog(LogLevel level, Action<DartLogLine> handler)
         {
             if (handler == null) return false;
@@ -1631,25 +1512,22 @@ namespace Dart
 
         // ---- @dart/meta introspection --------------------------------------------------
 
-        /// <summary>The local @dart/meta caller handle (null when meta is disabled). Call it
-        /// directed at a peer id, e.g. MetaFunction().Call(req, -1, peerId). Most callers
-        /// want MetaAsync.</summary>
+        /// <summary>The local @dart/meta caller handle, null when meta is disabled. Direct it at
+        /// a peer id. Most callers want MetaAsync.</summary>
         public RemoteFunction MetaFunction()
         {
             IntPtr fn = Native.dart_node_meta_function(_handle);
             return fn == IntPtr.Zero ? null : new RemoteFunction(this, fn);
         }
 
-        /// <summary>Fetch a peer's snapshot: directs a @dart/meta call at `peer` and decodes
-        /// the reply into a DartMetaSnapshot. The Task never faults (inspect Status). Works
-        /// under Start() (unlike a blocking call). sections = OR of MetaSection (All = every
-        /// section).</summary>
+        /// <summary>Fetch a peer's snapshot: a directed @dart/meta call decoded into a
+        /// DartMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
         public async Task<DartMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
         {
             RemoteFunction fn = MetaFunction();
             if (fn == null) return new DartMetaSnapshot { Status = CallStatus.NoHandler };
             byte[] req = sections == MetaSection.All
-                ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);   // LE, as the C wire wants
+                ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
             DartResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
             return DartMetaSnapshot.FromResponse(r);
         }
@@ -1665,9 +1543,8 @@ namespace Dart
         /// DartEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
         public DartEvent LastError => DartEvent.FromValue(Native.dart_last_error(_handle));
 
-        /// <summary>Why the most recent node open failed, from the process-global slot
-        /// (there is no node handle on failure). The constructor already throws with
-        /// this message.</summary>
+        /// <summary>Why the most recent node open failed, from the process global slot. The
+        /// constructor already throws with this message.</summary>
         public static DartEvent LastOpenError() => DartEvent.FromValue(Native.dart_last_error(IntPtr.Zero));
 
         /// <summary>Sends that evicted never-sent history after the bounded wait (the
@@ -1688,9 +1565,8 @@ namespace Dart
             return (us, n);
         }
 
-        /// <summary>Stop the service thread (if running) and tear the node down. Returns
-        /// false when refused from inside a handler (the node and this wrapper stay
-        /// fully live): close from another thread instead.</summary>
+        /// <summary>Stop the service thread and tear the node down. False when refused from a
+        /// handler, where the node stays live: close from another thread.</summary>
         public bool Close(bool sendBye = true)
         {
             if (_handle != IntPtr.Zero)
@@ -1730,7 +1606,7 @@ namespace Dart
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null && node._onMsg == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
-                var msg = DartMessage.FromNative(ref m, clr);      // fully copied: safe past the callback
+                var msg = DartMessage.FromNative(ref m, clr);   // copied, safe past the callback
                 if (hs != null) { foreach (var h in hs) h(msg); }
                 else node._onMsg(msg);
             }
@@ -1746,7 +1622,7 @@ namespace Dart
                 DartNode node;
                 lock (s_reg) s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                node._onEvt(DartEvent.FromNative(evPtr, ref e));    // fully copied: safe past the callback
+                node._onEvt(DartEvent.FromNative(evPtr, ref e));   // copied past the callback
             }
             catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
         }
@@ -1800,10 +1676,8 @@ namespace Dart
             public Action<TaskProgress> OnProgress;   // task calls only, else null
         }
 
-        // Definition-side registry of one task's live calls: defer token -> the per-call
-        // CancellationTokenSource the C on_cancel slot fans out to. Cancel runs the user's
-        // token registrations inline under the lock (Monitor is reentrant, so a handler
-        // continuation that completes the call on this thread stays safe).
+        // The definition side registry of one task's live calls: defer token to the per call
+        // CancellationTokenSource. Cancel runs the registrations inline, Monitor is reentrant.
         internal sealed class TaskCancelBox
         {
             private readonly Dictionary<ulong, CancellationTokenSource> _live =
@@ -1859,9 +1733,8 @@ namespace Dart
         {
             lock (s_lock) { AsyncCall c; s_async.TryGetValue(id, out c); return c; }
         }
-        // Backstop only: the C fires every pending callback with CANCELLED during
-        // dart_node_close, so this normally finds nothing. Completes any straggler
-        // the same way instead of hanging its Task.
+        // A backstop only: the C fires every pending callback with CANCELLED at close, so this
+        // normally finds nothing. A straggler completes the same way instead of hanging its Task.
         internal static void AbandonAsync(long id)
         {
             AsyncCall c = TakeAsync(id);
@@ -1890,8 +1763,8 @@ namespace Dart
                 try { box.Handler(r); }
                 catch (Exception e)
                 {
-                    // a thrown handler answers AppError with the exception's text as the
-                    // response message; the exception never crosses into C
+                    // a thrown handler answers AppError with the exception's text, which never
+                    // crosses into C
                     r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
                     Console.Error.WriteLine("dart on_request: " + e);
                 }
@@ -1935,7 +1808,7 @@ namespace Dart
                 {
                     CallId = p.call_id,
                     Provider = p.provider,
-                    Value = (ulong)p.data.len != 0 ? Codec.Bytes(p.data) : null,   // null = the RUNNING ack
+                    Value = (ulong)p.data.len != 0 ? Codec.Bytes(p.data) : null,
                     WrittenUs = p.written_us,
                     RecvUs = p.recv_us,
                     SchemaPtr = p.schema,
@@ -1997,12 +1870,11 @@ namespace Dart
 
     // ---- patterns: functions ----------------------------------------------------
 
-    /// <summary>The request as seen by a FunctionDefinition handler. Valid only inside
-    /// the handler callback: reply there (Reply/Fail), or Defer() and complete later
-    /// from any thread. Returning without answering auto-acks CallStatus.Ok.</summary>
+    /// <summary>The request seen by a FunctionDefinition handler, valid only inside the
+    /// callback. Reply there, or Defer() and complete later. No reply acknowledges Ok.</summary>
     public sealed class DartRequest
     {
-        private IntPtr _ptr;          // the EXACT native pointer; zeroed when the callback returns
+        private IntPtr _ptr;          // the exact native pointer, zeroed when the callback returns
         private readonly IntPtr _fn;
         private bool _done;
         internal readonly IntPtr SchemaPtr;
@@ -2039,9 +1911,8 @@ namespace Dart
             _done = true;
         }
 
-        /// <summary>Answer CallStatus.AppError. message is the human-readable reason
-        /// (DartResponse.Message on the caller, truncated at 255 bytes; null/empty =
-        /// the default "app error"); rsp may still carry structured failure data.</summary>
+        /// <summary>Answer AppError. message is the text shown on the caller, truncated at 255
+        /// bytes, empty = the default. rsp may still carry structured failure data.</summary>
         public void Fail(string message = null, byte[] rsp = null)
         {
             Guard();
@@ -2050,8 +1921,8 @@ namespace Dart
             _done = true;
         }
 
-        /// <summary>Park the reply: suppresses the auto-ack and lets the handler return
-        /// now; the returned Deferred completes the call later, from any thread.</summary>
+        /// <summary>Park the reply and return now. The Deferred completes the call later from
+        /// any thread.</summary>
         public Deferred Defer()
         {
             Guard();
@@ -2082,10 +1953,10 @@ namespace Dart
 
         public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
 
-        /// <summary>message as in DartRequest.Fail; also carried on Ok (debug/warning text).</summary>
+        /// <summary>message as in DartRequest.Fail, also carried on Ok as debug text.</summary>
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
         public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
-        /// <summary>Complete CallStatus.Cancelled: the cooperative honor of a task cancel.</summary>
+        /// <summary>Complete Cancelled, the cooperative honor of a task cancel.</summary>
         public bool CompleteCancelled(string message = null) => Finish(CallStatus.Cancelled, message, null);
 
         internal IntPtr Fn => _fn;
@@ -2101,10 +1972,8 @@ namespace Dart
         }
     }
 
-    /// <summary>The implementation side of a request/response function (untyped:
-    /// Schema + byte[]). Exactly one reply per call; ONE definition per name on the
-    /// network (a rival fires ErrorKind.DuplicateAuthority on both). A null handler
-    /// answers every call CallStatus.NoHandler (a declared stub).</summary>
+    /// <summary>The untyped implementation side of a function: one reply per call, one
+    /// definition per name. A null handler answers NoHandler.</summary>
     public class FunctionDefinition
     {
         internal IntPtr Fn;   // zeroed by Retire
@@ -2142,9 +2011,8 @@ namespace Dart
             node.RetainSchema(responseSchema);
         }
 
-        /// <summary>Async-handler form: the returned Task's completion answers the call
-        /// (the result -> Ok, an exception -> AppError with its message). The handler runs
-        /// on the polling thread until its first await: CPU-bound work belongs in Task.Run.</summary>
+        /// <summary>The async handler form: the Task's completion answers the call, its result
+        /// Ok and an exception AppError. On the polling thread until the first await.</summary>
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
                                   Func<DartRequest, Task<byte[]>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
@@ -2175,10 +2043,8 @@ namespace Dart
         /// <summary>Callers currently matched to this definition.</summary>
         public int CallerCount => Native.dart_function_match_count(Fn);
 
-        /// <summary>Retire the definition: park its channels and release the name so a
-        /// successor can bind (a re-created same-name handle is otherwise silently
-        /// shadowed by the live twin). The handle is unusable after. Refused
-        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        /// <summary>Retire the definition: park its channels and release the name, else a re
+        /// created same name handle is shadowed. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
             var rc = (SendStatus)Native.dart_function_retire(Fn);
@@ -2187,21 +2053,18 @@ namespace Dart
         }
     }
 
-    /// <summary>An owning function-call outcome: the payload is copied out, so it
-    /// outlives the call. SendStatus carries a synchronous refusal (Status stays
-    /// Timeout then: the call never launched).</summary>
+    /// <summary>An owning call outcome, the payload copied out. SendStatus carries a
+    /// synchronous refusal, and Status stays Timeout then.</summary>
     public sealed class DartResponse
     {
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
         public uint Provider { get; internal set; }
-        /// <summary>The provider's wall clock when it sent the response (0 = synthesized).</summary>
+        /// <summary>The provider's wall clock when it sent the response, 0 = synthesized.</summary>
         public ulong WrittenUs { get; internal set; }
         public byte[] Data { get; internal set; } = Array.Empty<byte>();
-        /// <summary>Human-readable outcome text, the one field to display on a failure:
-        /// the definition's message (Fail/Complete, or a thrown handler's text), else
-        /// default status text ("timeout", ...). Empty only on Ok with no message, and
-        /// on a synchronous send refusal (SendStatus carries that).</summary>
+        /// <summary>The outcome text to display on a failure: the definition's message, else
+        /// the default status text. Empty only on Ok with no message and on a refusal.</summary>
         public string Message { get; internal set; } = "";
         internal IntPtr SchemaPtr;
 
@@ -2248,10 +2111,8 @@ namespace Dart
             return g;
         }
 
-        /// <summary>BLOCKING call: drives the node loop until the response arrives or
-        /// timeoutMs elapses (negative = the function's default timeout). Refused
-        /// (SendStatus.State) from inside a callback or while a service thread owns
-        /// this node's loop; use CallAsync there. Inspect Status, never throws.</summary>
+        /// <summary>Blocking call: drives the loop until the response or timeoutMs, negative =
+        /// the default. Refused from a callback or under a service thread. Never throws.</summary>
         public DartResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
             var r = new DartResponse();
@@ -2270,7 +2131,7 @@ namespace Dart
                 r.Provider = o.provider;
                 r.WrittenUs = o.written_us;
                 r.SchemaPtr = o.schema;
-                r.Data = Codec.Bytes(o.data);   // the view is only valid until the next call: copy now
+                r.Data = Codec.Bytes(o.data);   // the view lasts until the next call, copy now
             }
             else if (rc < 0)
             {
@@ -2281,16 +2142,15 @@ namespace Dart
             return r;
         }
 
-        /// <summary>Async call over dart_function_call_async: the Task completes with
-        /// the outcome and NEVER faults (inspect Status/SendStatus). The response fires
-        /// from whichever thread polls this node, continuations run off it.</summary>
+        /// <summary>Async call: the Task completes with the outcome and never faults. The
+        /// response fires from the polling thread and continuations run off it.</summary>
         public Task<DartResponse> CallAsync(byte[] request, uint provider = 0)
         {
             var tcs = new TaskCompletionSource<DartResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, DartNode = DartNode });
             DartNode.RegisterAsync(id);
             int rc;
-            GCHandle og = OptsHandle(provider, out IntPtr optp);   // committed synchronously; freed after
+            GCHandle og = OptsHandle(provider, out IntPtr optp);
             try
             {
                 using (var p = new PinnedBytes(request))
@@ -2310,10 +2170,8 @@ namespace Dart
         public int MatchCount => Native.dart_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
 
-        /// <summary>Retire the remote: park its channels and release the name so a
-        /// successor can bind; every outstanding call completes with
-        /// CallStatus.Cancelled. The handle is unusable after. Refused
-        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        /// <summary>Retire the remote: park its channels and release the name. Every outstanding
+        /// call completes Cancelled. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
             var rc = (SendStatus)Native.dart_function_retire(Fn);
@@ -2324,17 +2182,15 @@ namespace Dart
 
     // ---- patterns: tasks --------------------------------------------------------
 
-    /// <summary>What a task handler works through while it runs: stream progress, observe
-    /// cancellation. Thread-safe and usable across awaits; once the call completes, a
-    /// Progress returns SendStatus.State.</summary>
+    /// <summary>What a task handler works through: stream progress, observe cancellation.
+    /// Thread safe across awaits. Once the call completed, Progress returns State.</summary>
     public sealed class TaskContext
     {
         private readonly IntPtr _fn;
         private readonly ulong _token;
 
-        /// <summary>Cancelled the moment a cancel for this call arrives. Cooperative:
-        /// honor it by throwing OperationCanceledException (the terminal status is then
-        /// Cancelled), or run to completion anyway.</summary>
+        /// <summary>Cancelled the moment a cancel arrives. Honor it by throwing
+        /// OperationCanceledException, or run to completion anyway.</summary>
         public CancellationToken CancellationToken { get; }
         public uint Caller { get; }
         public string CallerName { get; }
@@ -2349,8 +2205,8 @@ namespace Dart
             RecvUs = r.RecvUs; WrittenUs = r.WrittenUs;
         }
 
-        /// <summary>Broadcast one progress update on the task's progress channel (any
-        /// observer may watch; a reliable subscriber backpressures end to end).</summary>
+        /// <summary>Broadcast one progress update on the task's progress channel. A reliable
+        /// subscriber backpressures end to end.</summary>
         public SendStatus Progress(byte[] value)
         {
             using (var p = new PinnedBytes(value))
@@ -2363,14 +2219,8 @@ namespace Dart
             || Native.dart_function_cancelled(_fn, _token) == 1;
     }
 
-    /// <summary>The implementation side of a task, a function with progress and
-    /// cancellation (untyped: Schema + byte[]). The handler is an ASYNC delegate: the call
-    /// is deferred and RUNNING sent before it is invoked, it runs on the polling thread
-    /// until its first await (CPU-bound work belongs in Task.Run), and the returned Task's
-    /// completion answers the call: the result -> Ok, OperationCanceledException ->
-    /// Cancelled, any other exception -> AppError with its message. A completion after
-    /// Retire/Close is refused by the C (the caller already got Cancelled) and swallowed.
-    /// A null handler answers every call NoHandler (a declared stub).</summary>
+    /// <summary>The untyped implementation side of a task. The handler is an async delegate
+    /// whose completion answers the call (docs/csharp.md). Null answers NoHandler.</summary>
     public class TaskDefinition
     {
         internal IntPtr Fn;   // zeroed by Retire
@@ -2429,8 +2279,8 @@ namespace Dart
             node.RetainSchema(responseSchema);
         }
 
-        // Poll thread: defer (implies RUNNING), arm the per-call CancellationTokenSource,
-        // invoke the async delegate; wherever its completion lands answers the call.
+        // Poll thread: defer, which implies RUNNING, arm the per call CancellationTokenSource,
+        // invoke the async delegate. Wherever its completion lands answers the call.
         private static void RunCall(Patterns.RequestBox box, Patterns.TaskCancelBox cancels,
                                     Func<DartRequest, TaskContext, Task<byte[]>> handler, DartRequest r)
         {
@@ -2458,11 +2308,8 @@ namespace Dart
         /// <summary>Callers currently matched to this definition.</summary>
         public int CallerCount => Native.dart_function_match_count(Fn);
 
-        /// <summary>Retire the definition: every live deferred call answers Cancelled
-        /// while the channels are still up (a RUNNING caller never hangs), and a handler
-        /// completing after sees its token refused, silently. The handle is unusable
-        /// after. Refused (SendStatus.State) from inside a callback; the handle then
-        /// stays valid.</summary>
+        /// <summary>Retire the definition: every live deferred call answers Cancelled while the
+        /// channels are up, a later completion is refused. Refused from a callback.</summary>
         public SendStatus Retire()
         {
             var rc = (SendStatus)Native.dart_function_retire(Fn);
@@ -2471,8 +2318,8 @@ namespace Dart
         }
     }
 
-    /// <summary>One task progress update (the untyped info form). Value is the payload,
-    /// fully copied out; null = the RUNNING acknowledgment.</summary>
+    /// <summary>One task progress update, the untyped form. Value is the payload copied out,
+    /// null = the RUNNING acknowledgment.</summary>
     public sealed class TaskProgress
     {
         public uint CallId { get; internal set; }
@@ -2485,11 +2332,8 @@ namespace Dart
         internal IntPtr SchemaPtr;
     }
 
-    /// <summary>A reference to a task defined on another node (untyped). A task request
-    /// is always DIRECTED at one provider (provider 0 = the oldest matched, resolved at
-    /// send). The per-call timeout bounds only the wait for the FIRST response: once
-    /// RUNNING (or progress) arrives the task runs as long as it runs, and cancellation
-    /// is the caller's tool for impatience.</summary>
+    /// <summary>The untyped reference to a task defined elsewhere. A request is always
+    /// directed at one provider, and the timeout bounds only the first response.</summary>
     public class RemoteTask
     {
         internal IntPtr Fn;   // zeroed by Retire
@@ -2520,17 +2364,14 @@ namespace Dart
             node.RetainSchema(responseSchema);
         }
 
-        /// <summary>Start the task: the Task completes with the terminal outcome and NEVER
-        /// faults (inspect Status/SendStatus). progress fires per update on the delivering
-        /// thread, once with a null Value for the RUNNING ack. Cancelling cancellationToken
-        /// requests cooperative cancellation of the remote run: the outcome says whether it
-        /// was honored (Cancelled) or it completed anyway.</summary>
+        /// <summary>Start the task: the Task completes with the terminal outcome and never
+        /// faults. progress fires per update, null for RUNNING. The token cancels.</summary>
         public Task<DartResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
                                             CancellationToken cancellationToken = default, uint provider = 0)
             => CallAsync(request, out _, progress, cancellationToken, provider);
 
-        /// <summary>As above; callId receives the call id at commit (before any response):
-        /// the handle for Cancel from anywhere. 0 when the request never committed.</summary>
+        /// <summary>As above, and callId receives the call id at commit, the handle for Cancel
+        /// from anywhere. 0 when the request never committed.</summary>
         public Task<DartResponse> CallAsync(byte[] request, out uint callId,
                                             IProgress<TaskProgress> progress = null,
                                             CancellationToken cancellationToken = default, uint provider = 0)
@@ -2562,7 +2403,7 @@ namespace Dart
             int rc;
             try
             {
-                opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit, before any wait
+                opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit
                 using (var p = new PinnedBytes(request))
                     rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
                                                          optsHandle.AddrOfPinnedObject());
@@ -2584,29 +2425,24 @@ namespace Dart
             {
                 uint cid = callId;
                 CancellationTokenRegistration reg = cancellationToken.Register(() => Cancel(cid));
-                // release the registration off the poll thread once the outcome lands (never
-                // from the response trampoline: Dispose can wait for a cancel callback that
-                // is itself waiting on the node lock)
+                // release the registration off the poll thread once the outcome lands, never from
+                // the response trampoline, where Dispose can wait on a cancel callback
                 tcs.Task.ContinueWith(_ => reg.Dispose(), CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
             return tcs.Task;
         }
 
-        /// <summary>Request cancellation of the outstanding call callId. Cooperative and
-        /// never acked: the terminal status is the answer (Cancelled = honored or never
-        /// started; a normal outcome = it completed anyway). SendStatus.BadRole when the
-        /// provider declared noCancel (checked locally, nothing sent); State when the call
-        /// is not pending (already answered).</summary>
+        /// <summary>Request cancellation of the call. Cooperative and never acked, the terminal
+        /// status answers. BadRole when the provider declared noCancel, State if done.</summary>
         public SendStatus Cancel(uint callId) => (SendStatus)Native.dart_function_cancel(Fn, callId);
 
         /// <summary>Providers currently matched (the definition side present).</summary>
         public int MatchCount => Native.dart_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
 
-        /// <summary>Retire the remote: every outstanding call completes with Cancelled.
-        /// The handle is unusable after. Refused (SendStatus.State) from inside a
-        /// callback; the handle then stays valid.</summary>
+        /// <summary>Retire the remote: every outstanding call completes Cancelled. Unusable
+        /// after, refused from a callback.</summary>
         public SendStatus Retire()
         {
             var rc = (SendStatus)Native.dart_function_retire(Fn);
@@ -2628,7 +2464,7 @@ namespace Dart
         /// <summary>Peer id the write arrived from (0 = a local call on this node).</summary>
         public uint Source { get; internal set; }
         public ulong RecvUs { get; internal set; }
-        /// <summary>The writer's wall clock for this write (this node's own for a local one).</summary>
+        /// <summary>The writer's wall clock for this write, our own for a local one.</summary>
         public ulong WrittenUs { get; internal set; }
         internal IntPtr SchemaPtr;
     }
@@ -2676,8 +2512,8 @@ namespace Dart
             node.RetainSchema(schema);
         }
 
-        /// <summary>Read the current value fully copied out (definition: the store;
-        /// remote: the cached latest). False when no value exists yet.</summary>
+        /// <summary>Read the current value copied out, the store or the cached latest. False
+        /// when no value exists yet.</summary>
         public bool TryGet(out byte[] value)
         {
             value = null;
@@ -2693,16 +2529,15 @@ namespace Dart
             finally { Native.dart_node_unlock(DartNode.Handle); }
         }
 
-        /// <summary>Set the value (definition: apply + publish; remote: send over the
-        /// set channel). SendStatus.BadRole = the owner advertises no set channel.</summary>
+        /// <summary>Set the value: apply and publish, or send over the set channel. BadRole =
+        /// the owner advertises no set channel.</summary>
         public SendStatus Set(byte[] value)
         {
             using (var p = new PinnedBytes(value)) return (SendStatus)Native.dart_variable_set(Var, p.B);
         }
 
-        /// <summary>Force the value: writes are absorbed into the shadow source until
-        /// Unforce, which restores the latest absorbed set. The definition must have
-        /// been created with allowForce (SendStatus.State otherwise).</summary>
+        /// <summary>Force the value: writes are absorbed into the shadow source until Unforce
+        /// restores the latest absorbed set. Needs allowForce on the definition.</summary>
         public SendStatus Force(byte[] value)
         {
             using (var p = new PinnedBytes(value)) return (SendStatus)Native.dart_variable_force(Var, p.B);
@@ -2714,22 +2549,16 @@ namespace Dart
         /// matched, 0 = no owner present).</summary>
         public int RemoteCount => Native.dart_variable_match_count(Var);
 
-        /// <summary>Block driving the node loop until a value exists or timeoutMs
-        /// elapses (negative = forever-ish). Refused (false) from a callback or while
-        /// a service thread owns this node's loop.</summary>
+        /// <summary>Block driving the loop until a value exists or timeoutMs elapses. Refused
+        /// from a callback or under a service thread.</summary>
         public bool Wait(int timeoutMs) => Native.dart_variable_wait(Var, timeoutMs) == 1;
 
-        /// <summary>Observe changes. Fires only when the observed state actually
-        /// changes (the first value, different bytes, or a forced flip; a
-        /// byte-identical re-set stays silent), and replays the current value once
-        /// at registration so it can never be missed. Runs inline on the thread that
-        /// applied the write (the service thread for anything off the wire), with the
-        /// usual from-a-callback restrictions. One handler; null clears.</summary>
+        /// <summary>Observe changes: fires on every state change and replays the current value
+        /// at registration, inline on the thread that applied the write. Null clears.</summary>
         public void OnChange(Action<VariableUpdate> handler) => Observe(handler, true);
 
-        /// <summary>Observe every applied write, byte-identical or not (no replay at
-        /// registration: writes are events, not state). Same threading as OnChange;
-        /// one handler, null clears.</summary>
+        /// <summary>Observe every applied write, identical bytes or not, with no replay at
+        /// registration. The same threading as OnChange. Null clears.</summary>
         public void OnWrite(Action<VariableUpdate> handler) => Observe(handler, false);
 
         private void Observe(Action<VariableUpdate> handler, bool change)
@@ -2746,10 +2575,8 @@ namespace Dart
             else Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id);
         }
 
-        /// <summary>Retire the handle: park its channels and release the name so a
-        /// successor can bind (a re-created same-name handle is otherwise silently
-        /// shadowed by the live twin). The handle is unusable after. Refused
-        /// (SendStatus.State) from inside a callback; the handle then stays valid.</summary>
+        /// <summary>Retire the handle: park its channels and release the name, else a re created
+        /// same name handle is shadowed. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
             var rc = (SendStatus)Native.dart_variable_retire(Var);
@@ -2798,9 +2625,8 @@ namespace Dart
         public Topic Topic => T;
     }
 
-    /// <summary>The subscribe-side handle (untyped). A handler fires per message on
-    /// the polling thread; or consume with TryTake/Dispatch on a thread of your
-    /// choosing. Handlers on a topic replace the node-wide onMessage for it.</summary>
+    /// <summary>The untyped subscribe side. A handler fires per message on the polling
+    /// thread instead of the node wide onMessage, or consume with TryTake and Dispatch.</summary>
     public class Subscriber
     {
         internal readonly Topic T;
@@ -2858,9 +2684,8 @@ namespace Dart
         public bool Fail(string message = null) => _core.Fail(message);
     }
 
-    /// <summary>The typed implementation side. Simple form: the return value is the
-    /// reply, a THROWN exception answers CallStatus.AppError (it never crosses into
-    /// the C). Full form: reply/fail/defer explicitly through DartRequest&lt;TRsp&gt;.</summary>
+    /// <summary>The typed implementation side. Simple form: the return value is the reply
+    /// and a thrown exception answers AppError. Full form: DartRequest&lt;TRsp&gt;.</summary>
     public sealed class FunctionDefinition<TReq, TRsp>
     {
         private readonly FunctionDefinition _core;
@@ -2886,9 +2711,8 @@ namespace Dart
             _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
         }
 
-        /// <summary>Async-handler form: the returned Task's completion is the reply (the
-        /// result -> Ok, an exception -> AppError with its message). The handler runs on
-        /// the polling thread until its first await; CPU-bound work belongs in Task.Run.</summary>
+        /// <summary>The async handler form: the Task's completion answers the call, its result
+        /// Ok and an exception AppError. On the polling thread until the first await.</summary>
         public FunctionDefinition(DartNode node, string name, Func<TReq, Task<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0)
         {
@@ -2933,8 +2757,8 @@ namespace Dart
         public SendStatus Retire() => _core.Retire();
     }
 
-    /// <summary>The typed owning call outcome. Reading Value when !Ok throws
-    /// CallException; Status/SendStatus never throw.</summary>
+    /// <summary>The typed owning call outcome. Reading Value when not Ok throws
+    /// CallException. Status never throws.</summary>
     public sealed class DartResponse<TRsp>
     {
         internal DartResponse Core;
@@ -3012,11 +2836,8 @@ namespace Dart
         public ulong WrittenUs => _core.WrittenUs;
     }
 
-    /// <summary>The typed implementation side of a task. The async handler answers the
-    /// call by completing: the result -> Ok, OperationCanceledException (the cooperative
-    /// honor of the context's CancellationToken) -> Cancelled, any other exception ->
-    /// AppError with its message. It runs on the polling thread until its first await;
-    /// CPU-bound work belongs in Task.Run.</summary>
+    /// <summary>The typed implementation side of a task. The async handler's completion
+    /// answers the call (docs/csharp.md), on the polling thread until its first await.</summary>
     public sealed class TaskDefinition<TReq, TPrg, TRsp>
     {
         private readonly TaskDefinition _core;
@@ -3068,17 +2889,15 @@ namespace Dart
                                    progressKeepLast, backpressureWaitMs, timeoutMs);
         }
 
-        /// <summary>Start the task: the Task NEVER faults, inspect Status. progress fires
-        /// per typed update on the delivering thread (the RUNNING ack is skipped: it
-        /// carries no value; watch it through the untyped RemoteTask if needed).
-        /// Cancelling cancellationToken requests cooperative cancellation.</summary>
+        /// <summary>Start the task: the Task never faults. progress fires per typed update and
+        /// skips the valueless RUNNING ack. The token requests cooperative cancellation.</summary>
         public Task<DartResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
                                                   uint provider = 0)
             => CallAsync(request, out _, progress, cancellationToken, provider);
 
-        /// <summary>As above; callId receives the call id at commit: the handle for
-        /// Cancel from anywhere. 0 when the request never committed.</summary>
+        /// <summary>As above, and callId receives the call id at commit, the handle for Cancel.
+        /// 0 when the request never committed.</summary>
         public Task<DartResponse<TRsp>> CallAsync(TReq request, out uint callId,
                                                   IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
@@ -3105,16 +2924,15 @@ namespace Dart
         private async Task<DartResponse<TRsp>> Wrap(Task<DartResponse> core)
             => new DartResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
 
-        /// <summary>Cancel the outstanding call callId (see the untyped RemoteTask.Cancel).</summary>
+        /// <summary>Cancel the call callId, see the untyped RemoteTask.Cancel.</summary>
         public SendStatus Cancel(uint callId) => _core.Cancel(callId);
         public int MatchCount => _core.MatchCount;
         public bool HasDefinition => _core.HasDefinition;
         public SendStatus Retire() => _core.Retire();
     }
 
-    /// <summary>The typed authoritative variable. Value get throws
-    /// InvalidOperationException while no value exists; Value set throws DartException
-    /// on a non-Ok SendStatus (use Set for the status-returning form).</summary>
+    /// <summary>The typed authoritative variable. Value get throws while no value exists,
+    /// Value set throws DartException on a non Ok status. Set returns the status.</summary>
     public class VariableDefinition<T>
     {
         private protected VariableDefinition _core;
@@ -3178,9 +2996,8 @@ namespace Dart
         public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
         public SendStatus Retire() => _core.Retire();
 
-        /// <summary>Observe changes, typed (see the untyped OnChange for the change
-        /// contract and threading). Handler forms: (T value) or
-        /// (T value, VariableUpdate update); pass a null-cast delegate to clear.</summary>
+        /// <summary>Observe changes, typed. Handler forms: (T value) or (T value, VariableUpdate
+        /// update). A null cast delegate clears.</summary>
         public void OnChange(Action<T> handler) => _core.OnChange(Adapt(handler, null));
         public void OnChange(Action<T, VariableUpdate> handler) => _core.OnChange(Adapt(null, handler));
         /// <summary>Observe every applied write, typed (no replay at registration).</summary>
@@ -3200,9 +3017,8 @@ namespace Dart
         }
     }
 
-    /// <summary>The typed accessor of a variable owned elsewhere. Same surface as the
-    /// definition (the definition decides force/write permissions), plus
-    /// HasDefinition/MatchCount.</summary>
+    /// <summary>The typed accessor of a variable owned elsewhere. The same surface as the
+    /// definition plus HasDefinition and MatchCount.</summary>
     public sealed class RemoteVariable<T> : VariableDefinition<T>
     {
         public RemoteVariable(DartNode node, string name, int catchUp = 0, int keepLast = 0,
@@ -3394,7 +3210,7 @@ namespace Dart
             return Encoding.UTF8.GetString(buf, 0, n);
         }
 
-        // --- reflection: message type -> field plan -> DSL ---
+        // reflection: message type to field plan to DSL
         private sealed class FieldPlan
         {
             public FieldInfo Field;
@@ -3418,11 +3234,8 @@ namespace Dart
         private static bool IsMapType(Type t)
             => typeof(System.Collections.IDictionary).IsAssignableFrom(t);
 
-        // A BARE TYPE used directly as a handle's T (CreateTopic<bool>, Variable<double>,
-        // Topic<float[]>, Topic<string>, Topic<Dictionary<string,object>>, an enum): the whole
-        // schema is that one type, anonymous (its identity is its shape), so the same bare type
-        // in any language is the same wire bytes and the same hash. Mirrors the field rules: a
-        // plain string is the unbounded `string`, a plain array is the variable `elem[]`.
+        // A bare type used directly as a handle's T is the whole schema, anonymous, so the same
+        // bare type in any language is the same bytes and hash. A plain array is the variable one.
         private static bool IsValueType(Type t)
             => ScalarKind.ContainsKey(t) || t.IsEnum || t == typeof(string) || t.IsArray
                || IsMapType(t);
@@ -3467,7 +3280,7 @@ namespace Dart
                 var attr = (DartSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(DartSchemaAttribute));
                 string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : t.Name;
                 FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
-                Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));  // declaration order
+                Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));
                 var plans = new List<FieldPlan>();
                 foreach (var f in fields)
                 {
@@ -3476,7 +3289,7 @@ namespace Dart
                     var str = (DartStringAttribute)Attribute.GetCustomAttribute(f, typeof(DartStringAttribute));
                     var plan = new FieldPlan { Field = f, WireName = fa != null ? fa.Name : f.Name };
                     byte k;
-                    if (arr != null)   // [DartArray(N)] -> FIXED array
+                    if (arr != null)   // [DartArray(N)]: a fixed array
                     {
                         Type et = f.FieldType.GetElementType();
                         if (et == typeof(string))
@@ -3491,7 +3304,7 @@ namespace Dart
                         else throw new SchemaException("array field " + f.Name
                             + " element must be a scalar or a [DartString] string");
                     }
-                    else if (f.FieldType.IsArray)   // T[] without [DartArray] -> VARIABLE array
+                    else if (f.FieldType.IsArray)   // T[] without [DartArray]: a variable array
                     {
                         Type et = f.FieldType.GetElementType();
                         if (et == typeof(string))
@@ -3509,10 +3322,10 @@ namespace Dart
                     else if (f.FieldType == typeof(string))
                     {
                         if (str != null) { plan.Kind = STR; plan.StrCap = str.Cap; }   // capped
-                        else plan.Kind = VSTR;                                          // variable (unbounded)
+                        else plan.Kind = VSTR;   // variable, unbounded
                     }
                     else if (IsMapType(f.FieldType)) { plan.Kind = MAP; }
-                    else if (f.FieldType.IsEnum)   // named integer; backing from the enum's underlying type
+                    else if (f.FieldType.IsEnum)   // a named integer, backing from the enum
                     {
                         if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(f.FieldType), out k) || k > I64)
                             throw new SchemaException("enum field " + f.Name + " must have an integer backing type");
@@ -3559,7 +3372,7 @@ namespace Dart
         // one field's type in DSL form (the whole schema when the root is a bare type)
         private static string TypeToken(FieldPlan f)
         {
-            if (f.TypeName != null) return f.TypeName;   // a standard type: the name IS the spelling
+            if (f.TypeName != null) return f.TypeName;   // a standard type spells as its name
             if (f.Kind == STRUCT)
             {
                 var nested = Spec(f.Nested).Fields;
@@ -3591,9 +3404,7 @@ namespace Dart
             return "{ " + string.Join(", ", parts) + " }";
         }
 
-        // --- DSL text of ANY compiled schema, straight from the C printer ---
-        // It spells named types and struct arrays, hoists each named type as a leading
-        // `Name = type` definition, and recompiles to identical wire, so there is exactly
+        // The DSL text of any compiled schema, straight from the C printer, so there is exactly
         // one implementation of the spelling across every binding.
         internal static string SchemaDsl(IntPtr s)
         {
@@ -3664,9 +3475,8 @@ namespace Dart
             return "{ " + string.Join(", ", parts) + " }";
         }
 
-        // --- encode: object -> message bytes ---------------------------------------
-        // One walk of the reflection spec resolves every value and pre-serializes the
-        // variable-field payloads, so the tail can be sized before the buffer is pinned.
+        // Encode: object to message bytes. One walk of the reflection spec resolves every value
+        // and pre serializes the variable payloads, so the tail is sized before pinning.
         private sealed class SetOp
         {
             public byte[] Cpath;
@@ -3677,21 +3487,21 @@ namespace Dart
             public byte[] Prepared;  // variable fields: the pre-serialized payload bytes
         }
 
-        // Encode a typed object (fields by reflection) OR a Dictionary<string,object>
-        // (values by field name, the schema drives the walk -- like the Python wrapper).
+        // Encode a typed object by reflection, or a Dictionary by field name with the schema
+        // driving the walk, like the Python wrapper.
         internal static byte[] Encode(IntPtr s, object value)
         {
             var ops = new List<SetOp>();
             long varBytes = 0;
             if (IsValueRoot(s))
-                CollectRootValue(s, value, ops, ref varBytes);   // a bare type: the value IS the field
+                CollectRootValue(s, value, ops, ref varBytes);   // the bare root value
             else if (value is System.Collections.IDictionary dict)
                 CollectFromDict(s, dict, ops, ref varBytes);
             else
                 Collect(s, Spec(value.GetType()), value, "", ops, ref varBytes);
 
-            // msg_min is the fixed section plus one empty frame per variable field; each
-            // variable frame then grows by exactly its payload length.
+            // msg_min is the fixed section plus one empty frame per variable field, and each
+            // variable frame then grows by exactly its payload length
             long cap = (long)Native.dart_schema_msg_min(s) + varBytes;
             byte[] buf = new byte[cap > 0 ? cap : 1];
             GCHandle gh = GCHandle.Alloc(buf, GCHandleType.Pinned);
@@ -3709,7 +3519,7 @@ namespace Dart
             finally { gh.Free(); }
         }
 
-        // bare-type root -> one op on the empty path (the schema's single anonymous field)
+        // a bare type root: one op on the empty path, the schema's single anonymous field
         private static void CollectRootValue(IntPtr s, object value, List<SetOp> ops, ref long varBytes)
         {
             DartSchemaFieldInfo info;
@@ -3720,7 +3530,7 @@ namespace Dart
             ops.Add(op);
         }
 
-        // reflected object -> ops (recurses the type spec, dotted paths for nested structs)
+        // a reflected object to ops, recursing the type spec with dotted paths for nested structs
         private static void Collect(IntPtr s, TypeSpec spec, object obj, string prefix,
                                     List<SetOp> ops, ref long varBytes)
         {
@@ -3737,8 +3547,8 @@ namespace Dart
             }
         }
 
-        // Dictionary source -> ops (walks the compiled schema's flat field table, pulling
-        // values by name; nested structs read from a nested dictionary of the same shape).
+        // a Dictionary source to ops: walk the compiled schema's flat field table pulling values
+        // by name, nested structs from a nested dictionary of the same shape
         private static void CollectFromDict(IntPtr s, System.Collections.IDictionary root,
                                             List<SetOp> ops, ref long varBytes)
         {
@@ -3758,7 +3568,7 @@ namespace Dart
                 if (info.kind == STRUCT)
                 {
                     while (srcs.Count <= d + 1) srcs.Add(null);
-                    srcs[d + 1] = val as System.Collections.IDictionary;   // null subtree -> keep defaults
+                    srcs[d + 1] = val as System.Collections.IDictionary;
                     continue;
                 }
                 if (val == null) continue;
@@ -3770,7 +3580,7 @@ namespace Dart
             }
         }
 
-        // Pre-serialize a field's variable payload (for sizing); fixed fields keep the raw value.
+        // Pre serialize a field's variable payload for sizing. Fixed fields keep the raw value.
         private static void PrepareOp(SetOp op, object val, ref long varBytes)
         {
             if (op.Kind == VSTR) { op.Prepared = Encoding.UTF8.GetBytes(val as string ?? ""); varBytes += op.Prepared.Length; }
@@ -3800,7 +3610,7 @@ namespace Dart
                 if (!SetString(s, buf, cap, cpath, (string)op.Value))
                     throw new SchemaException("string too long for " + op.Path + " (cap " + op.StrCap + ")");
             }
-            else if (op.Kind == VSTR) SetBytesString(s, buf, cap, cpath, op.Prepared);   // variable: never fails on length
+            else if (op.Kind == VSTR) SetBytesString(s, buf, cap, cpath, op.Prepared);
             else if (op.Kind == ARR && op.Elem == STR)
             {
                 var strs = AsStringArray(op.Value);
@@ -3817,7 +3627,7 @@ namespace Dart
             }
             else if (op.Kind == F32) Native.dart_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
             else if (op.Kind == F64) Native.dart_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
-            else if (op.Kind == ENUM)   // write the enum's backing integer (signed vs unsigned per Elem)
+            else if (op.Kind == ENUM)   // the backing integer, signed or unsigned per Elem
             {
                 object raw = op.Value is Enum ? Convert.ChangeType(op.Value, Enum.GetUnderlyingType(op.Value.GetType())) : op.Value;
                 if (op.Elem >= I8 && op.Elem <= I64) Native.dart_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
@@ -3886,8 +3696,8 @@ namespace Dart
             finally { gh.Free(); }
         }
 
-        // A variable string array's frame: whole [u16 len][cap bytes] slots (the layout
-        // UnpackStringArray reads back), one per element; live count = element count.
+        // A variable string array's frame: whole [u16 len][cap bytes] slots, the layout
+        // UnpackStringArray reads back, one per element. The live count is the element count.
         private static byte[] PackStringSlots(string[] strings, int cap)
         {
             if (strings == null) return Array.Empty<byte>();
@@ -3905,12 +3715,8 @@ namespace Dart
             return outb;
         }
 
-        // ---- map: the self-describing tagged value tree (`map` fields) ----------------
-        // Body wire (little-endian): [u16 n] entry*n; entry := [u8 keylen][key] value;
-        // value := [u8 kind] payload -- scalars store their raw bytes, VSTR is [u16 len]
-        // [bytes], VARR is [u16 n] value*n, MAP is a nested body. Built/parsed here
-        // (managed) rather than mirroring the C DartMapWriter struct; dart_set_map
-        // validates the body we build.
+        // The map body, the self describing tagged value tree of a map field, built and parsed
+        // here rather than mirroring the C writer. spec/schema.md has the wire, the C validates.
         private static void WriteLE(System.IO.MemoryStream m, ulong v, int nbytes)
         {
             for (int i = 0; i < nbytes; i++) m.WriteByte((byte)(v >> (8 * i)));
@@ -3924,7 +3730,7 @@ namespace Dart
             int n = 0;
             foreach (System.Collections.DictionaryEntry e in dict)
             {
-                if (e.Value == null) continue;   // a map has no null kind; omit the key
+                if (e.Value == null) continue;   // a map has no null kind, omit the key
                 byte[] kb = Encoding.UTF8.GetBytes(e.Key.ToString());
                 if (kb.Length > 255) throw new SchemaException("map key too long (max 255 bytes): " + e.Key);
                 entries.WriteByte((byte)kb.Length);
@@ -4036,7 +3842,7 @@ namespace Dart
             Buffer.BlockCopy(b, 0, buf, off, b.Length);
         }
 
-        // --- decode: message bytes -> nested dict / typed object ---
+        // decode: message bytes to a nested dict or a typed object
         internal static Dictionary<string, object> DecodeDict(IntPtr s, byte[] data)
         {
             GCHandle gh = GCHandle.Alloc(data, GCHandleType.Pinned);
@@ -4095,7 +3901,7 @@ namespace Dart
                 return DecodeMapBody(raw, ref off, raw.Length, 1);
             }
             if (v.kind == F32 || v.kind == F64) return v.v.f;
-            if (v.kind == ENUM) return v.v.i;   // the number; ToObject casts it to the enum type
+            if (v.kind == ENUM) return v.v.i;   // the number. ToObject casts it to the enum type
             if (v.kind >= I8 && v.kind <= I64) return v.v.i;
             if (v.kind == BOOL) return v.v.u != 0;
             return v.v.u;
@@ -4163,8 +3969,8 @@ namespace Dart
             }
         }
 
-        // string-array slots are [u16 len][cap bytes] each; clamp len like the C reader
-        // so a hostile message can never over-read
+        // string array slots are [u16 len][cap bytes] each. Clamp len like the C reader so a
+        // hostile message can never over read
         private static string[] UnpackStringArray(byte[] raw, int count, int cap)
         {
             var strs = new string[count];
@@ -4240,7 +4046,7 @@ namespace Dart
                 if (fp.Kind == STRUCT) set = ToObject(fp.Nested, (Dictionary<string, object>)val);
                 else if (fp.Kind == ARR || fp.Kind == VARR || fp.Kind == STR || fp.Kind == VSTR
                          || fp.Kind == MAP) set = val;   // already string / typed array / dict
-                else if (fp.Kind == ENUM) set = Enum.ToObject(fp.Field.FieldType, val);   // number -> enum
+                else if (fp.Kind == ENUM) set = Enum.ToObject(fp.Field.FieldType, val);
                 else set = Convert.ChangeType(val, fp.Field.FieldType);
                 fp.Field.SetValue(obj, set);
             }
