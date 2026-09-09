@@ -7,19 +7,8 @@ using UnityEngine;
 
 namespace Dart
 {
-    /// <summary>Per-message metadata for handlers that want more than the payload.</summary>
-    public readonly struct MessageInfo
-    {
-        /// <summary>The sending node's name, never null.</summary>
-        public readonly string Sender;
-        /// <summary>The node's monotonic clock in microseconds at arrival on the poll side, not
-        /// at dispatch, so inter arrival timing is real under a frame paced dispatch.</summary>
-        public readonly ulong RecvUs;
-        public MessageInfo(string sender, ulong recvUs) { Sender = sender; RecvUs = recvUs; }
-    }
-
-    /// <summary>A live subscription to a topic or a variable observer. Dispose() unsubscribes,
-    /// and an owner bound one disposes itself when the owner is destroyed.</summary>
+    /// <summary>A live subscription. Dispose() unsubscribes, and an owner bound one disposes
+    /// itself when the owner is destroyed.</summary>
     public sealed class DartSubscription : IDisposable
     {
         private Action _unsub;
@@ -66,6 +55,11 @@ namespace Dart
         public int Matches => _raw != null ? _raw.MatchCount() : 0;
         /// <summary>Local handlers currently subscribed.</summary>
         public int SubscriberCount => _live;
+        /// <summary>True when a publish would not wait on the match wait.</summary>
+        public bool Ready => _raw != null && _raw.Ready;
+        /// <summary>Consumer queue depth, bytes, capacity and drops since open.</summary>
+        public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
+            => _raw != null ? _raw.QueueStats() : (0u, 0u, 0u, 0u);
 
         internal abstract Topic CreateRaw(DartNode node, string name, Role role, Qos qos);
 
@@ -85,7 +79,9 @@ namespace Dart
             if (node == null) return;               // deferred until the node opens
             _raw = CreateRaw(node, _name, want, _qos);
             _appliedRole = want;
-            _owner.RegisterIndex(_raw.Index, this);
+            // The wrapper fans a topic index out to its own handlers, so the node needs no
+            // router of ours. Every Unity topic is queued, so this lands on the frame.
+            node.AddSubHandler(_raw.Index, Deliver);
         }
 
         internal void OnNodeOpened()
@@ -129,8 +125,8 @@ namespace Dart
             ApplyRole();
         }
 
-        // Main thread, from DartNodeUnity's per-frame dispatch. Handlers may subscribe,
-        // unsubscribe, and publish freely from inside a delivery.
+        // Main thread, from the node's per-frame dispatch. Handlers may subscribe, unsubscribe
+        // and publish freely from inside a delivery.
         internal void Deliver(DartMessage m)
         {
             bool sawDead = false;
@@ -214,7 +210,7 @@ namespace Dart
         internal DartTopic(DartNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
 
         internal override Topic CreateRaw(DartNode node, string name, Role role, Qos qos)
-            => new Topic<T>(node, name, role, qos);   // the internal (role, qos) plumbing ctor
+            => new Topic<T>(node, name, role, qos);
 
         public SendStatus Publish(T message)
         {
@@ -228,11 +224,11 @@ namespace Dart
             return AddSub(m => { if (m.Value is T v) handler(v); }, null, false);
         }
 
-        public DartSubscription Subscribe(Action<T, MessageInfo> handler)
+        /// <summary>With the message beside the value: sender, both clocks, raw bytes.</summary>
+        public DartSubscription Subscribe(Action<T, DartMessage> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v, new MessageInfo(m.PublisherName, m.RecvUs)); },
-                          null, false);
+            return AddSub(m => { if (m.Value is T v) handler(v, m); }, null, false);
         }
 
         /// <summary>Owner-bound: auto-unsubscribes when owner is destroyed, skipped
@@ -244,13 +240,12 @@ namespace Dart
             return AddSub(m => { if (m.Value is T v) handler(v); }, owner, true);
         }
 
-        /// <summary>Owner-bound, with per-message metadata.</summary>
-        public DartSubscription Subscribe(Component owner, Action<T, MessageInfo> handler)
+        /// <summary>Owner-bound, with the message beside the value.</summary>
+        public DartSubscription Subscribe(Component owner, Action<T, DartMessage> handler)
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v, new MessageInfo(m.PublisherName, m.RecvUs)); },
-                          owner, true);
+            return AddSub(m => { if (m.Value is T v) handler(v, m); }, owner, true);
         }
     }
 }

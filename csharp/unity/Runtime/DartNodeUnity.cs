@@ -4,7 +4,6 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Dart
@@ -25,12 +24,20 @@ namespace Dart
         [SerializeField] private int maxTopics = 32;
         [Tooltip("Multihomed hosts (VPN adapters, WSL, docker bridges): this machine's LAN IP, so discovery uses the right interface. Empty = auto probe.")]
         [SerializeField] private string multicastInterface = "";
+        [Tooltip("Per topic consumer queue in bytes. The wire fills it off thread, the frame drains it.")]
+        [SerializeField] private int queueBytes = 1 << 20;
+        [Tooltip("Most messages dispatched per frame across all topics, 0 = drain everything. A budget bounds the frame under a burst.")]
+        [SerializeField] private int dispatchBudget = 0;
         [Tooltip("Keep the node live in the editor outside play mode.")]
         [SerializeField] private bool runInEditMode = true;
         [Tooltip("Log peer lifecycle, message loss, and errors to the Console.")]
         [SerializeField] private bool logEvents = true;
         [Tooltip("Play mode: survive scene loads (DontDestroyOnLoad).")]
         [SerializeField] private bool persistAcrossScenes = true;
+
+        // A frame that has to run more than this many parked callbacks is a symptom, not a
+        // budget: nothing is dropped, but the console says so.
+        private const int CallbackBacklogWarn = 4096;
 
         private static DartNodeUnity s_main;
 
@@ -39,15 +46,10 @@ namespace Dart
         private bool _configDirty;
         private int _frame;
         private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
-        private readonly Dictionary<string, DartPatternEntity> _patterns = new Dictionary<string, DartPatternEntity>();
-        private readonly Dictionary<ushort, DartTopicBase> _byIndex = new Dictionary<ushort, DartTopicBase>();
-        private readonly List<DartEvent> _pending = new List<DartEvent>();   // service to main
-        private readonly List<DartEvent> _drain = new List<DartEvent>();
-        private readonly object _pendingLock = new object();
-        private readonly List<Action> _mainActions = new List<Action>();   // callbacks to main
-        private readonly List<Action> _mainDrain = new List<Action>();
-        private readonly object _mainLock = new object();
-        private int _mainThreadId;
+        private readonly Dictionary<string, object> _shared = new Dictionary<string, object>();
+        private readonly List<Action> _callbacks = new List<Action>();   // node threads to the frame
+        private readonly List<Action> _drain = new List<Action>();
+        private readonly object _cbLock = new object();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
 
         /// <summary>The scene's DartNodeUnity (found lazily), or null if none exists.</summary>
@@ -76,71 +78,43 @@ namespace Dart
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
         public static event Action<DartEvent> Events;
 
-        /// <summary>The shared topic of this name on the scene node, created on first request. The
-        /// QoS parameters apply only to that first request, later callers share it.</summary>
-        public static DartTopic<T> Topic<T>(string name, bool reliable = true, int keepLast = 0,
-                                            int catchUp = 0, int queueBytes = 0)
-            => RequireMain().GetTopic<T>(name, reliable, keepLast, catchUp, queueBytes);
+        // ---- topics -----------------------------------------------------------------
 
-        /// <summary>The shared raw (bytes) topic named <paramref name="name"/>.</summary>
-        public static DartTopic Topic(string name, bool reliable = true, int keepLast = 0,
-                                      int catchUp = 0, int queueBytes = 0)
-            => RequireMain().GetTopic(name, reliable, keepLast, catchUp, queueBytes);
+        /// <summary>The shared topic of this name on the scene node, created on first request.
+        /// The QoS applies only to that first request, later callers share it.</summary>
+        public static DartTopic<T> Topic<T>(string name, Qos qos = null)
+            => RequireMain().GetTopic<T>(name, qos);
 
-        /// <summary>One-liner subscribe on the scene node. The reliability applies only if
-        /// this is the first request for the topic (first request sets its QoS).</summary>
-        public static DartSubscription Subscribe<T>(string name, Action<T> handler, bool reliable = true)
-            => Topic<T>(name, reliable).Subscribe(handler);
-
-        /// <summary>One-liner owner-bound subscribe: dies with owner, skipped while
-        /// it is disabled.</summary>
-        public static DartSubscription Subscribe<T>(string name, Component owner, Action<T> handler,
-                                                    bool reliable = true)
-            => Topic<T>(name, reliable).Subscribe(owner, handler);
-
-        /// <summary>One-liner publish on the scene node (creates/shares the topic by name).
-        /// The reliability applies only if this is the first request for the topic.</summary>
-        public static SendStatus Publish<T>(string name, T message, bool reliable = true)
-            => RequireMain().GetTopic<T>(name, reliable).Publish(message);
-
-        /// <summary>One-liner raw (bytes) publish.</summary>
-        public static SendStatus Publish(string name, byte[] data, bool reliable = true)
-            => RequireMain().GetTopic(name, reliable).Publish(data);
-
-        /// <summary>One-liner raw (UTF-8 string) publish.</summary>
-        public static SendStatus Publish(string name, string text, bool reliable = true)
-            => RequireMain().GetTopic(name, reliable).Publish(text);
+        /// <summary>The shared raw (bytes) topic of this name.</summary>
+        public static DartTopic Topic(string name, Qos qos = null)
+            => RequireMain().GetTopic(name, qos);
 
         /// <summary>The instance form of the static Topic&lt;T&gt;().</summary>
-        public DartTopic<T> GetTopic<T>(string name, bool reliable = true, int keepLast = 0,
-                                        int catchUp = 0, int queueBytes = 0)
+        public DartTopic<T> GetTopic<T>(string name, Qos qos = null)
         {
-            bool custom = !reliable || keepLast != 0 || catchUp != 0 || queueBytes != 0;
-            DartTopicBase ch = LookupOrNull(name, custom);
+            DartTopicBase ch = LookupOrNull(name, qos != null);
             if (ch != null)
             {
                 var typed = ch as DartTopic<T>;
                 if (typed == null) throw ShapeMismatch(name, ch, "DartTopic<" + typeof(T).Name + ">");
                 return typed;
             }
-            var c = new DartTopic<T>(this, name, EffectiveQos(reliable, keepLast, catchUp, queueBytes));
+            var c = new DartTopic<T>(this, name, EffectiveQos(qos));
             _topics.Add(name, c);
             return c;
         }
 
         /// <summary>Instance form of the static raw Topic().</summary>
-        public DartTopic GetTopic(string name, bool reliable = true, int keepLast = 0,
-                                  int catchUp = 0, int queueBytes = 0)
+        public DartTopic GetTopic(string name, Qos qos = null)
         {
-            bool custom = !reliable || keepLast != 0 || catchUp != 0 || queueBytes != 0;
-            DartTopicBase ch = LookupOrNull(name, custom);
+            DartTopicBase ch = LookupOrNull(name, qos != null);
             if (ch != null)
             {
                 var raw = ch as DartTopic;
                 if (raw == null) throw ShapeMismatch(name, ch, "a raw DartTopic");
                 return raw;
             }
-            var c = new DartTopic(this, name, EffectiveQos(reliable, keepLast, catchUp, queueBytes));
+            var c = new DartTopic(this, name, EffectiveQos(qos));
             _topics.Add(name, c);
             return c;
         }
@@ -168,109 +142,111 @@ namespace Dart
             return m;
         }
 
-        // Reliable by default and always queued from creation: with the service thread owning
-        // the wire, only a queued topic keeps its handlers off that thread.
-        private static Qos EffectiveQos(bool reliable, int keepLast, int catchUp, int queueBytes)
+        // Unity's one QoS rule: handlers run on the frame, so every topic is queued. Everything
+        // else is the C default, best effort included, as in every other binding.
+        private Qos EffectiveQos(Qos qos)
         {
-            var e = new Qos
-            {
-                Reliability = reliable ? Reliability.Reliable : Reliability.BestEffort,
-                KeepLast = (ushort)keepLast,
-                CatchUp = (ushort)catchUp,
-                QueueBytes = (uint)queueBytes,
-            };
-            if (e.QueueBytes == 0) e.QueueBytes = 1 << 20;
+            var e = new Qos(qos);
+            if (e.QueueBytes == 0) e.QueueBytes = (uint)Mathf.Max(queueBytes, 1);
             return e;
         }
 
-        // ---- patterns: variables / functions --------------------------------------
+        // ---- patterns: the core handles, shared by name -------------------------------
 
-        /// <summary>The scene shared authoritative variable of this name. One side per node, so
-        /// asking for a RemoteVariable of the same name throws.</summary>
-        public static DartVariableDefinition<T> VariableDefinition<T>(string name,
-                bool readOnly = false, bool allowForce = false, int catchUp = 0, int keepLast = 0)
-            => RequireMain().GetVariableDefinition<T>(name, readOnly, allowForce, catchUp, keepLast);
+        /// <summary>The scene shared handle of this key, built on first request against the open
+        /// node. Use it for a pattern that needs options the shorthands below do not take.</summary>
+        public static T Shared<T>(string key, Func<DartNode, T> make) where T : class
+            => RequireMain().GetShared(key, make);
 
-        /// <summary>The scene-shared reference to a variable owned by another node.</summary>
-        public static DartRemoteVariable<T> RemoteVariable<T>(string name, int catchUp = 0,
-                int keepLast = 0)
-            => RequireMain().GetRemoteVariable<T>(name, catchUp, keepLast);
-
-        /// <summary>The scene shared function definition, one per name on the network. The
-        /// handler runs on the main thread.</summary>
-        public static DartFunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(
-                string name, Func<TReq, TRsp> handler)
-            => RequireMain().GetFunctionDefinition<TReq, TRsp>(name, handler);
-
-        /// <summary>The scene-shared reference to a function defined on another node.</summary>
-        public static DartRemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
-            => RequireMain().GetRemoteFunction<TReq, TRsp>(name);
-
-        /// <summary>The scene shared task definition, one per name. The async handler runs on the
-        /// main thread.</summary>
-        public static DartTaskDefinition<TReq, TPrg, TRsp> TaskDefinition<TReq, TPrg, TRsp>(
-                string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
-                bool noCancel = false, bool exclusive = false)
-            => RequireMain().GetTaskDefinition<TReq, TPrg, TRsp>(name, handler, noCancel, exclusive);
-
-        /// <summary>The scene-shared reference to a task defined on another node.</summary>
-        public static DartRemoteTask<TReq, TPrg, TRsp> RemoteTask<TReq, TPrg, TRsp>(string name)
-            => RequireMain().GetRemoteTask<TReq, TPrg, TRsp>(name);
-
-        public DartVariableDefinition<T> GetVariableDefinition<T>(string name,
-                bool readOnly = false, bool allowForce = false, int catchUp = 0, int keepLast = 0)
-            => GetOrCreatePattern("var:", name,
-                   () => new DartVariableDefinition<T>(this, name, readOnly, allowForce, catchUp, keepLast));
-
-        public DartRemoteVariable<T> GetRemoteVariable<T>(string name, int catchUp = 0, int keepLast = 0)
-            => GetOrCreatePattern("var:", name,
-                   () => new DartRemoteVariable<T>(this, name, catchUp, keepLast));
-
-        public DartFunctionDefinition<TReq, TRsp> GetFunctionDefinition<TReq, TRsp>(
-                string name, Func<TReq, TRsp> handler)
-            => GetOrCreatePattern("fn:", name,
-                   () => new DartFunctionDefinition<TReq, TRsp>(this, name, handler));
-
-        public DartRemoteFunction<TReq, TRsp> GetRemoteFunction<TReq, TRsp>(string name)
-            => GetOrCreatePattern("fn:", name, () => new DartRemoteFunction<TReq, TRsp>(this, name));
-
-        public DartTaskDefinition<TReq, TPrg, TRsp> GetTaskDefinition<TReq, TPrg, TRsp>(
-                string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
-                bool noCancel = false, bool exclusive = false)
-            => GetOrCreatePattern("task:", name,
-                   () => new DartTaskDefinition<TReq, TPrg, TRsp>(this, name, handler, noCancel, exclusive));
-
-        public DartRemoteTask<TReq, TPrg, TRsp> GetRemoteTask<TReq, TPrg, TRsp>(string name)
-            => GetOrCreatePattern("task:", name, () => new DartRemoteTask<TReq, TPrg, TRsp>(this, name));
-
-        // Share a pattern handle by kind and name: the first request builds it, later ones return
-        // it, and a mismatched kind or type on the same name is a hard error, as for topics.
-        private TEntity GetOrCreatePattern<TEntity>(string kind, string name, Func<TEntity> make)
-            where TEntity : DartPatternEntity
+        public T GetShared<T>(string key, Func<DartNode, T> make) where T : class
         {
-            if (string.IsNullOrEmpty(name)) throw new ArgumentException("pattern name required", nameof(name));
-            string key = kind + name;
-            DartPatternEntity have;
-            if (_patterns.TryGetValue(key, out have))
+            if (string.IsNullOrEmpty(key)) throw new ArgumentException("name required", nameof(key));
+            if (make == null) throw new ArgumentNullException(nameof(make));
+            string slot = typeof(T).Name + ":" + key;
+            object have;
+            if (_shared.TryGetValue(slot, out have))
             {
-                var typed = have as TEntity;
+                var typed = have as T;
                 if (typed == null)
-                    throw new InvalidOperationException("'" + name + "' already exists as "
-                        + have.GetType().Name + ", requested as " + typeof(TEntity).Name
-                        + ": one name = one kind/type per node");
+                    throw new InvalidOperationException("'" + key + "' already exists as "
+                        + have.GetType().Name + ", requested as " + typeof(T).Name
+                        + ": one name = one kind per node");
                 return typed;
             }
-            TEntity created = make();
-            _patterns.Add(key, created);
-            created.OnNodeOpened();   // create the native object now if the node is already open
-            return created;
+            if (_node == null) Reconcile();     // acquiring one is a reason to open
+            if (_node == null)
+                throw new InvalidOperationException(
+                    "DART node is not open: '" + key + "' cannot be created (component disabled, "
+                    + "Run In Edit Mode off, or open failed)");
+            T made = make(_node);
+            _shared.Add(slot, made);
+            return made;
+        }
+
+        /// <summary>The scene shared authoritative variable of this name.</summary>
+        public static VariableDefinition<T> VariableDefinition<T>(string name)
+            => Shared(name, n => new VariableDefinition<T>(n, name));
+
+        /// <summary>Overload with the value it holds before any set.</summary>
+        public static VariableDefinition<T> VariableDefinition<T>(string name, T initial)
+            => Shared(name, n => new VariableDefinition<T>(n, name, initial));
+
+        /// <summary>The scene shared reference to a variable owned by another node.</summary>
+        public static RemoteVariable<T> RemoteVariable<T>(string name)
+            => Shared(name, n => new RemoteVariable<T>(n, name));
+
+        /// <summary>The scene shared function definition, one per name on the network.</summary>
+        public static FunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(
+                string name, Func<TReq, TRsp> handler)
+            => Shared(name, n => new FunctionDefinition<TReq, TRsp>(n, name, handler));
+
+        /// <summary>The scene shared reference to a function defined on another node.</summary>
+        public static RemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
+            => Shared(name, n => new RemoteFunction<TReq, TRsp>(n, name));
+
+        /// <summary>The scene shared task definition, one per name.</summary>
+        public static TaskDefinition<TReq, TPrg, TRsp> TaskDefinition<TReq, TPrg, TRsp>(
+                string name, Func<TReq, TaskContext<TPrg>, System.Threading.Tasks.Task<TRsp>> handler)
+            => Shared(name, n => new TaskDefinition<TReq, TPrg, TRsp>(n, name, handler));
+
+        /// <summary>The scene shared reference to a task defined on another node.</summary>
+        public static RemoteTask<TReq, TPrg, TRsp> RemoteTask<TReq, TPrg, TRsp>(string name)
+            => Shared(name, n => new RemoteTask<TReq, TPrg, TRsp>(n, name));
+
+        // ---- owner bound lifetime ----------------------------------------------------
+
+        private sealed class Bound { internal Component Owner; internal IDisposable Sub; }
+        private readonly List<Bound> _bound = new List<Bound>();
+
+        /// <summary>Tie a subscription to a component, so it is disposed when that component is
+        /// destroyed. Topic subscriptions take an owner directly; this covers the pattern
+        /// observers, whose handles are plain IDisposable.</summary>
+        public static IDisposable Bind(Component owner, IDisposable sub)
+            => RequireMain().BindTo(owner, sub);
+
+        public IDisposable BindTo(Component owner, IDisposable sub)
+        {
+            if (owner == null) throw new ArgumentNullException(nameof(owner));
+            if (sub == null) throw new ArgumentNullException(nameof(sub));
+            _bound.Add(new Bound { Owner = owner, Sub = sub });
+            return sub;
+        }
+
+        private void PruneBound()
+        {
+            for (int i = _bound.Count - 1; i >= 0; i--)
+            {
+                if (_bound[i].Owner != null) continue;
+                try { _bound[i].Sub.Dispose(); }
+                catch (Exception e) { Debug.LogException(e); }
+                _bound.RemoveAt(i);
+            }
         }
 
         // ---- lifecycle ------------------------------------------------------------
 
         private void OnEnable()
         {
-            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             if (s_main != null && s_main != this)
             {
                 Debug.LogWarning("[DART] a DartNodeUnity already exists on '" + s_main.gameObject.name
@@ -335,9 +311,12 @@ namespace Dart
             try
             {
                 _node = new DartNode(string.IsNullOrEmpty(nodeName) ? null : nodeName,
-                                 RouteMessage, QueueEvent,
+                                 null, OnNodeEvent,
                                  domain: Mathf.Clamp(domain, 0, ushort.MaxValue),
                                  maxTopics: Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
+                                 // A frame must never block: publishing into an unresolved match
+                                 // returns at once and topic.Ready is the check (docs/topics.md).
+                                 matchWaitMs: -1,
                                  multicastInterface: string.IsNullOrEmpty(multicastInterface)
                                      ? null : multicastInterface);
             }
@@ -347,22 +326,23 @@ namespace Dart
                 _node = null;
                 return;
             }
+            // Everything that is not a message now arrives on the frame: events, pattern
+            // handlers, variable observers, awaited call results. Messages ride the C queue.
+            _node.CallbackDispatcher = PostToFrame;
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
             _pollFallback = !_node.Start();     // DART_NO_THREADS builds: pump polls
             foreach (DartTopicBase ch in _topics.Values) ch.OnNodeOpened();
-            foreach (DartPatternEntity p in _patterns.Values) p.OnNodeOpened();
         }
 
         private void CloseNativeNode()
         {
             if (_node == null) return;
             foreach (DartTopicBase ch in _topics.Values) ch.OnNodeClosed();
-            foreach (DartPatternEntity p in _patterns.Values) p.OnNodeClosed();
-            lock (_byIndex) _byIndex.Clear();
+            _shared.Clear();          // the core handles died with the node, re acquire in OnEnable
+            _bound.Clear();
             _node.Close();
             _node = null;
-            lock (_pendingLock) _pending.Clear();
-            lock (_mainLock) _mainActions.Clear();
+            lock (_cbLock) _callbacks.Clear();
         }
 
         // ---- per-frame pump ---------------------------------------------------------
@@ -371,96 +351,55 @@ namespace Dart
         {
             if (_configDirty) Reconcile();
             if (_node == null) return;
-            DrainEvents();
             if (_pollFallback) _node.Poll(0);
-            _node.Dispatch();                   // every queued topic to this thread
-            DrainMainActions();                 // pattern callbacks parked by the service thread
+            _node.Dispatch(Mathf.Max(dispatchBudget, 0));   // every queued topic, up to the budget
+            DrainCallbacks();
             if ((++_frame & 0xFF) == 0)
             {
                 foreach (DartTopicBase ch in _topics.Values) ch.PruneDeadOwners();
-                foreach (DartPatternEntity p in _patterns.Values) p.PruneDeadOwners();
+                PruneBound();
             }
         }
 
-        internal void RegisterIndex(ushort index, DartTopicBase ch)
+        // The node's threads park work here. Nothing is dropped: a deep backlog is reported and
+        // still run, since a swallowed callback is a silent fault.
+        private void PostToFrame(Action a)
         {
-            lock (_byIndex) _byIndex[index] = ch;
+            lock (_cbLock) _callbacks.Add(a);
         }
 
-        // Pattern callbacks fire on the service thread, so hand them to the frame. Already on the
-        // main thread (the poll fallback, the synchronous OnChange replay) they run inline.
-        internal bool OnMainThread => Thread.CurrentThread.ManagedThreadId == _mainThreadId;
-
-        internal void Post(Action a)
+        private void DrainCallbacks()
         {
-            lock (_mainLock) { if (_mainActions.Count < 4096) _mainActions.Add(a); }
-        }
-
-        internal void RunOnMain(Action a)
-        {
-            if (OnMainThread) a();
-            else Post(a);
-        }
-
-        private void DrainMainActions()
-        {
-            lock (_mainLock)
+            lock (_cbLock)
             {
-                if (_mainActions.Count == 0) return;
-                _mainDrain.AddRange(_mainActions);
-                _mainActions.Clear();
+                if (_callbacks.Count == 0) return;
+                _drain.AddRange(_callbacks);
+                _callbacks.Clear();
             }
-            for (int i = 0; i < _mainDrain.Count; i++)
-            {
-                try { _mainDrain[i](); }
-                catch (Exception e) { Debug.LogException(e); }
-            }
-            _mainDrain.Clear();
-        }
-
-        // Runs on whichever thread dispatches, the main thread since our topics are all queued. A
-        // locked lookup keeps a user's own extra topic on Raw from racing the table.
-        private void RouteMessage(DartMessage m)
-        {
-            DartTopicBase ch;
-            lock (_byIndex) _byIndex.TryGetValue(m.TopicIndex, out ch);
-            if (ch != null) ch.Deliver(m);
-        }
-
-        // Service thread: park the event for the main-thread pump.
-        private void QueueEvent(DartEvent e)
-        {
-            lock (_pendingLock)
-            {
-                if (_pending.Count < 512) _pending.Add(e);
-            }
-        }
-
-        private void DrainEvents()
-        {
-            lock (_pendingLock)
-            {
-                if (_pending.Count == 0) return;
-                _drain.AddRange(_pending);
-                _pending.Clear();
-            }
-            Action<DartEvent> handler = Events;
+            if (_drain.Count > CallbackBacklogWarn)
+                Debug.LogWarning("[DART] " + _drain.Count + " callbacks parked for one frame: "
+                    + "the frame is behind the wire", this);
             for (int i = 0; i < _drain.Count; i++)
             {
-                DartEvent e = _drain[i];
-                if (logEvents)
-                {
-                    if (e.IsError) Debug.LogError("[DART] " + e, this);
-                    else if (e.Kind == EventKind.MessageLost) Debug.LogWarning("[DART] " + e, this);
-                    else Debug.Log("[DART] " + e, this);
-                }
-                if (handler != null)
-                {
-                    try { handler(e); }
-                    catch (Exception ex) { Debug.LogException(ex); }
-                }
+                try { _drain[i](); }
+                catch (Exception e) { Debug.LogException(e); }
             }
             _drain.Clear();
+        }
+
+        // Already on the frame: the node hands its events here through the dispatcher.
+        private void OnNodeEvent(DartEvent e)
+        {
+            if (logEvents)
+            {
+                if (e.IsError) Debug.LogError("[DART] " + e, this);
+                else if (e.Kind == EventKind.MessageLost) Debug.LogWarning("[DART] " + e, this);
+                else Debug.Log("[DART] " + e, this);
+            }
+            Action<DartEvent> handler = Events;
+            if (handler == null) return;
+            try { handler(e); }
+            catch (Exception ex) { Debug.LogException(ex); }
         }
     }
 }

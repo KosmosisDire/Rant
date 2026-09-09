@@ -589,6 +589,25 @@ namespace Dart
         public ushort MaxRateHz = 0;          // subscriber side, best effort: a delivery cap per publisher
         public bool NoTimestamp = false;      // publisher side: no source stamp, receivers see WrittenUs 0
 
+        public Qos() { }
+
+        /// <summary>Copy, so a layer that fills in a default never changes its caller's object.</summary>
+        public Qos(Qos other)
+        {
+            if (other == null) return;
+            Reliability = other.Reliability;
+            KeepLast = other.KeepLast;
+            CatchUp = other.CatchUp;
+            MaxMessageBytes = other.MaxMessageBytes;
+            HeartbeatUs = other.HeartbeatUs;
+            RepairDelayUs = other.RepairDelayUs;
+            BackpressureWaitUs = other.BackpressureWaitUs;
+            ShmMaxBytes = other.ShmMaxBytes;
+            QueueBytes = other.QueueBytes;
+            MaxRateHz = other.MaxRateHz;
+            NoTimestamp = other.NoTimestamp;
+        }
+
         internal DartQos ToNative()
         {
             return new DartQos
@@ -2575,24 +2594,88 @@ namespace Dart
 
         /// <summary>Observe changes: fires on every state change and replays the current value
         /// at registration, inline on the thread that applied the write. Null clears.</summary>
-        public void OnChange(Action<VariableUpdate> handler) => Observe(handler, true);
+        public IDisposable OnChange(Action<VariableUpdate> handler) => Observe(handler, true);
 
         /// <summary>Observe every applied write, identical bytes or not, with no replay at
-        /// registration. The same threading as OnChange. Null clears.</summary>
-        public void OnWrite(Action<VariableUpdate> handler) => Observe(handler, false);
+        /// registration. The same threading as OnChange. Null clears every observer.</summary>
+        public IDisposable OnWrite(Action<VariableUpdate> handler) => Observe(handler, false);
 
-        private void Observe(Action<VariableUpdate> handler, bool change)
+        // One native registration per kind fans out to every observer, as a topic index does.
+        // The C replays the current value at registration, so a later observer is replayed the
+        // last one seen instead, and both see the same first value.
+        private readonly List<Action<VariableUpdate>> _change = new List<Action<VariableUpdate>>();
+        private readonly List<Action<VariableUpdate>> _write = new List<Action<VariableUpdate>>();
+        private bool _changeBound, _writeBound, _hasLast;
+        private VariableUpdate _last;
+
+        private IDisposable Observe(Action<VariableUpdate> handler, bool change)
         {
+            List<Action<VariableUpdate>> list = change ? _change : _write;
             if (handler == null)
             {
-                if (change) Native.dart_variable_on_change(Var, null, IntPtr.Zero);
-                else Native.dart_variable_on_write(Var, null, IntPtr.Zero);
-                return;
+                lock (list) list.Clear();
+                if (change) { Native.dart_variable_on_change(Var, null, IntPtr.Zero); _changeBound = false; }
+                else { Native.dart_variable_on_write(Var, null, IntPtr.Zero); _writeBound = false; }
+                return null;
             }
-            long id = Patterns.AddBox(new Patterns.VarBox { Handler = handler, Node = DartNode });
-            DartNode.RegisterPatternBox(id);
-            if (change) Native.dart_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id);
-            else Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id);
+            bool bound = change ? _changeBound : _writeBound;
+            lock (list) list.Add(handler);
+            if (!bound)
+            {
+                List<Action<VariableUpdate>> l = list;
+                bool ch = change;
+                long id = Patterns.AddBox(new Patterns.VarBox
+                {
+                    Handler = u => Fan(l, ch, u),
+                    Node = DartNode,
+                });
+                DartNode.RegisterPatternBox(id);
+                if (change) { Native.dart_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
+                else { Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
+            }
+            else if (change)
+            {
+                bool had; VariableUpdate last;
+                lock (list) { had = _hasLast; last = _last; }
+                if (had)
+                {
+                    try { handler(last); }     // late observer: the replay it missed
+                    catch (Exception e) { Console.Error.WriteLine("dart variable observer: " + e); }
+                }
+            }
+            return new Observer(list, handler);
+        }
+
+        private void Fan(List<Action<VariableUpdate>> list, bool change, VariableUpdate u)
+        {
+            Action<VariableUpdate>[] hs;
+            lock (list)
+            {
+                if (change) { _last = u; _hasLast = true; }
+                hs = list.ToArray();           // an observer may add or drop from inside
+            }
+            for (int i = 0; i < hs.Length; i++)
+            {
+                try { hs[i](u); }
+                catch (Exception e) { Console.Error.WriteLine("dart variable observer: " + e); }
+            }
+        }
+
+        private sealed class Observer : IDisposable
+        {
+            private List<Action<VariableUpdate>> _list;
+            private Action<VariableUpdate> _fn;
+            internal Observer(List<Action<VariableUpdate>> list, Action<VariableUpdate> fn)
+            {
+                _list = list; _fn = fn;
+            }
+            public void Dispose()
+            {
+                List<Action<VariableUpdate>> l = _list;
+                Action<VariableUpdate> f = _fn;
+                _list = null; _fn = null;
+                if (l != null) lock (l) l.Remove(f);
+            }
         }
 
         /// <summary>Retire the handle: park its channels and release the name, else a re created
@@ -3008,11 +3091,11 @@ namespace Dart
 
         /// <summary>Observe changes, typed. Handler forms: (T value) or (T value, VariableUpdate
         /// update). A null cast delegate clears.</summary>
-        public void OnChange(Action<T> handler) => _core.OnChange(Adapt(handler, null));
-        public void OnChange(Action<T, VariableUpdate> handler) => _core.OnChange(Adapt(null, handler));
+        public IDisposable OnChange(Action<T> handler) => _core.OnChange(Adapt(handler, null));
+        public IDisposable OnChange(Action<T, VariableUpdate> handler) => _core.OnChange(Adapt(null, handler));
         /// <summary>Observe every applied write, typed (no replay at registration).</summary>
-        public void OnWrite(Action<T> handler) => _core.OnWrite(Adapt(handler, null));
-        public void OnWrite(Action<T, VariableUpdate> handler) => _core.OnWrite(Adapt(null, handler));
+        public IDisposable OnWrite(Action<T> handler) => _core.OnWrite(Adapt(handler, null));
+        public IDisposable OnWrite(Action<T, VariableUpdate> handler) => _core.OnWrite(Adapt(null, handler));
 
         private Action<VariableUpdate> Adapt(Action<T> plain, Action<T, VariableUpdate> full)
         {

@@ -772,6 +772,28 @@ static class Program
         Check("variable change arrived", level == 9);
         Check("observer ran on the drain thread", changeId == drainId);
 
+        // several scripts share one variable: every observer fires, a late one is replayed
+        // the current value, and dropping one leaves the rest alone
+        int a2 = 0, b2 = 0;
+        var subA = rvar.OnChange(v => a2 = v.Value);
+        var subB = rvar.OnChange(v => b2 = v.Value);
+        Check("late observers replayed the current value", a2 == 9 && b2 == 9);
+
+        lvlDef.Set(new Level { Value = 11 });
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && !(a2 == 11 && b2 == 11 && level == 11))
+        {
+            Drain();
+            Thread.Sleep(5);
+        }
+        Check("every observer fired", a2 == 11 && b2 == 11 && level == 11);
+
+        subA.Dispose();
+        lvlDef.Set(new Level { Value = 12 });
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && b2 != 12) { Drain(); Thread.Sleep(5); }
+        Check("a disposed observer stops, the others go on", a2 == 11 && b2 == 12 && level == 12);
+
         deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && evtId == 0) { Drain(); Thread.Sleep(5); }
         Check("events ran on the drain thread", evtId == drainId);
