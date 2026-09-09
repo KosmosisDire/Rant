@@ -122,9 +122,12 @@ async void OnEnable() {
 `TaskDefinition<,,>` and `RemoteTask<,,>` all work the same way, and docs/patterns.md
 describes them. Two Unity rules:
 
-- **Acquire them in `OnEnable`, not `Start`.** These handles belong to the native node, so a
-  node reopen (an inspector change, or an editor assembly reload) replaces them. `OnEnable`
-  runs again after both; `Start` does not.
+- **Re-acquire them in `OnEnable`, not `Start`.** A handle belongs to the native node, and
+  the node is reopened by an inspector change or an editor assembly reload. DartNodeUnity
+  rebuilds every shared handle at that point, so asking for one always gives a live one, but
+  a handle you cached in a field is the old one and your observers on it are gone. `OnEnable`
+  runs again after a reload; `Start` does not. A stale handle refuses cleanly (`NoTopic`), it
+  never touches the closed node.
 - **`OnChange` and `OnWrite` return an `IDisposable`.** Any number of scripts may observe one
   variable, and a late one is replayed the current value. Pass the handle through
   `DartNodeUnity.Bind(this, ...)` to have it disposed when your component is destroyed.

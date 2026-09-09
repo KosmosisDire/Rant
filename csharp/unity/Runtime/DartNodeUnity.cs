@@ -46,7 +46,7 @@ namespace Dart
         private bool _configDirty;
         private int _frame;
         private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
-        private readonly Dictionary<string, object> _shared = new Dictionary<string, object>();
+        private readonly Dictionary<string, SharedEntry> _shared = new Dictionary<string, SharedEntry>();
         private readonly List<Action> _callbacks = new List<Action>();   // node threads to the frame
         private readonly List<Action> _drain = new List<Action>();
         private readonly object _cbLock = new object();
@@ -158,18 +158,26 @@ namespace Dart
         public static T Shared<T>(string key, Func<DartNode, T> make) where T : class
             => RequireMain().GetShared(key, make);
 
+        // The recipe is kept beside the handle: the handle belongs to the native node, so a
+        // reopen has to build a new one, exactly as a topic re creates itself.
+        private sealed class SharedEntry
+        {
+            internal Func<DartNode, object> Make;
+            internal object Handle;
+        }
+
         public T GetShared<T>(string key, Func<DartNode, T> make) where T : class
         {
             if (string.IsNullOrEmpty(key)) throw new ArgumentException("name required", nameof(key));
             if (make == null) throw new ArgumentNullException(nameof(make));
             string slot = typeof(T).Name + ":" + key;
-            object have;
+            SharedEntry have;
             if (_shared.TryGetValue(slot, out have))
             {
-                var typed = have as T;
+                var typed = have.Handle as T;
                 if (typed == null)
                     throw new InvalidOperationException("'" + key + "' already exists as "
-                        + have.GetType().Name + ", requested as " + typeof(T).Name
+                        + have.Handle.GetType().Name + ", requested as " + typeof(T).Name
                         + ": one name = one kind per node");
                 return typed;
             }
@@ -178,9 +186,10 @@ namespace Dart
                 throw new InvalidOperationException(
                     "DART node is not open: '" + key + "' cannot be created (component disabled, "
                     + "Run In Edit Mode off, or open failed)");
-            T made = make(_node);
-            _shared.Add(slot, made);
-            return made;
+            var e = new SharedEntry { Make = n => make(n) };
+            e.Handle = make(_node);
+            _shared.Add(slot, e);
+            return (T)e.Handle;
         }
 
         /// <summary>The scene shared authoritative variable of this name.</summary>
@@ -332,14 +341,21 @@ namespace Dart
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
             _pollFallback = !_node.Start();     // DART_NO_THREADS builds: pump polls
             foreach (DartTopicBase ch in _topics.Values) ch.OnNodeOpened();
+            foreach (KeyValuePair<string, SharedEntry> kv in _shared)
+            {
+                try { kv.Value.Handle = kv.Value.Make(_node); }
+                catch (Exception e)
+                {
+                    Debug.LogError("[DART] '" + kv.Key + "' could not be re created: " + e.Message, this);
+                }
+            }
         }
 
         private void CloseNativeNode()
         {
             if (_node == null) return;
             foreach (DartTopicBase ch in _topics.Values) ch.OnNodeClosed();
-            _shared.Clear();          // the core handles died with the node, re acquire in OnEnable
-            _bound.Clear();
+            _bound.Clear();           // the observers those handles carried died with the node
             _node.Close();
             _node = null;
             lock (_cbLock) _callbacks.Clear();

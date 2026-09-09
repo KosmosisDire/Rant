@@ -1028,12 +1028,19 @@ namespace Dart
         }
     }
 
+    // A wrapper handle pointing into the node's arena. Close frees that arena, so the node
+    // zeroes every handle there: the C refuses a NULL one (DART_ERR_NO_TOPIC) instead of
+    // reading freed memory.
+    internal interface INodeHandle { void Invalidate(); }
+
     // ---- topic ----------------------------------------------------------------
 
-    public class Topic
+    public class Topic : INodeHandle
     {
         internal readonly DartNode _node;
-        internal IntPtr _handle;   // zeroed by Retire
+        internal IntPtr _handle;   // zeroed by Retire, and by the node at Close
+
+        void INodeHandle.Invalidate() { _handle = IntPtr.Zero; }
         internal readonly Schema Schema;
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
@@ -1049,6 +1056,7 @@ namespace Dart
             _node = node;
             Schema = schema;
             _handle = node.CreateOrShareTopic(name, role, schema, qos);
+            node.RegisterHandle(this);
         }
 
         // Wrap an already-existing native handle (e.g. a @dart/log topic from the node):
@@ -1058,6 +1066,7 @@ namespace Dart
             _node = node;
             Schema = null;
             _handle = handle;
+            node.RegisterHandle(this);
         }
 
         /// <summary>Publish bytes/string (raw) or a message object (encoded via the
@@ -1198,6 +1207,7 @@ namespace Dart
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
         private readonly List<long> _patternBoxes = new List<long>();
+        private readonly List<WeakReference<INodeHandle>> _handles = new List<WeakReference<INodeHandle>>();
         private readonly HashSet<long> _asyncLive = new HashSet<long>();
         internal readonly object PatternLock = new object();
 
@@ -1425,6 +1435,10 @@ namespace Dart
         // pattern-layer bookkeeping (reaped at Close)
         internal void RetainSchema(Schema s) { if (s != null) lock (_createLock) _schemas.Add(s); }
         internal void RegisterPatternBox(long id) { lock (PatternLock) _patternBoxes.Add(id); }
+        internal void RegisterHandle(INodeHandle h)
+        {
+            lock (PatternLock) _handles.Add(new WeakReference<INodeHandle>(h));
+        }
         internal void RegisterAsync(long id) { lock (PatternLock) _asyncLive.Add(id); }
         internal void UnregisterAsync(long id) { lock (PatternLock) _asyncLive.Remove(id); }
 
@@ -1571,6 +1585,13 @@ namespace Dart
             // async calls (the C never fires their callbacks after close)
             lock (PatternLock)
             {
+                // the arena these point into is gone: a later call must refuse, not read it
+                foreach (WeakReference<INodeHandle> w in _handles)
+                {
+                    INodeHandle h;
+                    if (w.TryGetTarget(out h)) h.Invalidate();
+                }
+                _handles.Clear();
                 foreach (long id in _patternBoxes) Patterns.DropBox(id);
                 _patternBoxes.Clear();
                 foreach (long id in _asyncLive) Patterns.AbandonAsync(id);
@@ -2005,10 +2026,12 @@ namespace Dart
 
     /// <summary>The untyped implementation side of a function: one reply per call, one
     /// definition per name. A null handler answers NoHandler.</summary>
-    public class FunctionDefinition
+    public class FunctionDefinition : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire
+        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
         internal readonly DartNode DartNode;
+
+        void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
                                   Action<DartRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
@@ -2040,6 +2063,7 @@ namespace Dart
             if (box != null) { box.Fn = Fn; node.RegisterPatternBox(id); }
             node.RetainSchema(requestSchema);
             node.RetainSchema(responseSchema);
+            node.RegisterHandle(this);
         }
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
@@ -2103,10 +2127,12 @@ namespace Dart
     }
 
     /// <summary>A reference to a function definition on another node (untyped).</summary>
-    public class RemoteFunction
+    public class RemoteFunction : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire
+        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
         internal readonly DartNode DartNode;
+
+        void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
         public RemoteFunction(DartNode node, string name, Schema requestSchema = null,
                               Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0,
@@ -2126,11 +2152,16 @@ namespace Dart
                 throw new InvalidOperationException("remote function create failed: " + node.LastError);
             node.RetainSchema(requestSchema);
             node.RetainSchema(responseSchema);
+            node.RegisterHandle(this);
         }
 
         // Wrap an existing node-owned function handle (the @dart/meta endpoint): callable,
         // never created or destroyed here.
-        internal RemoteFunction(DartNode node, IntPtr fn) { DartNode = node; Fn = fn; }
+        internal RemoteFunction(DartNode node, IntPtr fn)
+        {
+            DartNode = node; Fn = fn;
+            node.RegisterHandle(this);
+        }
 
         // Pin a DartCallOpts for one native call (IntPtr.Zero when undirected).
         private static GCHandle OptsHandle(uint provider, out IntPtr ptr)
@@ -2256,10 +2287,12 @@ namespace Dart
 
     /// <summary>The untyped implementation side of a task. The handler is an async delegate
     /// whose completion answers the call (docs/csharp.md). Null answers NoHandler.</summary>
-    public class TaskDefinition
+    public class TaskDefinition : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire
+        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
         internal readonly DartNode DartNode;
+
+        void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
         public TaskDefinition(DartNode node, string name, Schema requestSchema, Schema progressSchema,
                               Schema responseSchema, Func<DartRequest, TaskContext, Task<byte[]>> handler,
@@ -2312,6 +2345,7 @@ namespace Dart
             node.RetainSchema(requestSchema);
             node.RetainSchema(progressSchema);
             node.RetainSchema(responseSchema);
+            node.RegisterHandle(this);
         }
 
         // Poll thread: defer, which implies RUNNING, arm the per call CancellationTokenSource,
@@ -2369,10 +2403,12 @@ namespace Dart
 
     /// <summary>The untyped reference to a task defined elsewhere. A request is always
     /// directed at one provider, and the timeout bounds only the first response.</summary>
-    public class RemoteTask
+    public class RemoteTask : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire
+        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
         internal readonly DartNode DartNode;
+
+        void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
         public RemoteTask(DartNode node, string name, Schema requestSchema = null,
                           Schema progressSchema = null, Schema responseSchema = null,
@@ -2397,6 +2433,7 @@ namespace Dart
             node.RetainSchema(requestSchema);
             node.RetainSchema(progressSchema);
             node.RetainSchema(responseSchema);
+            node.RegisterHandle(this);
         }
 
         /// <summary>Start the task: the Task completes with the terminal outcome and never
@@ -2510,10 +2547,12 @@ namespace Dart
 
     /// <summary>Replicated state, ONE owner: this node holds the authoritative value
     /// (untyped: Schema + byte[]). Remotes cache the latest published value.</summary>
-    public class VariableDefinition
+    public class VariableDefinition : INodeHandle
     {
-        internal IntPtr Var;   // zeroed by Retire
+        internal IntPtr Var;   // zeroed by Retire, and by the node at Close
         internal readonly DartNode DartNode;
+
+        void INodeHandle.Invalidate() { Var = IntPtr.Zero; }
         internal readonly string Name;
 
         public VariableDefinition(DartNode node, string name, Schema schema, byte[] initial = null,
@@ -2549,6 +2588,7 @@ namespace Dart
                 throw new InvalidOperationException((definition ? "variable definition" : "remote variable")
                     + " create failed: " + node.LastError);
             node.RetainSchema(schema);
+            node.RegisterHandle(this);
         }
 
         /// <summary>Read the current value copied out, the store or the cached latest. False

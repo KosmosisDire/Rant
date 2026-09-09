@@ -78,6 +78,12 @@ TPrg, TRsp>`, `RemoteTask<TReq, TPrg, TRsp>`, `VariableDefinition<T>`, `RemoteVa
 `Publisher<T>` and `Subscriber<T>` are the typed handles. Each has an untyped core over
 `Schema` and `byte[]`.
 
+A variable takes any number of observers: `OnChange` and `OnWrite` each return an
+`IDisposable` that removes just that one, a null handler removes them all, and an observer
+registered after the first is replayed the value the others already saw. Every handle a node
+hands out (topics included) is invalidated when the node closes, so a call on one that
+outlived its node returns `NoTopic` instead of reading a freed pointer.
+
 A simple function handler returns the reply, and a thrown exception answers AppError with
 its message. The full form receives a `DartRequest` valid only inside the callback, and
 replies, fails or defers. `Defer()` returns a `Deferred` completed from any thread. An

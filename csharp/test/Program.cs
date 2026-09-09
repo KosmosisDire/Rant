@@ -802,8 +802,17 @@ static class Program
         Check("no callback ran off the drain thread",
               evtId == drainId && fnId == drainId && changeId == drainId && doneId == drainId);
 
+        // a handle that outlives its node must refuse, never read the freed arena
+        var staleTopic = new Topic<Level>(cli, "dstale", Role.PubOnly);
+        bool matchedBefore = call.HasDefinition;
         srv.Close();
         cli.Close();
+        Level got;
+        Check("stale variable set refuses", rvar.Set(new Level { Value = 1 }) == SendStatus.NoTopic);
+        Check("stale variable read is empty", !rvar.TryGet(out got));
+        Check("stale topic send refuses", staleTopic.Send(new Level { Value = 1 }) == SendStatus.NoTopic);
+        Check("stale remote function is unmatched", matchedBefore && !call.HasDefinition);
+
         Console.WriteLine(ok ? "dispatcher: PASS\n" : "dispatcher: FAIL\n");
         return ok;
     }
