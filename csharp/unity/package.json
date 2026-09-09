@@ -1,6 +1,6 @@
 {
   "name": "com.rant.dart",
-  "version": "0.0.11-preview",
+  "version": "0.0.12-preview",
   "displayName": "DART",
   "description": "Discovery And Realtime Transport: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Desktop standalone (Windows / macOS / Linux) and the Editor.",
   "unity": "2021.3",

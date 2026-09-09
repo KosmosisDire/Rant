@@ -818,6 +818,47 @@ static class Program
         return ok;
     }
 
+    // reflect_from_mesh: a handle carrying no type of its own takes the provider's from the
+    // mesh, which is what an observer tool or a generic HMI needs.
+    static bool ReflectLeg()
+    {
+        Console.WriteLine("reflect leg: two nodes, domain 49, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var a = new DartNode("rsrv", null, e => { },
+            domain: 49, multicastInterface: "127.0.0.1", maxTopics: 32);
+        var b = new DartNode("rcli", null, e => { },
+            domain: 49, multicastInterface: "127.0.0.1", maxTopics: 32, fetchDetails: true);
+
+        var pub = new Topic<Level>(a, "reflected", Role.PubOnly,
+                                   new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+        a.Start();
+        b.Start();
+        pub.Send(new Level { Value = 3 });
+
+        // nobody provides this one, so there is nothing to copy and it stays untyped
+        var plain = new Topic(b, "unprovided", Role.SubOnly, new Qos { ReflectFromMesh = true });
+        Check("an unprovided reflect topic stays untyped",
+              Native.dart_topic_schema(plain._handle) == IntPtr.Zero);
+
+        var reflect = new Topic(b, "reflected", Role.SubOnly, new Qos { ReflectFromMesh = true });
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && Native.dart_topic_schema(reflect._handle) == IntPtr.Zero)
+        {
+            reflect.Refresh();          // never automatic: the app picks the moment
+            Thread.Sleep(20);
+        }
+        Check("a reflect topic took the provider's schema",
+              Native.dart_topic_schema(reflect._handle) != IntPtr.Zero);
+        Check("refresh on a settled handle reports no change", !reflect.Refresh());
+
+        a.Close();
+        b.Close();
+        Console.WriteLine(ok ? "reflect: PASS\n" : "reflect: FAIL\n");
+        return ok;
+    }
+
     static int Main()
     {
         if (!RoundTrip()) return 1;
@@ -918,6 +959,7 @@ static class Program
         if (ok) ok = Patterns();
         if (ok) ok = Tasks();
         if (ok) ok = DispatcherLeg();
+        if (ok) ok = ReflectLeg();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;
     }

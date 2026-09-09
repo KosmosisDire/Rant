@@ -33,7 +33,10 @@ dart_function_call
 dart_function_call_async
 dart_function_match_count
 dart_topic_retire
+dart_topic_refresh
+dart_topic_schema
 dart_function_retire
+dart_function_refresh
 dart_request_reply
 dart_request_fail
 dart_request_defer
@@ -55,6 +58,7 @@ dart_variable_forced
 dart_variable_wait
 dart_variable_match_count
 dart_variable_retire
+dart_variable_refresh
 dart_variable_on_change
 dart_variable_on_write
 dart_node_log

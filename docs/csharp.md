@@ -59,6 +59,12 @@ var t = new Topic<Pose>(node, "pose", Role.SubOnly,
                         new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
 ```
 
+`Qos.ReflectFromMesh` is not a QoS field. It rides beside them in the C topic opts, so a
+null schema and a BestEffort reliability then follow the mesh. The pattern handles take the
+same thing as a trailing `reflectFromMesh` argument, and every handle that can carry it has
+`Refresh()`, which re types it in place when the mesh moved and returns true when it did.
+docs/reflection.md explains what gets adopted.
+
 ## Messages and queues
 
 `DartMessage` is fully copied out. `Value` or `As<T>()` decodes, `RecvUs` is the node's

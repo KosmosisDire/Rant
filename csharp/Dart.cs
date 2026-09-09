@@ -394,6 +394,12 @@ namespace Dart
         internal static extern int dart_topic_set_role(IntPtr ch, int role);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_topic_retire(IntPtr ch);
+
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_topic_refresh(IntPtr ch);
+
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_topic_schema(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern ushort dart_topic_index(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
@@ -517,6 +523,9 @@ namespace Dart
         internal static extern int dart_function_match_count(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_function_retire(IntPtr fn);
+
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_function_refresh(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void dart_request_reply(IntPtr request, DartBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
@@ -568,6 +577,9 @@ namespace Dart
         internal static extern int dart_variable_match_count(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_retire(IntPtr var);
+
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int dart_variable_refresh(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_variable_on_change(IntPtr var, DartVariableUpdateFn on_change, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
@@ -591,6 +603,9 @@ namespace Dart
         public uint QueueBytes = 0;           // consumer queue cap. Setting it queues from creation
         public ushort MaxRateHz = 0;          // subscriber side, best effort: a delivery cap per publisher
         public bool NoTimestamp = false;      // publisher side: no source stamp, receivers see WrittenUs 0
+        /// <summary>Not a QoS field: it rides beside them in the C topic opts. A null schema and
+        /// a BestEffort reliability then follow the mesh. See docs/reflection.md.</summary>
+        public bool ReflectFromMesh = false;
 
         public Qos() { }
 
@@ -609,6 +624,7 @@ namespace Dart
             QueueBytes = other.QueueBytes;
             MaxRateHz = other.MaxRateHz;
             NoTimestamp = other.NoTimestamp;
+            ReflectFromMesh = other.ReflectFromMesh;
         }
 
         internal DartQos ToNative()
@@ -1137,6 +1153,10 @@ namespace Dart
         /// (docs/topics.md). On Ok this handle is invalid. Refused from a callback.</summary>
         public SendStatus Retire() => _node.RetireTopic(this);
 
+        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
+        /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _handle != IntPtr.Zero && Native.dart_topic_refresh(_handle) == 1;
+
         public ushort Index => Native.dart_topic_index(_handle);
 
         public int MatchCount()
@@ -1392,7 +1412,11 @@ namespace Dart
                 }
 
                 qos = qos ?? new Qos();
-                var co = new DartTopicOpts { qos = qos.ToNative() };
+                var co = new DartTopicOpts
+                {
+                    qos = qos.ToNative(),
+                    reflect_from_mesh = (byte)(qos.ReflectFromMesh ? 1 : 0),
+                };
                 IntPtr h = Native.dart_node_create_topic(_handle, Codec.CStr(name), (int)role,
                     schema != null ? schema.Handle : IntPtr.Zero, ref co);
                 if (h == IntPtr.Zero)
@@ -2060,7 +2084,7 @@ namespace Dart
 
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
                                   Action<DartRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  int keepLast = 0)
+                                  int keepLast = 0, bool reflectFromMesh = false)
         {
             DartNode = node;
             var co = new DartFunctionOpts
@@ -2068,6 +2092,7 @@ namespace Dart
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
                 keep_last = (ushort)keepLast,
+                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
             };
             long id = 0;
             Patterns.RequestBox box = null;
@@ -2095,7 +2120,8 @@ namespace Dart
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
         public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
                                   Func<DartRequest, Task<byte[]>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
+                                  int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
+                                  bool reflectFromMesh = false)
             : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler),
                    backpressureWaitMs, timeoutMs, keepLast) { }
 
@@ -2131,6 +2157,10 @@ namespace Dart
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
+
+        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
+        /// moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
     }
 
     /// <summary>An owning call outcome, the payload copied out. SendStatus carries a
@@ -2161,7 +2191,7 @@ namespace Dart
 
         public RemoteFunction(DartNode node, string name, Schema requestSchema = null,
                               Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0,
-                              int keepLast = 0)
+                              int keepLast = 0, bool reflectFromMesh = false)
         {
             DartNode = node;
             var co = new DartFunctionOpts
@@ -2169,6 +2199,7 @@ namespace Dart
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
                 keep_last = (ushort)keepLast,
+                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
             };
             Fn = Native.dart_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
@@ -2269,6 +2300,10 @@ namespace Dart
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
+
+        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
+        /// moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: tasks --------------------------------------------------------
@@ -2323,12 +2358,14 @@ namespace Dart
                               Schema responseSchema, Func<DartRequest, TaskContext, Task<byte[]>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
-                              int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
+                              int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
+                              bool reflectFromMesh = false)
         {
             DartNode = node;
             var co = new DartTaskOpts
             {
                 keep_last = (ushort)keepLast,
+                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
                 progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
                 progress_keep_last = (ushort)progressKeepLast,
                 no_cancel = (byte)(noCancel ? 1 : 0),
@@ -2410,6 +2447,10 @@ namespace Dart
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
+
+        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
+        /// moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
     }
 
     /// <summary>One task progress update, the untyped form. Value is the payload copied out,
@@ -2438,12 +2479,14 @@ namespace Dart
         public RemoteTask(DartNode node, string name, Schema requestSchema = null,
                           Schema progressSchema = null, Schema responseSchema = null,
                           bool progressBestEffort = false, int progressKeepLast = 0,
-                          int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0)
+                          int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
+                          bool reflectFromMesh = false)
         {
             DartNode = node;
             var co = new DartTaskOpts
             {
                 keep_last = (ushort)keepLast,
+                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
                 progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
                 progress_keep_last = (ushort)progressKeepLast,
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
@@ -2550,6 +2593,10 @@ namespace Dart
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
+
+        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
+        /// moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: variables ----------------------------------------------------
@@ -2582,13 +2629,15 @@ namespace Dart
 
         public VariableDefinition(DartNode node, string name, Schema schema, byte[] initial = null,
                                   bool readOnly = false, bool allowForce = false,
-                                  int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0)
+                                  int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
+                                  bool reflectFromMesh = false)
             : this(node, name, schema, initial, readOnly, allowForce, catchUp, keepLast,
-                   backpressureWaitMs, true) { }
+                   backpressureWaitMs, reflectFromMesh, true) { }
 
         private protected VariableDefinition(DartNode node, string name, Schema schema, byte[] initial,
                                              bool readOnly, bool allowForce, int catchUp,
-                                             int keepLast, int backpressureWaitMs, bool definition)
+                                             int keepLast, int backpressureWaitMs,
+                                             bool reflectFromMesh, bool definition)
         {
             DartNode = node;
             Name = name;
@@ -2599,6 +2648,7 @@ namespace Dart
                 catch_up = (ushort)catchUp,
                 keep_last = (ushort)keepLast,
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
+                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
             };
             using (var p = new PinnedBytes(initial))
             {
@@ -2751,6 +2801,10 @@ namespace Dart
             if (rc == SendStatus.Ok) Var = IntPtr.Zero;
             return rc;
         }
+
+        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
+        /// moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => Var != IntPtr.Zero && Native.dart_variable_refresh(Var) == 1;
     }
 
     /// <summary>A reference to a variable owned by another node (untyped): reads see
@@ -2758,9 +2812,10 @@ namespace Dart
     public class RemoteVariable : VariableDefinition
     {
         public RemoteVariable(DartNode node, string name, Schema schema = null,
-                              int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0)
+                              int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
+                              bool reflectFromMesh = false)
             : base(node, name, schema, null, false, false, catchUp, keepLast,
-                   backpressureWaitMs, false) { }
+                   backpressureWaitMs, reflectFromMesh, false) { }
 
         /// <summary>Owners currently matched.</summary>
         public int MatchCount => RemoteCount;
@@ -2850,7 +2905,8 @@ namespace Dart
         private readonly Schema _req, _rsp;
 
         public FunctionDefinition(DartNode node, string name, Func<TReq, TRsp> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+                                  int backpressureWaitMs = 0, int timeoutMs = 0,
+                                  bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
@@ -2866,13 +2922,15 @@ namespace Dart
                     if (!r.Answered) r.Reply(rsp.Encode(outv));
                 };
             }
-            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
+            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
+                                           reflectFromMesh: reflectFromMesh);
         }
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
         public FunctionDefinition(DartNode node, string name, Func<TReq, Task<TRsp>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+                                  int backpressureWaitMs = 0, int timeoutMs = 0,
+                                  bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
@@ -2889,11 +2947,13 @@ namespace Dart
                     return rsp.Encode(outv);
                 };
             }
-            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
+            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
+                                           reflectFromMesh: reflectFromMesh);
         }
 
         public FunctionDefinition(DartNode node, string name, Action<TReq, DartRequest<TRsp>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0)
+                                  int backpressureWaitMs = 0, int timeoutMs = 0,
+                                  bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
@@ -2908,10 +2968,14 @@ namespace Dart
                     handler((TReq)q, new DartRequest<TRsp>(r, rsp));
                 };
             }
-            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs);
+            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
+                                           reflectFromMesh: reflectFromMesh);
         }
 
         public int CallerCount => _core.CallerCount;
+        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _core.Refresh();
         public SendStatus Retire() => _core.Retire();
     }
 
@@ -2952,11 +3016,13 @@ namespace Dart
         private readonly RemoteFunction _core;
         private readonly Schema _req, _rsp;
 
-        public RemoteFunction(DartNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0)
+        public RemoteFunction(DartNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
+                              bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            _core = new RemoteFunction(node, name, _req, _rsp, backpressureWaitMs, timeoutMs);
+            _core = new RemoteFunction(node, name, _req, _rsp, backpressureWaitMs, timeoutMs,
+                                       reflectFromMesh: reflectFromMesh);
         }
 
         /// <summary>BLOCKING call (see the untyped RemoteFunction.Call). provider directs it
@@ -2973,6 +3039,9 @@ namespace Dart
 
         public int MatchCount => _core.MatchCount;
         public bool HasDefinition => _core.HasDefinition;
+        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _core.Refresh();
         public SendStatus Retire() => _core.Retire();
     }
 
@@ -3004,7 +3073,8 @@ namespace Dart
         public TaskDefinition(DartNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
-                              int backpressureWaitMs = 0, int timeoutMs = 0)
+                              int backpressureWaitMs = 0, int timeoutMs = 0,
+                              bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _prg = new Schema(typeof(TPrg));
@@ -3024,10 +3094,14 @@ namespace Dart
             }
             _core = new TaskDefinition(node, name, _req, _prg, _rsp, h, progressBestEffort,
                                        progressKeepLast, noCancel, exclusive, multi,
-                                       backpressureWaitMs, timeoutMs);
+                                       backpressureWaitMs, timeoutMs,
+                                       reflectFromMesh: reflectFromMesh);
         }
 
         public int CallerCount => _core.CallerCount;
+        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _core.Refresh();
         public SendStatus Retire() => _core.Retire();
     }
 
@@ -3038,13 +3112,15 @@ namespace Dart
         private readonly Schema _req, _prg, _rsp;
 
         public RemoteTask(DartNode node, string name, bool progressBestEffort = false,
-                          int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0)
+                          int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0,
+                          bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _prg = new Schema(typeof(TPrg));
             _rsp = new Schema(typeof(TRsp));
             _core = new RemoteTask(node, name, _req, _prg, _rsp, progressBestEffort,
-                                   progressKeepLast, backpressureWaitMs, timeoutMs);
+                                   progressKeepLast, backpressureWaitMs, timeoutMs,
+                                   reflectFromMesh: reflectFromMesh);
         }
 
         /// <summary>Start the task: the Task never faults. progress fires per typed update and
@@ -3086,6 +3162,9 @@ namespace Dart
         public SendStatus Cancel(uint callId) => _core.Cancel(callId);
         public int MatchCount => _core.MatchCount;
         public bool HasDefinition => _core.HasDefinition;
+        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _core.Refresh();
         public SendStatus Retire() => _core.Retire();
     }
 
@@ -3100,22 +3179,22 @@ namespace Dart
 
         public VariableDefinition(DartNode node, string name, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
-                                  int backpressureWaitMs = 0)
+                                  int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
             _schema = new Schema(typeof(T));
             _core = new VariableDefinition(node, name, _schema, null, readOnly, allowForce,
-                                           catchUp, keepLast, backpressureWaitMs);
+                                           catchUp, keepLast, backpressureWaitMs, reflectFromMesh);
         }
 
         /// <summary>Overload with an initial value (the value before any set).</summary>
         public VariableDefinition(DartNode node, string name, T initial, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
-                                  int backpressureWaitMs = 0)
+                                  int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
             _schema = new Schema(typeof(T));
             _core = new VariableDefinition(node, name, _schema, _schema.Encode(initial),
                                            readOnly, allowForce, catchUp, keepLast,
-                                           backpressureWaitMs);
+                                           backpressureWaitMs, reflectFromMesh);
         }
 
         public T Value
@@ -3152,6 +3231,9 @@ namespace Dart
         public bool Forced => _core.Forced;
         public int RemoteCount => _core.RemoteCount;
         public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
+        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _core.Refresh();
         public SendStatus Retire() => _core.Retire();
 
         /// <summary>Observe changes, typed. Handler forms: (T value) or (T value, VariableUpdate
@@ -3180,10 +3262,11 @@ namespace Dart
     public sealed class RemoteVariable<T> : VariableDefinition<T>
     {
         public RemoteVariable(DartNode node, string name, int catchUp = 0, int keepLast = 0,
-                              int backpressureWaitMs = 0)
+                              int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
             _schema = new Schema(typeof(T));
-            _core = new RemoteVariable(node, name, _schema, catchUp, keepLast, backpressureWaitMs);
+            _core = new RemoteVariable(node, name, _schema, catchUp, keepLast, backpressureWaitMs,
+                                       reflectFromMesh);
         }
 
         /// <summary>Owners currently matched.</summary>

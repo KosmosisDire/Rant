@@ -89,6 +89,10 @@ Two rules are specific to Unity. Every topic is queued, because that is how hand
 the frame, so `QueueBytes` sizes that queue rather than turning it off. And the queue size
 left at zero comes from the component's Queue Bytes setting rather than the C default.
 
+For a panel that carries no message type of its own and wants to show whatever is on the
+network, `new Qos { ReflectFromMesh = true }` takes the schema from the provider instead.
+docs/csharp.md covers it and the `Refresh()` that re types a handle later.
+
 ## Variables, functions and tasks
 
 These are the wrapper's own types, described in docs/csharp.md and docs/patterns.md. The
