@@ -2,7 +2,7 @@
 
 `csharp/Dart.cs` is a P/Invoke layer over a prebuilt native library named `dart`, bundled
 per platform in the NuGet package and in the Unity package. csharp/README.md has the
-build, the install and the first example, and csharp/unity/README.md the Unity component.
+build, the install and the first example, and docs/unity.md the Unity component.
 The semantics are the C ones, so docs/node.md, docs/topics.md, docs/patterns.md and
 docs/tasks.md apply. This page says what is different in C#.
 

@@ -39,9 +39,8 @@ auto-detects Standalone by extension: `.dll` is Windows, `.so` is Linux).
 
 ## Use
 
-Put one **DartNodeUnity** component in the scene (Add Component > DART > DART DartNode). It owns
-the shared node (name, domain, lifecycle) and every other script publishes/subscribes
-through it:
+Put one **DartNodeUnity** component in the scene (Add Component > DART > DART DartNode). It
+owns the shared node and every other script publishes and subscribes through it:
 
 ```csharp
 using Dart;
@@ -63,77 +62,9 @@ public class PoseReceiver : MonoBehaviour {
 }
 ```
 
-- **The wire never runs on your thread.** The node runs the C service thread, which fills a
-  per topic queue, and DartNodeUnity drains it once per frame before other scripts'
-  `Update()`. Everything else the node reports (events, pattern handlers, variable
-  observers, awaited call results) is parked by that thread and run on the same frame, so
-  **every callback you write is on the main thread**. Nothing is ever dropped to keep up.
-- **Topics are shared by name**: every script asking for `"player/pose"` gets the same
-  `DartTopic<Pose>`. Roles are automatic: created inactive, the first `Publish`
-  advertises pub, the first `Subscribe` advertises sub, the last unsubscribe withdraws it.
-- **QoS** is the wrapper's `Qos` object, passed on the first request for a name:
-  `DartNodeUnity.Topic<Pose>("player/pose", new Qos { MaxRateHz = 30 })` caps delivery to
-  30 Hz per publisher. Defaults are the C ones, best effort included. The one Unity rule is
-  that every topic is queued, so `Qos.QueueBytes` sizes that queue rather than opting out.
-- **Publishing never blocks the frame.** The node disables the send path match wait, so a
-  publish before a subscriber is matched returns at once instead of stalling up to a second.
-  Check `topic.Ready` if you would rather hold the payload back.
-- **Owner-bound subscriptions** (`Subscribe(this, handler)`) die with their component and
-  are skipped while it is disabled. The ownerless overload returns a `DartSubscription`:
-  dispose it yourself.
-- **Edit mode**: `DartNodeUnity` is `[ExecuteAlways]`. With Run In Edit Mode on (default) the
-  node is live in the editor outside play. Whether your publishers/subscribers run at
-  edit time is up to them. A topic acquired while the node is closed goes live when it
-  opens.
-- **Events** (peer up/down, message loss, errors) are logged to the Console (toggle on
-  the component) and observable via `DartNodeUnity.Events`, on the main thread.
-- **Escape hatch**: `DartNodeUnity.Main.Raw` is the underlying `DartNode`, `topic.Raw` the
-  underlying `Topic` (TryTake, Drain, QueueStats...). The low-level wrapper (`new
-  DartNode(...)` + `Poll()`/`Start()`) remains fully usable without the component.
-
-Any struct/class with public fields is a message type. Wire field names are the C#
-field names (override with `[DartField("stamp")]`, and `[DartString(cap)]` is required on
-string fields, `[DartArray(n)]` on fixed arrays) and must match on every node for a
-topic. `Publish` is thread-safe from any thread.
-
-## Patterns
-
-Variables, functions and tasks are the **wrapper's own types**, handed out shared by name so
-every script gets the same one:
-
-```csharp
-public class MotorPanel : MonoBehaviour {
-    RemoteVariable<float> speed;
-    void OnEnable() {
-        speed = DartNodeUnity.RemoteVariable<float>("motor/speed");
-        DartNodeUnity.Bind(this, speed.OnChange(v => slider.value = v));
-    }
-}
-
-DartNodeUnity.FunctionDefinition<int, int>("square", x => x * x);   // handler on the frame
-
-async void OnEnable() {
-    var r = await DartNodeUnity.RemoteFunction<int, int>("square").CallAsync(7);
-    label.text = r.Value.ToString();                                 // resumes on the frame
-}
-```
-
-`VariableDefinition<T>`, `RemoteVariable<T>`, `FunctionDefinition<,>`, `RemoteFunction<,>`,
-`TaskDefinition<,,>` and `RemoteTask<,,>` all work the same way, and docs/patterns.md
-describes them. Two Unity rules:
-
-- **Re-acquire them in `OnEnable`, not `Start`.** A handle belongs to the native node, and
-  the node is reopened by an inspector change or an editor assembly reload. DartNodeUnity
-  rebuilds every shared handle at that point, so asking for one always gives a live one, but
-  a handle you cached in a field is the old one and your observers on it are gone. `OnEnable`
-  runs again after a reload; `Start` does not. A stale handle refuses cleanly (`NoTopic`), it
-  never touches the closed node.
-- **`OnChange` and `OnWrite` return an `IDisposable`.** Any number of scripts may observe one
-  variable, and a late one is replayed the current value. Pass the handle through
-  `DartNodeUnity.Bind(this, ...)` to have it disposed when your component is destroyed.
-
-For options the shorthands above do not take, build the handle yourself and let the node
-share it: `DartNodeUnity.Shared("motor/speed", n => new RemoteVariable<float>(n, "motor/speed", catchUp: 5))`.
+Topics are shared by name, roles are automatic, and the wire runs on its own thread while
+your handlers run on the frame. **docs/unity.md** is the guide: QoS, variables, functions and
+tasks, edit mode, the component's settings and the things that catch people out.
 
 ## IL2CPP / AOT
 
