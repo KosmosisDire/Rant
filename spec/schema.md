@@ -144,7 +144,7 @@ schema at once. Build a schema from the same allocator the node opens with and d
 it explicitly, because the node copies the pool by value and close frees the page.
 
 Canonical hashes pinned across languages: `bool` ee90234f61d2520b, `f32[]`
-314844e3386a1fc4, `Float3` 04aa9469cd08b1dd, `Image` 83abed7b2c4e334c, `VideoFrame`
+314844e3386a1fc4, `Float3` 04aa9469cd08b1dd, `Image` 489841f99f392b85, `VideoFrame`
 f677bd147b513fbc, `ExternalVideoStream` aae502077016ac13.
 
 ## Not done

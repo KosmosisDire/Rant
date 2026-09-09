@@ -231,14 +231,14 @@ like any other; the reference client lets the message BE the value
 | `map`     | self-describing tagged value tree; lives in the tail | none |
 
 A field's type may also carry a NAME (`named`), which the schema wire carries and no
-message byte does. It NARROWS matching: a `Pose` field never binds to a same-shaped
+message byte does. It NARROWS matching: a `Transform` field never binds to a same-shaped
 `Twist` one, while a reader declaring the bare shape reads either. The `kind` a row
-reports is always what the name WRAPS (a `Pose` reads as `struct`), so a decoder that
+reports is always what the name WRAPS (a `Transform` reads as `struct`), so a decoder that
 ignores `named` is still correct; see docs/stdtypes.md for the standard names.
 
 | extra field | on | meaning |
 |-------------|----|---------|
-| `named`      | any row | the field type's name (`"Pose"`, `"Uuid"`, `"Timestamp"`) |
+| `named`      | any row | the field type's name (`"Transform"`, `"Uuid"`, `"Timestamp"`) |
 | `elem_named` | `arr` / `varr` | the ELEMENT type's name (`"Float3"` for `Float3[4]`) |
 | `elem_size`  | `arr` / `varr` | bytes of one element |
 | `elem_struct`| `arr` / `varr` | the element is a struct: its element-0 template rows follow |
@@ -596,7 +596,7 @@ cfg.set({ rate_hz: 100 });
 // video: a VideoView is a picture sink (a MediaStream) fed from anywhere: push() any
 // VideoFrame / Image value, or attach() it to an entity's stream by field path; over
 // WebRTC an attached VideoFrame field arrives as a real video track
-const sub = await node.subscriber("camera", "CamSample { pose: Pose, frame: VideoFrame }",
+const sub = await node.subscriber("camera", "CamSample { pose: Transform, frame: VideoFrame }",
   (v) => drawPose(v.pose));                 // the rest of the sample still arrives
 const view = await node.videoView().attach(sub, "frame");
 videoEl.srcObject = view.stream;            // view.path: "track" | "decoder"

@@ -127,7 +127,7 @@ integer and matches an `enum<uN>` by width only.
 
 ## Standard types
 
-The roster in docs/stdtypes.md is mirrored as `dart::Timestamp`, `dart::Pose`,
+The roster in docs/stdtypes.md is mirrored as `dart::Timestamp`, `dart::Transform`,
 `dart::Color`, `dart::Uuid` and the rest. Each fixed mirror is standard layout and
 identical to the wire, so the memcpy path applies. `Image` and `VideoFrame` carry a
 `std::vector<uint8_t>` data member, so they take the tail path, and they nest as a member

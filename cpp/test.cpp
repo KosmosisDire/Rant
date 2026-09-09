@@ -349,15 +349,15 @@ static bool patterns_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* leg 5: standard types. The mirrors carry a wire name, so a Pose field matches only a
- * Pose. The golden vectors are shared with the C, C# and Python bindings. */
+/* leg 5: standard types. The mirrors carry a wire name, so a Transform field matches only
+ * a Transform. The golden vectors are shared with the C, C# and Python bindings. */
 static const uint64_t HASH_FLOAT3    = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
-static const uint64_t HASH_IMAGE     = 0x83abed7b2c4e334cULL;
+static const uint64_t HASH_IMAGE     = 0x489841f99f392b85ULL;
 static const uint64_t HASH_VIDEO     = 0xf677bd147b513fbcULL;   /* `VideoFrame` */
 static const uint64_t HASH_EXTSTREAM = 0xaae502077016ac13ULL;   /* `ExternalVideoStream` */
 
 struct Track {
-    dart::Pose      at;
+    dart::Transform at;
     dart::Uuid      id;
     dart::Timestamp when;
     dart::Color     tag;
@@ -385,7 +385,7 @@ static bool stdtypes_leg() {
     chk("std: A started", a.start());     /* A on its service thread, B pumped by wait_for */
 
     /* the mirrors ARE the wire, so the memcpy fast path stays available */
-    chk("std: Pose is 56 bytes", sizeof(dart::Pose) == 56);
+    chk("std: Transform is 88 bytes", sizeof(dart::Transform) == 88);
     chk("std: Uuid is 16 bytes", sizeof(dart::Uuid) == 16);
     chk("std: Color is 4 bytes", sizeof(dart::Color) == 4);
 
@@ -396,25 +396,25 @@ static bool stdtypes_leg() {
             chk("std: Float3 golden hash", f3->hash() == HASH_FLOAT3);
             chk("std: Float3 is 12 message bytes", f3->size() == 12);
         }
-        auto pose  = dart::Schema::compile("Pose");
+        auto tf    = dart::Schema::compile("Transform");
         auto twist = dart::Schema::compile("Twist");
-        chk("std: Twist and Pose are both 3+4 doubles, never mistaken for each other",
-            pose && twist && !twist->can_read(*pose) && !pose->can_read(*twist));
-        /* the name NARROWS: an anonymous field of the same shape reads a Pose field,
+        chk("std: Transform and Twist are distinct names, never mistaken for each other",
+            tf && twist && !twist->can_read(*tf) && !tf->can_read(*twist));
+        /* the name NARROWS: an anonymous field of the same shape reads a Transform field,
            never the reverse (a struct ROOT's name stays strict-equal, as before) */
-        auto named_f = dart::Schema::compile("W { at: Pose }");
+        auto named_f = dart::Schema::compile("W { at: Transform }");
         auto bare_f  = dart::Schema::compile(
-            "W { at: { position: { x: f64, y: f64, z: f64 },"
-            "          orientation: { x: f64, y: f64, z: f64, w: f64 } } }");
-        chk("std: an anonymous field of the same shape reads a Pose field",
+            "W { at: { translation: { x: f64, y: f64, z: f64 },"
+            "          rotation: { x: f64, y: f64, z: f64, w: f64 }, parent: string<30> } }");
+        chk("std: an anonymous field of the same shape reads a Transform field",
             named_f && bare_f && bare_f->can_read(*named_f) && !named_f->can_read(*bare_f));
-        if (pose) {
+        if (tf) {
             dart::Schema::Field f;
-            int i = pose->field_index("position");
+            int i = tf->field_index("translation");
             chk("std: a named member reports its type name",
-                i >= 0 && pose->field_at((uint16_t)i, f) && f.type_name == "Double3");
+                i >= 0 && tf->field_at((uint16_t)i, f) && f.type_name == "Double3");
         }
-        auto cloud = dart::Schema::compile("Cloud { pts: Float3[], at: Pose }");
+        auto cloud = dart::Schema::compile("Cloud { pts: Float3[], at: Transform }");
         chk("std: named types nest and array", cloud.has_value());
         if (cloud) {
             dart::Schema::Field f;
@@ -430,27 +430,27 @@ static bool stdtypes_leg() {
         const dart::Schema* sc = dart::priv::schema_of<Track>();
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("std: the codec spells named members by name",
-            txt.find("at: Pose") != std::string::npos &&
+            txt.find("at: Transform") != std::string::npos &&
             txt.find("id: Uuid") != std::string::npos &&
             txt.find("when: Timestamp") != std::string::npos &&
             txt.find("velocity: Float3") != std::string::npos);
         chk("std: they print back as hoisted definitions, not inlined shapes",
-            txt.find("Pose = {") != std::string::npos &&
+            txt.find("Transform = {") != std::string::npos &&
             txt.find("Uuid = u8[16]") != std::string::npos);
     }
 
     {   /* end to end through the typed codec */
         dart::Publisher<Track> pub(a, "std/track2");
         dart::Subscriber<Track> sub(b, "std/track2", [](const Track& t) {
-            g_track_x = t.at.position.x;
+            g_track_x = t.at.translation.x;
             g_track_id0 = t.id.bytes[0];
             g_track_recv++;
         });
         chk("std: publisher and subscriber match",
             wait_for(4000, [&] { return pub.match_count() == 1; }, &b));
         Track t{};
-        t.at.position = { 4.5, -1.25, 9.0 };
-        t.at.orientation = dart::identity_rotation();
+        t.at.translation = { 4.5, -1.25, 9.0 };
+        t.at.rotation = dart::identity_rotation();
         t.id.bytes[0] = 0xAB;
         t.when = dart::now();
         t.tag = dart::color_from_hex(0x112233FFu);

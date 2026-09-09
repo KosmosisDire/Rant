@@ -420,7 +420,7 @@ static class Program
 
     // The video family, same golden vectors (pinned in cpp/test.cpp too). A mirror whose
     // enum member names, values or order drifted would hash differently, so this catches it.
-    const ulong HashImage = 0x83abed7b2c4e334cUL;
+    const ulong HashImage = 0x489841f99f392b85UL;
     const ulong HashVideoFrame = 0xf677bd147b513fbcUL;
     const ulong HashExternalVideoStream = 0xaae502077016ac13UL;
 
@@ -428,7 +428,7 @@ static class Program
     // a shipped mirror struct that names itself. Both narrow matching.
     struct Track
     {
-        [DartField("at")]   public Dart.Pose At;
+        [DartField("at")]   public Dart.Transform At;
         [DartField("when")] [DartTypeName("Timestamp")] public long When;
         [DartField("tag")]  public Dart.Color Tag;
         [DartField("id")]   [DartTypeName("Uuid")] [DartArray(16)] public byte[] Id;
@@ -447,29 +447,30 @@ static class Program
             Check("Float3 is 12 message bytes", f3.Size == 12);
             Check("the mirror struct IS that type", mirror.Hash == HashFloat3);
         }
-        // a name narrows: an anonymous field of the same shape reads a Pose field, never the
-        // reverse, and Pose/Twist are both 3+4 doubles yet never mistaken for each other
-        using (var named = new Schema("W { at: Pose }"))
-        using (var bare = new Schema("W { at: { position: { x: f64, y: f64, z: f64 }," +
-                                     "         orientation: { x: f64, y: f64, z: f64, w: f64 } } }"))
-        using (var pose = new Schema("Pose"))
+        // a name narrows: an anonymous field of the same shape reads a Transform field, never
+        // the reverse, and Transform/Twist are distinct names never mistaken for each other
+        using (var named = new Schema("W { at: Transform }"))
+        using (var bare = new Schema("W { at: { translation: { x: f64, y: f64, z: f64 }," +
+                                     "         rotation: { x: f64, y: f64, z: f64, w: f64 }," +
+                                     "         parent: string<30> } }"))
+        using (var xform = new Schema("Transform"))
         using (var twist = new Schema("Twist"))
         {
-            Check("an anonymous field of the same shape reads a Pose field",
+            Check("an anonymous field of the same shape reads a Transform field",
                   bare.CanRead(named) && !named.CanRead(bare));
-            Check("Pose and Twist never cross-wire", !twist.CanRead(pose));
+            Check("Transform and Twist never cross-wire", !twist.CanRead(xform));
         }
         using (var sch = new Schema(typeof(Track)))
         {
             string text = sch.Dsl;
             Check("the reflected schema spells the names, not the shapes",
-                  text.Contains("at: Pose") && text.Contains("when: Timestamp")
+                  text.Contains("at: Transform") && text.Contains("when: Timestamp")
                   && text.Contains("id: Uuid") && text.Contains("velocity: Float3"));
-            Check("its message is the sum of the wire shapes (56+8+4+16+12)", sch.Size == 96);
+            Check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.Size == 128);
 
             var t = new Track {
-                At = new Dart.Pose { Position = new Dart.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
-                                Orientation = Std.IdentityRotation() },
+                At = new Dart.Transform { Translation = new Dart.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
+                                Rotation = Std.IdentityRotation() },
                 When = Std.Now(),
                 Tag = Std.ColorFromHex(0x112233FFu),
                 Id = new byte[16],
@@ -477,7 +478,7 @@ static class Program
             for (int i = 0; i < 16; i++) t.Id[i] = (byte)i;
             var back = (Track)sch.Decode(sch.Encode(t));
             Check("a Track round-trips whole",
-                  back.At.Position.X == 4.5 && back.At.Orientation.W == 1.0
+                  back.At.Translation.X == 4.5 && back.At.Rotation.W == 1.0
                   && back.When == t.When && back.Tag.R == 0x11 && back.Tag.A == 0xFF
                   && back.Id != null && back.Id[15] == 15 && back.Velocity.Z == 3.0f);
             Check("Std.Now is Unix-epoch microseconds", Std.Now() > 1600000000000000L);

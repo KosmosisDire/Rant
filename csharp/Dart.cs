@@ -703,9 +703,11 @@ namespace Dart
     [DartTypeName("RectI")] public struct RectI
     { [DartField("x")] public int X; [DartField("y")] public int Y;
       [DartField("w")] public int W; [DartField("h")] public int H; }
-    [DartTypeName("Pose")] public struct Pose
-    { [DartField("position")] public Double3 Position;
-      [DartField("orientation")] public Quaternion Orientation; }
+    // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
+    [DartTypeName("Transform")] public struct Transform
+    { [DartField("translation")] public Double3 Translation;
+      [DartField("rotation")] public Quaternion Rotation;
+      [DartField("parent")] [DartString(30)] public string Parent; }
     [DartTypeName("Twist")] public struct Twist               // m/s and rad/s
     { [DartField("linear")] public Double3 Linear; [DartField("angular")] public Double3 Angular; }
     [DartTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
@@ -715,7 +717,7 @@ namespace Dart
     /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
     /// container, so data holds the file bytes rather than pixels.</summary>
     public enum ImageFormat : byte
-    { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6,
+    { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,
       Jpeg = 16, Png = 17 }
     /// <summary>The codec a VideoFrame's data is encoded with. Unknown is the unstated
     /// codec hint (an ExternalVideoStream that does not state one).</summary>
@@ -742,6 +744,26 @@ namespace Dart
       [DartField("width")] public uint Width; [DartField("height")] public uint Height;
       [DartField("url")] [DartTypeName("Uri")] [DartString(256)] public string Url;
       [DartField("name")] [DartString(32)] public string Name; }
+
+    /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
+    public enum DistortionModel : byte
+    { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
+    // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
+    [DartTypeName("CameraIntrinsics")] public struct CameraIntrinsics
+    { [DartField("width")] public uint Width; [DartField("height")] public uint Height;
+      [DartField("fx")] public double Fx; [DartField("fy")] public double Fy;
+      [DartField("cx")] public double Cx; [DartField("cy")] public double Cy;
+      [DartField("model")] public DistortionModel Model;
+      [DartField("coeffs")] [DartArray(8)] public double[] Coeffs; }
+    // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
+    // may be empty. The names ride a JointNames variable, not every sample.
+    [DartTypeName("JointState")] public struct JointState
+    { [DartField("position")] public double[] Position;
+      [DartField("velocity")] public double[] Velocity;
+      [DartField("effort")] public double[] Effort; }
+    // Published once as a variable. The order every JointState array follows.
+    [DartTypeName("JointNames")] public struct JointNames
+    { [DartField("name")] [DartString(32)] public string[] Name; }
 
     /// <summary>The standard-type values that need a platform.</summary>
     public static class Std

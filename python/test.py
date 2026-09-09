@@ -108,7 +108,7 @@ HASH_FLOAT3 = 0x04AA9469CD08B1DD
 class Track:
     """Standard types as ordinary annotations: an alias spells as its name and carries a
         plain value, a composite is a shipped dataclass. Both narrow matching."""
-    at: dart.Pose = field(default_factory=dart.Pose)
+    at: dart.Transform = field(default_factory=dart.Transform)
     when: dart.Timestamp = 0
     tag: dart.Color = field(default_factory=dart.Color)
     id: dart.Uuid = bytes(16)
@@ -129,28 +129,29 @@ def std_types():
     check("Float3 is 12 message bytes", f3.size == 12)
     check("the mirror dataclass IS that type", dart.Schema(dart.Float3).hash == HASH_FLOAT3)
 
-    # a name narrows: an anonymous field of the same shape reads a Pose field, never the
-    # reverse, and Pose/Twist are both 3+4 doubles yet never mistaken for each other
-    named = dart.Schema("W { at: Pose }")
-    bare = dart.Schema("W { at: { position: { x: f64, y: f64, z: f64 },"
-                       "         orientation: { x: f64, y: f64, z: f64, w: f64 } } }")
-    check("an anonymous field of the same shape reads a Pose field",
+    # a name narrows: an anonymous field of the same shape reads a Transform field, never
+    # the reverse, and Transform/Twist are distinct names never mistaken for each other
+    named = dart.Schema("W { at: Transform }")
+    bare = dart.Schema("W { at: { translation: { x: f64, y: f64, z: f64 },"
+                       "         rotation: { x: f64, y: f64, z: f64, w: f64 },"
+                       "         parent: string<30> } }")
+    check("an anonymous field of the same shape reads a Transform field",
           bare.can_read(named) and not named.can_read(bare))
-    check("Pose and Twist never cross-wire",
-          not dart.Schema("Twist").can_read(dart.Schema("Pose")))
+    check("Transform and Twist never cross-wire",
+          not dart.Schema("Twist").can_read(dart.Schema("Transform")))
 
     sch = dart.Schema(Track)
     text = " ".join(dart.dsl(Track).split())
     check("the reflected schema spells the names, not the shapes",
-          text == "Track { at: Pose, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
-    check("its message is the sum of the wire shapes (56+8+4+16+12)", sch.size == 96)
+          text == "Track { at: Transform, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
+    check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.size == 128)
 
-    t = Track(at=dart.Pose(position=dart.Double3(4.5, -1.25, 9.0)),
+    t = Track(at=dart.Transform(translation=dart.Double3(4.5, -1.25, 9.0)),
               when=dart.timestamp_now(), tag=dart.Color(0x11, 0x22, 0x33, 0xFF),
               id=bytes(range(16)), velocity=dart.Float3(1.0, 2.0, 3.0))
     back = sch.decode(sch.encode(t))
     check("a Track round-trips whole",
-          back.at.position.x == 4.5 and back.at.orientation.w == 1.0
+          back.at.translation.x == 4.5 and back.at.rotation.w == 1.0
           and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
     check("timestamp_now is Unix-epoch microseconds", dart.timestamp_now() > 1600000000000000)
@@ -159,7 +160,7 @@ def std_types():
 
 # The video family: golden wire shared with the C, C++ and C# bindings (pinned in
 # cpp/test.cpp and by dart_test's stdtypes phase).
-HASH_IMAGE = 0x83ABED7B2C4E334C
+HASH_IMAGE = 0x489841F99F392B85
 HASH_VIDEO_FRAME = 0xF677BD147B513FBC
 HASH_EXT_STREAM = 0xAAE502077016AC13
 

@@ -1695,13 +1695,14 @@ typedef enum {
     DART_STD_QUATERNION,
     DART_STD_COLOR,
     DART_STD_RECT, DART_STD_RECTI,
-    DART_STD_POSE, DART_STD_TWIST,
+    DART_STD_TRANSFORM, DART_STD_TWIST,
     DART_STD_GEOPOINT,
     DART_STD_UUID,
     DART_STD_TIMESTAMP, DART_STD_DURATION,
     DART_STD_MATRIX3X3, DART_STD_MATRIX4X4,
     DART_STD_URI,
     DART_STD_IMAGE, DART_STD_VIDEOFRAME, DART_STD_EXTERNALVIDEOSTREAM,
+    DART_STD_CAMERAINTRINSICS, DART_STD_JOINTSTATE, DART_STD_JOINTNAMES,
     DART_STD_COUNT
 } DartStdType;
 
@@ -1737,7 +1738,8 @@ typedef struct { double x, y, z, w; } DartQuaternion;   /* x, y, z, w in that or
 typedef struct { uint8_t r, g, b, a; } DartColor;       /* sRGB, straight alpha */
 typedef struct { float   x, y, w, h; } DartRect;
 typedef struct { int32_t x, y, w, h; } DartRectI;
-typedef struct { DartDouble3 position; DartQuaternion orientation; } DartPose;
+typedef struct { DartDouble3 translation; DartQuaternion rotation;
+                 uint16_t parent_len; char parent[30]; } DartTransform;
 typedef struct { DartDouble3 linear, angular; } DartTwist;   /* m/s and rad/s */
 typedef struct { double lat, lon, alt; } DartGeoPoint;       /* degrees, degrees, meters */
 typedef struct { uint8_t bytes[16]; } DartUuid;              /* RFC 4122 byte order */
@@ -1751,12 +1753,17 @@ typedef struct { float m[16]; } DartMatrix4x4;               /* row major */
 typedef enum {
     DART_IMAGE_MONO8 = 0, DART_IMAGE_MONO16 = 1, DART_IMAGE_RGB8 = 2, DART_IMAGE_RGBA8 = 3,
     DART_IMAGE_BGR8 = 4, DART_IMAGE_YUYV = 5, DART_IMAGE_NV12 = 6,
+    DART_IMAGE_MONOF32 = 7,
     DART_IMAGE_JPEG = 16, DART_IMAGE_PNG = 17
 } DartImageFormat;
 typedef enum {
     DART_VIDEO_UNKNOWN = 0, DART_VIDEO_MJPEG = 1, DART_VIDEO_H264 = 2,
     DART_VIDEO_H265 = 3, DART_VIDEO_AV1 = 4
 } DartVideoCodec;
+typedef enum {
+    DART_DISTORTION_NONE = 0, DART_DISTORTION_BROWN_CONRADY = 1,
+    DART_DISTORTION_FISHEYE = 2, DART_DISTORTION_RATIONAL = 3
+} DartDistortionModel;
 typedef enum {
     DART_STREAM_RTSP = 0, DART_STREAM_WEBRTC_WHEP = 1, DART_STREAM_HLS = 2,
     DART_STREAM_SRT = 3, DART_STREAM_RTP = 4, DART_STREAM_HTTP_MJPEG = 5,
@@ -1768,7 +1775,7 @@ typedef char i_dart_std_size_check[
       (sizeof(DartFloat3) == 12 && sizeof(DartFloat4) == 16 &&
        sizeof(DartDouble3) == 24 && sizeof(DartQuaternion) == 32 &&
        sizeof(DartColor) == 4 && sizeof(DartRect) == 16 &&
-       sizeof(DartPose) == 56 && sizeof(DartTwist) == 48 &&
+       sizeof(DartTransform) == 88 && sizeof(DartTwist) == 48 &&
        sizeof(DartUuid) == 16 && sizeof(DartMatrix4x4) == 64) ? 1 : -1];
 
 /* The thin operations, header only. */
@@ -1816,9 +1823,9 @@ static inline DartQuaternion dart_quaternion_mul(DartQuaternion a, DartQuaternio
 DartQuaternion dart_quaternion_normalize(DartQuaternion q);
 DartDouble3    dart_quaternion_rotate(DartQuaternion q, DartDouble3 v);
 
-static inline DartPose dart_pose_identity(void){
-    DartPose p; p.position = dart_double3(0.0, 0.0, 0.0);
-    p.orientation = dart_quaternion_identity(); return p;
+static inline DartTransform dart_transform_identity(void){
+    DartTransform t = {{0}};   /* zero fills the parent name too, it reaches the wire */
+    t.rotation = dart_quaternion_identity(); return t;
 }
 static inline DartColor dart_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a){
     DartColor c; c.r = r; c.g = g; c.b = b; c.a = a; return c;
@@ -11205,7 +11212,7 @@ static const i_DartStdEntry i_dart_std_table[] = {
     { "Color",   "{ r: u8, g: u8, b: u8, a: u8 }" },
     { "Rect",    "{ x: f32, y: f32, w: f32, h: f32 }" },
     { "RectI",   "{ x: i32, y: i32, w: i32, h: i32 }" },
-    { "Pose",    "{ position: Double3, orientation: Quaternion }" },
+    { "Transform", "{ translation: Double3, rotation: Quaternion, parent: string<30> }" },
     { "Twist",   "{ linear: Double3, angular: Double3 }" },
     { "GeoPoint","{ lat: f64, lon: f64, alt: f64 }" },
     { "Uuid",      "u8[16]" },
@@ -11216,7 +11223,8 @@ static const i_DartStdEntry i_dart_std_table[] = {
     { "Uri",       "string<256>" },
     { "Image",   "{ width: u32, height: u32, stride: u32,"
                  "  format: enum<u8> { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3,"
-                 "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Jpeg = 16, Png = 17 },"
+                 "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,"
+                 "                     Jpeg = 16, Png = 17 },"
                  "  data: u8[] }" },
     { "VideoFrame", "{ codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
                  "  width: u32, height: u32,"
@@ -11226,7 +11234,14 @@ static const i_DartStdEntry i_dart_std_table[] = {
                  "                   Rtp = 4, HttpMjpeg = 5, Other = 15 },"
                  "  codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
                  "  width: u32, height: u32,"
-                 "  url: Uri, name: string<32> }" }
+                 "  url: Uri, name: string<32> }" },
+    { "CameraIntrinsics",
+                 "{ width: u32, height: u32,"
+                 "  fx: f64, fy: f64, cx: f64, cy: f64,"
+                 "  model: enum<u8> { None = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 },"
+                 "  coeffs: f64[8] }" },
+    { "JointState", "{ position: f64[], velocity: f64[], effort: f64[] }" },
+    { "JointNames", "{ name: string<32>[] }" }
 };
 
 /* the table is indexed by DartStdType minus 1, a mismatch would shift every name */
@@ -18841,7 +18856,8 @@ struct Quaternion { double x, y, z, w; };            /* stored x, y, z, w */
 struct Color   { uint8_t r, g, b, a; };              /* sRGB, straight alpha */
 struct Rect    { float x, y, w, h; };
 struct RectI   { int32_t x, y, w, h; };
-struct Pose    { Double3 position; Quaternion orientation; };   /* meters, radians */
+/* meters and radians. parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned */
+struct Transform { Double3 translation; Quaternion rotation; String<30> parent; };
 struct Twist   { Double3 linear, angular; };                    /* m/s, rad/s */
 struct GeoPoint{ double lat, lon, alt; };                       /* degrees, degrees, meters */
 struct Uuid    { uint8_t bytes[16]; };                          /* RFC 4122 byte order */
@@ -18854,7 +18870,7 @@ struct Duration  { int64_t us = 0; };
 
 /* The video family (docs/stdtypes.md). The enum values are the wire values, and
  * VideoCodec::Unknown is the unstated codec hint. */
-enum class ImageFormat : uint8_t { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12,
+enum class ImageFormat : uint8_t { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32,
                                    Jpeg = 16, Png = 17 };
 enum class VideoCodec : uint8_t { Unknown, Mjpeg, H264, H265, Av1 };
 enum class VideoStreamKind : uint8_t { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
@@ -18879,6 +18895,24 @@ struct ExternalVideoStream {
     uint32_t        width = 0, height = 0;
     Uri             url;
     String<32>      name;
+};
+/* NoDistortion rather than None: X11 defines None as a macro. */
+enum class DistortionModel : uint8_t { NoDistortion, BrownConrady, Fisheye, Rational };
+/* The pinhole model and its lens distortion. coeffs is zero filled past the model's count. */
+struct CameraIntrinsics {
+    uint32_t width = 0, height = 0;      /* the resolution these numbers are valid for */
+    double   fx = 0, fy = 0, cx = 0, cy = 0;
+    DistortionModel model = DistortionModel::NoDistortion;
+    double   coeffs[8] = { 0 };
+};
+/* SI: radians or meters, per second, and newtons or newton meters. velocity and effort
+ * may be empty. The names ride a JointNames variable, not every sample. */
+struct JointState {
+    std::vector<double> position, velocity, effort;
+};
+/* Published once as a variable. The order every JointState array follows. */
+struct JointNames {
+    std::vector<String<32>> name;
 };
 
 inline bool operator==(Timestamp a, Timestamp b) { return a.us == b.us; }
@@ -18921,7 +18955,9 @@ inline Double3 rotate(Quaternion q, Double3 v) {
     detail::DartDouble3 r = detail::dart_quaternion_rotate({ q.x, q.y, q.z, q.w }, { v.x, v.y, v.z });
     return { r.x, r.y, r.z };
 }
-inline Pose identity_pose() { return { { 0.0, 0.0, 0.0 }, identity_rotation() }; }
+inline Transform identity_transform() {
+    return { { 0.0, 0.0, 0.0 }, identity_rotation(), {} };
+}
 inline bool is_nil(const Uuid& u) {
     for (int i = 0; i < 16; i++) if (u.bytes[i]) return false;
     return true;
@@ -18958,8 +18994,9 @@ inline Uuid      new_uuid() { Uuid u; detail::dart_uuid_new((detail::DartUuid*)&
 #define DART_STD_MEMBERS_Color(v)   DART_STD_F(Color,r)   DART_STD_F(Color,g)   DART_STD_F(Color,b)   DART_STD_F(Color,a)
 #define DART_STD_MEMBERS_Rect(v)    DART_STD_F(Rect,x)    DART_STD_F(Rect,y)    DART_STD_F(Rect,w)    DART_STD_F(Rect,h)
 #define DART_STD_MEMBERS_RectI(v)   DART_STD_F(RectI,x)   DART_STD_F(RectI,y)   DART_STD_F(RectI,w)   DART_STD_F(RectI,h)
-#define DART_STD_MEMBERS_Pose(v)    v(::dart::field_tag<::dart::Double3>{}, "position", offsetof(::dart::Pose, position)); \
-                                    v(::dart::field_tag<::dart::Quaternion>{}, "orientation", offsetof(::dart::Pose, orientation));
+#define DART_STD_MEMBERS_Transform(v) v(::dart::field_tag<::dart::Double3>{}, "translation", offsetof(::dart::Transform, translation)); \
+                                    v(::dart::field_tag<::dart::Quaternion>{}, "rotation", offsetof(::dart::Transform, rotation)); \
+                                    DART_STD_F(Transform,parent)
 #define DART_STD_MEMBERS_Twist(v)   v(::dart::field_tag<::dart::Double3>{}, "linear", offsetof(::dart::Twist, linear)); \
                                     v(::dart::field_tag<::dart::Double3>{}, "angular", offsetof(::dart::Twist, angular));
 #define DART_STD_MEMBERS_GeoPoint(v) DART_STD_F(GeoPoint,lat) DART_STD_F(GeoPoint,lon) DART_STD_F(GeoPoint,alt)
@@ -18973,6 +19010,13 @@ inline Uuid      new_uuid() { Uuid u; detail::dart_uuid_new((detail::DartUuid*)&
                                        DART_STD_F(ExternalVideoStream,codec) \
                                        DART_STD_F(ExternalVideoStream,width) DART_STD_F(ExternalVideoStream,height) \
                                        DART_STD_F(ExternalVideoStream,url) DART_STD_F(ExternalVideoStream,name)
+#define DART_STD_MEMBERS_CameraIntrinsics(v) DART_STD_F(CameraIntrinsics,width) DART_STD_F(CameraIntrinsics,height) \
+                                       DART_STD_F(CameraIntrinsics,fx) DART_STD_F(CameraIntrinsics,fy) \
+                                       DART_STD_F(CameraIntrinsics,cx) DART_STD_F(CameraIntrinsics,cy) \
+                                       DART_STD_F(CameraIntrinsics,model) DART_STD_F(CameraIntrinsics,coeffs)
+#define DART_STD_MEMBERS_JointState(v) DART_STD_F(JointState,position) \
+                                       DART_STD_F(JointState,velocity) DART_STD_F(JointState,effort)
+#define DART_STD_MEMBERS_JointNames(v) DART_STD_F(JointNames,name)
 
 namespace priv {
 
@@ -21989,13 +22033,13 @@ private:
     }
 
 /* The standard type registrations at global scope: each mirror gets its wire name here,
- * so a member spells as at: Pose and matches only a Pose. */
+ * so a member spells as at: Transform and matches only a Transform. */
 DART_STD_STRUCT(Float2);   DART_STD_STRUCT(Float3);   DART_STD_STRUCT(Float4);
 DART_STD_STRUCT(Double2);  DART_STD_STRUCT(Double3);  DART_STD_STRUCT(Double4);
 DART_STD_STRUCT(Int2);     DART_STD_STRUCT(Int3);     DART_STD_STRUCT(Int4);
 DART_STD_STRUCT(Quaternion);
 DART_STD_STRUCT(Color);    DART_STD_STRUCT(Rect);     DART_STD_STRUCT(RectI);
-DART_STD_STRUCT(Pose);     DART_STD_STRUCT(Twist);    DART_STD_STRUCT(GeoPoint);
+DART_STD_STRUCT(Transform); DART_STD_STRUCT(Twist);   DART_STD_STRUCT(GeoPoint);
 DART_STD_ALIAS(Uuid,      uint8_t[16]);
 DART_STD_ALIAS(Timestamp, int64_t);
 DART_STD_ALIAS(Duration,  int64_t);
@@ -22004,10 +22048,13 @@ DART_STD_ALIAS(Matrix4x4, float[16]);
 DART_STD_ALIAS(Uri,       dart::String<256>);
 /* the video family: the enums are DART_ENUM-registered so a member of one (in these
  * mirrors or in a user struct) ships as the canonical named integer */
-DART_ENUM(dart::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Jpeg, Png);
+DART_ENUM(dart::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
 DART_ENUM(dart::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
 DART_ENUM(dart::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
 DART_STD_STRUCT(Image); DART_STD_STRUCT(VideoFrame); DART_STD_STRUCT(ExternalVideoStream);
+DART_ENUM(dart::DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
+DART_STD_STRUCT(CameraIntrinsics);
+DART_STD_STRUCT(JointState); DART_STD_STRUCT(JointNames);
 
 #endif /* C++ consumer (not the implementation anchor) */
 #endif /* DART_HPP_INCLUDED */

@@ -47,7 +47,7 @@ function parseFrame(b: Uint8Array): Frame | null {
 type Field = {
     path: string;
     kind: string;
-    named?: string;                                /* the field type's NAME ("Pose"), if any */
+    named?: string;                                /* the field type's NAME ("Transform"), if any */
     elem?: string;
     elem_named?: string;                           /* an array element type's name, if any */
     elem_size?: number;                            /* bytes of one array element */

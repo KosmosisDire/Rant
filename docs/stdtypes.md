@@ -5,7 +5,7 @@ two programs that both mean "a 3D point" say so with the same name and the same 
 
 ```c
 DartSchema *s = dart_schema_compile(alloc, user,
-    "Waypoint { at: Pose, when: Timestamp, tag: Color }", NULL);
+    "Waypoint { at: Transform, when: Timestamp, tag: Color }", NULL);
 ```
 
 No imports, no registration. Every name below is always in scope in the schema DSL. Strip
@@ -16,8 +16,8 @@ spell their shapes out.
 
 Before wire version 8 a schema was purely structural: `{ x: f64, y: f64, z: f64 }` matched
 any other schema with those three fields. That is right for a field's layout and wrong for
-its meaning. A `Twist` (linear plus angular velocity) and a `Pose` split into two
-`Double3`s are the same bytes. A Celsius reading and a Fahrenheit reading are both `f32`.
+its meaning. A `Twist` (linear plus angular velocity) and two `Double3`s are the same
+bytes. A Celsius reading and a Fahrenheit reading are both `f32`.
 
 So a type may carry a NAME. It rides the schema wire, never a message byte, and it narrows
 matching:
@@ -51,12 +51,23 @@ Geometry and time:
 
 ```
 Quaternion { x: f64, y: f64, z: f64, w: f64 }
-Pose       { position: Double3, orientation: Quaternion }
+Transform  { translation: Double3, rotation: Quaternion, parent: string<30> }
 Twist      { linear: Double3, angular: Double3 }        -- m/s and rad/s
 GeoPoint   { lat: f64, lon: f64, alt: f64 }             -- degrees, degrees, meters
 Matrix3x3 = f32[9]        Matrix4x4 = f32[16]           -- row major
 Timestamp = i64           Duration  = i64               -- microseconds
 Uuid      = u8[16]                                      -- RFC 4122 byte order
+```
+
+Sensing and robots:
+
+```
+CameraIntrinsics { width: u32, height: u32,             -- the resolution these hold for
+                   fx: f64, fy: f64, cx: f64, cy: f64,
+                   model: enum<u8> { NoDistortion, BrownConrady, Fisheye, Rational },
+                   coeffs: f64[8] }                     -- zero filled past the model's count
+JointState { position: f64[], velocity: f64[], effort: f64[] }
+JointNames { name: string<32>[] }
 ```
 
 Presentation:
@@ -71,7 +82,7 @@ Media:
 
 ```
 Image { width: u32, height: u32, stride: u32,
-        format: enum<u8> { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12,
+        format: enum<u8> { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32,
                            Jpeg = 16, Png = 17 },
         data: u8[] }
 VideoFrame { codec: enum<u8> { Unknown, Mjpeg, H264, H265, Av1 },
@@ -132,10 +143,17 @@ this:
   The C# binding converts explicitly rather than calling `Guid.ToByteArray`.
 - A right handed coordinate frame is recommended but not enforced. DART carries the
   numbers. The frame convention is your system's to state.
+- `Transform.parent` names the frame this one is measured in, `""` when unstated. The cap
+  is 30 rather than 32 so the packed 88 bytes stay 8 aligned and the C mirror still matches.
+- A `JointState` array is positional. The names ride a `JointNames` variable published
+  once, never a field of every sample. `velocity` and `effort` may be empty.
+- A new fixed type lists its widest member first, so the packed wire size matches the
+  natural C size and the type can keep a mirror. The transport internals follow the same
+  rule.
 
 Deliberately absent for now: civil date and time, unit annotated value types (SI by
 convention today, schema level unit annotations are the future mechanism), IP addresses,
-the sensor tier (PointCloud, Imu, LaserScan), any TF or frame_id story, and WebRTC
+the rest of the sensor tier (PointCloud, Imu, LaserScan), a TF tree, and WebRTC
 session signaling (SDP and ICE ride as opaque strings through an app level function, see
 the media section).
 
@@ -144,22 +162,26 @@ the media section).
 ```c
 #include "dart.h"
 
-DartSchema *s = dart_schema_compile(alloc, user, "Track { at: Pose, id: Uuid }", NULL);
+DartSchema *s = dart_schema_compile(alloc, user, "Track { at: Transform, id: Uuid }", NULL);
 
 uint8_t msg[256];
-DartPose p;
-p.position    = dart_double3(4.5, -1.25, 9.0);
-p.orientation = dart_quaternion_identity();
+DartTransform p = dart_transform_identity();
+p.translation = dart_double3(4.5, -1.25, 9.0);
 
 dart_schema_message_default(s, msg, sizeof msg);
-memcpy(msg + /* the Pose field's offset */ 0, &p, sizeof p);   /* layout identical */
+memcpy(msg + /* the Transform field's offset */ 0, &p, sizeof p);  /* layout identical */
 ```
 
-The C mirror structs (`DartFloat3`, `DartPose`, `DartColor`, `DartUuid`,
+The C mirror structs (`DartFloat3`, `DartTransform`, `DartColor`, `DartUuid`,
 `DartMatrix4x4` and the rest) are layout identical to the wire on any little endian
 target, which the header static asserts, so a whole value memcpys in and out. Field at a
-time access through `dart_get_f64(msg, s, "at.position.x")` works exactly as it does for
-any other nested struct.
+time access through `dart_get_f64(msg, s, "at.translation.x")` works exactly as it does
+for any other nested struct.
+
+A type only gets a C mirror when its packed wire size already equals its natural C size.
+`Image`, `VideoFrame`, `ExternalVideoStream` and `CameraIntrinsics` have none: they carry
+a variable member or would gain padding. The other bindings reflect field by field, so
+they mirror every type either way.
 
 The operations are deliberately thin: construction, add, sub, scale, dot, cross, length,
 normalize, quaternion multiply, conjugate and rotate, `Color` hex conversion, and

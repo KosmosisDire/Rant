@@ -19,7 +19,7 @@ static const i_DartStdEntry i_dart_std_table[] = {
     { "Color",   "{ r: u8, g: u8, b: u8, a: u8 }" },
     { "Rect",    "{ x: f32, y: f32, w: f32, h: f32 }" },
     { "RectI",   "{ x: i32, y: i32, w: i32, h: i32 }" },
-    { "Pose",    "{ position: Double3, orientation: Quaternion }" },
+    { "Transform", "{ translation: Double3, rotation: Quaternion, parent: string<30> }" },
     { "Twist",   "{ linear: Double3, angular: Double3 }" },
     { "GeoPoint","{ lat: f64, lon: f64, alt: f64 }" },
     { "Uuid",      "u8[16]" },
@@ -30,7 +30,8 @@ static const i_DartStdEntry i_dart_std_table[] = {
     { "Uri",       "string<256>" },
     { "Image",   "{ width: u32, height: u32, stride: u32,"
                  "  format: enum<u8> { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3,"
-                 "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Jpeg = 16, Png = 17 },"
+                 "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,"
+                 "                     Jpeg = 16, Png = 17 },"
                  "  data: u8[] }" },
     { "VideoFrame", "{ codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
                  "  width: u32, height: u32,"
@@ -40,7 +41,14 @@ static const i_DartStdEntry i_dart_std_table[] = {
                  "                   Rtp = 4, HttpMjpeg = 5, Other = 15 },"
                  "  codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
                  "  width: u32, height: u32,"
-                 "  url: Uri, name: string<32> }" }
+                 "  url: Uri, name: string<32> }" },
+    { "CameraIntrinsics",
+                 "{ width: u32, height: u32,"
+                 "  fx: f64, fy: f64, cx: f64, cy: f64,"
+                 "  model: enum<u8> { None = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 },"
+                 "  coeffs: f64[8] }" },
+    { "JointState", "{ position: f64[], velocity: f64[], effort: f64[] }" },
+    { "JointNames", "{ name: string<32>[] }" }
 };
 
 /* the table is indexed by DartStdType minus 1, a mismatch would shift every name */

@@ -962,7 +962,7 @@ class Field:
     offset: int
     size: int
     str_cap: int = 0     # string capacity (STRING fields and STRING-element arrays)
-    type_name: str = ""  # the field type's NAME ("Pose"), "" when anonymous
+    type_name: str = ""  # the field type's NAME ("Transform"), "" when anonymous
     elem_name: str = ""  # an array ELEMENT type's name, "" when anonymous
     elem_size: int = 0   # bytes of one array element, else 0
     arr_parent: int = 0xFFFF   # flat index of the enclosing struct ARRAY, 0xFFFF for none
@@ -1195,10 +1195,12 @@ class RectI:
     h: i32 = 0
 
 
-@_std("Pose")
-class Pose:
-    position: Double3 = dataclasses.field(default_factory=Double3)
-    orientation: Quaternion = dataclasses.field(default_factory=Quaternion)
+# Meters and radians. parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
+@_std("Transform")
+class Transform:
+    translation: Double3 = dataclasses.field(default_factory=Double3)
+    rotation: Quaternion = dataclasses.field(default_factory=Quaternion)
+    parent: string(30) = ""
 
 
 @_std("Twist")
@@ -1227,6 +1229,7 @@ class ImageFormat(_pyenum.IntEnum):
     Bgr8 = 4
     Yuyv = 5
     Nv12 = 6
+    Monof32 = 7
     Jpeg = 16
     Png = 17
 
@@ -1281,6 +1284,42 @@ class ExternalVideoStream:
     height: u32 = 0
     url: Uri = ""
     name: string(32) = ""
+
+
+class DistortionModel(_pyenum.IntEnum):
+    """A lens distortion model. NoDistortion is an ideal pinhole."""
+    NoDistortion = 0
+    BrownConrady = 1
+    Fisheye = 2
+    Rational = 3
+
+
+# The pinhole model and its lens distortion. coeffs is zero filled past the model's count.
+@_std("CameraIntrinsics")
+class CameraIntrinsics:
+    width: u32 = 0                              # the resolution these numbers are valid for
+    height: u32 = 0
+    fx: f64 = 0.0
+    fy: f64 = 0.0
+    cx: f64 = 0.0
+    cy: f64 = 0.0
+    model: enum(DistortionModel, u8) = DistortionModel.NoDistortion
+    coeffs: f64[8] = dataclasses.field(default_factory=lambda: [0.0] * 8)
+
+
+# SI: radians or meters, per second, and newtons or newton meters. velocity and effort
+# may be empty. The names ride a JointNames variable, not every sample.
+@_std("JointState")
+class JointState:
+    position: list[f64] = dataclasses.field(default_factory=list)
+    velocity: list[f64] = dataclasses.field(default_factory=list)
+    effort: list[f64] = dataclasses.field(default_factory=list)
+
+
+# Published once as a variable. The order every JointState array follows.
+@_std("JointNames")
+class JointNames:
+    name: list[string(32)] = dataclasses.field(default_factory=list)
 
 
 def timestamp_now():

@@ -3415,7 +3415,7 @@ static void schema_v8_checks(void){
             "A { p: { q: { r: f32 }[2] }[2] }", /* a struct array inside an element      */
             "A { m: enum<u8> { X }[2] }",       /* enum elements would hide the backing  */
             "Float3 = { x: f32 }\nA { p: Float3 }",  /* a reserved name, a wrong shape   */
-            "Pose = { x: f32 }",                /* likewise as the last definition       */
+            "Transform = { x: f32 }",           /* likewise as the last definition       */
             "A { p: Nope }",                    /* an unknown type word                  */
             "A { x: f32 }\nB { y: f32 }",       /* two roots                             */
             "Temperature: f32"                  /* the old typedef spelling stays an error */
@@ -3458,18 +3458,18 @@ static void schema_v8_checks(void){
     }
 
     /* ---- print: named definitions hoist, dependencies first, and recompile exactly ---- */
-    ST_CHECK(sv_roundtrip("Uuid = u8[16]") && sv_roundtrip("Pose") && sv_roundtrip("Image"),
+    ST_CHECK(sv_roundtrip("Uuid = u8[16]") && sv_roundtrip("Transform") && sv_roundtrip("Image"),
              "schema-v8: alias, composite and variable standard roots round-trip");
     ST_CHECK(sv_roundtrip("A { x: f32, v: { a: u8, b: string<4> }, p: Float3[3],"
                           "    q: { m: i16 }[2], s: string, e: enum<i16> { N = -1, Z } }"),
              "schema-v8: a mixed schema round-trips through print");
-    ST_CHECK(sv_roundtrip("Cloud { at: Pose, when: Timestamp, pts: Float3[], meta: map }"),
+    ST_CHECK(sv_roundtrip("Cloud { at: Transform, when: Timestamp, pts: Float3[], meta: map }"),
              "schema-v8: nested standard types round-trip");
-    {   DartSchema *s = sv("Cloud { at: Pose, pts: Float3[] }");
+    {   DartSchema *s = sv("Cloud { at: Transform, pts: Float3[] }");
         char buf[1024]; const char *d3, *q, *ps;
         if (s){
             dart_schema_print(s, buf, sizeof buf);
-            d3 = strstr(buf, "Double3 ="); q = strstr(buf, "Quaternion ="); ps = strstr(buf, "Pose =");
+            d3 = strstr(buf, "Double3 ="); q = strstr(buf, "Quaternion ="); ps = strstr(buf, "Transform =");
             ST_CHECK(d3 && q && ps && d3 < ps && q < ps,
                      "schema-v8: print emits each named type once, dependencies first");
         }
@@ -3496,17 +3496,17 @@ static void schema_v8_checks(void){
 }
 
 /* (19a5) the standard type library: names always in scope, golden bytes and hash, shape
-   verifying recognition, and an end to end pair publishing Pose and Image. */
+   verifying recognition, and an end to end pair publishing Transform and Image. */
 static volatile long sd_pose_recv = 0, sd_img_recv = 0, sd_bad_recv = 0, sd_mismatch = 0;
 static double sd_px = 0.0, sd_qw = 0.0;
 static unsigned sd_iw = 0, sd_ih = 0, sd_ifmt = 0; static size_t sd_ilen = 0;
 static void sd_on_message(const DartMsg *m){
     if (!m->schema) return;
-    if (dart_get_f64(m->data, m->schema, "position.x") != 0.0 ||
-        dart_schema_field_index(m->schema, "orientation.w") >= 0){
-        if (dart_schema_field_index(m->schema, "position.x") >= 0){
-            sd_px = dart_get_f64(m->data, m->schema, "position.x");
-            sd_qw = dart_get_f64(m->data, m->schema, "orientation.w");
+    if (dart_get_f64(m->data, m->schema, "translation.x") != 0.0 ||
+        dart_schema_field_index(m->schema, "rotation.w") >= 0){
+        if (dart_schema_field_index(m->schema, "translation.x") >= 0){
+            sd_px = dart_get_f64(m->data, m->schema, "translation.x");
+            sd_qw = dart_get_f64(m->data, m->schema, "rotation.w");
             sd_pose_recv++;
             return;
         }
@@ -3565,7 +3565,7 @@ static void stdtypes_checks(void){
     }
     /* recognition verifies the SHAPE, so a peer's same-named impostor never converts */
     {   DartSchema *good = dart_schema_compile(dart_allocator_alloc, &ma,
-            "A { at: Pose, id: Uuid, pts: Float3[], plain: f32 }", NULL);
+            "A { at: Transform, id: Uuid, pts: Float3[], plain: f32 }", NULL);
         DartSchema *bad = dart_schema_compile(dart_allocator_alloc, &ma,
             "Uuid = u8[16]\nB { id: Uuid }", NULL);
         DartSchema *lie = dart_schema_parse(bad ? dart_schema_wire(bad).data : NULL,
@@ -3574,7 +3574,7 @@ static void stdtypes_checks(void){
         ST_CHECK(good && bad && lie, "stdtypes: recognition fixtures compile");
         if (good){
             ST_CHECK(dart_std_recognize_field(good, (uint16_t)dart_schema_field_index(good, "at"),
-                                              dart_allocator_alloc, &ma) == DART_STD_POSE
+                                              dart_allocator_alloc, &ma) == DART_STD_TRANSFORM
                      && dart_std_recognize_field(good, (uint16_t)dart_schema_field_index(good, "id"),
                                               dart_allocator_alloc, &ma) == DART_STD_UUID,
                      "stdtypes: a named field recognizes by name AND shape");
@@ -3601,19 +3601,18 @@ static void stdtypes_checks(void){
         if (s) dart_schema_free(s, dart_allocator_alloc, &ma);
     }
     /* the C mirrors line up with the wire, byte for byte */
-    {   DartSchema *sp = dart_std_schema(DART_STD_POSE, dart_allocator_alloc, &ma);
-        DartPose p; uint8_t m[sizeof(DartPose)];
-        p.position = dart_double3(1.0, 2.0, 3.0);
-        p.orientation = dart_quaternion(0.0, 0.0, 0.0, 1.0);
+    {   DartSchema *sp = dart_std_schema(DART_STD_TRANSFORM, dart_allocator_alloc, &ma);
+        DartTransform p = dart_transform_identity(); uint8_t m[sizeof(DartTransform)];
+        p.translation = dart_double3(1.0, 2.0, 3.0);
         memcpy(m, &p, sizeof p);
-        ST_CHECK(sp && sizeof(DartPose) == dart_schema_size(sp),
-                 "stdtypes: sizeof(DartPose) == the wire size (%u)",
+        ST_CHECK(sp && sizeof(DartTransform) == dart_schema_size(sp),
+                 "stdtypes: sizeof(DartTransform) == the wire size (%u)",
                  sp ? dart_schema_size(sp) : 0);
         if (sp){
             DartBytes b = dart_bytes(m, sizeof m);
-            ST_CHECK(dart_get_f64(b, sp, "position.y") == 2.0
-                     && dart_get_f64(b, sp, "orientation.w") == 1.0,
-                     "stdtypes: a memcpy'd DartPose reads back through the schema");
+            ST_CHECK(dart_get_f64(b, sp, "translation.y") == 2.0
+                     && dart_get_f64(b, sp, "rotation.w") == 1.0,
+                     "stdtypes: a memcpy'd DartTransform reads back through the schema");
         }
         if (sp) dart_schema_free(sp, dart_allocator_alloc, &ma);
     }
@@ -3640,11 +3639,11 @@ static void stdtypes_checks(void){
                  "stdtypes: dart_uuid_new makes distinct RFC 4122 version-4 ids");
     }
 
-    /* ---- end to end: Pose and Image over two nodes, plus a shape impostor refused ---- */
-    SPose = dart_std_schema(DART_STD_POSE, dart_allocator_alloc, &ma);
+    /* ---- end to end: Transform and Image over two nodes, plus a shape impostor refused ---- */
+    SPose = dart_std_schema(DART_STD_TRANSFORM, dart_allocator_alloc, &ma);
     SImg  = dart_std_schema(DART_STD_IMAGE, dart_allocator_alloc, &ma);
     SBad  = dart_schema_compile(dart_allocator_alloc, &ma, "Twist", NULL);
-    SBadSub = dart_std_schema(DART_STD_POSE, dart_allocator_alloc, &ma);
+    SBadSub = dart_std_schema(DART_STD_TRANSFORM, dart_allocator_alloc, &ma);
     ST_CHECK(SPose && SImg && SBad && SBadSub, "stdtypes: e2e schemas compile");
     if (!(SPose && SImg && SBad && SBadSub)){ dart_allocator_reset(&ma); return; }
 
@@ -3670,15 +3669,14 @@ static void stdtypes_checks(void){
         dart_node_poll(P,2); dart_node_poll(S,2);
     }
     ST_CHECK(dart_topic_match_count(ppose)==1 && dart_topic_match_count(pimg)==1,
-             "stdtypes: Pose and Image topics matched");
+             "stdtypes: Transform and Image topics matched");
     ST_CHECK(dart_topic_match_count(pbad)==0,
-             "stdtypes: a Pose reader refuses a same-shaped Twist writer");
+             "stdtypes: a Transform reader refuses a Twist writer");
     ST_CHECK(sd_mismatch >= 1, "stdtypes: the refusal surfaced (%ld)", sd_mismatch);
 
-    {   uint8_t m[64]; DartPose p;
+    {   uint8_t m[sizeof(DartTransform)]; DartTransform p = dart_transform_identity();
         uint8_t *img; uint32_t need; size_t px = 64u*48u*3u;
-        p.position = dart_double3(4.5, -1.25, 9.0);
-        p.orientation = dart_quaternion(0.0, 0.0, 0.0, 1.0);
+        p.translation = dart_double3(4.5, -1.25, 9.0);
         memcpy(m, &p, sizeof p);
         dart_topic_send(ppose, dart_bytes(m, sizeof p));
         need = dart_schema_msg_min(SImg) + (uint32_t)px;
@@ -3704,7 +3702,7 @@ static void stdtypes_checks(void){
         }
     }
     ST_CHECK(sd_pose_recv==1 && sd_px==4.5 && sd_qw==1.0,
-             "stdtypes: Pose delivered (recv=%ld x=%g w=%g)", sd_pose_recv, sd_px, sd_qw);
+             "stdtypes: Transform delivered (recv=%ld x=%g w=%g)", sd_pose_recv, sd_px, sd_qw);
     ST_CHECK(sd_img_recv==1 && sd_iw==64 && sd_ih==48 && sd_ifmt==(unsigned)DART_IMAGE_RGB8
              && sd_ilen==64u*48u*3u,
              "stdtypes: Image delivered whole (%ux%u fmt=%u %u bytes)",

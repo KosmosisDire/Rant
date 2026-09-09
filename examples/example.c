@@ -29,7 +29,7 @@ static const char CHAT_SCHEMA[] =
     "    heading: Bearing,"              /* our alias: never reads as a bare f32 */
     "    pos:     Double3,"              /* meters */
     "    vel:     Float2,"
-    "    at:      Pose,"                 /* position plus an orientation quaternion */
+    "    at:      Transform,"            /* a translation plus a rotation quaternion */
     "    tint:    Color,"                /* sRGB RGBA bytes */
     "    tags:    string<8>[2],"
     "    path:    f32[],"                /* variable array: a live element count */
@@ -62,12 +62,12 @@ static uint32_t chat_encode(uint8_t *buf, size_t cap, const char *line, size_t l
     dart_set_f64 (buf, cap, g_schema, "pos.z",  (double)(rand() % 2001 - 1000) / 10.0);
     dart_set_f32 (buf, cap, g_schema, "vel.x",  (float)(rand() % 100) / 10.0f);
     dart_set_f32 (buf, cap, g_schema, "vel.y",  (float)(rand() % 100) / 10.0f);
-    {   /* a Pose is a struct of standard types, so its members nest by dotted path. The C
-           mirror DartPose has the identical layout if you would rather memcpy one in. */
-        DartPose at = dart_pose_identity();
-        at.position = dart_double3((double)(rand() % 100) / 10.0, 0.0, 0.0);
-        dart_set_f64(buf, cap, g_schema, "at.position.x", at.position.x);
-        dart_set_f64(buf, cap, g_schema, "at.orientation.w", at.orientation.w);
+    {   /* a Transform is a struct of standard types, so its members nest by dotted path.
+           The C mirror DartTransform has the identical layout if you would rather memcpy. */
+        DartTransform at = dart_transform_identity();
+        at.translation = dart_double3((double)(rand() % 100) / 10.0, 0.0, 0.0);
+        dart_set_f64(buf, cap, g_schema, "at.translation.x", at.translation.x);
+        dart_set_f64(buf, cap, g_schema, "at.rotation.w", at.rotation.w);
     }
     {   DartColor tint = dart_color_from_hex(0x3080C0FFu);   /* 0xRRGGBBAA */
         dart_set_uint(buf, cap, g_schema, "tint.r", tint.r);

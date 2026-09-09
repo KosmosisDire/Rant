@@ -61,7 +61,7 @@ same one in any language is the same wire bytes and the same hash.
 `decode` walk the compiled flat field table, so they work for any schema including a
 peer's. A missing value keeps the zeroed default. The map body is built and parsed in
 Python and validated by the C setter. The standard types in docs/stdtypes.md are shipped
-as tagged dataclasses and aliases: `dart.Pose`, `dart.Color`, `dart.Timestamp` and the
+as tagged dataclasses and aliases: `dart.Transform`, `dart.Color`, `dart.Timestamp` and the
 rest, and `dart.now()` is the Timestamp clock.
 
 ## Messages and queues
