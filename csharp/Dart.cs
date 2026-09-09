@@ -99,7 +99,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartTopicOpts { public DartQos qos; }
+    internal struct DartTopicOpts { public DartQos qos; public byte reflect_from_mesh; }
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct DartNodeNet
@@ -277,6 +277,7 @@ namespace Dart
         public uint backpressure_wait_us;
         public uint timeout_us;
         public ushort keep_last;        // req and rsp ring depth, 0 = 10
+        public byte reflect_from_mesh;
         public byte multi;              // duplicate-authority diagnostic suppressed (@dart/meta)
     }
 
@@ -289,6 +290,7 @@ namespace Dart
         public ushort catch_up;
         public ushort keep_last;
         public uint backpressure_wait_us;
+        public byte reflect_from_mesh;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -325,6 +327,7 @@ namespace Dart
         public uint timeout_us;
         public uint backpressure_wait_us;
         public ushort keep_last;        // req and rsp ring depth, 0 = 10
+        public byte reflect_from_mesh;
     }
 
     [StructLayout(LayoutKind.Sequential)]
