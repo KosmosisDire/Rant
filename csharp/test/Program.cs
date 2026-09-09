@@ -515,8 +515,8 @@ static class Program
                              domain: 46, multicastInterface: "127.0.0.1");
         try
         {
-            var pub = new Topic<Dart.Image>(a, "frame", Role.PubOnly, reliable: true, keepLast: 4);
-            var sub = new Topic<Dart.Image>(b, "frame", Role.SubOnly, reliable: true, keepLast: 4);
+            var pub = new Topic<Dart.Image>(a, "frame", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var sub = new Topic<Dart.Image>(b, "frame", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
             sub.TryTake(out Dart.Image _);   // switch to queued delivery
             var initial = new Dart.ExternalVideoStream
             {
@@ -656,10 +656,10 @@ static class Program
                              domain: 44, multicastInterface: "127.0.0.1");
         try
         {
-            var pubFlag = new Topic<bool>(a, "flag", Role.PubOnly, reliable: true, keepLast: 4);
-            var subFlag = new Topic<bool>(b, "flag", Role.SubOnly, reliable: true, keepLast: 4);
-            var pubNote = new Topic<string>(a, "note", Role.PubOnly, reliable: true, keepLast: 4);
-            var subNote = new Topic<string>(b, "note", Role.SubOnly, reliable: true, keepLast: 4);
+            var pubFlag = new Topic<bool>(a, "flag", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var subFlag = new Topic<bool>(b, "flag", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var pubNote = new Topic<string>(a, "note", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var subNote = new Topic<string>(b, "note", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
             subFlag.TryTake(out bool _);      // switch both to queued delivery
             subNote.TryTake(out string _);
             var vd = new VariableDefinition<double>(a, "gain", 1.25);
@@ -705,6 +705,87 @@ static class Program
         return ok;
     }
 
+    // The callback dispatcher: with one set, every event, handler, observer and awaited
+    // result must run on the thread that drains it, never on a service thread.
+    static bool DispatcherLeg()
+    {
+        Console.WriteLine("dispatcher leg: two nodes, domain 48, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var work = new System.Collections.Concurrent.ConcurrentQueue<Action>();
+        int drainId = Thread.CurrentThread.ManagedThreadId;
+        void Drain() { Action a; while (work.TryDequeue(out a)) a(); }
+
+        int evtId = 0, fnId = 0, changeId = 0, doneId = 0, sum = 0, level = 0;
+
+        var srv = new DartNode("dsrv", null,
+            e => { if (evtId == 0) evtId = Thread.CurrentThread.ManagedThreadId; },
+            domain: 48, multicastInterface: "127.0.0.1", maxTopics: 32);
+        var cli = new DartNode("dcli", null, e => { },
+            domain: 48, multicastInterface: "127.0.0.1", maxTopics: 32);
+        srv.CallbackDispatcher = a => work.Enqueue(a);
+        cli.CallbackDispatcher = a => work.Enqueue(a);
+
+        var add = new FunctionDefinition<AddReq, AddRsp>(srv, "dadd", q =>
+        {
+            fnId = Thread.CurrentThread.ManagedThreadId;
+            return new AddRsp { Sum = q.A + q.B };
+        });
+        var lvlDef = new VariableDefinition<Level>(srv, "dlevel", new Level { Value = 1 });
+
+        srv.Start();          // both wires owned by service threads: nothing polls on this one
+        cli.Start();
+
+        var call = new RemoteFunction<AddReq, AddRsp>(cli, "dadd");
+        var rvar = new RemoteVariable<Level>(cli, "dlevel");
+        rvar.OnChange((v, u) =>
+        {
+            changeId = Thread.CurrentThread.ManagedThreadId;
+            level = v.Value;
+        });
+
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && !(call.HasDefinition && rvar.RemoteCount > 0))
+        {
+            Drain();
+            Thread.Sleep(5);
+        }
+        Check("definitions matched", call.HasDefinition && rvar.RemoteCount > 0);
+
+        // the handler runs a frame later, through the parked reply, and still answers
+        var t = call.CallAsync(new AddReq { A = 2, B = 3 });
+        t.ContinueWith(x =>
+        {
+            doneId = Thread.CurrentThread.ManagedThreadId;
+            sum = x.Result.Ok ? x.Result.Value.Sum : -1;
+        }, TaskContinuationOptions.ExecuteSynchronously);
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && doneId == 0) { Drain(); Thread.Sleep(5); }
+        Check("deferred handler answered the call", sum == 5);
+        Check("handler ran on the drain thread", fnId == drainId);
+        Check("awaited result resumed on the drain thread", doneId == drainId);
+
+        lvlDef.Set(new Level { Value = 9 });
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && level != 9) { Drain(); Thread.Sleep(5); }
+        Check("variable change arrived", level == 9);
+        Check("observer ran on the drain thread", changeId == drainId);
+
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && evtId == 0) { Drain(); Thread.Sleep(5); }
+        Check("events ran on the drain thread", evtId == drainId);
+
+        // nothing may have slipped onto a service thread
+        Check("no callback ran off the drain thread",
+              evtId == drainId && fnId == drainId && changeId == drainId && doneId == drainId);
+
+        srv.Close();
+        cli.Close();
+        Console.WriteLine(ok ? "dispatcher: PASS\n" : "dispatcher: FAIL\n");
+        return ok;
+    }
+
     static int Main()
     {
         if (!RoundTrip()) return 1;
@@ -725,8 +806,8 @@ static class Program
         var pub = new DartNode("pub", null, e => Console.WriteLine("event(pub): " + e),
             domain: 42, multicastInterface: "127.0.0.1");
 
-        new Topic<Pose>(sub, "pose", Role.SubOnly, reliable: true, keepLast: 8);
-        var pubch = new Topic<Pose>(pub, "pose", Role.PubOnly, reliable: true, keepLast: 8);
+        new Topic<Pose>(sub, "pose", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
+        var pubch = new Topic<Pose>(pub, "pose", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
 
         var sent = new Pose
         {
@@ -804,6 +885,7 @@ static class Program
         if (ok) ok = VideoLive();
         if (ok) ok = Patterns();
         if (ok) ok = Tasks();
+        if (ok) ok = DispatcherLeg();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;
     }

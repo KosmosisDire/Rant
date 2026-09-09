@@ -573,41 +573,21 @@ namespace Dart
 
     // ---- config + reflection attributes -----------------------------------------
 
-    // The internal QoS carrier. The public surface is named constructor parameters, this
-    // just plumbs them to the native DartQos.
-    internal sealed class Qos
+    /// <summary>Per topic QoS, the C DartQos as a class. Every field zero means the default,
+    /// so a null Qos is every default. docs/topics.md explains them.</summary>
+    public sealed class Qos
     {
         public Reliability Reliability = Reliability.BestEffort;
-        public ushort KeepLast = 0;
-        public ushort CatchUp = 0;
-        public uint MaxMessageBytes = 0;
-        public uint HeartbeatUs = 0;
-        public uint RepairDelayUs = 0;
-        public uint BackpressureWaitUs = 0;
-        public uint ShmMaxBytes = 0;
-        public uint QueueBytes = 0;
-        public ushort MaxRateHz = 0;
-        public bool NoTimestamp = false;
-
-        internal static Qos FromParams(bool reliable, int keepLast, int catchUp,
-            int maxMessageBytes, int heartbeatUs, int repairDelayUs, int backpressureWaitMs,
-            int shmMaxBytes, int queueBytes, int maxRateHz = 0, bool noTimestamp = false)
-        {
-            return new Qos
-            {
-                Reliability = reliable ? Reliability.Reliable : Reliability.BestEffort,
-                KeepLast = (ushort)keepLast,
-                CatchUp = (ushort)catchUp,
-                MaxMessageBytes = (uint)maxMessageBytes,
-                HeartbeatUs = (uint)heartbeatUs,
-                RepairDelayUs = (uint)repairDelayUs,
-                BackpressureWaitUs = (uint)backpressureWaitMs * 1000u,
-                ShmMaxBytes = (uint)shmMaxBytes,
-                QueueBytes = (uint)queueBytes,
-                MaxRateHz = (ushort)maxRateHz,
-                NoTimestamp = noTimestamp,
-            };
-        }
+        public ushort KeepLast = 0;           // retained for late join and repair. 0 = 1, or 10 reliable
+        public ushort CatchUp = 0;            // messages a new subscriber gets at once. 0 = future only
+        public uint MaxMessageBytes = 0;      // size hint that pins the SHM class, never a cap
+        public uint HeartbeatUs = 0;          // reliable idle publisher ping. 0 = 250 ms
+        public uint RepairDelayUs = 0;        // the reliable re ask bound. 0 = adaptive from the round trip
+        public uint BackpressureWaitUs = 0;   // reliable send pause for a slow subscriber. 0 = none
+        public uint ShmMaxBytes = 0;          // pin the topic to one SHM class. 0 = per message
+        public uint QueueBytes = 0;           // consumer queue cap. Setting it queues from creation
+        public ushort MaxRateHz = 0;          // subscriber side, best effort: a delivery cap per publisher
+        public bool NoTimestamp = false;      // publisher side: no source stamp, receivers see WrittenUs 0
 
         internal DartQos ToNative()
         {
@@ -1038,28 +1018,14 @@ namespace Dart
         internal readonly Schema Schema;
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
-        /// UTF-8 strings. QoS rides as named parameters (all zero = defaults).</summary>
-        public Topic(DartNode node, string name, Role role = Role.PubSub,
-                     bool reliable = false, int keepLast = 0, int catchUp = 0,
-                     int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
-            : this(node, name, (Schema)null, role, Qos.FromParams(reliable, keepLast, catchUp,
-                   maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                   shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
+        /// UTF-8 strings. A null qos is every default.</summary>
+        public Topic(DartNode node, string name, Role role = Role.PubSub, Qos qos = null)
+            : this(node, name, (Schema)null, role, qos) { }
 
         /// <summary>Create a typed topic with an explicit Schema. Topic&lt;T&gt; is the shorthand
-        /// for the reflected case.</summary>
-        public Topic(DartNode node, string name, Schema schema, Role role = Role.PubSub,
-                     bool reliable = false, int keepLast = 0, int catchUp = 0,
-                     int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
-            : this(node, name, schema, role, Qos.FromParams(reliable, keepLast, catchUp,
-                   maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                   shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
-
-        // The plumbing constructor every path funnels through: same-name topics on
-        // one node share the native slot with a widened role (registry in DartNode).
-        internal Topic(DartNode node, string name, Schema schema, Role role, Qos qos)
+        /// for the reflected case. Same-name topics on one node share the native slot with a
+        /// widened role (registry in DartNode).</summary>
+        public Topic(DartNode node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
         {
             _node = node;
             Schema = schema;
@@ -1174,15 +1140,7 @@ namespace Dart
     /// itself and Send and TryTake carry the plain value (docs/csharp.md).</summary>
     public sealed class Topic<T> : Topic
     {
-        public Topic(DartNode node, string name, Role role = Role.PubSub,
-                     bool reliable = false, int keepLast = 0, int catchUp = 0,
-                     int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                     int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
-            : base(node, name, new Schema(typeof(T)), role, Qos.FromParams(reliable, keepLast,
-                   catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                   shmMaxBytes, queueBytes, maxRateHz, noTimestamp)) { }
-
-        internal Topic(DartNode node, string name, Role role, Qos qos)
+        public Topic(DartNode node, string name, Role role = Role.PubSub, Qos qos = null)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
         public SendStatus Send(T value) => Send((object)value);
@@ -1335,6 +1293,21 @@ namespace Dart
         /// <summary>Rebind the message handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
         public DartNode OnMessage(Action<DartMessage> fn) { _onMsg = fn; return this; }
+
+        /// <summary>Where this node's callbacks run. Null runs them inline on the polling or
+        /// service thread. Set it and every event, pattern handler, variable observer, progress
+        /// report and awaited call result is handed to it instead: a UI toolkit posts to its
+        /// frame. Messages are unaffected, they have the consumer queue (docs/node.md).</summary>
+        public Action<Action> CallbackDispatcher;
+
+        // Every callback funnels through here so a dispatcher is honored in one place.
+        internal void RunCallback(Action a)
+        {
+            Action<Action> d = CallbackDispatcher;
+            if (d == null) { a(); return; }
+            try { d(a); }
+            catch (Exception e) { Console.Error.WriteLine("dart callback dispatcher: " + e); }
+        }
         /// <summary>Rebind the event handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
         public DartNode OnEvent(Action<DartEvent> fn) { _onEvt = fn; return this; }
@@ -1622,7 +1595,9 @@ namespace Dart
                 DartNode node;
                 lock (s_reg) s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                node._onEvt(DartEvent.FromNative(evPtr, ref e));   // copied past the callback
+                DartEvent ev = DartEvent.FromNative(evPtr, ref e);   // copied past the callback
+                Action<DartEvent> fn = node._onEvt;
+                node.RunCallback(() => fn(ev));
             }
             catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
         }
@@ -1664,10 +1639,12 @@ namespace Dart
         {
             public Action<DartRequest> Handler;
             public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
+            public DartNode Node;
         }
         internal sealed class VarBox
         {
             public Action<VariableUpdate> Handler;
+            public DartNode Node;
         }
         internal sealed class AsyncCall
         {
@@ -1760,6 +1737,23 @@ namespace Dart
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
                 var r = new DartRequest(reqPtr, box.Fn);
+                // The handler runs after this callback returns, where the native request is
+                // dead, so park the reply now and answer through the Deferred instead.
+                if (box.Node != null && box.Node.CallbackDispatcher != null)
+                {
+                    r.Rebind(r.Defer());
+                    RequestBox b = box;
+                    box.Node.RunCallback(() =>
+                    {
+                        try { b.Handler(r); }
+                        catch (Exception e)
+                        {
+                            r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
+                            Console.Error.WriteLine("dart on_request: " + e);
+                        }
+                    });
+                    return;
+                }
                 try { box.Handler(r); }
                 catch (Exception e)
                 {
@@ -1791,7 +1785,8 @@ namespace Dart
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                     Message = Codec.Str(o.message),
                 };
-                call.Tcs.TrySetResult(r);
+                if (call.DartNode != null) call.DartNode.RunCallback(() => call.Tcs.TrySetResult(r));
+                else call.Tcs.TrySetResult(r);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_response: " + e); }
         }
@@ -1804,7 +1799,7 @@ namespace Dart
                 var p = Marshal.PtrToStructure<DartProgressNative>(prgPtr);
                 AsyncCall call = PeekAsync((long)p.user);
                 if (call == null || call.OnProgress == null) return;
-                call.OnProgress(new TaskProgress
+                var prg = new TaskProgress
                 {
                     CallId = p.call_id,
                     Provider = p.provider,
@@ -1812,7 +1807,10 @@ namespace Dart
                     WrittenUs = p.written_us,
                     RecvUs = p.recv_us,
                     SchemaPtr = p.schema,
-                });
+                };
+                Action<TaskProgress> sink = call.OnProgress;
+                if (call.DartNode != null) call.DartNode.RunCallback(() => sink(prg));
+                else sink(prg);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_progress: " + e); }
         }
@@ -1836,7 +1834,7 @@ namespace Dart
                 var box = GetBox((long)user) as VarBox;
                 if (box == null) return;
                 var u = Marshal.PtrToStructure<DartVariableUpdateNative>(updPtr);
-                box.Handler(new VariableUpdate
+                var vu = new VariableUpdate
                 {
                     Name = Codec.Str(u.name),
                     Data = Codec.Bytes(u.value),   // copied out: the view dies with the callback
@@ -1846,7 +1844,10 @@ namespace Dart
                     RecvUs = u.recv_us,
                     WrittenUs = u.written_us,
                     SchemaPtr = u.schema,
-                });
+                };
+                Action<VariableUpdate> fn = box.Handler;
+                if (box.Node != null) box.Node.RunCallback(() => fn(vu));
+                else fn(vu);
             }
             catch (Exception e) { Console.Error.WriteLine("dart on_variable_update: " + e); }
         }
@@ -1876,6 +1877,7 @@ namespace Dart
     {
         private IntPtr _ptr;          // the exact native pointer, zeroed when the callback returns
         private readonly IntPtr _fn;
+        private Deferred _deferred;   // set when the reply was parked for another thread
         private bool _done;
         internal readonly IntPtr SchemaPtr;
 
@@ -1907,8 +1909,9 @@ namespace Dart
         public void Reply(byte[] rsp)
         {
             Guard();
-            using (var p = new PinnedBytes(rsp)) Native.dart_request_reply(_ptr, p.B);
             _done = true;
+            if (_deferred != null) { _deferred.Complete(rsp); return; }
+            using (var p = new PinnedBytes(rsp)) Native.dart_request_reply(_ptr, p.B);
         }
 
         /// <summary>Answer AppError. message is the text shown on the caller, truncated at 255
@@ -1916,9 +1919,10 @@ namespace Dart
         public void Fail(string message = null, byte[] rsp = null)
         {
             Guard();
+            _done = true;
+            if (_deferred != null) { _deferred.Fail(message, rsp); return; }
             using (var p = new PinnedBytes(rsp))
                 Native.dart_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
-            _done = true;
         }
 
         /// <summary>Park the reply and return now. The Deferred completes the call later from
@@ -1926,16 +1930,24 @@ namespace Dart
         public Deferred Defer()
         {
             Guard();
-            ulong token = Native.dart_request_defer(_ptr);
             _done = true;
+            if (_deferred != null) return _deferred;
+            ulong token = Native.dart_request_defer(_ptr);
             return new Deferred(_fn, token);
         }
 
-        internal void FailQuiet(string message = null) { if (_ptr != IntPtr.Zero && !_done) Fail(message); }
+        // The reply is parked so the handler can run on another thread. Every field is already
+        // copied out, so only the answer has to move off the dead native pointer.
+        internal void Rebind(Deferred d) { _ptr = IntPtr.Zero; _deferred = d; _done = false; }
+
+        internal void FailQuiet(string message = null)
+        {
+            if ((_ptr != IntPtr.Zero || _deferred != null) && !_done) Fail(message);
+        }
         internal void Expire() { _ptr = IntPtr.Zero; }
         private void Guard()
         {
-            if (_ptr == IntPtr.Zero)
+            if (_ptr == IntPtr.Zero && _deferred == null)
                 throw new InvalidOperationException(
                     "request expired: answer inside the handler callback, or Defer() first");
             if (_done) throw new InvalidOperationException("request already answered");
@@ -1994,7 +2006,7 @@ namespace Dart
             Patterns.RequestBox box = null;
             if (handler != null)
             {
-                box = new Patterns.RequestBox { Handler = handler };
+                box = new Patterns.RequestBox { Handler = handler, Node = node };
                 id = Patterns.AddBox(box);
             }
             Fn = Native.dart_node_create_function_definition(node.Handle, Codec.CStr(name),
@@ -2146,7 +2158,11 @@ namespace Dart
         /// response fires from the polling thread and continuations run off it.</summary>
         public Task<DartResponse> CallAsync(byte[] request, uint provider = 0)
         {
-            var tcs = new TaskCompletionSource<DartResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            // A dispatcher already completes on the thread the caller chose, so continuations
+            // belong there. With none, keep them off the polling thread.
+            var tcs = new TaskCompletionSource<DartResponse>(
+                DartNode.CallbackDispatcher != null ? TaskCreationOptions.None
+                                                    : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, DartNode = DartNode });
             DartNode.RegisterAsync(id);
             int rc;
@@ -2251,7 +2267,7 @@ namespace Dart
             {
                 cancels = new Patterns.TaskCancelBox();
                 cancelId = Patterns.AddBox(cancels);
-                var b = box = new Patterns.RequestBox();
+                var b = box = new Patterns.RequestBox { Node = node };
                 var c = cancels;
                 box.Handler = r => RunCall(b, c, handler, r);
                 id = Patterns.AddBox(box);
@@ -2384,7 +2400,11 @@ namespace Dart
         internal Task<DartResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
                                              CancellationToken cancellationToken, uint provider)
         {
-            var tcs = new TaskCompletionSource<DartResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            // A dispatcher already completes on the thread the caller chose, so continuations
+            // belong there. With none, keep them off the polling thread.
+            var tcs = new TaskCompletionSource<DartResponse>(
+                DartNode.CallbackDispatcher != null ? TaskCreationOptions.None
+                                                    : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall
             {
                 Tcs = tcs, DartNode = DartNode, OnProgress = sink,
@@ -2569,7 +2589,7 @@ namespace Dart
                 else Native.dart_variable_on_write(Var, null, IntPtr.Zero);
                 return;
             }
-            long id = Patterns.AddBox(new Patterns.VarBox { Handler = handler });
+            long id = Patterns.AddBox(new Patterns.VarBox { Handler = handler, Node = DartNode });
             DartNode.RegisterPatternBox(id);
             if (change) Native.dart_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id);
             else Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id);
@@ -2607,14 +2627,9 @@ namespace Dart
     {
         internal readonly Topic T;
 
-        public Publisher(DartNode node, string name, Schema schema = null,
-                         bool reliable = false, int keepLast = 0, int catchUp = 0,
-                         int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
+        public Publisher(DartNode node, string name, Schema schema = null, Qos qos = null)
         {
-            T = new Topic(node, name, schema, Role.PubOnly, Qos.FromParams(reliable, keepLast,
-                    catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                    shmMaxBytes, queueBytes, maxRateHz, noTimestamp));
+            T = new Topic(node, name, schema, Role.PubOnly, qos);
         }
 
         public SendStatus Send(byte[] data) => T.Send(data);
@@ -2632,14 +2647,9 @@ namespace Dart
         internal readonly Topic T;
 
         public Subscriber(DartNode node, string name, Schema schema = null,
-                          Action<DartMessage> handler = null,
-                          bool reliable = false, int keepLast = 0, int catchUp = 0,
-                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
+                          Action<DartMessage> handler = null, Qos qos = null)
         {
-            T = new Topic(node, name, schema, Role.SubOnly, Qos.FromParams(reliable, keepLast,
-                    catchUp, maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                    shmMaxBytes, queueBytes, maxRateHz, noTimestamp));
+            T = new Topic(node, name, schema, Role.SubOnly, qos);
             if (handler != null) node.AddSubHandler(T.Index, handler);
         }
 
@@ -3039,15 +3049,10 @@ namespace Dart
         private readonly Publisher _core;
         private readonly Schema _schema;
 
-        public Publisher(DartNode node, string name,
-                         bool reliable = false, int keepLast = 0, int catchUp = 0,
-                         int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                         int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
+        public Publisher(DartNode node, string name, Qos qos = null)
         {
             _schema = new Schema(typeof(T));
-            _core = new Publisher(node, name, _schema, reliable, keepLast, catchUp,
-                maxMessageBytes, heartbeatUs, repairDelayUs, backpressureWaitMs,
-                shmMaxBytes, queueBytes, maxRateHz, noTimestamp);
+            _core = new Publisher(node, name, _schema, qos);
         }
 
         public SendStatus Send(T value) => _core.Send(_schema.Encode(value));
@@ -3063,27 +3068,19 @@ namespace Dart
     {
         private readonly Subscriber _core;
 
-        public Subscriber(DartNode node, string name, Action<T> handler = null,
-                          bool reliable = false, int keepLast = 0, int catchUp = 0,
-                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
+        public Subscriber(DartNode node, string name, Action<T> handler = null, Qos qos = null)
         {
             _core = new Subscriber(node, name, new Schema(typeof(T)),
                 handler == null ? (Action<DartMessage>)null : m => { if (m.Value is T v) handler(v); },
-                reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
-                backpressureWaitMs, shmMaxBytes, queueBytes, maxRateHz, noTimestamp);
+                qos);
         }
 
         public Subscriber(DartNode node, string name, Action<T, DartMessage> handler,
-                          bool reliable = false, int keepLast = 0, int catchUp = 0,
-                          int maxMessageBytes = 0, int heartbeatUs = 0, int repairDelayUs = 0,
-                          int backpressureWaitMs = 0, int shmMaxBytes = 0, int queueBytes = 0, int maxRateHz = 0, bool noTimestamp = false)
+                          Qos qos = null)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             _core = new Subscriber(node, name, new Schema(typeof(T)),
-                m => { if (m.Value is T v) handler(v, m); },
-                reliable, keepLast, catchUp, maxMessageBytes, heartbeatUs, repairDelayUs,
-                backpressureWaitMs, shmMaxBytes, queueBytes, maxRateHz, noTimestamp);
+                m => { if (m.Value is T v) handler(v, m); }, qos);
         }
 
         /// <summary>Typed take: decodes straight from the queue.</summary>

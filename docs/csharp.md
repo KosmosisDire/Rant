@@ -16,8 +16,12 @@ and `selfIp` with `advertisePort` are the discovery options of docs/discovery.md
 
 Every call is thread safe. `Start()` runs the C service thread and handlers fire on it
 one at a time. To keep handlers on one thread, such as Unity's main thread, skip `Start()`
-and call `Poll()` from that thread, or keep `Start()` and call `DispatchAll()` once per
-frame so every queued handler runs there. From inside a handler, `Send` and read only
+and call `Poll()` from that thread, or keep `Start()` and call `Dispatch()` once per
+frame so every queued handler runs there. `Dispatch()` covers messages only.
+`CallbackDispatcher` covers the rest: set it to a delegate that posts to your thread and
+every event, pattern handler, variable observer, progress report and awaited call result
+runs there instead of on the service thread. A function or task handler that lands this
+way has its reply parked first, so it still answers from wherever it runs. From inside a handler, `Send` and read only
 queries are allowed, and Poll, topic create, SetRole, Drain, Start, Stop and Close are
 refused with `SendStatus.State` or an exception. `Close()` returns false from a handler.
 
@@ -43,6 +47,18 @@ encodes against any compiled schema by field name, nested structs as nested dict
 The standard types of docs/stdtypes.md ship as mirror structs with lowercase wire names,
 `DartTimestamp.Now()` is the Timestamp clock, and the video enums carry the wire values.
 
+## QoS
+
+Topic QoS is one `Qos` object passed as the trailing argument to `Topic`, `Topic<T>`,
+`Publisher` and `Subscriber`, and a null one means every default. The fields are the C
+ones of docs/topics.md under C# names, so `HeartbeatUs` and `BackpressureWaitUs` are
+microseconds.
+
+```csharp
+var t = new Topic<Pose>(node, "pose", Role.SubOnly,
+                        new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
+```
+
 ## Messages and queues
 
 `DartMessage` is fully copied out. `Value` or `As<T>()` decodes, `RecvUs` is the node's
@@ -52,8 +68,8 @@ monotonic clock at receipt and `WrittenUs` the sender's wall clock, 0 when it op
 queued delivery, as in docs/node.md. Dispatch handlers run on the calling thread without
 the node lock. `QueueStats` and the traffic counters are always available. `Retire()`
 releases the name for a re creation and forgets every wrapper registration for the slot,
-since a reused slot may carry a different topic. `CanSend` is true when a send would not
-wait, and `PendingMatches` counts unresolved candidates.
+since a reused slot may carry a different topic. `Ready` is true when a send would not
+wait, and `PendingCount` counts unresolved candidates.
 
 ## Functions, tasks and variables
 

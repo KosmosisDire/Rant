@@ -62,7 +62,7 @@ var node = new DartNode("robot1",
                     onMessage: m => Console.WriteLine(m.As<Pose>()),
                     onEvent: e => Console.Error.WriteLine(e),   // required: it carries the diagnostics
                     domain: 7);                                 // all options are named parameters
-var ch = new Topic<Pose>(node, "pose", reliable: true);
+var ch = new Topic<Pose>(node, "pose", qos: new Qos { Reliability = Reliability.Reliable });
 node.Start();                                    // C-level service thread owns the loop
 ch.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
 // (or skip Start() and drive node.Poll(1) in your own loop)
@@ -82,7 +82,7 @@ var own = new VariableDefinition<Level>(node, "level", new Level { Value = 5 });
 var acc = new RemoteVariable<Level>(other, "level");     // acc.Value / acc.Set(...) / acc.Wait(...)
 
 // side-named topic handles (share the topic slot by name, widening the role)
-var pub = new Publisher<Pose>(node, "pose", reliable: true);
+var pub = new Publisher<Pose>(node, "pose", new Qos { Reliability = Reliability.Reliable });
 var sub = new Subscriber<Pose>(other, "pose", p => Console.WriteLine(p.X));
 ```
 
