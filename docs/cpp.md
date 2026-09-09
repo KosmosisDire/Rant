@@ -41,7 +41,7 @@ chat.send("hello");
 
 The message handler may be empty, since typed subscribers and pattern handles carry their
 own. The event handler is required. Options are plain structs mirroring the C ones, and
-all zero means every default. `Qos::queue_bytes`, `Qos::rate_limit_hz` and
+all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
 `Qos::no_timestamp` are the C fields of the same meaning.
 
 Every failed constructor throws `dart::Error`, which carries the error kind, the OS errno
