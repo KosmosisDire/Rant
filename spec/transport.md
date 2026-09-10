@@ -16,7 +16,9 @@ implied) or 21 for multi fragment, HB is 23, NACK is 21. Byte 0 is `type | flags
 single fragment bit lives here, and `(b[0] & 0x07)` in 1 to 3 picks out a transport
 datagram). Bytes 1 and 2 are the topic index. Every message carries 8 little endian bytes
 of `written_us` inside the sample ahead of any pattern header, unless the topic opted out,
-so repair, replay, shared memory and the queue all keep the original stamp.
+so repair, replay, shared memory and the queue all keep the original stamp. Bit 63 of that
+stamp marks a second 8 byte `capture_us` slot behind it, which the sender adds per message
+and which costs nothing when unset. See spec/node.md.
 
 There is no GAP submessage. A writer that cannot satisfy a NACK, or that overran its
 ring, answers with an HB whose `first` advertises its floor. The reader's HB handler

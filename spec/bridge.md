@@ -12,8 +12,8 @@ debugger.
   as the WebRTC data channel id, so both ends open the channel with no round trip. Frames
   for an in flight create are held client side and replayed. Schema blocks come back under
   the request key (`schema`, `req`, `prg`, `rsp`), each `{name, size, hash, fields}`.
-- One 21 byte frame header for every op both ways:
-  `[op][flags][u16 id][u32 seq][u32 peer][u64 written_us][u8 text_len][text][payload]`,
+- One 29 byte frame header for every op both ways:
+  `[op][flags][u16 id][u32 seq][u32 peer][u64 written_us][u64 capture_us][u8 text_len][text][payload]`,
   ops DATA, VAR, CALL, RESULT, PROGRESS, CANCEL. The caller name and the result message
   ride the text slot. The `match` push is `{id, count, ready}`. A topic's count is the
   publisher side matched readers, so a sub only topic reads 0.

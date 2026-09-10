@@ -172,7 +172,7 @@ int main(int argc, char **argv){
         dart_variable_set(var_def, enc_u32(temp_s, "celsius", tick, buf, sizeof buf));
 
         wr32(raw, tick);                                   /* plain topic: raw bytes */
-        dart_topic_send(lidar_pub, dart_bytes(raw, 4));
+        dart_topic_send(lidar_pub, dart_bytes(raw, 4), NULL);
 
         run_transfer_step();     /* task superloop, server side: one chunk per pass */
 

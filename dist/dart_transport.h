@@ -323,6 +323,11 @@ extern "C" {
 /* The source stamp in front of every sample of a stamped topic, taken once at commit so
  * repair, replay and shared memory carry the original. DartQos.no_timestamp opts out. */
 #define DART_TIMESTAMP_BYTES 8u
+/* A microsecond wall clock needs 51 bits, so the source stamp's top bit is free to mark
+ * that a capture slot follows it. Per message, and costs nothing unset. See spec/node.md */
+#define DART_CAPTURE_BYTES   8u
+#define DART_STAMP_CAPTURE   0x8000000000000000ull
+#define DART_STAMP_MASK      0x7FFFFFFFFFFFFFFFull
 
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 /* DART_INACTIVE is declared but off. Resources stay allocated and set_role flips it. */
@@ -685,13 +690,14 @@ uint32_t  dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t
 /* Matched publishers feeding our subscription side. */
 int       dart_transport_subscriber_match_count(DartTransportState *st, uint16_t topic_index);
 
-/* hdr rides in front of data as one message, byte identical to sending the concatenation. */
+/* hdr rides in front of data as one message, byte identical to sending the concatenation.
+ * capture_us 0 sends no capture slot. */
 int       dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index,
-                      DartBytes hdr, DartBytes data, uint64_t now_us);
+                      DartBytes hdr, DartBytes data, uint64_t capture_us, uint64_t now_us);
 /* Publishes to one peer. Every other matched reliable lane skips the seqno through its
  * HB floor. A no op delivery when the peer is not a matched subscriber. */
 int       dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
-                      DartBytes hdr, DartBytes data, uint64_t now_us);
+                      DartBytes hdr, DartBytes data, uint64_t capture_us, uint64_t now_us);
 
 #ifdef DART_SHM
 /* The payload lives in an external chunk, fragmented for remote peers and described to
@@ -1641,6 +1647,8 @@ typedef struct {
     uint64_t       recv_us;          /* the monotonic clock at receive, or at enqueue */
     uint64_t       written_us;       /* the writer's wall clock at commit, UTC microseconds. 0 = the
                                         publisher opted out. Never mix it with recv_us */
+    uint64_t       capture_us;       /* when the publisher says the data was true, UTC
+                                        microseconds. 0 = none given, written_us is all there is */
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
@@ -1708,7 +1716,13 @@ int dart_node_dispatch(DartNode *n, int max_msgs, int timeout_ms);
 void dart_topic_queue_stats(DartTopic *topic, uint32_t *msgs, uint32_t *bytes,
                               uint32_t *capacity, uint32_t *dropped);
 /* Publishes to every matched subscriber. DART_OK or a negative DartResult. */
-int          dart_topic_send(DartTopic *topic, DartBytes data);
+/* Optional per send config, NULL means all defaults. capture_us is when the data was
+ * true rather than when it was sent, and costs 8 wire bytes only when it is set. */
+typedef struct {
+    uint64_t capture_us;   /* UTC microseconds, the dart_timestamp_now clock. 0 = none */
+} DartSendOpts;
+
+int          dart_topic_send(DartTopic *topic, DartBytes data, const DartSendOpts *opts);
 /* Flips the role at runtime and re advertises. 0 ok, negative on error. */
 int          dart_topic_set_role(DartTopic *topic, DartRole role);
 /* The local index, DartMsg.topic_index for its messages. */
@@ -2601,6 +2615,13 @@ static inline uint32_t i_dart_topic_ts_bytes(const i_DartTopic *topic){
     return topic->qos.no_timestamp ? 0u : DART_TIMESTAMP_BYTES;
 }
 
+/* The whole stamp prefix: the source slot, plus a capture slot when the sender gave one.
+ * Never a hook's presence, so a reader sizes it from the bytes it received. */
+static inline uint32_t i_dart_topic_stamp_bytes(const i_DartTopic *topic, uint64_t capture_us){
+    uint32_t ts = i_dart_topic_ts_bytes(topic);
+    return (ts && capture_us) ? ts + DART_CAPTURE_BYTES : ts;
+}
+
 /* Only a reliable topic with catch_up replays history to a late joiner. Everywhere else
  * history with no subscriber is dead weight and the send can be skipped. */
 static inline int i_dart_topic_retains_history(const i_DartTopic *topic){
@@ -2971,9 +2992,11 @@ static int i_dart_writer_too_big(DartTransportState *st, i_DartTopic *topic, siz
 /* Stores ts, hdr and data into the head slot. The source stamp is taken here, once per
  * message, so a repair resend, a replay and the SHM chunk all carry the original. */
 static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
-                               DartBytes hdr, DartBytes data, size_t *len_out){
+                               DartBytes hdr, DartBytes data, uint64_t capture_us,
+                               size_t *len_out){
     uint32_t ts = i_dart_topic_ts_bytes(topic);
-    size_t len = (size_t)ts + hdr.len + data.len;
+    uint32_t cap_b = (ts && capture_us) ? DART_CAPTURE_BYTES : 0u;
+    size_t len = (size_t)ts + cap_b + hdr.len + data.len;
     if (i_dart_writer_too_big(st, topic, len)) return DART_ERR_TOO_BIG;
     {   i_DartWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
@@ -2984,9 +3007,15 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
         }
     }
     {   uint8_t *dst = topic->history[topic->history_head].buf;    /* gather: ts, hdr, payload */
-        if (ts)       i_dart_le_w64(dst, st->cfg.source_time ? st->cfg.source_time(st->cfg.user) : 0u);
-        if (hdr.len)  memcpy(dst + ts, hdr.data, hdr.len);
-        if (data.len) memcpy(dst + ts + hdr.len, data.data, data.len);
+        if (ts){
+            uint64_t w = st->cfg.source_time ? st->cfg.source_time(st->cfg.user) : 0u;
+            w &= DART_STAMP_MASK;
+            if (cap_b) w |= DART_STAMP_CAPTURE;
+            i_dart_le_w64(dst, w);
+            if (cap_b) i_dart_le_w64(dst + ts, capture_us);
+        }
+        if (hdr.len)  memcpy(dst + ts + cap_b, hdr.data, hdr.len);
+        if (data.len) memcpy(dst + ts + cap_b + hdr.len, data.data, data.len);
     }
 #ifdef DART_SHM
     topic->history[topic->history_head].shm = 0;   /* an inline send: not SHM backed */
@@ -2998,17 +3027,19 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
 
 /* The one send: prologue, store and commit. dest_slot is stamped onto the sample. */
 static int i_dart_writer_send(DartTransportState *st, uint16_t topic_index,
-                              DartBytes hdr, DartBytes data, uint32_t dest_slot){
+                              DartBytes hdr, DartBytes data, uint64_t capture_us,
+                              uint32_t dest_slot){
     i_DartTopic *topic; size_t len; int r;
     topic = i_dart_topic_at(st, topic_index, NULL);
     if (!topic) return DART_ERR_NO_TOPIC;
-    /* the source stamp is ordinary payload for every size rule */
-    if (i_dart_writer_too_big(st, topic, i_dart_topic_ts_bytes(topic) + hdr.len + data.len))
+    /* the stamps are ordinary payload for every size rule */
+    if (i_dart_writer_too_big(st, topic,
+            i_dart_topic_stamp_bytes(topic, capture_us) + hdr.len + data.len))
         return DART_ERR_TOO_BIG;
     if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
     /* nobody subscribes and nothing durable to keep: skip the grow, the copy and the commit */
     if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
-    r = i_dart_writer_store(st, topic, hdr, data, &len);
+    r = i_dart_writer_store(st, topic, hdr, data, capture_us, &len);
     if (r != DART_OK) return r;
     i_dart_writer_commit(st, topic_index, len, dest_slot);
     return DART_OK;
@@ -3017,21 +3048,22 @@ static int i_dart_writer_send(DartTransportState *st, uint16_t topic_index,
 
 int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
     DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
+    return dart_transport_send_hdr(st, topic_index, nohdr, data, 0, now);
 }
 
 
-int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr,
+                            DartBytes data, uint64_t capture_us, uint64_t now){
     (void)now;
-    return i_dart_writer_send(st, topic_index, hdr, data, DART__DEST_ALL);
+    return i_dart_writer_send(st, topic_index, hdr, data, capture_us, DART__DEST_ALL);
 }
 
 
 int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
-                           DartBytes hdr, DartBytes data, uint64_t now){
+                           DartBytes hdr, DartBytes data, uint64_t capture_us, uint64_t now){
     int peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown: sent to nobody, seqno consumed */
     (void)now;
-    return i_dart_writer_send(st, topic_index, hdr, data,
+    return i_dart_writer_send(st, topic_index, hdr, data, capture_us,
                               peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
 }
 
@@ -10463,6 +10495,7 @@ typedef struct {
     uint32_t data_len;
     uint64_t t_recv_us;    /* the arrival stamp, DartMsg.recv_us */
     uint64_t t_written_us; /* the publisher's source stamp, stripped at enqueue, 0 = opted out */
+    uint64_t t_capture_us; /* the publisher's capture stamp, 0 = it sent none */
     uint32_t publisher_id;
     uint8_t  name_len;     /* the name is copied inline, discovery views die with the peer */
     uint8_t  pad[3];
@@ -10748,12 +10781,23 @@ static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
     return (const char*)s.data;
 }
 
-/* Strips the source stamp a stamped publisher prepends, filling *written_us. The one strip
- * point: every delivery path runs through here before the pattern header split. */
-static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us){
-    if (!stamped || wire.len < DART_TIMESTAMP_BYTES){ *written_us = 0; return wire; }
-    *written_us = i_dart_le_r64(wire.data);
-    return dart_bytes(wire.data + DART_TIMESTAMP_BYTES, wire.len - DART_TIMESTAMP_BYTES);
+/* Strips the stamps a stamped publisher prepends, filling *written_us and *capture_us.
+ * The one strip point: every delivery path runs through here before the header split. */
+static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us,
+                                      uint64_t *capture_us){
+    uint64_t w;
+    *written_us = 0; *capture_us = 0;
+    if (!stamped || wire.len < DART_TIMESTAMP_BYTES) return wire;
+    w = i_dart_le_r64(wire.data);
+    *written_us = w & DART_STAMP_MASK;
+    if (!(w & DART_STAMP_CAPTURE))
+        return dart_bytes(wire.data + DART_TIMESTAMP_BYTES, wire.len - DART_TIMESTAMP_BYTES);
+    /* the marker promises a second slot: a sample too short for it is malformed, keep the
+       bytes whole rather than reading past them */
+    if (wire.len < (size_t)DART_TIMESTAMP_BYTES + DART_CAPTURE_BYTES) return wire;
+    *capture_us = i_dart_le_r64(wire.data + DART_TIMESTAMP_BYTES);
+    return dart_bytes(wire.data + DART_TIMESTAMP_BYTES + DART_CAPTURE_BYTES,
+                      wire.len - DART_TIMESTAMP_BYTES - DART_CAPTURE_BYTES);
 }
 
 /* Splits a delivered wire into its pattern header and the payload after it, so the schema
@@ -10846,7 +10890,8 @@ static void i_dart_node_queue_lost(DartNode *n, uint16_t topic_index, uint32_t f
 /* Enqueues one message. 0 = accepted (stored, or dropped per the best effort contract),
  * 1 = refused, a reliable queue at cap: the transport parks and flow control backpressures. */
 static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQueue *q,
-                                  uint32_t from, DartBytes data, uint64_t written_us){
+                                  uint32_t from, DartBytes data, uint64_t written_us,
+                                  uint64_t capture_us){
     DartString name = i_dart_node_core_peer_name(n->core, from);
     uint32_t name_len = name.len > DART_NODE_NAME_MAX ? (uint32_t)DART_NODE_NAME_MAX
                                                       : (uint32_t)name.len;
@@ -10868,6 +10913,7 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQu
         rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
         rec->t_recv_us = i_dart_plat_now_us();
         rec->t_written_us = written_us;
+        rec->t_capture_us = capture_us;
         rec->publisher_id = from; rec->name_len = (uint8_t)name_len;
         rec->pad[0] = rec->pad[1] = rec->pad[2] = 0;
         if (name_len) memcpy((uint8_t*)rec + sizeof *rec, name.data, name_len);
@@ -10895,6 +10941,7 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
     if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* an op only pattern message */
     m->recv_us = rec->t_recv_us;
     m->written_us = rec->t_written_us;
+    m->capture_us = rec->t_capture_us;
 }
 
 /* Creates the queue. An explicit queue_bytes allocates in full, the lazy default starts at
@@ -10954,11 +11001,12 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     DartMsg m;
     DartTopic *h = (topic_index < i_dart_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
     DartBytes hdr, payload, body;
-    uint64_t written_us;
+    uint64_t written_us, capture_us;
     const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
-    /* the stamp first, then the header split, then the schema validates the payload */
+    /* the stamps first, then the header split, then the schema validates the payload */
     body = i_dart_node_strip_ts(data,
-              dart_transport_peer_timestamped(n->transport, topic_index, from), &written_us);
+              dart_transport_peer_timestamped(n->transport, topic_index, from),
+              &written_us, &capture_us);
     i_dart_node_split(h, body, &hdr, &payload);
     /* an op only pattern message (a zero payload, or a task op that is not CALL) skips
        the schema, the pattern layer judges it. See spec/node.md */
@@ -10976,8 +11024,8 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
         return 0;
     }
     if (h && h->q){
-        /* store the wire minus the stamp, the stamp rides the record */
-        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, written_us))
+        /* store the wire minus the stamps, the stamps ride the record */
+        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, written_us, capture_us))
             return 1;   /* parked: the accepted retry re counts */
         h->rx_msgs++; h->rx_bytes += data.len;
         return 0;
@@ -10994,6 +11042,7 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     m.schema = schema;
     m.recv_us = i_dart_plat_now_us();
     m.written_us = written_us;
+    m.capture_us = capture_us;
     if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* the patterns layer */
     else n->user_on_message(&m);
     return 0;
@@ -11647,7 +11696,8 @@ DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartR
 
 /* the built in log topics */
 
-static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data, int may_wait);
+static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data,
+                               uint64_t capture_us, int may_wait);
 
 static const char *const i_dart_log_topic_names[3] =
     { "@dart/log/error", "@dart/log/warn", "@dart/log/info" };
@@ -11685,8 +11735,8 @@ static int i_dart_node_log_publish(DartNode *n, DartLogLevel level, const char *
     if (!dart_set_string(msg, sizeof msg, n->log_schema, "text", dart_string(text, text_len)))
         return DART_ERR_TOO_BIG;
     len = dart_schema_msg_len(n->log_schema, msg, sizeof msg);
-    if (locked) return i_dart_node_do_send(n, h->index, dart_bytes(msg, len), 0);
-    return dart_topic_send(h, dart_bytes(msg, len));
+    if (locked) return i_dart_node_do_send(n, h->index, dart_bytes(msg, len), 0, 0);
+    return dart_topic_send(h, dart_bytes(msg, len), NULL);
 }
 
 int dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...){
@@ -12172,14 +12222,16 @@ static void i_dart_node_pump_wait_tick(DartNode *n, void *ctx, uint64_t now){
 /* Publishes on a topic index: the match wait, the flow control wait, then SHM or UDP.
  * may_wait = 0 is a reentrant send from a callback: it never blocks or runs the loop. */
 static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes hdr, DartBytes data,
-                                  int directed, uint32_t to_peer, int may_wait){
+                                  uint64_t capture_us, int directed, uint32_t to_peer,
+                                  int may_wait){
     /* one O(1) count gates the per send fast paths: an unsubscribed topic skips them all */
     int matched = dart_transport_publisher_match_count(n->transport, topic_index);
     const DartQos *q = dart_transport_topic_qos(n->transport, topic_index);
     /* the source stamp is ordinary payload, so every size rule here counts it. qos is
        immutable, so this stays valid across the waits that may re fetch q */
     size_t ts_bytes = (q && q->no_timestamp) ? 0u : (size_t)DART_TIMESTAMP_BYTES;
-    size_t len = ts_bytes + hdr.len + data.len;
+    size_t cap_bytes = (ts_bytes && capture_us) ? (size_t)DART_CAPTURE_BYTES : 0u;
+    size_t len = ts_bytes + cap_bytes + hdr.len + data.len;
     int guarded = 0;   /* the unsent eviction check runs after the wait */
 
     /* a send to zero subscribers while a match forms waits for it to converge. A topic
@@ -12278,9 +12330,14 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
                     i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
                     /* gather the whole wire sample into the chunk: stamp, header, payload,
                        exactly as the inline commit writes it */
-                    if (ts_bytes) i_dart_le_w64((uint8_t*)chunk_ptr, i_dart_plat_wall_us());
-                    if (hdr.len) memcpy((uint8_t*)chunk_ptr + ts_bytes, hdr.data, hdr.len);
-                    memcpy((uint8_t*)chunk_ptr + ts_bytes + hdr.len, data.data, data.len);
+                    if (ts_bytes){
+                        uint64_t w = i_dart_plat_wall_us() & DART_STAMP_MASK;
+                        if (cap_bytes) w |= DART_STAMP_CAPTURE;
+                        i_dart_le_w64((uint8_t*)chunk_ptr, w);
+                        if (cap_bytes) i_dart_le_w64((uint8_t*)chunk_ptr + ts_bytes, capture_us);
+                    }
+                    if (hdr.len) memcpy((uint8_t*)chunk_ptr + ts_bytes + cap_bytes, hdr.data, hdr.len);
+                    memcpy((uint8_t*)chunk_ptr + ts_bytes + cap_bytes + hdr.len, data.data, data.len);
                     i_dart_shm_stamp(pool, slot, (uint32_t)len, &d);
                     i_dart_shm_desc_encode(&d, desc);
                     if (dart_transport_send_shm(n->transport, topic_index, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
@@ -12292,8 +12349,10 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
             }
         }
 #endif
-        r = directed ? dart_transport_send_to(n->transport, topic_index, to_peer, hdr, data, i_dart_plat_now_us())
-                     : dart_transport_send_hdr(n->transport, topic_index, hdr, data, i_dart_plat_now_us());
+        r = directed ? dart_transport_send_to(n->transport, topic_index, to_peer, hdr, data,
+                                              capture_us, i_dart_plat_now_us())
+                     : dart_transport_send_hdr(n->transport, topic_index, hdr, data,
+                                               capture_us, i_dart_plat_now_us());
 #ifdef DART_SHM
 committed:
 #endif
@@ -12314,16 +12373,18 @@ committed:
 }
 
 /* the plain broadcast send, the hot dart_topic_send path */
-static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data, int may_wait){
+static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data,
+                               uint64_t capture_us, int may_wait){
     DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return i_dart_node_do_send_ex(n, topic_index, nohdr, data, 0, 0, may_wait);
+    return i_dart_node_do_send_ex(n, topic_index, nohdr, data, capture_us, 0, 0, may_wait);
 }
 
-int dart_topic_send(DartTopic *topic, DartBytes data){
+int dart_topic_send(DartTopic *topic, DartBytes data, const DartSendOpts *opts){
     int acquired, r;
     if (!topic) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_do_send(topic->n, topic->index, data, acquired);
+    r = i_dart_node_do_send(topic->n, topic->index, data,
+                            opts ? opts->capture_us : 0u, acquired);
     i_dart_node_kick_tx(topic->n);           /* flush the commit now, not at the next tick */
     i_dart_node_unlock(topic->n, acquired);
     return r;
@@ -12333,7 +12394,7 @@ int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
     int acquired, r;
     if (!topic) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, acquired);
+    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, 0, acquired);
     i_dart_node_kick_tx(topic->n);
     i_dart_node_unlock(topic->n, acquired);
     return r;
@@ -12383,7 +12444,7 @@ int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, Dart
     int acquired, r;
     if (!topic) return DART_ERR_NO_TOPIC;
     acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 1, to_peer, acquired);
+    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 1, to_peer, acquired);
     i_dart_node_kick_tx(topic->n);
     i_dart_node_unlock(topic->n, acquired);
     return r;

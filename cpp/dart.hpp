@@ -779,6 +779,8 @@ public:
     /* the writer's wall clock in UTC us when it wrote the message, kept across repair and
      * replay. 0 = the publisher opted out. Never mix it with the monotonic recv_us. */
     uint64_t         written_us()        const { return msg_->written_us; }
+    /* When the data was true, as against when it was sent. 0 = the publisher gave none. */
+    uint64_t         capture_us()        const { return msg_->capture_us; }
 
 private:
     explicit MessageView(const detail::DartMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
@@ -1701,10 +1703,14 @@ public:
     bool refresh() { return ch_ && detail::dart_topic_refresh(ch_) == 1; }
     explicit operator bool() const noexcept { return valid(); }
 
-    SendStatus send(Bytes data) {
+    /* capture is when the data was true, as against when it was sent. The default is
+     * unstated, which costs no wire bytes. */
+    SendStatus send(Bytes data, Timestamp capture = {}) {
+        detail::DartSendOpts o;
         if (!ch_) return SendStatus::NoTopic;
+        o.capture_us = static_cast<uint64_t>(capture.us);
         return static_cast<SendStatus>(
-            detail::dart_topic_send(ch_, detail::dart_bytes(data.data(), data.size())));
+            detail::dart_topic_send(ch_, detail::dart_bytes(data.data(), data.size()), &o));
     }
     SendStatus set_role(Role r) {
         if (!ch_) return SendStatus::NoTopic;
@@ -3375,7 +3381,7 @@ public:
     bool valid() const noexcept { return t_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    SendStatus send(Bytes data)   { return t_.send(data); }
+    SendStatus send(Bytes data, Timestamp capture = {}) { return t_.send(data, capture); }
     int  match_count()      const { return t_.match_count(); }
     int  pending_count()    const { return t_.pending_count(); }
     bool ready()            const { return t_.ready(); }
@@ -3943,9 +3949,9 @@ public:
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    SendStatus send(const T& v) {
+    SendStatus send(const T& v, Timestamp capture = {}) {
         std::vector<uint8_t> s;
-        return core_.send(priv::encode(v, s));
+        return core_.send(priv::encode(v, s), capture);
     }
     int  match_count()   const { return core_.match_count(); }
     int  pending_count() const { return core_.pending_count(); }

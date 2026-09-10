@@ -158,7 +158,7 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 
 /* Test shims keeping the index based call sites concise: dart_node_topic maps a creation
  * index back to its handle, so a (node, index) call form maps onto the handle calls. */
-#define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)))
+#define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)), NULL)
 #define dart_node_set_role(n, idx, r)        dart_topic_set_role(dart_node_topic((n),(idx)), (r))
 #define dart_node_drain(n, idx, ms)          dart_topic_drain(dart_node_topic((n),(idx)), (ms))
 #define dart_node_publisher_match_count(n, idx) dart_topic_match_count(dart_node_topic((n),(idx)))
@@ -2127,18 +2127,18 @@ static void dynamic_grow_checks(void){
     ST_CHECK(pc0 != NULL, "dyn-grow: topic 0 created");
     for (t=0;t<800 && dart_topic_match_count(pc0)==0;t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(dart_topic_match_count(pc0)>0, "dyn-grow: topic 0 matched");
-    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (i=0;i<5;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1), NULL); dart_node_poll(P,1); dart_node_poll(S,2); }
     /* create topics 1 to 11 on both: several grows, max_topics 2, 4, 8, 16 */
     for (i=1;i<12;i++){ dart_node_create_topic(P, names[i], DART_PUB_ONLY, NULL, &co);
                         dart_node_create_topic(S, names[i], DART_SUB_ONLY, NULL, &co);
                         dart_node_poll(P,1); dart_node_poll(S,1); }
     ST_CHECK(dart_topic_match_count(pc0)>0, "dyn-grow: topic 0 still matched after grows");
-    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (i=5;i<10;i++){ payload[0]=(uint8_t)i; dart_topic_send(pc0,dart_bytes(payload,1), NULL); dart_node_poll(P,1); dart_node_poll(S,2); }
     for (t=0;t<400 && dg_recv[0]<10;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
     ST_CHECK(dg_recv[0]==10, "dyn-grow: all 10 on topic 0 delivered across grows (got %d)", dg_recv[0]);
     ST_CHECK(dg_seq_ok, "dyn-grow: topic 0 in-order, no loss/dup across grows");
     pcN = dart_node_topic(P, 11);                  /* a topic created AFTER a grow */
-    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_topic_send(pcN,dart_bytes(payload,1)); dart_node_poll(P,1); dart_node_poll(S,2); }
+    for (i=0;i<3;i++){ payload[0]=0xAA; if(pcN) dart_topic_send(pcN,dart_bytes(payload,1), NULL); dart_node_poll(P,1); dart_node_poll(S,2); }
     for (t=0;t<200 && dg_recv[11]<3;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
     ST_CHECK(dg_recv[11]==3, "dyn-grow: post-grow topic delivers (got %d)", dg_recv[11]);
     dart_node_close(P,1); dart_node_close(S,1);
@@ -2791,7 +2791,7 @@ static void schema_bind_checks(void){
         memcpy(&bits,&x,8); i_dart_le_w64(buf+8,  bits);        /* x     @8 */
         memcpy(&bits,&y,8); i_dart_le_w64(buf+16, bits);        /* y     @16 */
         buf[24]=7;                                              /* tag   @24 */
-        dart_topic_send(pc, dart_bytes(buf, sizeof buf));
+        dart_topic_send(pc, dart_bytes(buf, sizeof buf), NULL);
         for (t=0;t<400 && sb_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
         ST_CHECK(sb_recv==1, "schema-bind: subset message delivered");
         ST_CHECK(sb_schema_ok, "schema-bind: DartMsg.schema is the rebased view (writer size, reader fields)");
@@ -2801,7 +2801,7 @@ static void schema_bind_checks(void){
     {   /* a message that does not fit the sender's schema is dropped + surfaced */
         unsigned long before = sb_mismatch_n;
         uint8_t junk[3] = {1,2,3};
-        dart_topic_send(pc, dart_bytes(junk, sizeof junk));
+        dart_topic_send(pc, dart_bytes(junk, sizeof junk), NULL);
         for (t=0;t<200 && sb_mismatch_n==before;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
         ST_CHECK(sb_recv==1 && sb_mismatch_n>before,
                  "schema-bind: wrong-size message dropped + surfaced (recv=%d)", sb_recv);
@@ -2890,7 +2890,7 @@ static void schema_bigenum_checks(void){
         dart_set_uint(buf, sizeof buf, es, "id", 42);
         ST_CHECK(dart_set_enum(buf, sizeof buf, es, "job", "job_1000"),
                  "bigenum: set the value by its human name");
-        dart_topic_send(pc, dart_bytes(buf, dart_schema_msg_len(es, buf, sizeof buf)));
+        dart_topic_send(pc, dart_bytes(buf, dart_schema_msg_len(es, buf, sizeof buf)), NULL);
         for (t=0;t<400 && be_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
         ST_CHECK(be_recv==1 && be_val==1000 && strcmp(be_label,"job_1000")==0,
                  "bigenum: value delivered + resolved to its name (val=%lld, label=%s)",
@@ -3202,22 +3202,22 @@ static void schema_root_checks(void){
         xs[0]=1.5f; xs[1]=2.5f; xs[2]=-3.0f;
         dart_schema_message_default(sb, m, sizeof m);
         dart_set_uint(m, sizeof m, sb, "", 1);
-        dart_topic_send(pflag, dart_bytes(m, 1));
+        dart_topic_send(pflag, dart_bytes(m, 1), NULL);
         dart_schema_message_default(sstr, m, sizeof m);
         dart_set_string(m, sizeof m, sstr, "", dart_cstr("bare-string"));
-        dart_topic_send(pnote, dart_bytes(m, dart_schema_msg_len(sstr, m, sizeof m)));
+        dart_topic_send(pnote, dart_bytes(m, dart_schema_msg_len(sstr, m, sizeof m)), NULL);
         dart_schema_message_default(sarr, m, sizeof m);
         dart_set_array(m, sizeof m, sarr, "", dart_bytes(xs, sizeof xs));
-        dart_topic_send(psamples, dart_bytes(m, dart_schema_msg_len(sarr, m, sizeof m)));
+        dart_topic_send(psamples, dart_bytes(m, dart_schema_msg_len(sarr, m, sizeof m)), NULL);
         mw = dart_map_begin(body, sizeof body);
         dart_map_put_uint(&mw, "battery", 87);
         bl = dart_map_finish(&mw);
         dart_schema_message_default(smap, m, sizeof m);
         dart_set_map(m, sizeof m, smap, "", dart_bytes(body, bl));
-        dart_topic_send(pextras, dart_bytes(m, dart_schema_msg_len(smap, m, sizeof m)));
+        dart_topic_send(pextras, dart_bytes(m, dart_schema_msg_len(smap, m, sizeof m)), NULL);
         dart_schema_message_default(senum, m, sizeof m);
         dart_set_enum(m, sizeof m, senum, "", "Fault");
-        dart_topic_send(pmode, dart_bytes(m, 1));
+        dart_topic_send(pmode, dart_bytes(m, 1), NULL);
         for (t=0;t<800 && (sr_flag_recv==0 || sr_note_recv==0 || sr_samples_recv==0
                            || sr_map_recv==0 || sr_enum_recv==0 || sr_raw_recv==0);t++){
             dart_node_poll(P,1); dart_node_poll(S,2); dart_node_poll(Q,2);
@@ -3678,7 +3678,7 @@ static void stdtypes_checks(void){
         uint8_t *img; uint32_t need; size_t px = 64u*48u*3u;
         p.translation = dart_double3(4.5, -1.25, 9.0);
         memcpy(m, &p, sizeof p);
-        dart_topic_send(ppose, dart_bytes(m, sizeof p));
+        dart_topic_send(ppose, dart_bytes(m, sizeof p), NULL);
         need = dart_schema_msg_min(SImg) + (uint32_t)px;
         img = (uint8_t *)i_dart_plat_realloc(NULL, need);
         if (img){
@@ -3694,7 +3694,7 @@ static void stdtypes_checks(void){
                 dart_set_array(img, need, SImg, "data", dart_bytes(pix, px));
                 i_dart_plat_realloc(pix, 0);
             }
-            dart_topic_send(pimg, dart_bytes(img, dart_schema_msg_len(SImg, img, need)));
+            dart_topic_send(pimg, dart_bytes(img, dart_schema_msg_len(SImg, img, need)), NULL);
             i_dart_plat_realloc(img, 0);
         }
         for (t=0;t<1200 && (sd_pose_recv==0 || sd_img_recv==0);t++){
@@ -4034,7 +4034,7 @@ static void detail_live_checks(void){
                          "detail-obs: observe-then-subscribe re-verifies and matches (%u readers)",
                          dart_topic_match_count(pc));
                 {   uint8_t pose[16]; memset(pose, 0x33, sizeof pose);   /* stamp + x */
-                    dart_topic_send(pc, dart_bytes(pose, sizeof pose));
+                    dart_topic_send(pc, dart_bytes(pose, sizeof pose), NULL);
                     for (t=0;t<400 && st_any < a0+2;t++){
                         dart_node_poll(P,1); dart_node_poll(S,1); dart_node_poll(O,2);
                     }
@@ -4162,7 +4162,7 @@ static void th_sender(void *arg){
     for (i=0;i<TH_MSGS;i++){
         buf[0]=(uint8_t)a->id; buf[1]=(uint8_t)(a->id>>8); buf[2]=(uint8_t)(a->id>>16); buf[3]=(uint8_t)(a->id>>24);
         buf[4]=(uint8_t)i; buf[5]=(uint8_t)(i>>8); buf[6]=(uint8_t)(i>>16); buf[7]=(uint8_t)(i>>24);
-        dart_topic_send(a->ch, dart_bytes(buf, sizeof buf));
+        dart_topic_send(a->ch, dart_bytes(buf, sizeof buf), NULL);
     }
 }
 
@@ -4173,7 +4173,7 @@ static DartTopic *th_echo_rep;
 static volatile unsigned long th_echo_replies;
 static volatile int th_cb_send_rc = -100, th_cb_create_refused = -1, th_cb_setrole_rc = -100;
 static void th_echo_b_on_msg(const DartMsg *m){
-    th_cb_send_rc = dart_topic_send(th_echo_rep, m->data);
+    th_cb_send_rc = dart_topic_send(th_echo_rep, m->data, NULL);
     if (th_cb_create_refused < 0){
         th_cb_create_refused = (dart_node_create_topic(th_echo_b, "th/na", DART_PUBSUB, NULL, NULL) == NULL);
         th_cb_setrole_rc = dart_topic_set_role(th_echo_rep, DART_PUB_ONLY);
@@ -4185,7 +4185,7 @@ static void th_echo_a_on_msg(const DartMsg *m){ (void)m; th_echo_replies++; }
 static volatile int th_hammer_stop;
 static void th_hammer(void *arg){
     uint8_t buf[8]; memset(buf, 0x77, sizeof buf);
-    while (!th_hammer_stop) dart_topic_send((DartTopic*)arg, dart_bytes(buf, sizeof buf));
+    while (!th_hammer_stop) dart_topic_send((DartTopic*)arg, dart_bytes(buf, sizeof buf), NULL);
 }
 
 static void threaded_checks(void){
@@ -6134,7 +6134,7 @@ static void ch_send(DartTopic *beat, int nbytes){
     uint8_t pb[8];
     memset(pb, 0, sizeof pb);
     i_dart_le_w32(pb, ++ch_seq);
-    dart_topic_send(beat, dart_bytes(pb, (size_t)nbytes));
+    dart_topic_send(beat, dart_bytes(pb, (size_t)nbytes), NULL);
 }
 
 static void churn_checks(void){
@@ -6311,7 +6311,7 @@ static void churn_checks(void){
               else {
                   for (t=0;t<4000 && dart_topic_match_count(tt) < 1;t++) ch_pump(nodes,4,2);
                   {   uint8_t pb[4]; i_dart_le_w32(pb, 0xBADBEEFu);   /* must never reach C */
-                      dart_topic_send(tt, dart_bytes(pb, 4)); }
+                      dart_topic_send(tt, dart_bytes(pb, 4), NULL); }
                   for (t=0;t<4000 && ch_u_recv == u0;t++) ch_pump(nodes,4,2);
                   if (ch_u_recv == u0) wave_ok = 0;
                   ch_send(beat, 8);   /* the survivor stream runs beside the rival */
@@ -6409,7 +6409,7 @@ static void matchwait_checks(void){
                    dart_topic_match_count(at));
           ST_CHECK(dart_topic_pending_count(bt) > 0,
                    "matchwait: reader side still PENDING (%d)", dart_topic_pending_count(bt));
-          r = dart_topic_send(at, dart_bytes("authoritative", 13));
+          r = dart_topic_send(at, dart_bytes("authoritative", 13), NULL);
           ST_CHECK(r==DART_OK, "matchwait: matched send commits (%d)", r);
           for (t=0;t<150;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
           ST_CHECK(mw_recv==0, "matchwait: unverified reader drops the DATA (recv=%lu)", mw_recv);
@@ -6448,7 +6448,7 @@ static void matchwait_checks(void){
                    &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } }) : NULL;
       ST_CHECK(A && at, "matchwait: first-send pub up");
       if (A && B && at && bt){
-          int r = dart_topic_send(at, dart_bytes("first", 5));   /* immediately: the race */
+          int r = dart_topic_send(at, dart_bytes("first", 5), NULL);   /* immediately: the race */
           ST_CHECK(r==DART_OK, "matchwait: racing first send commits (%d)", r);
           ST_CHECK(dart_topic_match_count(at) > 0,
                    "matchwait: ...after waiting out the match (%d)", dart_topic_match_count(at));
@@ -6463,7 +6463,7 @@ static void matchwait_checks(void){
             uint64_t t0, el;
             ST_CHECK(v!=NULL, "matchwait: void topic up");
             t0 = i_dart_plat_now_us();
-            r = v ? dart_topic_send(v, dart_bytes("x",1)) : -1;
+            r = v ? dart_topic_send(v, dart_bytes("x",1), NULL) : -1;
             el = i_dart_plat_now_us() - t0;
             ST_CHECK(r==DART_OK && el < 250000u,
                      "matchwait: no-consumer send returns fast (%d, %luus)", r, (unsigned long)el); }
@@ -6492,7 +6492,7 @@ static void matchwait_checks(void){
                    &(DartTopicOpts){ .qos={ .reliability=DART_RELIABLE } }) : NULL;
       ST_CHECK(A && B && at && bt, "matchwait: knob-off pair up");
       if (A && B && at && bt){
-          int r = dart_topic_send(at, dart_bytes("gone", 4));   /* no wait: commits to zero */
+          int r = dart_topic_send(at, dart_bytes("gone", 4), NULL);   /* no wait: commits to zero */
           ST_CHECK(r==DART_OK && mw_unmatched==1,
                    "matchwait: disabled wait drops LOUDLY (r=%d events=%lu)", r, mw_unmatched);
           for (t=0;t<2000 && dart_topic_match_count(at)==0;t++){ dart_node_poll(A,2); dart_node_poll(B,2); }
@@ -6581,7 +6581,7 @@ static void relay_checks(void){
               for (t=0;t<2000 && dart_topic_match_count(ut)==0;t++) rly_pump(U,R,B,1);
               ST_CHECK(dart_topic_match_count(ut)==1, "relay: topic matches across the introduction (%d)",
                        dart_topic_match_count(ut));
-              r = dart_topic_send(ut, dart_bytes("over-unicast", 12));
+              r = dart_topic_send(ut, dart_bytes("over-unicast", 12), NULL);
               for (t=0;t<2000 && rly_recv==0;t++) rly_pump(U,R,B,1);
               ST_CHECK(r==DART_OK && rly_recv==1 && strcmp(rly_last,"over-unicast")==0,
                        "relay: data flows unicast end to end (r=%d recv=%lu '%s')", r, rly_recv, rly_last);
@@ -6597,7 +6597,7 @@ static void relay_checks(void){
           ST_CHECK(!rly_sees(B,"rly-relay") && !rly_sees(U,"rly-relay"),
                    "relay: ...and the departed relay itself is gone from both");
           if (ut && bt){
-              int r = dart_topic_send(ut, dart_bytes("after-relay-died", 16));
+              int r = dart_topic_send(ut, dart_bytes("after-relay-died", 16), NULL);
               for (t=0;t<2000 && rly_recv<2;t++) rly_pump(U,NULL,B,1);
               ST_CHECK(r==DART_OK && rly_recv==2 && strcmp(rly_last,"after-relay-died")==0,
                        "relay: data still flows with the relay dead (r=%d recv=%lu '%s')",
@@ -6696,7 +6696,7 @@ static void nat_checks(void){
               for (t=0;t<2000 && dart_topic_match_count(ut)==0;t++) rly_pump(U,R,B,1);
               ST_CHECK(dart_topic_match_count(ut)==1, "nat: topic matches through the mappings (%d)",
                        dart_topic_match_count(ut));
-              r = dart_topic_send(ut, dart_bytes("through-the-nat", 15));
+              r = dart_topic_send(ut, dart_bytes("through-the-nat", 15), NULL);
               for (t=0;t<2000 && rly_recv==0;t++) rly_pump(U,R,B,1);
               ST_CHECK(r==DART_OK && rly_recv==1 && strcmp(rly_last,"through-the-nat")==0,
                        "nat: reliable data flows despite a dead locator (r=%d recv=%lu '%s')",
@@ -6710,7 +6710,7 @@ static void nat_checks(void){
                    "nat: the pair outlives the introducer (B sees U=%d, U sees B=%d)",
                    rly_sees(B,"nat-uni"), rly_sees(U,"nat-far"));
           if (ut && bt){
-              int r = dart_topic_send(ut, dart_bytes("after-introducer-died", 21));
+              int r = dart_topic_send(ut, dart_bytes("after-introducer-died", 21), NULL);
               for (t=0;t<2000 && rly_recv<2;t++) rly_pump(U,NULL,B,1);
               ST_CHECK(r==DART_OK && rly_recv==2 && strcmp(rly_last,"after-introducer-died")==0,
                        "nat: data still flows with the introducer dead (r=%d recv=%lu '%s')",
@@ -6783,7 +6783,7 @@ static void selfip_checks(void){
 #define TS_CH_OFF    1   /* publisher sets qos.no_timestamp: stamp 0, bytes untouched */
 #define TS_CH_QUEUED 2   /* the subscriber drains it with dart_topic_take */
 #define TS_CH_BIG    3   /* payload past the fragment size: SHM where available */
-static uint64_t ts_sent[8], ts_recv_wall[8];
+static uint64_t ts_sent[8], ts_recv_wall[8], ts_capture[8];
 static unsigned long ts_msgs[8];
 static size_t   ts_len[8]; static unsigned long ts_sum[8];
 static void ts_on_message(const DartMsg *msg){
@@ -6792,6 +6792,7 @@ static void ts_on_message(const DartMsg *msg){
     size_t i; unsigned long s = 0;
     for (i=0;i<msg->data.len;i++) s += p[i];
     ts_sent[c] = msg->written_us; ts_recv_wall[c] = i_dart_plat_wall_us();
+    ts_capture[c] = msg->capture_us;
     ts_len[c] = msg->data.len; ts_sum[c] = s;
     ts_msgs[c]++;
 }
@@ -6944,9 +6945,83 @@ static void ts_checks(void){
             ST_CHECK(shm_tx>=1, "writets: the big message took the SHM path (tx=%u)", shm_tx); }
 #endif
     }
+
+    /* (f) the capture stamp: per message, costs nothing unset, and its marker bit never
+       leaks into written_us. The plain, fragmenting, queued and opted out paths agree. */
+    {   DartTopic *pt = dart_node_topic(A, TS_CH_PLAIN);
+        DartTopic *ot = dart_node_topic(A, TS_CH_OFF);
+        DartTopic *bt = dart_node_topic(A, TS_CH_BIG);
+        DartTopic *qt = dart_node_topic(B, TS_CH_QUEUED);
+        const uint64_t want = 1234567890123456ull;   /* a wall clock well inside 51 bits */
+        uint64_t b0 = 0, b1 = 0, b2 = 0;
+        DartMsg m; int r;
+
+        /* unset: capture_us 0, and the sample is no larger than before */
+        ts_msgs[TS_CH_PLAIN]=0; ts_capture[TS_CH_PLAIN]=1;
+        dart_topic_counts(pt, NULL, &b0, NULL, NULL);
+        dart_topic_send(pt, dart_bytes(payload, sizeof payload), NULL);
+        for (t=0;t<800 && ts_msgs[TS_CH_PLAIN]==0;t++) st_pump(A,B,2);
+        dart_topic_counts(pt, NULL, &b1, NULL, NULL);
+        ST_CHECK(ts_msgs[TS_CH_PLAIN]==1 && ts_capture[TS_CH_PLAIN]==0,
+                 "capture: an unset capture delivers 0 (%llu)",
+                 (unsigned long long)ts_capture[TS_CH_PLAIN]);
+
+        /* set: delivered exactly, written_us still a sane wall clock beside it */
+        before = i_dart_plat_wall_us();
+        ts_msgs[TS_CH_PLAIN]=0; ts_capture[TS_CH_PLAIN]=0;
+        dart_topic_send(pt, dart_bytes(payload, sizeof payload),
+                        &(DartSendOpts){ .capture_us = want });
+        for (t=0;t<800 && ts_msgs[TS_CH_PLAIN]==0;t++) st_pump(A,B,2);
+        dart_topic_counts(pt, NULL, &b2, NULL, NULL);
+        ST_CHECK(ts_msgs[TS_CH_PLAIN]==1 && ts_capture[TS_CH_PLAIN]==want,
+                 "capture: capture_us delivered exactly (%llu)",
+                 (unsigned long long)ts_capture[TS_CH_PLAIN]);
+        ST_CHECK(ts_sent[TS_CH_PLAIN] >= before
+              && ts_sent[TS_CH_PLAIN] <= ts_recv_wall[TS_CH_PLAIN],
+                 "capture: the marker never leaks into written_us (%llu in [%llu, %llu])",
+                 (unsigned long long)ts_sent[TS_CH_PLAIN], (unsigned long long)before,
+                 (unsigned long long)ts_recv_wall[TS_CH_PLAIN]);
+        ST_CHECK(ts_len[TS_CH_PLAIN]==sizeof payload,
+                 "capture: both stamps stripped, payload intact (%lu B)",
+                 (unsigned long)ts_len[TS_CH_PLAIN]);
+        ST_CHECK((b2 - b1) == (b1 - b0) + DART_CAPTURE_BYTES,
+                 "capture: it costs its 8 bytes only when set (%llu vs %llu)",
+                 (unsigned long long)(b2 - b1), (unsigned long long)(b1 - b0));
+
+        /* a no_timestamp topic frames neither slot, so a capture cannot ride it */
+        ts_msgs[TS_CH_OFF]=0; ts_capture[TS_CH_OFF]=1;
+        dart_topic_send(ot, dart_bytes(payload, sizeof payload),
+                        &(DartSendOpts){ .capture_us = want });
+        for (t=0;t<800 && ts_msgs[TS_CH_OFF]==0;t++) st_pump(A,B,2);
+        ST_CHECK(ts_msgs[TS_CH_OFF]==1 && ts_capture[TS_CH_OFF]==0
+              && ts_sent[TS_CH_OFF]==0 && ts_len[TS_CH_OFF]==sizeof payload,
+                 "capture: an opted out topic carries neither stamp (cap=%llu len=%lu)",
+                 (unsigned long long)ts_capture[TS_CH_OFF], (unsigned long)ts_len[TS_CH_OFF]);
+
+        /* the fragmenting path, which is SHM where it is compiled in */
+        ts_msgs[TS_CH_BIG]=0; ts_capture[TS_CH_BIG]=0;
+        dart_topic_send(bt, dart_bytes(big, sizeof big),
+                        &(DartSendOpts){ .capture_us = want });
+        for (t=0;t<2000 && ts_msgs[TS_CH_BIG]==0;t++) st_pump(A,B,2);
+        ST_CHECK(ts_msgs[TS_CH_BIG]==1 && ts_capture[TS_CH_BIG]==want
+              && ts_len[TS_CH_BIG]==sizeof big,
+                 "capture: a fragmenting message carries it (cap=%llu len=%lu)",
+                 (unsigned long long)ts_capture[TS_CH_BIG], (unsigned long)ts_len[TS_CH_BIG]);
+
+        /* the queued path: take surfaces it exactly as an inline callback would */
+        memset(&m,0,sizeof m);
+        dart_topic_send(dart_node_topic(A, TS_CH_QUEUED),
+                        dart_bytes(payload, sizeof payload),
+                        &(DartSendOpts){ .capture_us = want });
+        r = 0;
+        for (t=0;t<800 && r!=1;t++){ dart_node_poll(A,0); r = dart_topic_take(qt, &m, 20); }
+        ST_CHECK(r==1 && m.capture_us==want,
+                 "capture: a taken message carries it (r=%d cap=%llu)",
+                 r, (unsigned long long)m.capture_us);
+    }
     dart_node_close(B,1); dart_node_close(A,1);
 
-    /* (f) the patterns layer: a request's stamp at the handler, a remote write's stamp at
+    /* (g) the patterns layer: a request's stamp at the handler, a remote write's stamp at
        the variable owner */
     {   DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
         DartAllocator qa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
@@ -7087,7 +7162,7 @@ static void interest_external_checks(void){
     for (t=0;t<2000 && (!pub || dart_topic_match_count(pub)==0);t++){ dart_node_poll(P,2); dart_node_poll(S,2); }
     ST_CHECK(pub && dart_topic_match_count(pub)>0, "interest: match formed through the external fetch");
     memset(payload,0x77,sizeof payload);
-    if (pub) dart_topic_send(pub, dart_bytes(payload,sizeof payload));
+    if (pub) dart_topic_send(pub, dart_bytes(payload,sizeof payload), NULL);
     for (t=0;t<800 && ix_recv==0;t++){ dart_node_poll(P,1); dart_node_poll(S,2); }
     ST_CHECK(ix_recv>=1, "interest: delivery across the external match (%d)", ix_recv);
     {   /* reflection reads the assembled interest, not the announce: the entity fold must
@@ -7172,7 +7247,7 @@ static void metalog_checks(void){
     { DartTopic *src = dart_node_create_topic(A, "mirror-src", DART_PUB_ONLY, NULL, NULL);
       uint8_t payload[4] = {1,2,3,4};
       ST_CHECK(src != NULL, "metalog: mirror-src created");
-      if (src) dart_topic_send(src, dart_bytes(payload, 4));
+      if (src) dart_topic_send(src, dart_bytes(payload, 4), NULL);
       dart_node_poll(A, 0);   /* flush the mirror ring into the log topic */
     }
 
@@ -8209,14 +8284,14 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     a0=ms_allocs(P,S,nsubs);                              /* total allocs before any traffic */
     g_ms_rx=0;                                            /* warmup: fill + size the buffers */
     for (i=0;i<nwarm;i++){
-        double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
+        double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen), NULL); double s1=(double)i_dart_plat_now_us();
         if (i<keep){ cold_sum += s1-s0; coldc++; }
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
     a1=ms_allocs(P,S,nsubs);                              /* allocs after warmup */
     g_ms_rx=0; t0=(double)i_dart_plat_now_us();   /* steady: the buffers are sized, so no alloc */
     for (i=0;i<nsteady;i++){
-        double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen)); double s1=(double)i_dart_plat_now_us();
+        double s0=(double)i_dart_plat_now_us(); dart_topic_send(pc,dart_bytes(payload,plen), NULL); double s1=(double)i_dart_plat_now_us();
         warm_sum += s1-s0;
         for (k=0;k<400000 && g_ms_rx < (i+1)*nsubs;k++){ dart_node_poll(P,0); for(j=0;j<nsubs;j++) dart_node_poll(S[j],0); }
     }
@@ -8298,7 +8373,7 @@ static void tb_run_rate(DartNode *w, DartTopic *ch, unsigned rate_hz, double dur
             next += 1000000u / rate_hz;
             if (next < now) next = now;              /* fell behind: no burst catch-up */
         }
-        dart_topic_send(ch, dart_bytes(payload, sizeof payload));
+        dart_topic_send(ch, dart_bytes(payload, sizeof payload), NULL);
         sent++;
     }
     wall = (i_dart_plat_now_us() - t0) / 1e6;
@@ -8368,7 +8443,7 @@ static int threadbench_main(void){
         recv0 = g_tb_recv;
         t0 = i_dart_plat_now_us(); t_end = t0 + 2000000u;
         while (i_dart_plat_now_us() < t_end){
-            dart_topic_send(cw, dart_bytes(payload, sizeof payload));
+            dart_topic_send(cw, dart_bytes(payload, sizeof payload), NULL);
             dart_node_poll(w, 0);
             dart_node_poll(r, 0);
             sent++;
@@ -8397,7 +8472,7 @@ static void qb_sender(void *arg){
     DartTopic *ch = (DartTopic *)arg;
     memset(payload, 0x42, g_qb_len);
     while (!g_qb_stop)
-        dart_topic_send(ch, dart_bytes(payload, g_qb_len));
+        dart_topic_send(ch, dart_bytes(payload, g_qb_len), NULL);
 }
 
 static void qb_run(uint32_t size, int queued, int disable_shm){

@@ -2,33 +2,36 @@
  * over a WebSocket with a WebRTC data path. docs/javascript.md explains how to use it. */
 
 /* Data-plane frame: ONE header for every op, both directions, little-endian:
- *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u8 text_len][text][payload] */
+ *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u64 capture_us]
+ *   [u8 text_len][text][payload] */
 const OP_DATA = 1;       /* topic message (publish / delivery) */
 const OP_VAR = 2;        /* variable write / update */
 const OP_CALL = 3;       /* call a remote / a request for a definition */
 const OP_RESULT = 4;     /* call outcome / request reply */
 const OP_PROGRESS = 5;   /* task progress, either direction */
 const OP_CANCEL = 6;     /* server->client: cancel a parked request */
-const HDR = 21;
+const HDR = 29;
 
 const LOSSY_BUFFER = 1 << 20;   /* a best-effort frame drops past this much unsent on its carrier */
 
 type Frame = {
     op: number; flags: number; id: number; seq: number; peer: number;
-    writtenUs: number; text: string; payload: Uint8Array;
+    writtenUs: number; captureUs: number; text: string; payload: Uint8Array;
 };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-function buildFrame(op: number, flags: number, id: number, seq: number, text: string, payload: Uint8Array): Uint8Array {
+function buildFrame(op: number, flags: number, id: number, seq: number, text: string,
+                    payload: Uint8Array, captureUs = 0): Uint8Array {
     let tb = text ? enc.encode(text) : new Uint8Array(0);
     if (tb.length > 255) tb = tb.subarray(0, 255);   /* one length byte, like the wire */
     const f = new Uint8Array(HDR + tb.length + payload.length);
     const v = new DataView(f.buffer);
     f[0] = op; f[1] = flags;
     v.setUint16(2, id, true); v.setUint32(4, seq, true);   /* peer and written_us are 0 from a client */
-    f[20] = tb.length;
+    if (captureUs) v.setBigUint64(20, BigInt(captureUs), true);
+    f[28] = tb.length;
     f.set(tb, HDR);
     f.set(payload, HDR + tb.length);
     return f;
@@ -36,11 +39,12 @@ function buildFrame(op: number, flags: number, id: number, seq: number, text: st
 
 function parseFrame(b: Uint8Array): Frame | null {
     if (b.length < HDR) return null;
-    const tl = b[20];
+    const tl = b[28];
     if (b.length < HDR + tl) return null;
     const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
     return { op: b[0], flags: b[1], id: v.getUint16(2, true), seq: v.getUint32(4, true),
              peer: v.getUint32(8, true), writtenUs: Number(v.getBigUint64(12, true)),
+             captureUs: Number(v.getBigUint64(20, true)),
              text: tl ? dec.decode(b.subarray(HDR, HDR + tl)) : "", payload: b.subarray(HDR + tl) };
 }
 
@@ -649,16 +653,18 @@ class DartMessage {
     publisher: number;         /* peer id of the sending node */
     data: Uint8Array;          /* the payload, verbatim */
     writtenUs: number;         /* the publisher's source stamp in UTC us, 0 = opted out */
+    captureUs: number;         /* when the data was true, UTC us, 0 = the publisher gave none */
     _layout: Layout;
     _view: DataView;
 
     constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array,
-                writtenUs: number = 0) {
+                writtenUs: number = 0, captureUs: number = 0) {
         this._layout = layout;
         this.topic = topic;
         this.publisher = publisher;
         this.data = data;
         this.writtenUs = writtenUs;
+        this.captureUs = captureUs;
         this._view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     }
 
@@ -717,8 +723,9 @@ class DartEntity {
     _frame(_f: Frame): void {}
     _retype(_r: any): void {}
     _tap(value: any): void { for (const t of this._taps) t(value); }
-    _send(op: number, flags: number, seq: number, text: string, payload: Uint8Array): void {
-        this._node._sendFrame(this, buildFrame(op, flags, this.id, seq, text, payload));
+    _send(op: number, flags: number, seq: number, text: string, payload: Uint8Array,
+          captureUs = 0): void {
+        this._node._sendFrame(this, buildFrame(op, flags, this.id, seq, text, payload, captureUs));
     }
 }
 
@@ -740,12 +747,16 @@ class DartTopic extends DartEntity {
     get hash(): string | undefined { return this.layout.hash; }
     get fields(): Map<string, Field> { return this.layout.fields; }
 
-    /* Publish raw bytes. */
-    sendRaw(bytes: Uint8Array): void { this._send(OP_DATA, 0, 0, "", bytes); }
+    /* Publish raw bytes. captureUs is when the data was true, 0 = unstated. */
+    sendRaw(bytes: Uint8Array, captureUs = 0): void {
+        this._send(OP_DATA, 0, 0, "", bytes, captureUs);
+    }
 
     /* Typed publish from a plain nested object mirroring the schema. A bare type topic takes
      * the value itself. */
-    send(value: any): void { this.sendRaw(this.layout.encode(value)); }
+    send(value: any, captureUs = 0): void {
+        this.sendRaw(this.layout.encode(value), captureUs);
+    }
 
     /* Flip this topic's role: "pubsub" | "pub" | "sub" | "inactive". */
     setRole(role: Role): Promise<any> { return this._node._request({ op: "role", id: this.id, role }); }
@@ -758,7 +769,7 @@ class DartTopic extends DartEntity {
 
     _frame(f: Frame): void {
         if (f.op !== OP_DATA) return;
-        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs);
+        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs, f.captureUs);
         this.onMessage?.(msg);
         if (this._taps.length) this._tap(msg.value());
     }
@@ -770,8 +781,8 @@ class Publisher<T = any> {
 
     constructor(topic: DartTopic) { this.topic = topic; }
 
-    send(value: T): void { this.topic.send(value); }
-    sendRaw(bytes: Uint8Array): void { this.topic.sendRaw(bytes); }
+    send(value: T, captureUs = 0): void { this.topic.send(value, captureUs); }
+    sendRaw(bytes: Uint8Array, captureUs = 0): void { this.topic.sendRaw(bytes, captureUs); }
     get matchCount(): number { return this.topic.matchCount; }
     get ready(): boolean { return this.topic.ready; }
 }

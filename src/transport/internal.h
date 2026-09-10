@@ -272,6 +272,13 @@ static inline uint32_t i_dart_topic_ts_bytes(const i_DartTopic *topic){
     return topic->qos.no_timestamp ? 0u : DART_TIMESTAMP_BYTES;
 }
 
+/* The whole stamp prefix: the source slot, plus a capture slot when the sender gave one.
+ * Never a hook's presence, so a reader sizes it from the bytes it received. */
+static inline uint32_t i_dart_topic_stamp_bytes(const i_DartTopic *topic, uint64_t capture_us){
+    uint32_t ts = i_dart_topic_ts_bytes(topic);
+    return (ts && capture_us) ? ts + DART_CAPTURE_BYTES : ts;
+}
+
 /* Only a reliable topic with catch_up replays history to a late joiner. Everywhere else
  * history with no subscriber is dead weight and the send can be skipped. */
 static inline int i_dart_topic_retains_history(const i_DartTopic *topic){

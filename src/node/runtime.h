@@ -96,6 +96,8 @@ typedef struct {
     uint64_t       recv_us;          /* the monotonic clock at receive, or at enqueue */
     uint64_t       written_us;       /* the writer's wall clock at commit, UTC microseconds. 0 = the
                                         publisher opted out. Never mix it with recv_us */
+    uint64_t       capture_us;       /* when the publisher says the data was true, UTC
+                                        microseconds. 0 = none given, written_us is all there is */
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
@@ -163,7 +165,13 @@ int dart_node_dispatch(DartNode *n, int max_msgs, int timeout_ms);
 void dart_topic_queue_stats(DartTopic *topic, uint32_t *msgs, uint32_t *bytes,
                               uint32_t *capacity, uint32_t *dropped);
 /* Publishes to every matched subscriber. DART_OK or a negative DartResult. */
-int          dart_topic_send(DartTopic *topic, DartBytes data);
+/* Optional per send config, NULL means all defaults. capture_us is when the data was
+ * true rather than when it was sent, and costs 8 wire bytes only when it is set. */
+typedef struct {
+    uint64_t capture_us;   /* UTC microseconds, the dart_timestamp_now clock. 0 = none */
+} DartSendOpts;
+
+int          dart_topic_send(DartTopic *topic, DartBytes data, const DartSendOpts *opts);
 /* Flips the role at runtime and re advertises. 0 ok, negative on error. */
 int          dart_topic_set_role(DartTopic *topic, DartRole role);
 /* The local index, DartMsg.topic_index for its messages. */

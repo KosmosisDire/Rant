@@ -439,7 +439,8 @@ framing, so there are no length fields). **Every frame, every op, both direction
 has the same header** (little-endian):
 
 ```
-[u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u8 text_len][text][payload]
+[u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u64 capture_us]
+[u8 text_len][text][payload]
 ```
 
 | field        | meaning |
@@ -450,10 +451,11 @@ has the same header** (little-endian):
 | `seq`        | a call id or request id (0 for DATA / VAR) |
 | `peer`       | server to client: the peer id of the publisher / provider / caller / write source (0 = local); a client sends 0 |
 | `written_us` | server to client: the source stamp (below); a client sends 0 |
+| `capture_us` | when the data was true, as against when it was sent (below); 0 = unstated, and a client MAY set it on DATA |
 | `text`       | a short UTF-8 string, at most 255 bytes: a caller name or a result message; empty otherwise |
 | `payload`    | the raw message bytes (the schema validates these alone) |
 
-The payload starts at byte `21 + text_len`.
+The payload starts at byte `29 + text_len`.
 
 | op | client to server | server to client |
 |----|------------------|------------------|
@@ -474,6 +476,13 @@ history, or handed over shared memory keeps the original value. 0 means the
 publisher opted out (`no_timestamp` on its topic) or the frame is a synthesized
 outcome. It compares across hosts only as well as their clocks are synced, and it
 is a different clock from the `recv_us` on a log line: never mix the two.
+
+**`capture_us` is a CAPTURE timestamp**: when the data was true, which is not when
+it was sent. A camera driver sets it to the exposure time, so a consumer can line a
+frame up against other data from that instant rather than against the moment the
+driver published. Same clock and same cross host caveat as `written_us`. 0 means
+nobody stated one. On a DATA frame a client may set it to stamp its own publish; on
+every other op it is 0. A topic with `no_timestamp` carries neither stamp.
 
 Call `status` is the DART `DartCallStatus`: 0 ok, 1 app_error, 2 no_handler,
 3 timeout, 4 peer_lost, 5 cancelled. A call the bridge refuses synchronously (out

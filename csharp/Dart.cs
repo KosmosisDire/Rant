@@ -165,6 +165,14 @@ namespace Dart
         public IntPtr schema;
         public ulong recv_us;
         public ulong written_us;
+        public ulong capture_us;
+    }
+
+    // Optional per send config. capture_us 0 = unstated, and costs no wire bytes.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DartSendOpts
+    {
+        public ulong capture_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -389,7 +397,8 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern IntPtr dart_node_topic(IntPtr node, ushort index);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_send(IntPtr ch, DartBytes data);
+        internal static extern int dart_topic_send(IntPtr ch, DartBytes data,
+                                                   ref DartSendOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int dart_topic_set_role(IntPtr ch, int role);
         [DllImport(LIB, CallingConvention = CC)]
@@ -1111,8 +1120,10 @@ namespace Dart
         }
 
         /// <summary>Publish bytes/string (raw) or a message object (encoded via the
-        /// topic schema). Returns a SendStatus.</summary>
-        public SendStatus Send(byte[] data)
+        /// topic schema). captureUs is when the data was true rather than when it was
+        /// sent, in Std.Now() units; 0 leaves it unstated and costs no wire bytes.
+        /// Returns a SendStatus.</summary>
+        public SendStatus Send(byte[] data, long captureUs = 0)
         {
             int r;
             var h = GCHandle.Alloc(data, GCHandleType.Pinned);
@@ -1123,25 +1134,27 @@ namespace Dart
                     data = data != null && data.Length > 0 ? h.AddrOfPinnedObject() : IntPtr.Zero,
                     len = (UIntPtr)(data?.Length ?? 0)
                 };
-                r = Native.dart_topic_send(_handle, b);
+                var o = new DartSendOpts { capture_us = (ulong)captureUs };
+                r = Native.dart_topic_send(_handle, b, ref o);
             }
             finally { h.Free(); }
             return (SendStatus)r;
         }
 
-        public SendStatus Send(string text) => Send(Encoding.UTF8.GetBytes(text));
+        public SendStatus Send(string text, long captureUs = 0)
+            => Send(Encoding.UTF8.GetBytes(text), captureUs);
 
-        public SendStatus Send(object value)
+        public SendStatus Send(object value, long captureUs = 0)
         {
             // A bare-type schema frames its own value, so bytes/string go through it too:
             // a `string` root is a framed value, not loose text.
             bool bare = Schema != null && Schema.IsValueRoot;
-            if (!bare && value is byte[] b) return Send(b);
-            if (!bare && value is string s) return Send(s);
+            if (!bare && value is byte[] b) return Send(b, captureUs);
+            if (!bare && value is string s) return Send(s, captureUs);
             if (Schema == null)
                 throw new InvalidOperationException(
                     "topic has no schema; send bytes/string, or create the topic with a schema");
-            return Send(Schema.Encode(value));
+            return Send(Schema.Encode(value), captureUs);
         }
 
         public SendStatus SetRole(Role role)
@@ -1216,7 +1229,7 @@ namespace Dart
         public Topic(DartNode node, string name, Role role = Role.PubSub, Qos qos = null)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
-        public SendStatus Send(T value) => Send((object)value);
+        public SendStatus Send(T value, long captureUs = 0) => Send((object)value, captureUs);
 
         /// <summary>Typed take: decodes straight from the queue.</summary>
         public bool TryTake(out T value, int timeoutMs = 0)
@@ -2835,8 +2848,8 @@ namespace Dart
             T = new Topic(node, name, schema, Role.PubOnly, qos);
         }
 
-        public SendStatus Send(byte[] data) => T.Send(data);
-        public SendStatus Send(string text) => T.Send(text);
+        public SendStatus Send(byte[] data, long captureUs = 0) => T.Send(data, captureUs);
+        public SendStatus Send(string text, long captureUs = 0) => T.Send(text, captureUs);
         public int MatchCount => T.MatchCount();
         public int PendingCount => T.PendingCount;
         public bool Ready => T.Ready;
@@ -3286,7 +3299,8 @@ namespace Dart
             _core = new Publisher(node, name, _schema, qos);
         }
 
-        public SendStatus Send(T value) => _core.Send(_schema.Encode(value));
+        public SendStatus Send(T value, long captureUs = 0)
+            => _core.Send(_schema.Encode(value), captureUs);
         public int MatchCount => _core.MatchCount;
         public int PendingCount => _core.PendingCount;
         public bool Ready => _core.Ready;

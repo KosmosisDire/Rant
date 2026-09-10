@@ -315,7 +315,13 @@ class DartMsg(Structure):
         ("schema", c_void_p),
         ("recv_us", c_uint64),
         ("written_us", c_uint64),
+        ("capture_us", c_uint64),
     ]
+
+
+# Optional per send config. capture_us 0 = unstated, and costs no wire bytes.
+class DartSendOpts(Structure):
+    _fields_ = [("capture_us", c_uint64)]
 
 
 class DartEvent(Structure):
@@ -519,7 +525,7 @@ def _bind(lib):
     F("dart_node_create_topic", [c_void_p, c_char_p, c_int, c_void_p,
                                    POINTER(DartTopicOpts)], c_void_p)
     F("dart_node_topic", [c_void_p, c_uint16], c_void_p)
-    F("dart_topic_send", [c_void_p, DartBytes], c_int)
+    F("dart_topic_send", [c_void_p, DartBytes, POINTER(DartSendOpts)], c_int)
     F("dart_topic_set_role", [c_void_p, c_int], c_int)
     F("dart_topic_retire", [c_void_p], c_int)
     F("dart_topic_index", [c_void_p], c_uint16)
@@ -2079,7 +2085,7 @@ class Message:
     """A delivered message, copied out so it outlives the callback. value is the decoded
         object and fields the dict. recv_us and written_us are explained in docs/node.md."""
     __slots__ = ("topic_index", "publisher_id", "publisher_name", "topic_name",
-                 "data", "recv_us", "written_us", "fields", "value")
+                 "data", "recv_us", "written_us", "capture_us", "fields", "value")
 
     @classmethod
     def _from_c(cls, m, spec):
@@ -2090,6 +2096,7 @@ class Message:
         self.topic_name = _dstr(m.topic_name)
         self.recv_us = m.recv_us
         self.written_us = m.written_us
+        self.capture_us = m.capture_us
         self.data = string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
         self.fields = None
         self.value = None
@@ -2191,9 +2198,10 @@ class Topic:
     def __class_getitem__(cls, item):
         return _TypedTopic(item)
 
-    def send(self, data):
+    def send(self, data, capture_us=0):
         """Publish. data is bytes or str for raw, else a mapping or object encoded by the
-                schema. A bare string schema takes a str. Returns a SendStatus."""
+                schema. A bare string schema takes a str. capture_us is when the data was
+                true rather than when it was sent, 0 = unstated. Returns a SendStatus."""
         if isinstance(data, (bytes, bytearray, memoryview)):
             payload = bytes(data)
         elif isinstance(data, str) and (self._schema is None
@@ -2205,7 +2213,8 @@ class Topic:
                                 "topic with a schema to send objects/dicts")
             payload = self._schema.encode(data)
         b, buf = _c_view(payload)
-        r = self._node._lib.dart_topic_send(self._h, b)
+        o = DartSendOpts(capture_us=int(capture_us or 0))
+        r = self._node._lib.dart_topic_send(self._h, b, byref(o))
         del buf
         return _send_status(r)
 
@@ -3492,9 +3501,9 @@ class Publisher:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("schema",))
 
-    def send(self, data):
+    def send(self, data, capture_us=0):
         """Publish (typed value, mapping, or bytes/str). SendStatus."""
-        return self.topic.send(data)
+        return self.topic.send(data, capture_us)
 
     def match_count(self):
         return self.topic.match_count()

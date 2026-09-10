@@ -5,6 +5,7 @@ type Frame = {
     seq: number;
     peer: number;
     writtenUs: number;
+    captureUs: number;
     text: string;
     payload: Uint8Array;
 };
@@ -228,9 +229,10 @@ declare class DartMessage {
     publisher: number;
     data: Uint8Array;
     writtenUs: number;
+    captureUs: number;
     _layout: Layout;
     _view: DataView;
-    constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array, writtenUs?: number);
+    constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array, writtenUs?: number, captureUs?: number);
     get(path: string): any;
     value(): any;
     _value: any;
@@ -252,7 +254,7 @@ declare class DartEntity {
     _frame(_f: Frame): void;
     _retype(_r: any): void;
     _tap(value: any): void;
-    _send(op: number, flags: number, seq: number, text: string, payload: Uint8Array): void;
+    _send(op: number, flags: number, seq: number, text: string, payload: Uint8Array, captureUs?: number): void;
 }
 declare class DartTopic extends DartEntity {
     layout: Layout;
@@ -262,8 +264,8 @@ declare class DartTopic extends DartEntity {
     get size(): number | undefined;
     get hash(): string | undefined;
     get fields(): Map<string, Field>;
-    sendRaw(bytes: Uint8Array): void;
-    send(value: any): void;
+    sendRaw(bytes: Uint8Array, captureUs?: number): void;
+    send(value: any, captureUs?: number): void;
     setRole(role: Role): Promise<any>;
     drain(timeout_ms?: number): Promise<boolean>;
     _frame(f: Frame): void;
@@ -271,8 +273,8 @@ declare class DartTopic extends DartEntity {
 declare class Publisher<T = any> {
     topic: DartTopic;
     constructor(topic: DartTopic);
-    send(value: T): void;
-    sendRaw(bytes: Uint8Array): void;
+    send(value: T, captureUs?: number): void;
+    sendRaw(bytes: Uint8Array, captureUs?: number): void;
     get matchCount(): number;
     get ready(): boolean;
 }

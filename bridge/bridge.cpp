@@ -36,7 +36,7 @@ static const int kProtoVersion = 11;
 /* The data plane frame, one header for every op in both directions (PROTOCOL.md).
  * written_us is the writer's wall clock, 0 = opted out or synthesized. A client sends 0. */
 enum : uint8_t { OP_DATA = 1, OP_VAR = 2, OP_CALL = 3, OP_RESULT = 4, OP_PROGRESS = 5, OP_CANCEL = 6 };
-static const size_t kHdr = 21;
+static const size_t kHdr = 29;
 
 static const int    kTickMs      = 30;         /* match-state poll cadence */
 static const size_t kLossyBuffer = 1u << 20;   /* best-effort frames drop past this much unsent */
@@ -57,6 +57,7 @@ struct Frame {
     uint16_t id = 0;
     uint32_t seq = 0, peer = 0;
     uint64_t written = 0;
+    uint64_t capture = 0;   /* when the data was true, 0 = none given */
     std::string_view text;
     dart::Bytes      payload;
 };
@@ -174,7 +175,7 @@ static std::string frame_build(const Frame &f){
     out.resize(kHdr + tl + f.payload.size());
     uint8_t *p = (uint8_t *)&out[0];
     p[0] = f.op; p[1] = f.flags; w16(p + 2, f.id); w32(p + 4, f.seq); w32(p + 8, f.peer);
-    w64(p + 12, f.written); p[20] = (uint8_t)tl;
+    w64(p + 12, f.written); w64(p + 20, f.capture); p[28] = (uint8_t)tl;
     if (tl) memcpy(p + kHdr, f.text.data(), tl);
     if (f.payload.size()) memcpy(p + kHdr + tl, f.payload.data(), f.payload.size());
     return out;
@@ -182,10 +183,10 @@ static std::string frame_build(const Frame &f){
 
 static bool frame_parse(const uint8_t *p, size_t n, Frame &f){
     if (n < kHdr) return false;
-    size_t tl = p[20];
+    size_t tl = p[28];
     if (n < kHdr + tl) return false;
     f.op = p[0]; f.flags = p[1]; f.id = r16(p + 2); f.seq = r32(p + 4); f.peer = r32(p + 8);
-    f.written = r64(p + 12);
+    f.written = r64(p + 12); f.capture = r64(p + 20);
     f.text    = std::string_view((const char *)p + kHdr, tl);
     f.payload = dart::Bytes(p + kHdr + tl, n - kHdr - tl);
     return true;
@@ -890,6 +891,7 @@ static void deliver_message(Conn *c, const dart::MessageView &m){
     for (Entity *e : targets){
         Frame f;
         f.op = OP_DATA; f.id = e->id; f.peer = m.publisher_id(); f.written = m.written_us();
+        f.capture = m.capture_us();
         f.payload = m.data();
 #if DART_BRIDGE_WEBRTC
         std::string scratch;
@@ -1586,7 +1588,9 @@ static void on_frame(Conn *c, const uint8_t *p, size_t n){
     dart::SendStatus rc = dart::SendStatus::Ok;
     switch (f.op){
     case OP_DATA:
-        rc = e->kind == Entity::Topic ? e->topic.send(f.payload) : dart::SendStatus::BadRole;
+        rc = e->kind == Entity::Topic
+               ? e->topic.send(f.payload, dart::Timestamp{ (int64_t)f.capture })
+               : dart::SendStatus::BadRole;
         break;
     case OP_VAR: {
         if (e->kind != Entity::VarDef && e->kind != Entity::VarRemote){ rc = dart::SendStatus::BadRole; break; }

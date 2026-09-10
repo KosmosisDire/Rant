@@ -84,9 +84,11 @@ static int i_dart_writer_too_big(DartTransportState *st, i_DartTopic *topic, siz
 /* Stores ts, hdr and data into the head slot. The source stamp is taken here, once per
  * message, so a repair resend, a replay and the SHM chunk all carry the original. */
 static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
-                               DartBytes hdr, DartBytes data, size_t *len_out){
+                               DartBytes hdr, DartBytes data, uint64_t capture_us,
+                               size_t *len_out){
     uint32_t ts = i_dart_topic_ts_bytes(topic);
-    size_t len = (size_t)ts + hdr.len + data.len;
+    uint32_t cap_b = (ts && capture_us) ? DART_CAPTURE_BYTES : 0u;
+    size_t len = (size_t)ts + cap_b + hdr.len + data.len;
     if (i_dart_writer_too_big(st, topic, len)) return DART_ERR_TOO_BIG;
     {   i_DartWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
@@ -97,9 +99,15 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
         }
     }
     {   uint8_t *dst = topic->history[topic->history_head].buf;    /* gather: ts, hdr, payload */
-        if (ts)       i_dart_le_w64(dst, st->cfg.source_time ? st->cfg.source_time(st->cfg.user) : 0u);
-        if (hdr.len)  memcpy(dst + ts, hdr.data, hdr.len);
-        if (data.len) memcpy(dst + ts + hdr.len, data.data, data.len);
+        if (ts){
+            uint64_t w = st->cfg.source_time ? st->cfg.source_time(st->cfg.user) : 0u;
+            w &= DART_STAMP_MASK;
+            if (cap_b) w |= DART_STAMP_CAPTURE;
+            i_dart_le_w64(dst, w);
+            if (cap_b) i_dart_le_w64(dst + ts, capture_us);
+        }
+        if (hdr.len)  memcpy(dst + ts + cap_b, hdr.data, hdr.len);
+        if (data.len) memcpy(dst + ts + cap_b + hdr.len, data.data, data.len);
     }
 #ifdef DART_SHM
     topic->history[topic->history_head].shm = 0;   /* an inline send: not SHM backed */
@@ -111,17 +119,19 @@ static int i_dart_writer_store(DartTransportState *st, i_DartTopic *topic,
 
 /* The one send: prologue, store and commit. dest_slot is stamped onto the sample. */
 static int i_dart_writer_send(DartTransportState *st, uint16_t topic_index,
-                              DartBytes hdr, DartBytes data, uint32_t dest_slot){
+                              DartBytes hdr, DartBytes data, uint64_t capture_us,
+                              uint32_t dest_slot){
     i_DartTopic *topic; size_t len; int r;
     topic = i_dart_topic_at(st, topic_index, NULL);
     if (!topic) return DART_ERR_NO_TOPIC;
-    /* the source stamp is ordinary payload for every size rule */
-    if (i_dart_writer_too_big(st, topic, i_dart_topic_ts_bytes(topic) + hdr.len + data.len))
+    /* the stamps are ordinary payload for every size rule */
+    if (i_dart_writer_too_big(st, topic,
+            i_dart_topic_stamp_bytes(topic, capture_us) + hdr.len + data.len))
         return DART_ERR_TOO_BIG;
     if (topic->role == DART_SUB_ONLY || topic->role == DART_INACTIVE) return DART_ERR_ROLE;
     /* nobody subscribes and nothing durable to keep: skip the grow, the copy and the commit */
     if (topic->matched_writers == 0 && !i_dart_topic_retains_history(topic)) return DART_OK;
-    r = i_dart_writer_store(st, topic, hdr, data, &len);
+    r = i_dart_writer_store(st, topic, hdr, data, capture_us, &len);
     if (r != DART_OK) return r;
     i_dart_writer_commit(st, topic_index, len, dest_slot);
     return DART_OK;
@@ -130,21 +140,22 @@ static int i_dart_writer_send(DartTransportState *st, uint16_t topic_index,
 
 int dart_transport_send(DartTransportState *st, uint16_t topic_index, DartBytes data, uint64_t now){
     DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return dart_transport_send_hdr(st, topic_index, nohdr, data, now);
+    return dart_transport_send_hdr(st, topic_index, nohdr, data, 0, now);
 }
 
 
-int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr, DartBytes data, uint64_t now){
+int dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index, DartBytes hdr,
+                            DartBytes data, uint64_t capture_us, uint64_t now){
     (void)now;
-    return i_dart_writer_send(st, topic_index, hdr, data, DART__DEST_ALL);
+    return i_dart_writer_send(st, topic_index, hdr, data, capture_us, DART__DEST_ALL);
 }
 
 
 int dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
-                           DartBytes hdr, DartBytes data, uint64_t now){
+                           DartBytes hdr, DartBytes data, uint64_t capture_us, uint64_t now){
     int peer_slot = i_dart_peer_slot(st, to_peer);   /* unknown: sent to nobody, seqno consumed */
     (void)now;
-    return i_dart_writer_send(st, topic_index, hdr, data,
+    return i_dart_writer_send(st, topic_index, hdr, data, capture_us,
                               peer_slot < 0 ? DART__DEST_NONE : (uint32_t)peer_slot);
 }
 

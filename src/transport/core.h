@@ -52,6 +52,11 @@ extern "C" {
 /* The source stamp in front of every sample of a stamped topic, taken once at commit so
  * repair, replay and shared memory carry the original. DartQos.no_timestamp opts out. */
 #define DART_TIMESTAMP_BYTES 8u
+/* A microsecond wall clock needs 51 bits, so the source stamp's top bit is free to mark
+ * that a capture slot follows it. Per message, and costs nothing unset. See spec/node.md */
+#define DART_CAPTURE_BYTES   8u
+#define DART_STAMP_CAPTURE   0x8000000000000000ull
+#define DART_STAMP_MASK      0x7FFFFFFFFFFFFFFFull
 
 typedef enum { DART_BEST_EFFORT = 0, DART_RELIABLE = 1 } DartReliability;
 /* DART_INACTIVE is declared but off. Resources stay allocated and set_role flips it. */
@@ -414,13 +419,14 @@ uint32_t  dart_transport_publisher_oldest_match(DartTransportState *st, uint16_t
 /* Matched publishers feeding our subscription side. */
 int       dart_transport_subscriber_match_count(DartTransportState *st, uint16_t topic_index);
 
-/* hdr rides in front of data as one message, byte identical to sending the concatenation. */
+/* hdr rides in front of data as one message, byte identical to sending the concatenation.
+ * capture_us 0 sends no capture slot. */
 int       dart_transport_send_hdr(DartTransportState *st, uint16_t topic_index,
-                      DartBytes hdr, DartBytes data, uint64_t now_us);
+                      DartBytes hdr, DartBytes data, uint64_t capture_us, uint64_t now_us);
 /* Publishes to one peer. Every other matched reliable lane skips the seqno through its
  * HB floor. A no op delivery when the peer is not a matched subscriber. */
 int       dart_transport_send_to(DartTransportState *st, uint16_t topic_index, uint32_t to_peer,
-                      DartBytes hdr, DartBytes data, uint64_t now_us);
+                      DartBytes hdr, DartBytes data, uint64_t capture_us, uint64_t now_us);
 
 #ifdef DART_SHM
 /* The payload lives in an external chunk, fragmented for remote peers and described to

@@ -250,7 +250,7 @@ int main(int argc, char **argv){
         int sent = 0;
         uint32_t msg_len = chat_encode(buf, sizeof buf, line, len);
         for (int i = 0; i < g_n_topics; i++)
-            if (g_topics[i].pub){ dart_topic_send(g_topics[i].ch, dart_bytes(buf, msg_len)); sent++; }
+            if (g_topics[i].pub){ dart_topic_send(g_topics[i].ch, dart_bytes(buf, msg_len), NULL); sent++; }
         if (!sent) printf("  (no pub topic yet: try 'pub <topic>' or 'pubsub <topic>')\n");
     }
 

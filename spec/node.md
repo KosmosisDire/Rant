@@ -123,12 +123,22 @@ on release) is the known escape for huge payloads, not built.
 pattern header, stamped in `i_dart_writer_store` from the `DartConfig.source_time` hook
 (the node wires it to `i_dart_plat_wall_us`). A NULL hook still writes 8 zero bytes:
 framing is driven by the QoS alone, never by hook presence. The opt out
-(`qos.no_timestamp`) rides a sparse interest section of opted out publish topics, and the
-detail intake re applies the cached interest blob in the same call that forms proxies, so
-the receiver always knows before it can deliver. The node strips the stamp at one point
-before the pattern prefix split (the queue path strips at enqueue). `recv_us` is the
-node's monotonic clock at the moment the poll received the message, or at enqueue for a
-queued topic.
+(`qos.no_timestamp`) rides the attrs byte of the DETAIL_RESP (`DART_ATTR_NO_TIMESTAMP`,
+see spec/interest.md), and the detail intake re applies the cached interest blob in the
+same call that forms proxies, so the receiver always knows before it can deliver. The
+node strips the stamp at one point before the pattern prefix split (the queue path strips
+at enqueue). `recv_us` is the node's monotonic clock at the moment the poll received the
+message, or at enqueue for a queued topic.
+
+`capture_us` is a second 8 byte slot right after `written_us`, present only when the
+sender passed one. A microsecond wall clock needs 51 bits, so bit 63 of `written_us`
+carries the marker that announces it, and the strip masks that bit off before the value
+reaches `DartMsg`. The marker lives inside the sample rather than in the DATA submessage
+flags on purpose: repair, catch up replay, the SHM chunk and the consumer queue then
+carry it with no extra plumbing, exactly as the source stamp already does, and neither
+delivery callback grows an argument. A sample whose marker is set but which is too short
+to hold the slot is malformed and is passed through whole rather than read past.
+A `no_timestamp` topic frames neither slot, so a capture time cannot ride it.
 
 ## Errors
 

@@ -10,7 +10,7 @@
 
 /* The tool creates its topics in index order, so these shims keep a (node, index) call
  * form: dart_node_topic maps a creation index back to its handle. */
-#define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)))
+#define dart_node_send(n, idx, d, l)         dart_topic_send(dart_node_topic((n),(idx)), dart_bytes((d),(l)), NULL)
 #define dart_node_drain(n, idx, ms)          dart_topic_drain(dart_node_topic((n),(idx)), (ms))
 #define dart_node_publisher_match_count(n, idx) dart_topic_match_count(dart_node_topic((n),(idx)))
 #define dart_node_repair_stats(n, idx, o)    dart_topic_repair_stats(dart_node_topic((n),(idx)), (o))

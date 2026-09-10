@@ -1,18 +1,19 @@
 /* The bridge client: one DartNode is one full node on the mesh, spoken through the bridge
  * over a WebSocket with a WebRTC data path. docs/javascript.md explains how to use it. */
 /* Data-plane frame: ONE header for every op, both directions, little-endian:
- *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u8 text_len][text][payload] */
+ *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u64 capture_us]
+ *   [u8 text_len][text][payload] */
 const OP_DATA = 1; /* topic message (publish / delivery) */
 const OP_VAR = 2; /* variable write / update */
 const OP_CALL = 3; /* call a remote / a request for a definition */
 const OP_RESULT = 4; /* call outcome / request reply */
 const OP_PROGRESS = 5; /* task progress, either direction */
 const OP_CANCEL = 6; /* server->client: cancel a parked request */
-const HDR = 21;
+const HDR = 29;
 const LOSSY_BUFFER = 1 << 20; /* a best-effort frame drops past this much unsent on its carrier */
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-function buildFrame(op, flags, id, seq, text, payload) {
+function buildFrame(op, flags, id, seq, text, payload, captureUs = 0) {
     let tb = text ? enc.encode(text) : new Uint8Array(0);
     if (tb.length > 255)
         tb = tb.subarray(0, 255); /* one length byte, like the wire */
@@ -22,7 +23,9 @@ function buildFrame(op, flags, id, seq, text, payload) {
     f[1] = flags;
     v.setUint16(2, id, true);
     v.setUint32(4, seq, true); /* peer and written_us are 0 from a client */
-    f[20] = tb.length;
+    if (captureUs)
+        v.setBigUint64(20, BigInt(captureUs), true);
+    f[28] = tb.length;
     f.set(tb, HDR);
     f.set(payload, HDR + tb.length);
     return f;
@@ -30,12 +33,13 @@ function buildFrame(op, flags, id, seq, text, payload) {
 function parseFrame(b) {
     if (b.length < HDR)
         return null;
-    const tl = b[20];
+    const tl = b[28];
     if (b.length < HDR + tl)
         return null;
     const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
     return { op: b[0], flags: b[1], id: v.getUint16(2, true), seq: v.getUint32(4, true),
         peer: v.getUint32(8, true), writtenUs: Number(v.getBigUint64(12, true)),
+        captureUs: Number(v.getBigUint64(20, true)),
         text: tl ? dec.decode(b.subarray(HDR, HDR + tl)) : "", payload: b.subarray(HDR + tl) };
 }
 const MEDIA_TYPES = new Set(["VideoFrame", "Image", "ExternalVideoStream"]);
@@ -530,12 +534,13 @@ class Layout {
 }
 /* A delivered message: raw bytes plus typed reads through the entity's field table. */
 class DartMessage {
-    constructor(layout, topic, publisher, data, writtenUs = 0) {
+    constructor(layout, topic, publisher, data, writtenUs = 0, captureUs = 0) {
         this._layout = layout;
         this.topic = topic;
         this.publisher = publisher;
         this.data = data;
         this.writtenUs = writtenUs;
+        this.captureUs = captureUs;
         this._view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     }
     /* Typed read of one field by dotted path. The JS types per kind are in docs/javascript.md. */
@@ -580,8 +585,8 @@ class DartEntity {
     _retype(_r) { }
     _tap(value) { for (const t of this._taps)
         t(value); }
-    _send(op, flags, seq, text, payload) {
-        this._node._sendFrame(this, buildFrame(op, flags, this.id, seq, text, payload));
+    _send(op, flags, seq, text, payload, captureUs = 0) {
+        this._node._sendFrame(this, buildFrame(op, flags, this.id, seq, text, payload, captureUs));
     }
 }
 /* One topic on the node (the dynamic form). Returned by DartNode.topic(). */
@@ -596,11 +601,15 @@ class DartTopic extends DartEntity {
     get size() { return this.layout.size; }
     get hash() { return this.layout.hash; }
     get fields() { return this.layout.fields; }
-    /* Publish raw bytes. */
-    sendRaw(bytes) { this._send(OP_DATA, 0, 0, "", bytes); }
+    /* Publish raw bytes. captureUs is when the data was true, 0 = unstated. */
+    sendRaw(bytes, captureUs = 0) {
+        this._send(OP_DATA, 0, 0, "", bytes, captureUs);
+    }
     /* Typed publish from a plain nested object mirroring the schema. A bare type topic takes
      * the value itself. */
-    send(value) { this.sendRaw(this.layout.encode(value)); }
+    send(value, captureUs = 0) {
+        this.sendRaw(this.layout.encode(value), captureUs);
+    }
     /* Flip this topic's role: "pubsub" | "pub" | "sub" | "inactive". */
     setRole(role) { return this._node._request({ op: "role", id: this.id, role }); }
     /* Wait until every reader acked everything (reliable topics, before close). */
@@ -611,7 +620,7 @@ class DartTopic extends DartEntity {
     _frame(f) {
         if (f.op !== OP_DATA)
             return;
-        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs);
+        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs, f.captureUs);
         this.onMessage?.(msg);
         if (this._taps.length)
             this._tap(msg.value());
@@ -620,8 +629,8 @@ class DartTopic extends DartEntity {
 /* The publish side handle over a topic, speaking plain nested objects. */
 class Publisher {
     constructor(topic) { this.topic = topic; }
-    send(value) { this.topic.send(value); }
-    sendRaw(bytes) { this.topic.sendRaw(bytes); }
+    send(value, captureUs = 0) { this.topic.send(value, captureUs); }
+    sendRaw(bytes, captureUs = 0) { this.topic.sendRaw(bytes, captureUs); }
     get matchCount() { return this.topic.matchCount; }
     get ready() { return this.topic.ready; }
 }

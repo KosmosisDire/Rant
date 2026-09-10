@@ -58,7 +58,7 @@ The queue's extra copy costs about 15% of peak goodput at small payloads and up 
 
 ## Timestamps
 
-Every `DartMsg` carries two clocks.
+Every `DartMsg` carries three clocks.
 
 - `recv_us` is this node's monotonic clock when the poll received the message (at enqueue
   for a queued topic). Use it for rates and jitter.
@@ -66,10 +66,27 @@ Every `DartMsg` carries two clocks.
   Repair, catch up replay, shared memory and the consumer queue all keep the original
   stamp. Compare it across hosts only as far as their clocks are synced. Never mix it with
   `recv_us`.
+- `capture_us` is when the data was true, which is not when it was sent. A camera driver
+  sets it to the exposure time, so a consumer can line the frame up against other data
+  from that instant instead of against the moment the driver got round to publishing.
+  0 means the publisher gave none. Same clock and same caveats as `written_us`.
 
-A publisher opts out per topic with `qos.no_timestamp`. `written_us` is then 0. The
-patterns layer forwards the stamp as `written_us` on `DartRequest`, `DartResponse`,
-`DartProgress` and `DartVariableUpdate`.
+The publisher sets it per message, and it costs 8 wire bytes only on the messages that
+carry one:
+
+```c
+dart_topic_send(topic, frame, &(DartSendOpts){ .capture_us = exposed_at });
+dart_topic_send(topic, frame, NULL);        /* no capture time, no extra bytes */
+```
+
+The two together measure the pipeline: `written_us - capture_us` is how long the sensor
+and the driver took, and the rest of the way to `recv_us` is transport.
+
+A publisher opts out of both stamps per topic with `qos.no_timestamp`. `written_us` and
+`capture_us` are then 0 and a capture time cannot ride that topic. The patterns layer
+forwards the commit stamp as `written_us` on `DartRequest`, `DartResponse`,
+`DartProgress` and `DartVariableUpdate`, and carries no capture time: it describes
+sensor data on a topic, not a call or a write.
 
 ## Errors and events
 
