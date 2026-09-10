@@ -101,8 +101,9 @@ typedef struct {
 } DartMsg;
 typedef void (*DartMsgFn)(const DartMsg *msg);
 
-/* Opens a node on alloc, which it copies and resets on close, so use one per node. name
- * NULL gives an auto name, on_message and on_event may be NULL, opts NULL means defaults. */
+/* Opens a node on alloc, which it copies and resets on close, so use one per node. alloc
+ * is required and NULL refuses the open with DART_E_OOM. name NULL gives an auto name,
+ * on_message and on_event may be NULL, opts NULL means defaults. */
 DartNode    *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message,
                             DartEventFn on_event, const DartNodeOpts *opts);
 /* The most recent error. n NULL returns the process global slot, the reason an open
