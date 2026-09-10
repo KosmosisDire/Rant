@@ -453,6 +453,8 @@ namespace Dart
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern ulong dart_schema_hash(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr dart_schema_copy(IntPtr s, DartAllocFn alloc, IntPtr user);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern DartStringView dart_schema_name(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint dart_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
@@ -853,6 +855,10 @@ namespace Dart
         /// A bare type is the whole schema, an anonymous root whose message is one value.</summary>
         public Schema(Type t) : this(Codec.TypeDsl(t)) { ClrType = t; }
 
+        /// <summary>Adopt a compiled schema this wrapper already owns, such as a copy of a
+        /// publisher's. Freeing it is this object's job from here on.</summary>
+        internal Schema(IntPtr owned) { Handle = owned; }
+
         public string Name => Codec.Str(Native.dart_schema_name(Handle));
         public uint Size => Native.dart_schema_size(Handle);
         public ulong Hash => Native.dart_schema_hash(Handle);
@@ -903,13 +909,17 @@ namespace Dart
 
     // ---- delivered message / event ----------------------------------------------
 
+    /// <summary>A delivered message. The payload is copied out so it outlives the callback,
+    /// but the decode happens on the first read of Fields or Value and never if neither is
+    /// read. Read it from one thread, as handlers do.</summary>
     public sealed class DartMessage
     {
         public ushort TopicIndex;
         public uint PublisherId;
         public string PublisherName;
         public string TopicName;
-        public byte[] Data;
+        /// <summary>The payload bytes, copied out of the transport buffer.</summary>
+        public byte[] Data { get; private set; }
         /// <summary>The node's monotonic clock in microseconds when the poll received the
         /// message, at enqueue for a queued topic (docs/node.md).</summary>
         public ulong RecvUs;
@@ -919,16 +929,45 @@ namespace Dart
         /// <summary>When the publisher says the data was true, UTC microseconds, which is not
         /// when it was sent. 0 = none given and WrittenUs is all there is (docs/node.md).</summary>
         public ulong CaptureUs;
-        public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
-        public object Value;                          // typed instance for a typed topic, the bare
-                                                      // value for a bare-type schema, else Fields
+
+        // The node's own copy of the publisher's schema, so a decode after the callback is
+        // safe. Held by reference, so it outlives the node when this message does. Null on
+        // a raw topic or an untyped publisher.
+        private Schema _schema;
+        private Type _clrType;
+        private Dictionary<string, object> _fields;
+        private object _value;
+        private bool _decoded;
+
+        /// <summary>The decoded fields, null on a raw topic or when the decode failed.
+        /// Decodes on the first read.</summary>
+        public Dictionary<string, object> Fields { get { Decode(); return _fields; } }
+        /// <summary>The typed instance for a typed topic, the bare value for a bare-type
+        /// schema, else Fields. Decodes on the first read.</summary>
+        public object Value { get { Decode(); return _value; } }
+
+        // Decode failures stay where they were: reported once, leaving Fields and Value null,
+        // so one bad publisher never throws out of a handler that only wanted the bytes.
+        private void Decode()
+        {
+            if (_decoded) return;
+            _decoded = true;
+            if (_schema == null || _schema.Handle == IntPtr.Zero) return;
+            try
+            {
+                _fields = Codec.DecodeDict(_schema.Handle, Data);
+                _value = _clrType != null ? Codec.ToObject(_clrType, _fields)
+                                          : Codec.RootOrFields(_schema.Handle, _fields);
+            }
+            catch (Exception e) { Console.Error.WriteLine("dart decode: " + e); }
+        }
 
         public string Text => Encoding.UTF8.GetString(Data);
         public T As<T>() => (T)Value;
 
-        internal static DartMessage FromNative(ref DartMsg m, Type clrType)
+        internal static DartMessage FromNative(ref DartMsg m, Type clrType, Schema ownedSchema)
         {
-            var msg = new DartMessage
+            return new DartMessage
             {
                 TopicIndex = m.topic_index,
                 PublisherId = m.publisher_id,
@@ -938,18 +977,9 @@ namespace Dart
                 RecvUs = m.recv_us,
                 WrittenUs = m.written_us,
                 CaptureUs = m.capture_us,
+                _schema = ownedSchema,
+                _clrType = clrType,
             };
-            if (m.schema != IntPtr.Zero)
-            {
-                try
-                {
-                    msg.Fields = Codec.DecodeDict(m.schema, msg.Data);
-                    msg.Value = clrType != null ? Codec.ToObject(clrType, msg.Fields)
-                                                : Codec.RootOrFields(m.schema, msg.Fields);
-                }
-                catch (Exception e) { Console.Error.WriteLine("dart decode: " + e); }
-            }
-            return msg;
         }
 
         public override string ToString()
@@ -1201,7 +1231,8 @@ namespace Dart
             message = null;
             var m = new DartMsg();
             if (Native.dart_topic_take(_handle, ref m, timeoutMs) != 1) return false;
-            message = DartMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index));
+            message = DartMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index),
+                                             _node.OwnedSchema(m.schema));
             return true;
         }
 
@@ -1259,6 +1290,13 @@ namespace Dart
         private Action<DartEvent> _onEvt;
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
+        // A publisher's schema is a node owned view good only until the next poll, so a
+        // message that decodes later needs our own copy. Keyed by the schema hash, so one
+        // copy serves every message on every topic that carries it.
+        private readonly Dictionary<ulong, Schema> _msgSchemas = new Dictionary<ulong, Schema>();
+        // its own lock: the delivery path reaches it while the node lock is held, and
+        // _createLock is held across a create, which takes the node lock the other way round
+        private readonly object _msgSchemaLock = new object();
         // same name topic sharing with role widening, serialized by the ctor path's lock
         private sealed class TopicRec { public IntPtr Handle; public byte Bits; public ulong SchemaHash; }
         private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
@@ -1501,6 +1539,24 @@ namespace Dart
             }
         }
 
+        // Our copy of a publisher's schema, made once per distinct schema. Called on the
+        // delivering thread, where the view passed in is still valid.
+        internal Schema OwnedSchema(IntPtr view)
+        {
+            if (view == IntPtr.Zero) return null;
+            ulong hash = Native.dart_schema_hash(view);
+            lock (_msgSchemaLock)
+            {
+                Schema owned;
+                if (_msgSchemas.TryGetValue(hash, out owned)) return owned;
+                IntPtr h = Native.dart_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
+                if (h == IntPtr.Zero) return null;
+                owned = new Schema(h);
+                _msgSchemas[hash] = owned;
+                return owned;
+            }
+        }
+
         // pattern-layer bookkeeping (reaped at Close)
         internal void RetainSchema(Schema s) { if (s != null) lock (_createLock) _schemas.Add(s); }
         internal void RegisterPatternBox(long id) { lock (PatternLock) _patternBoxes.Add(id); }
@@ -1668,6 +1724,9 @@ namespace Dart
             }
             foreach (var s in _schemas) s.Dispose();
             _schemas.Clear();
+            // Not disposed: a DartMessage taken before Close may still decode against one.
+            // Dropping the node's reference leaves each to its finalizer.
+            lock (_msgSchemaLock) _msgSchemas.Clear();
             Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
             Codec.FreeCStr(_mcastIf); _mcastIf = IntPtr.Zero;
             return true;
@@ -1688,7 +1747,8 @@ namespace Dart
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null && node._onMsg == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
-                var msg = DartMessage.FromNative(ref m, clr);   // copied, safe past the callback
+                // the payload is copied and the schema is ours, so a later decode is safe
+                var msg = DartMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
                 if (hs != null) { foreach (var h in hs) h(msg); }
                 else node._onMsg(msg);
             }

@@ -26,6 +26,11 @@ about a wrapper API, this file wins.
   non null by every wrapper so the first diagnostics are never missed. Setter methods
   exist only for later rebinding.
 - Handlers come in two forms: payload only, or payload plus message envelope.
+- An owning message copies its payload, since the transport buffer is reused after the
+  callback, but decodes only when the fields or the typed value are read. A handler that
+  wants the bytes must not pay for the topic's schema. The decode outlives the callback,
+  so the wrapper holds its own `dart_schema_copy` of the publisher's schema, made once
+  per distinct hash and released with the last message that names it, never at close.
 - An owning type is a plain noun, a view type has a `View` suffix, "Taken" is banned:
   `Message`, `MessageView`, `MessageBuilder`, `Response`, `ResponseView`.
 - `Peer::entities` replaces any `Peer::topics`. No dual surfaces.

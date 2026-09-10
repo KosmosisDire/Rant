@@ -68,6 +68,7 @@ dart_topic_counts
 dart_node_meta_function
 dart_schema_compile
 dart_schema_free
+dart_schema_copy
 dart_schema_wire
 dart_schema_hash
 dart_schema_name

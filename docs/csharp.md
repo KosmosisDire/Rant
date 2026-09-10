@@ -67,8 +67,11 @@ docs/reflection.md explains what gets adopted.
 
 ## Messages and queues
 
-`DartMessage` is fully copied out. `Value` or `As<T>()` decodes, `RecvUs` is the node's
-monotonic clock at receipt, `WrittenUs` the sender's wall clock, 0 when it opted out, and
+`DartMessage` copies its payload out, so `Data` outlives the callback. `Fields` and
+`Value` decode on the first read and never at all if neither is read, so a handler that
+only wants the bytes pays nothing for the topic's schema. Read one message from one
+thread, as a handler does. `As<T>()` is `Value` cast. `RecvUs` is the node's monotonic
+clock at receipt, `WrittenUs` the sender's wall clock, 0 when it opted out, and
 `CaptureUs` when the publisher says the data was true, 0 when it gave none.
 
 `TryTake(out msg, timeoutMs)` and `Dispatch(maxMsgs, timeoutMs)` switch a topic to

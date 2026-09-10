@@ -76,7 +76,7 @@ _EXPORTS = [
     "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
     "dart_variable_match_count", "dart_variable_retire",
     "dart_variable_on_change", "dart_variable_on_write",
-    "dart_schema_compile", "dart_schema_free", "dart_schema_wire",
+    "dart_schema_compile", "dart_schema_free", "dart_schema_copy", "dart_schema_wire",
     "dart_schema_hash", "dart_schema_name", "dart_schema_size", "dart_schema_print",
     "dart_schema_field_type_wire", "dart_schema_subset", "dart_get_array_count",
     "dart_set_array_count",
