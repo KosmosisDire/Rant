@@ -104,6 +104,9 @@ type NodeOpts = {
                                  it from the datagram source (static 1:1 mapping / multihomed pin) */
     advertise_port?: number;  /* advertise this data port instead of the one we bound */
     fragment_size?: number;
+    recv_buffer_bytes?: number;   /* data socket OS buffers. 0 = the OS default, which is too
+                                     small to hold a multi megabyte message whole */
+    send_buffer_bytes?: number;
     announce_interval_ms?: number;
     peer_timeout_ms?: number;
     match_wait_ms?: number;

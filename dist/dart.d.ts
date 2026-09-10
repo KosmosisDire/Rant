@@ -66,6 +66,8 @@ type NodeOpts = {
     self_ip?: string;
     advertise_port?: number;
     fragment_size?: number;
+    recv_buffer_bytes?: number;
+    send_buffer_bytes?: number;
     announce_interval_ms?: number;
     peer_timeout_ms?: number;
     match_wait_ms?: number;

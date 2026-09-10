@@ -919,6 +919,8 @@ static void op_open(Conn *c, const json &req, const json &seq){
     o.disable_shm          = req.value("disable_shm", false);
     o.multicast_interface  = req.value("interface", std::string());
     o.fragment_size        = (uint16_t)req.value("fragment_size", 0);
+    o.recv_buffer_bytes    = (uint32_t)req.value("recv_buffer_bytes", 0);
+    o.send_buffer_bytes    = (uint32_t)req.value("send_buffer_bytes", 0);
     o.announce_interval_us = (uint32_t)req.value("announce_interval_ms", 0) * 1000u;
     o.peer_timeout_us      = (uint32_t)req.value("peer_timeout_ms", 0) * 1000u;
     o.max_peers            = (uint16_t)req.value("max_peers", 0);

@@ -865,6 +865,8 @@ class NodeOptions:
                                   # learn it from the datagram source, for a static 1:1 mapping
     advertise_port: int = 0       # advertise THIS data port instead of the one we bound (0 = bound)
     fragment_size: int = 0
+    recv_buffer_bytes: int = 0    # data socket OS buffers. 0 = the OS default, which is too
+    send_buffer_bytes: int = 0    # small to hold a multi megabyte message whole
     announce_interval_us: int = 0
     peer_timeout_us: int = 0
     max_peers: int = 0
@@ -2365,6 +2367,8 @@ class Node:
         co.net.self_ip = options.self_ip.encode() if options.self_ip else None
         co.net.advertise_port = options.advertise_port
         co.net.fragment_size = options.fragment_size
+        co.net.recv_buffer_bytes = options.recv_buffer_bytes
+        co.net.send_buffer_bytes = options.send_buffer_bytes
         co.discovery.announce_interval_us = options.announce_interval_us
         co.discovery.peer_timeout_us = options.peer_timeout_us
         co.discovery.max_peers = options.max_peers

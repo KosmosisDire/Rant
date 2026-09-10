@@ -18265,6 +18265,10 @@ struct NodeOptions {
     std::vector<std::string> seed_peers;   /* "ip" or "ip:port", unicast announce targets */
     bool                     unicast_only         = false;   /* no group join, seeds relay us */
     uint16_t                 fragment_size        = 0;   /* UDP payload bytes per fragment */
+    /* Data socket OS buffers. 0 = the OS default, which is too small to hold a multi
+     * megabyte message whole, so raise both for big payloads. See docs/discovery.md. */
+    uint32_t                 recv_buffer_bytes    = 0;
+    uint32_t                 send_buffer_bytes    = 0;
     /* Advertise this locator to every peer instead of letting each learn it from the datagram
      * source. For a static 1:1 mapping such as a cloud IP or a published container port. */
     std::string              self_ip;   /* "203.0.113.7", empty = learn per path */
@@ -20131,6 +20135,8 @@ public:
         co.net.self_ip             = impl->self_ip.empty() ? nullptr : impl->self_ip.c_str();
         co.net.advertise_port      = o.advertise_port;
         co.net.fragment_size       = o.fragment_size;
+        co.net.recv_buffer_bytes   = o.recv_buffer_bytes;
+        co.net.send_buffer_bytes   = o.send_buffer_bytes;
         co.discovery.announce_interval_us = o.announce_interval_us;
         co.discovery.peer_timeout_us      = o.peer_timeout_us;
         co.discovery.max_peers            = o.max_peers;

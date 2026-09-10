@@ -74,6 +74,8 @@ request, only for a broken WebSocket.
   "unicast_only": false,          // no multicast: seeds + relaying (see docs/discovery.md)
   "self_ip": "", "advertise_port": 0,   // state our locator outright
   "fragment_size": 0,             // UDP payload bytes per fragment; 0 = default
+  "recv_buffer_bytes": 0,         // data socket OS buffers; 0 = OS default, too small to
+  "send_buffer_bytes": 0,         //   hold a multi-megabyte message whole
   "announce_interval_ms": 1000,
   "peer_timeout_ms": 3500,
   "match_wait_ms": 0,             // send-path match wait; 0 = default 1s, negative = off

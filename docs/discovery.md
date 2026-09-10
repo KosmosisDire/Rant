@@ -72,6 +72,12 @@ translate addresses, so it needs only the relay above.
 `opts.discovery` holds `announce_interval_us` (3 s), `peer_timeout_us` (12 s) and
 `max_peers` (16).
 
+A message has no flow control inside it, so a fragment the receive buffer cannot hold is
+dropped and repair carries it instead. Raise `recv_buffer_bytes` to at least the largest
+message a topic carries once payloads reach a megabyte. Linux also needs
+`net.core.rmem_max` raised to that size or the request is silently clamped. Every binding
+takes both under its own name.
+
 ## Peer information
 
 `dart_node_peers_next` walks the peers with a `DartPeerInfo`: id, uuid, name, address,

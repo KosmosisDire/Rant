@@ -1290,7 +1290,8 @@ namespace Dart
                     string multicastInterface = null, int multicastTtl = 0,
                     string[] seedPeers = null, bool unicastOnly = false,
                     string selfIp = null, int advertisePort = 0,
-                    int fragmentSize = 0, int announceIntervalUs = 0, int peerTimeoutUs = 0,
+                    int fragmentSize = 0, int recvBufferBytes = 0, int sendBufferBytes = 0,
+                    int announceIntervalUs = 0, int peerTimeoutUs = 0,
                     int maxPeers = 0)
         {
             if (onEvent == null)
@@ -1332,6 +1333,8 @@ namespace Dart
             co.net.self_ip = selfIpPtr;
             co.net.advertise_port = (ushort)advertisePort;
             co.net.fragment_size = (ushort)fragmentSize;
+            co.net.recv_buffer_bytes = (uint)recvBufferBytes;
+            co.net.send_buffer_bytes = (uint)sendBufferBytes;
             co.discovery.announce_interval_us = (uint)announceIntervalUs;
             co.discovery.peer_timeout_us = (uint)peerTimeoutUs;
             co.discovery.max_peers = (ushort)maxPeers;
