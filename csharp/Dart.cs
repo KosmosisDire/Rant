@@ -1303,7 +1303,7 @@ namespace Dart
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
         // takes more than a volatile fetch
-        private readonly Dictionary<ushort, Action<DartMessage>[]> _subHandlers = new Dictionary<ushort, Action<DartMessage>[]>();
+        private volatile Dictionary<ushort, Action<DartMessage>[]> _subHandlers = new Dictionary<ushort, Action<DartMessage>[]>();
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
         private readonly List<long> _patternBoxes = new List<long>();
@@ -1314,7 +1314,9 @@ namespace Dart
         // rooted so the GC never collects the trampolines handed to native code.
         private static readonly DartMsgFn s_onMsg = OnMessageTramp;
         private static readonly DartEventFn s_onEvt = OnEventTramp;
-        private static readonly Dictionary<long, DartNode> s_nodes = new Dictionary<long, DartNode>();
+        // Read once per delivered message and per event, written only at open and close, so
+        // it is replaced whole under s_reg and read without a lock.
+        private static volatile Dictionary<long, DartNode> s_nodes = new Dictionary<long, DartNode>();
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
@@ -1337,7 +1339,12 @@ namespace Dart
                     "onEvent carries the node's diagnostics (errors, peer lifecycle) and must not be null");
             _onMsg = onMessage;
             _onEvt = onEvent;
-            lock (s_reg) { _id = s_nextId++; s_nodes[_id] = this; }
+            lock (s_reg)
+            {
+                _id = s_nextId++;
+                var next = new Dictionary<long, DartNode>(s_nodes) { [_id] = this };
+                s_nodes = next;
+            }
 
             var co = new DartNodeOpts
             {
@@ -1385,7 +1392,7 @@ namespace Dart
 
             if (h == IntPtr.Zero)
             {
-                lock (s_reg) s_nodes.Remove(_id);
+                lock (s_reg) { var next = new Dictionary<long, DartNode>(s_nodes); next.Remove(_id); s_nodes = next; }
                 Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
                 DartEvent err = LastOpenError();
@@ -1501,7 +1508,12 @@ namespace Dart
                     if (kv.Value.Handle == t._handle) { dead = kv.Key; break; }
                 if (dead != null) _topicsByName.Remove(dead);
                 _topicTypes.Remove(idx);
-                lock (_subLock) _subHandlers.Remove(idx);
+                lock (_subLock)
+            {
+                var next = new Dictionary<ushort, Action<DartMessage>[]>(_subHandlers);
+                next.Remove(idx);
+                _subHandlers = next;
+            }
                 t._handle = IntPtr.Zero;
                 return SendStatus.Ok;
             }
@@ -1520,23 +1532,24 @@ namespace Dart
         {
             lock (_subLock)
             {
+                var next = new Dictionary<ushort, Action<DartMessage>[]>(_subHandlers);
                 Action<DartMessage>[] cur;
-                if (!_subHandlers.TryGetValue(index, out cur)) cur = Array.Empty<Action<DartMessage>>();
+                if (!next.TryGetValue(index, out cur)) cur = Array.Empty<Action<DartMessage>>();
                 var nv = new Action<DartMessage>[cur.Length + 1];
                 Array.Copy(cur, nv, cur.Length);
                 nv[cur.Length] = fn;
-                _subHandlers[index] = nv;
+                next[index] = nv;
+                _subHandlers = next;   // published whole, so a reader never sees a torn map
             }
         }
 
+        // No lock: the map is replaced whole on every write, so this volatile read gets one
+        // consistent version. Runs once per delivered message.
         private Action<DartMessage>[] SubHandlersOf(ushort index)
         {
-            lock (_subLock)
-            {
-                Action<DartMessage>[] hs;
-                _subHandlers.TryGetValue(index, out hs);
-                return hs;
-            }
+            Action<DartMessage>[] hs;
+            _subHandlers.TryGetValue(index, out hs);
+            return hs;
         }
 
         // Our copy of a publisher's schema, made once per distinct schema. Called on the
@@ -1705,7 +1718,7 @@ namespace Dart
                 if (Native.dart_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
                 _handle = IntPtr.Zero;
             }
-            lock (s_reg) s_nodes.Remove(_id);
+            lock (s_reg) { var next = new Dictionary<long, DartNode>(s_nodes); next.Remove(_id); s_nodes = next; }
             // reap this node's pattern handler boxes and complete any still-pending
             // async calls (the C never fires their callbacks after close)
             lock (PatternLock)
@@ -1742,7 +1755,7 @@ namespace Dart
             {
                 var m = Marshal.PtrToStructure<DartMsg>(msgPtr);
                 DartNode node; Type clr = null;
-                lock (s_reg) s_nodes.TryGetValue((long)m.user, out node);
+                s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null) return;
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null && node._onMsg == null) return;
@@ -1762,7 +1775,7 @@ namespace Dart
             {
                 var e = Marshal.PtrToStructure<DartEventNative>(evPtr);
                 DartNode node;
-                lock (s_reg) s_nodes.TryGetValue((long)e.user, out node);
+                s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
                 DartEvent ev = DartEvent.FromNative(evPtr, ref e);   // copied past the callback
                 Action<DartEvent> fn = node._onEvt;
