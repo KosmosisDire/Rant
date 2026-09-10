@@ -68,7 +68,8 @@ docs/reflection.md explains what gets adopted.
 ## Messages and queues
 
 `DartMessage` is fully copied out. `Value` or `As<T>()` decodes, `RecvUs` is the node's
-monotonic clock at receipt and `WrittenUs` the sender's wall clock, 0 when it opted out.
+monotonic clock at receipt, `WrittenUs` the sender's wall clock, 0 when it opted out, and
+`CaptureUs` when the publisher says the data was true, 0 when it gave none.
 
 `TryTake(out msg, timeoutMs)` and `Dispatch(maxMsgs, timeoutMs)` switch a topic to
 queued delivery, as in docs/node.md. Dispatch handlers run on the calling thread without

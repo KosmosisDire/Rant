@@ -916,6 +916,9 @@ namespace Dart
         /// <summary>The sender's wall clock in UTC microseconds when its send committed, kept
         /// across repair and replay. 0 = opted out. Never mix it with RecvUs.</summary>
         public ulong WrittenUs;
+        /// <summary>When the publisher says the data was true, UTC microseconds, which is not
+        /// when it was sent. 0 = none given and WrittenUs is all there is (docs/node.md).</summary>
+        public ulong CaptureUs;
         public Dictionary<string, object> Fields;   // decoded (schema'd messages), else null
         public object Value;                          // typed instance for a typed topic, the bare
                                                       // value for a bare-type schema, else Fields
@@ -934,6 +937,7 @@ namespace Dart
                 Data = Codec.Bytes(m.data),
                 RecvUs = m.recv_us,
                 WrittenUs = m.written_us,
+                CaptureUs = m.capture_us,
             };
             if (m.schema != IntPtr.Zero)
             {

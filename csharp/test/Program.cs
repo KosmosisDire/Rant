@@ -894,10 +894,11 @@ static class Program
         };
 
         // Single-threaded: drive both nodes by polling them in the loop (no start()).
+        long captured = Std.Now() - 5000;   // "true" 5 ms before the send, to read back
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && !Got.IsSet)
         {
-            pubch.Send(sent);
+            pubch.Send(sent, captured);
             pub.Poll(1);
             sub.Poll(1);
         }
@@ -911,7 +912,16 @@ static class Program
                  && r.Frame == "map"
                  && r.Tags != null && r.Tags.Length == 2 && r.Tags[0] == "fast" && r.Tags[1] == "ok"
                  && Math.Abs(r.Vel.Dx - 0.5) < 1e-6 && Math.Abs(r.Vel.Dy - 0.25) < 1e-6;
-            Console.WriteLine(ok ? "PASS" : "FAIL: decoded value mismatch");
+            if (!ok) Console.WriteLine("FAIL: decoded value mismatch");
+            // The three stamps: the sender's commit, its stated capture time, our receipt.
+            if (ok && (Received.CaptureUs != (ulong)captured
+                       || Received.WrittenUs < Received.CaptureUs || Received.RecvUs == 0))
+            {
+                ok = false;
+                Console.WriteLine($"FAIL: stamps capture={Received.CaptureUs} (want {captured})"
+                                  + $" written={Received.WrittenUs} recv={Received.RecvUs}");
+            }
+            if (ok) Console.WriteLine("PASS");
             using (var s = new Schema(typeof(Pose)))
                 Console.WriteLine("Pose DSL (for C interop):\n" + s.Dsl);
         }
