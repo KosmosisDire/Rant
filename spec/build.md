@@ -83,5 +83,14 @@ links, whether it adds DART as a subproject or finds the installed package.
   assembles the Unity package, `node bridge/client/build.mjs` regenerates the JS client
   dist. A tag push builds win-x64 and linux-x64 and publishes the NuGet and Unity packages.
   Nothing binary is committed.
+- CI is `.github/workflows/build.yml` on every push and pull request, across linux, windows
+  and macos: configure and build, regenerate `dist/` and refuse a diff, build
+  `tools/consumer` both ways, and build the shared library. The explorer and the bridge are
+  off, since they fetch SDL3 and IXWebSocket and are moving out of this repo. No test suite
+  runs yet: that waits on the test rework, so a red build means a build broke.
+- `tools/consumer` is a throwaway project that consumes DART the way a user does, from the
+  source tree by default and from an install with `DART_CONSUMER_FIND_PACKAGE=ON`. It is
+  the only thing that notices when external consumption breaks, which the normal build
+  cannot see.
 - `.gitignore` binary patterns are anchored to the root. An unanchored `node` once matched
   `src/node/`. Check `git status --ignored` when a new source file will not stage.

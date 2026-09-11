@@ -1,0 +1,66 @@
+# Build DART on every push and pull request, on the three desktop platforms.
+#
+# The test suites are deliberately not run here yet. The test rework lands first and the
+# suites (bin/dart_test selftest, cpp/test.cpp, csharp/test, python/test.py) get wired in
+# after it, so a red build here means a build broke, never a flaky network leg.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux }
+          - { os: windows-latest, name: windows }
+          - { os: macos-latest,   name: macos }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The explorer and the bridge fetch SDL3, IXWebSocket and libdatachannel, and both
+      # are moving out of this repo, so CI covers the library and its own programs.
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
+          cmake --build build --config Release --parallel
+
+      # A hand edited dist/ header is the one thing the amalgamator cannot catch itself.
+      # .gitattributes pins the committed form to LF, so this is clean on every platform.
+      - name: dist matches src
+        run: |
+          cmake -P tools/pack.cmake
+          git diff --exit-code -- dist/
+
+      # The CPM and FetchContent path: a consumer writes no anchor and defines nothing.
+      - name: A consumer builds from source
+        run: |
+          cmake -S tools/consumer -B build/consumer -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/consumer --config Release
+
+      - name: A consumer builds from an install
+        run: |
+          cmake --install build --prefix "${{ runner.temp }}/prefix"
+          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DDART_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
+          cmake --build build/findpkg --config Release
+
+      - name: Shared library
+        if: runner.os != 'Windows'
+        run: sh csharp/native/build.sh
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: Shared library
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:Path = "C:\Program Files\LLVM\bin;$env:Path"
+          ./csharp/native/build.ps1
