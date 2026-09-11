@@ -18,9 +18,11 @@ the C declarations inside `dart::detail` and nothing at global scope.
 #include "dart.hpp"
 ```
 
+`dist/dart.cpp` is exactly that, generated, so a project compiles it instead of writing one.
+
 ```sh
-g++ -std=c++17 -Idist cpp/example.cpp cpp/dart_impl.cpp -o example -lrt -lpthread
-g++ -std=c++17 -Idist cpp/example.cpp cpp/dart_impl.cpp -o example.exe -lws2_32 -lbcrypt -lwinmm
+g++ -std=c++17 -Idist cpp/example.cpp dist/dart.cpp -o example -lrt -lpthread
+g++ -std=c++17 -Idist cpp/example.cpp dist/dart.cpp -o example.exe -lws2_32 -lbcrypt -lwinmm
 ```
 
 The header is clean under `-fno-exceptions -fno-rtti` and is verified on MinGW g++,

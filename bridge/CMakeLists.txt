@@ -14,6 +14,8 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/static_runtime.cmake")
 
 option(DART_BRIDGE_WEBRTC "WebRTC data path (fetches libdatachannel + MbedTLS)" ON)
 
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+
 # Standalone: own the output dir and define a minimal dart target over ../dist. Under the
 # root build the dart target already exists.
 if(NOT TARGET dart)
@@ -21,7 +23,6 @@ if(NOT TARGET dart)
     set(CMAKE_CONFIGURATION_TYPES "Release;Debug;RelWithDebInfo;MinSizeRel"
         CACHE STRING "Build configs (Release first = the default)" FORCE)
   endif()
-  get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
   # land binaries in bin/ like the root build, every config shares it (docs/building.md)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REPO_ROOT}/bin")
   foreach(_cfg ${CMAKE_CONFIGURATION_TYPES})
@@ -89,9 +90,8 @@ if(DART_BRIDGE_WEBRTC)
   FetchContent_MakeAvailable(libdatachannel)
 endif()
 
-# Two C++ translation units: bridge.cpp is the server, dart.cpp is the implementation
-# anchor defining DART_IMPLEMENTATION.
-add_executable(dart_bridge bridge.cpp dart.cpp)
+# Two C++ translation units: bridge.cpp is the server, dist/dart.cpp the generated anchor.
+add_executable(dart_bridge bridge.cpp "${REPO_ROOT}/dist/dart.cpp")
 target_link_libraries(dart_bridge PRIVATE dart dart_platform
                       ixwebsocket::ixwebsocket nlohmann_json::nlohmann_json)
 if(DART_BRIDGE_WEBRTC)
