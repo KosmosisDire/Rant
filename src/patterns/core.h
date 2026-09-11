@@ -3,6 +3,7 @@
 #ifndef DART_PATTERNS_H
 #define DART_PATTERNS_H
 
+#include "../common/api.h"
 #include "../node/runtime.h"
 
 #ifdef __cplusplus
@@ -106,44 +107,44 @@ typedef struct {
 
 /* Creates the definition (the body lives here, on_request NULL answers NO_HANDLER) or a
  * remote (a reference to one). Schemas may be NULL for untyped. NULL on failure. */
-DartFunction *dart_node_create_function_definition(DartNode *n, const char *name,
-                    const DartSchema *req_schema, const DartSchema *rsp_schema,
-                    DartRequestFn on_request, void *user, const DartFunctionOpts *opts);
-DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
-                    const DartSchema *req_schema, const DartSchema *rsp_schema,
-                    const DartFunctionOpts *opts);
+DART_API DartFunction *dart_node_create_function_definition(DartNode *n, const char *name,
+                             const DartSchema *req_schema, const DartSchema *rsp_schema,
+                             DartRequestFn on_request, void *user, const DartFunctionOpts *opts);
+DART_API DartFunction *dart_node_create_remote_function(DartNode *n, const char *name,
+                             const DartSchema *req_schema, const DartSchema *rsp_schema,
+                             const DartFunctionOpts *opts);
 
 /* Calls and blocks driving the node loop. timeout_ms negative = the function's default.
  * out->data is valid until the next blocking call. docs/patterns.md has the returns. */
-int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
-                        const DartCallOpts *opts);
+DART_API int  dart_function_call(DartFunction *fn, DartBytes req, DartResponse *out, int timeout_ms,
+                                 const DartCallOpts *opts);
 /* Returns as soon as the request is committed, then on_response fires once with the
  * outcome. NULL = fire and forget. DART_OK or a negative DartResult. */
-int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
-                              void *user, const DartCallOpts *opts);
+DART_API int  dart_function_call_async(DartFunction *fn, DartBytes req, DartResponseFn on_response,
+                                       void *user, const DartCallOpts *opts);
 /* Providers matched at a remote, callers matched at a definition. */
-int  dart_function_match_count(DartFunction *fn);
+DART_API int  dart_function_match_count(DartFunction *fn);
 /* Parks both channels, cancels every outstanding call with one CANCELLED outcome and frees
  * the handle. DART_ERR_STATE from a callback, the handle then stays valid. */
-int  dart_function_retire(DartFunction *fn);
+DART_API int  dart_function_retire(DartFunction *fn);
 /* A reflect_from_mesh handle: re types every channel in place when the generation moved.
  * 1 re typed, 0 current, negative on error, DART_ERR_ROLE without the flag. */
-int  dart_function_refresh(DartFunction *fn);
+DART_API int  dart_function_refresh(DartFunction *fn);
 
 /* The built in @dart/meta function every node hosts and can call, with .multi and directed
  * requests. Ask with DartCallOpts.provider and a DART_META_* mask. NULL when disabled. */
-DartFunction *dart_node_meta_function(DartNode *n);
+DART_API DartFunction *dart_node_meta_function(DartNode *n);
 
 /* in the handler callback */
-void      dart_request_reply(DartRequest *request, DartBytes rsp);   /* answers OK */
+DART_API void      dart_request_reply(DartRequest *request, DartBytes rsp);   /* answers OK */
 /* Answers APP_ERROR with a human readable message (NULL = the default text, truncated at
  * DART_CALL_MSG_MAX). rsp may still carry structured failure data. */
-void      dart_request_fail (DartRequest *request, const char *message, DartBytes rsp);
+DART_API void      dart_request_fail (DartRequest *request, const char *message, DartBytes rsp);
 /* Defers the reply: returns a token (0 on failure) and suppresses the auto ack. Complete it
  * later from any thread with dart_function_complete. */
-uint64_t  dart_request_defer(DartRequest *request);
-int       dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus status,
-                                 const char *message, DartBytes rsp);
+DART_API uint64_t  dart_request_defer(DartRequest *request);
+DART_API int       dart_function_complete(DartFunction *fn, uint64_t token, DartCallStatus status,
+                                          const char *message, DartBytes rsp);
 
 /* Tasks: a function with progress and cancellation on the same handle. docs/tasks.md and
  * spec/patterns.md explain the model. */
@@ -163,28 +164,28 @@ typedef struct {
 
 /* Creates the definition or a remote, exactly as for a function, with prg_schema typing the
  * progress channel. The handler answers inline, or starts, defers and works the token. */
-DartFunction *dart_node_create_task_definition(DartNode *n, const char *name,
-                    const DartSchema *req_schema, const DartSchema *prg_schema,
-                    const DartSchema *rsp_schema, DartRequestFn on_request, void *user,
-                    const DartTaskOpts *opts);
-DartFunction *dart_node_create_remote_task(DartNode *n, const char *name,
-                    const DartSchema *req_schema, const DartSchema *prg_schema,
-                    const DartSchema *rsp_schema, const DartTaskOpts *opts);
+DART_API DartFunction *dart_node_create_task_definition(DartNode *n, const char *name,
+                             const DartSchema *req_schema, const DartSchema *prg_schema,
+                             const DartSchema *rsp_schema, DartRequestFn on_request, void *user,
+                             const DartTaskOpts *opts);
+DART_API DartFunction *dart_node_create_remote_task(DartNode *n, const char *name,
+                             const DartSchema *req_schema, const DartSchema *prg_schema,
+                             const DartSchema *rsp_schema, const DartTaskOpts *opts);
 
 /* Sends RUNNING to the caller now. Idempotent, and implied by defer on a task.
  * DART_ERR_STATE on a plain function or after a reply. */
-int dart_request_start(DartRequest *request);
+DART_API int dart_request_start(DartRequest *request);
 /* Token verbs, any thread. A stale token is DART_ERR_STATE. progress broadcasts on the prg
  * channel, cancelled answers 1 once a cancel arrived. Cancellation is cooperative. */
-int dart_function_progress (DartFunction *fn, uint64_t token, DartBytes progress);
-int dart_function_cancelled(DartFunction *fn, uint64_t token);
+DART_API int dart_function_progress (DartFunction *fn, uint64_t token, DartBytes progress);
+DART_API int dart_function_cancelled(DartFunction *fn, uint64_t token);
 /* The cancel notification, one slot per definition, NULL clears. Fires on the poll thread
  * under the usual callback restrictions. Polling dart_function_cancelled alone is complete. */
 typedef void (*DartCancelFn)(uint64_t token, void *user);
-int dart_function_on_cancel(DartFunction *def, DartCancelFn on_cancel, void *user);
+DART_API int dart_function_on_cancel(DartFunction *def, DartCancelFn on_cancel, void *user);
 /* Requests cancellation of call_id, cooperative and never acked: the terminal status is the
  * answer. DART_ERR_ROLE when the provider declared no_cancel, DART_ERR_STATE when not pending. */
-int dart_function_cancel(DartFunction *fn, uint32_t call_id);
+DART_API int dart_function_cancel(DartFunction *fn, uint32_t call_id);
 
 /* Variables: replicated state with one owner, the definition, which publishes the value.
  * Writers push over a set channel with no response. Remotes cache the latest value. */
@@ -206,22 +207,22 @@ typedef struct {
 
 /* Creates the definition (this node holds the value) or a remote (reads see the cached
  * latest, writes go over the set channel). schema NULL = untyped. NULL on failure. */
-DartVariable *dart_node_create_variable_definition(DartNode *n, const char *name,
-                              const DartSchema *schema, const DartVariableOpts *opts);
-DartVariable *dart_node_create_remote_variable(DartNode *n, const char *name,
-                              const DartSchema *schema, const DartVariableOpts *opts);
+DART_API DartVariable *dart_node_create_variable_definition(DartNode *n, const char *name,
+                                       const DartSchema *schema, const DartVariableOpts *opts);
+DART_API DartVariable *dart_node_create_remote_variable(DartNode *n, const char *name,
+                                       const DartSchema *schema, const DartVariableOpts *opts);
 
 /* Reads the current value into *out, a view valid until the next call on this variable or
  * the next poll. 1 if a value exists. */
-int  dart_variable_get(DartVariable *var, DartBytes *out);
+DART_API int  dart_variable_get(DartVariable *var, DartBytes *out);
 /* Sets the value: a definition applies and publishes, a remote sends over the set channel.
  * DART_ERR_NO_TOPIC = no owner matched, DART_ERR_ROLE = a read only owner. docs/patterns.md. */
-int  dart_variable_set(DartVariable *var, DartBytes value);
+DART_API int  dart_variable_set(DartVariable *var, DartBytes value);
 /* Force overrides the value until unforce restores the latest absorbed set. A definition
  * needs .allow_force (DART_ERR_STATE without), a remote's force is ignored by one without. */
-int  dart_variable_force(DartVariable *var, DartBytes value);
-int  dart_variable_unforce(DartVariable *var);
-int  dart_variable_forced(DartVariable *var);
+DART_API int  dart_variable_force(DartVariable *var, DartBytes value);
+DART_API int  dart_variable_unforce(DartVariable *var);
+DART_API int  dart_variable_forced(DartVariable *var);
 
 /* Variable events, one slot each, NULL clears. on_write fires on every applied write,
  * on_change only when the observed state changes, with a replay at registration. */
@@ -240,18 +241,18 @@ typedef struct {
 } DartVariableUpdate;
 typedef void (*DartVariableUpdateFn)(const DartVariableUpdate *update, void *user);
 
-int  dart_variable_on_change(DartVariable *var, DartVariableUpdateFn on_change, void *user);
-int  dart_variable_on_write (DartVariable *var, DartVariableUpdateFn on_write,  void *user);
+DART_API int  dart_variable_on_change(DartVariable *var, DartVariableUpdateFn on_change, void *user);
+DART_API int  dart_variable_on_write (DartVariable *var, DartVariableUpdateFn on_write,  void *user);
 /* Blocks driving the node loop until a value exists or timeout_ms elapses (negative =
  * forever). 1 = a value, 0 = timeout, or from a callback or under a service thread. */
-int  dart_variable_wait(DartVariable *var, int timeout_ms);
+DART_API int  dart_variable_wait(DartVariable *var, int timeout_ms);
 /* Remote: owners matched. Definition: remotes matched. */
-int  dart_variable_match_count(DartVariable *var);
+DART_API int  dart_variable_match_count(DartVariable *var);
 /* Parks the channels, silences the callbacks and frees the handle, invalid after. The same
  * contract as dart_function_retire. See docs/patterns.md. */
-int  dart_variable_retire(DartVariable *var);
+DART_API int  dart_variable_retire(DartVariable *var);
 /* As dart_function_refresh, for a reflect_from_mesh variable. */
-int  dart_variable_refresh(DartVariable *var);
+DART_API int  dart_variable_refresh(DartVariable *var);
 
 #ifdef __cplusplus
 }

@@ -773,6 +773,15 @@ static int i_dart_node_on_shm(void *u, uint16_t topic_index, uint32_t from, cons
 
 static void i_dart_node_logs_open(DartNode *n);   /* defined with the log API below */
 
+DartAllocator dart_allocator_heap(uint32_t page_size){
+    return dart_allocator_dynamic(i_dart_plat_realloc, page_size);
+}
+
+void *dart_heap_realloc(void *user, void *ptr, size_t size){
+    (void)user;
+    return i_dart_plat_realloc(ptr, size);
+}
+
 DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message, DartEventFn on_event, const DartNodeOpts *opts){
     DartNodeOpts o; DartDiscoveryNetConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;

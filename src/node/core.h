@@ -3,6 +3,7 @@
 #ifndef DART_NODE_CORE_H
 #define DART_NODE_CORE_H
 
+#include "../common/api.h"
 #include "../transport/core.h"
 #include "../discovery/core.h"
 #include "../serialize/schema.h"
@@ -76,7 +77,7 @@ typedef void (*DartEventFn)(const DartEvent *ev);
 
 /* Formats ev as one line into buf, always NUL terminated. Returns buf. DART_NO_DIAG
  * compiles the text out and yields "error N". */
-const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
+DART_API const char *dart_event_str(const DartEvent *ev, char *buf, size_t cap);
 
 /* reflection types, the walks are in node/runtime.h */
 typedef struct { uint32_t a, b; uint16_t c, d; } DartIter;   /* walk state, zero initialize */

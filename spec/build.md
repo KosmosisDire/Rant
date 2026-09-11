@@ -31,6 +31,17 @@ Linux: rt) plus Threads.
   `CMAKE_DEFAULT_BUILD_TYPE` is rejected by the VS generator, so it is guarded to Ninja
   Multi-Config with an `unset(... CACHE)` else branch.
 - `DART_BUILD_TOOLS=OFF` (auto when cross compiling) builds only the `dart` target.
+- Three builds, one macro. `src/common/api.h` defines `DART_API`, which every public
+  declaration carries. The default build compiles DART into the caller's own binary and
+  needs no decoration. `DART_BUILD_SHARED` marks each entry point exported, so the shared
+  library's export table is exactly what the public headers declare and nothing else,
+  which is why no binding keeps an export list. `DART_LINK_SHARED` marks them imported,
+  which only Windows needs. GNU toolchains also take `-fvisibility=hidden` so the
+  internals stay in. The declaration carries the attribute and the definition in the `.c`
+  stays plain: the amalgamation puts both in one translation unit, declaration first.
+- `dart_allocator_heap` and `dart_heap_realloc` are the process heap as an allocator and
+  as a `DartAllocFn`. They exist so a binding over the shared library never has to reach
+  for an internal symbol or route allocation back through its own runtime.
 - The `DART_THREADS` and `DART_SHM` detection blocks live identically in both
   `platform/core.h` and `transport/core.h`, because every translation unit must agree
   whichever header it saw first. Edit both together. Code guards are `#ifdef DART_THREADS`,
@@ -38,7 +49,7 @@ Linux: rt) plus Threads.
   the thread, mutex, condvar and waker contract and defining `DART_THREADS` itself.
 - The `DART_IMPLEMENTATION` auto define in `dart.hpp` is guarded by
   `!defined(__cplusplus)`, so a `.cpp` anchor spells the define itself.
-- Bindings: `csharp/native/build.ps1` builds the native library, `csharp/unity/pack.ps1`
+- Bindings: `csharp/native/build.ps1` builds the native library with `DART_BUILD_SHARED`, `csharp/unity/pack.ps1`
   assembles the Unity package, `node bridge/client/build.mjs` regenerates the JS client
   dist. A tag push builds win-x64 and linux-x64 and publishes the NuGet and Unity packages.
   Nothing binary is committed.

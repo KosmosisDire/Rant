@@ -20,7 +20,7 @@ from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
                     c_int32, c_int64, c_uint8, c_uint16, c_uint32, c_uint64,
                     c_size_t, c_double, c_float, c_ubyte)
 
-_WRAPPER_VERSION = "5"   # bump to force a recompile when this file's ABI view changes
+_WRAPPER_VERSION = "6"   # bump to force a recompile when this file's ABI view changes
 
 # The embedded C source. The packer replaces the marker with the escaped dist/dart.h. In
 # tree the marker stays and _source() reads dist/dart.h from disk.
@@ -43,56 +43,6 @@ def _source():
 
 # Compile on import: find a compiler, build a shared library from the embedded source
 # once, cache it by content hash, and load it via ctypes.
-
-# The symbols the wrapper binds. MSVC style compilers export nothing from a DLL by
-# default, so they get this list as a .def. GNU compilers auto export.
-_EXPORTS = [
-    "i_dart_plat_realloc",
-    "dart_node_open", "dart_node_poll", "dart_node_close",
-    "dart_node_start", "dart_node_stop", "dart_node_is_started",
-    "dart_node_evicted_unsent", "dart_last_error",
-    "dart_node_create_topic", "dart_node_topic",
-    "dart_topic_send", "dart_topic_set_role", "dart_topic_retire", "dart_topic_index",
-    "dart_topic_match_count", "dart_topic_drain",
-    "dart_topic_take", "dart_topic_dispatch", "dart_node_dispatch",
-    "dart_topic_queue_stats",
-    "dart_node_mem_stats", "dart_node_backpressure_stats", "dart_event_str",
-    "dart_topic_counts", "dart_node_log_text", "dart_node_log_topic",
-    "dart_node_meta_function",
-    "dart_node_settle", "dart_topic_ready", "dart_topic_pending_count",
-    "dart_node_lock", "dart_node_unlock",
-    # patterns: functions / variables
-    "dart_node_create_function_definition", "dart_node_create_remote_function",
-    "dart_function_call", "dart_function_call_async", "dart_function_match_count",
-    "dart_function_retire",
-    "dart_request_reply", "dart_request_fail", "dart_request_defer",
-    "dart_function_complete",
-    # patterns: tasks
-    "dart_node_create_task_definition", "dart_node_create_remote_task",
-    "dart_request_start", "dart_function_progress", "dart_function_cancelled",
-    "dart_function_on_cancel", "dart_function_cancel",
-    "dart_node_create_variable_definition", "dart_node_create_remote_variable",
-    "dart_variable_get", "dart_variable_set", "dart_variable_force",
-    "dart_variable_unforce", "dart_variable_forced", "dart_variable_wait",
-    "dart_variable_match_count", "dart_variable_retire",
-    "dart_variable_on_change", "dart_variable_on_write",
-    "dart_schema_compile", "dart_schema_free", "dart_schema_copy", "dart_schema_wire",
-    "dart_schema_hash", "dart_schema_name", "dart_schema_size", "dart_schema_print",
-    "dart_schema_field_type_wire", "dart_schema_subset", "dart_get_array_count",
-    "dart_set_array_count",
-    "dart_get_value_at", "dart_set_value_at", "dart_array_count_at",
-    "dart_schema_compile_env", "dart_std_name", "dart_std_text", "dart_std_by_name",
-    "dart_std_schema", "dart_std_recognize", "dart_std_recognize_field",
-    "dart_std_recognize_elem", "dart_timestamp_now", "dart_uuid_new",
-    "dart_schema_field_count", "dart_schema_field_at", "dart_schema_field_index",
-    "dart_schema_enum_count", "dart_schema_enum_variant", "dart_get_enum", "dart_set_enum",
-    "dart_schema_message_default", "dart_schema_scalar_size",
-    "dart_set_uint", "dart_set_int", "dart_set_f64", "dart_set_f32", "dart_set_array",
-    "dart_set_string", "dart_set_string_at",
-    "dart_get_uint", "dart_get_int", "dart_get_f64", "dart_get_f32", "dart_get_array",
-    "dart_get_value", "dart_set_value",
-    "dart_schema_msg_min", "dart_schema_msg_len", "dart_set_map",
-]
 
 
 def _lib_ext():
@@ -157,17 +107,12 @@ def _compile(src, path, family, out_lib):
             f.write(src)
         staged = os.path.join(tmp, "dart" + _lib_ext())
         if family == "msvc":
-            deffile = os.path.join(tmp, "dart.def")
-            with open(deffile, "w") as f:
-                f.write("EXPORTS\n")
-                f.writelines(name + "\n" for name in _EXPORTS)
             cmd = [path, "/nologo", "/O2", "/LD", "/TC", "/DDART_IMPLEMENTATION",
-                   "/D_CRT_SECURE_NO_WARNINGS", cfile, "/Fe:" + staged,
-                   "/link", "/DEF:" + deffile,
-                   "ws2_32.lib", "bcrypt.lib", "winmm.lib"]
+                   "/DDART_BUILD_SHARED", "/D_CRT_SECURE_NO_WARNINGS", cfile,
+                   "/Fe:" + staged, "/link", "ws2_32.lib", "bcrypt.lib", "winmm.lib"]
         else:
             cmd = [path, "-O2", "-std=c99", "-shared", "-DDART_IMPLEMENTATION",
-                   cfile, "-o", staged]
+                   "-DDART_BUILD_SHARED", "-fvisibility=hidden", cfile, "-o", staged]
             if sys.platform != "win32":
                 cmd.insert(1, "-fPIC")
             if sys.platform.startswith("linux"):
@@ -513,6 +458,8 @@ _NULL_VAR_FN = cast(None, _VarFn)
 def _bind(lib):
     F = lambda fn, args, ret: (setattr(getattr(lib, fn), "argtypes", args),
                                setattr(getattr(lib, fn), "restype", ret))
+    F("dart_allocator_heap", [c_uint32], DartAllocator)
+    F("dart_heap_realloc", [c_void_p, c_void_p, c_size_t], c_void_p)
     F("dart_node_open", [POINTER(DartAllocator), c_char_p, _MsgFn, _EvtFn,
                          POINTER(DartNodeOpts)], c_void_p)
     F("dart_last_error", [c_void_p], DartEvent)
@@ -651,31 +598,16 @@ def _load():
     return _LIB
 
 
-# The schema layer needs a realloc style hook. dart_allocator_alloc is static inline and
-# not exported, so the C runtime's realloc and free back it. Every schema alloc uses it.
-_CRT = None
+# The schema layer needs a realloc style hook. dart_heap_realloc is the library's own,
+# so a schema allocation stays in native code with no callback into Python.
+_SCHEMA_ALLOC = None
 
 
-def _crt():
-    global _CRT
-    if _CRT is None:
-        crt = ctypes.CDLL("msvcrt") if sys.platform == "win32" else ctypes.CDLL(None)
-        crt.realloc.restype = c_void_p
-        crt.realloc.argtypes = [c_void_p, c_size_t]
-        crt.free.restype = None
-        crt.free.argtypes = [c_void_p]
-        _CRT = crt
-    return _CRT
-
-
-@_AllocFn
-def _schema_alloc(user, ptr, size):
-    crt = _crt()
-    if size == 0:
-        if ptr:
-            crt.free(ptr)
-        return None
-    return crt.realloc(ptr, size)
+def _schema_alloc():
+    global _SCHEMA_ALLOC
+    if _SCHEMA_ALLOC is None:
+        _SCHEMA_ALLOC = cast(_load().dart_heap_realloc, _AllocFn)
+    return _SCHEMA_ALLOC
 
 
 # The enums. Values match the C wire, names mirror the C# wrapper.
@@ -1536,7 +1468,7 @@ def _dstr(s):
 def _compile_dsl(text):
     lib = _load()
     err = c_char_p()
-    s = lib.dart_schema_compile(_schema_alloc, None, text.encode("utf-8"), byref(err))
+    s = lib.dart_schema_compile(_schema_alloc(), None, text.encode("utf-8"), byref(err))
     if not s:
         near = err.value.decode("utf-8", "replace") if err.value else "?"
         raise SchemaError("schema compile failed near: " + near)
@@ -1628,7 +1560,7 @@ class Schema:
     def __del__(self):
         try:
             if self._s:
-                _load().dart_schema_free(self._s, _schema_alloc, None)
+                _load().dart_schema_free(self._s, _schema_alloc(), None)
                 self._s = None
         except Exception:
             pass
@@ -2373,10 +2305,7 @@ class Node:
         co.discovery.peer_timeout_us = options.peer_timeout_us
         co.discovery.max_peers = options.max_peers
 
-        alloc = DartAllocator()
-        memset(byref(alloc), 0, sizeof(alloc))
-        alloc.page_realloc = cast(lib.i_dart_plat_realloc, c_void_p)
-        alloc.page_size = _DART_ALLOCATOR_PAGE
+        alloc = lib.dart_allocator_heap(_DART_ALLOCATOR_PAGE)
         self._alloc = alloc
 
         cname = name.encode("utf-8") if name else None

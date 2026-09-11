@@ -9,8 +9,12 @@ only, depends on nothing but stddef, stdint and string, and the backing is injec
 Two modes. `dart_allocator_static(buf, size)` bumps one caller buffer, never grows, and
 returns NULL on overflow, for embedded no heap use. `dart_allocator_dynamic(backing,
 page_size)` bumps within pages and takes a new page through the injected `DartPageFn`
-when full (the runtime passes `i_dart_plat_realloc`). Exhaustion surfaces as
-`DART_E_OOM`. `max_bytes` is a runaway guard (0 = `DART_MEM_DEFAULT_MAX`).
+when full. `dart_allocator_heap(page_size)` is that over the process heap and is what a
+caller with no page source of its own uses, including every binding. Exhaustion surfaces
+as `DART_E_OOM`. `max_bytes` is a runaway guard (0 = `DART_MEM_DEFAULT_MAX`).
+
+`dart_heap_realloc` is the same heap in `DartAllocFn` shape, for `dart_schema_compile`
+and `dart_schema_free`.
 
 Two intents, explicit not size based. `dart_allocator_fixed` bumps a shared page,
 cheapest, never individually freed. `dart_allocator_alloc` is a `DartAllocFn` (pass `&a`

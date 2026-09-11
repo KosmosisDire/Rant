@@ -43,9 +43,11 @@ about a wrapper API, this file wins.
   including `type_name`, `elem_name`, `elem_size` and `arr_parent`. A dropped `type_name`
   turns `color: Color` into an anonymous struct and every named reader then refuses the
   sender. Only `dart_schema_print` spells DSL text.
-- A public feature lands in every binding, and `csharp/native/dart.def` plus the Python
-  `_EXPORTS` list gain every new C export. Bindings format log text in their own runtime
-  and call `dart_node_log_text`, never the variadic `dart_node_log` over FFI.
+- A public feature lands in every binding. Nothing lists the exports: a declaration
+  carrying `DART_API` in a public header is exported and nothing else is, so a new entry
+  point is reachable from every binding the moment it is declared. Bindings format log
+  text in their own runtime and call `dart_node_log_text`, never the variadic
+  `dart_node_log` over FFI.
 - A thrown handler in C#, Python or JS answers APP_ERROR with the exception text.
 - Every wait is a probe plus an event plus a bounded block. No blocking only APIs.
 
@@ -118,10 +120,12 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   without them). An over cap string throws.
 - Callbacks are static trampolines dispatched by an int id in `user_data`, marked
   `[MonoPInvokeCallback]` for IL2CPP. Allocators are managed callbacks over
-  `Marshal.ReAllocHGlobal`.
+  `Marshal.ReAllocHGlobal`, which pays a native to managed transition per page.
+  `dart_allocator_heap` and `dart_heap_realloc` are the library's own heap hooks and cost
+  no transition.
 - Stale DLL trap: a stale `dart.dll` presents as memory corruption or peers that never
   match. Check the DLL timestamp first. `csharp/native/build.ps1` deletes the old library
-  before building. `csharp/native/dart.def` is the hand maintained MSVC export list.
+  before building.
 - Task handlers are async delegates with a real `CancellationToken`. They run on the poll
   thread until their first await, so CPU work belongs in `Task.Run`.
 - Unity (`csharp/unity/`) is a subset. `Runtime/Dart.cs` and `Runtime/Plugins/` are
@@ -151,8 +155,8 @@ MinGW.
   `__dart_name__` overrides the type name. `dart.dsl(cls)` computes DSL with no library
   load. Std types are tagged dataclasses.
 - The map body is built and parsed in pure Python.
-- The compiled library is cached by content hash. A new C export needs the `_EXPORTS`
-  list updated and the cache cleared.
+- The compiled library is cached by content hash, keyed on `_WRAPPER_VERSION`, so a
+  changed ABI view needs that bumped.
 - Task handlers run on a daemon thread per call. Raising `dart.CancelledError` completes
   CANCELLED.
 - Gaps: no `seed_peers`, no peer reflection.

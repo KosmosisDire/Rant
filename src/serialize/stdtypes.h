@@ -3,6 +3,7 @@
 #ifndef DART_STDTYPES_H
 #define DART_STDTYPES_H
 
+#include "../common/api.h"
 #include "schema.h"
 
 #ifdef __cplusplus
@@ -31,21 +32,21 @@ typedef enum {
 
 /* The type's name and its canonical spelling, the two halves of the definition the DSL
  * knows. NULL for DART_STD_NONE or an out of range value. */
-const char *dart_std_name(DartStdType t);
-const char *dart_std_text(DartStdType t);
+DART_API const char *dart_std_name(DartStdType t);
+DART_API const char *dart_std_text(DartStdType t);
 /* A name lookup only. Use dart_std_recognize when a peer's shape must be verified too. */
-DartStdType dart_std_by_name(DartString name);
+DART_API DartStdType dart_std_by_name(DartString name);
 
 /* One standard type compiled as a schema of its own, for a topic whose payload is one. */
-DartSchema *dart_std_schema(DartStdType t, DartAllocFn alloc, void *user);
+DART_API DartSchema *dart_std_schema(DartStdType t, DartAllocFn alloc, void *user);
 
 /* Recognizes a standard type in a schema we did not write: the name and the shape must
  * both match. The result is stable per schema, so cache it. */
-DartStdType dart_std_recognize(const DartSchema *s, DartAllocFn alloc, void *user);
-DartStdType dart_std_recognize_field(const DartSchema *s, uint16_t field,
-                                     DartAllocFn alloc, void *user);
-DartStdType dart_std_recognize_elem(const DartSchema *s, uint16_t field,
-                                    DartAllocFn alloc, void *user);
+DART_API DartStdType dart_std_recognize(const DartSchema *s, DartAllocFn alloc, void *user);
+DART_API DartStdType dart_std_recognize_field(const DartSchema *s, uint16_t field,
+                                              DartAllocFn alloc, void *user);
+DART_API DartStdType dart_std_recognize_elem(const DartSchema *s, uint16_t field,
+                                             DartAllocFn alloc, void *user);
 
 /* The C mirrors, layout identical to the wire on a little endian target. */
 typedef struct { float  x, y;       } DartFloat2;
@@ -123,8 +124,8 @@ static inline double dart_double3_dot(DartDouble3 a, DartDouble3 b){
 static inline DartDouble3 dart_double3_cross(DartDouble3 a, DartDouble3 b){
     return dart_double3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 }
-double        dart_double3_length(DartDouble3 a);        /* needs a square root, in stdtypes.c */
-DartDouble3   dart_double3_normalize(DartDouble3 a);     /* the zero vector maps to itself */
+DART_API double        dart_double3_length(DartDouble3 a);        /* needs a square root, in stdtypes.c */
+DART_API DartDouble3   dart_double3_normalize(DartDouble3 a);     /* the zero vector maps to itself */
 
 static inline DartQuaternion dart_quaternion(double x, double y, double z, double w){
     DartQuaternion q; q.x = x; q.y = y; q.z = z; q.w = w; return q;
@@ -143,8 +144,8 @@ static inline DartQuaternion dart_quaternion_mul(DartQuaternion a, DartQuaternio
         b.w * a.z + b.x * a.y - b.y * a.x + b.z * a.w,
         b.w * a.w - b.x * a.x - b.y * a.y - b.z * a.z);
 }
-DartQuaternion dart_quaternion_normalize(DartQuaternion q);
-DartDouble3    dart_quaternion_rotate(DartQuaternion q, DartDouble3 v);
+DART_API DartQuaternion dart_quaternion_normalize(DartQuaternion q);
+DART_API DartDouble3    dart_quaternion_rotate(DartQuaternion q, DartDouble3 v);
 
 static inline DartTransform dart_transform_identity(void){
     DartTransform t = {{0}};   /* zero fills the parent name too, it reaches the wire */

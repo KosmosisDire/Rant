@@ -214,7 +214,7 @@ int main(int argc, char **argv){
     }
     /* compile the shared ChatMsg schema from the allocator the node is about to own. The
      * node copies mem by value at open, so the pool reset in close frees the schema too. */
-    DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator mem = dart_allocator_heap(0);
     g_schema = dart_schema_compile(dart_allocator_alloc, &mem, CHAT_SCHEMA, NULL);
     if (!g_schema || dart_schema_msg_min(g_schema) > 256){   /* the send buffer below is 512 */
         const char *err = NULL;

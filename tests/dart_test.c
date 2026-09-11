@@ -170,7 +170,7 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
  * index is the handle index the shims above resolve. */
 static DartNode *test_node_open(uint8_t *mem, size_t cap, const char *name, DartMsgFn on_msg,
                                DartEventFn on_event, DartNodeOpts opts, const DartTopicDef *chans, uint16_t nch){
-    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartNode *node; uint16_t i; DartAllocator alloc = dart_allocator_heap(0);
     (void)mem; (void)cap;             /* heap-backed: the node self-sizes (was a static arena) */
     if (!opts.max_topics) opts.max_topics = nch ? nch : 1;
     node = dart_node_open(&alloc, name, on_msg, on_event, &opts);
@@ -788,8 +788,8 @@ static void rate_pump(uint64_t dt){   /* flush W to R, then advance the clock */
 }
 static void rate_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_BEST_EFFORT; q.keep_last=4;
     memset(&cw,0,sizeof cw); cw.name="ratech"; cw.qos=q; cw.role=DART_PUB_ONLY;
     memset(&cr,0,sizeof cr); cr.name="ratech"; cr.qos=q; cr.qos.max_rate_hz=100; cr.role=DART_SUB_ONLY;
@@ -877,8 +877,8 @@ static void lap_pump(uint64_t dt){ lap_flush_w(0); lap_collect_r(); lap_feed_w()
 static void lap_run(int ms){ while (ms-- > 0) lap_pump(1000); }   /* 1 ms steps */
 static void lapped_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     DartRepairStats rs;
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=4;
     q.heartbeat_us=30000; q.repair_delay_us=50000;
@@ -990,8 +990,8 @@ static void rt_pump(void){
 }
 static void rtt_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr; int i, n;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     DartPeerRtt e;
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
     q.heartbeat_us=200000;   /* idle HB far off: only the tail HB matters here */
@@ -1113,8 +1113,8 @@ static void ah_pump(uint64_t dt){ ah_flush_w(); ah_collect_r(); ah_feed_w(); ah_
 static void ah_run(int ms){ while (ms-- > 0) ah_pump(1000); }
 static void ahead_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     DartRepairStats ws, rs; uint64_t resent0, ahead0;
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=4;
     q.heartbeat_us=30000; q.repair_delay_us=50000;
@@ -1827,8 +1827,8 @@ static void shml_send(void){
 }
 static void shm_loss_checks(void){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     DartQos q; memset(&q,0,sizeof q); q.reliability=DART_RELIABLE; q.keep_last=8;
     q.heartbeat_us=50000; q.repair_delay_us=20000;
     memset(&cw,0,sizeof cw); cw.name="shmloss"; cw.qos=q; cw.role=DART_PUB_ONLY;
@@ -2107,7 +2107,7 @@ static void dg_on_message(const DartMsg *msg){
 static void dynamic_grow_checks(void){
     static const char *names[12] = {"dg/0","dg/1","dg/2","dg/3","dg/4","dg/5",
                                     "dg/6","dg/7","dg/8","dg/9","dg/10","dg/11"};
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0), sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0), sa = dart_allocator_heap(0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc0=NULL, *pcN;
     DartTopicOpts co; DartDiscoveryAddr seed; uint8_t payload[8]; int i, t;
     memset(&co,0,sizeof co); co.qos.reliability=DART_RELIABLE; co.qos.keep_last=32;
@@ -2151,8 +2151,8 @@ static void qos_on_event(const DartTransportEvent *ev){ if (ev->kind==DART_TRANS
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint16_t pub=0, recv=0;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=wrel?DART_RELIABLE:DART_BEST_EFFORT; cw.qos.keep_last=4;
     memset(&cr,0,sizeof cr); cr.name="qostopic"; cr.role=DART_SUB_ONLY;
@@ -2190,8 +2190,8 @@ static void qos_match_checks(void){
 static int beff_would_evict(int rrel){
     DartTopicDef cw, cr; DartConfig wc, rc; void *mw, *mr; size_t nw, nr;
     DartTransportState *W, *R; uint8_t payload[8]; int i, evict;
-    DartAllocator wa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator wa = dart_allocator_heap(0);
+    DartAllocator ra = dart_allocator_heap(0);
     memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=DART_PUB_ONLY;
     cw.qos.reliability=DART_RELIABLE; cw.qos.keep_last=2;
     memset(&cr,0,sizeof cr); cr.name="beff"; cr.role=DART_SUB_ONLY;
@@ -2233,7 +2233,7 @@ static void schema_print_roundtrip(DartAllocator *ma, DartSchema *s, const char 
 /* (17c) the schema DSL: text compiles to the same wire bytes (hence hash) the builder
    emits, layout comes out right, and malformed text fails with a useful position. */
 static void schema_dsl_checks(void){
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_heap(0);
     static const char POSE[] =
         "Pose\n"
         "{\n"
@@ -2650,9 +2650,9 @@ static void schema_dsl_checks(void){
 /* (18) announce interest: one positional [u32 hash][u8 flags] entry per topic slot. An
    inactive topic is not yielded but holds its position (spec/testing.md). */
 static void schema_advert_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);   /* caller side schema */
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
+    DartAllocator ma = dart_allocator_heap(0);   /* caller side schema */
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc;
     DartTopicOpts co; DartDiscoveryAddr seed; DartSchema *sch=NULL;
     uint32_t pose_h = (uint32_t)dart_topic_id("sch/pose");
@@ -2745,9 +2745,9 @@ static void sb_on_event(const DartEvent *ev){
     if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sb_mismatch_n++;
 }
 static void schema_bind_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL;
     DartTopic *pc, *pc_bad; DartTopicOpts co; DartDiscoveryAddr seed;
     DartSchema *W, *R, *WB, *RB; int t;
@@ -2836,9 +2836,9 @@ static DartSchema *be_build_schema(DartAllocator *a){
     return dart_schema_finish(&b);
 }
 static void schema_bigenum_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopic *pc; DartTopicOpts co;
     DartDiscoveryAddr seed; DartSchema *es; int t, ji;
 
@@ -2994,10 +2994,10 @@ static void sr_on_event(const DartEvent *ev){
     if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sr_mismatch_n++;
 }
 static void schema_root_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator qa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
+    DartAllocator qa = dart_allocator_heap(0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartNodeOpts po, so, qo; DartNode *P=NULL, *S=NULL, *Q=NULL;
     DartTopicOpts co; DartDiscoveryAddr seed;
     DartSchema *sb, *su8, *sstr, *sarr, *smap, *senum, *swrap;
@@ -3265,7 +3265,7 @@ static int sv_roundtrip(const char *text){                  /* print, recompile,
     return ok;
 }
 static void schema_v8_checks(void){
-    sv_ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    sv_ma = dart_allocator_heap(0);
 
     /* ---- named types NARROW: unnamed reads named, named demands the same name ---- */
     {   DartSchema *c = sv("Celsius = f32"), *f = sv("Fahrenheit = f32"), *bare = sv("f32");
@@ -3525,9 +3525,9 @@ static void sd_on_event(const DartEvent *ev, void *user){
     if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sd_mismatch++;
 }
 static void stdtypes_checks(void){
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_heap(0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
     DartNodeOpts po, so; DartNode *P = NULL, *S = NULL;
     DartTopicOpts co; DartDiscoveryAddr seed;
     DartTopic *ppose, *pimg, *pbad; DartSchema *SPose, *SImg, *SBad, *SBadSub;
@@ -3716,7 +3716,7 @@ static void stdtypes_checks(void){
    wire only on a hash mismatch, entry boundary truncation, malformed input rejected whole. */
 static void detail_codec_checks(void){
     static uint8_t tmem[1<<18];
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartConfig tc; DartTransportState *tr; DartTopicDef ch[3];
     DartMetaSchema schemas[3]; DartSchema *S;
     DartDetailWant wants[4];
@@ -3820,7 +3820,7 @@ static void detail_codec_checks(void){
    and the requester pages the rest (spec/testing.md). */
 static void detail_paging_checks(void){
 #define DP_N 40
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartConfig tc; DartTransportState *tr; DartMetaSchema schemas[DP_N]; DartSchema *S;
     DartDetailWant wants[DP_N]; uint8_t req[512], buf[DART_DGRAM_MAX + 8];
     char names[DP_N][DART_TOPIC_NAME_MAX + 1];
@@ -3870,7 +3870,7 @@ static void detail_paging_checks(void){
 
     /* (b) force first: one topic whose schema wire alone exceeds a datagram. respond must
        emit exactly that whole entry, never a header only reply that re asks forever. */
-    {   DartAllocator mb = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    {   DartAllocator mb = dart_allocator_heap(0);
         DartSchemaBuilder b = dart_schema_begin(dart_allocator_alloc, &mb, "Big");
         DartTransportState *t2; DartConfig c2; DartMetaSchema sc; DartDetailWant w; DartSchema *B;
         DartTopicDef d; uint8_t rq[64], *big; size_t need2, rl2, page2, len2; int k;
@@ -3908,9 +3908,9 @@ static void detail_paging_checks(void){
 /* (19c) live uDTL routing: a DETAIL_REQ at the data socket is answered to its source even
    from a bare socket. Duplicates are idempotent, wrong domain and garbage are ignored. */
 static void detail_live_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartNodeOpts po, so; DartNode *P=NULL, *S=NULL; DartTopicOpts co; DartDiscoveryAddr seed;
     DartSchema *W; DartTopic *pc;
     i_DartSock q = DART_SOCK_BAD;
@@ -3967,7 +3967,7 @@ static void detail_live_checks(void){
 
     /* observer mode (opts.fetch_details): a topic-less node greedily fetches every
        peer topic's name + schema and serves the dart_node_peer_topic_* queries */
-    {   DartAllocator oa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    {   DartAllocator oa = dart_allocator_heap(0);
         DartNodeOpts oo = po; DartNode *O;
         oo.fetch_details = 1;
         O = dart_node_open(&oa, "dt-obs", st_on_message, NULL, &oo);
@@ -4628,8 +4628,8 @@ static void pf_pump(DartNode *a, DartNode *b, int ms){
 }
 
 static void patterns_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator ca = dart_allocator_heap(0);
     DartNodeOpts po, co; DartNode *P=NULL, *C=NULL; DartDiscoveryAddr seed;
     DartFunction *prov, *call_add, *pe, *ce, *pd, *cd, *pnh, *cnh, *ghost, *pfm, *cfm;
     uint16_t dom = ST_DOMAIN+20; int t;
@@ -4750,7 +4750,7 @@ static void patterns_checks(void){
 
     /* two callers answered in one provider tick: both replies commit back to back before any
        TX runs, and each caller must receive its own, since call ids are per caller counters */
-    { DartAllocator c2a = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator c2a = dart_allocator_heap(0);
       DartNodeOpts c2o = co; DartNode *C2 = dart_node_open(&c2a, "fn-call2", NULL, NULL, &c2o);
       DartFunction *call2 = C2 ? dart_node_create_remote_function(C2, "add", NULL, NULL, NULL) : NULL;
       ST_CHECK(C2 && call2, "patterns: second caller open");
@@ -4862,7 +4862,7 @@ static void patterns_checks(void){
       ST_CHECK(sr==DART_ERR_NO_TOPIC, "var: set with no owner -> NO_TOPIC (%d)", sr); }
     { /* typed variable, remote force and unforce: the op only unforce must pass the schema
          gate through the empty payload exemption, and remote sets while forced absorb */
-      DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator ma = dart_allocator_heap(0);
       DartSchema *ts = dart_schema_compile(dart_allocator_alloc, &ma, "T { v: u32 }", NULL);
       DartVariable *to, *ta; DartBytes gv; uint8_t b[4]; int fr, ur;
       ST_CHECK(ts != NULL, "var: typed schema compiles");
@@ -5139,8 +5139,8 @@ static volatile int tk_cancel_fired; static volatile uint64_t tk_cancel_token;
 static void tk_on_cancel_cb(uint64_t token, void *user){ (void)user; tk_cancel_token = token; tk_cancel_fired = 1; }
 
 static void task_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator ca = dart_allocator_heap(0);
     DartNodeOpts po, co; DartNode *P=NULL, *C=NULL; DartDiscoveryAddr seed;
     DartFunction *pxfer, *cxfer, *plong, *clong, *pnc, *cnc, *pinl, *cinl, *pbare, *cbare;
     uint16_t dom = ST_DOMAIN+32; int t;
@@ -5385,12 +5385,12 @@ static DartBytes txm_enc(const DartSchema *s, uint32_t tag, uint32_t v, int has_
 }
 
 static void taskx_checks(void){
-    DartAllocator ap  = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ap2 = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ac1 = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ac2 = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ax  = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ma  = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ap  = dart_allocator_heap(0);
+    DartAllocator ap2 = dart_allocator_heap(0);
+    DartAllocator ac1 = dart_allocator_heap(0);
+    DartAllocator ac2 = dart_allocator_heap(0);
+    DartAllocator ax  = dart_allocator_heap(0);
+    DartAllocator ma  = dart_allocator_heap(0);
     DartNodeOpts o; DartDiscoveryAddr seed;
     DartNode *P, *P2, *C1, *C2, *X, *ns[5];
     DartSchema *req_s, *prg_s, *rsp_s;
@@ -5795,8 +5795,8 @@ static void taskx_checks(void){
 
     /* 4. PEER LOSS MID-RUN on a short timeout pair: RUNNING dropped the deadline, then the
        provider stops pumping. The caller's reap must answer PEER_LOST. */
-    { DartAllocator apd = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator acd = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator apd = dart_allocator_heap(0);
+      DartAllocator acd = dart_allocator_heap(0);
       DartNodeOpts od; DartNode *PD, *CD, *pair[2];
       DartFunction *pd, *cd; static TxmProg g; static TxmRsp r;
       uint32_t id=0; uint64_t give_up;
@@ -5841,8 +5841,8 @@ static void dup_on_event(const DartEvent *ev){
         ++*(int*)ev->user;
 }
 static void dup_authority_checks(void){
-    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator aa = dart_allocator_heap(0);
+    DartAllocator ba = dart_allocator_heap(0);
     DartNodeOpts ao, bo; DartNode *A, *B; DartDiscoveryAddr seed;
     int a_dups = 0, b_dups = 0, t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -5896,8 +5896,8 @@ static void dup_authority_checks(void){
 /* The pattern retire lifecycle (19e3): a second same name handle is shadowed while the
  * first lives, and retire parks the predecessor so a re created handle receives. */
 static void retire_checks(void){
-    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator aa = dart_allocator_heap(0);
+    DartAllocator ba = dart_allocator_heap(0);
     DartNodeOpts ao, bo; DartNode *A, *B; DartDiscoveryAddr seed;
     int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -5990,8 +5990,8 @@ static void retire_checks(void){
 /* The dropped peer reflection gate (19e4): the entity walk must refuse dropped peers
  * unless include_dropped is set, or observers grow ghost entities after a restart. */
 static void reflect_dropped_checks(void){
-    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator aa = dart_allocator_heap(0);
+    DartAllocator ba = dart_allocator_heap(0);
     DartNodeOpts ao, bo; DartNode *A, *B; DartDiscoveryAddr seed;
     DartVariable *def; uint32_t pid = 0; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -6044,8 +6044,8 @@ static void reflect_dropped_checks(void){
 /* The variable set match wait (19e5): a fresh accessor's first write rides the send path's
  * match wait, so NO_TOPIC means the owner is genuinely absent. */
 static void varwait_checks(void){
-    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator aa = dart_allocator_heap(0);
+    DartAllocator ba = dart_allocator_heap(0);
     DartNodeOpts ao, bo; DartNode *P, *C; DartDiscoveryAddr seed;
     DartVariable *vd; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -6138,10 +6138,10 @@ static void ch_send(DartTopic *beat, int nbytes){
 }
 
 static void churn_checks(void){
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_heap(0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator ca = dart_allocator_heap(0);
+    DartAllocator ua = dart_allocator_heap(0);
     DartNodeOpts po, co2, uo; DartNode *P, *C, *U; DartDiscoveryAddr seed;
     DartSchema *G1, *G2, *G3;
     DartTopic *beat, *csub; DartTopicOpts topts;
@@ -6298,7 +6298,7 @@ static void churn_checks(void){
     { int wave_ok = 1, cross_ok = 1, late_ok = 1, live_ok = 1;
       size_t p_mem1 = 0, c_mem1 = 0, u_mem1 = 0;
       for (cyc=0;cyc<6;cyc++){
-          DartAllocator ta = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+          DartAllocator ta = dart_allocator_heap(0);
           DartNodeOpts to2 = po; DartNode *T; DartTopic *tt;
           unsigned long u0 = ch_u_recv, t0c = ch_t_recv;
           to2.user_data = (void*)"T";
@@ -6383,8 +6383,8 @@ static void matchwait_checks(void){
     { /* per-process fixed port, like the domain base: concurrent selftests must not
          collide on the bind (the phase needs it fixed only to intercept by port) */
       const uint16_t MW_PORT = (uint16_t)(40000u + st_domain_base % 20000u);
-      DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+      DartAllocator aa = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts ao, bo; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
       memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+24; bo.disable_shm=1; bo.discovery.max_peers=4;
       bo.discovery.announce_interval_us=200000;
@@ -6432,8 +6432,8 @@ static void matchwait_checks(void){
 #ifdef DART_THREADS
     /* (b) FIRST SEND against the forming match: a catch_up 0 publish fired right after
        create_topic must wait for the present subscriber's match, commit and deliver. */
-    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator aa = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts o; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
       memset(&o,0,sizeof o); o.domain=ST_DOMAIN+25; o.disable_shm=1; o.discovery.max_peers=4;
       o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
@@ -6477,8 +6477,8 @@ static void matchwait_checks(void){
 
     /* (c) CONTROL, the wait disabled: the same racing send commits at once to zero
        subscribers and is gone, but DART_E_UNMATCHED_SEND fires on the way out. */
-    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator aa = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts o, ao; DartNode *A, *B; DartTopic *at=NULL, *bt=NULL;
       memset(&o,0,sizeof o); o.domain=ST_DOMAIN+26; o.disable_shm=1; o.discovery.max_peers=4;
       o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
@@ -6541,9 +6541,9 @@ static void relay_checks(void){
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4; seed.port=R_PORT;
 
     /* (a) INTRODUCTION + DATA, then the relay dies */
-    { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator ua = dart_allocator_heap(0);
+      DartAllocator ra = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts uo, ro, bo; DartNode *U=NULL, *R=NULL, *B=NULL;
       DartTopic *ut=NULL, *bt=NULL;
       memset(&ro,0,sizeof ro); ro.domain=ST_DOMAIN+27; ro.disable_shm=1; ro.discovery.max_peers=4;
@@ -6612,8 +6612,8 @@ static void relay_checks(void){
 
     /* (b) CONTROL: the same unicast only node with nobody to relay it is unreachable in
        both directions, so (a) measured the relay, not the loopback */
-    { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator ua = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts uo, bo; DartNode *U=NULL, *B=NULL;
       memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+28; bo.disable_shm=1; bo.discovery.max_peers=4;
       bo.discovery.announce_interval_us=200000;
@@ -6653,9 +6653,9 @@ static void nat_checks(void){
     }
     ST_CHECK(DEAD_PORT != 0, "nat: black-hole port binds");
 
-    { DartAllocator ua = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ra = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator ua = dart_allocator_heap(0);
+      DartAllocator ra = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts uo, ro, bo; DartNode *U=NULL, *R=NULL, *B=NULL;
       DartTopic *ut=NULL, *bt=NULL;
       memset(&ro,0,sizeof ro); ro.domain=ST_DOMAIN+29; ro.disable_shm=1; ro.discovery.max_peers=4;
@@ -6740,8 +6740,8 @@ static void selfip_checks(void){
     const uint16_t ADV_PORT = (uint16_t)(45000u + st_domain_base % 15000u);
     int t;
     /* (a) peers record what we STATE, not where our packets came from */
-    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-      DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator aa = dart_allocator_heap(0);
+      DartAllocator ba = dart_allocator_heap(0);
       DartNodeOpts ao, bo; DartNode *A=NULL, *B=NULL; DartDiscoveryAddr got;
       memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+29; bo.disable_shm=1; bo.discovery.max_peers=4;
       bo.discovery.announce_interval_us=200000; bo.net.multicast_interface="127.0.0.1";
@@ -6763,7 +6763,7 @@ static void selfip_checks(void){
     }
     /* (b) an unparseable locator is a config error, never a silent fallback to the default:
        a node advertising an unreachable address would look healthy and receive nothing */
-    { DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    { DartAllocator aa = dart_allocator_heap(0);
       DartNodeOpts o; DartNode *n; DartEvent err; char line[160];
       memset(&o,0,sizeof o); o.domain=ST_DOMAIN+29; o.net.multicast_interface="127.0.0.1";
       o.net.self_ip="not-an-ip";
@@ -6882,7 +6882,7 @@ static void ts_checks(void){
     }
 
     /* (c) catch_up replay: a LATE joiner gets the original stamp, not a fresh one */
-    {   DartAllocator la = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    {   DartAllocator la = dart_allocator_heap(0);
         DartNodeOpts lo = ao; DartNode *L; DartTopic *lt;
         DartTopicOpts lopt; uint64_t join_wall;
         memset(&lopt,0,sizeof lopt); lopt.qos = ca[TS_CH_PLAIN].qos;
@@ -7023,8 +7023,8 @@ static void ts_checks(void){
 
     /* (g) the patterns layer: a request's stamp at the handler, a remote write's stamp at
        the variable owner */
-    {   DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-        DartAllocator qa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    {   DartAllocator pa = dart_allocator_heap(0);
+        DartAllocator qa = dart_allocator_heap(0);
         DartNodeOpts po = ao, co; DartNode *P, *C;
         DartFunction *fd, *fr; DartVariable *vd, *vr;
         uint8_t b[4];
@@ -7067,7 +7067,7 @@ static void ts_checks(void){
    a blob by byte range, reject malformed pages. Sans IO, codec only. */
 static void interest_codec_checks(void){
     static uint8_t tmem[1<<16];
-    DartAllocator ma = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator ma = dart_allocator_heap(0);
     DartConfig tc; DartTransportState *tr; DartTopicDef ch[3];
     uint8_t meta[256], req[64], page[128];
     uint16_t ml; uint32_t total, off; DartBytes chunk;
@@ -7133,8 +7133,8 @@ static int ix_recv;
 static uint32_t ix_epoch_pid, ix_epoch;
 static void ix_on_message(const DartMsg *msg){ (void)msg; ix_recv++; }
 static void interest_external_checks(void){
-    DartAllocator pa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator pa = dart_allocator_heap(0);
+    DartAllocator sa = dart_allocator_heap(0);
     DartNodeOpts po, so; DartNode *P, *S; DartTopic *pub=NULL, *sub=NULL;
     DartTopicOpts co; DartDiscoveryAddr seed; char name[16];
     uint8_t payload[8]; int i, t;
@@ -7211,8 +7211,8 @@ static void interest_external_checks(void){
 /* The metalog phase: A logs before anyone listens and triggers a mirrored error, B late
  * joins the error level and reads both, then calls A's @dart/meta directed at A. */
 static void metalog_checks(void){
-    DartAllocator aa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ba = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator aa = dart_allocator_heap(0);
+    DartAllocator ba = dart_allocator_heap(0);
     DartNodeOpts ao, bo; DartNode *A=NULL, *B=NULL; DartDiscoveryAddr seed;
     int t, i;
 
@@ -8273,9 +8273,9 @@ static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     po.discovery.max_peers=(uint16_t)(nsubs+2); po.disable_shm=(uint8_t)disable_shm;
     po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
     so=po;
-    pa=dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    pa=dart_allocator_heap(0);
     P=dart_node_open(&pa,"ms-pub",NULL,NULL,&po);
-    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_dynamic(i_dart_plat_realloc, 0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
+    for (i=0;i<nsubs;i++){ sa[i]=dart_allocator_heap(0); S[i]=dart_node_open(&sa[i],"ms-sub",ms_on_message,NULL,&so); }
     if (!P){ free(payload); return; }
     pc=dart_node_create_topic(P,"ms/ch",DART_PUB_ONLY,NULL,&co);
     for (i=0;i<nsubs;i++) dart_node_create_topic(S[i],"ms/ch",DART_SUB_ONLY,NULL,&co);
@@ -8333,7 +8333,7 @@ static volatile unsigned long g_tb_recv;
 static void tb_on_message(const DartMsg *m){ (void)m; g_tb_recv++; }
 
 static DartNode *tb_open(const char *name, int sub, int disable_shm){
-    DartAllocator a = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator a = dart_allocator_heap(0);
     DartNodeOpts o;
     memset(&o, 0, sizeof o);
     o.domain = 51;
@@ -8476,8 +8476,8 @@ static void qb_sender(void *arg){
 }
 
 static void qb_run(uint32_t size, int queued, int disable_shm){
-    DartAllocator aw = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ar = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator aw = dart_allocator_heap(0);
+    DartAllocator ar = dart_allocator_heap(0);
     DartNodeOpts o; DartTopicOpts co;
     DartNode *w, *r; DartTopic *cw, *cr;
     i_DartThread th;

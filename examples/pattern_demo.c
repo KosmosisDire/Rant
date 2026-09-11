@@ -24,11 +24,6 @@ static DartSchema *add_req_s, *add_rsp_s, *temp_s;
 static uint32_t rd32(DartBytes b){ return b.len >= 4 ? i_dart_le_r32(b.data) : 0; }
 static void     wr32(uint8_t *o, uint32_t v){ i_dart_le_w32(o, v); }
 
-/* DartAllocFn over the platform realloc (the hook takes a leading user pointer) */
-static void *demo_alloc(void *user, void *ptr, size_t size){
-    (void)user; return i_dart_plat_realloc(ptr, size);
-}
-
 /* build a one u32 field message in buf and return the bytes to send */
 static DartBytes enc_u32(const DartSchema *s, const char *field, uint32_t v,
                          uint8_t *buf, size_t cap){
@@ -111,8 +106,8 @@ static void on_node_event(const DartEvent *ev){
 
 int main(int argc, char **argv){
     uint16_t domain = argc > 1 ? (uint16_t)atoi(argv[1]) : 0;
-    DartAllocator sa = dart_allocator_dynamic(i_dart_plat_realloc, 0);
-    DartAllocator ca = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+    DartAllocator sa = dart_allocator_heap(0);
+    DartAllocator ca = dart_allocator_heap(0);
     DartNode *server, *client;
     DartFunction *fn_def, *fn_remote, *task_remote;
     DartVariable *var_def, *var_remote;
@@ -127,9 +122,9 @@ int main(int argc, char **argv){
     if (!server || !client){ fprintf(stderr, "node open failed\n"); return 1; }
 
     /* typed entities: the explorer shows these shapes and its forms fill them */
-    add_req_s = dart_schema_compile(demo_alloc, NULL, "AddRequest { x: i32, y: i32 }", NULL);
-    add_rsp_s = dart_schema_compile(demo_alloc, NULL, "AddResult { sum: i32 }", NULL);
-    temp_s    = dart_schema_compile(demo_alloc, NULL, "Temperature { celsius: u32 }", NULL);
+    add_req_s = dart_schema_compile(dart_heap_realloc, NULL, "AddRequest { x: i32, y: i32 }", NULL);
+    add_rsp_s = dart_schema_compile(dart_heap_realloc, NULL, "AddResult { sum: i32 }", NULL);
+    temp_s    = dart_schema_compile(dart_heap_realloc, NULL, "Temperature { celsius: u32 }", NULL);
     if (!add_req_s || !add_rsp_s || !temp_s){
         fprintf(stderr, "schema compile failed\n"); return 1;
     }

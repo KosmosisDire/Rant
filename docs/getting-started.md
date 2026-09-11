@@ -30,7 +30,7 @@ static void on_event(const DartEvent *ev){
     puts(dart_event_str(ev, buf, sizeof buf));
 }
 
-DartAllocator mem = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+DartAllocator mem = dart_allocator_heap(0);
 DartNode  *n = dart_node_open(&mem, "robot1", on_message, on_event,
                    &(DartNodeOpts){ .domain = 7 });
 DartTopic *t = dart_node_create_topic(n, "msg", DART_PUBSUB, NULL,

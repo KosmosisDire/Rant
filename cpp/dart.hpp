@@ -361,7 +361,7 @@ public:
     /* Compile a schema from DSL text. nullopt on error, and err receives a short message
      * pointing near the offending text. The compiled schema is freed with the Schema. */
     static std::optional<Schema> compile(std::string_view text, std::string* err = nullptr) {
-        return compile_with(detail::dart_allocator_dynamic(detail::i_dart_plat_realloc, 0), text, err);
+        return compile_with(detail::dart_allocator_heap(0), text, err);
     }
     /* Zero heap variant: compile into scratch, which must outlive this Schema. Once a create
      * has copied the schema into the node the scratch may be reused. nullopt if too small. */
@@ -378,7 +378,7 @@ public:
     static Schema adopt(const detail::DartSchema* raw) {
         Schema s;
         if (!raw) return s;
-        s.alloc_ = detail::dart_allocator_dynamic(detail::i_dart_plat_realloc, 0);
+        s.alloc_ = detail::dart_allocator_heap(0);
         s.schema_ = detail::dart_schema_copy(raw, detail::dart_allocator_alloc, &s.alloc_);
         if (!s.schema_) detail::dart_allocator_reset(&s.alloc_);
         return s;
@@ -2170,7 +2170,7 @@ public:
 
         detail::DartAllocator mem = (o.memory && o.memory_size)
             ? detail::dart_allocator_static(o.memory, o.memory_size)
-            : detail::dart_allocator_dynamic(detail::i_dart_plat_realloc, 0);
+            : detail::dart_allocator_heap(0);
         detail::DartNode* n = detail::dart_node_open(
             &mem, nm.empty() ? nullptr : nm.c_str(),
             &Node::on_msg_tramp, &Node::on_evt_tramp, &co);

@@ -14,7 +14,7 @@ and fires handlers) or by calling `Poll()` from your own loop.
 csharp/
   Dart.cs               the wrapper (the one source; compiled by the package + examples)
   Dart.csproj           NuGet package: Dart.cs + runtimes/<rid>/native/  ->  .nupkg
-  native/               build.ps1 / build.sh / dart.def  (build the native lib per platform)
+  native/               build.ps1 / build.sh  (build the native lib per platform)
   runtimes/<rid>/native/   prebuilt libs (gitignored; built by the scripts or CI)
   test/ publisher/ subscriber/    console examples (compile ../Dart.cs)
   unity/                Unity package (see unity/README.md)

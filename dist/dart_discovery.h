@@ -15,6 +15,28 @@
   #endif
 #endif
 
+#pragma region common/api.h
+/* The linkage of every public entry point. spec/build.md explains the three builds. */
+#ifndef DART_API_H
+#define DART_API_H
+
+/* Default: the single header build, where the caller compiles DART into its own binary
+ * and needs no decoration. DART_BUILD_SHARED builds the shared library, DART_LINK_SHARED
+ * consumes one. */
+#if defined(DART_BUILD_SHARED)
+  #if defined(_WIN32)
+    #define DART_API __declspec(dllexport)
+  #else
+    #define DART_API __attribute__((visibility("default")))
+  #endif
+#elif defined(DART_LINK_SHARED) && defined(_WIN32)
+  #define DART_API __declspec(dllimport)
+#else
+  #define DART_API
+#endif
+
+#endif /* DART_API_H */
+#pragma endregion
 #pragma region common/string.h
 /* The two view types. Neither owns, copies or implies a NUL terminator. */
 #ifndef DART_STRING_H
@@ -379,85 +401,85 @@ typedef struct {
 typedef struct DartDiscoveryState DartDiscoveryState;
 
 /* Fills every zero timing and size field with its default. Idempotent. */
-void         dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg);
+DART_API void         dart_discovery_config_defaults(DartDiscoveryCoreConfig *cfg);
 
 /* Bytes one datagram scratch buffer needs for meta_cap (0 = the default). */
-uint32_t     dart_discovery_wire_size(uint16_t meta_cap);
+DART_API uint32_t     dart_discovery_wire_size(uint16_t meta_cap);
 
-size_t       dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg);
-DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryCoreConfig *cfg);
+DART_API size_t       dart_discovery_required_memory(const DartDiscoveryCoreConfig *cfg);
+DART_API DartDiscoveryState *dart_discovery_init(void *mem, size_t mem_size, const DartDiscoveryCoreConfig *cfg);
 /* Frees the hook allocated peer blobs. A no op without a hook. The arena stays the caller's. */
-void         dart_discovery_destroy(DartDiscoveryState *st);
+DART_API void         dart_discovery_destroy(DartDiscoveryState *st);
 /* Relocates a live core into a bigger block, keeping the uuid, versions, ids and peers.
  * self_meta is the announce blob's new address. The caller frees the old block after. */
-DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
-        size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
-        const uint8_t *self_meta, void *peer_cb_user);
+DART_API DartDiscoveryState *dart_discovery_core_migrate(DartDiscoveryState *old, void *new_mem,
+                 size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
+                 const uint8_t *self_meta, void *peer_cb_user);
 /* src NULL or port 0 means the IO layer cannot say, so the locator comes from the blob
  * alone and no observed source binds. via says which local socket it arrived on. */
-void         dart_discovery_on_datagram(DartDiscoveryState *st, const DartDiscoveryAddr *src,
-                               DartDiscoveryVia via, DartBytes datagram, uint64_t now_us);
-size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
+DART_API void         dart_discovery_on_datagram(DartDiscoveryState *st, const DartDiscoveryAddr *src,
+                                        DartDiscoveryVia via, DartBytes datagram, uint64_t now_us);
+DART_API size_t       dart_discovery_update(DartDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
 /* When update next wants to run its timers. 0 means now. Peer timeout sweeps ride the
  * announce cadence. */
-uint64_t     dart_discovery_next_due_us(const DartDiscoveryState *st);
-size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
+DART_API uint64_t     dart_discovery_next_due_us(const DartDiscoveryState *st);
+DART_API size_t       dart_discovery_leave(DartDiscoveryState *st, void *out, size_t cap);
 /* Queues a one shot solicit. The next update asks peers to announce now. */
-void         dart_discovery_solicit(DartDiscoveryState *st);
+DART_API void         dart_discovery_solicit(DartDiscoveryState *st);
 /* Re fires peer up for every live peer with the blob we hold, so a caller that changed
  * its own advertised data re applies every peer's interest. */
-void         dart_discovery_replay_peers(DartDiscoveryState *st);
+DART_API void         dart_discovery_replay_peers(DartDiscoveryState *st);
 /* Replaces the overlay and bumps its version so peers re fetch it. meta must stay valid. */
-void         dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta);
+DART_API void         dart_discovery_set_meta(DartDiscoveryState *st, DartBytes meta);
 /* The version our announces advertise, 0 if none. Detail responses are stamped with it. */
-uint32_t     dart_discovery_meta_version(const DartDiscoveryState *st);
+DART_API uint32_t     dart_discovery_meta_version(const DartDiscoveryState *st);
 /* Sets the advertised locator port. 0 = none, peers then use the discovery port. */
-void         dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port);
+DART_API void         dart_discovery_set_data_port(DartDiscoveryState *st, uint16_t port);
 /* Our own subnets, for locator ranking. Re callable when the interface set changes. A
  * zero mask is ignored. */
-void         dart_discovery_set_local_subnets(DartDiscoveryState *st,
-                             const DartDiscoverySubnet *nets, uint8_t n);
+DART_API void         dart_discovery_set_local_subnets(DartDiscoveryState *st,
+                                      const DartDiscoverySubnet *nets, uint8_t n);
 /* Drains one unicast datagram: a solicit reply or a re fetch request. Returns bytes and
  * fills *to, or 0. *exact 1 means *to is an observed source, send exactly there. */
-size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
-                             DartDiscoveryAddr *to, int *exact);
+DART_API size_t       dart_discovery_poll_targeted(DartDiscoveryState *st, void *out, size_t cap,
+                                      DartDiscoveryAddr *to, int *exact);
 /* Drains one proxied announce built on behalf of a relay me peer. The runtime sends it
  * on every path. Loop until 0. */
-size_t       dart_discovery_poll_relay(DartDiscoveryState *st, void *out, size_t cap);
+DART_API size_t       dart_discovery_poll_relay(DartDiscoveryState *st, void *out, size_t cap);
 /* Drains one introduction: a proxied announce of a peer we hear directly, addressed to
  * one relay me peer. *to and *exact as in poll_targeted. Loop until 0. */
-size_t       dart_discovery_poll_introduce(DartDiscoveryState *st, void *out, size_t cap,
-                             DartDiscoveryAddr *to, int *exact);
+DART_API size_t       dart_discovery_poll_introduce(DartDiscoveryState *st, void *out, size_t cap,
+                                      DartDiscoveryAddr *to, int *exact);
 /* Live peers, DROPPED entries excluded. */
-uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
+DART_API uint16_t     dart_discovery_peer_count(const DartDiscoveryState *st);
 /* Table capacity, the slot range for peer_addr and peer_at. */
-uint16_t     dart_discovery_max_peers(const DartDiscoveryState *st);
+DART_API uint16_t     dart_discovery_max_peers(const DartDiscoveryState *st);
 /* Discovery TX destination for the ACTIVE peer in a slot. 0 none, 1 the locator, which
  * the runtime expands to both ports, 2 an observed source, send exactly there. */
-int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot,
-                             DartDiscoveryAddr *out);
+DART_API int          dart_discovery_peer_addr(const DartDiscoveryState *st, uint16_t slot,
+                                      DartDiscoveryAddr *out);
 /* Read only view of the peer in a slot, ACTIVE or DROPPED. 1 if it holds one. */
-int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
-                             DartDiscoveryPeer *out);
+DART_API int          dart_discovery_peer_at(const DartDiscoveryState *st, uint16_t slot,
+                                      DartDiscoveryPeer *out);
 
 /* By id lookups, DROPPED peers included. The node keys its state on the id and uses
  * these instead of a second peer table. */
-void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
+DART_API void        *dart_discovery_peer_user(DartDiscoveryState *st, uint32_t id);
 /* The overlay we hold and, through *version, the version it is at. A view until the next poll. */
-DartBytes    dart_discovery_peer_meta(const DartDiscoveryState *st, uint32_t id,
-                             uint32_t *version);
+DART_API DartBytes    dart_discovery_peer_meta(const DartDiscoveryState *st, uint32_t id,
+                                      uint32_t *version);
 /* The one address to send data to: the observed data source when bound, else the locator. */
-int          dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id,
-                             DartDiscoveryAddr *out);
+DART_API int          dart_discovery_addr_of_id(const DartDiscoveryState *st, uint32_t id,
+                                      DartDiscoveryAddr *out);
 /* {NULL,0} for an unknown peer. */
-DartString   dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id);
+DART_API DartString   dart_discovery_peer_name(const DartDiscoveryState *st, uint32_t id);
 /* Maps a source back to a peer id. A peer with observed sources matches only those. */
-int          dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint8_t *ip,
-                             uint8_t ip_len, uint16_t port, uint32_t *id);
+DART_API int          dart_discovery_id_for_addr(const DartDiscoveryState *st, const uint8_t *ip,
+                                      uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic RFC 9562 v8 uuid from a stable input plus a boot seed. Not cryptographic. */
-void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t boot_seed);
+DART_API void         dart_discovery_make_uuid(uint8_t out[16], DartBytes stable, uint64_t boot_seed);
 /* Our own uuid, a view valid for the state's lifetime. */
-const uint8_t *dart_discovery_uuid(const DartDiscoveryState *st);
+DART_API const uint8_t *dart_discovery_uuid(const DartDiscoveryState *st);
 
 #ifdef __cplusplus
 }
@@ -692,22 +714,22 @@ typedef struct {
 
 /* alloc is copied in and reset on close, so it may be a temporary. A NULL name is auto
  * generated and a NULL cfg means all defaults. NULL on failure, see dart_discovery_last_error. */
-DartDiscovery   *dart_discovery_open(DartAllocator *alloc, const char *name, const DartDiscoveryConfig *cfg);
+DART_API DartDiscovery   *dart_discovery_open(DartAllocator *alloc, const char *name, const DartDiscoveryConfig *cfg);
 
 /* lifecycle */
 /* One loop tick. 1 if a datagram arrived, 0 if idle, negative on a socket error. */
-int        dart_discovery_poll(DartDiscovery *d, int timeout_ms);
+DART_API int        dart_discovery_poll(DartDiscovery *d, int timeout_ms);
 /* Blocks: solicits, then pumps until the peer set is quiet for quiet_ms or timeout_ms
  * passes. Returns the peer count. */
-int        dart_discovery_gather(DartDiscovery *d, int quiet_ms, int timeout_ms);
+DART_API int        dart_discovery_gather(DartDiscovery *d, int quiet_ms, int timeout_ms);
 /* Optionally multicasts a BYE, then closes the sockets and frees owned memory. */
-void       dart_discovery_close(DartDiscovery *d, int send_bye);
+DART_API void       dart_discovery_close(DartDiscovery *d, int send_bye);
 
 /* The live peer list by pointer, valid until the next poll. Each .user is writable in place. */
-const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count);
+DART_API const DartDiscoveryPeer *dart_discovery_peers(DartDiscovery *d, uint16_t *count);
 
 /* The sans-IO core, for the by id lookups. Valid for the runtime's life. */
-DartDiscoveryState *dart_discovery_state(DartDiscovery *d);
+DART_API DartDiscoveryState *dart_discovery_state(DartDiscovery *d);
 
 /* advanced: placement open */
 /* The placement config. Zero and NULL fields get defaults. A zero uuid is auto generated. */
@@ -724,10 +746,10 @@ typedef struct {
                                  least one peer, or be seeded by one, or nothing can find us. */
 } DartDiscoveryNetConfig;
 
-size_t     dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg);
+DART_API size_t     dart_discovery_placement_memory(const DartDiscoveryNetConfig *cfg);
 /* Places a runtime in caller memory. The caller owns mem. NULL on failure, and
  * dart_discovery_last_error names the step. */
-DartDiscovery   *dart_discovery_place(void *mem, size_t mem_size, const DartDiscoveryNetConfig *cfg);
+DART_API DartDiscovery   *dart_discovery_place(void *mem, size_t mem_size, const DartDiscoveryNetConfig *cfg);
 
 /* Why the last open or place returned NULL. A process global with no lock, read it right after. */
 typedef enum {
@@ -738,40 +760,40 @@ typedef enum {
     DART_DISCOVERY_E_BIND,        /* bind to the discovery port failed */
     DART_DISCOVERY_E_MCAST_JOIN   /* joining the group failed */
 } DartDiscoveryPlaceError;
-DartDiscoveryPlaceError dart_discovery_last_error(void);
+DART_API DartDiscoveryPlaceError dart_discovery_last_error(void);
 /* The OS socket error captured with the last failure, 0 if none. */
-int        dart_discovery_last_os_error(void);
+DART_API int        dart_discovery_last_os_error(void);
 /* Relocates a placed runtime into a bigger block, keeping the socket, uuid and peers.
  * self_meta is the new announce blob address. The caller frees the old block after. */
-DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t new_cap,
-        uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user);
+DART_API DartDiscovery   *dart_discovery_migrate(DartDiscovery *old, void *new_mem, size_t new_cap,
+                 uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user);
 
 /* node integration */
 /* A discovery datagram that arrived on the data socket. src carries the port too, so the
  * core can bind an observed source. */
-void       dart_discovery_feed(DartDiscovery *d, const DartDiscoveryAddr *src, DartBytes datagram);
+DART_API void       dart_discovery_feed(DartDiscovery *d, const DartDiscoveryAddr *src, DartBytes datagram);
 /* Routes unicast discovery TX out of fd, the node's data socket. DART_SOCK_BAD restores
  * the own socket. Group TX stays on the own socket. */
-void       dart_discovery_set_tx_fd(DartDiscovery *d, i_DartSock fd);
+DART_API void       dart_discovery_set_tx_fd(DartDiscovery *d, i_DartSock fd);
 /* Replaces the overlay and bumps its version. meta must outlive the runtime. */
-void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
+DART_API void       dart_discovery_advertise(DartDiscovery *d, DartBytes meta);
 /* Re applies every peer's interest. Call after changing our own advertised meta. */
-void       dart_discovery_replay(DartDiscovery *d);
+DART_API void       dart_discovery_replay(DartDiscovery *d);
 /* The receive sockets, 1 or 2, for a caller with its own wait. Stable across a migrate. */
-int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
+DART_API int        dart_discovery_pollfds(DartDiscovery *d, i_DartSock out[2]);
 /* dart_discovery_poll without the wait. Pass each fd's readability in pollfds order. Call
  * it every pass, the clock driven work needs no readable fd. */
-int        dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable);
+DART_API int        dart_discovery_service(DartDiscovery *d, int fd_readable, int unicast_readable);
 
 /* uuid */
 /* A random RFC 9562 v4 uuid. 0 if there is no entropy source. */
-int        dart_discovery_make_uuid4(uint8_t out[16]);
+DART_API int        dart_discovery_make_uuid4(uint8_t out[16]);
 /* The CSPRNG path, else a host identity fallback. Shared with the node's DartUuid. */
 void       i_dart_discovery_auto_uuid(uint8_t out[16]);
 
 /* Resolves an advertised name into out: want clamped, or an auto "node-XXXXXXXX" when
  * want is NULL or empty. Returns the length. */
-uint8_t    dart_discovery_default_name(char *out, size_t cap, const char *want);
+DART_API uint8_t    dart_discovery_default_name(char *out, size_t cap, const char *want);
 
 #ifdef __cplusplus
 }

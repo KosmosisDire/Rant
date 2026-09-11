@@ -402,7 +402,7 @@ int main(int argc, char **argv){
        allocator over one block sized for history plus reassembly, live for the whole process. */
     DartAllocator alloc;
     if (dynamic){
-        alloc = dart_allocator_dynamic(i_dart_plat_realloc, 0);
+        alloc = dart_allocator_heap(0);
     } else {
         size_t mem_size = (8u<<20)
                         + (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
