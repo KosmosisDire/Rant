@@ -18,13 +18,13 @@ $gcc = Get-Command gcc -ErrorAction SilentlyContinue
 Remove-Item $outDll -ErrorAction SilentlyContinue
 $ErrorActionPreference = "Continue"
 if ($clangcl) {
-    & $clangcl.Source /nologo /O2 /LD /TC /DDART_IMPLEMENTATION /DDART_BUILD_SHARED /D_CRT_SECURE_NO_WARNINGS "/I$dist" `
+    & $clangcl.Source /nologo /O2 /LD /TC /DDART_BUILD_SHARED /D_CRT_SECURE_NO_WARNINGS "/I$dist" `
         $impl "/Fe:$outDll" /link ws2_32.lib bcrypt.lib winmm.lib 2>&1 | ForEach-Object { "$_" }
     # clang-cl and MSVC also emit dart.lib and dart.exp next to the dll, drop the byproducts
     Remove-Item (Join-Path $Out "dart.lib"), (Join-Path $Out "dart.exp") -ErrorAction SilentlyContinue
 }
 elseif ($gcc) {
-    & $gcc.Source -O2 -std=c99 -shared -DDART_IMPLEMENTATION -DDART_BUILD_SHARED `
+    & $gcc.Source -O2 -std=c99 -shared -DDART_BUILD_SHARED `
         -fvisibility=hidden "-I$dist" $impl -o $outDll `
         -lws2_32 -lbcrypt -lwinmm -static-libgcc 2>&1 | ForEach-Object { "$_" }
 }
