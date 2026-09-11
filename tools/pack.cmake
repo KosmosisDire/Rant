@@ -275,6 +275,20 @@ function(build_py f dart_h)
   message(STATUS "wrote ${f}")
 endfunction()
 
+# dart.c and dart.cpp: the implementation anchors. A consumer that links the built library
+# never writes one, and the CMake target and the native plugin builds compile these.
+function(build_anchor f header)
+  file(WRITE "${f}" "/* GENERATED. The implementation anchor: exactly one translation unit
+"
+                    " * defines DART_IMPLEMENTATION so the amalgamation emits the library. */
+"
+                    "#define DART_IMPLEMENTATION
+"
+                    "#include \"${header}\"
+")
+  message(STATUS "wrote ${f}")
+endfunction()
+
 # The C# wrapper is a hand written P/Invoke layer over the prebuilt native library, so
 # nothing is generated for it.
 
@@ -283,4 +297,6 @@ build_transport("${OUT}/dart_transport.h")
 build_combined("${OUT}/dart.h")
 build_cpp("${OUT}/dart.hpp" "${OUT}/dart.h")
 build_py("${OUT}/dart.py" "${OUT}/dart.h")
+build_anchor("${OUT}/dart.c" "dart.h")
+build_anchor("${OUT}/dart.cpp" "dart.hpp")
 message(STATUS "pack: done (${SRC} -> ${OUT})")

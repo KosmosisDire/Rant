@@ -32,6 +32,46 @@ Embedded targets (Arduino, ESP32, VxWorks) do not build the host programs. They 
 `dist/` header into their own project and link the header only `dart` target, or just
 point at `dist/`. Set `-DDART_BUILD_TOOLS=OFF`. Cross builds default it off.
 
+## From another CMake project
+
+Add DART as a subproject and link one of two targets: `dart::dart_host` is the core plus
+the platform libraries, `dart::dart` is the header only core alone, for an embedded target
+that links its own platform. Only the library is configured, so nothing is fetched and no
+tools, explorer or bridge are built.
+
+```cmake
+CPMAddPackage(NAME dart
+              GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
+              GIT_TAG v0.0.12-beta)
+
+target_link_libraries(app PRIVATE dart::dart_host)
+```
+
+`dart::dart_host` is a built library, so your project defines nothing and compiles no
+anchor. Include `dart.h` anywhere and link. `dart::dart` is the header only alternative,
+for an embedded target that compiles the amalgamation itself with its own flags.
+
+Plain `FetchContent_Declare` plus `FetchContent_MakeAvailable(dart)` gives the same two
+targets. A project that exports its own targets against `dart::` also sets
+`DART_INSTALL=ON`, or its export refuses them.
+
+Or install DART once and find it. Spell `CONFIG` unless your own
+`cmake_minimum_required` is 3.27 or later: below that, CMake still ships an unrelated
+`FindDart` module and module mode picks it up instead. Policy CMP0145 removes it at 3.27.
+
+```sh
+cmake -S . -B build -DDART_BUILD_TOOLS=OFF -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
+cmake --install build --prefix /usr/local
+```
+
+```cmake
+find_package(dart 0.0.12 CONFIG REQUIRED)
+target_link_libraries(app PRIVATE dart::dart_host)
+```
+
+The install is the `dist/` headers in `include/` and the config package in
+`share/cmake/dart`. There is no library to build: the implementation comes from the header.
+
 ## Without CMake
 
 Compile a consumer straight against `dist/`. Linux needs `-lrt` for shared memory and

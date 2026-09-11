@@ -92,19 +92,11 @@ endif()
 # Two C++ translation units: bridge.cpp is the server, dart.cpp is the implementation
 # anchor defining DART_IMPLEMENTATION.
 add_executable(dart_bridge bridge.cpp dart.cpp)
-target_link_libraries(dart_bridge PRIVATE dart ixwebsocket::ixwebsocket
-                      nlohmann_json::nlohmann_json)
+target_link_libraries(dart_bridge PRIVATE dart dart_platform
+                      ixwebsocket::ixwebsocket nlohmann_json::nlohmann_json)
 if(DART_BRIDGE_WEBRTC)
   target_compile_definitions(dart_bridge PRIVATE DART_BRIDGE_WEBRTC=1)
   target_link_libraries(dart_bridge PRIVATE LibDataChannel::LibDataChannelStatic)
-endif()
-
-find_package(Threads REQUIRED)
-target_link_libraries(dart_bridge PRIVATE Threads::Threads)
-if(WIN32)
-  target_link_libraries(dart_bridge PRIVATE ws2_32 bcrypt winmm)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_libraries(dart_bridge PRIVATE rt)   # shm_open for the SHM fast path
 endif()
 
 # regenerate dist/ before building when the root build owns that target

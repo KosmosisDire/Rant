@@ -28,6 +28,23 @@ Drop `dart.hpp` into your project and define the implementation in **one** `.cpp
 ```
 Compile as C++17, and link the same platform libraries as C.
 
+### CMake
+Fetch DART with CPM (or plain `FetchContent`) and link the target that carries the
+platform libraries:
+```cmake
+CPMAddPackage(NAME dart
+              GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
+              GIT_TAG v0.0.12-beta)
+
+target_link_libraries(app PRIVATE dart::dart_host)
+```
+`dart::dart_host` is built for you, so nothing in your project defines
+`DART_IMPLEMENTATION`: include `dart.h` and link. Only the library is configured: no tools,
+no explorer, no bridge, nothing fetched.
+`dart::dart` is the header only core for a target that links its own platform libraries.
+An installed DART is `find_package(dart CONFIG REQUIRED)`, same targets. See
+[docs/building.md](docs/building.md).
+
 ### Python (`dart.py`)
 Drop `dart.py` next to your code and import it (it compiles the embedded C into a cached
 native library on first import, so a C compiler is needed once):

@@ -9,7 +9,7 @@ $dist = Join-Path $here "..\..\dist"
 if ($Out -eq "") { $Out = Join-Path $here "..\runtimes\win-x64\native" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $outDll = Join-Path $Out "dart.dll"
-$impl = Join-Path $here "dart_impl.c"
+$impl = Join-Path $dist "dart.c"          # the generated anchor, see tools/pack.cmake
 
 $clangcl = Get-Command clang-cl -ErrorAction SilentlyContinue
 $gcc = Get-Command gcc -ErrorAction SilentlyContinue

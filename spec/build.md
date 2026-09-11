@@ -3,7 +3,8 @@
 The root `CMakeLists.txt` amalgamates `src/` into `dist/` and builds the host tools, tests
 and examples. The header only portable core is an INTERFACE target `dart`. Host programs
 link `dart_host`, which carries the platform libraries (Windows: ws2_32, bcrypt, winmm.
-Linux: rt) plus Threads.
+Linux: rt) plus Threads. Both carry a `dart::` alias, and that is what another project
+links, whether it adds DART as a subproject or finds the installed package.
 
 - `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is the three dist
   headers, so it re packs only when a `src/` file or pack.cmake changes. It also splices
@@ -20,7 +21,9 @@ Linux: rt) plus Threads.
   explorer hits. It must be included before any target or FetchContent subproject so every
   object agrees on one runtime, and it forces policy CMP0091 NEW because vendored freetype
   asks for cmake 3.0 and would otherwise build `/MD` from the legacy flags. MinGW takes a
-  full `-static`, other GNU toolchains static libgcc and libstdc++ with glibc shared.
+  full `-static`, other GNU toolchains static libgcc and libstdc++ with glibc shared. Every
+  variable it sets is a plain one in DART's own directory scope, so a project that adds
+  DART as a subproject keeps the runtime it picked and only DART's targets go static.
 - `CMakePresets.json` has `windows` and `linux` configure presets, both with the explorer
   on and `binaryDir` `build`. The Windows preset pins no generator and no architecture so
   it works with any installed Visual Studio. Build presets `windows` and `linux` pin
@@ -30,7 +33,34 @@ Linux: rt) plus Threads.
   Debug whatever the config order, which is why the build preset pins Release.
   `CMAKE_DEFAULT_BUILD_TYPE` is rejected by the VS generator, so it is guarded to Ninja
   Multi-Config with an `unset(... CACHE)` else branch.
-- `DART_BUILD_TOOLS=OFF` (auto when cross compiling) builds only the `dart` target.
+- `DART_BUILD_TOOLS=OFF` (auto when cross compiling or when DART is a subproject) drops
+  the programs. `dart_platform` and `dart_host` survive it, because a consumer wants the
+  library without the tests. A cross build gets `dart` alone: the platform is its own.
+- Three targets, one job each. `dart` is the `dist/` include directory and nothing else.
+  `dart_platform` is the OS libraries, written once and linked by everything that builds
+  DART for a desktop, in this tree and out of it. `dart_host` is a static library over
+  `dist/dart.c`, so a consumer defines no `DART_IMPLEMENTATION` and writes no anchor.
+  The in tree programs link `dart` and `dart_platform` instead, never `dart_host`: each
+  compiles its own flavour of the amalgamation, some with `DART_NO_SHM` or transport only,
+  and linking the built library too would define every symbol twice.
+- `dist/dart.c` and `dist/dart.cpp` are the generated anchors, two lines each. They are
+  what `dart_host`, the native plugin builds and the bridge compile, so the define lives
+  in one generated place instead of a hand written file per consumer.
+- Everything but the library is top level only: the packer target, the programs, the
+  explorer, the bridge, the `bin/` output dir and the multi config defaults. The test is
+  `CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR`, since `PROJECT_IS_TOP_LEVEL` wants
+  cmake 3.21 and the root asks for 3.15. Two of those really did reach a consumer: the
+  config type list is a FORCEd cache entry so it overwrote the consumer's own, and the
+  explorer and bridge defaults had it fetch SDL3, IXWebSocket and libdatachannel. `dist/`
+  is committed, so a consumer never runs the packer and never reads `src/`.
+- `install()` copies the four `dist/` headers into `include/` and writes an export set plus
+  `dart-config.cmake` (from `tools/dart-config.cmake.in`) into `share/cmake/dart`, so
+  `find_package(dart CONFIG)` hands over the same two targets. `CONFIG` is not optional:
+  CMake ships a `FindDart` module for an unrelated old tool and module mode finds that
+  first on a case insensitive filesystem. The config finds Threads before the targets file,
+  which names `Threads::Threads`.
+- `project()` carries a VERSION so the config package can answer a version request, with
+  `SameMinorVersion` compatibility. Bump it with the release tag.
 - Three builds, one macro. `src/common/api.h` defines `DART_API`, which every public
   declaration carries. The default build compiles DART into the caller's own binary and
   needs no decoration. `DART_BUILD_SHARED` marks each entry point exported, so the shared

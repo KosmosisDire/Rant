@@ -14,5 +14,5 @@ case "$(uname -s)" in
 esac
 out="$here/../runtimes/$rid/native"
 mkdir -p "$out"
-"$cc" -O2 -std=c99 -fPIC -shared -DDART_IMPLEMENTATION -DDART_BUILD_SHARED \n  -fvisibility=hidden -I"$dist" "$here/dart_impl.c" -o "$out/$lib" $extra
+"$cc" -O2 -std=c99 -fPIC -shared -DDART_IMPLEMENTATION -DDART_BUILD_SHARED \n  -fvisibility=hidden -I"$dist" "$dist/dart.c" -o "$out/$lib" $extra
 echo "built $out/$lib"
