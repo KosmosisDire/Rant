@@ -95,21 +95,9 @@ else()
 endif()
 option(DART_BUILD_TOOLS "Build the DART host tools, tests and examples" ${_dart_tools_default})
 
-# The OS libraries the host build needs, written once. Everything that compiles DART for a
-# desktop links this, in this tree and out of it. A cross build links its own instead.
+# A cross build links its own platform, so it gets neither of these.
 if(DART_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
-  add_library(dart_platform INTERFACE)
-  add_library(dart::dart_platform ALIAS dart_platform)
-
-  find_package(Threads REQUIRED)
-  target_link_libraries(dart_platform INTERFACE Threads::Threads)
-
-  if(WIN32)
-    # ws2_32: sockets   bcrypt: entropy   winmm: timeBeginPeriod (dart_test)
-    target_link_libraries(dart_platform INTERFACE ws2_32 bcrypt winmm)
-  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(dart_platform INTERFACE rt)   # shm_open for the SHM fast path
-  endif()
+  include("${CMAKE_CURRENT_SOURCE_DIR}/tools/dart_platform.cmake")
 
   # The built library: the one target a consumer links. It compiles the amalgamation once
   # so nothing outside this tree ever defines DART_IMPLEMENTATION.

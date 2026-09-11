@@ -37,8 +37,8 @@ links, whether it adds DART as a subproject or finds the installed package.
   the programs. `dart_platform` and `dart_host` survive it, because a consumer wants the
   library without the tests. A cross build gets `dart` alone: the platform is its own.
 - Three targets, one job each. `dart` is the `dist/` include directory and nothing else.
-  `dart_platform` is the OS libraries, written once and linked by everything that builds
-  DART for a desktop, in this tree and out of it. `dart_host` is a static library over
+  `dart_platform` is the OS libraries, in `tools/dart_platform.cmake` so the root build and
+  a standalone `explore/` or `bridge/` configure share one list. `dart_host` is a static library over
   `dist/dart.c`, so a consumer defines no `DART_IMPLEMENTATION` and writes no anchor.
   The in tree programs link `dart` and `dart_platform` instead, never `dart_host`: each
   compiles its own flavour of the amalgamation, some with `DART_NO_SHM` or transport only,

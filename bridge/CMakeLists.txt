@@ -31,6 +31,7 @@ if(NOT TARGET dart)
   endforeach()
   add_library(dart INTERFACE)
   target_include_directories(dart INTERFACE "${REPO_ROOT}/dist")
+  include("${REPO_ROOT}/tools/dart_platform.cmake")
 endif()
 
 include(FetchContent)
