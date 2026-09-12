@@ -47,7 +47,7 @@ False. A handle used after its node closed answers `NO_TOPIC`, None or False.
 ## Schemas
 
 Any class with annotated fields is a schema, no decorator needed, and `@dataclass` just
-gives a constructor. Field types are `dart.u8` to `dart.f64` and `dart.bool_`,
+gives a constructor. Field types are `dart.u8` to `dart.f64`,
 `dart.string(cap)` for a capped string, `dart.<scalar>[n]` or `dart.string(cap)[n]` for a
 fixed array, a nested annotated class, plain `int`, `float` and `bool`, `str` for an
 unbounded string, `list[...]` for a variable array, `dict` for a map, and an `IntEnum` or
@@ -55,17 +55,18 @@ unbounded string, `list[...]` for a variable array, `dict` for a map, and an `In
 wire type name. `dart.dsl(source)` gives the DSL text of a class, a bare type, a compiled
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.
 
-A bare type is a schema of its own: `dart.Topic[dart.bool_](node, "estop")` sends and
+A bare type is a schema of its own: `dart.Topic[bool](node, "estop")` sends and
 receives plain booleans, and so do the scalars, `dart.string(N)`, arrays, `list[dart.f32]`,
 `str`, `dict`, an enum class and the plain Python scalars. Such a root is anonymous, so the
 same one in any language is the same wire bytes and the same hash.
 
 `Schema(text)`, `Schema(cls)` and `Schema(bare_type)` compile explicitly. `encode` and
 `decode` walk the compiled flat field table, so they work for any schema including a
-peer's. A missing value keeps the zeroed default. The map body is built and parsed in
-Python and validated by the C setter. The standard types in docs/stdtypes.md are shipped
-as tagged dataclasses and aliases: `dart.Transform`, `dart.Color`, `dart.Timestamp` and the
-rest, and `dart.timestamp_now()` is the Timestamp clock.
+peer's. `fields()` lists `Schema.Field` records whose kinds are `Schema.FieldType`. A
+missing value keeps the zeroed default. The map body is built and parsed in Python and
+validated by the C setter. The standard types in docs/stdtypes.md live in `dart.types` as
+tagged dataclasses and aliases: `dart.types.Transform`, `dart.types.Color`,
+`dart.types.Timestamp` and the rest, and `dart.types.now()` is the Timestamp clock.
 
 ## Messages and queues
 

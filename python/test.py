@@ -108,11 +108,11 @@ HASH_FLOAT3 = 0x04AA9469CD08B1DD
 class Track:
     """Standard types as ordinary annotations: an alias spells as its name and carries a
         plain value, a composite is a shipped dataclass. Both narrow matching."""
-    at: dart.Transform = field(default_factory=dart.Transform)
-    when: dart.Timestamp = 0
-    tag: dart.Color = field(default_factory=dart.Color)
-    id: dart.Uuid = bytes(16)
-    velocity: dart.Float3 = field(default_factory=dart.Float3)
+    at: dart.types.Transform = field(default_factory=dart.types.Transform)
+    when: dart.types.Timestamp = 0
+    tag: dart.types.Color = field(default_factory=dart.types.Color)
+    id: dart.types.Uuid = bytes(16)
+    velocity: dart.types.Float3 = field(default_factory=dart.types.Float3)
 
 
 def std_types():
@@ -127,7 +127,7 @@ def std_types():
     f3 = dart.Schema("Float3")
     check("Float3 compiles by name alone, golden hash", f3.hash == HASH_FLOAT3)
     check("Float3 is 12 message bytes", f3.size == 12)
-    check("the mirror dataclass IS that type", dart.Schema(dart.Float3).hash == HASH_FLOAT3)
+    check("the mirror dataclass IS that type", dart.Schema(dart.types.Float3).hash == HASH_FLOAT3)
 
     # a name narrows: an anonymous field of the same shape reads a Transform field, never
     # the reverse, and Transform/Twist are distinct names never mistaken for each other
@@ -146,15 +146,15 @@ def std_types():
           text == "Track { at: Transform, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
     check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.size == 128)
 
-    t = Track(at=dart.Transform(translation=dart.Double3(4.5, -1.25, 9.0)),
-              when=dart.timestamp_now(), tag=dart.Color(0x11, 0x22, 0x33, 0xFF),
-              id=bytes(range(16)), velocity=dart.Float3(1.0, 2.0, 3.0))
+    t = Track(at=dart.types.Transform(translation=dart.types.Double3(4.5, -1.25, 9.0)),
+              when=dart.types.now(), tag=dart.types.Color(0x11, 0x22, 0x33, 0xFF),
+              id=bytes(range(16)), velocity=dart.types.Float3(1.0, 2.0, 3.0))
     back = sch.decode(sch.encode(t))
     check("a Track round-trips whole",
           back.at.translation.x == 4.5 and back.at.rotation.w == 1.0
           and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
-    check("timestamp_now is Unix-epoch microseconds", dart.timestamp_now() > 1600000000000000)
+    check("types.now is Unix-epoch microseconds", dart.types.now() > 1600000000000000)
     return ok
 
 
@@ -169,8 +169,8 @@ HASH_EXT_STREAM = 0xAAE502077016AC13
 class Clip:
     """The video mirrors used as FIELDS: each spells as its name, so the schema is the
     same as the text form and needs no definition of its own."""
-    cover: dart.Image = field(default_factory=dart.Image)
-    live: dart.ExternalVideoStream = field(default_factory=dart.ExternalVideoStream)
+    cover: dart.types.Image = field(default_factory=dart.types.Image)
+    live: dart.types.ExternalVideoStream = field(default_factory=dart.types.ExternalVideoStream)
 
 
 def video_types():
@@ -184,9 +184,9 @@ def video_types():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    for name, cls, golden in (("Image", dart.Image, HASH_IMAGE),
-                              ("VideoFrame", dart.VideoFrame, HASH_VIDEO_FRAME),
-                              ("ExternalVideoStream", dart.ExternalVideoStream,
+    for name, cls, golden in (("Image", dart.types.Image, HASH_IMAGE),
+                              ("VideoFrame", dart.types.VideoFrame, HASH_VIDEO_FRAME),
+                              ("ExternalVideoStream", dart.types.ExternalVideoStream,
                                HASH_EXT_STREAM)):
         check("%s compiles by name alone, golden hash" % name,
               dart.Schema(name).hash == golden)
@@ -200,14 +200,14 @@ def video_types():
     b = dart.Node("VidB", None, on_event("VidB"), domain=45, multicast_interface=IFACE)
     try:
         qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=4)
-        pub = dart.Publisher[dart.Image](a, "frame", qos=qos)
-        dart.Subscriber[dart.Image](b, "frame", lambda i: got.setdefault("img", i), qos=qos)
-        stream = dart.ExternalVideoStream(kind=dart.VideoStreamKind.Rtsp,
-                                          codec=dart.VideoCodec.H264,
+        pub = dart.Publisher[dart.types.Image](a, "frame", qos=qos)
+        dart.Subscriber[dart.types.Image](b, "frame", lambda i: got.setdefault("img", i), qos=qos)
+        stream = dart.types.ExternalVideoStream(kind=dart.types.VideoStreamKind.Rtsp,
+                                          codec=dart.types.VideoCodec.H264,
                                           width=1920, height=1080,
                                           url="rtsp://cam.local/main", name="front door")
-        vd = dart.VariableDefinition[dart.ExternalVideoStream](a, "stream", initial=stream)
-        rv = dart.RemoteVariable[dart.ExternalVideoStream](b, "stream")
+        vd = dart.VariableDefinition[dart.types.ExternalVideoStream](a, "stream", initial=stream)
+        rv = dart.RemoteVariable[dart.types.ExternalVideoStream](b, "stream")
         check("handles created", all(h is not None for h in (pub, vd, rv)))
         deadline = time.time() + 8.0
         while time.time() < deadline and (pub.match_count() == 0 or rv.get() is None):
@@ -216,8 +216,8 @@ def video_types():
         check("image pair matched", pub.match_count() == 1)
 
         pixels = bytes((i * 7) & 0xFF for i in range(384))
-        img = dart.Image(width=32, height=4, stride=96,
-                         format=dart.ImageFormat.Rgb8, data=pixels)
+        img = dart.types.Image(width=32, height=4, stride=96,
+                         format=dart.types.ImageFormat.Rgb8, data=pixels)
         check("image send", pub.send(img) == dart.SendStatus.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and "img" not in got:
@@ -226,12 +226,12 @@ def video_types():
         r = got.get("img")
         check("an Image crosses whole",
               r is not None and r.width == 32 and r.height == 4 and r.stride == 96
-              and r.format == dart.ImageFormat.Rgb8 and bytes(r.data) == pixels)
+              and r.format == dart.types.ImageFormat.Rgb8 and bytes(r.data) == pixels)
 
         v = rv.get()
         check("the stream variable replicated",
-              v is not None and v.kind == dart.VideoStreamKind.Rtsp
-              and v.codec == dart.VideoCodec.H264
+              v is not None and v.kind == dart.types.VideoStreamKind.Rtsp
+              and v.codec == dart.types.VideoCodec.H264
               and v.width == 1920 and v.height == 1080
               and v.url == "rtsp://cam.local/main" and v.name == "front door")
     finally:
@@ -250,16 +250,16 @@ def value_roots():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    check("bool canonical hash", dart.Schema(dart.bool_).hash == HASH_BOOL)
+    check("bool canonical hash", dart.Schema(bool).hash == HASH_BOOL)
     check("f32[] canonical hash", dart.Schema(list[dart.f32]).hash == HASH_F32ARR)
-    check("bool dsl", dart.dsl(dart.bool_) == "bool\n")
+    check("bool dsl", dart.dsl(bool) == "bool\n")
     check("f32[] dsl", dart.dsl(list[dart.f32]) == "f32[]\n")
     check("string(16) dsl", dart.dsl(dart.string(16)) == "string<16>\n")
     check("bare root reflects as one anonymous field",
           dart.Schema(dart.f64).field_count == 1
           and dart.Schema(dart.f64).name == ""
           and dart.Schema(dart.f64).fields()[0].name == "")
-    for src, value in ((dart.bool_, True), (dart.u8, 200), (dart.i32, -7),
+    for src, value in ((bool, True), (dart.u8, 200), (dart.i32, -7),
                        (dart.f32, 1.5), (dart.f64, -2.25), (int, 5), (float, 0.5),
                        (bool, False), (dart.string(16), "capped"), (str, "unbounded"),
                        (list[dart.f32], [1.5, -2.5]), (dict, {"battery": 87}),
@@ -276,7 +276,7 @@ def value_roots():
             same = out == value
         check("round-trip %s -> %r" % (dart.dsl(src).strip(), out), same)
     # text DSL and the bare type agree, and a named bare root is an error
-    check("text `bool` == dart.bool_", dart.Schema("bool").hash == HASH_BOOL)
+    check("text `bool` == plain bool", dart.Schema("bool").hash == HASH_BOOL)
     try:
         dart.Schema("Temperature: f32")
         check("named bare root refused", False)
@@ -301,8 +301,8 @@ def value_roots_live():
     b = dart.Node("VB", None, lambda e: None, domain=44, multicast_interface=IFACE)
     try:
         qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=4)
-        pub_flag = dart.Topic[dart.bool_](a, "flag", dart.Role.PUB_ONLY, qos)
-        sub_flag = dart.Topic[dart.bool_](b, "flag", dart.Role.SUB_ONLY, qos)
+        pub_flag = dart.Topic[bool](a, "flag", dart.Role.PUB_ONLY, qos)
+        sub_flag = dart.Topic[bool](b, "flag", dart.Role.SUB_ONLY, qos)
         pub_note = dart.Topic[str](a, "note", dart.Role.PUB_ONLY, qos)
         sub_note = dart.Topic[str](b, "note", dart.Role.SUB_ONLY, qos)
         b.on_message(lambda m: got.setdefault(m.topic_name, m.value))

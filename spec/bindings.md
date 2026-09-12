@@ -157,10 +157,11 @@ platform serves every interpreter.
   `Topic[T](...)`, `Schema(source)` from DSL text or a class. Variables are methods only.
   Handlers are arity dispatched.
 - Any annotated class is a schema, no decorator needed. Field types: `dart.u8` to
-  `dart.f64`, `dart.bool_`, `dart.string(cap)`, `dart.<t>[N]`, a nested class, plain int,
-  float and bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.
+  `dart.f64`, `dart.string(cap)`, `dart.<t>[N]`, a nested class, plain int, float and
+  bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.
   `__dart_name__` overrides the type name. `dart.dsl(cls)` computes DSL with no library
-  load. Std types are tagged dataclasses.
+  load. The standard types are tagged dataclasses in `python/dart/types.py`, reached as
+  `dart.types.*`.
 - The map body is built and parsed in pure Python.
 - Task handlers run on a daemon thread per call. Raising `dart.CancelledError` completes
   CANCELLED.

@@ -12,20 +12,14 @@ from . import _native as _c
 
 __all__ = [
     "Node", "NodeOptions", "Topic", "Publisher", "Subscriber", "Qos", "Message", "Event",
-    "Schema", "Field", "SchemaError", "dsl",
-    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool_", "string",
-    "enum",
+    "Schema", "SchemaError", "dsl", "types",
+    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "string", "enum",
     "Reliability", "Role", "SendStatus", "CallStatus", "LogLevel", "MetaSection", "EventKind",
-    "ErrorKind", "FieldType",
+    "ErrorKind",
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred", "CallError",
     "TaskDefinition", "RemoteTask", "TaskRequest", "Progress", "CancelledError",
     "VariableDefinition", "RemoteVariable", "VariableUpdate",
     "LogLine", "MetaSnapshot",
-    "Float2", "Float3", "Float4", "Double2", "Double3", "Double4", "Int2", "Int3", "Int4",
-    "Quaternion", "Color", "Rect", "RectI", "Transform", "Twist", "GeoPoint",
-    "Image", "VideoFrame", "ExternalVideoStream", "CameraIntrinsics", "ImageFormat",
-    "VideoCodec", "VideoStreamKind", "DistortionModel", "JointState", "JointNames",
-    "Timestamp", "Duration", "Uri", "Uuid", "Matrix3x3", "Matrix4x4", "timestamp_now",
 ]
 
 
@@ -117,29 +111,7 @@ class ErrorKind(_pyenum.IntEnum):
     BAD_ADDRESS = 23
 
 
-class FieldType(_pyenum.IntEnum):
-    U8 = 0
-    U16 = 1
-    U32 = 2
-    U64 = 3
-    I8 = 4
-    I16 = 5
-    I32 = 6
-    I64 = 7
-    F32 = 8
-    F64 = 9
-    BOOL = 10
-    ARRAY = 11
-    STRUCT = 12
-    STRING = 13
-    VSTRING = 14   # variable string (`string`): rides the message tail
-    VARRAY = 15    # variable array (`elem[]` / `string<C>[]`): live element count
-    MAP = 16       # self-describing tagged map (`map`)
-    ENUM = 17      # named integer (`enum<uN>{...}`): wire is just the backing scalar
-    NAMED = 18     # a nominal tag on another type, reported as Field.type_name
-
-
-# raw kind bytes (== FieldType, kept short for the codec below)
+# raw kind bytes (== Schema.FieldType, kept short for the codec below)
 _U8, _U16, _U32, _U64 = 0, 1, 2, 3
 _I8, _I16, _I32, _I64 = 4, 5, 6, 7
 _F32, _F64, _BOOL, _ARR, _STRUCT, _STR = 8, 9, 10, 11, 12, 13
@@ -311,26 +283,10 @@ class MetaSnapshot:
         return s
 
 
-@_dataclasses.dataclass
-class Field:
-    name: str
-    kind: FieldType
-    elem: FieldType
-    count: int
-    depth: int
-    offset: int
-    size: int
-    str_cap: int = 0     # string capacity (STRING fields and STRING-element arrays)
-    type_name: str = ""  # the field type's NAME ("Transform"), "" when anonymous
-    elem_name: str = ""  # an array ELEMENT type's name, "" when anonymous
-    elem_size: int = 0   # bytes of one array element, else 0
-    arr_parent: int = 0xFFFF   # flat index of the enclosing struct ARRAY, 0xFFFF for none
-
-
 # Reflection: the field type markers and the lazy per class schema specs.
 
 class _Type:
-    """A DART scalar field-type marker (dart.u8 ... dart.f64, dart.bool_)."""
+    """A DART scalar field-type marker (dart.u8 ... dart.f64)."""
     def __init__(self, kind, token):
         self.kind = kind
         self.token = token
@@ -380,7 +336,6 @@ i32 = _Type(_I32, "i32")
 i64 = _Type(_I64, "i64")
 f32 = _Type(_F32, "f32")
 f64 = _Type(_F64, "f64")
-bool_ = _Type(_BOOL, "bool")
 
 
 def string(cap):
@@ -442,14 +397,6 @@ class _StdAlias:
         return "dart." + self.name
 
 
-Timestamp = _StdAlias("Timestamp", i64)     # microseconds since the Unix epoch, UTC
-Duration  = _StdAlias("Duration", i64)      # microseconds
-Uuid      = _StdAlias("Uuid", u8[16])       # RFC 4122 byte order
-Matrix3x3 = _StdAlias("Matrix3x3", f32[9])  # row-major
-Matrix4x4 = _StdAlias("Matrix4x4", f32[16])
-Uri       = _StdAlias("Uri", _String(256))
-
-
 def _std(name):
     """Class decorator: this class IS the standard type `name`, so a field of it spells
     as the name (and must have the canonical shape, else compiling the schema fails)."""
@@ -457,234 +404,6 @@ def _std(name):
         cls.__dart_std__ = name
         return _dataclasses.dataclass(cls)
     return wrap
-
-
-@_std("Float2")
-class Float2:
-    x: f32 = 0.0
-    y: f32 = 0.0
-
-
-@_std("Float3")
-class Float3:
-    x: f32 = 0.0
-    y: f32 = 0.0
-    z: f32 = 0.0
-
-
-@_std("Float4")
-class Float4:
-    x: f32 = 0.0
-    y: f32 = 0.0
-    z: f32 = 0.0
-    w: f32 = 0.0
-
-
-@_std("Double2")
-class Double2:
-    x: f64 = 0.0
-    y: f64 = 0.0
-
-
-@_std("Double3")
-class Double3:
-    x: f64 = 0.0
-    y: f64 = 0.0
-    z: f64 = 0.0
-
-
-@_std("Double4")
-class Double4:
-    x: f64 = 0.0
-    y: f64 = 0.0
-    z: f64 = 0.0
-    w: f64 = 0.0
-
-
-@_std("Int2")
-class Int2:
-    x: i32 = 0
-    y: i32 = 0
-
-
-@_std("Int3")
-class Int3:
-    x: i32 = 0
-    y: i32 = 0
-    z: i32 = 0
-
-
-@_std("Int4")
-class Int4:
-    x: i32 = 0
-    y: i32 = 0
-    z: i32 = 0
-    w: i32 = 0
-
-
-@_std("Quaternion")
-class Quaternion:
-    x: f64 = 0.0
-    y: f64 = 0.0
-    z: f64 = 0.0
-    w: f64 = 1.0     # identity rotation
-
-
-@_std("Color")
-class Color:
-    r: u8 = 0
-    g: u8 = 0
-    b: u8 = 0
-    a: u8 = 255
-
-
-@_std("Rect")
-class Rect:
-    x: f32 = 0.0
-    y: f32 = 0.0
-    w: f32 = 0.0
-    h: f32 = 0.0
-
-
-@_std("RectI")
-class RectI:
-    x: i32 = 0
-    y: i32 = 0
-    w: i32 = 0
-    h: i32 = 0
-
-
-# Meters and radians. parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
-@_std("Transform")
-class Transform:
-    translation: Double3 = _dataclasses.field(default_factory=Double3)
-    rotation: Quaternion = _dataclasses.field(default_factory=Quaternion)
-    parent: string(30) = ""
-
-
-@_std("Twist")
-class Twist:
-    linear: Double3 = _dataclasses.field(default_factory=Double3)    # m/s
-    angular: Double3 = _dataclasses.field(default_factory=Double3)   # rad/s
-
-
-@_std("GeoPoint")
-class GeoPoint:
-    lat: f64 = 0.0      # degrees
-    lon: f64 = 0.0      # degrees
-    alt: f64 = 0.0      # meters
-
-
-# The video family. Each member value IS the wire value, so the names and numbers
-# below are the same in every binding.
-
-class ImageFormat(_pyenum.IntEnum):
-    """How an Image's data is laid out. A value >= 16 is a compressed container, so
-    `data` holds the file bytes rather than pixels."""
-    Mono8 = 0
-    Mono16 = 1
-    Rgb8 = 2
-    Rgba8 = 3
-    Bgr8 = 4
-    Yuyv = 5
-    Nv12 = 6
-    Monof32 = 7
-    Jpeg = 16
-    Png = 17
-
-
-class VideoCodec(_pyenum.IntEnum):
-    """The codec a VideoFrame's data is encoded with. Unknown is the unstated
-    codec hint (an ExternalVideoStream that does not state one)."""
-    Unknown = 0
-    Mjpeg = 1
-    H264 = 2
-    H265 = 3
-    Av1 = 4
-
-
-class VideoStreamKind(_pyenum.IntEnum):
-    """The protocol an ExternalVideoStream's url speaks."""
-    Rtsp = 0
-    WebrtcWhep = 1
-    Hls = 2
-    Srt = 3
-    Rtp = 4
-    HttpMjpeg = 5
-    Other = 15
-
-
-@_std("Image")
-class Image:
-    width: u32 = 0
-    height: u32 = 0
-    stride: u32 = 0                             # bytes per row, 0 = tightly packed
-    format: enum(ImageFormat, u8) = ImageFormat.Mono8
-    data: list[u8] = b""                        # pixels, or the file bytes if compressed
-
-
-@_std("VideoFrame")
-class VideoFrame:
-    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
-    width: u32 = 0                              # the coded size, 0 = unstated
-    height: u32 = 0
-    keyframe: bool_ = False
-    pts: Timestamp = 0                          # presentation time, the Timestamp clock
-    data: list[u8] = b""
-
-
-# Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. codec,
-# width and height are hints for pickers, the stream stays authoritative once connected.
-@_std("ExternalVideoStream")
-class ExternalVideoStream:
-    kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
-    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
-    width: u32 = 0
-    height: u32 = 0
-    url: Uri = ""
-    name: string(32) = ""
-
-
-class DistortionModel(_pyenum.IntEnum):
-    """A lens distortion model. NoDistortion is an ideal pinhole."""
-    NoDistortion = 0
-    BrownConrady = 1
-    Fisheye = 2
-    Rational = 3
-
-
-# The pinhole model and its lens distortion. coeffs is zero filled past the model's count.
-@_std("CameraIntrinsics")
-class CameraIntrinsics:
-    width: u32 = 0                              # the resolution these numbers are valid for
-    height: u32 = 0
-    fx: f64 = 0.0
-    fy: f64 = 0.0
-    cx: f64 = 0.0
-    cy: f64 = 0.0
-    model: enum(DistortionModel, u8) = DistortionModel.NoDistortion
-    coeffs: f64[8] = _dataclasses.field(default_factory=lambda: [0.0] * 8)
-
-
-# SI: radians or meters, per second, and newtons or newton meters. velocity and effort
-# may be empty. The names ride a JointNames variable, not every sample.
-@_std("JointState")
-class JointState:
-    position: list[f64] = _dataclasses.field(default_factory=list)
-    velocity: list[f64] = _dataclasses.field(default_factory=list)
-    effort: list[f64] = _dataclasses.field(default_factory=list)
-
-
-# Published once as a variable. The order every JointState array follows.
-@_std("JointNames")
-class JointNames:
-    name: list[string(32)] = _dataclasses.field(default_factory=list)
-
-
-def timestamp_now():
-    """The wall clock in Timestamp units, microseconds since the Unix epoch UTC, the clock a
-        message's written_us uses."""
-    return int(_c.load().dart_timestamp_now())
 
 
 class _FieldSpec:
@@ -785,8 +504,8 @@ def _field_spec(name, ann, g):
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann),    # or a standard composite
                           type_name=getattr(ann, "__dart_std__", None))
     raise SchemaError("dart schema: field %r has unsupported type %r (use dart.u8..f64, "
-                      "dart.bool_, dart.string(N), dart.<t>[N], str, list[dart.<t>], dict, "
-                      "a nested schema class, or int/float/bool)" % (name, ann))
+                      "dart.string(N), dart.<t>[N], str, list[dart.<t>], dict, a nested "
+                      "schema class, or int/float/bool)" % (name, ann))
 
 
 def _build_spec(cls):
@@ -898,6 +617,42 @@ class Schema:
     """A compiled schema from DSL text, a schema class whose annotated fields are the wire
         fields, or a bare type whose message is that one value (docs/python.md)."""
 
+    class FieldType(_pyenum.IntEnum):
+        U8 = 0
+        U16 = 1
+        U32 = 2
+        U64 = 3
+        I8 = 4
+        I16 = 5
+        I32 = 6
+        I64 = 7
+        F32 = 8
+        F64 = 9
+        BOOL = 10
+        ARRAY = 11
+        STRUCT = 12
+        STRING = 13
+        VSTRING = 14   # variable string (`string`): rides the message tail
+        VARRAY = 15    # variable array (`elem[]` / `string<C>[]`): live element count
+        MAP = 16       # self-describing tagged map (`map`)
+        ENUM = 17      # named integer (`enum<uN>{...}`): wire is just the backing scalar
+        NAMED = 18     # a nominal tag on another type, reported as Field.type_name
+
+    @_dataclasses.dataclass
+    class Field:
+        name: str
+        kind: "Schema.FieldType"
+        elem: "Schema.FieldType"
+        count: int
+        depth: int
+        offset: int
+        size: int
+        str_cap: int = 0     # string capacity (STRING fields and STRING-element arrays)
+        type_name: str = ""  # the field type's NAME ("Transform"), "" when anonymous
+        elem_name: str = ""  # an array ELEMENT type's name, "" when anonymous
+        elem_size: int = 0   # bytes of one array element, else 0
+        arr_parent: int = 0xFFFF   # flat index of the enclosing struct ARRAY, 0xFFFF for none
+
     __slots__ = ("_s", "_spec", "_vroot")
 
     def __init__(self, source):
@@ -960,8 +715,8 @@ class Schema:
         info = _c.DartSchemaFieldInfo()
         for i in range(lib.dart_schema_field_count(self._s)):
             if lib.dart_schema_field_at(self._s, i, _c.byref(info)):
-                out.append(Field(_dstr(info.name), FieldType(info.kind),
-                                 FieldType(info.elem), info.count, info.depth,
+                out.append(Schema.Field(_dstr(info.name), Schema.FieldType(info.kind),
+                                        Schema.FieldType(info.elem), info.count, info.depth,
                                  info.offset, info.size, info.str_cap,
                                  _dstr(info.type_name), _dstr(info.elem_name),
                                  info.elem_size, info.arr_parent))
@@ -3107,3 +2862,6 @@ def _on_var_update(upd_ptr, user):
             box.handler(val, upd)
     except Exception:
         _traceback.print_exc()
+
+
+from . import types   # noqa: E402  the standard type roster, dart.types.*

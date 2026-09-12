@@ -12,9 +12,9 @@ import dart  # noqa: E402
 @dataclass
 class Tick:
     seq: dart.u64 = 0
-    when: dart.Timestamp = 0                                  # Unix-epoch microseconds, UTC
+    when: dart.types.Timestamp = 0                                  # Unix-epoch microseconds, UTC
     value: dart.f64 = 0.0
-    at: dart.Transform = field(default_factory=dart.Transform)   # meters and a quaternion
+    at: dart.types.Transform = field(default_factory=dart.types.Transform)   # meters and a quaternion
 
 
 count = 0
@@ -46,7 +46,7 @@ def main():
                 rate = (count - last_count) / (now - last_report)
                 # `when` is the publisher's wall clock in the same units everywhere, so the
                 # difference against ours is one-way latency plus clock skew.
-                age_ms = (dart.timestamp_now() - last.when) / 1000.0 if last.when else 0.0
+                age_ms = (dart.types.now() - last.when) / 1000.0 if last.when else 0.0
                 p = last.at.translation
                 print("received=%d  rate=%.0f Hz  age=%.1f ms  at=(%.2f, %.2f, %.2f)"
                       % (count, rate, age_ms, p.x, p.y, p.z))
