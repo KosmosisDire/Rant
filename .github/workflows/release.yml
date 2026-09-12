@@ -128,13 +128,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Before the platform artifacts land in the tree, so the sdist is the source alone.
+      - name: Source distribution
+        run: |
+          python -m pip install build
+          python -m build --sdist -o wheelhouse
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
       - name: Merge the platforms
         run: |
-          mkdir -p dist/native wheelhouse
+          mkdir -p dist/native
           cp -r artifacts/native-*/. dist/native/
           cp artifacts/wheels-*/*.whl wheelhouse/
           ls -R dist/native wheelhouse
@@ -144,11 +150,6 @@ jobs:
 
       - name: Unity package
         run: cmake -P tools/unity.cmake
-
-      - name: Source distribution
-        run: |
-          python -m pip install build
-          python -m build --sdist -o wheelhouse
 
       - name: Stage the assets
         run: |

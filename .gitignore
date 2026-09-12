@@ -22,8 +22,9 @@ old
 # C# / .NET wrapper build output (csharp/*/{bin,obj}); the wrapper source is csharp/Dart.cs
 [Bb]in/
 [Oo]bj/
-# NuGet pack output + CI release staging
-/nupkg/
+# The release workflow's staging folders
+/artifacts/
+/wheelhouse/
 /release/
 # The shared library the CMake target dart_shared builds, one folder per platform. The
 # packages bundle it. Never committed.

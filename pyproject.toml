@@ -25,7 +25,7 @@ wheel.packages = ["python/dart"]
 # ctypes needs no Python ABI, so the wheel is py3-none-<platform>: one per platform.
 wheel.py-api = "py3"
 cmake.build-type = "Release"
-sdist.exclude = [".github", "bin", "bridge", "csharp", "examples", "explore", "tests"]
+sdist.exclude = [".github", "artifacts", "bin", "bridge", "csharp", "examples", "explore", "release", "tests", "wheelhouse", "Logo.ai", "Logo.svg"]
 
 [tool.scikit-build.cmake.define]
 DART_BUILD_TOOLS = "OFF"
