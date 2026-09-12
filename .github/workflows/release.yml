@@ -73,15 +73,14 @@ jobs:
         run: dotnet pack csharp/Dart.csproj -c Release -o nupkg
 
       - name: Assemble Unity package
-        run: sh csharp/unity/pack.sh            # copies Dart.cs + native libs into csharp/unity/Runtime/
+        run: cmake -P tools/unity.cmake         # -> dist/com.rant.dart/ and dist/dart-<version>.unitypackage
 
       - name: Stage release assets
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p release
           cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.hpp release/
-          cp nupkg/Dart.*.nupkg release/
-          sh csharp/unity/mk-unitypackage.sh "release/dart-$VERSION.unitypackage"
+          cp nupkg/Dart.*.nupkg dist/dart-*.unitypackage release/
           ls -la release/
 
       - name: Publish release
@@ -99,9 +98,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          pkg="$RUNNER_TEMP/upm"
-          sh csharp/unity/mk-upm.sh "$pkg"   # tree + a .meta per file/folder (immutable pkg cache needs them)
-          cd "$pkg"
+          cd dist/com.rant.dart
           git init -q -b upm
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

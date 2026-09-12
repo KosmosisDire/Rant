@@ -29,6 +29,20 @@ To regenerate `dist/` without CMake:
 cmake -DSRC=src -DOUT=dist -P tools/pack.cmake
 ```
 
+## Packages
+
+Every package this machine can build lands in `dist/`:
+
+```sh
+cmake --build build --config Release --target packages
+```
+
+`unity_package` assembles `dist/com.rant.dart/` and `dist/dart-<version>.unitypackage`,
+`nuget_package` runs `dotnet pack` for `dist/Dart.<version>.nupkg`, and `python_wheel`
+runs `pip wheel` for this platform's wheel. Each bundles the native libraries in
+`dist/native/`, so a local package covers this machine and the release workflow covers
+every platform. The version is the `VERSION` file at the root.
+
 Embedded targets (Arduino, ESP32, VxWorks) do not build the host programs. They drop a
 `dist/` header into their own project and link the header only `dart` target, or just
 point at `dist/`. Set `-DDART_BUILD_TOOLS=OFF`. Cross builds default it off.

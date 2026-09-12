@@ -93,9 +93,13 @@ DART as a subproject or finds the installed package.
 - Bindings: `dart_shared` is the one native library every binding loads. The top level
   build copies it to `dist/native/<rid>/`, named by .NET runtime identifier, so the NuGet,
   Unity and Python packages read one place. macOS builds it universal under the portable
-  `osx` identifier. `csharp/unity/pack.ps1` assembles the Unity package and
+  `osx` identifier. `tools/unity.cmake` assembles the Unity package and
   `node bridge/client/build.mjs` regenerates the JS client dist. A tag push builds win-x64
   and linux-x64 and publishes the NuGet and Unity packages. Nothing binary is committed.
+- The `packages` target builds whichever of `unity_package`, `nuget_package` (needs
+  dotnet) and `python_wheel` (needs Python) this machine can, into `dist/`, each over the
+  libraries in `dist/native/`. The release workflow runs the same three after merging the
+  libraries of every platform.
 - CI is `.github/workflows/build.yml` on every push and pull request, across linux, windows
   and macos: configure and build, regenerate `dist/` and refuse a diff, build
   `tools/consumer` both ways. The explorer and the bridge are

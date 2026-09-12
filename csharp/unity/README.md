@@ -4,9 +4,9 @@ Discovery And Realtime Transport in Unity: peer discovery + reliable realtime UD
 pub/sub with typed messages. Desktop standalone (Windows / Linux x86_64) and the Editor.
 
 This is the **same `Dart.cs`** as the NuGet wrapper (one source, in `csharp/Dart.cs`) plus
-a **prebuilt native plugin**. Unity cannot compile the C at build time, so a native
-library is required. To keep one copy of the code and no binaries in git, the package's
-`Runtime/Dart.cs` and `Runtime/Plugins/` are **assembled by a script** (both gitignored).
+a **prebuilt native plugin** per platform. Unity cannot compile the C at build time, so a
+native library is required. The package is assembled into `dist/` by a script, so git
+keeps one copy of the code and no binaries.
 
 ## Install
 
@@ -20,22 +20,19 @@ the release and import it via `Assets > Import Package > Custom Package`.
 
 ## Building the package locally (maintainers)
 
-`Runtime/Dart.cs` and `Runtime/Plugins/` are gitignored and assembled by a script, so `main`
-keeps one copy of the code and no binaries:
+`tools/unity.cmake` assembles `dist/com.rant.dart/` and `dist/dart-<version>.unitypackage`
+from `csharp/Dart.cs`, this folder's `Runtime/` and the libraries in `dist/native/`. It
+writes `package.json` with the version from `VERSION` and a `.meta` for every entry, each
+plugin enabled for exactly its platform. Nothing generated lives in this folder.
 
 ```sh
-# 1. build the native library on each target OS (or in CI): the CMake target dart_shared
-cmake -S ../.. -B ../../build
-cmake --build ../../build --config Release --target dart_shared   # -> dist/native/<rid>/
-# 2. assemble Runtime/ (copies Dart.cs + the built libs in)
-powershell -File pack.ps1                # or: sh pack.sh
-# 3. (optional) build a .unitypackage
-sh mk-unitypackage.sh dart.unitypackage
+cmake -S . -B build
+cmake --build build --config Release --target unity_package
 ```
 
-Then add it locally via Package Manager `+`, then "Add package from disk", then `package.json`.
-In the plugin import settings, set each native lib to its platform + CPU (Unity usually
-auto-detects Standalone by extension: `.dll` is Windows, `.so` is Linux).
+Then Package Manager `+`, "Add package from disk", `dist/com.rant.dart/package.json`. Only
+the platforms built into `dist/native/` get a plugin, so a local package covers this
+machine and the release covers Windows, Linux and macOS.
 
 ## Use
 

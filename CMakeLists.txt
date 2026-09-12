@@ -203,7 +203,34 @@ if(DART_BUILD_JS_CLIENT)
     VERBATIM)
 endif()
 
-# 4. Install the single headers and a config package, so find_package(dart) gives the
+# 4. The packages, into dist/. unity_package needs nothing installed, nuget_package needs
+#    dotnet and python_wheel needs Python, and packages is whichever of the three this
+#    machine can build. The release workflow runs the same three per platform.
+if(DART_IS_TOP_LEVEL AND TARGET dart_shared)
+  add_custom_target(unity_package
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/unity.cmake" VERBATIM)
+  add_dependencies(unity_package dart_shared)
+  add_custom_target(packages DEPENDS unity_package)
+
+  find_program(DOTNET_EXECUTABLE dotnet)
+  if(DOTNET_EXECUTABLE)
+    add_custom_target(nuget_package
+      COMMAND "${DOTNET_EXECUTABLE}" pack "${CMAKE_CURRENT_SOURCE_DIR}/csharp/Dart.csproj"
+              -c Release --nologo -o "${CMAKE_CURRENT_SOURCE_DIR}/dist" VERBATIM)
+    add_dependencies(nuget_package dart_shared)
+    add_dependencies(packages nuget_package)
+  endif()
+
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_custom_target(python_wheel
+      COMMAND "${Python3_EXECUTABLE}" -m pip wheel "${CMAKE_CURRENT_SOURCE_DIR}" --no-deps
+              -w "${CMAKE_CURRENT_SOURCE_DIR}/dist" VERBATIM)
+    add_dependencies(packages python_wheel)
+  endif()
+endif()
+
+# 5. Install the single headers and a config package, so find_package(dart) gives the
 #    same dart::dart and dart::dart_host a subproject build does. A consumer that exports
 #    its own targets against dart:: turns this on, or the export refuses them.
 option(DART_INSTALL "Install the headers and the CMake config package" ${DART_IS_TOP_LEVEL})

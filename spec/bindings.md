@@ -128,14 +128,17 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `dist/native/<rid>/`, which the `dart_shared` target overwrites on every build.
 - Task handlers are async delegates with a real `CancellationToken`. They run on the poll
   thread until their first await, so CPU work belongs in `Task.Run`.
-- Unity (`csharp/unity/`) is a subset. `Runtime/Dart.cs` and `Runtime/Plugins/` are
-  assembled by `pack.ps1`. The scene MonoBehaviour is `UnityDartNode`. Unity only
+- Unity (`csharp/unity/`) is a subset. `tools/unity.cmake` assembles the package into
+  `dist/com.rant.dart/`: `csharp/Dart.cs`, `csharp/unity/Runtime/`, the `dist/native/`
+  libraries for win-x64, linux-x64 and osx, a `package.json` stamped from `VERSION`, and
+  a `.meta` per entry whose GUID is the md5 of its path so an upgrade keeps references.
+  Each plugin `.meta` enables exactly its own platform, since the three libraries share
+  the name `dart`. The scene MonoBehaviour is `UnityDartNode`. Unity only
   registers a MonoBehaviour whose class name matches its file name, and fails silently
   otherwise. Pattern: `Start()` the service thread, force `QueueBytes` nonzero on every
   topic so it is queued from creation, then `Dispatch()` per frame. OnDisable closes and a
   beforeAssemblyReload backstop stops the service thread. The Unity path has never run in
-  a real editor here. `package.json` keeps a `-preview` suffix, `-beta` belongs only to
-  the git tag.
+  a real editor here.
 
 ## Python
 

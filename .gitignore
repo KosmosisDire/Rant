@@ -28,14 +28,12 @@ old
 # The shared library the CMake target dart_shared builds, one folder per platform. The
 # packages bundle it. Never committed.
 /dist/native/
-# Packages built into dist/ by dotnet pack and pip wheel. Never committed.
+# Packages built into dist/ by dotnet pack, pip wheel and tools/unity.cmake. Never committed.
 /dist/*.nupkg
 /dist/*.whl
 /dist/*.tar.gz
-/csharp/unity/Runtime/Plugins/
-# The Unity package's Dart.cs is a copy of csharp/Dart.cs made by unity/pack.{ps1,sh}
-# (one source of truth, no committed duplicate).
-/csharp/unity/Runtime/Dart.cs
+/dist/*.unitypackage
+/dist/com.rant.dart/
 # Python build/cache artifacts (pip build, bytecode)
 __pycache__/
 *.egg-info/
