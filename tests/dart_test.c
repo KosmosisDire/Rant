@@ -3523,8 +3523,7 @@ static void sd_on_message(const DartMsg *m){
     }
 }
 static void sd_on_bad(const DartMsg *m){ (void)m; sd_bad_recv++; }
-static void sd_on_event(const DartEvent *ev, void *user){
-    (void)user;
+static void sd_on_event(const DartEvent *ev){
     if (ev->kind == DART_ERROR && ev->error == DART_E_SCHEMA_MISMATCH) sd_mismatch++;
 }
 static void stdtypes_checks(void){
