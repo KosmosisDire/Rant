@@ -259,22 +259,6 @@ function(build_cpp f dart_h)
   message(STATUS "wrote ${f}")
 endfunction()
 
-# dart.py: the Python wrapper with dist/dart.h embedded as a string at its @DART_EMBED@
-# marker. The C is escaped into one logical line so any content is safe.
-function(build_py f dart_h)
-  set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../python/dart.py.in")
-  file(READ "${dart_h}" dh)
-  string(REGEX REPLACE "\r" "" dh "${dh}")   # normalize CRLF -> LF first
-  string(REPLACE "\\" "\\\\" dh "${dh}")      # escape backslashes
-  string(REPLACE "\"" "\\\"" dh "${dh}")      # escape double quotes
-  string(REPLACE "\n" "\\n"  dh "${dh}")      # newlines -> \n (keep it one line)
-  file(READ "${tmpl}" py)
-  string(REGEX REPLACE "\r" "" py "${py}")
-  string(REPLACE "@DART_EMBED@" "${dh}" py "${py}")
-  file(WRITE "${f}" "${py}")
-  message(STATUS "wrote ${f}")
-endfunction()
-
 # dart.c and dart.cpp: the implementation anchors. A consumer that links the built library
 # never writes one, and the CMake target and the native plugin builds compile these.
 function(build_anchor f header)
@@ -296,7 +280,6 @@ build_discovery("${OUT}/dart_discovery.h")
 build_transport("${OUT}/dart_transport.h")
 build_combined("${OUT}/dart.h")
 build_cpp("${OUT}/dart.hpp" "${OUT}/dart.h")
-build_py("${OUT}/dart.py" "${OUT}/dart.h")
 build_anchor("${OUT}/dart.c" "dart.h")
 build_anchor("${OUT}/dart.cpp" "dart.hpp")
 message(STATUS "pack: done (${SRC} -> ${OUT})")

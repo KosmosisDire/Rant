@@ -56,7 +56,6 @@ if(DART_IS_TOP_LEVEL)
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart_transport.h"
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.h"
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.hpp"     # C++ wrapper with dart.h embedded
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.py"      # Python wrapper with dart.h embedded
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.c"       # the C implementation anchor
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.cpp")    # the C++ implementation anchor
       # (the C# wrapper csharp/Dart.cs is hand-written over the prebuilt native lib, not generated)
@@ -69,7 +68,6 @@ if(DART_IS_TOP_LEVEL)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
     DEPENDS ${DART_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
             "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dart.hpp"
-            "${CMAKE_CURRENT_SOURCE_DIR}/python/dart.py.in"
     COMMENT "DART: amalgamating src/ -> dist/ single-headers"
     VERBATIM)
 
@@ -142,6 +140,12 @@ if(DART_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
       VERBATIM)
   else()
     set_target_properties(dart_shared PROPERTIES EXCLUDE_FROM_ALL ON)
+  endif()
+
+  # A wheel build (scikit-build-core, spec/build.md) wants the library next to the package.
+  if(SKBUILD)
+    install(TARGETS dart_shared RUNTIME DESTINATION dart LIBRARY DESTINATION dart
+            ARCHIVE DESTINATION dart EXCLUDE_FROM_ALL)
   endif()
 endif()
 

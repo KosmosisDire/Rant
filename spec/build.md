@@ -9,7 +9,12 @@ DART as a subproject or finds the installed package.
 
 - `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is the three dist
   headers, so it re packs only when a `src/` file or pack.cmake changes. It also splices
-  `dart.h` into `dist/dart.hpp` and `dist/dart.py`.
+  `dart.h` into `dist/dart.hpp` and writes the two anchors.
+- `pyproject.toml` builds the Python wheel through scikit-build-core, which runs this same
+  CMake with `SKBUILD` set. The one rule keyed on it installs `dart_shared` next to the
+  package. The wheel is tagged `py3-none`, since ctypes needs no Python ABI, so one wheel
+  per platform serves every interpreter. Linux wheels are built inside manylinux, which
+  is what gives the shipped Linux library its glibc 2.28 floor.
 - CMake `file(WRITE)` turns `\n` into CRLF on Windows while `file(READ)` strips CR. The
   packer strips `\r` after read so its logic is deterministic, and `.gitattributes` pins
   every text file to LF so the committed headers do not churn between machines.

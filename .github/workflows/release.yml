@@ -76,7 +76,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p release
-          cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.hpp dist/dart.py release/
+          cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.hpp release/
           cp nupkg/Dart.*.nupkg release/
           sh csharp/unity/mk-unitypackage.sh "release/dart-$VERSION.unitypackage"
           ls -la release/

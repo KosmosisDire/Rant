@@ -1,19 +1,50 @@
-# Lets DART's Python wrapper be pip-installed straight from GitHub:
-#   pip install "git+https://github.com/OWNER/REPO.git"
-# It installs the single generated module dist/dart.py as `dart` (which embeds the C
-# and compiles it on first import). The C library itself is built with CMake, not pip.
+# The Python package: the wrapper in python/dart plus the shared library the CMake target
+# dart_shared builds. scikit-build-core runs that CMake, so pip install . works from a
+# checkout and the release workflow builds one wheel per platform (spec/build.md).
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "dart-middleware"
 version = "0.1.0"
-description = "DART (Discovery And Realtime Transport) Python wrapper: one file, compiles the embedded C99 core on first import."
+description = "DART (Discovery And Realtime Transport): peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
+readme = "python/README.md"
 requires-python = ">=3.8"
+keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "dart", "rant"]
+authors = [{ name = "Nathan George" }]
 
-[tool.setuptools]
-py-modules = ["dart"]
+[project.urls]
+Homepage = "https://github.com/KosmosisDire/DART"
 
-[tool.setuptools.package-dir]
-"" = "dist"
+[tool.scikit-build]
+wheel.packages = ["python/dart"]
+# ctypes needs no Python ABI, so the wheel is py3-none-<platform>: one per platform.
+wheel.py-api = "py3"
+cmake.build-type = "Release"
+sdist.exclude = [".github", "bin", "bridge", "csharp", "examples", "explore", "tests"]
+
+[tool.scikit-build.cmake.define]
+DART_BUILD_TOOLS = "OFF"
+DART_BUILD_EXPLORER = "OFF"
+DART_BUILD_BRIDGE = "OFF"
+DART_INSTALL = "OFF"
+
+# The release workflow runs cibuildwheel. One interpreter per platform is enough since the
+# wheel is py3-none. Linux builds inside manylinux, so the library needs glibc 2.28 or
+# newer, and that same library ships in the NuGet and Unity packages.
+[tool.cibuildwheel]
+build = "cp312-*"
+skip = "*-musllinux_*"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+archs = ["universal2"]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]

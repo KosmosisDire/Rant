@@ -1,11 +1,11 @@
 # Python
 
-`dist/dart.py` is one self contained module. It embeds the C amalgamation and, on the
-first `Node(...)`, compiles it into a cached shared library with the system C compiler
-and binds it through ctypes. Later imports load the cache. Drop the file into a project,
-there is nothing to install. A C compiler is needed once, and `DART_CC` overrides the
-one found. The semantics are the C ones, so docs/node.md, docs/topics.md,
-docs/patterns.md and docs/tasks.md apply. This page says what is different in Python.
+`pip install dart-middleware` installs the `dart` package: the wrapper in `python/dart`
+plus the shared library for your platform, bound through ctypes, so nothing compiles on
+your machine. In a source checkout, build the CMake target `dart_shared` and put
+`python/` on `sys.path`. `DART_LIBRARY` points the wrapper at any other copy of the
+library. The semantics are the C ones, so docs/node.md, docs/topics.md, docs/patterns.md
+and docs/tasks.md apply. This page says what is different in Python.
 
 ## A node
 

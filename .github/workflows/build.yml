@@ -54,3 +54,15 @@ jobs:
       # The build above already made the shared library. This is where the packages read it.
       - name: Shared library
         run: ls -l dist/native/*/
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: NuGet package
+        run: dotnet pack csharp/Dart.csproj -c Release -o dist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python wheel
+        run: python -m pip wheel . --no-deps -w dist

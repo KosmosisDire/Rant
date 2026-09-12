@@ -1,18 +1,15 @@
-"""The DART Python wrapper: one self contained module compiled on the first Node and bound
-through ctypes. docs/python.md explains how to use it."""
+"""The DART Python wrapper: ctypes over the shared library the CMake target dart_shared
+builds. docs/python.md explains how to use it."""
 
 import ctypes
 import dataclasses
 import enum
 import enum as _pyenum   # kept reachable after the public dart.enum() shadows the module name
-import hashlib
 import inspect
 import os
-import shutil
+import platform
 import struct
-import subprocess
 import sys
-import tempfile
 import threading
 import traceback
 from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
@@ -20,128 +17,29 @@ from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
                     c_int32, c_int64, c_uint8, c_uint16, c_uint32, c_uint64,
                     c_size_t, c_double, c_float, c_ubyte)
 
-_WRAPPER_VERSION = "6"   # bump to force a recompile when this file's ABI view changes
 
-# The embedded C source. The packer replaces the marker with the escaped dist/dart.h. In
-# tree the marker stays and _source() reads dist/dart.h from disk.
-_DART_C_SOURCE = "@DART_EMBED@"
-_EMBED_MARKER = "@DART_" + "EMBED@"   # split so the packer never rewrites this copy
-
-
-def _source():
-    if _DART_C_SOURCE != _EMBED_MARKER:
-        return _DART_C_SOURCE
-    here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, "dart.h"),
-                 os.path.join(here, "..", "dist", "dart.h")):
-        if os.path.exists(cand):
-            with open(cand, "r", encoding="utf-8", newline="") as f:
-                return f.read()
-    raise RuntimeError("dart: no embedded C source and no dist/dart.h found "
-                       "(run the packer, or keep dart.py next to dist/dart.h)")
-
-
-# Compile on import: find a compiler, build a shared library from the embedded source
-# once, cache it by content hash, and load it via ctypes.
-
-
-def _lib_ext():
-    if sys.platform == "win32":
-        return ".dll"
-    if sys.platform == "darwin":
-        return ".dylib"
-    return ".so"
-
-
-def _cache_dir():
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Caches")
-    else:
-        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    d = os.path.join(base, "dart-python")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _find_compiler():
-    """Return (path, family) where family is 'gnu' or 'msvc'."""
-    override = os.environ.get("DART_CC")
+def _library_path():
+    """DART_LIBRARY, else the copy the wheel carries next to this file, else the
+    dist/native/<rid>/ copy of a source checkout."""
+    name = {"win32": "dart.dll", "darwin": "libdart.dylib"}.get(sys.platform, "libdart.so")
+    override = os.environ.get("DART_LIBRARY")
     if override:
-        path = override if os.path.sep in override else shutil.which(override)
-        if not path:
-            raise RuntimeError("dart: DART_CC=%r not found" % override)
-        return path, _family(path)
-    names = (["clang-cl", "gcc", "clang", "cl"] if sys.platform == "win32"
-             else ["cc", "clang", "gcc"])
-    for name in names:
-        path = shutil.which(name)
-        if path:
-            return path, _family(path)
-    raise RuntimeError("dart: no C compiler found (looked for %s). Install one "
-                       "or set DART_CC." % ", ".join(names))
-
-
-def _family(path):
-    base = os.path.basename(path).lower()
-    if base.startswith("cl.") or base == "cl" or "clang-cl" in base:
-        return "msvc"
-    return "gnu"
-
-
-def _compiler_id(path):
-    try:
-        out = subprocess.run([path, "--version"], capture_output=True, timeout=20).stdout
-    except Exception:
-        out = b""
-    return hashlib.sha256(path.encode("utf-8", "replace") + b"\0" + out).hexdigest()[:12]
-
-
-def _compile(src, path, family, out_lib):
-    tmp = tempfile.mkdtemp(prefix="dart-build-")
-    try:
-        cfile = os.path.join(tmp, "dart_impl.c")
-        with open(cfile, "w", encoding="utf-8", newline="\n") as f:
-            f.write("#define DART_IMPLEMENTATION\n")
-            f.write(src)
-        staged = os.path.join(tmp, "dart" + _lib_ext())
-        if family == "msvc":
-            cmd = [path, "/nologo", "/O2", "/LD", "/TC", "/DDART_IMPLEMENTATION",
-                   "/DDART_BUILD_SHARED", "/D_CRT_SECURE_NO_WARNINGS", cfile,
-                   "/Fe:" + staged, "/link", "ws2_32.lib", "bcrypt.lib", "winmm.lib"]
-        else:
-            cmd = [path, "-O2", "-std=c99", "-shared", "-DDART_IMPLEMENTATION",
-                   "-DDART_BUILD_SHARED", "-fvisibility=hidden", cfile, "-o", staged]
-            if sys.platform != "win32":
-                cmd.insert(1, "-fPIC")
-            if sys.platform.startswith("linux"):
-                cmd += ["-lrt"]
-            if sys.platform == "win32":
-                cmd += ["-lws2_32", "-lbcrypt", "-lwinmm", "-static-libgcc"]
-        proc = subprocess.run(cmd, capture_output=True, cwd=tmp)
-        if proc.returncode != 0 or not os.path.exists(staged):
-            raise RuntimeError(
-                "dart: compile failed (%s)\n%s\n%s"
-                % (" ".join(cmd),
-                   proc.stdout.decode("utf-8", "replace"),
-                   proc.stderr.decode("utf-8", "replace")))
-        os.replace(staged, out_lib)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def _ensure_library():
-    src = _source()
-    path, family = _find_compiler()
-    key = hashlib.sha256(
-        ("\0".join([_WRAPPER_VERSION, sys.platform, str(sizeof(c_void_p)),
-                    _compiler_id(path)]) + "\0").encode("utf-8")
-        + src.encode("utf-8")).hexdigest()[:16]
-    out_lib = os.path.join(_cache_dir(), "dart-%s%s" % (key, _lib_ext()))
-    if not os.path.exists(out_lib):
-        _compile(src, path, family, out_lib)
-    return out_lib
+        return override
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.join(here, name)
+    if os.path.exists(bundled):
+        return bundled
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    if sys.platform == "darwin":
+        rid = "osx"
+    else:
+        rid = ("win-" if sys.platform == "win32" else "linux-") + arch
+    in_tree = os.path.join(here, "..", "..", "dist", "native", rid, name)
+    if os.path.exists(in_tree):
+        return in_tree
+    raise RuntimeError("dart: no native library found. Install the wheel (pip install "
+                       "dart-middleware), build the CMake target dart_shared in a source "
+                       "checkout, or point DART_LIBRARY at the library.")
 
 
 # The ctypes layouts, which must mirror the C structs exactly (spec/bindings.md).
@@ -592,7 +490,7 @@ def _load():
         return _LIB
     with _LIB_LOCK:
         if _LIB is None:
-            lib = ctypes.CDLL(_ensure_library())
+            lib = ctypes.CDLL(_library_path())
             _bind(lib)
             _LIB = lib
     return _LIB

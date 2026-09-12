@@ -1,7 +1,7 @@
 # Bindings
 
 Five API surfaces share one C core: C, C++ (`cpp/dart.hpp`), C# (`csharp/Dart.cs` plus
-the Unity copy), Python (`python/dart.py.in`) and JS through the bridge. The cross
+the Unity copy), Python (`python/dart/__init__.py`) and JS through the bridge. The cross
 language rules below were argued once and apply everywhere. Where anything else disagrees
 about a wrapper API, this file wins.
 
@@ -139,11 +139,13 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 
 ## Python
 
-`python/dart.py.in` becomes `dist/dart.py` with `dart.h` embedded. On the first `Node(...)`
-it hashes the embedded C, compiler id, platform and wrapper version, compiles a shared
-library into `%LOCALAPPDATA%/dart-python` (or `~/.cache/dart-python`) and loads it with
-ctypes. A C compiler is needed once (`DART_CC` overrides). Verified with clang-cl and
-MinGW.
+`python/dart/__init__.py` is the package. It loads the library `dart_shared` builds
+through ctypes: `DART_LIBRARY`, else the copy the wheel carries next to it, else
+`dist/native/<rid>/` in a source checkout. scikit-build-core drives the wheel from
+`pyproject.toml`, so `pip install .` runs this same CMake with the tools, explorer, bridge
+and install off and the one `SKBUILD` rule copies the library next to the package. The
+wheel is `py3-none-<platform>`, since ctypes needs no Python ABI, so one wheel per
+platform serves every interpreter.
 
 - The API mirrors C#: constructors not factories, `Node(name, on_message, on_event,
   options=None, **opts)`, `Topic(node, name, schema=None, role=PUBSUB, **qos)`,
@@ -155,8 +157,6 @@ MinGW.
   `__dart_name__` overrides the type name. `dart.dsl(cls)` computes DSL with no library
   load. Std types are tagged dataclasses.
 - The map body is built and parsed in pure Python.
-- The compiled library is cached by content hash, keyed on `_WRAPPER_VERSION`, so a
-  changed ABI view needs that bumped.
 - Task handlers run on a daemon thread per call. Raising `dart.CancelledError` completes
   CANCELLED.
 - Gaps: no `seed_peers`, no peer reflection.

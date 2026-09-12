@@ -45,12 +45,11 @@ no explorer, no bridge, nothing fetched.
 An installed DART is `find_package(dart CONFIG REQUIRED)`, same targets. See
 [docs/building.md](docs/building.md).
 
-### Python (`dart.py`)
-Drop `dart.py` next to your code and import it (it compiles the embedded C into a cached
-native library on first import, so a C compiler is needed once):
-```python
-import dart
+### Python
+```sh
+pip install dart-middleware
 ```
+The wheel carries the native library, so nothing compiles on your machine.
 
 ### C# / .NET
 Put the `.nupkg` in a folder, register it as a local NuGet source, and add the package:

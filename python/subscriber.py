@@ -5,7 +5,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dart  # noqa: E402
 
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 # Import the shipped single-file wrapper from dist/ (dev layout).
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, "..", "dist"))
+sys.path.insert(0, _HERE)
 import dart  # noqa: E402
 
 DOMAIN = 42
@@ -671,7 +671,7 @@ def main():
         return 1
     if not std_types():
         return 1
-    print("opening nodes (first run compiles the embedded C, please wait)...")
+    print("opening nodes...")
     sub = dart.Node("sub", on_message, on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE)
     pub = dart.Node("pub", None, on_event("pub"),
