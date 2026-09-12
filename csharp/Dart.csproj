@@ -12,8 +12,11 @@
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
 
     <PackageId>Dart</PackageId>
+    <Authors>Nathan George</Authors>
+    <RepositoryUrl>https://github.com/KosmosisDire/DART</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/KosmosisDire/DART</PackageProjectUrl>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../VERSION').Trim())</Version>
-    <Description>DART (Discovery And Realtime Transport): peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64).</Description>
+    <Description>DART (Discovery And Realtime Transport): peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64, linux-arm64, osx).</Description>
     <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;dart;rant</PackageTags>
     <IncludeSymbols>false</IncludeSymbols>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

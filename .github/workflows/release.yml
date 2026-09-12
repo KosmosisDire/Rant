@@ -1,107 +1,193 @@
-# Build every DART distributable and attach them to a GitHub Release when a tag is pushed.
-# Single-file distributables (C headers, C++ header, Python module, the NuGet .nupkg) are
-# uploaded as-is; anything made of multiple files (the Unity package) is zipped.
-#
-# Assets:
-#   dart.h  dart_discovery.h  dart_transport.h   (C single-headers)
-#   dart.hpp                                      (C++ wrapper)
-#   dart.py                                       (Python wrapper)
-#   Dart.<version>.nupkg                          (C# NuGet: managed + win-x64 + linux-x64 native)
-#   dart-<version>.unitypackage                   (Unity: Dart.cs + native plugins -> Assets/Dart/)
+# Cut a release when a tag v<VERSION> is pushed: every package and every program on every
+# platform attached to a GitHub Release, the Unity package pushed to the upm branch, and
+# the NuGet and the wheels published wherever an API key is set (spec/build.md).
 name: release
 
 on:
   push:
-    tags: ['*']            # any tag you push cuts a release
+    tags: ['v*']
 
 permissions:
-  contents: write          # create the release + upload assets (uses GITHUB_TOKEN, no PAT)
+  contents: write
 
 jobs:
-  # ---- native libraries (one per platform, run in parallel) -------------------
-  native-linux:
-    runs-on: ubuntu-latest
+  # The shared library and the Python wheel per platform, both from cibuildwheel: the
+  # library inside each wheel is the one the NuGet and Unity packages bundle too, so on
+  # Linux it comes out of the manylinux container and runs on any glibc since 2.28.
+  native:
+    name: native ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux }
+          - { os: windows-latest, name: windows }
+          - { os: macos-latest,   name: macos }
     steps:
-      - uses: actions/checkout@v4
-      - name: Build linux-x64 native lib
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDART_BUILD_TOOLS=OFF -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
-          cmake --build build --target dart_shared
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-linux
-          path: dist/native/linux-x64/libdart.so
+      - uses: actions/checkout@v7
 
-  native-windows:
-    runs-on: windows-latest
+      - name: The tag matches VERSION
+        shell: bash
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+
+      # aarch64 wheels build under emulation, since no arm runner is free on a private repo.
+      - uses: docker/setup-qemu-action@v4
+        if: runner.os == 'Linux'
+        with:
+          platforms: arm64
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: pypa/cibuildwheel@v4.2.1
+
+      - name: The libraries out of the wheels
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import glob, os, zipfile
+          for w in glob.glob("wheelhouse/*.whl"):
+              tag = os.path.basename(w).rsplit("-", 1)[1]
+              rid = ("win-x64" if "win_amd64" in tag else "linux-arm64" if "aarch64" in tag
+                     else "linux-x64" if "x86_64" in tag else "osx")
+              with zipfile.ZipFile(w) as z:
+                  for n in z.namelist():
+                      if n in ("dart/dart.dll", "dart/libdart.so", "dart/libdart.dylib"):
+                          os.makedirs("dist/native/" + rid, exist_ok=True)
+                          with open("dist/native/" + rid + "/" + n[5:], "wb") as f:
+                              f.write(z.read(n))
+                          print(w, "->", rid)
+          EOF
+          ls -lR dist/native
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.name }}
+          path: wheelhouse/*.whl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.name }}
+          path: dist/native/
+
+  # The explorer, the bridge and the command line tools, one zip per platform. Linux
+  # builds on ubuntu-22.04 so the binaries run on glibc 2.35 and newer.
+  programs:
+    name: programs ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,   name: linux-x64 }
+          - { os: windows-latest, name: win-x64 }
+          - { os: macos-latest,   name: osx-arm64 }
     steps:
-      - uses: actions/checkout@v4
-      - name: Build win-x64 native lib
-        run: |
-          cmake -S . -B build -DDART_BUILD_TOOLS=OFF -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
-          cmake --build build --config Release --target dart_shared
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-windows
-          path: dist/native/win-x64/dart.dll
+      - uses: actions/checkout@v7
 
-  # ---- pack everything + publish the release ----------------------------------
+      - name: SDL3 build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev libdbus-1-dev libudev-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
+
+      - name: Zip
+        shell: bash
+        run: |
+          mkdir -p out/dart
+          for p in dart_explorer dart_bridge demo_scene dart_test dart_test_noshm pubsub example pattern_demo if_probe_check; do
+            cp "bin/$p" out/dart/ 2>/dev/null || cp "bin/$p.exe" out/dart/
+          done
+          ls out/dart
+          cd out && cmake -E tar cf "../dart-$(cat ../VERSION)-${{ matrix.name }}.zip" --format=zip dart
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: programs-${{ matrix.name }}
+          path: dart-*.zip
+
+  # Everything into one GitHub Release, the upm branch and the registries.
   release:
-    needs: [native-linux, native-windows]
+    needs: [native, programs]
     runs-on: ubuntu-latest
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
 
-      - name: Download native libs
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: Place native libs
+      - name: Merge the platforms
         run: |
-          mkdir -p dist/native/win-x64 dist/native/linux-x64
-          cp artifacts/native-windows/dart.dll   dist/native/win-x64/dart.dll
-          cp artifacts/native-linux/libdart.so   dist/native/linux-x64/libdart.so
+          mkdir -p dist/native wheelhouse
+          cp -r artifacts/native-*/. dist/native/
+          cp artifacts/wheels-*/*.whl wheelhouse/
+          ls -R dist/native wheelhouse
 
-      - name: The tag matches VERSION
-        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+      - name: NuGet package
+        run: dotnet pack csharp/Dart.csproj -c Release -o dist
 
-      - name: Pack NuGet (managed + both native RIDs)
-        run: dotnet pack csharp/Dart.csproj -c Release -o nupkg
+      - name: Unity package
+        run: cmake -P tools/unity.cmake
 
-      - name: Assemble Unity package
-        run: cmake -P tools/unity.cmake         # -> dist/com.rant.dart/ and dist/dart-<version>.unitypackage
-
-      - name: Stage release assets
+      - name: Source distribution
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          python -m pip install build
+          python -m build --sdist -o wheelhouse
+
+      - name: Stage the assets
+        run: |
+          VERSION="$(cat VERSION)"
           mkdir -p release
-          cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.hpp release/
-          cp nupkg/Dart.*.nupkg dist/dart-*.unitypackage release/
-          ls -la release/
+          cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.c dist/dart.hpp dist/dart.cpp release/
+          cp dist/dart.mjs dist/dart.js dist/dart.d.ts release/
+          cp dist/Dart.*.nupkg dist/dart-*.unitypackage wheelhouse/* artifacts/programs-*/*.zip release/
+          (cd dist && cmake -E tar cf "../release/dart-$VERSION-native.zip" --format=zip native)
+          ls -la release
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: release/*
           generate_release_notes: true
 
-      # Publish the assembled Unity package (Dart.cs + native plugins at the branch root)
-      # to a dedicated `upm` branch so it can be added via a UPM git URL:
-      #   https://github.com/OWNER/REPO.git#upm
-      # main stays binary-free; only this generated branch carries the compiled libs.
-      - name: Publish upm branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The Unity package as a git URL: https://github.com/OWNER/REPO.git#upm
+      - name: Publish the upm branch
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          cd dist/com.rant.dart
+          pkg="$RUNNER_TEMP/upm"
+          rm -rf "$pkg"
+          cp -r dist/com.rant.dart "$pkg"
+          cd "$pkg"
           git init -q -b upm
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -q -m "upm $VERSION"
-          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" upm
+          git commit -q -m "upm $(cat "$GITHUB_WORKSPACE/VERSION")"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" upm
+
+      # Set NUGET_API_KEY and PYPI_API_TOKEN as repository secrets and the next tag
+      # publishes. Without them the release is the GitHub page alone.
+      - name: Publish to nuget.org
+        if: env.NUGET_API_KEY != ''
+        run: dotnet nuget push "dist/Dart.*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Publish to PyPI
+        if: env.PYPI_API_TOKEN != ''
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: wheelhouse

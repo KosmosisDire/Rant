@@ -4,7 +4,7 @@ C# wrapper for **DART** (Discovery And Realtime Transport): peer discovery over 
 multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
 
 `Dart.cs` is a thin P/Invoke layer over a **prebuilt native library** (`dart`), bundled
-per-platform (win-x64, linux-x64). Every call is **thread-safe** (a node-level lock in
+per-platform (win-x64, linux-x64, linux-arm64, osx). Every call is **thread-safe** (a node-level lock in
 the C core): drive a node with `Start()` (a C background service thread runs the loop
 and fires handlers) or by calling `Poll()` from your own loop.
 
@@ -32,16 +32,19 @@ The binaries are **not committed** to git. The CMake target (or the release work
 produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Dart.dll` +
 `runtimes/<rid>/native/*`.
 
-## Install (no nuget.org, no keys)
-
-Put the `.nupkg` in a folder, point a local NuGet source at it, and add the package:
+## Install
 
 ```sh
-dotnet nuget add source ./path/to/nupkg -n dart-local
 dotnet add package Dart
 ```
 
-(Or attach the `.nupkg` to a GitHub Release and download it: release assets need no key.)
+Before the package is on nuget.org, download the `.nupkg` from the GitHub Release and
+register its folder as a source first:
+
+```sh
+dotnet nuget add source ./path/to/that/folder -n dart
+dotnet add package Dart
+```
 
 ## Use
 

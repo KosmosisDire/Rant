@@ -94,17 +94,28 @@ DART as a subproject or finds the installed package.
   build copies it to `dist/native/<rid>/`, named by .NET runtime identifier, so the NuGet,
   Unity and Python packages read one place. macOS builds it universal under the portable
   `osx` identifier. `tools/unity.cmake` assembles the Unity package and
-  `node bridge/client/build.mjs` regenerates the JS client dist. A tag push builds win-x64
-  and linux-x64 and publishes the NuGet and Unity packages. Nothing binary is committed.
+  `node bridge/client/build.mjs` regenerates the JS client dist. Nothing binary is
+  committed.
 - The `packages` target builds whichever of `unity_package`, `nuget_package` (needs
   dotnet) and `python_wheel` (needs Python) this machine can, into `dist/`, each over the
   libraries in `dist/native/`. The release workflow runs the same three after merging the
   libraries of every platform.
-- CI is `.github/workflows/build.yml` on every push and pull request, across linux, windows
-  and macos: configure and build, regenerate `dist/` and refuse a diff, build
-  `tools/consumer` both ways. The explorer and the bridge are
-  off, since they fetch SDL3 and IXWebSocket and are moving out of this repo. No test suite
-  runs yet: that waits on the test rework, so a red build means a build broke.
+- CI is two workflows. `build.yml` runs on every push to main and every pull request, on
+  linux, windows and macos: configure and build the library and its programs, regenerate
+  `dist/` and refuse a diff, build `tools/consumer` from the source tree and from an
+  install, pack the NuGet and build the wheel of that platform. The explorer and the
+  bridge are off there, since they fetch SDL3 and libdatachannel and are moving out of
+  this repo. No test suite runs yet: that waits on the test rework, so a red build means
+  a build broke.
+- `release.yml` runs on a tag `v*` and refuses one that differs from `VERSION`. Two jobs
+  per platform, then one release job. `native` runs cibuildwheel, which builds the wheel
+  and, inside it, the library the NuGet and Unity packages bundle, so the Linux libraries
+  come out of the manylinux container, aarch64 under QEMU since no arm runner is free on
+  a private repo. `programs` builds the explorer, the bridge and the tools into one zip
+  per platform, Linux on ubuntu-22.04 for a glibc 2.35 floor. `release` merges the
+  libraries, packs the NuGet, assembles the Unity package and the sdist, attaches
+  everything to a GitHub Release, pushes the upm branch, and publishes to nuget.org and
+  PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
 - `tools/consumer` is a throwaway project that consumes DART the way a user does, from the
   source tree by default and from an install with `DART_CONSUMER_FIND_PACKAGE=ON`. It is
   the only thing that notices when external consumption breaks, which the normal build

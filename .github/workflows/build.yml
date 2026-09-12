@@ -23,7 +23,7 @@ jobs:
           - { os: macos-latest,   name: macos }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The explorer and the bridge fetch SDL3, IXWebSocket and libdatachannel, and both
       # are moving out of this repo, so CI covers the library and its own programs.
@@ -55,13 +55,13 @@ jobs:
       - name: Shared library
         run: ls -l dist/native/*/
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
       - name: NuGet package
         run: dotnet pack csharp/Dart.csproj -c Release -o dist
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Python wheel

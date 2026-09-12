@@ -1,7 +1,7 @@
 # DART for Unity
 
 Discovery And Realtime Transport in Unity: peer discovery + reliable realtime UDP
-pub/sub with typed messages. Desktop standalone (Windows / Linux x86_64) and the Editor.
+pub/sub with typed messages. Desktop standalone (Windows, Linux x86_64, macOS) and the Editor.
 
 This is the **same `Dart.cs`** as the NuGet wrapper (one source, in `csharp/Dart.cs`) plus
 a **prebuilt native plugin** per platform. Unity cannot compile the C at build time, so a

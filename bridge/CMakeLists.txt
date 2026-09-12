@@ -84,7 +84,7 @@ if(DART_BRIDGE_WEBRTC)
   set(ENABLE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(libdatachannel
     GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-    GIT_TAG        v0.23.2
+    GIT_TAG        v0.23.3
     GIT_SHALLOW    TRUE
     GIT_SUBMODULES "deps/libjuice" "deps/usrsctp" "deps/plog" "deps/libsrtp"
     GIT_SUBMODULES_RECURSE FALSE)
