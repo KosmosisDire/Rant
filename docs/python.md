@@ -70,9 +70,10 @@ tagged dataclasses and aliases: `dart.types.Transform`, `dart.types.Color`,
 
 ## Messages and queues
 
-A `Message` is copied out, so it outlives the callback. `value` is the decoded object and
-`fields` the dict. `recv_us` is the node's monotonic clock at receipt and `written_us` the
-writer's wall clock, 0 when the publisher opted out, as in docs/node.md.
+A `Message` is copied out, so it outlives the callback. `value` is the decoded object,
+None on a raw topic, and `data` the wire bytes. `recv_us` is the node's monotonic clock at
+receipt and `written_us` the writer's wall clock, 0 when the publisher opted out, as in
+docs/node.md.
 
 `take(timeout_ms)` and `dispatch(max_msgs, timeout_ms)` switch a topic to queued
 delivery. `take` returns None when nothing arrived, and dispatch handlers run on the
@@ -89,7 +90,9 @@ wait on the match wait, and `pending_count()` counts unresolved candidates. `Pub
 `FunctionDefinition[Req, Rsp](node, name, handler)`, `RemoteFunction[Req, Rsp](node, name)`,
 `TaskDefinition[Req, Prg, Rsp]`, `RemoteTask[Req, Prg, Rsp]`, `VariableDefinition[T]`,
 `RemoteVariable[T]`, `Publisher[T]` and `Subscriber[T]` are the typed forms. The untyped
-forms take explicit schema arguments, None for raw bytes.
+forms take explicit schema arguments, None for raw bytes. `match_count()` on any handle
+counts the other side: callers on a definition, providers on a remote, remotes on a
+variable definition, owners on a remote variable.
 
 Handlers are arity dispatched. A one argument function handler returns the reply and is
 acknowledged OK, and raising answers APP_ERROR with the exception text. The two argument

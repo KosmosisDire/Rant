@@ -398,12 +398,12 @@ def patterns():
     lvl = dart.RemoteVariable[Level](cli, "level")
 
     deadline = time.time() + 8.0
-    while time.time() < deadline and not (add_r.has_definition()
-                                          and boom_r.has_definition()
-                                          and late_r.has_definition()):
+    while time.time() < deadline and not (add_r.match_count() > 0
+                                          and boom_r.match_count() > 0
+                                          and late_r.match_count() > 0):
         cli.poll(5)
-    check("definitions discovered", add_r.has_definition() and boom_r.has_definition()
-          and late_r.has_definition())
+    check("definitions discovered", add_r.match_count() > 0 and boom_r.match_count() > 0
+          and late_r.match_count() > 0)
 
     # blocking calls
     r = add_r.call(AddReq(a=2, b=3), 3000)
@@ -422,13 +422,13 @@ def patterns():
 
     rl = late_r.call(AddReq(a=20, b=22), 3000)
     check("deferred completion", rl.ok and rl.value.sum == 42)
-    check("caller count seen by definition", add.caller_count() == 1)
+    check("caller count seen by definition", add.match_count() == 1)
 
     # variable: catch_up hands the remote the initial value
     check("variable wait", lvl.wait(3000))
     v = lvl.get()
     check("initial value", v is not None and v.value == 5)
-    check("has_definition", lvl.has_definition())
+    check("owner matched", lvl.match_count() > 0)
     check("remote set accepted", lvl.set(Level(value=9)) == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
@@ -571,12 +571,12 @@ def tasks():
         rigid_r = dart.RemoteTask[JobReq, JobPrg, JobRsp](cli, "rigid")
 
         deadline = time.time() + 8.0
-        while time.time() < deadline and not (work_r.has_definition()
-                                              and grind_r.has_definition()
-                                              and rigid_r.has_definition()):
+        while time.time() < deadline and not (work_r.match_count() > 0
+                                              and grind_r.match_count() > 0
+                                              and rigid_r.match_count() > 0):
             cli.poll(5)
-        check("definitions discovered", work_r.has_definition()
-              and grind_r.has_definition() and rigid_r.has_definition())
+        check("definitions discovered", work_r.match_count() > 0
+              and grind_r.match_count() > 0 and rigid_r.match_count() > 0)
 
         cli.start()   # async legs: progress + responses fire on cli's service thread
 
@@ -642,7 +642,7 @@ def tasks():
         check("blocking progress on the calling thread, in order",
               bprog == [None, 1, 2] and all(bthread))
 
-        check("caller count seen by the definition", work.caller_count() == 1)
+        check("caller count seen by the definition", work.match_count() == 1)
     finally:
         srv.close()
         cli.close()

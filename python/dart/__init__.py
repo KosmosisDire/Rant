@@ -1191,14 +1191,14 @@ def _role_from_bits(bits):
 
 class Message:
     """A delivered message, copied out so it outlives the callback. value is the decoded
-        object and fields the dict. recv_us and written_us are explained in docs/node.md."""
-    __slots__ = ("topic_index", "publisher_id", "publisher_name", "topic_name",
-                 "data", "recv_us", "written_us", "capture_us", "fields", "value")
+        object, None on a raw topic, and data the wire bytes. recv_us and written_us are
+        explained in docs/node.md."""
+    __slots__ = ("publisher_id", "publisher_name", "topic_name",
+                 "data", "recv_us", "written_us", "capture_us", "value")
 
     @classmethod
     def _from_c(cls, m, spec):
         self = cls.__new__(cls)
-        self.topic_index = m.topic_index
         self.publisher_id = m.publisher_id
         self.publisher_name = _dstr(m.publisher_name)
         self.topic_name = _dstr(m.topic_name)
@@ -1206,19 +1206,13 @@ class Message:
         self.written_us = m.written_us
         self.capture_us = m.capture_us
         self.data = _c.string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
-        self.fields = None
         self.value = None
         if m.schema:
             try:
-                self.fields = _decode(_c.load(), m.schema, self.data)
-                self.value = _from_decoded(spec, self.fields)
+                self.value = _from_decoded(spec, _decode(_c.load(), m.schema, self.data))
             except Exception:
                 _traceback.print_exc()
         return self
-
-    @property
-    def text(self):
-        return self.data.decode("utf-8", "replace")
 
     def __repr__(self):
         return "Message(topic=%r, from=%r, %d bytes)" % (
@@ -1643,7 +1637,7 @@ class Node:
         lvl = LogLevel(int(level))
 
         def _wrap(m):
-            f = m.fields or {}
+            f = m.value if isinstance(m.value, dict) else {}
             handler(LogLine(level=lvl, node=m.publisher_name, node_id=m.publisher_id,
                             wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
                             recv_us=m.recv_us, written_us=m.written_us,
@@ -2208,7 +2202,7 @@ class FunctionDefinition:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "rsp_schema"))
 
-    def caller_count(self):
+    def match_count(self):
         """Callers currently matched to this definition."""
         return self._node._lib.dart_function_match_count(self._ptr())
 
@@ -2315,9 +2309,6 @@ class RemoteFunction:
         """Providers currently matched (the definition side present)."""
         return self._node._lib.dart_function_match_count(self._ptr())
 
-    def has_definition(self):
-        return self.match_count() > 0
-
     def retire(self):
         """Retire the remote: park its channels and release the name. Every outstanding call
                 completes CANCELLED. Unusable after, refused with STATE from a callback."""
@@ -2387,7 +2378,7 @@ class TaskDefinition:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
 
-    def caller_count(self):
+    def match_count(self):
         """Callers currently matched to this definition."""
         return self._node._lib.dart_function_match_count(self._ptr())
 
@@ -2510,9 +2501,6 @@ class RemoteTask:
         """Providers currently matched (the definition side present)."""
         return self._node._lib.dart_function_match_count(self._ptr())
 
-    def has_definition(self):
-        return self.match_count() > 0
-
     def retire(self):
         """Retire the remote: every outstanding call completes CANCELLED. Unusable after,
                 refused with STATE from a callback."""
@@ -2609,8 +2597,8 @@ class VariableDefinition:
                 callback or under a service thread."""
         return self._node._lib.dart_variable_wait(self._ptr(), timeout_ms) == 1
 
-    def remote_count(self):
-        """Remotes matched to this definition."""
+    def match_count(self):
+        """The other side currently matched: remotes on a definition, owners on a remote."""
         return self._node._lib.dart_variable_match_count(self._ptr())
 
     def on_change(self, handler):
@@ -2652,13 +2640,6 @@ class RemoteVariable(VariableDefinition):
                  backpressure_wait_us=0):
         super().__init__(node, name, schema, None, False, False, catch_up,
                          keep_last, backpressure_wait_us)
-
-    def match_count(self):
-        """Owners currently matched (0 = no owner present)."""
-        return self.remote_count()
-
-    def has_definition(self):
-        return self.remote_count() > 0
 
 
 class Publisher:

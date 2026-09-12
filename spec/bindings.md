@@ -11,8 +11,9 @@ about a wrapper API, this file wins.
   `create_remote_function`, `create_variable_definition`, `create_remote_variable`.
 - `call` is the completed transaction in every language. `_async` marks the callback or
   Task form. JS has no callAsync, the Promise is it.
-- Match queries are side named. The remote side exposes a bool `has_definition`. The
-  definition side uses `caller_count` or `remote_count`. C keeps its generic primitives.
+- Match queries in C++ and C# are side named: the remote side exposes a bool
+  `has_definition`, the definition side `caller_count` or `remote_count`. Python spells
+  every one `match_count`, the count of the other side. C keeps its generic primitives.
 - A call outcome is a value, never a fault. C# `CallAsync` always completes with a
   Response, and reading `.Value` off OK throws. JS `call()` rejects only on connection loss.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
