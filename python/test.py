@@ -196,12 +196,12 @@ def video_types():
           == dart.Schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
 
     got = {}
-    a = dart.Node("VidA", None, on_event("VidA"), domain=45, multicast_interface=IFACE)
-    b = dart.Node("VidB", None, on_event("VidB"), domain=45, multicast_interface=IFACE)
+    a = dart.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE)
+    b = dart.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE)
     try:
-        qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=4)
-        pub = dart.Publisher[dart.types.Image](a, "frame", qos=qos)
-        dart.Subscriber[dart.types.Image](b, "frame", lambda i: got.setdefault("img", i), qos=qos)
+        qos = dict(reliable=True, keep_last=4)
+        pub = dart.Publisher[dart.types.Image](a, "frame", **qos)
+        dart.Subscriber[dart.types.Image](b, "frame", lambda i: got.setdefault("img", i), **qos)
         stream = dart.types.ExternalVideoStream(kind=dart.types.VideoStreamKind.Rtsp,
                                           codec=dart.types.VideoCodec.H264,
                                           width=1920, height=1080,
@@ -211,8 +211,8 @@ def video_types():
         check("handles created", all(h is not None for h in (pub, vd, rv)))
         deadline = time.time() + 8.0
         while time.time() < deadline and (pub.match_count() == 0 or rv.get() is None):
-            a.poll(1)
-            b.poll(1)
+            a.poll(0.001)
+            b.poll(0.001)
         check("image pair matched", pub.match_count() == 1)
 
         pixels = bytes((i * 7) & 0xFF for i in range(384))
@@ -221,8 +221,8 @@ def video_types():
         check("image send", pub.send(img) == dart.SendStatus.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and "img" not in got:
-            a.poll(1)
-            b.poll(1)
+            a.poll(0.001)
+            b.poll(0.001)
         r = got.get("img")
         check("an Image crosses whole",
               r is not None and r.width == 32 and r.height == 4 and r.stride == 96
@@ -297,14 +297,14 @@ def value_roots_live():
         ok = ok and cond
 
     got = {}
-    a = dart.Node("VA", None, lambda e: None, domain=44, multicast_interface=IFACE)
-    b = dart.Node("VB", None, lambda e: None, domain=44, multicast_interface=IFACE)
+    a = dart.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
+    b = dart.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
     try:
-        qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=4)
-        pub_flag = dart.Topic[bool](a, "flag", dart.Role.PUB_ONLY, qos)
-        sub_flag = dart.Topic[bool](b, "flag", dart.Role.SUB_ONLY, qos)
-        pub_note = dart.Topic[str](a, "note", dart.Role.PUB_ONLY, qos)
-        sub_note = dart.Topic[str](b, "note", dart.Role.SUB_ONLY, qos)
+        qos = dict(reliable=True, keep_last=4)
+        pub_flag = dart.Topic[bool](a, "flag", dart.Role.PUB_ONLY, **qos)
+        sub_flag = dart.Topic[bool](b, "flag", dart.Role.SUB_ONLY, **qos)
+        pub_note = dart.Topic[str](a, "note", dart.Role.PUB_ONLY, **qos)
+        sub_note = dart.Topic[str](b, "note", dart.Role.SUB_ONLY, **qos)
         b.on_message(lambda m: got.setdefault(m.topic_name, m.value))
         vd = dart.VariableDefinition[dart.f64](a, "gain", initial=1.25)
         rv = dart.RemoteVariable[dart.f64](b, "gain")
@@ -314,8 +314,8 @@ def value_roots_live():
         while time.time() < deadline and (pub_flag.match_count() == 0
                                           or pub_note.match_count() == 0
                                           or rv.get() is None):
-            a.poll(1)
-            b.poll(1)
+            a.poll(0.001)
+            b.poll(0.001)
         check("bare topics matched",
               pub_flag.match_count() == 1 and pub_note.match_count() == 1)
         check("bare variable replicated the initial", rv.get() == 1.25)
@@ -323,15 +323,15 @@ def value_roots_live():
         pub_note.send("a bare unbounded string")
         deadline = time.time() + 5.0
         while time.time() < deadline and len(got) < 2:
-            a.poll(1)
-            b.poll(1)
+            a.poll(0.001)
+            b.poll(0.001)
         check("bool delivered as a plain value", got.get("flag") is True)
         check("string delivered as a plain value", got.get("note") == "a bare unbounded string")
         rv.set(2.5)
         deadline = time.time() + 5.0
         while time.time() < deadline and vd.get() != 2.5:
-            a.poll(1)
-            b.poll(1)
+            a.poll(0.001)
+            b.poll(0.001)
         check("bare variable set converged", vd.get() == 2.5)
     finally:
         a.close()
@@ -367,9 +367,9 @@ def patterns():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    srv = dart.Node("srv", None, on_event("srv"),
+    srv = dart.Node("srv", on_event=on_event("srv"),
                     domain=43, multicast_interface=IFACE, max_topics=32)
-    cli = dart.Node("cli", None, on_event("cli"),
+    cli = dart.Node("cli", on_event=on_event("cli"),
                     domain=43, multicast_interface=IFACE, max_topics=32)
 
     # definitions on srv: the simple form, a raiser giving APP_ERROR, and a full form that
@@ -401,17 +401,17 @@ def patterns():
     while time.time() < deadline and not (add_r.match_count() > 0
                                           and boom_r.match_count() > 0
                                           and late_r.match_count() > 0):
-        cli.poll(5)
+        cli.poll(0.005)
     check("definitions discovered", add_r.match_count() > 0 and boom_r.match_count() > 0
           and late_r.match_count() > 0)
 
     # blocking calls
-    r = add_r.call(AddReq(a=2, b=3), 3000)
+    r = add_r.call(AddReq(a=2, b=3), 3.0)
     check("blocking call ok", r.ok and r.status == dart.CallStatus.OK)
     check("blocking call value", r.ok and r.value.sum == 5)
     check("provider set", r.ok and r.provider != 0)
 
-    rb = boom_r.call(AddReq(a=1, b=1), 3000)
+    rb = boom_r.call(AddReq(a=1, b=1), 3.0)
     check("raising handler -> APP_ERROR", rb.status == dart.CallStatus.APP_ERROR)
     threw = False
     try:
@@ -420,19 +420,19 @@ def patterns():
         threw = True
     check(".value on not-ok raises CallError", threw)
 
-    rl = late_r.call(AddReq(a=20, b=22), 3000)
+    rl = late_r.call(AddReq(a=20, b=22), 3.0)
     check("deferred completion", rl.ok and rl.value.sum == 42)
     check("caller count seen by definition", add.match_count() == 1)
 
     # variable: catch_up hands the remote the initial value
-    check("variable wait", lvl.wait(3000))
+    check("variable wait", lvl.wait(3.0))
     v = lvl.get()
     check("initial value", v is not None and v.value == 5)
     check("owner matched", lvl.match_count() > 0)
     check("remote set accepted", lvl.set(Level(value=9)) == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
-        cli.poll(5)
+        cli.poll(0.005)
     check("set round-trips to the remote", lvl.get().value == 9)
     check("definition applied it", lvl_def.get().value == 9)
 
@@ -440,13 +440,13 @@ def patterns():
     check("force", lvl_def.force(Level(value=99)) == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
-        cli.poll(5)
+        cli.poll(0.005)
     check("forced value visible remotely", lvl.get().value == 99)
     check("remote sees forced()", lvl.forced())
     check("unforce", lvl_def.unforce() == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
-        cli.poll(5)
+        cli.poll(0.005)
     check("unforce restores the latest set", lvl.get().value == 9 and not lvl.forced())
 
     # variable events: on_change dedups + replays at registration, on_write counts
@@ -466,7 +466,7 @@ def patterns():
     check("remote on_change replays the cache", bool(rchg) and rchg[0] == 9)
     deadline = time.time() + 5.0
     while time.time() < deadline and (not rchg or rchg[-1] != 12):
-        cli.poll(5)
+        cli.poll(0.005)
     check("remote change arrives", bool(rchg) and rchg[-1] == 12)
     lvl_def.on_change(None)
     lvl_def.on_write(None)
@@ -485,14 +485,14 @@ def patterns():
           and async_rsp[0].value.sum == 15)
 
     # a blocking call is refused while the service thread owns the loop, loudly
-    rr = add_r.call(AddReq(a=1, b=2), 100)
+    rr = add_r.call(AddReq(a=1, b=2), 0.1)
     check("blocking call refused under service thread",
           rr.status == dart.CallStatus.TIMEOUT
           and rr.send_status == dart.SendStatus.STATE)
     cli.stop()
 
     # a call still pending at close gets exactly one CANCELLED outcome, never hangs
-    never = dart.RemoteFunction(cli, "never-served", timeout_us=60_000_000)
+    never = dart.RemoteFunction(cli, "never-served", timeout=60.0)
     cancelled = []
     cdone = threading.Event()
 
@@ -534,9 +534,9 @@ def tasks():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    srv = dart.Node("tsrv", None, on_event("tsrv"),
+    srv = dart.Node("tsrv", on_event=on_event("tsrv"),
                     domain=46, multicast_interface=IFACE, max_topics=32)
-    cli = dart.Node("tcli", None, on_event("tcli"),
+    cli = dart.Node("tcli", on_event=on_event("tcli"),
                     domain=46, multicast_interface=IFACE, max_topics=32)
     try:
         # work: streams progress then returns a result
@@ -574,7 +574,7 @@ def tasks():
         while time.time() < deadline and not (work_r.match_count() > 0
                                               and grind_r.match_count() > 0
                                               and rigid_r.match_count() > 0):
-            cli.poll(5)
+            cli.poll(0.005)
         check("definitions discovered", work_r.match_count() > 0
               and grind_r.match_count() > 0 and rigid_r.match_count() > 0)
 
@@ -637,7 +637,7 @@ def tasks():
         def bprg(v):
             bprog.append(None if v is None else v.done)
             bthread.append(threading.current_thread() is threading.main_thread())
-        br = work_r.call(JobReq(count=2), on_progress=bprg, timeout_ms=3000)
+        br = work_r.call(JobReq(count=2), on_progress=bprg, timeout=3.0)
         check("blocking task ok", br.ok and br.value.total == 3)
         check("blocking progress on the calling thread, in order",
               bprog == [None, 1, 2] and all(bthread))
@@ -672,14 +672,14 @@ def main():
     if not std_types():
         return 1
     print("opening nodes...")
-    sub = dart.Node("sub", on_message, on_event("sub"),
+    sub = dart.Node("sub", on_message=on_message, on_event=on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE)
-    pub = dart.Node("pub", None, on_event("pub"),
+    pub = dart.Node("pub", on_event=on_event("pub"),
                     domain=DOMAIN, multicast_interface=IFACE)
 
-    qos = dart.Qos(reliability=dart.Reliability.RELIABLE, keep_last=8)
-    dart.Topic[Pose](sub, "pose", dart.Role.SUB_ONLY, qos)
-    pubch = dart.Topic[Pose](pub, "pose", dart.Role.PUB_ONLY, qos)
+    qos = dict(reliable=True, keep_last=8)
+    dart.Topic[Pose](sub, "pose", dart.Role.SUB_ONLY, **qos)
+    pubch = dart.Topic[Pose](pub, "pose", dart.Role.PUB_ONLY, **qos)
 
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
                 frame="map", tags=["fast", "ok"], vel=Twist(dx=0.5, dy=0.25))
@@ -688,8 +688,8 @@ def main():
     deadline = time.time() + 8.0
     while time.time() < deadline and not got.is_set():
         pubch.send(sent)
-        pub.poll(1)
-        sub.poll(1)
+        pub.poll(0.001)
+        sub.poll(0.001)
 
     ok = got.is_set()
     if ok:

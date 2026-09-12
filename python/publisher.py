@@ -23,11 +23,9 @@ class Tick:
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0   # 0 = run forever
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = dart.Node("py-publisher", None,                       # default iface, domain 0
-                     lambda e: print("event:", e, file=sys.stderr),
-                     multicast_interface=iface)
+    node = dart.Node("py-publisher", multicast_interface=iface)   # default iface, domain 0
     # keep_last deep enough that a small per-loop burst is not evicted before it flushes.
-    ch = dart.Topic[Tick](node, "tick", dart.Role.PUB_ONLY, dart.Qos(keep_last=64))
+    ch = dart.Topic[Tick](node, "tick", dart.Role.PUB_ONLY, keep_last=64)
     print("publishing 'tick' at %d Hz on the default interface, domain 0 (Ctrl+C to stop)" % HZ)
     print("schema: " + " ".join(dart.dsl(Tick).split()))
 

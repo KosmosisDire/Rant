@@ -153,10 +153,12 @@ and install off and the one `SKBUILD` rule copies the library next to the packag
 wheel is `py3-none-<platform>`, since ctypes needs no Python ABI, so one wheel per
 platform serves every interpreter.
 
-- The API mirrors C#: constructors not factories, `Node(name, on_message, on_event,
-  options=None, **opts)`, `Topic(node, name, schema=None, role=PUBSUB, **qos)`,
-  `Topic[T](...)`, `Schema(source)` from DSL text or a class. Variables are methods only.
-  Handlers are arity dispatched.
+- Constructors not factories: `Node(name=None, *, on_message, on_event, **options)`,
+  `Topic(node, name, schema=None, role=PUBSUB, *, **qos)`, `Topic[T](...)`,
+  `Schema(source)` from DSL text or a class. Options are keyword only and spelled out, no
+  option dataclasses. Durations and timeouts are float seconds (`_ms` and `_us` convert),
+  timestamps stay integer microseconds. Variables are methods only. Handlers are arity
+  dispatched.
 - Any annotated class is a schema, no decorator needed. Field types: `dart.u8` to
   `dart.f64`, `dart.string(cap)`, `dart.<t>[N]`, a nested class, plain int, float and
   bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.

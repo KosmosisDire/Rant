@@ -11,10 +11,10 @@ import traceback as _traceback
 from . import _native as _c
 
 __all__ = [
-    "Node", "NodeOptions", "Topic", "Publisher", "Subscriber", "Qos", "Message", "Event",
+    "Node", "Topic", "Publisher", "Subscriber", "Message", "Event",
     "Schema", "SchemaError", "dsl", "types",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "string", "enum",
-    "Reliability", "Role", "SendStatus", "CallStatus", "LogLevel", "MetaSection", "EventKind",
+    "Role", "SendStatus", "CallStatus", "LogLevel", "MetaSection", "EventKind",
     "ErrorKind",
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred", "CallError",
     "TaskDefinition", "RemoteTask", "TaskRequest", "Progress", "CancelledError",
@@ -24,11 +24,6 @@ __all__ = [
 
 
 # The enums. Values match the C wire, names mirror the C# wrapper.
-
-class Reliability(_pyenum.IntEnum):
-    BEST_EFFORT = 0
-    RELIABLE = 1
-
 
 class Role(_pyenum.IntEnum):
     PUBSUB = 0
@@ -146,58 +141,11 @@ class CancelledError(Exception):
     cooperative honor of a cancel). The exception text becomes Response.message."""
 
 
-# The config and value dataclasses, mirroring the C++ structs. Zero = default.
-
-@_dataclasses.dataclass
-class Qos:
-    reliability: Reliability = Reliability.BEST_EFFORT
-    keep_last: int = 0
-    catch_up: int = 0
-    max_message_bytes: int = 0
-    heartbeat_us: int = 0
-    repair_delay_us: int = 0
-    backpressure_wait_us: int = 0
-    shm_max_bytes: int = 0
-    queue_bytes: int = 0   # take and dispatch queue cap, 0 = lazy with a 1 MB cap
-    max_rate_hz: int = 0   # best effort sub: kept samples per second, 0 = all
-    no_timestamp: bool = False  # PUBLISHER: send without the per-message source timestamp, so
-                                # receivers read msg.written_us == 0. Default stamps every message
-
-
-@_dataclasses.dataclass
-class NodeOptions:
-    domain: int = 0
-    max_topics: int = 0
-    disable_shm: bool = False
-    fetch_details: bool = False   # greedily fetch every peer topic's name + schema (observer UIs)
-    match_wait_ms: int = 0        # send path match wait, 0 = 1 s, negative = disabled
-    disable_logs: bool = False    # strip the built-in @dart/log/{error,warn,info} topics
-    disable_meta: bool = False    # do not host the built-in @dart/meta introspection endpoint
-    disable_error_logs: bool = False # suppress default error mirroring onto @dart/log/error
-    data_port: int = 0
-    discovery_group: str = ""
-    discovery_port: int = 0
-    multicast_interface: str = ""
-    multicast_ttl: int = 0
-    seed_peers: list = _dataclasses.field(default_factory=list)
-                                  # "ip" or "ip:port" strings to also unicast announces to, so
-                                  # discovery works where multicast is filtered
-    unicast_only: bool = False    # join no group, announce to seed peers and ask them to relay us
-                                  # (docs/discovery.md)
-    self_ip: str = ""             # advertise this locator to every peer instead of letting each
-                                  # learn it from the datagram source, for a static 1:1 mapping
-    advertise_port: int = 0       # advertise THIS data port instead of the one we bound (0 = bound)
-    fragment_size: int = 0
-    recv_buffer_bytes: int = 0    # data socket OS buffers. 0 = the OS default, which is too
-    send_buffer_bytes: int = 0    # small to hold a multi megabyte message whole
-    announce_interval_us: int = 0
-    peer_timeout_us: int = 0
-    max_peers: int = 0
-
+# The value dataclasses.
 
 @_dataclasses.dataclass
 class LogLine:
-    """One decoded @dart/log line for a Node.on_log handler. wall_us is epoch us, mono_us the
+    """One decoded @dart/log line for a node.log.on handler. wall_us is epoch us, mono_us the
         publisher's monotonic clock and recv_us this node's clock at receipt."""
     level: LogLevel
     node: str           # the publishing node's name
@@ -383,8 +331,8 @@ def enum(cls, backing=None):
     return _Enum(cls, backing)
 
 
-# The standard types (docs/stdtypes.md): pre named so two programs that both mean a 3D
-# point say so with the same name and the same bytes. The names narrow matching.
+# The machinery behind the standard types in types.py: a field of one spells as the type
+# name on the wire, so two programs that both mean a 3D point say so with the same bytes.
 
 class _StdAlias:
     """A standard type that is an alias of one wire type: it encodes like under but spells
@@ -394,7 +342,7 @@ class _StdAlias:
         self.under = under      # a _Type, _Array or _String
 
     def __repr__(self):
-        return "dart." + self.name
+        return "dart.types." + self.name
 
 
 def _std(name):
@@ -1122,6 +1070,16 @@ def _send_status(r):
     return SendStatus(r) if r in SendStatus._value2member_map_ else r
 
 
+def _ms(timeout):
+    """A wait in seconds to the C milliseconds. None = forever, or the default where one exists."""
+    return -1 if timeout is None else int(round(timeout * 1000))
+
+
+def _us(seconds):
+    """A duration option in seconds to the C microseconds, 0 = the default."""
+    return int(round(seconds * 1000000))
+
+
 def _c_view(payload):
     """(DartBytes, keepalive buffer) over a bytes payload. Hold the buffer across the call."""
     b = _c.DartBytes()
@@ -1287,8 +1245,8 @@ class _TypedTopic:
     def __init__(self, cls_type):
         self._type = cls_type
 
-    def __call__(self, node, name, role=Role.PUBSUB, qos=None, **qos_kwargs):
-        return Topic(node, name, self._type, role, qos, **qos_kwargs)
+    def __call__(self, node, name, role=Role.PUBSUB, **qos):
+        return Topic(node, name, self._type, role, **qos)
 
     def __repr__(self):
         return "dart.Topic[%s]" % getattr(self._type, "__name__", self._type)
@@ -1322,13 +1280,32 @@ class Topic:
         it typed, and Topic[T](node, name) is the typed shorthand."""
     __slots__ = ("_node", "_h", "_schema", "_name", "_stats")
 
-    def __init__(self, node, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
+    def __init__(self, node, name, schema=None, role=Role.PUBSUB, *, reliable=False,
+                 keep_last=0, catch_up=0, max_message_bytes=0, heartbeat=0.0,
+                 repair_delay=0.0, backpressure_wait=0.0, shm_max_bytes=0, queue_bytes=0,
+                 max_rate_hz=0, no_timestamp=False):
+        """The QoS keywords are docs/topics.md's, durations in seconds and 0 = the default.
+                no_timestamp sends without the per message source stamp, so receivers read
+                written_us == 0."""
         sch = _as_schema(schema)
         self._node = node
         self._name = name
         self._schema = sch
         self._stats = _TopicStats(self)
-        self._h = node._create_or_share(name, role, sch, qos, qos_kwargs)
+        co = _c.DartTopicOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
+        co.qos.reliability = 1 if reliable else 0
+        co.qos.keep_last = keep_last
+        co.qos.catch_up = catch_up
+        co.qos.max_message_bytes = max_message_bytes
+        co.qos.heartbeat_us = _us(heartbeat)
+        co.qos.repair_delay_us = _us(repair_delay)
+        co.qos.backpressure_wait_us = _us(backpressure_wait)
+        co.qos.shm_max_bytes = shm_max_bytes
+        co.qos.queue_bytes = queue_bytes
+        co.qos.max_rate_hz = max_rate_hz
+        co.qos.no_timestamp = 1 if no_timestamp else 0
+        self._h = node._create_or_share(name, role, sch, co)
 
     @classmethod
     def _from_handle(cls, node, handle):
@@ -1418,17 +1395,17 @@ class Topic:
                 peer."""
         return self._node._lib.dart_topic_pending_count(self._ptr())
 
-    def drain(self, timeout_ms):
-        """Pump until every reader has acked, or timeout. Call before close."""
-        return self._node._lib.dart_topic_drain(self._ptr(), timeout_ms) == 1
+    def drain(self, timeout):
+        """Pump until every reader has acked, or timeout seconds. Call before close."""
+        return self._node._lib.dart_topic_drain(self._ptr(), _ms(timeout)) == 1
 
-    def take(self, timeout_ms=0):
-        """Pop the next queued message, copied out, or None if nothing arrived in timeout_ms
-                (0 = check, negative = forever). The first take or dispatch queues the topic."""
+    def take(self, timeout=0.0):
+        """Pop the next queued message, copied out, or None if nothing arrived in timeout
+                seconds (0 = check, None = forever). The first take or dispatch queues the topic."""
         if self._ptr() is None:
             return None
         m = _c.DartMsg()
-        r = self._node._lib.dart_topic_take(self._ptr(), _c.byref(m), timeout_ms)
+        r = self._node._lib.dart_topic_take(self._ptr(), _c.byref(m), _ms(timeout))
         if r < 0:
             raise RuntimeError("take failed (%s)" % (SendStatus(r)
                                if r in SendStatus._value2member_map_ else r))
@@ -1436,10 +1413,10 @@ class Topic:
             return None
         return Message._from_c(m, self._node._topic_specs.get(m.topic_index))
 
-    def dispatch(self, max_msgs=0, timeout_ms=0):
+    def dispatch(self, max_msgs=0, timeout=0.0):
         """Drain the queue by running on_message on the calling thread, oldest first, up to
                 max_msgs (0 = all), waiting like take. These run without the node lock."""
-        return self._node._lib.dart_topic_dispatch(self._ptr(), max_msgs, timeout_ms)
+        return self._node._lib.dart_topic_dispatch(self._ptr(), max_msgs, _ms(timeout))
 
     @property
     def schema(self):
@@ -1526,16 +1503,24 @@ class _NodeStats:
 
 class Node:
     """A DART node: owns sockets, discovery, and topics. Construct it directly:
-    Node(name, on_message, on_event, **opts)."""
+    Node(name, **options)."""
 
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt",
                  "_topic_specs", "_schemas", "_topics_by_name", "_create_lock",
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
                  "_log", "_stats")
 
-    def __init__(self, name, on_message, on_event, options=None, **opts):
-        """Open a node. An empty name is auto generated. on_message may be None, on_event is
-                required. Other config is keyword args or options=NodeOptions(...)."""
+    def __init__(self, name=None, *, on_message=None, on_event=None, domain=0,
+                 multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
+                 fetch_details=False, disable_logs=False, disable_meta=False,
+                 disable_error_logs=False, data_port=0, discovery_group=None,
+                 discovery_port=0, multicast_ttl=0, seed_peers=(), unicast_only=False,
+                 self_ip=None, advertise_port=0, fragment_size=0, recv_buffer_bytes=0,
+                 send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0):
+        """Open a node. name None = auto generated. on_message receives every message of a
+                topic without its own handler, on_event every event, printed to stderr when
+                None. The options are docs/getting-started.md's, durations in seconds and 0 =
+                the default. match_wait None = off. seed_peers are "ip" or "ip:port" strings."""
         self._lib = None
         self._name = name or None
         self._log = _NodeLog(self)
@@ -1544,7 +1529,7 @@ class Node:
         self._id = None
         self._alloc = None
         self._on_msg = on_message
-        self._on_evt = on_event
+        self._on_evt = on_event if on_event is not None else self._print_event
         self._topic_specs = {}
         self._schemas = []       # compiled schemas kept alive for the node's life
         self._topics_by_name = {}   # name to [handle, role bits, schema hash]
@@ -1553,13 +1538,6 @@ class Node:
         self._pattern_boxes = []    # pattern handler box ids (reaped at close)
         self._async_live = set()    # in-flight async-call box ids
         self._pat_lock = _threading.Lock()
-        if on_event is None:
-            raise ValueError("on_event is required: it carries diagnostics that "
-                             "must never be missed (pass e.g. print)")
-        if options is None:
-            options = NodeOptions(**opts)
-        elif opts:
-            raise TypeError("pass either options= or keyword options, not both")
         self._lib = lib = _c.load()
 
         with _REG_LOCK:
@@ -1570,34 +1548,33 @@ class Node:
 
         co = _c.DartNodeOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
-        co.domain = options.domain
-        co.max_topics = options.max_topics
-        co.disable_shm = 1 if options.disable_shm else 0
-        co.fetch_details = 1 if options.fetch_details else 0
-        co.match_wait_ms = options.match_wait_ms
-        co.disable_logs = 1 if options.disable_logs else 0
-        co.disable_meta = 1 if options.disable_meta else 0
-        co.disable_error_logs = 1 if options.disable_error_logs else 0
+        co.domain = domain
+        co.max_topics = max_topics
+        co.disable_shm = 1 if disable_shm else 0
+        co.fetch_details = 1 if fetch_details else 0
+        co.match_wait_ms = _ms(match_wait)
+        co.disable_logs = 1 if disable_logs else 0
+        co.disable_meta = 1 if disable_meta else 0
+        co.disable_error_logs = 1 if disable_error_logs else 0
         co.user_data = _c.c_void_p(self._id)
-        co.net.data_port = options.data_port
-        co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None
-        co.net.discovery_port = options.discovery_port
-        co.net.multicast_interface = (options.multicast_interface.encode()
-                                      if options.multicast_interface else None)
-        co.net.multicast_ttl = options.multicast_ttl
-        seeds, n_seeds = _c.seed_addrs(options.seed_peers)   # copied by open, alive for the call
+        co.net.data_port = data_port
+        co.net.discovery_group = discovery_group.encode() if discovery_group else None
+        co.net.discovery_port = discovery_port
+        co.net.multicast_interface = multicast_interface.encode() if multicast_interface else None
+        co.net.multicast_ttl = multicast_ttl
+        seeds, n_seeds = _c.seed_addrs(list(seed_peers))   # copied by open, alive for the call
         if n_seeds:
             co.net.seed_peers = _c.cast(seeds, _c.c_void_p)
             co.net.n_seed_peers = n_seeds
-        co.net.unicast_only = 1 if options.unicast_only else 0
-        co.net.self_ip = options.self_ip.encode() if options.self_ip else None
-        co.net.advertise_port = options.advertise_port
-        co.net.fragment_size = options.fragment_size
-        co.net.recv_buffer_bytes = options.recv_buffer_bytes
-        co.net.send_buffer_bytes = options.send_buffer_bytes
-        co.discovery.announce_interval_us = options.announce_interval_us
-        co.discovery.peer_timeout_us = options.peer_timeout_us
-        co.discovery.max_peers = options.max_peers
+        co.net.unicast_only = 1 if unicast_only else 0
+        co.net.self_ip = self_ip.encode() if self_ip else None
+        co.net.advertise_port = advertise_port
+        co.net.fragment_size = fragment_size
+        co.net.recv_buffer_bytes = recv_buffer_bytes
+        co.net.send_buffer_bytes = send_buffer_bytes
+        co.discovery.announce_interval_us = _us(announce_interval)
+        co.discovery.peer_timeout_us = _us(peer_timeout)
+        co.discovery.max_peers = max_peers
 
         alloc = lib.dart_allocator_heap(_c.DART_ALLOCATOR_PAGE)
         self._alloc = alloc
@@ -1616,6 +1593,10 @@ class Node:
     def name(self):
         """The name given at open, None when the node generated one."""
         return self._name
+
+    def _print_event(self, e):
+        # the default on_event: nothing goes unseen when the caller registered no handler
+        print("dart[%s]: %s" % (self._name or "node", e), file=_sys.stderr)
 
     @property
     def log(self):
@@ -1639,7 +1620,7 @@ class Node:
 
     # The create behind every Topic carrying constructor. Same name creates on this node
     # share the native slot with a widened role, and a different schema is refused.
-    def _create_or_share(self, name, role, sch, qos, qos_kwargs):
+    def _create_or_share(self, name, role, sch, opts):
         if not name:
             raise ValueError("topic name required")
         with self._create_lock:
@@ -1661,33 +1642,16 @@ class Node:
                     if not rec[2]:
                         rec[2] = sh
                 return rec[0]
-            h = self._create_native(name, role, sch, qos, qos_kwargs)
+            h = self._create_native(name, role, sch, opts)
             self._topics_by_name[name] = [h, _role_bits(role), sh]
             return h
 
     # the native create: makes the handle and registers the schema (kept alive)
     # + decode spec against the topic index.
-    def _create_native(self, name, role, sch, qos, qos_kwargs):
-        if qos is None:
-            qos = Qos(**qos_kwargs)
-        elif qos_kwargs:
-            raise TypeError("pass either qos= or keyword qos options, not both")
-        co = _c.DartTopicOpts()
-        _c.memset(_c.byref(co), 0, _c.sizeof(co))
-        co.qos.reliability = int(qos.reliability)
-        co.qos.keep_last = qos.keep_last
-        co.qos.catch_up = qos.catch_up
-        co.qos.max_message_bytes = qos.max_message_bytes
-        co.qos.heartbeat_us = qos.heartbeat_us
-        co.qos.repair_delay_us = qos.repair_delay_us
-        co.qos.backpressure_wait_us = qos.backpressure_wait_us
-        co.qos.shm_max_bytes = qos.shm_max_bytes
-        co.qos.queue_bytes = qos.queue_bytes
-        co.qos.max_rate_hz = qos.max_rate_hz
-        co.qos.no_timestamp = 1 if qos.no_timestamp else 0
+    def _create_native(self, name, role, sch, opts):
         h = self._lib.dart_node_create_topic(
             self._h, name.encode("utf-8"), int(role),
-            sch._s if sch else None, _c.byref(co))
+            sch._s if sch else None, _c.byref(opts))
         if not h:
             raise RuntimeError("Topic(%r) create failed: %s" % (name, self.last_error()))
         idx = self._lib.dart_topic_index(h)
@@ -1696,10 +1660,10 @@ class Node:
             self._schemas.append(sch)
         return h
 
-    def poll(self, timeout_ms=0):
-        """One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout_ms
-                in the socket wait, 0 = non blocking. Returns STATE while start() runs."""
-        return self._lib.dart_node_poll(self._h, timeout_ms)
+    def poll(self, timeout=0.0):
+        """One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout
+                seconds in the socket wait, 0 = non blocking, None = until something happens. Returns STATE while start() runs."""
+        return self._lib.dart_node_poll(self._h, _ms(timeout))
 
     def start(self):
         """Run the C service thread. Handlers fire on it under the GIL, never two at once, and
@@ -1713,15 +1677,15 @@ class Node:
     def is_started(self):
         return self._lib.dart_node_is_started(self._h) == 1
 
-    def dispatch(self, max_msgs=0, timeout_ms=0):
-        """Dispatch every queued topic on the calling thread, waiting up to timeout_ms for any
+    def dispatch(self, max_msgs=0, timeout=0.0):
+        """Dispatch every queued topic on the calling thread, waiting up to timeout seconds for any
                 to hold data. The one liner for a frame paced consumer."""
-        return self._lib.dart_node_dispatch(self._h, max_msgs, timeout_ms)
+        return self._lib.dart_node_dispatch(self._h, max_msgs, _ms(timeout))
 
-    def settle(self, timeout_ms=-1):
+    def settle(self, timeout=None):
         """Block until discovery and matching settle, so everything sent now reaches everyone.
-                Call after creating the topics. timeout_ms < 0 = 3 announce intervals."""
-        return self._lib.dart_node_settle(self._h, timeout_ms) == 1
+                Call after creating the topics. timeout None = 3 announce intervals."""
+        return self._lib.dart_node_settle(self._h, _ms(timeout)) == 1
 
     # ---- @dart/meta introspection ----
 
@@ -1730,14 +1694,14 @@ class Node:
         h = self._lib.dart_node_meta_function(self._h)
         return RemoteFunction._from_handle(self, h) if h else None
 
-    def meta(self, peer, sections=MetaSection.ALL, timeout_ms=1000):
+    def meta(self, peer, sections=MetaSection.ALL, timeout=1.0):
         """Blocking: a @dart/meta call directed at peer, decoded into a MetaSnapshot. Drives the
                 loop, so never under start() or from a callback. sections is a MetaSection mask."""
         fn = self._meta_function()
         if fn is None:
             return MetaSnapshot(status=CallStatus.NO_HANDLER)
         req = b"" if int(sections) == 0 else _struct.pack("<I", int(sections))
-        return MetaSnapshot._from_response(fn.call(req, timeout_ms, provider=peer))
+        return MetaSnapshot._from_response(fn.call(req, timeout, provider=peer))
 
     def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
         """Async: a @dart/meta call directed at peer. on_snapshot fires once from the polling
@@ -2222,13 +2186,13 @@ class FunctionDefinition:
         Handler forms and the typed shorthand are in docs/python.md. None answers NO_HANDLER."""
     __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema", "_name")
 
-    def __init__(self, node, name, handler, req_schema=None, rsp_schema=None,
-                 backpressure_wait_us=0, timeout_us=0, keep_last=0):
+    def __init__(self, node, name, handler, req_schema=None, rsp_schema=None, *,
+                 backpressure_wait=0.0, timeout=0.0, keep_last=0):
         self._node = node
         self._name = name
         self._req_schema = _as_schema(req_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = _c.DartFunctionOpts(backpressure_wait_us, timeout_us, keep_last)
+        co = _c.DartFunctionOpts(_us(backpressure_wait), _us(timeout), keep_last)
         box_id = 0
         box = None
         if handler is not None:
@@ -2279,13 +2243,13 @@ class RemoteFunction:
     RemoteFunction[Req, Rsp](node, name) is the typed shorthand."""
     __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema", "_name")
 
-    def __init__(self, node, name, req_schema=None, rsp_schema=None,
-                 backpressure_wait_us=0, timeout_us=0, keep_last=0):
+    def __init__(self, node, name, req_schema=None, rsp_schema=None, *,
+                 backpressure_wait=0.0, timeout=0.0, keep_last=0):
         self._node = node
         self._name = name
         self._req_schema = _as_schema(req_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = _c.DartFunctionOpts(backpressure_wait_us, timeout_us, keep_last)
+        co = _c.DartFunctionOpts(_us(backpressure_wait), _us(timeout), keep_last)
         h = node._lib.dart_node_create_remote_function(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
@@ -2319,13 +2283,13 @@ class RemoteFunction:
         self._rsp_schema = rsp_schema
         return self
 
-    def call(self, req=None, timeout_ms=-1, provider=0):
-        """Blocking call: drives the loop until the response or timeout_ms, negative = the
+    def call(self, req=None, timeout=None, provider=0):
+        """Blocking call: drives the loop until the response or timeout seconds, None = the
                 default. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = _c.DartResponse()
         co = _c.DartCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.dart_function_call(self._ptr(), b, _c.byref(out), timeout_ms,
+        rc = self._node._lib.dart_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
                                                 _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
         if rc == 1:
@@ -2383,9 +2347,9 @@ class TaskDefinition:
     __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema", "_name")
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
-                 rsp_schema=None, progress_best_effort=False, progress_keep_last=0,
-                 no_cancel=False, exclusive=False, multi=False, timeout_us=0,
-                 backpressure_wait_us=0, keep_last=0):
+                 rsp_schema=None, *, progress_best_effort=False, progress_keep_last=0,
+                 no_cancel=False, exclusive=False, multi=False, timeout=0.0,
+                 backpressure_wait=0.0, keep_last=0):
         self._node = node
         self._name = name
         self._req_schema = _as_schema(req_schema)
@@ -2398,8 +2362,8 @@ class TaskDefinition:
         co.no_cancel = 1 if no_cancel else 0
         co.exclusive = 1 if exclusive else 0
         co.multi = 1 if multi else 0
-        co.timeout_us = timeout_us
-        co.backpressure_wait_us = backpressure_wait_us
+        co.timeout_us = _us(timeout)
+        co.backpressure_wait_us = _us(backpressure_wait)
         co.keep_last = keep_last
         box_id = 0
         box = None
@@ -2455,10 +2419,9 @@ class RemoteTask:
         provider, and the timeout bounds only the first response (docs/tasks.md)."""
     __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema", "_name")
 
-    def __init__(self, node, name, req_schema=None, prg_schema=None,
-                 rsp_schema=None, progress_best_effort=False,
-                 progress_keep_last=0, timeout_us=0, backpressure_wait_us=0,
-                 keep_last=0):
+    def __init__(self, node, name, req_schema=None, prg_schema=None, rsp_schema=None, *,
+                 progress_best_effort=False, progress_keep_last=0, timeout=0.0,
+                 backpressure_wait=0.0, keep_last=0):
         self._node = node
         self._name = name
         self._req_schema = _as_schema(req_schema)
@@ -2468,8 +2431,8 @@ class RemoteTask:
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.progress_best_effort = 1 if progress_best_effort else 0
         co.progress_keep_last = progress_keep_last
-        co.timeout_us = timeout_us
-        co.backpressure_wait_us = backpressure_wait_us
+        co.timeout_us = _us(timeout)
+        co.backpressure_wait_us = _us(backpressure_wait)
         co.keep_last = keep_last
         h = node._lib.dart_node_create_remote_task(
             node._h, name.encode("utf-8"),
@@ -2493,7 +2456,7 @@ class RemoteTask:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
 
-    def call(self, req=None, on_progress=None, timeout_ms=-1, provider=0):
+    def call(self, req=None, on_progress=None, timeout=None, provider=0):
         """Blocking call: drives the loop until the terminal outcome, with on_progress on this
                 thread. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
@@ -2505,7 +2468,7 @@ class RemoteTask:
             # fires only inside dart_function_call, so the local ref holds it
             keep_cb = _progress_cb(on_progress, self._prg_schema)
             co.on_progress = keep_cb
-        rc = self._node._lib.dart_function_call(self._ptr(), b, _c.byref(out), timeout_ms,
+        rc = self._node._lib.dart_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
                                                 _c.cast(_c.byref(co), _c.c_void_p))
         del buf, keep_cb
         if rc == 1:
@@ -2583,8 +2546,8 @@ class VariableDefinition:
         # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
         return self._var if self._node._h else None
 
-    def __init__(self, node, name, schema=None, initial=None, read_only=False,
-                 allow_force=False, catch_up=0, keep_last=0, backpressure_wait_us=0):
+    def __init__(self, node, name, schema=None, *, initial=None, read_only=False,
+                 allow_force=False, catch_up=0, keep_last=0, backpressure_wait=0.0):
         self._node = node
         self._name = name
         sch = self._schema = _as_schema(schema)
@@ -2594,7 +2557,7 @@ class VariableDefinition:
         co.allow_force = 1 if allow_force else 0
         co.catch_up = catch_up
         co.keep_last = keep_last
-        co.backpressure_wait_us = backpressure_wait_us
+        co.backpressure_wait_us = _us(backpressure_wait)
         b, buf = _c_view(_payload_bytes(sch, initial) if initial is not None else b"")
         co.initial = b
         create = (node._lib.dart_node_create_remote_variable if self._remote
@@ -2651,10 +2614,10 @@ class VariableDefinition:
                 remote."""
         return self._node._lib.dart_variable_forced(self._ptr()) == 1
 
-    def wait(self, timeout_ms):
-        """Block driving the loop until a value exists or timeout_ms elapses. Refused from a
+    def wait(self, timeout):
+        """Block driving the loop until a value exists or timeout seconds elapse. Refused from a
                 callback or under a service thread."""
-        return self._node._lib.dart_variable_wait(self._ptr(), timeout_ms) == 1
+        return self._node._lib.dart_variable_wait(self._ptr(), _ms(timeout)) == 1
 
     def match_count(self):
         """The other side currently matched: remotes on a definition, owners on a remote."""
@@ -2695,19 +2658,19 @@ class RemoteVariable(VariableDefinition):
         over the set channel with no response. RemoteVariable[T] is the typed form."""
     _remote = True
 
-    def __init__(self, node, name, schema=None, catch_up=0, keep_last=0,
-                 backpressure_wait_us=0):
-        super().__init__(node, name, schema, None, False, False, catch_up,
-                         keep_last, backpressure_wait_us)
+    def __init__(self, node, name, schema=None, *, catch_up=0, keep_last=0,
+                 backpressure_wait=0.0):
+        super().__init__(node, name, schema, catch_up=catch_up, keep_last=keep_last,
+                         backpressure_wait=backpressure_wait)
 
 
 class Publisher:
     """The publish side of a topic. Same name constructions on one node share the slot with
-        a widened role. Publisher[T] is the typed form, qos as keyword args or qos=Qos()."""
+        a widened role. Publisher[T] is the typed form, QoS as the Topic keywords."""
     __slots__ = ("topic",)
 
-    def __init__(self, node, name, schema=None, qos=None, **qos_kwargs):
-        self.topic = Topic(node, name, schema, Role.PUB_ONLY, qos, **qos_kwargs)
+    def __init__(self, node, name, schema=None, **qos):
+        self.topic = Topic(node, name, schema, Role.PUB_ONLY, **qos)
 
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("schema",))
@@ -2735,8 +2698,8 @@ class Subscriber:
         thread instead of on_message, or consume with take and dispatch. Subscriber[T] is typed."""
     __slots__ = ("topic", "_schema")
 
-    def __init__(self, node, name, handler=None, schema=None, qos=None, **qos_kwargs):
-        self.topic = Topic(node, name, schema, Role.SUB_ONLY, qos, **qos_kwargs)
+    def __init__(self, node, name, handler=None, schema=None, **qos):
+        self.topic = Topic(node, name, schema, Role.SUB_ONLY, **qos)
         self._schema = self.topic.schema
         if handler is not None:
             if _arity(handler) == 1:
@@ -2760,18 +2723,18 @@ class Subscriber:
         """True once matching has converged, so a publisher's first send reaches this side."""
         return self.topic.ready()
 
-    def take(self, timeout_ms=0):
+    def take(self, timeout=0.0):
         """Typed take: the next queued message's decoded value, the whole Message without a
                 schema, None when nothing arrived in time. The first use queues the topic."""
-        m = self.topic.take(timeout_ms)
+        m = self.topic.take(timeout)
         if m is None or self._schema is None:
             return m
         return m.value if m.value is not None else m.data
 
-    def dispatch(self, max_msgs=0, timeout_ms=0):
+    def dispatch(self, max_msgs=0, timeout=0.0):
         """Drain the queue on the calling thread through this subscriber's
         handler (see Topic.dispatch). Returns the number dispatched."""
-        return self.topic.dispatch(max_msgs, timeout_ms)
+        return self.topic.dispatch(max_msgs, timeout)
 
 
 # Callback dispatch. The C callbacks carry no user pointer, but every DartMsg and

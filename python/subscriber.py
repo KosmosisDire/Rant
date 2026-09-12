@@ -30,9 +30,7 @@ def on_message(msg):
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = dart.Node("py-subscriber", on_message,
-                     lambda e: print("event:", e, file=sys.stderr),
-                     multicast_interface=iface)
+    node = dart.Node("py-subscriber", on_message=on_message, multicast_interface=iface)
     dart.Topic[Tick](node, "tick", dart.Role.SUB_ONLY)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 
@@ -40,7 +38,7 @@ def main():
     last_report, last_count = start, 0
     try:
         while True:
-            node.poll(1)                          # block up to 1 ms, wakes on receive and delivers
+            node.poll(0.001)                      # block up to 1 ms, wakes on receive and delivers
             now = time.perf_counter()
             if now - last_report >= 1.0:
                 rate = (count - last_count) / (now - last_report)

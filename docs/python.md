@@ -19,21 +19,22 @@ class Pose:
     x:     dart.f64 = 0.0
     frame: dart.string(16) = ""
 
-node = dart.Node("robot1",
-                 on_message=lambda m: print(m.value),
-                 on_event=lambda e: print("event:", e),
-                 domain=7)
-pose = dart.Topic[Pose](node, "pose", qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
+node = dart.Node("robot1", on_message=lambda m: print(m.value), domain=7)
+pose = dart.Topic[Pose](node, "pose", reliable=True)
 node.start()
 pose.send(Pose(stamp=1, x=1.0, frame="map"))
 ```
 
-The API mirrors the C# wrapper: everything is a constructor, config is keyword arguments
-or the `Qos` and `NodeOptions` dataclasses, and payloads are bytes, str or typed objects.
-`on_message` may be None, since subscribers and pattern handles carry their own handlers.
-`on_event` is required, and both are wired before the constructor returns. `on_message(fn)`
-and `on_event(fn)` rebind one and return it, so they work as decorators. The node and every
-handle carry `name`.
+Everything is a constructor whose required arguments are positional and whose options are
+keyword only: the node options of docs/getting-started.md on `Node`, the QoS keywords of
+docs/topics.md on `Topic`, `Publisher` and `Subscriber`, with `reliable=True` for the
+reliable transport. Every duration option is float seconds, 0 = the default, and every
+timeout is float seconds, None = forever or the default. Timestamps stay integer
+microseconds. Payloads are bytes, str or typed objects. `on_message` may be None, since
+subscribers and pattern handles carry their own handlers, and `on_event` defaults to
+printing every event to stderr. Both are wired before the constructor returns.
+`on_message(fn)` and `on_event(fn)` rebind one and return it, so they work as decorators.
+The node and every handle carry `name`.
 
 Every call is thread safe. Drive a node with `start()`, where the C service thread runs
 the loop and handlers fire on it one at a time, or call `poll()` from your own loop. From
@@ -79,7 +80,7 @@ None on a raw topic, and `data` the wire bytes. `recv_us` is the node's monotoni
 receipt and `written_us` the writer's wall clock, 0 when the publisher opted out, as in
 docs/node.md.
 
-`take(timeout_ms)` and `dispatch(max_msgs, timeout_ms)` switch a topic to queued
+`take(timeout)` and `dispatch(max_msgs, timeout)` switch a topic to queued
 delivery. `take` returns None when nothing arrived, and dispatch handlers run on the
 calling thread without the node lock. `stats.queue()` and `stats.traffic()` on a topic
 return the queue and traffic counters as tuples.

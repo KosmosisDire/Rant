@@ -18,11 +18,8 @@ class Pose:
     x:     dart.f64 = 0.0
     frame: dart.string(16) = ""
 
-node = dart.Node("robot1",
-                 on_message=lambda m: print(m.value),
-                 on_event=lambda e: print("event:", e),
-                 domain=7)
-pose = dart.Topic[Pose](node, "pose", qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
+node = dart.Node("robot1", on_message=lambda m: print(m.value), domain=7)
+pose = dart.Topic[Pose](node, "pose", reliable=True)
 node.start()
 pose.send(Pose(stamp=1, x=1.0, frame="map"))
 ```
