@@ -1,10 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- DART C# NuGet package: the thin P/Invoke wrapper (Dart.cs) plus the prebuilt native
-       library, bundled under runtimes/<rid>/native/ so .NET loads the right one per platform.
-       Build the native libs first (csharp/native/build.ps1 on Windows, build.sh on Linux),
-       then:  dotnet pack csharp/Dart.csproj -c Release -o nupkg
-       The binaries are gitignored; CI (or the build scripts) produce them before packing. -->
+  <!-- The NuGet package: the P/Invoke wrapper plus the native library per platform under
+       runtimes/<rid>/native/, so .NET loads the right one. The CMake target dart_shared
+       builds the library into dist/native/<rid>/, then: dotnet pack csharp/Dart.csproj -->
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <Nullable>disable</Nullable>
@@ -27,14 +25,9 @@
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
-  <!-- Prebuilt native libraries -> runtimes/<rid>/native/ in the package, and copied next
-       to the consumer's output so [DllImport("dart")] resolves. Globbed so a missing platform
-       (not yet built) simply isn't packed rather than breaking the build. -->
+  <!-- Globbed, so a platform that was not built is left out rather than failing the pack. -->
   <ItemGroup>
-    <None Include="runtimes/**/native/*" Pack="true" PackagePath="runtimes/">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>%(RecursiveDir)%(Filename)%(Extension)</Link>
-    </None>
+    <None Include="../dist/native/**" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

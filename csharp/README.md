@@ -13,9 +13,7 @@ and fires handlers) or by calling `Poll()` from your own loop.
 ```
 csharp/
   Dart.cs               the wrapper (the one source; compiled by the package + examples)
-  Dart.csproj           NuGet package: Dart.cs + runtimes/<rid>/native/  ->  .nupkg
-  native/               build.ps1 / build.sh  (build the native lib per platform)
-  runtimes/<rid>/native/   prebuilt libs (gitignored; built by the scripts or CI)
+  Dart.csproj           NuGet package: Dart.cs + ../dist/native/<rid>/  ->  .nupkg
   test/ publisher/ subscriber/    console examples (compile ../Dart.cs)
   unity/                Unity package (see unity/README.md)
 ```
@@ -23,15 +21,15 @@ csharp/
 ## Build + package
 
 ```sh
-# 1. build the native lib(s)  (do this on each target OS, or in CI)
-powershell -File csharp/native/build.ps1      # Windows -> runtimes/win-x64/native/dart.dll
-sh          csharp/native/build.sh            # Linux   -> runtimes/linux-x64/native/libdart.so
+# 1. build the native library (on each target OS, or let the release workflow do it)
+cmake -S . -B build
+cmake --build build --config Release --target dart_shared   # -> dist/native/<rid>/
 # 2. pack the NuGet
-dotnet pack csharp/Dart.csproj -c Release -o nupkg
+dotnet pack csharp/Dart.csproj -c Release -o dist
 ```
 
-The binaries are **not committed** to git. The build scripts (or a CI job) produce them
-before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Dart.dll` +
+The binaries are **not committed** to git. The CMake target (or the release workflow)
+produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Dart.dll` +
 `runtimes/<rid>/native/*`.
 
 ## Install (no nuget.org, no keys)

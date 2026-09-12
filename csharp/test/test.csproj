@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Compiles the wrapper (../Dart.cs) and copies the prebuilt native lib next to the
-       exe so [DllImport("dart")] resolves. Build the native lib first: csharp/native/build.ps1. -->
+  <!-- Compiles the wrapper (../Dart.cs) and copies the native library next to the exe so
+       [DllImport("dart")] resolves. Build it first: the CMake target dart_shared. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <Compile Include="../Dart.cs" />
-    <None Include="../runtimes/**/native/*" Link="%(Filename)%(Extension)">
+    <None Include="../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

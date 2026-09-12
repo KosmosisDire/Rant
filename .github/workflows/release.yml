@@ -24,26 +24,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build linux-x64 native lib
-        run: sh csharp/native/build.sh          # -> csharp/runtimes/linux-x64/native/libdart.so
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDART_BUILD_TOOLS=OFF -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
+          cmake --build build --target dart_shared
       - uses: actions/upload-artifact@v4
         with:
           name: native-linux
-          path: csharp/runtimes/linux-x64/native/libdart.so
+          path: dist/native/linux-x64/libdart.so
 
   native-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1            # MSVC env so clang-cl finds the toolchain
       - name: Build win-x64 native lib
-        shell: pwsh
         run: |
-          $env:Path = "C:\Program Files\LLVM\bin;$env:Path"   # clang-cl from the runner's LLVM
-          ./csharp/native/build.ps1             # -> csharp/runtimes/win-x64/native/dart.dll
+          cmake -S . -B build -DDART_BUILD_TOOLS=OFF -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
+          cmake --build build --config Release --target dart_shared
       - uses: actions/upload-artifact@v4
         with:
           name: native-windows
-          path: csharp/runtimes/win-x64/native/dart.dll
+          path: dist/native/win-x64/dart.dll
 
   # ---- pack everything + publish the release ----------------------------------
   release:
@@ -62,9 +62,9 @@ jobs:
 
       - name: Place native libs
         run: |
-          mkdir -p csharp/runtimes/win-x64/native csharp/runtimes/linux-x64/native
-          cp artifacts/native-windows/dart.dll   csharp/runtimes/win-x64/native/dart.dll
-          cp artifacts/native-linux/libdart.so   csharp/runtimes/linux-x64/native/libdart.so
+          mkdir -p dist/native/win-x64 dist/native/linux-x64
+          cp artifacts/native-windows/dart.dll   dist/native/win-x64/dart.dll
+          cp artifacts/native-linux/libdart.so   dist/native/linux-x64/libdart.so
 
       - name: Pack NuGet (managed + both native RIDs)
         run: dotnet pack csharp/Dart.csproj -c Release -o nupkg -p:Version="${GITHUB_REF_NAME#v}"

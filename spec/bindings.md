@@ -124,8 +124,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `dart_allocator_heap` and `dart_heap_realloc` are the library's own heap hooks and cost
   no transition.
 - Stale DLL trap: a stale `dart.dll` presents as memory corruption or peers that never
-  match. Check the DLL timestamp first. `csharp/native/build.ps1` deletes the old library
-  before building.
+  match. Check the timestamp of the copy next to the executable against
+  `dist/native/<rid>/`, which the `dart_shared` target overwrites on every build.
 - Task handlers are async delegates with a real `CancellationToken`. They run on the poll
   thread until their first await, so CPU work belongs in `Task.Run`.
 - Unity (`csharp/unity/`) is a subset. `Runtime/Dart.cs` and `Runtime/Plugins/` are

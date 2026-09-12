@@ -1,10 +1,11 @@
 # Build system
 
 The root `CMakeLists.txt` amalgamates `src/` into `dist/` and builds the host tools, tests
-and examples. The header only portable core is an INTERFACE target `dart`. Host programs
-link `dart_host`, which carries the platform libraries (Windows: ws2_32, bcrypt, winmm.
-Linux: rt) plus Threads. Both carry a `dart::` alias, and that is what another project
-links, whether it adds DART as a subproject or finds the installed package.
+and examples. Four targets: `dart` is the header only core, `dart_platform` the OS
+libraries (Windows: ws2_32, bcrypt, winmm. Linux: rt) plus Threads, `dart_host` the built
+static library a consumer links, and `dart_shared` the shared library the bindings load.
+Each carries a `dart::` alias, and that is what another project links, whether it adds
+DART as a subproject or finds the installed package.
 
 - `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is the three dist
   headers, so it re packs only when a `src/` file or pack.cmake changes. It also splices
@@ -36,13 +37,15 @@ links, whether it adds DART as a subproject or finds the installed package.
 - `DART_BUILD_TOOLS=OFF` (auto when cross compiling or when DART is a subproject) drops
   the programs. `dart_platform` and `dart_host` survive it, because a consumer wants the
   library without the tests. A cross build gets `dart` alone: the platform is its own.
-- Three targets, one job each. `dart` is the `dist/` include directory and nothing else.
+- Four targets, one job each. `dart` is the `dist/` include directory and nothing else.
   `dart_platform` is the OS libraries, in `tools/dart_platform.cmake` so the root build and
   a standalone `explore/` or `bridge/` configure share one list. `dart_host` is a static library over
   `dist/dart.c`, so a consumer defines no `DART_IMPLEMENTATION` and writes no anchor.
   The in tree programs link `dart` and `dart_platform` instead, never `dart_host`: each
   compiles its own flavour of the amalgamation, some with `DART_NO_SHM` or transport only,
-  and linking the built library too would define every symbol twice.
+  and linking the built library too would define every symbol twice. `dart_shared` is the
+  same anchor built with `DART_BUILD_SHARED` and hidden visibility, `EXCLUDE_FROM_ALL` in a
+  subproject, and it exports `DART_LINK_SHARED` to whatever links it.
 - `dist/dart.c` and `dist/dart.cpp` are the generated anchors, two lines each. They are
   what `dart_host`, the native plugin builds and the bridge compile, so the define lives
   in one generated place instead of a hand written file per consumer.
@@ -79,13 +82,15 @@ links, whether it adds DART as a subproject or finds the installed package.
   the thread, mutex, condvar and waker contract and defining `DART_THREADS` itself.
 - The `DART_IMPLEMENTATION` auto define in `dart.hpp` is guarded by
   `!defined(__cplusplus)`, so a `.cpp` anchor spells the define itself.
-- Bindings: `csharp/native/build.ps1` builds the native library with `DART_BUILD_SHARED`, `csharp/unity/pack.ps1`
-  assembles the Unity package, `node bridge/client/build.mjs` regenerates the JS client
-  dist. A tag push builds win-x64 and linux-x64 and publishes the NuGet and Unity packages.
-  Nothing binary is committed.
+- Bindings: `dart_shared` is the one native library every binding loads. The top level
+  build copies it to `dist/native/<rid>/`, named by .NET runtime identifier, so the NuGet,
+  Unity and Python packages read one place. macOS builds it universal under the portable
+  `osx` identifier. `csharp/unity/pack.ps1` assembles the Unity package and
+  `node bridge/client/build.mjs` regenerates the JS client dist. A tag push builds win-x64
+  and linux-x64 and publishes the NuGet and Unity packages. Nothing binary is committed.
 - CI is `.github/workflows/build.yml` on every push and pull request, across linux, windows
   and macos: configure and build, regenerate `dist/` and refuse a diff, build
-  `tools/consumer` both ways, and build the shared library. The explorer and the bridge are
+  `tools/consumer` both ways. The explorer and the bridge are
   off, since they fetch SDL3 and IXWebSocket and are moving out of this repo. No test suite
   runs yet: that waits on the test rework, so a red build means a build broke.
 - `tools/consumer` is a throwaway project that consumes DART the way a user does, from the

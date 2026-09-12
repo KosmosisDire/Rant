@@ -107,6 +107,42 @@ if(DART_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
   if(TARGET dist)
     add_dependencies(dart_host dist)
   endif()
+
+  # The shared library the bindings load. DART_BUILD_SHARED exports exactly the public
+  # entry points and hidden visibility keeps the internals in (spec/build.md).
+  add_library(dart_shared SHARED "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.c")
+  add_library(dart::dart_shared ALIAS dart_shared)
+  target_link_libraries(dart_shared PUBLIC dart PRIVATE dart_platform)
+  target_compile_definitions(dart_shared PRIVATE DART_BUILD_SHARED INTERFACE DART_LINK_SHARED)
+  set_target_properties(dart_shared PROPERTIES OUTPUT_NAME dart C_VISIBILITY_PRESET hidden
+                        OSX_ARCHITECTURES "arm64;x86_64")
+  if(TARGET dist)
+    add_dependencies(dart_shared dist)
+  endif()
+
+  # Filed by .NET runtime identifier under dist/native/, where every package build picks
+  # it up. macOS is one universal binary, so its identifier is the portable osx.
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(DART_ARCH arm64)
+  else()
+    set(DART_ARCH x64)
+  endif()
+  if(WIN32)
+    set(DART_RID "win-${DART_ARCH}")
+  elseif(APPLE)
+    set(DART_RID osx)
+  else()
+    set(DART_RID "linux-${DART_ARCH}")
+  endif()
+  if(DART_IS_TOP_LEVEL)
+    add_custom_command(TARGET dart_shared POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_SOURCE_DIR}/dist/native/${DART_RID}"
+      COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:dart_shared>"
+              "${CMAKE_CURRENT_SOURCE_DIR}/dist/native/${DART_RID}/"
+      VERBATIM)
+  else()
+    set_target_properties(dart_shared PROPERTIES EXCLUDE_FROM_ALL ON)
+  endif()
 endif()
 
 if(DART_BUILD_TOOLS)
@@ -169,7 +205,7 @@ if(DART_INSTALL)
 
   set(DART_INSTALL_TARGETS dart)
   if(TARGET dart_host)
-    list(APPEND DART_INSTALL_TARGETS dart_platform dart_host)
+    list(APPEND DART_INSTALL_TARGETS dart_platform dart_host dart_shared)
   endif()
 
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/dist/dart.h"
@@ -179,7 +215,9 @@ if(DART_INSTALL)
           DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
   install(TARGETS ${DART_INSTALL_TARGETS} EXPORT dart-targets
-          ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+          ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+          LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+          RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
   install(EXPORT dart-targets FILE dart-targets.cmake NAMESPACE dart::
           DESTINATION "${DART_CMAKE_DIR}")
 

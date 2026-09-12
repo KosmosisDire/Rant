@@ -51,16 +51,6 @@ jobs:
           cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DDART_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
           cmake --build build/findpkg --config Release
 
+      # The build above already made the shared library. This is where the packages read it.
       - name: Shared library
-        if: runner.os != 'Windows'
-        run: sh csharp/native/build.sh
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: runner.os == 'Windows'
-
-      - name: Shared library
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $env:Path = "C:\Program Files\LLVM\bin;$env:Path"
-          ./csharp/native/build.ps1
+        run: ls -l dist/native/*/

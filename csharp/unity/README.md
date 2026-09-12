@@ -24,9 +24,9 @@ the release and import it via `Assets > Import Package > Custom Package`.
 keeps one copy of the code and no binaries:
 
 ```sh
-# 1. build the native lib(s) on each target OS (or in CI)
-powershell -File ../native/build.ps1     # -> csharp/runtimes/win-x64/native/dart.dll
-sh          ../native/build.sh           # -> csharp/runtimes/linux-x64/native/libdart.so
+# 1. build the native library on each target OS (or in CI): the CMake target dart_shared
+cmake -S ../.. -B ../../build
+cmake --build ../../build --config Release --target dart_shared   # -> dist/native/<rid>/
 # 2. assemble Runtime/ (copies Dart.cs + the built libs in)
 powershell -File pack.ps1                # or: sh pack.sh
 # 3. (optional) build a .unitypackage

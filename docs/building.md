@@ -20,9 +20,10 @@ cmake --build --preset windows-debug   # Debug, overwrites Release in bin/
 `build.bat` and `build.sh` do the same with the JS client enabled. Add `debug` for a
 Debug build.
 
-Targets: `dart_test`, `dart_test_noshm`, `example`, `pubsub`, `if_probe_check`, and
-`dist` (amalgamate only). `pubsub --help` lists that tool's modes and flags. To regenerate
-`dist/` without CMake:
+Targets: `dart_test`, `dart_test_noshm`, `example`, `pubsub`, `if_probe_check`, `dist`
+(amalgamate only) and `dart_shared`, the shared library the C#, Unity and Python packages
+bundle, copied to `dist/native/<rid>/`. `pubsub --help` lists that tool's modes and flags.
+To regenerate `dist/` without CMake:
 
 ```sh
 cmake -DSRC=src -DOUT=dist -P tools/pack.cmake
@@ -69,8 +70,9 @@ find_package(dart 0.0.12 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE dart::dart_host)
 ```
 
-The install is the `dist/` headers in `include/` and the config package in
-`share/cmake/dart`. There is no library to build: the implementation comes from the header.
+The install is the `dist/` headers in `include/`, the `dart_host` static library and the
+`dart` shared library in `lib/` (the DLL in `bin/` on Windows), and the config package in
+`share/cmake/dart`.
 
 ## Without CMake
 
