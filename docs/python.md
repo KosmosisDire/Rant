@@ -26,9 +26,9 @@ pose.send(Pose(stamp=1, x=1.0, frame="map"))
 ```
 
 Everything is a constructor whose required arguments are positional and whose options are
-keyword only: the node options of docs/getting-started.md on `Node`, the QoS keywords of
-docs/topics.md on `Topic`, `Publisher` and `Subscriber`, with `reliable=True` for the
-reliable transport. Every duration option is float seconds, 0 = the default, and every
+keyword only: the node options of docs/getting-started.md on `Node`, and `role=` plus the
+QoS keywords of docs/topics.md on `Topic`, `Publisher` and `Subscriber`, with
+`reliable=True` for the reliable transport. Every duration option is float seconds, 0 = the default, and every
 timeout is float seconds, None = forever or the default. Timestamps stay integer
 microseconds. Payloads are bytes, str or typed objects. `on_message` may be None, since
 subscribers and pattern handles carry their own handlers, and `on_event` defaults to
@@ -64,6 +64,14 @@ A bare type is a schema of its own: `dart.Topic[bool](node, "estop")` sends and
 receives plain booleans, and so do the scalars, `dart.string(N)`, arrays, `list[dart.f32]`,
 `str`, `dict`, an enum class and the plain Python scalars. Such a root is anonymous, so the
 same one in any language is the same wire bytes and the same hash.
+
+The package ships type stubs, so a checker sees `Publisher[Pose].send` take a `Pose` and
+`Subscriber[Pose].take()` return `Pose | None`. The scalars are `int` and `float` aliases
+to a checker. A capped string, a fixed or variable array and a pinned enum width are
+spelled `Annotated[T, "<dsl field type>"]`, the Python type for the checker and the DSL for
+the wire: `Annotated[str, "string<16>"]`, `Annotated[bytes, "u8[4]"]`,
+`Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. In a value position the same
+DSL text does it: `dart.Schema("u8[4]")`.
 
 `Schema(text)`, `Schema(cls)` and `Schema(bare_type)` compile explicitly. `encode` and
 `decode` walk the compiled flat field table, so they work for any schema including a

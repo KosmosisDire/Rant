@@ -154,7 +154,7 @@ wheel is `py3-none-<platform>`, since ctypes needs no Python ABI, so one wheel p
 platform serves every interpreter.
 
 - Constructors not factories: `Node(name=None, *, on_message, on_event, **options)`,
-  `Topic(node, name, schema=None, role=PUBSUB, *, **qos)`, `Topic[T](...)`,
+  `Topic(node, name, schema=None, *, role=PUBSUB, **qos)`, `Topic[T](...)`,
   `Schema(source)` from DSL text or a class. Options are keyword only and spelled out, no
   option dataclasses. Durations and timeouts are float seconds (`_ms` and `_us` convert),
   timestamps stay integer microseconds. Variables are methods only. Handlers are arity
@@ -165,6 +165,11 @@ platform serves every interpreter.
   `__dart_name__` overrides the type name. `dart.dsl(cls)` computes DSL with no library
   load. The standard types are tagged dataclasses in `python/dart/types.py`, reached as
   `dart.types.*`.
+- `__init__.pyi` and `types.pyi` are the checker's view, hand maintained beside the runtime
+  and checked by running pyright over `python/test.py`. Handles are `Generic[T]` there
+  while the runtime subscripts through `__class_getitem__`. The scalars are `int` and
+  `float` aliases in the stub, so a capped string or array field is spelled
+  `Annotated[T, "<dsl>"]`, which `_resolve` reads at runtime.
 - The map body is built and parsed in pure Python.
 - Task handlers run on a daemon thread per call. Raising `dart.CancelledError` completes
   CANCELLED.

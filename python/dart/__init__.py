@@ -4,10 +4,12 @@ builds. docs/python.md explains how to use it."""
 import dataclasses as _dataclasses
 import enum as _pyenum
 import inspect as _inspect
+import re as _re
 import struct as _struct
 import sys as _sys
 import threading as _threading
 import traceback as _traceback
+import typing as _typing
 from . import _native as _c
 
 __all__ = [
@@ -395,8 +397,37 @@ def _spec_of(cls):
         return spec
 
 
+_DSL_FIELD = _re.compile(r"^(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|bool|string<(\d+)>)(\[(\d*)\])?$")
+_KIND_OF = {token: kind for kind, token in _TOKEN.items()}
+
+
+def _marker_from_dsl(text):
+    """The field marker for one DSL field type: a scalar, bool, string<N>, or one of those
+        in a fixed [N] or variable [] array."""
+    m = _DSL_FIELD.match(text.replace(" ", ""))
+    if not m:
+        raise SchemaError("dart schema: %r is not a DSL field type (u8..f64, bool, "
+                          "string<N>, or one of those followed by [N] or [])" % text)
+    base = _String(int(m.group(2))) if m.group(2) else _Type(_KIND_OF[m.group(1)], m.group(1))
+    if m.group(3) is None:
+        return base
+    return _Array(base, int(m.group(4))) if m.group(4) else list[base]
+
+
 def _resolve(ann, g):
-    return eval(ann, g, {}) if isinstance(ann, str) else ann   # future-annotation strings
+    if isinstance(ann, str):
+        ann = eval(ann, g, {})   # future-annotation strings
+    if getattr(ann, "__origin__", None) is not None and hasattr(ann, "__metadata__"):
+        # Annotated[T, "dsl"]: T is for the type checker, the DSL text is the wire type
+        base = ann.__origin__
+        dsl_text = next((m for m in ann.__metadata__ if isinstance(m, str)), None)
+        if dsl_text is None:
+            return base
+        marker = _marker_from_dsl(dsl_text)
+        if isinstance(base, type) and issubclass(base, _pyenum.Enum) and isinstance(marker, _Type):
+            return _Enum(base, marker)
+        return marker
+    return ann
 
 
 def _var_array_spec(name, elem):
@@ -469,7 +500,7 @@ def _build_spec(cls):
 def _value_spec(ann):
     """A spec for a bare type used as the whole schema: the root is anonymous, one field
         named "". None if ann is not a bare type."""
-    if isinstance(ann, (_Type, _String, _Array, _Enum)):
+    if isinstance(ann, (_Type, _String, _Array, _Enum, _StdAlias)):
         return _Spec(None, [_field_spec("", ann, {})], None)
     if getattr(ann, "__origin__", None) in (list, tuple, dict):   # list[...] IS a type: check first
         return _Spec(None, [_field_spec("", ann, {})], None)
@@ -1245,8 +1276,8 @@ class _TypedTopic:
     def __init__(self, cls_type):
         self._type = cls_type
 
-    def __call__(self, node, name, role=Role.PUBSUB, **qos):
-        return Topic(node, name, self._type, role, **qos)
+    def __call__(self, node, name, **opts):
+        return Topic(node, name, self._type, **opts)
 
     def __repr__(self):
         return "dart.Topic[%s]" % getattr(self._type, "__name__", self._type)
@@ -1280,7 +1311,7 @@ class Topic:
         it typed, and Topic[T](node, name) is the typed shorthand."""
     __slots__ = ("_node", "_h", "_schema", "_name", "_stats")
 
-    def __init__(self, node, name, schema=None, role=Role.PUBSUB, *, reliable=False,
+    def __init__(self, node, name, schema=None, *, role=Role.PUBSUB, reliable=False,
                  keep_last=0, catch_up=0, max_message_bytes=0, heartbeat=0.0,
                  repair_delay=0.0, backpressure_wait=0.0, shm_max_bytes=0, queue_bytes=0,
                  max_rate_hz=0, no_timestamp=False):
@@ -2670,7 +2701,7 @@ class Publisher:
     __slots__ = ("topic",)
 
     def __init__(self, node, name, schema=None, **qos):
-        self.topic = Topic(node, name, schema, Role.PUB_ONLY, **qos)
+        self.topic = Topic(node, name, schema, role=Role.PUB_ONLY, **qos)
 
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("schema",))
@@ -2699,7 +2730,7 @@ class Subscriber:
     __slots__ = ("topic", "_schema")
 
     def __init__(self, node, name, handler=None, schema=None, **qos):
-        self.topic = Topic(node, name, schema, Role.SUB_ONLY, **qos)
+        self.topic = Topic(node, name, schema, role=Role.SUB_ONLY, **qos)
         self._schema = self.topic.schema
         if handler is not None:
             if _arity(handler) == 1:

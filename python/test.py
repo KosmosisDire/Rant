@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Annotated
 
 # Import the package from the source checkout, which finds the library in dist/native.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,9 +29,9 @@ class Pose:
     stamp: dart.u64 = 0
     x:     dart.f64 = 0.0
     y:     dart.f64 = 0.0
-    uuid:  dart.u8[4] = b""
-    frame: dart.string(16) = ""             # a capped UTF-8 string
-    tags:  dart.string(8)[2] = ()           # a fixed array of capped strings
+    uuid:  Annotated[bytes, "u8[4]"] = b""
+    frame: Annotated[str, "string<16>"] = ""             # a capped UTF-8 string
+    tags:  Annotated[list[str], "string<8>[2]"] = field(default_factory=list)  # a fixed array of capped strings
     vel:   Twist = field(default_factory=Twist)
 
 
@@ -39,10 +40,10 @@ class Pose:
 @dataclass
 class Sensor:
     id:      dart.u32 = 0
-    name:    dart.string(16) = ""                              # capped (fixed)
+    name:    Annotated[str, "string<16>"] = ""                 # capped (fixed)
     note:    str = ""                                          # variable string
     samples: list[dart.f32] = field(default_factory=list)     # variable scalar array
-    labels:  list[dart.string(8)] = field(default_factory=list)  # variable string array
+    labels:  Annotated[list[str], "string<8>[]"] = field(default_factory=list)  # variable string array
     extras:  dict = field(default_factory=dict)               # self-describing map
 
 
@@ -199,9 +200,9 @@ def video_types():
     a = dart.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE)
     b = dart.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE)
     try:
-        qos = dict(reliable=True, keep_last=4)
-        pub = dart.Publisher[dart.types.Image](a, "frame", **qos)
-        dart.Subscriber[dart.types.Image](b, "frame", lambda i: got.setdefault("img", i), **qos)
+        pub = dart.Publisher[dart.types.Image](a, "frame", reliable=True, keep_last=4)
+        dart.Subscriber[dart.types.Image](b, "frame", lambda i: got.setdefault("img", i),
+                                          reliable=True, keep_last=4)
         stream = dart.types.ExternalVideoStream(kind=dart.types.VideoStreamKind.Rtsp,
                                           codec=dart.types.VideoCodec.H264,
                                           width=1920, height=1080,
@@ -263,7 +264,7 @@ def value_roots():
                        (dart.f32, 1.5), (dart.f64, -2.25), (int, 5), (float, 0.5),
                        (bool, False), (dart.string(16), "capped"), (str, "unbounded"),
                        (list[dart.f32], [1.5, -2.5]), (dict, {"battery": 87}),
-                       (dart.u8[4], b"\x01\x02\x03\x04"), (Mode, Mode.FAULT)):
+                       ("u8[4]", b"\x01\x02\x03\x04"), (Mode, Mode.FAULT)):
         sch = dart.Schema(src)
         out = sch.decode(sch.encode(value))
         if isinstance(value, list):
@@ -300,11 +301,10 @@ def value_roots_live():
     a = dart.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
     b = dart.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
     try:
-        qos = dict(reliable=True, keep_last=4)
-        pub_flag = dart.Topic[bool](a, "flag", dart.Role.PUB_ONLY, **qos)
-        sub_flag = dart.Topic[bool](b, "flag", dart.Role.SUB_ONLY, **qos)
-        pub_note = dart.Topic[str](a, "note", dart.Role.PUB_ONLY, **qos)
-        sub_note = dart.Topic[str](b, "note", dart.Role.SUB_ONLY, **qos)
+        pub_flag = dart.Publisher[bool](a, "flag", reliable=True, keep_last=4)
+        sub_flag = dart.Topic[bool](b, "flag", role=dart.Role.SUB_ONLY, reliable=True, keep_last=4)
+        pub_note = dart.Publisher[str](a, "note", reliable=True, keep_last=4)
+        sub_note = dart.Topic[str](b, "note", role=dart.Role.SUB_ONLY, reliable=True, keep_last=4)
         b.on_message(lambda m: got.setdefault(m.topic_name, m.value))
         vd = dart.VariableDefinition[dart.f64](a, "gain", initial=1.25)
         rv = dart.RemoteVariable[dart.f64](b, "gain")
@@ -433,21 +433,22 @@ def patterns():
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
         cli.poll(0.005)
-    check("set round-trips to the remote", lvl.get().value == 9)
-    check("definition applied it", lvl_def.get().value == 9)
+    check("set round-trips to the remote", (v := lvl.get()) is not None and v.value == 9)
+    check("definition applied it", (v := lvl_def.get()) is not None and v.value == 9)
 
     # force overrides with a shadow source, unforce restores the latest set
     check("force", lvl_def.force(Level(value=99)) == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
         cli.poll(0.005)
-    check("forced value visible remotely", lvl.get().value == 99)
+    check("forced value visible remotely", (v := lvl.get()) is not None and v.value == 99)
     check("remote sees forced()", lvl.forced())
     check("unforce", lvl_def.unforce() == dart.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
         cli.poll(0.005)
-    check("unforce restores the latest set", lvl.get().value == 9 and not lvl.forced())
+    check("unforce restores the latest set",
+          (v := lvl.get()) is not None and v.value == 9 and not lvl.forced())
 
     # variable events: on_change dedups + replays at registration, on_write counts
     # every applied write
@@ -677,9 +678,8 @@ def main():
     pub = dart.Node("pub", on_event=on_event("pub"),
                     domain=DOMAIN, multicast_interface=IFACE)
 
-    qos = dict(reliable=True, keep_last=8)
-    dart.Topic[Pose](sub, "pose", dart.Role.SUB_ONLY, **qos)
-    pubch = dart.Topic[Pose](pub, "pose", dart.Role.PUB_ONLY, **qos)
+    dart.Topic[Pose](sub, "pose", role=dart.Role.SUB_ONLY, reliable=True, keep_last=8)
+    pubch = dart.Topic[Pose](pub, "pose", role=dart.Role.PUB_ONLY, reliable=True, keep_last=8)
 
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
                 frame="map", tags=["fast", "ok"], vel=Twist(dx=0.5, dy=0.25))

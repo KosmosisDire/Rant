@@ -31,7 +31,7 @@ def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
     iface = sys.argv[2] if len(sys.argv) > 2 else None
     node = dart.Node("py-subscriber", on_message=on_message, multicast_interface=iface)
-    dart.Topic[Tick](node, "tick", dart.Role.SUB_ONLY)
+    dart.Topic[Tick](node, "tick", role=dart.Role.SUB_ONLY)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 
     start = time.perf_counter()
