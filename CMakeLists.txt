@@ -4,7 +4,11 @@
 # link the header-only `dart` target and set -DDART_BUILD_TOOLS=OFF (auto-off cross).
 
 cmake_minimum_required(VERSION 3.15)
-project(dart VERSION 0.0.12 LANGUAGES C)
+
+# The one version. Dart.csproj, pyproject.toml and the Unity packer read the same file,
+# and the release workflow refuses a tag that does not match it.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" DART_VERSION LIMIT_COUNT 1)
+project(dart VERSION ${DART_VERSION} LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)

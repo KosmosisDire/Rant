@@ -43,7 +43,7 @@ tools, explorer or bridge are built.
 ```cmake
 CPMAddPackage(NAME dart
               GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
-              GIT_TAG v0.0.12-beta)
+              GIT_TAG v0.0.13)
 
 target_link_libraries(app PRIVATE dart::dart_host)
 ```
@@ -66,7 +66,7 @@ cmake --install build --prefix /usr/local
 ```
 
 ```cmake
-find_package(dart 0.0.12 CONFIG REQUIRED)
+find_package(dart 0.0.13 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE dart::dart_host)
 ```
 

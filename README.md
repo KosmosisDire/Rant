@@ -34,7 +34,7 @@ platform libraries:
 ```cmake
 CPMAddPackage(NAME dart
               GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
-              GIT_TAG v0.0.12-beta)
+              GIT_TAG v0.0.13)
 
 target_link_libraries(app PRIVATE dart::dart_host)
 ```

@@ -66,8 +66,11 @@ jobs:
           cp artifacts/native-windows/dart.dll   dist/native/win-x64/dart.dll
           cp artifacts/native-linux/libdart.so   dist/native/linux-x64/libdart.so
 
+      - name: The tag matches VERSION
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+
       - name: Pack NuGet (managed + both native RIDs)
-        run: dotnet pack csharp/Dart.csproj -c Release -o nupkg -p:Version="${GITHUB_REF_NAME#v}"
+        run: dotnet pack csharp/Dart.csproj -c Release -o nupkg
 
       - name: Assemble Unity package
         run: sh csharp/unity/pack.sh            # copies Dart.cs + native libs into csharp/unity/Runtime/

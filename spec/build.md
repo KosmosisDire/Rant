@@ -67,8 +67,11 @@ DART as a subproject or finds the installed package.
   CMake ships a `FindDart` module for an unrelated old tool and module mode finds that
   first on a case insensitive filesystem. The config finds Threads before the targets file,
   which names `Threads::Threads`.
-- `project()` carries a VERSION so the config package can answer a version request, with
-  `SameMinorVersion` compatibility. Bump it with the release tag.
+- The version lives once, in `VERSION` at the root: `project()` reads it so the config
+  package answers a version request with `SameMinorVersion` compatibility, `Dart.csproj`
+  reads it through an MSBuild property function, `pyproject.toml` through the
+  scikit-build-core regex provider, and the Unity packer stamps it into `package.json`.
+  A release is a tag `v` plus that number, and the workflow refuses any other tag.
 - Three builds, one macro. `src/common/api.h` defines `DART_API`, which every public
   declaration carries. The default build compiles DART into the caller's own binary and
   needs no decoration. `DART_BUILD_SHARED` marks each entry point exported, so the shared

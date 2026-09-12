@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "dart-middleware"
-version = "0.1.0"
+dynamic = ["version"]
 description = "DART (Discovery And Realtime Transport): peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
 readme = "python/README.md"
 requires-python = ">=3.8"
@@ -18,6 +18,9 @@ authors = [{ name = "Nathan George" }]
 Homepage = "https://github.com/KosmosisDire/DART"
 
 [tool.scikit-build]
+metadata.version.provider = "scikit_build_core.metadata.regex"
+metadata.version.input = "VERSION"
+metadata.version.regex = "(?P<value>[0-9.]+)"
 wheel.packages = ["python/dart"]
 # ctypes needs no Python ABI, so the wheel is py3-none-<platform>: one per platform.
 wheel.py-api = "py3"
