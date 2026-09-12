@@ -13,6 +13,9 @@
   #ifndef _DEFAULT_SOURCE
   #define _DEFAULT_SOURCE 1
   #endif
+  #ifndef _DARWIN_C_SOURCE
+  #define _DARWIN_C_SOURCE 1   /* Darwin hides its own extensions under _POSIX_C_SOURCE without this */
+  #endif
 #endif
 
 #ifndef DART_TRANSPORT_SANS_IO

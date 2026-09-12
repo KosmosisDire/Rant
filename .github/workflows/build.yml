@@ -53,6 +53,7 @@ jobs:
 
       # The build above already made the shared library. This is where the packages read it.
       - name: Shared library
+        shell: bash
         run: ls -l dist/native/*/
 
       - uses: actions/setup-dotnet@v6
