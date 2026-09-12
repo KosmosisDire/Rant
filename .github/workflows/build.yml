@@ -30,7 +30,7 @@ jobs:
       - name: Configure and build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
-          cmake --build build --config Release --parallel
+          cmake --build build --config Release --parallel 4
 
       # A hand edited dist/ header is the one thing the amalgamator cannot catch itself.
       # .gitattributes pins the committed form to LF, so this is clean on every platform.
