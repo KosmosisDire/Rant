@@ -1220,30 +1220,48 @@ class Message:
 
 
 class Event:
-    """A peer, message loss or error notification. Everything that went wrong arrives as
-        EventKind.ERROR with error set, and str(event) is the text either way."""
-    __slots__ = ("kind", "error", "topic_name", "peer", "topic", "os_error",
-                 "lost_first", "lost_count", "too_big_bytes", "identity",
-                 "publish_topics", "receive_topics", "schema_detail", "peer_name", "_line")
+    """A peer, message loss or error notification. kind says which, error the fault on an
+        ERROR, and details holds only the fields the C names for that kind (src/node/core.h).
+        str(event) is the one line text."""
+    __slots__ = ("kind", "error", "peer", "peer_name", "topic", "topic_name", "details", "_line")
+
+    _KIND_FIELDS = {
+        EventKind.PEER_INTEREST: ("publish_topics", "receive_topics"),
+        EventKind.MSG_LOST: ("lost_first", "lost_count"),
+    }
+    _ERROR_FIELDS = {
+        ErrorKind.NAME_COLLISION: ("identity",),
+        ErrorKind.SCHEMA_MISMATCH: ("schema_detail",),
+        ErrorKind.INTEREST_OVERFLOW: ("lost_count",),
+        ErrorKind.PEER_META_TOO_BIG: ("too_big_bytes",),
+        ErrorKind.MSG_TOO_BIG: ("too_big_bytes",),
+        ErrorKind.EVICTED_UNSENT: ("lost_first", "lost_count"),
+        ErrorKind.OOM: ("too_big_bytes",),
+        ErrorKind.SOCKET: ("os_error",),
+        ErrorKind.BIND: ("os_error",),
+        ErrorKind.MCAST_JOIN: ("os_error",),
+        ErrorKind.SEND: ("os_error", "too_big_bytes"),
+        ErrorKind.RECV: ("os_error",),
+        ErrorKind.POLL: ("os_error",),
+    }
 
     @classmethod
     def _from_c(cls, e):
         self = cls.__new__(cls)
         self.kind = EventKind(e.kind) if e.kind in EventKind._value2member_map_ else e.kind
         self.error = ErrorKind(e.error) if e.error in ErrorKind._value2member_map_ else e.error
-        self.topic_name = e.topic_name.decode("utf-8", "replace") if e.topic_name else None
         self.peer = e.peer
-        self.topic = e.topic
-        self.os_error = e.os_error
-        self.lost_first = e.lost_first
-        self.lost_count = e.lost_count
-        self.too_big_bytes = e.too_big_bytes
-        self.identity = e.identity
-        self.publish_topics = e.publish_topics
-        self.receive_topics = e.receive_topics
-        self.schema_detail = (e.schema_detail.decode("utf-8", "replace")
-                              if e.schema_detail else None)
         self.peer_name = e.peer_name.decode("utf-8", "replace") if e.peer_name else None
+        self.topic = e.topic
+        self.topic_name = e.topic_name.decode("utf-8", "replace") if e.topic_name else None
+        names = (cls._ERROR_FIELDS.get(self.error, ()) if self.kind == EventKind.ERROR
+                 else cls._KIND_FIELDS.get(self.kind, ()))
+        self.details = {}
+        for n in names:
+            v = getattr(e, n)
+            if n == "schema_detail":
+                v = v.decode("utf-8", "replace") if v else None
+            self.details[n] = v
         buf = _c.create_string_buffer(192)
         _c.load().dart_event_str(_c.byref(e), buf, len(buf))
         self._line = buf.value.decode("utf-8", "replace")
@@ -1276,16 +1294,40 @@ class _TypedTopic:
         return "dart.Topic[%s]" % getattr(self._type, "__name__", self._type)
 
 
+class _TopicStats:
+    """topic.stats: the counters behind a topic."""
+    __slots__ = ("_topic",)
+
+    def __init__(self, topic):
+        self._topic = topic
+
+    def traffic(self):
+        """(tx_msgs, tx_bytes, rx_msgs, rx_bytes), the cumulative traffic this node committed to
+                the topic and delivered from it. Always on."""
+        tm, tb, rm, rb = _c.c_uint64(), _c.c_uint64(), _c.c_uint64(), _c.c_uint64()
+        self._topic._node._lib.dart_topic_counts(self._topic._ptr(), _c.byref(tm), _c.byref(tb),
+                                                 _c.byref(rm), _c.byref(rb))
+        return tm.value, tb.value, rm.value, rb.value
+
+    def queue(self):
+        """(messages, bytes, capacity, dropped) of the consumer queue, zeros when not queued."""
+        m, b, c, d = _c.c_uint32(), _c.c_uint32(), _c.c_uint32(), _c.c_uint32()
+        self._topic._node._lib.dart_topic_queue_stats(self._topic._ptr(), _c.byref(m),
+                                                      _c.byref(b), _c.byref(c), _c.byref(d))
+        return m.value, b.value, c.value, d.value
+
+
 class Topic:
     """A topic handle owned by the Node. Topic(node, name) is raw, a schema argument makes
         it typed, and Topic[T](node, name) is the typed shorthand."""
-    __slots__ = ("_node", "_h", "_schema", "_name")
+    __slots__ = ("_node", "_h", "_schema", "_name", "_stats")
 
     def __init__(self, node, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
         sch = _as_schema(schema)
         self._node = node
         self._name = name
         self._schema = sch
+        self._stats = _TopicStats(self)
         self._h = node._create_or_share(name, role, sch, qos, qos_kwargs)
 
     @classmethod
@@ -1297,6 +1339,7 @@ class Topic:
         t._name = None
         t._schema = None
         t._h = handle
+        t._stats = _TopicStats(t)
         return t
 
     def __class_getitem__(cls, item):
@@ -1305,6 +1348,10 @@ class Topic:
     @property
     def name(self):
         return self._name
+
+    @property
+    def stats(self):
+        return self._stats
 
     def _ptr(self):
         # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
@@ -1355,7 +1402,7 @@ class Topic:
             return _send_status(r)
 
     @property
-    def index(self):
+    def _index(self):
         return self._node._lib.dart_topic_index(self._ptr())
 
     def match_count(self):
@@ -1394,24 +1441,87 @@ class Topic:
                 max_msgs (0 = all), waiting like take. These run without the node lock."""
         return self._node._lib.dart_topic_dispatch(self._ptr(), max_msgs, timeout_ms)
 
-    def queue_stats(self):
-        """(messages, bytes, capacity, dropped) of the consumer queue, zeros when not queued."""
-        m, b, c, d = _c.c_uint32(), _c.c_uint32(), _c.c_uint32(), _c.c_uint32()
-        self._node._lib.dart_topic_queue_stats(self._ptr(), _c.byref(m), _c.byref(b),
-                                                 _c.byref(c), _c.byref(d))
-        return m.value, b.value, c.value, d.value
-
-    def counts(self):
-        """(tx_msgs, tx_bytes, rx_msgs, rx_bytes), the cumulative traffic this node committed to
-                the topic and delivered from it. Always on."""
-        tm, tb, rm, rb = _c.c_uint64(), _c.c_uint64(), _c.c_uint64(), _c.c_uint64()
-        self._node._lib.dart_topic_counts(self._ptr(), _c.byref(tm), _c.byref(tb),
-                                           _c.byref(rm), _c.byref(rb))
-        return tm.value, tb.value, rm.value, rb.value
-
     @property
     def schema(self):
         return self._schema
+
+
+class _NodeLog:
+    """node.log: the built in @dart/log/{error,warn,info} topics. Callable with a level and
+        a line, or through error, warn and info."""
+    __slots__ = ("_node",)
+
+    def __init__(self, node):
+        self._node = node
+
+    def __call__(self, level, text):
+        """Publish a formatted line on a level's log topic, truncated at DART_LOG_MAX. Returns
+                a SendStatus, NOSYS when logs are disabled."""
+        b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+        return _send_status(self._node._lib.dart_node_log_text(self._node._h, int(level), b, len(b)))
+
+    def error(self, text):
+        return self(LogLevel.ERROR, text)
+
+    def warn(self, text):
+        return self(LogLevel.WARN, text)
+
+    def info(self, text):
+        return self(LogLevel.INFO, text)
+
+    def topic(self, level):
+        """This node's own handle for a level's log topic (None when disabled): widen its role
+                and read it like any topic, or use on()."""
+        h = self._node._lib.dart_node_log_topic(self._node._h, int(level))
+        return Topic._from_handle(self._node, h) if h else None
+
+    def on(self, level, handler):
+        """Subscribe to a level's mesh wide log stream: every other node's lines at that level
+                as a LogLine, on the polling thread. Returns False when logs are disabled."""
+        node = self._node
+        h = node._lib.dart_node_log_topic(node._h, int(level))
+        if not h:
+            return False
+        if node._lib.dart_topic_set_role(h, int(Role.PUBSUB)) != 0:
+            return False
+        idx = node._lib.dart_topic_index(h)
+        lvl = LogLevel(int(level))
+
+        def _wrap(m):
+            f = m.value if isinstance(m.value, dict) else {}
+            handler(LogLine(level=lvl, node=m.publisher_name, node_id=m.publisher_id,
+                            wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
+                            recv_us=m.recv_us, written_us=m.written_us,
+                            text=f.get("text", "") or ""))
+        node._add_sub_handler(idx, _wrap)
+        return True
+
+
+class _NodeStats:
+    """node.stats: the node's counters."""
+    __slots__ = ("_node",)
+
+    def __init__(self, node):
+        self._node = node
+
+    def evicted_unsent(self):
+        """Sends that evicted never sent history after the bounded wait (the EVICTED_UNSENT
+                error count): the send burst or overload indicator."""
+        return self._node._lib.dart_node_evicted_unsent(self._node._h)
+
+    def memory(self):
+        """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the hot path
+                is allocation free."""
+        in_use, peak, calls = _c.c_size_t(), _c.c_size_t(), _c.c_uint64()
+        self._node._lib.dart_node_mem_stats(self._node._h, _c.byref(in_use), _c.byref(peak),
+                                            _c.byref(calls))
+        return in_use.value, peak.value, calls.value
+
+    def backpressure(self):
+        """(waited_us, waited_sends) since open."""
+        us, n = _c.c_uint64(), _c.c_uint32()
+        self._node._lib.dart_node_backpressure_stats(self._node._h, _c.byref(us), _c.byref(n))
+        return us.value, n.value
 
 
 class Node:
@@ -1420,13 +1530,16 @@ class Node:
 
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt",
                  "_topic_specs", "_schemas", "_topics_by_name", "_create_lock",
-                 "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name")
+                 "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
+                 "_log", "_stats")
 
     def __init__(self, name, on_message, on_event, options=None, **opts):
         """Open a node. An empty name is auto generated. on_message may be None, on_event is
                 required. Other config is keyword args or options=NodeOptions(...)."""
         self._lib = None
         self._name = name or None
+        self._log = _NodeLog(self)
+        self._stats = _NodeStats(self)
         self._h = None
         self._id = None
         self._alloc = None
@@ -1503,6 +1616,14 @@ class Node:
     def name(self):
         """The name given at open, None when the node generated one."""
         return self._name
+
+    @property
+    def log(self):
+        return self._log
+
+    @property
+    def stats(self):
+        return self._stats
 
     def on_message(self, fn):
         """Rebind the message handler set at construction. Returns fn, so it works as a
@@ -1602,61 +1723,17 @@ class Node:
                 Call after creating the topics. timeout_ms < 0 = 3 announce intervals."""
         return self._lib.dart_node_settle(self._h, timeout_ms) == 1
 
-    # ---- built-in logs (the @dart/log/{error,warn,info} topics) ----
-
-    def log(self, level, text):
-        """Publish a formatted line on a level's log topic, truncated at DART_LOG_MAX. Returns
-                a SendStatus, NOSYS when logs are disabled."""
-        b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
-        return _send_status(self._lib.dart_node_log_text(self._h, int(level), b, len(b)))
-
-    def log_error(self, text):
-        return self.log(LogLevel.ERROR, text)
-
-    def log_warn(self, text):
-        return self.log(LogLevel.WARN, text)
-
-    def log_info(self, text):
-        return self.log(LogLevel.INFO, text)
-
-    def log_topic(self, level):
-        """This node's own handle for a level's log topic (None when disabled): widen
-        its role and read it like any topic, or use on_log()."""
-        h = self._lib.dart_node_log_topic(self._h, int(level))
-        return Topic._from_handle(self, h) if h else None
-
-    def on_log(self, level, handler):
-        """Subscribe to a level's mesh wide log stream: every other node's lines at that level
-                as a LogLine, on the polling thread. Returns False when logs are disabled."""
-        h = self._lib.dart_node_log_topic(self._h, int(level))
-        if not h:
-            return False
-        if self._lib.dart_topic_set_role(h, int(Role.PUBSUB)) != 0:
-            return False
-        idx = self._lib.dart_topic_index(h)
-        lvl = LogLevel(int(level))
-
-        def _wrap(m):
-            f = m.value if isinstance(m.value, dict) else {}
-            handler(LogLine(level=lvl, node=m.publisher_name, node_id=m.publisher_id,
-                            wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
-                            recv_us=m.recv_us, written_us=m.written_us,
-                            text=f.get("text", "") or ""))
-        self._add_sub_handler(idx, _wrap)
-        return True
-
     # ---- @dart/meta introspection ----
 
-    def meta_function(self):
-        """The local @dart/meta caller handle (None when meta is disabled). Call it
-        directed at a peer id. Most callers want meta()/meta_async()."""
+    def _meta_function(self):
+        # the local @dart/meta caller handle, None when meta is disabled
         h = self._lib.dart_node_meta_function(self._h)
         return RemoteFunction._from_handle(self, h) if h else None
 
     def meta(self, peer, sections=MetaSection.ALL, timeout_ms=1000):
         """Blocking: a @dart/meta call directed at peer, decoded into a MetaSnapshot. Drives the
                 loop, so never under start() or from a callback. sections is a MetaSection mask."""
-        fn = self.meta_function()
+        fn = self._meta_function()
         if fn is None:
             return MetaSnapshot(status=CallStatus.NO_HANDLER)
         req = b"" if int(sections) == 0 else _struct.pack("<I", int(sections))
@@ -1665,7 +1742,7 @@ class Node:
     def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
         """Async: a @dart/meta call directed at peer. on_snapshot fires once from the polling
                 thread. Works under start(). Returns the launch SendStatus."""
-        fn = self.meta_function()
+        fn = self._meta_function()
         if fn is None:
             on_snapshot(MetaSnapshot(status=CallStatus.NO_HANDLER))
             return SendStatus.NO_TOPIC
@@ -1695,28 +1772,10 @@ class Node:
         with self._pat_lock:
             self._sub_handlers.setdefault(index, []).append(fn)
 
-    def evicted_unsent(self):
-        """Sends that evicted never-sent history after the bounded wait (the
-        EVICTED_UNSENT error count): the send-burst/overload indicator."""
-        return self._lib.dart_node_evicted_unsent(self._h)
-
     def last_error(self):
         """The most recent error this node reported, as an Event (also delivered via
         on_event). kind is PEER_UP with error == ErrorKind.NONE if none has occurred."""
         return Event._from_c(self._lib.dart_last_error(self._h))
-
-    def memory_stats(self):
-        """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the
-        hot path is allocation-free."""
-        in_use, peak, calls = _c.c_size_t(), _c.c_size_t(), _c.c_uint64()
-        self._lib.dart_node_mem_stats(self._h, _c.byref(in_use), _c.byref(peak), _c.byref(calls))
-        return in_use.value, peak.value, calls.value
-
-    def backpressure_stats(self):
-        """(waited_us, waited_sends) since open."""
-        us, n = _c.c_uint64(), _c.c_uint32()
-        self._lib.dart_node_backpressure_stats(self._h, _c.byref(us), _c.byref(n))
-        return us.value, n.value
 
     def close(self, send_bye=True):
         """Stop the service thread and tear the node down. Returns True, or False when refused
@@ -2684,7 +2743,7 @@ class Subscriber:
                 fn = lambda m: handler(m.value if m.value is not None else m.data)
             else:
                 fn = lambda m: handler(m.value if m.value is not None else m.data, m)
-            node._add_sub_handler(self.topic.index, fn)
+            node._add_sub_handler(self.topic._index, fn)
 
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("schema",))

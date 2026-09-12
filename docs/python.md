@@ -44,6 +44,10 @@ drain, start, stop and close are refused with `SendStatus.STATE`, None or False.
 every queued topic on the calling thread. `close()` is refused from a handler and returns
 False. A handle used after its node closed answers `NO_TOPIC`, None or False.
 
+An `Event` carries `kind`, `error`, `peer`, `peer_name`, `topic` and `topic_name`, plus a
+`details` dict holding only the fields the kind names, as in docs/node.md. `str(event)` is
+the one line text.
+
 ## Schemas
 
 Any class with annotated fields is a schema, no decorator needed, and `@dataclass` just
@@ -77,8 +81,8 @@ docs/node.md.
 
 `take(timeout_ms)` and `dispatch(max_msgs, timeout_ms)` switch a topic to queued
 delivery. `take` returns None when nothing arrived, and dispatch handlers run on the
-calling thread without the node lock. `queue_stats()` and `counts()` return the queue and
-traffic counters as tuples.
+calling thread without the node lock. `stats.queue()` and `stats.traffic()` on a topic
+return the queue and traffic counters as tuples.
 
 `retire()` releases a topic's name for a re creation with another schema. The handle is
 unusable after and every call returns NO_TOPIC. `ready()` is true when a send would not
@@ -121,8 +125,10 @@ every applied write, both inline on the thread that applied the write.
 
 ## Logs and meta
 
-`log(level, text)` publishes a formatted line, truncated at DART_LOG_MAX. `on_log(level,
-handler)` delivers every other node's lines at that level as a `LogLine`. `meta(peer,
-sections)` blocks and must not run under `start()` or from a callback, and `meta_async`
-works anywhere. Both decode into a `MetaSnapshot` whose node and proc scalars are fields
-and whose full body is `info`.
+`node.log(level, text)`, or `node.log.error(text)`, `warn` and `info`, publishes a
+formatted line, truncated at DART_LOG_MAX. `node.log.on(level, handler)` delivers every
+other node's lines at that level as a `LogLine`, and `node.log.topic(level)` is the topic
+behind a level. `meta(peer, sections)` blocks and must not run under `start()` or from a
+callback, and `meta_async` works anywhere. Both decode into a `MetaSnapshot` whose node and
+proc scalars are fields and whose full body is `info`. `node.stats.memory()`,
+`backpressure()` and `evicted_unsent()` are the node's own counters.

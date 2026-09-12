@@ -726,7 +726,7 @@ def main():
             sent.stamp = 8
             pubch.send(sent)
             ok = got.wait(3.0) and received[-1].value.stamp == 8
-            print("PASS: threaded delivery via start() (evicted_unsent=%d)" % pub.evicted_unsent()
+            print("PASS: threaded delivery via start() (evicted_unsent=%d)" % pub.stats.evicted_unsent()
                   if ok else "FAIL: threaded delivery")
             pub.stop()
             sub.stop()
