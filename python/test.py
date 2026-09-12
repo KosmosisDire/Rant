@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-# Import the shipped single-file wrapper from dist/ (dev layout).
+# Import the package from the source checkout, which finds the library in dist/native.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import dart  # noqa: E402
@@ -733,6 +733,12 @@ def main():
 
     pub.close()
     sub.close()
+
+    # A handle outliving its node answers NO_TOPIC instead of touching freed memory.
+    if ok:
+        ok = (pubch.send(sent) == dart.SendStatus.NO_TOPIC and pubch.match_count() == 0
+              and pubch.take() is None and pubch.name == "pose" and pub.name == "pub")
+        print("PASS: handle after close" if ok else "FAIL: handle after close")
 
     if ok:
         ok = value_roots_live()

@@ -17,7 +17,7 @@ class Tick:
     seq: dart.u64 = 0
     when: dart.Timestamp = 0                                  # Unix-epoch microseconds, UTC
     value: dart.f64 = 0.0
-    at: dart.Pose = field(default_factory=dart.Pose)          # meters + a quaternion
+    at: dart.Transform = field(default_factory=dart.Transform)   # meters and a quaternion
 
 
 def main():
@@ -42,8 +42,8 @@ def main():
             while seq < due:
                 angle = seq * 0.01
                 ch.send(Tick(seq=seq, when=dart.timestamp_now(), value=math.sin(angle),
-                             at=dart.Pose(position=dart.Double3(math.cos(angle),
-                                                               math.sin(angle), 0.0))))
+                             at=dart.Transform(translation=dart.Double3(math.cos(angle),
+                                                                       math.sin(angle), 0.0))))
                 seq += 1
             node.poll(0)                                   # non-blocking: flush the burst + service RX
             if now - last_report >= 1.0:

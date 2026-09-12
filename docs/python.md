@@ -23,23 +23,26 @@ node = dart.Node("robot1",
                  on_message=lambda m: print(m.value),
                  on_event=lambda e: print("event:", e),
                  domain=7)
-ch = dart.Topic[Pose](node, "pose", qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
+pose = dart.Topic[Pose](node, "pose", qos=dart.Qos(reliability=dart.Reliability.RELIABLE))
 node.start()
-ch.send(Pose(stamp=1, x=1.0, frame="map"))
+pose.send(Pose(stamp=1, x=1.0, frame="map"))
 ```
 
 The API mirrors the C# wrapper: everything is a constructor, config is keyword arguments
 or the `Qos` and `NodeOptions` dataclasses, and payloads are bytes, str or typed objects.
 `on_message` may be None, since subscribers and pattern handles carry their own handlers.
-`on_event` is required, and both are wired before the constructor returns.
+`on_event` is required, and both are wired before the constructor returns. `on_message(fn)`
+and `on_event(fn)` rebind one and return it, so they work as decorators. The node and every
+handle carry `name`.
 
 Every call is thread safe. Drive a node with `start()`, where the C service thread runs
 the loop and handlers fire on it one at a time, or call `poll()` from your own loop. From
 inside a handler, sends and read only queries are allowed, and poll, create, set_role,
 drain, start, stop and close are refused with `SendStatus.STATE`, None or False.
 
-`settle()` blocks until discovery and matching converge. `dispatch_all()` drains every
-queued topic on the calling thread. `close()` is refused from a handler and returns False.
+`settle()` blocks until discovery and matching converge. `dispatch()` on the node drains
+every queued topic on the calling thread. `close()` is refused from a handler and returns
+False. A handle used after its node closed answers `NO_TOPIC`, None or False.
 
 ## Schemas
 
@@ -62,7 +65,7 @@ same one in any language is the same wire bytes and the same hash.
 peer's. A missing value keeps the zeroed default. The map body is built and parsed in
 Python and validated by the C setter. The standard types in docs/stdtypes.md are shipped
 as tagged dataclasses and aliases: `dart.Transform`, `dart.Color`, `dart.Timestamp` and the
-rest, and `dart.now()` is the Timestamp clock.
+rest, and `dart.timestamp_now()` is the Timestamp clock.
 
 ## Messages and queues
 
@@ -72,12 +75,13 @@ writer's wall clock, 0 when the publisher opted out, as in docs/node.md.
 
 `take(timeout_ms)` and `dispatch(max_msgs, timeout_ms)` switch a topic to queued
 delivery. `take` returns None when nothing arrived, and dispatch handlers run on the
-calling thread without the node lock. `queue_stats()` and `stats()` return the queue and
+calling thread without the node lock. `queue_stats()` and `counts()` return the queue and
 traffic counters as tuples.
 
 `retire()` releases a topic's name for a re creation with another schema. The handle is
-unusable after and every call returns NO_TOPIC. `can_send()` is true when a send would not
-wait on the match wait, and `pending_matches()` counts unresolved candidates.
+unusable after and every call returns NO_TOPIC. `ready()` is true when a send would not
+wait on the match wait, and `pending_count()` counts unresolved candidates. `Publisher` and
+`Subscriber` carry `match_count()` and `ready()` too.
 
 ## Functions, tasks and variables
 

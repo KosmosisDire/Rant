@@ -142,8 +142,10 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 
 ## Python
 
-`python/dart/__init__.py` is the package. It loads the library `dart_shared` builds
-through ctypes: `DART_LIBRARY`, else the copy the wheel carries next to it, else
+`python/dart/__init__.py` is the package and `python/dart/_native.py` the private ctypes
+side: the struct mirrors, the callback types and the loader, referenced from the package
+as `_c.*` so none of it shows up on `dart.`. The loader finds the library `dart_shared`
+builds: `DART_LIBRARY`, else the copy the wheel carries next to it, else
 `dist/native/<rid>/` in a source checkout. scikit-build-core drives the wheel from
 `pyproject.toml`, so `pip install .` runs this same CMake with the tools, explorer, bridge
 and install off and the one `SKBUILD` rule copies the library next to the package. The

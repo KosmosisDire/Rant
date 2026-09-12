@@ -1,528 +1,49 @@
 """The DART Python wrapper: ctypes over the shared library the CMake target dart_shared
 builds. docs/python.md explains how to use it."""
 
-import ctypes
-import dataclasses
-import enum
-import enum as _pyenum   # kept reachable after the public dart.enum() shadows the module name
-import inspect
-import os
-import platform
-import struct
-import sys
-import threading
-import traceback
-from ctypes import (POINTER, CFUNCTYPE, Structure, Union, byref, cast, memset,
-                    pointer, sizeof, string_at, c_char_p, c_void_p, c_int,
-                    c_int32, c_int64, c_uint8, c_uint16, c_uint32, c_uint64,
-                    c_size_t, c_double, c_float, c_ubyte)
-
-
-def _library_path():
-    """DART_LIBRARY, else the copy the wheel carries next to this file, else the
-    dist/native/<rid>/ copy of a source checkout."""
-    name = {"win32": "dart.dll", "darwin": "libdart.dylib"}.get(sys.platform, "libdart.so")
-    override = os.environ.get("DART_LIBRARY")
-    if override:
-        return override
-    here = os.path.dirname(os.path.abspath(__file__))
-    bundled = os.path.join(here, name)
-    if os.path.exists(bundled):
-        return bundled
-    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
-    if sys.platform == "darwin":
-        rid = "osx"
-    else:
-        rid = ("win-" if sys.platform == "win32" else "linux-") + arch
-    in_tree = os.path.join(here, "..", "..", "dist", "native", rid, name)
-    if os.path.exists(in_tree):
-        return in_tree
-    raise RuntimeError("dart: no native library found. Install the wheel (pip install "
-                       "dart-middleware), build the CMake target dart_shared in a source "
-                       "checkout, or point DART_LIBRARY at the library.")
-
-
-# The ctypes layouts, which must mirror the C structs exactly (spec/bindings.md).
-
-class DartBytes(Structure):
-    _fields_ = [("data", c_void_p), ("len", c_size_t)]
-
-
-# the C DartString, a length carrying view. Named View so the public string field
-# marker owns the plain dart.string name
-class DartStringView(Structure):
-    _fields_ = [("data", c_void_p), ("len", c_size_t)]
-
-
-class DartQos(Structure):
-    _fields_ = [
-        ("reliability", c_int),
-        ("keep_last", c_uint16),
-        ("catch_up", c_uint16),
-        ("max_message_bytes", c_uint32),
-        ("heartbeat_us", c_uint32),
-        ("repair_delay_us", c_uint32),
-        ("backpressure_wait_us", c_uint32),
-        ("shm_max_bytes", c_uint32),
-        ("queue_bytes", c_uint32),
-        ("max_rate_hz", c_uint16),
-        ("no_timestamp", c_uint8),
-    ]
-
-
-class DartTopicOpts(Structure):
-    _fields_ = [("qos", DartQos)]
-
-
-class DartDiscoveryAddr(Structure):
-    _fields_ = [
-        ("ip", c_uint8 * 16),   # network-order bytes
-        ("ip_len", c_uint8),    # 4 = IPv4, 16 = IPv6
-        ("port", c_uint16),     # host order, 0 = the discovery port
-    ]
-
-
-def _seed_addrs(seeds):
-    """Marshal "ip" / "ip:port" strings into a C array of DartDiscoveryAddr (IPv4).
-    The node copies the array at open, so it need not outlive the call."""
-    if not seeds:
-        return None, 0
-    arr = (DartDiscoveryAddr * len(seeds))()
-    for i, s in enumerate(seeds):
-        host, _, port = s.partition(":")
-        octets = host.split(".")
-        if len(octets) != 4:
-            raise ValueError("seed_peers entry %r is not an IPv4 address" % s)
-        for k, o in enumerate(octets):
-            v = int(o)
-            if not 0 <= v <= 255:
-                raise ValueError("seed_peers entry %r is not an IPv4 address" % s)
-            arr[i].ip[k] = v
-        arr[i].ip_len = 4
-        arr[i].port = int(port) if port else 0    # 0 = the discovery port
-    return arr, len(seeds)
-
-
-class DartNodeNet(Structure):
-    _fields_ = [
-        ("data_port", c_uint16),
-        ("discovery_group", c_char_p),
-        ("discovery_port", c_uint16),
-        ("multicast_interface", c_char_p),
-        ("multicast_ttl", c_uint8),
-        ("seed_peers", c_void_p),
-        ("n_seed_peers", c_uint16),
-        ("unicast_only", c_uint8),
-        ("recv_buffer_bytes", c_uint32),
-        ("send_buffer_bytes", c_uint32),
-        ("fragment_size", c_uint16),
-        ("self_ip", c_char_p),
-        ("advertise_port", c_uint16),
-    ]
-
-
-class DartNodeDiscovery(Structure):
-    _fields_ = [
-        ("announce_interval_us", c_uint32),
-        ("peer_timeout_us", c_uint32),
-        ("max_peers", c_uint16),
-    ]
-
-
-class DartNodeOpts(Structure):
-    _fields_ = [
-        ("domain", c_uint16),
-        ("max_topics", c_uint16),
-        ("user_data", c_void_p),
-        ("disable_shm", c_uint8),
-        ("fetch_details", c_uint8),
-        ("match_wait_ms", c_int32),
-        ("disable_logs", c_uint8),
-        ("disable_meta", c_uint8),
-        ("disable_error_logs", c_uint8),
-        ("net", DartNodeNet),
-        ("discovery", DartNodeDiscovery),
-    ]
-
-
-class DartMsg(Structure):
-    _fields_ = [
-        ("node", c_void_p),
-        ("user", c_void_p),
-        ("topic_index", c_uint16),
-        ("publisher_id", c_uint32),
-        ("publisher_name", DartStringView),
-        ("topic_name", DartStringView),
-        ("header", DartBytes),   # the pattern header view, None on a plain topic
-        ("data", DartBytes),
-        ("schema", c_void_p),
-        ("recv_us", c_uint64),
-        ("written_us", c_uint64),
-        ("capture_us", c_uint64),
-    ]
-
-
-# Optional per send config. capture_us 0 = unstated, and costs no wire bytes.
-class DartSendOpts(Structure):
-    _fields_ = [("capture_us", c_uint64)]
-
-
-class DartEvent(Structure):
-    _fields_ = [
-        ("kind", c_int),
-        ("error", c_int),
-        ("topic_name", c_char_p),
-        ("user", c_void_p),
-        ("peer", c_uint32),
-        ("topic", c_uint16),
-        ("os_error", c_int),
-        ("ip", c_uint8 * 16),
-        ("ip_len", c_uint8),
-        ("port", c_uint16),
-        ("lost_first", c_uint64),
-        ("lost_count", c_uint64),
-        ("too_big_bytes", c_uint64),
-        ("identity", c_uint64),
-        ("publish_topics", c_uint16),
-        ("receive_topics", c_uint16),
-        ("schema_detail", c_char_p),
-        ("peer_name", c_char_p),
-    ]
-
-
-class DartAllocator(Structure):
-    _fields_ = [
-        ("page_realloc", c_void_p),
-        ("shared", c_void_p),
-        ("owned", c_void_p),
-        ("free_pool", c_void_p),
-        ("page_size", c_uint32),
-        ("max_bytes", c_size_t),
-        ("in_use", c_size_t),
-        ("pooled", c_size_t),
-        ("peak", c_size_t),
-        ("alloc_calls", c_uint64),
-        ("pages_live", c_uint64),
-    ]
-
-
-class DartSchemaFieldInfo(Structure):
-    _fields_ = [
-        ("name", DartStringView),
-        ("type_name", DartStringView),   # the field type's NAME, empty when anonymous
-        ("elem_name", DartStringView),   # an array ELEMENT type's name, empty when anonymous
-        ("kind", c_uint8),
-        ("elem", c_uint8),
-        ("count", c_uint16),
-        ("depth", c_uint16),
-        ("str_cap", c_uint16),
-        ("arr_parent", c_uint16),        # flat index of the enclosing struct ARRAY, 0xFFFF none
-        ("offset", c_uint32),
-        ("size", c_uint32),
-        ("elem_size", c_uint32),         # bytes of one array element, else 0
-    ]
-
-
-class _DartValueV(Union):
-    _fields_ = [("u", c_uint64), ("i", c_int64), ("f", c_double)]
-
-
-class DartValue(Structure):
-    _fields_ = [
-        ("kind", c_uint8),
-        ("elem", c_uint8),
-        ("count", c_uint16),
-        ("str_cap", c_uint16),
-        ("v", _DartValueV),
-        ("bytes", DartBytes),
-    ]
-
-
-# the pattern struct mirrors of src/patterns/core.h, field order and types exact
-
-# The public head of the C DartRequest, only ever touched through the callback's pointer:
-# the reply machinery lives behind the struct, so the exact pointer is what reply takes.
-class DartRequest(Structure):
-    _fields_ = [
-        ("node", c_void_p),
-        ("function_name", DartStringView),
-        ("data", DartBytes),
-        ("schema", c_void_p),
-        ("caller", c_uint32),
-        ("caller_name", DartStringView),
-        ("recv_us", c_uint64),
-        ("written_us", c_uint64),
-    ]
-
-
-class DartResponse(Structure):
-    _fields_ = [
-        ("status", c_int),
-        ("data", DartBytes),
-        ("schema", c_void_p),
-        ("provider", c_uint32),
-        ("user", c_void_p),
-        ("written_us", c_uint64),
-        ("message", DartStringView),   # outcome text (default status text if none sent)
-    ]
-
-
-class DartFunctionOpts(Structure):
-    _fields_ = [
-        ("backpressure_wait_us", c_uint32),
-        ("timeout_us", c_uint32),
-        ("keep_last", c_uint16),
-        ("multi", c_uint8),
-    ]
-
-
-class DartVariableOpts(Structure):
-    _fields_ = [
-        ("initial", DartBytes),
-        ("access", c_uint8),
-        ("allow_force", c_uint8),
-        ("catch_up", c_uint16),
-        ("keep_last", c_uint16),
-        ("backpressure_wait_us", c_uint32),
-    ]
-
-
-class DartVariableUpdate(Structure):
-    _fields_ = [
-        ("variable", c_void_p),
-        ("name", DartStringView),
-        ("value", DartBytes),
-        ("schema", c_void_p),
-        ("forced", c_uint8),
-        ("write_seq", c_uint32),
-        ("source", c_uint32),
-        ("recv_us", c_uint64),
-        ("written_us", c_uint64),
-    ]
-
-
-class DartTaskOpts(Structure):
-    _fields_ = [
-        ("progress_best_effort", c_uint8),
-        ("progress_keep_last", c_uint16),
-        ("no_cancel", c_uint8),
-        ("exclusive", c_uint8),
-        ("multi", c_uint8),
-        ("timeout_us", c_uint32),
-        ("backpressure_wait_us", c_uint32),
-        ("keep_last", c_uint16),
-    ]
-
-
-class DartProgress(Structure):
-    _fields_ = [
-        ("call_id", c_uint32),
-        ("provider", c_uint32),
-        ("data", DartBytes),      # len 0 = the RUNNING ack
-        ("schema", c_void_p),
-        ("written_us", c_uint64),
-        ("recv_us", c_uint64),
-        ("user", c_void_p),
-    ]
-
-
-_PrgFn = CFUNCTYPE(None, POINTER(DartProgress))
-
-
-class DartCallOpts(Structure):
-    # direct a call at one definition by peer id, 0 = first answer wins. The task fields
-    # stay NULL on a plain call
-    _fields_ = [
-        ("provider", c_uint32),
-        ("on_progress", _PrgFn),
-        ("progress_user", c_void_p),
-        ("id_out", POINTER(c_uint32)),
-    ]
-
-
-_DART_ALLOCATOR_PAGE = 64 * 1024   # DART_ALLOCATOR_PAGE default
-
-_MsgFn = CFUNCTYPE(None, POINTER(DartMsg))
-_EvtFn = CFUNCTYPE(None, POINTER(DartEvent))
-_AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
-_ReqFn = CFUNCTYPE(None, POINTER(DartRequest), c_void_p)
-_RspFn = CFUNCTYPE(None, POINTER(DartResponse))
-_VarFn = CFUNCTYPE(None, POINTER(DartVariableUpdate), c_void_p)
-_CancelFn = CFUNCTYPE(None, c_uint64, c_void_p)
-_NULL_REQ_FN = cast(None, _ReqFn)   # a CFUNCTYPE argtype refuses a bare None
-_NULL_VAR_FN = cast(None, _VarFn)
-
-
-def _bind(lib):
-    F = lambda fn, args, ret: (setattr(getattr(lib, fn), "argtypes", args),
-                               setattr(getattr(lib, fn), "restype", ret))
-    F("dart_allocator_heap", [c_uint32], DartAllocator)
-    F("dart_heap_realloc", [c_void_p, c_void_p, c_size_t], c_void_p)
-    F("dart_node_open", [POINTER(DartAllocator), c_char_p, _MsgFn, _EvtFn,
-                         POINTER(DartNodeOpts)], c_void_p)
-    F("dart_last_error", [c_void_p], DartEvent)
-    F("dart_node_poll", [c_void_p, c_int], c_int)
-    F("dart_node_close", [c_void_p, c_int], c_int)
-    F("dart_node_start", [c_void_p], c_int)
-    F("dart_node_stop", [c_void_p], c_int)
-    F("dart_node_is_started", [c_void_p], c_int)
-    F("dart_node_evicted_unsent", [c_void_p], c_uint32)
-    F("dart_node_create_topic", [c_void_p, c_char_p, c_int, c_void_p,
-                                   POINTER(DartTopicOpts)], c_void_p)
-    F("dart_node_topic", [c_void_p, c_uint16], c_void_p)
-    F("dart_topic_send", [c_void_p, DartBytes, POINTER(DartSendOpts)], c_int)
-    F("dart_topic_set_role", [c_void_p, c_int], c_int)
-    F("dart_topic_retire", [c_void_p], c_int)
-    F("dart_topic_index", [c_void_p], c_uint16)
-    F("dart_topic_match_count", [c_void_p], c_int)
-    F("dart_topic_drain", [c_void_p, c_int], c_int)
-    F("dart_topic_take", [c_void_p, POINTER(DartMsg), c_int], c_int)
-    F("dart_topic_dispatch", [c_void_p, c_int, c_int], c_int)
-    F("dart_node_dispatch", [c_void_p, c_int, c_int], c_int)
-    F("dart_topic_queue_stats", [c_void_p, POINTER(c_uint32), POINTER(c_uint32),
-                                   POINTER(c_uint32), POINTER(c_uint32)], None)
-    F("dart_node_mem_stats", [c_void_p, POINTER(c_size_t), POINTER(c_size_t),
-                              POINTER(c_uint64)], None)
-    F("dart_node_backpressure_stats", [c_void_p, POINTER(c_uint64),
-                                       POINTER(c_uint32)], None)
-    F("dart_topic_counts", [c_void_p, POINTER(c_uint64), POINTER(c_uint64),
-                            POINTER(c_uint64), POINTER(c_uint64)], None)
-    F("dart_node_log_text", [c_void_p, c_int, c_char_p, c_int], c_int)
-    F("dart_node_log_topic", [c_void_p, c_int], c_void_p)
-    F("dart_node_meta_function", [c_void_p], c_void_p)
-    F("dart_event_str", [POINTER(DartEvent), c_char_p, c_size_t], c_char_p)
-    F("dart_node_settle", [c_void_p, c_int], c_int)
-    F("dart_topic_ready", [c_void_p], c_int)
-    F("dart_topic_pending_count", [c_void_p], c_int)
-    F("dart_node_lock", [c_void_p], None)
-    F("dart_node_unlock", [c_void_p], None)
-    # patterns: functions / variables
-    F("dart_node_create_function_definition", [c_void_p, c_char_p, c_void_p,
-                                               c_void_p, _ReqFn, c_void_p,
-                                               POINTER(DartFunctionOpts)], c_void_p)
-    F("dart_node_create_remote_function", [c_void_p, c_char_p, c_void_p, c_void_p,
-                                           POINTER(DartFunctionOpts)], c_void_p)
-    F("dart_function_call", [c_void_p, DartBytes, POINTER(DartResponse), c_int, c_void_p], c_int)
-    F("dart_function_call_async", [c_void_p, DartBytes, _RspFn, c_void_p, c_void_p], c_int)
-    F("dart_function_match_count", [c_void_p], c_int)
-    F("dart_function_retire", [c_void_p], c_int)
-    F("dart_request_reply", [POINTER(DartRequest), DartBytes], None)
-    F("dart_request_fail", [POINTER(DartRequest), c_char_p, DartBytes], None)
-    F("dart_request_defer", [POINTER(DartRequest)], c_uint64)
-    F("dart_function_complete", [c_void_p, c_uint64, c_int, c_char_p, DartBytes], c_int)
-    # patterns: tasks
-    F("dart_node_create_task_definition", [c_void_p, c_char_p, c_void_p, c_void_p,
-                                           c_void_p, _ReqFn, c_void_p,
-                                           POINTER(DartTaskOpts)], c_void_p)
-    F("dart_node_create_remote_task", [c_void_p, c_char_p, c_void_p, c_void_p,
-                                       c_void_p, POINTER(DartTaskOpts)], c_void_p)
-    F("dart_request_start", [POINTER(DartRequest)], c_int)
-    F("dart_function_progress", [c_void_p, c_uint64, DartBytes], c_int)
-    F("dart_function_cancelled", [c_void_p, c_uint64], c_int)
-    F("dart_function_on_cancel", [c_void_p, _CancelFn, c_void_p], c_int)
-    F("dart_function_cancel", [c_void_p, c_uint32], c_int)
-    F("dart_node_create_variable_definition", [c_void_p, c_char_p, c_void_p,
-                                               POINTER(DartVariableOpts)], c_void_p)
-    F("dart_node_create_remote_variable", [c_void_p, c_char_p, c_void_p,
-                                           POINTER(DartVariableOpts)], c_void_p)
-    F("dart_variable_get", [c_void_p, POINTER(DartBytes)], c_int)
-    F("dart_variable_set", [c_void_p, DartBytes], c_int)
-    F("dart_variable_force", [c_void_p, DartBytes], c_int)
-    F("dart_variable_unforce", [c_void_p], c_int)
-    F("dart_variable_forced", [c_void_p], c_int)
-    F("dart_variable_wait", [c_void_p, c_int], c_int)
-    F("dart_variable_match_count", [c_void_p], c_int)
-    F("dart_variable_retire", [c_void_p], c_int)
-    F("dart_variable_on_change", [c_void_p, _VarFn, c_void_p], c_int)
-    F("dart_variable_on_write", [c_void_p, _VarFn, c_void_p], c_int)
-    # serialize / schema
-    F("dart_schema_compile", [_AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
-    F("dart_schema_free", [c_void_p, _AllocFn, c_void_p], None)
-    F("dart_schema_wire", [c_void_p], DartBytes)
-    F("dart_schema_hash", [c_void_p], c_uint64)
-    F("dart_schema_name", [c_void_p], DartStringView)
-    F("dart_schema_print", [c_void_p, c_char_p, c_size_t], c_uint32)
-    F("dart_schema_subset", [c_void_p, c_void_p], c_int)
-    F("dart_std_name", [c_int], c_char_p)
-    F("dart_std_by_name", [DartStringView], c_int)
-    F("dart_std_recognize", [c_void_p, _AllocFn, c_void_p], c_int)
-    F("dart_std_recognize_field", [c_void_p, c_uint16, _AllocFn, c_void_p], c_int)
-    F("dart_std_recognize_elem", [c_void_p, c_uint16, _AllocFn, c_void_p], c_int)
-    F("dart_timestamp_now", [], c_int64)
-    F("dart_schema_size", [c_void_p], c_uint32)
-    F("dart_schema_field_count", [c_void_p], c_uint16)
-    F("dart_schema_field_at", [c_void_p, c_uint16, POINTER(DartSchemaFieldInfo)], c_int)
-    F("dart_schema_field_index", [c_void_p, c_char_p], c_int)
-    F("dart_schema_enum_count", [c_void_p, c_uint16], c_uint16)
-    F("dart_schema_enum_variant", [c_void_p, c_uint16, c_uint16, POINTER(c_int64),
-                                   POINTER(DartStringView)], c_int)
-    F("dart_get_enum", [DartBytes, c_void_p, c_char_p], DartStringView)
-    F("dart_set_enum", [c_void_p, c_size_t, c_void_p, c_char_p, c_char_p], c_int)
-    F("dart_schema_message_default", [c_void_p, c_void_p, c_size_t], c_int)
-    F("dart_schema_scalar_size", [c_int], c_uint32)
-    F("dart_set_uint", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint64], c_int)
-    F("dart_set_int", [c_void_p, c_size_t, c_void_p, c_char_p, c_int64], c_int)
-    F("dart_set_f64", [c_void_p, c_size_t, c_void_p, c_char_p, c_double], c_int)
-    F("dart_set_f32", [c_void_p, c_size_t, c_void_p, c_char_p, c_float], c_int)
-    F("dart_set_array", [c_void_p, c_size_t, c_void_p, c_char_p, DartBytes], c_int)
-    F("dart_set_string", [c_void_p, c_size_t, c_void_p, c_char_p, DartStringView], c_int)
-    F("dart_set_string_at", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint16,
-                             DartStringView], c_int)
-    F("dart_get_uint", [DartBytes, c_void_p, c_char_p], c_uint64)
-    F("dart_get_int", [DartBytes, c_void_p, c_char_p], c_int64)
-    F("dart_get_f64", [DartBytes, c_void_p, c_char_p], c_double)
-    F("dart_get_f32", [DartBytes, c_void_p, c_char_p], c_float)
-    F("dart_get_array", [DartBytes, c_void_p, c_char_p], DartBytes)
-    F("dart_get_value", [DartBytes, c_void_p, c_uint16, POINTER(DartValue)], c_int)
-    F("dart_set_value", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(DartValue)], c_int)
-    F("dart_schema_msg_min", [c_void_p], c_uint32)
-    F("dart_schema_msg_len", [c_void_p, c_void_p, c_size_t], c_uint32)
-    F("dart_set_map", [c_void_p, c_size_t, c_void_p, c_char_p, DartBytes], c_int)
-
-
-_LIB = None
-_LIB_LOCK = threading.Lock()
-
-
-def _load():
-    global _LIB
-    if _LIB is not None:
-        return _LIB
-    with _LIB_LOCK:
-        if _LIB is None:
-            lib = ctypes.CDLL(_library_path())
-            _bind(lib)
-            _LIB = lib
-    return _LIB
-
-
-# The schema layer needs a realloc style hook. dart_heap_realloc is the library's own,
-# so a schema allocation stays in native code with no callback into Python.
-_SCHEMA_ALLOC = None
-
-
-def _schema_alloc():
-    global _SCHEMA_ALLOC
-    if _SCHEMA_ALLOC is None:
-        _SCHEMA_ALLOC = cast(_load().dart_heap_realloc, _AllocFn)
-    return _SCHEMA_ALLOC
+import dataclasses as _dataclasses
+import enum as _pyenum
+import inspect as _inspect
+import struct as _struct
+import sys as _sys
+import threading as _threading
+import traceback as _traceback
+from . import _native as _c
+
+__all__ = [
+    "Node", "NodeOptions", "Topic", "Publisher", "Subscriber", "Qos", "Message", "Event",
+    "Schema", "Field", "SchemaError", "dsl",
+    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool_", "string",
+    "enum",
+    "Reliability", "Role", "SendStatus", "CallStatus", "LogLevel", "MetaSection", "EventKind",
+    "ErrorKind", "FieldType",
+    "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred", "CallError",
+    "TaskDefinition", "RemoteTask", "TaskRequest", "Progress", "CancelledError",
+    "VariableDefinition", "RemoteVariable", "VariableUpdate",
+    "LogLine", "MetaSnapshot",
+    "Float2", "Float3", "Float4", "Double2", "Double3", "Double4", "Int2", "Int3", "Int4",
+    "Quaternion", "Color", "Rect", "RectI", "Transform", "Twist", "GeoPoint",
+    "Image", "VideoFrame", "ExternalVideoStream", "CameraIntrinsics", "ImageFormat",
+    "VideoCodec", "VideoStreamKind", "DistortionModel", "JointState", "JointNames",
+    "Timestamp", "Duration", "Uri", "Uuid", "Matrix3x3", "Matrix4x4", "timestamp_now",
+]
 
 
 # The enums. Values match the C wire, names mirror the C# wrapper.
 
-class Reliability(enum.IntEnum):
+class Reliability(_pyenum.IntEnum):
     BEST_EFFORT = 0
     RELIABLE = 1
 
 
-class Role(enum.IntEnum):
+class Role(_pyenum.IntEnum):
     PUBSUB = 0
     PUB_ONLY = 1
     SUB_ONLY = 2
     INACTIVE = 3
 
 
-class SendStatus(enum.IntEnum):
+class SendStatus(_pyenum.IntEnum):
     OK = 0
     NO_TOPIC = -1
     TOO_BIG = -2
@@ -532,7 +53,7 @@ class SendStatus(enum.IntEnum):
     NOSYS = -6       # not compiled in (start() under DART_NO_THREADS)
 
 
-class CallStatus(enum.IntEnum):
+class CallStatus(_pyenum.IntEnum):
     """A call's outcome, mirrors DartCallStatus. TIMEOUT and PEER_LOST are synthesized on the
         caller, RUNNING is task only and the one non terminal status (docs/tasks.md)."""
     OK = 0
@@ -544,14 +65,14 @@ class CallStatus(enum.IntEnum):
     RUNNING = 6
 
 
-class LogLevel(enum.IntEnum):
+class LogLevel(_pyenum.IntEnum):
     """Severity of a built-in @dart/log line. Mirrors DartLogLevel."""
     ERROR = 0
     WARN = 1
     INFO = 2
 
 
-class MetaSection(enum.IntFlag):
+class MetaSection(_pyenum.IntFlag):
     """A @dart/meta request's section mask, OR the bits. ALL or 0 = every section."""
     NODE = 0x1
     PROC = 0x2
@@ -560,7 +81,7 @@ class MetaSection(enum.IntFlag):
     ALL = 0
 
 
-class EventKind(enum.IntEnum):
+class EventKind(_pyenum.IntEnum):
     PEER_UP = 0
     PEER_DOWN = 1
     PEER_INTEREST = 2
@@ -568,7 +89,7 @@ class EventKind(enum.IntEnum):
     ERROR = 4       # something went wrong, read Event.error
 
 
-class ErrorKind(enum.IntEnum):
+class ErrorKind(_pyenum.IntEnum):
     """The specific error carried by an EventKind.ERROR event (mirrors DartErrorKind)."""
     NONE = 0
     NAME_COLLISION = 1
@@ -596,7 +117,7 @@ class ErrorKind(enum.IntEnum):
     BAD_ADDRESS = 23
 
 
-class FieldType(enum.IntEnum):
+class FieldType(_pyenum.IntEnum):
     U8 = 0
     U16 = 1
     U32 = 2
@@ -655,7 +176,7 @@ class CancelledError(Exception):
 
 # The config and value dataclasses, mirroring the C++ structs. Zero = default.
 
-@dataclasses.dataclass
+@_dataclasses.dataclass
 class Qos:
     reliability: Reliability = Reliability.BEST_EFFORT
     keep_last: int = 0
@@ -671,7 +192,7 @@ class Qos:
                                 # receivers read msg.written_us == 0. Default stamps every message
 
 
-@dataclasses.dataclass
+@_dataclasses.dataclass
 class NodeOptions:
     domain: int = 0
     max_topics: int = 0
@@ -686,7 +207,7 @@ class NodeOptions:
     discovery_port: int = 0
     multicast_interface: str = ""
     multicast_ttl: int = 0
-    seed_peers: list = dataclasses.field(default_factory=list)
+    seed_peers: list = _dataclasses.field(default_factory=list)
                                   # "ip" or "ip:port" strings to also unicast announces to, so
                                   # discovery works where multicast is filtered
     unicast_only: bool = False    # join no group, announce to seed peers and ask them to relay us
@@ -702,7 +223,7 @@ class NodeOptions:
     max_peers: int = 0
 
 
-@dataclasses.dataclass
+@_dataclasses.dataclass
 class LogLine:
     """One decoded @dart/log line for a Node.on_log handler. wall_us is epoch us, mono_us the
         publisher's monotonic clock and recv_us this node's clock at receipt."""
@@ -716,7 +237,7 @@ class LogLine:
     text: str
 
 
-@dataclasses.dataclass
+@_dataclasses.dataclass
 class MetaSnapshot:
     """A decoded @dart/meta reply. The node and proc scalars are fields, the full body stays
         in info. Absent sections leave zeros and have_proc False."""
@@ -790,7 +311,7 @@ class MetaSnapshot:
         return s
 
 
-@dataclasses.dataclass
+@_dataclasses.dataclass
 class Field:
     name: str
     kind: FieldType
@@ -934,7 +455,7 @@ def _std(name):
     as the name (and must have the canonical shape, else compiling the schema fails)."""
     def wrap(cls):
         cls.__dart_std__ = name
-        return dataclasses.dataclass(cls)
+        return _dataclasses.dataclass(cls)
     return wrap
 
 
@@ -1036,15 +557,15 @@ class RectI:
 # Meters and radians. parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
 @_std("Transform")
 class Transform:
-    translation: Double3 = dataclasses.field(default_factory=Double3)
-    rotation: Quaternion = dataclasses.field(default_factory=Quaternion)
+    translation: Double3 = _dataclasses.field(default_factory=Double3)
+    rotation: Quaternion = _dataclasses.field(default_factory=Quaternion)
     parent: string(30) = ""
 
 
 @_std("Twist")
 class Twist:
-    linear: Double3 = dataclasses.field(default_factory=Double3)    # m/s
-    angular: Double3 = dataclasses.field(default_factory=Double3)   # rad/s
+    linear: Double3 = _dataclasses.field(default_factory=Double3)    # m/s
+    angular: Double3 = _dataclasses.field(default_factory=Double3)   # rad/s
 
 
 @_std("GeoPoint")
@@ -1142,28 +663,28 @@ class CameraIntrinsics:
     cx: f64 = 0.0
     cy: f64 = 0.0
     model: enum(DistortionModel, u8) = DistortionModel.NoDistortion
-    coeffs: f64[8] = dataclasses.field(default_factory=lambda: [0.0] * 8)
+    coeffs: f64[8] = _dataclasses.field(default_factory=lambda: [0.0] * 8)
 
 
 # SI: radians or meters, per second, and newtons or newton meters. velocity and effort
 # may be empty. The names ride a JointNames variable, not every sample.
 @_std("JointState")
 class JointState:
-    position: list[f64] = dataclasses.field(default_factory=list)
-    velocity: list[f64] = dataclasses.field(default_factory=list)
-    effort: list[f64] = dataclasses.field(default_factory=list)
+    position: list[f64] = _dataclasses.field(default_factory=list)
+    velocity: list[f64] = _dataclasses.field(default_factory=list)
+    effort: list[f64] = _dataclasses.field(default_factory=list)
 
 
 # Published once as a variable. The order every JointState array follows.
 @_std("JointNames")
 class JointNames:
-    name: list[string(32)] = dataclasses.field(default_factory=list)
+    name: list[string(32)] = _dataclasses.field(default_factory=list)
 
 
 def timestamp_now():
     """The wall clock in Timestamp units, microseconds since the Unix epoch UTC, the clock a
         message's written_us uses."""
-    return int(_load().dart_timestamp_now())
+    return int(_c.load().dart_timestamp_now())
 
 
 class _FieldSpec:
@@ -1194,7 +715,7 @@ class _Spec:
 
 
 _SPECS = {}
-_SPECS_LOCK = threading.RLock()   # reentrant: nested-struct reflection recurses under it
+_SPECS_LOCK = _threading.RLock()   # reentrant: nested-struct reflection recurses under it
 
 
 def _spec_of(cls):
@@ -1269,7 +790,7 @@ def _field_spec(name, ann, g):
 
 
 def _build_spec(cls):
-    mod = sys.modules.get(cls.__module__)
+    mod = _sys.modules.get(cls.__module__)
     g = getattr(mod, "__dict__", {})
     anns = getattr(cls, "__annotations__", {})
     if not anns:
@@ -1328,9 +849,9 @@ def _enum_body_from_schema(lib, s, field):
     """`{ Name=value, ... }` read from a compiled schema's enum option table."""
     parts = []
     for k in range(lib.dart_schema_enum_count(s, field)):
-        val = c_int64()
-        nm = DartStringView()
-        if lib.dart_schema_enum_variant(s, field, k, byref(val), byref(nm)):
+        val = _c.c_int64()
+        nm = _c.DartStringView()
+        if lib.dart_schema_enum_variant(s, field, k, _c.byref(val), _c.byref(nm)):
             parts.append("%s=%d" % (_dstr(nm), val.value))
     return "{ %s }" % ", ".join(parts)
 
@@ -1340,8 +861,8 @@ def _is_value_root(lib, s):
     message is a single value (encode/decode take and give that value, not a dict)."""
     if lib.dart_schema_field_count(s) != 1 or lib.dart_schema_name(s).len != 0:
         return False
-    info = DartSchemaFieldInfo()
-    return (bool(lib.dart_schema_field_at(s, 0, byref(info)))
+    info = _c.DartSchemaFieldInfo()
+    return (bool(lib.dart_schema_field_at(s, 0, _c.byref(info)))
             and info.depth == 0 and info.name.len == 0 and info.kind != _STRUCT)
 
 
@@ -1351,7 +872,7 @@ def _schema_dsl(lib, s):
     need = lib.dart_schema_print(s, None, 0)
     if not need:
         return ""
-    buf = ctypes.create_string_buffer(need + 1)
+    buf = _c.create_string_buffer(need + 1)
     lib.dart_schema_print(s, buf, need + 1)
     return buf.value.decode("utf-8", "replace")
 
@@ -1360,13 +881,13 @@ def _schema_dsl(lib, s):
 # Schema(cls), and Topic[T] builds one for you.
 
 def _dstr(s):
-    return string_at(s.data, s.len).decode("utf-8", "replace") if s.data and s.len else ""
+    return _c.string_at(s.data, s.len).decode("utf-8", "replace") if s.data and s.len else ""
 
 
 def _compile_dsl(text):
-    lib = _load()
-    err = c_char_p()
-    s = lib.dart_schema_compile(_schema_alloc(), None, text.encode("utf-8"), byref(err))
+    lib = _c.load()
+    err = _c.c_char_p()
+    s = lib.dart_schema_compile(_c.schema_alloc(), None, text.encode("utf-8"), _c.byref(err))
     if not s:
         near = err.value.decode("utf-8", "replace") if err.value else "?"
         raise SchemaError("schema compile failed near: " + near)
@@ -1395,50 +916,50 @@ class Schema:
 
     @property
     def name(self):
-        return _dstr(_load().dart_schema_name(self._s))
+        return _dstr(_c.load().dart_schema_name(self._s))
 
     @property
     def size(self):
-        return _load().dart_schema_size(self._s)
+        return _c.load().dart_schema_size(self._s)
 
     @property
     def hash(self):
-        return _load().dart_schema_hash(self._s)
+        return _c.load().dart_schema_hash(self._s)
 
     @property
     def wire(self):
-        b = _load().dart_schema_wire(self._s)
-        return string_at(b.data, b.len) if b.data and b.len else b""
+        b = _c.load().dart_schema_wire(self._s)
+        return _c.string_at(b.data, b.len) if b.data and b.len else b""
 
     @property
     def dsl(self):
         """The schema's DSL text, reconstructed from the compiled form. Paste this
         into a C/C++ node's dart_schema_compile for interop, or just print it."""
-        return _schema_dsl(_load(), self._s)
+        return _schema_dsl(_c.load(), self._s)
 
     @property
     def field_count(self):
-        return _load().dart_schema_field_count(self._s)
+        return _c.load().dart_schema_field_count(self._s)
 
     @property
     def is_value_root(self):
         """True when this schema is a BARE TYPE: its message is one value, so encode takes
         and decode returns that value instead of a field dict."""
         if self._vroot is None:
-            self._vroot = _is_value_root(_load(), self._s)   # probed once
+            self._vroot = _is_value_root(_c.load(), self._s)   # probed once
         return self._vroot
 
     def can_read(self, pub):
         """Can a reader declaring this schema read messages written with pub? Type names
                 narrow: an anonymous type reads a named one of the same shape, never the reverse."""
-        return bool(_load().dart_schema_subset(self._s, pub._s))
+        return bool(_c.load().dart_schema_subset(self._s, pub._s))
 
     def fields(self):
-        lib = _load()
+        lib = _c.load()
         out = []
-        info = DartSchemaFieldInfo()
+        info = _c.DartSchemaFieldInfo()
         for i in range(lib.dart_schema_field_count(self._s)):
-            if lib.dart_schema_field_at(self._s, i, byref(info)):
+            if lib.dart_schema_field_at(self._s, i, _c.byref(info)):
                 out.append(Field(_dstr(info.name), FieldType(info.kind),
                                  FieldType(info.elem), info.count, info.depth,
                                  info.offset, info.size, info.str_cap,
@@ -1448,17 +969,17 @@ class Schema:
 
     def encode(self, value):
         """Encode a mapping or an object (attributes by field name) to message bytes."""
-        return _encode(_load(), self._s, value)
+        return _encode(_c.load(), self._s, value)
 
     def decode(self, data):
         """Decode message bytes to a nested dict (any schema), the bare value (a bare-type
         schema), or a typed instance if this schema was built from a class."""
-        return _from_decoded(self._spec, _decode(_load(), self._s, bytes(data)))
+        return _from_decoded(self._spec, _decode(_c.load(), self._s, bytes(data)))
 
     def __del__(self):
         try:
             if self._s:
-                _load().dart_schema_free(self._s, _schema_alloc(), None)
+                _c.load().dart_schema_free(self._s, _c.schema_alloc(), None)
                 self._s = None
         except Exception:
             pass
@@ -1501,19 +1022,19 @@ def _pack_array(elem_kind, val):
         return bytes(val)
     fmt = _FMT[elem_kind]
     if elem_kind in _FLOATK:
-        return struct.pack("<%d%s" % (len(val), fmt), *(float(x) for x in val))
-    return struct.pack("<%d%s" % (len(val), fmt), *(int(x) for x in val))
+        return _struct.pack("<%d%s" % (len(val), fmt), *(float(x) for x in val))
+    return _struct.pack("<%d%s" % (len(val), fmt), *(int(x) for x in val))
 
 
 def _str_view(val, keep):
     sb = val.encode("utf-8") if isinstance(val, str) else bytes(val)
     keep.append(sb)   # keep the buffer alive across the setter call
-    return DartStringView(cast(c_char_p(sb), c_void_p) if sb else None, len(sb))
+    return _c.DartStringView(_c.cast(_c.c_char_p(sb), _c.c_void_p) if sb else None, len(sb))
 
 
 def _bytes_view(b, keep):
     keep.append(b)    # keep the buffer alive across the setter call
-    return DartBytes(cast(c_char_p(b), c_void_p) if b else None, len(b))
+    return _c.DartBytes(_c.cast(_c.c_char_p(b), _c.c_void_p) if b else None, len(b))
 
 
 def _pack_string_slots(strings, cap):
@@ -1524,7 +1045,7 @@ def _pack_string_slots(strings, cap):
         sb = item.encode("utf-8") if isinstance(item, str) else bytes(item)
         if len(sb) > cap:
             raise SchemaError("string too long (cap %d): %r" % (cap, item))
-        out += struct.pack("<H", len(sb)) + sb + b"\x00" * (cap - len(sb))
+        out += _struct.pack("<H", len(sb)) + sb + b"\x00" * (cap - len(sb))
     return bytes(out)
 
 
@@ -1542,7 +1063,7 @@ def _map_int_bytes(v):
         elif v <= 0xffff:                    k, fmt = _U16, "<H"
         elif v <= 0xffffffff:                k, fmt = _U32, "<I"
         else:                                k, fmt = _U64, "<Q"
-    return bytes((k,)) + struct.pack(fmt, v)
+    return bytes((k,)) + _struct.pack(fmt, v)
 
 
 def _encode_map_value(v):
@@ -1551,14 +1072,14 @@ def _encode_map_value(v):
     if isinstance(v, int):
         return _map_int_bytes(v)
     if isinstance(v, float):
-        return bytes((_F64,)) + struct.pack("<d", v)
+        return bytes((_F64,)) + _struct.pack("<d", v)
     if isinstance(v, str):
         sb = v.encode("utf-8")
-        return bytes((_VSTR,)) + struct.pack("<H", len(sb)) + sb
+        return bytes((_VSTR,)) + _struct.pack("<H", len(sb)) + sb
     if isinstance(v, dict):
         return bytes((_MAP,)) + _encode_map_body(v)
     if isinstance(v, (list, tuple)):
-        return bytes((_VARR,)) + struct.pack("<H", len(v)) + b"".join(_encode_map_value(x) for x in v)
+        return bytes((_VARR,)) + _struct.pack("<H", len(v)) + b"".join(_encode_map_value(x) for x in v)
     raise SchemaError("dart map: unsupported value type %r (use int/float/bool/str/dict/list)"
                       % type(v).__name__)
 
@@ -1574,7 +1095,7 @@ def _encode_map_body(d):
         if len(kb) > 255:
             raise SchemaError("dart map: key too long (max 255 bytes): %r" % key)
         parts.append(bytes((len(kb),)) + kb + _encode_map_value(val))
-    return struct.pack("<H", len(parts)) + b"".join(parts)
+    return _struct.pack("<H", len(parts)) + b"".join(parts)
 
 
 def _encode(lib, s, src):
@@ -1585,8 +1106,8 @@ def _encode(lib, s, src):
     names, srcs, ops = [], [src], []
     var_bytes = 0
     for i in range(lib.dart_schema_field_count(s)):
-        info = DartSchemaFieldInfo()
-        lib.dart_schema_field_at(s, i, byref(info))
+        info = _c.DartSchemaFieldInfo()
+        lib.dart_schema_field_at(s, i, _c.byref(info))
         name = _dstr(info.name)
         d = info.depth
         while len(names) <= d:
@@ -1621,7 +1142,7 @@ def _encode(lib, s, src):
     # msg_min is the fixed section plus one empty frame per variable field, and each
     # variable frame then grows by exactly its payload length
     size = lib.dart_schema_msg_min(s) + var_bytes
-    buf = (c_ubyte * (size or 1))()
+    buf = (_c.c_ubyte * (size or 1))()
     lib.dart_schema_message_default(s, buf, size)
     keep = []
     for kind, elem, count, cap, path, val in ops:
@@ -1699,7 +1220,7 @@ def _decode_map_value(buf, off, end, depth):
         sz = _SCALAR_SIZE[kind]
         if off + sz > end:
             return 0, end
-        return struct.unpack_from("<" + _FMT[kind], buf, off)[0], off + sz
+        return _struct.unpack_from("<" + _FMT[kind], buf, off)[0], off + sz
     if kind == _VSTR:
         if off + 2 > end:
             return "", end
@@ -1747,18 +1268,18 @@ def _decode_map_body(buf, off, end, depth=1):
 def _value_to_py(val):
     k = val.kind
     if k == _STR or k == _VSTR:
-        return (string_at(val.bytes.data, val.bytes.len).decode("utf-8", "replace")
+        return (_c.string_at(val.bytes.data, val.bytes.len).decode("utf-8", "replace")
                 if val.bytes.data and val.bytes.len else "")
     if k == _ARR or k == _VARR:
-        raw = string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
+        raw = _c.string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
         if val.elem == _STR:
             return _unpack_string_array(raw, val.count, val.str_cap)
         if val.elem in (_U8, _I8):
             return raw
         esz = _SCALAR_SIZE[val.elem]
-        return list(struct.unpack("<%d%s" % (len(raw) // esz, _FMT[val.elem]), raw)) if raw else []
+        return list(_struct.unpack("<%d%s" % (len(raw) // esz, _FMT[val.elem]), raw)) if raw else []
     if k == _MAP:
-        raw = string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
+        raw = _c.string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
         return _decode_map_body(raw, 0, len(raw))[0]
     if k in _FLOATK:
         return val.v.f
@@ -1772,16 +1293,16 @@ def _value_to_py(val):
 
 
 def _decode(lib, s, msg):
-    mb = DartBytes(cast(c_char_p(msg), c_void_p) if msg else None, len(msg))
+    mb = _c.DartBytes(_c.cast(_c.c_char_p(msg), _c.c_void_p) if msg else None, len(msg))
     if _is_value_root(lib, s):       # a bare type: hand back the value, not a one-key dict
-        val = DartValue()
-        lib.dart_get_value(mb, s, 0, byref(val))
+        val = _c.DartValue()
+        lib.dart_get_value(mb, s, 0, _c.byref(val))
         return _value_to_py(val)
     root = {}
     dests = [root]
     for i in range(lib.dart_schema_field_count(s)):
-        info = DartSchemaFieldInfo()
-        lib.dart_schema_field_at(s, i, byref(info))
+        info = _c.DartSchemaFieldInfo()
+        lib.dart_schema_field_at(s, i, _c.byref(info))
         name = _dstr(info.name)
         d = info.depth
         parent = dests[d]
@@ -1792,8 +1313,8 @@ def _decode(lib, s, msg):
                 dests.append(None)
             dests[d + 1] = child
         else:
-            val = DartValue()
-            lib.dart_get_value(mb, s, i, byref(val))
+            val = _c.DartValue()
+            lib.dart_get_value(mb, s, i, _c.byref(val))
             parent[name] = _value_to_py(val)
     return root
 
@@ -1848,11 +1369,11 @@ def _send_status(r):
 
 def _c_view(payload):
     """(DartBytes, keepalive buffer) over a bytes payload. Hold the buffer across the call."""
-    b = DartBytes()
+    b = _c.DartBytes()
     buf = None
     if payload:
-        buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
-        b.data = cast(buf, c_void_p)
+        buf = (_c.c_ubyte * len(payload)).from_buffer_copy(payload)
+        b.data = _c.cast(buf, _c.c_void_p)
         b.len = len(payload)
     return b, buf
 
@@ -1879,7 +1400,7 @@ def _decode_payload(wire_schema, local, data):
     if not sp:
         return data, True
     try:
-        d = _decode(_load(), sp, data)
+        d = _decode(_c.load(), sp, data)
         return _from_decoded(local._spec if local is not None else None, d), True
     except Exception:
         return None, False
@@ -1889,7 +1410,7 @@ def _arity(fn):
     """1 or 2: how many positional args a handler accepts. Bound methods drop self and
         *args counts as the 2 arg form."""
     try:
-        params = inspect.signature(fn).parameters.values()
+        params = _inspect.signature(fn).parameters.values()
     except (TypeError, ValueError):
         return 1
     n = 0
@@ -1929,15 +1450,15 @@ class Message:
         self.recv_us = m.recv_us
         self.written_us = m.written_us
         self.capture_us = m.capture_us
-        self.data = string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
+        self.data = _c.string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
         self.fields = None
         self.value = None
         if m.schema:
             try:
-                self.fields = _decode(_load(), m.schema, self.data)
+                self.fields = _decode(_c.load(), m.schema, self.data)
                 self.value = _from_decoded(spec, self.fields)
             except Exception:
-                traceback.print_exc()
+                _traceback.print_exc()
         return self
 
     @property
@@ -1974,8 +1495,8 @@ class Event:
         self.schema_detail = (e.schema_detail.decode("utf-8", "replace")
                               if e.schema_detail else None)
         self.peer_name = e.peer_name.decode("utf-8", "replace") if e.peer_name else None
-        buf = ctypes.create_string_buffer(192)
-        _load().dart_event_str(byref(e), buf, len(buf))
+        buf = _c.create_string_buffer(192)
+        _c.load().dart_event_str(_c.byref(e), buf, len(buf))
         self._line = buf.value.decode("utf-8", "replace")
         return self
 
@@ -2009,11 +1530,12 @@ class _TypedTopic:
 class Topic:
     """A topic handle owned by the Node. Topic(node, name) is raw, a schema argument makes
         it typed, and Topic[T](node, name) is the typed shorthand."""
-    __slots__ = ("_node", "_h", "_schema")
+    __slots__ = ("_node", "_h", "_schema", "_name")
 
     def __init__(self, node, name, schema=None, role=Role.PUBSUB, qos=None, **qos_kwargs):
         sch = _as_schema(schema)
         self._node = node
+        self._name = name
         self._schema = sch
         self._h = node._create_or_share(name, role, sch, qos, qos_kwargs)
 
@@ -2023,12 +1545,21 @@ class Topic:
         # registry entry, no schema. send/set_role/counts/query like any topic.
         t = cls.__new__(cls)
         t._node = node
+        t._name = None
         t._schema = None
         t._h = handle
         return t
 
     def __class_getitem__(cls, item):
         return _TypedTopic(item)
+
+    @property
+    def name(self):
+        return self._name
+
+    def _ptr(self):
+        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
+        return self._h if self._node._h else None
 
     def send(self, data, capture_us=0):
         """Publish. data is bytes or str for raw, else a mapping or object encoded by the
@@ -2045,22 +1576,22 @@ class Topic:
                                 "topic with a schema to send objects/dicts")
             payload = self._schema.encode(data)
         b, buf = _c_view(payload)
-        o = DartSendOpts(capture_us=int(capture_us or 0))
-        r = self._node._lib.dart_topic_send(self._h, b, byref(o))
+        o = _c.DartSendOpts(capture_us=int(capture_us or 0))
+        r = self._node._lib.dart_topic_send(self._ptr(), b, _c.byref(o))
         del buf
         return _send_status(r)
 
     def set_role(self, role):
-        return self._node._lib.dart_topic_set_role(self._h, int(role))
+        return _send_status(self._node._lib.dart_topic_set_role(self._ptr(), int(role)))
 
     def retire(self):
         """Retire the topic so the name can be re created with another schema (docs/topics.md).
                 On OK this handle is invalid. Refused with STATE from a callback."""
         node = self._node
         with node._create_lock:
-            if not self._h:
+            if not self._ptr():
                 return _send_status(-1)
-            idx = node._lib.dart_topic_index(self._h)
+            idx = node._lib.dart_topic_index(self._ptr())
             r = node._lib.dart_topic_retire(self._h)
             if r == 0:
                 for nm, rec in list(node._topics_by_name.items()):
@@ -2076,30 +1607,32 @@ class Topic:
 
     @property
     def index(self):
-        return self._node._lib.dart_topic_index(self._h)
+        return self._node._lib.dart_topic_index(self._ptr())
 
     def match_count(self):
-        return self._node._lib.dart_topic_match_count(self._h)
+        return self._node._lib.dart_topic_match_count(self._ptr())
 
     def ready(self):
         """True when a send would not wait on the match wait: a subscriber is matched, or
                 matching has converged. For a GUI: disable the wait, park payloads while False."""
-        return self._node._lib.dart_topic_ready(self._h) == 1
+        return self._node._lib.dart_topic_ready(self._ptr()) == 1
 
     def pending_count(self):
         """Unresolved candidate matches right now. 0 = matching has converged for every known
                 peer."""
-        return self._node._lib.dart_topic_pending_count(self._h)
+        return self._node._lib.dart_topic_pending_count(self._ptr())
 
     def drain(self, timeout_ms):
         """Pump until every reader has acked, or timeout. Call before close."""
-        return self._node._lib.dart_topic_drain(self._h, timeout_ms) == 1
+        return self._node._lib.dart_topic_drain(self._ptr(), timeout_ms) == 1
 
     def take(self, timeout_ms=0):
         """Pop the next queued message, copied out, or None if nothing arrived in timeout_ms
                 (0 = check, negative = forever). The first take or dispatch queues the topic."""
-        m = DartMsg()
-        r = self._node._lib.dart_topic_take(self._h, byref(m), timeout_ms)
+        if self._ptr() is None:
+            return None
+        m = _c.DartMsg()
+        r = self._node._lib.dart_topic_take(self._ptr(), _c.byref(m), timeout_ms)
         if r < 0:
             raise RuntimeError("take failed (%s)" % (SendStatus(r)
                                if r in SendStatus._value2member_map_ else r))
@@ -2110,21 +1643,21 @@ class Topic:
     def dispatch(self, max_msgs=0, timeout_ms=0):
         """Drain the queue by running on_message on the calling thread, oldest first, up to
                 max_msgs (0 = all), waiting like take. These run without the node lock."""
-        return self._node._lib.dart_topic_dispatch(self._h, max_msgs, timeout_ms)
+        return self._node._lib.dart_topic_dispatch(self._ptr(), max_msgs, timeout_ms)
 
     def queue_stats(self):
         """(messages, bytes, capacity, dropped) of the consumer queue, zeros when not queued."""
-        m, b, c, d = c_uint32(), c_uint32(), c_uint32(), c_uint32()
-        self._node._lib.dart_topic_queue_stats(self._h, byref(m), byref(b),
-                                                 byref(c), byref(d))
+        m, b, c, d = _c.c_uint32(), _c.c_uint32(), _c.c_uint32(), _c.c_uint32()
+        self._node._lib.dart_topic_queue_stats(self._ptr(), _c.byref(m), _c.byref(b),
+                                                 _c.byref(c), _c.byref(d))
         return m.value, b.value, c.value, d.value
 
     def counts(self):
         """(tx_msgs, tx_bytes, rx_msgs, rx_bytes), the cumulative traffic this node committed to
                 the topic and delivered from it. Always on."""
-        tm, tb, rm, rb = c_uint64(), c_uint64(), c_uint64(), c_uint64()
-        self._node._lib.dart_topic_counts(self._h, byref(tm), byref(tb),
-                                           byref(rm), byref(rb))
+        tm, tb, rm, rb = _c.c_uint64(), _c.c_uint64(), _c.c_uint64(), _c.c_uint64()
+        self._node._lib.dart_topic_counts(self._ptr(), _c.byref(tm), _c.byref(tb),
+                                           _c.byref(rm), _c.byref(rb))
         return tm.value, tb.value, rm.value, rb.value
 
     @property
@@ -2138,12 +1671,13 @@ class Node:
 
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt",
                  "_topic_specs", "_schemas", "_topics_by_name", "_create_lock",
-                 "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock")
+                 "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name")
 
     def __init__(self, name, on_message, on_event, options=None, **opts):
         """Open a node. An empty name is auto generated. on_message may be None, on_event is
                 required. Other config is keyword args or options=NodeOptions(...)."""
         self._lib = None
+        self._name = name or None
         self._h = None
         self._id = None
         self._alloc = None
@@ -2152,11 +1686,11 @@ class Node:
         self._topic_specs = {}
         self._schemas = []       # compiled schemas kept alive for the node's life
         self._topics_by_name = {}   # name to [handle, role bits, schema hash]
-        self._create_lock = threading.Lock()
+        self._create_lock = _threading.Lock()
         self._sub_handlers = {}     # topic index to [Message handlers], for Subscriber
         self._pattern_boxes = []    # pattern handler box ids (reaped at close)
         self._async_live = set()    # in-flight async-call box ids
-        self._pat_lock = threading.Lock()
+        self._pat_lock = _threading.Lock()
         if on_event is None:
             raise ValueError("on_event is required: it carries diagnostics that "
                              "must never be missed (pass e.g. print)")
@@ -2164,7 +1698,7 @@ class Node:
             options = NodeOptions(**opts)
         elif opts:
             raise TypeError("pass either options= or keyword options, not both")
-        self._lib = lib = _load()
+        self._lib = lib = _c.load()
 
         with _REG_LOCK:
             global _NEXT_ID
@@ -2172,8 +1706,8 @@ class Node:
             _NEXT_ID += 1
             _NODES[self._id] = self
 
-        co = DartNodeOpts()
-        memset(byref(co), 0, sizeof(co))
+        co = _c.DartNodeOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.domain = options.domain
         co.max_topics = options.max_topics
         co.disable_shm = 1 if options.disable_shm else 0
@@ -2182,16 +1716,16 @@ class Node:
         co.disable_logs = 1 if options.disable_logs else 0
         co.disable_meta = 1 if options.disable_meta else 0
         co.disable_error_logs = 1 if options.disable_error_logs else 0
-        co.user_data = c_void_p(self._id)
+        co.user_data = _c.c_void_p(self._id)
         co.net.data_port = options.data_port
         co.net.discovery_group = options.discovery_group.encode() if options.discovery_group else None
         co.net.discovery_port = options.discovery_port
         co.net.multicast_interface = (options.multicast_interface.encode()
                                       if options.multicast_interface else None)
         co.net.multicast_ttl = options.multicast_ttl
-        seeds, n_seeds = _seed_addrs(options.seed_peers)   # copied by open, alive for the call
+        seeds, n_seeds = _c.seed_addrs(options.seed_peers)   # copied by open, alive for the call
         if n_seeds:
-            co.net.seed_peers = cast(seeds, c_void_p)
+            co.net.seed_peers = _c.cast(seeds, _c.c_void_p)
             co.net.n_seed_peers = n_seeds
         co.net.unicast_only = 1 if options.unicast_only else 0
         co.net.self_ip = options.self_ip.encode() if options.self_ip else None
@@ -2203,11 +1737,11 @@ class Node:
         co.discovery.peer_timeout_us = options.peer_timeout_us
         co.discovery.max_peers = options.max_peers
 
-        alloc = lib.dart_allocator_heap(_DART_ALLOCATOR_PAGE)
+        alloc = lib.dart_allocator_heap(_c.DART_ALLOCATOR_PAGE)
         self._alloc = alloc
 
         cname = name.encode("utf-8") if name else None
-        h = lib.dart_node_open(byref(alloc), cname, _on_message, _on_event, byref(co))
+        h = lib.dart_node_open(_c.byref(alloc), cname, _on_message, _on_event, _c.byref(co))
         if not h:
             with _REG_LOCK:
                 _NODES.pop(self._id, None)
@@ -2216,17 +1750,22 @@ class Node:
             raise RuntimeError("Node(...) failed: %s" % err)
         self._h = h
 
+    @property
+    def name(self):
+        """The name given at open, None when the node generated one."""
+        return self._name
+
     def on_message(self, fn):
-        """Rebind the message handler set at construction. Rarely needed: the
-        constructor already requires an initial one."""
+        """Rebind the message handler set at construction. Returns fn, so it works as a
+        decorator."""
         self._on_msg = fn
-        return self
+        return fn
 
     def on_event(self, fn):
-        """Rebind the event handler set at construction. Rarely needed: the
-        constructor already requires an initial one."""
+        """Rebind the event handler set at construction. Returns fn, so it works as a
+        decorator."""
         self._on_evt = fn
-        return self
+        return fn
 
     # The create behind every Topic carrying constructor. Same name creates on this node
     # share the native slot with a widened role, and a different schema is refused.
@@ -2263,8 +1802,8 @@ class Node:
             qos = Qos(**qos_kwargs)
         elif qos_kwargs:
             raise TypeError("pass either qos= or keyword qos options, not both")
-        co = DartTopicOpts()
-        memset(byref(co), 0, sizeof(co))
+        co = _c.DartTopicOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.qos.reliability = int(qos.reliability)
         co.qos.keep_last = qos.keep_last
         co.qos.catch_up = qos.catch_up
@@ -2278,7 +1817,7 @@ class Node:
         co.qos.no_timestamp = 1 if qos.no_timestamp else 0
         h = self._lib.dart_node_create_topic(
             self._h, name.encode("utf-8"), int(role),
-            sch._s if sch else None, byref(co))
+            sch._s if sch else None, _c.byref(co))
         if not h:
             raise RuntimeError("Topic(%r) create failed: %s" % (name, self.last_error()))
         idx = self._lib.dart_topic_index(h)
@@ -2371,7 +1910,7 @@ class Node:
         fn = self.meta_function()
         if fn is None:
             return MetaSnapshot(status=CallStatus.NO_HANDLER)
-        req = b"" if int(sections) == 0 else struct.pack("<I", int(sections))
+        req = b"" if int(sections) == 0 else _struct.pack("<I", int(sections))
         return MetaSnapshot._from_response(fn.call(req, timeout_ms, provider=peer))
 
     def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
@@ -2381,7 +1920,7 @@ class Node:
         if fn is None:
             on_snapshot(MetaSnapshot(status=CallStatus.NO_HANDLER))
             return SendStatus.NO_TOPIC
-        req = b"" if int(sections) == 0 else struct.pack("<I", int(sections))
+        req = b"" if int(sections) == 0 else _struct.pack("<I", int(sections))
         return fn.call_async(req, lambda r: on_snapshot(MetaSnapshot._from_response(r)),
                              provider=peer)
 
@@ -2420,14 +1959,14 @@ class Node:
     def memory_stats(self):
         """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the
         hot path is allocation-free."""
-        in_use, peak, calls = c_size_t(), c_size_t(), c_uint64()
-        self._lib.dart_node_mem_stats(self._h, byref(in_use), byref(peak), byref(calls))
+        in_use, peak, calls = _c.c_size_t(), _c.c_size_t(), _c.c_uint64()
+        self._lib.dart_node_mem_stats(self._h, _c.byref(in_use), _c.byref(peak), _c.byref(calls))
         return in_use.value, peak.value, calls.value
 
     def backpressure_stats(self):
         """(waited_us, waited_sends) since open."""
-        us, n = c_uint64(), c_uint32()
-        self._lib.dart_node_backpressure_stats(self._h, byref(us), byref(n))
+        us, n = _c.c_uint64(), _c.c_uint32()
+        self._lib.dart_node_backpressure_stats(self._h, _c.byref(us), _c.byref(n))
         return us.value, n.value
 
     def close(self, send_bye=True):
@@ -2454,7 +1993,7 @@ class Node:
                 try:
                     box.on_response(r)
                 except Exception:
-                    traceback.print_exc()
+                    _traceback.print_exc()
         return True
 
     def __enter__(self):
@@ -2528,7 +2067,7 @@ class Request:
         """Answer CallStatus.OK with rsp (bytes/str, or a typed value)."""
         self._guard()
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        _load().dart_request_reply(self._ptr, b)
+        _c.load().dart_request_reply(self._ptr, b)
         del buf
         self._done = True
 
@@ -2537,7 +2076,7 @@ class Request:
                 empty = the default. rsp may still carry structured failure data."""
         self._guard()
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        _load().dart_request_fail(self._ptr, message.encode("utf-8") if message else None, b)
+        _c.load().dart_request_fail(self._ptr, message.encode("utf-8") if message else None, b)
         del buf
         self._done = True
 
@@ -2545,7 +2084,7 @@ class Request:
         """Park the reply: suppresses the auto-ack and lets the handler return
         now. The returned Deferred completes the call later, from any thread."""
         self._guard()
-        token = _load().dart_request_defer(self._ptr)
+        token = _c.load().dart_request_defer(self._ptr)
         if not token:
             raise RuntimeError("defer failed")
         self._done = True
@@ -2571,7 +2110,7 @@ class Deferred:
         self._fn = fn
         self._rsp_schema = rsp_schema
         self._token = token
-        self._lock = threading.Lock()
+        self._lock = _threading.Lock()
 
     @property
     def valid(self):
@@ -2592,7 +2131,7 @@ class Deferred:
         if not token:
             return False
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        r = _load().dart_function_complete(self._fn, token, int(status),
+        r = _c.load().dart_function_complete(self._fn, token, int(status),
                                            message.encode("utf-8") if message else None, b)
         del buf
         return r == 0
@@ -2622,7 +2161,7 @@ class Response:
                        if o.status in CallStatus._value2member_map_ else o.status)
         self.provider = o.provider
         self.written_us = o.written_us
-        self.data = string_at(o.data.data, o.data.len) if o.data.data and o.data.len else b""
+        self.data = _c.string_at(o.data.data, o.data.len) if o.data.data and o.data.len else b""
         self.message = _dstr(o.message)
         if self.status == CallStatus.OK:
             # decode NOW: the wire-schema view dies with the C callback/call
@@ -2668,11 +2207,11 @@ def _progress_cb(on_progress, prg_schema):
         must stay alive until the call's terminal outcome."""
     arity = _arity(on_progress)
 
-    @_PrgFn
+    @_c.PrgFn
     def cb(prg_ptr):
         try:
             p = prg_ptr.contents
-            data = string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
+            data = _c.string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
             if not data:
                 val = None       # the RUNNING ack
             else:
@@ -2691,7 +2230,7 @@ def _progress_cb(on_progress, prg_schema):
                 info.recv_us = p.recv_us
                 on_progress(val, info)
         except Exception:
-            traceback.print_exc()
+            _traceback.print_exc()
     return cb
 
 
@@ -2708,7 +2247,7 @@ class _FnBox:
 
     def dispatch(self, req_ptr):
         r = req_ptr.contents
-        data = string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
+        data = _c.string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
         request = Request(req_ptr, self.fn, self.rsp_schema, r, data)
         try:
             val, ok = _decode_payload(r.schema, self.req_schema, data)
@@ -2724,7 +2263,7 @@ class _FnBox:
         except Exception as e:
             # a raising handler answers APP_ERROR with str(e) as the message. The exception never
             # crosses into C
-            traceback.print_exc()
+            _traceback.print_exc()
             if not request.answered:
                 try:
                     request.fail(str(e) or "handler threw")
@@ -2745,7 +2284,7 @@ class TaskRequest:
         self._fn = fn
         self._prg_schema = prg_schema
         self._token = token
-        self.cancel_event = threading.Event()   # set the moment a cancel arrives
+        self.cancel_event = _threading.Event()   # set the moment a cancel arrives
         self.value = value
         self.data = data
         self.caller = r.caller
@@ -2758,7 +2297,7 @@ class TaskRequest:
         """Broadcast a progress update, encoded via the prg schema. Returns a SendStatus, STATE
                 once the call completed."""
         b, buf = _c_view(_payload_bytes(self._prg_schema, value))
-        r = _load().dart_function_progress(self._fn, self._token, b)
+        r = _c.load().dart_function_progress(self._fn, self._token, b)
         del buf
         return _send_status(r)
 
@@ -2768,7 +2307,7 @@ class TaskRequest:
                 CancelledError, or run to completion. cancel_event is the same signal."""
         if self.cancel_event.is_set():
             return True
-        if _load().dart_function_cancelled(self._fn, self._token) == 1:
+        if _c.load().dart_function_cancelled(self._fn, self._token) == 1:
             self.cancel_event.set()   # backstop: a cancel that beat the C slot
             return True
         return False
@@ -2787,24 +2326,24 @@ class _TaskBox:
         self.prg_schema = prg_schema
         self.rsp_schema = rsp_schema
         self.cancel_events = {}   # defer token to threading.Event
-        self.lock = threading.Lock()
+        self.lock = _threading.Lock()
 
     def dispatch(self, req_ptr):   # poll thread: copy what the views hold, return fast
-        lib = _load()
+        lib = _c.load()
         r = req_ptr.contents
-        data = string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
+        data = _c.string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
         val, ok = _decode_payload(r.schema, self.req_schema, data)
         if not ok:
-            lib.dart_request_fail(req_ptr, b"request decode failed", DartBytes())
+            lib.dart_request_fail(req_ptr, b"request decode failed", _c.DartBytes())
             return
         token = lib.dart_request_defer(req_ptr)   # implies RUNNING to the caller
         if not token:
-            lib.dart_request_fail(req_ptr, b"defer failed", DartBytes())
+            lib.dart_request_fail(req_ptr, b"defer failed", _c.DartBytes())
             return
         task = TaskRequest(self.fn, self.prg_schema, token, r, val, data)
         with self.lock:
             self.cancel_events[token] = task.cancel_event
-        threading.Thread(target=self._run, args=(task,), daemon=True).start()
+        _threading.Thread(target=self._run, args=(task,), daemon=True).start()
 
     def cancel(self, token):       # poll thread, from the C on_cancel slot
         with self.lock:
@@ -2819,12 +2358,12 @@ class _TaskBox:
         except CancelledError as e:
             status, message, rsp = CallStatus.CANCELLED, str(e) or None, None
         except Exception as e:
-            traceback.print_exc()
+            _traceback.print_exc()
             status, message, rsp = CallStatus.APP_ERROR, str(e) or "handler threw", None
         try:
             payload = _payload_bytes(self.rsp_schema, rsp)
         except Exception as e:
-            traceback.print_exc()
+            _traceback.print_exc()
             status, message, payload = (CallStatus.APP_ERROR,
                                         str(e) or "response encode failed", b"")
         with self.lock:
@@ -2832,7 +2371,7 @@ class _TaskBox:
         b, buf = _c_view(payload)
         # a stale token (the definition retired / node closed mid-run) returns
         # STATE: swallowed, the caller already got its one CANCELLED outcome
-        _load().dart_function_complete(self.fn, task._token, int(status),
+        _c.load().dart_function_complete(self.fn, task._token, int(status),
                                        message.encode("utf-8") if message else None, b)
         del buf
 
@@ -2873,14 +2412,15 @@ class _VarBox:
 class FunctionDefinition:
     """The implementation side of a function: one reply per call, one definition per name.
         Handler forms and the typed shorthand are in docs/python.md. None answers NO_HANDLER."""
-    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema")
+    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema", "_name")
 
     def __init__(self, node, name, handler, req_schema=None, rsp_schema=None,
                  backpressure_wait_us=0, timeout_us=0, keep_last=0):
         self._node = node
+        self._name = name
         self._req_schema = _as_schema(req_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = DartFunctionOpts(backpressure_wait_us, timeout_us, keep_last)
+        co = _c.DartFunctionOpts(backpressure_wait_us, timeout_us, keep_last)
         box_id = 0
         box = None
         if handler is not None:
@@ -2890,7 +2430,7 @@ class FunctionDefinition:
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._rsp_schema._s if self._rsp_schema else None,
-            _on_request if box else _NULL_REQ_FN, c_void_p(box_id), byref(co))
+            _on_request if box else _c.NULL_REQ_FN, _c.c_void_p(box_id), _c.byref(co))
         if not h:
             if box:
                 _pbox_pop(box_id)
@@ -2902,17 +2442,25 @@ class FunctionDefinition:
             node._register_box(box_id)
         node._retain(self._req_schema, self._rsp_schema)
 
+    @property
+    def name(self):
+        return self._name
+
+    def _ptr(self):
+        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
+        return self._fn if self._node._h else None
+
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "rsp_schema"))
 
     def caller_count(self):
         """Callers currently matched to this definition."""
-        return self._node._lib.dart_function_match_count(self._fn)
+        return self._node._lib.dart_function_match_count(self._ptr())
 
     def retire(self):
         """Retire the definition: park its channels and release the name for a successor. The
                 handle is unusable after. Refused with STATE from a callback."""
-        rc = self._node._lib.dart_function_retire(self._fn)
+        rc = self._node._lib.dart_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -2921,23 +2469,32 @@ class FunctionDefinition:
 class RemoteFunction:
     """A reference to a function defined on another node.
     RemoteFunction[Req, Rsp](node, name) is the typed shorthand."""
-    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema")
+    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema", "_name")
 
     def __init__(self, node, name, req_schema=None, rsp_schema=None,
                  backpressure_wait_us=0, timeout_us=0, keep_last=0):
         self._node = node
+        self._name = name
         self._req_schema = _as_schema(req_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = DartFunctionOpts(backpressure_wait_us, timeout_us, keep_last)
+        co = _c.DartFunctionOpts(backpressure_wait_us, timeout_us, keep_last)
         h = node._lib.dart_node_create_remote_function(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
-            self._rsp_schema._s if self._rsp_schema else None, byref(co))
+            self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
         if not h:
             raise RuntimeError("RemoteFunction(%r) create failed: %s"
                                % (name, node.last_error()))
         self._fn = h
         node._retain(self._req_schema, self._rsp_schema)
+
+    @property
+    def name(self):
+        return self._name
+
+    def _ptr(self):
+        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
+        return self._fn if self._node._h else None
 
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "rsp_schema"))
@@ -2948,6 +2505,7 @@ class RemoteFunction:
         # never created or destroyed here.
         self = cls.__new__(cls)
         self._node = node
+        self._name = None
         self._fn = handle
         self._req_schema = req_schema
         self._rsp_schema = rsp_schema
@@ -2957,10 +2515,10 @@ class RemoteFunction:
         """Blocking call: drives the loop until the response or timeout_ms, negative = the
                 default. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        out = DartResponse()
-        co = DartCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms,
-                                                cast(byref(co), c_void_p) if co else None)
+        out = _c.DartResponse()
+        co = _c.DartCallOpts(int(provider)) if provider else None
+        rc = self._node._lib.dart_function_call(self._ptr(), b, _c.byref(out), timeout_ms,
+                                                _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
         if rc == 1:
             return Response._from_c(out, self._rsp_schema)
@@ -2981,10 +2539,10 @@ class RemoteFunction:
         box.id = box_id
         self._node._register_async(box_id)
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        co = DartCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.dart_function_call_async(self._fn, b, _on_response,
-                                                      c_void_p(box_id),
-                                                      cast(byref(co), c_void_p) if co else None)
+        co = _c.DartCallOpts(int(provider)) if provider else None
+        rc = self._node._lib.dart_function_call_async(self._ptr(), b, _on_response,
+                                                      _c.c_void_p(box_id),
+                                                      _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
         st = _send_status(rc)
         if rc != 0:
@@ -2995,12 +2553,12 @@ class RemoteFunction:
             try:
                 on_response(r)
             except Exception:
-                traceback.print_exc()
+                _traceback.print_exc()
         return st
 
     def match_count(self):
         """Providers currently matched (the definition side present)."""
-        return self._node._lib.dart_function_match_count(self._fn)
+        return self._node._lib.dart_function_match_count(self._ptr())
 
     def has_definition(self):
         return self.match_count() > 0
@@ -3008,7 +2566,7 @@ class RemoteFunction:
     def retire(self):
         """Retire the remote: park its channels and release the name. Every outstanding call
                 completes CANCELLED. Unusable after, refused with STATE from a callback."""
-        rc = self._node._lib.dart_function_retire(self._fn)
+        rc = self._node._lib.dart_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -3017,18 +2575,19 @@ class RemoteFunction:
 class TaskDefinition:
     """The implementation side of a task. The handler runs on a worker thread per call with a
         TaskRequest (docs/python.md). None answers NO_HANDLER, the options mirror DartTaskOpts."""
-    __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema")
+    __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema", "_name")
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
                  rsp_schema=None, progress_best_effort=False, progress_keep_last=0,
                  no_cancel=False, exclusive=False, multi=False, timeout_us=0,
                  backpressure_wait_us=0, keep_last=0):
         self._node = node
+        self._name = name
         self._req_schema = _as_schema(req_schema)
         self._prg_schema = _as_schema(prg_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = DartTaskOpts()
-        memset(byref(co), 0, sizeof(co))
+        co = _c.DartTaskOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.progress_best_effort = 1 if progress_best_effort else 0
         co.progress_keep_last = progress_keep_last
         co.no_cancel = 1 if no_cancel else 0
@@ -3048,7 +2607,7 @@ class TaskDefinition:
             self._req_schema._s if self._req_schema else None,
             self._prg_schema._s if self._prg_schema else None,
             self._rsp_schema._s if self._rsp_schema else None,
-            _on_request if box else _NULL_REQ_FN, c_void_p(box_id), byref(co))
+            _on_request if box else _c.NULL_REQ_FN, _c.c_void_p(box_id), _c.byref(co))
         if not h:
             if box:
                 _pbox_pop(box_id)
@@ -3059,20 +2618,28 @@ class TaskDefinition:
             box.fn = h
             node._register_box(box_id)
             # the one C cancel slot: fans out to the per-call cancel Events
-            node._lib.dart_function_on_cancel(h, _on_task_cancel, c_void_p(box_id))
+            node._lib.dart_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
         node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
+
+    @property
+    def name(self):
+        return self._name
+
+    def _ptr(self):
+        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
+        return self._fn if self._node._h else None
 
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
 
     def caller_count(self):
         """Callers currently matched to this definition."""
-        return self._node._lib.dart_function_match_count(self._fn)
+        return self._node._lib.dart_function_match_count(self._ptr())
 
     def retire(self):
         """Retire the definition: every live deferred call answers CANCELLED while the channels
                 are up, a later worker completion is refused silently. Refused from a callback."""
-        rc = self._node._lib.dart_function_retire(self._fn)
+        rc = self._node._lib.dart_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -3081,18 +2648,19 @@ class TaskDefinition:
 class RemoteTask:
     """A reference to a task defined elsewhere. A request is always directed at one
         provider, and the timeout bounds only the first response (docs/tasks.md)."""
-    __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema")
+    __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema", "_name")
 
     def __init__(self, node, name, req_schema=None, prg_schema=None,
                  rsp_schema=None, progress_best_effort=False,
                  progress_keep_last=0, timeout_us=0, backpressure_wait_us=0,
                  keep_last=0):
         self._node = node
+        self._name = name
         self._req_schema = _as_schema(req_schema)
         self._prg_schema = _as_schema(prg_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = DartTaskOpts()
-        memset(byref(co), 0, sizeof(co))
+        co = _c.DartTaskOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.progress_best_effort = 1 if progress_best_effort else 0
         co.progress_keep_last = progress_keep_last
         co.timeout_us = timeout_us
@@ -3102,12 +2670,20 @@ class RemoteTask:
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._prg_schema._s if self._prg_schema else None,
-            self._rsp_schema._s if self._rsp_schema else None, byref(co))
+            self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
         if not h:
             raise RuntimeError("RemoteTask(%r) create failed: %s"
                                % (name, node.last_error()))
         self._fn = h
         node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
+
+    @property
+    def name(self):
+        return self._name
+
+    def _ptr(self):
+        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
+        return self._fn if self._node._h else None
 
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
@@ -3116,16 +2692,16 @@ class RemoteTask:
         """Blocking call: drives the loop until the terminal outcome, with on_progress on this
                 thread. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        out = DartResponse()
-        co = DartCallOpts()
+        out = _c.DartResponse()
+        co = _c.DartCallOpts()
         co.provider = int(provider)
         keep_cb = None
         if on_progress is not None:
             # fires only inside dart_function_call, so the local ref holds it
             keep_cb = _progress_cb(on_progress, self._prg_schema)
             co.on_progress = keep_cb
-        rc = self._node._lib.dart_function_call(self._fn, b, byref(out), timeout_ms,
-                                                cast(byref(co), c_void_p))
+        rc = self._node._lib.dart_function_call(self._ptr(), b, _c.byref(out), timeout_ms,
+                                                _c.cast(_c.byref(co), _c.c_void_p))
         del buf, keep_cb
         if rc == 1:
             return Response._from_c(out, self._rsp_schema)
@@ -3146,16 +2722,16 @@ class RemoteTask:
         box.id = box_id
         self._node._register_async(box_id)
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        call_id = c_uint32(0)
-        co = DartCallOpts()
+        call_id = _c.c_uint32(0)
+        co = _c.DartCallOpts()
         co.provider = int(provider)
-        co.id_out = pointer(call_id)
+        co.id_out = _c.pointer(call_id)
         if on_progress is not None:
             box.progress_cb = _progress_cb(on_progress, self._prg_schema)
             co.on_progress = box.progress_cb
-        rc = self._node._lib.dart_function_call_async(self._fn, b, _on_response,
-                                                      c_void_p(box_id),
-                                                      cast(byref(co), c_void_p))
+        rc = self._node._lib.dart_function_call_async(self._ptr(), b, _on_response,
+                                                      _c.c_void_p(box_id),
+                                                      _c.cast(_c.byref(co), _c.c_void_p))
         del buf
         if rc != 0:
             _pbox_pop(box_id)
@@ -3165,19 +2741,19 @@ class RemoteTask:
             try:
                 on_response(r)
             except Exception:
-                traceback.print_exc()
+                _traceback.print_exc()
             return 0
         return call_id.value
 
     def cancel(self, call_id):
         """Request cancellation of the call. Cooperative and never acked, the terminal status
                 answers. BAD_ROLE when the provider declared no_cancel, STATE when not pending."""
-        return _send_status(self._node._lib.dart_function_cancel(self._fn,
+        return _send_status(self._node._lib.dart_function_cancel(self._ptr(),
                                                                  int(call_id)))
 
     def match_count(self):
         """Providers currently matched (the definition side present)."""
-        return self._node._lib.dart_function_match_count(self._fn)
+        return self._node._lib.dart_function_match_count(self._ptr())
 
     def has_definition(self):
         return self.match_count() > 0
@@ -3185,7 +2761,7 @@ class RemoteTask:
     def retire(self):
         """Retire the remote: every outstanding call completes CANCELLED. Unusable after,
                 refused with STATE from a callback."""
-        rc = self._node._lib.dart_function_retire(self._fn)
+        rc = self._node._lib.dart_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -3197,13 +2773,21 @@ class VariableDefinition:
     __slots__ = ("_node", "_var", "_schema", "_name")
     _remote = False
 
+    @property
+    def name(self):
+        return self._name
+
+    def _ptr(self):
+        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
+        return self._var if self._node._h else None
+
     def __init__(self, node, name, schema=None, initial=None, read_only=False,
                  allow_force=False, catch_up=0, keep_last=0, backpressure_wait_us=0):
         self._node = node
         self._name = name
         sch = self._schema = _as_schema(schema)
-        co = DartVariableOpts()
-        memset(byref(co), 0, sizeof(co))
+        co = _c.DartVariableOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.access = 1 if read_only else 0
         co.allow_force = 1 if allow_force else 0
         co.catch_up = catch_up
@@ -3213,7 +2797,7 @@ class VariableDefinition:
         co.initial = b
         create = (node._lib.dart_node_create_remote_variable if self._remote
                   else node._lib.dart_node_create_variable_definition)
-        h = create(node._h, name.encode("utf-8"), sch._s if sch else None, byref(co))
+        h = create(node._h, name.encode("utf-8"), sch._s if sch else None, _c.byref(co))
         del buf
         if not h:
             raise RuntimeError("%s(%r) create failed: %s"
@@ -3230,10 +2814,10 @@ class VariableDefinition:
         lib = self._node._lib
         lib.dart_node_lock(self._node._h)
         try:
-            b = DartBytes()
-            if lib.dart_variable_get(self._var, byref(b)) != 1:
+            b = _c.DartBytes()
+            if lib.dart_variable_get(self._ptr(), _c.byref(b)) != 1:
                 return None
-            data = string_at(b.data, b.len) if b.data and b.len else b""
+            data = _c.string_at(b.data, b.len) if b.data and b.len else b""
         finally:
             lib.dart_node_unlock(self._node._h)
         if self._schema is None:
@@ -3245,7 +2829,7 @@ class VariableDefinition:
         """Set the value: apply and publish, or send over the set channel. NO_TOPIC = no owner
                 matched, BAD_ROLE = the owner advertises no set channel."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.dart_variable_set(self._var, b)
+        r = self._node._lib.dart_variable_set(self._ptr(), b)
         del buf
         return _send_status(r)
 
@@ -3253,51 +2837,52 @@ class VariableDefinition:
         """Force the value: sets are absorbed into the shadow source until unforce restores the
                 latest absorbed set. Needs allow_force on the definition, else STATE."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.dart_variable_force(self._var, b)
+        r = self._node._lib.dart_variable_force(self._ptr(), b)
         del buf
         return _send_status(r)
 
     def unforce(self):
-        return _send_status(self._node._lib.dart_variable_unforce(self._var))
+        return _send_status(self._node._lib.dart_variable_unforce(self._ptr()))
 
     def forced(self):
         """True while forced: authoritative on the definition, the last received flag on a
                 remote."""
-        return self._node._lib.dart_variable_forced(self._var) == 1
+        return self._node._lib.dart_variable_forced(self._ptr()) == 1
 
     def wait(self, timeout_ms):
         """Block driving the loop until a value exists or timeout_ms elapses. Refused from a
                 callback or under a service thread."""
-        return self._node._lib.dart_variable_wait(self._var, timeout_ms) == 1
+        return self._node._lib.dart_variable_wait(self._ptr(), timeout_ms) == 1
 
     def remote_count(self):
         """Remotes matched to this definition."""
-        return self._node._lib.dart_variable_match_count(self._var)
+        return self._node._lib.dart_variable_match_count(self._ptr())
 
     def on_change(self, handler):
         """Observe changes: fires on every state change and replays the current value at
                 registration, inline on the thread that applied the write. None clears."""
-        self._observe(handler, True)
+        return self._observe(handler, True)
 
     def on_write(self, handler):
         """Observe every applied write, identical bytes or not, with no replay at registration.
                 The same forms and threading as on_change. None clears."""
-        self._observe(handler, False)
+        return self._observe(handler, False)
 
     def _observe(self, handler, change):
         lib = self._node._lib
         reg = lib.dart_variable_on_change if change else lib.dart_variable_on_write
         if handler is None:
-            reg(self._var, _NULL_VAR_FN, None)
-            return
+            reg(self._ptr(), _c.NULL_VAR_FN, None)
+            return None
         box_id = _pbox_add(_VarBox(handler, self._schema))
         self._node._register_box(box_id)
-        reg(self._var, _on_var_update, c_void_p(box_id))
+        reg(self._ptr(), _on_var_update, _c.c_void_p(box_id))
+        return handler
 
     def retire(self):
         """Retire the handle: park its channels and release the name, else a re created same
                 name handle is shadowed by the live twin. Refused with STATE from a callback."""
-        rc = self._node._lib.dart_variable_retire(self._var)
+        rc = self._node._lib.dart_variable_retire(self._ptr())
         if rc == 0:
             self._var = None
         return _send_status(rc)
@@ -3332,6 +2917,10 @@ class Publisher:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("schema",))
 
+    @property
+    def name(self):
+        return self.topic.name
+
     def send(self, data, capture_us=0):
         """Publish (typed value, mapping, or bytes/str). SendStatus."""
         return self.topic.send(data, capture_us)
@@ -3364,6 +2953,18 @@ class Subscriber:
     def __class_getitem__(cls, item):
         return _typed_pattern(cls, item, ("schema",))
 
+    @property
+    def name(self):
+        return self.topic.name
+
+    def match_count(self):
+        """Publishers currently matched."""
+        return self.topic.match_count()
+
+    def ready(self):
+        """True once matching has converged, so a publisher's first send reaches this side."""
+        return self.topic.ready()
+
     def take(self, timeout_ms=0):
         """Typed take: the next queued message's decoded value, the whole Message without a
                 schema, None when nothing arrived in time. The first use queues the topic."""
@@ -3381,11 +2982,11 @@ class Subscriber:
 # Callback dispatch. The C callbacks carry no user pointer, but every DartMsg and
 # DartEvent carries the node id stashed in user. One trampoline per module serves all.
 _NODES = {}
-_REG_LOCK = threading.Lock()
+_REG_LOCK = _threading.Lock()
 _NEXT_ID = 1
 
 
-@_MsgFn
+@_c.MsgFn
 def _on_message(msg_ptr):
     try:
         m = msg_ptr.contents
@@ -3402,10 +3003,10 @@ def _on_message(msg_ptr):
         elif node._on_msg is not None:
             node._on_msg(Message._from_c(m, node._topic_specs.get(m.topic_index)))
     except Exception:
-        traceback.print_exc()
+        _traceback.print_exc()
 
 
-@_EvtFn
+@_c.EvtFn
 def _on_event(ev_ptr):
     try:
         e = ev_ptr.contents
@@ -3413,13 +3014,13 @@ def _on_event(ev_ptr):
         if node is not None and node._on_evt is not None:
             node._on_evt(Event._from_c(e))
     except Exception:
-        traceback.print_exc()
+        _traceback.print_exc()
 
 
 # Pattern handler boxes: the C side user pointer carries an id into this registry, never
 # a Python reference, so native code never holds a collectable callback.
 _PBOXES = {}
-_PBOX_LOCK = threading.Lock()
+_PBOX_LOCK = _threading.Lock()
 _PBOX_NEXT = 1
 
 
@@ -3442,27 +3043,27 @@ def _pbox_pop(box_id):
         return _PBOXES.pop(box_id, None)
 
 
-@_ReqFn
+@_c.ReqFn
 def _on_request(req_ptr, user):
     try:
         box = _pbox_get(user)
         if box is not None:
             box.dispatch(req_ptr)
     except Exception:
-        traceback.print_exc()
+        _traceback.print_exc()
 
 
-@_CancelFn
+@_c.CancelFn
 def _on_task_cancel(token, user):
     try:
         box = _pbox_get(user)
         if box is not None:
             box.cancel(token)
     except Exception:
-        traceback.print_exc()
+        _traceback.print_exc()
 
 
-@_RspFn
+@_c.RspFn
 def _on_response(rsp_ptr):
     try:
         o = rsp_ptr.contents
@@ -3474,19 +3075,19 @@ def _on_response(rsp_ptr):
         try:
             box.on_response(resp)
         except Exception:
-            traceback.print_exc()
+            _traceback.print_exc()
     except Exception:
-        traceback.print_exc()
+        _traceback.print_exc()
 
 
-@_VarFn
+@_c.VarFn
 def _on_var_update(upd_ptr, user):
     try:
         box = _pbox_get(user)
         if box is None:
             return
         u = upd_ptr.contents
-        data = string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
+        data = _c.string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
         val, ok = _decode_payload(u.schema, box.schema, data)
         if not ok:
             val = data
@@ -3494,7 +3095,7 @@ def _on_var_update(upd_ptr, user):
             box.handler(val)
         else:
             upd = VariableUpdate()
-            upd.name = string_at(u.name.data, u.name.len).decode("utf-8", "replace") \
+            upd.name = _c.string_at(u.name.data, u.name.len).decode("utf-8", "replace") \
                        if u.name.data and u.name.len else ""
             upd.data = data
             upd.value = val
@@ -3505,4 +3106,4 @@ def _on_var_update(upd_ptr, user):
             upd.written_us = u.written_us
             box.handler(val, upd)
     except Exception:
-        traceback.print_exc()
+        _traceback.print_exc()

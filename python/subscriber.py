@@ -14,7 +14,7 @@ class Tick:
     seq: dart.u64 = 0
     when: dart.Timestamp = 0                                  # Unix-epoch microseconds, UTC
     value: dart.f64 = 0.0
-    at: dart.Pose = field(default_factory=dart.Pose)          # meters + a quaternion
+    at: dart.Transform = field(default_factory=dart.Transform)   # meters and a quaternion
 
 
 count = 0
@@ -47,7 +47,7 @@ def main():
                 # `when` is the publisher's wall clock in the same units everywhere, so the
                 # difference against ours is one-way latency plus clock skew.
                 age_ms = (dart.timestamp_now() - last.when) / 1000.0 if last.when else 0.0
-                p = last.at.position
+                p = last.at.translation
                 print("received=%d  rate=%.0f Hz  age=%.1f ms  at=(%.2f, %.2f, %.2f)"
                       % (count, rate, age_ms, p.x, p.y, p.z))
                 last_report, last_count = now, count
