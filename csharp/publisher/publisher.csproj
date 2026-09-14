@@ -6,12 +6,12 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>dart_publisher</AssemblyName>
-    <RootNamespace>DartPublisher</RootNamespace>
+    <AssemblyName>ramble_publisher</AssemblyName>
+    <RootNamespace>RamblePublisher</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="../Dart.cs" />
+    <Compile Include="../Ramble.cs" />
     <None Include="../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

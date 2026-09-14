@@ -1,45 +1,45 @@
 /* The node runtime: the sockets, the clock, the send and receive paths, and the public
- * dart_node_* and dart_topic_* API over the sans-IO cores. The rules are in spec/node.md. */
+ * ramble_node_* and ramble_topic_* API over the sans-IO cores. The rules are in spec/node.md. */
 
 #include "runtime.h"
 #include "core.h"
 #include "../discovery/runtime.h"
 #include "../platform/core.h"
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
 #include "../shm/core.h"
 #endif
 #include "../common/arena.h"
 #include "../common/bytes.h"
 #include <string.h>    /* heap access goes through the node pool, no stdlib.h here */
-#include <stdarg.h>    /* dart_node_log */
+#include <stdarg.h>    /* ramble_node_log */
 #include <stdio.h>     /* vsnprintf for log text only, never the data path */
 
-#ifndef DART_NO_PATTERNS
-struct DartNode;       /* patterns/core.c hosts the @dart/meta endpoint, open calls this seam */
-void i_dart_patterns_meta_open(struct DartNode *n);
+#ifndef RAMBLE_NO_PATTERNS
+struct RambleNode;       /* patterns/core.c hosts the @ramble/meta endpoint, open calls this seam */
+void i_ramble_patterns_meta_open(struct RambleNode *n);
 #endif
 
 /* A consumer queue ring record: this header, the publisher name, then the payload at an
- * 8 aligned offset. Records never wrap, a short tail holds the DART__QWRAP sentinel. */
+ * 8 aligned offset. Records never wrap, a short tail holds the RAMBLE__QWRAP sentinel. */
 typedef struct {
     uint32_t rec_bytes;    /* the whole record, 8 aligned. First, the ring reads it at offset 0 */
     uint32_t data_len;
-    uint64_t t_recv_us;    /* the arrival stamp, DartMsg.recv_us */
+    uint64_t t_recv_us;    /* the arrival stamp, RambleMsg.recv_us */
     uint64_t t_written_us; /* the publisher's source stamp, stripped at enqueue, 0 = opted out */
     uint64_t t_capture_us; /* the publisher's capture stamp, 0 = it sent none */
     uint32_t publisher_id;
     uint8_t  name_len;     /* the name is copied inline, discovery views die with the peer */
     uint8_t  pad[3];
-} i_DartQRec;
-#define DART__QWRAP 0xFFFFFFFFu
-#define DART__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
+} i_RambleQRec;
+#define RAMBLE__QWRAP 0xFFFFFFFFu
+#define RAMBLE__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
 
 /* One topic's consumer queue: a byte ring filled by the poll thread and drained by take or
  * dispatch. Under the node lock. The ring and this struct are stable pool allocations. */
 typedef struct {
     uint8_t  *buf;
     uint32_t  cap;         /* current ring bytes, 8 aligned, grows on demand */
-    uint32_t  cap_limit;   /* the growth bound: qos.queue_bytes or DART_QUEUE_CAP */
+    uint32_t  cap_limit;   /* the growth bound: qos.queue_bytes or RAMBLE_QUEUE_CAP */
     uint32_t  head, tail;  /* byte offsets, empty iff count == 0 */
     uint32_t  bytes;       /* queued record bytes, excludes wrap padding */
     uint32_t  count;       /* queued records, including one being viewed */
@@ -48,90 +48,90 @@ typedef struct {
     uint8_t   busy;        /* inside dispatch's unlocked callback window, no reentry */
     uint8_t   reliable;    /* the full queue policy: park (reliable) or overwrite */
     uint8_t   parked;      /* transport lanes parked on this topic, retried as we drain */
-} i_DartMsgQueue;
+} i_RambleMsgQueue;
 
-struct DartTopic {
-    DartNode *n; uint16_t index; DartSchema *schema;   /* the schema is the node's own copy */
-    i_DartMsgQueue *q;                  /* the consumer queue, NULL = inline callbacks */
-    i_DartSysMsgFn sys_on_message;      /* the patterns layer's routing, NULL = a normal topic */
+struct RambleTopic {
+    RambleNode *n; uint16_t index; RambleSchema *schema;   /* the schema is the node's own copy */
+    i_RambleMsgQueue *q;                  /* the consumer queue, NULL = inline callbacks */
+    i_RambleSysMsgFn sys_on_message;      /* the patterns layer's routing, NULL = a normal topic */
     void    *sys_msg_user;
-    uint64_t tx_msgs, tx_bytes;         /* committed by our sends */
-    uint64_t rx_msgs, rx_bytes;         /* delivered to us, parked excluded */
-    uint32_t resolve_epoch;             /* match_epoch at the last convergence, 0 = never */
-    uint8_t  prefix_bytes;              /* pattern header bytes split into .header, 0 = plain */
-    uint8_t  prefix_string;             /* [u8 len][bytes] follows the prefix on a response kind */
-    uint8_t  kind;                      /* DartTopicKind */
-    uint8_t  role;                      /* DartRole, mirrored at create and set_role */
-    uint8_t  attrs, directed;           /* the def's declared facts, kept so refresh can redefine */
-    uint8_t  reflect;                   /* created with reflect_from_mesh, so refresh applies */
-    uint64_t generation;                /* the mesh generation the schema was taken at */
-    DartQos  qos;
-    uint8_t  name_len;                  /* stable copy, queued views never point into the arena */
-    char     name[DART_TOPIC_NAME_MAX];
+    uint64_t  tx_msgs, tx_bytes;         /* committed by our sends */
+    uint64_t  rx_msgs, rx_bytes;         /* delivered to us, parked excluded */
+    uint32_t  resolve_epoch;             /* match_epoch at the last convergence, 0 = never */
+    uint8_t   prefix_bytes;              /* pattern header bytes split into .header, 0 = plain */
+    uint8_t   prefix_string;             /* [u8 len][bytes] follows the prefix on a response kind */
+    uint8_t   kind;                      /* RambleTopicKind */
+    uint8_t   role;                      /* RambleRole, mirrored at create and set_role */
+    uint8_t   attrs, directed;           /* the def's declared facts, kept so refresh can redefine */
+    uint8_t   reflect;                   /* created with reflect_from_mesh, so refresh applies */
+    uint64_t  generation;                /* the mesh generation the schema was taken at */
+    RambleQos qos;
+    uint8_t   name_len;                  /* stable copy, queued views never point into the arena */
+    char      name[RAMBLE_TOPIC_NAME_MAX];
 };
 
 /* One pending error to log mirror entry. Errors fire deep inside receive processing where
  * a send may not re enter the transport, so emit records here and the poll pass publishes. */
-#define DART_LOG_PEND 8
+#define RAMBLE_LOG_PEND 8
 typedef struct {
     uint64_t wall_us, mono_us;   /* when the first occurrence fired */
     uint32_t peer, count;
     uint16_t topic;
-    uint8_t  error;              /* DartErrorKind */
+    uint8_t  error;              /* RambleErrorKind */
     char     text[192];
-} i_DartLogPend;
+} i_RambleLogPend;
 
-struct DartNode {
-    DartTransportState     *transport;
-    i_DartNodeCore *core;     /* the peer table and discovery lifecycle, sans-IO */
-    DartDiscovery     *discovery;
-    i_DartSock       fd;       /* the unicast data socket */
+struct RambleNode {
+    RambleTransportState     *transport;
+    i_RambleNodeCore *core;     /* the peer table and discovery lifecycle, sans-IO */
+    RambleDiscovery     *discovery;
+    i_RambleSock       fd;       /* the unicast data socket */
     uint16_t      domain;
-    DartNodeNet  net;         /* a copy of opts.net */
+    RambleNodeNet  net;         /* a copy of opts.net */
     /* the detail exchange retry cadence: queued requests drain each poll and a sweep re
        asks once per announce interval until a sweep sends nothing */
     uint32_t      announce_us;     /* the resolved discovery announce interval */
     uint64_t      next_detail_us;  /* the next retry sweep, 0 = disarmed */
     /* the datagram the socket refused, retried first next poll so it is never lost */
-    uint8_t       tx_hold[DART_DGRAM_MAX];
+    uint8_t       tx_hold[RAMBLE_DGRAM_MAX];
     size_t        tx_hold_len;
     uint32_t      tx_hold_peer;
     /* the data socket RX buffer, sized for the largest discovery datagram we accept too */
     uint8_t      *rx_buf;
     size_t        rx_buf_bytes;
-    /* backpressure accumulators, read via dart_node_backpressure_stats */
+    /* backpressure accumulators, read via ramble_node_backpressure_stats */
     uint64_t      backpressure_total_us;
     uint32_t      backpressure_wait_count;
-    uint32_t      evicted_unsent;  /* the DART_E_EVICTED_UNSENT count */
-#ifdef DART_THREADS
+    uint32_t      evicted_unsent;  /* the RAMBLE_E_EVICTED_UNSENT count */
+#ifdef RAMBLE_THREADS
     /* the node lock and the optional service thread. See spec/node.md */
-    i_DartMutex   mu;             /* the node lock: every public entry point takes it */
-    i_DartCond    cv;             /* senders and drainers waiting on the poller's progress */
-    uint32_t      cv_waiters;     /* under mu, broadcast skipped when 0 */
-    i_DartWaker   waker;          /* interrupts the unlocked socket wait */
-    i_DartThread  svc;
+    i_RambleMutex   mu;             /* the node lock: every public entry point takes it */
+    i_RambleCond    cv;             /* senders and drainers waiting on the poller's progress */
+    uint32_t        cv_waiters;     /* under mu, broadcast skipped when 0 */
+    i_RambleWaker   waker;          /* interrupts the unlocked socket wait */
+    i_RambleThread  svc;
     volatile uint8_t svc_running; /* a service thread is alive */
     volatile uint8_t svc_stop;    /* stop requested, the service loop exits on it */
     uint8_t       svc_joining;    /* under mu: one stopper owns the join, others wait on cv */
     uint32_t      pollers_sleeping; /* under mu: pollers in or headed into the unlocked wait */
     uint8_t       wake_signaled;  /* under mu: a burst coalesces into one waker datagram */
-    uint8_t       user_locked;    /* the public dart_node_lock is held */
+    uint8_t       user_locked;    /* the public ramble_node_lock is held */
     uint64_t      work_seq;       /* completed work passes, the unsent wait predicate */
     volatile uint8_t  lock_held;  /* the owner reentrancy check, written by the owner only */
     volatile uint64_t lock_owner;
 #endif
     /* the in pump probe sampled inside the backpressure wait */
-    DartPumpProbeFn pump_probe;
+    RamblePumpProbeFn pump_probe;
     void          *pump_probe_user;
     uint64_t       pump_probe_interval_us;
     /* the app callbacks */
-    DartMsgFn    user_on_message;
-    DartEventFn  on_event;
+    RambleMsgFn    user_on_message;
+    RambleEventFn  on_event;
     void          *user_data;
     /* the patterns layer's hooks, all optional */
-    i_DartSysEventFn sys_on_event;
-    i_DartSysTickFn  sys_tick;
-    i_DartSysCloseFn sys_on_close;
+    i_RambleSysEventFn sys_on_event;
+    i_RambleSysTickFn  sys_tick;
+    i_RambleSysCloseFn sys_on_close;
     void            *sys_user;
     uint64_t         sys_tick_next;   /* the tick's next deadline, folded into the poll wait */
     uint64_t         settle_topology_us; /* the last PEER_UP, DOWN or INTEREST change */
@@ -142,23 +142,23 @@ struct DartNode {
     uint8_t          gather_done;     /* latched once the post open gather settles */
     uint32_t         match_epoch;     /* bumps on peer or interest change, create and set_role */
     void            *patterns;        /* the patterns layer's per node manager, opaque here */
-    DartEvent     last_error;  /* the most recent DART_ERROR, DART_E_NONE until one fires */
-    /* the built in @dart/log topics and the error mirror ring */
-    DartTopic    *log_topics[3];       /* by DartLogLevel, all NULL under opts.disable_logs */
-    DartSchema   *log_schema;          /* DartLog { wall_us, mono_us, text }, node owned */
-    uint8_t       log_errors;          /* the default on DART_ERROR mirror */
-    uint8_t       log_flushing;        /* reentrancy guard: a flush must not re enter the ring */
-    uint8_t       log_pend_n;
-    uint32_t      log_pend_dropped;    /* ring overflow between flushes, summarized, never silent */
-    i_DartLogPend *log_pend;           /* [DART_LOG_PEND], allocated on the first recorded error */
-    /* the @dart/meta snapshot scratch, grown on demand */
+    RambleEvent     last_error;  /* the most recent RAMBLE_ERROR, RAMBLE_E_NONE until one fires */
+    /* the built in @ramble/log topics and the error mirror ring */
+    RambleTopic    *log_topics[3];       /* by RambleLogLevel, all NULL under opts.disable_logs */
+    RambleSchema   *log_schema;          /* RambleLog { wall_us, mono_us, text }, node owned */
+    uint8_t         log_errors;          /* the default on RAMBLE_ERROR mirror */
+    uint8_t         log_flushing;        /* reentrancy guard: a flush must not re enter the ring */
+    uint8_t         log_pend_n;
+    uint32_t        log_pend_dropped;    /* ring overflow between flushes, summarized, never silent */
+    i_RambleLogPend *log_pend;           /* [RAMBLE_LOG_PEND], allocated on the first recorded error */
+    /* the @ramble/meta snapshot scratch, grown on demand */
     uint8_t      *snap_buf; uint32_t snap_cap;
     uint16_t     *snap_pend; uint16_t snap_pend_cap;   /* per topic pending counts, one walk */
-    char          name[DART_NODE_NAME_MAX + 1];   /* our advertised node name */
+    char          name[RAMBLE_NODE_NAME_MAX + 1];   /* our advertised node name */
     uint8_t       name_len;
     void          *arena;      /* the control structs block, relocated on grow */
     /* the node's pool, copied from the caller's allocator at open and reset on close */
-    DartAllocator pool;
+    RambleAllocator pool;
     uint8_t        alloc_dynamic;
     uint8_t        grow_pending;   /* a peer was refused for lack of slots, grow at the next poll */
     uint16_t       max_peers;      /* the current peer table capacity, doubles on a dynamic grow */
@@ -167,15 +167,15 @@ struct DartNode {
     uint16_t       meta_cap;
     uint16_t       meta_grow_need;
     uint16_t       meta_grow_failed;
-    /* topic handles: a pointer array in the arena, each DartTopic a stable allocation */
-    DartTopic **handles;    /* [max_topics] */
+    /* topic handles: a pointer array in the arena, each RambleTopic a stable allocation */
+    RambleTopic **handles;    /* [max_topics] */
     uint16_t      max_topics;
     uint16_t      n_created;       /* user topics created, dense from 0, stepping over builtins */
     /* the builtins live at [builtin_lo, builtin_lo + n_builtin), above the user budget */
     uint16_t      builtin_lo;      /* the first builtin index */
     uint16_t      n_builtin;
     uint8_t       creating_builtin;/* open is creating builtins: allocate from the block */
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
     /* the same host path: lazy per topic and size class segments, see spec/shm.md */
     uint8_t        shm_capable;
     uint8_t        shm_host[16];  /* our host uuid, advertised for the same host check */
@@ -193,60 +193,60 @@ struct DartNode {
 
 /* The node's allocator hook for the transport, schemas and handles: one freeable pool
  * allocation per call, so reset reclaims all. u is the node. */
-static void *i_dart_node_alloc(void *u, void *ptr, size_t size){
-    return dart_allocator_alloc(&((DartNode*)u)->pool, ptr, size);
+static void *i_ramble_node_alloc(void *u, void *ptr, size_t size){
+    return ramble_allocator_alloc(&((RambleNode*)u)->pool, ptr, size);
 }
 
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
 /* Raw lock ops keeping the owner id consistent. lock_owner is zeroed before the release
    so a non owner reading the pair unlocked never sees lock_held with its own id. */
-static void i_dart_node_lock_raw(DartNode *n){
-    i_dart_plat_mutex_lock(&n->mu);
-    n->lock_owner = i_dart_plat_thread_id();
+static void i_ramble_node_lock_raw(RambleNode *n){
+    i_ramble_plat_mutex_lock(&n->mu);
+    n->lock_owner = i_ramble_plat_thread_id();
     n->lock_held = 1;
 }
-static void i_dart_node_unlock_raw(DartNode *n){
+static void i_ramble_node_unlock_raw(RambleNode *n){
     n->lock_owner = 0;
     n->lock_held = 0;
-    i_dart_plat_mutex_unlock(&n->mu);
+    i_ramble_plat_mutex_unlock(&n->mu);
 }
 /* The reentrant aware entry lock: 1 = this call acquired mu, 0 = the calling thread
    already held it (a callback, or the pump's nested poll) and proceeds without waiting. */
-static int i_dart_node_lock(DartNode *n){
-    if (n->lock_held && n->lock_owner == i_dart_plat_thread_id()) return 0;
-    i_dart_node_lock_raw(n);
+static int i_ramble_node_lock(RambleNode *n){
+    if (n->lock_held && n->lock_owner == i_ramble_plat_thread_id()) return 0;
+    i_ramble_node_lock_raw(n);
     return 1;
 }
-static void i_dart_node_unlock(DartNode *n, int acquired){
-    if (acquired) i_dart_node_unlock_raw(n);
+static void i_ramble_node_unlock(RambleNode *n, int acquired){
+    if (acquired) i_ramble_node_unlock_raw(n);
 }
 /* With mu held, before unlocking: cut the pollers' wait short so the change is serviced
    now. One datagram wakes every sleeping poller, and a burst coalesces to one per sleep. */
-static void i_dart_node_kick(DartNode *n){
-    if (n->pollers_sleeping && !n->wake_signaled && i_dart_plat_waker_signal(&n->waker))
+static void i_ramble_node_kick(RambleNode *n){
+    if (n->pollers_sleeping && !n->wake_signaled && i_ramble_plat_waker_signal(&n->waker))
         n->wake_signaled = 1;
 }
 /* A condvar wait that re stamps ownership after reacquire. Nothing cached from inside
    the node survives it: the poller may have relocated the arena. */
-static void i_dart_node_cv_wait(DartNode *n, uint64_t timeout_us){
+static void i_ramble_node_cv_wait(RambleNode *n, uint64_t timeout_us){
     n->lock_owner = 0;
     n->lock_held = 0;
-    i_dart_plat_cond_wait(&n->cv, &n->mu,
+    i_ramble_plat_cond_wait(&n->cv, &n->mu,
                           timeout_us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)timeout_us);
-    n->lock_owner = i_dart_plat_thread_id();
+    n->lock_owner = i_ramble_plat_thread_id();
     n->lock_held = 1;
 }
 #else
-static int  i_dart_node_lock(DartNode *n){ (void)n; return 1; }
-static void i_dart_node_unlock(DartNode *n, int acquired){ (void)n; (void)acquired; }
-static void i_dart_node_kick(DartNode *n){ (void)n; }
-#endif /* DART_THREADS */
+static int  i_ramble_node_lock(RambleNode *n){ (void)n; return 1; }
+static void i_ramble_node_unlock(RambleNode *n, int acquired){ (void)n; (void)acquired; }
+static void i_ramble_node_kick(RambleNode *n){ (void)n; }
+#endif /* RAMBLE_THREADS */
 
 /* The kick a send owes: only when the transport has a datagram to hand out or a held one
    to retry. The waker costs tens of microseconds, an idle publisher must not pay it. */
-static void i_dart_node_kick_tx(DartNode *n){
-#ifdef DART_THREADS
-    if (n->tx_hold_len || dart_transport_tx_pending(n->transport)) i_dart_node_kick(n);
+static void i_ramble_node_kick_tx(RambleNode *n){
+#ifdef RAMBLE_THREADS
+    if (n->tx_hold_len || ramble_transport_tx_pending(n->transport)) i_ramble_node_kick(n);
 #else
     (void)n;
 #endif
@@ -255,7 +255,7 @@ static void i_dart_node_kick_tx(DartNode *n){
 /* error reporting: one emit path stamps user_data, keeps the last error and hands on */
 
 /* one past the highest defined topic index, the bound over handles[] (holes are NULL) */
-static uint16_t i_dart_node_topic_hi(DartNode *n){
+static uint16_t i_ramble_node_topic_hi(RambleNode *n){
     uint16_t hi = n->n_created;
     if (n->n_builtin){
         if (hi >= n->builtin_lo) hi = (uint16_t)(hi + n->n_builtin);   /* users grew past it */
@@ -264,76 +264,76 @@ static uint16_t i_dart_node_topic_hi(DartNode *n){
     return hi;
 }
 
-static int i_dart_node_is_log_topic(DartNode *n, uint16_t topic_index){
-    DartTopic *h = (topic_index < i_dart_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
+static int i_ramble_node_is_log_topic(RambleNode *n, uint16_t topic_index){
+    RambleTopic *h = (topic_index < i_ramble_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
     return h && (h == n->log_topics[0] || h == n->log_topics[1] || h == n->log_topics[2]);
 }
 
-static void i_dart_node_emit(DartNode *n, DartEvent *e){
+static void i_ramble_node_emit(RambleNode *n, RambleEvent *e){
     e->user = n->user_data;
     if (e->peer){    /* resolve the peer's name once so every event message prints a label */
-        DartString nm = i_dart_node_core_peer_name(n->core, e->peer);
+        RambleString nm = i_ramble_node_core_peer_name(n->core, e->peer);
         e->peer_name = nm.data;   /* a NUL terminated view into discovery state, NULL if unknown */
     }
-    if (e->kind == DART_ERROR) n->last_error = *e;
+    if (e->kind == RAMBLE_ERROR) n->last_error = *e;
     /* the error to log mirror records only, the poll pass publishes. Errors on a log
        topic itself are excluded, and nothing is recorded during a flush */
-    if (e->kind == DART_ERROR && n->log_errors && !n->log_flushing
-        && !(e->topic_name && i_dart_node_is_log_topic(n, e->topic))){
+    if (e->kind == RAMBLE_ERROR && n->log_errors && !n->log_flushing
+        && !(e->topic_name && i_ramble_node_is_log_topic(n, e->topic))){
         uint8_t i;
         if (!n->log_pend){                 /* the first error ever: allocate the mirror ring */
-            n->log_pend = (i_DartLogPend*)i_dart_node_alloc(n, NULL,
-                              sizeof(i_DartLogPend) * DART_LOG_PEND);
+            n->log_pend = (i_RambleLogPend*)i_ramble_node_alloc(n, NULL,
+                              sizeof(i_RambleLogPend) * RAMBLE_LOG_PEND);
             if (!n->log_pend){ n->log_pend_dropped++; goto pend_done; }
         }
         for (i = 0; i < n->log_pend_n; i++)
             if (n->log_pend[i].error == (uint8_t)e->error && n->log_pend[i].topic == e->topic
                 && n->log_pend[i].peer == e->peer) break;
         if (i < n->log_pend_n) n->log_pend[i].count++;
-        else if (n->log_pend_n < DART_LOG_PEND){
-            i_DartLogPend *p = &n->log_pend[n->log_pend_n++];
+        else if (n->log_pend_n < RAMBLE_LOG_PEND){
+            i_RambleLogPend *p = &n->log_pend[n->log_pend_n++];
             p->error = (uint8_t)e->error; p->topic = e->topic; p->peer = e->peer; p->count = 1;
-            p->wall_us = i_dart_plat_wall_us(); p->mono_us = i_dart_plat_now_us();
-            dart_event_str(e, p->text, sizeof p->text);
+            p->wall_us = i_ramble_plat_wall_us(); p->mono_us = i_ramble_plat_now_us();
+            ramble_event_str(e, p->text, sizeof p->text);
         } else n->log_pend_dropped++;
     }
 pend_done:
-    if (e->kind == DART_PEER_UP || e->kind == DART_PEER_DOWN || e->kind == DART_PEER_INTEREST){
-        n->settle_topology_us = i_dart_plat_now_us();   /* dart_node_settle's quiet window clock */
-        n->match_epoch++;                               /* stale the topics' converged memos */
+    if (e->kind == RAMBLE_PEER_UP || e->kind == RAMBLE_PEER_DOWN || e->kind == RAMBLE_PEER_INTEREST){
+        n->settle_topology_us = i_ramble_plat_now_us();   /* ramble_node_settle's quiet window clock */
+        n->match_epoch++;                                 /* stale the topics' converged memos */
     }
     if (n->sys_on_event) n->sys_on_event(n->sys_user, e);
     if (n->on_event) n->on_event(e);
 }
 
 /* our topic's name as a C string, NULL if undefined: the topic_name view on events */
-static const char *i_dart_node_topic_name(DartNode *n, uint16_t topic_index){
-    DartString s = dart_transport_topic_name(n->transport, topic_index);
+static const char *i_ramble_node_topic_name(RambleNode *n, uint16_t topic_index){
+    RambleString s = ramble_transport_topic_name(n->transport, topic_index);
     return (const char*)s.data;
 }
 
 /* Strips the stamps a stamped publisher prepends, filling *written_us and *capture_us.
  * The one strip point: every delivery path runs through here before the header split. */
-static DartBytes i_dart_node_strip_ts(DartBytes wire, int stamped, uint64_t *written_us,
+static RambleBytes i_ramble_node_strip_ts(RambleBytes wire, int stamped, uint64_t *written_us,
                                       uint64_t *capture_us){
     uint64_t w;
     *written_us = 0; *capture_us = 0;
-    if (!stamped || wire.len < DART_TIMESTAMP_BYTES) return wire;
-    w = i_dart_le_r64(wire.data);
-    *written_us = w & DART_STAMP_MASK;
-    if (!(w & DART_STAMP_CAPTURE))
-        return dart_bytes(wire.data + DART_TIMESTAMP_BYTES, wire.len - DART_TIMESTAMP_BYTES);
+    if (!stamped || wire.len < RAMBLE_TIMESTAMP_BYTES) return wire;
+    w = i_ramble_le_r64(wire.data);
+    *written_us = w & RAMBLE_STAMP_MASK;
+    if (!(w & RAMBLE_STAMP_CAPTURE))
+        return ramble_bytes(wire.data + RAMBLE_TIMESTAMP_BYTES, wire.len - RAMBLE_TIMESTAMP_BYTES);
     /* the marker promises a second slot: a sample too short for it is malformed, keep the
        bytes whole rather than reading past them */
-    if (wire.len < (size_t)DART_TIMESTAMP_BYTES + DART_CAPTURE_BYTES) return wire;
-    *capture_us = i_dart_le_r64(wire.data + DART_TIMESTAMP_BYTES);
-    return dart_bytes(wire.data + DART_TIMESTAMP_BYTES + DART_CAPTURE_BYTES,
-                      wire.len - DART_TIMESTAMP_BYTES - DART_CAPTURE_BYTES);
+    if (wire.len < (size_t)RAMBLE_TIMESTAMP_BYTES + RAMBLE_CAPTURE_BYTES) return wire;
+    *capture_us = i_ramble_le_r64(wire.data + RAMBLE_TIMESTAMP_BYTES);
+    return ramble_bytes(wire.data + RAMBLE_TIMESTAMP_BYTES + RAMBLE_CAPTURE_BYTES,
+                      wire.len - RAMBLE_TIMESTAMP_BYTES - RAMBLE_CAPTURE_BYTES);
 }
 
 /* Splits a delivered wire into its pattern header and the payload after it, so the schema
  * validates a message free payload. A plain topic yields an empty header. */
-static void i_dart_node_split(DartTopic *h, DartBytes wire, DartBytes *hdr, DartBytes *payload){
+static void i_ramble_node_split(RambleTopic *h, RambleBytes wire, RambleBytes *hdr, RambleBytes *payload){
     size_t pfx = (h && (uint32_t)wire.len >= h->prefix_bytes) ? h->prefix_bytes : 0u;
     if (pfx && h->prefix_string && wire.len > pfx){
         size_t ml = wire.data[pfx], avail = wire.len - pfx - 1u;
@@ -346,17 +346,17 @@ static void i_dart_node_split(DartTopic *h, DartBytes wire, DartBytes *hdr, Dart
 /* the consumer queue ring */
 
 /* the oldest record with the wrap normalized into tail, NULL when empty */
-static const i_DartQRec *i_dart_q_peek(i_DartMsgQueue *q){
+static const i_RambleQRec *i_ramble_q_peek(i_RambleMsgQueue *q){
     if (!q->count) return NULL;
-    if (q->cap - q->tail < (uint32_t)sizeof(i_DartQRec) ||
-        ((const i_DartQRec*)(q->buf + q->tail))->rec_bytes == DART__QWRAP)
+    if (q->cap - q->tail < (uint32_t)sizeof(i_RambleQRec) ||
+        ((const i_RambleQRec*)(q->buf + q->tail))->rec_bytes == RAMBLE__QWRAP)
         q->tail = 0;
-    return (const i_DartQRec*)(q->buf + q->tail);
+    return (const i_RambleQRec*)(q->buf + q->tail);
 }
 
 /* drops the oldest record, never a viewed one */
-static void i_dart_q_pop(i_DartMsgQueue *q){
-    const i_DartQRec *rec = i_dart_q_peek(q);
+static void i_ramble_q_pop(i_RambleMsgQueue *q){
+    const i_RambleQRec *rec = i_ramble_q_peek(q);
     if (!rec) return;
     q->tail += rec->rec_bytes;
     q->bytes -= rec->rec_bytes;
@@ -364,14 +364,14 @@ static void i_dart_q_pop(i_DartMsgQueue *q){
 }
 
 /* contiguous space for need bytes, fills *at and pre writes the wrap sentinel */
-static int i_dart_q_fit(i_DartMsgQueue *q, uint32_t need, uint32_t *at){
+static int i_ramble_q_fit(i_RambleMsgQueue *q, uint32_t need, uint32_t *at){
     if (!q->buf || need > q->cap) return 0;
     if (q->count == 0){ q->head = 0; q->tail = 0; *at = 0; return 1; }
     if (q->head > q->tail){
         if (q->cap - q->head >= need){ *at = q->head; return 1; }
         if (q->tail >= need){                                    /* wrap to the start */
             if (q->cap - q->head >= 4u)
-                ((i_DartQRec*)(q->buf + q->head))->rec_bytes = DART__QWRAP;
+                ((i_RambleQRec*)(q->buf + q->head))->rec_bytes = RAMBLE__QWRAP;
             *at = 0; return 1;
         }
         return 0;
@@ -382,67 +382,67 @@ static int i_dart_q_fit(i_DartMsgQueue *q, uint32_t need, uint32_t *at){
 
 /* Relinearizes into a bigger ring, doubling toward cap_limit. One over cap message still
  * fits. 0 = cannot grow now: at the cap, OOM, or a live take view pins the ring. */
-static int i_dart_q_grow(DartNode *n, i_DartMsgQueue *q, uint32_t need_total, uint32_t need_one){
+static int i_ramble_q_grow(RambleNode *n, i_RambleMsgQueue *q, uint32_t need_total, uint32_t need_one){
     uint32_t target = q->cap ? q->cap * 2u : 4096u;
     uint8_t *nb;
     if (q->viewing) return 0;
     if (target < 4096u) target = 4096u;
     while (target < need_total && target < 0x80000000u) target *= 2u;
     if (target > q->cap_limit) target = q->cap_limit;
-    if (target < need_one) target = DART__QALIGN(need_one);      /* one message always fits */
+    if (target < need_one) target = RAMBLE__QALIGN(need_one);      /* one message always fits */
     if (target <= q->cap) return 0;
-    nb = (uint8_t*)i_dart_node_alloc(n, NULL, target);
+    nb = (uint8_t*)i_ramble_node_alloc(n, NULL, target);
     if (!nb) return 0;
     {   uint32_t off = 0, i, src = q->tail;                        /* compact, oldest first */
         for (i = 0; i < q->count; i++){
-            const i_DartQRec *rec;
-            if (q->cap - src < (uint32_t)sizeof(i_DartQRec) ||
-                ((const i_DartQRec*)(q->buf + src))->rec_bytes == DART__QWRAP) src = 0;
-            rec = (const i_DartQRec*)(q->buf + src);
+            const i_RambleQRec *rec;
+            if (q->cap - src < (uint32_t)sizeof(i_RambleQRec) ||
+                ((const i_RambleQRec*)(q->buf + src))->rec_bytes == RAMBLE__QWRAP) src = 0;
+            rec = (const i_RambleQRec*)(q->buf + src);
             memcpy(nb + off, rec, rec->rec_bytes);
             off += rec->rec_bytes; src += rec->rec_bytes;
         }
         q->tail = 0; q->head = off;
     }
-    if (q->buf) i_dart_node_alloc(n, q->buf, 0);
+    if (q->buf) i_ramble_node_alloc(n, q->buf, 0);
     q->buf = nb; q->cap = target;
     return 1;
 }
 
-/* best effort queue loss is loss like any other: DART_MSG_LOST, never silent */
-static void i_dart_node_queue_lost(DartNode *n, uint16_t topic_index, uint32_t from, uint32_t count){
-    DartEvent e; memset(&e, 0, sizeof e);
-    e.kind = DART_MSG_LOST; e.topic = topic_index; e.peer = from;
-    e.topic_name = i_dart_node_topic_name(n, topic_index);
+/* best effort queue loss is loss like any other: RAMBLE_MSG_LOST, never silent */
+static void i_ramble_node_queue_lost(RambleNode *n, uint16_t topic_index, uint32_t from, uint32_t count){
+    RambleEvent e; memset(&e, 0, sizeof e);
+    e.kind = RAMBLE_MSG_LOST; e.topic = topic_index; e.peer = from;
+    e.topic_name = i_ramble_node_topic_name(n, topic_index);
     e.lost_count = count;
-    i_dart_node_emit(n, &e);
+    i_ramble_node_emit(n, &e);
 }
 
 /* Enqueues one message. 0 = accepted (stored, or dropped per the best effort contract),
  * 1 = refused, a reliable queue at cap: the transport parks and flow control backpressures. */
-static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQueue *q,
-                                  uint32_t from, DartBytes data, uint64_t written_us,
+static int i_ramble_node_queue_push(RambleNode *n, uint16_t topic_index, i_RambleMsgQueue *q,
+                                  uint32_t from, RambleBytes data, uint64_t written_us,
                                   uint64_t capture_us){
-    DartString name = i_dart_node_core_peer_name(n->core, from);
-    uint32_t name_len = name.len > DART_NODE_NAME_MAX ? (uint32_t)DART_NODE_NAME_MAX
+    RambleString name = i_ramble_node_core_peer_name(n->core, from);
+    uint32_t name_len = name.len > RAMBLE_NODE_NAME_MAX ? (uint32_t)RAMBLE_NODE_NAME_MAX
                                                       : (uint32_t)name.len;
-    uint32_t payload_off = DART__QALIGN(sizeof(i_DartQRec) + name_len);
-    uint32_t need = DART__QALIGN(payload_off + data.len);
+    uint32_t payload_off = RAMBLE__QALIGN(sizeof(i_RambleQRec) + name_len);
+    uint32_t need = RAMBLE__QALIGN(payload_off + data.len);
     uint32_t at = 0, evicted = 0;
     for (;;){
-        if (i_dart_q_fit(q, need, &at)) break;
-        if (i_dart_q_grow(n, q, q->bytes + need, need)) continue;
+        if (i_ramble_q_fit(q, need, &at)) break;
+        if (i_ramble_q_grow(n, q, q->bytes + need, need)) continue;
         if (q->reliable){ q->parked = 1; return 1; }
         if (!q->viewing && q->count){                        /* overwrite the oldest */
-            i_dart_q_pop(q); q->dropped++; evicted++; continue;
+            i_ramble_q_pop(q); q->dropped++; evicted++; continue;
         }
         q->dropped++;                     /* a live view pins the ring: drop the incoming */
-        i_dart_node_queue_lost(n, topic_index, from, evicted + 1u);
+        i_ramble_node_queue_lost(n, topic_index, from, evicted + 1u);
         return 0;
     }
-    {   i_DartQRec *rec = (i_DartQRec*)(q->buf + at);
+    {   i_RambleQRec *rec = (i_RambleQRec*)(q->buf + at);
         rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
-        rec->t_recv_us = i_dart_plat_now_us();
+        rec->t_recv_us = i_ramble_plat_now_us();
         rec->t_written_us = written_us;
         rec->t_capture_us = capture_us;
         rec->publisher_id = from; rec->name_len = (uint8_t)name_len;
@@ -452,23 +452,23 @@ static int i_dart_node_queue_push(DartNode *n, uint16_t topic_index, i_DartMsgQu
         q->head = at + need;
         q->bytes += need; q->count++;
     }
-    if (evicted) i_dart_node_queue_lost(n, topic_index, from, evicted);
+    if (evicted) i_ramble_node_queue_lost(n, topic_index, from, evicted);
     return 0;
 }
 
-/* A queued DartMsg: every view points at stable memory, valid until the next take or
+/* A queued RambleMsg: every view points at stable memory, valid until the next take or
  * dispatch. The schema is re resolved now, since the delivery map may repoint. */
-static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *rec, DartMsg *m){
+static void i_ramble_node_queue_msg(RambleNode *n, RambleTopic *h, const i_RambleQRec *rec, RambleMsg *m){
     memset(m, 0, sizeof *m);
     m->node = n; m->user = n->user_data;
     m->topic_index = h->index;
     m->publisher_id = rec->publisher_id;
-    m->publisher_name = rec->name_len ? dart_string((const char*)(rec + 1), rec->name_len)
-                                   : dart_cstr("unknown-peer");
-    m->topic_name = dart_string(h->name, h->name_len);
-    i_dart_node_split(h, dart_bytes((const uint8_t*)rec + DART__QALIGN(sizeof *rec + rec->name_len),
+    m->publisher_name = rec->name_len ? ramble_string((const char*)(rec + 1), rec->name_len)
+                                   : ramble_cstr("unknown-peer");
+    m->topic_name = ramble_string(h->name, h->name_len);
+    i_ramble_node_split(h, ramble_bytes((const uint8_t*)rec + RAMBLE__QALIGN(sizeof *rec + rec->name_len),
                          rec->data_len), &m->header, &m->data);
-    m->schema = i_dart_node_core_msg_schema(n->core, rec->publisher_id, h->index);
+    m->schema = i_ramble_node_core_msg_schema(n->core, rec->publisher_id, h->index);
     if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* an op only pattern message */
     m->recv_us = rec->t_recv_us;
     m->written_us = rec->t_written_us;
@@ -476,87 +476,87 @@ static void i_dart_node_queue_msg(DartNode *n, DartTopic *h, const i_DartQRec *r
 }
 
 /* Creates the queue. An explicit queue_bytes allocates in full, the lazy default starts at
- * one page and grows toward DART_QUEUE_CAP. NULL on OOM. */
-static i_DartMsgQueue *i_dart_node_queue_ensure(DartNode *n, DartTopic *h, const DartQos *qos){
-    i_DartMsgQueue *q = h->q;
+ * one page and grows toward RAMBLE_QUEUE_CAP. NULL on OOM. */
+static i_RambleMsgQueue *i_ramble_node_queue_ensure(RambleNode *n, RambleTopic *h, const RambleQos *qos){
+    i_RambleMsgQueue *q = h->q;
     uint32_t limit, initial;
     if (q) return q;
-    if (!qos) qos = dart_transport_topic_qos(n->transport, h->index);
-    limit = DART__QALIGN((qos && qos->queue_bytes) ? qos->queue_bytes : DART_QUEUE_CAP);
+    if (!qos) qos = ramble_transport_topic_qos(n->transport, h->index);
+    limit = RAMBLE__QALIGN((qos && qos->queue_bytes) ? qos->queue_bytes : RAMBLE_QUEUE_CAP);
     initial = (qos && qos->queue_bytes) ? limit : (limit < 4096u ? limit : 4096u);
-    q = (i_DartMsgQueue*)i_dart_node_alloc(n, NULL, sizeof *q);
+    q = (i_RambleMsgQueue*)i_ramble_node_alloc(n, NULL, sizeof *q);
     if (!q) return NULL;
     memset(q, 0, sizeof *q);
-    q->buf = (uint8_t*)i_dart_node_alloc(n, NULL, initial);
-    if (!q->buf){ i_dart_node_alloc(n, q, 0); return NULL; }
+    q->buf = (uint8_t*)i_ramble_node_alloc(n, NULL, initial);
+    if (!q->buf){ i_ramble_node_alloc(n, q, 0); return NULL; }
     q->cap = initial; q->cap_limit = limit;
-    q->reliable = (qos && qos->reliability == DART_RELIABLE) ? 1u : 0u;
+    q->reliable = (qos && qos->reliability == RAMBLE_RELIABLE) ? 1u : 0u;
     h->q = q;
     return q;
 }
 
 /* Finishes an outstanding take view, then retries parked lanes into the freed space. Their
  * acks need a TX pass, so kick. Lock held. */
-static void i_dart_node_queue_release(DartNode *n, DartTopic *h, i_DartMsgQueue *q){
+static void i_ramble_node_queue_release(RambleNode *n, RambleTopic *h, i_RambleMsgQueue *q){
     if (q->viewing){
         q->viewing = 0;
-        i_dart_q_pop(q);
+        i_ramble_q_pop(q);
     }
     if (q->parked){
-        q->parked = dart_transport_deliver_parked(n->transport, h->index,
-                                                  i_dart_plat_now_us()) ? 1u : 0u;
-        i_dart_node_kick(n);
+        q->parked = ramble_transport_deliver_parked(n->transport, h->index,
+                                                  i_ramble_plat_now_us()) ? 1u : 0u;
+        i_ramble_node_kick(n);
     }
 }
 
 /* The process global last error slot for failures during open, before the node exists.
  * A plain global, meaningful right after a failed open on the calling thread. */
-static DartEvent g_last_error;
+static RambleEvent g_last_error;
 
 /* Reports an open time failure into the global slot and the caller's on_event. Returns NULL. */
-static DartNode *i_dart_node_open_fail(DartEventFn on_event, void *user, DartErrorKind err,
+static RambleNode *i_ramble_node_open_fail(RambleEventFn on_event, void *user, RambleErrorKind err,
                             int os_error, uint16_t port, uint64_t need){
-    DartEvent e; memset(&e, 0, sizeof e);
-    e.kind = DART_ERROR; e.error = err; e.user = user;
+    RambleEvent e; memset(&e, 0, sizeof e);
+    e.kind = RAMBLE_ERROR; e.error = err; e.user = user;
     e.os_error = os_error; e.port = port; e.too_big_bytes = need;
     g_last_error = e;
     if (on_event) on_event(&e);
     return NULL;
 }
 
-DartEvent dart_last_error(DartNode *n){ return n ? n->last_error : g_last_error; }
+RambleEvent ramble_last_error(RambleNode *n){ return n ? n->last_error : g_last_error; }
 
-/* Builds a DartMsg and hands it to the app, inline or copied into the consumer queue.
+/* Builds a RambleMsg and hands it to the app, inline or copied into the consumer queue.
  * Returns 0 accepted, nonzero refused (a reliable queue at cap, the transport parks). */
-static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from, DartBytes data){
-    DartMsg m;
-    DartTopic *h = (topic_index < i_dart_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
-    DartBytes hdr, payload, body;
+static int i_ramble_node_deliver(RambleNode *n, uint16_t topic_index, uint32_t from, RambleBytes data){
+    RambleMsg m;
+    RambleTopic *h = (topic_index < i_ramble_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
+    RambleBytes hdr, payload, body;
     uint64_t written_us, capture_us;
-    const DartSchema *schema = i_dart_node_core_msg_schema(n->core, from, topic_index);
+    const RambleSchema *schema = i_ramble_node_core_msg_schema(n->core, from, topic_index);
     /* the stamps first, then the header split, then the schema validates the payload */
-    body = i_dart_node_strip_ts(data,
-              dart_transport_peer_timestamped(n->transport, topic_index, from),
+    body = i_ramble_node_strip_ts(data,
+              ramble_transport_peer_timestamped(n->transport, topic_index, from),
               &written_us, &capture_us);
-    i_dart_node_split(h, body, &hdr, &payload);
+    i_ramble_node_split(h, body, &hdr, &payload);
     /* an op only pattern message (a zero payload, or a task op that is not CALL) skips
        the schema, the pattern layer judges it. See spec/node.md */
     if (h && h->prefix_bytes
         && (payload.len == 0
-            || (h->kind == DART_KIND_TASK_REQ && hdr.len >= 5 && hdr.data[4] != 0)))
+            || (h->kind == RAMBLE_KIND_TASK_REQ && hdr.len >= 5 && hdr.data[4] != 0)))
         schema = NULL;
-    if (schema && !dart_schema_validate(schema, payload)){
-        DartEvent e; memset(&e, 0, sizeof e);
-        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH;
-        e.peer = from; e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
-        e.schema_detail = i_dart_node_core_note_size_mismatch(n->core, from, topic_index,
-                                            payload.len, dart_schema_msg_min(schema));
-        i_dart_node_emit(n, &e);
+    if (schema && !ramble_schema_validate(schema, payload)){
+        RambleEvent e; memset(&e, 0, sizeof e);
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_SCHEMA_MISMATCH;
+        e.peer = from; e.topic = topic_index; e.topic_name = i_ramble_node_topic_name(n, topic_index);
+        e.schema_detail = i_ramble_node_core_note_size_mismatch(n->core, from, topic_index,
+                                            payload.len, ramble_schema_msg_min(schema));
+        i_ramble_node_emit(n, &e);
         return 0;
     }
     if (h && h->q){
         /* store the wire minus the stamps, the stamps ride the record */
-        if (i_dart_node_queue_push(n, topic_index, h->q, from, body, written_us, capture_us))
+        if (i_ramble_node_queue_push(n, topic_index, h->q, from, body, written_us, capture_us))
             return 1;   /* parked: the accepted retry re counts */
         h->rx_msgs++; h->rx_bytes += data.len;
         return 0;
@@ -566,238 +566,238 @@ static int i_dart_node_deliver(DartNode *n, uint16_t topic_index, uint32_t from,
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
     m.topic_index = topic_index; m.publisher_id = from;
-    m.publisher_name = i_dart_node_core_peer_name(n->core, from);          /* a discovery view */
-    if (!m.publisher_name.data) m.publisher_name = dart_cstr("unknown-peer"); /* never NULL */
-    m.topic_name = dart_transport_topic_name(n->transport, topic_index);
+    m.publisher_name = i_ramble_node_core_peer_name(n->core, from);          /* a discovery view */
+    if (!m.publisher_name.data) m.publisher_name = ramble_cstr("unknown-peer"); /* never NULL */
+    m.topic_name = ramble_transport_topic_name(n->transport, topic_index);
     m.header = hdr; m.data = payload;
     m.schema = schema;
-    m.recv_us = i_dart_plat_now_us();
+    m.recv_us = i_ramble_plat_now_us();
     m.written_us = written_us;
     m.capture_us = capture_us;
     if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* the patterns layer */
     else n->user_on_message(&m);
     return 0;
 }
-static int i_dart_node_on_message(void *u, uint16_t topic_index, uint32_t from, DartBytes data){
-    return i_dart_node_deliver((DartNode*)u, topic_index, from, data);
+static int i_ramble_node_on_message(void *u, uint16_t topic_index, uint32_t from, RambleBytes data){
+    return i_ramble_node_deliver((RambleNode*)u, topic_index, from, data);
 }
 /* Node core events funnel through here. The core sets ev->user to this node, swap it for
  * the app's user_data before handing on. */
-static void i_dart_node_on_event(const DartEvent *ev){
-    DartNode *n = (DartNode*)ev->user;
+static void i_ramble_node_on_event(const RambleEvent *ev){
+    RambleNode *n = (RambleNode*)ev->user;
     /* dynamic mode has no peer cap: a refusal means grow at the next poll, out of this
        callback, and the peer's next announce is admitted. Static mode surfaces it */
-    if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_REFUSED){
+    if (n->alloc_dynamic && ev->kind == RAMBLE_ERROR && ev->error == RAMBLE_E_PEER_REFUSED){
         n->grow_pending = 1; return;
     }
     /* a blob we cannot hold is a growth signal too: grow at the next poll, then solicit.
        Sizes past the wire ceiling and a size that already failed surface */
-    if (n->alloc_dynamic && ev->kind == DART_ERROR && ev->error == DART_E_PEER_META_TOO_BIG){
+    if (n->alloc_dynamic && ev->kind == RAMBLE_ERROR && ev->error == RAMBLE_E_PEER_META_TOO_BIG){
         uint64_t need = ev->too_big_bytes;
         if (need > n->meta_cap && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
             n->meta_grow_need = (uint16_t)need;
             return;
         }
     }
-    { DartEvent e = *ev; i_dart_node_emit(n, &e); }
+    { RambleEvent e = *ev; i_ramble_node_emit(n, &e); }
 }
 
 /* the transport's schema gate, answered by the node core. u is the node */
-static int i_dart_node_schema_check(void *u, uint32_t peer, uint16_t topic_index,
-                                    int peer_is_pub, uint64_t hash, DartBytes wire){
-    return i_dart_node_core_schema_check(((DartNode*)u)->core, peer, topic_index,
+static int i_ramble_node_schema_check(void *u, uint32_t peer, uint16_t topic_index,
+                                    int peer_is_pub, uint64_t hash, RambleBytes wire){
+    return i_ramble_node_core_schema_check(((RambleNode*)u)->core, peer, topic_index,
                                          peer_is_pub, hash, wire);
 }
 
 /* the transport's source clock: the wall clock, since it is read on other hosts */
-static uint64_t i_dart_node_source_time(void *u){ (void)u; return i_dart_plat_wall_us(); }
+static uint64_t i_ramble_node_source_time(void *u){ (void)u; return i_ramble_plat_wall_us(); }
 
-/* Maps a transport event onto the app DartEvent. MSG_LOST is an info kind, everything
- * else is a DART_ERROR with its DartErrorKind, and topic scoped kinds get our name. */
-static void i_dart_node_on_transport_event(const DartTransportEvent *tev){
-    DartNode *n = (DartNode*)tev->user;
-    DartEvent e;
+/* Maps a transport event onto the app RambleEvent. MSG_LOST is an info kind, everything
+ * else is a RAMBLE_ERROR with its RambleErrorKind, and topic scoped kinds get our name. */
+static void i_ramble_node_on_transport_event(const RambleTransportEvent *tev){
+    RambleNode *n = (RambleNode*)tev->user;
+    RambleEvent e;
     memset(&e, 0, sizeof e);
     e.peer = tev->peer; e.topic = tev->topic;
     e.lost_first = tev->lost_first; e.lost_count = tev->lost_count;
     e.too_big_bytes = tev->too_big_bytes; e.identity = tev->identity;
     switch (tev->kind){
-    case DART_TRANSPORT_MSG_LOST:
-        e.kind = DART_MSG_LOST; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
-    case DART_TRANSPORT_MSG_TOO_BIG:
-        e.kind = DART_ERROR; e.error = DART_E_MSG_TOO_BIG; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
-    case DART_TRANSPORT_NAME_COLLISION:
-        e.kind = DART_ERROR; e.error = DART_E_NAME_COLLISION; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
-    case DART_TRANSPORT_QOS_INCOMPATIBLE:
-        e.kind = DART_ERROR; e.error = DART_E_QOS_INCOMPATIBLE; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
-    case DART_TRANSPORT_KIND_MISMATCH:
-        e.kind = DART_ERROR; e.error = DART_E_KIND_MISMATCH; e.topic_name = i_dart_node_topic_name(n, tev->topic); break;
-    case DART_TRANSPORT_SCHEMA_MISMATCH:
-        e.kind = DART_ERROR; e.error = DART_E_SCHEMA_MISMATCH; e.topic_name = i_dart_node_topic_name(n, tev->topic);
-        e.schema_detail = i_dart_node_core_schema_why(n->core, tev->peer, tev->topic,
+    case RAMBLE_TRANSPORT_MSG_LOST:
+        e.kind = RAMBLE_MSG_LOST; e.topic_name = i_ramble_node_topic_name(n, tev->topic); break;
+    case RAMBLE_TRANSPORT_MSG_TOO_BIG:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_MSG_TOO_BIG; e.topic_name = i_ramble_node_topic_name(n, tev->topic); break;
+    case RAMBLE_TRANSPORT_NAME_COLLISION:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_NAME_COLLISION; e.topic_name = i_ramble_node_topic_name(n, tev->topic); break;
+    case RAMBLE_TRANSPORT_QOS_INCOMPATIBLE:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_QOS_INCOMPATIBLE; e.topic_name = i_ramble_node_topic_name(n, tev->topic); break;
+    case RAMBLE_TRANSPORT_KIND_MISMATCH:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_KIND_MISMATCH; e.topic_name = i_ramble_node_topic_name(n, tev->topic); break;
+    case RAMBLE_TRANSPORT_SCHEMA_MISMATCH:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_SCHEMA_MISMATCH; e.topic_name = i_ramble_node_topic_name(n, tev->topic);
+        e.schema_detail = i_ramble_node_core_schema_why(n->core, tev->peer, tev->topic,
                                                       tev->peer_is_pub); break;
-    case DART_TRANSPORT_INTEREST_OVERFLOW:
-        e.kind = DART_ERROR; e.error = DART_E_INTEREST_OVERFLOW; break;
-    case DART_TRANSPORT_META_TRUNCATED_INTEREST:
-        e.kind = DART_ERROR; e.error = DART_E_META_TRUNCATED_INTEREST; break;
-    case DART_TRANSPORT_META_TRUNCATED_SCHEMA:
-        e.kind = DART_ERROR; e.error = DART_E_META_TRUNCATED_SCHEMA; break;
+    case RAMBLE_TRANSPORT_INTEREST_OVERFLOW:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_INTEREST_OVERFLOW; break;
+    case RAMBLE_TRANSPORT_META_TRUNCATED_INTEREST:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_META_TRUNCATED_INTEREST; break;
+    case RAMBLE_TRANSPORT_META_TRUNCATED_SCHEMA:
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_META_TRUNCATED_SCHEMA; break;
     default: return;
     }
-    i_dart_node_emit(n, &e);
+    i_ramble_node_emit(n, &e);
 }
 
 /* The arena's sub blocks, laid out in one place so the measure pass and the build pass
  * run the same sequence and never drift. */
 typedef struct {
     uint8_t   *handles, *node_core, *transport, *discovery, *rx_buf;
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
     uint8_t   *shm_pool;
 #endif
     size_t     node_core_bytes, transport_bytes, discovery_bytes, rx_buf_bytes;
-} i_DartNodeBlocks;
+} i_RambleNodeBlocks;
 
-static void i_dart_node_layout(i_DartBump *b, uint16_t max_peers, uint16_t max_topics,
-                              const DartConfig *transport_cfg,
-                              const DartDiscoveryNetConfig *discovery_rt_cfg, i_DartNodeBlocks *o){
-    o->handles       = (uint8_t*)i_dart_bump_take(b, (size_t)max_topics * sizeof(DartTopic*), 16);
-    o->node_core_bytes = i_dart_node_core_required_memory(max_topics);   /* no peers here */
-    o->node_core = (uint8_t*)i_dart_bump_take(b, o->node_core_bytes, 16);
-    o->transport_bytes = dart_transport_required_memory(transport_cfg);
-    o->transport = (uint8_t*)i_dart_bump_take(b, o->transport_bytes, 16);
-#ifdef DART_SHM
+static void i_ramble_node_layout(i_RambleBump *b, uint16_t max_peers, uint16_t max_topics,
+                              const RambleConfig *transport_cfg,
+                              const RambleDiscoveryNetConfig *discovery_rt_cfg, i_RambleNodeBlocks *o){
+    o->handles       = (uint8_t*)i_ramble_bump_take(b, (size_t)max_topics * sizeof(RambleTopic*), 16);
+    o->node_core_bytes = i_ramble_node_core_required_memory(max_topics);   /* no peers here */
+    o->node_core = (uint8_t*)i_ramble_bump_take(b, o->node_core_bytes, 16);
+    o->transport_bytes = ramble_transport_required_memory(transport_cfg);
+    o->transport = (uint8_t*)i_ramble_bump_take(b, o->transport_bytes, 16);
+#ifdef RAMBLE_SHM
     /* only the (topic, class) segment pointer table lives in the arena */
-    o->shm_pool = (uint8_t*)i_dart_bump_take(b, (size_t)max_topics * DART_SHM_N_CLASSES * sizeof(void*), 16);
+    o->shm_pool = (uint8_t*)i_ramble_bump_take(b, (size_t)max_topics * RAMBLE_SHM_N_CLASSES * sizeof(void*), 16);
 #endif
-    o->discovery_bytes = dart_discovery_placement_memory(discovery_rt_cfg);
-    o->discovery = (uint8_t*)i_dart_bump_take(b, o->discovery_bytes, 16);
+    o->discovery_bytes = ramble_discovery_placement_memory(discovery_rt_cfg);
+    o->discovery = (uint8_t*)i_ramble_bump_take(b, o->discovery_bytes, 16);
     /* the RX buffer fits a unicast announce carrying the largest blob we accept, since
        recvfrom drops an oversized datagram and a late joiner has no other path to it */
-    o->rx_buf_bytes = dart_discovery_wire_size(discovery_rt_cfg->discovery.meta_cap);
-    if (o->rx_buf_bytes < DART_DGRAM_MAX) o->rx_buf_bytes = DART_DGRAM_MAX;
-    o->rx_buf = (uint8_t*)i_dart_bump_take(b, o->rx_buf_bytes, 16);
+    o->rx_buf_bytes = ramble_discovery_wire_size(discovery_rt_cfg->discovery.meta_cap);
+    if (o->rx_buf_bytes < RAMBLE_DGRAM_MAX) o->rx_buf_bytes = RAMBLE_DGRAM_MAX;
+    o->rx_buf = (uint8_t*)i_ramble_bump_take(b, o->rx_buf_bytes, 16);
 }
 
 /* Sends one datagram to a peer. 1 when done with it, 0 only on a would block TX full. */
-static int i_dart_node_tx(DartNode *n, uint32_t to, const uint8_t *buf, size_t len){
-    i_DartNodeDest d;
-    if (!i_dart_node_core_resolve(n->core, to, &d)) return 1;   /* the peer vanished */
-    if (i_dart_plat_send(n->fd, buf, len, d.ip, d.port) < 0){
-        if (i_dart_plat_would_block()) return 0;                /* TX full: retry next tick */
+static int i_ramble_node_tx(RambleNode *n, uint32_t to, const uint8_t *buf, size_t len){
+    i_RambleNodeDest d;
+    if (!i_ramble_node_core_resolve(n->core, to, &d)) return 1;   /* the peer vanished */
+    if (i_ramble_plat_send(n->fd, buf, len, d.ip, d.port) < 0){
+        if (i_ramble_plat_would_block()) return 0;                /* TX full: retry next tick */
         {   /* a hard failure: report and drop, reliable data is repaired. Byte 0 is type and
                flags, bytes 1 and 2 the first submessage's topic index */
-            DartEvent e; memset(&e, 0, sizeof e);
-            e.kind = DART_ERROR; e.error = DART_E_SEND; e.peer = to;
-            e.os_error = i_dart_plat_last_socket_error();
+            RambleEvent e; memset(&e, 0, sizeof e);
+            e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_SEND; e.peer = to;
+            e.os_error = i_ramble_plat_last_socket_error();
             e.too_big_bytes = len;
             if (len >= 3){
                 uint16_t idx = (uint16_t)(buf[1] | ((uint16_t)buf[2] << 8));
                 e.topic = idx;
-                e.topic_name = i_dart_node_topic_name(n, idx);
+                e.topic_name = i_ramble_node_topic_name(n, idx);
             }
-            i_dart_node_emit(n, &e);
+            i_ramble_node_emit(n, &e);
         }
     }
     return 1;
 }
 
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
 /* Lazily creates our per topic segment: chunk_bytes is the size class, n_chunks the
  * keep_last, so history slot i binds chunk i. NULL on failure. */
-static i_DartShmPool *i_dart_node_shm_topic_pool(DartNode *n, uint16_t topic_index, uint32_t k, uint16_t keep_last){
-    i_DartShmConfig c; uint8_t *mem; uint64_t seg; size_t idx;
-    if (k >= DART_SHM_N_CLASSES) return NULL;
-    idx = (size_t)topic_index * DART_SHM_N_CLASSES + k;
-    if (n->shm_pool[idx]) return (i_DartShmPool*)n->shm_pool[idx];
+static i_RambleShmPool *i_ramble_node_shm_topic_pool(RambleNode *n, uint16_t topic_index, uint32_t k, uint16_t keep_last){
+    i_RambleShmConfig c; uint8_t *mem; uint64_t seg; size_t idx;
+    if (k >= RAMBLE_SHM_N_CLASSES) return NULL;
+    idx = (size_t)topic_index * RAMBLE_SHM_N_CLASSES + k;
+    if (n->shm_pool[idx]) return (i_RambleShmPool*)n->shm_pool[idx];
     memset(&c, 0, sizeof c);
     seg = n->shm_base | ((uint64_t)topic_index << 3) | (uint64_t)k;   /* class low, topic above */
     c.segment_id = seg;
-    i_dart_shm_seg_name(c.name, seg);
-    c.chunk_bytes = i_dart_shm_class_bytes(k);
+    i_ramble_shm_seg_name(c.name, seg);
+    c.chunk_bytes = i_ramble_shm_class_bytes(k);
     c.n_chunks = keep_last ? keep_last : 1u;
-    mem = (uint8_t*)i_dart_node_alloc(n, NULL, i_dart_shm_state_bytes());   /* stable */
+    mem = (uint8_t*)i_ramble_node_alloc(n, NULL, i_ramble_shm_state_bytes());   /* stable */
     if (!mem) return NULL;
-    n->shm_pool[idx] = i_dart_shm_create(mem, &c);
-    if (!n->shm_pool[idx]) i_dart_node_alloc(n, mem, 0);
-    return (i_DartShmPool*)n->shm_pool[idx];
+    n->shm_pool[idx] = i_ramble_shm_create(mem, &c);
+    if (!n->shm_pool[idx]) i_ramble_node_alloc(n, mem, 0);
+    return (i_RambleShmPool*)n->shm_pool[idx];
 }
 /* Lazily attaches a peer's segment by id and caches it. The cache grows with segments
  * actually attached, so a node with no same host peer holds none. */
-static i_DartShmPool *i_dart_node_shm_reader_pool(DartNode *n, uint64_t seg){
-    uint16_t i; i_DartShmConfig c; uint8_t *mem;
+static i_RambleShmPool *i_ramble_node_shm_reader_pool(RambleNode *n, uint64_t seg){
+    uint16_t i; i_RambleShmConfig c; uint8_t *mem;
     for (i=0;i<n->shm_reader_count;i++)
-        if (n->shm_reader_segments[i]==seg) return (i_DartShmPool*)n->shm_reader_states[i];
+        if (n->shm_reader_segments[i]==seg) return (i_RambleShmPool*)n->shm_reader_states[i];
     if (n->shm_reader_count == n->shm_reader_cap){        /* grow the id and state arrays */
         uint16_t ncap = n->shm_reader_cap ? (uint16_t)(n->shm_reader_cap*2u) : 8u;
         uint64_t *nseg; void **nst;
         if (ncap <= n->shm_reader_cap) return NULL;       /* u16 wrap: an absurd segment count */
-        nseg = (uint64_t*)i_dart_node_alloc(n, n->shm_reader_segments, (size_t)ncap*sizeof(uint64_t));
+        nseg = (uint64_t*)i_ramble_node_alloc(n, n->shm_reader_segments, (size_t)ncap*sizeof(uint64_t));
         if (!nseg) return NULL;
         n->shm_reader_segments = nseg;
-        nst = (void**)i_dart_node_alloc(n, n->shm_reader_states, (size_t)ncap*sizeof(void*));
+        nst = (void**)i_ramble_node_alloc(n, n->shm_reader_states, (size_t)ncap*sizeof(void*));
         if (!nst) return NULL;
         n->shm_reader_states = nst;
         n->shm_reader_cap = ncap;
     }
     memset(&c, 0, sizeof c);
-    c.segment_id = seg; i_dart_shm_seg_name(c.name, seg);     /* attach reads the geometry */
-    mem = (uint8_t*)i_dart_node_alloc(n, NULL, i_dart_shm_state_bytes());
+    c.segment_id = seg; i_ramble_shm_seg_name(c.name, seg);     /* attach reads the geometry */
+    mem = (uint8_t*)i_ramble_node_alloc(n, NULL, i_ramble_shm_state_bytes());
     if (!mem) return NULL;
-    if (!i_dart_shm_attach(mem, &c)){ i_dart_node_alloc(n, mem, 0); return NULL; }
+    if (!i_ramble_shm_attach(mem, &c)){ i_ramble_node_alloc(n, mem, 0); return NULL; }
     n->shm_reader_segments[n->shm_reader_count] = seg;
     n->shm_reader_states[n->shm_reader_count] = mem;
     n->shm_reader_count++;
-    return (i_DartShmPool*)mem;
+    return (i_RambleShmPool*)mem;
 }
-static int i_dart_node_on_shm(void *u, uint16_t topic_index, uint32_t from, const uint8_t *desc){
-    DartNode *n = (DartNode*)u; i_DartShmDesc d; i_DartShmPool *reader_pool; const void *p; uint32_t len;
-    if (!i_dart_shm_desc_decode(&d, desc, DART_SHM_DESC_WIRE)) return 0;
-    reader_pool = i_dart_node_shm_reader_pool(n, d.segment_id);
+static int i_ramble_node_on_shm(void *u, uint16_t topic_index, uint32_t from, const uint8_t *desc){
+    RambleNode *n = (RambleNode*)u; i_RambleShmDesc d; i_RambleShmPool *reader_pool; const void *p; uint32_t len;
+    if (!i_ramble_shm_desc_decode(&d, desc, RAMBLE_SHM_DESC_WIRE)) return 0;
+    reader_pool = i_ramble_node_shm_reader_pool(n, d.segment_id);
     if (!reader_pool) return 0;                                     /* cannot attach: NACK */
-    p = i_dart_shm_read(reader_pool, &d, &len);                       /* the seqlock head */
+    p = i_ramble_shm_read(reader_pool, &d, &len);                       /* the seqlock head */
     if (!p) return 0;                                      /* recycled: NACK, then repair or skip */
     /* one copy out of shared memory so the user owns the bytes */
     if (len > n->shm_scratch_cap){
-        void *new_buf = i_dart_node_alloc(n, n->shm_scratch, len?len:1u);
+        void *new_buf = i_ramble_node_alloc(n, n->shm_scratch, len?len:1u);
         if (!new_buf) return 0;
         n->shm_scratch = new_buf; n->shm_scratch_cap = len;
     }
     memcpy(n->shm_scratch, p, len);
-    if (!i_dart_shm_verify(reader_pool, &d)) return 0;                /* the seqlock tail: torn */
-    if (i_dart_node_deliver(n, topic_index, from, dart_bytes(n->shm_scratch, len)))
+    if (!i_ramble_shm_verify(reader_pool, &d)) return 0;                /* the seqlock tail: torn */
+    if (i_ramble_node_deliver(n, topic_index, from, ramble_bytes(n->shm_scratch, len)))
         return -1;                                         /* the queue is full: park */
     n->shm_rx++;
     return 1;
 }
 #endif
 
-static void i_dart_node_logs_open(DartNode *n);   /* defined with the log API below */
+static void i_ramble_node_logs_open(RambleNode *n);   /* defined with the log API below */
 
-DartAllocator dart_allocator_heap(uint32_t page_size){
-    return dart_allocator_dynamic(i_dart_plat_realloc, page_size);
+RambleAllocator ramble_allocator_heap(uint32_t page_size){
+    return ramble_allocator_dynamic(i_ramble_plat_realloc, page_size);
 }
 
-void *dart_heap_realloc(void *user, void *ptr, size_t size){
+void *ramble_heap_realloc(void *user, void *ptr, size_t size){
     (void)user;
-    return i_dart_plat_realloc(ptr, size);
+    return i_ramble_plat_realloc(ptr, size);
 }
 
-DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_message, DartEventFn on_event, const DartNodeOpts *opts){
-    DartNodeOpts o; DartDiscoveryNetConfig dc; DartConfig tc; i_DartNodeBlocks blocks;
+RambleNode *ramble_node_open(RambleAllocator *alloc, const char *name, RambleMsgFn on_message, RambleEventFn on_event, const RambleNodeOpts *opts){
+    RambleNodeOpts o; RambleDiscoveryNetConfig dc; RambleConfig tc; i_RambleNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
-    uint8_t *base; void *arena; size_t need; DartAllocator pool;
-    DartNode *n; i_DartSock fd; uint16_t local_port;
-    char node_name[DART_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
+    uint8_t *base; void *arena; size_t need; RambleAllocator pool;
+    RambleNode *n; i_RambleSock fd; uint16_t local_port;
+    char node_name[RAMBLE_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
 
     memset(&o, 0, sizeof o);
     if (opts) o = *opts;
     /* a node has no memory of its own, so no allocator is the same fault as one that
        returns NULL. Reported, never a bare NULL with an empty last error. */
-    if (!alloc) return i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, sizeof *n);
+    if (!alloc) return i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_OOM, 0, 0, sizeof *n);
     user_topics = o.max_topics ? o.max_topics : 8;
     /* the builtins ride outside the app's budget, in a block above it */
     max_topics = (uint16_t)(user_topics + (o.disable_logs ? 0 : 3));
-#ifndef DART_NO_PATTERNS
+#ifndef RAMBLE_NO_PATTERNS
     max_topics = (uint16_t)(max_topics + (o.disable_meta ? 0 : 2));
 #endif
     max_peers    = o.discovery.max_peers ? o.discovery.max_peers : 16;
@@ -809,9 +809,9 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     dc.discovery.announce_interval_us = o.discovery.announce_interval_us;
     dc.discovery.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.discovery.max_peers   = max_peers;
-    dc.discovery.meta_cap = dart_meta_cap(max_topics);
-    dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* the core's scratch */
-    dc.discovery.alloc = i_dart_node_alloc;   /* per peer blobs at their size. Set before sizing so
+    dc.discovery.meta_cap = ramble_meta_cap(max_topics);
+    dc.discovery.peer_user_bytes = i_ramble_node_core_peer_user_bytes();   /* the core's scratch */
+    dc.discovery.alloc = i_ramble_node_alloc;   /* per peer blobs at their size. Set before sizing so
                                                  measure and place agree. alloc_user is set below */
     dc.group                 = o.net.discovery_group;
     dc.discovery_port        = o.net.discovery_port;
@@ -824,45 +824,45 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
     tc.frag_size= o.net.fragment_size;
-    tc.allocator   = i_dart_node_alloc;   /* required by dart_transport_init */
+    tc.allocator   = i_ramble_node_alloc;   /* required by ramble_transport_init */
 
-    {   i_DartBump b; memset(&b,0,sizeof b);
-        i_dart_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks);
+    {   i_RambleBump b; memset(&b,0,sizeof b);
+        i_ramble_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks);
         need = b.offset + 32u; }
 
     /* The node copies the caller's allocator into its own pool, so the caller's may be a
        temporary. The node struct stays put across a grow, the arena is relocated. */
     pool = *alloc;
-    n = (DartNode*)dart_allocator_alloc(&pool, NULL, sizeof *n);
-    if (!n) return i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, sizeof *n);
+    n = (RambleNode*)ramble_allocator_alloc(&pool, NULL, sizeof *n);
+    if (!n) return i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_OOM, 0, 0, sizeof *n);
     memset(n, 0, sizeof *n);
     n->pool = pool;                                  /* the node owns the pool now */
     n->alloc_dynamic = (alloc->page_realloc != NULL);
-    arena = dart_allocator_alloc(&n->pool, NULL, need);
-    if (!arena){ DartAllocator p = n->pool; dart_allocator_reset(&p);
-                 return i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, need); }
+    arena = ramble_allocator_alloc(&n->pool, NULL, need);
+    if (!arena){ RambleAllocator p = n->pool; ramble_allocator_reset(&p);
+                 return i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_OOM, 0, 0, need); }
     base = (uint8_t*)(((uintptr_t)arena+15u)&~(uintptr_t)15u);
-    {   i_DartBump b; memset(&b,0,sizeof b);
+    {   i_RambleBump b; memset(&b,0,sizeof b);
         b.base = base; b.cap = need - (size_t)(base - (uint8_t*)arena);
-        i_dart_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks); }
+        i_ramble_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks); }
 
-    if (!i_dart_plat_startup()){
-        DartAllocator p = n->pool; dart_allocator_reset(&p);
-        return i_dart_node_open_fail(on_event, o.user_data, DART_E_PLATFORM, 0, 0, 0);
+    if (!i_ramble_plat_startup()){
+        RambleAllocator p = n->pool; ramble_allocator_reset(&p);
+        return i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_PLATFORM, 0, 0, 0);
     }
 
-    n->fd = DART_SOCK_BAD;
+    n->fd = RAMBLE_SOCK_BAD;
     n->user_data = o.user_data;      /* set early so emit can stamp any open time error */
     n->on_event = on_event;
-#ifdef DART_THREADS
-    i_dart_plat_mutex_init(&n->mu);
-    i_dart_plat_cond_init(&n->cv);
+#ifdef RAMBLE_THREADS
+    i_ramble_plat_mutex_init(&n->mu);
+    i_ramble_plat_cond_init(&n->cv);
     /* opened for every node: it also wakes a plain poll when another thread sends. A
        platform whose loopback cannot carry it degrades, reported once. See spec/node.md */
-    if (!i_dart_plat_waker_open(&n->waker)){
-        DartEvent e; memset(&e, 0, sizeof e);
-        e.kind = DART_ERROR; e.error = DART_E_WAKER;
-        i_dart_node_emit(n, &e);
+    if (!i_ramble_plat_waker_open(&n->waker)){
+        RambleEvent e; memset(&e, 0, sizeof e);
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_WAKER;
+        i_ramble_node_emit(n, &e);
     }
 #endif
     n->domain = o.domain;
@@ -871,39 +871,39 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
                                                       : 3000000u;   /* discovery's default */
     n->match_wait_us = o.match_wait_ms < 0 ? 0u
                      : o.match_wait_ms ? (uint32_t)o.match_wait_ms * 1000u
-                                       : (uint32_t)DART_MATCH_WAIT_MS * 1000u;
+                                       : (uint32_t)RAMBLE_MATCH_WAIT_MS * 1000u;
     n->match_epoch = 1;   /* a topic memo at 0 = never computed, so a first send always checks */
     n->user_on_message = on_message;
     n->arena = arena;
-    n->handles = (DartTopic**)blocks.handles;
-    memset(n->handles, 0, (size_t)max_topics * sizeof(DartTopic*));
+    n->handles = (RambleTopic**)blocks.handles;
+    memset(n->handles, 0, (size_t)max_topics * sizeof(RambleTopic*));
     n->rx_buf = blocks.rx_buf; n->rx_buf_bytes = blocks.rx_buf_bytes;
     n->max_topics = max_topics;
     n->builtin_lo = user_topics;           /* the builtin block sits above the app's budget */
     n->max_peers = max_peers;
     n->meta_cap = dc.discovery.meta_cap;   /* the initial accept bound, self heals up */
 
-    tc.on_message = i_dart_node_on_message;     /* wrapped so on_message receives a DartMsg */
-    tc.on_event   = i_dart_node_on_transport_event;
-    tc.schema_check = i_dart_node_schema_check;
-    tc.source_time = i_dart_node_source_time;
+    tc.on_message = i_ramble_node_on_message;     /* wrapped so on_message receives a RambleMsg */
+    tc.on_event   = i_ramble_node_on_transport_event;
+    tc.schema_check = i_ramble_node_schema_check;
+    tc.source_time = i_ramble_node_source_time;
     tc.user       = n;
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
     n->shm_capable = (uint8_t)(n->alloc_dynamic && !o.disable_shm);   /* never in static mode */
     if (n->shm_capable){
-        i_dart_plat_host_uuid(n->shm_host);
-        if (!i_dart_plat_random(&n->shm_base, sizeof n->shm_base)) n->shm_base = i_dart_plat_pid();
-        n->shm_base ^= (uint64_t)i_dart_plat_pid() << 32;    /* unique per process */
+        i_ramble_plat_host_uuid(n->shm_host);
+        if (!i_ramble_plat_random(&n->shm_base, sizeof n->shm_base)) n->shm_base = i_ramble_plat_pid();
+        n->shm_base ^= (uint64_t)i_ramble_plat_pid() << 32;    /* unique per process */
         n->shm_base &= ~(((uint64_t)1u << 19) - 1u);       /* low 19 bits: 3 class, 16 topic */
         if (n->shm_base == 0) n->shm_base = (uint64_t)1u << 19;
     }
-    tc.on_shm = i_dart_node_on_shm;
+    tc.on_shm = i_ramble_node_on_shm;
 #endif
 
-    n->transport = dart_transport_init(blocks.transport, blocks.transport_bytes, &tc);
-    if (!n->transport){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, 0); goto fail_threads; }
-#ifdef DART_SHM
-    {   uint32_t n_segments = (uint32_t)max_topics * DART_SHM_N_CLASSES; uint32_t i;
+    n->transport = ramble_transport_init(blocks.transport, blocks.transport_bytes, &tc);
+    if (!n->transport){ (void)i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_OOM, 0, 0, 0); goto fail_threads; }
+#ifdef RAMBLE_SHM
+    {   uint32_t n_segments = (uint32_t)max_topics * RAMBLE_SHM_N_CLASSES; uint32_t i;
         n->shm_n_topics = max_topics;
         n->shm_pool = (void**)blocks.shm_pool;
         for (i=0;i<n_segments;i++) n->shm_pool[i]=NULL;
@@ -913,119 +913,119 @@ DartNode *dart_node_open(DartAllocator *alloc, const char *name, DartMsgFn on_me
 #endif
 
     /* the sans-IO node core, bound to discovery's peer table below once it exists */
-    node_name_len = dart_discovery_default_name(node_name, sizeof node_name, name);
+    node_name_len = ramble_discovery_default_name(node_name, sizeof node_name, name);
     memcpy(n->name, node_name, node_name_len); n->name[node_name_len] = '\0';   /* snapshot copy */
     n->name_len = node_name_len;
-    {   i_DartNodeCoreConfig cc;
+    {   i_RambleNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
-        cc.transport = n->transport;   /* cc.discovery is bound after dart_discovery_place */
-        cc.n_topics = max_topics; cc.frag_size = dart_clamp_frag(o.net.fragment_size);
-        cc.on_event = i_dart_node_on_event; cc.user = n;
-        cc.alloc = i_dart_node_alloc; cc.alloc_user = n;   /* backs the peer schema state */
+        cc.transport = n->transport;   /* cc.discovery is bound after ramble_discovery_place */
+        cc.n_topics = max_topics; cc.frag_size = ramble_clamp_frag(o.net.fragment_size);
+        cc.on_event = i_ramble_node_on_event; cc.user = n;
+        cc.alloc = i_ramble_node_alloc; cc.alloc_user = n;   /* backs the peer schema state */
         cc.fetch_details = o.fetch_details;
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif
-        n->core = i_dart_node_core_init(blocks.node_core, blocks.node_core_bytes, &cc);
-        if (!n->core){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_OOM, 0, 0, 0); goto fail_threads; }
+        n->core = i_ramble_node_core_init(blocks.node_core, blocks.node_core_bytes, &cc);
+        if (!n->core){ (void)i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_OOM, 0, 0, 0); goto fail_threads; }
     }
 
     /* the data socket is bound before discovery opens so we advertise its real port. No
        reuse: a unicast endpoint owns its port, so a collision fails loudly here */
-    fd = i_dart_plat_udp_open();
-    if (fd==DART_SOCK_BAD){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_SOCKET, i_dart_plat_last_socket_error(), 0, 0); goto fail_threads; }
+    fd = i_ramble_plat_udp_open();
+    if (fd==RAMBLE_SOCK_BAD){ (void)i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_SOCKET, i_ramble_plat_last_socket_error(), 0, 0); goto fail_threads; }
     n->fd=fd;                       /* owned now: fail_sock closes it */
-    if (!i_dart_plat_bind(fd, 0, o.net.data_port, 0)){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_BIND, i_dart_plat_last_socket_error(), o.net.data_port, 0); goto fail_sock; }
-    local_port = i_dart_plat_local_port(fd);
-    if (local_port==0){ (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_SOCKET, 0, 0, 0); goto fail_sock; }
-    i_dart_plat_set_nonblock(fd);   /* never block in recv or send, poll drains the queue */
-    i_dart_plat_suppress_connreset(fd);  /* suppress WSAECONNRESET from a bounced send */
-    if (o.net.recv_buffer_bytes) i_dart_plat_set_rcvbuf(fd, (int)o.net.recv_buffer_bytes);
-    if (o.net.send_buffer_bytes) i_dart_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
+    if (!i_ramble_plat_bind(fd, 0, o.net.data_port, 0)){ (void)i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_BIND, i_ramble_plat_last_socket_error(), o.net.data_port, 0); goto fail_sock; }
+    local_port = i_ramble_plat_local_port(fd);
+    if (local_port==0){ (void)i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_SOCKET, 0, 0, 0); goto fail_sock; }
+    i_ramble_plat_set_nonblock(fd);   /* never block in recv or send, poll drains the queue */
+    i_ramble_plat_suppress_connreset(fd);  /* suppress WSAECONNRESET from a bounced send */
+    if (o.net.recv_buffer_bytes) i_ramble_plat_set_rcvbuf(fd, (int)o.net.recv_buffer_bytes);
+    if (o.net.send_buffer_bytes) i_ramble_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
     /* our advertised locator: the port we really bound and no address, unless the caller
        states one outright. See docs/discovery.md */
     dc.discovery.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
     if (o.net.self_ip){
-        uint32_t naddr = i_dart_plat_parse_ip(o.net.self_ip);
+        uint32_t naddr = i_ramble_plat_parse_ip(o.net.self_ip);
         /* 0 and 0xFFFFFFFF are inet_addr's failure value and the broadcast address, neither
            a unicast locator, so a bad string is a config error */
         if (!naddr || naddr == 0xFFFFFFFFu){
-            (void)i_dart_node_open_fail(on_event, o.user_data, DART_E_BAD_ADDRESS, 0, 0, 0);
+            (void)i_ramble_node_open_fail(on_event, o.user_data, RAMBLE_E_BAD_ADDRESS, 0, 0, 0);
             goto fail_sock;
         }
-        i_dart_plat_naddr_to_ip4(naddr, dc.discovery.self_ip);
+        i_ramble_plat_naddr_to_ip4(naddr, dc.discovery.self_ip);
         dc.discovery.self_ip_len = 4;
     }
 
-    dc.discovery.on_event = i_dart_node_core_on_disc_event;   /* the core demuxes peer events */
+    dc.discovery.on_event = i_ramble_node_core_on_disc_event;   /* the core demuxes peer events */
     dc.discovery.user     = n->core;
     dc.discovery.alloc_user = n;               /* the blob hook allocates from the node's pool */
-    dc.discovery.name     = dart_string(node_name, node_name_len);   /* discovery owned */
+    dc.discovery.name     = ramble_string(node_name, node_name_len);   /* discovery owned */
     /* the core builds our overlay, discovery wraps it in its blob after the locator and name */
-    i_dart_node_core_build_meta(n->core);
-    dc.discovery.meta = i_dart_node_core_meta(n->core);
-    n->discovery = dart_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
+    i_ramble_node_core_build_meta(n->core);
+    dc.discovery.meta = i_ramble_node_core_meta(n->core);
+    n->discovery = ramble_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
     if (!n->discovery){
-        DartErrorKind err;   /* discovery's setup failure in our vocabulary */
-        switch (dart_discovery_last_error()){
-        case DART_DISCOVERY_E_PLATFORM:   err = DART_E_PLATFORM;   break;
-        case DART_DISCOVERY_E_SOCKET:     err = DART_E_SOCKET;     break;
-        case DART_DISCOVERY_E_BIND:       err = DART_E_BIND;       break;
-        case DART_DISCOVERY_E_MCAST_JOIN: err = DART_E_MCAST_JOIN; break;
-        default:                          err = DART_E_OOM;        break;
+        RambleErrorKind err;   /* discovery's setup failure in our vocabulary */
+        switch (ramble_discovery_last_error()){
+        case RAMBLE_DISCOVERY_E_PLATFORM:   err = RAMBLE_E_PLATFORM;   break;
+        case RAMBLE_DISCOVERY_E_SOCKET:     err = RAMBLE_E_SOCKET;     break;
+        case RAMBLE_DISCOVERY_E_BIND:       err = RAMBLE_E_BIND;       break;
+        case RAMBLE_DISCOVERY_E_MCAST_JOIN: err = RAMBLE_E_MCAST_JOIN; break;
+        default:                          err = RAMBLE_E_OOM;        break;
         }
-        (void)i_dart_node_open_fail(on_event, o.user_data, err, dart_discovery_last_os_error(),
+        (void)i_ramble_node_open_fail(on_event, o.user_data, err, ramble_discovery_last_os_error(),
                                     o.net.discovery_port, 0);
         goto fail_sock;
     }
     /* the node core delegates address resolution and per peer scratch to discovery's table */
-    i_dart_node_core_bind_discovery(n->core, dart_discovery_state(n->discovery));
-    i_dart_node_core_set_self_name(n->core, dart_string(n->name, strlen(n->name)));
+    i_ramble_node_core_bind_discovery(n->core, ramble_discovery_state(n->discovery));
+    i_ramble_node_core_set_self_name(n->core, ramble_string(n->name, strlen(n->name)));
 
     /* every unicast discovery send goes out of the data socket, so a NAT's per flow
        mappings are the ones the data will use. See spec/discovery.md */
-    dart_discovery_set_tx_fd(n->discovery, fd);
+    ramble_discovery_set_tx_fd(n->discovery, fd);
 
     /* the post open gather anchor: discovery solicits on startup, so every peer already
        out there answers within an RTT of the first poll */
-    n->open_us = i_dart_plat_now_us();
+    n->open_us = i_ramble_plat_now_us();
 
     /* the builtins last, since they create topics. A failed creation degrades and never
        fails the open */
     n->log_errors = (uint8_t)(!o.disable_error_logs && !o.disable_logs);
     n->creating_builtin = 1;               /* allocate from the builtin block */
-    if (!o.disable_logs) i_dart_node_logs_open(n);
-#ifndef DART_NO_PATTERNS
-    if (!o.disable_meta) i_dart_patterns_meta_open(n);
+    if (!o.disable_logs) i_ramble_node_logs_open(n);
+#ifndef RAMBLE_NO_PATTERNS
+    if (!o.disable_meta) i_ramble_patterns_meta_open(n);
 #endif
     n->creating_builtin = 0;
     return n;
 
 fail_sock:
-    if (n->fd != DART_SOCK_BAD) i_dart_plat_close(n->fd);
-    n->fd = DART_SOCK_BAD;
+    if (n->fd != RAMBLE_SOCK_BAD) i_ramble_plat_close(n->fd);
+    n->fd = RAMBLE_SOCK_BAD;
 fail_threads:
-#ifdef DART_THREADS
-    if (n->waker.fd != DART_SOCK_BAD) i_dart_plat_waker_close(&n->waker);
-    i_dart_plat_cond_destroy(&n->cv);
-    i_dart_plat_mutex_destroy(&n->mu);
+#ifdef RAMBLE_THREADS
+    if (n->waker.fd != RAMBLE_SOCK_BAD) i_ramble_plat_waker_close(&n->waker);
+    i_ramble_plat_cond_destroy(&n->cv);
+    i_ramble_plat_mutex_destroy(&n->mu);
 #endif
-    i_dart_plat_cleanup();
-    { DartAllocator p = n->pool; dart_allocator_reset(&p); }   /* frees the node struct and arena */
+    i_ramble_plat_cleanup();
+    { RambleAllocator p = n->pool; ramble_allocator_reset(&p); }   /* frees the node struct and arena */
     return NULL;
 }
 
 /* Dynamic mode growth: relocates the node into a bigger arena at the given counts. Message
  * buffers, SHM segments and the user held handles stay put. 0 leaves n unchanged. */
-static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_max_topics,
+static int i_ramble_node_grow(RambleNode *n, uint16_t new_max_peers, uint16_t new_max_topics,
                             uint16_t want_meta_cap){
-    DartConfig tc; DartDiscoveryNetConfig dc; i_DartNodeBlocks nb; i_DartBump b;
-    DartTransportState *nt; i_DartNodeCore *ncore; DartDiscovery *ndisc;
+    RambleConfig tc; RambleDiscoveryNetConfig dc; i_RambleNodeBlocks nb; i_RambleBump b;
+    RambleTransportState *nt; i_RambleNodeCore *ncore; RambleDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
     uint16_t old_max_topics = n->max_topics;
     /* the accept bound never shrinks: topic derived, previously grown, or requested */
-    uint16_t new_meta_cap = dart_meta_cap(new_max_topics);
+    uint16_t new_meta_cap = ramble_meta_cap(new_max_topics);
     if (n->meta_cap > new_meta_cap) new_meta_cap = n->meta_cap;
     if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
@@ -1035,43 +1035,43 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
 
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
     tc.topics=NULL; tc.n_topics=new_max_topics; tc.max_peers=new_max_peers;
-    tc.allocator=i_dart_node_alloc; tc.frag_size=n->net.fragment_size;
+    tc.allocator=i_ramble_node_alloc; tc.frag_size=n->net.fragment_size;
     dc.discovery.max_peers=new_max_peers; dc.discovery.meta_cap=new_meta_cap;
-    dc.discovery.peer_user_bytes = i_dart_node_core_peer_user_bytes();   /* scratch to match */
+    dc.discovery.peer_user_bytes = i_ramble_node_core_peer_user_bytes();   /* scratch to match */
     /* sizing must match the live core's hook mode: no arena blob pool */
-    dc.discovery.alloc = i_dart_node_alloc; dc.discovery.alloc_user = n;
+    dc.discovery.alloc = i_ramble_node_alloc; dc.discovery.alloc_user = n;
 
     memset(&b,0,sizeof b);
-    i_dart_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
+    i_ramble_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
     need = b.offset + 32u;
-    new_arena = dart_allocator_alloc(&n->pool, NULL, need);
+    new_arena = ramble_allocator_alloc(&n->pool, NULL, need);
     if (!new_arena) return 0;
     nbase = (uint8_t*)(((uintptr_t)new_arena+15u)&~(uintptr_t)15u);
     memset(&b,0,sizeof b); b.base=nbase; b.cap=need-(size_t)(nbase-(uint8_t*)new_arena);
-    i_dart_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
+    i_ramble_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
 
     /* migrate the three cores. Each leaves the old intact, so a failure frees the new
        arena and the old node keeps running, only refusing the growth */
-    nt = dart_transport_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_topics);
-    if (!nt){ dart_allocator_alloc(&n->pool, new_arena, 0); return 0; }
-    ncore = i_dart_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_topics);
-    if (!ncore){ dart_allocator_alloc(&n->pool, new_arena, 0); return 0; }
+    nt = ramble_transport_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_topics);
+    if (!nt){ ramble_allocator_alloc(&n->pool, new_arena, 0); return 0; }
+    ncore = i_ramble_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_topics);
+    if (!ncore){ ramble_allocator_alloc(&n->pool, new_arena, 0); return 0; }
     ncore->transport = nt;                         /* re point the cross layer pointer */
-    i_dart_node_core_build_meta(ncore);              /* rebuild the blob in the new buffer */
-    ndisc = dart_discovery_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
-                                      new_max_peers, new_meta_cap, i_dart_node_core_meta(ncore).data, ncore);
-    if (!ndisc){ dart_allocator_alloc(&n->pool, new_arena, 0); return 0; }
-    i_dart_node_core_bind_discovery(ncore, dart_discovery_state(ndisc));   /* the relocated table */
+    i_ramble_node_core_build_meta(ncore);              /* rebuild the blob in the new buffer */
+    ndisc = ramble_discovery_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
+                                      new_max_peers, new_meta_cap, i_ramble_node_core_meta(ncore).data, ncore);
+    if (!ndisc){ ramble_allocator_alloc(&n->pool, new_arena, 0); return 0; }
+    i_ramble_node_core_bind_discovery(ncore, ramble_discovery_state(ndisc));   /* the relocated table */
 
     /* the handle pointer array. The handle structs are stable and do not move */
-    memcpy(nb.handles, n->handles, (size_t)old_max_topics*sizeof(DartTopic*));
-    memset((DartTopic**)nb.handles + old_max_topics, 0,
-           (size_t)(new_max_topics-old_max_topics)*sizeof(DartTopic*));
+    memcpy(nb.handles, n->handles, (size_t)old_max_topics*sizeof(RambleTopic*));
+    memset((RambleTopic**)nb.handles + old_max_topics, 0,
+           (size_t)(new_max_topics-old_max_topics)*sizeof(RambleTopic*));
 
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
     if (n->shm_capable){
-        uint32_t old_segs=(uint32_t)n->shm_n_topics*DART_SHM_N_CLASSES;
-        uint32_t new_segs=(uint32_t)new_max_topics*DART_SHM_N_CLASSES, i;
+        uint32_t old_segs=(uint32_t)n->shm_n_topics*RAMBLE_SHM_N_CLASSES;
+        uint32_t new_segs=(uint32_t)new_max_topics*RAMBLE_SHM_N_CLASSES, i;
         void **np = (void**)nb.shm_pool;
         for (i=0;i<new_segs;i++) np[i]=NULL;
         for (i=0;i<old_segs;i++) np[i]=n->shm_pool[i];   /* only the table moves */
@@ -1081,62 +1081,62 @@ static int i_dart_node_grow(DartNode *n, uint16_t new_max_peers, uint16_t new_ma
 #endif
 
     n->transport=nt; n->core=ncore; n->discovery=ndisc;
-    n->handles=(DartTopic**)nb.handles;
+    n->handles=(RambleTopic**)nb.handles;
     n->rx_buf=nb.rx_buf; n->rx_buf_bytes=nb.rx_buf_bytes;
     n->max_topics=new_max_topics; n->max_peers=new_max_peers;
     n->meta_cap=new_meta_cap;
-    dart_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only */
+    ramble_allocator_alloc(&n->pool, old_arena, 0);    /* control structs only */
     n->arena=new_arena;
     return 1;
 }
 
-/* the local channel table behind DART_SELF reflection: every live handle as a peer sees it */
-static void i_dart_node_reflect_self(DartNode *n){
+/* the local channel table behind RAMBLE_SELF reflection: every live handle as a peer sees it */
+static void i_ramble_node_reflect_self(RambleNode *n){
     uint16_t i;
-    i_dart_node_core_self_begin(n->core);
+    i_ramble_node_core_self_begin(n->core);
     for (i = 0; i < n->max_topics; i++){
-        DartTopic *h = n->handles[i];
-        const DartQos *q;
+        RambleTopic *h = n->handles[i];
+        const RambleQos *q;
         if (!h) continue;
-        q = dart_transport_topic_qos(n->transport, i);
-        i_dart_node_core_self_channel(n->core, i, dart_string(h->name, h->name_len), h->kind, h->role,
+        q = ramble_transport_topic_qos(n->transport, i);
+        i_ramble_node_core_self_channel(n->core, i, ramble_string(h->name, h->name_len), h->kind, h->role,
                                       (uint8_t)(q ? q->reliability : 0),
-                                      dart_transport_topic_attrs(n->transport, i), h->schema);
+                                      ramble_transport_topic_attrs(n->transport, i), h->schema);
     }
-    i_dart_node_core_self_end(n->core);
+    i_ramble_node_core_self_end(n->core);
 }
 
 /* Our own interest changed: re advertise, replay known peers' interest against the new
  * state, stale the converged memos and kick so the announce goes out now. Lock held. */
-static void i_dart_node_readvertise(DartNode *n){
-    i_dart_node_reflect_self(n);
-    i_dart_node_core_build_meta(n->core);
-    dart_discovery_advertise(n->discovery, i_dart_node_core_meta(n->core));
-    dart_discovery_replay(n->discovery);
+static void i_ramble_node_readvertise(RambleNode *n){
+    i_ramble_node_reflect_self(n);
+    i_ramble_node_core_build_meta(n->core);
+    ramble_discovery_advertise(n->discovery, i_ramble_node_core_meta(n->core));
+    ramble_discovery_replay(n->discovery);
     n->match_epoch++;
-    i_dart_node_kick(n);
+    i_ramble_node_kick(n);
 }
 
 /* The shared topic create: the public create and the patterns layer's both funnel here.
  * kind, prefix_bytes and directed stamp the entity, allow_at permits the reserved '@'. */
-static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRole role,
-                              const DartSchema *schema, const DartTopicOpts *opts,
+static RambleTopic *i_ramble_node_create_impl(RambleNode *n, const char *name, RambleRole role,
+                              const RambleSchema *schema, const RambleTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
-                              i_DartSysMsgFn sys_msg, void *sys_user, int allow_at){
-    DartTopicDef def; DartTopic *h; uint16_t idx; int acquired;
+                              i_RambleSysMsgFn sys_msg, void *sys_user, int allow_at){
+    RambleTopicDef def; RambleTopic *h; uint16_t idx; int acquired;
     int reuse = 0;
     if (!n || !name) return NULL;
     if (!allow_at){   /* '@' is reserved for pattern channels */
         const char *s = name;
         while (*s){ if (*s=='@') return NULL; s++; }
     }
-    acquired = i_dart_node_lock(n);
+    acquired = i_ramble_node_lock(n);
     if (!acquired) return NULL;   /* from a callback: a grow would move the arena mid delivery */
     if (n->creating_builtin){
         /* open time builtins fill their block. A full block degrades to no builtin, never a grow */
         idx = (uint16_t)(n->builtin_lo + n->n_builtin);
-        if (idx >= n->max_topics){ i_dart_node_unlock(n, acquired); return NULL; }
-    } else if ((reuse = dart_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
+        if (idx >= n->max_topics){ i_ramble_node_unlock(n, acquired); return NULL; }
+    } else if ((reuse = ramble_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
         /* a retired slot takes this create so churn never grows the table. Same identity,
            kind and schema (find = 2) relinks silently, anything else rebinds. See spec/interest.md */
     } else {
@@ -1145,30 +1145,30 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
             idx = (uint16_t)(idx + n->n_builtin);   /* step over the builtin block */
         if (idx >= n->max_topics){       /* the reserve is full: grow or refuse (static) */
             uint16_t want = n->max_topics < 0x8000u ? (uint16_t)(n->max_topics*2u) : 0xFFFFu;
-            if (want <= n->max_topics || !i_dart_node_grow(n, n->max_peers, want, 0)){
-                i_dart_node_unlock(n, acquired);
+            if (want <= n->max_topics || !i_ramble_node_grow(n, n->max_peers, want, 0)){
+                i_ramble_node_unlock(n, acquired);
                 return NULL;
             }
         }
     }
-    h = (DartTopic*)i_dart_node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
-    if (!h){ i_dart_node_unlock(n, acquired); return NULL; }
+    h = (RambleTopic*)i_ramble_node_alloc(n, NULL, sizeof *h);   /* stable: outlives any arena grow */
+    if (!h){ i_ramble_node_unlock(n, acquired); return NULL; }
     memset(h, 0, sizeof *h);
     if (opts) h->qos = opts->qos;
-    if (opts && opts->reflect_from_mesh && kind == DART_KIND_TOPIC){
+    if (opts && opts->reflect_from_mesh && kind == RAMBLE_KIND_TOPIC){
         /* fill what the caller left unspecified from the mesh: a reader takes the
            provider's schema, a writer the widest every reader accepts */
-        const DartSchema *ms = NULL; uint8_t rel = 0;
+        const RambleSchema *ms = NULL; uint8_t rel = 0;
         h->reflect = 1;
-        i_dart_node_core_reflect_pick(n->core, DART_ENTITY_TOPIC, name, 0,
-                                      dart_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
+        i_ramble_node_core_reflect_pick(n->core, RAMBLE_ENTITY_TOPIC, name, 0,
+                                      ramble_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
         if (!schema) schema = ms;
-        if (!h->qos.reliability) h->qos.reliability = rel ? DART_RELIABLE : DART_BEST_EFFORT;
+        if (!h->qos.reliability) h->qos.reliability = rel ? RAMBLE_RELIABLE : RAMBLE_BEST_EFFORT;
     }
     if (schema){   /* copied into node memory so the caller's schema need not outlive the topic */
-        DartBytes w = dart_schema_wire(schema);
-        h->schema = dart_schema_parse(w.data, w.len, i_dart_node_alloc, n);
-        if (!h->schema){ i_dart_node_alloc(n, h, 0); i_dart_node_unlock(n, acquired); return NULL; }
+        RambleBytes w = ramble_schema_wire(schema);
+        h->schema = ramble_schema_parse(w.data, w.len, i_ramble_node_alloc, n);
+        if (!h->schema){ i_ramble_node_alloc(n, h, 0); i_ramble_node_unlock(n, acquired); return NULL; }
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
@@ -1179,182 +1179,182 @@ static DartTopic *i_dart_node_create_impl(DartNode *n, const char *name, DartRol
         if (reuse){
             /* an identical binding rebinds silently, anything else bumps the slot's
                generation and publishes the rebind under the version the advertise stamps */
-            uint64_t new_hash = h->schema ? dart_schema_hash(h->schema) : 0;
+            uint64_t new_hash = h->schema ? ramble_schema_hash(h->schema) : 0;
             int changed = (reuse != 2)
-                       || (new_hash != i_dart_node_core_topic_schema_hash(n->core, idx));
+                       || (new_hash != i_ramble_node_core_topic_schema_hash(n->core, idx));
             uint32_t rb = changed
-                ? dart_discovery_meta_version(dart_discovery_state(n->discovery)) + 1u : 0u;
-            rc = dart_transport_topic_reuse(n->transport, idx, &def, changed, rb);
-            if (rc == 0 && changed) i_dart_node_core_topic_rebound(n->core, idx);
+                ? ramble_discovery_meta_version(ramble_discovery_state(n->discovery)) + 1u : 0u;
+            rc = ramble_transport_topic_reuse(n->transport, idx, &def, changed, rb);
+            if (rc == 0 && changed) i_ramble_node_core_topic_rebound(n->core, idx);
         } else {
-            rc = dart_transport_topic_define(n->transport, idx, &def);
+            rc = ramble_transport_topic_define(n->transport, idx, &def);
         }
         if (rc != 0){
-            if (h->schema) dart_schema_free(h->schema, i_dart_node_alloc, n);
-            i_dart_node_alloc(n, h, 0);
-            i_dart_node_unlock(n, acquired);
+            if (h->schema) ramble_schema_free(h->schema, i_ramble_node_alloc, n);
+            i_ramble_node_alloc(n, h, 0);
+            i_ramble_node_unlock(n, acquired);
             return NULL;
         }
     }
     h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
     /* a response prefix is followed by [u8 len][message] on the wire, derived from the
        kind so every creator of the kind splits alike */
-    h->prefix_string = (uint8_t)(kind == DART_KIND_FUNC_RSP || kind == DART_KIND_TASK_RSP);
+    h->prefix_string = (uint8_t)(kind == RAMBLE_KIND_FUNC_RSP || kind == RAMBLE_KIND_TASK_RSP);
     h->role = (uint8_t)role;
     h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* the stable name copy, queued views must not point into the arena */
         size_t nl = strlen(name);
-        if (nl > DART_TOPIC_NAME_MAX) nl = DART_TOPIC_NAME_MAX;
+        if (nl > RAMBLE_TOPIC_NAME_MAX) nl = RAMBLE_TOPIC_NAME_MAX;
         memcpy(h->name, name, nl);
         h->name_len = (uint8_t)nl;
     }
     if (def.qos.queue_bytes)   /* queued from creation, best effort on OOM (take retries) */
-        (void)i_dart_node_queue_ensure(n, h, &def.qos);
+        (void)i_ramble_node_queue_ensure(n, h, &def.qos);
     if (h->schema || reuse)   /* advertise and gate with it. A reused slot must also clear
                                  the retired occupant's fingerprint when the new topic is untyped */
-        i_dart_node_core_set_topic_schema(n->core, idx, h->schema);
+        i_ramble_node_core_set_topic_schema(n->core, idx, h->schema);
     n->handles[idx] = h;
     if (n->creating_builtin) n->n_builtin++;
     else if (!reuse) n->n_created++;   /* a reused slot is already inside the dense region */
     /* the handle is installed before the publish: the replay fires peer events into the
        patterns layer and the app, which must never see a half created topic */
-    i_dart_node_readvertise(n);
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_readvertise(n);
+    i_ramble_node_unlock(n, acquired);
     return h;
 }
 
-DartTopic *dart_node_create_topic(DartNode *n, const char *name, DartRole role,
-                                      const DartSchema *schema, const DartTopicOpts *opts){
-    return i_dart_node_create_impl(n, name, role, schema, opts, DART_KIND_TOPIC, 0, 0, 0, NULL, NULL, 0);
+RambleTopic *ramble_node_create_topic(RambleNode *n, const char *name, RambleRole role,
+                                      const RambleSchema *schema, const RambleTopicOpts *opts){
+    return i_ramble_node_create_impl(n, name, role, schema, opts, RAMBLE_KIND_TOPIC, 0, 0, 0, NULL, NULL, 0);
 }
 
-DartTopic *i_dart_node_create_pattern_topic(DartNode *n, const char *name, DartRole role,
-                              const DartSchema *schema, const DartTopicOpts *opts,
+RambleTopic *i_ramble_node_create_pattern_topic(RambleNode *n, const char *name, RambleRole role,
+                              const RambleSchema *schema, const RambleTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
-                              i_DartSysMsgFn on_msg, void *on_msg_user){
-    return i_dart_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, attrs,
+                              i_RambleSysMsgFn on_msg, void *on_msg_user){
+    return i_ramble_node_create_impl(n, name, role, schema, opts, kind, prefix_bytes, directed, attrs,
                                    on_msg, on_msg_user, 1);
 }
 
 /* the built in log topics */
 
-static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data,
+static int i_ramble_node_do_send(RambleNode *n, uint16_t topic_index, RambleBytes data,
                                uint64_t capture_us, int may_wait);
 
-static const char *const i_dart_log_topic_names[3] =
-    { "@dart/log/error", "@dart/log/warn", "@dart/log/info" };
+static const char *const i_ramble_log_topic_names[3] =
+    { "@ramble/log/error", "@ramble/log/warn", "@ramble/log/info" };
 
 /* Creates the three log topics at open: reliable, keep_last = catch_up as the replayable
  * history, publish only, and no backpressure wait. NULL handles on OOM, never a failed open. */
-static void i_dart_node_logs_open(DartNode *n){
-    DartTopicOpts topt; int lvl;
-    n->log_schema = dart_schema_compile(i_dart_node_alloc, n,
-        "DartLog { wall_us: u64, mono_us: u64, text: string }", NULL);
+static void i_ramble_node_logs_open(RambleNode *n){
+    RambleTopicOpts topt; int lvl;
+    n->log_schema = ramble_schema_compile(i_ramble_node_alloc, n,
+        "RambleLog { wall_us: u64, mono_us: u64, text: string }", NULL);
     if (!n->log_schema) return;
     for (lvl = 0; lvl < 3; lvl++){
         memset(&topt, 0, sizeof topt);
-        topt.qos.reliability = DART_RELIABLE;
-        topt.qos.keep_last = topt.qos.catch_up = (lvl == DART_LOG_INFO) ? 8 : 16;
+        topt.qos.reliability = RAMBLE_RELIABLE;
+        topt.qos.keep_last = topt.qos.catch_up = (lvl == RAMBLE_LOG_INFO) ? 8 : 16;
         /* backpressure_wait_us stays 0, so logs never block */
-        n->log_topics[lvl] = i_dart_node_create_impl(n, i_dart_log_topic_names[lvl],
-                                 DART_PUB_ONLY, n->log_schema, &topt,
-                                 DART_KIND_TOPIC, 0, 0, 0, NULL, NULL, 1);
+        n->log_topics[lvl] = i_ramble_node_create_impl(n, i_ramble_log_topic_names[lvl],
+                                 RAMBLE_PUB_ONLY, n->log_schema, &topt,
+                                 RAMBLE_KIND_TOPIC, 0, 0, 0, NULL, NULL, 1);
     }
 }
 
-/* Builds one DartLog message and publishes it on the level's topic. locked = 1 is the
+/* Builds one RambleLog message and publishes it on the level's topic. locked = 1 is the
  * mirror flush under the node lock, 0 the public thread safe path. */
-static int i_dart_node_log_publish(DartNode *n, DartLogLevel level, const char *text,
+static int i_ramble_node_log_publish(RambleNode *n, RambleLogLevel level, const char *text,
                                    size_t text_len, uint64_t wall_us, uint64_t mono_us,
                                    int locked){
-    uint8_t msg[20u + DART_LOG_MAX];   /* the fixed section (16) and the text frame header (4) */
+    uint8_t msg[20u + RAMBLE_LOG_MAX];   /* the fixed section (16) and the text frame header (4) */
     uint32_t len;
-    DartTopic *h = n->log_topics[level];
-    if (!h || !n->log_schema) return DART_ERR_NOSYS;
-    if (!dart_schema_message_default(n->log_schema, msg, sizeof msg)) return DART_ERR_OOM;
-    dart_set_uint(msg, sizeof msg, n->log_schema, "wall_us", wall_us);
-    dart_set_uint(msg, sizeof msg, n->log_schema, "mono_us", mono_us);
-    if (!dart_set_string(msg, sizeof msg, n->log_schema, "text", dart_string(text, text_len)))
-        return DART_ERR_TOO_BIG;
-    len = dart_schema_msg_len(n->log_schema, msg, sizeof msg);
-    if (locked) return i_dart_node_do_send(n, h->index, dart_bytes(msg, len), 0, 0);
-    return dart_topic_send(h, dart_bytes(msg, len), NULL);
+    RambleTopic *h = n->log_topics[level];
+    if (!h || !n->log_schema) return RAMBLE_ERR_NOSYS;
+    if (!ramble_schema_message_default(n->log_schema, msg, sizeof msg)) return RAMBLE_ERR_OOM;
+    ramble_set_uint(msg, sizeof msg, n->log_schema, "wall_us", wall_us);
+    ramble_set_uint(msg, sizeof msg, n->log_schema, "mono_us", mono_us);
+    if (!ramble_set_string(msg, sizeof msg, n->log_schema, "text", ramble_string(text, text_len)))
+        return RAMBLE_ERR_TOO_BIG;
+    len = ramble_schema_msg_len(n->log_schema, msg, sizeof msg);
+    if (locked) return i_ramble_node_do_send(n, h->index, ramble_bytes(msg, len), 0, 0);
+    return ramble_topic_send(h, ramble_bytes(msg, len), NULL);
 }
 
-int dart_node_log(DartNode *n, DartLogLevel level, const char *fmt, ...){
-    char text[DART_LOG_MAX]; int tn;
+int ramble_node_log(RambleNode *n, RambleLogLevel level, const char *fmt, ...){
+    char text[RAMBLE_LOG_MAX]; int tn;
     va_list ap;
-    if (!n || (int)level < 0 || level > DART_LOG_INFO || !fmt) return DART_ERR_NO_TOPIC;
-    if (!n->log_topics[level]) return DART_ERR_NOSYS;
+    if (!n || (int)level < 0 || level > RAMBLE_LOG_INFO || !fmt) return RAMBLE_ERR_NO_TOPIC;
+    if (!n->log_topics[level]) return RAMBLE_ERR_NOSYS;
     va_start(ap, fmt);
     tn = vsnprintf(text, sizeof text, fmt, ap);
     va_end(ap);
     if (tn < 0) tn = 0;                                       /* an encoding error: an empty line */
-    if (tn >= (int)sizeof text) tn = (int)sizeof text - 1;    /* truncated at DART_LOG_MAX */
-    return i_dart_node_log_publish(n, level, text, (size_t)tn,
-                                   i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
+    if (tn >= (int)sizeof text) tn = (int)sizeof text - 1;    /* truncated at RAMBLE_LOG_MAX */
+    return i_ramble_node_log_publish(n, level, text, (size_t)tn,
+                                   i_ramble_plat_wall_us(), i_ramble_plat_now_us(), 0);
 }
 
-int dart_node_log_text(DartNode *n, DartLogLevel level, const char *text, int len){
+int ramble_node_log_text(RambleNode *n, RambleLogLevel level, const char *text, int len){
     size_t tl;
-    if (!n || (int)level < 0 || level > DART_LOG_INFO || !text) return DART_ERR_NO_TOPIC;
-    if (!n->log_topics[level]) return DART_ERR_NOSYS;
+    if (!n || (int)level < 0 || level > RAMBLE_LOG_INFO || !text) return RAMBLE_ERR_NO_TOPIC;
+    if (!n->log_topics[level]) return RAMBLE_ERR_NOSYS;
     tl = len < 0 ? strlen(text) : (size_t)len;
-    if (tl >= DART_LOG_MAX) tl = DART_LOG_MAX - 1;   /* match the variadic path's truncation */
-    return i_dart_node_log_publish(n, level, text, tl,
-                                   i_dart_plat_wall_us(), i_dart_plat_now_us(), 0);
+    if (tl >= RAMBLE_LOG_MAX) tl = RAMBLE_LOG_MAX - 1;   /* match the variadic path's truncation */
+    return i_ramble_node_log_publish(n, level, text, tl,
+                                   i_ramble_plat_wall_us(), i_ramble_plat_now_us(), 0);
 }
 
-DartTopic *dart_node_log_topic(DartNode *n, DartLogLevel level){
-    if (!n || (int)level < 0 || level > DART_LOG_INFO) return NULL;
+RambleTopic *ramble_node_log_topic(RambleNode *n, RambleLogLevel level){
+    if (!n || (int)level < 0 || level > RAMBLE_LOG_INFO) return NULL;
     return n->log_topics[level];
 }
 
 /* Publishes the pending error mirror ring under the lock. A coalesced burst appends its
  * count and overflow between flushes becomes one summary line. */
-static void i_dart_node_log_flush(DartNode *n){
+static void i_ramble_node_log_flush(RambleNode *n){
     uint8_t i, cnt;
-    if (!n->log_topics[DART_LOG_ERROR]){ n->log_pend_n = 0; n->log_pend_dropped = 0; return; }
+    if (!n->log_topics[RAMBLE_LOG_ERROR]){ n->log_pend_n = 0; n->log_pend_dropped = 0; return; }
     n->log_flushing = 1;
     cnt = n->log_pend_n; n->log_pend_n = 0;
     for (i = 0; i < cnt; i++){
-        i_DartLogPend *p = &n->log_pend[i];
+        i_RambleLogPend *p = &n->log_pend[i];
         char line[sizeof p->text + 16]; int ln;
         ln = (p->count > 1) ? snprintf(line, sizeof line, "%s (x%u)", p->text, (unsigned)p->count)
                             : snprintf(line, sizeof line, "%s", p->text);
         if (ln < 0) ln = 0;
         if (ln >= (int)sizeof line) ln = (int)sizeof line - 1;
-        i_dart_node_log_publish(n, DART_LOG_ERROR, line, (size_t)ln, p->wall_us, p->mono_us, 1);
+        i_ramble_node_log_publish(n, RAMBLE_LOG_ERROR, line, (size_t)ln, p->wall_us, p->mono_us, 1);
     }
     if (n->log_pend_dropped){
         char line[64];
         int ln = snprintf(line, sizeof line, "log mirror overflow: %u error events dropped",
                           (unsigned)n->log_pend_dropped);
         n->log_pend_dropped = 0;
-        i_dart_node_log_publish(n, DART_LOG_ERROR, line, (size_t)(ln < 0 ? 0 : ln),
-                                i_dart_plat_wall_us(), i_dart_plat_now_us(), 1);
+        i_ramble_node_log_publish(n, RAMBLE_LOG_ERROR, line, (size_t)(ln < 0 ? 0 : ln),
+                                i_ramble_plat_wall_us(), i_ramble_plat_now_us(), 1);
     }
     n->log_flushing = 0;
 }
 
 /* the longest one poll tick drains RX before yielding to discovery and send */
-#ifndef DART_RX_BUDGET_US
-#define DART_RX_BUDGET_US 5000u
+#ifndef RAMBLE_RX_BUDGET_US
+#define RAMBLE_RX_BUDGET_US 5000u
 #endif
 
 /* Drains the socket into the transport until empty or past the deadline. A full drain
- * avoids NACK storms. Distinct from the public dart_topic_drain. */
-static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
+ * avoids NACK storms. Distinct from the public ramble_topic_drain. */
+static void i_ramble_node_rx_drain(RambleNode *n, i_RambleSock fd, uint64_t deadline){
     uint8_t *buf = n->rx_buf;
     for (;;){
         uint8_t src_ip[4]; uint16_t src_port;
-        int r = i_dart_plat_recv(fd, buf, n->rx_buf_bytes, src_ip, &src_port);
+        int r = i_ramble_plat_recv(fd, buf, n->rx_buf_bytes, src_ip, &src_port);
         if (r<0){
-            if (i_dart_plat_would_block()) break;        /* the queue is empty */
+            if (i_ramble_plat_would_block()) break;        /* the queue is empty */
             {   /* a hard error: report and stop this tick, never spin on a wedged socket */
-                DartEvent e; memset(&e, 0, sizeof e);
-                e.kind = DART_ERROR; e.error = DART_E_RECV; e.os_error = i_dart_plat_last_socket_error();
-                i_dart_node_emit(n, &e);
+                RambleEvent e; memset(&e, 0, sizeof e);
+                e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_RECV; e.os_error = i_ramble_plat_last_socket_error();
+                i_ramble_node_emit(n, &e);
             }
             break;
         }
@@ -1362,68 +1362,68 @@ static void i_dart_node_rx_drain(DartNode *n, i_DartSock fd, uint64_t deadline){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
                 /* a unicast announce aimed at our data port goes to discovery with its
                    source port, so a translated peer's observed source can bind */
-                DartDiscoveryAddr src;
+                RambleDiscoveryAddr src;
                 memset(&src, 0, sizeof src);
                 memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
-                dart_discovery_feed(n->discovery, &src, dart_bytes(buf, (size_t)r));
+                ramble_discovery_feed(n->discovery, &src, ramble_bytes(buf, (size_t)r));
             } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
                 /* the pairwise detail exchange, stateless: a request is answered to its
                    source, a response feeds the pending match cycle. See spec/interest.md */
-                if (buf[4]==DART_DETAIL_REQ){
-                    DartBytes resp = i_dart_node_core_detail_respond(n->core, n->domain,
-                                                                     dart_bytes(buf, (size_t)r));
-                    if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                if (buf[4]==RAMBLE_DETAIL_REQ){
+                    RambleBytes resp = i_ramble_node_core_detail_respond(n->core, n->domain,
+                                                                     ramble_bytes(buf, (size_t)r));
+                    if (resp.len) i_ramble_plat_send(fd, resp.data, resp.len, src_ip, src_port);
                     {   /* the request names the version the peer applied: feed the rebind hold */
                         uint32_t from;
-                        if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from)
-                            && i_dart_node_core_seen_version(n->core, from,
-                                   dart_detail_meta_version(dart_bytes(buf, (size_t)r))))
+                        if (i_ramble_node_core_id_for_addr(n->core, src_ip, src_port, &from)
+                            && i_ramble_node_core_seen_version(n->core, from,
+                                   ramble_detail_meta_version(ramble_bytes(buf, (size_t)r))))
                             n->match_epoch++;
                     }
-                } else if (buf[4]==DART_DETAIL_RESP){
+                } else if (buf[4]==RAMBLE_DETAIL_RESP){
                     uint32_t from;
-                    if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                        i_dart_node_core_apply_details(n->core, n->domain, from,
-                                                       dart_bytes(buf, (size_t)r));
-                } else if (buf[4]==DART_INTEREST_REQ){
+                    if (i_ramble_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                        i_ramble_node_core_apply_details(n->core, n->domain, from,
+                                                       ramble_bytes(buf, (size_t)r));
+                } else if (buf[4]==RAMBLE_INTEREST_REQ){
                     /* interest paging: serve one page. Not a rebind hold confirmation, the
                        peer is still fetching that version */
-                    DartBytes resp = i_dart_node_core_interest_respond(n->core, n->domain,
-                                                                       dart_bytes(buf, (size_t)r));
-                    if (resp.len) i_dart_plat_send(fd, resp.data, resp.len, src_ip, src_port);
-                } else if (buf[4]==DART_INTEREST_RESP){
+                    RambleBytes resp = i_ramble_node_core_interest_respond(n->core, n->domain,
+                                                                       ramble_bytes(buf, (size_t)r));
+                    if (resp.len) i_ramble_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+                } else if (buf[4]==RAMBLE_INTEREST_RESP){
                     uint32_t from;
-                    if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                        i_dart_node_core_apply_interest_page(n->core, n->domain, from,
-                                                             dart_bytes(buf, (size_t)r));
+                    if (i_ramble_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                        i_ramble_node_core_apply_interest_page(n->core, n->domain, from,
+                                                             ramble_bytes(buf, (size_t)r));
                 }
             } else {
                 uint32_t from;
-                if (i_dart_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                    dart_transport_on_datagram(n->transport, from, dart_bytes(buf, (size_t)r), i_dart_plat_now_us());
+                if (i_ramble_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                    ramble_transport_on_datagram(n->transport, from, ramble_bytes(buf, (size_t)r), i_ramble_plat_now_us());
             }
         }
-        if (i_dart_plat_now_us() >= deadline) break;      /* yield to discovery and send */
+        if (i_ramble_plat_now_us() >= deadline) break;      /* yield to discovery and send */
     }
 }
 
 /* threaded mode: the longest a send waits for a poller to hand unsent history to the
  * wire before overwriting it. One kicked pass normally clears it in microseconds. */
-#ifndef DART_UNSENT_WAIT_US
-#define DART_UNSENT_WAIT_US 20000u
+#ifndef RAMBLE_UNSENT_WAIT_US
+#define RAMBLE_UNSENT_WAIT_US 20000u
 #endif
 
 /* Caps a wait at the transport's next timer, discovery's next announce and the patterns
  * tick, so each fires on time with no traffic. Lock held, pure compute. */
-static int i_dart_node_wait_ms(DartNode *n, int timeout_ms){
-    uint64_t next = dart_transport_next_deadline_us(n->transport);
-    uint64_t due  = dart_discovery_next_due_us(dart_discovery_state(n->discovery));
+static int i_ramble_node_wait_ms(RambleNode *n, int timeout_ms){
+    uint64_t next = ramble_transport_next_deadline_us(n->transport);
+    uint64_t due  = ramble_discovery_next_due_us(ramble_discovery_state(n->discovery));
     if (timeout_ms < 0) timeout_ms = 0;
     if (!next || due < next) next = due;   /* due is a real time (0 = now), next 0 = none */
     /* the patterns tick */
     if (n->sys_tick_next && (!next || n->sys_tick_next < next)) next = n->sys_tick_next;
     if (next){
-        uint64_t t0 = i_dart_plat_now_us();
+        uint64_t t0 = i_ramble_plat_now_us();
         uint64_t us = (next > t0) ? next - t0 : 0;
         int ms = (us >= (uint64_t)timeout_ms*1000u) ? timeout_ms   /* rounded up: no busy spin */
                                                     : (int)((us + 999u)/1000u);
@@ -1432,15 +1432,15 @@ static int i_dart_node_wait_ms(DartNode *n, int timeout_ms){
     return timeout_ms;
 }
 
-static int i_dart_node_gather_done(DartNode *n, uint64_t now);   /* defined with the match wait */
+static int i_ramble_node_gather_done(RambleNode *n, uint64_t now);   /* defined with the match wait */
 
 /* One poll tick under the node lock: deferred grows, the wait, discovery's tick, RX drain,
  * TX flush. The one poll body. outer = 1 lets the wait drop the lock. See spec/node.md. */
-static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
-    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
-    i_DartPollfd pfd[5]; int nfds = 0, wait_ms, poll_rc;
+static void i_ramble_node_poll_locked(RambleNode *n, int timeout_ms, int outer){
+    uint8_t buf[RAMBLE_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
+    i_RamblePollfd pfd[5]; int nfds = 0, wait_ms, poll_rc;
     int disc_slot = 0, disc_n = 0;
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
     int waker_slot = -1;
 #endif
 
@@ -1448,7 +1448,7 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
     if (n->grow_pending){
         uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
         n->grow_pending = 0;
-        if (want > n->max_peers) i_dart_node_grow(n, want, n->max_topics, 0);
+        if (want > n->max_peers) i_ramble_node_grow(n, want, n->max_topics, 0);
     }
     /* a peer's blob exceeded the accept bound last tick: raise it, then solicit so the
        peer re sends into buffers that fit. A failed grow is remembered, see spec/node.md */
@@ -1456,122 +1456,122 @@ static void i_dart_node_poll_locked(DartNode *n, int timeout_ms, int outer){
         uint16_t want = n->meta_grow_need;
         n->meta_grow_need = 0;
         if (want > n->meta_cap){
-            if (i_dart_node_grow(n, n->max_peers, n->max_topics, want)){
+            if (i_ramble_node_grow(n, n->max_peers, n->max_topics, want)){
                 n->meta_grow_failed = 0;
-                dart_discovery_solicit(dart_discovery_state(n->discovery));
+                ramble_discovery_solicit(ramble_discovery_state(n->discovery));
             } else
                 n->meta_grow_failed = want;
         }
     }
 
     /* the discovery tick runs after the wait off its revents, so a pass costs one syscall */
-    wait_ms = i_dart_node_wait_ms(n, timeout_ms);
+    wait_ms = i_ramble_node_wait_ms(n, timeout_ms);
     memset(pfd, 0, sizeof pfd);
-    pfd[nfds].fd = n->fd; pfd[nfds].events = DART_POLLIN; nfds++;
-#ifdef DART_THREADS
-    if (n->waker.fd != DART_SOCK_BAD){
+    pfd[nfds].fd = n->fd; pfd[nfds].events = RAMBLE_POLLIN; nfds++;
+#ifdef RAMBLE_THREADS
+    if (n->waker.fd != RAMBLE_SOCK_BAD){
         waker_slot = nfds;
-        pfd[nfds].fd = n->waker.fd; pfd[nfds].events = DART_POLLIN; nfds++;
+        pfd[nfds].fd = n->waker.fd; pfd[nfds].events = RAMBLE_POLLIN; nfds++;
     }
 #endif
     {   /* discovery's sockets join the wait so an announce cuts a long sleep short. The
            fds are stable by value: a grow relocates structs, never sockets */
-        i_DartSock dfds[2]; int i;
-        disc_slot = nfds; disc_n = dart_discovery_pollfds(n->discovery, dfds);
-        for (i = 0; i < disc_n; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = DART_POLLIN; nfds++; }
+        i_RambleSock dfds[2]; int i;
+        disc_slot = nfds; disc_n = ramble_discovery_pollfds(n->discovery, dfds);
+        for (i = 0; i < disc_n; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = RAMBLE_POLLIN; nfds++; }
     }
 
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
     if (outer){
         /* the wait runs unlocked so a sender on another thread is never blocked behind
            it. pollers_sleeping is a counter, several threads may poll the same node */
         n->pollers_sleeping++;
-        i_dart_node_unlock_raw(n);
-        poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
-        i_dart_node_lock_raw(n);
+        i_ramble_node_unlock_raw(n);
+        poll_rc = i_ramble_plat_poll(pfd, nfds, wait_ms);
+        i_ramble_node_lock_raw(n);
         n->pollers_sleeping--;
     } else {
-        poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
+        poll_rc = i_ramble_plat_poll(pfd, nfds, wait_ms);
     }
-    if (waker_slot >= 0 && (pfd[waker_slot].revents & DART_POLLIN)){
+    if (waker_slot >= 0 && (pfd[waker_slot].revents & RAMBLE_POLLIN)){
         /* revents gated, so an idle pass costs no drain syscall. A kick still in flight
            wakes the next wait, which drains and clears it, so no kick is ever lost */
-        i_dart_plat_waker_drain(&n->waker);
+        i_ramble_plat_waker_drain(&n->waker);
         n->wake_signaled = 0;
     }
 #else
     (void)outer;
-    poll_rc = i_dart_plat_poll(pfd, nfds, wait_ms);
+    poll_rc = i_ramble_plat_poll(pfd, nfds, wait_ms);
 #endif
     if (poll_rc < 0){   /* the wait itself failed, a real fault such as a bad fd */
-        DartEvent e; memset(&e, 0, sizeof e);
-        e.kind = DART_ERROR; e.error = DART_E_POLL; e.os_error = i_dart_plat_last_socket_error();
-        i_dart_node_emit(n, &e);
+        RambleEvent e; memset(&e, 0, sizeof e);
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_POLL; e.os_error = i_ramble_plat_last_socket_error();
+        i_ramble_node_emit(n, &e);
     }
 
     /* the discovery tick off this wait's readiness. A failed wait leaves revents zeroed,
        so the clock driven work still runs */
-    dart_discovery_service(n->discovery,
-                           disc_n > 0 && (pfd[disc_slot].revents & DART_POLLIN) != 0,
-                           disc_n > 1 && (pfd[disc_slot + 1].revents & DART_POLLIN) != 0);
-    if (pfd[0].revents & DART_POLLIN)
-        i_dart_node_rx_drain(n, n->fd, i_dart_plat_now_us() + DART_RX_BUDGET_US);
+    ramble_discovery_service(n->discovery,
+                           disc_n > 0 && (pfd[disc_slot].revents & RAMBLE_POLLIN) != 0,
+                           disc_n > 1 && (pfd[disc_slot + 1].revents & RAMBLE_POLLIN) != 0);
+    if (pfd[0].revents & RAMBLE_POLLIN)
+        i_ramble_node_rx_drain(n, n->fd, i_ramble_plat_now_us() + RAMBLE_RX_BUDGET_US);
 
     /* mirrored errors publish now, before the TX pull, so the lines ride this pass */
-    if (n->log_pend_n || n->log_pend_dropped) i_dart_node_log_flush(n);
+    if (n->log_pend_n || n->log_pend_dropped) i_ramble_node_log_flush(n);
 
-    now=i_dart_plat_now_us();
+    now=i_ramble_plat_now_us();
     /* the detail requester: drain queued requests and rearm every active peer once per
        announce interval while any went out. A sweep that sends nothing disarms the timer */
-    if (i_dart_node_core_detail_any(n->core) || (n->next_detail_us && now >= n->next_detail_us)){
-        i_DartNodeDest dst; size_t len; int sent = 0;
+    if (i_ramble_node_core_detail_any(n->core) || (n->next_detail_us && now >= n->next_detail_us)){
+        i_RambleNodeDest dst; size_t len; int sent = 0;
         if (n->next_detail_us && now >= n->next_detail_us)
-            i_dart_node_core_detail_rearm(n->core);
-        while ((len = i_dart_node_core_detail_req_next(n->core, n->domain, buf, sizeof buf, &dst)) != 0){
-            i_dart_plat_send(n->fd, buf, len, dst.ip, dst.port);   /* best effort: retries heal */
+            i_ramble_node_core_detail_rearm(n->core);
+        while ((len = i_ramble_node_core_detail_req_next(n->core, n->domain, buf, sizeof buf, &dst)) != 0){
+            i_ramble_plat_send(n->fd, buf, len, dst.ip, dst.port);   /* best effort: retries heal */
             sent = 1;
         }
         n->next_detail_us = sent ? now + n->announce_us : 0;
     }
     /* the core already consumed any held datagram, so retry it before pulling new */
-    if (n->tx_hold_len && i_dart_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
+    if (n->tx_hold_len && i_ramble_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
         n->tx_hold_len = 0;
     if (!n->tx_hold_len)
-        while (dart_transport_poll_send(n->transport,&to,buf,sizeof buf,&out_len,now)){
-            if (!i_dart_node_tx(n, to, buf, out_len)){
+        while (ramble_transport_poll_send(n->transport,&to,buf,sizeof buf,&out_len,now)){
+            if (!i_ramble_node_tx(n, to, buf, out_len)){
                 memcpy(n->tx_hold, buf, out_len);
                 n->tx_hold_len = out_len; n->tx_hold_peer = to;
                 break;          /* the TX buffer is full: yield this tick */
             }
-            now=i_dart_plat_now_us();
+            now=i_ramble_plat_now_us();
         }
 
     /* latch the post open gather the moment it settles, so a later create's replay events
        cannot reset the quiet clock and make a first send re wait */
-    if (!n->gather_done) (void)i_dart_node_gather_done(n, now);
+    if (!n->gather_done) (void)i_ramble_node_gather_done(n, now);
 
     /* the patterns tick runs under the lock like a callback and returns the next deadline */
-    if (n->sys_tick) n->sys_tick_next = n->sys_tick(n->sys_user, i_dart_plat_now_us());
+    if (n->sys_tick) n->sys_tick_next = n->sys_tick(n->sys_user, i_ramble_plat_now_us());
 
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
     n->work_seq++;
-    if (n->cv_waiters) i_dart_plat_cond_broadcast(&n->cv);   /* acks or TX may have progressed */
+    if (n->cv_waiters) i_ramble_plat_cond_broadcast(&n->cv);   /* acks or TX may have progressed */
 #endif
 }
 
-int dart_node_poll(DartNode *n, int timeout_ms){
+int ramble_node_poll(RambleNode *n, int timeout_ms){
     int acquired;
-    if (!n) return DART_ERR_STATE;
-    acquired = i_dart_node_lock(n);
-#ifdef DART_THREADS
+    if (!n) return RAMBLE_ERR_STATE;
+    acquired = i_ramble_node_lock(n);
+#ifdef RAMBLE_THREADS
     if (!acquired || n->svc_running){
         /* from inside a callback, or a service thread owns the loop: refuse loudly */
-        i_dart_node_unlock(n, acquired);
-        return DART_ERR_STATE;
+        i_ramble_node_unlock(n, acquired);
+        return RAMBLE_ERR_STATE;
     }
 #endif
-    i_dart_node_poll_locked(n, timeout_ms, acquired);
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_poll_locked(n, timeout_ms, acquired);
+    i_ramble_node_unlock(n, acquired);
     return 0;
 }
 
@@ -1579,35 +1579,35 @@ int dart_node_poll(DartNode *n, int timeout_ms){
  * run periodic, then sleep on the condvar or pump. See spec/node.md. */
 typedef struct {
     /* nonzero = the wait is over, *deadline is this iteration's bound, UINT64_MAX = none */
-    int    (*done)(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline);
-    void   (*periodic)(DartNode *n, void *ctx, uint64_t now);   /* optional, NULL = nothing */
+    int    (*done)(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline);
+    void   (*periodic)(RambleNode *n, void *ctx, uint64_t now);   /* optional, NULL = nothing */
     void    *ctx;
     uint64_t cv_cap_us;      /* the longest single sleep, 0 = the whole remaining time */
     int      pump_ms;        /* the pump tick in ms, 0 = the remaining time */
     int      pump_outer;     /* poll_locked's outer flag: 1 lets the pump's wait drop the lock */
     int      pump_after_svc; /* 1 = a service thread stopping under us finishes in the pump,
-                                0 = the wait ends there with DART__WAIT_SVC_GONE */
-} i_DartWait;
+                                0 = the wait ends there with RAMBLE__WAIT_SVC_GONE */
+} i_RambleWait;
 
 /* what ended the wait: the predicate, the deadline, or the service thread going away */
-#define DART__WAIT_DONE     1
-#define DART__WAIT_TIMEOUT  0
-#define DART__WAIT_SVC_GONE (-1)
+#define RAMBLE__WAIT_DONE     1
+#define RAMBLE__WAIT_TIMEOUT  0
+#define RAMBLE__WAIT_SVC_GONE (-1)
 
-static int i_dart_node_wait_until(DartNode *n, const i_DartWait *w){
+static int i_ramble_node_wait_until(RambleNode *n, const i_RambleWait *w){
     for (;;){
-        uint64_t deadline = 0, left, now = i_dart_plat_now_us();
-        if (w->done(n, w->ctx, now, &deadline)) return DART__WAIT_DONE;
-        if (now >= deadline) return DART__WAIT_TIMEOUT;
+        uint64_t deadline = 0, left, now = i_ramble_plat_now_us();
+        if (w->done(n, w->ctx, now, &deadline)) return RAMBLE__WAIT_DONE;
+        if (now >= deadline) return RAMBLE__WAIT_TIMEOUT;
         if (w->periodic) w->periodic(n, w->ctx, now);
         left = deadline - now;
         if (w->cv_cap_us && left > w->cv_cap_us) left = w->cv_cap_us;
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
         if (n->svc_running){
             n->cv_waiters++;
-            i_dart_node_cv_wait(n, left);   /* mu drops: nothing cached survives */
+            i_ramble_node_cv_wait(n, left);   /* mu drops: nothing cached survives */
             n->cv_waiters--;
-            if (!n->svc_running && !w->pump_after_svc) return DART__WAIT_SVC_GONE;
+            if (!n->svc_running && !w->pump_after_svc) return RAMBLE__WAIT_SVC_GONE;
             continue;                       /* stopped under us: the next pass pumps */
         }
 #endif
@@ -1616,39 +1616,39 @@ static int i_dart_node_wait_until(DartNode *n, const i_DartWait *w){
                 uint64_t left_ms = left / 1000u;
                 ms = left < 1000u ? 1 : (left_ms > 0x7FFFFFFFu ? 0x7FFFFFFF : (int)left_ms);
             }
-            i_dart_node_poll_locked(n, ms, w->pump_outer);
+            i_ramble_node_poll_locked(n, ms, w->pump_outer);
         }
     }
 }
 
 /* The kick a wait owes before it sleeps: only a service thread needs telling, a pump is
  * the poller and services the change on its own next tick. */
-static void i_dart_node_wait_kick(DartNode *n, void *ctx, uint64_t now){
+static void i_ramble_node_wait_kick(RambleNode *n, void *ctx, uint64_t now){
     (void)n; (void)ctx; (void)now;
-#ifdef DART_THREADS
-    if (n->svc_running) i_dart_node_kick(n);
+#ifdef RAMBLE_THREADS
+    if (n->svc_running) i_ramble_node_kick(n);
 #endif
 }
 
 /* the send path match wait, see spec/interest.md */
 
-static int i_dart_node_settled(DartNode *n, uint64_t start, uint64_t now);   /* with settle */
+static int i_ramble_node_settled(RambleNode *n, uint64_t start, uint64_t now);   /* with settle */
 
 /* Has the post open gather completed: the settle predicate anchored at open, latched
  * once true. */
-static int i_dart_node_gather_done(DartNode *n, uint64_t now){
+static int i_ramble_node_gather_done(RambleNode *n, uint64_t now){
     if (n->gather_done) return 1;
-    if (!i_dart_node_settled(n, n->open_us, now)) return 0;
+    if (!i_ramble_node_settled(n, n->open_us, now)) return 0;
     n->gather_done = 1;
     return 1;
 }
 
 /* Would a send now race a forming match: 1 while the gather is unsettled or verdicts are
  * in flight, else 0, memoized against the topology epoch. Lock held. */
-static int i_dart_node_topic_unsettled(DartNode *n, DartTopic *h, uint64_t now){
+static int i_ramble_node_topic_unsettled(RambleNode *n, RambleTopic *h, uint64_t now){
     if (h->resolve_epoch == n->match_epoch) return 0;   /* converged at this topology */
-    if (!i_dart_node_gather_done(n, now)) return 1;
-    if (i_dart_node_core_topic_unresolved(n->core, h->index) > 0) return 1;
+    if (!i_ramble_node_gather_done(n, now)) return 1;
+    if (i_ramble_node_core_topic_unresolved(n->core, h->index) > 0) return 1;
     h->resolve_epoch = n->match_epoch;
     return 0;
 }
@@ -1656,53 +1656,53 @@ static int i_dart_node_topic_unsettled(DartNode *n, DartTopic *h, uint64_t now){
 /* The match wait's predicate: done once a subscriber matched, or once matching converged
  * with none. The match count is re read from the transport every call. */
 typedef struct {
-    DartTopic *h;
+    RambleTopic *h;
     uint16_t   index;
     uint64_t   deadline;
     int        matched;   /* the count the wait ended on */
-} i_DartMatchWait;
+} i_RambleMatchWait;
 
-static int i_dart_node_match_wait_done(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_DartMatchWait *c = (i_DartMatchWait*)ctx;
+static int i_ramble_node_match_wait_done(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline){
+    i_RambleMatchWait *c = (i_RambleMatchWait*)ctx;
     *deadline = c->deadline;
-    c->matched = dart_transport_publisher_match_count(n->transport, c->index);
+    c->matched = ramble_transport_publisher_match_count(n->transport, c->index);
     if (c->matched) return 1;
-    return !i_dart_node_topic_unsettled(n, c->h, now);
+    return !i_ramble_node_topic_unsettled(n, c->h, now);
 }
 
 /* Bounded wait for a forming match before a zero subscriber send commits. Returns the
- * matched count. loud fires DART_E_UNMATCHED_SEND on timeout, a pattern write passes 0. */
-static int i_dart_node_match_wait(DartNode *n, uint16_t topic_index, DartTopic *h, int loud){
-    i_DartMatchWait c; i_DartWait w = { 0 };
+ * matched count. loud fires RAMBLE_E_UNMATCHED_SEND on timeout, a pattern write passes 0. */
+static int i_ramble_node_match_wait(RambleNode *n, uint16_t topic_index, RambleTopic *h, int loud){
+    i_RambleMatchWait c; i_RambleWait w = { 0 };
     c.h = h; c.index = topic_index; c.matched = 0;
-    c.deadline = i_dart_plat_now_us() + n->match_wait_us;
-    w.done = i_dart_node_match_wait_done; w.ctx = &c;
+    c.deadline = i_ramble_plat_now_us() + n->match_wait_us;
+    w.done = i_ramble_node_match_wait_done; w.ctx = &c;
     w.cv_cap_us = 50000u;   /* re check the clock: gather settling is partly time driven */
     w.pump_ms   = 1;        /* a nested tick: the lock stays held */
-    if (i_dart_node_wait_until(n, &w) == DART__WAIT_TIMEOUT && loud){
-        DartEvent e; memset(&e, 0, sizeof e);
-        e.kind = DART_ERROR; e.error = DART_E_UNMATCHED_SEND;
-        e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
-        i_dart_node_emit(n, &e);
+    if (i_ramble_node_wait_until(n, &w) == RAMBLE__WAIT_TIMEOUT && loud){
+        RambleEvent e; memset(&e, 0, sizeof e);
+        e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_UNMATCHED_SEND;
+        e.topic = topic_index; e.topic_name = i_ramble_node_topic_name(n, topic_index);
+        i_ramble_node_emit(n, &e);
     }
     return c.matched;
 }
 
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
 /* The threaded flow control wait's predicate: done when neither eviction looms. Unacked
- * history is bounded by qos.backpressure_wait_us, unsent history by DART_UNSENT_WAIT_US. */
+ * history is bounded by qos.backpressure_wait_us, unsent history by RAMBLE_UNSENT_WAIT_US. */
 typedef struct {
     uint16_t index;
     uint64_t rel_deadline;      /* 0 = no reliable bound */
     uint64_t unsent_deadline;
     uint64_t seq0;              /* the work_seq snapshot, the completed pass test */
     int      waited;            /* at least one sleep happened, gates the stats */
-} i_DartSendWait;
+} i_RambleSendWait;
 
-static int i_dart_node_send_wait_done(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_DartSendWait *c = (i_DartSendWait*)ctx;
-    int evict_unacked = c->rel_deadline && dart_transport_send_would_evict(n->transport, c->index);
-    int evict_unsent  = dart_transport_send_would_evict_unsent(n->transport, c->index, NULL, NULL);
+static int i_ramble_node_send_wait_done(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline){
+    i_RambleSendWait *c = (i_RambleSendWait*)ctx;
+    int evict_unacked = c->rel_deadline && ramble_transport_send_would_evict(n->transport, c->index);
+    int evict_unsent  = ramble_transport_send_would_evict_unsent(n->transport, c->index, NULL, NULL);
     (void)now;
     *deadline = evict_unacked ? (c->rel_deadline > c->unsent_deadline ? c->rel_deadline
                                                                      : c->unsent_deadline)
@@ -1716,11 +1716,11 @@ static int i_dart_node_send_wait_done(DartNode *n, void *ctx, uint64_t now, uint
 }
 
 /* the sleep is what the backpressure stats measure, so arm them where sleeping is decided */
-static void i_dart_node_send_wait_tick(DartNode *n, void *ctx, uint64_t now){
-    ((i_DartSendWait*)ctx)->waited = 1;
-    i_dart_node_wait_kick(n, ctx, now);
+static void i_ramble_node_send_wait_tick(RambleNode *n, void *ctx, uint64_t now){
+    ((i_RambleSendWait*)ctx)->waited = 1;
+    i_ramble_node_wait_kick(n, ctx, now);
 }
-#endif /* DART_THREADS */
+#endif /* RAMBLE_THREADS */
 
 /* The unthreaded pump's predicate: done once the send no longer evicts unacked history.
  * It also samples the in pump probe on a timer, after a tick and before the re check. */
@@ -1730,18 +1730,18 @@ typedef struct {
     uint64_t t0, sample_last, interval;
     uint32_t polls, polls_idle;
     int      polled;
-    DartRepairStats prev;
-} i_DartPumpWait;
+    RambleRepairStats prev;
+} i_RamblePumpWait;
 
-static int i_dart_node_pump_wait_done(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_DartPumpWait *c = (i_DartPumpWait*)ctx;
+static int i_ramble_node_pump_wait_done(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline){
+    i_RamblePumpWait *c = (i_RamblePumpWait*)ctx;
     *deadline = c->deadline;
     if (n->pump_probe && c->polled){
         c->polls++;
-        if (dart_transport_repair_pending(n->transport, c->index) == 0) c->polls_idle++;
+        if (ramble_transport_repair_pending(n->transport, c->index) == 0) c->polls_idle++;
         if (now - c->sample_last >= c->interval){
-            DartRepairStats sample_now; DartPumpSample sample;
-            dart_transport_repair_stats(n->transport, c->index, &sample_now);
+            RambleRepairStats sample_now; RamblePumpSample sample;
+            ramble_transport_repair_stats(n->transport, c->index, &sample_now);
             sample.topic           = c->index;
             sample.wait_elapsed_us = now - c->t0;
             sample.interval_us     = now - c->sample_last;
@@ -1753,95 +1753,95 @@ static int i_dart_node_pump_wait_done(DartNode *n, void *ctx, uint64_t now, uint
             c->prev = sample_now; c->sample_last = now; c->polls = 0; c->polls_idle = 0;
         }
     }
-    return !dart_transport_send_would_evict(n->transport, c->index);
+    return !ramble_transport_send_would_evict(n->transport, c->index);
 }
 
-static void i_dart_node_pump_wait_tick(DartNode *n, void *ctx, uint64_t now){
+static void i_ramble_node_pump_wait_tick(RambleNode *n, void *ctx, uint64_t now){
     (void)n; (void)now;
-    ((i_DartPumpWait*)ctx)->polled = 1;   /* a tick runs next: sample on the call after it */
+    ((i_RamblePumpWait*)ctx)->polled = 1;   /* a tick runs next: sample on the call after it */
 }
 
 /* Publishes on a topic index: the match wait, the flow control wait, then SHM or UDP.
  * may_wait = 0 is a reentrant send from a callback: it never blocks or runs the loop. */
-static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes hdr, DartBytes data,
+static int i_ramble_node_do_send_ex(RambleNode *n, uint16_t topic_index, RambleBytes hdr, RambleBytes data,
                                   uint64_t capture_us, int directed, uint32_t to_peer,
                                   int may_wait){
     /* one O(1) count gates the per send fast paths: an unsubscribed topic skips them all */
-    int matched = dart_transport_publisher_match_count(n->transport, topic_index);
-    const DartQos *q = dart_transport_topic_qos(n->transport, topic_index);
+    int matched = ramble_transport_publisher_match_count(n->transport, topic_index);
+    const RambleQos *q = ramble_transport_topic_qos(n->transport, topic_index);
     /* the source stamp is ordinary payload, so every size rule here counts it. qos is
        immutable, so this stays valid across the waits that may re fetch q */
-    size_t ts_bytes = (q && q->no_timestamp) ? 0u : (size_t)DART_TIMESTAMP_BYTES;
-    size_t cap_bytes = (ts_bytes && capture_us) ? (size_t)DART_CAPTURE_BYTES : 0u;
+    size_t ts_bytes = (q && q->no_timestamp) ? 0u : (size_t)RAMBLE_TIMESTAMP_BYTES;
+    size_t cap_bytes = (ts_bytes && capture_us) ? (size_t)RAMBLE_CAPTURE_BYTES : 0u;
     size_t len = ts_bytes + cap_bytes + hdr.len + data.len;
     int guarded = 0;   /* the unsent eviction check runs after the wait */
 
     /* a send to zero subscribers while a match forms waits for it to converge. A topic
        that retains history is exempt, since its history replays. See spec/interest.md */
     if (!matched && topic_index < n->max_topics
-        && !(q && q->reliability == DART_RELIABLE && q->catch_up > 0)){
-        DartTopic *h = n->handles[topic_index];
-        if (h && dart_role_pubs(h->role)
-              && i_dart_node_topic_unsettled(n, h, i_dart_plat_now_us())){
+        && !(q && q->reliability == RAMBLE_RELIABLE && q->catch_up > 0)){
+        RambleTopic *h = n->handles[topic_index];
+        if (h && ramble_role_pubs(h->role)
+              && i_ramble_node_topic_unsettled(n, h, i_ramble_plat_now_us())){
             if (may_wait && n->match_wait_us){
-                matched = i_dart_node_match_wait(n, topic_index, h, 1);
-                q = dart_transport_topic_qos(n->transport, topic_index);   /* the arena may move */
+                matched = i_ramble_node_match_wait(n, topic_index, h, 1);
+                q = ramble_transport_topic_qos(n->transport, topic_index);   /* the arena may move */
             } else {
-                DartEvent e; memset(&e, 0, sizeof e);
-                e.kind = DART_ERROR; e.error = DART_E_UNMATCHED_SEND;
-                e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
-                i_dart_node_emit(n, &e);
+                RambleEvent e; memset(&e, 0, sizeof e);
+                e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_UNMATCHED_SEND;
+                e.topic = topic_index; e.topic_name = i_ramble_node_topic_name(n, topic_index);
+                i_ramble_node_emit(n, &e);
             }
         }
     }
 
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
     if (matched && n->svc_running){
         guarded = 1;
         /* threaded: wait on the condvar for the poller's progress. A service thread that
            stops under us ends the wait, there is no poller left */
         if (may_wait){
-            i_DartSendWait c; i_DartWait w = { 0 };
-            uint64_t t0 = i_dart_plat_now_us();
+            i_RambleSendWait c; i_RambleWait w = { 0 };
+            uint64_t t0 = i_ramble_plat_now_us();
             c.index = topic_index;
             c.rel_deadline = (q && q->backpressure_wait_us) ? t0 + q->backpressure_wait_us : 0;
-            c.unsent_deadline = t0 + DART_UNSENT_WAIT_US;
+            c.unsent_deadline = t0 + RAMBLE_UNSENT_WAIT_US;
             c.seq0 = n->work_seq;
             c.waited = 0;
-            w.done = i_dart_node_send_wait_done; w.periodic = i_dart_node_send_wait_tick;
+            w.done = i_ramble_node_send_wait_done; w.periodic = i_ramble_node_send_wait_tick;
             w.ctx = &c;
             w.pump_ms = 1;   /* a pump is unreachable here, bounded regardless */
-            i_dart_node_wait_until(n, &w);   /* every outcome proceeds: KEEP_LAST applies */
+            i_ramble_node_wait_until(n, &w);   /* every outcome proceeds: KEEP_LAST applies */
             if (c.waited){
-                n->backpressure_total_us += i_dart_plat_now_us() - t0;
+                n->backpressure_total_us += i_ramble_plat_now_us() - t0;
                 n->backpressure_wait_count++;
             }
             /* the poller may have relocated the arena while we slept */
-            q = dart_transport_topic_qos(n->transport, topic_index);
-            matched = dart_transport_publisher_match_count(n->transport, topic_index);
+            q = ramble_transport_topic_qos(n->transport, topic_index);
+            matched = ramble_transport_publisher_match_count(n->transport, topic_index);
         }
     } else
 #endif
     /* no service thread: the bounded backpressure pump runs the loop until a slow reader
        acks or the wait elapses, then sends anyway */
-    if (matched && may_wait && q && q->backpressure_wait_us && dart_transport_send_would_evict(n->transport, topic_index)){
-        i_DartPumpWait c = { 0 }; i_DartWait w = { 0 };
+    if (matched && may_wait && q && q->backpressure_wait_us && ramble_transport_send_would_evict(n->transport, topic_index)){
+        i_RamblePumpWait c = { 0 }; i_RambleWait w = { 0 };
         c.index = topic_index;
-        c.t0 = i_dart_plat_now_us();
+        c.t0 = i_ramble_plat_now_us();
         c.deadline = c.t0 + q->backpressure_wait_us;
         c.sample_last = c.t0;
         c.interval = n->pump_probe_interval_us ? n->pump_probe_interval_us : 200000u;
-        if (n->pump_probe) dart_transport_repair_stats(n->transport, topic_index, &c.prev);
-        w.done = i_dart_node_pump_wait_done; w.periodic = i_dart_node_pump_wait_tick;
+        if (n->pump_probe) ramble_transport_repair_stats(n->transport, topic_index, &c.prev);
+        w.done = i_ramble_node_pump_wait_done; w.periodic = i_ramble_node_pump_wait_tick;
         w.ctx = &c;
         w.pump_ms = 1;   /* a nested tick: the lock stays held */
         guarded = 1;
-        i_dart_node_wait_until(n, &w);
-        n->backpressure_total_us += i_dart_plat_now_us() - c.t0;
+        i_ramble_node_wait_until(n, &w);
+        n->backpressure_total_us += i_ramble_plat_now_us() - c.t0;
         n->backpressure_wait_count++;
         /* a mid pump grow relocates the arena: re derive the cached pointers */
-        q = dart_transport_topic_qos(n->transport, topic_index);
-        matched = dart_transport_publisher_match_count(n->transport, topic_index);
+        q = ramble_transport_topic_qos(n->transport, topic_index);
+        matched = ramble_transport_publisher_match_count(n->transport, topic_index);
     }
 
     /* a send that evicts never sent history is surfaced. The state is read before the
@@ -1849,482 +1849,482 @@ static int i_dart_node_do_send_ex(DartNode *n, uint16_t topic_index, DartBytes h
     {
         uint64_t evict_base = 0; uint32_t evict_count = 0;
         int will_evict = guarded &&
-            dart_transport_send_would_evict_unsent(n->transport, topic_index, &evict_base, &evict_count);
+            ramble_transport_send_would_evict_unsent(n->transport, topic_index, &evict_base, &evict_count);
         int r;
-#ifdef DART_SHM
+#ifdef RAMBLE_SHM
         /* only a message that would fragment gains from SHM, below the fragment size
            inline UDP is strictly cheaper. See spec/transport.md */
-        if (!directed && n->shm_capable && len > dart_transport_frag(n->transport)
+        if (!directed && n->shm_capable && len > ramble_transport_frag(n->transport)
             && topic_index < n->shm_n_topics && matched
-            && dart_transport_publisher_shm_eligible(n->transport, topic_index)){
+            && ramble_transport_publisher_shm_eligible(n->transport, topic_index)){
             uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
             /* a hint pins the topic to one class, else each message uses its own size
                class's segment. Per topic either way */
             uint32_t hint = q ? (q->shm_max_bytes ? q->shm_max_bytes : q->max_message_bytes) : 0u;
-            uint32_t k = i_dart_shm_class_for(hint ? hint : (uint32_t)len);
+            uint32_t k = i_ramble_shm_class_for(hint ? hint : (uint32_t)len);
             /* fits its class: publish via SHM. The chunk index is the history slot this
                send occupies, so chunk i binds slot i */
-            if (k < DART_SHM_N_CLASSES && (uint32_t)len <= i_dart_shm_class_bytes(k)){
-                i_DartShmPool *pool = i_dart_node_shm_topic_pool(n, topic_index, k, keep_last);
-                uint16_t slot = dart_transport_topic_hist_head(n->transport, topic_index);
-                void *chunk_ptr = pool ? i_dart_shm_chunk(pool, slot, NULL) : NULL;
+            if (k < RAMBLE_SHM_N_CLASSES && (uint32_t)len <= i_ramble_shm_class_bytes(k)){
+                i_RambleShmPool *pool = i_ramble_node_shm_topic_pool(n, topic_index, k, keep_last);
+                uint16_t slot = ramble_transport_topic_hist_head(n->transport, topic_index);
+                void *chunk_ptr = pool ? i_ramble_shm_chunk(pool, slot, NULL) : NULL;
                 if (chunk_ptr){
-                    i_DartShmDesc d; uint8_t desc[DART_SHM_DESC_WIRE];
+                    i_RambleShmDesc d; uint8_t desc[RAMBLE_SHM_DESC_WIRE];
                     /* gather the whole wire sample into the chunk: stamp, header, payload,
                        exactly as the inline commit writes it */
                     if (ts_bytes){
-                        uint64_t w = i_dart_plat_wall_us() & DART_STAMP_MASK;
-                        if (cap_bytes) w |= DART_STAMP_CAPTURE;
-                        i_dart_le_w64((uint8_t*)chunk_ptr, w);
-                        if (cap_bytes) i_dart_le_w64((uint8_t*)chunk_ptr + ts_bytes, capture_us);
+                        uint64_t w = i_ramble_plat_wall_us() & RAMBLE_STAMP_MASK;
+                        if (cap_bytes) w |= RAMBLE_STAMP_CAPTURE;
+                        i_ramble_le_w64((uint8_t*)chunk_ptr, w);
+                        if (cap_bytes) i_ramble_le_w64((uint8_t*)chunk_ptr + ts_bytes, capture_us);
                     }
                     if (hdr.len) memcpy((uint8_t*)chunk_ptr + ts_bytes + cap_bytes, hdr.data, hdr.len);
                     memcpy((uint8_t*)chunk_ptr + ts_bytes + cap_bytes + hdr.len, data.data, data.len);
-                    i_dart_shm_stamp(pool, slot, (uint32_t)len, &d);
-                    i_dart_shm_desc_encode(&d, desc);
-                    if (dart_transport_send_shm(n->transport, topic_index, dart_bytes(chunk_ptr, len), desc, i_dart_plat_now_us())==0){
+                    i_ramble_shm_stamp(pool, slot, (uint32_t)len, &d);
+                    i_ramble_shm_desc_encode(&d, desc);
+                    if (ramble_transport_send_shm(n->transport, topic_index, ramble_bytes(chunk_ptr, len), desc, i_ramble_plat_now_us())==0){
                         n->shm_tx++;
-                        r = DART_OK;
+                        r = RAMBLE_OK;
                         goto committed;
                     }
                 }
             }
         }
 #endif
-        r = directed ? dart_transport_send_to(n->transport, topic_index, to_peer, hdr, data,
-                                              capture_us, i_dart_plat_now_us())
-                     : dart_transport_send_hdr(n->transport, topic_index, hdr, data,
-                                               capture_us, i_dart_plat_now_us());
-#ifdef DART_SHM
+        r = directed ? ramble_transport_send_to(n->transport, topic_index, to_peer, hdr, data,
+                                              capture_us, i_ramble_plat_now_us())
+                     : ramble_transport_send_hdr(n->transport, topic_index, hdr, data,
+                                               capture_us, i_ramble_plat_now_us());
+#ifdef RAMBLE_SHM
 committed:
 #endif
-        if (r == DART_OK && topic_index < i_dart_node_topic_hi(n) && n->handles[topic_index]){
-            n->handles[topic_index]->tx_msgs++;                      /* dart_topic_counts */
+        if (r == RAMBLE_OK && topic_index < i_ramble_node_topic_hi(n) && n->handles[topic_index]){
+            n->handles[topic_index]->tx_msgs++;                      /* ramble_topic_counts */
             n->handles[topic_index]->tx_bytes += len;
         }
-        if (r == DART_OK && will_evict){
-            DartEvent e; memset(&e, 0, sizeof e);
+        if (r == RAMBLE_OK && will_evict){
+            RambleEvent e; memset(&e, 0, sizeof e);
             n->evicted_unsent++;
-            e.kind = DART_ERROR; e.error = DART_E_EVICTED_UNSENT;
-            e.topic = topic_index; e.topic_name = i_dart_node_topic_name(n, topic_index);
+            e.kind = RAMBLE_ERROR; e.error = RAMBLE_E_EVICTED_UNSENT;
+            e.topic = topic_index; e.topic_name = i_ramble_node_topic_name(n, topic_index);
             e.lost_first = evict_base; e.lost_count = evict_count;
-            i_dart_node_emit(n, &e);
+            i_ramble_node_emit(n, &e);
         }
         return r;
     }
 }
 
-/* the plain broadcast send, the hot dart_topic_send path */
-static int i_dart_node_do_send(DartNode *n, uint16_t topic_index, DartBytes data,
+/* the plain broadcast send, the hot ramble_topic_send path */
+static int i_ramble_node_do_send(RambleNode *n, uint16_t topic_index, RambleBytes data,
                                uint64_t capture_us, int may_wait){
-    DartBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return i_dart_node_do_send_ex(n, topic_index, nohdr, data, capture_us, 0, 0, may_wait);
+    RambleBytes nohdr; nohdr.data=NULL; nohdr.len=0;
+    return i_ramble_node_do_send_ex(n, topic_index, nohdr, data, capture_us, 0, 0, may_wait);
 }
 
-int dart_topic_send(DartTopic *topic, DartBytes data, const DartSendOpts *opts){
+int ramble_topic_send(RambleTopic *topic, RambleBytes data, const RambleSendOpts *opts){
     int acquired, r;
-    if (!topic) return DART_ERR_NO_TOPIC;
-    acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_do_send(topic->n, topic->index, data,
+    if (!topic) return RAMBLE_ERR_NO_TOPIC;
+    acquired = i_ramble_node_lock(topic->n);
+    r = i_ramble_node_do_send(topic->n, topic->index, data,
                             opts ? opts->capture_us : 0u, acquired);
-    i_dart_node_kick_tx(topic->n);           /* flush the commit now, not at the next tick */
-    i_dart_node_unlock(topic->n, acquired);
+    i_ramble_node_kick_tx(topic->n);           /* flush the commit now, not at the next tick */
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
-int i_dart_topic_send_hdr(DartTopic *topic, DartBytes hdr, DartBytes data){
+int i_ramble_topic_send_hdr(RambleTopic *topic, RambleBytes hdr, RambleBytes data){
     int acquired, r;
-    if (!topic) return DART_ERR_NO_TOPIC;
-    acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, 0, acquired);
-    i_dart_node_kick_tx(topic->n);
-    i_dart_node_unlock(topic->n, acquired);
+    if (!topic) return RAMBLE_ERR_NO_TOPIC;
+    acquired = i_ramble_node_lock(topic->n);
+    r = i_ramble_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, 0, acquired);
+    i_ramble_node_kick_tx(topic->n);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
-uint64_t i_dart_topic_seqno(DartTopic *topic){
-    return topic ? dart_transport_topic_seqno(topic->n->transport, topic->index) : 0;
+uint64_t i_ramble_topic_seqno(RambleTopic *topic){
+    return topic ? ramble_transport_topic_seqno(topic->n->transport, topic->index) : 0;
 }
 
-void i_dart_node_flush_tx(DartNode *n){
-    uint8_t buf[DART_DGRAM_MAX]; uint32_t to; size_t out_len;
+void i_ramble_node_flush_tx(RambleNode *n){
+    uint8_t buf[RAMBLE_DGRAM_MAX]; uint32_t to; size_t out_len;
     int acquired;
-    if (!n || n->fd == DART_SOCK_BAD) return;
-    acquired = i_dart_node_lock(n);
-    if (n->tx_hold_len && i_dart_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
+    if (!n || n->fd == RAMBLE_SOCK_BAD) return;
+    acquired = i_ramble_node_lock(n);
+    if (n->tx_hold_len && i_ramble_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
         n->tx_hold_len = 0;
     if (!n->tx_hold_len)
-        while (dart_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len,
-                                        i_dart_plat_now_us()))
-            if (!i_dart_node_tx(n, to, buf, out_len)) break;   /* TX full: best effort */
-    i_dart_node_unlock(n, acquired);
+        while (ramble_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len,
+                                        i_ramble_plat_now_us()))
+            if (!i_ramble_node_tx(n, to, buf, out_len)) break;   /* TX full: best effort */
+    i_ramble_node_unlock(n, acquired);
 }
 
-void i_dart_topic_clear_sys(DartTopic *topic){
+void i_ramble_topic_clear_sys(RambleTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
     topic->sys_msg_user = NULL;
 }
 
-int i_dart_topic_match_wait(DartTopic *topic){
-    DartNode *n; int acquired, matched;
+int i_ramble_topic_match_wait(RambleTopic *topic){
+    RambleNode *n; int acquired, matched;
     if (!topic) return 0;
     n = topic->n;
-    acquired = i_dart_node_lock(n);
-    matched = dart_transport_publisher_match_count(n->transport, topic->index);
+    acquired = i_ramble_node_lock(n);
+    matched = ramble_transport_publisher_match_count(n->transport, topic->index);
     /* wait only when it can help and can run: a match still forming, the knob on, a
        publishing role, and not from a callback. Converged matching returns at once */
     if (acquired && !matched && n->match_wait_us
-        && dart_role_pubs(topic->role)
-        && i_dart_node_topic_unsettled(n, topic, i_dart_plat_now_us()))
-        matched = i_dart_node_match_wait(n, topic->index, topic, 0);
-    i_dart_node_unlock(n, acquired);
+        && ramble_role_pubs(topic->role)
+        && i_ramble_node_topic_unsettled(n, topic, i_ramble_plat_now_us()))
+        matched = i_ramble_node_match_wait(n, topic->index, topic, 0);
+    i_ramble_node_unlock(n, acquired);
     return matched;
 }
 
-int i_dart_topic_send_to(DartTopic *topic, uint32_t to_peer, DartBytes hdr, DartBytes data){
+int i_ramble_topic_send_to(RambleTopic *topic, uint32_t to_peer, RambleBytes hdr, RambleBytes data){
     int acquired, r;
-    if (!topic) return DART_ERR_NO_TOPIC;
-    acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 1, to_peer, acquired);
-    i_dart_node_kick_tx(topic->n);
-    i_dart_node_unlock(topic->n, acquired);
+    if (!topic) return RAMBLE_ERR_NO_TOPIC;
+    acquired = i_ramble_node_lock(topic->n);
+    r = i_ramble_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 1, to_peer, acquired);
+    i_ramble_node_kick_tx(topic->n);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
 /* The patterns layer's seams. Not lock guarded, the layer calls them under the node lock. */
-void  *i_dart_node_sys_alloc(DartNode *n, void *ptr, size_t size){ return i_dart_node_alloc(n, ptr, size); }
-void **i_dart_node_sys_slot (DartNode *n){ return &n->patterns; }
-uint64_t i_dart_node_now_us (DartNode *n){ (void)n; return i_dart_plat_now_us(); }
-uint64_t i_dart_node_wall_us(DartNode *n){ (void)n; return i_dart_plat_wall_us(); }
+void  *i_ramble_node_sys_alloc(RambleNode *n, void *ptr, size_t size){ return i_ramble_node_alloc(n, ptr, size); }
+void **i_ramble_node_sys_slot (RambleNode *n){ return &n->patterns; }
+uint64_t i_ramble_node_now_us (RambleNode *n){ (void)n; return i_ramble_plat_now_us(); }
+uint64_t i_ramble_node_wall_us(RambleNode *n){ (void)n; return i_ramble_plat_wall_us(); }
 /* The node lock for a pattern call, reentrancy aware like the internal entry lock. No kick
  * on unlock: every mutating path kicks at its own layer, and read only ops must not wake. */
-int  i_dart_node_sys_lock  (DartNode *n){ return i_dart_node_lock(n); }
-void i_dart_node_sys_unlock(DartNode *n, int acquired){ i_dart_node_unlock(n, acquired); }
-int  i_dart_node_sys_poll  (DartNode *n, int timeout_ms){ return dart_node_poll(n, timeout_ms); }
+int  i_ramble_node_sys_lock  (RambleNode *n){ return i_ramble_node_lock(n); }
+void i_ramble_node_sys_unlock(RambleNode *n, int acquired){ i_ramble_node_unlock(n, acquired); }
+int  i_ramble_node_sys_poll  (RambleNode *n, int timeout_ms){ return ramble_node_poll(n, timeout_ms); }
 
-/* A topic scoped DART_ERROR from the patterns layer, through the node's one event path. */
-void i_dart_node_sys_error(DartNode *n, DartErrorKind error, DartTopic *topic, uint32_t peer){
-    DartEvent e;
+/* A topic scoped RAMBLE_ERROR from the patterns layer, through the node's one event path. */
+void i_ramble_node_sys_error(RambleNode *n, RambleErrorKind error, RambleTopic *topic, uint32_t peer){
+    RambleEvent e;
     if (!n) return;
     memset(&e, 0, sizeof e);
-    e.kind = DART_ERROR; e.error = error; e.peer = peer;
-    if (topic){ e.topic = topic->index; e.topic_name = i_dart_node_topic_name(n, topic->index); }
-    i_dart_node_emit(n, &e);
+    e.kind = RAMBLE_ERROR; e.error = error; e.peer = peer;
+    if (topic){ e.topic = topic->index; e.topic_name = i_ramble_node_topic_name(n, topic->index); }
+    i_ramble_node_emit(n, &e);
 }
 
-/* Matched subscribers excluding dormant peers, since dart_topic_match_count keeps counting
+/* Matched subscribers excluding dormant peers, since ramble_topic_match_count keeps counting
  * a dropped but resumable peer. */
-int i_dart_topic_live_match_count(DartTopic *topic){
+int i_ramble_topic_live_match_count(RambleTopic *topic){
     int acquired, r;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_publisher_live_matches(topic->n->transport, topic->index);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_publisher_live_matches(topic->n->transport, topic->index);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
-int i_dart_topic_peer_matched(DartTopic *topic, uint32_t peer){
+int i_ramble_topic_peer_matched(RambleTopic *topic, uint32_t peer){
     int acquired, r;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_publisher_peer_matched(topic->n->transport, topic->index, peer);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_publisher_peer_matched(topic->n->transport, topic->index, peer);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
 /* Matched publishers feeding this topic's subscription side. */
-int i_dart_topic_source_match_count(DartTopic *topic){
+int i_ramble_topic_source_match_count(RambleTopic *topic){
     int acquired, r;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_subscriber_match_count(topic->n->transport, topic->index);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_subscriber_match_count(topic->n->transport, topic->index);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
 /* The oldest live matched subscriber's peer id, 0 = none. */
-uint32_t i_dart_topic_oldest_match(DartTopic *topic){
+uint32_t i_ramble_topic_oldest_match(RambleTopic *topic){
     uint32_t r; int acquired;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_publisher_oldest_match(topic->n->transport, topic->index);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_publisher_oldest_match(topic->n->transport, topic->index);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
-const uint8_t *i_dart_node_uuid(DartNode *n){
-    return n ? dart_discovery_uuid(dart_discovery_state(n->discovery)) : NULL;
+const uint8_t *i_ramble_node_uuid(RambleNode *n){
+    return n ? ramble_discovery_uuid(ramble_discovery_state(n->discovery)) : NULL;
 }
 
 /* Reflection getters for the patterns layer's entity enumeration. */
-uint8_t    i_dart_topic_kind (const DartTopic *topic){ return topic ? topic->kind : 0; }
-uint8_t    i_dart_topic_role (const DartTopic *topic){ return topic ? topic->role : (uint8_t)DART_INACTIVE; }
-uint8_t    i_dart_topic_reliability(const DartTopic *topic){ return topic ? (uint8_t)topic->qos.reliability : 0; }
-const uint8_t *i_dart_node_peer_uuid(DartNode *n, uint32_t peer){
-    const DartDiscoveryState *st; uint16_t q, np; int acquired; const uint8_t *out = NULL;
-    DartDiscoveryPeer v;   /* the uuid is a view into discovery state, the copy only carries it */
+uint8_t    i_ramble_topic_kind (const RambleTopic *topic){ return topic ? topic->kind : 0; }
+uint8_t    i_ramble_topic_role (const RambleTopic *topic){ return topic ? topic->role : (uint8_t)RAMBLE_INACTIVE; }
+uint8_t    i_ramble_topic_reliability(const RambleTopic *topic){ return topic ? (uint8_t)topic->qos.reliability : 0; }
+const uint8_t *i_ramble_node_peer_uuid(RambleNode *n, uint32_t peer){
+    const RambleDiscoveryState *st; uint16_t q, np; int acquired; const uint8_t *out = NULL;
+    RambleDiscoveryPeer v;   /* the uuid is a view into discovery state, the copy only carries it */
     if (!n) return NULL;
-    acquired = i_dart_node_lock(n);
-    st = dart_discovery_state(n->discovery);
-    np = dart_discovery_max_peers(st);
+    acquired = i_ramble_node_lock(n);
+    st = ramble_discovery_state(n->discovery);
+    np = ramble_discovery_max_peers(st);
     for (q = 0; q < np; q++)
-        if (dart_discovery_peer_at(st, q, &v) && v.id == peer){ out = v.uuid; break; }
-    i_dart_node_unlock(n, acquired);
+        if (ramble_discovery_peer_at(st, q, &v) && v.id == peer){ out = v.uuid; break; }
+    i_ramble_node_unlock(n, acquired);
     return out;
 }
-DartString i_dart_topic_name (const DartTopic *topic){
-    return topic ? dart_string(topic->name, topic->name_len) : dart_string(NULL, 0);
+RambleString i_ramble_topic_name (const RambleTopic *topic){
+    return topic ? ramble_string(topic->name, topic->name_len) : ramble_string(NULL, 0);
 }
-uint16_t   i_dart_node_topic_count(DartNode *n){ return n ? i_dart_node_topic_hi(n) : 0; }
+uint16_t   i_ramble_node_topic_count(RambleNode *n){ return n ? i_ramble_node_topic_hi(n) : 0; }
 
-void i_dart_node_set_sys_hooks(DartNode *n, i_DartSysEventFn on_event, i_DartSysTickFn tick,
-                               i_DartSysCloseFn on_close, void *user){
+void i_ramble_node_set_sys_hooks(RambleNode *n, i_RambleSysEventFn on_event, i_RambleSysTickFn tick,
+                               i_RambleSysCloseFn on_close, void *user){
     int acquired;
     if (!n) return;
-    acquired = i_dart_node_lock(n);
+    acquired = i_ramble_node_lock(n);
     n->sys_on_event = on_event; n->sys_tick = tick; n->sys_on_close = on_close; n->sys_user = user;
     n->sys_tick_next = 0;
-    i_dart_node_kick(n);   /* re evaluate the wait cap with the new tick */
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_kick(n);   /* re evaluate the wait cap with the new tick */
+    i_ramble_node_unlock(n, acquired);
 }
 
-int dart_topic_set_role(DartTopic *topic, DartRole role){
+int ramble_topic_set_role(RambleTopic *topic, RambleRole role){
     int r, acquired;
     if (!topic) return -1;
-    acquired = i_dart_node_lock(topic->n);
+    acquired = i_ramble_node_lock(topic->n);
     if (!acquired){
         /* from a callback: the replay would rematch the reader proxy mid delivery, refuse loudly */
-        return DART_ERR_STATE;
+        return RAMBLE_ERR_STATE;
     }
     /* a log builtin is queued before its subscribe side goes live, so the catch up replay
        can never race the first take into the inline path. See spec/node.md */
-    if (dart_role_subs((uint8_t)role) && !topic->q
-        && i_dart_node_is_log_topic(topic->n, topic->index))
-        (void)i_dart_node_queue_ensure(topic->n, topic, NULL);
-    r = dart_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
+    if (ramble_role_subs((uint8_t)role) && !topic->q
+        && i_ramble_node_is_log_topic(topic->n, topic->index))
+        (void)i_ramble_node_queue_ensure(topic->n, topic, NULL);
+    r = ramble_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0){
         topic->role = (uint8_t)role;
-        i_dart_node_readvertise(topic->n);   /* a role flip may raise fresh candidates */
+        i_ramble_node_readvertise(topic->n);   /* a role flip may raise fresh candidates */
     }
-    i_dart_node_unlock(topic->n, acquired);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
-int dart_topic_retire(DartTopic *topic){
-    DartNode *n; int acquired; uint16_t idx;
-    if (!topic) return DART_ERR_NO_TOPIC;
+int ramble_topic_retire(RambleTopic *topic){
+    RambleNode *n; int acquired; uint16_t idx;
+    if (!topic) return RAMBLE_ERR_NO_TOPIC;
     n = topic->n;
-    acquired = i_dart_node_lock(n);
-    if (!acquired) return DART_ERR_STATE;   /* from a callback: lanes are live mid delivery */
+    acquired = i_ramble_node_lock(n);
+    if (!acquired) return RAMBLE_ERR_STATE;   /* from a callback: lanes are live mid delivery */
     if (topic->sys_on_message                       /* a pattern channel: retire its handle */
-        || i_dart_node_is_log_topic(n, topic->index)
+        || i_ramble_node_is_log_topic(n, topic->index)
         || (n->n_builtin && topic->index >= n->builtin_lo
             && topic->index < (uint16_t)(n->builtin_lo + n->n_builtin))
         || (topic->q && topic->q->busy)){           /* mid dispatch on another thread */
-        i_dart_node_unlock(n, acquired);
-        return DART_ERR_STATE;
+        i_ramble_node_unlock(n, acquired);
+        return RAMBLE_ERR_STATE;
     }
     idx = topic->index;
-    if (dart_transport_topic_retire(n->transport, idx) != 0){
-        i_dart_node_unlock(n, acquired);
-        return DART_ERR_STATE;
+    if (ramble_transport_topic_retire(n->transport, idx) != 0){
+        i_ramble_node_unlock(n, acquired);
+        return RAMBLE_ERR_STATE;
     }
     /* the slot keeps its schema hash as the reuse fingerprint, the parsed copy goes */
-    i_dart_node_core_retire_topic_schema(n->core, idx);
+    i_ramble_node_core_retire_topic_schema(n->core, idx);
     if (topic->q){
-        if (topic->q->buf) i_dart_node_alloc(n, topic->q->buf, 0);
-        i_dart_node_alloc(n, topic->q, 0);
+        if (topic->q->buf) i_ramble_node_alloc(n, topic->q->buf, 0);
+        i_ramble_node_alloc(n, topic->q, 0);
         topic->q = NULL;
     }
-    if (topic->schema) dart_schema_free(topic->schema, i_dart_node_alloc, n);
+    if (topic->schema) ramble_schema_free(topic->schema, i_ramble_node_alloc, n);
     n->handles[idx] = NULL;
-    i_dart_node_alloc(n, topic, 0);         /* the handle is invalid from here */
+    i_ramble_node_alloc(n, topic, 0);         /* the handle is invalid from here */
     /* the slot rides the announce as a hole from the next blob on */
-    i_dart_node_readvertise(n);
-    i_dart_node_unlock(n, acquired);
-    return DART_OK;
+    i_ramble_node_readvertise(n);
+    i_ramble_node_unlock(n, acquired);
+    return RAMBLE_OK;
 }
 
-uint16_t dart_topic_index(const DartTopic *topic){ return topic ? topic->index : 0; }
+uint16_t ramble_topic_index(const RambleTopic *topic){ return topic ? topic->index : 0; }
 
-const DartSchema *dart_topic_schema(const DartTopic *topic){ return topic ? topic->schema : NULL; }
+const RambleSchema *ramble_topic_schema(const RambleTopic *topic){ return topic ? topic->schema : NULL; }
 
-DartTopic *dart_node_topic(DartNode *n, uint16_t index){
-    DartTopic *h; int acquired;
+RambleTopic *ramble_node_topic(RambleNode *n, uint16_t index){
+    RambleTopic *h; int acquired;
     if (!n) return NULL;
-    acquired = i_dart_node_lock(n);
-    h = (index < i_dart_node_topic_hi(n)) ? n->handles[index] : NULL;   /* holes yield NULL */
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    h = (index < i_ramble_node_topic_hi(n)) ? n->handles[index] : NULL;   /* holes yield NULL */
+    i_ramble_node_unlock(n, acquired);
     return h;
 }
 
 /* reflection: the walks read the core's tables under the node lock */
 
-int dart_node_peers_next(DartNode *n, DartIter *it, DartPeerInfo *out){
+int ramble_node_peers_next(RambleNode *n, RambleIter *it, RamblePeerInfo *out){
     int r, acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
-    r = i_dart_node_core_peers_next(n->core, it, out);
+    acquired = i_ramble_node_lock(n);
+    r = i_ramble_node_core_peers_next(n->core, it, out);
     if (r){   /* the transport's path measurement, folded in since the core is sans transport */
-        DartPeerRtt e;
-        if (dart_transport_peer_rtt(n->transport, out->id, &e)){
+        RamblePeerRtt e;
+        if (ramble_transport_peer_rtt(n->transport, out->id, &e)){
             out->rtt_us = e.rtt_us; out->rtt_jitter_us = e.rtt_jitter_us;
             out->rtt_min_us = e.rtt_min_us; out->rtt_samples = e.samples;
         }
     }
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
     return r;
 }
 
-int dart_node_entities_next(DartNode *n, uint32_t peer, DartIter *it, DartEntityInfo *out){
+int ramble_node_entities_next(RambleNode *n, uint32_t peer, RambleIter *it, RambleEntityInfo *out){
     int r, acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
-    r = i_dart_node_core_entities_next(n->core, peer, it, out);
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    r = i_ramble_node_core_entities_next(n->core, peer, it, out);
+    i_ramble_node_unlock(n, acquired);
     return r;
 }
 
-int dart_node_mesh_next(DartNode *n, DartIter *it, DartEntityInfo *out){
+int ramble_node_mesh_next(RambleNode *n, RambleIter *it, RambleEntityInfo *out){
     int r, acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
-    r = i_dart_node_core_mesh_next(n->core, it, out);
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    r = i_ramble_node_core_mesh_next(n->core, it, out);
+    i_ramble_node_unlock(n, acquired);
     return r;
 }
 
-int dart_node_mesh_find(DartNode *n, DartEntityKind kind, const char *name, DartEntityInfo *out){
+int ramble_node_mesh_find(RambleNode *n, RambleEntityKind kind, const char *name, RambleEntityInfo *out){
     int r, acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
-    r = i_dart_node_core_mesh_find(n->core, kind, name, out);
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    r = i_ramble_node_core_mesh_find(n->core, kind, name, out);
+    i_ramble_node_unlock(n, acquired);
     return r;
 }
 
-uint32_t dart_node_mesh_epoch(DartNode *n){
+uint32_t ramble_node_mesh_epoch(RambleNode *n){
     uint32_t e; int acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
-    e = i_dart_node_core_mesh_epoch(n->core);
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    e = i_ramble_node_core_mesh_epoch(n->core);
+    i_ramble_node_unlock(n, acquired);
     return e;
 }
 
 /* Re types a live topic in place: the slot is retired and reused at the same index under
  * a bumped generation, the schema copy replaced, the handle and queue kept. Lock held. */
-int i_dart_topic_retype(DartTopic *topic, const DartSchema *schema, uint8_t reliability){
-    DartNode *n = topic->n; DartTopicDef def; DartSchema *copy = NULL; uint16_t idx = topic->index;
+int i_ramble_topic_retype(RambleTopic *topic, const RambleSchema *schema, uint8_t reliability){
+    RambleNode *n = topic->n; RambleTopicDef def; RambleSchema *copy = NULL; uint16_t idx = topic->index;
     uint32_t rb; int rc;
     if (schema){
-        DartBytes w = dart_schema_wire(schema);
-        copy = dart_schema_parse(w.data, w.len, i_dart_node_alloc, n);
-        if (!copy) return DART_ERR_OOM;
+        RambleBytes w = ramble_schema_wire(schema);
+        copy = ramble_schema_parse(w.data, w.len, i_ramble_node_alloc, n);
+        if (!copy) return RAMBLE_ERR_OOM;
     }
-    if (dart_transport_topic_retire(n->transport, idx) != 0){
-        if (copy) dart_schema_free(copy, i_dart_node_alloc, n);
-        return DART_ERR_STATE;
+    if (ramble_transport_topic_retire(n->transport, idx) != 0){
+        if (copy) ramble_schema_free(copy, i_ramble_node_alloc, n);
+        return RAMBLE_ERR_STATE;
     }
-    i_dart_node_core_retire_topic_schema(n->core, idx);
-    if (topic->schema) dart_schema_free(topic->schema, i_dart_node_alloc, n);
+    i_ramble_node_core_retire_topic_schema(n->core, idx);
+    if (topic->schema) ramble_schema_free(topic->schema, i_ramble_node_alloc, n);
     topic->schema = copy;
-    topic->qos.reliability = (DartReliability)reliability;
+    topic->qos.reliability = (RambleReliability)reliability;
     memset(&def, 0, sizeof def);
     def.name = topic->name; def.role = topic->role; def.kind = topic->kind;
     def.prefix_bytes = topic->prefix_bytes; def.directed = topic->directed; def.attrs = topic->attrs;
     def.qos = topic->qos;
-    rb = dart_discovery_meta_version(dart_discovery_state(n->discovery)) + 1u;
-    rc = dart_transport_topic_reuse(n->transport, idx, &def, 1, rb);
-    if (rc != 0) return rc == -4 ? DART_ERR_OOM : DART_ERR_STATE;
-    i_dart_node_core_topic_rebound(n->core, idx);
-    i_dart_node_core_set_topic_schema(n->core, idx, topic->schema);
-    i_dart_node_readvertise(n);
-    return DART_OK;
+    rb = ramble_discovery_meta_version(ramble_discovery_state(n->discovery)) + 1u;
+    rc = ramble_transport_topic_reuse(n->transport, idx, &def, 1, rb);
+    if (rc != 0) return rc == -4 ? RAMBLE_ERR_OOM : RAMBLE_ERR_STATE;
+    i_ramble_node_core_topic_rebound(n->core, idx);
+    i_ramble_node_core_set_topic_schema(n->core, idx, topic->schema);
+    i_ramble_node_readvertise(n);
+    return RAMBLE_OK;
 }
 
-int dart_topic_refresh(DartTopic *topic){
-    DartNode *n; int acquired, r = 0;
-    const DartSchema *ms = NULL; uint8_t rel = 0; uint64_t gen = 0;
-    if (!topic) return DART_ERR_NO_TOPIC;
-    if (!topic->reflect) return DART_ERR_ROLE;
+int ramble_topic_refresh(RambleTopic *topic){
+    RambleNode *n; int acquired, r = 0;
+    const RambleSchema *ms = NULL; uint8_t rel = 0; uint64_t gen = 0;
+    if (!topic) return RAMBLE_ERR_NO_TOPIC;
+    if (!topic->reflect) return RAMBLE_ERR_ROLE;
     n = topic->n;
-    acquired = i_dart_node_lock(n);
-    if (!acquired) return DART_ERR_STATE;   /* from a callback: lanes are live mid delivery */
-    if (i_dart_node_core_reflect_pick(n->core, DART_ENTITY_TOPIC, topic->name, 0,
-                                      dart_role_pubs(topic->role), &ms, &rel, &gen)
+    acquired = i_ramble_node_lock(n);
+    if (!acquired) return RAMBLE_ERR_STATE;   /* from a callback: lanes are live mid delivery */
+    if (i_ramble_node_core_reflect_pick(n->core, RAMBLE_ENTITY_TOPIC, topic->name, 0,
+                                      ramble_role_pubs(topic->role), &ms, &rel, &gen)
         && gen != topic->generation){
-        r = i_dart_topic_retype(topic, ms, rel ? DART_RELIABLE : DART_BEST_EFFORT);
+        r = i_ramble_topic_retype(topic, ms, rel ? RAMBLE_RELIABLE : RAMBLE_BEST_EFFORT);
         if (r == 0){ topic->generation = gen; r = 1; }
     }
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
     return r;
 }
 
 /* the patterns layer's reflect_from_mesh: the pick for one channel of an entity */
-int i_dart_node_reflect_pick(DartNode *n, DartEntityKind kind, const char *name, int which, int writer,
-                             const DartSchema **schema, uint8_t *reliable, uint64_t *generation){
+int i_ramble_node_reflect_pick(RambleNode *n, RambleEntityKind kind, const char *name, int which, int writer,
+                             const RambleSchema **schema, uint8_t *reliable, uint64_t *generation){
     int r, acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
-    r = i_dart_node_core_reflect_pick(n->core, kind, name, which, writer, schema, reliable, generation);
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    r = i_ramble_node_core_reflect_pick(n->core, kind, name, which, writer, schema, reliable, generation);
+    i_ramble_node_unlock(n, acquired);
     return r;
 }
 
-void dart_node_backpressure_stats(DartNode *n, uint64_t *waited_us, uint32_t *waited_sends){
-    int acquired = i_dart_node_lock(n);
+void ramble_node_backpressure_stats(RambleNode *n, uint64_t *waited_us, uint32_t *waited_sends){
+    int acquired = i_ramble_node_lock(n);
     if (waited_us)    *waited_us    = n->backpressure_total_us;
     if (waited_sends) *waited_sends = n->backpressure_wait_count;
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
 }
 
 /* Sends that evicted never sent history after the bounded wait, since open. */
-uint32_t dart_node_evicted_unsent(DartNode *n){
+uint32_t ramble_node_evicted_unsent(RambleNode *n){
     uint32_t v; int acquired;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
+    acquired = i_ramble_node_lock(n);
     v = n->evicted_unsent;
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
     return v;
 }
 
-#ifndef DART_NO_STDTYPES
+#ifndef RAMBLE_NO_STDTYPES
 /* The standard types that need a platform. They sit here so serialize/ keeps needing
  * nothing but memory. */
-DartTimestamp dart_timestamp_now(void){
-    return (DartTimestamp)i_dart_plat_wall_us();
+RambleTimestamp ramble_timestamp_now(void){
+    return (RambleTimestamp)i_ramble_plat_wall_us();
 }
 
-void dart_uuid_new(DartUuid *out){
+void ramble_uuid_new(RambleUuid *out){
     /* one generator: the CSPRNG path, else the host identity mix a node's own uuid uses */
-    if (out) i_dart_discovery_auto_uuid(out->bytes);
+    if (out) i_ramble_discovery_auto_uuid(out->bytes);
 }
 #endif
 
-void dart_node_mem_stats(DartNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
+void ramble_node_mem_stats(RambleNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls){
     int acquired;
     if (!n) return;
-    acquired = i_dart_node_lock(n);
-    dart_allocator_stats(&n->pool, in_use, peak, alloc_calls);
-    i_dart_node_unlock(n, acquired);
+    acquired = i_ramble_node_lock(n);
+    ramble_allocator_stats(&n->pool, in_use, peak, alloc_calls);
+    i_ramble_node_unlock(n, acquired);
 }
 
-void dart_topic_repair_stats(DartTopic *topic, DartRepairStats *out){
+void ramble_topic_repair_stats(RambleTopic *topic, RambleRepairStats *out){
     if (topic){
-        int acquired = i_dart_node_lock(topic->n);
-        dart_transport_repair_stats(topic->n->transport, topic->index, out);
-        i_dart_node_unlock(topic->n, acquired);
+        int acquired = i_ramble_node_lock(topic->n);
+        ramble_transport_repair_stats(topic->n->transport, topic->index, out);
+        i_ramble_node_unlock(topic->n, acquired);
     } else if (out) memset(out, 0, sizeof *out);
 }
 
-void dart_topic_counts(DartTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
+void ramble_topic_counts(RambleTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
                        uint64_t *rx_msgs, uint64_t *rx_bytes){
     uint64_t tm = 0, tb = 0, rm = 0, rb = 0;
     if (topic){
-        int acquired = i_dart_node_lock(topic->n);
+        int acquired = i_ramble_node_lock(topic->n);
         tm = topic->tx_msgs; tb = topic->tx_bytes; rm = topic->rx_msgs; rb = topic->rx_bytes;
-        i_dart_node_unlock(topic->n, acquired);
+        i_ramble_node_unlock(topic->n, acquired);
     }
     if (tx_msgs)  *tx_msgs  = tm;
     if (tx_bytes) *tx_bytes = tb;
@@ -2332,276 +2332,276 @@ void dart_topic_counts(DartTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
     if (rx_bytes) *rx_bytes = rb;
 }
 
-/* the @dart/meta snapshot builder, see spec/node.md */
+/* the @ramble/meta snapshot builder, see spec/node.md */
 
 /* one pass of the map body. A latched writer error makes finish return 0 and the caller
  * grows and rebuilds */
-static void i_dart_node_snapshot_fill(DartNode *n, DartMapWriter *w, uint32_t sections){
-    uint64_t now = i_dart_plat_now_us();
-    if (sections & DART_META_NODE){
+static void i_ramble_node_snapshot_fill(RambleNode *n, RambleMapWriter *w, uint32_t sections){
+    uint64_t now = i_ramble_plat_now_us();
+    if (sections & RAMBLE_META_NODE){
         size_t in_use = 0, peak = 0; uint64_t allocs = 0;
-        dart_allocator_stats(&n->pool, &in_use, &peak, &allocs);
-        dart_map_open_map(w, "node");
-        dart_map_put_string(w, "name", dart_string(n->name, n->name_len));
-        dart_map_put_uint(w, "uptime_us", now - n->open_us);
-        dart_map_put_uint(w, "mono_us", now);
-        dart_map_put_uint(w, "wall_us", i_dart_plat_wall_us());
-        dart_map_put_uint(w, "mem_in_use", (uint64_t)in_use);
-        dart_map_put_uint(w, "mem_peak", (uint64_t)peak);
-        dart_map_put_uint(w, "alloc_calls", allocs);
-        dart_map_put_uint(w, "evicted_unsent", n->evicted_unsent);
-        dart_map_put_uint(w, "bp_waited_us", n->backpressure_total_us);
-        dart_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
-        dart_map_put_uint(w, "peers", dart_discovery_peer_count(dart_discovery_state(n->discovery)));
-        dart_map_put_uint(w, "max_peers", n->max_peers);
-        /* app topics only: the @dart/ builtins are hidden, so neither the counts nor the
+        ramble_allocator_stats(&n->pool, &in_use, &peak, &allocs);
+        ramble_map_open_map(w, "node");
+        ramble_map_put_string(w, "name", ramble_string(n->name, n->name_len));
+        ramble_map_put_uint(w, "uptime_us", now - n->open_us);
+        ramble_map_put_uint(w, "mono_us", now);
+        ramble_map_put_uint(w, "wall_us", i_ramble_plat_wall_us());
+        ramble_map_put_uint(w, "mem_in_use", (uint64_t)in_use);
+        ramble_map_put_uint(w, "mem_peak", (uint64_t)peak);
+        ramble_map_put_uint(w, "alloc_calls", allocs);
+        ramble_map_put_uint(w, "evicted_unsent", n->evicted_unsent);
+        ramble_map_put_uint(w, "bp_waited_us", n->backpressure_total_us);
+        ramble_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
+        ramble_map_put_uint(w, "peers", ramble_discovery_peer_count(ramble_discovery_state(n->discovery)));
+        ramble_map_put_uint(w, "max_peers", n->max_peers);
+        /* app topics only: the @ramble/ builtins are hidden, so neither the counts nor the
            topics array below surface them */
-        dart_map_put_uint(w, "topics", (uint64_t)n->n_created);
-        dart_map_put_uint(w, "max_topics", (uint64_t)(n->max_topics - n->n_builtin));
-#ifdef DART_SHM
-        dart_map_put_uint(w, "shm_tx", n->shm_tx);
-        dart_map_put_uint(w, "shm_rx", n->shm_rx);
+        ramble_map_put_uint(w, "topics", (uint64_t)n->n_created);
+        ramble_map_put_uint(w, "max_topics", (uint64_t)(n->max_topics - n->n_builtin));
+#ifdef RAMBLE_SHM
+        ramble_map_put_uint(w, "shm_tx", n->shm_tx);
+        ramble_map_put_uint(w, "shm_rx", n->shm_rx);
 #endif
-        dart_map_put_uint(w, "last_error", (uint64_t)n->last_error.error);
-        if (n->last_error.error != DART_E_NONE){
+        ramble_map_put_uint(w, "last_error", (uint64_t)n->last_error.error);
+        if (n->last_error.error != RAMBLE_E_NONE){
             /* format from a sanitized copy: the stored event's name views can outlive what
                they pointed at, so the text carries the indices instead */
-            DartEvent le = n->last_error; char txt[160];
+            RambleEvent le = n->last_error; char txt[160];
             le.topic_name = NULL; le.peer_name = NULL; le.schema_detail = NULL;
-            dart_event_str(&le, txt, sizeof txt);
-            dart_map_put_string(w, "last_error_text", dart_cstr(txt));
+            ramble_event_str(&le, txt, sizeof txt);
+            ramble_map_put_string(w, "last_error_text", ramble_cstr(txt));
         }
-        dart_map_close(w);
+        ramble_map_close(w);
     }
-#ifdef DART_PROC_STATS
-    if (sections & DART_META_PROC){
+#ifdef RAMBLE_PROC_STATS
+    if (sections & RAMBLE_META_PROC){
         uint64_t cpu = 0, rss = 0, peak_rss = 0; int have_cpu = 0;
-        if (i_dart_plat_proc_stats(&cpu, &rss, &peak_rss, &have_cpu)){   /* absent if unsupported */
-            dart_map_open_map(w, "proc");
-            dart_map_put_uint(w, "pid", i_dart_plat_pid());
-            if (have_cpu) dart_map_put_uint(w, "cpu_us", cpu);
-            dart_map_put_uint(w, "rss", rss);
-            dart_map_put_uint(w, "peak_rss", peak_rss);
+        if (i_ramble_plat_proc_stats(&cpu, &rss, &peak_rss, &have_cpu)){   /* absent if unsupported */
+            ramble_map_open_map(w, "proc");
+            ramble_map_put_uint(w, "pid", i_ramble_plat_pid());
+            if (have_cpu) ramble_map_put_uint(w, "cpu_us", cpu);
+            ramble_map_put_uint(w, "rss", rss);
+            ramble_map_put_uint(w, "peak_rss", peak_rss);
             {   uint64_t heap_total, heap_free, heap_min_free, heap_largest_free_block;
-                if (i_dart_plat_heap_stats(&heap_total, &heap_free, &heap_min_free,
+                if (i_ramble_plat_heap_stats(&heap_total, &heap_free, &heap_min_free,
                                            &heap_largest_free_block)){
-                    dart_map_put_uint(w, "heap_total", heap_total);
-                    dart_map_put_uint(w, "heap_free", heap_free);
-                    dart_map_put_uint(w, "heap_min_free", heap_min_free);
-                    dart_map_put_uint(w, "heap_largest_free_block", heap_largest_free_block);
+                    ramble_map_put_uint(w, "heap_total", heap_total);
+                    ramble_map_put_uint(w, "heap_free", heap_free);
+                    ramble_map_put_uint(w, "heap_min_free", heap_min_free);
+                    ramble_map_put_uint(w, "heap_largest_free_block", heap_largest_free_block);
                 }
             }
-            dart_map_close(w);
+            ramble_map_close(w);
         }
     }
 #endif
-    if (sections & DART_META_TOPICS){
-        uint16_t i, hi = i_dart_node_topic_hi(n);
+    if (sections & RAMBLE_META_TOPICS){
+        uint16_t i, hi = i_ramble_node_topic_hi(n);
         const uint16_t *pend = NULL;
         if (hi){
             /* every topic's unresolved count in one walk of each peer's interest, since the
                per topic query is quadratic for an observer. On OOM the per topic query stands in */
             if (n->snap_pend_cap < hi){
-                uint16_t *nb = (uint16_t*)i_dart_node_alloc(n, n->snap_pend, (size_t)hi * sizeof *nb);
+                uint16_t *nb = (uint16_t*)i_ramble_node_alloc(n, n->snap_pend, (size_t)hi * sizeof *nb);
                 if (nb){ n->snap_pend = nb; n->snap_pend_cap = hi; }
             }
             if (n->snap_pend_cap >= hi){
-                i_dart_node_core_topics_unresolved(n->core, n->snap_pend, hi);
+                i_ramble_node_core_topics_unresolved(n->core, n->snap_pend, hi);
                 pend = n->snap_pend;
             }
         }
-        dart_map_open_array(w, "topics");
+        ramble_map_open_array(w, "topics");
         for (i = 0; i < hi; i++){
-            DartTopic *h = n->handles[i];
-            const DartQos *q = dart_transport_topic_qos(n->transport, i);
-            DartRepairStats rs;
+            RambleTopic *h = n->handles[i];
+            const RambleQos *q = ramble_transport_topic_qos(n->transport, i);
+            RambleRepairStats rs;
             if (!h) continue;
             if (n->n_builtin && i >= n->builtin_lo
                              && i < (uint16_t)(n->builtin_lo + n->n_builtin)) continue;
-            dart_transport_repair_stats(n->transport, i, &rs);
-            dart_map_open_map(w, NULL);
-            dart_map_put_uint(w, "index", i);
-            dart_map_put_string(w, "name", dart_string(h->name, h->name_len));
-            dart_map_put_uint(w, "kind", h->kind);
-            dart_map_put_uint(w, "role", h->role);
-            dart_map_put_bool(w, "reliable", q && q->reliability == DART_RELIABLE);
-            dart_map_put_uint(w, "keep_last", q ? q->keep_last : 0);
-            dart_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
-            dart_map_put_uint(w, "subs", (uint64_t)dart_transport_publisher_match_count(n->transport, i));
-            dart_map_put_uint(w, "pubs", (uint64_t)dart_transport_subscriber_match_count(n->transport, i));
-            dart_map_put_uint(w, "pending", pend ? (uint64_t)pend[i]
-                                                 : (uint64_t)i_dart_node_core_topic_unresolved(n->core, i));
-            dart_map_put_uint(w, "tx_msgs", h->tx_msgs);
-            dart_map_put_uint(w, "tx_bytes", h->tx_bytes);
-            dart_map_put_uint(w, "rx_msgs", h->rx_msgs);
-            dart_map_put_uint(w, "rx_bytes", h->rx_bytes);
-            dart_map_put_uint(w, "nacks_recv", rs.nacks_recv);
-            dart_map_put_uint(w, "frags_resent", rs.frags_resent);
-            dart_map_put_uint(w, "frags_sent", rs.frags_sent);
-            dart_map_put_uint(w, "nacks_sent", rs.nacks_sent);
-            dart_map_put_uint(w, "frags_recv", rs.frags_recv);
-            dart_map_put_uint(w, "frags_dup", rs.frags_dup);
-            dart_map_put_uint(w, "msgs_skipped", rs.msgs_skipped);
+            ramble_transport_repair_stats(n->transport, i, &rs);
+            ramble_map_open_map(w, NULL);
+            ramble_map_put_uint(w, "index", i);
+            ramble_map_put_string(w, "name", ramble_string(h->name, h->name_len));
+            ramble_map_put_uint(w, "kind", h->kind);
+            ramble_map_put_uint(w, "role", h->role);
+            ramble_map_put_bool(w, "reliable", q && q->reliability == RAMBLE_RELIABLE);
+            ramble_map_put_uint(w, "keep_last", q ? q->keep_last : 0);
+            ramble_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
+            ramble_map_put_uint(w, "subs", (uint64_t)ramble_transport_publisher_match_count(n->transport, i));
+            ramble_map_put_uint(w, "pubs", (uint64_t)ramble_transport_subscriber_match_count(n->transport, i));
+            ramble_map_put_uint(w, "pending", pend ? (uint64_t)pend[i]
+                                                 : (uint64_t)i_ramble_node_core_topic_unresolved(n->core, i));
+            ramble_map_put_uint(w, "tx_msgs", h->tx_msgs);
+            ramble_map_put_uint(w, "tx_bytes", h->tx_bytes);
+            ramble_map_put_uint(w, "rx_msgs", h->rx_msgs);
+            ramble_map_put_uint(w, "rx_bytes", h->rx_bytes);
+            ramble_map_put_uint(w, "nacks_recv", rs.nacks_recv);
+            ramble_map_put_uint(w, "frags_resent", rs.frags_resent);
+            ramble_map_put_uint(w, "frags_sent", rs.frags_sent);
+            ramble_map_put_uint(w, "nacks_sent", rs.nacks_sent);
+            ramble_map_put_uint(w, "frags_recv", rs.frags_recv);
+            ramble_map_put_uint(w, "frags_dup", rs.frags_dup);
+            ramble_map_put_uint(w, "msgs_skipped", rs.msgs_skipped);
             if (h->q){
-                dart_map_put_uint(w, "q_msgs", h->q->count);
-                dart_map_put_uint(w, "q_bytes", h->q->bytes);
-                dart_map_put_uint(w, "q_cap", h->q->cap);
-                dart_map_put_uint(w, "q_dropped", h->q->dropped);
+                ramble_map_put_uint(w, "q_msgs", h->q->count);
+                ramble_map_put_uint(w, "q_bytes", h->q->bytes);
+                ramble_map_put_uint(w, "q_cap", h->q->cap);
+                ramble_map_put_uint(w, "q_dropped", h->q->dropped);
             }
-            dart_map_close(w);
+            ramble_map_close(w);
         }
-        dart_map_close(w);
+        ramble_map_close(w);
     }
-    if (sections & DART_META_PEERS){
+    if (sections & RAMBLE_META_PEERS){
         uint16_t cnt = 0, i;
-        const DartDiscoveryPeer *ps = dart_discovery_peers(n->discovery, &cnt);
-        dart_map_open_array(w, "peers");
+        const RambleDiscoveryPeer *ps = ramble_discovery_peers(n->discovery, &cnt);
+        ramble_map_open_array(w, "peers");
         for (i = 0; i < cnt; i++){
             uint16_t pub_to = 0, recv_from = 0;
             char ip[16]; int ln = 0;
-            dart_transport_peer_match_counts(n->transport, ps[i].id, &pub_to, &recv_from);
-            dart_map_open_map(w, NULL);
-            dart_map_put_uint(w, "id", ps[i].id);
-            dart_map_put_string(w, "name", ps[i].name);
-            dart_map_put_bool(w, "active", ps[i].liveness == DART_PEER_ACTIVE);
+            ramble_transport_peer_match_counts(n->transport, ps[i].id, &pub_to, &recv_from);
+            ramble_map_open_map(w, NULL);
+            ramble_map_put_uint(w, "id", ps[i].id);
+            ramble_map_put_string(w, "name", ps[i].name);
+            ramble_map_put_bool(w, "active", ps[i].liveness == RAMBLE_PEER_ACTIVE);
             if (ps[i].addr.ip_len == 4)
                 ln = snprintf(ip, sizeof ip, "%u.%u.%u.%u", ps[i].addr.ip[0], ps[i].addr.ip[1],
                               ps[i].addr.ip[2], ps[i].addr.ip[3]);
-            dart_map_put_string(w, "ip", dart_string(ip, ln > 0 ? (size_t)ln : 0));
-            dart_map_put_uint(w, "port", ps[i].addr.port);
-            dart_map_put_uint(w, "age_us", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
-            dart_map_put_uint(w, "publish_to", pub_to);
-            dart_map_put_uint(w, "receive_from", recv_from);
-            {   DartPeerRtt e;   /* the measured round trip, absent until the first sample */
-                if (dart_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
-                    dart_map_put_uint(w, "rtt_us", e.rtt_us);
-                    dart_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
-                    dart_map_put_uint(w, "rtt_min_us", e.rtt_min_us);
-                    dart_map_put_uint(w, "rtt_samples", e.samples);
+            ramble_map_put_string(w, "ip", ramble_string(ip, ln > 0 ? (size_t)ln : 0));
+            ramble_map_put_uint(w, "port", ps[i].addr.port);
+            ramble_map_put_uint(w, "age_us", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
+            ramble_map_put_uint(w, "publish_to", pub_to);
+            ramble_map_put_uint(w, "receive_from", recv_from);
+            {   RamblePeerRtt e;   /* the measured round trip, absent until the first sample */
+                if (ramble_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
+                    ramble_map_put_uint(w, "rtt_us", e.rtt_us);
+                    ramble_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
+                    ramble_map_put_uint(w, "rtt_min_us", e.rtt_min_us);
+                    ramble_map_put_uint(w, "rtt_samples", e.samples);
                 } }
-            dart_map_close(w);
+            ramble_map_close(w);
         }
-        dart_map_close(w);
+        ramble_map_close(w);
     }
 }
 
-DartBytes i_dart_node_snapshot(DartNode *n, uint32_t sections){
+RambleBytes i_ramble_node_snapshot(RambleNode *n, uint32_t sections){
     uint32_t body;
-    if (!n) return dart_bytes(NULL, 0);
+    if (!n) return ramble_bytes(NULL, 0);
     if (!sections) sections = 0xFFFFFFFFu;
     for (;;){
-        DartMapWriter w;
+        RambleMapWriter w;
         if (!n->snap_buf){
             /* a small node's snapshot is 1 to 2 KB: start there, the doubling finds the size */
-            n->snap_buf = (uint8_t*)i_dart_node_alloc(n, NULL, 1024u);
-            if (!n->snap_buf) return dart_bytes(NULL, 0);
+            n->snap_buf = (uint8_t*)i_ramble_node_alloc(n, NULL, 1024u);
+            if (!n->snap_buf) return ramble_bytes(NULL, 0);
             n->snap_cap = 1024u;
         }
-        w = dart_map_begin(n->snap_buf, n->snap_cap);
-        i_dart_node_snapshot_fill(n, &w, sections);
-        body = dart_map_finish(&w);
+        w = ramble_map_begin(n->snap_buf, n->snap_cap);
+        i_ramble_node_snapshot_fill(n, &w, sections);
+        body = ramble_map_finish(&w);
         if (body) break;
         {   /* did not fit (the writer latches on any failure): double and rebuild */
             uint32_t ncap = n->snap_cap * 2u; uint8_t *nb;
-            if (ncap > (1u << 22)) return dart_bytes(NULL, 0);   /* 4 MB: not a size problem */
-            nb = (uint8_t*)i_dart_node_alloc(n, n->snap_buf, ncap);
-            if (!nb) return dart_bytes(NULL, 0);
+            if (ncap > (1u << 22)) return ramble_bytes(NULL, 0);   /* 4 MB: not a size problem */
+            nb = (uint8_t*)i_ramble_node_alloc(n, n->snap_buf, ncap);
+            if (!nb) return ramble_bytes(NULL, 0);
             n->snap_buf = nb; n->snap_cap = ncap;
         }
     }
-    return dart_bytes(n->snap_buf, body);
+    return ramble_bytes(n->snap_buf, body);
 }
 
-void dart_node_set_pump_probe(DartNode *n, DartPumpProbeFn fn, uint64_t interval_us, void *user){
-    int acquired = i_dart_node_lock(n);
+void ramble_node_set_pump_probe(RambleNode *n, RamblePumpProbeFn fn, uint64_t interval_us, void *user){
+    int acquired = i_ramble_node_lock(n);
     n->pump_probe = fn; n->pump_probe_interval_us = interval_us; n->pump_probe_user = user;
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
 }
 
-int dart_topic_subscriber_progress(DartTopic *topic, uint32_t peer,
+int ramble_topic_subscriber_progress(RambleTopic *topic, uint32_t peer,
                                  uint64_t *base_seqno, uint32_t *have, uint32_t *total){
     int r, acquired;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_subscriber_progress(topic->n->transport, topic->index, peer, base_seqno, have, total);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_subscriber_progress(topic->n->transport, topic->index, peer, base_seqno, have, total);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
-#ifdef DART_SHM
-void dart_node_shm_stats(DartNode *n, uint32_t *sent, uint32_t *recv){
-    int acquired = i_dart_node_lock(n);
+#ifdef RAMBLE_SHM
+void ramble_node_shm_stats(RambleNode *n, uint32_t *sent, uint32_t *recv){
+    int acquired = i_ramble_node_lock(n);
     if (sent) *sent = n->shm_tx;
     if (recv) *recv = n->shm_rx;
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
 }
 #endif
 
 /* drain's predicate: the topic's send queue is empty at the transport */
-typedef struct { uint16_t index; uint64_t deadline; } i_DartDrainWait;
+typedef struct { uint16_t index; uint64_t deadline; } i_RambleDrainWait;
 
-static int i_dart_node_drain_wait_done(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_DartDrainWait *c = (i_DartDrainWait*)ctx;
+static int i_ramble_node_drain_wait_done(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline){
+    i_RambleDrainWait *c = (i_RambleDrainWait*)ctx;
     (void)now;
     *deadline = c->deadline;
-    return dart_transport_send_drained(n->transport, c->index) != 0;
+    return ramble_transport_send_drained(n->transport, c->index) != 0;
 }
 
-int dart_topic_drain(DartTopic *topic, int timeout_ms){
-    DartNode *n; i_DartDrainWait c; i_DartWait w = { 0 }; int acquired, drained;
+int ramble_topic_drain(RambleTopic *topic, int timeout_ms){
+    RambleNode *n; i_RambleDrainWait c; i_RambleWait w = { 0 }; int acquired, drained;
     if (!topic) return 0;
     n = topic->n;
-    acquired = i_dart_node_lock(n);
+    acquired = i_ramble_node_lock(n);
     if (!acquired) return 0;   /* from a callback: can neither pump nor wait */
     c.index = topic->index;
-    c.deadline = i_dart_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
-    w.done = i_dart_node_drain_wait_done; w.periodic = i_dart_node_wait_kick; w.ctx = &c;
+    c.deadline = i_ramble_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
+    w.done = i_ramble_node_drain_wait_done; w.periodic = i_ramble_node_wait_kick; w.ctx = &c;
     w.pump_ms = 1;          /* a nested tick: the lock stays held */
     w.pump_after_svc = 1;   /* a service thread stopping under us finishes with the pump */
-    drained = i_dart_node_wait_until(n, &w) == DART__WAIT_DONE;
-    i_dart_node_unlock(n, acquired);
+    drained = i_ramble_node_wait_until(n, &w) == RAMBLE__WAIT_DONE;
+    i_ramble_node_unlock(n, acquired);
     return drained;
 }
 
-int dart_topic_match_count(DartTopic *topic){
+int ramble_topic_match_count(RambleTopic *topic){
     int r, acquired;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_publisher_match_count(topic->n->transport, topic->index);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_publisher_match_count(topic->n->transport, topic->index);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
-int dart_topic_pending_count(DartTopic *topic){
+int ramble_topic_pending_count(RambleTopic *topic){
     int r, acquired;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = i_dart_node_core_topic_unresolved(topic->n->core, topic->index);
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = i_ramble_node_core_topic_unresolved(topic->n->core, topic->index);
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
 /* 1 = a send now would not wait: matched, or converged with nobody to wait for. Shares the
  * send path's predicate, so a GUI polling this then sending sees what the send decides. */
-int dart_topic_ready(DartTopic *topic){
+int ramble_topic_ready(RambleTopic *topic){
     int r, acquired;
     if (!topic) return 0;
-    acquired = i_dart_node_lock(topic->n);
-    r = dart_transport_publisher_match_count(topic->n->transport, topic->index) > 0
-     || !i_dart_node_topic_unsettled(topic->n, topic, i_dart_plat_now_us());
-    i_dart_node_unlock(topic->n, acquired);
+    acquired = i_ramble_node_lock(topic->n);
+    r = ramble_transport_publisher_match_count(topic->n->transport, topic->index) > 0
+     || !i_ramble_node_topic_unsettled(topic->n, topic, i_ramble_plat_now_us());
+    i_ramble_node_unlock(topic->n, acquired);
     return r;
 }
 
 /* Settled: the network answered and went quiet. Every active peer heard since the solicit,
  * the topology quiet for one window, one window passed overall. See spec/node.md. */
-static int i_dart_node_settled(DartNode *n, uint64_t start, uint64_t now){
+static int i_ramble_node_settled(RambleNode *n, uint64_t start, uint64_t now){
     uint64_t quiet = n->announce_us < 300000u ? n->announce_us : 300000u;
     uint16_t i, count = 0;
-    const DartDiscoveryPeer *peers = dart_discovery_peers(n->discovery, &count);
+    const RambleDiscoveryPeer *peers = ramble_discovery_peers(n->discovery, &count);
     int any = 0;
     for (i = 0; i < count; i++){
-        if (peers[i].liveness != DART_PEER_ACTIVE) continue;   /* dropped: not expected to answer */
+        if (peers[i].liveness != RAMBLE_PEER_ACTIVE) continue;   /* dropped: not expected to answer */
         any = 1;
         if (peers[i].last_heard_us < start) return 0;          /* not answered the solicit yet */
     }
@@ -2614,47 +2614,47 @@ typedef struct {
     uint64_t start;         /* the settled anchor and the deadline's base */
     uint64_t deadline;
     uint64_t last_solicit;  /* 0 = never: the first iteration solicits at once */
-} i_DartSettleWait;
+} i_RambleSettleWait;
 
-static int i_dart_node_settle_wait_done(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_DartSettleWait *c = (i_DartSettleWait*)ctx;
+static int i_ramble_node_settle_wait_done(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline){
+    i_RambleSettleWait *c = (i_RambleSettleWait*)ctx;
     *deadline = c->deadline;
-    return i_dart_node_settled(n, c->start, now);
+    return i_ramble_node_settled(n, c->start, now);
 }
 
 /* re solicit 4 times a second so a lost one retries. The kick makes a service thread send
  * it now, a pump sends it on the tick that follows. */
-static void i_dart_node_settle_wait_solicit(DartNode *n, void *ctx, uint64_t now){
-    i_DartSettleWait *c = (i_DartSettleWait*)ctx;
+static void i_ramble_node_settle_wait_solicit(RambleNode *n, void *ctx, uint64_t now){
+    i_RambleSettleWait *c = (i_RambleSettleWait*)ctx;
     if (now - c->last_solicit < 250000u) return;
-    dart_discovery_solicit(dart_discovery_state(n->discovery));
+    ramble_discovery_solicit(ramble_discovery_state(n->discovery));
     c->last_solicit = now;
-    i_dart_node_wait_kick(n, ctx, now);
+    i_ramble_node_wait_kick(n, ctx, now);
 }
 
-int dart_node_settle(DartNode *n, int timeout_ms){
-    i_DartSettleWait c; i_DartWait w = { 0 }; int acquired, settled;
+int ramble_node_settle(RambleNode *n, int timeout_ms){
+    i_RambleSettleWait c; i_RambleWait w = { 0 }; int acquired, settled;
     if (!n) return 0;
-    acquired = i_dart_node_lock(n);
+    acquired = i_ramble_node_lock(n);
     if (!acquired){ return 0; }   /* from a callback: can neither pump nor wait */
-    c.start = i_dart_plat_now_us();
+    c.start = i_ramble_plat_now_us();
     c.last_solicit = 0;
     c.deadline = c.start + (timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u
                                             : (uint64_t)n->announce_us * 3u);
-    w.done = i_dart_node_settle_wait_done; w.periodic = i_dart_node_settle_wait_solicit;
+    w.done = i_ramble_node_settle_wait_done; w.periodic = i_ramble_node_settle_wait_solicit;
     w.ctx = &c;
     w.cv_cap_us = 50000u;   /* re check the clock: settling is partly time driven */
     w.pump_ms = 1;          /* a nested tick: sends the solicit, takes in the replies */
     w.pump_after_svc = 1;   /* a service thread stopping under us finishes with the pump */
-    settled = i_dart_node_wait_until(n, &w) == DART__WAIT_DONE;
-    i_dart_node_unlock(n, acquired);
+    settled = i_ramble_node_wait_until(n, &w) == RAMBLE__WAIT_DONE;
+    i_ramble_node_unlock(n, acquired);
     return settled;
 }
 
 /* the consumer queue API, see spec/node.md */
 
-static int i_dart_node_any_queued(DartNode *n){
-    uint16_t i, hi = i_dart_node_topic_hi(n);
+static int i_ramble_node_any_queued(RambleNode *n){
+    uint16_t i, hi = i_ramble_node_topic_hi(n);
     for (i = 0; i < hi; i++)
         if (n->handles[i] && n->handles[i]->q && n->handles[i]->q->count) return 1;
     return 0;
@@ -2662,124 +2662,124 @@ static int i_dart_node_any_queued(DartNode *n){
 
 /* the queue wait's predicate: data on q when one was given, else on any queued topic. The
  * queue struct is a stable allocation, so the pointer survives the waits. */
-typedef struct { i_DartMsgQueue *q; uint64_t deadline; } i_DartQueueWait;
+typedef struct { i_RambleMsgQueue *q; uint64_t deadline; } i_RambleQueueWait;
 
-static int i_dart_node_queue_wait_done(DartNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_DartQueueWait *c = (i_DartQueueWait*)ctx;
+static int i_ramble_node_queue_wait_done(RambleNode *n, void *ctx, uint64_t now, uint64_t *deadline){
+    i_RambleQueueWait *c = (i_RambleQueueWait*)ctx;
     (void)now;
     *deadline = c->deadline;
-    return c->q ? (c->q->count != 0) : i_dart_node_any_queued(n);
+    return c->q ? (c->q->count != 0) : i_ramble_node_any_queued(n);
 }
 
 /* Waits until data is queued: on the service thread's progress when one runs, else by
  * driving the poll loop itself. Lock held on entry and exit, never from a callback. */
-static void i_dart_node_queue_wait(DartNode *n, i_DartMsgQueue *q, int timeout_ms){
-    i_DartQueueWait c; i_DartWait w = { 0 };
+static void i_ramble_node_queue_wait(RambleNode *n, i_RambleMsgQueue *q, int timeout_ms){
+    i_RambleQueueWait c; i_RambleWait w = { 0 };
     c.q = q;
     c.deadline = timeout_ms < 0 ? (uint64_t)-1
-                                : i_dart_plat_now_us() + (uint64_t)timeout_ms * 1000u;
-    w.done = i_dart_node_queue_wait_done; w.ctx = &c;
+                                : i_ramble_plat_now_us() + (uint64_t)timeout_ms * 1000u;
+    w.done = i_ramble_node_queue_wait_done; w.ctx = &c;
     w.cv_cap_us = 3600000000u;   /* an unbounded wait still re checks hourly */
     w.pump_outer = 1;            /* outer: this wait may drop the lock */
     w.pump_after_svc = 1;        /* a service thread stopping under us pumps from then on */
-    i_dart_node_wait_until(n, &w);
+    i_ramble_node_wait_until(n, &w);
 }
 
 /* Dispatches up to max_msgs of the messages queued at entry, callbacks on the calling
  * thread and outside the lock when this thread owns it. A reentrant caller keeps the lock. */
-static int i_dart_topic_dispatch_locked(DartNode *n, DartTopic *h, int max_msgs, int acquired){
-    i_DartMsgQueue *q = h->q;
+static int i_ramble_topic_dispatch_locked(RambleNode *n, RambleTopic *h, int max_msgs, int acquired){
+    i_RambleMsgQueue *q = h->q;
     int done = 0; uint32_t todo;
     if (!q || q->busy) return 0;
-    i_dart_node_queue_release(n, h, q);
+    i_ramble_node_queue_release(n, h, q);
     todo = q->count;                    /* a snapshot: later arrivals wait for the next call */
     if (max_msgs > 0 && todo > (uint32_t)max_msgs) todo = (uint32_t)max_msgs;
     while (todo-- && q->count){
-        const i_DartQRec *rec = i_dart_q_peek(q);
-        DartMsg m;
-        i_dart_node_queue_msg(n, h, rec, &m);
+        const i_RambleQRec *rec = i_ramble_q_peek(q);
+        RambleMsg m;
+        i_ramble_node_queue_msg(n, h, rec, &m);
         q->viewing = 1;
         if (n->user_on_message){
             q->busy = 1;
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
             if (acquired){
-                i_dart_node_unlock_raw(n);
+                i_ramble_node_unlock_raw(n);
                 n->user_on_message(&m);
-                i_dart_node_lock_raw(n);
+                i_ramble_node_lock_raw(n);
             } else
 #endif
             n->user_on_message(&m);
             q->busy = 0;
         }
-        i_dart_node_queue_release(n, h, q);
+        i_ramble_node_queue_release(n, h, q);
         done++;
     }
     (void)acquired;
     return done;
 }
 
-int dart_topic_take(DartTopic *topic, DartMsg *out, int timeout_ms){
-    DartNode *n; i_DartMsgQueue *q; int acquired, got = 0;
-    if (!topic || !out) return DART_ERR_NO_TOPIC;
+int ramble_topic_take(RambleTopic *topic, RambleMsg *out, int timeout_ms){
+    RambleNode *n; i_RambleMsgQueue *q; int acquired, got = 0;
+    if (!topic || !out) return RAMBLE_ERR_NO_TOPIC;
     n = topic->n;
-    acquired = i_dart_node_lock(n);
-    q = i_dart_node_queue_ensure(n, topic, NULL);
-    if (!q){ i_dart_node_unlock(n, acquired); return DART_ERR_OOM; }
-    if (q->busy){ i_dart_node_unlock(n, acquired); return DART_ERR_STATE; }
-    i_dart_node_queue_release(n, topic, q);      /* finish the previous view first */
+    acquired = i_ramble_node_lock(n);
+    q = i_ramble_node_queue_ensure(n, topic, NULL);
+    if (!q){ i_ramble_node_unlock(n, acquired); return RAMBLE_ERR_OOM; }
+    if (q->busy){ i_ramble_node_unlock(n, acquired); return RAMBLE_ERR_STATE; }
+    i_ramble_node_queue_release(n, topic, q);      /* finish the previous view first */
     if (!q->count && timeout_ms != 0 && acquired)
-        i_dart_node_queue_wait(n, q, timeout_ms);
-    {   const i_DartQRec *rec = i_dart_q_peek(q);
+        i_ramble_node_queue_wait(n, q, timeout_ms);
+    {   const i_RambleQRec *rec = i_ramble_q_peek(q);
         if (rec){
-            i_dart_node_queue_msg(n, topic, rec, out);
+            i_ramble_node_queue_msg(n, topic, rec, out);
             q->viewing = 1;                   /* the view lives until the next take or dispatch */
             got = 1;
         }
     }
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
     return got;
 }
 
-int dart_topic_dispatch(DartTopic *topic, int max_msgs, int timeout_ms){
-    DartNode *n; i_DartMsgQueue *q; int acquired, done;
-    if (!topic) return DART_ERR_NO_TOPIC;
+int ramble_topic_dispatch(RambleTopic *topic, int max_msgs, int timeout_ms){
+    RambleNode *n; i_RambleMsgQueue *q; int acquired, done;
+    if (!topic) return RAMBLE_ERR_NO_TOPIC;
     n = topic->n;
-    acquired = i_dart_node_lock(n);
-    q = i_dart_node_queue_ensure(n, topic, NULL);
-    if (!q){ i_dart_node_unlock(n, acquired); return DART_ERR_OOM; }
-    if (q->busy){ i_dart_node_unlock(n, acquired); return DART_ERR_STATE; }
-    i_dart_node_queue_release(n, topic, q);
+    acquired = i_ramble_node_lock(n);
+    q = i_ramble_node_queue_ensure(n, topic, NULL);
+    if (!q){ i_ramble_node_unlock(n, acquired); return RAMBLE_ERR_OOM; }
+    if (q->busy){ i_ramble_node_unlock(n, acquired); return RAMBLE_ERR_STATE; }
+    i_ramble_node_queue_release(n, topic, q);
     if (!q->count && timeout_ms != 0 && acquired)
-        i_dart_node_queue_wait(n, q, timeout_ms);
-    done = i_dart_topic_dispatch_locked(n, topic, max_msgs, acquired);
-    i_dart_node_unlock(n, acquired);
+        i_ramble_node_queue_wait(n, q, timeout_ms);
+    done = i_ramble_topic_dispatch_locked(n, topic, max_msgs, acquired);
+    i_ramble_node_unlock(n, acquired);
     return done;
 }
 
-int dart_node_dispatch(DartNode *n, int max_msgs, int timeout_ms){
+int ramble_node_dispatch(RambleNode *n, int max_msgs, int timeout_ms){
     int acquired, total = 0;
     uint16_t i;
-    if (!n) return DART_ERR_STATE;
-    acquired = i_dart_node_lock(n);
-    if (!i_dart_node_any_queued(n) && timeout_ms != 0 && acquired)
-        i_dart_node_queue_wait(n, NULL, timeout_ms);
-    for (i = 0; i < i_dart_node_topic_hi(n); i++){
-        DartTopic *h = n->handles[i];
+    if (!n) return RAMBLE_ERR_STATE;
+    acquired = i_ramble_node_lock(n);
+    if (!i_ramble_node_any_queued(n) && timeout_ms != 0 && acquired)
+        i_ramble_node_queue_wait(n, NULL, timeout_ms);
+    for (i = 0; i < i_ramble_node_topic_hi(n); i++){
+        RambleTopic *h = n->handles[i];
         if (!h || !h->q || !h->q->count) continue;
-        total += i_dart_topic_dispatch_locked(n, h, max_msgs > 0 ? max_msgs - total : 0, acquired);
+        total += i_ramble_topic_dispatch_locked(n, h, max_msgs > 0 ? max_msgs - total : 0, acquired);
         if (max_msgs > 0 && total >= max_msgs) break;
     }
-    i_dart_node_unlock(n, acquired);
+    i_ramble_node_unlock(n, acquired);
     return total;
 }
 
-void dart_topic_queue_stats(DartTopic *topic, uint32_t *msgs, uint32_t *bytes,
+void ramble_topic_queue_stats(RambleTopic *topic, uint32_t *msgs, uint32_t *bytes,
                               uint32_t *capacity, uint32_t *dropped){
     uint32_t m = 0, b = 0, c = 0, d = 0;
     if (topic && topic->q){
-        int acquired = i_dart_node_lock(topic->n);
+        int acquired = i_ramble_node_lock(topic->n);
         m = topic->q->count; b = topic->q->bytes; c = topic->q->cap; d = topic->q->dropped;
-        i_dart_node_unlock(topic->n, acquired);
+        i_ramble_node_unlock(topic->n, acquired);
     }
     if (msgs)     *msgs = m;
     if (bytes)    *bytes = b;
@@ -2787,77 +2787,77 @@ void dart_topic_queue_stats(DartTopic *topic, uint32_t *msgs, uint32_t *bytes,
     if (dropped)  *dropped = d;
 }
 
-#ifdef DART_THREADS
+#ifdef RAMBLE_THREADS
 /* The service thread: the poll body in a loop, holding the lock for every work pass and
  * dropping it inside the wait. The 250 ms cap bounds a lost wakeup. See spec/node.md. */
-static void i_dart_node_service(void *arg){
-    DartNode *n = (DartNode *)arg;
-    i_dart_node_lock_raw(n);
+static void i_ramble_node_service(void *arg){
+    RambleNode *n = (RambleNode *)arg;
+    i_ramble_node_lock_raw(n);
     while (!n->svc_stop)
-        i_dart_node_poll_locked(n, 250, 1);
-    i_dart_node_unlock_raw(n);
+        i_ramble_node_poll_locked(n, 250, 1);
+    i_ramble_node_unlock_raw(n);
 }
 #endif
 
-int dart_node_start(DartNode *n){
-#ifndef DART_THREADS
+int ramble_node_start(RambleNode *n){
+#ifndef RAMBLE_THREADS
     (void)n;
-    return DART_ERR_NOSYS;
+    return RAMBLE_ERR_NOSYS;
 #else
     int acquired;
-    if (!n) return DART_ERR_STATE;
-    acquired = i_dart_node_lock(n);
-    if (!acquired) return DART_ERR_STATE;               /* from a callback */
-    if (n->svc_running){ i_dart_node_unlock(n, acquired); return DART_ERR_STATE; }
+    if (!n) return RAMBLE_ERR_STATE;
+    acquired = i_ramble_node_lock(n);
+    if (!acquired) return RAMBLE_ERR_STATE;               /* from a callback */
+    if (n->svc_running){ i_ramble_node_unlock(n, acquired); return RAMBLE_ERR_STATE; }
     n->svc_stop = 0;
     n->svc_running = 1;
-    if (!i_dart_plat_thread_start(&n->svc, i_dart_node_service, n)){
+    if (!i_ramble_plat_thread_start(&n->svc, i_ramble_node_service, n)){
         n->svc_running = 0;
-        i_dart_node_unlock(n, acquired);
-        return DART_ERR_NOSYS;
+        i_ramble_node_unlock(n, acquired);
+        return RAMBLE_ERR_NOSYS;
     }
-    i_dart_node_unlock(n, acquired);                    /* the service takes the lock now */
-    return DART_OK;
+    i_ramble_node_unlock(n, acquired);                    /* the service takes the lock now */
+    return RAMBLE_OK;
 #endif
 }
 
-int dart_node_stop(DartNode *n){
-#ifndef DART_THREADS
+int ramble_node_stop(RambleNode *n){
+#ifndef RAMBLE_THREADS
     (void)n;
-    return DART_OK;                                     /* nothing to stop, idempotent */
+    return RAMBLE_OK;                                     /* nothing to stop, idempotent */
 #else
     int acquired;
-    if (!n) return DART_ERR_STATE;
-    acquired = i_dart_node_lock(n);
-    if (!acquired) return DART_ERR_STATE;               /* from a callback (it is the service) */
+    if (!n) return RAMBLE_ERR_STATE;
+    acquired = i_ramble_node_lock(n);
+    if (!acquired) return RAMBLE_ERR_STATE;               /* from a callback (it is the service) */
     if (n->svc_joining){
         /* another thread owns the join: wait for it rather than join twice. Counted as
            a cv waiter so its broadcasts land */
         n->cv_waiters++;
-        while (n->svc_running) i_dart_node_cv_wait(n, 100000u);
+        while (n->svc_running) i_ramble_node_cv_wait(n, 100000u);
         n->cv_waiters--;
-        i_dart_node_unlock(n, acquired);
-        return DART_OK;
+        i_ramble_node_unlock(n, acquired);
+        return RAMBLE_OK;
     }
-    if (!n->svc_running){ i_dart_node_unlock(n, acquired); return DART_OK; }
+    if (!n->svc_running){ i_ramble_node_unlock(n, acquired); return RAMBLE_OK; }
     n->svc_joining = 1;
     n->svc_stop = 1;
-    i_dart_node_kick(n);
-    i_dart_node_unlock(n, acquired);
-    i_dart_plat_thread_join(&n->svc);                   /* never joined holding the lock */
-    acquired = i_dart_node_lock(n);
+    i_ramble_node_kick(n);
+    i_ramble_node_unlock(n, acquired);
+    i_ramble_plat_thread_join(&n->svc);                   /* never joined holding the lock */
+    acquired = i_ramble_node_lock(n);
     n->svc_running = 0;
     n->svc_stop = 0;
     n->svc_joining = 0;
     /* free every waiter: blocked senders proceed unwaited, a parked stopper returns */
-    if (n->cv_waiters) i_dart_plat_cond_broadcast(&n->cv);
-    i_dart_node_unlock(n, acquired);
-    return DART_OK;
+    if (n->cv_waiters) i_ramble_plat_cond_broadcast(&n->cv);
+    i_ramble_node_unlock(n, acquired);
+    return RAMBLE_OK;
 #endif
 }
 
-int dart_node_is_started(DartNode *n){
-#ifndef DART_THREADS
+int ramble_node_is_started(RambleNode *n){
+#ifndef RAMBLE_THREADS
     (void)n;
     return 0;
 #else
@@ -2865,63 +2865,63 @@ int dart_node_is_started(DartNode *n){
 #endif
 }
 
-void dart_node_lock(DartNode *n){
-#ifndef DART_THREADS
+void ramble_node_lock(RambleNode *n){
+#ifndef RAMBLE_THREADS
     (void)n;
 #else
     if (!n) return;
-    if (n->lock_held && n->lock_owner == i_dart_plat_thread_id()) return;  /* already ours */
-    i_dart_node_lock_raw(n);
+    if (n->lock_held && n->lock_owner == i_ramble_plat_thread_id()) return;  /* already ours */
+    i_ramble_node_lock_raw(n);
     n->user_locked = 1;
 #endif
 }
 
-void dart_node_unlock(DartNode *n){
-#ifndef DART_THREADS
+void ramble_node_unlock(RambleNode *n){
+#ifndef RAMBLE_THREADS
     (void)n;
 #else
-    if (!n || !n->user_locked) return;   /* only releases what dart_node_lock took */
-    if (!(n->lock_held && n->lock_owner == i_dart_plat_thread_id())) return;
+    if (!n || !n->user_locked) return;   /* only releases what ramble_node_lock took */
+    if (!(n->lock_held && n->lock_owner == i_ramble_plat_thread_id())) return;
     n->user_locked = 0;
-    i_dart_node_unlock_raw(n);
+    i_ramble_node_unlock_raw(n);
 #endif
 }
 
-int dart_node_close(DartNode *n, int send_bye){
-    DartAllocator pool;
-    if (!n) return DART_OK;
-#ifdef DART_THREADS
+int ramble_node_close(RambleNode *n, int send_bye){
+    RambleAllocator pool;
+    if (!n) return RAMBLE_OK;
+#ifdef RAMBLE_THREADS
     /* from a callback: refuse loudly, the return code lets a binding keep its handle alive */
-    if (n->lock_held && n->lock_owner == i_dart_plat_thread_id()) return DART_ERR_STATE;
-    dart_node_stop(n);
+    if (n->lock_held && n->lock_owner == i_ramble_plat_thread_id()) return RAMBLE_ERR_STATE;
+    ramble_node_stop(n);
     /* from here no other thread is inside, or may enter, any call on this node */
 #endif
     /* settle outstanding pattern promises while the node is fully alive, cleared first so
        a callback closing the node cannot recurse */
     if (n->sys_on_close){
-        i_DartSysCloseFn f = n->sys_on_close;
+        i_RambleSysCloseFn f = n->sys_on_close;
         n->sys_on_close = NULL;
         f(n->sys_user);
     }
     /* discovery frees peer blobs via our hook, so it must close before the pool is copied out */
-    if (n->discovery) dart_discovery_close(n->discovery, send_bye);
-    if (n->fd != DART_SOCK_BAD) i_dart_plat_close(n->fd);
-#ifdef DART_SHM
+    if (n->discovery) ramble_discovery_close(n->discovery, send_bye);
+    if (n->fd != RAMBLE_SOCK_BAD) i_ramble_plat_close(n->fd);
+#ifdef RAMBLE_SHM
     if (n->shm_capable){                              /* the pool reset unmaps nothing */
-        uint32_t i, n_segments = (uint32_t)n->shm_n_topics * DART_SHM_N_CLASSES;
+        uint32_t i, n_segments = (uint32_t)n->shm_n_topics * RAMBLE_SHM_N_CLASSES;
         for (i=0;i<n_segments;i++)
-            if (n->shm_pool[i]) i_dart_shm_detach((i_DartShmPool*)n->shm_pool[i]);
+            if (n->shm_pool[i]) i_ramble_shm_detach((i_RambleShmPool*)n->shm_pool[i]);
         for (i=0;i<n->shm_reader_count;i++)
-            if (n->shm_reader_states[i]) i_dart_shm_detach((i_DartShmPool*)n->shm_reader_states[i]);
+            if (n->shm_reader_states[i]) i_ramble_shm_detach((i_RambleShmPool*)n->shm_reader_states[i]);
     }
 #endif
-#ifdef DART_THREADS
-    if (n->waker.fd != DART_SOCK_BAD) i_dart_plat_waker_close(&n->waker);
-    i_dart_plat_cond_destroy(&n->cv);
-    i_dart_plat_mutex_destroy(&n->mu);
+#ifdef RAMBLE_THREADS
+    if (n->waker.fd != RAMBLE_SOCK_BAD) i_ramble_plat_waker_close(&n->waker);
+    i_ramble_plat_cond_destroy(&n->cv);
+    i_ramble_plat_mutex_destroy(&n->mu);
 #endif
-    i_dart_plat_cleanup();
-    pool = n->pool;                /* copied out last, the reset frees n itself */
-    dart_allocator_reset(&pool);   /* frees the node struct, arena, buffers, schemas and handles */
-    return DART_OK;
+    i_ramble_plat_cleanup();
+    pool = n->pool;                  /* copied out last, the reset frees n itself */
+    ramble_allocator_reset(&pool);   /* frees the node struct, arena, buffers, schemas and handles */
+    return RAMBLE_OK;
 }

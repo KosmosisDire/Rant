@@ -1,5 +1,5 @@
 @echo off
-REM Configure CMake and build all DART targets. Output lands in bin\ for every
+REM Configure CMake and build all Ramble targets. Output lands in bin\ for every
 REM config, so a Release build overwrites a Debug one (and vice versa).
 REM Usage: build [release^|debug]   (default: release)
 setlocal
@@ -17,7 +17,7 @@ if /i "%CONFIG%"=="release" (
   exit /b 2
 )
 
-cmake --preset windows -D DART_BUILD_JS_CLIENT=ON
+cmake --preset windows -D RAMBLE_BUILD_JS_CLIENT=ON
 if errorlevel 1 exit /b 1
 
 cmake --build --preset %BUILDPRESET%

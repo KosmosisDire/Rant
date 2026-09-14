@@ -25,24 +25,24 @@ and settled. Do not relitigate them.
   force both make optimism wrong. `get()` answers what the system's value is.
 - Multi writer stays legal on the wire (an HMI, the explorer and failover need it). The
   one authority contract is watched, not refused.
-- Backpressure is on by default for every pattern channel (`DART_PATTERN_BP_WAIT_US`).
+- Backpressure is on by default for every pattern channel (`RAMBLE_PATTERN_BP_WAIT_US`).
   There is no "off" spelling for it on a pattern channel, an open design question.
   Reliability and latching stay sealed. `catch_up` and `keep_last` are exposed.
 - Vocabulary: DEFINITION is where the body or storage lives, REMOTE is a reference to one
   on another node. You CALL a function, the definition handles a REQUEST and sends a
-  RESPONSE, the outcome is a `DartCallStatus`. No ROS vocabulary (RUNNING, never ACCEPTED,
+  RESPONSE, the outcome is a `RambleCallStatus`. No ROS vocabulary (RUNNING, never ACCEPTED,
   progress never feedback).
 - The layer depends on `node/runtime` only, through kind agnostic seams: create a topic
   with a kind and a fixed payload prefix, route that topic's deliveries to a pattern
   handler, send with a header or directed to one peer, observe events and a per poll tick.
-  `DART_NO_PATTERNS` strips it.
-- `DartTaskOpts` uses discrete zero default progress fields, not an embedded `DartQos`,
-  because a zeroed `DartQos` means best effort and would contradict the reliable default.
+  `RAMBLE_NO_PATTERNS` strips it.
+- `RambleTaskOpts` uses discrete zero default progress fields, not an embedded `RambleQos`,
+  because a zeroed `RambleQos` means best effort and would contradict the reliable default.
 
 ## Kinds
 
-`DartTopicKind` rides bits 3 to 6 of the announce interest flags. A kind mismatch is
-refused with `DART_E_KIND_MISMATCH`.
+`RambleTopicKind` rides bits 3 to 6 of the announce interest flags. A kind mismatch is
+refused with `RAMBLE_E_KIND_MISMATCH`.
 
 | kind | channel | who publishes |
 |---|---|---|
@@ -57,22 +57,22 @@ refused with `DART_E_KIND_MISMATCH`.
 
 ## Headers
 
-A delivered message splits into `DartMsg.header` (the pattern prefix) and
-`DartMsg.data` (the user payload the schema validates). A zero length payload on a prefix
+A delivered message splits into `RambleMsg.header` (the pattern prefix) and
+`RambleMsg.data` (the user payload the schema validates). A zero length payload on a prefix
 carrying channel is an op only message, exempt from schema validation, which is what lets
 a remote unforce a typed variable.
 
 - `@req`: `[u32 call_id][u8 op]`. Op 0 is CALL, op 1 is CANCEL (schema exempt). A CANCEL
   with a 4 byte `[u32 caller_lo]` payload names another caller's call.
 - `@rsp`: `[u32 call_id][u8 status][u8 msg_len][msg]`. The message text is capped at
-  `DART_CALL_MSG_MAX` (255) and truncated, never refused. A non OK outcome with no text
+  `RAMBLE_CALL_MSG_MAX` (255) and truncated, never refused. A non OK outcome with no text
   gets default status text, so `message` is always displayable. The text rides the header
   side so the payload stays schema validated alone.
 - `t@prg`: `[u32 caller_lo][u32 call_id]`. Call ids are per caller counters and peer ids
   are node local, so `call_id` alone would blend two callers' same numbered calls on the
   shared broadcast channel. `caller_lo` is the little endian u32 of the requester's uuid's
   first 4 bytes. It also gives any observer requester attribution, which is why there is
-  no `@dart/meta` tasks section.
+  no `@ramble/meta` tasks section.
 - value: `[u8 flags][u32 write_seq]`, flag 0x01 = forced.
 - `v@set`: `[u8 op]`, op 0 set, 1 force, 2 unforce. A plain set with an empty payload is
   ignored.
@@ -99,15 +99,15 @@ of a queued call is local. Request and response channels have `catch_up` 0, sinc
 carry no replay: their history is purely the repair window.
 
 Defer tokens live in a per handle registry. Every token verb validates membership first,
-so a stale token is `DART_ERR_STATE`, never undefined behavior. `dart_function_progress`,
-`dart_function_cancelled` and `dart_function_complete` are thread safe. Cancellation is
+so a stale token is `RAMBLE_ERR_STATE`, never undefined behavior. `ramble_function_progress`,
+`ramble_function_cancelled` and `ramble_function_complete` are thread safe. Cancellation is
 cooperative and never acked: the terminal status is the answer. A CANCELLED completion may
 carry a partial result.
 
 Traps pinned by the `task:` and `taskx:` selftests:
 
 - A send only commits. A poll pass transmits. Retire and close drain the CANCELLED
-  replies through `i_dart_node_flush_tx` (a transmit only drain) before tearing lanes down,
+  replies through `i_ramble_node_flush_tx` (a transmit only drain) before tearing lanes down,
   or the reply stays in history forever.
 - The retire announce can sever the demux before the queued reply drains (discovery is
   serviced before the data socket), so the caller side severed lane backstop on
@@ -132,7 +132,7 @@ re lock to append.
 
 ## Directed requests
 
-Task requests are always directed at one provider (`DartCallOpts.provider`, 0 = the
+Task requests are always directed at one provider (`RambleCallOpts.provider`, 0 = the
 oldest matched at send time, or at flush for a call queued before any match). A function
 call with no provider reaches every definition and the first answer wins. A directed send
 shares the topic's seqno line and every other reliable lane skips past it. See
@@ -142,7 +142,7 @@ spec/transport.md.
 
 The owner publishes the value channel (`catch_up` 1, so a late remote gets the latest).
 Writers push on `v@set` with no response. A read only definition creates no set channel,
-and remote sets get `DART_ERR_ROLE`. Both channels keep the reliable history depth (10).
+and remote sets get `RAMBLE_ERR_ROLE`. Both channels keep the reliable history depth (10).
 That depth is the repair window, distinct from `catch_up`, the replay window. They were
 once the same line, which gave every reliable variable a one slot history: the next write
 overwrote the sample a lagging accessor was about to NACK. A burst written from inside a
@@ -155,9 +155,9 @@ replays the current value once at registration, which kills the create to regist
 `on_write` fires on every applied write with no replay, because writes are events, not
 state. Both fire inline under the node lock on the thread that applied the write. Writes
 absorbed while forced fire nothing. Edge predicates would hook in at
-`i_dart_var_would_change`.
+`i_ramble_var_would_change`.
 
-A fresh remote's first write rides the send path match wait, so `DART_ERR_NO_TOPIC`
+A fresh remote's first write rides the send path match wait, so `RAMBLE_ERR_NO_TOPIC`
 means the owner is genuinely absent. A node younger than the post open gather window pays
 the gather once even for an orphan set. The `varwait:` selftests pin it.
 
@@ -175,7 +175,7 @@ node successor definition's values were dropped forever.
 
 Two authorities never form a lane (pub and pub, sub and sub), so the layer checks the
 announce interest instead: at authority create against known peers, and on every
-interest apply. It fires `DART_E_DUPLICATE_AUTHORITY` once per (entity, peer) on both
+interest apply. It fires `RAMBLE_E_DUPLICATE_AUTHORITY` once per (entity, peer) on both
 rivals. This is a diagnostic, not a refusal: calls take the first response and remotes
 converge on the last write. The per apply check is one walk of the peer's entities
 against a sorted (kind, hash) index of the local authorities, rebuilt lazily after a
@@ -193,9 +193,9 @@ delivery callback, and the owner's force and unforce republish from the shadow.
 
 ## Retire and shadowing
 
-Retire parks the channels (`DART_INACTIVE`, re advertised), answers every outstanding
+Retire parks the channels (`RAMBLE_INACTIVE`, re advertised), answers every outstanding
 call CANCELLED (a definition answers its live deferred calls on the wire first), silences
-callbacks, unlinks the handle and frees it. It is refused with `DART_ERR_STATE` from
+callbacks, unlinks the handle and frees it. It is refused with `RAMBLE_ERR_STATE` from
 inside a callback and the handle then stays valid. The builtin meta handle refuses retire.
 
 Retire runs in three phases: park the channels before taking the lock (`set_role` refuses
@@ -217,14 +217,14 @@ it.
 
 ## Progress reliability
 
-`t@prg` reliability is configurable per side with `DartTaskOpts.progress_best_effort`
+`t@prg` reliability is configurable per side with `RambleTaskOpts.progress_best_effort`
 (default reliable). The RxO rule composes the mixed case: a reliable caller gets every
 update with backpressure, and a best effort observer is out of flow control and can never
 stall the task.
 
 ## The meta function
 
-`@dart/meta` rides this layer as one handle carrying both sides (mode 2 of the function
+`@ramble/meta` rides this layer as one handle carrying both sides (mode 2 of the function
 constructor). Its request channel is reliable, so a caller's immediate in order ack from
 the provider samples the round trip. See spec/node.md for the snapshot.
 
@@ -233,7 +233,7 @@ the provider samples the round trip. See spec/node.md for the snapshot.
 Variable external storage (owner get and set hooks, with `on_force` and `on_unforce`),
 the owner side `on_set` transform, `exclusive_write`, publish side on change dedup, the
 dispatch collapsed consumer thread delivery mode and rising or falling edge triggers (one
-slot per event kind, the same `DartVariableUpdate` payload). `dart_variable_wait` cannot
+slot per event kind, the same `RambleVariableUpdate` payload). `ramble_variable_wait` cannot
 wait under a service thread because the wait seam was part of that deferred design. Name
 directed calls, a `call_all` keyed response list and a fast reboot challenge supersede
 (which needs the host id unconditionally in the announce) were argued through and parked.

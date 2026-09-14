@@ -3,14 +3,14 @@
 
 using System;
 using System.Diagnostics;
-using Dart;
+using Ramble;
 
 struct Tick
 {
-    [DartField("seq")]   public ulong Seq;
-    [DartField("when")] [DartTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
-    [DartField("value")] public double Value;
-    [DartField("at")]    public Pose At;                                // meters + a quaternion
+    [RambleField("seq")]   public ulong Seq;
+    [RambleField("when")] [RambleTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
+    [RambleField("value")] public double Value;
+    [RambleField("at")]    public Pose At;                                // meters + a quaternion
 }
 
 static class Program
@@ -23,7 +23,7 @@ static class Program
         double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 = run forever
         string iface = args.Length > 1 ? args[1] : null;
 
-        var node = new DartNode("cs-subscriber", m => { _count++; _last = m.As<Tick>(); },
+        var node = new RambleNode("cs-subscriber", m => { _count++; _last = m.As<Tick>(); },
             e => Console.Error.WriteLine("event: " + e), multicastInterface: iface);
         new Topic<Tick>(node, "tick", Role.SubOnly);
         Console.WriteLine("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)");

@@ -54,7 +54,7 @@ jobs:
                      else "linux-x64" if "x86_64" in tag else "osx")
               with zipfile.ZipFile(w) as z:
                   for n in z.namelist():
-                      if n in ("dart/dart.dll", "dart/libdart.so", "dart/libdart.dylib"):
+                      if n in ("ramble/ramble.dll", "ramble/libramble.so", "ramble/libramble.dylib"):
                           os.makedirs("dist/native/" + rid, exist_ok=True)
                           with open("dist/native/" + rid + "/" + n[5:], "wb") as f:
                               f.write(z.read(n))
@@ -100,17 +100,17 @@ jobs:
       - name: Zip
         shell: bash
         run: |
-          mkdir -p out/dart
-          for p in dart_explorer dart_bridge demo_scene dart_test dart_test_noshm pubsub example pattern_demo if_probe_check; do
-            cp "bin/$p" out/dart/ 2>/dev/null || cp "bin/$p.exe" out/dart/
+          mkdir -p out/ramble
+          for p in ramble_explorer ramble_bridge demo_scene ramble_test ramble_test_noshm pubsub example pattern_demo if_probe_check; do
+            cp "bin/$p" out/ramble/ 2>/dev/null || cp "bin/$p.exe" out/ramble/
           done
-          ls out/dart
-          cd out && cmake -E tar cf "../dart-$(cat ../VERSION)-${{ matrix.name }}.zip" --format=zip dart
+          ls out/ramble
+          cd out && cmake -E tar cf "../ramble-$(cat ../VERSION)-${{ matrix.name }}.zip" --format=zip ramble
 
       - uses: actions/upload-artifact@v7
         with:
           name: programs-${{ matrix.name }}
-          path: dart-*.zip
+          path: ramble-*.zip
 
   # Everything into one GitHub Release, the upm branch and the registries.
   release:
@@ -146,7 +146,7 @@ jobs:
           ls -R dist/native wheelhouse
 
       - name: NuGet package
-        run: dotnet pack csharp/Dart.csproj -c Release -o dist
+        run: dotnet pack csharp/Ramble.csproj -c Release -o dist
 
       - name: Unity package
         run: cmake -P tools/unity.cmake
@@ -155,10 +155,10 @@ jobs:
         run: |
           VERSION="$(cat VERSION)"
           mkdir -p release
-          cp dist/dart.h dist/dart_discovery.h dist/dart_transport.h dist/dart.c dist/dart.hpp dist/dart.cpp release/
-          cp dist/dart.mjs dist/dart.js dist/dart.d.ts release/
-          cp dist/Dart.*.nupkg dist/dart-*.unitypackage wheelhouse/* artifacts/programs-*/*.zip release/
-          (cd dist && cmake -E tar cf "../release/dart-$VERSION-native.zip" --format=zip native)
+          cp dist/ramble.h dist/ramble_discovery.h dist/ramble_transport.h dist/ramble.c dist/ramble.hpp dist/ramble.cpp release/
+          cp dist/ramble.mjs dist/ramble.js dist/ramble.d.ts release/
+          cp dist/Ramble.*.nupkg dist/ramble-*.unitypackage wheelhouse/* artifacts/programs-*/*.zip release/
+          (cd dist && cmake -E tar cf "../release/ramble-$VERSION-native.zip" --format=zip native)
           ls -la release
 
       - uses: softprops/action-gh-release@v3
@@ -171,7 +171,7 @@ jobs:
         run: |
           pkg="$RUNNER_TEMP/upm"
           rm -rf "$pkg"
-          cp -r dist/com.rant.dart "$pkg"
+          cp -r dist/com.rant.ramble "$pkg"
           cd "$pkg"
           git init -q -b upm
           git config user.name  "github-actions[bot]"
@@ -184,7 +184,7 @@ jobs:
       # publishes. Without them the release is the GitHub page alone.
       - name: Publish to nuget.org
         if: env.NUGET_API_KEY != ''
-        run: dotnet nuget push "dist/Dart.*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push "dist/Ramble.*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: Publish to PyPI
         if: env.PYPI_API_TOKEN != ''

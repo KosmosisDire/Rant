@@ -1,6 +1,6 @@
 /* The example and end to end check: pub sub, a function, a task and a variable over the
- * bridge from Node. Start dart_bridge --bind 127.0.0.1, then node example.mjs [ws url]. */
-import { DartNode, MetaSection } from "../../dist/dart.mjs";
+ * bridge from Node. Start ramble_bridge --bind 127.0.0.1, then node example.mjs [ws url]. */
+import { RambleNode, MetaSection } from "../../dist/ramble.mjs";
 
 const url = process.argv[2] ?? "ws://127.0.0.1:7480";
 
@@ -17,9 +17,9 @@ const net = { interface: "127.0.0.1" };
 
 const fail = setTimeout(() => { console.error("timeout: no progress in 30s (is the bridge running?)"); process.exit(1); }, 30000);
 
-const robot = await DartNode.connect(url, { name: "robot", ...net,
+const robot = await RambleNode.connect(url, { name: "robot", ...net,
     onEvent: (e) => { if (e.event === "error") console.warn("robot:", e.text); } });
-const dash  = await DartNode.connect(url, { name: "dashboard", ...net, fetch_details: true,
+const dash  = await RambleNode.connect(url, { name: "dashboard", ...net, fetch_details: true,
     onEvent: (e) => { if (e.event === "error") console.warn("dash:", e.text); } });
 console.log(`connected to ${url} (data over ${robot.transport})`);
 
@@ -126,7 +126,7 @@ if (!robotTelemetry.schema.fields.some((f) => f.path === "at" && f.named === "Do
     throw new Error("peer reflection dropped the Double2 name");
 
 const snap = await dash.meta(robotPeer.id, MetaSection.Node | MetaSection.Topics);
-console.log(`robot @dart/meta: status=${snap.status} valid=${snap.valid}` +
+console.log(`robot @ramble/meta: status=${snap.status} valid=${snap.valid}` +
             (snap.valid ? `  name=${snap.info.node?.name} topics=${snap.info.node?.topics}` : ""));
 if (!snap.valid) throw new Error("meta query failed");
 

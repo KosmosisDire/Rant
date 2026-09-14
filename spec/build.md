@@ -1,17 +1,17 @@
 # Build system
 
 The root `CMakeLists.txt` amalgamates `src/` into `dist/` and builds the host tools, tests
-and examples. Four targets: `dart` is the header only core, `dart_platform` the OS
-libraries (Windows: ws2_32, bcrypt, winmm. Linux: rt) plus Threads, `dart_host` the built
-static library a consumer links, and `dart_shared` the shared library the bindings load.
-Each carries a `dart::` alias, and that is what another project links, whether it adds
-DART as a subproject or finds the installed package.
+and examples. Four targets: `ramble` is the header only core, `ramble_platform` the OS
+libraries (Windows: ws2_32, bcrypt, winmm. Linux: rt) plus Threads, `ramble_host` the built
+static library a consumer links, and `ramble_shared` the shared library the bindings load.
+Each carries a `ramble::` alias, and that is what another project links, whether it adds
+Ramble as a subproject or finds the installed package.
 
 - `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is the three dist
   headers, so it re packs only when a `src/` file or pack.cmake changes. It also splices
-  `dart.h` into `dist/dart.hpp` and writes the two anchors.
+  `ramble.h` into `dist/ramble.hpp` and writes the two anchors.
 - `pyproject.toml` builds the Python wheel through scikit-build-core, which runs this same
-  CMake with `SKBUILD` set. The one rule keyed on it installs `dart_shared` next to the
+  CMake with `SKBUILD` set. The one rule keyed on it installs `ramble_shared` next to the
   package. The wheel is tagged `py3-none`, since ctypes needs no Python ABI, so one wheel
   per platform serves every interpreter. Linux wheels are built inside manylinux, which
   is what gives the shipped Linux library its glibc 2.28 floor.
@@ -28,8 +28,8 @@ DART as a subproject or finds the installed package.
   object agrees on one runtime, and it forces policy CMP0091 NEW because vendored freetype
   asks for cmake 3.0 and would otherwise build `/MD` from the legacy flags. MinGW takes a
   full `-static`, other GNU toolchains static libgcc and libstdc++ with glibc shared. Every
-  variable it sets is a plain one in DART's own directory scope, so a project that adds
-  DART as a subproject keeps the runtime it picked and only DART's targets go static.
+  variable it sets is a plain one in Ramble's own directory scope, so a project that adds
+  Ramble as a subproject keeps the runtime it picked and only Ramble's targets go static.
 - `CMakePresets.json` has `windows` and `linux` configure presets, both with the explorer
   on and `binaryDir` `build`. The Windows preset pins no generator and no architecture so
   it works with any installed Visual Studio. Build presets `windows` and `linux` pin
@@ -39,20 +39,20 @@ DART as a subproject or finds the installed package.
   Debug whatever the config order, which is why the build preset pins Release.
   `CMAKE_DEFAULT_BUILD_TYPE` is rejected by the VS generator, so it is guarded to Ninja
   Multi-Config with an `unset(... CACHE)` else branch.
-- `DART_BUILD_TOOLS=OFF` (auto when cross compiling or when DART is a subproject) drops
-  the programs. `dart_platform` and `dart_host` survive it, because a consumer wants the
-  library without the tests. A cross build gets `dart` alone: the platform is its own.
-- Four targets, one job each. `dart` is the `dist/` include directory and nothing else.
-  `dart_platform` is the OS libraries, in `tools/dart_platform.cmake` so the root build and
-  a standalone `explore/` or `bridge/` configure share one list. `dart_host` is a static library over
-  `dist/dart.c`, so a consumer defines no `DART_IMPLEMENTATION` and writes no anchor.
-  The in tree programs link `dart` and `dart_platform` instead, never `dart_host`: each
-  compiles its own flavour of the amalgamation, some with `DART_NO_SHM` or transport only,
-  and linking the built library too would define every symbol twice. `dart_shared` is the
-  same anchor built with `DART_BUILD_SHARED` and hidden visibility, `EXCLUDE_FROM_ALL` in a
-  subproject, and it exports `DART_LINK_SHARED` to whatever links it.
-- `dist/dart.c` and `dist/dart.cpp` are the generated anchors, two lines each. They are
-  what `dart_host`, the native plugin builds and the bridge compile, so the define lives
+- `RAMBLE_BUILD_TOOLS=OFF` (auto when cross compiling or when Ramble is a subproject) drops
+  the programs. `ramble_platform` and `ramble_host` survive it, because a consumer wants the
+  library without the tests. A cross build gets `ramble` alone: the platform is its own.
+- Four targets, one job each. `ramble` is the `dist/` include directory and nothing else.
+  `ramble_platform` is the OS libraries, in `tools/ramble_platform.cmake` so the root build and
+  a standalone `explore/` or `bridge/` configure share one list. `ramble_host` is a static library over
+  `dist/ramble.c`, so a consumer defines no `RAMBLE_IMPLEMENTATION` and writes no anchor.
+  The in tree programs link `ramble` and `ramble_platform` instead, never `ramble_host`: each
+  compiles its own flavour of the amalgamation, some with `RAMBLE_NO_SHM` or transport only,
+  and linking the built library too would define every symbol twice. `ramble_shared` is the
+  same anchor built with `RAMBLE_BUILD_SHARED` and hidden visibility, `EXCLUDE_FROM_ALL` in a
+  subproject, and it exports `RAMBLE_LINK_SHARED` to whatever links it.
+- `dist/ramble.c` and `dist/ramble.cpp` are the generated anchors, two lines each. They are
+  what `ramble_host`, the native plugin builds and the bridge compile, so the define lives
   in one generated place instead of a hand written file per consumer.
 - Everything but the library is top level only: the packer target, the programs, the
   explorer, the bridge, the `bin/` output dir and the multi config defaults. The test is
@@ -62,35 +62,33 @@ DART as a subproject or finds the installed package.
   explorer and bridge defaults had it fetch SDL3, IXWebSocket and libdatachannel. `dist/`
   is committed, so a consumer never runs the packer and never reads `src/`.
 - `install()` copies the four `dist/` headers into `include/` and writes an export set plus
-  `dart-config.cmake` (from `tools/dart-config.cmake.in`) into `share/cmake/dart`, so
-  `find_package(dart CONFIG)` hands over the same two targets. `CONFIG` is not optional:
-  CMake ships a `FindDart` module for an unrelated old tool and module mode finds that
-  first on a case insensitive filesystem. The config finds Threads before the targets file,
-  which names `Threads::Threads`.
+  `ramble-config.cmake` (from `tools/ramble-config.cmake.in`) into `share/cmake/ramble`, so
+  `find_package(ramble CONFIG)` hands over the same two targets. The config finds Threads
+  before the targets file, which names `Threads::Threads`.
 - The version lives once, in `VERSION` at the root: `project()` reads it so the config
-  package answers a version request with `SameMinorVersion` compatibility, `Dart.csproj`
+  package answers a version request with `SameMinorVersion` compatibility, `Ramble.csproj`
   reads it through an MSBuild property function, `pyproject.toml` through the
   scikit-build-core regex provider, and the Unity packer stamps it into `package.json`.
   A release is a tag `v` plus that number, and the workflow refuses any other tag.
-- Three builds, one macro. `src/common/api.h` defines `DART_API`, which every public
-  declaration carries. The default build compiles DART into the caller's own binary and
-  needs no decoration. `DART_BUILD_SHARED` marks each entry point exported, so the shared
+- Three builds, one macro. `src/common/api.h` defines `RAMBLE_API`, which every public
+  declaration carries. The default build compiles Ramble into the caller's own binary and
+  needs no decoration. `RAMBLE_BUILD_SHARED` marks each entry point exported, so the shared
   library's export table is exactly what the public headers declare and nothing else,
-  which is why no binding keeps an export list. `DART_LINK_SHARED` marks them imported,
+  which is why no binding keeps an export list. `RAMBLE_LINK_SHARED` marks them imported,
   which only Windows needs. GNU toolchains also take `-fvisibility=hidden` so the
   internals stay in. The declaration carries the attribute and the definition in the `.c`
   stays plain: the amalgamation puts both in one translation unit, declaration first.
-- `dart_allocator_heap` and `dart_heap_realloc` are the process heap as an allocator and
-  as a `DartAllocFn`. They exist so a binding over the shared library never has to reach
+- `ramble_allocator_heap` and `ramble_heap_realloc` are the process heap as an allocator and
+  as a `RambleAllocFn`. They exist so a binding over the shared library never has to reach
   for an internal symbol or route allocation back through its own runtime.
-- The `DART_THREADS` and `DART_SHM` detection blocks live identically in both
+- The `RAMBLE_THREADS` and `RAMBLE_SHM` detection blocks live identically in both
   `platform/core.h` and `transport/core.h`, because every translation unit must agree
-  whichever header it saw first. Edit both together. Code guards are `#ifdef DART_THREADS`,
-  never `#ifndef DART_NO_THREADS`. A new platform layer declares support by implementing
-  the thread, mutex, condvar and waker contract and defining `DART_THREADS` itself.
-- The `DART_IMPLEMENTATION` auto define in `dart.hpp` is guarded by
+  whichever header it saw first. Edit both together. Code guards are `#ifdef RAMBLE_THREADS`,
+  never `#ifndef RAMBLE_NO_THREADS`. A new platform layer declares support by implementing
+  the thread, mutex, condvar and waker contract and defining `RAMBLE_THREADS` itself.
+- The `RAMBLE_IMPLEMENTATION` auto define in `ramble.hpp` is guarded by
   `!defined(__cplusplus)`, so a `.cpp` anchor spells the define itself.
-- Bindings: `dart_shared` is the one native library every binding loads. The top level
+- Bindings: `ramble_shared` is the one native library every binding loads. The top level
   build copies it to `dist/native/<rid>/`, named by .NET runtime identifier, so the NuGet,
   Unity and Python packages read one place. macOS builds it universal under the portable
   `osx` identifier. `tools/unity.cmake` assembles the Unity package and
@@ -116,8 +114,8 @@ DART as a subproject or finds the installed package.
   libraries, packs the NuGet, assembles the Unity package and the sdist, attaches
   everything to a GitHub Release, pushes the upm branch, and publishes to nuget.org and
   PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
-- `tools/consumer` is a throwaway project that consumes DART the way a user does, from the
-  source tree by default and from an install with `DART_CONSUMER_FIND_PACKAGE=ON`. It is
+- `tools/consumer` is a throwaway project that consumes Ramble the way a user does, from the
+  source tree by default and from an install with `RAMBLE_CONSUMER_FIND_PACKAGE=ON`. It is
   the only thing that notices when external consumption breaks, which the normal build
   cannot see.
 - `.gitignore` binary patterns are anchored to the root. An unanchored `node` once matched

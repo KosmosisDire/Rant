@@ -1,6 +1,6 @@
-# DART bridge protocol (v11)
+# Ramble bridge protocol (v11)
 
-The bridge turns a WebSocket connection into a full DART node on the mesh. One
+The bridge turns a WebSocket connection into a full Ramble node on the mesh. One
 connection = one node: the bridge opens the node when asked, owns its sockets and
 service thread, and closes it (with a BYE) when the connection drops. Everything a
 native node needs, **pub/sub** plus the pattern entities (**functions**, **tasks**,
@@ -27,7 +27,7 @@ streamed entity (a topic, a variable, a task's progress) can additionally arrive
 real **WebRTC video track** (see Media), decoded by the browser instead of crossing the
 data plane as pixels.
 
-All integers in frames are little-endian (matching the DART wire, and `DataView`'s
+All integers in frames are little-endian (matching the Ramble wire, and `DataView`'s
 `true` flag in JS). The protocol version is returned by `open`; there is no
 cross-version compatibility (see the repo rule: robust parsing, no back-compat).
 
@@ -80,9 +80,9 @@ request, only for a broken WebSocket.
   "peer_timeout_ms": 3500,
   "match_wait_ms": 0,             // send-path match wait; 0 = default 1s, negative = off
   "disable_shm": false,           // force on-wire UDP even to same-host peers
-  "disable_logs": false,          // strip the built-in @dart/log topics
-  "disable_meta": false,          // do not host the @dart/meta endpoint
-  "disable_error_logs": false,    // suppress default mirroring onto @dart/log/error
+  "disable_logs": false,          // strip the built-in @ramble/log topics
+  "disable_meta": false,          // do not host the @ramble/meta endpoint
+  "disable_error_logs": false,    // suppress default mirroring onto @ramble/log/error
   "fetch_details": false }        // greedily fetch peer details so reflected entity
                                   //   names resolve even for topics this node doesn't share
 ```
@@ -256,7 +256,7 @@ payload is a JSON-style tagged tree; the reference client has the codec.
 
 A schema error replies `ok:false` with the reason. The DSL text must be
 byte-identical across nodes for the identical-hash fast path, and structurally a
-subset to match a wider publisher (the normal DART rules; the bridge adds nothing).
+subset to match a wider publisher (the normal Ramble rules; the bridge adds nothing).
 The standard media types are always in scope by name: a schema of just `VideoFrame`
 or `Image` is the canonical type.
 
@@ -285,9 +285,9 @@ the mesh moved and replies `{ "retyped": true|false, "reflected": ..., ...schema
 (the current tables either way; outstanding calls on a re-typed remote are answered
 `cancelled` first).
 
-### `log` / `log_subscribe` : the built-in @dart/log topics
+### `log` / `log_subscribe` : the built-in @ramble/log topics
 
-Every node hosts three shared reliable log topics (`@dart/log/{error,warn,info}`,
+Every node hosts three shared reliable log topics (`@ramble/log/{error,warn,info}`,
 rosout-style), unless opened with `disable_logs`.
 
 ```json
@@ -302,7 +302,7 @@ per level; late-join history replays on match.
 ### Introspection (query-based, pull-only)
 
 `peers`, `entities`, `peer_entities`, `mesh` and `mesh_find` are local reads of this
-node's reflection tables; `meta` is an async directed call to a peer's `@dart/meta`
+node's reflection tables; `meta` is an async directed call to a peer's `@ramble/meta`
 endpoint. None of them push.
 
 ```json
@@ -387,7 +387,7 @@ died). If WebRTC never connects, or fails later, nothing changes but the carrier
 { "op": "event", "event": "peer_up", "text": "peer 2 up ...", ...fields }
 ```
 
-`text` is the human-readable one-liner (`dart_event_str`); the structured fields
+`text` is the human-readable one-liner (`ramble_event_str`); the structured fields
 are per event:
 
 | event              | fields                                          |
@@ -401,7 +401,7 @@ are per event:
 | `rtc`              | `state`                                         |
 
 Everything that goes wrong is one `error` event: `text` carries the message and
-`error` the numeric code (a `DartErrorKind`, see docs/node.md). `send_error` is the
+`error` the numeric code (a `RambleErrorKind`, see docs/node.md). `send_error` is the
 bridge's own event for a frame refused synchronously (bad id, bad role, too big,
 backpressure timeout).
 
@@ -486,7 +486,7 @@ driver published. Same clock and same cross host caveat as `written_us`. 0 means
 nobody stated one. On a DATA frame a client may set it to stamp its own publish; on
 every other op it is 0. A topic with `no_timestamp` carries neither stamp.
 
-Call `status` is the DART `DartCallStatus`: 0 ok, 1 app_error, 2 no_handler,
+Call `status` is the Ramble `RambleCallStatus`: 0 ok, 1 app_error, 2 no_handler,
 3 timeout, 4 peer_lost, 5 cancelled. A call the bridge refuses synchronously (out
 of memory, bad state) answers status 5 plus a `send_error` event carrying the
 reason, so the client's promise always settles. The one non-terminal status, 6
@@ -496,7 +496,7 @@ provider retire or close. When the definition sends no message on a non-ok statu
 the client fills the default status text ("timeout", "no handler", ...), so a
 message is always displayable.
 
-**Variable updates** are pushed event-driven off the C `dart_variable_on_change`
+**Variable updates** are pushed event-driven off the C `ramble_variable_on_change`
 hook: an update frame goes out the moment a change applies, including once right
 after the create reply when a value already exists. A set to the byte-identical
 current value pushes nothing (on_change fires only on an actual state change).
@@ -550,22 +550,22 @@ likes).
 
 ## The JS/TS client
 
-The reference client is **TypeScript source** (`bridge/client/dart.ts`, zero
+The reference client is **TypeScript source** (`bridge/client/ramble.ts`, zero
 runtime dependencies) compiled by pure type stripping into three committed
 distributables (regenerate with `node bridge/client/build.mjs`, or configure
-CMake with `-DDART_BUILD_JS_CLIENT=ON`; tsc is pinned at 5.5 via npx):
+CMake with `-DRAMBLE_BUILD_JS_CLIENT=ON`; tsc is pinned at 5.5 via npx):
 
-- `dist/dart.mjs` : the ES module (browser + Node >= 22 + Deno + Bun)
-- `dist/dart.d.ts` : the type declarations
-- `dist/dart.js` : the classic-script twin: identical code with the export block
-  replaced by ONE global, `globalThis.DartNode`, for a plain `<script src>` tag
-  (no module MIME pitfalls); the constant tables hang off it (`DartNode.VideoCodec`,
-  `DartNode.ImageFormat`, `DartNode.MetaSection`)
+- `dist/ramble.mjs` : the ES module (browser + Node >= 22 + Deno + Bun)
+- `dist/ramble.d.ts` : the type declarations
+- `dist/ramble.js` : the classic-script twin: identical code with the export block
+  replaced by ONE global, `globalThis.RambleNode`, for a plain `<script src>` tag
+  (no module MIME pitfalls); the constant tables hang off it (`RambleNode.VideoCodec`,
+  `RambleNode.ImageFormat`, `RambleNode.MetaSection`)
 
 ```ts
-import { DartNode } from "../../dist/dart.mjs";
+import { RambleNode } from "../../dist/ramble.mjs";
 
-const node = await DartNode.connect("ws://localhost:7480", {
+const node = await RambleNode.connect("ws://localhost:7480", {
   name: "dashboard",                     // transport: "auto" (try WebRTC, default) | "websocket"
   onEvent: (e) => { if (e.event === "error") console.warn(e.text); } });
 console.log(node.transport);             // "webrtc" or "websocket": the API is the same

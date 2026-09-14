@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+# ramble_host carries Threads::Threads, so the finder has to run before the targets file.
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/ramble-targets.cmake")

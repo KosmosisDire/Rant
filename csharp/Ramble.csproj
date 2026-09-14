@@ -1,30 +1,30 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- The NuGet package: the P/Invoke wrapper plus the native library per platform under
-       runtimes/<rid>/native/, so .NET loads the right one. The CMake target dart_shared
-       builds the library into dist/native/<rid>/, then: dotnet pack csharp/Dart.csproj -->
+       runtimes/<rid>/native/, so .NET loads the right one. The CMake target ramble_shared
+       builds the library into dist/native/<rid>/, then: dotnet pack csharp/Ramble.csproj -->
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>Dart</AssemblyName>
-    <RootNamespace>Dart</RootNamespace>
+    <AssemblyName>Ramble</AssemblyName>
+    <RootNamespace>Ramble</RootNamespace>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
 
-    <PackageId>Dart</PackageId>
+    <PackageId>Ramble</PackageId>
     <Authors>Nathan George</Authors>
     <RepositoryUrl>https://github.com/KosmosisDire/DART</RepositoryUrl>
     <PackageProjectUrl>https://github.com/KosmosisDire/DART</PackageProjectUrl>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../VERSION').Trim())</Version>
-    <Description>DART (Discovery And Realtime Transport): peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64, linux-arm64, osx).</Description>
-    <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;dart;rant</PackageTags>
+    <Description>Ramble: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64, linux-arm64, osx).</Description>
+    <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;ramble;rant</PackageTags>
     <IncludeSymbols>false</IncludeSymbols>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Dart.cs" />
+    <Compile Include="Ramble.cs" />
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 

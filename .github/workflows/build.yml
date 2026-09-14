@@ -1,7 +1,7 @@
-# Build DART on every push and pull request, on the three desktop platforms.
+# Build Ramble on every push and pull request, on the three desktop platforms.
 #
 # The test suites are deliberately not run here yet. The test rework lands first and the
-# suites (bin/dart_test selftest, cpp/test.cpp, csharp/test, python/test.py) get wired in
+# suites (bin/ramble_test selftest, cpp/test.cpp, csharp/test, python/test.py) get wired in
 # after it, so a red build here means a build broke, never a flaky network leg.
 name: build
 
@@ -29,7 +29,7 @@ jobs:
       # are moving out of this repo, so CI covers the library and its own programs.
       - name: Configure and build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRAMBLE_BUILD_EXPLORER=OFF -DRAMBLE_BUILD_BRIDGE=OFF
           cmake --build build --config Release --parallel 4
 
       # A hand edited dist/ header is the one thing the amalgamator cannot catch itself.
@@ -48,7 +48,7 @@ jobs:
       - name: A consumer builds from an install
         run: |
           cmake --install build --prefix "${{ runner.temp }}/prefix"
-          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DDART_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
+          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DRAMBLE_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
           cmake --build build/findpkg --config Release
 
       # The build above already made the shared library. This is where the packages read it.
@@ -60,7 +60,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: NuGet package
-        run: dotnet pack csharp/Dart.csproj -c Release -o dist
+        run: dotnet pack csharp/Ramble.csproj -c Release -o dist
 
       - uses: actions/setup-python@v7
         with:

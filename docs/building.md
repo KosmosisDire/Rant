@@ -20,8 +20,8 @@ cmake --build --preset windows-debug   # Debug, overwrites Release in bin/
 `build.bat` and `build.sh` do the same with the JS client enabled. Add `debug` for a
 Debug build.
 
-Targets: `dart_test`, `dart_test_noshm`, `example`, `pubsub`, `if_probe_check`, `dist`
-(amalgamate only) and `dart_shared`, the shared library the C#, Unity and Python packages
+Targets: `ramble_test`, `ramble_test_noshm`, `example`, `pubsub`, `if_probe_check`, `dist`
+(amalgamate only) and `ramble_shared`, the shared library the C#, Unity and Python packages
 bundle, copied to `dist/native/<rid>/`. `pubsub --help` lists that tool's modes and flags.
 To regenerate `dist/` without CMake:
 
@@ -37,56 +37,54 @@ Every package this machine can build lands in `dist/`:
 cmake --build build --config Release --target packages
 ```
 
-`unity_package` assembles `dist/com.rant.dart/` and `dist/dart-<version>.unitypackage`,
-`nuget_package` runs `dotnet pack` for `dist/Dart.<version>.nupkg`, and `python_wheel`
+`unity_package` assembles `dist/com.rant.ramble/` and `dist/ramble-<version>.unitypackage`,
+`nuget_package` runs `dotnet pack` for `dist/Ramble.<version>.nupkg`, and `python_wheel`
 runs `pip wheel` for this platform's wheel. Each bundles the native libraries in
 `dist/native/`, so a local package covers this machine and the release workflow covers
 every platform. The version is the `VERSION` file at the root.
 
 Embedded targets (Arduino, ESP32, VxWorks) do not build the host programs. They drop a
-`dist/` header into their own project and link the header only `dart` target, or just
-point at `dist/`. Set `-DDART_BUILD_TOOLS=OFF`. Cross builds default it off.
+`dist/` header into their own project and link the header only `ramble` target, or just
+point at `dist/`. Set `-DRAMBLE_BUILD_TOOLS=OFF`. Cross builds default it off.
 
 ## From another CMake project
 
-Add DART as a subproject and link one of two targets: `dart::dart_host` is the core plus
-the platform libraries, `dart::dart` is the header only core alone, for an embedded target
+Add Ramble as a subproject and link one of two targets: `ramble::ramble_host` is the core plus
+the platform libraries, `ramble::ramble` is the header only core alone, for an embedded target
 that links its own platform. Only the library is configured, so nothing is fetched and no
 tools, explorer or bridge are built.
 
 ```cmake
-CPMAddPackage(NAME dart
+CPMAddPackage(NAME ramble
               GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
               GIT_TAG v0.0.13)
 
-target_link_libraries(app PRIVATE dart::dart_host)
+target_link_libraries(app PRIVATE ramble::ramble_host)
 ```
 
-`dart::dart_host` is a built library, so your project defines nothing and compiles no
-anchor. Include `dart.h` anywhere and link. `dart::dart` is the header only alternative,
+`ramble::ramble_host` is a built library, so your project defines nothing and compiles no
+anchor. Include `ramble.h` anywhere and link. `ramble::ramble` is the header only alternative,
 for an embedded target that compiles the amalgamation itself with its own flags.
 
-Plain `FetchContent_Declare` plus `FetchContent_MakeAvailable(dart)` gives the same two
-targets. A project that exports its own targets against `dart::` also sets
-`DART_INSTALL=ON`, or its export refuses them.
+Plain `FetchContent_Declare` plus `FetchContent_MakeAvailable(ramble)` gives the same two
+targets. A project that exports its own targets against `ramble::` also sets
+`RAMBLE_INSTALL=ON`, or its export refuses them.
 
-Or install DART once and find it. Spell `CONFIG` unless your own
-`cmake_minimum_required` is 3.27 or later: below that, CMake still ships an unrelated
-`FindDart` module and module mode picks it up instead. Policy CMP0145 removes it at 3.27.
+Or install Ramble once and find it.
 
 ```sh
-cmake -S . -B build -DDART_BUILD_TOOLS=OFF -DDART_BUILD_EXPLORER=OFF -DDART_BUILD_BRIDGE=OFF
+cmake -S . -B build -DRAMBLE_BUILD_TOOLS=OFF -DRAMBLE_BUILD_EXPLORER=OFF -DRAMBLE_BUILD_BRIDGE=OFF
 cmake --install build --prefix /usr/local
 ```
 
 ```cmake
-find_package(dart 0.0.13 CONFIG REQUIRED)
-target_link_libraries(app PRIVATE dart::dart_host)
+find_package(ramble 0.0.13 CONFIG REQUIRED)
+target_link_libraries(app PRIVATE ramble::ramble_host)
 ```
 
-The install is the `dist/` headers in `include/`, the `dart_host` static library and the
-`dart` shared library in `lib/` (the DLL in `bin/` on Windows), and the config package in
-`share/cmake/dart`.
+The install is the `dist/` headers in `include/`, the `ramble_host` static library and the
+`ramble` shared library in `lib/` (the DLL in `bin/` on Windows), and the config package in
+`share/cmake/ramble`.
 
 ## Without CMake
 
@@ -95,13 +93,13 @@ Compile a consumer straight against `dist/`. Linux needs `-lrt` for shared memor
 neither. Windows threads are in kernel32.
 
 ```sh
-cc  -std=c99 -Wall -Idist examples/example.c -o node      -lrt -lpthread
-cc  -std=c99 -Wall -Idist tests/dart_test.c  -o dart_test -lrt -lpthread
-gcc -std=c99 -Wall -Idist examples/example.c -o example.exe -lws2_32 -lbcrypt
-gcc -std=c99 -Wall -Idist tests/dart_test.c  -o dart_test.exe -lws2_32 -lbcrypt -lwinmm
+cc  -std=c99 -Wall -Idist examples/example.c  -o node        -lrt -lpthread
+cc  -std=c99 -Wall -Idist tests/ramble_test.c -o ramble_test -lrt -lpthread
+gcc -std=c99 -Wall -Idist examples/example.c  -o example.exe -lws2_32 -lbcrypt
+gcc -std=c99 -Wall -Idist tests/ramble_test.c -o ramble_test.exe -lws2_32 -lbcrypt -lwinmm
 ```
 
-`example.c` uses the two header packaging. `dart_test.c` uses `dart.h` and needs the
+`example.c` uses the two header packaging. `ramble_test.c` uses `ramble.h` and needs the
 implementation in its own translation unit so its diagnostic `sendto` and `recvfrom`
 wrappers can intercept the transport's calls.
 
@@ -115,36 +113,36 @@ client node that calls them, so the explorer shows every pattern kind live.
 
 ## Testing
 
-All test tooling is one C program, `dart_test`.
+All test tooling is one C program, `ramble_test`.
 
 ```sh
-dart_test selftest                # every selftest phase, exit 0 = pass
-dart_test sweep                   # full mesh RTT vs throughput sweep (10 nodes)
-dart_test sweep --nodes 10 --duration 8 --rates 0,5k,50k,200k
-dart_test sweep --rates 1k,10k --reliable --diag
-dart_test sweep --rates 20k --reliable --extra-ch 500          # 500 idle topics
-dart_test sweep --rates 20k --reliable --extra-ch 500 --spread # load across all of them
-dart_test node n0 11 50000 8      # a single node by hand (name domain hz duration)
-dart_test sendbench               # UDP send cost microbench (Windows only)
-dart_test queuebench              # consumer queue take vs inline callback
+ramble_test selftest                # every selftest phase, exit 0 = pass
+ramble_test sweep                   # full mesh RTT vs throughput sweep (10 nodes)
+ramble_test sweep --nodes 10 --duration 8 --rates 0,5k,50k,200k
+ramble_test sweep --rates 1k,10k --reliable --diag
+ramble_test sweep --rates 20k --reliable --extra-ch 500          # 500 idle topics
+ramble_test sweep --rates 20k --reliable --extra-ch 500 --spread # load across all of them
+ramble_test node n0 11 50000 8      # a single node by hand (name domain hz duration)
+ramble_test sendbench               # UDP send cost microbench (Windows only)
+ramble_test queuebench              # consumer queue take vs inline callback
 ```
 
-Run both `dart_test selftest` and `dart_test_noshm selftest`. The phases cover loss
+Run both `ramble_test selftest` and `ramble_test_noshm selftest`. The phases cover loss
 events, backpressure, dynamic interest, relaying, NAT, the patterns, retire, churn, the
 lapped and ahead rules and the round trip estimator.
 
-`sweep` spawns N `dart_test node` children per rate, waits for them to exit, and
+`sweep` spawns N `ramble_test node` children per rate, waits for them to exit, and
 aggregates their `SUMMARY` lines into a table. A nonzero `Stall ms` column means nodes
 lost the CPU mid run, so distrust that row.
 
 ## Two machines
 
 ```sh
-dart_test serve                           # on machine B
-dart_test sweep --remote --rates 5k,20k   # on machine A, B's nodes join every rate
+ramble_test serve                           # on machine B
+ramble_test sweep --remote --rates 5k,20k   # on machine A, B's nodes join every rate
 ```
 
-The control plane is DART itself on its own domain (default 9, keep `--domain` away from
+The control plane is Ramble itself on its own domain (default 9, keep `--domain` away from
 it). Workers HELLO the coordinator, receive one command per rate so starts are
 synchronized, spawn the same N children, and publish their SUMMARY lines back over a
 reliable topic. Machines must share a subnet (announce TTL 1). `--mcast 2` leaves

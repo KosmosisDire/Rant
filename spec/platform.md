@@ -2,7 +2,7 @@
 
 `src/platform/` is the one OS layer. `core.h` is the contract. `core.c` is the Windows and
 POSIX implementation (Linux, macOS, the BSDs and ESP-IDF over lwIP) and the only file in
-DART with an OS ifdef. A runtime speaks only `i_dart_plat_*` and never touches a sockaddr.
+Ramble with an OS ifdef. A runtime speaks only `i_ramble_plat_*` and never touches a sockaddr.
 A new platform is one new implementation of the header, and a platform with BSD sockets
 needs none. The layer is pure IO, so the sans-IO builds strip it with the runtimes. On non
 MSVC Windows link ws2_32, bcrypt and winmm.
@@ -11,24 +11,24 @@ MSVC Windows link ws2_32, bcrypt and winmm.
 
 An endpoint (send, recv, a peer, a seed) is a `uint8_t ip[4]` plus a host order `uint16_t`
 port. A multicast group or an interface address is a `uint32_t` in network byte order,
-called a naddr. The two are the same four bytes. `i_dart_plat_ip4_to_naddr` and
-`i_dart_plat_naddr_to_ip4` move between them.
+called a naddr. The two are the same four bytes. `i_ramble_plat_ip4_to_naddr` and
+`i_ramble_plat_naddr_to_ip4` move between them.
 
 ## Feature flags
 
-Three features share one flag shape: `DART_SHM`, `DART_THREADS` and `DART_PROC_STATS`.
-Each is auto detected where the bundled layer provides it, the matching `DART_NO_*` opt
+Three features share one flag shape: `RAMBLE_SHM`, `RAMBLE_THREADS` and `RAMBLE_PROC_STATS`.
+Each is auto detected where the bundled layer provides it, the matching `RAMBLE_NO_*` opt
 out always wins, and a new platform layer that implements the contract declares support by
-defining the flag itself. Code guards are `#ifdef DART_THREADS`, never
-`#ifndef DART_NO_THREADS`.
+defining the flag itself. Code guards are `#ifdef RAMBLE_THREADS`, never
+`#ifndef RAMBLE_NO_THREADS`.
 
 | flag | on by default | the platform needs |
 |---|---|---|
-| `DART_SHM` | Windows, Linux, macOS, the BSDs | file mappings, or shm_open and mmap. Older glibc wants `-lrt` |
-| `DART_THREADS` | the same plus ESP-IDF and any libc with pthread.h | thread, mutex, condvar and waker. Older toolchains want `-lpthread` |
-| `DART_PROC_STATS` | the same plus ESP-IDF | GetProcessTimes, getrusage or the ESP heap API |
+| `RAMBLE_SHM` | Windows, Linux, macOS, the BSDs | file mappings, or shm_open and mmap. Older glibc wants `-lrt` |
+| `RAMBLE_THREADS` | the same plus ESP-IDF and any libc with pthread.h | thread, mutex, condvar and waker. Older toolchains want `-lpthread` |
+| `RAMBLE_PROC_STATS` | the same plus ESP-IDF | GetProcessTimes, getrusage or the ESP heap API |
 
-When `DART_PROC_STATS` is off the two stats functions are absent and every consumer
+When `RAMBLE_PROC_STATS` is off the two stats functions are absent and every consumer
 compiles out with them, so the meta snapshot omits its proc section and a layer that
 cannot measure implements nothing. The SHM and THREADS detection blocks are mirrored in
 `transport/core.h` (see spec/build.md).
@@ -36,16 +36,16 @@ cannot measure implements nothing. The SHM and THREADS detection blocks are mirr
 ## Contract notes
 
 - Startup and cleanup. WSAStartup and timeBeginPeriod are refcounted by the OS per
-  process, so matched calls pair safely from any thread and DART keeps no counter. The 1 ms
+  process, so matched calls pair safely from any thread and Ramble keeps no counter. The 1 ms
   timer matters: the default 15.6 ms tick throttles ACK and repair rates.
-  `DART_NO_HIGHRES_TIMER` skips it.
+  `RAMBLE_NO_HIGHRES_TIMER` skips it.
 - Clocks. The monotonic clock is QueryPerformanceCounter or CLOCK_MONOTONIC, microseconds
   from an arbitrary epoch. The wall clock is a separate call for timestamps that compare
   across hosts.
 - Entropy. BCryptGenRandom, esp_fill_random, arc4random_buf, or getrandom then
   /dev/urandom. A failure returns 0 and the caller falls back to hostname, pid and time.
   On ESP the hostname is `esp-` plus the factory MAC, since lwIP has no gethostname.
-- Heap. `i_dart_plat_realloc` is the single heap dependency (ptr NULL allocates, size 0
+- Heap. `i_ramble_plat_realloc` is the single heap dependency (ptr NULL allocates, size 0
   frees). A target with a custom heap overrides just this.
 - Process stats are per process, not per node, so several nodes in one process report the
   same numbers and consumers dedup by pid. Any out pointer may be NULL. A platform may fill
@@ -56,12 +56,12 @@ cannot measure implements nothing. The SHM and THREADS detection blocks are mirr
 - Receive. Windows fails an oversized datagram with WSAEMSGSIZE after filling the buffer,
   POSIX delivers the prefix. The layer delivers the prefix on Windows too, so discovery
   reads the intact fixed header and grows and refetches instead of failing the recv.
-  `i_dart_plat_suppress_connreset` stops an ICMP port unreachable from failing the next
+  `i_ramble_plat_suppress_connreset` stops an ICMP port unreachable from failing the next
   recv on a shared socket (Windows only).
 - Poll translates at most 8 descriptors on the stack. Callers poll a few sockets.
 - The route probe connects an unbound UDP socket and reads getsockname. No packet leaves.
   It is a diagnostic (`tools/if_probe_check.c`) and discovery routes nothing through it.
-- Interfaces. `i_dart_plat_local_ifaces` returns the up, non loopback IPv4 interfaces with
+- Interfaces. `i_ramble_plat_local_ifaces` returns the up, non loopback IPv4 interfaces with
   netmasks: SIO_GET_INTERFACE_LIST on Windows, getifaddrs on POSIX, and the named netifs
   WIFI_STA_DEF, ETH_DEF and WIFI_AP_DEF on ESP (WiFi must be up before the node opens, and
   STA plus SoftAP reports both). A netmask the platform cannot report is 0 and never
@@ -107,12 +107,12 @@ The 64 bit atomics carry acquire and release order for the chunk generation stam
 
 `src/common/` holds the helpers every layer shares: `alloc.h` (spec/allocation.md),
 `arena.h` (the measure then build bump packer), `bytes.h` (little endian packing),
-`hash.h` (FNV-1a) and `string.h` (`DartBytes` and `DartString`). All are static inline, so
+`hash.h` (FNV-1a) and `string.h` (`RambleBytes` and `RambleString`). All are static inline, so
 a layer compiles standalone and pays nothing for a helper it does not use, and the
 amalgamator emits each once per implementation unit.
 
 The FNV basis in `hash.h` is not the textbook one. On wire identities depend on it, so it
-never changes. `i_dart_plat_hash16` in the platform layer uses the textbook basis and is
+never changes. `i_ramble_plat_hash16` in the platform layer uses the textbook basis and is
 unrelated.
 
 `common/stdint.h` is a stdint.h for toolchains that ship none: the Wind River and Yaskawa

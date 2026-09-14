@@ -1,15 +1,15 @@
 /* The C++ wrapper: a header only layer over the C library, with the C API hidden inside
- * dart::detail. docs/cpp.md explains how to use it. */
-#ifndef DART_HPP_INCLUDED
-#define DART_HPP_INCLUDED
+ * ramble::detail. docs/cpp.md explains how to use it. */
+#ifndef RAMBLE_HPP_INCLUDED
+#define RAMBLE_HPP_INCLUDED
 
-/* dart.h is embedded below exactly once. With DART_IMPLEMENTATION it lands at global scope
- * as the implementation, else inside namespace dart::detail as declarations only. */
-#if !defined(DART_IMPLEMENTATION) && !defined(__cplusplus)
-#define DART_IMPLEMENTATION
+/* ramble.h is embedded below exactly once. With RAMBLE_IMPLEMENTATION it lands at global scope
+ * as the implementation, else inside namespace ramble::detail as declarations only. */
+#if !defined(RAMBLE_IMPLEMENTATION) && !defined(__cplusplus)
+#define RAMBLE_IMPLEMENTATION
 #endif
 
-#if defined(__cplusplus) && !defined(DART_IMPLEMENTATION)
+#if defined(__cplusplus) && !defined(RAMBLE_IMPLEMENTATION)
 
 #include <array>
 #include <atomic>
@@ -37,40 +37,40 @@
 #include <span>
 #endif
 
-/* Pre include the C std headers dart.h pulls, so their guards are set before the embed
- * and no std name is dragged into dart::detail. */
+/* Pre include the C std headers ramble.h pulls, so their guards are set before the embed
+ * and no std name is dragged into ramble::detail. */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#if defined(DART_STRING_H) || defined(DART_TRANSPORT_H) || defined(DART_NODE_H)
-#error "include dart.hpp instead of dart.h (do not include dart.h before dart.hpp)"
+#if defined(RAMBLE_STRING_H) || defined(RAMBLE_TRANSPORT_H) || defined(RAMBLE_NODE_H)
+#error "include ramble.hpp instead of ramble.h (do not include ramble.h before ramble.hpp)"
 #endif
 
-namespace dart {
+namespace ramble {
 namespace detail {
 
 #endif  /* C++ consumer: open the hiding namespace before the embed */
 
-/* ---- embedded C library (dist/dart.h spliced here by tools/pack.cmake) ---- */
-#include "dart.h"   /* @DART_EMBED@ */
+/* ---- embedded C library (dist/ramble.h spliced here by tools/pack.cmake) ---- */
+#include "ramble.h"   /* @RAMBLE_EMBED@ */
 
-#if defined(__cplusplus) && !defined(DART_IMPLEMENTATION)
+#if defined(__cplusplus) && !defined(RAMBLE_IMPLEMENTATION)
 }   /* namespace detail */
 
 /* Enums, 1:1 with the C enums by value and asserted below. */
 enum class Reliability { BestEffort = 0, Reliable = 1 };
 enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
-/* dart_topic_send and create result. Ok is 0, the rest mirror DartResult. */
-enum class SendStatus  { Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
+/* ramble_topic_send and create result. Ok is 0, the rest mirror RambleResult. */
+enum class SendStatus    { Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
                          State = -5, NoSys = -6 };
 
 enum class EventKind {
     PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
 };
 
-/* The error carried by an EventKind::Error event, mirrors DartErrorKind. */
+/* The error carried by an EventKind::Error event, mirrors RambleErrorKind. */
 enum class ErrorKind {
     None = 0,
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
@@ -86,39 +86,39 @@ enum class FieldType : uint8_t {
     VString, VArray, Map, Enum, Named
 };
 
-/* A call's outcome, mirrors DartCallStatus. Timeout and PeerLost are synthesized on the
+/* A call's outcome, mirrors RambleCallStatus. Timeout and PeerLost are synthesized on the
  * caller. Running is task only and the one non terminal status (docs/tasks.md). */
 enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4,
                         Cancelled = 5, Running = 6 };
 
-/* What a network entity is, mirrors DartEntityKind. Observers see folded entities, never
+/* What a network entity is, mirrors RambleEntityKind. Observers see folded entities, never
  * raw channels (docs/reflection.md). */
 enum class EntityKind { Topic = 0, Function, Variable, Task };
 
-/* Severity of a built-in @dart/log line (mirrors DartLogLevel). */
+/* Severity of a built-in @ramble/log line (mirrors RambleLogLevel). */
 enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
 
-static_assert((int)Reliability::Reliable == detail::DART_RELIABLE, "reliability enum drift");
-static_assert((int)Role::Inactive == detail::DART_INACTIVE, "role enum drift");
-static_assert((int)SendStatus::NoSys == detail::DART_ERR_NOSYS, "result enum drift");
-static_assert((int)EventKind::Error == detail::DART_ERROR, "event enum drift");
-static_assert((int)ErrorKind::Waker == detail::DART_E_WAKER, "error enum drift");
-static_assert((int)ErrorKind::BadAddress == detail::DART_E_BAD_ADDRESS, "error enum drift");
-static_assert((int)FieldType::Struct == detail::DART_STRUCT, "field-type enum drift");
-static_assert((int)FieldType::String == detail::DART_STR, "field-type enum drift");
-static_assert((int)FieldType::Map == detail::DART_MAP, "field-type enum drift");
-static_assert((int)FieldType::Enum == detail::DART_ENUM, "field-type enum drift");
-static_assert((int)FieldType::Named == detail::DART_NAMED, "field-type enum drift");
-#ifndef DART_NO_PATTERNS
-static_assert((int)CallStatus::Ok == detail::DART_CALL_OK, "call-status enum drift");
-static_assert((int)CallStatus::PeerLost == detail::DART_CALL_PEER_LOST, "call-status enum drift");
-static_assert((int)CallStatus::Cancelled == detail::DART_CALL_CANCELLED, "call-status enum drift");
-static_assert((int)CallStatus::Running == detail::DART_CALL_RUNNING, "call-status enum drift");
-static_assert((int)EntityKind::Topic == detail::DART_ENTITY_TOPIC, "entity enum drift");
-static_assert((int)EntityKind::Variable == detail::DART_ENTITY_VARIABLE, "entity enum drift");
-static_assert((int)EntityKind::Task == detail::DART_ENTITY_TASK, "entity enum drift");
+static_assert((int)Reliability::Reliable == detail::RAMBLE_RELIABLE, "reliability enum drift");
+static_assert((int)Role::Inactive == detail::RAMBLE_INACTIVE, "role enum drift");
+static_assert((int)SendStatus::NoSys == detail::RAMBLE_ERR_NOSYS, "result enum drift");
+static_assert((int)EventKind::Error == detail::RAMBLE_ERROR, "event enum drift");
+static_assert((int)ErrorKind::Waker == detail::RAMBLE_E_WAKER, "error enum drift");
+static_assert((int)ErrorKind::BadAddress == detail::RAMBLE_E_BAD_ADDRESS, "error enum drift");
+static_assert((int)FieldType::Struct == detail::RAMBLE_STRUCT, "field-type enum drift");
+static_assert((int)FieldType::String == detail::RAMBLE_STR, "field-type enum drift");
+static_assert((int)FieldType::Map == detail::RAMBLE_MAP, "field-type enum drift");
+static_assert((int)FieldType::Enum == detail::RAMBLE_ENUM, "field-type enum drift");
+static_assert((int)FieldType::Named == detail::RAMBLE_NAMED, "field-type enum drift");
+#ifndef RAMBLE_NO_PATTERNS
+static_assert((int)CallStatus::Ok == detail::RAMBLE_CALL_OK, "call-status enum drift");
+static_assert((int)CallStatus::PeerLost == detail::RAMBLE_CALL_PEER_LOST, "call-status enum drift");
+static_assert((int)CallStatus::Cancelled == detail::RAMBLE_CALL_CANCELLED, "call-status enum drift");
+static_assert((int)CallStatus::Running == detail::RAMBLE_CALL_RUNNING, "call-status enum drift");
+static_assert((int)EntityKind::Topic == detail::RAMBLE_ENTITY_TOPIC, "entity enum drift");
+static_assert((int)EntityKind::Variable == detail::RAMBLE_ENTITY_VARIABLE, "entity enum drift");
+static_assert((int)EntityKind::Task == detail::RAMBLE_ENTITY_TASK, "entity enum drift");
 #endif
-static_assert((int)LogLevel::Info == detail::DART_LOG_INFO, "log-level enum drift");
+static_assert((int)LogLevel::Info == detail::RAMBLE_LOG_INFO, "log-level enum drift");
 
 /* forward decls */
 class Node;
@@ -161,14 +161,14 @@ private:
 
 namespace priv {
 
-/* raise helpers: throw dart::Error when exceptions are on, else return (the caller
- * leaves its handle invalid). raise_last formats dart_last_error(n) as the reason. */
-inline void raise_last(detail::DartNode* n, const char* what) {
+/* raise helpers: throw ramble::Error when exceptions are on, else return (the caller
+ * leaves its handle invalid). raise_last formats ramble_last_error(n) as the reason. */
+inline void raise_last(detail::RambleNode* n, const char* what) {
 #if defined(__cpp_exceptions)
-    detail::DartEvent e = detail::dart_last_error(n);
+    detail::RambleEvent e = detail::ramble_last_error(n);
     char b[192];
     std::string t = what ? std::string(what) + ": " : std::string();
-    t += detail::dart_event_str(&e, b, sizeof b);
+    t += detail::ramble_event_str(&e, b, sizeof b);
     throw Error(static_cast<ErrorKind>(e.error), e.os_error, t);
 #else
     (void)n; (void)what;
@@ -248,7 +248,7 @@ private:
 };
 
 namespace priv {
-inline detail::DartBytes  to_c(Bytes b) { return detail::dart_bytes(b.data(), b.size()); }
+inline detail::RambleBytes  to_c(Bytes b) { return detail::ramble_bytes(b.data(), b.size()); }
 }
 
 /* Pass it where a constructor takes a schema pointer and the handle types itself from the
@@ -279,11 +279,11 @@ struct NodeOptions {
     int32_t                  match_wait_ms        = 0;   /* 0 = 1 s, negative = drop loudly */
     /* networking (all optional) */
     /* built in observability, all on by default (Node::log, Node::on_log, Node::meta) */
-    bool                     disable_logs         = false; /* strip the @dart/log/{error,warn,info}
+    bool                     disable_logs         = false; /* strip the @ramble/log/{error,warn,info}
                                                               topics (saves their history memory) */
-    bool                     disable_meta         = false; /* do not host the @dart/meta endpoint */
+    bool                     disable_meta         = false; /* do not host the @ramble/meta endpoint */
     bool                     disable_error_logs   = false; /* suppress the default mirroring of this
-                                                              node's errors onto @dart/log/error */
+                                                              node's errors onto @ramble/log/error */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
     uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
@@ -310,14 +310,14 @@ struct NodeOptions {
     size_t                   memory_size = 0;
 };
 
-#ifndef DART_NO_PATTERNS
+#ifndef RAMBLE_NO_PATTERNS
 /* Per-pattern options (all zero = defaults). */
 struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout, 0 = 5 s */
     uint16_t keep_last            = 0;   /* req and rsp ring depth, 0 = 10 */
 };
-/* Task options, mirrors DartTaskOpts (docs/tasks.md). */
+/* Task options, mirrors RambleTaskOpts (docs/tasks.md). */
 struct TaskOptions {
     bool     progress_best_effort = false;   /* the definition offers, a remote requests */
     uint16_t progress_keep_last   = 0;   /* progress ring depth, 0 = the pattern default */
@@ -328,7 +328,7 @@ struct TaskOptions {
     uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
     uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
 };
-/* Per call options, mirrors DartCallOpts. provider directs a call at one definition by peer
+/* Per call options, mirrors RambleCallOpts. provider directs a call at one definition by peer
  * id, 0 = first answer wins. A task request is always directed, 0 = the oldest provider. */
 struct CallOptions {
     uint32_t  provider = 0;
@@ -353,7 +353,7 @@ template <> struct VariableOptions<void> {
     uint16_t keep_last            = 0;
     uint32_t backpressure_wait_us = 0;
 };
-#endif /* !DART_NO_PATTERNS */
+#endif /* !RAMBLE_NO_PATTERNS */
 
 /* Schema: an owned, compiled message schema (see the DSL in schema.h). */
 class Schema {
@@ -361,26 +361,26 @@ public:
     /* Compile a schema from DSL text. nullopt on error, and err receives a short message
      * pointing near the offending text. The compiled schema is freed with the Schema. */
     static std::optional<Schema> compile(std::string_view text, std::string* err = nullptr) {
-        return compile_with(detail::dart_allocator_heap(0), text, err);
+        return compile_with(detail::ramble_allocator_heap(0), text, err);
     }
     /* Zero heap variant: compile into scratch, which must outlive this Schema. Once a create
      * has copied the schema into the node the scratch may be reused. nullopt if too small. */
     static std::optional<Schema> compile(std::string_view text, void* scratch, size_t scratch_size,
                                          std::string* err = nullptr) {
         if (!scratch || scratch_size == 0) { if (err) *err = "scratch buffer missing"; return std::nullopt; }
-        return compile_with(detail::dart_allocator_static(scratch, scratch_size), text, err);
+        return compile_with(detail::ramble_allocator_static(scratch, scratch_size), text, err);
     }
 
     /* An EMPTY schema (empty() true, raw() null): what an untyped entity reports, and the
      * state a default-constructed member holds until assigned. */
     Schema() = default;
     /* An owned copy of any compiled schema, ours or one reflected off the mesh. */
-    static Schema adopt(const detail::DartSchema* raw) {
+    static Schema adopt(const detail::RambleSchema* raw) {
         Schema s;
         if (!raw) return s;
-        s.alloc_ = detail::dart_allocator_heap(0);
-        s.schema_ = detail::dart_schema_copy(raw, detail::dart_allocator_alloc, &s.alloc_);
-        if (!s.schema_) detail::dart_allocator_reset(&s.alloc_);
+        s.alloc_ = detail::ramble_allocator_heap(0);
+        s.schema_ = detail::ramble_schema_copy(raw, detail::ramble_allocator_alloc, &s.alloc_);
+        if (!s.schema_) detail::ramble_allocator_reset(&s.alloc_);
         return s;
     }
     Schema(const Schema& o) : Schema(adopt(o.schema_)) {}
@@ -401,36 +401,36 @@ public:
 
     std::string_view name() const {
         if (!schema_) return {};
-        detail::DartString n = detail::dart_schema_name(schema_);
+        detail::RambleString n = detail::ramble_schema_name(schema_);
         return { n.data, n.len };
     }
-    uint32_t size() const { return schema_ ? detail::dart_schema_size(schema_) : 0; }
-    uint64_t hash() const { return schema_ ? detail::dart_schema_hash(schema_) : 0; }
-    uint16_t field_count() const { return schema_ ? detail::dart_schema_field_count(schema_) : 0; }
+    uint32_t size() const { return schema_ ? detail::ramble_schema_size(schema_) : 0; }
+    uint64_t hash() const { return schema_ ? detail::ramble_schema_hash(schema_) : 0; }
+    uint16_t field_count() const { return schema_ ? detail::ramble_schema_field_count(schema_) : 0; }
     /* Flat index of a field by name, nested members by dotted path ("velocity.dx") and struct
      * array members by index ("corners[2].x"). -1 if unknown. */
     int field_index(std::string_view path) const {
-        return detail::dart_schema_field_index(schema_, std::string(path).c_str());
+        return detail::ramble_schema_field_index(schema_, std::string(path).c_str());
     }
     /* Can a reader declaring THIS schema read messages written with `pub`? Type NAMES
      * narrow: an anonymous type reads a named one, never the reverse. */
     bool can_read(const Schema& pub) const {
-        return schema_ && pub.schema_ && detail::dart_schema_subset(schema_, pub.schema_) != 0;
+        return schema_ && pub.schema_ && detail::ramble_schema_subset(schema_, pub.schema_) != 0;
     }
     /* Why this schema cannot read pub, one line. Empty when it can. */
     std::string why_not(const Schema& pub) const {
         char buf[256];
         if (!schema_ || !pub.schema_) return "no schema";
-        if (detail::dart_schema_subset_why(schema_, pub.schema_, buf, sizeof buf)) return {};
+        if (detail::ramble_schema_subset_why(schema_, pub.schema_, buf, sizeof buf)) return {};
         return buf;
     }
     /* Spell the schema back as compile-ready DSL text (the inverse of compile), with
      * every named type it uses hoisted to a leading `Name = type` definition. */
     std::string to_dsl() const {
         if (!schema_) return {};
-        uint32_t n = detail::dart_schema_print(schema_, nullptr, 0);
+        uint32_t n = detail::ramble_schema_print(schema_, nullptr, 0);
         std::string out(n, '\0');
-        if (n) detail::dart_schema_print(schema_, &out[0], n + 1);
+        if (n) detail::ramble_schema_print(schema_, &out[0], n + 1);
         return out;
     }
 
@@ -447,8 +447,8 @@ public:
         uint32_t  elem_size;     /* bytes of one array element, else 0 */
     };
     bool field_at(uint16_t i, Field& out) const {
-        detail::DartSchemaFieldInfo f;
-        if (!schema_ || !detail::dart_schema_field_at(schema_, i, &f)) return false;
+        detail::RambleSchemaFieldInfo f;
+        if (!schema_ || !detail::ramble_schema_field_at(schema_, i, &f)) return false;
         out.name      = { f.name.data, f.name.len };
         out.type_name = { f.type_name.data ? f.type_name.data : "", f.type_name.len };
         out.elem_name = { f.elem_name.data ? f.elem_name.data : "", f.elem_name.len };
@@ -470,34 +470,34 @@ public:
 
     /* Enum options (by flat field index). One option of an Enum field. */
     struct EnumVariant { int64_t value; std::string_view name; };
-    uint16_t enum_count(uint16_t field) const { return detail::dart_schema_enum_count(schema_, field); }
+    uint16_t enum_count(uint16_t field) const { return detail::ramble_schema_enum_count(schema_, field); }
     bool enum_variant(uint16_t field, uint16_t i, EnumVariant& out) const {
-        detail::DartString n; int64_t v;
-        if (!detail::dart_schema_enum_variant(schema_, field, i, &v, &n)) return false;
+        detail::RambleString n; int64_t v;
+        if (!detail::ramble_schema_enum_variant(schema_, field, i, &v, &n)) return false;
         out.value = v; out.name = { n.data, n.len };
         return true;
     }
 
     /* The raw compiled schema, opaque to consumers. The create calls use it. */
-    const detail::DartSchema* raw() const { return schema_; }
+    const detail::RambleSchema* raw() const { return schema_; }
 
 private:
-    static std::optional<Schema> compile_with(detail::DartAllocator a, std::string_view text, std::string* err) {
+    static std::optional<Schema> compile_with(detail::RambleAllocator a, std::string_view text, std::string* err) {
         Schema s;
         s.alloc_ = a;
         std::string t(text);   /* NUL-terminate for the C API */
         const char* e = nullptr;
-        s.schema_ = detail::dart_schema_compile(detail::dart_allocator_alloc, &s.alloc_, t.c_str(), &e);
+        s.schema_ = detail::ramble_schema_compile(detail::ramble_allocator_alloc, &s.alloc_, t.c_str(), &e);
         if (!s.schema_) {
             if (err) *err = e ? (std::string("schema error near: ") + e) : "schema compile failed";
-            detail::dart_allocator_reset(&s.alloc_);
+            detail::ramble_allocator_reset(&s.alloc_);
             return std::nullopt;
         }
         return s;
     }
-    void reset() { if (alloc_.page_realloc || alloc_.shared) detail::dart_allocator_reset(&alloc_); schema_ = nullptr; }
-    detail::DartAllocator alloc_{};
-    detail::DartSchema*   schema_ = nullptr;
+    void reset() { if (alloc_.page_realloc || alloc_.shared) detail::ramble_allocator_reset(&alloc_); schema_ = nullptr; }
+    detail::RambleAllocator alloc_{};
+    detail::RambleSchema*   schema_ = nullptr;
 };
 
 /* The self describing tagged value tree of a map field: a thin layer over the C map codec.
@@ -512,28 +512,28 @@ using MapDict = std::map<std::string, MapItem>;   /* a decoded map: the std::map
 class MapWriter {
 public:
     explicit MapWriter(size_t capacity = 512) : buf_(capacity ? capacity : 1) {
-        w_ = detail::dart_map_begin(buf_.data(), buf_.size());
+        w_ = detail::ramble_map_begin(buf_.data(), buf_.size());
     }
     MapWriter(const MapWriter&) = delete;             /* holds a raw buffer pointer */
     MapWriter& operator=(const MapWriter&) = delete;
 
-    MapWriter& put_uint  (const char* key, uint64_t v)         { detail::dart_map_put_uint  (&w_, key, v); return *this; }
-    MapWriter& put_int   (const char* key, int64_t  v)         { detail::dart_map_put_int   (&w_, key, v); return *this; }
-    MapWriter& put_f64   (const char* key, double   v)         { detail::dart_map_put_f64   (&w_, key, v); return *this; }
-    MapWriter& put_f32   (const char* key, float    v)         { detail::dart_map_put_f32   (&w_, key, v); return *this; }
-    MapWriter& put_bool  (const char* key, bool     v)         { detail::dart_map_put_bool  (&w_, key, v ? 1 : 0); return *this; }
-    MapWriter& put_string(const char* key, std::string_view v) { detail::dart_map_put_string(&w_, key, detail::dart_string(v.data(), v.size())); return *this; }
+    MapWriter& put_uint  (const char* key, uint64_t v)         { detail::ramble_map_put_uint  (&w_, key, v); return *this; }
+    MapWriter& put_int   (const char* key, int64_t  v)         { detail::ramble_map_put_int   (&w_, key, v); return *this; }
+    MapWriter& put_f64   (const char* key, double   v)         { detail::ramble_map_put_f64   (&w_, key, v); return *this; }
+    MapWriter& put_f32   (const char* key, float    v)         { detail::ramble_map_put_f32   (&w_, key, v); return *this; }
+    MapWriter& put_bool  (const char* key, bool     v)         { detail::ramble_map_put_bool  (&w_, key, v ? 1 : 0); return *this; }
+    MapWriter& put_string(const char* key, std::string_view v) { detail::ramble_map_put_string(&w_, key, detail::ramble_string(v.data(), v.size())); return *this; }
     /* nested map / array: open, write members (array members pass key = nullptr), close */
-    MapWriter& open_map  (const char* key) { detail::dart_map_open_map  (&w_, key); return *this; }
-    MapWriter& open_array(const char* key) { detail::dart_map_open_array(&w_, key); return *this; }
-    MapWriter& close()                     { detail::dart_map_close     (&w_);      return *this; }
+    MapWriter& open_map  (const char* key) { detail::ramble_map_open_map  (&w_, key); return *this; }
+    MapWriter& open_array(const char* key) { detail::ramble_map_open_array(&w_, key); return *this; }
+    MapWriter& close()                     { detail::ramble_map_close     (&w_);      return *this; }
 
     bool  ok() const { return w_.err == 0; }
-    Bytes finish() { uint32_t n = detail::dart_map_finish(&w_); return { buf_.data(), n }; }
+    Bytes finish() { uint32_t n = detail::ramble_map_finish(&w_); return { buf_.data(), n }; }
 
 private:
-    std::vector<uint8_t>  buf_;
-    detail::DartMapWriter w_{};
+    std::vector<uint8_t>    buf_;
+    detail::RambleMapWriter w_{};
 };
 
 /* One value read from a map: a scalar, a string, a nested map, or an array. */
@@ -548,11 +548,11 @@ public:
     Bytes            raw()       const { return { v_.bytes.data, v_.bytes.len }; }
     MapReader        as_map()    const;   /* kind() == FieldType::Map */
     /* array value (kind() == FieldType::VArray): element count + element by index */
-    uint16_t array_count()          const { return detail::dart_map_array_count(v_.bytes); }
-    MapValue array_at(uint16_t i)   const { MapValue o; detail::dart_map_array_at(v_.bytes, i, &o.v_); return o; }
+    uint16_t array_count()          const { return detail::ramble_map_array_count(v_.bytes); }
+    MapValue array_at(uint16_t i)   const { MapValue o; detail::ramble_map_array_at(v_.bytes, i, &o.v_); return o; }
 
 private:
-    detail::DartValue v_{};
+    detail::RambleValue v_{};
     friend class MapReader;
 };
 
@@ -561,12 +561,12 @@ private:
 class MapReader {
 public:
     MapReader() = default;
-    explicit MapReader(Bytes body) : body_(detail::dart_bytes(body.data(), body.size())) {}
-    uint16_t count() const { return detail::dart_map_count(body_); }
-    bool get(const char* key, MapValue& out) const { return detail::dart_map_get(body_, key, &out.v_) != 0; }
+    explicit MapReader(Bytes body) : body_(detail::ramble_bytes(body.data(), body.size())) {}
+    uint16_t count() const { return detail::ramble_map_count(body_); }
+    bool get(const char* key, MapValue& out) const { return detail::ramble_map_get(body_, key, &out.v_) != 0; }
     bool at(uint16_t i, std::string_view& key, MapValue& out) const {
-        detail::DartString k;
-        if (!detail::dart_map_at(body_, i, &k, &out.v_)) return false;
+        detail::RambleString k;
+        if (!detail::ramble_map_at(body_, i, &k, &out.v_)) return false;
         key = { k.data, k.len };
         return true;
     }
@@ -576,7 +576,7 @@ public:
     MapDict to_map() const;
 
 private:
-    detail::DartBytes body_{};
+    detail::RambleBytes body_{};
 };
 
 inline MapReader MapValue::as_map() const { return MapReader(Bytes{ v_.bytes.data, v_.bytes.len }); }
@@ -672,66 +672,66 @@ inline MapDict MapReader::to_map() const {
  * it to Topic::send. Variable fields grow the buffer, an over cap value flips ok() false. */
 class MessageBuilder {
 public:
-    explicit MessageBuilder(const Schema& s) : schema_(s.raw()), buf_(detail::dart_schema_msg_min(s.raw())) {
-        detail::dart_schema_message_default(schema_, buf_.data(), buf_.size());
+    explicit MessageBuilder(const Schema& s) : schema_(s.raw()), buf_(detail::ramble_schema_msg_min(s.raw())) {
+        detail::ramble_schema_message_default(schema_, buf_.data(), buf_.size());
     }
-    MessageBuilder& set_uint (const char* field, uint64_t v) { ok_ &= detail::dart_set_uint (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
-    MessageBuilder& set_int  (const char* field, int64_t  v) { ok_ &= detail::dart_set_int  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
-    MessageBuilder& set_f64  (const char* field, double   v) { ok_ &= detail::dart_set_f64  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
-    MessageBuilder& set_f32  (const char* field, float    v) { ok_ &= detail::dart_set_f32  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
-    MessageBuilder& set_bool (const char* field, bool     v) { ok_ &= detail::dart_set_uint (buf_.data(), buf_.size(), schema_, field, v ? 1u : 0u) != 0; return *this; }
-    /* a capped OR variable string (dart_set_string handles both) */
+    MessageBuilder& set_uint (const char* field, uint64_t v) { ok_ &= detail::ramble_set_uint (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageBuilder& set_int  (const char* field, int64_t  v) { ok_ &= detail::ramble_set_int  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageBuilder& set_f64  (const char* field, double   v) { ok_ &= detail::ramble_set_f64  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageBuilder& set_f32  (const char* field, float    v) { ok_ &= detail::ramble_set_f32  (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
+    MessageBuilder& set_bool (const char* field, bool     v) { ok_ &= detail::ramble_set_uint (buf_.data(), buf_.size(), schema_, field, v ? 1u : 0u) != 0; return *this; }
+    /* a capped OR variable string (ramble_set_string handles both) */
     MessageBuilder& set_string(const char* field, std::string_view v) {
         grow_for(v.size());
-        ok_ &= detail::dart_set_string(buf_.data(), buf_.size(), schema_, field, detail::dart_string(v.data(), v.size())) != 0;
+        ok_ &= detail::ramble_set_string(buf_.data(), buf_.size(), schema_, field, detail::ramble_string(v.data(), v.size())) != 0;
         return *this;
     }
     /* one element of a string array (a variable string array must be grown first with
        a set_array of empty slots, per the C API) */
     MessageBuilder& set_string_at(const char* field, uint16_t index, std::string_view v) {
         grow_for(v.size() + 2);
-        ok_ &= detail::dart_set_string_at(buf_.data(), buf_.size(), schema_, field, index, detail::dart_string(v.data(), v.size())) != 0;
+        ok_ &= detail::ramble_set_string_at(buf_.data(), buf_.size(), schema_, field, index, detail::ramble_string(v.data(), v.size())) != 0;
         return *this;
     }
     /* a fixed or variable array as raw element bytes. A string array takes whole
        [u16 len][cap] slots */
     MessageBuilder& set_array(const char* field, Bytes elems) {
         grow_for(elems.size());
-        ok_ &= detail::dart_set_array(buf_.data(), buf_.size(), schema_, field, detail::dart_bytes(elems.data(), elems.size())) != 0;
+        ok_ &= detail::ramble_set_array(buf_.data(), buf_.size(), schema_, field, detail::ramble_bytes(elems.data(), elems.size())) != 0;
         return *this;
     }
     /* a `map` field, from a finished map body */
     MessageBuilder& set_map(const char* field, Bytes map_body) {
         grow_for(map_body.size());
-        ok_ &= detail::dart_set_map(buf_.data(), buf_.size(), schema_, field, detail::dart_bytes(map_body.data(), map_body.size())) != 0;
+        ok_ &= detail::ramble_set_map(buf_.data(), buf_.size(), schema_, field, detail::ramble_bytes(map_body.data(), map_body.size())) != 0;
         return *this;
     }
     MessageBuilder& set_map(const char* field, MapWriter& w) { return set_map(field, w.finish()); }
     /* an enum field by number or by option name. An unknown name is refused, ok() false */
     MessageBuilder& set_enum(const char* field, int64_t value) {
-        ok_ &= detail::dart_set_int(buf_.data(), buf_.size(), schema_, field, value) != 0;
+        ok_ &= detail::ramble_set_int(buf_.data(), buf_.size(), schema_, field, value) != 0;
         return *this;
     }
     MessageBuilder& set_enum(const char* field, std::string_view name) {
         std::string n(name);
-        ok_ &= detail::dart_set_enum(buf_.data(), buf_.size(), schema_, field, n.c_str()) != 0;
+        ok_ &= detail::ramble_set_enum(buf_.data(), buf_.size(), schema_, field, n.c_str()) != 0;
         return *this;
     }
 
     /* false if any setter was refused (over-cap string, unknown field, short buffer) */
     bool ok() const { return ok_; }
     /* the live message bytes (fixed section + its variable tail) */
-    Bytes bytes() const { return { buf_.data(), detail::dart_schema_msg_len(schema_, buf_.data(), buf_.size()) }; }
+    Bytes bytes() const { return { buf_.data(), detail::ramble_schema_msg_len(schema_, buf_.data(), buf_.size()) }; }
     operator Bytes() const { return bytes(); }
 
 private:
     /* ensure room for a variable frame to grow: the new content can add at most its
        own length past the current live length. resize preserves the live prefix. */
     void grow_for(size_t extra) {
-        size_t used = detail::dart_schema_msg_len(schema_, buf_.data(), buf_.size());
+        size_t used = detail::ramble_schema_msg_len(schema_, buf_.data(), buf_.size());
         if (buf_.size() < used + extra) buf_.resize(used + extra);
     }
-    const detail::DartSchema* schema_;
+    const detail::RambleSchema* schema_;
     std::vector<uint8_t>      buf_;
     bool                      ok_ = true;
 };
@@ -744,28 +744,28 @@ public:
     std::string_view text() const { return { reinterpret_cast<const char*>(d_.data), d_.len }; }
     bool             has_schema() const { return s_ != nullptr; }
     /* the raw compiled schema the payload decodes with, feeds the typed codec */
-    const detail::DartSchema* raw_schema() const { return s_; }
+    const detail::RambleSchema* raw_schema() const { return s_; }
 
     /* Typed field reads by name or dotted path, meaningful only when has_schema(). */
-    uint64_t get_uint (const char* field) const { return detail::dart_get_uint (d_, s_, field); }
-    int64_t  get_int  (const char* field) const { return detail::dart_get_int  (d_, s_, field); }
-    double   get_f64  (const char* field) const { return detail::dart_get_f64  (d_, s_, field); }
-    float    get_f32  (const char* field) const { return detail::dart_get_f32  (d_, s_, field); }
-    bool     get_bool (const char* field) const { return detail::dart_get_uint (d_, s_, field) != 0; }
-    Bytes    get_array(const char* field) const { auto a = detail::dart_get_array(d_, s_, field); return { a.data, a.len }; }
+    uint64_t get_uint (const char* field) const { return detail::ramble_get_uint (d_, s_, field); }
+    int64_t  get_int  (const char* field) const { return detail::ramble_get_int  (d_, s_, field); }
+    double   get_f64  (const char* field) const { return detail::ramble_get_f64  (d_, s_, field); }
+    float    get_f32  (const char* field) const { return detail::ramble_get_f32  (d_, s_, field); }
+    bool     get_bool (const char* field) const { return detail::ramble_get_uint (d_, s_, field) != 0; }
+    Bytes    get_array(const char* field) const { auto a = detail::ramble_get_array(d_, s_, field); return { a.data, a.len }; }
     /* a capped or variable string, an empty view on a mismatch */
-    std::string_view get_string(const char* field) const { auto s = detail::dart_get_string(d_, s_, field); return { s.data, s.len }; }
-    std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::dart_get_string_at(d_, s_, field, index); return { s.data, s.len }; }
+    std::string_view get_string(const char* field) const { auto s = detail::ramble_get_string(d_, s_, field); return { s.data, s.len }; }
+    std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::ramble_get_string_at(d_, s_, field, index); return { s.data, s.len }; }
     /* a `map` field, as a reader over its body (valid while the view is) */
-    MapReader get_map(const char* field) const { auto b = detail::dart_get_map(d_, s_, field); return MapReader(Bytes{ b.data, b.len }); }
+    MapReader get_map(const char* field) const { auto b = detail::ramble_get_map(d_, s_, field); return MapReader(Bytes{ b.data, b.len }); }
     /* an enum field's current option name, {} when the stored number has no option */
-    std::string_view get_enum_name(const char* field) const { auto s = detail::dart_get_enum(d_, s_, field); return { s.data, s.len }; }
+    std::string_view get_enum_name(const char* field) const { auto s = detail::ramble_get_enum(d_, s_, field); return { s.data, s.len }; }
 
 protected:
     FieldView() = default;
-    FieldView(detail::DartBytes d, const detail::DartSchema* s) : d_(d), s_(s) {}
-    detail::DartBytes         d_{};
-    const detail::DartSchema* s_ = nullptr;
+    FieldView(detail::RambleBytes d, const detail::RambleSchema* s) : d_(d), s_(s) {}
+    detail::RambleBytes         d_{};
+    const detail::RambleSchema* s_ = nullptr;
 };
 
 /* A delivered message. Non owning, valid only inside the handler. */
@@ -787,8 +787,8 @@ public:
     uint64_t         capture_us()        const { return msg_->capture_us; }
 
 private:
-    explicit MessageView(const detail::DartMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
-    const detail::DartMsg* msg_;
+    explicit MessageView(const detail::RambleMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
+    const detail::RambleMsg* msg_;
     friend class Node;
 };
 
@@ -798,7 +798,7 @@ class Event {
 public:
     EventKind        kind()           const { return static_cast<EventKind>(ev_->kind); }
     ErrorKind        error()          const { return static_cast<ErrorKind>(ev_->error); }
-    bool             is_error()       const { return ev_->kind == detail::DART_ERROR; }
+    bool             is_error()       const { return ev_->kind == detail::RAMBLE_ERROR; }
     uint32_t         peer()           const { return ev_->peer; }
     /* the peer's node name for peer scoped events, empty when unknown. Prefer it over
        peer() in messages, an id means nothing to a human */
@@ -817,11 +817,11 @@ public:
     std::string      schema_detail()  const { return ev_->schema_detail ? ev_->schema_detail : ""; }
 
     /* A one-line human-readable rendering (uses the C formatter). */
-    std::string to_string() const { char b[192]; return detail::dart_event_str(ev_, b, sizeof b); }
+    std::string to_string() const { char b[192]; return detail::ramble_event_str(ev_, b, sizeof b); }
 
 private:
-    explicit Event(const detail::DartEvent* e) : ev_(e) {}
-    const detail::DartEvent* ev_;
+    explicit Event(const detail::RambleEvent* e) : ev_(e) {}
+    const detail::RambleEvent* ev_;
     friend class Node;
 };
 
@@ -869,7 +869,7 @@ struct Peer {
     uint32_t                rtt_samples = 0;
 };
 
-/* One decoded @dart/log line for a Node::on_log handler. The views are valid for the
+/* One decoded @ramble/log line for a Node::on_log handler. The views are valid for the
  * callback only. wall_us is epoch us, mono_us the publisher's monotonic clock, recv_us ours. */
 struct LogLine {
     LogLevel         level = LogLevel::Info;
@@ -898,16 +898,16 @@ public:
     uint64_t         written_us()        const { return m_.written_us; }   /* source stamp */
 private:
     void bind() { d_ = m_.data; s_ = m_.schema; ok_ = true; }
-    detail::DartMsg m_{};
+    detail::RambleMsg m_{};
     bool ok_ = false;
     friend class Topic;
 };
 
-/* The DART_SCHEMA reflection and the typed codec. DART_SCHEMA specializes dart::reflect<T>,
+/* The RAMBLE_SCHEMA reflection and the typed codec. RAMBLE_SCHEMA specializes ramble::reflect<T>,
  * and the codec synthesizes the DSL, compiles it and builds a copy table (docs/cpp.md). */
 
-template <class T> struct reflect;              /* specialized by DART_SCHEMA */
-template <class E> struct reflect_enum;         /* specialized by DART_ENUM */
+template <class T> struct reflect;              /* specialized by RAMBLE_SCHEMA */
+template <class E> struct reflect_enum;         /* specialized by RAMBLE_ENUM */
 template <class U> struct field_tag {};         /* visitor dispatch tag */
 
 /* The capped string wire slot, [u16 live length][N bytes]. assign() refuses over capacity
@@ -918,7 +918,7 @@ template <uint16_t N> struct String {
 
     String() = default;
     template <size_t M> String(const char (&lit)[M]) {
-        static_assert(M - 1 <= N, "string literal exceeds dart::String capacity");
+        static_assert(M - 1 <= N, "string literal exceeds ramble::String capacity");
         len = static_cast<uint16_t>(M - 1);
         std::memcpy(data, lit, M - 1);
     }
@@ -1034,9 +1034,9 @@ inline double  dot(Double3 a, Double3 b)  { return a.x * b.x + a.y * b.y + a.z *
 inline Double3 cross(Double3 a, Double3 b) {
     return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
 }
-inline double  length(Double3 a) { return detail::dart_double3_length({ a.x, a.y, a.z }); }
+inline double  length(Double3 a) { return detail::ramble_double3_length({ a.x, a.y, a.z }); }
 inline Double3 normalize(Double3 a) {
-    detail::DartDouble3 n = detail::dart_double3_normalize({ a.x, a.y, a.z });
+    detail::RambleDouble3 n = detail::ramble_double3_normalize({ a.x, a.y, a.z });
     return { n.x, n.y, n.z };
 }
 inline Quaternion identity_rotation() { return { 0.0, 0.0, 0.0, 1.0 }; }
@@ -1049,7 +1049,7 @@ inline Quaternion operator*(Quaternion a, Quaternion b) {
              b.w * a.w - b.x * a.x - b.y * a.y - b.z * a.z };
 }
 inline Double3 rotate(Quaternion q, Double3 v) {
-    detail::DartDouble3 r = detail::dart_quaternion_rotate({ q.x, q.y, q.z, q.w }, { v.x, v.y, v.z });
+    detail::RambleDouble3 r = detail::ramble_quaternion_rotate({ q.x, q.y, q.z, q.w }, { v.x, v.y, v.z });
     return { r.x, r.y, r.z };
 }
 inline Transform identity_transform() {
@@ -1060,67 +1060,67 @@ inline bool is_nil(const Uuid& u) {
     return true;
 }
 /* The two values that need a platform (the node runtime provides them). */
-inline Timestamp now() { return Timestamp{ detail::dart_timestamp_now() }; }
-inline Uuid      new_uuid() { Uuid u; detail::dart_uuid_new((detail::DartUuid*)&u); return u; }
+inline Timestamp now() { return Timestamp{ detail::ramble_timestamp_now() }; }
+inline Uuid      new_uuid() { Uuid u; detail::ramble_uuid_new((detail::RambleUuid*)&u); return u; }
 
 /* Give a struct-shaped type a wire name: reflect its members, then name it. */
-#define DART_STD_STRUCT(T, ...) \
-    template <> struct dart::reflect<dart::T> { \
-        using is_dart_schema = void; \
+#define RAMBLE_STD_STRUCT(T, ...) \
+    template <> struct ramble::reflect<ramble::T> { \
+        using is_ramble_schema = void; \
         static constexpr const char* type_name = #T; \
-        template <class V> static void visit(V&& v) { DART_STD_MEMBERS_##T(v) } \
+        template <class V> static void visit(V&& v) { RAMBLE_STD_MEMBERS_##T(v) } \
     }; \
-    template <> struct dart::std_type<dart::T> { \
+    template <> struct ramble::std_type<ramble::T> { \
         static constexpr const char* name = #T; using repr = void; }
 /* Give an ALIAS-shaped type a wire name: it copies as R (`Uuid = u8[16]`, R = uint8_t[16]). */
-#define DART_STD_ALIAS(T, R) \
-    template <> struct dart::std_type<dart::T> { \
+#define RAMBLE_STD_ALIAS(T, R) \
+    template <> struct ramble::std_type<ramble::T> { \
         static constexpr const char* name = #T; using repr = R; }
 
-#define DART_STD_F(T, f) v(::dart::field_tag<decltype(::dart::T::f)>{}, #f, offsetof(::dart::T, f));
-#define DART_STD_MEMBERS_Float2(v)  DART_STD_F(Float2,x)  DART_STD_F(Float2,y)
-#define DART_STD_MEMBERS_Float3(v)  DART_STD_F(Float3,x)  DART_STD_F(Float3,y)  DART_STD_F(Float3,z)
-#define DART_STD_MEMBERS_Float4(v)  DART_STD_F(Float4,x)  DART_STD_F(Float4,y)  DART_STD_F(Float4,z)  DART_STD_F(Float4,w)
-#define DART_STD_MEMBERS_Double2(v) DART_STD_F(Double2,x) DART_STD_F(Double2,y)
-#define DART_STD_MEMBERS_Double3(v) DART_STD_F(Double3,x) DART_STD_F(Double3,y) DART_STD_F(Double3,z)
-#define DART_STD_MEMBERS_Double4(v) DART_STD_F(Double4,x) DART_STD_F(Double4,y) DART_STD_F(Double4,z) DART_STD_F(Double4,w)
-#define DART_STD_MEMBERS_Int2(v)    DART_STD_F(Int2,x)    DART_STD_F(Int2,y)
-#define DART_STD_MEMBERS_Int3(v)    DART_STD_F(Int3,x)    DART_STD_F(Int3,y)    DART_STD_F(Int3,z)
-#define DART_STD_MEMBERS_Int4(v)    DART_STD_F(Int4,x)    DART_STD_F(Int4,y)    DART_STD_F(Int4,z)    DART_STD_F(Int4,w)
-#define DART_STD_MEMBERS_Quaternion(v) DART_STD_F(Quaternion,x) DART_STD_F(Quaternion,y) DART_STD_F(Quaternion,z) DART_STD_F(Quaternion,w)
-#define DART_STD_MEMBERS_Color(v)   DART_STD_F(Color,r)   DART_STD_F(Color,g)   DART_STD_F(Color,b)   DART_STD_F(Color,a)
-#define DART_STD_MEMBERS_Rect(v)    DART_STD_F(Rect,x)    DART_STD_F(Rect,y)    DART_STD_F(Rect,w)    DART_STD_F(Rect,h)
-#define DART_STD_MEMBERS_RectI(v)   DART_STD_F(RectI,x)   DART_STD_F(RectI,y)   DART_STD_F(RectI,w)   DART_STD_F(RectI,h)
-#define DART_STD_MEMBERS_Transform(v) v(::dart::field_tag<::dart::Double3>{}, "translation", offsetof(::dart::Transform, translation)); \
-                                    v(::dart::field_tag<::dart::Quaternion>{}, "rotation", offsetof(::dart::Transform, rotation)); \
-                                    DART_STD_F(Transform,parent)
-#define DART_STD_MEMBERS_Twist(v)   v(::dart::field_tag<::dart::Double3>{}, "linear", offsetof(::dart::Twist, linear)); \
-                                    v(::dart::field_tag<::dart::Double3>{}, "angular", offsetof(::dart::Twist, angular));
-#define DART_STD_MEMBERS_GeoPoint(v) DART_STD_F(GeoPoint,lat) DART_STD_F(GeoPoint,lon) DART_STD_F(GeoPoint,alt)
-#define DART_STD_MEMBERS_Image(v)      DART_STD_F(Image,width) DART_STD_F(Image,height) \
-                                       DART_STD_F(Image,stride) DART_STD_F(Image,format) DART_STD_F(Image,data)
-#define DART_STD_MEMBERS_VideoFrame(v) DART_STD_F(VideoFrame,codec) \
-                                       DART_STD_F(VideoFrame,width) DART_STD_F(VideoFrame,height) \
-                                       DART_STD_F(VideoFrame,keyframe) \
-                                       DART_STD_F(VideoFrame,pts) DART_STD_F(VideoFrame,data)
-#define DART_STD_MEMBERS_ExternalVideoStream(v) DART_STD_F(ExternalVideoStream,kind) \
-                                       DART_STD_F(ExternalVideoStream,codec) \
-                                       DART_STD_F(ExternalVideoStream,width) DART_STD_F(ExternalVideoStream,height) \
-                                       DART_STD_F(ExternalVideoStream,url) DART_STD_F(ExternalVideoStream,name)
-#define DART_STD_MEMBERS_CameraIntrinsics(v) DART_STD_F(CameraIntrinsics,width) DART_STD_F(CameraIntrinsics,height) \
-                                       DART_STD_F(CameraIntrinsics,fx) DART_STD_F(CameraIntrinsics,fy) \
-                                       DART_STD_F(CameraIntrinsics,cx) DART_STD_F(CameraIntrinsics,cy) \
-                                       DART_STD_F(CameraIntrinsics,model) DART_STD_F(CameraIntrinsics,coeffs)
-#define DART_STD_MEMBERS_JointState(v) DART_STD_F(JointState,position) \
-                                       DART_STD_F(JointState,velocity) DART_STD_F(JointState,effort)
-#define DART_STD_MEMBERS_JointNames(v) DART_STD_F(JointNames,name)
+#define RAMBLE_STD_F(T, f) v(::ramble::field_tag<decltype(::ramble::T::f)>{}, #f, offsetof(::ramble::T, f));
+#define RAMBLE_STD_MEMBERS_Float2(v)  RAMBLE_STD_F(Float2,x)  RAMBLE_STD_F(Float2,y)
+#define RAMBLE_STD_MEMBERS_Float3(v)  RAMBLE_STD_F(Float3,x)  RAMBLE_STD_F(Float3,y)  RAMBLE_STD_F(Float3,z)
+#define RAMBLE_STD_MEMBERS_Float4(v)  RAMBLE_STD_F(Float4,x)  RAMBLE_STD_F(Float4,y)  RAMBLE_STD_F(Float4,z)  RAMBLE_STD_F(Float4,w)
+#define RAMBLE_STD_MEMBERS_Double2(v) RAMBLE_STD_F(Double2,x) RAMBLE_STD_F(Double2,y)
+#define RAMBLE_STD_MEMBERS_Double3(v) RAMBLE_STD_F(Double3,x) RAMBLE_STD_F(Double3,y) RAMBLE_STD_F(Double3,z)
+#define RAMBLE_STD_MEMBERS_Double4(v) RAMBLE_STD_F(Double4,x) RAMBLE_STD_F(Double4,y) RAMBLE_STD_F(Double4,z) RAMBLE_STD_F(Double4,w)
+#define RAMBLE_STD_MEMBERS_Int2(v)    RAMBLE_STD_F(Int2,x)    RAMBLE_STD_F(Int2,y)
+#define RAMBLE_STD_MEMBERS_Int3(v)    RAMBLE_STD_F(Int3,x)    RAMBLE_STD_F(Int3,y)    RAMBLE_STD_F(Int3,z)
+#define RAMBLE_STD_MEMBERS_Int4(v)    RAMBLE_STD_F(Int4,x)    RAMBLE_STD_F(Int4,y)    RAMBLE_STD_F(Int4,z)    RAMBLE_STD_F(Int4,w)
+#define RAMBLE_STD_MEMBERS_Quaternion(v) RAMBLE_STD_F(Quaternion,x) RAMBLE_STD_F(Quaternion,y) RAMBLE_STD_F(Quaternion,z) RAMBLE_STD_F(Quaternion,w)
+#define RAMBLE_STD_MEMBERS_Color(v)   RAMBLE_STD_F(Color,r)   RAMBLE_STD_F(Color,g)   RAMBLE_STD_F(Color,b)   RAMBLE_STD_F(Color,a)
+#define RAMBLE_STD_MEMBERS_Rect(v)    RAMBLE_STD_F(Rect,x)    RAMBLE_STD_F(Rect,y)    RAMBLE_STD_F(Rect,w)    RAMBLE_STD_F(Rect,h)
+#define RAMBLE_STD_MEMBERS_RectI(v)   RAMBLE_STD_F(RectI,x)   RAMBLE_STD_F(RectI,y)   RAMBLE_STD_F(RectI,w)   RAMBLE_STD_F(RectI,h)
+#define RAMBLE_STD_MEMBERS_Transform(v) v(::ramble::field_tag<::ramble::Double3>{}, "translation", offsetof(::ramble::Transform, translation)); \
+                                    v(::ramble::field_tag<::ramble::Quaternion>{}, "rotation", offsetof(::ramble::Transform, rotation)); \
+                                    RAMBLE_STD_F(Transform,parent)
+#define RAMBLE_STD_MEMBERS_Twist(v)   v(::ramble::field_tag<::ramble::Double3>{}, "linear", offsetof(::ramble::Twist, linear)); \
+                                    v(::ramble::field_tag<::ramble::Double3>{}, "angular", offsetof(::ramble::Twist, angular));
+#define RAMBLE_STD_MEMBERS_GeoPoint(v) RAMBLE_STD_F(GeoPoint,lat) RAMBLE_STD_F(GeoPoint,lon) RAMBLE_STD_F(GeoPoint,alt)
+#define RAMBLE_STD_MEMBERS_Image(v)      RAMBLE_STD_F(Image,width) RAMBLE_STD_F(Image,height) \
+                                       RAMBLE_STD_F(Image,stride) RAMBLE_STD_F(Image,format) RAMBLE_STD_F(Image,data)
+#define RAMBLE_STD_MEMBERS_VideoFrame(v) RAMBLE_STD_F(VideoFrame,codec) \
+                                       RAMBLE_STD_F(VideoFrame,width) RAMBLE_STD_F(VideoFrame,height) \
+                                       RAMBLE_STD_F(VideoFrame,keyframe) \
+                                       RAMBLE_STD_F(VideoFrame,pts) RAMBLE_STD_F(VideoFrame,data)
+#define RAMBLE_STD_MEMBERS_ExternalVideoStream(v) RAMBLE_STD_F(ExternalVideoStream,kind) \
+                                       RAMBLE_STD_F(ExternalVideoStream,codec) \
+                                       RAMBLE_STD_F(ExternalVideoStream,width) RAMBLE_STD_F(ExternalVideoStream,height) \
+                                       RAMBLE_STD_F(ExternalVideoStream,url) RAMBLE_STD_F(ExternalVideoStream,name)
+#define RAMBLE_STD_MEMBERS_CameraIntrinsics(v) RAMBLE_STD_F(CameraIntrinsics,width) RAMBLE_STD_F(CameraIntrinsics,height) \
+                                       RAMBLE_STD_F(CameraIntrinsics,fx) RAMBLE_STD_F(CameraIntrinsics,fy) \
+                                       RAMBLE_STD_F(CameraIntrinsics,cx) RAMBLE_STD_F(CameraIntrinsics,cy) \
+                                       RAMBLE_STD_F(CameraIntrinsics,model) RAMBLE_STD_F(CameraIntrinsics,coeffs)
+#define RAMBLE_STD_MEMBERS_JointState(v) RAMBLE_STD_F(JointState,position) \
+                                       RAMBLE_STD_F(JointState,velocity) RAMBLE_STD_F(JointState,effort)
+#define RAMBLE_STD_MEMBERS_JointNames(v) RAMBLE_STD_F(JointNames,name)
 
 namespace priv {
 
 template <class> inline constexpr bool always_false = false;
 
-template <class U> struct is_dart_string : std::false_type {};
-template <uint16_t N> struct is_dart_string<String<N>> : std::true_type {
+template <class U> struct is_ramble_string : std::false_type {};
+template <uint16_t N> struct is_ramble_string<String<N>> : std::true_type {
     static constexpr uint16_t cap = N;
 };
 template <class U> struct is_std_array : std::false_type {};
@@ -1129,11 +1129,11 @@ template <class E, size_t N> struct is_std_array<std::array<E, N>> : std::true_t
     static constexpr size_t count = N;
 };
 template <class U, class = void> struct is_reflected : std::false_type {};
-template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_dart_schema>>
+template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_ramble_schema>>
     : std::true_type {};
-/* an enum type registered with DART_ENUM (else a plain enum ships as its backing integer) */
+/* an enum type registered with RAMBLE_ENUM (else a plain enum ships as its backing integer) */
 template <class U, class = void> struct is_reg_enum : std::false_type {};
-template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_dart_enum>>
+template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_ramble_enum>>
     : std::true_type {};
 /* std::string: the unbounded string type, a tail frame. Legal as a member and a bare root. */
 template <class U> struct is_var_string : std::is_same<U, std::string> {};
@@ -1146,17 +1146,17 @@ template <class E> struct is_std_vector<std::vector<E>> : std::true_type {
 
 /* map a C++ scalar type onto the wire kind, -1 = not a wire scalar */
 template <class U> constexpr int scalar_kind_of() {
-    if constexpr (std::is_same_v<U, bool>) return (int)detail::DART_BOOL;
+    if constexpr (std::is_same_v<U, bool>) return (int)detail::RAMBLE_BOOL;
     else if constexpr (std::is_integral_v<U>) {
-        if constexpr (sizeof(U) == 1) return std::is_signed_v<U> ? (int)detail::DART_I8  : (int)detail::DART_U8;
-        else if constexpr (sizeof(U) == 2) return std::is_signed_v<U> ? (int)detail::DART_I16 : (int)detail::DART_U16;
-        else if constexpr (sizeof(U) == 4) return std::is_signed_v<U> ? (int)detail::DART_I32 : (int)detail::DART_U32;
-        else if constexpr (sizeof(U) == 8) return std::is_signed_v<U> ? (int)detail::DART_I64 : (int)detail::DART_U64;
+        if constexpr (sizeof(U) == 1) return std::is_signed_v<U> ? (int)detail::RAMBLE_I8  : (int)detail::RAMBLE_U8;
+        else if constexpr (sizeof(U) == 2) return std::is_signed_v<U> ? (int)detail::RAMBLE_I16 : (int)detail::RAMBLE_U16;
+        else if constexpr (sizeof(U) == 4) return std::is_signed_v<U> ? (int)detail::RAMBLE_I32 : (int)detail::RAMBLE_U32;
+        else if constexpr (sizeof(U) == 8) return std::is_signed_v<U> ? (int)detail::RAMBLE_I64 : (int)detail::RAMBLE_U64;
         else return -1;
     }
     else if constexpr (std::is_floating_point_v<U>) {
-        if constexpr (sizeof(U) == 4) return (int)detail::DART_F32;
-        else if constexpr (sizeof(U) == 8) return (int)detail::DART_F64;
+        if constexpr (sizeof(U) == 4) return (int)detail::RAMBLE_F32;
+        else if constexpr (sizeof(U) == 8) return (int)detail::RAMBLE_F64;
         else return -1;
     }
     else return -1;
@@ -1164,11 +1164,11 @@ template <class U> constexpr int scalar_kind_of() {
 
 inline const char* scalar_kind_name(int k) {
     static const char* names[] = { "u8","u16","u32","u64","i8","i16","i32","i64","f32","f64","bool" };
-    return (k >= 0 && k <= (int)detail::DART_BOOL) ? names[k] : "?";
+    return (k >= 0 && k <= (int)detail::RAMBLE_BOOL) ? names[k] : "?";
 }
 inline uint32_t scalar_wire_size(int k) {
     static const uint8_t sz[] = { 1,2,4,8,1,2,4,8,4,8,1 };
-    return (k >= 0 && k <= (int)detail::DART_BOOL) ? sz[k] : 0;
+    return (k >= 0 && k <= (int)detail::RAMBLE_BOOL) ? sz[k] : 0;
 }
 inline bool host_le() {
     const uint16_t probe = 1;
@@ -1179,7 +1179,7 @@ inline bool host_le() {
  * wire, and how to copy it. Arrays are one leaf with count > 1 (per-element strides). */
 struct Leaf {
     uint32_t    struct_off = 0, wire_off = 0;
-    uint8_t     kind = 0;   /* scalar kind, DART_STR, or the enum backing kind */
+    uint8_t     kind = 0;   /* scalar kind, RAMBLE_STR, or the enum backing kind */
     uint8_t     is_array = 0;
     uint8_t     is_enum = 0;   /* wire kind ENUM, copied as its backing integer */
     uint16_t    count = 1, cap = 0;   /* elements, or the string capacity */
@@ -1196,9 +1196,9 @@ struct Tail {
     std::string path;
     size_t (*extra)(const uint8_t* member) = nullptr;   /* payload bytes to reserve */
     bool (*write)(const uint8_t* member, uint8_t* buf, size_t cap,
-                  const detail::DartSchema* s, const char* path) = nullptr;
-    bool (*read)(uint8_t* member, detail::DartBytes msg,
-                 const detail::DartSchema* s, const char* path) = nullptr;
+                  const detail::RambleSchema* s, const char* path) = nullptr;
+    bool (*read)(uint8_t* member, detail::RambleBytes msg,
+                 const detail::RambleSchema* s, const char* path) = nullptr;
 };
 
 inline void copy_swapped(uint8_t* dst, const uint8_t* src, size_t n);
@@ -1208,23 +1208,23 @@ template <class E> struct vector_tail {
         return reinterpret_cast<const std::vector<E>*>(m)->size() * sizeof(E);
     }
     static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
-                      const detail::DartSchema* s, const char* path) {
+                      const detail::RambleSchema* s, const char* path) {
         const std::vector<E>& v = *reinterpret_cast<const std::vector<E>*>(m);
         size_t bytes = v.size() * sizeof(E);
         if (host_le() || sizeof(E) == 1)
-            return detail::dart_set_array(buf, cap, s, path,
-                                          detail::dart_bytes(v.data(), bytes)) != 0;
+            return detail::ramble_set_array(buf, cap, s, path,
+                                          detail::ramble_bytes(v.data(), bytes)) != 0;
         std::vector<uint8_t> tmp(bytes);        /* big-endian host: the wire is LE */
         for (size_t i = 0; i < v.size(); i++)
             copy_swapped(tmp.data() + i * sizeof(E),
                          reinterpret_cast<const uint8_t*>(&v[i]), sizeof(E));
-        return detail::dart_set_array(buf, cap, s, path,
-                                      detail::dart_bytes(tmp.data(), bytes)) != 0;
+        return detail::ramble_set_array(buf, cap, s, path,
+                                      detail::ramble_bytes(tmp.data(), bytes)) != 0;
     }
-    static bool read(uint8_t* m, detail::DartBytes msg,
-                     const detail::DartSchema* s, const char* path) {
+    static bool read(uint8_t* m, detail::RambleBytes msg,
+                     const detail::RambleSchema* s, const char* path) {
         std::vector<E>& v = *reinterpret_cast<std::vector<E>*>(m);
-        detail::DartBytes view = detail::dart_get_array(msg, s, path);
+        detail::RambleBytes view = detail::ramble_get_array(msg, s, path);
         if (!view.data) return false;   /* empty is non NULL, NULL = mismatch */
         const uint8_t* src = view.data;
         size_t n = view.len / sizeof(E);
@@ -1244,15 +1244,15 @@ struct string_tail {
         return reinterpret_cast<const std::string*>(m)->size();
     }
     static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
-                      const detail::DartSchema* s, const char* path) {
+                      const detail::RambleSchema* s, const char* path) {
         const std::string& v = *reinterpret_cast<const std::string*>(m);
-        detail::DartString sv; sv.data = v.data(); sv.len = v.size();
-        return detail::dart_set_string(buf, cap, s, path, sv) != 0;
+        detail::RambleString sv; sv.data = v.data(); sv.len = v.size();
+        return detail::ramble_set_string(buf, cap, s, path, sv) != 0;
     }
-    static bool read(uint8_t* m, detail::DartBytes msg,
-                     const detail::DartSchema* s, const char* path) {
+    static bool read(uint8_t* m, detail::RambleBytes msg,
+                     const detail::RambleSchema* s, const char* path) {
         std::string& v = *reinterpret_cast<std::string*>(m);
-        detail::DartString sv = detail::dart_get_string(msg, s, path);
+        detail::RambleString sv = detail::ramble_get_string(msg, s, path);
         if (!sv.data) return false;
         v.assign(sv.data, sv.len);
         return true;
@@ -1281,7 +1281,7 @@ struct SchemaBuilder {
     }
     template <class E> void add_scalar(const char* name, size_t off, size_t count, bool arr) {
         constexpr int k = scalar_kind_of<E>();
-        static_assert(k >= 0, "DART_SCHEMA: field/element type is not a wire scalar");
+        static_assert(k >= 0, "RAMBLE_SCHEMA: field/element type is not a wire scalar");
         static_assert(!std::is_same_v<E, bool> || sizeof(bool) == 1, "bool must be one byte");
         sep(name);
         put(scalar_kind_name(k));
@@ -1296,25 +1296,25 @@ struct SchemaBuilder {
         leaves.push_back(std::move(l));
     }
     template <class E> void add_string(const char* name, size_t off, size_t count, bool arr) {
-        constexpr uint16_t cap = is_dart_string<E>::cap;
+        constexpr uint16_t cap = is_ramble_string<E>::cap;
         sep(name);
         put("string<"); put(std::to_string(cap)); put(">");
         if (arr) { put("["); put(std::to_string(count)); put("]"); }
         Leaf l;
         l.struct_off = base + (uint32_t)off;
-        l.kind = (uint8_t)detail::DART_STR; l.is_array = arr ? 1 : 0;
+        l.kind = (uint8_t)detail::RAMBLE_STR; l.is_array = arr ? 1 : 0;
         l.count = (uint16_t)count; l.cap = cap;
         l.s_stride = (uint32_t)sizeof(E);
         l.w_stride = 2u + cap;
         l.path = prefix + name;
         leaves.push_back(std::move(l));
     }
-    /* a DART_ENUM-registered enum: emit `enum<uN> { A=v, ... }`, copy as the backing int */
+    /* a RAMBLE_ENUM-registered enum: emit `enum<uN> { A=v, ... }`, copy as the backing int */
     template <class E> void add_enum(const char* name, size_t off) {
         using Backing = std::underlying_type_t<E>;
         constexpr int k = scalar_kind_of<Backing>();
-        static_assert(k >= 0 && k <= (int)detail::DART_I64,
-                      "DART_ENUM: backing must be an integer type (u8..i64)");
+        static_assert(k >= 0 && k <= (int)detail::RAMBLE_I64,
+                      "RAMBLE_ENUM: backing must be an integer type (u8..i64)");
         sep(name);
         put("enum<"); put(scalar_kind_name(k)); put("> { ");
         bool firstv = true;
@@ -1335,10 +1335,10 @@ struct SchemaBuilder {
     /* a VARIABLE member: no fixed leaf, a Tail reached by path via the C accessors */
     template <class E> void add_vector(const char* name, size_t off) {
         constexpr int k = scalar_kind_of<E>();
-        static_assert(k >= 0, "DART_SCHEMA: std::vector element must be a wire scalar "
+        static_assert(k >= 0, "RAMBLE_SCHEMA: std::vector element must be a wire scalar "
                               "(no vectors of structs, strings, or vectors)");
         static_assert(!std::is_same_v<E, bool>,
-                      "DART_SCHEMA: std::vector<bool> is bit-packed; use std::vector<uint8_t>");
+                      "RAMBLE_SCHEMA: std::vector<bool> is bit-packed; use std::vector<uint8_t>");
         sep(name);
         put(scalar_kind_name(k)); put("[]");
         Tail t;
@@ -1378,17 +1378,17 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
     } else if constexpr (std::is_enum_v<U>) {
         if constexpr (is_reg_enum<U>::value) add_enum<U>(name, off);   /* named options */
         else add_scalar<std::underlying_type_t<U>>(name, off, 1, false); /* a plain int */
-    } else if constexpr (is_dart_string<U>::value) {
+    } else if constexpr (is_ramble_string<U>::value) {
         add_string<U>(name, off, 1, false);
     } else if constexpr (std::is_array_v<U>) {
         using E = std::remove_extent_t<U>;
         constexpr size_t n = std::extent_v<U>;
-        if constexpr (is_dart_string<E>::value) add_string<E>(name, off, n, true);
+        if constexpr (is_ramble_string<E>::value) add_string<E>(name, off, n, true);
         else                                    add_scalar<E>(name, off, n, true);
     } else if constexpr (is_std_array<U>::value) {
         using E = typename is_std_array<U>::elem;
         constexpr size_t n = is_std_array<U>::count;
-        if constexpr (is_dart_string<E>::value) add_string<E>(name, off, n, true);
+        if constexpr (is_ramble_string<E>::value) add_string<E>(name, off, n, true);
         else                                    add_scalar<E>(name, off, n, true);
     } else if constexpr (std_type<U>::name != nullptr) {
         /* a NAMED type: it spells as its name alone, but still contributes the leaves of
@@ -1431,27 +1431,27 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
         add_var_string(name, off);
     } else {
         static_assert(always_false<U>,
-            "DART_SCHEMA: unsupported field type (no pointers/maps; use scalars, "
-            "dart::String<N>, fixed arrays, std::vector<scalar>, std::string, or a "
-            "nested DART_SCHEMA struct)");
+            "RAMBLE_SCHEMA: unsupported field type (no pointers/maps; use scalars, "
+            "ramble::String<N>, fixed arrays, std::vector<scalar>, std::string, or a "
+            "nested RAMBLE_SCHEMA struct)");
     }
 }
 
 /* resolve every leaf's wire offset by dotted path in a compiled schema, verifying the kinds.
  * Used on our own schema at registration and on an incoming one for the rebase decode. */
-inline bool fill_offsets(const detail::DartSchema* s, std::vector<Leaf>& lv) {
+inline bool fill_offsets(const detail::RambleSchema* s, std::vector<Leaf>& lv) {
     for (Leaf& l : lv) {
-        int idx = detail::dart_schema_field_index(s, l.path.c_str());
+        int idx = detail::ramble_schema_field_index(s, l.path.c_str());
         if (idx < 0) return false;
-        detail::DartSchemaFieldInfo fi;
-        if (!detail::dart_schema_field_at(s, (uint16_t)idx, &fi)) return false;
+        detail::RambleSchemaFieldInfo fi;
+        if (!detail::ramble_schema_field_at(s, (uint16_t)idx, &fi)) return false;
         if (l.is_enum) {
-            if (fi.kind != (uint8_t)detail::DART_ENUM || fi.elem != l.kind) return false;
+            if (fi.kind != (uint8_t)detail::RAMBLE_ENUM || fi.elem != l.kind) return false;
         } else if (l.is_array) {
-            if (fi.kind != (uint8_t)detail::DART_ARR || fi.elem != l.kind || fi.count != l.count) return false;
-            if (l.kind == (uint8_t)detail::DART_STR && fi.str_cap != l.cap) return false;
-        } else if (l.kind == (uint8_t)detail::DART_STR) {
-            if (fi.kind != (uint8_t)detail::DART_STR || fi.str_cap != l.cap) return false;
+            if (fi.kind != (uint8_t)detail::RAMBLE_ARR || fi.elem != l.kind || fi.count != l.count) return false;
+            if (l.kind == (uint8_t)detail::RAMBLE_STR && fi.str_cap != l.cap) return false;
+        } else if (l.kind == (uint8_t)detail::RAMBLE_STR) {
+            if (fi.kind != (uint8_t)detail::RAMBLE_STR || fi.str_cap != l.cap) return false;
         } else {
             if (fi.kind != l.kind) return false;
         }
@@ -1462,16 +1462,16 @@ inline bool fill_offsets(const detail::DartSchema* s, std::vector<Leaf>& lv) {
 
 /* verify every tail member resolves in a compiled schema with the matching variable
  * kind (a tail needs no offset: the accessors walk the frames per message) */
-inline bool tails_resolve(const detail::DartSchema* s, const std::vector<Tail>& tv) {
+inline bool tails_resolve(const detail::RambleSchema* s, const std::vector<Tail>& tv) {
     for (const Tail& t : tv) {
-        int idx = detail::dart_schema_field_index(s, t.path.c_str());
+        int idx = detail::ramble_schema_field_index(s, t.path.c_str());
         if (idx < 0) return false;
-        detail::DartSchemaFieldInfo fi;
-        if (!detail::dart_schema_field_at(s, (uint16_t)idx, &fi)) return false;
+        detail::RambleSchemaFieldInfo fi;
+        if (!detail::ramble_schema_field_at(s, (uint16_t)idx, &fi)) return false;
         if (t.is_string) {
-            if (fi.kind != (uint8_t)detail::DART_VSTR) return false;
+            if (fi.kind != (uint8_t)detail::RAMBLE_VSTR) return false;
         } else {
-            if (fi.kind != (uint8_t)detail::DART_VARR || fi.elem != t.elem_kind) return false;
+            if (fi.kind != (uint8_t)detail::RAMBLE_VARR || fi.elem != t.elem_kind) return false;
         }
     }
     return true;
@@ -1485,7 +1485,7 @@ inline void leaf_to_wire(const Leaf& l, const uint8_t* sbase, uint8_t* wire, boo
     const uint8_t* sp = sbase + l.struct_off;
     uint8_t*       wp = wire + l.wire_off;
     for (uint16_t i = 0; i < l.count; i++, sp += l.s_stride, wp += l.w_stride) {
-        if (l.kind == (uint8_t)detail::DART_STR) {
+        if (l.kind == (uint8_t)detail::RAMBLE_STR) {
             uint16_t len;
             std::memcpy(&len, sp, 2);
             if (len > l.cap) len = l.cap;
@@ -1502,7 +1502,7 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
     uint8_t*       sp = sbase + l.struct_off;
     const uint8_t* wp = wire + l.wire_off;
     for (uint16_t i = 0; i < l.count; i++, sp += l.s_stride, wp += l.w_stride) {
-        if (l.kind == (uint8_t)detail::DART_STR) {
+        if (l.kind == (uint8_t)detail::RAMBLE_STR) {
             uint16_t len;
             if (le) std::memcpy(&len, wp, 2); else copy_swapped(reinterpret_cast<uint8_t*>(&len), wp, 2);
             if (len > l.cap) len = l.cap;   /* clamp a hostile length prefix */
@@ -1516,10 +1516,10 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
     }
 }
 
-/* T is a bare wire type, usable as a handle's whole schema with no DART_SCHEMA. std::string
+/* T is a bare wire type, usable as a handle's whole schema with no RAMBLE_SCHEMA. std::string
  * is the unbounded string root and std::vector<E> the E[] root, both on the tail path. */
 template <class U> constexpr bool is_value_type() {
-    return scalar_kind_of<U>() >= 0 || std::is_enum_v<U> || is_dart_string<U>::value
+    return scalar_kind_of<U>() >= 0 || std::is_enum_v<U> || is_ramble_string<U>::value
         || is_std_array<U>::value || is_std_vector<U>::value || is_var_string<U>::value;
 }
 
@@ -1529,7 +1529,7 @@ struct TypeCodec {
     bool                      memcpy_ok = false;      /* our own layout coincides with our wire */
     bool                      memcpy_capable = false; /* trivially copyable + little-endian host */
     std::optional<Schema>     schema;
-    const detail::DartSchema* raw = nullptr;
+    const detail::RambleSchema* raw = nullptr;
     uint64_t                  hash = 0;
     uint32_t                  wire_size = 0;   /* the fixed section, all of it when no tails */
     uint32_t                  msg_min = 0;            /* fixed section + one empty frame per tail */
@@ -1541,16 +1541,16 @@ struct TypeCodec {
      * publisher's offsets, so offsets are resolved per pointer and never chosen by hash. */
     struct Rebased { std::vector<Leaf> leaves; uint32_t size = 0; bool ok = false, coincide = false; };
     std::mutex                                       mu;
-    std::map<const detail::DartSchema*, Rebased>     rebased;
+    std::map<const detail::RambleSchema*, Rebased>     rebased;
 
-    const Rebased* rebased_for(const detail::DartSchema* s) {
+    const Rebased* rebased_for(const detail::RambleSchema* s) {
         std::lock_guard<std::mutex> g(mu);
         auto it = rebased.find(s);
         if (it != rebased.end()) return &it->second;
         Rebased r;
         r.leaves = leaves;                    /* keep struct offsets, refill wire offsets */
         r.ok     = fill_offsets(s, r.leaves) && tails_resolve(s, tails);
-        r.size   = detail::dart_schema_size(s);
+        r.size   = detail::ramble_schema_size(s);
         if (r.ok && memcpy_capable && r.size >= struct_size) {
             bool co = true;
             for (const Leaf& l : r.leaves)
@@ -1569,7 +1569,7 @@ inline std::string strip_namespaces(const char* type_name) {
 
 template <class T> TypeCodec* build_codec() {
     static_assert(std_type<T>::name != nullptr || is_reflected<T>::value || is_value_type<T>(),
-                  "type has no DART_SCHEMA(T, fields...) declaration and is not a bare wire type");
+                  "type has no RAMBLE_SCHEMA(T, fields...) declaration and is not a bare wire type");
     auto* c = new TypeCodec();
     SchemaBuilder b;
     if constexpr (std_type<T>::name != nullptr) {
@@ -1595,8 +1595,8 @@ template <class T> TypeCodec* build_codec() {
     if (!c->schema) return c;
     c->raw         = c->schema->raw();
     c->hash        = c->schema->hash();
-    c->wire_size   = detail::dart_schema_size(c->raw);
-    c->msg_min     = detail::dart_schema_msg_min(c->raw);
+    c->wire_size   = detail::ramble_schema_size(c->raw);
+    c->msg_min     = detail::ramble_schema_msg_min(c->raw);
     c->struct_size = (uint32_t)sizeof(T);
     if (!fill_offsets(c->raw, c->leaves)) return c;
     if (!tails_resolve(c->raw, c->tails)) return c;
@@ -1637,7 +1637,7 @@ template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
     size_t need = c.msg_min;
     for (const Tail& t : c.tails) need += t.extra(base + t.struct_off);
     scratch.assign(need, 0);
-    if (!detail::dart_schema_message_default(c.raw, scratch.data(), scratch.size()))
+    if (!detail::ramble_schema_message_default(c.raw, scratch.data(), scratch.size()))
         return Bytes();
     for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
     for (const Tail& t : c.tails)
@@ -1645,15 +1645,15 @@ template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
                      c.raw, t.path.c_str()))
             return Bytes();
     return Bytes(scratch.data(),
-                 detail::dart_schema_msg_len(c.raw, scratch.data(), scratch.size()));
+                 detail::ramble_schema_msg_len(c.raw, scratch.data(), scratch.size()));
 }
 
 /* wire to struct. Offsets always come from the delivered schema and are cached per schema
  * pointer, with the memcpy path when that layout matches. nullptr assumes our own layout. */
-template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* schema) {
+template <class T> bool decode(T& out, Bytes data, const detail::RambleSchema* schema) {
     TypeCodec& c = type_codec<T>();
     if (!c.ok) return false;
-    const detail::DartSchema* sch = c.raw;
+    const detail::RambleSchema* sch = c.raw;
     const std::vector<Leaf>* lv = &c.leaves;
     uint32_t need = c.wire_size;
     bool fast = c.memcpy_ok;
@@ -1679,7 +1679,7 @@ template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* sch
     uint8_t* base = reinterpret_cast<uint8_t*>(&out);
     for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
     if (!c.tails.empty()) {                     /* frames walked per message, by path */
-        detail::DartBytes mb; mb.data = data.data(); mb.len = data.size();
+        detail::RambleBytes mb; mb.data = data.data(); mb.len = data.size();
         for (const Tail& t : c.tails)
             if (!t.read(base + t.struct_off, mb, sch, t.path.c_str()))
                 return false;
@@ -1694,7 +1694,7 @@ template <class T> bool decode(T& out, Bytes data, const detail::DartSchema* sch
 class Topic {
 public:
     Topic() = default;
-    /* Create (or share) a topic on `node`. Throws dart::Error on failure (with
+    /* Create (or share) a topic on `node`. Throws ramble::Error on failure (with
      * -fno-exceptions: check valid()). schema is copied into the node. */
     Topic(Node& node, std::string_view name, Role role = Role::PubSub,
           const Schema* schema = nullptr, const Qos& qos = {});
@@ -1704,50 +1704,50 @@ public:
     bool valid() const noexcept { return ch_ != nullptr; }
     /* A reflect_from_mesh topic: re read the mesh and re type in place if what it took has
      * moved. true = re typed, false = current or not a reflect handle. */
-    bool refresh() { return ch_ && detail::dart_topic_refresh(ch_) == 1; }
+    bool refresh() { return ch_ && detail::ramble_topic_refresh(ch_) == 1; }
     explicit operator bool() const noexcept { return valid(); }
 
     /* capture is when the data was true, as against when it was sent. The default is
      * unstated, which costs no wire bytes. */
     SendStatus send(Bytes data, Timestamp capture = {}) {
-        detail::DartSendOpts o;
+        detail::RambleSendOpts o;
         if (!ch_) return SendStatus::NoTopic;
         o.capture_us = static_cast<uint64_t>(capture.us);
         return static_cast<SendStatus>(
-            detail::dart_topic_send(ch_, detail::dart_bytes(data.data(), data.size()), &o));
+            detail::ramble_topic_send(ch_, detail::ramble_bytes(data.data(), data.size()), &o));
     }
     SendStatus set_role(Role r) {
         if (!ch_) return SendStatus::NoTopic;
         return static_cast<SendStatus>(
-            detail::dart_topic_set_role(ch_, static_cast<detail::DartRole>(r)));
+            detail::ramble_topic_set_role(ch_, static_cast<detail::RambleRole>(r)));
     }
     /* Retire the topic so the name can be re created with another schema (docs/topics.md).
      * Every handle sharing the slot is invalid after Ok. Refused with State from a callback. */
     SendStatus retire();
     uint16_t index() const {
         if (!ch_) return 0xffff;
-        return detail::dart_topic_index(ch_);
+        return detail::ramble_topic_index(ch_);
     }
     int match_count() const {
         if (!ch_) return 0;
-        return detail::dart_topic_match_count(ch_);
+        return detail::ramble_topic_match_count(ch_);
     }
     /* Unresolved candidate matches right now. 0 = matching has converged for every known peer. */
     int pending_count() const {
         if (!ch_) return 0;
-        return detail::dart_topic_pending_count(ch_);
+        return detail::ramble_topic_pending_count(ch_);
     }
     /* 1 when a send would not wait: a subscriber is matched, or matching has converged
      * so there is nobody to wait for. The async form of the send-path match wait. */
     bool ready() const {
         if (!ch_) return false;
-        return detail::dart_topic_ready(ch_) == 1;
+        return detail::ramble_topic_ready(ch_) == 1;
     }
     /* Pump until every reader has acked, or timeout_ms elapses. Call before
      * closing so a final burst is not cut off by the BYE. */
     bool drain(int timeout_ms) {
         if (!ch_) return true;
-        return detail::dart_topic_drain(ch_, timeout_ms) == 1;
+        return detail::ramble_topic_drain(ch_, timeout_ms) == 1;
     }
 
     /* The consumer queue. The first take or dispatch switches the topic to queued delivery,
@@ -1757,7 +1757,7 @@ public:
      * negative = wait indefinitely. An empty optional = nothing arrived in time. */
     std::optional<Message<>> take(int timeout_ms = 0) {
         Message<> t;
-        if (!ch_ || detail::dart_topic_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
+        if (!ch_ || detail::ramble_topic_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
         t.bind();
         return t;
     }
@@ -1765,35 +1765,35 @@ public:
      * max_msgs (0 = all), waiting like take. These handlers run without the node lock. */
     int dispatch(int max_msgs = 0, int timeout_ms = 0) {
         if (!ch_) return 0;
-        return detail::dart_topic_dispatch(ch_, max_msgs, timeout_ms);
+        return detail::ramble_topic_dispatch(ch_, max_msgs, timeout_ms);
     }
     struct QueueStats { uint32_t messages = 0, bytes = 0, capacity = 0, dropped = 0; };
     QueueStats queue_stats() const {
         QueueStats s;
-        if (ch_) detail::dart_topic_queue_stats(ch_, &s.messages, &s.bytes, &s.capacity, &s.dropped);
+        if (ch_) detail::ramble_topic_queue_stats(ch_, &s.messages, &s.bytes, &s.capacity, &s.dropped);
         return s;
     }
 
     /* Cumulative traffic counters (always on): messages/bytes this node committed to the
-     * topic (tx) and delivered from it (rx). Also carried in the @dart/meta snapshot. */
+     * topic (tx) and delivered from it (rx). Also carried in the @ramble/meta snapshot. */
     struct Counts { uint64_t tx_msgs = 0, tx_bytes = 0, rx_msgs = 0, rx_bytes = 0; };
     Counts counts() const {
         Counts c;
-        if (ch_) detail::dart_topic_counts(ch_, &c.tx_msgs, &c.tx_bytes, &c.rx_msgs, &c.rx_bytes);
+        if (ch_) detail::ramble_topic_counts(ch_, &c.tx_msgs, &c.tx_bytes, &c.rx_msgs, &c.rx_bytes);
         return c;
     }
 
 private:
     Topic(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos, bool reflect);
 
-    explicit Topic(detail::DartTopic* c, void* impl = nullptr) : ch_(c), impl_(impl) {}
-    detail::DartTopic* ch_ = nullptr;
+    explicit Topic(detail::RambleTopic* c, void* impl = nullptr) : ch_(c), impl_(impl) {}
+    detail::RambleTopic* ch_ = nullptr;
     void* impl_ = nullptr;   /* the owning Node::Impl (Node is incomplete here), so
                                 retire() can forget the wrapper's name-cache entry */
     friend class Node;
 };
 
-#ifndef DART_NO_PATTERNS
+#ifndef RAMBLE_NO_PATTERNS
 
 /* A parked function reply from Request::defer. Movable and single shot, completed from any
  * thread. Dropping it leaves the caller to its timeout. */
@@ -1812,27 +1812,27 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     /* message: optional outcome text, ResponseView::message on the caller, truncated at
-     * DART_CALL_MSG_MAX. On fail it is what a generic consumer displays. */
+     * RAMBLE_CALL_MSG_MAX. On fail it is what a generic consumer displays. */
     bool complete(Bytes rsp = Bytes(), std::string_view message = {}) {
-        return finish(detail::DART_CALL_OK, message, rsp);
+        return finish(detail::RAMBLE_CALL_OK, message, rsp);
     }
     bool fail(std::string_view message = {}, Bytes rsp = Bytes()) {
-        return finish(detail::DART_CALL_APP_ERROR, message, rsp);
+        return finish(detail::RAMBLE_CALL_APP_ERROR, message, rsp);
     }
 
 private:
-    Deferred(detail::DartFunction* fn, uint64_t token) : fn_(fn), token_(token) {}
+    Deferred(detail::RambleFunction* fn, uint64_t token) : fn_(fn), token_(token) {}
     bool finish(int status, std::string_view message, Bytes rsp) {
         if (!valid()) return false;
         std::string m(message);   /* the C API takes a NUL-terminated string */
-        int r = detail::dart_function_complete(fn_, token_,
-                    static_cast<detail::DartCallStatus>(status),
+        int r = detail::ramble_function_complete(fn_, token_,
+                    static_cast<detail::RambleCallStatus>(status),
                     m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
         fn_ = nullptr; token_ = 0;
         return r == 0;
     }
-    detail::DartFunction* fn_ = nullptr;
-    uint64_t              token_ = 0;
+    detail::RambleFunction* fn_ = nullptr;
+    uint64_t                token_ = 0;
     template <class R> friend class Request;
 };
 
@@ -1846,21 +1846,21 @@ public:
     uint64_t         recv_us()       const { return rq_->recv_us; }
     uint64_t         written_us()       const { return rq_->written_us; }   /* the caller's stamp */
 
-    void reply(Bytes rsp)       { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
+    void reply(Bytes rsp)       { detail::ramble_request_reply(rq_, priv::to_c(rsp)); }
     /* message: the failure text, ResponseView::message on the caller, truncated at
-     * DART_CALL_MSG_MAX. Empty = the default "app error". rsp may carry data beside it. */
+     * RAMBLE_CALL_MSG_MAX. Empty = the default "app error". rsp may carry data beside it. */
     void fail(std::string_view message = {}, Bytes rsp = {}) {
         std::string m(message);
-        detail::dart_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
+        detail::ramble_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
     }
     /* Park the reply and return now. The Deferred completes the call later from any thread. */
-    Deferred<> defer() { return Deferred<>(fn_, detail::dart_request_defer(rq_)); }
+    Deferred<> defer() { return Deferred<>(fn_, detail::ramble_request_defer(rq_)); }
 
 private:
-    Request(detail::DartRequest* rq, detail::DartFunction* fn)
+    Request(detail::RambleRequest* rq, detail::RambleFunction* fn)
         : FieldView(rq->data, rq->schema), rq_(rq), fn_(fn) {}
-    detail::DartRequest*  rq_;
-    detail::DartFunction* fn_;
+    detail::RambleRequest*  rq_;
+    detail::RambleFunction* fn_;
     template <class A, class B> friend class FunctionDefinition;
 };
 
@@ -1883,38 +1883,38 @@ public:
     /* one progress update, broadcast on the progress channel (any observer may watch) */
     SendStatus progress(Bytes update) {
         if (!valid()) return SendStatus::State;
-        return static_cast<SendStatus>(detail::dart_function_progress(fn_, token_, priv::to_c(update)));
+        return static_cast<SendStatus>(detail::ramble_function_progress(fn_, token_, priv::to_c(update)));
     }
     /* true the moment a cancel for this call arrived (false on an emptied handle) */
     bool cancelled() const {
-        return valid() && detail::dart_function_cancelled(fn_, token_) == 1;
+        return valid() && detail::ramble_function_cancelled(fn_, token_) == 1;
     }
     /* message as on Deferred: optional outcome text (ResponseView::message on the caller) */
     SendStatus complete(Bytes rsp = Bytes(), std::string_view message = {}) {
-        return finish(detail::DART_CALL_OK, message, rsp);
+        return finish(detail::RAMBLE_CALL_OK, message, rsp);
     }
     SendStatus fail(std::string_view message = {}, Bytes rsp = Bytes()) {
-        return finish(detail::DART_CALL_APP_ERROR, message, rsp);
+        return finish(detail::RAMBLE_CALL_APP_ERROR, message, rsp);
     }
     /* honor a cancel: the caller's terminal status is Cancelled. rsp may carry a partial
      * result, which a function cannot express. */
     SendStatus complete_cancelled(std::string_view message = {}, Bytes rsp = Bytes()) {
-        return finish(detail::DART_CALL_CANCELLED, message, rsp);
+        return finish(detail::RAMBLE_CALL_CANCELLED, message, rsp);
     }
 
 private:
-    PendingTask(detail::DartFunction* fn, uint64_t token) : fn_(fn), token_(token) {}
+    PendingTask(detail::RambleFunction* fn, uint64_t token) : fn_(fn), token_(token) {}
     SendStatus finish(int status, std::string_view message, Bytes rsp) {
         if (!valid()) return SendStatus::State;
         std::string m(message);   /* the C API takes a NUL-terminated string */
-        int r = detail::dart_function_complete(fn_, token_,
-                    static_cast<detail::DartCallStatus>(status),
+        int r = detail::ramble_function_complete(fn_, token_,
+                    static_cast<detail::RambleCallStatus>(status),
                     m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
         fn_ = nullptr; token_ = 0;
         return static_cast<SendStatus>(r);
     }
-    detail::DartFunction* fn_ = nullptr;
-    uint64_t              token_ = 0;
+    detail::RambleFunction* fn_ = nullptr;
+    uint64_t                token_ = 0;
     template <class A, class B> friend class TaskRequest;
 };
 
@@ -1928,21 +1928,21 @@ public:
     uint64_t         recv_us()     const { return rq_->recv_us; }
     uint64_t         written_us()  const { return rq_->written_us; }   /* the caller's stamp */
 
-    void reply(Bytes rsp) { detail::dart_request_reply(rq_, priv::to_c(rsp)); }
+    void reply(Bytes rsp) { detail::ramble_request_reply(rq_, priv::to_c(rsp)); }
     void fail(std::string_view message = {}, Bytes rsp = {}) {
         std::string m(message);
-        detail::dart_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
+        detail::ramble_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
     }
     /* send RUNNING to the caller now, idempotent. defer() implies it */
-    SendStatus start() { return static_cast<SendStatus>(detail::dart_request_start(rq_)); }
+    SendStatus start() { return static_cast<SendStatus>(detail::ramble_request_start(rq_)); }
     /* park the call and return now: the returned PendingTask carries it to completion */
-    PendingTask<> defer() { return PendingTask<>(fn_, detail::dart_request_defer(rq_)); }
+    PendingTask<> defer() { return PendingTask<>(fn_, detail::ramble_request_defer(rq_)); }
 
 private:
-    TaskRequest(detail::DartRequest* rq, detail::DartFunction* fn)
+    TaskRequest(detail::RambleRequest* rq, detail::RambleFunction* fn)
         : FieldView(rq->data, rq->schema), rq_(rq), fn_(fn) {}
-    detail::DartRequest*  rq_;
-    detail::DartFunction* fn_;
+    detail::RambleRequest*  rq_;
+    detail::RambleFunction* fn_;
     template <class A, class B, class C> friend class TaskDefinition;
 };
 
@@ -1961,7 +1961,7 @@ public:
      * non OK outcome. Empty on OK with no message and on a synchronous send refusal. */
     std::string_view message() const { return message_; }
     /* the schema data decodes with (interned in the node, valid until node close) */
-    const detail::DartSchema* raw_schema() const { return schema_; }
+    const detail::RambleSchema* raw_schema() const { return schema_; }
 
 private:
     CallStatus                st_ = CallStatus::Timeout;
@@ -1970,7 +1970,7 @@ private:
     uint64_t                  written_ = 0;
     std::vector<uint8_t>      data_;
     std::string               message_;
-    const detail::DartSchema* schema_ = nullptr;
+    const detail::RambleSchema* schema_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
     template <class A, class B, class C> friend class RemoteTask;
 };
@@ -1979,7 +1979,7 @@ private:
 template <> class ResponseView<void> : public FieldView {
 public:
     CallStatus status()   const { return static_cast<CallStatus>(r_->status); }
-    bool       ok()       const { return r_->status == detail::DART_CALL_OK; }
+    bool       ok()       const { return r_->status == detail::RAMBLE_CALL_OK; }
     uint32_t   provider() const { return r_->provider; }
     uint64_t   written_us()  const { return r_->written_us; }   /* the provider's write stamp */
     /* the outcome text as a view for the callback: the provider's message, else the default
@@ -1987,9 +1987,9 @@ public:
     std::string_view message() const { return { r_->message.data, r_->message.len }; }
 
 private:
-    explicit ResponseView(const detail::DartResponse* r)
+    explicit ResponseView(const detail::RambleResponse* r)
         : FieldView(r->data, r->schema), r_(r) {}
-    const detail::DartResponse* r_;
+    const detail::RambleResponse* r_;
     template <class A, class B> friend class RemoteFunction;
     template <class A, class B, class C> friend class RemoteTask;
 };
@@ -2005,8 +2005,8 @@ public:
     bool     has_value()  const { return p_->data.len != 0; }
 
 private:
-    explicit ProgressView(const detail::DartProgress* p) : FieldView(p->data, p->schema), p_(p) {}
-    const detail::DartProgress* p_;
+    explicit ProgressView(const detail::RambleProgress* p) : FieldView(p->data, p->schema), p_(p) {}
+    const detail::RambleProgress* p_;
     template <class A, class B, class C> friend class RemoteTask;
 };
 
@@ -2021,7 +2021,7 @@ struct AsyncBox {
 };
 }
 
-/* Section-mask bits for a @dart/meta request: OR them into Node::meta_request's
+/* Section-mask bits for a @ramble/meta request: OR them into Node::meta_request's
  * `sections` (0 = every section). */
 enum MetaSection : uint32_t {
     MetaNode   = 0x1u,   /* uptime, memory, backpressure, peer/topic counts, last error */
@@ -2030,7 +2030,7 @@ enum MetaSection : uint32_t {
     MetaPeers  = 0x8u    /* per-peer array: id, name, address, match counts */
 };
 
-/* A decoded @dart/meta reply, owned so it outlives the callback. The node and proc scalars
+/* A decoded @ramble/meta reply, owned so it outlives the callback. The node and proc scalars
  * are pulled out, the full body stays in info as a MapDict. Absent sections leave zeros. */
 struct MetaSnapshot {
     bool       valid    = false;                 /* a CallStatus::Ok reply decoded */
@@ -2057,11 +2057,11 @@ struct MetaSnapshot {
     /* Decode from a raw response body + schema (the wrapper below feeds Response/
      * ResponseView). status/provider are carried through unchanged. */
     static MetaSnapshot decode(CallStatus st, uint32_t provider,
-                               Bytes data, const detail::DartSchema* schema) {
+                               Bytes data, const detail::RambleSchema* schema) {
         MetaSnapshot s;
         s.status = st; s.provider = provider;
         if (st != CallStatus::Ok || !schema) return s;
-        detail::DartBytes info = detail::dart_get_map(detail::dart_bytes(data.data(), data.size()),
+        detail::RambleBytes info = detail::ramble_get_map(detail::ramble_bytes(data.data(), data.size()),
                                                       schema, "info");
         if (!info.data) return s;
         s.info = MapReader(Bytes{ info.data, info.len }).to_map();
@@ -2113,9 +2113,9 @@ struct MetaSnapshot {
     }
 };
 
-#endif /* !DART_NO_PATTERNS */
+#endif /* !RAMBLE_NO_PATTERNS */
 
-/* Owns the DartNode, its memory and the user callbacks. Every call is serialized by the C
+/* Owns the RambleNode, its memory and the user callbacks. Every call is serialized by the C
  * node lock. The threading and callback rules are in docs/cpp.md and docs/node.md. */
 class Node {
 public:
@@ -2123,10 +2123,10 @@ public:
     using EventHandler   = std::function<void(const Event&)>;
 
     /* Open a node. An empty name is auto generated. on_message may be empty, on_event is
-     * required. Throws dart::Error, or under -fno-exceptions check valid(). */
+     * required. Throws ramble::Error, or under -fno-exceptions check valid(). */
     Node(std::string_view name, MessageHandler on_message,
          EventHandler on_event, const NodeOptions& o = {}) {
-        if (!on_event) { priv::raise_msg("dart::Node: an on_event handler is required"); return; }
+        if (!on_event) { priv::raise_msg("ramble::Node: an on_event handler is required"); return; }
         std::unique_ptr<Impl> impl(new Impl());
         impl->on_msg   = std::move(on_message);
         impl->on_event = std::move(on_event);
@@ -2135,12 +2135,12 @@ public:
         impl->mcast_if   = o.multicast_interface;
         impl->self_ip    = o.self_ip;
         for (const std::string& s : o.seed_peers) {
-            detail::DartDiscoveryAddr a;
+            detail::RambleDiscoveryAddr a;
             if (parse_addr(s, a)) impl->seeds.push_back(a);
         }
         std::string nm(name);
 
-        detail::DartNodeOpts co;
+        detail::RambleNodeOpts co;
         std::memset(&co, 0, sizeof co);
         co.domain        = o.domain;
         co.max_topics    = o.max_topics;
@@ -2168,13 +2168,13 @@ public:
         co.discovery.peer_timeout_us      = o.peer_timeout_us;
         co.discovery.max_peers            = o.max_peers;
 
-        detail::DartAllocator mem = (o.memory && o.memory_size)
-            ? detail::dart_allocator_static(o.memory, o.memory_size)
-            : detail::dart_allocator_heap(0);
-        detail::DartNode* n = detail::dart_node_open(
+        detail::RambleAllocator mem = (o.memory && o.memory_size)
+            ? detail::ramble_allocator_static(o.memory, o.memory_size)
+            : detail::ramble_allocator_heap(0);
+        detail::RambleNode* n = detail::ramble_node_open(
             &mem, nm.empty() ? nullptr : nm.c_str(),
             &Node::on_msg_tramp, &Node::on_evt_tramp, &co);
-        if (!n) { priv::raise_last(nullptr, "dart::Node open"); return; }
+        if (!n) { priv::raise_last(nullptr, "ramble::Node open"); return; }
         impl->node = n;
         impl_ = std::move(impl);
     }
@@ -2182,14 +2182,14 @@ public:
     bool valid() const noexcept { return impl_ != nullptr && impl_->node != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Why the most recent construction failed (also what a thrown dart::Error carries):
+    /* Why the most recent construction failed (also what a thrown ramble::Error carries):
        the formatted one-line reason, and its machine-readable ErrorKind. */
     static std::string last_open_error() {
-        detail::DartEvent e = detail::dart_last_error(nullptr);
-        char b[192]; return detail::dart_event_str(&e, b, sizeof b);
+        detail::RambleEvent e = detail::ramble_last_error(nullptr);
+        char b[192]; return detail::ramble_event_str(&e, b, sizeof b);
     }
     static ErrorKind last_open_error_kind() {
-        return static_cast<ErrorKind>(detail::dart_last_error(nullptr).error);
+        return static_cast<ErrorKind>(detail::ramble_last_error(nullptr).error);
     }
 
     Node(Node&&) noexcept = default;
@@ -2211,33 +2211,33 @@ public:
     /* Recover an already-created topic handle by its creation index. */
     Topic topic(uint16_t index) const {
         if (!valid()) return Topic();
-        return Topic(detail::dart_node_topic(impl_->node, index), impl_.get());
+        return Topic(detail::ramble_node_topic(impl_->node, index), impl_.get());
     }
 
     /* One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout_ms in
      * the socket wait, 0 = non blocking. Refused while start() runs. */
     int poll(int timeout_ms = 0) {
         if (!valid()) return (int)SendStatus::State;
-        return detail::dart_node_poll(impl_->node, timeout_ms);
+        return detail::ramble_node_poll(impl_->node, timeout_ms);
     }
 
     /* Run the C service thread. Every call stays safe from any thread and a send wakes it. */
-    bool start() { return valid() && detail::dart_node_start(impl_->node) == 0; }
+    bool start() { return valid() && detail::ramble_node_start(impl_->node) == 0; }
     /* Stop and join the service thread. Idempotent, implied by teardown. */
-    void stop()  { if (valid()) detail::dart_node_stop(impl_->node); }
-    bool is_started() const { return valid() && detail::dart_node_is_started(impl_->node) == 1; }
+    void stop()  { if (valid()) detail::ramble_node_stop(impl_->node); }
+    bool is_started() const { return valid() && detail::ramble_node_is_started(impl_->node) == 1; }
 
     /* Block until discovery and matching settle, so everything sent now reaches everyone on
      * the network. Call after creating the topics. timeout_ms < 0 = 3 announce intervals. */
     bool settle(int timeout_ms = -1) {
-        return valid() && detail::dart_node_settle(impl_->node, timeout_ms) == 1;
+        return valid() && detail::ramble_node_settle(impl_->node, timeout_ms) == 1;
     }
 
     /* Dispatch every queued topic on the calling thread, waiting up to timeout_ms for any to
      * hold data. The one liner for a frame paced consumer. */
     int dispatch(int max_msgs = 0, int timeout_ms = 0) {
         if (!valid()) return 0;
-        return detail::dart_node_dispatch(impl_->node, max_msgs, timeout_ms);
+        return detail::ramble_node_dispatch(impl_->node, max_msgs, timeout_ms);
     }
 
     /* The number of known peers, allocation free (safe from any callback). */
@@ -2245,9 +2245,9 @@ public:
         if (!valid()) return 0;
         uint16_t count = 0;
         LockGuard guard(impl_->node);
-        detail::DartIter it; std::memset(&it, 0, sizeof it);
-        detail::DartPeerInfo p;
-        while (detail::dart_node_peers_next(impl_->node, &it, &p)) count++;
+        detail::RambleIter it; std::memset(&it, 0, sizeof it);
+        detail::RamblePeerInfo p;
+        while (detail::ramble_node_peers_next(impl_->node, &it, &p)) count++;
         return count;
     }
 
@@ -2258,15 +2258,15 @@ public:
         std::vector<Peer> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
-        detail::DartIter it; std::memset(&it, 0, sizeof it);
-        detail::DartPeerInfo p;
-        while (detail::dart_node_peers_next(impl_->node, &it, &p)) {
+        detail::RambleIter it; std::memset(&it, 0, sizeof it);
+        detail::RamblePeerInfo p;
+        while (detail::ramble_node_peers_next(impl_->node, &it, &p)) {
             Peer peer;
             peer.id = p.id;
             std::memcpy(peer.uuid.data(), p.uuid, 16);
             if (p.name.data)    peer.name.assign(p.name.data, p.name.len);
             if (p.address.data) peer.address.assign(p.address.data, p.address.len);
-            peer.active        = (p.liveness == detail::DART_PEER_ACTIVE);
+            peer.active        = (p.liveness == detail::RAMBLE_PEER_ACTIVE);
             peer.last_heard_us = p.last_heard_us;
             peer.epoch         = p.epoch;
             peer.catching_up   = p.catching_up != 0;
@@ -2286,9 +2286,9 @@ public:
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
-        detail::DartIter it; std::memset(&it, 0, sizeof it);
-        detail::DartEntityInfo ei;
-        while (detail::dart_node_entities_next(impl_->node, peer, &it, &ei))
+        detail::RambleIter it; std::memset(&it, 0, sizeof it);
+        detail::RambleEntityInfo ei;
+        while (detail::ramble_node_entities_next(impl_->node, peer, &it, &ei))
             out.push_back(entity_from(ei));
         return out;
     }
@@ -2299,56 +2299,56 @@ public:
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
-        detail::DartIter it; std::memset(&it, 0, sizeof it);
-        detail::DartEntityInfo ei;
-        while (detail::dart_node_mesh_next(impl_->node, &it, &ei))
+        detail::RambleIter it; std::memset(&it, 0, sizeof it);
+        detail::RambleEntityInfo ei;
+        while (detail::ramble_node_mesh_next(impl_->node, &it, &ei))
             out.push_back(entity_from(ei));
         return out;
     }
     std::optional<Entity> mesh_find(EntityKind kind, std::string_view name) const {
         if (!valid()) return std::nullopt;
         LockGuard guard(impl_->node);
-        detail::DartEntityInfo ei;
+        detail::RambleEntityInfo ei;
         std::string nm(name);
-        if (!detail::dart_node_mesh_find(impl_->node, static_cast<detail::DartEntityKind>(kind),
+        if (!detail::ramble_node_mesh_find(impl_->node, static_cast<detail::RambleEntityKind>(kind),
                                          nm.c_str(), &ei)) return std::nullopt;
         return entity_from(ei);
     }
     /* Bumps on every reflected change anywhere in the mesh: re-walk iff it moved. */
-    uint32_t mesh_epoch() const { return valid() ? detail::dart_node_mesh_epoch(impl_->node) : 0; }
+    uint32_t mesh_epoch() const { return valid() ? detail::ramble_node_mesh_epoch(impl_->node) : 0; }
 
     struct MemoryStats { size_t in_use = 0, peak = 0; uint64_t alloc_calls = 0; };
     MemoryStats memory_stats() const {
         MemoryStats s;
-        if (valid()) detail::dart_node_mem_stats(impl_->node, &s.in_use, &s.peak, &s.alloc_calls);
+        if (valid()) detail::ramble_node_mem_stats(impl_->node, &s.in_use, &s.peak, &s.alloc_calls);
         return s;
     }
     struct BackpressureStats { uint64_t waited_us = 0; uint32_t waited_sends = 0; };
     BackpressureStats backpressure_stats() const {
         BackpressureStats b;
-        if (valid()) detail::dart_node_backpressure_stats(impl_->node, &b.waited_us, &b.waited_sends);
+        if (valid()) detail::ramble_node_backpressure_stats(impl_->node, &b.waited_us, &b.waited_sends);
         return b;
     }
     /* Sends that evicted never-sent history after the bounded wait (the
      * ErrorKind::EvictedUnsent count): the send-burst/overload indicator. */
-    uint32_t evicted_unsent() const { return valid() ? detail::dart_node_evicted_unsent(impl_->node) : 0; }
+    uint32_t evicted_unsent() const { return valid() ? detail::ramble_node_evicted_unsent(impl_->node) : 0; }
 
     /* The most recent error this node reported (also delivered via on_event): the
      * formatted one-line message, and its machine-readable ErrorKind. */
     std::string last_error() const {
-        detail::DartEvent e = detail::dart_last_error(valid() ? impl_->node : nullptr);
-        char b[192]; return detail::dart_event_str(&e, b, sizeof b);
+        detail::RambleEvent e = detail::ramble_last_error(valid() ? impl_->node : nullptr);
+        char b[192]; return detail::ramble_event_str(&e, b, sizeof b);
     }
     ErrorKind last_error_kind() const {
-        return static_cast<ErrorKind>(detail::dart_last_error(valid() ? impl_->node : nullptr).error);
+        return static_cast<ErrorKind>(detail::ramble_last_error(valid() ? impl_->node : nullptr).error);
     }
 
     /* Publish an already formatted line on a level's built in log topic, truncated at
-     * DART_LOG_MAX. SendStatus::NoSys when logs are disabled. */
+     * RAMBLE_LOG_MAX. SendStatus::NoSys when logs are disabled. */
     SendStatus log(LogLevel level, std::string_view text) {
         if (!valid()) return SendStatus::State;
-        return static_cast<SendStatus>(detail::dart_node_log_text(
-            impl_->node, static_cast<detail::DartLogLevel>(level),
+        return static_cast<SendStatus>(detail::ramble_node_log_text(
+            impl_->node, static_cast<detail::RambleLogLevel>(level),
             text.data(), static_cast<int>(text.size())));
     }
     SendStatus log_error(std::string_view t) { return log(LogLevel::Error, t); }
@@ -2356,12 +2356,12 @@ public:
     SendStatus log_info (std::string_view t) { return log(LogLevel::Info,  t); }
 
     /* printf style overloads with the C log API's bounded formatting: truncated at
-     * DART_LOG_MAX, and a formatting failure publishes an empty line. */
+     * RAMBLE_LOG_MAX, and a formatting failure publishes an empty line. */
     template <class... Args>
     SendStatus log(LogLevel level, const char* fmt, Args&&... args) {
         if (!valid()) return SendStatus::State;
         if (!fmt) return SendStatus::NoTopic;
-        char text[DART_LOG_MAX];
+        char text[RAMBLE_LOG_MAX];
         int len = std::snprintf(text, sizeof text, fmt, std::forward<Args>(args)...);
         if (len < 0) len = 0;
         if (len >= static_cast<int>(sizeof text)) len = static_cast<int>(sizeof text) - 1;
@@ -2384,19 +2384,19 @@ public:
      * widen its role and read it like any topic, or use on_log below. */
     Topic log_topic(LogLevel level) {
         if (!valid()) return Topic();
-        return Topic(detail::dart_node_log_topic(impl_->node,
-                     static_cast<detail::DartLogLevel>(level)), impl_.get());
+        return Topic(detail::ramble_node_log_topic(impl_->node,
+                     static_cast<detail::RambleLogLevel>(level)), impl_.get());
     }
 
     /* Subscribe to a level's mesh wide log stream: every other node's lines, decoded to a
      * LogLine, on the polling thread. Call it once per level from setup. false when disabled. */
     bool on_log(LogLevel level, std::function<void(const LogLine&)> cb) {
         if (!valid() || !cb) return false;
-        detail::DartTopic* ch = detail::dart_node_log_topic(
-            impl_->node, static_cast<detail::DartLogLevel>(level));
+        detail::RambleTopic* ch = detail::ramble_node_log_topic(
+            impl_->node, static_cast<detail::RambleLogLevel>(level));
         if (!ch) return false;
-        if (detail::dart_topic_set_role(ch, detail::DART_PUBSUB) != 0) return false;
-        uint16_t idx = detail::dart_topic_index(ch);
+        if (detail::ramble_topic_set_role(ch, detail::RAMBLE_PUBSUB) != 0) return false;
+        uint16_t idx = detail::ramble_topic_index(ch);
         MessageHandler h = [level, cb = std::move(cb)](const MessageView& m) {
             LogLine ln;
             ln.level   = level;
@@ -2418,27 +2418,27 @@ public:
         return true;
     }
 
-#ifndef DART_NO_PATTERNS
-    /* The local @dart/meta caller handle, invalid when meta is disabled. Direct it at a peer
+#ifndef RAMBLE_NO_PATTERNS
+    /* The local @ramble/meta caller handle, invalid when meta is disabled. Direct it at a peer
      * id to fetch that peer's snapshot. Most callers want meta_request. */
     RemoteFunction<> meta();
-    /* Fetch a peer's snapshot: a directed @dart/meta call decoded into an owning MetaSnapshot.
+    /* Fetch a peer's snapshot: a directed @ramble/meta call decoded into an owning MetaSnapshot.
      * cb fires once on the polling thread. sections is a MetaSection mask, 0 = all. */
     SendStatus meta_request(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
                             uint32_t sections = 0);
 #endif
 
 private:
-    struct TopicRec { detail::DartTopic* ch; uint8_t bits; uint64_t schema_hash; };
+    struct TopicRec { detail::RambleTopic* ch; uint8_t bits; uint64_t schema_hash; };
 
     struct Impl {
-        detail::DartNode*        node = nullptr;
-        MessageHandler           on_msg;
-        EventHandler             on_event;
-        std::string              disc_group;
-        std::string              mcast_if;
-        std::string              self_ip;
-        std::vector<detail::DartDiscoveryAddr> seeds;
+        detail::RambleNode*        node = nullptr;
+        MessageHandler             on_msg;
+        EventHandler               on_event;
+        std::string                disc_group;
+        std::string                mcast_if;
+        std::string                self_ip;
+        std::vector<detail::RambleDiscoveryAddr> seeds;
 
         /* wrapper registries. create_mu serializes wrapper side creates and is never taken from
          * a callback. reg_mu is a leaf lock, never call into C while holding it. */
@@ -2448,13 +2448,13 @@ private:
         std::unordered_map<uint16_t,
             std::shared_ptr<const std::vector<MessageHandler>>> sub_handlers;
         std::vector<std::unique_ptr<priv::HandlerBox>> boxes;  /* pattern handler boxes */
-#ifndef DART_NO_PATTERNS
+#ifndef RAMBLE_NO_PATTERNS
         std::unordered_set<void*> async_live;                  /* outstanding AsyncBox* */
 #endif
 
         ~Impl() {
-            if (node) detail::dart_node_close(node, /*send_bye=*/1);
-#ifndef DART_NO_PATTERNS
+            if (node) detail::ramble_node_close(node, /*send_bye=*/1);
+#ifndef RAMBLE_NO_PATTERNS
             /* the C never fires pending async callbacks at close, so reap the boxes */
             for (void* b : async_live) delete static_cast<priv::AsyncBox*>(b);
 #endif
@@ -2463,12 +2463,12 @@ private:
     std::unique_ptr<Impl> impl_;
 
     struct LockGuard {
-        detail::DartNode* n;
-        explicit LockGuard(detail::DartNode* node) : n(node) { detail::dart_node_lock(n); }
-        ~LockGuard() { detail::dart_node_unlock(n); }
+        detail::RambleNode* n;
+        explicit LockGuard(detail::RambleNode* node) : n(node) { detail::ramble_node_lock(n); }
+        ~LockGuard() { detail::ramble_node_unlock(n); }
     };
 
-    static void on_msg_tramp(const detail::DartMsg* m) {
+    static void on_msg_tramp(const detail::RambleMsg* m) {
         Impl* impl = static_cast<Impl*>(m->user);
         if (!impl) return;
         std::shared_ptr<const std::vector<MessageHandler>> hs;
@@ -2496,7 +2496,7 @@ private:
 #endif
         }
     }
-    static void on_evt_tramp(const detail::DartEvent* e) {
+    static void on_evt_tramp(const detail::RambleEvent* e) {
         Impl* impl = static_cast<Impl*>(e->user);
         if (impl && impl->on_event) {
             Event ev(e);
@@ -2512,10 +2512,10 @@ private:
     static void report_handler_exception(Impl* impl) {
 #if defined(__cpp_exceptions)
         if (!impl->on_event) return;
-        detail::DartEvent e;
+        detail::RambleEvent e;
         std::memset(&e, 0, sizeof e);
-        e.kind = detail::DART_ERROR;
-        e.error = detail::DART_E_NONE;
+        e.kind = detail::RAMBLE_ERROR;
+        e.error = detail::RAMBLE_E_NONE;
         e.user = impl;
         Event ev(&e);
         try { impl->on_event(ev); } catch (...) {}
@@ -2525,7 +2525,7 @@ private:
     }
 
     /* one entity view (valid under the node lock the walk holds) into an owned Entity */
-    static Entity entity_from(const detail::DartEntityInfo& ei) {
+    static Entity entity_from(const detail::RambleEntityInfo& ei) {
         Entity e;
         e.kind = static_cast<EntityKind>(ei.kind);
         if (ei.name.data) e.name.assign(ei.name.data, ei.name.len);
@@ -2556,10 +2556,10 @@ private:
         return e;
     }
 
-    static detail::DartQos to_c(const Qos& q) {
-        detail::DartQos c;
+    static detail::RambleQos to_c(const Qos& q) {
+        detail::RambleQos c;
         std::memset(&c, 0, sizeof c);
-        c.reliability          = static_cast<detail::DartReliability>(q.reliability);
+        c.reliability          = static_cast<detail::RambleReliability>(q.reliability);
         c.keep_last            = q.keep_last;
         c.catch_up             = q.catch_up;
         c.max_message_bytes    = q.max_message_bytes;
@@ -2576,7 +2576,7 @@ private:
 
     /* Parse "ip" or "ip:port" into a locator, port 0 = discovery_port. Hand rolled so no
      * locale bound scanf is needed. */
-    static bool parse_addr(const std::string& s, detail::DartDiscoveryAddr& out) {
+    static bool parse_addr(const std::string& s, detail::RambleDiscoveryAddr& out) {
         unsigned oct[4] = {0}, port = 0;
         size_t i = 0, n = s.size();
         for (int part = 0; part < 4; ++part) {
@@ -2621,7 +2621,7 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
 
 inline Topic::Topic(Node& node, std::string_view name, Role role,
                     const Schema* schema, const Qos& qos, bool reflect) {
-    if (!node.valid()) { priv::raise_msg("dart::Topic: node is not valid"); return; }
+    if (!node.valid()) { priv::raise_msg("ramble::Topic: node is not valid"); return; }
     Node::Impl* impl = node.impl_.get();
     std::lock_guard<std::mutex> g(impl->create_mu);
     std::string nm(name);
@@ -2630,25 +2630,25 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
     auto it = impl->topics.find(nm);
     if (it != impl->topics.end()) {
         if (sh && it->second.schema_hash && sh != it->second.schema_hash) {
-            priv::raise_msg("dart::Topic: same-name topic already exists with a different schema"
+            priv::raise_msg("ramble::Topic: same-name topic already exists with a different schema"
                             " (retire() it to retype the name)");
             return;
         }
         uint8_t bits = (uint8_t)(it->second.bits | priv::role_bits(role));
         if (bits != it->second.bits) {
-            detail::dart_topic_set_role(it->second.ch, static_cast<detail::DartRole>(priv::role_from_bits(bits)));
+            detail::ramble_topic_set_role(it->second.ch, static_cast<detail::RambleRole>(priv::role_from_bits(bits)));
             it->second.bits = bits;
         }
         ch_ = it->second.ch;
         return;
     }
-    detail::DartTopicOpts co;
+    detail::RambleTopicOpts co;
     std::memset(&co, 0, sizeof co);
     co.qos = Node::to_c(qos);
     co.reflect_from_mesh = reflect ? 1 : 0;
-    ch_ = detail::dart_node_create_topic(impl->node, nm.c_str(),
-              static_cast<detail::DartRole>(role), schema ? schema->raw() : nullptr, &co);
-    if (!ch_) { priv::raise_last(impl->node, "dart::Topic create"); return; }
+    ch_ = detail::ramble_node_create_topic(impl->node, nm.c_str(),
+              static_cast<detail::RambleRole>(role), schema ? schema->raw() : nullptr, &co);
+    if (!ch_) { priv::raise_last(impl->node, "ramble::Topic create"); return; }
     impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh });
 }
 
@@ -2658,13 +2658,13 @@ inline SendStatus Topic::retire() {
     if (!ch_) return SendStatus::NoTopic;
     Node::Impl* impl = static_cast<Node::Impl*>(impl_);
     if (!impl) {   /* no registry back-pointer (default-constructed edge): C-level only */
-        int bare = detail::dart_topic_retire(ch_);
+        int bare = detail::ramble_topic_retire(ch_);
         if (bare == 0) ch_ = nullptr;
         return static_cast<SendStatus>(bare);
     }
     std::lock_guard<std::mutex> g(impl->create_mu);
-    uint16_t idx = detail::dart_topic_index(ch_);
-    int rc = detail::dart_topic_retire(ch_);
+    uint16_t idx = detail::ramble_topic_index(ch_);
+    int rc = detail::ramble_topic_retire(ch_);
     if (rc != 0) return static_cast<SendStatus>(rc);
     for (auto it = impl->topics.begin(); it != impl->topics.end(); ++it)
         if (it->second.ch == ch_) { impl->topics.erase(it); break; }
@@ -2685,7 +2685,7 @@ inline Topic Node::create_topic(std::string_view name, Role role, reflect_from_m
     return Topic(*this, name, role, reflect_from_mesh, qos);
 }
 
-#ifndef DART_NO_PATTERNS
+#ifndef RAMBLE_NO_PATTERNS
 
 /* ====================== FUNCTIONS (untyped cores) =========================== */
 
@@ -2708,14 +2708,14 @@ public:
         init(n, name, nullptr, nullptr, std::move(handler), o, true);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
-    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+    bool refresh() { return fn_ && detail::ramble_function_refresh(fn_) == 1; }
 
 private:
     void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* rsp_schema,
               Handler handler, const FunctionOptions& o, bool reflect) {
-        if (!n.valid()) { priv::raise_msg("dart::FunctionDefinition: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::FunctionDefinition: node is not valid"); return; }
         std::string nm(name);
-        detail::DartFunctionOpts co;
+        detail::RambleFunctionOpts co;
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
@@ -2723,13 +2723,13 @@ private:
         co.reflect_from_mesh    = reflect ? 1 : 0;
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
-        fn_ = detail::dart_node_create_function_definition(n.impl_->node, nm.c_str(),
+        fn_ = detail::ramble_node_create_function_definition(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr,
                   box ? &FunctionDefinition::tramp : nullptr, box, &co);
         if (!fn_) {
             delete box;
-            priv::raise_last(n.impl_->node, "dart::FunctionDefinition create");
+            priv::raise_last(n.impl_->node, "ramble::FunctionDefinition create");
             return;
         }
         if (box) {
@@ -2743,12 +2743,12 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
-    int caller_count() const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+    int caller_count() const { return fn_ ? detail::ramble_function_match_count(fn_) : 0; }
     /* Retire the definition: park its channels and release the name for a successor. The
      * handle is empty after. Refused with State from a callback, and it stays valid then. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
-        int rc = detail::dart_function_retire(fn_);
+        int rc = detail::ramble_function_retire(fn_);
         if (rc == 0) fn_ = nullptr;
         return static_cast<SendStatus>(rc);
     }
@@ -2756,19 +2756,19 @@ public:
 private:
     struct Box : priv::HandlerBox {
         Handler h;
-        std::atomic<detail::DartFunction*> fn{ nullptr };
+        std::atomic<detail::RambleFunction*> fn{ nullptr };
     };
-    static void tramp(detail::DartRequest* rq, void* user) {
+    static void tramp(detail::RambleRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
         Request<> r(rq, b->fn.load());
 #if defined(__cpp_exceptions)
         try { b->h(r); }
-        catch (...) { detail::dart_request_fail(rq, "handler threw", detail::dart_bytes(nullptr, 0)); }
+        catch (...) { detail::ramble_request_fail(rq, "handler threw", detail::ramble_bytes(nullptr, 0)); }
 #else
         b->h(r);
 #endif
     }
-    detail::DartFunction* fn_ = nullptr;
+    detail::RambleFunction* fn_ = nullptr;
     template <class A, class B> friend class FunctionDefinition;
 };
 
@@ -2787,23 +2787,23 @@ public:
     }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
-    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+    bool refresh() { return fn_ && detail::ramble_function_refresh(fn_) == 1; }
 
 private:
     void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* rsp_schema,
               const FunctionOptions& o, bool reflect) {
-        if (!n.valid()) { priv::raise_msg("dart::RemoteFunction: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::RemoteFunction: node is not valid"); return; }
         std::string nm(name);
-        detail::DartFunctionOpts co;
+        detail::RambleFunctionOpts co;
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = reflect ? 1 : 0;
-        fn_ = detail::dart_node_create_remote_function(n.impl_->node, nm.c_str(),
+        fn_ = detail::ramble_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
-        if (!fn_) { priv::raise_last(n.impl_->node, "dart::RemoteFunction create"); return; }
+        if (!fn_) { priv::raise_last(n.impl_->node, "ramble::RemoteFunction create"); return; }
         impl_ = n.impl_.get();
     }
 public:
@@ -2816,11 +2816,11 @@ public:
     Response<> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
         Response<> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
-        detail::DartResponse out;
+        detail::RambleResponse out;
         std::memset(&out, 0, sizeof out);
-        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        detail::RambleCallOpts co; std::memset(&co, 0, sizeof co);
         co.provider = opts.provider; co.id_out = opts.id_out;
-        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
+        int rc = detail::ramble_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
@@ -2845,9 +2845,9 @@ public:
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
         }
-        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        detail::RambleCallOpts co; std::memset(&co, 0, sizeof co);
         co.provider = opts.provider; co.id_out = opts.id_out;
-        int rc = detail::dart_function_call_async(fn_, priv::to_c(req),
+        int rc = detail::ramble_function_call_async(fn_, priv::to_c(req),
                                                   &RemoteFunction::async_tramp, box, &co);
         if (rc != 0) {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
@@ -2857,22 +2857,22 @@ public:
         return static_cast<SendStatus>(rc);
     }
 
-    int  match_count()    const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+    int  match_count()    const { return fn_ ? detail::ramble_function_match_count(fn_) : 0; }
     bool has_definition() const { return match_count() > 0; }
     /* Retire the remote: park its channels and release the name. Every outstanding call
      * completes Cancelled. The handle is empty after. Refused with State from a callback. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
-        int rc = detail::dart_function_retire(fn_);
+        int rc = detail::ramble_function_retire(fn_);
         if (rc == 0) fn_ = nullptr;
         return static_cast<SendStatus>(rc);
     }
 
 private:
-    /* wrap a node-owned function handle (the @dart/meta endpoint): callable, never
+    /* wrap a node-owned function handle (the @ramble/meta endpoint): callable, never
      * destroyed by us (functions are never torn down before the node). */
-    RemoteFunction(detail::DartFunction* fn, Node::Impl* impl) : fn_(fn), impl_(impl) {}
-    static void async_tramp(const detail::DartResponse* r) {
+    RemoteFunction(detail::RambleFunction* fn, Node::Impl* impl) : fn_(fn), impl_(impl) {}
+    static void async_tramp(const detail::RambleResponse* r) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
         {
             std::lock_guard<std::mutex> g(*box->mu);
@@ -2888,8 +2888,8 @@ private:
         }
         delete box;
     }
-    detail::DartFunction* fn_ = nullptr;
-    Node::Impl*           impl_ = nullptr;
+    detail::RambleFunction* fn_ = nullptr;
+    Node::Impl*             impl_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
     friend class Node;
 };
@@ -2897,7 +2897,7 @@ private:
 /* Node::meta / meta_request: out-of-line so RemoteFunction<> is a complete type here. */
 inline RemoteFunction<> Node::meta() {
     if (!valid()) return RemoteFunction<>();
-    return RemoteFunction<>(detail::dart_node_meta_function(impl_->node), impl_.get());
+    return RemoteFunction<>(detail::ramble_node_meta_function(impl_->node), impl_.get());
 }
 inline SendStatus Node::meta_request(uint32_t peer,
                                      std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
@@ -2943,14 +2943,14 @@ public:
         init(n, name, nullptr, nullptr, nullptr, std::move(handler), o, true);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
-    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+    bool refresh() { return fn_ && detail::ramble_function_refresh(fn_) == 1; }
 
 private:
     void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
               const Schema* rsp_schema, Handler handler, const TaskOptions& o, bool reflect) {
-        if (!n.valid()) { priv::raise_msg("dart::TaskDefinition: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::TaskDefinition: node is not valid"); return; }
         std::string nm(name);
-        detail::DartTaskOpts co;
+        detail::RambleTaskOpts co;
         std::memset(&co, 0, sizeof co);
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
@@ -2963,14 +2963,14 @@ private:
         co.reflect_from_mesh    = reflect ? 1 : 0;
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
-        fn_ = detail::dart_node_create_task_definition(n.impl_->node, nm.c_str(),
+        fn_ = detail::ramble_node_create_task_definition(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   prg_schema ? prg_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr,
                   box ? &TaskDefinition::tramp : nullptr, box, &co);
         if (!fn_) {
             delete box;
-            priv::raise_last(n.impl_->node, "dart::TaskDefinition create");
+            priv::raise_last(n.impl_->node, "ramble::TaskDefinition create");
             return;
         }
         impl_ = n.impl_.get();
@@ -2985,7 +2985,7 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
-    int caller_count() const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+    int caller_count() const { return fn_ ? detail::ramble_function_match_count(fn_) : 0; }
 
     /* Cancel notification, one slot, {} clears. Fires on the poll thread with the cancelled
      * call's defer token. Optional, since polling PendingTask::cancelled is complete alone. */
@@ -2993,7 +2993,7 @@ public:
         if (!fn_) return;
         CancelBox* box = nullptr;
         if (h) { box = new CancelBox(); box->h = std::move(h); }
-        detail::dart_function_on_cancel(fn_, box ? &TaskDefinition::cancel_tramp : nullptr, box);
+        detail::ramble_function_on_cancel(fn_, box ? &TaskDefinition::cancel_tramp : nullptr, box);
         if (box) {   /* kept alive until node close, like every handler box */
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->boxes.emplace_back(box);
@@ -3004,7 +3004,7 @@ public:
      * caller never hangs. Complete or drop PendingTask handles before. Refused from a callback. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
-        int rc = detail::dart_function_retire(fn_);
+        int rc = detail::ramble_function_retire(fn_);
         if (rc == 0) fn_ = nullptr;
         return static_cast<SendStatus>(rc);
     }
@@ -3012,18 +3012,18 @@ public:
 private:
     struct Box : priv::HandlerBox {
         Handler h;
-        std::atomic<detail::DartFunction*> fn{ nullptr };
+        std::atomic<detail::RambleFunction*> fn{ nullptr };
     };
     struct CancelBox : priv::HandlerBox {
         std::function<void(uint64_t)> h;
     };
-    static void tramp(detail::DartRequest* rq, void* user) {
+    static void tramp(detail::RambleRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
         TaskRequest<> r(rq, b->fn.load());
 #if defined(__cpp_exceptions)
         try { b->h(r); }
         catch (...) {   /* a no-op if the handler already deferred: one answer per call */
-            detail::dart_request_fail(rq, "handler threw", detail::dart_bytes(nullptr, 0));
+            detail::ramble_request_fail(rq, "handler threw", detail::ramble_bytes(nullptr, 0));
         }
 #else
         b->h(r);
@@ -3037,8 +3037,8 @@ private:
         b->h(token);
 #endif
     }
-    detail::DartFunction* fn_ = nullptr;
-    Node::Impl*           impl_ = nullptr;
+    detail::RambleFunction* fn_ = nullptr;
+    Node::Impl*             impl_ = nullptr;
     template <class A, class B, class C> friend class TaskDefinition;
 };
 
@@ -3060,14 +3060,14 @@ public:
     }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
-    bool refresh() { return fn_ && detail::dart_function_refresh(fn_) == 1; }
+    bool refresh() { return fn_ && detail::ramble_function_refresh(fn_) == 1; }
 
 private:
     void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
               const Schema* rsp_schema, const TaskOptions& o, bool reflect) {
-        if (!n.valid()) { priv::raise_msg("dart::RemoteTask: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::RemoteTask: node is not valid"); return; }
         std::string nm(name);
-        detail::DartTaskOpts co;
+        detail::RambleTaskOpts co;
         std::memset(&co, 0, sizeof co);
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
@@ -3075,11 +3075,11 @@ private:
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh    = reflect ? 1 : 0;
-        fn_ = detail::dart_node_create_remote_task(n.impl_->node, nm.c_str(),
+        fn_ = detail::ramble_node_create_remote_task(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   prg_schema ? prg_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
-        if (!fn_) { priv::raise_last(n.impl_->node, "dart::RemoteTask create"); return; }
+        if (!fn_) { priv::raise_last(n.impl_->node, "ramble::RemoteTask create"); return; }
         impl_ = n.impl_.get();
     }
 public:
@@ -3093,15 +3093,15 @@ public:
                     const CallOptions& opts = {}) {
         Response<> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
-        detail::DartResponse out;
+        detail::RambleResponse out;
         std::memset(&out, 0, sizeof out);
-        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        detail::RambleCallOpts co; std::memset(&co, 0, sizeof co);
         co.provider = opts.provider; co.id_out = opts.id_out;
-        if (on_progress) {   /* fires only inside dart_function_call: the stack copy holds */
+        if (on_progress) {   /* fires only inside ramble_function_call: the stack copy holds */
             co.on_progress   = &RemoteTask::blocking_progress_tramp;
             co.progress_user = &on_progress;
         }
-        int rc = detail::dart_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
+        int rc = detail::ramble_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
@@ -3129,14 +3129,14 @@ public:
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
         }
-        detail::DartCallOpts co; std::memset(&co, 0, sizeof co);
+        detail::RambleCallOpts co; std::memset(&co, 0, sizeof co);
         co.provider = opts.provider;
         co.id_out   = &tc.id;
         if (box->on_progress) {
             co.on_progress   = &RemoteTask::async_progress_tramp;
             co.progress_user = box;
         }
-        int rc = detail::dart_function_call_async(fn_, priv::to_c(req),
+        int rc = detail::ramble_function_call_async(fn_, priv::to_c(req),
                                                   &RemoteTask::async_response_tramp, box, &co);
         if (rc != 0) {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
@@ -3153,22 +3153,22 @@ public:
      * the answer. BadRole when the provider declared no_cancel, State when not pending. */
     SendStatus cancel(uint32_t call_id) {
         if (!fn_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::dart_function_cancel(fn_, call_id));
+        return static_cast<SendStatus>(detail::ramble_function_cancel(fn_, call_id));
     }
 
-    int  match_count()    const { return fn_ ? detail::dart_function_match_count(fn_) : 0; }
+    int  match_count()    const { return fn_ ? detail::ramble_function_match_count(fn_) : 0; }
     bool has_definition() const { return match_count() > 0; }
     /* Retire the remote. Every outstanding call completes Cancelled. The handle is empty
      * after, and refused with State from a callback. */
     SendStatus retire() {
         if (!fn_) return SendStatus::NoTopic;
-        int rc = detail::dart_function_retire(fn_);
+        int rc = detail::ramble_function_retire(fn_);
         if (rc == 0) fn_ = nullptr;
         return static_cast<SendStatus>(rc);
     }
 
 private:
-    static void blocking_progress_tramp(const detail::DartProgress* p) {
+    static void blocking_progress_tramp(const detail::RambleProgress* p) {
         ProgressHandler* h = static_cast<ProgressHandler*>(p->user);
         ProgressView<> pv(p);
 #if defined(__cpp_exceptions)
@@ -3177,7 +3177,7 @@ private:
         (*h)(pv);
 #endif
     }
-    static void async_progress_tramp(const detail::DartProgress* p) {
+    static void async_progress_tramp(const detail::RambleProgress* p) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(p->user);
         ProgressView<> pv(p);
 #if defined(__cpp_exceptions)
@@ -3186,7 +3186,7 @@ private:
         box->on_progress(pv);
 #endif
     }
-    static void async_response_tramp(const detail::DartResponse* r) {
+    static void async_response_tramp(const detail::RambleResponse* r) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
         {
             std::lock_guard<std::mutex> g(*box->mu);
@@ -3202,8 +3202,8 @@ private:
         }
         delete box;
     }
-    detail::DartFunction* fn_ = nullptr;
-    Node::Impl*           impl_ = nullptr;
+    detail::RambleFunction* fn_ = nullptr;
+    Node::Impl*             impl_ = nullptr;
     template <class A, class B, class C> friend class RemoteTask;
 };
 
@@ -3223,12 +3223,12 @@ public:
     uint64_t         recv_us()   const { return u_->recv_us; }
     /* the writer's wall clock for this write (this node's own for a local write) */
     uint64_t         written_us()   const { return u_->written_us; }
-    const detail::DartSchema* raw_schema() const { return u_->schema; }
+    const detail::RambleSchema* raw_schema() const { return u_->schema; }
 
 private:
     friend class VariableDefinition<void>;
-    explicit VariableUpdate(const detail::DartVariableUpdate* u) : u_(u) {}
-    const detail::DartVariableUpdate* u_;
+    explicit VariableUpdate(const detail::RambleVariableUpdate* u) : u_(u) {}
+    const detail::RambleVariableUpdate* u_;
 };
 
 /* VariableDefinition<> (untyped): this node holds the authoritative value. */
@@ -3237,17 +3237,17 @@ public:
     VariableDefinition() = default;
     VariableDefinition(Node& n, std::string_view name, const Schema* schema,
                        const VariableOptions<>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("dart::VariableDefinition: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::VariableDefinition: node is not valid"); return; }
         create(n, name, schema, o, /*definition=*/true, false);
     }
     /* The same, typed by the mesh (see reflect_from_mesh). */
     VariableDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
                        const VariableOptions<>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("dart::VariableDefinition: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::VariableDefinition: node is not valid"); return; }
         create(n, name, nullptr, o, /*definition=*/true, true);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
-    bool refresh() { return var_ && detail::dart_variable_refresh(var_) == 1; }
+    bool refresh() { return var_ && detail::ramble_variable_refresh(var_) == 1; }
 
     bool valid() const noexcept { return var_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -3255,33 +3255,33 @@ public:
     /* the current value, copied out under the node lock (nullopt = none yet) */
     std::optional<std::vector<uint8_t>> get() const {
         if (!var_) return std::nullopt;
-        detail::dart_node_lock(node_);
-        detail::DartBytes b;
+        detail::ramble_node_lock(node_);
+        detail::RambleBytes b;
         std::optional<std::vector<uint8_t>> out;
-        if (detail::dart_variable_get(var_, &b) == 1) {
+        if (detail::ramble_variable_get(var_, &b) == 1) {
             out.emplace();
             if (b.len) out->assign(b.data, b.data + b.len);
         }
-        detail::dart_node_unlock(node_);
+        detail::ramble_node_unlock(node_);
         return out;
     }
     SendStatus set(Bytes value) {
         if (!var_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::dart_variable_set(var_, priv::to_c(value)));
+        return static_cast<SendStatus>(detail::ramble_variable_set(var_, priv::to_c(value)));
     }
     /* Force the value: writes are absorbed into the shadow source until unforce, which
      * restores the latest absorbed set. Requires VariableOptions::allow_force. */
     SendStatus force(Bytes value) {
         if (!var_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::dart_variable_force(var_, priv::to_c(value)));
+        return static_cast<SendStatus>(detail::ramble_variable_force(var_, priv::to_c(value)));
     }
     SendStatus unforce() {
         if (!var_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::dart_variable_unforce(var_));
+        return static_cast<SendStatus>(detail::ramble_variable_unforce(var_));
     }
-    bool forced() const { return var_ && detail::dart_variable_forced(var_) == 1; }
+    bool forced() const { return var_ && detail::ramble_variable_forced(var_) == 1; }
     /* remotes currently matched to this definition */
-    int remote_count() const { return var_ ? detail::dart_variable_match_count(var_) : 0; }
+    int remote_count() const { return var_ ? detail::ramble_variable_match_count(var_) : 0; }
 
     /* Observe. on_change replays the current value at registration and fires on every state
      * change, on_write on every applied write, both inline on the applying thread. {} clears. */
@@ -3292,7 +3292,7 @@ public:
      * handle is shadowed by the live twin. Empty after, refused with State from a callback. */
     SendStatus retire() {
         if (!var_) return SendStatus::NoTopic;
-        int rc = detail::dart_variable_retire(var_);
+        int rc = detail::ramble_variable_retire(var_);
         if (rc == 0) var_ = nullptr;
         return static_cast<SendStatus>(rc);
     }
@@ -3302,7 +3302,7 @@ protected:
         std::function<void(const VariableUpdate&)> h;
         Node::Impl* impl = nullptr;
     };
-    static void utramp(const detail::DartVariableUpdate* u, void* user) {
+    static void utramp(const detail::RambleVariableUpdate* u, void* user) {
         UBox* b = static_cast<UBox*>(user);
         VariableUpdate up(u);
 #if defined(__cpp_exceptions)
@@ -3315,8 +3315,8 @@ protected:
         if (!var_) return;
         UBox* box = nullptr;
         if (h) { box = new UBox(); box->h = std::move(h); box->impl = impl_; }
-        (void)(change ? detail::dart_variable_on_change(var_, box ? &VariableDefinition::utramp : nullptr, box)
-                      : detail::dart_variable_on_write (var_, box ? &VariableDefinition::utramp : nullptr, box));
+        (void)(change ? detail::ramble_variable_on_change(var_, box ? &VariableDefinition::utramp : nullptr, box)
+                      : detail::ramble_variable_on_write (var_, box ? &VariableDefinition::utramp : nullptr, box));
         if (box) {   /* kept alive until node close, like every handler box */
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->boxes.emplace_back(box);
@@ -3325,10 +3325,10 @@ protected:
     void create(Node& n, std::string_view name, const Schema* schema,
                 const VariableOptions<>& o, bool definition, bool reflect) {
         std::string nm(name);
-        detail::DartVariableOpts co;
+        detail::RambleVariableOpts co;
         std::memset(&co, 0, sizeof co);
         co.initial     = priv::to_c(o.initial);
-        co.access      = o.read_only ? detail::DART_VAR_READONLY : detail::DART_VAR_READWRITE;
+        co.access      = o.read_only ? detail::RAMBLE_VAR_READONLY : detail::RAMBLE_VAR_READWRITE;
         co.allow_force = o.allow_force ? 1 : 0;
         co.catch_up    = o.catch_up;
         co.keep_last   = o.keep_last;
@@ -3337,16 +3337,16 @@ protected:
         node_ = n.impl_->node;
         impl_ = n.impl_.get();
         var_ = definition
-            ? detail::dart_node_create_variable_definition(node_, nm.c_str(),
+            ? detail::ramble_node_create_variable_definition(node_, nm.c_str(),
                   schema ? schema->raw() : nullptr, &co)
-            : detail::dart_node_create_remote_variable(node_, nm.c_str(),
+            : detail::ramble_node_create_remote_variable(node_, nm.c_str(),
                   schema ? schema->raw() : nullptr, &co);
-        if (!var_) priv::raise_last(node_, definition ? "dart::VariableDefinition create"
-                                                      : "dart::RemoteVariable create");
+        if (!var_) priv::raise_last(node_, definition ? "ramble::VariableDefinition create"
+                                                      : "ramble::RemoteVariable create");
     }
-    detail::DartVariable* var_ = nullptr;
-    detail::DartNode*     node_ = nullptr;
-    Node::Impl*           impl_ = nullptr;
+    detail::RambleVariable* var_ = nullptr;
+    detail::RambleNode*     node_ = nullptr;
+    Node::Impl*             impl_ = nullptr;
     template <class A> friend class VariableDefinition;
 };
 
@@ -3357,22 +3357,22 @@ public:
     RemoteVariable() = default;
     RemoteVariable(Node& n, std::string_view name, const Schema* schema,
                    const VariableOptions<>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("dart::RemoteVariable: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::RemoteVariable: node is not valid"); return; }
         create(n, name, schema, o, /*definition=*/false, false);
     }
     /* The same, typed by the mesh (see reflect_from_mesh). */
     RemoteVariable(Node& n, std::string_view name, reflect_from_mesh_t,
                    const VariableOptions<>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("dart::RemoteVariable: node is not valid"); return; }
+        if (!n.valid()) { priv::raise_msg("ramble::RemoteVariable: node is not valid"); return; }
         create(n, name, nullptr, o, /*definition=*/false, true);
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
-    bool wait(int timeout_ms) { return var_ && detail::dart_variable_wait(var_, timeout_ms) == 1; }
+    bool wait(int timeout_ms) { return var_ && detail::ramble_variable_wait(var_, timeout_ms) == 1; }
     bool has_definition() const { return remote_count() > 0; }
     int  match_count()    const { return remote_count(); }
 };
 
-#endif /* !DART_NO_PATTERNS */
+#endif /* !RAMBLE_NO_PATTERNS */
 
 /* ====================== PUB/SUB (untyped cores) ============================= */
 
@@ -3434,7 +3434,7 @@ private:
     template <class A> friend class Subscriber;
 };
 
-/* Typed sugar: thin template layers over the untyped cores using the DART_SCHEMA codec.
+/* Typed sugar: thin template layers over the untyped cores using the RAMBLE_SCHEMA codec.
  * Every handle stays thin and non owning. */
 
 /* Message<T>: an owning taken message (decoded value + copied envelope). */
@@ -3459,7 +3459,7 @@ private:
     template <class U> friend class Subscriber;
 };
 
-#ifndef DART_NO_PATTERNS
+#ifndef RAMBLE_NO_PATTERNS
 
 /* The typed view of a request inside a full form function handler. Wraps the untyped
  * Request<> for the callback lifetime and adds the typed reply. */
@@ -3561,7 +3561,7 @@ public:
                        const FunctionOptions& o = {}) {
         const Schema* rq = priv::schema_of<Req>();
         const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !rs) { priv::raise_msg("dart::FunctionDefinition: DART_SCHEMA compile failed"); return; }
+        if (!rq || !rs) { priv::raise_msg("ramble::FunctionDefinition: RAMBLE_SCHEMA compile failed"); return; }
         core_ = FunctionDefinition<>(n, name, rq, rs, adapt(std::forward<H>(handler)), o);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -3592,7 +3592,7 @@ private:
             };
         } else {
             static_assert(priv::always_false<H>,
-                "function handler must be Rsp(const Req&) or void(const Req&, dart::Request<Rsp>&)");
+                "function handler must be Rsp(const Req&) or void(const Req&, ramble::Request<Rsp>&)");
             return {};
         }
     }
@@ -3606,7 +3606,7 @@ public:
     RemoteFunction(Node& n, std::string_view name, const FunctionOptions& o = {}) {
         const Schema* rq = priv::schema_of<Req>();
         const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !rs) { priv::raise_msg("dart::RemoteFunction: DART_SCHEMA compile failed"); return; }
+        if (!rq || !rs) { priv::raise_msg("ramble::RemoteFunction: RAMBLE_SCHEMA compile failed"); return; }
         core_ = RemoteFunction<>(n, name, rq, rs, o);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -3732,7 +3732,7 @@ public:
         const Schema* rq = priv::schema_of<Req>();
         const Schema* pg = priv::schema_of<Prg>();
         const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !pg || !rs) { priv::raise_msg("dart::TaskDefinition: DART_SCHEMA compile failed"); return; }
+        if (!rq || !pg || !rs) { priv::raise_msg("ramble::TaskDefinition: RAMBLE_SCHEMA compile failed"); return; }
         core_ = TaskDefinition<>(n, name, rq, pg, rs, adapt(std::forward<H>(handler)), o);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -3745,7 +3745,7 @@ private:
     template <class H>
     static typename TaskDefinition<>::Handler adapt(H&& h) {
         static_assert(std::is_invocable_v<std::decay_t<H>&, const Req&, TaskRequest<Prg, Rsp>&>,
-                      "task handler must be void(const Req&, dart::TaskRequest<Prg,Rsp>&)");
+                      "task handler must be void(const Req&, ramble::TaskRequest<Prg,Rsp>&)");
         return [f = std::forward<H>(h)](TaskRequest<>& u) mutable {
             Req q{};
             if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
@@ -3766,7 +3766,7 @@ public:
         const Schema* rq = priv::schema_of<Req>();
         const Schema* pg = priv::schema_of<Prg>();
         const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !pg || !rs) { priv::raise_msg("dart::RemoteTask: DART_SCHEMA compile failed"); return; }
+        if (!rq || !pg || !rs) { priv::raise_msg("ramble::RemoteTask: RAMBLE_SCHEMA compile failed"); return; }
         core_ = RemoteTask<>(n, name, rq, pg, rs, o);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -3828,7 +3828,7 @@ public:
     VariableDefinition() = default;
     VariableDefinition(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
         const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::VariableDefinition: DART_SCHEMA compile failed"); return; }
+        if (!sc) { priv::raise_msg("ramble::VariableDefinition: RAMBLE_SCHEMA compile failed"); return; }
         std::vector<uint8_t> scratch;
         VariableOptions<> uo;
         if (o.initial) uo.initial = priv::encode(*o.initial, scratch);
@@ -3888,7 +3888,7 @@ public:
     RemoteVariable() = default;
     RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
         const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::RemoteVariable: DART_SCHEMA compile failed"); return; }
+        if (!sc) { priv::raise_msg("ramble::RemoteVariable: RAMBLE_SCHEMA compile failed"); return; }
         VariableOptions<> uo;
         uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
         core_ = RemoteVariable<>(n, name, sc, uo);
@@ -3941,7 +3941,7 @@ private:
     RemoteVariable<> core_;
 };
 
-#endif /* !DART_NO_PATTERNS */
+#endif /* !RAMBLE_NO_PATTERNS */
 
 /* Publisher<T>: the typed publish side. */
 template <class T> class Publisher {
@@ -3949,7 +3949,7 @@ public:
     Publisher() = default;
     Publisher(Node& n, std::string_view name, const Qos& qos = {}) {
         const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Publisher: DART_SCHEMA compile failed"); return; }
+        if (!sc) { priv::raise_msg("ramble::Publisher: RAMBLE_SCHEMA compile failed"); return; }
         core_ = Publisher<>(n, name, sc, qos);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -3976,7 +3976,7 @@ public:
     Subscriber() = default;
     Subscriber(Node& n, std::string_view name, const Qos& qos = {}) {
         const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Subscriber: DART_SCHEMA compile failed"); return; }
+        if (!sc) { priv::raise_msg("ramble::Subscriber: RAMBLE_SCHEMA compile failed"); return; }
         core_ = Subscriber<>(n, name, sc, qos);
     }
     template <class H, class = std::enable_if_t<
@@ -3984,7 +3984,7 @@ public:
         std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
     Subscriber(Node& n, std::string_view name, H&& handler, const Qos& qos = {}) {
         const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("dart::Subscriber: DART_SCHEMA compile failed"); return; }
+        if (!sc) { priv::raise_msg("ramble::Subscriber: RAMBLE_SCHEMA compile failed"); return; }
         core_ = Subscriber<>(n, name, sc, adapt(std::forward<H>(handler)), qos);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -4024,140 +4024,140 @@ private:
     Subscriber<> core_;
 };
 
-}   /* namespace dart */
+}   /* namespace ramble */
 
-/* DART_SCHEMA(T, fields...): reflect a struct for the typed codec. Invoke at global scope
+/* RAMBLE_SCHEMA(T, fields...): reflect a struct for the typed codec. Invoke at global scope
  * after the struct with up to 64 members in wire order (docs/cpp.md). */
-#define DART_PP_EXPAND(x) x
-#define DART_PP_CAT2(a, b) a##b
-#define DART_PP_CAT(a, b) DART_PP_CAT2(a, b)
-#define DART_PP_ARGN( \
+#define RAMBLE_PP_EXPAND(x) x
+#define RAMBLE_PP_CAT2(a, b) a##b
+#define RAMBLE_PP_CAT(a, b) RAMBLE_PP_CAT2(a, b)
+#define RAMBLE_PP_ARGN( \
     _1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,_12,_13,_14,_15,_16, \
     _17,_18,_19,_20,_21,_22,_23,_24,_25,_26,_27,_28,_29,_30,_31,_32, \
     _33,_34,_35,_36,_37,_38,_39,_40,_41,_42,_43,_44,_45,_46,_47,_48, \
     _49,_50,_51,_52,_53,_54,_55,_56,_57,_58,_59,_60,_61,_62,_63,_64, N, ...) N
-#define DART_PP_NARG(...) DART_PP_EXPAND(DART_PP_ARGN(__VA_ARGS__, \
+#define RAMBLE_PP_NARG(...) RAMBLE_PP_EXPAND(RAMBLE_PP_ARGN(__VA_ARGS__, \
     64,63,62,61,60,59,58,57,56,55,54,53,52,51,50,49, \
     48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33, \
     32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17, \
     16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1))
-#define DART_PP_FE_1(M, T, x) M(T, x)
-#define DART_PP_FE_2(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_1(M, T, __VA_ARGS__))
-#define DART_PP_FE_3(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_2(M, T, __VA_ARGS__))
-#define DART_PP_FE_4(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_3(M, T, __VA_ARGS__))
-#define DART_PP_FE_5(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_4(M, T, __VA_ARGS__))
-#define DART_PP_FE_6(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_5(M, T, __VA_ARGS__))
-#define DART_PP_FE_7(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_6(M, T, __VA_ARGS__))
-#define DART_PP_FE_8(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_7(M, T, __VA_ARGS__))
-#define DART_PP_FE_9(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_8(M, T, __VA_ARGS__))
-#define DART_PP_FE_10(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_9(M, T, __VA_ARGS__))
-#define DART_PP_FE_11(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_10(M, T, __VA_ARGS__))
-#define DART_PP_FE_12(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_11(M, T, __VA_ARGS__))
-#define DART_PP_FE_13(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_12(M, T, __VA_ARGS__))
-#define DART_PP_FE_14(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_13(M, T, __VA_ARGS__))
-#define DART_PP_FE_15(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_14(M, T, __VA_ARGS__))
-#define DART_PP_FE_16(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_15(M, T, __VA_ARGS__))
-#define DART_PP_FE_17(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_16(M, T, __VA_ARGS__))
-#define DART_PP_FE_18(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_17(M, T, __VA_ARGS__))
-#define DART_PP_FE_19(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_18(M, T, __VA_ARGS__))
-#define DART_PP_FE_20(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_19(M, T, __VA_ARGS__))
-#define DART_PP_FE_21(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_20(M, T, __VA_ARGS__))
-#define DART_PP_FE_22(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_21(M, T, __VA_ARGS__))
-#define DART_PP_FE_23(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_22(M, T, __VA_ARGS__))
-#define DART_PP_FE_24(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_23(M, T, __VA_ARGS__))
-#define DART_PP_FE_25(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_24(M, T, __VA_ARGS__))
-#define DART_PP_FE_26(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_25(M, T, __VA_ARGS__))
-#define DART_PP_FE_27(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_26(M, T, __VA_ARGS__))
-#define DART_PP_FE_28(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_27(M, T, __VA_ARGS__))
-#define DART_PP_FE_29(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_28(M, T, __VA_ARGS__))
-#define DART_PP_FE_30(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_29(M, T, __VA_ARGS__))
-#define DART_PP_FE_31(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_30(M, T, __VA_ARGS__))
-#define DART_PP_FE_32(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_31(M, T, __VA_ARGS__))
-#define DART_PP_FE_33(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_32(M, T, __VA_ARGS__))
-#define DART_PP_FE_34(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_33(M, T, __VA_ARGS__))
-#define DART_PP_FE_35(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_34(M, T, __VA_ARGS__))
-#define DART_PP_FE_36(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_35(M, T, __VA_ARGS__))
-#define DART_PP_FE_37(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_36(M, T, __VA_ARGS__))
-#define DART_PP_FE_38(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_37(M, T, __VA_ARGS__))
-#define DART_PP_FE_39(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_38(M, T, __VA_ARGS__))
-#define DART_PP_FE_40(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_39(M, T, __VA_ARGS__))
-#define DART_PP_FE_41(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_40(M, T, __VA_ARGS__))
-#define DART_PP_FE_42(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_41(M, T, __VA_ARGS__))
-#define DART_PP_FE_43(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_42(M, T, __VA_ARGS__))
-#define DART_PP_FE_44(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_43(M, T, __VA_ARGS__))
-#define DART_PP_FE_45(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_44(M, T, __VA_ARGS__))
-#define DART_PP_FE_46(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_45(M, T, __VA_ARGS__))
-#define DART_PP_FE_47(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_46(M, T, __VA_ARGS__))
-#define DART_PP_FE_48(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_47(M, T, __VA_ARGS__))
-#define DART_PP_FE_49(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_48(M, T, __VA_ARGS__))
-#define DART_PP_FE_50(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_49(M, T, __VA_ARGS__))
-#define DART_PP_FE_51(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_50(M, T, __VA_ARGS__))
-#define DART_PP_FE_52(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_51(M, T, __VA_ARGS__))
-#define DART_PP_FE_53(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_52(M, T, __VA_ARGS__))
-#define DART_PP_FE_54(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_53(M, T, __VA_ARGS__))
-#define DART_PP_FE_55(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_54(M, T, __VA_ARGS__))
-#define DART_PP_FE_56(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_55(M, T, __VA_ARGS__))
-#define DART_PP_FE_57(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_56(M, T, __VA_ARGS__))
-#define DART_PP_FE_58(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_57(M, T, __VA_ARGS__))
-#define DART_PP_FE_59(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_58(M, T, __VA_ARGS__))
-#define DART_PP_FE_60(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_59(M, T, __VA_ARGS__))
-#define DART_PP_FE_61(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_60(M, T, __VA_ARGS__))
-#define DART_PP_FE_62(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_61(M, T, __VA_ARGS__))
-#define DART_PP_FE_63(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_62(M, T, __VA_ARGS__))
-#define DART_PP_FE_64(M, T, x, ...) M(T, x) DART_PP_EXPAND(DART_PP_FE_63(M, T, __VA_ARGS__))
-#define DART_PP_FOR_EACH(M, T, ...) \
-    DART_PP_EXPAND(DART_PP_CAT(DART_PP_FE_, DART_PP_NARG(__VA_ARGS__))(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_1(M, T, x) M(T, x)
+#define RAMBLE_PP_FE_2(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_1(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_3(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_2(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_4(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_3(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_5(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_4(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_6(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_5(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_7(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_6(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_8(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_7(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_9(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_8(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_10(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_9(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_11(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_10(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_12(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_11(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_13(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_12(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_14(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_13(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_15(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_14(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_16(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_15(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_17(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_16(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_18(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_17(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_19(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_18(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_20(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_19(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_21(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_20(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_22(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_21(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_23(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_22(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_24(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_23(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_25(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_24(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_26(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_25(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_27(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_26(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_28(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_27(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_29(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_28(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_30(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_29(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_31(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_30(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_32(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_31(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_33(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_32(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_34(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_33(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_35(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_34(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_36(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_35(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_37(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_36(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_38(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_37(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_39(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_38(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_40(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_39(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_41(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_40(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_42(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_41(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_43(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_42(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_44(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_43(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_45(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_44(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_46(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_45(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_47(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_46(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_48(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_47(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_49(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_48(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_50(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_49(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_51(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_50(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_52(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_51(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_53(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_52(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_54(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_53(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_55(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_54(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_56(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_55(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_57(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_56(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_58(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_57(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_59(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_58(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_60(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_59(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_61(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_60(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_62(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_61(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_63(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_62(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FE_64(M, T, x, ...) M(T, x) RAMBLE_PP_EXPAND(RAMBLE_PP_FE_63(M, T, __VA_ARGS__))
+#define RAMBLE_PP_FOR_EACH(M, T, ...) \
+    RAMBLE_PP_EXPAND(RAMBLE_PP_CAT(RAMBLE_PP_FE_, RAMBLE_PP_NARG(__VA_ARGS__))(M, T, __VA_ARGS__))
 
-#define DART_SCHEMA_FIELD(T, f) \
-    dart_v(::dart::field_tag<decltype(T::f)>{}, #f, offsetof(T, f));
+#define RAMBLE_SCHEMA_FIELD(T, f) \
+    ramble_v(::ramble::field_tag<decltype(T::f)>{}, #f, offsetof(T, f));
 
-#define DART_SCHEMA(T, ...) \
-    template <> struct dart::reflect<T> { \
-        using is_dart_schema = void; \
+#define RAMBLE_SCHEMA(T, ...) \
+    template <> struct ramble::reflect<T> { \
+        using is_ramble_schema = void; \
         static_assert(std::is_standard_layout<T>::value, \
-                      "DART_SCHEMA: type must be standard-layout"); \
+                      "RAMBLE_SCHEMA: type must be standard-layout"); \
         static constexpr const char* type_name = #T; \
-        template <class V> static void visit(V&& dart_v) { \
-            DART_PP_FOR_EACH(DART_SCHEMA_FIELD, T, __VA_ARGS__) \
+        template <class V> static void visit(V&& ramble_v) { \
+            RAMBLE_PP_FOR_EACH(RAMBLE_SCHEMA_FIELD, T, __VA_ARGS__) \
         } \
     }
 
-/* DART_ENUM(E, options...): register an enum class so a member ships as a named enum<uN>
+/* RAMBLE_ENUM(E, options...): register an enum class so a member ships as a named enum<uN>
  * with these enumerators. An unregistered enum ships as its backing integer. */
-#define DART_ENUM_ITEM(E, x) dart_v((int64_t)(E::x), #x);
-#define DART_ENUM(E, ...) \
-    template <> struct dart::reflect_enum<E> { \
-        using is_dart_enum = void; \
-        static_assert(std::is_enum<E>::value, "DART_ENUM: type must be an enum"); \
+#define RAMBLE_ENUM_ITEM(E, x) ramble_v((int64_t)(E::x), #x);
+#define RAMBLE_ENUM(E, ...) \
+    template <> struct ramble::reflect_enum<E> { \
+        using is_ramble_enum = void; \
+        static_assert(std::is_enum<E>::value, "RAMBLE_ENUM: type must be an enum"); \
         static constexpr const char* type_name = #E; \
-        template <class V> static void visit(V&& dart_v) { \
-            DART_PP_FOR_EACH(DART_ENUM_ITEM, E, __VA_ARGS__) \
+        template <class V> static void visit(V&& ramble_v) { \
+            RAMBLE_PP_FOR_EACH(RAMBLE_ENUM_ITEM, E, __VA_ARGS__) \
         } \
     }
 
 /* The standard type registrations at global scope: each mirror gets its wire name here,
  * so a member spells as at: Transform and matches only a Transform. */
-DART_STD_STRUCT(Float2);   DART_STD_STRUCT(Float3);   DART_STD_STRUCT(Float4);
-DART_STD_STRUCT(Double2);  DART_STD_STRUCT(Double3);  DART_STD_STRUCT(Double4);
-DART_STD_STRUCT(Int2);     DART_STD_STRUCT(Int3);     DART_STD_STRUCT(Int4);
-DART_STD_STRUCT(Quaternion);
-DART_STD_STRUCT(Color);    DART_STD_STRUCT(Rect);     DART_STD_STRUCT(RectI);
-DART_STD_STRUCT(Transform); DART_STD_STRUCT(Twist);   DART_STD_STRUCT(GeoPoint);
-DART_STD_ALIAS(Uuid,      uint8_t[16]);
-DART_STD_ALIAS(Timestamp, int64_t);
-DART_STD_ALIAS(Duration,  int64_t);
-DART_STD_ALIAS(Matrix3x3, float[9]);
-DART_STD_ALIAS(Matrix4x4, float[16]);
-DART_STD_ALIAS(Uri,       dart::String<256>);
-/* the video family: the enums are DART_ENUM-registered so a member of one (in these
+RAMBLE_STD_STRUCT(Float2);   RAMBLE_STD_STRUCT(Float3);   RAMBLE_STD_STRUCT(Float4);
+RAMBLE_STD_STRUCT(Double2);  RAMBLE_STD_STRUCT(Double3);  RAMBLE_STD_STRUCT(Double4);
+RAMBLE_STD_STRUCT(Int2);     RAMBLE_STD_STRUCT(Int3);     RAMBLE_STD_STRUCT(Int4);
+RAMBLE_STD_STRUCT(Quaternion);
+RAMBLE_STD_STRUCT(Color);    RAMBLE_STD_STRUCT(Rect);     RAMBLE_STD_STRUCT(RectI);
+RAMBLE_STD_STRUCT(Transform); RAMBLE_STD_STRUCT(Twist);   RAMBLE_STD_STRUCT(GeoPoint);
+RAMBLE_STD_ALIAS(Uuid,      uint8_t[16]);
+RAMBLE_STD_ALIAS(Timestamp, int64_t);
+RAMBLE_STD_ALIAS(Duration,  int64_t);
+RAMBLE_STD_ALIAS(Matrix3x3, float[9]);
+RAMBLE_STD_ALIAS(Matrix4x4, float[16]);
+RAMBLE_STD_ALIAS(Uri,       ramble::String<256>);
+/* the video family: the enums are RAMBLE_ENUM-registered so a member of one (in these
  * mirrors or in a user struct) ships as the canonical named integer */
-DART_ENUM(dart::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
-DART_ENUM(dart::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
-DART_ENUM(dart::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
-DART_STD_STRUCT(Image); DART_STD_STRUCT(VideoFrame); DART_STD_STRUCT(ExternalVideoStream);
-DART_ENUM(dart::DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
-DART_STD_STRUCT(CameraIntrinsics);
-DART_STD_STRUCT(JointState); DART_STD_STRUCT(JointNames);
+RAMBLE_ENUM(ramble::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
+RAMBLE_ENUM(ramble::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
+RAMBLE_ENUM(ramble::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
+RAMBLE_STD_STRUCT(Image); RAMBLE_STD_STRUCT(VideoFrame); RAMBLE_STD_STRUCT(ExternalVideoStream);
+RAMBLE_ENUM(ramble::DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
+RAMBLE_STD_STRUCT(CameraIntrinsics);
+RAMBLE_STD_STRUCT(JointState); RAMBLE_STD_STRUCT(JointNames);
 
 #endif /* C++ consumer (not the implementation anchor) */
-#endif /* DART_HPP_INCLUDED */
+#endif /* RAMBLE_HPP_INCLUDED */

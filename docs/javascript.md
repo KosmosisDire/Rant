@@ -1,16 +1,16 @@
 # JavaScript
 
-`dist/dart.mjs` is the bridge client: one `DartNode` is one full node on the mesh, spoken
-through `dart_bridge` over a WebSocket. It has no runtime dependencies and runs in
-browsers, Node 22 and later, Deno and Bun off the global WebSocket. `dist/dart.d.ts`
-carries the types and `dist/dart.js` is the classic script twin exposing one global,
-`DartNode`. The wire is bridge/PROTOCOL.md and the design is spec/bridge.md. The
+`dist/ramble.mjs` is the bridge client: one `RambleNode` is one full node on the mesh, spoken
+through `ramble_bridge` over a WebSocket. It has no runtime dependencies and runs in
+browsers, Node 22 and later, Deno and Bun off the global WebSocket. `dist/ramble.d.ts`
+carries the types and `dist/ramble.js` is the classic script twin exposing one global,
+`RambleNode`. The wire is bridge/PROTOCOL.md and the design is spec/bridge.md. The
 semantics are the C ones, so docs/topics.md, docs/patterns.md and docs/tasks.md apply.
 
 ## A node
 
 ```js
-const node = await DartNode.connect("ws://localhost:7480", { name: "dashboard" });
+const node = await RambleNode.connect("ws://localhost:7480", { name: "dashboard" });
 const pub  = await node.publisher("pose", "Pose { x: f64, y: f64 }");
 pub.send({ x: 1.5, y: 2.0 });
 const add  = await node.remoteFunction("add", "A { a: i32, b: i32 }", "R { sum: i32 }");
@@ -36,7 +36,7 @@ sections)`, `log(level, text)` and `onLog(handler, levels)` mirror the C node.
 
 ## Messages
 
-A subscriber handler receives the decoded value and a `DartMessage`. `get(path)` reads
+A subscriber handler receives the decoded value and a `RambleMessage`. `get(path)` reads
 one field by dotted path, with bigint for 64 bit integers, a string for string fields, a
 plain object for a map and arrays for array fields, where a u8 array is a `Uint8Array`
 view. `value` decodes the whole message once. `writtenUs` is the publisher's source stamp,

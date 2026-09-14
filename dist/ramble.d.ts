@@ -79,9 +79,9 @@ type NodeOpts = {
     transport?: "auto" | "websocket";
     rtcTimeoutMs?: number;
     iceServers?: RTCIceServer[];
-    onEvent?: (e: DartEvent) => void;
+    onEvent?: (e: RambleEvent) => void;
 };
-type DartEvent = {
+type RambleEvent = {
     op: "event";
     event: string;
     text?: string;
@@ -163,7 +163,7 @@ type RequestInfo = {
     callerName: string;
     writtenUs: number;
 };
-type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
+type SubscriberHandler<T> = (value: T, msg: RambleMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
 type TaskContext<Prg = any> = {
     progress: (value: Prg) => void;
@@ -226,22 +226,22 @@ declare class Layout {
     decode(data: Uint8Array): any;
     encode(value: any): Uint8Array;
 }
-declare class DartMessage {
-    topic: DartTopic | null;
+declare class RambleMessage {
+    topic: RambleTopic | null;
     publisher: number;
     data: Uint8Array;
     writtenUs: number;
     captureUs: number;
     _layout: Layout;
     _view: DataView;
-    constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array, writtenUs?: number, captureUs?: number);
+    constructor(layout: Layout, topic: RambleTopic | null, publisher: number, data: Uint8Array, writtenUs?: number, captureUs?: number);
     get(path: string): any;
     value(): any;
     _value: any;
     text(path: string, lenField?: string): string;
 }
-declare class DartEntity {
-    _node: DartNode;
+declare class RambleEntity {
+    _node: RambleNode;
     id: number;
     name: string;
     reliable: boolean;
@@ -250,7 +250,7 @@ declare class DartEntity {
     ready: boolean;
     _dc: RTCDataChannel | null;
     _taps: ((value: any) => void)[];
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null);
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null);
     refresh(): Promise<boolean>;
     _match(m: any): void;
     _frame(_f: Frame): void;
@@ -258,10 +258,10 @@ declare class DartEntity {
     _tap(value: any): void;
     _send(op: number, flags: number, seq: number, text: string, payload: Uint8Array, captureUs?: number): void;
 }
-declare class DartTopic extends DartEntity {
+declare class RambleTopic extends RambleEntity {
     layout: Layout;
-    onMessage: ((msg: DartMessage) => void) | null;
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null);
+    onMessage: ((msg: RambleMessage) => void) | null;
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null);
     _retype(r: any): void;
     get size(): number | undefined;
     get hash(): string | undefined;
@@ -273,23 +273,23 @@ declare class DartTopic extends DartEntity {
     _frame(f: Frame): void;
 }
 declare class Publisher<T = any> {
-    topic: DartTopic;
-    constructor(topic: DartTopic);
+    topic: RambleTopic;
+    constructor(topic: RambleTopic);
     send(value: T, captureUs?: number): void;
     sendRaw(bytes: Uint8Array, captureUs?: number): void;
     get matchCount(): number;
     get ready(): boolean;
 }
 declare class Subscriber<T = any> {
-    topic: DartTopic;
-    constructor(topic: DartTopic, handler: SubscriberHandler<T>);
+    topic: RambleTopic;
+    constructor(topic: RambleTopic, handler: SubscriberHandler<T>);
     get matchCount(): number;
 }
-declare class FunctionDefinition<Req = any, Rsp = any> extends DartEntity {
+declare class FunctionDefinition<Req = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     rspLayout: Layout;
     _handler: FunctionHandler<Req, Rsp>;
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null, handler: FunctionHandler<Req, Rsp>);
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null, handler: FunctionHandler<Req, Rsp>);
     get callerCount(): number;
     _retype(r: any): void;
     _frame(f: Frame): void;
@@ -302,28 +302,28 @@ type PendingCall<Rsp> = {
     timer: ReturnType<typeof setTimeout> | undefined;
     progress?: (data: Uint8Array, provider: number, writtenUs: number) => void;
 };
-declare class RemoteFunction<Req = any, Rsp = any> extends DartEntity {
+declare class RemoteFunction<Req = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     rspLayout: Layout;
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null);
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null);
     get hasDefinition(): boolean;
     _retype(r: any): void;
     call(value: Req, timeoutMs?: number): Promise<Response<Rsp>>;
 }
-declare class TaskDefinition<Req = any, Prg = any, Rsp = any> extends DartEntity {
+declare class TaskDefinition<Req = any, Prg = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     prgLayout: Layout;
     rspLayout: Layout;
     _handler: TaskHandler<Req, Prg, Rsp>;
     _aborts: Map<number, AbortController>;
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null, handler: TaskHandler<Req, Prg, Rsp>);
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null, handler: TaskHandler<Req, Prg, Rsp>);
     get callerCount(): number;
     _retype(r: any): void;
     _frame(f: Frame): void;
     _handle(reqId: number, info: RequestInfo, payload: Uint8Array): Promise<void>;
 }
 declare class TaskRun<Prg = any, Rsp = any> {
-    _node: DartNode;
+    _node: RambleNode;
     _prgLayout: Layout;
     id: number;
     callId: number;
@@ -337,16 +337,16 @@ declare class TaskRun<Prg = any, Rsp = any> {
         };
     }[];
     _taps: ((value: any) => void)[];
-    constructor(node: DartNode, id: number, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>);
+    constructor(node: RambleNode, id: number, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>);
     onProgress(handler: TaskProgressHandler<Prg> | null): this;
     cancel(): Promise<CancelStatus>;
     _push(data: Uint8Array, provider: number, writtenUs: number): void;
 }
-declare class RemoteTask<Req = any, Prg = any, Rsp = any> extends DartEntity {
+declare class RemoteTask<Req = any, Prg = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     prgLayout: Layout;
     rspLayout: Layout;
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null);
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null);
     get hasDefinition(): boolean;
     _retype(r: any): void;
     call(value: Req): TaskRun<Prg, Rsp>;
@@ -360,7 +360,7 @@ type VarChangeHandler<T> = (value: T, info: {
     writtenUs: number;
     source: number;
 }) => void;
-declare class VarHandle<T = any> extends DartEntity {
+declare class VarHandle<T = any> extends RambleEntity {
     layout: Layout;
     forced: boolean;
     writtenUs: number;
@@ -369,7 +369,7 @@ declare class VarHandle<T = any> extends DartEntity {
     _waiters: Set<VarWaiter>;
     _onChange: VarChangeHandler<T> | null;
     _onWrite: VarChangeHandler<T> | null;
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null);
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null);
     get(): T | undefined;
     getRaw(): Uint8Array | undefined;
     wait(timeoutMs?: number): Promise<boolean>;
@@ -442,13 +442,13 @@ type ExternalVideoStreamValue = {
 };
 type MediaValue = VideoFrameValue | ImageValue | ExternalVideoStreamValue;
 type VideoPath = "none" | "track" | "decoder";
-type MediaSource = DartTopic | Subscriber | VarHandle | TaskRun;
+type MediaSource = RambleTopic | Subscriber | VarHandle | TaskRun;
 type MediaAttachOpts = {
     path?: string;
     keepData?: boolean;
 };
 declare class VideoView {
-    _node: DartNode;
+    _node: RambleNode;
     stream: MediaStream | null;
     canvas: HTMLCanvasElement | null;
     path: VideoPath;
@@ -456,7 +456,7 @@ declare class VideoView {
     width: number;
     height: number;
     onFrame: ((value: MediaValue) => void) | null;
-    source: DartTopic | VarHandle | TaskRun | null;
+    source: RambleTopic | VarHandle | TaskRun | null;
     sourcePath: string;
     sourceType: MediaTypeName | "";
     trackState: string;
@@ -481,7 +481,7 @@ declare class VideoView {
     } | null;
     _blobBusy: boolean;
     _closed: boolean;
-    constructor(node: DartNode);
+    constructor(node: RambleNode);
     attach(target: MediaSource, opts?: MediaAttachOpts | string): Promise<this>;
     _keepData: boolean;
     detach(): void;
@@ -506,8 +506,8 @@ declare class VideoView {
     _paintBlob(bytes: Uint8Array, mime: string): void;
     _decode(f: VideoFrameValue): void;
 }
-type AnyEntity = DartTopic | FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
-declare class DartNode {
+type AnyEntity = RambleTopic | FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
+declare class RambleNode {
     static MetaSection: {
         readonly Node: 1;
         readonly Proc: 2;
@@ -564,10 +564,10 @@ declare class DartNode {
     _anchor: RTCDataChannel | null;
     name: string;
     transport: TransportName;
-    onEvent: ((e: DartEvent) => void) | null;
+    onEvent: ((e: RambleEvent) => void) | null;
     onClose: ((e: CloseEvent) => void) | null;
     _onLog: ((l: LogLine) => void) | null;
-    static connect(url: string, opts?: NodeOpts): Promise<DartNode>;
+    static connect(url: string, opts?: NodeOpts): Promise<RambleNode>;
     constructor(ws: WebSocket);
     _request(obj: Record<string, any>): Promise<any>;
     _rtcConnect(timeoutMs: number, extraIce: RTCIceServer[]): Promise<void>;
@@ -576,13 +576,13 @@ declare class DartNode {
     _rtcState(): void;
     _rtcDrop(): void;
     _makeChannel(id: number, reliable: boolean): RTCDataChannel | null;
-    _openChannel(e: DartEntity): void;
-    _sendFrame(e: DartEntity, bytes: Uint8Array): void;
+    _openChannel(e: RambleEntity): void;
+    _sendFrame(e: RambleEntity, bytes: Uint8Array): void;
     _onText(m: any): void;
     _onFrame(b: Uint8Array): void;
     _onCallFrame(f: Frame): void;
     _create<E extends AnyEntity>(kind: string, name: string, reliable: boolean, fields: Record<string, any>, make: (r: any, dc: RTCDataChannel | null) => E): Promise<E>;
-    topic(name: string, role?: Role, opts?: TopicOpts): Promise<DartTopic>;
+    topic(name: string, role?: Role, opts?: TopicOpts): Promise<RambleTopic>;
     publisher<T = any>(name: string, schema: string | null, opts?: TopicOpts): Promise<Publisher<T>>;
     subscriber<T = any>(name: string, schema: string | null, handler: SubscriberHandler<T>, opts?: TopicOpts): Promise<Subscriber<T>>;
     videoView(): VideoView;
@@ -611,4 +611,4 @@ declare class DartNode {
     meta(peerId: number, sections?: number): Promise<MetaSnapshot>;
     close(): void;
 }
-export { DartNode, DartEntity, DartTopic, DartMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, TaskDefinition, RemoteTask, TaskRun, VariableDefinition, RemoteVariable, VideoView, VideoCodec, ImageFormat, StreamKind, VIDEO_FRAME, IMAGE, EXTERNAL_VIDEO_STREAM, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent, type TransportName, type CallStatusName, type Response, type RequestInfo, type SubscriberHandler, type FunctionHandler, type TaskContext, type TaskHandler, type TaskProgressHandler, type TaskOpts, type CancelStatus, type VariableDefOpts, type RemoteVarOpts, type VarChangeHandler, type VideoFrameValue, type ImageValue, type ExternalVideoStreamValue, type MediaValue, type MediaTypeName, type VideoPath, type MediaSource, type MediaAttachOpts, type MediaField, type FunctionOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };
+export { RambleNode, RambleEntity, RambleTopic, RambleMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, TaskDefinition, RemoteTask, TaskRun, VariableDefinition, RemoteVariable, VideoView, VideoCodec, ImageFormat, StreamKind, VIDEO_FRAME, IMAGE, EXTERNAL_VIDEO_STREAM, MetaSection, type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type RambleEvent, type TransportName, type CallStatusName, type Response, type RequestInfo, type SubscriberHandler, type FunctionHandler, type TaskContext, type TaskHandler, type TaskProgressHandler, type TaskOpts, type CancelStatus, type VariableDefOpts, type RemoteVarOpts, type VarChangeHandler, type VideoFrameValue, type ImageValue, type ExternalVideoStreamValue, type MediaValue, type MediaTypeName, type VideoPath, type MediaSource, type MediaAttachOpts, type MediaField, type FunctionOpts, type LogLevelName, type LogLine, type Peer, type Entity, type EntityKindName, type MetaSnapshot, };

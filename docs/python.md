@@ -1,9 +1,9 @@
 # Python
 
-`pip install dart-middleware` installs the `dart` package: the wrapper in `python/dart`
+`pip install ramble-middleware` installs the `ramble` package: the wrapper in `python/ramble`
 plus the shared library for your platform, bound through ctypes, so nothing compiles on
-your machine. In a source checkout, build the CMake target `dart_shared` and put
-`python/` on `sys.path`. `DART_LIBRARY` points the wrapper at any other copy of the
+your machine. In a source checkout, build the CMake target `ramble_shared` and put
+`python/` on `sys.path`. `RAMBLE_LIBRARY` points the wrapper at any other copy of the
 library. The semantics are the C ones, so docs/node.md, docs/topics.md, docs/patterns.md
 and docs/tasks.md apply. This page says what is different in Python.
 
@@ -11,16 +11,16 @@ and docs/tasks.md apply. This page says what is different in Python.
 
 ```python
 from dataclasses import dataclass
-import dart
+import ramble
 
 @dataclass
 class Pose:
-    stamp: dart.u64 = 0
-    x:     dart.f64 = 0.0
-    frame: dart.string(16) = ""
+    stamp: ramble.u64 = 0
+    x:     ramble.f64 = 0.0
+    frame: ramble.string(16) = ""
 
-node = dart.Node("robot1", on_message=lambda m: print(m.value), domain=7)
-pose = dart.Topic[Pose](node, "pose", reliable=True)
+node = ramble.Node("robot1", on_message=lambda m: print(m.value), domain=7)
+pose = ramble.Topic[Pose](node, "pose", reliable=True)
 node.start()
 pose.send(Pose(stamp=1, x=1.0, frame="map"))
 ```
@@ -52,16 +52,16 @@ the one line text.
 ## Schemas
 
 Any class with annotated fields is a schema, no decorator needed, and `@dataclass` just
-gives a constructor. Field types are `dart.u8` to `dart.f64`,
-`dart.string(cap)` for a capped string, `dart.<scalar>[n]` or `dart.string(cap)[n]` for a
+gives a constructor. Field types are `ramble.u8` to `ramble.f64`,
+`ramble.string(cap)` for a capped string, `ramble.<scalar>[n]` or `ramble.string(cap)[n]` for a
 fixed array, a nested annotated class, plain `int`, `float` and `bool`, `str` for an
 unbounded string, `list[...]` for a variable array, `dict` for a map, and an `IntEnum` or
-`dart.enum(cls, backing)` for a named integer. `__dart_name__` on the class overrides the
-wire type name. `dart.dsl(source)` gives the DSL text of a class, a bare type, a compiled
+`ramble.enum(cls, backing)` for a named integer. `__ramble_name__` on the class overrides the
+wire type name. `ramble.dsl(source)` gives the DSL text of a class, a bare type, a compiled
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.
 
-A bare type is a schema of its own: `dart.Topic[bool](node, "estop")` sends and
-receives plain booleans, and so do the scalars, `dart.string(N)`, arrays, `list[dart.f32]`,
+A bare type is a schema of its own: `ramble.Topic[bool](node, "estop")` sends and
+receives plain booleans, and so do the scalars, `ramble.string(N)`, arrays, `list[ramble.f32]`,
 `str`, `dict`, an enum class and the plain Python scalars. Such a root is anonymous, so the
 same one in any language is the same wire bytes and the same hash.
 
@@ -71,15 +71,15 @@ to a checker. A capped string, a fixed or variable array and a pinned enum width
 spelled `Annotated[T, "<dsl field type>"]`, the Python type for the checker and the DSL for
 the wire: `Annotated[str, "string<16>"]`, `Annotated[bytes, "u8[4]"]`,
 `Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. In a value position the same
-DSL text does it: `dart.Schema("u8[4]")`.
+DSL text does it: `ramble.Schema("u8[4]")`.
 
 `Schema(text)`, `Schema(cls)` and `Schema(bare_type)` compile explicitly. `encode` and
 `decode` walk the compiled flat field table, so they work for any schema including a
 peer's. `fields()` lists `Schema.Field` records whose kinds are `Schema.FieldType`. A
 missing value keeps the zeroed default. The map body is built and parsed in Python and
-validated by the C setter. The standard types in docs/stdtypes.md live in `dart.types` as
-tagged dataclasses and aliases: `dart.types.Transform`, `dart.types.Color`,
-`dart.types.Timestamp` and the rest, and `dart.types.now()` is the Timestamp clock.
+validated by the C setter. The standard types in docs/stdtypes.md live in `ramble.types` as
+tagged dataclasses and aliases: `ramble.types.Transform`, `ramble.types.Color`,
+`ramble.types.Timestamp` and the rest, and `ramble.types.now()` is the Timestamp clock.
 
 ## Messages and queues
 
@@ -114,7 +114,7 @@ only while the handler runs, and its verbs raise RuntimeError after. `defer()` r
 `Deferred` completed once from any thread. A None handler answers NO_HANDLER.
 
 A task handler runs on a dedicated daemon thread per call and receives a `TaskRequest`.
-Returning completes OK with the return value, raising `dart.CancelledError` completes
+Returning completes OK with the return value, raising `ramble.CancelledError` completes
 CANCELLED, and any other exception completes APP_ERROR. `progress(x)` streams updates and
 `cancelled` or the `cancel_event` observe a cooperative cancel. Retiring a definition
 answers every live call CANCELLED, and a worker completing after that is refused silently.
@@ -135,7 +135,7 @@ every applied write, both inline on the thread that applied the write.
 ## Logs and meta
 
 `node.log(level, text)`, or `node.log.error(text)`, `warn` and `info`, publishes a
-formatted line, truncated at DART_LOG_MAX. `node.log.on(level, handler)` delivers every
+formatted line, truncated at RAMBLE_LOG_MAX. `node.log.on(level, handler)` delivers every
 other node's lines at that level as a `LogLine`, and `node.log.topic(level)` is the topic
 behind a level. `meta(peer, sections)` blocks and must not run under `start()` or from a
 callback, and `meta_async` works anywhere. Both decode into a `MetaSnapshot` whose node and

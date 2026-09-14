@@ -1,4 +1,4 @@
-/* The bridge client: one DartNode is one full node on the mesh, spoken through the bridge
+/* The bridge client: one RambleNode is one full node on the mesh, spoken through the bridge
  * over a WebSocket with a WebRTC data path. docs/javascript.md explains how to use it. */
 
 /* Data-plane frame: ONE header for every op, both directions, little-endian:
@@ -111,21 +111,21 @@ type NodeOpts = {
     peer_timeout_ms?: number;
     match_wait_ms?: number;
     disable_shm?: boolean;
-    disable_logs?: boolean;   /* strip the built-in @dart/log topics */
-    disable_meta?: boolean;   /* do not host the @dart/meta endpoint */
-    disable_error_logs?: boolean; /* suppress default mirroring onto @dart/log/error */
+    disable_logs?: boolean;   /* strip the built-in @ramble/log topics */
+    disable_meta?: boolean;   /* do not host the @ramble/meta endpoint */
+    disable_error_logs?: boolean; /* suppress default mirroring onto @ramble/log/error */
     fetch_details?: boolean;  /* resolve reflected names for topics this node does not share */
     transport?: "auto" | "websocket";   /* auto (default): try WebRTC, fall back to the WebSocket */
     rtcTimeoutMs?: number;    /* how long WebRTC may take to connect before falling back (4000) */
     iceServers?: RTCIceServer[];   /* extra ICE servers beside the bridge's own (--ice) */
-    onEvent?: (e: DartEvent) => void;
+    onEvent?: (e: RambleEvent) => void;
 };
 
-type DartEvent = { op: "event"; event: string; text?: string } & Record<string, unknown>;
+type RambleEvent = { op: "event"; event: string; text?: string } & Record<string, unknown>;
 
 type LogLevelName = "error" | "warn" | "info";
 
-/* One decoded @dart/log line for DartNode.onLog. wallUs is epoch us, monoUs the publisher's
+/* One decoded @ramble/log line for RambleNode.onLog. wallUs is epoch us, monoUs the publisher's
  * monotonic clock, recvUs this node's clock at receipt, writtenUs the carrier's stamp. */
 type LogLine = {
     level: LogLevelName;
@@ -140,7 +140,7 @@ type LogLine = {
 type CallStatusName = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled";
 const CALL_STATUS: CallStatusName[] = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled"];
 
-/* ---- introspection (query-based, see DartNode.peers / entities / meta) ------------ */
+/* ---- introspection (query-based, see RambleNode.peers / entities / meta) ------------ */
 
 type Peer = {
     id: number;
@@ -188,10 +188,10 @@ type Entity = {
     progressSchema?: SchemaBlock; /* task only: the progress field table */
 };
 
-/* the @dart/meta section mask, OR the bits. 0 = every section. Mirrors DART_META_*. */
+/* the @ramble/meta section mask, OR the bits. 0 = every section. Mirrors RAMBLE_META_*. */
 const MetaSection = { Node: 0x1, Proc: 0x2, Topics: 0x4, Peers: 0x8, All: 0 } as const;
 
-/* A decoded @dart/meta reply. Never faults, inspect status. info is the whole snapshot body
+/* A decoded @ramble/meta reply. Never faults, inspect status. info is the whole snapshot body
  * with the sections requested. */
 type MetaSnapshot = {
     valid: boolean;              /* a status "ok" reply decoded */
@@ -245,7 +245,7 @@ const CALL_STATUS_TEXT: Record<CallStatusName, string> = {
 
 type RequestInfo = { caller: number; callerName: string; writtenUs: number };
 
-type SubscriberHandler<T> = (value: T, msg: DartMessage) => void;
+type SubscriberHandler<T> = (value: T, msg: RambleMessage) => void;
 type FunctionHandler<Req, Rsp> = (req: Req, info: RequestInfo) => Rsp | Promise<Rsp>;
 
 /* What a task handler receives beside the request: progress() streams an update and signal
@@ -577,7 +577,7 @@ class Layout {
         return out;
     }
 
-    /* one field by dotted path (see DartMessage.get) */
+    /* one field by dotted path (see RambleMessage.get) */
     getField(data: Uint8Array, view: DataView, path: string): any {
         const f = this.fields.get(path);
         if (!f) throw new Error(`no field '${path}'`);
@@ -651,16 +651,16 @@ class Layout {
 }
 
 /* A delivered message: raw bytes plus typed reads through the entity's field table. */
-class DartMessage {
-    topic: DartTopic | null;   /* the receiving topic for topic deliveries, null elsewhere */
-    publisher: number;         /* peer id of the sending node */
-    data: Uint8Array;          /* the payload, verbatim */
-    writtenUs: number;         /* the publisher's source stamp in UTC us, 0 = opted out */
-    captureUs: number;         /* when the data was true, UTC us, 0 = the publisher gave none */
+class RambleMessage {
+    topic: RambleTopic | null;   /* the receiving topic for topic deliveries, null elsewhere */
+    publisher: number;           /* peer id of the sending node */
+    data: Uint8Array;            /* the payload, verbatim */
+    writtenUs: number;           /* the publisher's source stamp in UTC us, 0 = opted out */
+    captureUs: number;           /* when the data was true, UTC us, 0 = the publisher gave none */
     _layout: Layout;
     _view: DataView;
 
-    constructor(layout: Layout, topic: DartTopic | null, publisher: number, data: Uint8Array,
+    constructor(layout: Layout, topic: RambleTopic | null, publisher: number, data: Uint8Array,
                 writtenUs: number = 0, captureUs: number = 0) {
         this._layout = layout;
         this.topic = topic;
@@ -690,8 +690,8 @@ class DartMessage {
 
 /* Everything created on a node: one client-chosen id (also its WebRTC data channel id),
  * one match summary from the bridge's pushes, one frame inbox. */
-class DartEntity {
-    _node: DartNode;
+class RambleEntity {
+    _node: RambleNode;
     id: number;
     name: string;
     reliable: boolean;         /* the topic's QoS, patterns are reliable */
@@ -701,7 +701,7 @@ class DartEntity {
     _dc: RTCDataChannel | null;
     _taps: ((value: any) => void)[];   /* VideoViews attached to this entity's stream */
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null) {
         this._node = node;
         this.id = r.id;
         this.name = name;
@@ -732,12 +732,12 @@ class DartEntity {
     }
 }
 
-/* One topic on the node (the dynamic form). Returned by DartNode.topic(). */
-class DartTopic extends DartEntity {
+/* One topic on the node (the dynamic form). Returned by RambleNode.topic(). */
+class RambleTopic extends RambleEntity {
     layout: Layout;
-    onMessage: ((msg: DartMessage) => void) | null;
+    onMessage: ((msg: RambleMessage) => void) | null;
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null) {
         super(node, name, r, dc);
         this.layout = new Layout(r.schema);
         this.onMessage = null;
@@ -772,7 +772,7 @@ class DartTopic extends DartEntity {
 
     _frame(f: Frame): void {
         if (f.op !== OP_DATA) return;
-        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs, f.captureUs);
+        const msg = new RambleMessage(this.layout, this, f.peer, f.payload, f.writtenUs, f.captureUs);
         this.onMessage?.(msg);
         if (this._taps.length) this._tap(msg.value());
     }
@@ -780,9 +780,9 @@ class DartTopic extends DartEntity {
 
 /* The publish side handle over a topic, speaking plain nested objects. */
 class Publisher<T = any> {
-    topic: DartTopic;
+    topic: RambleTopic;
 
-    constructor(topic: DartTopic) { this.topic = topic; }
+    constructor(topic: RambleTopic) { this.topic = topic; }
 
     send(value: T, captureUs = 0): void { this.topic.send(value, captureUs); }
     sendRaw(bytes: Uint8Array, captureUs = 0): void { this.topic.sendRaw(bytes, captureUs); }
@@ -792,9 +792,9 @@ class Publisher<T = any> {
 
 /* Subscribe-side handle: the handler gets (decoded plain object, message). */
 class Subscriber<T = any> {
-    topic: DartTopic;
+    topic: RambleTopic;
 
-    constructor(topic: DartTopic, handler: SubscriberHandler<T>) {
+    constructor(topic: RambleTopic, handler: SubscriberHandler<T>) {
         this.topic = topic;
         this.topic.onMessage = (msg) => handler(msg.value() as T, msg);
     }
@@ -803,19 +803,19 @@ class Subscriber<T = any> {
 }
 
 /* the RESULT frame a definition answers a request with */
-function replyFrame(entity: DartEntity, reqId: number, status: number, err: any, rsp: Uint8Array): void {
+function replyFrame(entity: RambleEntity, reqId: number, status: number, err: any, rsp: Uint8Array): void {
     const t = err === undefined ? "" : typeof err?.message === "string" ? err.message : (typeof err === "string" ? err : "");
     entity._send(OP_RESULT, status, reqId, t, rsp);
 }
 
 /* The implementation side of a function: the bridge defers every request here, the
  * handler's return value is the reply and a throw answers "app_error". One per name. */
-class FunctionDefinition<Req = any, Rsp = any> extends DartEntity {
+class FunctionDefinition<Req = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     rspLayout: Layout;
     _handler: FunctionHandler<Req, Rsp>;
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null, handler: FunctionHandler<Req, Rsp>) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null, handler: FunctionHandler<Req, Rsp>) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.rspLayout = new Layout(r.rsp);
@@ -851,11 +851,11 @@ type PendingCall<Rsp> = {
 
 /* A reference to a function definition on another node. call() resolves with the
  * outcome and NEVER rejects on a status (only on connection loss). */
-class RemoteFunction<Req = any, Rsp = any> extends DartEntity {
+class RemoteFunction<Req = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     rspLayout: Layout;
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.rspLayout = new Layout(r.rsp);
@@ -888,14 +888,14 @@ class RemoteFunction<Req = any, Rsp = any> extends DartEntity {
 
 /* The implementation side of a task: the bridge defers every request here, the async
  * handler streams ctx.progress() and its settlement is the one terminal answer. */
-class TaskDefinition<Req = any, Prg = any, Rsp = any> extends DartEntity {
+class TaskDefinition<Req = any, Prg = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     prgLayout: Layout;
     rspLayout: Layout;
     _handler: TaskHandler<Req, Prg, Rsp>;
     _aborts: Map<number, AbortController>;   /* req id to its cancel signal */
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null, handler: TaskHandler<Req, Prg, Rsp>) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null, handler: TaskHandler<Req, Prg, Rsp>) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.prgLayout = new Layout(r.prg);
@@ -950,7 +950,7 @@ class TaskDefinition<Req = any, Prg = any, Rsp = any> extends DartEntity {
 /* One task invocation in flight, returned synchronously by RemoteTask.call. result is the
  * terminal Response, onProgress observes and replays buffered updates, cancel() asks to stop. */
 class TaskRun<Prg = any, Rsp = any> {
-    _node: DartNode;
+    _node: RambleNode;
     _prgLayout: Layout;
     id: number;                /* the remote task's entity id */
     callId: number;            /* the client correlation id (the cancel op's `call`) */
@@ -959,7 +959,7 @@ class TaskRun<Prg = any, Rsp = any> {
     _buffered: { value: Prg | null; info: { provider: number; writtenUs: number } }[];
     _taps: ((value: any) => void)[];   /* VideoViews attached to this call's progress */
 
-    constructor(node: DartNode, id: number, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>) {
+    constructor(node: RambleNode, id: number, prgLayout: Layout, callId: number, result: Promise<Response<Rsp>>) {
         this._node = node;
         this._prgLayout = prgLayout;
         this.id = id;
@@ -994,12 +994,12 @@ class TaskRun<Prg = any, Rsp = any> {
 
 /* A reference to a task defined elsewhere. call() returns a TaskRun synchronously and the
  * timeout bounds only the first response, so there is no client side timer. */
-class RemoteTask<Req = any, Prg = any, Rsp = any> extends DartEntity {
+class RemoteTask<Req = any, Prg = any, Rsp = any> extends RambleEntity {
     reqLayout: Layout;
     prgLayout: Layout;
     rspLayout: Layout;
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
         this.prgLayout = new Layout(r.prg);
@@ -1031,7 +1031,7 @@ type VarWaiter = { res: (ok: boolean) => void; timer: ReturnType<typeof setTimeo
 type VarChangeHandler<T> = (value: T, info: { forced: boolean; writtenUs: number; source: number }) => void;
 
 /* Shared variable-handle core: the client-cached latest value fed by pushed updates. */
-class VarHandle<T = any> extends DartEntity {
+class VarHandle<T = any> extends RambleEntity {
     layout: Layout;
     forced: boolean;
     writtenUs: number;            /* source stamp of the last update pushed (0 = none/unstamped) */
@@ -1041,7 +1041,7 @@ class VarHandle<T = any> extends DartEntity {
     _onChange: VarChangeHandler<T> | null;
     _onWrite: VarChangeHandler<T> | null;
 
-    constructor(node: DartNode, name: string, r: any, dc: RTCDataChannel | null) {
+    constructor(node: RambleNode, name: string, r: any, dc: RTCDataChannel | null) {
         super(node, name, r, dc);
         this.layout = new Layout(r.schema);
         this.forced = false;
@@ -1140,7 +1140,7 @@ type VideoPath = "none" | "track" | "decoder";
 
 /* what a VideoView attaches to: an entity whose stream carries a VideoFrame or Image
  * somewhere in its type. A Subscriber stands for its topic */
-type MediaSource = DartTopic | Subscriber | VarHandle | TaskRun;
+type MediaSource = RambleTopic | Subscriber | VarHandle | TaskRun;
 type MediaAttachOpts = {
     path?: string;       /* the VideoFrame or Image field, dotted. "" = the value itself */
     keepData?: boolean;  /* keep the pixels in the frames too while a WebRTC track carries them */
@@ -1223,7 +1223,7 @@ function toRgba(img: ImageValue): Uint8ClampedArray | null {
 /* A picture as a MediaStream fed from anywhere: push() shows any VideoFrame, Image or
  * ExternalVideoStream value, attach() binds it to an entity's stream (docs/javascript.md). */
 class VideoView {
-    _node: DartNode;
+    _node: RambleNode;
     stream: MediaStream | null;      /* the picture (null outside a browser) */
     canvas: HTMLCanvasElement | null;   /* the decode surface, null while a track carries it */
     path: VideoPath;                 /* "track" (WebRTC video track) or "decoder" (painted here) */
@@ -1231,7 +1231,7 @@ class VideoView {
     width: number;
     height: number;
     onFrame: ((value: MediaValue) => void) | null;   /* every value pushed */
-    source: DartTopic | VarHandle | TaskRun | null;   /* what attach() bound */
+    source: RambleTopic | VarHandle | TaskRun | null;   /* what attach() bound */
     sourcePath: string;              /* the media field inside its type */
     sourceType: MediaTypeName | "";  /* what that field is */
     trackState: string;              /* "" (no track asked), "ok", or the bridge's refusal */
@@ -1254,7 +1254,7 @@ class VideoView {
     _blobBusy: boolean;
     _closed: boolean;
 
-    constructor(node: DartNode) {
+    constructor(node: RambleNode) {
         this._node = node;
         this.stream = typeof MediaStream !== "undefined" ? new MediaStream() : null;
         this.canvas = null;
@@ -1560,7 +1560,7 @@ class VideoView {
 
 /* ---- the node --------------------------------------------------------------------- */
 
-type AnyEntity = DartTopic | FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
+type AnyEntity = RambleTopic | FunctionDefinition | RemoteFunction | TaskDefinition | RemoteTask | VarHandle;
 
 /* the bridge's --ice syntax, "stun:host:port" or "turn:user:pass@host:port", to RTCIceServer */
 function iceServerFromUrl(url: string): RTCIceServer {
@@ -1571,7 +1571,7 @@ function iceServerFromUrl(url: string): RTCIceServer {
     return out;
 }
 
-class DartNode {
+class RambleNode {
     /* the constant tables, reachable from the classic-script build (one global) */
     static MetaSection = MetaSection;
     static VideoCodec = VideoCodec;
@@ -1597,20 +1597,20 @@ class DartNode {
     _anchor: RTCDataChannel | null;              /* channel 0: keeps the SCTP line in the offer */
     name: string;   /* this node's name, auto generated if none given */
     transport: TransportName;                    /* the data carrier in use */
-    onEvent: ((e: DartEvent) => void) | null;   /* every bridge event: errors, peers, loss, rtc */
+    onEvent: ((e: RambleEvent) => void) | null;   /* every bridge event: errors, peers, loss, rtc */
     onClose: ((e: CloseEvent) => void) | null;
     _onLog: ((l: LogLine) => void) | null;       /* mesh log-stream handler (set by onLog) */
 
     /* Connect to a bridge and open the node. WebRTC is tried first (opts.transport
      * "auto", the default) and the WebSocket carries the data if it cannot connect. */
-    static async connect(url: string, opts: NodeOpts = {}): Promise<DartNode> {
+    static async connect(url: string, opts: NodeOpts = {}): Promise<RambleNode> {
         const ws = new WebSocket(url);
         ws.binaryType = "arraybuffer";
         await new Promise<unknown>((res, rej) => {
             ws.onopen = res;
             ws.onerror = () => rej(new Error(`connect failed: ${url}`));
         });
-        const c = new DartNode(ws);
+        const c = new RambleNode(ws);
         const { onEvent, transport, rtcTimeoutMs, iceServers, ...open } = opts;
         if (onEvent) c.onEvent = onEvent;
         const r = await c._request({ op: "open", ...open });
@@ -1689,7 +1689,7 @@ class DartNode {
                     this._request({ op: "rtc", candidate: e.candidate.candidate, mid: e.candidate.sdpMid ?? "" }).catch(() => {});
             };
             /* the anchor channel puts the SCTP line in the offer (entity ids start at 1) */
-            this._anchor = pc.createDataChannel("dart", { negotiated: true, id: 0 });
+            this._anchor = pc.createDataChannel("ramble", { negotiated: true, id: 0 });
             for (const v of this._views) this._addVideoLine(v);
             const connected = new Promise<void>((res, rej) => {
                 const timer = setTimeout(() => rej(new Error("webrtc connect timeout")), timeoutMs);
@@ -1790,14 +1790,14 @@ class DartNode {
         }
     }
 
-    _openChannel(e: DartEntity): void {
+    _openChannel(e: RambleEntity): void {
         if (e._dc) return;
         e._dc = this._makeChannel(e.id, e.reliable);
     }
 
     /* the carrier per frame: the entity's open data channel when the frame fits, else the
      * WebSocket. A best effort frame is dropped rather than queued behind a backlog */
-    _sendFrame(e: DartEntity, bytes: Uint8Array): void {
+    _sendFrame(e: RambleEntity, bytes: Uint8Array): void {
         const dc = e._dc;
         if (dc && dc.readyState === "open" && bytes.byteLength <= this._rtcMax) {
             if (!e.reliable && dc.bufferedAmount > LOSSY_BUFFER) return;
@@ -1816,7 +1816,7 @@ class DartNode {
             else p.reject(new Error(m.error ?? "request failed"));
         } else if (m.op === "event") {
             if (m.event === "rtc" && (m.state === "failed" || m.state === "closed")) this._rtcFail?.(m.state);
-            this.onEvent?.(m as DartEvent);
+            this.onEvent?.(m as RambleEvent);
         } else if (m.op === "match") {
             this._entities.get(m.id)?._match(m);
         } else if (m.op === "log") {
@@ -1884,9 +1884,9 @@ class DartNode {
 
     /* Create a topic, the dynamic form. opts.schema is DSL text for a typed topic, omit it
      * for raw bytes. */
-    async topic(name: string, role: Role = "pubsub", opts: TopicOpts = {}): Promise<DartTopic> {
+    async topic(name: string, role: Role = "pubsub", opts: TopicOpts = {}): Promise<RambleTopic> {
         return this._create("topic", name, !!opts.reliable, { role, ...opts },
-                            (r, dc) => new DartTopic(this, name, r, dc));
+                            (r, dc) => new RambleTopic(this, name, r, dc));
     }
 
     /* Typed publish side: schema is the DSL text (null = raw bytes). */
@@ -1994,7 +1994,7 @@ class DartNode {
         return r.settled as boolean;
     }
 
-    /* Publish a line on a level's built-in @dart/log topic (mesh-wide, rosout-style).
+    /* Publish a line on a level's built-in @ramble/log topic (mesh-wide, rosout-style).
      * Every node that subscribed to that level receives it. */
     async log(level: LogLevelName, text: string): Promise<void> {
         await this._request({ op: "log", level, text });
@@ -2049,7 +2049,7 @@ class DartNode {
         return r.entity ? toEntity(r.entity) : null;
     }
 
-    /* Fetch a peer's @dart/meta snapshot by an async directed call. Never rejects on status.
+    /* Fetch a peer's @ramble/meta snapshot by an async directed call. Never rejects on status.
      * sections is a MetaSection mask, default All. */
     async meta(peerId: number, sections: number = MetaSection.All): Promise<MetaSnapshot> {
         const r = await this._request({ op: "meta", peer: peerId, sections });
@@ -2067,14 +2067,14 @@ class DartNode {
 }
 
 export {
-    DartNode, DartEntity, DartTopic, DartMessage, Layout,
+    RambleNode, RambleEntity, RambleTopic, RambleMessage, Layout,
     Publisher, Subscriber,
     FunctionDefinition, RemoteFunction,
     TaskDefinition, RemoteTask, TaskRun,
     VariableDefinition, RemoteVariable,
     VideoView, VideoCodec, ImageFormat, StreamKind, VIDEO_FRAME, IMAGE, EXTERNAL_VIDEO_STREAM,
     MetaSection,
-    type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type DartEvent,
+    type Field, type SchemaBlock, type Role, type TopicOpts, type NodeOpts, type RambleEvent,
     type TransportName,
     type CallStatusName, type Response, type RequestInfo,
     type SubscriberHandler, type FunctionHandler,

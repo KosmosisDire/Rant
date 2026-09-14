@@ -5,20 +5,20 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Dart;
+using Ramble;
 
 struct Twist { public float Dx; public float Dy; }
 
 // A schema exercising the v4 variable-length kinds: a variable string, a variable
 // scalar array, a variable string array, and a self-describing map.
-[DartSchema("Sensor")]
+[RambleSchema("Sensor")]
 struct Sensor
 {
     public uint Id;
-    [DartString(16)] public string Name;   // capped string (fixed)
-    public string Note;                     // variable string
-    public float[] Samples;                 // variable scalar array
-    [DartString(8)] public string[] Labels; // variable string array
+    [RambleString(16)] public string Name;   // capped string (fixed)
+    public string Note;                       // variable string
+    public float[] Samples;                   // variable scalar array
+    [RambleString(8)] public string[] Labels; // variable string array
     public Dictionary<string, object> Extras;  // self-describing map
 }
 
@@ -27,9 +27,9 @@ struct Pose
     public ulong Stamp;
     public double X;
     public double Y;
-    [DartArray(4)] public byte[] Uuid;
-    [DartString(16)] public string Frame;
-    [DartArray(2), DartString(8)] public string[] Tags;
+    [RambleArray(4)] public byte[] Uuid;
+    [RambleString(16)] public string Frame;
+    [RambleArray(2), RambleString(8)] public string[] Tags;
     public Twist Vel;
 }
 
@@ -55,7 +55,7 @@ sealed class InlineProgress<T> : IProgress<T>
 static class Program
 {
     static readonly ManualResetEventSlim Got = new ManualResetEventSlim(false);
-    static DartMessage Received;
+    static RambleMessage Received;
 
     // Encode and decode round trip of the variable kinds, no networking.
     static bool RoundTrip()
@@ -155,9 +155,9 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var srv = new DartNode("srv", null, e => Console.WriteLine("event(srv): " + e),
+        var srv = new RambleNode("srv", null, e => Console.WriteLine("event(srv): " + e),
                            domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new DartNode("cli", null, e => Console.WriteLine("event(cli): " + e),
+        var cli = new RambleNode("cli", null, e => Console.WriteLine("event(cli): " + e),
                            domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
 
         // definitions on srv: the simple form, a thrower giving AppError, and a full form that
@@ -285,9 +285,9 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var srv = new DartNode("tsrv", null, e => { if (e.IsError) Console.WriteLine("event(tsrv): " + e); },
+        var srv = new RambleNode("tsrv", null, e => { if (e.IsError) Console.WriteLine("event(tsrv): " + e); },
                                domain: 47, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new DartNode("tcli", null, e => { if (e.IsError) Console.WriteLine("event(tcli): " + e); },
+        var cli = new RambleNode("tcli", null, e => { if (e.IsError) Console.WriteLine("event(tcli): " + e); },
                                domain: 47, multicastInterface: "127.0.0.1", maxTopics: 32);
         try
         {
@@ -408,14 +408,14 @@ static class Program
     }
 
     // The canonical wire of a bare type is its kind alone, so these hashes are the same in
-    // every language binding (pinned in C by dart_test's schema-root phase).
+    // every language binding (pinned in C by ramble_test's schema-root phase).
     const ulong HashBool = 0xee90234f61d2520bUL;
     const ulong HashF32Arr = 0x314844e3386a1fc4UL;
 
     enum Mode : byte { Idle = 0, Run = 1, Fault = 2 }
 
     // The Float3 schema is the shared cross-language golden vector: the same wire and the
-    // same hash from C, C++, C# and Python (pinned in C by dart_test's stdtypes phase).
+    // same hash from C, C++, C# and Python (pinned in C by ramble_test's stdtypes phase).
     const ulong HashFloat3 = 0x04aa9469cd08b1ddUL;
 
     // The video family, same golden vectors (pinned in cpp/test.cpp too). A mirror whose
@@ -428,11 +428,11 @@ static class Program
     // a shipped mirror struct that names itself. Both narrow matching.
     struct Track
     {
-        [DartField("at")]   public Dart.Transform At;
-        [DartField("when")] [DartTypeName("Timestamp")] public long When;
-        [DartField("tag")]  public Dart.Color Tag;
-        [DartField("id")]   [DartTypeName("Uuid")] [DartArray(16)] public byte[] Id;
-        [DartField("velocity")] public Dart.Float3 Velocity;
+        [RambleField("at")]   public Ramble.Transform At;
+        [RambleField("when")] [RambleTypeName("Timestamp")] public long When;
+        [RambleField("tag")]  public Ramble.Color Tag;
+        [RambleField("id")]   [RambleTypeName("Uuid")] [RambleArray(16)] public byte[] Id;
+        [RambleField("velocity")] public Ramble.Float3 Velocity;
     }
 
     static bool StdTypes()
@@ -441,7 +441,7 @@ static class Program
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
         using (var f3 = new Schema("Float3"))
-        using (var mirror = new Schema(typeof(Dart.Float3)))
+        using (var mirror = new Schema(typeof(Ramble.Float3)))
         {
             Check("Float3 compiles by name alone, golden hash", f3.Hash == HashFloat3);
             Check("Float3 is 12 message bytes", f3.Size == 12);
@@ -469,12 +469,12 @@ static class Program
             Check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.Size == 128);
 
             var t = new Track {
-                At = new Dart.Transform { Translation = new Dart.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
+                At = new Ramble.Transform { Translation = new Ramble.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
                                 Rotation = Std.IdentityRotation() },
                 When = Std.Now(),
                 Tag = Std.ColorFromHex(0x112233FFu),
                 Id = new byte[16],
-                Velocity = new Dart.Float3 { X = 1.0f, Y = 2.0f, Z = 3.0f } };
+                Velocity = new Ramble.Float3 { X = 1.0f, Y = 2.0f, Z = 3.0f } };
             for (int i = 0; i < 16; i++) t.Id[i] = (byte)i;
             var back = (Track)sch.Decode(sch.Encode(t));
             Check("a Track round-trips whole",
@@ -487,9 +487,9 @@ static class Program
         // bare name must resolve to the same ones, so both forms are checked hash-exact
         (string, Type, ulong)[] video =
         {
-            ("Image", typeof(Dart.Image), HashImage),
-            ("VideoFrame", typeof(Dart.VideoFrame), HashVideoFrame),
-            ("ExternalVideoStream", typeof(Dart.ExternalVideoStream), HashExternalVideoStream),
+            ("Image", typeof(Ramble.Image), HashImage),
+            ("VideoFrame", typeof(Ramble.VideoFrame), HashVideoFrame),
+            ("ExternalVideoStream", typeof(Ramble.ExternalVideoStream), HashExternalVideoStream),
         };
         foreach (var (name, clr, gold) in video)
         {
@@ -510,40 +510,40 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new DartNode("MA", null, e => { if (e.IsError) Console.WriteLine("event(MA): " + e); },
+        var a = new RambleNode("MA", null, e => { if (e.IsError) Console.WriteLine("event(MA): " + e); },
                              domain: 46, multicastInterface: "127.0.0.1");
-        var b = new DartNode("MB", null, e => { if (e.IsError) Console.WriteLine("event(MB): " + e); },
+        var b = new RambleNode("MB", null, e => { if (e.IsError) Console.WriteLine("event(MB): " + e); },
                              domain: 46, multicastInterface: "127.0.0.1");
         try
         {
-            var pub = new Topic<Dart.Image>(a, "frame", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-            var sub = new Topic<Dart.Image>(b, "frame", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-            sub.TryTake(out Dart.Image _);   // switch to queued delivery
-            var initial = new Dart.ExternalVideoStream
+            var pub = new Topic<Ramble.Image>(a, "frame", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var sub = new Topic<Ramble.Image>(b, "frame", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            sub.TryTake(out Ramble.Image _);   // switch to queued delivery
+            var initial = new Ramble.ExternalVideoStream
             {
-                Kind = Dart.VideoStreamKind.Rtsp,
-                Codec = Dart.VideoCodec.H264,
+                Kind = Ramble.VideoStreamKind.Rtsp,
+                Codec = Ramble.VideoCodec.H264,
                 Width = 1920,
                 Height = 1080,
                 Url = "rtsp://cam.local/main",
                 Name = "front door",
             };
-            var vd = new VariableDefinition<Dart.ExternalVideoStream>(a, "stream", initial);
-            var rv = new RemoteVariable<Dart.ExternalVideoStream>(b, "stream");
+            var vd = new VariableDefinition<Ramble.ExternalVideoStream>(a, "stream", initial);
+            var rv = new RemoteVariable<Ramble.ExternalVideoStream>(b, "stream");
 
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline
-                   && (pub.MatchCount() == 0 || !rv.TryGet(out Dart.ExternalVideoStream _)))
+                   && (pub.MatchCount() == 0 || !rv.TryGet(out Ramble.ExternalVideoStream _)))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
             Check("image topic matched", pub.MatchCount() == 1);
 
-            var img = new Dart.Image
+            var img = new Ramble.Image
             {
                 Width = 64, Height = 4, Stride = 64,
-                Format = Dart.ImageFormat.Mono8,
+                Format = Ramble.ImageFormat.Mono8,
                 Data = new byte[256],
             };
             for (int i = 0; i < img.Data.Length; i++) img.Data[i] = (byte)(i * 7);
@@ -555,38 +555,38 @@ static class Program
             {
                 a.Poll(1);
                 b.Poll(1);
-                if (sub.TryTake(out Dart.Image got, 1))
+                if (sub.TryTake(out Ramble.Image got, 1))
                     gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
-                               && got.Format == Dart.ImageFormat.Mono8
+                               && got.Format == Ramble.ImageFormat.Mono8
                                && got.Data != null && got.Data.Length == img.Data.Length
                                && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255];
             }
             Check("an Image crosses whole (fixed fields + the variable payload)", gotImage);
 
             Check("stream variable replicated the initial",
-                  rv.TryGet(out Dart.ExternalVideoStream s0)
-                  && s0.Kind == Dart.VideoStreamKind.Rtsp
-                  && s0.Codec == Dart.VideoCodec.H264
+                  rv.TryGet(out Ramble.ExternalVideoStream s0)
+                  && s0.Kind == Ramble.VideoStreamKind.Rtsp
+                  && s0.Codec == Ramble.VideoCodec.H264
                   && s0.Width == 1920 && s0.Height == 1080
                   && s0.Url == "rtsp://cam.local/main" && s0.Name == "front door");
 
-            Check("stream variable set accepted", rv.Set(new Dart.ExternalVideoStream
+            Check("stream variable set accepted", rv.Set(new Ramble.ExternalVideoStream
             {
-                Kind = Dart.VideoStreamKind.WebrtcWhep,
+                Kind = Ramble.VideoStreamKind.WebrtcWhep,
                 Url = "https://gw.local/whep/cam1",
                 Name = "front door",
             }) == SendStatus.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline
-                   && !(vd.TryGet(out Dart.ExternalVideoStream v)
-                        && v.Kind == Dart.VideoStreamKind.WebrtcWhep))
+                   && !(vd.TryGet(out Ramble.ExternalVideoStream v)
+                        && v.Kind == Ramble.VideoStreamKind.WebrtcWhep))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
             Check("stream variable set converged at the owner",
-                  vd.TryGet(out Dart.ExternalVideoStream s1)
-                  && s1.Kind == Dart.VideoStreamKind.WebrtcWhep
+                  vd.TryGet(out Ramble.ExternalVideoStream s1)
+                  && s1.Kind == Ramble.VideoStreamKind.WebrtcWhep
                   && s1.Url == "https://gw.local/whep/cam1");
         }
         finally
@@ -651,9 +651,9 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new DartNode("VA", null, e => { if (e.IsError) Console.WriteLine("event(VA): " + e); },
+        var a = new RambleNode("VA", null, e => { if (e.IsError) Console.WriteLine("event(VA): " + e); },
                              domain: 44, multicastInterface: "127.0.0.1");
-        var b = new DartNode("VB", null, e => { if (e.IsError) Console.WriteLine("event(VB): " + e); },
+        var b = new RambleNode("VB", null, e => { if (e.IsError) Console.WriteLine("event(VB): " + e); },
                              domain: 44, multicastInterface: "127.0.0.1");
         try
         {
@@ -720,10 +720,10 @@ static class Program
 
         int evtId = 0, fnId = 0, changeId = 0, doneId = 0, sum = 0, level = 0;
 
-        var srv = new DartNode("dsrv", null,
+        var srv = new RambleNode("dsrv", null,
             e => { if (evtId == 0) evtId = Thread.CurrentThread.ManagedThreadId; },
             domain: 48, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new DartNode("dcli", null, e => { },
+        var cli = new RambleNode("dcli", null, e => { },
             domain: 48, multicastInterface: "127.0.0.1", maxTopics: 32);
         srv.CallbackDispatcher = a => work.Enqueue(a);
         cli.CallbackDispatcher = a => work.Enqueue(a);
@@ -826,9 +826,9 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new DartNode("rsrv", null, e => { },
+        var a = new RambleNode("rsrv", null, e => { },
             domain: 49, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var b = new DartNode("rcli", null, e => { },
+        var b = new RambleNode("rcli", null, e => { },
             domain: 49, multicastInterface: "127.0.0.1", maxTopics: 32, fetchDetails: true);
 
         var pub = new Topic<Level>(a, "reflected", Role.PubOnly,
@@ -840,17 +840,17 @@ static class Program
         // nobody provides this one, so there is nothing to copy and it stays untyped
         var plain = new Topic(b, "unprovided", Role.SubOnly, new Qos { ReflectFromMesh = true });
         Check("an unprovided reflect topic stays untyped",
-              Native.dart_topic_schema(plain._handle) == IntPtr.Zero);
+              Native.ramble_topic_schema(plain._handle) == IntPtr.Zero);
 
         var reflect = new Topic(b, "reflected", Role.SubOnly, new Qos { ReflectFromMesh = true });
         var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline && Native.dart_topic_schema(reflect._handle) == IntPtr.Zero)
+        while (DateTime.UtcNow < deadline && Native.ramble_topic_schema(reflect._handle) == IntPtr.Zero)
         {
             reflect.Refresh();          // never automatic: the app picks the moment
             Thread.Sleep(20);
         }
         Check("a reflect topic took the provider's schema",
-              Native.dart_topic_schema(reflect._handle) != IntPtr.Zero);
+              Native.ramble_topic_schema(reflect._handle) != IntPtr.Zero);
         Check("refresh on a settled handle reports no change", !reflect.Refresh());
 
         a.Close();
@@ -866,7 +866,7 @@ static class Program
         if (!StdTypes()) return 1;
         Console.WriteLine("opening nodes...");
 
-        var sub = new DartNode("sub",
+        var sub = new RambleNode("sub",
             onMessage: m =>
             {
                 Received = m;
@@ -876,7 +876,7 @@ static class Program
             onEvent: e => Console.WriteLine("event(sub): " + e),
             domain: 42, multicastInterface: "127.0.0.1");
 
-        var pub = new DartNode("pub", null, e => Console.WriteLine("event(pub): " + e),
+        var pub = new RambleNode("pub", null, e => Console.WriteLine("event(pub): " + e),
             domain: 42, multicastInterface: "127.0.0.1");
 
         new Topic<Pose>(sub, "pose", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });

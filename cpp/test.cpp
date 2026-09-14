@@ -1,6 +1,6 @@
-/* The two node test for dart.hpp. spec/testing.md lists the legs. Single process,
+/* The two node test for ramble.hpp. spec/testing.md lists the legs. Single process,
  * discovery pinned to loopback on isolated domains, never 0. Exit 0 = PASS. */
-#include "dart.hpp"
+#include "ramble.hpp"
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -15,7 +15,7 @@ static void chk(const char* what, bool ok) {
     if (!ok) g_failures++;
 }
 static bool wait_for(int timeout_ms, const std::function<bool()>& pred,
-                     dart::Node* pump = nullptr) {
+                     ramble::Node* pump = nullptr) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         if (pred()) return true;
@@ -34,9 +34,9 @@ static const char NOTE[]    = "a long unbounded note well over sixteen bytes";
 static const float SAMPLES[] = { 1.5f, -2.25f, 3.75f };
 
 /* build and send one message. false if a setter was refused or the send failed */
-static bool send_one(dart::Topic& pub, const dart::Schema& schema, uint32_t seq) {
-    dart::MessageBuilder s(schema);
-    dart::MapWriter mw;
+static bool send_one(ramble::Topic& pub, const ramble::Schema& schema, uint32_t seq) {
+    ramble::MessageBuilder s(schema);
+    ramble::MapWriter mw;
     mw.put_uint("battery", 87).put_int("signed", -5)
       .put_string("state", "docked").put_bool("ok", true);
     mw.open_array("temps"); mw.put_f64(nullptr, 36.2).put_f64(nullptr, 34.9); mw.close();
@@ -45,10 +45,10 @@ static bool send_one(dart::Topic& pub, const dart::Schema& schema, uint32_t seq)
     s.set_uint("seq", seq)
      .set_string("name", "lidar")
      .set_string("note", NOTE)
-     .set_array("samples", dart::Bytes(SAMPLES, sizeof SAMPLES))
+     .set_array("samples", ramble::Bytes(SAMPLES, sizeof SAMPLES))
      .set_map("extras", mw);
     if (!s.ok() || !mw.ok()) { std::printf("FAIL: encode (ok=%d mw=%d)\n", s.ok(), mw.ok()); return false; }
-    return pub.send(s) == dart::SendStatus::Ok;
+    return pub.send(s) == ramble::SendStatus::Ok;
 }
 
 /* decoded snapshot filled by the subscriber's handler */
@@ -68,7 +68,7 @@ struct Got {
     double      tm_temp0 = 0;
 } g;
 
-static void decode(const dart::MessageView& m) {
+static void decode(const ramble::MessageView& m) {
     g.seq  = (uint32_t)m.get_uint("seq");
     g.name = std::string(m.get_string("name"));
     g.note = std::string(m.get_string("note"));
@@ -77,7 +77,7 @@ static void decode(const dart::MessageView& m) {
     if (g.n_samples > 3) g.n_samples = 3;
     std::memcpy(g.samples, sm.data(), g.n_samples * sizeof(float));
     auto map = m.get_map("extras");
-    dart::MapValue v;
+    ramble::MapValue v;
     if (map.get("battery", v)) g.battery = v.as_uint();
     if (map.get("signed",  v)) g.sgn     = v.as_int();
     if (map.get("ok",      v)) g.ok_flag = v.as_bool();
@@ -85,13 +85,13 @@ static void decode(const dart::MessageView& m) {
     if (map.get("temps",   v)) { g.n_temps = v.array_count(); if (g.n_temps) g.temp0 = v.array_at(0).as_f64(); }
     if (map.get("meta",    v)) {
         auto meta = v.as_map();
-        dart::MapValue mv;
+        ramble::MapValue mv;
         if (meta.get("fw",  mv)) g.meta_fw  = std::string(mv.as_string());
         if (meta.get("rev", mv)) g.meta_rev = mv.as_uint();
     }
 
     /* std::map readback: decode the whole map into an owning tree that outlives the handler */
-    dart::MapDict d = m.get_map("extras").to_map();
+    ramble::MapDict d = m.get_map("extras").to_map();
     if (d.count("battery")) g.tm_battery = d.at("battery").as_uint();
     if (d.count("state"))   g.tm_state   = d.at("state").as_string();
     if (d.count("temps") && d.at("temps").is_array() && !d.at("temps").as_array().empty())
@@ -122,55 +122,55 @@ static bool verify_dynamic() {
 /* leg 3: typed schemas for the patterns layer */
 
 struct AddReq { int32_t x; int32_t y; };
-DART_SCHEMA(AddReq, x, y);
+RAMBLE_SCHEMA(AddReq, x, y);
 struct AddRsp { int64_t sum; };
-DART_SCHEMA(AddRsp, sum);
+RAMBLE_SCHEMA(AddRsp, sum);
 struct Speed { int32_t v; };
-DART_SCHEMA(Speed, v);
+RAMBLE_SCHEMA(Speed, v);
 
 /* padding free: offsets and size equal the wire, the memcpy path */
 struct Flat { uint32_t a; float b; };
-DART_SCHEMA(Flat, a, b);
+RAMBLE_SCHEMA(Flat, a, b);
 /* padded by the compiler while the wire is packed, plus a capped string: the loop path */
 struct Padded {
-    uint8_t         a;
-    uint32_t        b;
-    uint16_t        c;
-    double          d;
-    dart::String<7> tag;
+    uint8_t           a;
+    uint32_t          b;
+    uint16_t          c;
+    double            d;
+    ramble::String<7> tag;
 };
-DART_SCHEMA(Padded, a, b, c, d, tag);
+RAMBLE_SCHEMA(Padded, a, b, c, d, tag);
 static_assert(sizeof(Flat) == 8, "Flat must be padding-free for the memcpy-path leg");
 static_assert(sizeof(Padded) > 1 + 4 + 2 + 8 + 9, "Padded must carry padding for the loop-path leg");
 
 /* the same wire name with a different field set: the subscriber's schema is a subset of
  * the publisher's in another order, so the hashes differ and the rebase path decodes */
 namespace pubside { struct Telemetry { uint32_t seq; float volts; uint16_t flags; }; }
-DART_SCHEMA(pubside::Telemetry, seq, volts, flags);
+RAMBLE_SCHEMA(pubside::Telemetry, seq, volts, flags);
 namespace subside { struct Telemetry { uint16_t flags; uint32_t seq; }; }
-DART_SCHEMA(subside::Telemetry, flags, seq);
+RAMBLE_SCHEMA(subside::Telemetry, flags, seq);
 
-static dart::Deferred<AddRsp> g_deferred;
-static std::mutex             g_deferred_mu;
-static std::atomic<bool>      g_deferred_ready{ false };
+static ramble::Deferred<AddRsp> g_deferred;
+static std::mutex               g_deferred_mu;
+static std::atomic<bool>        g_deferred_ready{ false };
 
 static bool patterns_leg() {
     int fails_at_entry = g_failures;
-    dart::NodeOptions opts;
+    ramble::NodeOptions opts;
     opts.domain = 43;
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     opts.fetch_details = true;   /* observer: peer entity names resolve, else hash placeholders */
 
     auto on_evt = [](const char* tag) {
-        return [tag](const dart::Event& e) {
+        return [tag](const ramble::Event& e) {
             if (e.is_error())
                 std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
 
-    dart::Node a("PA", {}, on_evt("PA"), opts);
-    dart::Node b("PB", {}, on_evt("PB"), opts);
+    ramble::Node a("PA", {}, on_evt("PA"), opts);
+    ramble::Node b("PB", {}, on_evt("PB"), opts);
     chk("patterns: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
 
@@ -179,15 +179,15 @@ static bool patterns_leg() {
     chk("patterns: A started", a.start());
 
     /* functions */
-    dart::FunctionDefinition<AddReq, AddRsp> def_add(a, "add",
+    ramble::FunctionDefinition<AddReq, AddRsp> def_add(a, "add",
         [](const AddReq& q) { return AddRsp{ (int64_t)q.x + q.y }; });
-    dart::FunctionDefinition<AddReq, AddRsp> def_chk(a, "chk",
-        [](const AddReq& q, dart::Request<AddRsp>& rq) {
+    ramble::FunctionDefinition<AddReq, AddRsp> def_chk(a, "chk",
+        [](const AddReq& q, ramble::Request<AddRsp>& rq) {
             if (q.x < 0) rq.fail();
             else         rq.reply(AddRsp{ (int64_t)q.x * q.y });
         });
-    dart::FunctionDefinition<AddReq, AddRsp> def_defer(a, "defr",
-        [](const AddReq& q, dart::Request<AddRsp>& rq) {
+    ramble::FunctionDefinition<AddReq, AddRsp> def_defer(a, "defr",
+        [](const AddReq& q, ramble::Request<AddRsp>& rq) {
             (void)q;
             std::lock_guard<std::mutex> g(g_deferred_mu);
             g_deferred = rq.defer();
@@ -195,9 +195,9 @@ static bool patterns_leg() {
         });
     chk("patterns: definitions created", def_add.valid() && def_chk.valid() && def_defer.valid());
 
-    dart::RemoteFunction<AddReq, AddRsp> rf_add(b, "add");
-    dart::RemoteFunction<AddReq, AddRsp> rf_chk(b, "chk");
-    dart::RemoteFunction<AddReq, AddRsp> rf_defer(b, "defr");
+    ramble::RemoteFunction<AddReq, AddRsp> rf_add(b, "add");
+    ramble::RemoteFunction<AddReq, AddRsp> rf_chk(b, "chk");
+    ramble::RemoteFunction<AddReq, AddRsp> rf_defer(b, "defr");
     chk("patterns: remotes created", rf_add.valid() && rf_chk.valid() && rf_defer.valid());
 
     chk("patterns: definition discovered", wait_for(4000,
@@ -217,7 +217,7 @@ static bool patterns_leg() {
 
     /* full form handler failing: AppError */
     auto r3 = rf_chk.call(AddReq{ -1, 0 }, 3000);
-    chk("patterns: fail() -> AppError", !r3.ok() && r3.status() == dart::CallStatus::AppError);
+    chk("patterns: fail() -> AppError", !r3.ok() && r3.status() == ramble::CallStatus::AppError);
 
     /* deferred completion from another thread while the caller blocks */
     std::thread completer([] {
@@ -234,46 +234,46 @@ static bool patterns_leg() {
     std::atomic<int64_t> async_sum{ 0 };
     std::atomic<bool>    async_done{ false };
     auto st = rf_add.call_async(AddReq{ 1, 2 },
-        [&](const dart::ResponseView<AddRsp>& rv) {
+        [&](const ramble::ResponseView<AddRsp>& rv) {
             if (rv.ok()) async_sum = rv->sum;
             async_done = true;
         });
-    chk("patterns: call_async accepted", st == dart::SendStatus::Ok);
+    chk("patterns: call_async accepted", st == ramble::SendStatus::Ok);
     chk("patterns: async 1+2=3", wait_for(3000, [&] { return async_done.load(); }, &b)
         && async_sum == 3);
 
     chk("patterns: caller_count >= 1", def_add.caller_count() >= 1);
 
     /* variables */
-    dart::VariableOptions<Speed> vo;
+    ramble::VariableOptions<Speed> vo;
     vo.initial = Speed{ 7 };
     vo.allow_force = true;
-    dart::VariableDefinition<Speed> vd(a, "speed", vo);
-    dart::RemoteVariable<Speed>     rv(b, "speed");
+    ramble::VariableDefinition<Speed> vd(a, "speed", vo);
+    ramble::RemoteVariable<Speed>     rv(b, "speed");
     chk("var: created", vd.valid() && rv.valid());
     chk("var: remote wait() gets a value", rv.wait(4000));
     { auto v = rv.get(); chk("var: initial 7 replicated", v && v->v == 7); }
-    chk("var: remote set accepted", rv.set(Speed{ 25 }) == dart::SendStatus::Ok);
+    chk("var: remote set accepted", rv.set(Speed{ 25 }) == ramble::SendStatus::Ok);
     chk("var: set converges at definition", wait_for(3000,
         [&] { auto v = vd.get(); return v && v->v == 25; }, &b));
-    chk("var: force accepted", vd.force(Speed{ 99 }) == dart::SendStatus::Ok);
+    chk("var: force accepted", vd.force(Speed{ 99 }) == ramble::SendStatus::Ok);
     chk("var: forced value replicated", wait_for(3000,
         [&] { auto v = rv.get(); return rv.forced() && v && v->v == 99; }, &b));
-    chk("var: set absorbed while forced", vd.set(Speed{ 50 }) == dart::SendStatus::Ok);
-    chk("var: unforce accepted", vd.unforce() == dart::SendStatus::Ok);
+    chk("var: set absorbed while forced", vd.set(Speed{ 50 }) == ramble::SendStatus::Ok);
+    chk("var: unforce accepted", vd.unforce() == ramble::SendStatus::Ok);
     chk("var: unforce restores absorbed set", wait_for(3000,
         [&] { auto v = rv.get(); return !rv.forced() && v && v->v == 50; }, &b));
     chk("var: has_definition/remote_count", rv.has_definition() && vd.remote_count() >= 1);
 
     /* variable events: on_change replays + dedups, on_write counts every write */
     std::atomic<int> vchg{ 0 }, vwr{ 0 }; std::atomic<int64_t> vlast{ 0 };
-    vd.on_change([&](const Speed& s, const dart::VariableUpdate& u) { (void)u; vchg++; vlast = s.v; });
+    vd.on_change([&](const Speed& s, const ramble::VariableUpdate& u) { (void)u; vchg++; vlast = s.v; });
     chk("var: on_change replays current at registration", vchg.load() == 1 && vlast.load() == 50);
     vd.on_write([&](const Speed& s) { (void)s; vwr++; });
     chk("var: on_write does not replay", vwr.load() == 0);
-    chk("var: identical re-set accepted", vd.set(Speed{ 50 }) == dart::SendStatus::Ok);
+    chk("var: identical re-set accepted", vd.set(Speed{ 50 }) == ramble::SendStatus::Ok);
     chk("var: identical re-set is a write, not a change", vchg.load() == 1 && vwr.load() == 1);
-    chk("var: new set accepted", vd.set(Speed{ 51 }) == dart::SendStatus::Ok);
+    chk("var: new set accepted", vd.set(Speed{ 51 }) == ramble::SendStatus::Ok);
     chk("var: change fires inline with the new value",
         vchg.load() == 2 && vlast.load() == 51 && vwr.load() == 2);
     std::atomic<int64_t> rlast{ 0 };
@@ -282,19 +282,19 @@ static bool patterns_leg() {
     vd.on_change(nullptr); vd.on_write(nullptr); rv.on_change(nullptr);
 
     /* typed pub sub, memcpy path: a padding free struct and identical schemas */
-    dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
+    ramble::Qos rel; rel.reliability = ramble::Reliability::Reliable;
     std::atomic<bool> flat_ok{ false };
-    dart::Publisher<Flat>  pf(a, "flat", rel);
-    dart::Subscriber<Flat> sf(b, "flat",
+    ramble::Publisher<Flat>  pf(a, "flat", rel);
+    ramble::Subscriber<Flat> sf(b, "flat",
         [&](const Flat& f) { if (f.a == 7 && f.b == 2.5f) flat_ok = true; }, rel);
     chk("codec: flat pair created", pf.valid() && sf.valid());
     chk("codec: flat matched", wait_for(4000, [&] { return pf.match_count() > 0 && pf.ready(); }, &b));
-    chk("codec: flat send", pf.send(Flat{ 7, 2.5f }) == dart::SendStatus::Ok);
+    chk("codec: flat send", pf.send(Flat{ 7, 2.5f }) == ramble::SendStatus::Ok);
     chk("codec: memcpy-path round trip", wait_for(3000, [&] { return flat_ok.load(); }, &b));
 
     /* typed pub sub, loop path: a padded struct plus a string, via the typed take() */
-    dart::Publisher<Padded>  pp(a, "padded", rel);
-    dart::Subscriber<Padded> sp(b, "padded", rel);
+    ramble::Publisher<Padded>  pp(a, "padded", rel);
+    ramble::Subscriber<Padded> sp(b, "padded", rel);
     chk("codec: padded pair created", pp.valid() && sp.valid());
     (void)sp.take(0);   /* switch to queued delivery before anything arrives */
     chk("codec: padded matched", wait_for(4000, [&] { return pp.match_count() > 0; }, &b));
@@ -302,7 +302,7 @@ static bool patterns_leg() {
     out.a = 9; out.b = 0x11223344u; out.c = 777; out.d = -3.5;
     chk("codec: string assign", out.tag.assign("robot"));
     chk("codec: string over-cap refused", !out.tag.assign("well over seven"));
-    chk("codec: padded send", pp.send(out) == dart::SendStatus::Ok);
+    chk("codec: padded send", pp.send(out) == ramble::SendStatus::Ok);
     auto tm = sp.take(3000);
     chk("codec: loop-path take round trip", tm.has_value()
         && tm->value().a == 9 && tm->value().b == 0x11223344u
@@ -313,25 +313,25 @@ static bool patterns_leg() {
 
     /* typed pub sub, schema hash mismatch: a subset subscriber, rebase decode */
     std::atomic<bool> tele_ok{ false };
-    dart::Publisher<pubside::Telemetry>  tp(a, "tele", rel);
-    dart::Subscriber<subside::Telemetry> ts(b, "tele",
+    ramble::Publisher<pubside::Telemetry>  tp(a, "tele", rel);
+    ramble::Subscriber<subside::Telemetry> ts(b, "tele",
         [&](const subside::Telemetry& t) { if (t.seq == 31337 && t.flags == 5) tele_ok = true; }, rel);
     chk("codec: telemetry pair created", tp.valid() && ts.valid());
     chk("codec: telemetry matched", wait_for(4000, [&] { return tp.match_count() > 0 && tp.ready(); }, &b));
-    chk("codec: telemetry send", tp.send(pubside::Telemetry{ 31337, 12.6f, 5 }) == dart::SendStatus::Ok);
+    chk("codec: telemetry send", tp.send(pubside::Telemetry{ 31337, 12.6f, 5 }) == ramble::SendStatus::Ok);
     chk("codec: subset/rebase round trip", wait_for(3000, [&] { return tele_ok.load(); }, &b));
 
     /* reflection: local and peer entities */
-    auto find = [](const std::vector<dart::Entity>& es, dart::EntityKind k, const char* nm)
-                -> const dart::Entity* {
+    auto find = [](const std::vector<ramble::Entity>& es, ramble::EntityKind k, const char* nm)
+                -> const ramble::Entity* {
         for (const auto& e : es) if (e.kind == k && e.name == nm) return &e;
         return nullptr;
     };
     auto local = a.entities();
-    chk("reflect: local function folded",  find(local, dart::EntityKind::Function, "add") != nullptr);
-    chk("reflect: local variable folded",  find(local, dart::EntityKind::Variable, "speed") != nullptr);
-    chk("reflect: local topic passes",     find(local, dart::EntityKind::Topic, "flat") != nullptr);
-    const dart::Entity* var_ent = find(local, dart::EntityKind::Variable, "speed");
+    chk("reflect: local function folded",  find(local, ramble::EntityKind::Function, "add") != nullptr);
+    chk("reflect: local variable folded",  find(local, ramble::EntityKind::Variable, "speed") != nullptr);
+    chk("reflect: local topic passes",     find(local, ramble::EntityKind::Topic, "flat") != nullptr);
+    const ramble::Entity* var_ent = find(local, ramble::EntityKind::Variable, "speed");
     chk("reflect: variable writable", var_ent && var_ent->writable);
 
     bool peer_seen = false, peer_fn = false;
@@ -339,7 +339,7 @@ static bool patterns_leg() {
         if (p.name != "PA") continue;
         peer_seen = true;
         auto es = b.entities(p.id);
-        const dart::Entity* e = find(es, dart::EntityKind::Function, "add");
+        const ramble::Entity* e = find(es, ramble::EntityKind::Function, "add");
         peer_fn = e && e->provides;
     }
     chk("reflect: peer PA visible", peer_seen);
@@ -357,13 +357,13 @@ static const uint64_t HASH_VIDEO     = 0xf677bd147b513fbcULL;   /* `VideoFrame` 
 static const uint64_t HASH_EXTSTREAM = 0xaae502077016ac13ULL;   /* `ExternalVideoStream` */
 
 struct Track {
-    dart::Transform at;
-    dart::Uuid      id;
-    dart::Timestamp when;
-    dart::Color     tag;
-    dart::Float3    velocity;
+    ramble::Transform at;
+    ramble::Uuid      id;
+    ramble::Timestamp when;
+    ramble::Color     tag;
+    ramble::Float3    velocity;
 };
-DART_SCHEMA(Track, at, id, when, tag, velocity);
+RAMBLE_SCHEMA(Track, at, id, when, tag, velocity);
 
 static std::atomic<int> g_track_recv{0};
 static double  g_track_x = 0.0;
@@ -371,53 +371,53 @@ static uint8_t g_track_id0 = 0;
 
 static bool stdtypes_leg() {
     int fails_at_entry = g_failures;
-    dart::NodeOptions opts;
+    ramble::NodeOptions opts;
     opts.domain = 46;
     opts.multicast_interface = "127.0.0.1";
-    auto on_evt = [](const dart::Event& e) {
-        if (e.is_error() && e.error() != dart::ErrorKind::SchemaMismatch)
+    auto on_evt = [](const ramble::Event& e) {
+        if (e.is_error() && e.error() != ramble::ErrorKind::SchemaMismatch)
             std::printf("event(std): %s\n", e.to_string().c_str());
     };
-    dart::Node a("std-a", [](const dart::MessageView&) {}, on_evt, opts);
-    dart::Node b("std-b", [](const dart::MessageView&) {}, on_evt, opts);
+    ramble::Node a("std-a", [](const ramble::MessageView&) {}, on_evt, opts);
+    ramble::Node b("std-b", [](const ramble::MessageView&) {}, on_evt, opts);
     chk("std: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
     chk("std: A started", a.start());     /* A on its service thread, B pumped by wait_for */
 
     /* the mirrors ARE the wire, so the memcpy fast path stays available */
-    chk("std: Transform is 88 bytes", sizeof(dart::Transform) == 88);
-    chk("std: Uuid is 16 bytes", sizeof(dart::Uuid) == 16);
-    chk("std: Color is 4 bytes", sizeof(dart::Color) == 4);
+    chk("std: Transform is 88 bytes", sizeof(ramble::Transform) == 88);
+    chk("std: Uuid is 16 bytes", sizeof(ramble::Uuid) == 16);
+    chk("std: Color is 4 bytes", sizeof(ramble::Color) == 4);
 
     {   /* a standard type as a whole schema: its name, its canonical hash */
-        auto f3 = dart::Schema::compile("Float3");
+        auto f3 = ramble::Schema::compile("Float3");
         chk("std: Float3 compiles by name alone", f3.has_value());
         if (f3) {
             chk("std: Float3 golden hash", f3->hash() == HASH_FLOAT3);
             chk("std: Float3 is 12 message bytes", f3->size() == 12);
         }
-        auto tf    = dart::Schema::compile("Transform");
-        auto twist = dart::Schema::compile("Twist");
+        auto tf    = ramble::Schema::compile("Transform");
+        auto twist = ramble::Schema::compile("Twist");
         chk("std: Transform and Twist are distinct names, never mistaken for each other",
             tf && twist && !twist->can_read(*tf) && !tf->can_read(*twist));
         /* the name NARROWS: an anonymous field of the same shape reads a Transform field,
            never the reverse (a struct ROOT's name stays strict-equal, as before) */
-        auto named_f = dart::Schema::compile("W { at: Transform }");
-        auto bare_f  = dart::Schema::compile(
+        auto named_f = ramble::Schema::compile("W { at: Transform }");
+        auto bare_f  = ramble::Schema::compile(
             "W { at: { translation: { x: f64, y: f64, z: f64 },"
             "          rotation: { x: f64, y: f64, z: f64, w: f64 }, parent: string<30> } }");
         chk("std: an anonymous field of the same shape reads a Transform field",
             named_f && bare_f && bare_f->can_read(*named_f) && !named_f->can_read(*bare_f));
         if (tf) {
-            dart::Schema::Field f;
+            ramble::Schema::Field f;
             int i = tf->field_index("translation");
             chk("std: a named member reports its type name",
                 i >= 0 && tf->field_at((uint16_t)i, f) && f.type_name == "Double3");
         }
-        auto cloud = dart::Schema::compile("Cloud { pts: Float3[], at: Transform }");
+        auto cloud = ramble::Schema::compile("Cloud { pts: Float3[], at: Transform }");
         chk("std: named types nest and array", cloud.has_value());
         if (cloud) {
-            dart::Schema::Field f;
+            ramble::Schema::Field f;
             int i = cloud->field_index("pts");
             chk("std: an array element reports its type name",
                 i >= 0 && cloud->field_at((uint16_t)i, f)
@@ -425,9 +425,9 @@ static bool stdtypes_leg() {
         }
     }
 
-    {   /* the DART_SCHEMA codec emits the NAMES, never the inlined shapes */
-        dart::Publisher<Track> pub(a, "std/track");
-        const dart::Schema* sc = dart::priv::schema_of<Track>();
+    {   /* the RAMBLE_SCHEMA codec emits the NAMES, never the inlined shapes */
+        ramble::Publisher<Track> pub(a, "std/track");
+        const ramble::Schema* sc = ramble::priv::schema_of<Track>();
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("std: the codec spells named members by name",
             txt.find("at: Transform") != std::string::npos &&
@@ -440,8 +440,8 @@ static bool stdtypes_leg() {
     }
 
     {   /* end to end through the typed codec */
-        dart::Publisher<Track> pub(a, "std/track2");
-        dart::Subscriber<Track> sub(b, "std/track2", [](const Track& t) {
+        ramble::Publisher<Track> pub(a, "std/track2");
+        ramble::Subscriber<Track> sub(b, "std/track2", [](const Track& t) {
             g_track_x = t.at.translation.x;
             g_track_id0 = t.id.bytes[0];
             g_track_recv++;
@@ -450,10 +450,10 @@ static bool stdtypes_leg() {
             wait_for(4000, [&] { return pub.match_count() == 1; }, &b));
         Track t{};
         t.at.translation = { 4.5, -1.25, 9.0 };
-        t.at.rotation = dart::identity_rotation();
+        t.at.rotation = ramble::identity_rotation();
         t.id.bytes[0] = 0xAB;
-        t.when = dart::now();
-        t.tag = dart::color_from_hex(0x112233FFu);
+        t.when = ramble::now();
+        t.tag = ramble::color_from_hex(0x112233FFu);
         t.velocity = { 1.0f, 2.0f, 3.0f };
         pub.send(t);
         chk("std: a Track crosses whole",
@@ -462,12 +462,12 @@ static bool stdtypes_leg() {
     }
 
     {   /* the video family: mirrors with a variable member ride the codec's tail path */
-        const dart::Schema* im = dart::priv::schema_of<dart::Image>();
-        const dart::Schema* vf = dart::priv::schema_of<dart::VideoFrame>();
-        const dart::Schema* xs = dart::priv::schema_of<dart::ExternalVideoStream>();
-        auto imc = dart::Schema::compile("Image");
-        auto vfc = dart::Schema::compile("VideoFrame");
-        auto xsc = dart::Schema::compile("ExternalVideoStream");
+        const ramble::Schema* im = ramble::priv::schema_of<ramble::Image>();
+        const ramble::Schema* vf = ramble::priv::schema_of<ramble::VideoFrame>();
+        const ramble::Schema* xs = ramble::priv::schema_of<ramble::ExternalVideoStream>();
+        auto imc = ramble::Schema::compile("Image");
+        auto vfc = ramble::Schema::compile("VideoFrame");
+        auto xsc = ramble::Schema::compile("ExternalVideoStream");
         chk("std: video codecs compile", im && vf && xs && imc && vfc && xsc);
         chk("std: Image codec == canonical", im && imc && im->hash() == imc->hash());
         chk("std: VideoFrame codec == canonical", vf && vfc && vf->hash() == vfc->hash());
@@ -478,41 +478,41 @@ static bool stdtypes_leg() {
 
         /* an Image end to end: the variable payload crosses beside the fixed fields */
         std::atomic<int> img_recv{ 0 };
-        dart::Image img_got;
-        dart::Publisher<dart::Image> ipub(a, "std/frame");
-        dart::Subscriber<dart::Image> isub(b, "std/frame", [&](const dart::Image& i) {
+        ramble::Image img_got;
+        ramble::Publisher<ramble::Image> ipub(a, "std/frame");
+        ramble::Subscriber<ramble::Image> isub(b, "std/frame", [&](const ramble::Image& i) {
             img_got = i;
             img_recv++;
         });
         chk("std: image pair matched",
             wait_for(4000, [&] { return ipub.match_count() == 1 && ipub.ready(); }, &b));
-        dart::Image img;
+        ramble::Image img;
         img.width = 320; img.height = 4; img.stride = 320;
-        img.format = dart::ImageFormat::Mono8;
+        img.format = ramble::ImageFormat::Mono8;
         img.data.resize((size_t)img.stride * img.height);
         for (size_t i = 0; i < img.data.size(); i++) img.data[i] = (uint8_t)(i * 7);
-        chk("std: image send", ipub.send(img) == dart::SendStatus::Ok);
+        chk("std: image send", ipub.send(img) == ramble::SendStatus::Ok);
         chk("std: image crosses whole",
             wait_for(4000, [&] { return img_recv.load() > 0; }, &b)
-            && img_got.width == 320 && img_got.format == dart::ImageFormat::Mono8
+            && img_got.width == 320 && img_got.format == ramble::ImageFormat::Mono8
             && img_got.data.size() == img.data.size()
             && img_got.data == img.data);
 
         /* ExternalVideoStream is fully fixed: the latched-variable use it exists for */
-        dart::VariableOptions<dart::ExternalVideoStream> vo;
-        dart::ExternalVideoStream st;
-        st.kind = dart::VideoStreamKind::Rtsp;
-        st.codec = dart::VideoCodec::H264;
+        ramble::VariableOptions<ramble::ExternalVideoStream> vo;
+        ramble::ExternalVideoStream st;
+        st.kind = ramble::VideoStreamKind::Rtsp;
+        st.codec = ramble::VideoCodec::H264;
         st.width = 1920; st.height = 1080;
         st.url.value.assign("rtsp://cam.local/main");
         st.name.assign("front door");
         vo.initial = st;
-        dart::VariableDefinition<dart::ExternalVideoStream> vdef(a, "std/stream", vo);
-        dart::RemoteVariable<dart::ExternalVideoStream>     vrem(b, "std/stream");
+        ramble::VariableDefinition<ramble::ExternalVideoStream> vdef(a, "std/stream", vo);
+        ramble::RemoteVariable<ramble::ExternalVideoStream>     vrem(b, "std/stream");
         chk("std: stream variable replicates", wait_for(4000, [&] {
                 auto v = vrem.get();
-                return v && v->kind == dart::VideoStreamKind::Rtsp
-                         && v->codec == dart::VideoCodec::H264
+                return v && v->kind == ramble::VideoStreamKind::Rtsp
+                         && v->codec == ramble::VideoCodec::H264
                          && v->width == 1920 && v->height == 1080
                          && v->url.value == "rtsp://cam.local/main"
                          && v->name == "front door";
@@ -520,114 +520,114 @@ static bool stdtypes_leg() {
     }
 
     {   /* the thin operations */
-        dart::Color c = dart::color_from_hex(0x11223344u);
+        ramble::Color c = ramble::color_from_hex(0x11223344u);
         chk("std: Color hex round-trips", c.r == 0x11 && c.a == 0x44
-                                          && dart::color_to_hex(c) == 0x11223344u);
-        chk("std: vector length", dart::length(dart::Double3{ 3.0, 4.0, 0.0 }) == 5.0);
-        dart::Double3 r = dart::rotate(dart::Quaternion{ 0.0, 0.0, 1.0, 0.0 },
-                                       dart::Double3{ 1.0, 0.0, 0.0 });
+                                          && ramble::color_to_hex(c) == 0x11223344u);
+        chk("std: vector length", ramble::length(ramble::Double3{ 3.0, 4.0, 0.0 }) == 5.0);
+        ramble::Double3 r = ramble::rotate(ramble::Quaternion{ 0.0, 0.0, 1.0, 0.0 },
+                                       ramble::Double3{ 1.0, 0.0, 0.0 });
         chk("std: quaternion rotate", r.x < -0.999 && r.x > -1.001);
-        dart::Uuid u1 = dart::new_uuid(), u2 = dart::new_uuid();
+        ramble::Uuid u1 = ramble::new_uuid(), u2 = ramble::new_uuid();
         chk("std: new_uuid is random and version 4",
-            !dart::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0
+            !ramble::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0
             && (u1.bytes[6] & 0xF0u) == 0x40u);
-        chk("std: now() is Unix-epoch microseconds", dart::now().us > 1600000000000000LL);
-        chk("std: duration helpers", dart::seconds_of(dart::milliseconds(1500)) == 1.5);
+        chk("std: now() is Unix-epoch microseconds", ramble::now().us > 1600000000000000LL);
+        chk("std: duration helpers", ramble::seconds_of(ramble::milliseconds(1500)) == 1.5);
     }
     a.stop();
     return g_failures == fails_at_entry;
 }
 
-/* leg 4: bare type roots with no DART_SCHEMA, the type is the schema */
+/* leg 4: bare type roots with no RAMBLE_SCHEMA, the type is the schema */
 /* The canonical wire of a bare type is its kind alone, so these hashes are the same in
- * every language binding (pinned in C by dart_test's schema-root phase). */
+ * every language binding (pinned in C by ramble_test's schema-root phase). */
 static const uint64_t HASH_BOOL   = 0xee90234f61d2520bULL;
 static const uint64_t HASH_F32ARR = 0x314844e3386a1fc4ULL;
 
 static bool value_root_leg() {
     int fails_at_entry = g_failures;
-    dart::NodeOptions opts;
+    ramble::NodeOptions opts;
     opts.domain = 44;
     opts.multicast_interface = "127.0.0.1";
     auto on_evt = [](const char* tag) {
-        return [tag](const dart::Event& e) {
+        return [tag](const ramble::Event& e) {
             if (e.is_error()) std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
-    dart::Node a("VA", {}, on_evt("VA"), opts);
-    dart::Node b("VB", {}, on_evt("VB"), opts);
+    ramble::Node a("VA", {}, on_evt("VA"), opts);
+    ramble::Node b("VB", {}, on_evt("VB"), opts);
     chk("root: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
     chk("root: A started", a.start());   /* A on its service thread, B pumped by wait_for */
 
     /* the canonical-hash pin: the typed codec and the DSL agree, and both agree with C */
-    const dart::Schema* sb = dart::priv::schema_of<bool>();
-    auto arr = dart::Schema::compile("f32[]");
+    const ramble::Schema* sb = ramble::priv::schema_of<bool>();
+    auto arr = ramble::Schema::compile("f32[]");
     chk("root: bool codec compiles", sb != nullptr);
     chk("root: `bool` canonical hash", sb && sb->hash() == HASH_BOOL);
     chk("root: `f32[]` canonical hash", arr && arr->hash() == HASH_F32ARR);
     chk("root: bare root is one anonymous field",
         sb && sb->field_count() == 1 && sb->name().empty());
 
-    dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
+    ramble::Qos rel; rel.reliability = ramble::Reliability::Reliable;
 
     /* bool: the whole payload is one byte */
     std::atomic<int> flags{ 0 };
-    dart::Publisher<bool>  pb(a, "flag", rel);
-    dart::Subscriber<bool> sub_b(b, "flag", [&](const bool& v) { if (v) flags++; }, rel);
+    ramble::Publisher<bool>  pb(a, "flag", rel);
+    ramble::Subscriber<bool> sub_b(b, "flag", [&](const bool& v) { if (v) flags++; }, rel);
     chk("root: bool pair created", pb.valid() && sub_b.valid());
     chk("root: bool matched", wait_for(4000, [&] { return pb.match_count() > 0 && pb.ready(); }, &b));
-    chk("root: bool send", pb.send(true) == dart::SendStatus::Ok);
+    chk("root: bool send", pb.send(true) == ramble::SendStatus::Ok);
     chk("root: bool round trip", wait_for(3000, [&] { return flags.load() == 1; }, &b));
 
     /* std::string: the unbounded `string` root, one tail frame */
     std::string got;
-    dart::Publisher<std::string>  ps(a, "note", rel);
-    dart::Subscriber<std::string> sub_s(b, "note", [&](const std::string& v) { got = v; }, rel);
+    ramble::Publisher<std::string>  ps(a, "note", rel);
+    ramble::Subscriber<std::string> sub_s(b, "note", [&](const std::string& v) { got = v; }, rel);
     chk("root: string pair created", ps.valid() && sub_s.valid());
     chk("root: string matched", wait_for(4000, [&] { return ps.match_count() > 0 && ps.ready(); }, &b));
-    chk("root: string send", ps.send(std::string("a bare unbounded string")) == dart::SendStatus::Ok);
+    chk("root: string send", ps.send(std::string("a bare unbounded string")) == ramble::SendStatus::Ok);
     chk("root: string round trip", wait_for(3000, [&] { return got == "a bare unbounded string"; }, &b));
 
     /* std::array: a fixed array root, taken through the queue */
-    dart::Publisher<std::array<float, 3>>  pa3(a, "xyz", rel);
-    dart::Subscriber<std::array<float, 3>> sa3(b, "xyz", rel);
+    ramble::Publisher<std::array<float, 3>>  pa3(a, "xyz", rel);
+    ramble::Subscriber<std::array<float, 3>> sa3(b, "xyz", rel);
     (void)sa3.take(0);                                  /* queued delivery */
     chk("root: array pair created", pa3.valid() && sa3.valid());
     chk("root: array matched", wait_for(4000, [&] { return pa3.match_count() > 0; }, &b));
-    chk("root: array send", pa3.send(std::array<float, 3>{ 1.5f, 2.5f, -3.f }) == dart::SendStatus::Ok);
+    chk("root: array send", pa3.send(std::array<float, 3>{ 1.5f, 2.5f, -3.f }) == ramble::SendStatus::Ok);
     {   auto tm = sa3.take(3000);
         chk("root: array take round trip", tm.has_value() && tm->value()[0] == 1.5f
             && tm->value()[2] == -3.f);
     }
 
     /* a variable whose type is a bare double */
-    dart::VariableOptions<double> vo;
+    ramble::VariableOptions<double> vo;
     vo.initial = 1.25;
-    dart::VariableDefinition<double> vd(a, "gain", vo);
-    dart::RemoteVariable<double>     rv(b, "gain");
+    ramble::VariableDefinition<double> vd(a, "gain", vo);
+    ramble::RemoteVariable<double>     rv(b, "gain");
     chk("root: variable pair created", vd.valid() && rv.valid());
     chk("root: variable replicates the initial", wait_for(4000,
         [&] { auto v = rv.get(); return v && *v == 1.25; }, &b));
-    chk("root: variable set accepted", rv.set(2.5) == dart::SendStatus::Ok);
+    chk("root: variable set accepted", rv.set(2.5) == ramble::SendStatus::Ok);
     chk("root: variable set converges", wait_for(3000,
         [&] { auto v = vd.get(); return v && *v == 2.5; }, &b));
 
     /* the dynamic API over a bare root: MessageBuilder/FieldView through the "" path */
-    auto f64 = dart::Schema::compile("f64");
+    auto f64 = ramble::Schema::compile("f64");
     chk("root: dynamic f64 schema", f64 && f64->field_count() == 1);
     if (f64) {
         std::atomic<int> hits{ 0 };
         double seen = 0;
-        dart::Topic dp(a, "dyn", dart::Role::PubOnly, &*f64, rel);
-        dart::Subscriber<> ds(b, "dyn", &*f64,
-            [&](const dart::MessageView& m) { seen = m.get_f64(""); hits++; }, rel);
+        ramble::Topic dp(a, "dyn", ramble::Role::PubOnly, &*f64, rel);
+        ramble::Subscriber<> ds(b, "dyn", &*f64,
+            [&](const ramble::MessageView& m) { seen = m.get_f64(""); hits++; }, rel);
         chk("root: dynamic pair created", dp.valid() && ds.valid());
         chk("root: dynamic matched", wait_for(4000, [&] { return dp.match_count() > 0 && dp.ready(); }, &b));
-        dart::MessageBuilder mb(*f64);
+        ramble::MessageBuilder mb(*f64);
         mb.set_f64("", -7.5);
         chk("root: builder set through the empty path", mb.ok());
-        chk("root: dynamic send", dp.send(mb) == dart::SendStatus::Ok);
+        chk("root: dynamic send", dp.send(mb) == ramble::SendStatus::Ok);
         chk("root: dynamic round trip", wait_for(3000, [&] { return hits.load() == 1; }, &b));
         chk("root: dynamic value read through the empty path", seen == -7.5);
     }
@@ -636,7 +636,7 @@ static bool value_root_leg() {
 }
 
 /* leg 6: variable members, std::vector<E> and std::string, as tail frames */
-/* A DART_SCHEMA struct may carry variable members: each rides the message tail as a
+/* A RAMBLE_SCHEMA struct may carry variable members: each rides the message tail as a
  * length framed section read by path, while the fixed fields keep the static table. */
 
 /* the same wire name, the publisher a superset in another order with an extra variable
@@ -646,7 +646,7 @@ namespace narrow { struct Chunk {
     std::vector<float> samples;
     std::string        note;
 }; }
-DART_SCHEMA(narrow::Chunk, seq, samples, note);
+RAMBLE_SCHEMA(narrow::Chunk, seq, samples, note);
 
 namespace wide { struct Chunk {
     uint64_t           stamp = 0;
@@ -656,13 +656,13 @@ namespace wide { struct Chunk {
     std::string        note;
     float              gain = 0.f;
 }; }
-DART_SCHEMA(wide::Chunk, stamp, debug, samples, seq, note, gain);
+RAMBLE_SCHEMA(wide::Chunk, stamp, debug, samples, seq, note, gain);
 
 static bool tails_leg() {
     int fails_at_entry = g_failures;
 
     {   /* codec-level: spelling, roundtrip, and the bare-vector root pin */
-        const dart::Schema* sc = dart::priv::schema_of<narrow::Chunk>();
+        const ramble::Schema* sc = ramble::priv::schema_of<narrow::Chunk>();
         chk("tails: Chunk codec compiles", sc != nullptr);
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("tails: variable members spell as f32[] / string",
@@ -674,46 +674,46 @@ static bool tails_leg() {
         in.samples = { 1.5f, -2.5f, 8.75f };
         in.note = "a note well past any small-string buffer, to make the heap real";
         std::vector<uint8_t> scratch;
-        dart::Bytes wire = dart::priv::encode(in, scratch);
+        ramble::Bytes wire = ramble::priv::encode(in, scratch);
         chk("tails: encode produces a message", wire.size() > 0);
         narrow::Chunk out;
-        chk("tails: decode roundtrips", dart::priv::decode(out, wire, nullptr)
+        chk("tails: decode roundtrips", ramble::priv::decode(out, wire, nullptr)
             && out.seq == 7 && out.samples == in.samples && out.note == in.note);
 
         narrow::Chunk empty_in, empty_out;
         empty_out.samples = { 9.f };            /* stale state must be overwritten */
         empty_out.note = "stale";
-        dart::Bytes ewire = dart::priv::encode(empty_in, scratch);
+        ramble::Bytes ewire = ramble::priv::encode(empty_in, scratch);
         chk("tails: empty vector and string roundtrip", ewire.size() > 0
-            && dart::priv::decode(empty_out, ewire, nullptr)
+            && ramble::priv::decode(empty_out, ewire, nullptr)
             && empty_out.samples.empty() && empty_out.note.empty());
 
-        const dart::Schema* vr = dart::priv::schema_of<std::vector<float>>();
+        const ramble::Schema* vr = ramble::priv::schema_of<std::vector<float>>();
         chk("tails: bare std::vector<float> root is canonical `f32[]`",
             vr && vr->hash() == HASH_F32ARR);
     }
 
-    dart::NodeOptions opts;
+    ramble::NodeOptions opts;
     opts.domain = 47;
     opts.multicast_interface = "127.0.0.1";
     auto on_evt = [](const char* tag) {
-        return [tag](const dart::Event& e) {
-            if (e.is_error() && e.error() != dart::ErrorKind::SchemaMismatch)
+        return [tag](const ramble::Event& e) {
+            if (e.is_error() && e.error() != ramble::ErrorKind::SchemaMismatch)
                 std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
-    dart::Node a("TA", {}, on_evt("TA"), opts);
-    dart::Node b("TB", {}, on_evt("TB"), opts);
+    ramble::Node a("TA", {}, on_evt("TA"), opts);
+    ramble::Node b("TB", {}, on_evt("TB"), opts);
     chk("tails: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
     chk("tails: A started", a.start());   /* A on its service thread, B pumped by wait_for */
-    dart::Qos rel; rel.reliability = dart::Reliability::Reliable;
+    ramble::Qos rel; rel.reliability = ramble::Reliability::Reliable;
 
     {   /* subset/rebase: wide publisher, narrow subscriber, frames found by path */
         std::atomic<int> got{ 0 };
         narrow::Chunk seen;
-        dart::Publisher<wide::Chunk>    pub(a, "tails/chunk", rel);
-        dart::Subscriber<narrow::Chunk> sub(b, "tails/chunk", [&](const narrow::Chunk& c) {
+        ramble::Publisher<wide::Chunk>    pub(a, "tails/chunk", rel);
+        ramble::Subscriber<narrow::Chunk> sub(b, "tails/chunk", [&](const narrow::Chunk& c) {
             seen = c;
             got++;
         }, rel);
@@ -726,7 +726,7 @@ static bool tails_leg() {
         w.seq = 41;
         w.note = "shared tail";
         w.gain = 2.5f;
-        chk("tails: wide send", pub.send(w) == dart::SendStatus::Ok);
+        chk("tails: wide send", pub.send(w) == ramble::SendStatus::Ok);
         chk("tails: rebased decode reads the right frames",
             wait_for(4000, [&] { return got.load() > 0; }, &b)
             && seen.seq == 41 && seen.samples == w.samples && seen.note == "shared tail");
@@ -735,14 +735,14 @@ static bool tails_leg() {
     {   /* a bare vector root end to end */
         std::atomic<int> got{ 0 };
         std::vector<float> seen;
-        dart::Publisher<std::vector<float>>  pv(a, "tails/wave", rel);
-        dart::Subscriber<std::vector<float>> sv(b, "tails/wave",
+        ramble::Publisher<std::vector<float>>  pv(a, "tails/wave", rel);
+        ramble::Subscriber<std::vector<float>> sv(b, "tails/wave",
             [&](const std::vector<float>& v) { seen = v; got++; }, rel);
         chk("tails: vector-root pair matched",
             wait_for(4000, [&] { return pv.match_count() == 1 && pv.ready(); }, &b));
         std::vector<float> wave(256);
         for (size_t i = 0; i < wave.size(); i++) wave[i] = (float)i * 0.5f;
-        chk("tails: vector-root send", pv.send(wave) == dart::SendStatus::Ok);
+        chk("tails: vector-root send", pv.send(wave) == ramble::SendStatus::Ok);
         chk("tails: vector-root round trip",
             wait_for(4000, [&] { return got.load() > 0; }, &b) && seen == wave);
     }
@@ -754,49 +754,49 @@ static bool tails_leg() {
 /* leg 7: tasks, a function with progress and cancellation */
 
 struct MoveReq { double target; };
-DART_SCHEMA(MoveReq, target);
+RAMBLE_SCHEMA(MoveReq, target);
 struct MoveProgress { double remaining; };
-DART_SCHEMA(MoveProgress, remaining);
+RAMBLE_SCHEMA(MoveProgress, remaining);
 struct MoveRsp { double final_position; };
-DART_SCHEMA(MoveRsp, final_position);
+RAMBLE_SCHEMA(MoveRsp, final_position);
 
-static dart::PendingTask<MoveProgress, MoveRsp> g_move_pending;
+static ramble::PendingTask<MoveProgress, MoveRsp> g_move_pending;
 static std::mutex        g_move_mu;
 static std::atomic<int>  g_move_parked{ 0 };
-static dart::PendingTask<MoveProgress, MoveRsp> g_fixed_pending;
+static ramble::PendingTask<MoveProgress, MoveRsp> g_fixed_pending;
 static std::mutex        g_fixed_mu;
 static std::atomic<int>  g_fixed_parked{ 0 };
 
 static bool tasks_leg() {
     int fails_at_entry = g_failures;
-    dart::NodeOptions opts;
+    ramble::NodeOptions opts;
     opts.domain = 48;
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     opts.fetch_details = true;   /* the peer entity view resolves names, schemas, attrs */
     auto on_evt = [](const char* tag) {
-        return [tag](const dart::Event& e) {
+        return [tag](const ramble::Event& e) {
             if (e.is_error()) std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
-    dart::Node a("KA", {}, on_evt("KA"), opts);
-    dart::Node b("KB", {}, on_evt("KB"), opts);
+    ramble::Node a("KA", {}, on_evt("KA"), opts);
+    ramble::Node b("KB", {}, on_evt("KB"), opts);
     chk("task: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
     chk("task: A started", a.start());   /* A on its service thread, B pumped from here */
 
     /* the "move" handler parks every call for a thread the TEST owns */
-    dart::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_move(a, "move",
-        [](const MoveReq& q, dart::TaskRequest<MoveProgress, MoveRsp>& rq) {
+    ramble::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_move(a, "move",
+        [](const MoveReq& q, ramble::TaskRequest<MoveProgress, MoveRsp>& rq) {
             (void)q;
             std::lock_guard<std::mutex> g(g_move_mu);
             g_move_pending = rq.defer();      /* implies RUNNING */
             g_move_parked++;
         });
-    dart::TaskOptions fixed_opts;
+    ramble::TaskOptions fixed_opts;
     fixed_opts.no_cancel = true;
-    dart::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_fixed(a, "fixed",
-        [](const MoveReq& q, dart::TaskRequest<MoveProgress, MoveRsp>& rq) {
+    ramble::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_fixed(a, "fixed",
+        [](const MoveReq& q, ramble::TaskRequest<MoveProgress, MoveRsp>& rq) {
             (void)q;
             std::lock_guard<std::mutex> g(g_fixed_mu);
             g_fixed_pending = rq.defer();
@@ -807,8 +807,8 @@ static bool tasks_leg() {
     std::atomic<uint64_t> cancel_token{ 0 };
     def_move.on_cancel([&](uint64_t token) { cancel_token = token; });
 
-    dart::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_move(b, "move");
-    dart::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_fixed(b, "fixed");
+    ramble::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_move(b, "move");
+    ramble::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_fixed(b, "fixed");
     chk("task: remotes created", rt_move.valid() && rt_fixed.valid());
     chk("task: definition discovered", wait_for(4000,
         [&] { return rt_move.has_definition() && rt_fixed.has_definition(); }, &b));
@@ -820,18 +820,18 @@ static bool tasks_leg() {
     std::atomic<int> stale_rc{ -1 };
     std::thread worker([&] {
         while (!g_move_parked.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        dart::PendingTask<MoveProgress, MoveRsp> pending;
+        ramble::PendingTask<MoveProgress, MoveRsp> pending;
         { std::lock_guard<std::mutex> g(g_move_mu); pending = std::move(g_move_pending); }
         if (!pending.valid()) worker_bad++;
         if (pending.cancelled()) worker_bad++;       /* nobody cancelled this call */
         for (int i = 3; i >= 1; i--)
-            if (pending.progress(MoveProgress{ (double)i }) != dart::SendStatus::Ok) worker_bad++;
-        if (pending.complete(MoveRsp{ 5.0 }, "arrived") != dart::SendStatus::Ok) worker_bad++;
+            if (pending.progress(MoveProgress{ (double)i }) != ramble::SendStatus::Ok) worker_bad++;
+        if (pending.complete(MoveRsp{ 5.0 }, "arrived") != ramble::SendStatus::Ok) worker_bad++;
         stale_rc = (int)pending.complete(MoveRsp{ 0.0 });   /* the handle emptied: refused */
     });
     std::vector<std::pair<bool, double>> updates;   /* (has_value, value) in arrival order */
     auto r1 = rt_move.call(MoveReq{ 5.0 },
-        [&](const dart::ProgressView<MoveProgress>& p) {
+        [&](const ramble::ProgressView<MoveProgress>& p) {
             updates.emplace_back(p.has_value(), p.has_value() ? p.value().remaining : 0.0);
         }, 8000);
     worker.join();
@@ -844,22 +844,22 @@ static bool tasks_leg() {
         && updates[3].first && updates[3].second == 1.0);
     chk("task: every token verb accepted", worker_bad.load() == 0);
     chk("task: an answered handle refuses a second complete",
-        stale_rc.load() == (int)dart::SendStatus::State);
+        stale_rc.load() == (int)ramble::SendStatus::State);
 
     /* reflection: the folded task entity carries the attrs and the progress schema */
-    auto find = [](const std::vector<dart::Entity>& es, dart::EntityKind k, const char* nm)
-                -> const dart::Entity* {
+    auto find = [](const std::vector<ramble::Entity>& es, ramble::EntityKind k, const char* nm)
+                -> const ramble::Entity* {
         for (const auto& e : es) if (e.kind == k && e.name == nm) return &e;
         return nullptr;
     };
     chk("reflect: local task folded",
-        find(a.entities(), dart::EntityKind::Task, "move") != nullptr);
+        find(a.entities(), ramble::EntityKind::Task, "move") != nullptr);
     bool peer_task = false, attrs_ok = false, no_cancel_ok = false, prg_schema_ok = false;
     for (const auto& p : b.peers()) {
         if (p.name != "KA") continue;
         auto es = b.entities(p.id);
-        const dart::Entity* mv = find(es, dart::EntityKind::Task, "move");
-        const dart::Entity* fx = find(es, dart::EntityKind::Task, "fixed");
+        const ramble::Entity* mv = find(es, ramble::EntityKind::Task, "move");
+        const ramble::Entity* fx = find(es, ramble::EntityKind::Task, "fixed");
         peer_task     = mv && fx && mv->provides;
         attrs_ok      = mv && mv->cancellable && !mv->exclusive;
         no_cancel_ok  = fx && !fx->cancellable;
@@ -877,14 +877,14 @@ static bool tasks_leg() {
     std::atomic<int>  cancel_status{ -1 };
     std::string       cancel_message;   /* written on the polling thread == this one */
     auto tc = rt_move.call_async(MoveReq{ 9.0 }, {},
-        [&](const dart::ResponseView<MoveRsp>& rv) {
+        [&](const ramble::ResponseView<MoveRsp>& rv) {
             cancel_status = (int)rv.status();
             cancel_message = std::string(rv.message());
             cancel_done = true;
         });
     chk("task: call_async returns the id", tc.ok() && tc.id != 0);
     chk("task: definition parked", wait_for(4000, [&] { return g_move_parked.load() >= 2; }, &b));
-    chk("task: cancel accepted", rt_move.cancel(tc.id) == dart::SendStatus::Ok);
+    chk("task: cancel accepted", rt_move.cancel(tc.id) == ramble::SendStatus::Ok);
     chk("task: definition sees cancelled()", wait_for(4000, [&] {
             std::lock_guard<std::mutex> g(g_move_mu);
             return g_move_pending.cancelled();
@@ -893,43 +893,43 @@ static bool tasks_leg() {
     {
         std::lock_guard<std::mutex> g(g_move_mu);
         chk("task: complete_cancelled accepted",
-            g_move_pending.complete_cancelled("stopped") == dart::SendStatus::Ok);
+            g_move_pending.complete_cancelled("stopped") == ramble::SendStatus::Ok);
     }
     chk("task: caller sees Cancelled", wait_for(4000, [&] { return cancel_done.load(); }, &b)
-        && cancel_status.load() == (int)dart::CallStatus::Cancelled && cancel_message == "stopped");
+        && cancel_status.load() == (int)ramble::CallStatus::Cancelled && cancel_message == "stopped");
 
     /* no_cancel: cancel refused locally, the call still completes normally */
     std::atomic<bool> fixed_done{ false };
     std::atomic<int>  fixed_status{ -1 };
     auto tf = rt_fixed.call_async(MoveReq{ 1.0 }, {},
-        [&](const dart::ResponseView<MoveRsp>& rv) { fixed_status = (int)rv.status(); fixed_done = true; });
+        [&](const ramble::ResponseView<MoveRsp>& rv) { fixed_status = (int)rv.status(); fixed_done = true; });
     chk("task: fixed call committed", tf.ok() && tf.id != 0);
     chk("task: fixed parked", wait_for(4000, [&] { return g_fixed_parked.load() >= 1; }, &b));
     chk("task: no_cancel refused locally (BadRole)",
-        rt_fixed.cancel(tf.id) == dart::SendStatus::BadRole);
+        rt_fixed.cancel(tf.id) == ramble::SendStatus::BadRole);
     {
         std::lock_guard<std::mutex> g(g_fixed_mu);
         chk("task: fixed completes Ok anyway",
-            g_fixed_pending.complete(MoveRsp{ 1.0 }) == dart::SendStatus::Ok);
+            g_fixed_pending.complete(MoveRsp{ 1.0 }) == ramble::SendStatus::Ok);
     }
     chk("task: fixed caller sees Ok", wait_for(4000, [&] { return fixed_done.load(); }, &b)
-        && fixed_status.load() == (int)dart::CallStatus::Ok);
+        && fixed_status.load() == (int)ramble::CallStatus::Ok);
 
     /* retire mid-run: the deferred call answers Cancelled while the channels are up */
     std::atomic<bool> retired_done{ false };
     std::atomic<int>  retired_status{ -1 };
     auto tr = rt_move.call_async(MoveReq{ 2.0 }, {},
-        [&](const dart::ResponseView<MoveRsp>& rv) { retired_status = (int)rv.status(); retired_done = true; });
+        [&](const ramble::ResponseView<MoveRsp>& rv) { retired_status = (int)rv.status(); retired_done = true; });
     chk("task: retire-leg call committed", tr.ok());
     chk("task: retire-leg parked", wait_for(4000, [&] { return g_move_parked.load() >= 3; }, &b));
     {   /* the handle dies with the definition: DROP it before retiring */
         std::lock_guard<std::mutex> g(g_move_mu);
-        g_move_pending = dart::PendingTask<MoveProgress, MoveRsp>();
+        g_move_pending = ramble::PendingTask<MoveProgress, MoveRsp>();
     }
-    chk("task: retire mid-run", def_move.retire() == dart::SendStatus::Ok);
+    chk("task: retire mid-run", def_move.retire() == ramble::SendStatus::Ok);
     chk("task: retire resolves the caller Cancelled",
         wait_for(4000, [&] { return retired_done.load(); }, &b)
-        && retired_status.load() == (int)dart::CallStatus::Cancelled);
+        && retired_status.load() == (int)ramble::CallStatus::Cancelled);
 
     a.stop();
     return g_failures == fails_at_entry;
@@ -940,26 +940,26 @@ int main() {
   try {
 #endif
     std::string err;
-    auto schema = dart::Schema::compile(SCHEMA, &err);
+    auto schema = ramble::Schema::compile(SCHEMA, &err);
     if (!schema) { std::printf("FAIL: schema: %s\n", err.c_str()); return 1; }
     std::printf("schema '%.*s' size=%u fields=%u\n",
                 (int)schema->name().size(), schema->name().data(), schema->size(), schema->field_count());
 
-    dart::NodeOptions opts;
+    ramble::NodeOptions opts;
     opts.domain = 42;
     opts.multicast_interface = "127.0.0.1";   /* single-host discovery */
 
-    auto on_msg = [](const dart::MessageView& m) { decode(m); };
+    auto on_msg = [](const ramble::MessageView& m) { decode(m); };
     auto on_evt = [](const char* tag) {
-        return [tag](const dart::Event& e) { std::printf("event(%s): %s\n", tag, e.to_string().c_str()); };
+        return [tag](const ramble::Event& e) { std::printf("event(%s): %s\n", tag, e.to_string().c_str()); };
     };
 
-    dart::Node a("A", {}, on_evt("A"), opts);
-    dart::Node b("B", on_msg, on_evt("B"), opts);
+    ramble::Node a("A", {}, on_evt("A"), opts);
+    ramble::Node b("B", on_msg, on_evt("B"), opts);
     if (!a.valid() || !b.valid()) { std::printf("FAIL: node construction\n"); return 1; }
 
-    auto pub = dart::Topic(a, "t", dart::Role::PubOnly, &*schema, { dart::Reliability::Reliable });
-    auto sub = b.create_topic("t", dart::Role::SubOnly, &*schema, { dart::Reliability::Reliable });
+    auto pub = ramble::Topic(a, "t", ramble::Role::PubOnly, &*schema, { ramble::Reliability::Reliable });
+    auto sub = b.create_topic("t", ramble::Role::SubOnly, &*schema, { ramble::Reliability::Reliable });
     (void)sub;
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -978,7 +978,7 @@ int main() {
 
     /* threaded mode: both nodes on their service threads, no poll() from us */
     if (!a.start() || !b.start()) { std::printf("FAIL: start\n"); return 3; }
-    if (a.poll(0) != (int)dart::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
+    if (a.poll(0) != (int)ramble::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
     g.received = false;
     if (!send_one(pub, *schema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -1014,18 +1014,18 @@ int main() {
     std::printf("%s\n", task_ok ? "PASS: tasks" : "FAIL: tasks leg");
 
 #if defined(__cpp_exceptions)
-    /* a failed constructor throws dart::Error (on_event is required) */
+    /* a failed constructor throws ramble::Error (on_event is required) */
     bool caught = false;
-    try { dart::Node bad("bad", {}, {}); }
-    catch (const dart::Error&) { caught = true; }
-    chk("ctor throws dart::Error without on_event", caught);
+    try { ramble::Node bad("bad", {}, {}); }
+    catch (const ramble::Error&) { caught = true; }
+    chk("ctor throws ramble::Error without on_event", caught);
 #endif
 
     std::printf("%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 2;
 #if defined(__cpp_exceptions)
-  } catch (const dart::Error& e) {
-    std::printf("FAIL: unexpected dart::Error: %s\n", e.what());
+  } catch (const ramble::Error& e) {
+    std::printf("FAIL: unexpected ramble::Error: %s\n", e.what());
     return 4;
   }
 #endif

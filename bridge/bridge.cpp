@@ -1,11 +1,11 @@
 /* The bridge: one WebSocket connection is one full node on the mesh, with a WebRTC data
  * path negotiated over that socket. spec/bridge.md has the design, PROTOCOL.md the wire. */
-#include "dart.hpp"
+#include "ramble.hpp"
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <nlohmann/json.hpp>
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
 #include <rtc/rtc.hpp>
 #endif
 #ifdef _WIN32
@@ -44,7 +44,7 @@ static const size_t kLossyBuffer = 1u << 20;   /* best-effort frames drop past t
 static size_t g_max_buffered = 8u << 20;   /* a reliable carrier this far behind drops the client */
 static int    g_verbose      = 0;
 
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
 static int                      g_rtc_enabled = 1;
 static int                      g_rtc_debug   = 0;            /* libdatachannel's verbose log */
 static std::vector<std::string> g_ice;   /* stun and turn urls, handed to the client too */
@@ -59,10 +59,10 @@ struct Frame {
     uint64_t written = 0;
     uint64_t capture = 0;   /* when the data was true, 0 = none given */
     std::string_view text;
-    dart::Bytes      payload;
+    ramble::Bytes    payload;
 };
 
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
 /* what the client asked for a video line: the entity, the VideoFrame field, the call */
 struct TrackReq { uint16_t id = 0; std::string path; uint32_t call = 0; bool keep_data = false; };
 
@@ -89,21 +89,21 @@ struct Entity {
     uint16_t id       = 0;
     std::string name;
     bool     reliable = true;   /* the topic QoS, patterns are reliable */
-    dart::Topic                topic;
-    dart::FunctionDefinition<> fndef;
-    dart::RemoteFunction<>     fnrem;
-    dart::TaskDefinition<>     taskdef;
-    dart::RemoteTask<>         taskrem;
-    dart::VariableDefinition<> vardef;
-    dart::RemoteVariable<>     varrem;
+    ramble::Topic                topic;
+    ramble::FunctionDefinition<> fndef;
+    ramble::RemoteFunction<>     fnrem;
+    ramble::TaskDefinition<>     taskdef;
+    ramble::RemoteTask<>         taskrem;
+    ramble::VariableDefinition<> vardef;
+    ramble::RemoteVariable<>     varrem;
     /* the stream's schema, what a video line binds against. Empty when untyped */
-    dart::Schema value_schema, prg_schema;
+    ramble::Schema value_schema, prg_schema;
     /* match-state change detector (packed count*2 + ready), guarded by Conn::mu */
     int last_match = -1;
     /* best-effort drops not yet reported, guarded by Conn::mu */
     uint32_t dropped = 0;
     std::chrono::steady_clock::time_point drop_report{};
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     std::shared_ptr<rtc::DataChannel>            dc;      /* guarded by Conn::mu */
     std::vector<std::shared_ptr<TrackBinding>> tracks;   /* guarded by Conn::mu */
 #endif
@@ -112,23 +112,23 @@ struct Entity {
 /* One task request parked at the client, since the bridge defers every task request.
  * Shared: the client's frames complete it, the on_cancel scan polls pt.cancelled(). */
 struct ParkedTask {
-    uint16_t            ent = 0;
-    dart::PendingTask<> pt;
-    std::atomic<bool>   cancel_pushed{ false };   /* one CANCEL frame per request */
+    uint16_t              ent = 0;
+    ramble::PendingTask<> pt;
+    std::atomic<bool>     cancel_pushed{ false };   /* one CANCEL frame per request */
 };
 
 /* One WebSocket connection is one node. node, ws and name are written only by the
  * connection's own thread, the other threads read them fenced by conn_close. */
 struct Conn {
-    std::optional<dart::Node> node;
+    std::optional<ramble::Node> node;
     ix::WebSocket            *ws = nullptr;
     std::string               name;
     std::weak_ptr<Conn>       self;   /* for callbacks that may outlive the connection thread */
 
-    std::mutex mu;                    /* leaf lock: never call into dart while holding it */
+    std::mutex mu;                    /* leaf lock: never call into ramble while holding it */
     std::unordered_map<uint16_t, std::unique_ptr<Entity>>     ents;
     std::unordered_map<uint16_t, std::vector<Entity *>>       by_index;   /* by topic index */
-    std::unordered_map<uint32_t, dart::Deferred<>>            parked;   /* replies by req id */
+    std::unordered_map<uint32_t, ramble::Deferred<>>          parked;   /* replies by req id */
     std::unordered_map<uint32_t, std::shared_ptr<ParkedTask>> parked_tasks;   /* by req id */
     /* client call id to (remote task entity, C call id), the handle for the cancel op.
      * Inserted before call_async so the terminal response, which erases, never races it. */
@@ -139,7 +139,7 @@ struct Conn {
     std::thread       ticker;
     std::atomic<bool> stop{ false };
 
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     std::shared_ptr<rtc::PeerConnection> pc;
     std::atomic<bool> rtc_up{ false };
     json              rtc_seq;          /* the client's offer awaiting our answer */
@@ -188,45 +188,45 @@ static bool frame_parse(const uint8_t *p, size_t n, Frame &f){
     f.op = p[0]; f.flags = p[1]; f.id = r16(p + 2); f.seq = r32(p + 4); f.peer = r32(p + 8);
     f.written = r64(p + 12); f.capture = r64(p + 20);
     f.text    = std::string_view((const char *)p + kHdr, tl);
-    f.payload = dart::Bytes(p + kHdr + tl, n - kHdr - tl);
+    f.payload = ramble::Bytes(p + kHdr + tl, n - kHdr - tl);
     return true;
 }
 
-static const char *kind_str(dart::FieldType kind){
+static const char *kind_str(ramble::FieldType kind){
     switch (kind){
-    case dart::FieldType::U8:   return "u8";   case dart::FieldType::U16: return "u16";
-    case dart::FieldType::U32:  return "u32";  case dart::FieldType::U64: return "u64";
-    case dart::FieldType::I8:   return "i8";   case dart::FieldType::I16: return "i16";
-    case dart::FieldType::I32:  return "i32";  case dart::FieldType::I64: return "i64";
-    case dart::FieldType::F32:  return "f32";  case dart::FieldType::F64: return "f64";
-    case dart::FieldType::Bool: return "bool";
-    case dart::FieldType::Array:   return "arr";  case dart::FieldType::Struct: return "struct";
-    case dart::FieldType::String:  return "string";
-    case dart::FieldType::VString: return "vstring"; case dart::FieldType::VArray: return "varr";
-    case dart::FieldType::Map:     return "map";
-    case dart::FieldType::Enum:    return "enum";
-    case dart::FieldType::Named:   return "named";
+    case ramble::FieldType::U8:   return "u8";   case ramble::FieldType::U16: return "u16";
+    case ramble::FieldType::U32:  return "u32";  case ramble::FieldType::U64: return "u64";
+    case ramble::FieldType::I8:   return "i8";   case ramble::FieldType::I16: return "i16";
+    case ramble::FieldType::I32:  return "i32";  case ramble::FieldType::I64: return "i64";
+    case ramble::FieldType::F32:  return "f32";  case ramble::FieldType::F64: return "f64";
+    case ramble::FieldType::Bool: return "bool";
+    case ramble::FieldType::Array:   return "arr";  case ramble::FieldType::Struct: return "struct";
+    case ramble::FieldType::String:  return "string";
+    case ramble::FieldType::VString: return "vstring"; case ramble::FieldType::VArray: return "varr";
+    case ramble::FieldType::Map:     return "map";
+    case ramble::FieldType::Enum:    return "enum";
+    case ramble::FieldType::Named:   return "named";
     default: return "?";
     }
 }
 
-static const char *send_status_str(dart::SendStatus rc){
+static const char *send_status_str(ramble::SendStatus rc){
     switch (rc){
-    case dart::SendStatus::NoTopic:     return "no such entity";
-    case dart::SendStatus::TooBig:      return "message too big";
-    case dart::SendStatus::BadRole:     return "role cannot do that";
-    case dart::SendStatus::OutOfMemory: return "out of memory";
-    case dart::SendStatus::State:       return "wrong state";
-    case dart::SendStatus::NoSys:       return "not supported";
+    case ramble::SendStatus::NoTopic:     return "no such entity";
+    case ramble::SendStatus::TooBig:      return "message too big";
+    case ramble::SendStatus::BadRole:     return "role cannot do that";
+    case ramble::SendStatus::OutOfMemory: return "out of memory";
+    case ramble::SendStatus::State:       return "wrong state";
+    case ramble::SendStatus::NoSys:       return "not supported";
     default:                            return "send failed";
     }
 }
 
-/* One field of a schema. Every schema is a dart::Schema, so one row builder serves every
+/* One field of a schema. Every schema is a ramble::Schema, so one row builder serves every
  * table (two once drifted and every named reader then refused the sender). */
 struct FieldSrc {
     std::string name, type_name, elem_name;
-    dart::FieldType kind = dart::FieldType::U8, elem = dart::FieldType::U8;
+    ramble::FieldType kind = ramble::FieldType::U8, elem = ramble::FieldType::U8;
     uint16_t count = 0, depth = 0, str_cap = 0, arr_parent = 0xFFFFu;
     uint32_t offset = 0, size = 0, elem_size = 0;
     json variants = json::array();      /* enum only: the option table, already built */
@@ -242,33 +242,33 @@ static json field_row_json(const FieldSrc &f, std::vector<std::string> &parents)
     json row = { {"path", path}, {"kind", kind_str(f.kind)},
                  {"offset", f.offset}, {"size", f.size} };
     if (!f.type_name.empty()) row["named"] = f.type_name;   /* named types read as what they wrap */
-    if (f.kind == dart::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
-    if (f.kind == dart::FieldType::VArray) row["elem"] = kind_str(f.elem);
-    if (f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray){
+    if (f.kind == ramble::FieldType::Array){ row["elem"] = kind_str(f.elem); row["count"] = f.count; }
+    if (f.kind == ramble::FieldType::VArray) row["elem"] = kind_str(f.elem);
+    if (f.kind == ramble::FieldType::Array || f.kind == ramble::FieldType::VArray){
         if (!f.elem_name.empty()) row["elem_named"] = f.elem_name;
         if (f.elem_size) row["elem_size"] = f.elem_size;
-        if (f.elem == dart::FieldType::Struct) row["elem_struct"] = true;
+        if (f.elem == ramble::FieldType::Struct) row["elem_struct"] = true;
     }
     if (f.arr_parent != 0xFFFFu) row["in_array"] = f.arr_parent;
-    if (f.kind == dart::FieldType::Enum){
+    if (f.kind == ramble::FieldType::Enum){
         row["backing"] = kind_str(f.elem);
         row["variants"] = f.variants;
     }
     if (f.str_cap) row["cap"] = f.str_cap;
     /* a struct field, and a struct ARRAY (whose element-0 template follows), open a path level */
-    if (f.kind == dart::FieldType::Struct ||
-        ((f.kind == dart::FieldType::Array || f.kind == dart::FieldType::VArray)
-         && f.elem == dart::FieldType::Struct))
+    if (f.kind == ramble::FieldType::Struct ||
+        ((f.kind == ramble::FieldType::Array || f.kind == ramble::FieldType::VArray)
+         && f.elem == ramble::FieldType::Struct))
         parents.push_back(f.name);
     return row;
 }
 
-static json fields_json(const dart::Schema &s){
+static json fields_json(const ramble::Schema &s){
     json fields = json::array();
     std::vector<std::string> parents;
     uint16_t n = s.field_count();
     for (uint16_t i = 0; i < n; i++){
-        dart::Schema::Field f;
+        ramble::Schema::Field f;
         FieldSrc r;
         if (!s.field_at(i, f)) break;
         r.name.assign(f.name.data(), f.name.size());
@@ -277,8 +277,8 @@ static json fields_json(const dart::Schema &s){
         r.kind = f.kind; r.elem = f.elem;
         r.count = f.count; r.depth = f.depth; r.str_cap = f.str_cap; r.arr_parent = f.arr_parent;
         r.offset = f.offset; r.size = f.size; r.elem_size = f.elem_size;
-        if (f.kind == dart::FieldType::Enum){
-            dart::Schema::EnumVariant ev;
+        if (f.kind == ramble::FieldType::Enum){
+            ramble::Schema::EnumVariant ev;
             for (uint16_t k = 0; k < s.enum_count(i); k++)
                 if (s.enum_variant(i, k, ev))
                     r.variants.push_back({ {"name", std::string(ev.name.data(), ev.name.size())},
@@ -290,13 +290,13 @@ static json fields_json(const dart::Schema &s){
 }
 
 /* one schema's layout block ({name, size, hash, fields}), as every create reply carries it */
-static json schema_json(const dart::Schema &s){
+static json schema_json(const ramble::Schema &s){
     return { {"name", std::string(s.name())}, {"size", s.size()}, {"hash", hex64(s.hash())},
              {"fields", fields_json(s)} };
 }
 
-/* one decoded @dart/meta MapItem to JSON */
-static json mapitem_to_json(const dart::MapItem &m){
+/* one decoded @ramble/meta MapItem to JSON */
+static json mapitem_to_json(const ramble::MapItem &m){
     if (m.is_bool())   return m.as_bool();
     if (m.is_uint())   return m.as_uint();
     if (m.is_int())    return m.as_int();
@@ -304,7 +304,7 @@ static json mapitem_to_json(const dart::MapItem &m){
     if (m.is_string()) return m.as_string();
     if (m.is_array()){
         json a = json::array();
-        for (const dart::MapItem &e : m.as_array()) a.push_back(mapitem_to_json(e));
+        for (const ramble::MapItem &e : m.as_array()) a.push_back(mapitem_to_json(e));
         return a;
     }
     if (m.is_map()){
@@ -315,31 +315,31 @@ static json mapitem_to_json(const dart::MapItem &m){
     return nullptr;
 }
 
-static json mapdict_to_json(const dart::MapDict &d){
+static json mapdict_to_json(const ramble::MapDict &d){
     json o = json::object();
     for (const auto &kv : d) o[kv.first] = mapitem_to_json(kv.second);
     return o;
 }
 
-static const char *entity_kind_str(dart::EntityKind k){
+static const char *entity_kind_str(ramble::EntityKind k){
     switch (k){
-    case dart::EntityKind::Topic:    return "topic";
-    case dart::EntityKind::Function: return "function";
-    case dart::EntityKind::Variable: return "variable";
-    case dart::EntityKind::Task:     return "task";
+    case ramble::EntityKind::Topic:    return "topic";
+    case ramble::EntityKind::Function: return "function";
+    case ramble::EntityKind::Variable: return "variable";
+    case ramble::EntityKind::Task:     return "task";
     default:                         return "?";
     }
 }
 
-static json entity_json(const dart::Entity &e){
+static json entity_json(const ramble::Entity &e){
     json j = { {"kind", entity_kind_str(e.kind)}, {"name", e.name},
                {"provides", e.provides}, {"consumes", e.consumes}, {"reliable", e.reliable},
                {"hash", e.hash}, {"providers", e.providers}, {"consumers", e.consumers},
                {"generation", hex64(e.generation)} };
     if (e.providers) j["provider"] = e.provider;
     if (!e.from.empty()) j["from"] = e.from;
-    if (e.kind == dart::EntityKind::Variable){ j["writable"] = e.writable; j["forceable"] = e.forceable; }
-    if (e.kind == dart::EntityKind::Task){
+    if (e.kind == ramble::EntityKind::Variable){ j["writable"] = e.writable; j["forceable"] = e.forceable; }
+    if (e.kind == ramble::EntityKind::Task){
         j["cancellable"] = e.cancellable; j["exclusive"] = e.exclusive; j["multi"] = e.multi;
     }
     if (e.incomplete)               j["incomplete"]           = true;
@@ -353,22 +353,22 @@ static json entity_json(const dart::Entity &e){
     return j;
 }
 
-static int role_from(const std::string &s, dart::Role *out){
-    if (s == "pubsub")   { *out = dart::Role::PubSub;   return 1; }
-    if (s == "pub")      { *out = dart::Role::PubOnly;  return 1; }
-    if (s == "sub")      { *out = dart::Role::SubOnly;  return 1; }
-    if (s == "inactive") { *out = dart::Role::Inactive; return 1; }
+static int role_from(const std::string &s, ramble::Role *out){
+    if (s == "pubsub")   { *out = ramble::Role::PubSub;   return 1; }
+    if (s == "pub")      { *out = ramble::Role::PubOnly;  return 1; }
+    if (s == "sub")      { *out = ramble::Role::SubOnly;  return 1; }
+    if (s == "inactive") { *out = ramble::Role::Inactive; return 1; }
     return 0;
 }
 
-static int log_level_from(const std::string &s, dart::LogLevel *out){
-    if (s == "error") { *out = dart::LogLevel::Error; return 1; }
-    if (s == "warn")  { *out = dart::LogLevel::Warn;  return 1; }
-    if (s == "info")  { *out = dart::LogLevel::Info;  return 1; }
+static int log_level_from(const std::string &s, ramble::LogLevel *out){
+    if (s == "error") { *out = ramble::LogLevel::Error; return 1; }
+    if (s == "warn")  { *out = ramble::LogLevel::Warn;  return 1; }
+    if (s == "info")  { *out = ramble::LogLevel::Info;  return 1; }
     return 0;
 }
-static const char *log_level_str(dart::LogLevel l){
-    return l == dart::LogLevel::Error ? "error" : l == dart::LogLevel::Warn ? "warn" : "info";
+static const char *log_level_str(ramble::LogLevel l){
+    return l == ramble::LogLevel::Error ? "error" : l == ramble::LogLevel::Warn ? "warn" : "info";
 }
 
 static uint64_t now_wall_us(){
@@ -392,7 +392,7 @@ static void reply_err(Conn *c, const json &seq, const std::string &error){
 }
 
 /* a data frame refused synchronously (bad id, bad role, too big, backpressure timeout) */
-static void send_error_event(Conn *c, uint16_t id, dart::SendStatus rc){
+static void send_error_event(Conn *c, uint16_t id, ramble::SendStatus rc){
     send_json(c, { {"op", "event"}, {"event", "send_error"},
                    {"id", id}, {"code", (int)rc}, {"error", send_status_str(rc)} });
 }
@@ -424,7 +424,7 @@ static void note_drop(Conn *c, Entity *e){
 static void send_frame(Conn *c, Entity *e, const Frame &f){
     std::string bytes = frame_build(f);
     bool reliable = e ? e->reliable : true;
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     std::shared_ptr<rtc::DataChannel> dc;
     if (e && c->rtc_up){ std::lock_guard<std::mutex> g(c->mu); dc = e->dc; }
     if (dc && dc->isOpen() && bytes.size() <= dc->maxMessageSize()){
@@ -448,7 +448,7 @@ static void send_frame(Conn *c, Entity *e, const Frame &f){
 }
 
 /* ---- WebRTC ----------------------------------------------------------------------- */
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
 
 static void on_frame(Conn *c, const uint8_t *p, size_t n);
 
@@ -497,20 +497,20 @@ static void rtc_attach(Conn *c, Entity *e){
 
 /* A track binding: one recvonly video line the client offered for the VideoFrame at path of
  * one entity's stream. Resolved when the offer arrives, used by media_route. */
-static bool is_var_kind(dart::FieldType k){
-    return k == dart::FieldType::VString || k == dart::FieldType::VArray || k == dart::FieldType::Map;
+static bool is_var_kind(ramble::FieldType k){
+    return k == ramble::FieldType::VString || k == ramble::FieldType::VArray || k == ramble::FieldType::Map;
 }
 
 /* validate path as a VideoFrame inside s and fill the binding's field names, "" = the
  * message itself is one. Returns the reason it is not, or "" */
-static std::string bind_video_field(const dart::Schema &s, const std::string &path, TrackBinding &b){
+static std::string bind_video_field(const ramble::Schema &s, const std::string &path, TrackBinding &b){
     if (s.empty()) return "entity is untyped";
     std::string prefix;
     if (path.empty()){
         if (s.name() != "VideoFrame") return "the message is not a VideoFrame";
     } else {
         int idx = s.field_index(path);
-        dart::Schema::Field f;
+        ramble::Schema::Field f;
         if (idx < 0 || !s.field_at((uint16_t)idx, f)) return "no field '" + path + "'";
         if (f.type_name != "VideoFrame") return "'" + path + "' is not a VideoFrame";
         prefix = path + ".";
@@ -523,7 +523,7 @@ static std::string bind_video_field(const dart::Schema &s, const std::string &pa
     /* the data field's frame in the message tail: count the variable fields before it */
     b.data_ordinal = 0;
     for (uint16_t i = 0; i < (uint16_t)di; i++){
-        dart::Schema::Field f;
+        ramble::Schema::Field f;
         if (s.field_at(i, f) && is_var_kind(f.kind)) b.data_ordinal++;
     }
     b.fixed = s.size();
@@ -558,10 +558,10 @@ static void rtc_on_track(Conn *c, std::shared_ptr<rtc::Track> track){
     std::string why = bind_video_field(e->kind == Entity::TaskRemote ? e->prg_schema : e->value_schema, req.path, *b);
     if (!why.empty()){ refuse(why); return; }
 
-    std::string cname = "dart-" + mid;
+    std::string cname = "ramble-" + mid;
     uint32_t ssrc = 1000u + (uint32_t)e->id * 16u + (uint32_t)(e->tracks.size() & 15);
     rtc::Description::Media d = track->description();
-    d.addSSRC(ssrc, cname, "dart", mid);
+    d.addSSRC(ssrc, cname, "ramble", mid);
     track->setDescription(d);
     /* the payload types are the browser's: one per codec, H264 preferring packetization-mode=1 */
     bool h264_mode1 = false;
@@ -735,7 +735,7 @@ static bool media_send(Conn *c, Entity *e, TrackBinding *b, int codec, bool flag
 }
 
 /* the message with the tail frame `ordinal` emptied (the pixels went by track) */
-static std::string strip_tail_frame(dart::Bytes data, uint32_t fixed, int ordinal){
+static std::string strip_tail_frame(ramble::Bytes data, uint32_t fixed, int ordinal){
     const uint8_t *p = data.data();
     size_t n = data.size();
     std::string out;
@@ -754,8 +754,8 @@ static std::string strip_tail_frame(dart::Bytes data, uint32_t fixed, int ordina
 
 /* Route one stream sample of e through its track bindings: every bound VideoFrame goes onto
  * its track and the forwarded message has that field emptied. Returns the payload to forward. */
-static dart::Bytes media_route(Conn *c, Entity *e, uint32_t call, dart::Bytes data,
-                               const dart::detail::DartSchema *schema, uint64_t written_us,
+static ramble::Bytes media_route(Conn *c, Entity *e, uint32_t call, ramble::Bytes data,
+                               const ramble::detail::RambleSchema *schema, uint64_t written_us,
                                std::string &scratch){
     std::vector<std::shared_ptr<TrackBinding>> bindings;
     {
@@ -763,17 +763,17 @@ static dart::Bytes media_route(Conn *c, Entity *e, uint32_t call, dart::Bytes da
         for (auto &b : e->tracks) if (b->call == 0 || b->call == call) bindings.push_back(b);
     }
     if (bindings.empty() || !schema) return data;
-    dart::detail::DartBytes msg = dart::detail::dart_bytes(data.data(), data.size());
-    dart::Bytes out = data;
+    ramble::detail::RambleBytes msg = ramble::detail::ramble_bytes(data.data(), data.size());
+    ramble::Bytes out = data;
     for (auto &b : bindings){
-        int      codec = (int)dart::detail::dart_get_uint(msg, schema, b->f_codec.c_str());
-        bool     flag  = dart::detail::dart_get_uint(msg, schema, b->f_key.c_str()) != 0;
-        int64_t  pts   = dart::detail::dart_get_int(msg, schema, b->f_pts.c_str());
-        dart::detail::DartBytes bs = dart::detail::dart_get_array(msg, schema, b->f_data.c_str());
+        int      codec = (int)ramble::detail::ramble_get_uint(msg, schema, b->f_codec.c_str());
+        bool     flag  = ramble::detail::ramble_get_uint(msg, schema, b->f_key.c_str()) != 0;
+        int64_t  pts   = ramble::detail::ramble_get_int(msg, schema, b->f_pts.c_str());
+        ramble::detail::RambleBytes bs = ramble::detail::ramble_get_array(msg, schema, b->f_data.c_str());
         if (!bs.data) continue;
         if (media_send(c, e, b.get(), codec, flag, pts, bs.data, bs.len, written_us) && !b->keep_data){
             scratch = strip_tail_frame(data, b->fixed, b->data_ordinal);
-            out = dart::Bytes((const uint8_t *)scratch.data(), scratch.size());
+            out = ramble::Bytes((const uint8_t *)scratch.data(), scratch.size());
         }
     }
     return out;
@@ -838,29 +838,29 @@ static std::vector<uint16_t> ids_for_index(Conn *c, uint16_t index){
     return ids;
 }
 
-/* Format one event as JSON and send it. Runs inside the dart event handler (on the
+/* Format one event as JSON and send it. Runs inside the ramble event handler (on the
  * node's service thread, or on the connection thread for events a control op triggered). */
-static void send_event(Conn *c, const dart::Event &ev){
+static void send_event(Conn *c, const ramble::Event &ev){
     if (!c->ws) return;
     json e = { {"op", "event"}, {"text", ev.to_string()} };
     std::vector<uint16_t> ids;
     switch (ev.kind()){
-    case dart::EventKind::PeerUp:
+    case ramble::EventKind::PeerUp:
         e["event"] = "peer_up"; e["peer"] = ev.peer();
         break;
-    case dart::EventKind::PeerDown:
+    case ramble::EventKind::PeerDown:
         e["event"] = "peer_down"; e["peer"] = ev.peer();
         break;
-    case dart::EventKind::PeerInterest:
+    case ramble::EventKind::PeerInterest:
         e["event"] = "peer_interest"; e["peer"] = ev.peer();
         e["publishes"] = ev.publish_topics(); e["receives"] = ev.receive_topics();
         break;
-    case dart::EventKind::MessageLost:
+    case ramble::EventKind::MessageLost:
         e["event"] = "msg_lost"; e["peer"] = ev.peer();
         e["first"] = ev.lost_first(); e["count"] = ev.lost_count();
         ids = ids_for_index(c, ev.topic());
         break;
-    case dart::EventKind::Error:   /* one catch-all: "text" carries the message, "error" the code */
+    case ramble::EventKind::Error:   /* one catch-all: "text" carries the message, "error" the code */
         e["event"] = "error"; e["error"] = (int)ev.error();
         if (!ev.topic_name().empty()) e["topic_name"] = std::string(ev.topic_name());
         if (ev.peer())                e["peer"]       = ev.peer();
@@ -873,14 +873,14 @@ static void send_event(Conn *c, const dart::Event &ev){
     }
     if (ids.empty()) send_json(c, e);
     else for (uint16_t id : ids){ e["id"] = id; send_json(c, e); }
-    if (ev.kind() == dart::EventKind::PeerUp || ev.kind() == dart::EventKind::PeerDown ||
-        ev.kind() == dart::EventKind::PeerInterest)
+    if (ev.kind() == ramble::EventKind::PeerUp || ev.kind() == ramble::EventKind::PeerDown ||
+        ev.kind() == ramble::EventKind::PeerInterest)
         push_match_states(c);
 }
 
 /* Delivery: one message to one DATA frame per entity bound to the topic index, or the media
  * track. Runs on the service thread. Pattern channels never reach this handler. */
-static void deliver_message(Conn *c, const dart::MessageView &m){
+static void deliver_message(Conn *c, const ramble::MessageView &m){
     if (!c->ws) return;
     std::vector<Entity *> targets;
     {
@@ -893,7 +893,7 @@ static void deliver_message(Conn *c, const dart::MessageView &m){
         f.op = OP_DATA; f.id = e->id; f.peer = m.publisher_id(); f.written = m.written_us();
         f.capture = m.capture_us();
         f.payload = m.data();
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
         std::string scratch;
         f.payload = media_route(c, e, 0, m.data(), m.raw_schema(), m.written_us(), scratch);
 #endif
@@ -913,7 +913,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
         name = buf;
     }
 
-    dart::NodeOptions o;
+    ramble::NodeOptions o;
     o.domain               = (uint16_t)req.value("domain", 0);
     o.max_topics           = (uint16_t)req.value("max_topics", 0);
     o.disable_shm          = req.value("disable_shm", false);
@@ -938,13 +938,13 @@ static void op_open(Conn *c, const json &req, const json &seq){
 
     /* handlers capture the stable Conn*. The Conn always outlives its node, since
      * conn_close resets the node first */
-    auto on_msg = [c](const dart::MessageView &m){ deliver_message(c, m); };
-    auto on_evt = [c](const dart::Event    &e){ send_event(c, e); };
+    auto on_msg = [c](const ramble::MessageView &m){ deliver_message(c, m); };
+    auto on_evt = [c](const ramble::Event    &e){ send_event(c, e); };
 
     try {
         c->node.emplace(name, on_msg, on_evt, o);
-    } catch (const dart::Error &e){
-        reply_err(c, seq, std::string("dart_node_open failed: ") + e.what());
+    } catch (const ramble::Error &e){
+        reply_err(c, seq, std::string("ramble_node_open failed: ") + e.what());
         return;
     }
     c->name = name;
@@ -961,7 +961,7 @@ static void op_open(Conn *c, const json &req, const json &seq){
     });
 
     json r = { {"proto", kProtoVersion}, {"name", name} };
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     r["webrtc"] = g_rtc_enabled != 0;
 #else
     r["webrtc"] = false;
@@ -972,17 +972,17 @@ static void op_open(Conn *c, const json &req, const json &seq){
 
 /* compile the DSL text at `key` (optional). Returns 0 + replies on error. */
 static int compile_schema(Conn *c, const json &req, const json &seq, const char *key,
-                          std::optional<dart::Schema> *out){
+                          std::optional<ramble::Schema> *out){
     std::string text = req.value(key, "");
     if (text.empty()) return 1;
     std::string err;
-    *out = dart::Schema::compile(text, &err);
+    *out = ramble::Schema::compile(text, &err);
     if (!*out){ reply_err(c, seq, std::string("schema error in ") + key + ": " + err); return 0; }
     return 1;
 }
 
 /* the schema blocks of a create reply, under the keys the request used */
-static void add_schema(json &r, const char *key, const std::optional<dart::Schema> &s){
+static void add_schema(json &r, const char *key, const std::optional<ramble::Schema> &s){
     if (s) r[key] = schema_json(*s);
 }
 
@@ -995,16 +995,16 @@ static Entity *ent_add(Conn *c, std::unique_ptr<Entity> e){
     return raw;
 }
 
-static dart::FunctionOptions fn_opts(const json &req){
-    dart::FunctionOptions o;
+static ramble::FunctionOptions fn_opts(const json &req){
+    ramble::FunctionOptions o;
     o.backpressure_wait_us = (uint32_t)req.value("backpressure_wait_ms", 0) * 1000u;
     o.timeout_us           = (uint32_t)req.value("timeout_ms", 0) * 1000u;
     o.keep_last            = (uint16_t)req.value("keep_last", 0);
     return o;
 }
 
-static dart::TaskOptions task_opts(const json &req){
-    dart::TaskOptions o;
+static ramble::TaskOptions task_opts(const json &req){
+    ramble::TaskOptions o;
     o.progress_best_effort = req.value("progress_best_effort", false);
     o.progress_keep_last   = (uint16_t)req.value("progress_keep_last", 0);
     o.no_cancel            = req.value("no_cancel", false);
@@ -1018,13 +1018,13 @@ static dart::TaskOptions task_opts(const json &req){
 
 /* A reflect_from_mesh handle took its types from the mesh: read them back off this node's
  * entity walk into the reply, so the client codes against the adopted layout. */
-static void fill_reflected(Conn *c, Entity *e, dart::EntityKind kind, const std::string &name, json &r){
-    for (const dart::Entity &ent : c->node->entities()){
+static void fill_reflected(Conn *c, Entity *e, ramble::EntityKind kind, const std::string &name, json &r){
+    for (const ramble::Entity &ent : c->node->entities()){
         if (ent.kind != kind || ent.name != name) continue;
-        e->reliable = ent.reliable || kind != dart::EntityKind::Topic;
+        e->reliable = ent.reliable || kind != ramble::EntityKind::Topic;
         r["reliable"] = e->reliable;
         r["reflected"] = true;
-        if (kind == dart::EntityKind::Topic || kind == dart::EntityKind::Variable){
+        if (kind == ramble::EntityKind::Topic || kind == ramble::EntityKind::Variable){
             e->value_schema = ent.schema;
             if (!ent.schema.empty()) r["schema"] = schema_json(ent.schema);
         } else {
@@ -1039,11 +1039,11 @@ static void fill_reflected(Conn *c, Entity *e, dart::EntityKind kind, const std:
     r["reflected"] = false;   /* nothing on the mesh yet: untyped until refresh */
 }
 
-static int entity_kind_from(const std::string &s, dart::EntityKind *out){
-    if (s == "topic")    { *out = dart::EntityKind::Topic;    return 1; }
-    if (s == "function") { *out = dart::EntityKind::Function; return 1; }
-    if (s == "task")     { *out = dart::EntityKind::Task;     return 1; }
-    if (s == "variable") { *out = dart::EntityKind::Variable; return 1; }
+static int entity_kind_from(const std::string &s, ramble::EntityKind *out){
+    if (s == "topic")    { *out = ramble::EntityKind::Topic;    return 1; }
+    if (s == "function") { *out = ramble::EntityKind::Function; return 1; }
+    if (s == "task")     { *out = ramble::EntityKind::Task;     return 1; }
+    if (s == "variable") { *out = ramble::EntityKind::Variable; return 1; }
     return 0;
 }
 
@@ -1053,15 +1053,15 @@ static void op_refresh(Conn *c, const json &req, const json &seq){
     Entity *e = ent_get(c, (uint16_t)req.value("id", 0));
     if (!e){ reply_err(c, seq, "no such entity"); return; }
     bool retyped = false;
-    dart::EntityKind kind = dart::EntityKind::Topic;
+    ramble::EntityKind kind = ramble::EntityKind::Topic;
     switch (e->kind){
-    case Entity::Topic:      retyped = e->topic.refresh();   kind = dart::EntityKind::Topic;    break;
-    case Entity::FnDef:      retyped = e->fndef.refresh();   kind = dart::EntityKind::Function; break;
-    case Entity::FnRemote:   retyped = e->fnrem.refresh();   kind = dart::EntityKind::Function; break;
-    case Entity::TaskDef:    retyped = e->taskdef.refresh(); kind = dart::EntityKind::Task;     break;
-    case Entity::TaskRemote: retyped = e->taskrem.refresh(); kind = dart::EntityKind::Task;     break;
-    case Entity::VarDef:     retyped = e->vardef.refresh();  kind = dart::EntityKind::Variable; break;
-    case Entity::VarRemote:  retyped = e->varrem.refresh();  kind = dart::EntityKind::Variable; break;
+    case Entity::Topic:      retyped = e->topic.refresh();   kind = ramble::EntityKind::Topic;    break;
+    case Entity::FnDef:      retyped = e->fndef.refresh();   kind = ramble::EntityKind::Function; break;
+    case Entity::FnRemote:   retyped = e->fnrem.refresh();   kind = ramble::EntityKind::Function; break;
+    case Entity::TaskDef:    retyped = e->taskdef.refresh(); kind = ramble::EntityKind::Task;     break;
+    case Entity::TaskRemote: retyped = e->taskrem.refresh(); kind = ramble::EntityKind::Task;     break;
+    case Entity::VarDef:     retyped = e->vardef.refresh();  kind = ramble::EntityKind::Variable; break;
+    case Entity::VarRemote:  retyped = e->varrem.refresh();  kind = ramble::EntityKind::Variable; break;
     }
     json r = { {"id", e->id}, {"retyped", retyped} };
     fill_reflected(c, e, kind, e->name, r);
@@ -1072,21 +1072,21 @@ static void op_refresh(Conn *c, const json &req, const json &seq){
  * the provider. epoch moves on every change */
 static void op_mesh(Conn *c, const json &req, const json &seq, bool find){
     if (find){
-        dart::EntityKind kind;
+        ramble::EntityKind kind;
         if (!entity_kind_from(req.value("kind", ""), &kind)){ reply_err(c, seq, "bad kind"); return; }
-        std::optional<dart::Entity> e = c->node->mesh_find(kind, req.value("name", ""));
+        std::optional<ramble::Entity> e = c->node->mesh_find(kind, req.value("name", ""));
         reply_ok(c, seq, { {"entity", e ? entity_json(*e) : json(nullptr)}, {"epoch", c->node->mesh_epoch()} });
         return;
     }
     json arr = json::array();
-    for (const dart::Entity &e : c->node->mesh()) arr.push_back(entity_json(e));
+    for (const ramble::Entity &e : c->node->mesh()) arr.push_back(entity_json(e));
     reply_ok(c, seq, { {"entities", arr}, {"epoch", c->node->mesh_epoch()} });
 }
 
 /* a definition's incoming request: the CALL frame carries the caller and its name, and the
  * bridge parks the reply until the client's RESULT frame answers */
 static void push_request(Conn *c, Entity *e, uint32_t req_id, uint32_t caller,
-                         std::string_view caller_name, uint64_t written_us, dart::Bytes data){
+                         std::string_view caller_name, uint64_t written_us, ramble::Bytes data){
     Frame f;
     f.op = OP_CALL; f.id = e->id; f.seq = req_id; f.peer = caller; f.written = written_us;
     f.text = caller_name; f.payload = data;
@@ -1095,12 +1095,12 @@ static void push_request(Conn *c, Entity *e, uint32_t req_id, uint32_t caller,
 
 static void create_topic(Conn *c, const json &req, const json &seq, std::unique_ptr<Entity> e){
     std::string name = req.value("name", "");
-    dart::Role role;
+    ramble::Role role;
     if (!role_from(req.value("role", "pubsub"), &role)){ reply_err(c, seq, "bad role"); return; }
 
-    dart::Qos qos;
-    qos.reliability          = req.value("reliable", false) ? dart::Reliability::Reliable
-                                                            : dart::Reliability::BestEffort;
+    ramble::Qos qos;
+    qos.reliability          = req.value("reliable", false) ? ramble::Reliability::Reliable
+                                                            : ramble::Reliability::BestEffort;
     qos.keep_last            = (uint16_t)req.value("keep_last", 0);
     qos.catch_up             = (uint16_t)req.value("catch_up", 0);
     qos.max_message_bytes    = (uint32_t)req.value("max_message_bytes", 0);
@@ -1110,25 +1110,25 @@ static void create_topic(Conn *c, const json &req, const json &seq, std::unique_
     qos.shm_max_bytes        = (uint32_t)req.value("shm_max_bytes", 0);
     qos.max_rate_hz          = (uint16_t)req.value("max_rate_hz", 0);
 
-    std::optional<dart::Schema> schema;
+    std::optional<ramble::Schema> schema;
     if (!compile_schema(c, req, seq, "schema", &schema)) return;
 
     bool reflect = req.value("reflect", false);
     try {
-        if (reflect) e->topic = c->node->create_topic(name, role, dart::reflect_from_mesh, qos);
+        if (reflect) e->topic = c->node->create_topic(name, role, ramble::reflect_from_mesh, qos);
         else         e->topic = c->node->create_topic(name, role, schema ? &*schema : nullptr, qos);
-    } catch (const dart::Error &err){
+    } catch (const ramble::Error &err){
         reply_err(c, seq, std::string("create failed: ") + err.what());
         return;
     }
-    e->reliable = qos.reliability == dart::Reliability::Reliable;
+    e->reliable = qos.reliability == ramble::Reliability::Reliable;
     if (schema) e->value_schema = *schema;
     Entity *ent = ent_add(c, std::move(e));
     json r = { {"id", ent->id}, {"reliable", ent->reliable} };
-    if (reflect) fill_reflected(c, ent, dart::EntityKind::Topic, name, r);
+    if (reflect) fill_reflected(c, ent, ramble::EntityKind::Topic, name, r);
     else         add_schema(r, "schema", schema);
     reply_ok(c, seq, r);
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc_attach(c, ent);   /* its video line, if any, comes with the client's next offer */
 #endif
 }
@@ -1137,7 +1137,7 @@ static void create_topic(Conn *c, const json &req, const json &seq, std::unique_
  * Deferred completes when the RESULT frame arrives, or at disconnect. */
 static void create_function(Conn *c, const json &req, const json &seq, std::unique_ptr<Entity> e, bool definition){
     std::string name = req.value("name", "");
-    std::optional<dart::Schema> rq, rs;
+    std::optional<ramble::Schema> rq, rs;
     if (!compile_schema(c, req, seq, "req", &rq)) return;
     if (!compile_schema(c, req, seq, "rsp", &rs)) return;
     Entity *ent = e.get();
@@ -1145,35 +1145,35 @@ static void create_function(Conn *c, const json &req, const json &seq, std::uniq
     bool reflect = req.value("reflect", false);
     try {
         if (definition){
-            auto handler = [c, ent](dart::Request<> &r){
+            auto handler = [c, ent](ramble::Request<> &r){
                 uint32_t req_id;
                 { std::lock_guard<std::mutex> g(c->mu); req_id = ++c->next_req; }
-                dart::Bytes data = r.data();
+                ramble::Bytes data = r.data();
                 uint32_t caller = r.caller();
                 std::string caller_name(r.caller_name());
                 uint64_t written_us = r.written_us();   /* read before defer() */
-                dart::Deferred<> d = r.defer();
+                ramble::Deferred<> d = r.defer();
                 { std::lock_guard<std::mutex> g(c->mu); c->parked.emplace(req_id, std::move(d)); }
                 push_request(c, ent, req_id, caller, caller_name, written_us, data);
             };
-            if (reflect) ent->fndef = dart::FunctionDefinition<>(*c->node, name, dart::reflect_from_mesh, handler, fn_opts(req));
-            else ent->fndef = dart::FunctionDefinition<>(*c->node, name,
+            if (reflect) ent->fndef = ramble::FunctionDefinition<>(*c->node, name, ramble::reflect_from_mesh, handler, fn_opts(req));
+            else ent->fndef = ramble::FunctionDefinition<>(*c->node, name,
                                   rq ? &*rq : nullptr, rs ? &*rs : nullptr, handler, fn_opts(req));
         } else {
-            if (reflect) ent->fnrem = dart::RemoteFunction<>(*c->node, name, dart::reflect_from_mesh, fn_opts(req));
-            else ent->fnrem = dart::RemoteFunction<>(*c->node, name,
+            if (reflect) ent->fnrem = ramble::RemoteFunction<>(*c->node, name, ramble::reflect_from_mesh, fn_opts(req));
+            else ent->fnrem = ramble::RemoteFunction<>(*c->node, name,
                                   rq ? &*rq : nullptr, rs ? &*rs : nullptr, fn_opts(req));
         }
-    } catch (const dart::Error &err){
+    } catch (const ramble::Error &err){
         reply_err(c, seq, std::string("create failed: ") + err.what());
         return;
     }
     ent_add(c, std::move(e));
     json r = { {"id", id}, {"reliable", true} };
-    if (reflect) fill_reflected(c, ent, dart::EntityKind::Function, name, r);
+    if (reflect) fill_reflected(c, ent, ramble::EntityKind::Function, name, r);
     else { add_schema(r, "req", rq); add_schema(r, "rsp", rs); }
     reply_ok(c, seq, r);
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc_attach(c, ent);
 #endif
 }
@@ -1182,7 +1182,7 @@ static void create_function(Conn *c, const json &req, const json &seq, std::uniq
  * deferred, the client streams PROGRESS and answers with RESULT, a cancel is a CANCEL frame. */
 static void create_task(Conn *c, const json &req, const json &seq, std::unique_ptr<Entity> e, bool definition){
     std::string name = req.value("name", "");
-    std::optional<dart::Schema> rq, pg, rs;
+    std::optional<ramble::Schema> rq, pg, rs;
     if (!compile_schema(c, req, seq, "req", &rq)) return;
     if (!compile_schema(c, req, seq, "prg", &pg)) return;
     if (!compile_schema(c, req, seq, "rsp", &rs)) return;
@@ -1191,10 +1191,10 @@ static void create_task(Conn *c, const json &req, const json &seq, std::unique_p
     bool reflect = req.value("reflect", false);
     try {
         if (definition){
-            auto handler = [c, ent](dart::TaskRequest<> &r){
+            auto handler = [c, ent](ramble::TaskRequest<> &r){
                 uint32_t req_id;
                 { std::lock_guard<std::mutex> g(c->mu); req_id = ++c->next_req; }
-                dart::Bytes data = r.data();
+                ramble::Bytes data = r.data();
                 uint32_t caller = r.caller();
                 std::string caller_name(r.caller_name());
                 uint64_t written_us = r.written_us();
@@ -1204,8 +1204,8 @@ static void create_task(Conn *c, const json &req, const json &seq, std::unique_p
                 { std::lock_guard<std::mutex> g(c->mu); c->parked_tasks.emplace(req_id, tk); }
                 push_request(c, ent, req_id, caller, caller_name, written_us, data);
             };
-            if (reflect) ent->taskdef = dart::TaskDefinition<>(*c->node, name, dart::reflect_from_mesh, handler, task_opts(req));
-            else ent->taskdef = dart::TaskDefinition<>(*c->node, name,
+            if (reflect) ent->taskdef = ramble::TaskDefinition<>(*c->node, name, ramble::reflect_from_mesh, handler, task_opts(req));
+            else ent->taskdef = ramble::TaskDefinition<>(*c->node, name,
                                     rq ? &*rq : nullptr, pg ? &*pg : nullptr, rs ? &*rs : nullptr,
                                     handler, task_opts(req));
             /* the token cannot name its request through the public wrapper, so scan this
@@ -1223,32 +1223,32 @@ static void create_task(Conn *c, const json &req, const json &seq, std::unique_p
                     }
             });
         } else {
-            if (reflect) ent->taskrem = dart::RemoteTask<>(*c->node, name, dart::reflect_from_mesh, task_opts(req));
-            else ent->taskrem = dart::RemoteTask<>(*c->node, name,
+            if (reflect) ent->taskrem = ramble::RemoteTask<>(*c->node, name, ramble::reflect_from_mesh, task_opts(req));
+            else ent->taskrem = ramble::RemoteTask<>(*c->node, name,
                                     rq ? &*rq : nullptr, pg ? &*pg : nullptr, rs ? &*rs : nullptr,
                                     task_opts(req));
         }
-    } catch (const dart::Error &err){
+    } catch (const ramble::Error &err){
         reply_err(c, seq, std::string("create failed: ") + err.what());
         return;
     }
     if (pg) ent->prg_schema = *pg;
     ent_add(c, std::move(e));
     json r = { {"id", id}, {"reliable", true} };
-    if (reflect) fill_reflected(c, ent, dart::EntityKind::Task, name, r);
+    if (reflect) fill_reflected(c, ent, ramble::EntityKind::Task, name, r);
     else { add_schema(r, "req", rq); add_schema(r, "prg", pg); add_schema(r, "rsp", rs); }
     reply_ok(c, seq, r);
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc_attach(c, ent);
 #endif
 }
 
 static void create_variable(Conn *c, const json &req, const json &seq, std::unique_ptr<Entity> e, bool definition){
     std::string name = req.value("name", "");
-    std::optional<dart::Schema> sc;
+    std::optional<ramble::Schema> sc;
     if (!compile_schema(c, req, seq, "schema", &sc)) return;
 
-    dart::VariableOptions<> o;
+    ramble::VariableOptions<> o;
     o.read_only            = req.value("read_only", false);
     o.allow_force          = req.value("allow_force", false);
     o.catch_up             = (uint16_t)req.value("catch_up", 0);
@@ -1260,45 +1260,45 @@ static void create_variable(Conn *c, const json &req, const json &seq, std::uniq
     bool reflect = req.value("reflect", false);
     try {
         if (reflect){
-            if (definition) ent->vardef = dart::VariableDefinition<>(*c->node, name, dart::reflect_from_mesh, o);
-            else            ent->varrem = dart::RemoteVariable<>(*c->node, name, dart::reflect_from_mesh, o);
+            if (definition) ent->vardef = ramble::VariableDefinition<>(*c->node, name, ramble::reflect_from_mesh, o);
+            else            ent->varrem = ramble::RemoteVariable<>(*c->node, name, ramble::reflect_from_mesh, o);
         } else {
-            if (definition) ent->vardef = dart::VariableDefinition<>(*c->node, name, sc ? &*sc : nullptr, o);
-            else            ent->varrem = dart::RemoteVariable<>(*c->node, name, sc ? &*sc : nullptr, o);
+            if (definition) ent->vardef = ramble::VariableDefinition<>(*c->node, name, sc ? &*sc : nullptr, o);
+            else            ent->varrem = ramble::RemoteVariable<>(*c->node, name, sc ? &*sc : nullptr, o);
         }
-    } catch (const dart::Error &err){
+    } catch (const ramble::Error &err){
         reply_err(c, seq, std::string("create failed: ") + err.what());
         return;
     }
     if (sc) ent->value_schema = *sc;
     ent_add(c, std::move(e));
     json r = { {"id", id}, {"reliable", true} };
-    if (reflect) fill_reflected(c, ent, dart::EntityKind::Variable, name, r);
+    if (reflect) fill_reflected(c, ent, ramble::EntityKind::Variable, name, r);
     else         add_schema(r, "schema", sc);
     reply_ok(c, seq, r);
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc_attach(c, ent);
 #endif
 
     /* value updates are pushed off the hooks: on_change on a state change, on_write on every
      * write. Registered after the create reply, since the registration replays the value. */
     bool wants_write = req.value("on_write", false);
-    auto push_var = [c, ent](const dart::VariableUpdate &u, uint8_t evbit){
+    auto push_var = [c, ent](const ramble::VariableUpdate &u, uint8_t evbit){
         Frame f;
         f.op = OP_VAR; f.id = ent->id; f.flags = (uint8_t)((u.forced() ? 1 : 0) | evbit);
         f.peer = u.source(); f.written = u.written_us(); f.payload = u.value();
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
         std::string scratch;
         f.payload = media_route(c, ent, 0, u.value(), u.raw_schema(), u.written_us(), scratch);
 #endif
         send_frame(c, ent, f);
     };
     if (definition){
-        ent->vardef.on_change([push_var](const dart::VariableUpdate &u){ push_var(u, 0); });
-        if (wants_write) ent->vardef.on_write([push_var](const dart::VariableUpdate &u){ push_var(u, 2); });
+        ent->vardef.on_change([push_var](const ramble::VariableUpdate &u){ push_var(u, 0); });
+        if (wants_write) ent->vardef.on_write([push_var](const ramble::VariableUpdate &u){ push_var(u, 2); });
     } else {
-        ent->varrem.on_change([push_var](const dart::VariableUpdate &u){ push_var(u, 0); });
-        if (wants_write) ent->varrem.on_write([push_var](const dart::VariableUpdate &u){ push_var(u, 2); });
+        ent->varrem.on_change([push_var](const ramble::VariableUpdate &u){ push_var(u, 0); });
+        if (wants_write) ent->varrem.on_write([push_var](const ramble::VariableUpdate &u){ push_var(u, 2); });
     }
 }
 
@@ -1330,11 +1330,11 @@ static Entity *topic_arg(Conn *c, const json &req, const json &seq){
 }
 
 static void op_role(Conn *c, const json &req, const json &seq){
-    dart::Role role;
+    ramble::Role role;
     if (!role_from(req.value("role", ""), &role)){ reply_err(c, seq, "bad role"); return; }
     Entity *e = topic_arg(c, req, seq);
     if (!e) return;
-    if (e->topic.set_role(role) != dart::SendStatus::Ok){ reply_err(c, seq, "set_role failed"); return; }
+    if (e->topic.set_role(role) != ramble::SendStatus::Ok){ reply_err(c, seq, "set_role failed"); return; }
     reply_ok(c, seq, {});
 }
 
@@ -1363,21 +1363,21 @@ static void op_cancel(Conn *c, const json &req, const json &seq){
     if (!found){ reply_ok(c, seq, { {"status", "not_pending"} }); return; }
     Entity *e = ent_get(c, ent);
     if (!e || e->kind != Entity::TaskRemote){ reply_err(c, seq, "no such task"); return; }
-    dart::SendStatus rc = e->taskrem.cancel(cid);
-    const char *s = rc == dart::SendStatus::Ok      ? "ok"
-                  : rc == dart::SendStatus::BadRole ? "no_cancel"   /* declared no_cancel */
-                  : rc == dart::SendStatus::State   ? "not_pending"
+    ramble::SendStatus rc = e->taskrem.cancel(cid);
+    const char *s = rc == ramble::SendStatus::Ok      ? "ok"
+                  : rc == ramble::SendStatus::BadRole ? "no_cancel"   /* declared no_cancel */
+                  : rc == ramble::SendStatus::State   ? "not_pending"
                   :                                   "error";
     reply_ok(c, seq, { {"status", s} });
 }
 
-/* ---- built-in logs (the @dart/log topics) ---------------------------------------- */
+/* ---- built-in logs (the @ramble/log topics) ---------------------------------------- */
 
 static void op_log(Conn *c, const json &req, const json &seq){
-    dart::LogLevel level;
+    ramble::LogLevel level;
     if (!log_level_from(req.value("level", ""), &level)){ reply_err(c, seq, "bad log level"); return; }
-    dart::SendStatus rc = c->node->log(level, req.value("text", ""));
-    if (rc != dart::SendStatus::Ok){ reply_err(c, seq, std::string("log failed: ") + send_status_str(rc)); return; }
+    ramble::SendStatus rc = c->node->log(level, req.value("text", ""));
+    if (rc != ramble::SendStatus::Ok){ reply_err(c, seq, std::string("log failed: ") + send_status_str(rc)); return; }
     reply_ok(c, seq, {});
 }
 
@@ -1387,11 +1387,11 @@ static void op_log_subscribe(Conn *c, const json &req, const json &seq){
     std::vector<std::string> levels = req.value("levels",
         std::vector<std::string>{ "error", "warn", "info" });
     for (const std::string &ls : levels){
-        dart::LogLevel level;
+        ramble::LogLevel level;
         if (!log_level_from(ls, &level)){ reply_err(c, seq, "bad log level: " + ls); return; }
         uint8_t bit = (uint8_t)(1u << (int)level);
         if (c->log_sub & bit) continue;
-        bool ok = c->node->on_log(level, [c, level](const dart::LogLine &l){
+        bool ok = c->node->on_log(level, [c, level](const ramble::LogLine &l){
             send_json(c, { {"op", "log"}, {"level", log_level_str(level)},
                            {"node", std::string(l.node.data(), l.node.size())},
                            {"wall_us", l.wall_us}, {"mono_us", l.mono_us},
@@ -1408,7 +1408,7 @@ static void op_log_subscribe(Conn *c, const json &req, const json &seq){
 
 static void op_peers(Conn *c, const json &seq){
     json arr = json::array();
-    for (const dart::Peer &p : c->node->peers())
+    for (const ramble::Peer &p : c->node->peers())
         arr.push_back({ {"id", p.id}, {"name", p.name}, {"address", p.address},
                         {"active", p.active}, {"fragment_size", p.fragment_size},
                         {"epoch", p.epoch}, {"last_heard_us", p.last_heard_us},
@@ -1420,30 +1420,30 @@ static void op_peers(Conn *c, const json &seq){
 
 static void op_entities(Conn *c, const json &seq){
     json arr = json::array();
-    for (const dart::Entity &e : c->node->entities()) arr.push_back(entity_json(e));
+    for (const ramble::Entity &e : c->node->entities()) arr.push_back(entity_json(e));
     reply_ok(c, seq, { {"entities", arr} });
 }
 
 static void op_peer_entities(Conn *c, const json &req, const json &seq){
     uint32_t peer = (uint32_t)req.value("peer", 0);
     json arr = json::array();
-    for (const dart::Entity &e : c->node->entities(peer))   /* a dropped peer gives its last view */
+    for (const ramble::Entity &e : c->node->entities(peer))   /* a dropped peer gives its last view */
         arr.push_back(entity_json(e));
     reply_ok(c, seq, { {"peer", peer}, {"entities", arr} });
 }
 
-/* @dart/meta query: an async directed call to a peer's endpoint. The reply fires later
+/* @ramble/meta query: an async directed call to a peer's endpoint. The reply fires later
  * from the poll thread echoing the request's seq and never faults, the client reads status. */
 static void op_meta(Conn *c, const json &req, const json &seq){
     uint32_t peer     = (uint32_t)req.value("peer", 0);
     uint32_t sections = (uint32_t)req.value("sections", 0);
-    dart::SendStatus rc = c->node->meta_request(peer,
-        [c, seq](const dart::MetaSnapshot &s){
+    ramble::SendStatus rc = c->node->meta_request(peer,
+        [c, seq](const ramble::MetaSnapshot &s){
             json r = { {"valid", s.valid}, {"status", (int)s.status}, {"provider", s.provider} };
             if (s.valid) r["info"] = mapdict_to_json(s.info);
             reply_ok(c, seq, r);
         }, sections);
-    if (rc != dart::SendStatus::Ok)
+    if (rc != ramble::SendStatus::Ok)
         reply_err(c, seq, std::string("meta request failed: ") + send_status_str(rc));
 }
 
@@ -1472,7 +1472,7 @@ static void on_text(Conn *c, const std::string &raw){
     else if (op == "mesh")          op_mesh(c, req, seq, false);
     else if (op == "mesh_find")     op_mesh(c, req, seq, true);
     else if (op == "refresh")       op_refresh(c, req, seq);
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     else if (op == "rtc")           op_rtc(c, req, seq);
 #else
     else if (op == "rtc")           reply_err(c, seq, "webrtc not built into this bridge");
@@ -1483,7 +1483,7 @@ static void on_text(Conn *c, const std::string &raw){
 /* ---- data plane ------------------------------------------------------------------- */
 
 /* the one call-outcome frame both patterns answer with */
-static void push_result(Conn *c, Entity *e, uint32_t call, const dart::ResponseView<> &rv){
+static void push_result(Conn *c, Entity *e, uint32_t call, const ramble::ResponseView<> &rv){
     Frame f;
     f.op = OP_RESULT; f.flags = (uint8_t)rv.status(); f.id = e->id; f.seq = call;
     f.peer = rv.provider(); f.written = rv.written_us(); f.text = rv.message(); f.payload = rv.data();
@@ -1493,39 +1493,39 @@ static void push_result(Conn *c, Entity *e, uint32_t call, const dart::ResponseV
 /* a call the bridge refused synchronously: answer Cancelled so the promise settles */
 static void push_refused(Conn *c, Entity *e, uint32_t call){
     Frame f;
-    f.op = OP_RESULT; f.flags = (uint8_t)dart::CallStatus::Cancelled; f.id = e->id; f.seq = call;
+    f.op = OP_RESULT; f.flags = (uint8_t)ramble::CallStatus::Cancelled; f.id = e->id; f.seq = call;
     send_frame(c, e, f);
 }
 
 static void on_call(Conn *c, Entity *e, const Frame &f){
     uint32_t call = f.seq;
     if (e->kind == Entity::FnRemote){
-        auto cb = [c, e, call](const dart::ResponseView<> &rv){ push_result(c, e, call, rv); };
-        dart::SendStatus rc = e->fnrem.call_async(f.payload, cb);
-        if (rc != dart::SendStatus::Ok){ send_error_event(c, e->id, rc); push_refused(c, e, call); }
+        auto cb = [c, e, call](const ramble::ResponseView<> &rv){ push_result(c, e, call, rv); };
+        ramble::SendStatus rc = e->fnrem.call_async(f.payload, cb);
+        if (rc != ramble::SendStatus::Ok){ send_error_event(c, e->id, rc); push_refused(c, e, call); }
         return;
     }
-    if (e->kind != Entity::TaskRemote){ send_error_event(c, e->id, dart::SendStatus::BadRole); return; }
+    if (e->kind != Entity::TaskRemote){ send_error_event(c, e->id, ramble::SendStatus::BadRole); return; }
     /* a task call: progress frames (empty payload = the RUNNING ack) before the one
      * terminal response, which also releases the cancel mapping */
-    auto on_prog = [c, e, call](const dart::ProgressView<> &pv){
+    auto on_prog = [c, e, call](const ramble::ProgressView<> &pv){
         Frame p;
         p.op = OP_PROGRESS; p.id = e->id; p.seq = call; p.peer = pv.provider();
         p.written = pv.written_us(); p.payload = pv.data();
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
         std::string scratch;
         p.payload = media_route(c, e, call, pv.data(), pv.raw_schema(), pv.written_us(), scratch);
 #endif
         send_frame(c, e, p);
     };
-    auto on_rsp = [c, e, call](const dart::ResponseView<> &rv){
+    auto on_rsp = [c, e, call](const ramble::ResponseView<> &rv){
         { std::lock_guard<std::mutex> g(c->mu); c->task_calls.erase(call); }
         push_result(c, e, call, rv);
     };
     /* map the client call id before launch so the terminal response never races the
      * insert. call_async fills the C call id through the pair in place */
     { std::lock_guard<std::mutex> g(c->mu); c->task_calls.emplace(call, std::make_pair(e->id, 0u)); }
-    dart::TaskCall tc = e->taskrem.call_async(f.payload, on_prog, on_rsp);
+    ramble::TaskCall tc = e->taskrem.call_async(f.payload, on_prog, on_rsp);
     if (!tc.ok()){
         { std::lock_guard<std::mutex> g(c->mu); c->task_calls.erase(call); }
         send_error_event(c, e->id, tc.status);
@@ -1546,13 +1546,13 @@ static void on_progress(Conn *c, const Frame &f){
         if (it != c->parked_tasks.end()) tk = it->second;
     }
     if (!tk) return;   /* completed/unknown: drop, like an unknown request reply */
-    dart::SendStatus rc = tk->pt.progress(f.payload);
-    if (rc != dart::SendStatus::Ok) send_error_event(c, tk->ent, rc);
+    ramble::SendStatus rc = tk->pt.progress(f.payload);
+    if (rc != ramble::SendStatus::Ok) send_error_event(c, tk->ent, rc);
 }
 
 /* RESULT from the client: the reply to a parked request (function or task) */
 static void on_reply(Conn *c, const Frame &f){
-    dart::Deferred<> d;
+    ramble::Deferred<> d;
     {
         std::lock_guard<std::mutex> g(c->mu);
         auto it = c->parked.find(f.seq);
@@ -1582,26 +1582,26 @@ static void on_reply(Conn *c, const Frame &f){
 static void on_frame(Conn *c, const uint8_t *p, size_t n){
     Frame f;
     if (!frame_parse(p, n, f)) return;
-    if (!c->node){ send_error_event(c, f.id, dart::SendStatus::NoTopic); return; }
+    if (!c->node){ send_error_event(c, f.id, ramble::SendStatus::NoTopic); return; }
     if (f.op == OP_RESULT){ on_reply(c, f); return; }
     if (f.op == OP_PROGRESS){ on_progress(c, f); return; }
     Entity *e = ent_get(c, f.id);
-    if (!e){ send_error_event(c, f.id, dart::SendStatus::NoTopic); return; }
-    dart::SendStatus rc = dart::SendStatus::Ok;
+    if (!e){ send_error_event(c, f.id, ramble::SendStatus::NoTopic); return; }
+    ramble::SendStatus rc = ramble::SendStatus::Ok;
     switch (f.op){
     case OP_DATA:
         rc = e->kind == Entity::Topic
-               ? e->topic.send(f.payload, dart::Timestamp{ (int64_t)f.capture })
-               : dart::SendStatus::BadRole;
+               ? e->topic.send(f.payload, ramble::Timestamp{ (int64_t)f.capture })
+               : ramble::SendStatus::BadRole;
         break;
     case OP_VAR: {
-        if (e->kind != Entity::VarDef && e->kind != Entity::VarRemote){ rc = dart::SendStatus::BadRole; break; }
-        dart::VariableDefinition<> &v = e->kind == Entity::VarDef
-            ? e->vardef : static_cast<dart::VariableDefinition<> &>(e->varrem);
+        if (e->kind != Entity::VarDef && e->kind != Entity::VarRemote){ rc = ramble::SendStatus::BadRole; break; }
+        ramble::VariableDefinition<> &v = e->kind == Entity::VarDef
+            ? e->vardef : static_cast<ramble::VariableDefinition<> &>(e->varrem);
         rc = f.flags == 0 ? v.set(f.payload)
            : f.flags == 1 ? v.force(f.payload)
            : f.flags == 2 ? v.unforce()
-           : dart::SendStatus::NoSys;
+           : ramble::SendStatus::NoSys;
         break;
     }
     case OP_CALL:
@@ -1610,7 +1610,7 @@ static void on_frame(Conn *c, const uint8_t *p, size_t n){
     default:
         return;   /* reserved / server-only ops: drop */
     }
-    if (rc != dart::SendStatus::Ok) send_error_event(c, e->id, rc);
+    if (rc != ramble::SendStatus::Ok) send_error_event(c, e->id, rc);
     /* no explicit flush: a send kicks the node's service thread awake */
 }
 
@@ -1619,12 +1619,12 @@ static void on_frame(Conn *c, const uint8_t *p, size_t n){
 static void conn_close(const std::shared_ptr<Conn> &c){
     c->stop = true;
     if (c->ticker.joinable()) c->ticker.join();
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc_teardown(c.get());   /* no WebRTC callback can reach the node once this returns */
 #endif
     /* answer parked requests while the node is still alive, so remote callers get an
      * answer now instead of waiting out their timeout: functions fail, tasks cancel */
-    std::unordered_map<uint32_t, dart::Deferred<>>            parked;
+    std::unordered_map<uint32_t, ramble::Deferred<>>          parked;
     std::unordered_map<uint32_t, std::shared_ptr<ParkedTask>> parked_tasks;
     {
         std::lock_guard<std::mutex> g(c->mu);
@@ -1652,30 +1652,30 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind = argv[++i];
         else if (!strcmp(argv[i], "--max-buffered") && i + 1 < argc) g_max_buffered = (size_t)atoll(argv[++i]);
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v")) g_verbose = 1;
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
         else if (!strcmp(argv[i], "--ice") && i + 1 < argc) g_ice.push_back(argv[++i]);
         else if (!strcmp(argv[i], "--no-webrtc")) g_rtc_enabled = 0;
         else if (!strcmp(argv[i], "--webrtc-debug")) g_rtc_debug = 1;
         else if (!strcmp(argv[i], "--mtu") && i + 1 < argc){
             int v = atoi(argv[++i]);
-            if (v < 576 || v > 9000){ fprintf(stderr, "dart_bridge: --mtu wants 576..9000\n"); return 1; }
+            if (v < 576 || v > 9000){ fprintf(stderr, "ramble_bridge: --mtu wants 576..9000\n"); return 1; }
             g_mtu = (size_t)v;
         }
         else if (!strcmp(argv[i], "--rtc-ports") && i + 1 < argc){
             int lo = 0, hi = 0;
             if (sscanf(argv[++i], "%d-%d", &lo, &hi) != 2 || lo < 1 || hi < lo || hi > 65535){
-                fprintf(stderr, "dart_bridge: --rtc-ports wants lo-hi\n"); return 1;
+                fprintf(stderr, "ramble_bridge: --rtc-ports wants lo-hi\n"); return 1;
             }
             g_port_lo = (uint16_t)lo; g_port_hi = (uint16_t)hi;
         }
 #endif
         else {
-            printf("usage: dart_bridge [--port 7480] [--bind 0.0.0.0] [--max-buffered bytes] [--verbose]\n"
-#if DART_BRIDGE_WEBRTC
+            printf("usage: ramble_bridge [--port 7480] [--bind 0.0.0.0] [--max-buffered bytes] [--verbose]\n"
+#if RAMBLE_BRIDGE_WEBRTC
                    "                   [--ice stun:host:port | turn:user:pass@host:port]... [--rtc-ports lo-hi]\n"
                    "                   [--mtu 1200] [--no-webrtc] [--webrtc-debug]\n"
 #endif
-                   "One WebSocket connection = one DART node; see bridge/PROTOCOL.md.\n"
+                   "One WebSocket connection = one Ramble node; see bridge/PROTOCOL.md.\n"
                    "--bind 0.0.0.0 exposes the bridge (and full mesh access) beyond this host.\n"
                    "--ice is handed to the client too, so one flag configures both ends.\n"
                    "--mtu bounds every WebRTC datagram (sent with DF set): lower it on a VPN or tunnel\n"
@@ -1703,7 +1703,7 @@ int main(int argc, char **argv){
     });
 #endif
     ix::initNetSystem();
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc::InitLogger(g_rtc_debug ? rtc::LogLevel::Verbose : g_verbose ? rtc::LogLevel::Info : rtc::LogLevel::Warning,
                     [](rtc::LogLevel, std::string msg){ printf("[webrtc] %s\n", msg.c_str()); });
     rtc::Preload();
@@ -1758,19 +1758,19 @@ int main(int argc, char **argv){
 
     auto res = server.listen();
     if (!res.first){
-        fprintf(stderr, "dart_bridge: listen on %s:%d failed: %s\n", bind.c_str(), port, res.second.c_str());
+        fprintf(stderr, "ramble_bridge: listen on %s:%d failed: %s\n", bind.c_str(), port, res.second.c_str());
         return 1;
     }
     server.start();
-    printf("dart_bridge listening on ws://%s:%d (one connection = one node%s)\n", bind.c_str(), port,
-#if DART_BRIDGE_WEBRTC
+    printf("ramble_bridge listening on ws://%s:%d (one connection = one node%s)\n", bind.c_str(), port,
+#if RAMBLE_BRIDGE_WEBRTC
            g_rtc_enabled ? ", webrtc data path on" : ", webrtc off"
 #else
            ""
 #endif
            );
     server.wait();
-#if DART_BRIDGE_WEBRTC
+#if RAMBLE_BRIDGE_WEBRTC
     rtc::Cleanup();
 #endif
     ix::uninitNetSystem();

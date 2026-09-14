@@ -7,7 +7,7 @@
       "displayName": "Windows (Visual Studio)",
       "description": "Newest installed Visual Studio",
       "binaryDir": "${sourceDir}/build",
-      "cacheVariables": { "DART_BUILD_EXPLORER": "ON", "DART_BUILD_BRIDGE": "ON" },
+      "cacheVariables": { "RAMBLE_BUILD_EXPLORER": "ON", "RAMBLE_BUILD_BRIDGE": "ON" },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
@@ -16,7 +16,7 @@
       "description": "Ninja",
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build",
-      "cacheVariables": { "DART_BUILD_EXPLORER": "ON", "DART_BUILD_BRIDGE": "ON" },
+      "cacheVariables": { "RAMBLE_BUILD_EXPLORER": "ON", "RAMBLE_BUILD_BRIDGE": "ON" },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
     }
   ],

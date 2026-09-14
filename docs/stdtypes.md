@@ -1,15 +1,15 @@
 # Standard types
 
-A small library of the types applications keep re inventing, shipped with DART so that
+A small library of the types applications keep re inventing, shipped with Ramble so that
 two programs that both mean "a 3D point" say so with the same name and the same bytes.
 
 ```c
-DartSchema *s = dart_schema_compile(alloc, user,
+RambleSchema *s = ramble_schema_compile(alloc, user,
     "Waypoint { at: Transform, when: Timestamp, tag: Color }", NULL);
 ```
 
 No imports, no registration. Every name below is always in scope in the schema DSL. Strip
-the whole module with `DART_NO_STDTYPES`. The names then stop resolving and schemas must
+the whole module with `RAMBLE_NO_STDTYPES`. The names then stop resolving and schemas must
 spell their shapes out.
 
 ## Why names, not just shapes
@@ -30,7 +30,7 @@ matching:
 | `Celsius = f32` | `Fahrenheit = f32` | refused, different names never cross wire |
 
 The shape is still always checked. A name never skips structural verification, and a peer
-advertising `Uuid = u8[15]` is refused rather than trusted (`dart_std_recognize` verifies
+advertising `Uuid = u8[15]` is refused rather than trusted (`ramble_std_recognize` verifies
 name and shape). Struct root names stay strict equal in both directions, and enum option
 names stay advisory.
 
@@ -120,28 +120,28 @@ joiners. SDP offers and ICE candidates describe one SESSION between one viewer a
 source, so they cannot live in a one to many descriptor, and every `kind` in the roster
 already makes the `url` a complete rendezvous (RTSP negotiates in protocol, WHEP is
 exactly "signal WebRTC through this URL", HLS is plain HTTP). A system that wants to
-signal WebRTC through DART itself models it as the interaction it is: a function per
+signal WebRTC through Ramble itself models it as the interaction it is: a function per
 source (offer text in, answer text out) with SDP and candidate lines carried as the opaque
 strings every signaling stack passes verbatim.
 
 ## Conventions
 
-These are pinned, not suggestions. A number crossing DART in one of these types means
+These are pinned, not suggestions. A number crossing Ramble in one of these types means
 this:
 
 - SI units throughout. Lengths in meters, velocities in m/s, angles in radians.
 - Time is `i64` microseconds since the Unix epoch, UTC. It is the same clock
-  `DartMsg.written_us` is stamped from, so the two are directly comparable. Cross host
+  `RambleMsg.written_us` is stamped from, so the two are directly comparable. Cross host
   comparisons are only as good as the hosts' clock sync. Never mix a `Timestamp` with the
-  monotonic `DartMsg.recv_us`.
+  monotonic `RambleMsg.recv_us`.
 - Quaternions are stored x, y, z, w, in that order.
-- `dart_quaternion_mul(a, b)` is the rotation a followed by b, the Hamilton product b times
-  a. `dart_color_from_hex` and `dart_color_to_hex` use 0xRRGGBBAA, the CSS order.
+- `ramble_quaternion_mul(a, b)` is the rotation a followed by b, the Hamilton product b times
+  a. `ramble_color_from_hex` and `ramble_color_to_hex` use 0xRRGGBBAA, the CSS order.
 - Matrices are row major `f32`.
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.
   The C# binding converts explicitly rather than calling `Guid.ToByteArray`.
-- A right handed coordinate frame is recommended but not enforced. DART carries the
+- A right handed coordinate frame is recommended but not enforced. Ramble carries the
   numbers. The frame convention is your system's to state.
 - `Transform.parent` names the frame this one is measured in, `""` when unstated. The cap
   is 30 rather than 32 so the packed 88 bytes stay 8 aligned and the C mirror still matches.
@@ -160,22 +160,22 @@ the media section).
 ## Using them from C
 
 ```c
-#include "dart.h"
+#include "ramble.h"
 
-DartSchema *s = dart_schema_compile(alloc, user, "Track { at: Transform, id: Uuid }", NULL);
+RambleSchema *s = ramble_schema_compile(alloc, user, "Track { at: Transform, id: Uuid }", NULL);
 
 uint8_t msg[256];
-DartTransform p = dart_transform_identity();
-p.translation = dart_double3(4.5, -1.25, 9.0);
+RambleTransform p = ramble_transform_identity();
+p.translation = ramble_double3(4.5, -1.25, 9.0);
 
-dart_schema_message_default(s, msg, sizeof msg);
+ramble_schema_message_default(s, msg, sizeof msg);
 memcpy(msg + /* the Transform field's offset */ 0, &p, sizeof p);  /* layout identical */
 ```
 
-The C mirror structs (`DartFloat3`, `DartTransform`, `DartColor`, `DartUuid`,
-`DartMatrix4x4` and the rest) are layout identical to the wire on any little endian
+The C mirror structs (`RambleFloat3`, `RambleTransform`, `RambleColor`, `RambleUuid`,
+`RambleMatrix4x4` and the rest) are layout identical to the wire on any little endian
 target, which the header static asserts, so a whole value memcpys in and out. Field at a
-time access through `dart_get_f64(msg, s, "at.translation.x")` works exactly as it does
+time access through `ramble_get_f64(msg, s, "at.translation.x")` works exactly as it does
 for any other nested struct.
 
 A type only gets a C mirror when its packed wire size already equals its natural C size.
@@ -186,14 +186,14 @@ they mirror every type either way.
 The operations are deliberately thin: construction, add, sub, scale, dot, cross, length,
 normalize, quaternion multiply, conjugate and rotate, `Color` hex conversion, and
 timestamp arithmetic. Real linear algebra belongs in Eigen, numpy or your engine's math
-library. Convert at the edge. `dart_double3_length` and friends compute their square root
+library. Convert at the edge. `ramble_double3_length` and friends compute their square root
 inline rather than pulling in `<math.h>`, so a consumer's build line never grows an `-lm`.
 
 Two values need a platform, so they live in the node runtime rather than beside the type:
 
 ```c
-DartTimestamp now = dart_timestamp_now();   /* microseconds since the Unix epoch, UTC */
-DartUuid id; dart_uuid_new(&id);            /* a random (version 4) Uuid */
+RambleTimestamp now = ramble_timestamp_now();   /* microseconds since the Unix epoch, UTC */
+RambleUuid id; ramble_uuid_new(&id);            /* a random (version 4) Uuid */
 ```
 
 ## Recognizing them in someone else's schema
@@ -201,14 +201,14 @@ DartUuid id; dart_uuid_new(&id);            /* a random (version 4) Uuid */
 A tool that renders a schema it has never seen (the explorer, a bridge, a logger) asks:
 
 ```c
-DartStdType t = dart_std_recognize_field(schema, field, alloc, user);
-if (t == DART_STD_COLOR) draw_swatch(...);
+RambleStdType t = ramble_std_recognize_field(schema, field, alloc, user);
+if (t == RAMBLE_STD_COLOR) draw_swatch(...);
 ```
 
-`dart_std_recognize` looks at the schema's root, `dart_std_recognize_field` at one
-field's own type, and `dart_std_recognize_elem` at an array field's element type. All
+`ramble_std_recognize` looks at the schema's root, `ramble_std_recognize_field` at one
+field's own type, and `ramble_std_recognize_elem` at an array field's element type. All
 three verify the shape as well as the name, so a peer that advertises a differently
-shaped `Uuid` is reported as `DART_STD_NONE` rather than memcpy'd into a `DartUuid`.
+shaped `Uuid` is reported as `RAMBLE_STD_NONE` rather than memcpy'd into a `RambleUuid`.
 Verifying the shape means compiling the canonical type, hence the allocator hook. The
 answer is stable per schema, so cache it.
 
@@ -230,7 +230,7 @@ LAST definition is the root, which is how a named alias root is spelled:
 Uuid = u8[16]       -- a topic whose whole payload is a Uuid
 ```
 
-`dart_schema_compile_env` additionally puts a set of already compiled schemas in scope,
+`ramble_schema_compile_env` additionally puts a set of already compiled schemas in scope,
 referenceable by their root names, for a program that builds its schemas in layers.
 
 ### The names are reserved
@@ -268,20 +268,20 @@ in depth first declaration order, and its struct's size covers only the fixed pa
 Members of a struct array are addressed with an index in the path:
 
 ```c
-dart_set_f32(msg, cap, s, "corners[2].x", 1.5f);
-float z = dart_get_f32(msg, s, "points[0].z");
-uint32_t n = dart_get_array_count(msg, s, "points");
-dart_set_array_count(msg, cap, s, "points", 64);   /* grow a variable one first */
+ramble_set_f32(msg, cap, s, "corners[2].x", 1.5f);
+float z = ramble_get_f32(msg, s, "points[0].z");
+uint32_t n = ramble_get_array_count(msg, s, "points");
+ramble_set_array_count(msg, cap, s, "points", 64);   /* grow a variable one first */
 ```
 
-Reflection reaches the same values by flat index with `dart_get_value_at` and
-`dart_set_value_at`, taking the element index as an argument. The flat field table holds
-one element 0 template per array, and `DartSchemaFieldInfo.arr_parent` points a member
+Reflection reaches the same values by flat index with `ramble_get_value_at` and
+`ramble_set_value_at`, taking the element index as an argument. The flat field table holds
+one element 0 template per array, and `RambleSchemaFieldInfo.arr_parent` points a member
 back at the array it belongs to.
 
 ## Wire format
 
-Named types are `DART_NAMED` (kind 18) in schema wire version 8:
+Named types are `RAMBLE_NAMED` (kind 18) in schema wire version 8:
 
 ```
 NAMED := [u8 kind=18][u8 namelen >= 1][name][type inner]
@@ -289,6 +289,6 @@ NAMED := [u8 kind=18][u8 namelen >= 1][name][type inner]
 
 `inner` is never itself NAMED, and NAMED never appears in root position. A root's name
 rides the schema header instead, so there is exactly one encoding for it and the hash
-stays canonical. `dart_schema_print` spells a schema back with each named type hoisted to
+stays canonical. `ramble_schema_print` spells a schema back with each named type hoisted to
 a leading `Name = type` definition, dependencies first, and that text recompiles to
 identical bytes. The full wire grammar is in spec/schema.md.

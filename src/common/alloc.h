@@ -1,118 +1,118 @@
 /* The memory model at every layer. The rules are in spec/allocation.md. */
-#ifndef DART_ALLOC_H
-#define DART_ALLOC_H
+#ifndef RAMBLE_ALLOC_H
+#define RAMBLE_ALLOC_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 /* Growable buffer hook: ptr NULL allocates, size 0 frees, else resizes. */
-typedef void *(*DartAllocFn)(void *user, void *ptr, size_t size);
+typedef void *(*RambleAllocFn)(void *user, void *ptr, size_t size);
 
-#ifndef DART_ALLOCATOR_PAGE
-#define DART_ALLOCATOR_PAGE (64u * 1024u)
+#ifndef RAMBLE_ALLOCATOR_PAGE
+#define RAMBLE_ALLOCATOR_PAGE (64u * 1024u)
 #endif
 
-/* Page backing for dynamic mode, the DartAllocFn shape without the user pointer. */
-typedef void *(*DartPageFn)(void *ptr, size_t size);
+/* Page backing for dynamic mode, the RambleAllocFn shape without the user pointer. */
+typedef void *(*RamblePageFn)(void *ptr, size_t size);
 
 /* Header in front of every page. A shared page bumps, a freeable page holds one block. */
-typedef struct i_DartPage {
-    struct i_DartPage *next, *prev;
+typedef struct i_RamblePage {
+    struct i_RamblePage *next, *prev;
     size_t cap;    /* payload bytes after this header */
     size_t used;   /* shared: the bump cursor. freeable: the block size */
-} i_DartPage;
+} i_RamblePage;
 
 typedef struct {
-    DartPageFn  page_realloc;   /* NULL means static mode */
-    i_DartPage *shared;         /* bump pages, head is current. static: the buffer */
-    i_DartPage *owned;          /* freeable pages, dynamic only */
-    i_DartPage *free_pool;      /* freed blocks kept for reuse */
+    RamblePageFn  page_realloc;   /* NULL means static mode */
+    i_RamblePage *shared;         /* bump pages, head is current. static: the buffer */
+    i_RamblePage *owned;          /* freeable pages, dynamic only */
+    i_RamblePage *free_pool;      /* freed blocks kept for reuse */
     uint32_t    page_size;
     size_t      max_bytes;      /* runaway guard, 0 is unlimited */
     size_t      in_use, pooled, peak;
     uint64_t    alloc_calls, pages_live;
-} DartAllocator;
+} RambleAllocator;
 
-static inline size_t i_dart_allocator_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
+static inline size_t i_ramble_allocator_align(size_t n){ return (n + 15u) & ~(size_t)15u; }
 /* Rounds up to a quarter power of two class so pooled blocks recur. Exact above 4 kB. */
-static inline size_t i_dart_allocator_class(size_t n){
+static inline size_t i_ramble_allocator_class(size_t n){
     size_t p = 16u, q;
     if (n <= 16u) return 16u;
-    if (n >= 4096u) return i_dart_allocator_align(n);
+    if (n >= 4096u) return i_ramble_allocator_align(n);
     while ((p << 1) <= n){ if (p > (SIZE_MAX >> 2)) return n; p <<= 1; }
     q = p >> 2;
     return p + ((n - p + q - 1u) / q) * q;
 }
 /* The pool is held memory and counts. A pool reuse allocates nothing and skips this. */
-static inline int i_dart_allocator_over(const DartAllocator *a, size_t need){
+static inline int i_ramble_allocator_over(const RambleAllocator *a, size_t need){
     return a->max_bytes && a->in_use + a->pooled + need > a->max_bytes;
 }
 
-static inline DartAllocator dart_allocator_static(void *buffer, size_t size){
-    DartAllocator a;
+static inline RambleAllocator ramble_allocator_static(void *buffer, size_t size){
+    RambleAllocator a;
     uint8_t *b = (uint8_t *)buffer;
     uintptr_t aligned = ((uintptr_t)b + 15u) & ~(uintptr_t)15u;
     size_t head = (size_t)(aligned - (uintptr_t)b);
     memset(&a, 0, sizeof a);
-    if (b && size >= head + sizeof(i_DartPage)){
-        i_DartPage *pg = (i_DartPage *)(b + head);
+    if (b && size >= head + sizeof(i_RamblePage)){
+        i_RamblePage *pg = (i_RamblePage *)(b + head);
         pg->next = pg->prev = NULL;
-        pg->cap = size - head - sizeof(i_DartPage);
+        pg->cap = size - head - sizeof(i_RamblePage);
         pg->used = 0;
         a.shared = pg; a.pages_live = 1;
     }
     return a;
 }
 
-static inline DartAllocator dart_allocator_dynamic(DartPageFn page_realloc, uint32_t page_size){
-    DartAllocator a; memset(&a, 0, sizeof a);
+static inline RambleAllocator ramble_allocator_dynamic(RamblePageFn page_realloc, uint32_t page_size){
+    RambleAllocator a; memset(&a, 0, sizeof a);
     a.page_realloc = page_realloc;
-    a.page_size = page_size ? page_size : DART_ALLOCATOR_PAGE;
+    a.page_size = page_size ? page_size : RAMBLE_ALLOCATOR_PAGE;
     return a;
 }
 
 /* Bumps from the current shared page, or adds a page in dynamic mode. */
-static inline void *i_dart_allocator_bump(DartAllocator *a, size_t need){
-    i_DartPage *pg = a->shared;
-    need = i_dart_allocator_align(need);
-    if (!pg || i_dart_allocator_align(pg->used) + need > pg->cap){
-        size_t psz, floor_sz; i_DartPage *np;
-        if (!a->page_realloc || i_dart_allocator_over(a, need)) return NULL;
+static inline void *i_ramble_allocator_bump(RambleAllocator *a, size_t need){
+    i_RamblePage *pg = a->shared;
+    need = i_ramble_allocator_align(need);
+    if (!pg || i_ramble_allocator_align(pg->used) + need > pg->cap){
+        size_t psz, floor_sz; i_RamblePage *np;
+        if (!a->page_realloc || i_ramble_allocator_over(a, need)) return NULL;
         psz = a->page_size;
-        floor_sz = need + sizeof(i_DartPage);
+        floor_sz = need + sizeof(i_RamblePage);
         if (floor_sz > psz) psz = floor_sz;
-        np = (i_DartPage *)a->page_realloc(NULL, psz);
+        np = (i_RamblePage *)a->page_realloc(NULL, psz);
         while (!np && psz > floor_sz){
             /* a fragmented heap may hold the bytes only in shreds: halve until a page fits */
             psz >>= 1;
             if (psz < floor_sz) psz = floor_sz;
-            np = (i_DartPage *)a->page_realloc(NULL, psz);
+            np = (i_RamblePage *)a->page_realloc(NULL, psz);
         }
         if (!np) return NULL;
         np->prev = NULL; np->next = a->shared; if (a->shared) a->shared->prev = np;
-        np->cap = psz - sizeof(i_DartPage); np->used = 0;
+        np->cap = psz - sizeof(i_RamblePage); np->used = 0;
         a->shared = np; a->pages_live++;
         pg = np;
     }
-    pg->used = i_dart_allocator_align(pg->used);
+    pg->used = i_ramble_allocator_align(pg->used);
     { void *out = (uint8_t *)(pg + 1) + pg->used; pg->used += need; return out; }
 }
 
-static inline void *dart_allocator_fixed(DartAllocator *a, size_t size){
+static inline void *ramble_allocator_fixed(RambleAllocator *a, size_t size){
     void *p;
     if (!a || size == 0) return NULL;
-    p = i_dart_allocator_bump(a, size);
-    if (p){ a->alloc_calls++; a->in_use += i_dart_allocator_align(size);
+    p = i_ramble_allocator_bump(a, size);
+    if (p){ a->alloc_calls++; a->in_use += i_ramble_allocator_align(size);
             if (a->in_use > a->peak) a->peak = a->in_use; }
     return p;
 }
 
 /* A freeable block: a pooled one when it fits, else its own page, or a bump in static mode. */
-static inline void *i_dart_allocator_new_owned(DartAllocator *a, size_t cap){
-    i_DartPage *pg;
+static inline void *i_ramble_allocator_new_owned(RambleAllocator *a, size_t cap){
+    i_RamblePage *pg;
     {   /* the smallest pooled block within 2x, so a big block is not spent on a small ask */
-        i_DartPage *it, *best = NULL;
+        i_RamblePage *it, *best = NULL;
         for (it = a->free_pool; it; it = it->next)
             if (it->cap >= cap && (!best || it->cap < best->cap)) best = it;
         if (best && best->cap - cap <= cap){
@@ -131,13 +131,13 @@ static inline void *i_dart_allocator_new_owned(DartAllocator *a, size_t cap){
         }
     }
     if (a->page_realloc){
-        if (i_dart_allocator_over(a, cap)) return NULL;
-        pg = (i_DartPage *)a->page_realloc(NULL, sizeof(i_DartPage) + cap);
+        if (i_ramble_allocator_over(a, cap)) return NULL;
+        pg = (i_RamblePage *)a->page_realloc(NULL, sizeof(i_RamblePage) + cap);
         if (!pg) return NULL;
         pg->prev = NULL; pg->next = a->owned; if (a->owned) a->owned->prev = pg;
         a->owned = pg; a->pages_live++;
     } else {
-        pg = (i_DartPage *)i_dart_allocator_bump(a, sizeof(i_DartPage) + cap);
+        pg = (i_RamblePage *)i_ramble_allocator_bump(a, sizeof(i_RamblePage) + cap);
         if (!pg) return NULL;
         pg->prev = pg->next = NULL;   /* not linked, reset rewinds the buffer */
     }
@@ -147,8 +147,8 @@ static inline void *i_dart_allocator_new_owned(DartAllocator *a, size_t cap){
 }
 
 /* A freed block goes to the pool, never back to the backing heap. Reset reclaims it. */
-static inline void i_dart_allocator_free_owned(DartAllocator *a, void *ptr){
-    i_DartPage *pg = (i_DartPage *)ptr - 1;
+static inline void i_ramble_allocator_free_owned(RambleAllocator *a, void *ptr){
+    i_RamblePage *pg = (i_RamblePage *)ptr - 1;
     a->in_use -= pg->cap;
     if (a->page_realloc){
         if (pg->prev) pg->prev->next = pg->next; else a->owned = pg->next;
@@ -160,29 +160,29 @@ static inline void i_dart_allocator_free_owned(DartAllocator *a, void *ptr){
     a->pooled += pg->cap;
 }
 
-/* The DartAllocFn over a DartAllocator. Pass the allocator as user. */
-static inline void *dart_allocator_alloc(void *alloc, void *ptr, size_t size){
-    DartAllocator *a = (DartAllocator *)alloc; size_t cap;
+/* The RambleAllocFn over a RambleAllocator. Pass the allocator as user. */
+static inline void *ramble_allocator_alloc(void *alloc, void *ptr, size_t size){
+    RambleAllocator *a = (RambleAllocator *)alloc; size_t cap;
     if (!a) return NULL;
-    if (size == 0){ if (ptr) i_dart_allocator_free_owned(a, ptr); return NULL; }
-    cap = a->page_realloc ? i_dart_allocator_class(size) : i_dart_allocator_align(size);
-    if (!ptr) return i_dart_allocator_new_owned(a, cap);
-    {   i_DartPage *pg = (i_DartPage *)ptr - 1;
+    if (size == 0){ if (ptr) i_ramble_allocator_free_owned(a, ptr); return NULL; }
+    cap = a->page_realloc ? i_ramble_allocator_class(size) : i_ramble_allocator_align(size);
+    if (!ptr) return i_ramble_allocator_new_owned(a, cap);
+    {   i_RamblePage *pg = (i_RamblePage *)ptr - 1;
         if (cap <= pg->cap) return ptr;
-        {   void *np = i_dart_allocator_new_owned(a, cap);
+        {   void *np = i_ramble_allocator_new_owned(a, cap);
             if (!np) return NULL;   /* the old block stays intact */
             memcpy(np, ptr, pg->cap);
-            i_dart_allocator_free_owned(a, ptr);
+            i_ramble_allocator_free_owned(a, ptr);
             return np;
         }
     }
 }
 
 /* Frees both intents and the pool. Static mode rewinds the buffer and keeps it. */
-static inline void dart_allocator_reset(DartAllocator *a){
+static inline void ramble_allocator_reset(RambleAllocator *a){
     if (!a) return;
     if (a->page_realloc){
-        i_DartPage *pg, *nx;
+        i_RamblePage *pg, *nx;
         for (pg = a->owned;     pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
         for (pg = a->free_pool; pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
         for (pg = a->shared;    pg; pg = nx){ nx = pg->next; a->page_realloc(pg, 0); }
@@ -194,7 +194,7 @@ static inline void dart_allocator_reset(DartAllocator *a){
     a->in_use = 0; a->pooled = 0;
 }
 
-static inline void dart_allocator_stats(const DartAllocator *a, size_t *in_use, size_t *peak,
+static inline void ramble_allocator_stats(const RambleAllocator *a, size_t *in_use, size_t *peak,
                                      uint64_t *alloc_calls){
     if (!a) return;
     if (in_use)      *in_use      = a->in_use;
@@ -202,4 +202,4 @@ static inline void dart_allocator_stats(const DartAllocator *a, size_t *in_use, 
     if (alloc_calls) *alloc_calls = a->alloc_calls;
 }
 
-#endif /* DART_ALLOC_H */
+#endif /* RAMBLE_ALLOC_H */

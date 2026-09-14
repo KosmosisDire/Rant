@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 using MonoPInvokeCallbackAttribute = AOT.MonoPInvokeCallbackAttribute;
 #endif
 
-namespace Dart
+namespace Ramble
 {
 #if !UNITY_5_3_OR_NEWER
     // Off Unity this attribute is synthesized as a no op, so the callback methods stay
@@ -31,7 +31,7 @@ namespace Dart
     {
         Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
         State = -5,   // wrong state: Poll while started, or a call a handler may not make
-        NoSys = -6    // not compiled in (Start under DART_NO_THREADS)
+        NoSys = -6    // not compiled in (Start under RAMBLE_NO_THREADS)
     }
 
     public enum EventKind
@@ -39,7 +39,7 @@ namespace Dart
         PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
     }
 
-    // The error carried by an EventKind.Error event, DartEvent.Error and DartNode.LastError.
+    // The error carried by an EventKind.Error event, RambleEvent.Error and RambleNode.LastError.
     public enum ErrorKind
     {
         None = 0,
@@ -57,7 +57,7 @@ namespace Dart
         VString, VArray, Map, Enum, Named
     }
 
-    // A call's outcome, mirrors DartCallStatus. Timeout and PeerLost are synthesized on the
+    // A call's outcome, mirrors RambleCallStatus. Timeout and PeerLost are synthesized on the
     // caller, and Cancelled also for calls still pending when the node closes.
     public enum CallStatus
     {
@@ -65,25 +65,25 @@ namespace Dart
         Running = 6   // task, the one NON-terminal status: accepted and running
     }
 
-    // Severity of a built-in @dart/log line. Mirrors DartLogLevel.
+    // Severity of a built-in @ramble/log line. Mirrors RambleLogLevel.
     public enum LogLevel { Error = 0, Warn = 1, Info = 2 }
 
-    // A @dart/meta request's section mask, OR the bits. 0 = every section. Mirrors DART_META_*.
+    // A @ramble/meta request's section mask, OR the bits. 0 = every section. Mirrors RAMBLE_META_*.
     [Flags]
     public enum MetaSection : uint { Node = 0x1, Proc = 0x2, Topics = 0x4, Peers = 0x8, All = 0 }
 
     // ---- native struct layouts (mirror the C exactly) ---------------------------
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartBytes { public IntPtr data; public UIntPtr len; }
+    internal struct RambleBytes { public IntPtr data; public UIntPtr len; }
 
-    // the C DartString, a length carrying view. Named View so the [DartString] attribute
+    // the C RambleString, a length carrying view. Named View so the [RambleString] attribute
     // owns the public name
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartStringView { public IntPtr data; public UIntPtr len; }
+    internal struct RambleStringView { public IntPtr data; public UIntPtr len; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartQos
+    internal struct RambleQos
     {
         public int reliability;
         public ushort keep_last;
@@ -99,17 +99,17 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartTopicOpts { public DartQos qos; public byte reflect_from_mesh; }
+    internal struct RambleTopicOpts { public RambleQos qos; public byte reflect_from_mesh; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartNodeNet
+    internal struct RambleNodeNet
     {
         public ushort data_port;
         public IntPtr discovery_group;         // const char*
         public ushort discovery_port;
         public IntPtr multicast_interface;     // const char*
         public byte multicast_ttl;
-        public IntPtr seed_peers;              // const DartDiscoveryAddr*
+        public IntPtr seed_peers;              // const RambleDiscoveryAddr*
         public ushort n_seed_peers;
         public byte unicast_only;
         public uint recv_buffer_bytes;
@@ -120,7 +120,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartDiscoveryAddr
+    internal struct RambleDiscoveryAddr
     {
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
         public byte ip_len;                    // 4 = IPv4, 16 = IPv6
@@ -128,7 +128,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartNodeDiscovery
+    internal struct RambleNodeDiscovery
     {
         public uint announce_interval_us;
         public uint peer_timeout_us;
@@ -136,7 +136,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartNodeOpts
+    internal struct RambleNodeOpts
     {
         public ushort domain;
         public ushort max_topics;
@@ -144,24 +144,24 @@ namespace Dart
         public byte disable_shm;
         public byte fetch_details;
         public int match_wait_ms;              // send path match wait, 0 = 1 s, negative = off
-        public byte disable_logs;              // strip the built-in @dart/log topics
-        public byte disable_meta;              // do not host the @dart/meta endpoint
-        public byte disable_error_logs;   // no error mirroring onto @dart/log/error
-        public DartNodeNet net;
-        public DartNodeDiscovery discovery;
+        public byte disable_logs;              // strip the built-in @ramble/log topics
+        public byte disable_meta;              // do not host the @ramble/meta endpoint
+        public byte disable_error_logs;   // no error mirroring onto @ramble/log/error
+        public RambleNodeNet net;
+        public RambleNodeDiscovery discovery;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartMsg
+    internal struct RambleMsg
     {
         public IntPtr node;
         public IntPtr user;
         public ushort topic_index;
         public uint publisher_id;
-        public DartStringView publisher_name;
-        public DartStringView topic_name;
-        public DartBytes header;   // the pattern header view, null on a plain topic
-        public DartBytes data;
+        public RambleStringView publisher_name;
+        public RambleStringView topic_name;
+        public RambleBytes header;   // the pattern header view, null on a plain topic
+        public RambleBytes data;
         public IntPtr schema;
         public ulong recv_us;
         public ulong written_us;
@@ -170,16 +170,16 @@ namespace Dart
 
     // Optional per send config. capture_us 0 = unstated, and costs no wire bytes.
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartSendOpts
+    internal struct RambleSendOpts
     {
         public ulong capture_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartEventNative
+    internal struct RambleEventNative
     {
         public int kind;
-        public int error;                      // DartErrorKind (Error events)
+        public int error;                      // RambleErrorKind (Error events)
         public IntPtr topic_name;            // const char*, topic scoped events only
         public IntPtr user;
         public uint peer;
@@ -199,7 +199,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartAllocator
+    internal struct RambleAllocator
     {
         public IntPtr page_realloc;
         public IntPtr shared;
@@ -215,11 +215,11 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartSchemaFieldInfo
+    internal struct RambleSchemaFieldInfo
     {
-        public DartStringView name;
-        public DartStringView type_name;   // the field type's NAME, empty when anonymous
-        public DartStringView elem_name;   // an array ELEMENT type's name, empty when anonymous
+        public RambleStringView name;
+        public RambleStringView type_name;   // the field type's NAME, empty when anonymous
+        public RambleStringView elem_name;   // an array ELEMENT type's name, empty when anonymous
         public byte kind;
         public byte elem;
         public ushort count;
@@ -232,7 +232,7 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Explicit)]
-    internal struct DartValueUnion
+    internal struct RambleValueUnion
     {
         [FieldOffset(0)] public ulong u;
         [FieldOffset(0)] public long i;
@@ -240,60 +240,60 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartValue
+    internal struct RambleValue
     {
         public byte kind;
         public byte elem;
         public ushort count;
         public ushort str_cap;
-        public DartValueUnion v;
-        public DartBytes bytes;
+        public RambleValueUnion v;
+        public RambleBytes bytes;
     }
 
     // the pattern struct mirrors of src/patterns/core.h, field order and types exact
 
-    // The public head of the C DartRequest, only ever read through the callback's pointer:
+    // The public head of the C RambleRequest, only ever read through the callback's pointer:
     // the reply machinery lives behind the struct, so the exact pointer is what reply takes.
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartRequestNative
+    internal struct RambleRequestNative
     {
         public IntPtr node;
-        public DartStringView function_name;
-        public DartBytes data;
-        public IntPtr schema;                  // const DartSchema*
+        public RambleStringView function_name;
+        public RambleBytes data;
+        public IntPtr schema;                  // const RambleSchema*
         public uint caller;
-        public DartStringView caller_name;
+        public RambleStringView caller_name;
         public ulong recv_us;
         public ulong written_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartResponseNative
+    internal struct RambleResponseNative
     {
-        public int status;                     // DartCallStatus
-        public DartBytes data;
-        public IntPtr schema;                  // const DartSchema*
+        public int status;                     // RambleCallStatus
+        public RambleBytes data;
+        public IntPtr schema;                  // const RambleSchema*
         public uint provider;
         public IntPtr user;
         public ulong written_us;
-        public DartStringView message;         // outcome text (default status text if none sent)
+        public RambleStringView message;         // outcome text (default status text if none sent)
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartFunctionOpts
+    internal struct RambleFunctionOpts
     {
         public uint backpressure_wait_us;
         public uint timeout_us;
         public ushort keep_last;        // req and rsp ring depth, 0 = 10
         public byte reflect_from_mesh;
-        public byte multi;              // duplicate-authority diagnostic suppressed (@dart/meta)
+        public byte multi;              // duplicate-authority diagnostic suppressed (@ramble/meta)
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartVariableOpts
+    internal struct RambleVariableOpts
     {
-        public DartBytes initial;
-        public byte access;                    // DartVarAccess
+        public RambleBytes initial;
+        public byte access;                    // RambleVarAccess
         public byte allow_force;
         public ushort catch_up;
         public ushort keep_last;
@@ -302,11 +302,11 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartVariableUpdateNative
+    internal struct RambleVariableUpdateNative
     {
         public IntPtr variable;
-        public DartStringView name;
-        public DartBytes value;
+        public RambleStringView name;
+        public RambleBytes value;
         public IntPtr schema;
         public byte forced;
         public uint write_seq;
@@ -316,16 +316,16 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartCallOpts
+    internal struct RambleCallOpts
     {
         public uint provider;        // direct a call at one definition by peer id (0 = undirected)
-        public IntPtr on_progress;   // DartProgressFn for task calls, null = updates discarded
-        public IntPtr progress_user; // handed back as DartProgress.user
+        public IntPtr on_progress;   // RambleProgressFn for task calls, null = updates discarded
+        public IntPtr progress_user; // handed back as RambleProgress.user
         public IntPtr id_out;        // uint32_t*: filled with the call id at commit
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartTaskOpts
+    internal struct RambleTaskOpts
     {
         public byte progress_best_effort;
         public ushort progress_keep_last;
@@ -339,267 +339,267 @@ namespace Dart
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DartProgressNative
+    internal struct RambleProgressNative
     {
         public uint call_id;
         public uint provider;
-        public DartBytes data;
-        public IntPtr schema;                  // const DartSchema*
+        public RambleBytes data;
+        public IntPtr schema;                  // const RambleSchema*
         public ulong written_us;
         public ulong recv_us;
-        public IntPtr user;                    // DartCallOpts.progress_user
+        public IntPtr user;                    // RambleCallOpts.progress_user
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartMsgFn(IntPtr msg);
+    internal delegate void RambleMsgFn(IntPtr msg);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartEventFn(IntPtr ev);
+    internal delegate void RambleEventFn(IntPtr ev);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate IntPtr DartAllocFn(IntPtr user, IntPtr ptr, UIntPtr size);
+    internal delegate IntPtr RambleAllocFn(IntPtr user, IntPtr ptr, UIntPtr size);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartRequestFn(IntPtr request, IntPtr user);
+    internal delegate void RambleRequestFn(IntPtr request, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartResponseFn(IntPtr response);
+    internal delegate void RambleResponseFn(IntPtr response);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartVariableUpdateFn(IntPtr update, IntPtr user);
+    internal delegate void RambleVariableUpdateFn(IntPtr update, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartProgressFn(IntPtr progress);
+    internal delegate void RambleProgressFn(IntPtr progress);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DartCancelFn(ulong token, IntPtr user);
+    internal delegate void RambleCancelFn(ulong token, IntPtr user);
 
     // ---- native entry points ----------------------------------------------------
 
     internal static class Native
     {
-        internal const string LIB = "dart";
+        internal const string LIB = "ramble";
         private const CallingConvention CC = CallingConvention.Cdecl;
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_open(ref DartAllocator alloc, byte[] name,
-            DartMsgFn on_message, DartEventFn on_event, ref DartNodeOpts opts);
+        internal static extern IntPtr ramble_node_open(ref RambleAllocator alloc, byte[] name,
+            RambleMsgFn on_message, RambleEventFn on_event, ref RambleNodeOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern DartEventNative dart_last_error(IntPtr node);
+        internal static extern RambleEventNative ramble_last_error(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_poll(IntPtr node, int timeout_ms);
+        internal static extern int ramble_node_poll(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_close(IntPtr node, int send_bye);
+        internal static extern int ramble_node_close(IntPtr node, int send_bye);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_start(IntPtr node);
+        internal static extern int ramble_node_start(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_stop(IntPtr node);
+        internal static extern int ramble_node_stop(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_is_started(IntPtr node);
+        internal static extern int ramble_node_is_started(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint dart_node_evicted_unsent(IntPtr node);
+        internal static extern uint ramble_node_evicted_unsent(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_topic(IntPtr node, byte[] name, int role,
-            IntPtr schema, ref DartTopicOpts opts);
+        internal static extern IntPtr ramble_node_create_topic(IntPtr node, byte[] name, int role,
+            IntPtr schema, ref RambleTopicOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_topic(IntPtr node, ushort index);
+        internal static extern IntPtr ramble_node_topic(IntPtr node, ushort index);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_send(IntPtr ch, DartBytes data,
-                                                   ref DartSendOpts opts);
+        internal static extern int ramble_topic_send(IntPtr ch, RambleBytes data,
+                                                   ref RambleSendOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_set_role(IntPtr ch, int role);
+        internal static extern int ramble_topic_set_role(IntPtr ch, int role);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_retire(IntPtr ch);
+        internal static extern int ramble_topic_retire(IntPtr ch);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_refresh(IntPtr ch);
+        internal static extern int ramble_topic_refresh(IntPtr ch);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_topic_schema(IntPtr ch);
+        internal static extern IntPtr ramble_topic_schema(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort dart_topic_index(IntPtr ch);
+        internal static extern ushort ramble_topic_index(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_match_count(IntPtr ch);
+        internal static extern int ramble_topic_match_count(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_drain(IntPtr ch, int timeout_ms);
+        internal static extern int ramble_topic_drain(IntPtr ch, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_take(IntPtr ch, ref DartMsg msg, int timeout_ms);
+        internal static extern int ramble_topic_take(IntPtr ch, ref RambleMsg msg, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
+        internal static extern int ramble_topic_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
+        internal static extern int ramble_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_topic_queue_stats(IntPtr ch, out uint msgs,
+        internal static extern void ramble_topic_queue_stats(IntPtr ch, out uint msgs,
             out uint bytes, out uint capacity, out uint dropped);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_node_mem_stats(IntPtr node, out UIntPtr in_use,
+        internal static extern void ramble_node_mem_stats(IntPtr node, out UIntPtr in_use,
             out UIntPtr peak, out ulong alloc_calls);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_node_backpressure_stats(IntPtr node, out ulong waited_us,
+        internal static extern void ramble_node_backpressure_stats(IntPtr node, out ulong waited_us,
             out uint waited_sends);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_topic_counts(IntPtr ch, out ulong tx_msgs, out ulong tx_bytes,
+        internal static extern void ramble_topic_counts(IntPtr ch, out ulong tx_msgs, out ulong tx_bytes,
             out ulong rx_msgs, out ulong rx_bytes);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_log_text(IntPtr node, int level, byte[] text, int len);
+        internal static extern int ramble_node_log_text(IntPtr node, int level, byte[] text, int len);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_log_topic(IntPtr node, int level);
+        internal static extern IntPtr ramble_node_log_topic(IntPtr node, int level);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_meta_function(IntPtr node);
+        internal static extern IntPtr ramble_node_meta_function(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_event_str(IntPtr ev, byte[] buf, UIntPtr cap);
+        internal static extern IntPtr ramble_event_str(IntPtr ev, byte[] buf, UIntPtr cap);
 
         // serialize / schema
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_schema_compile(DartAllocFn alloc, IntPtr user,
+        internal static extern IntPtr ramble_schema_compile(RambleAllocFn alloc, IntPtr user,
             byte[] text, out IntPtr err);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_schema_free(IntPtr s, DartAllocFn alloc, IntPtr user);
+        internal static extern void ramble_schema_free(IntPtr s, RambleAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern DartBytes dart_schema_wire(IntPtr s);
+        internal static extern RambleBytes ramble_schema_wire(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ulong dart_schema_hash(IntPtr s);
+        internal static extern ulong ramble_schema_hash(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_schema_copy(IntPtr s, DartAllocFn alloc, IntPtr user);
+        internal static extern IntPtr ramble_schema_copy(IntPtr s, RambleAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern DartStringView dart_schema_name(IntPtr s);
+        internal static extern RambleStringView ramble_schema_name(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint dart_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
+        internal static extern uint ramble_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_schema_subset(IntPtr sub, IntPtr pub);
+        internal static extern int ramble_schema_subset(IntPtr sub, IntPtr pub);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_std_recognize(IntPtr s, DartAllocFn alloc, IntPtr user);
+        internal static extern int ramble_std_recognize(IntPtr s, RambleAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_std_recognize_field(IntPtr s, ushort field,
-                                                            DartAllocFn alloc, IntPtr user);
+        internal static extern int ramble_std_recognize_field(IntPtr s, ushort field,
+                                                            RambleAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern long dart_timestamp_now();
+        internal static extern long ramble_timestamp_now();
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint dart_schema_size(IntPtr s);
+        internal static extern uint ramble_schema_size(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort dart_schema_field_count(IntPtr s);
+        internal static extern ushort ramble_schema_field_count(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_schema_field_at(IntPtr s, ushort i, out DartSchemaFieldInfo info);
+        internal static extern int ramble_schema_field_at(IntPtr s, ushort i, out RambleSchemaFieldInfo info);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort dart_schema_enum_count(IntPtr s, ushort field);
+        internal static extern ushort ramble_schema_enum_count(IntPtr s, ushort field);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_schema_enum_variant(IntPtr s, ushort field, ushort i,
-            out long value, out DartStringView name);
+        internal static extern int ramble_schema_enum_variant(IntPtr s, ushort field, ushort i,
+            out long value, out RambleStringView name);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_schema_message_default(IntPtr s, IntPtr buf, UIntPtr cap);
+        internal static extern int ramble_schema_message_default(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_uint(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, ulong v);
+        internal static extern int ramble_set_uint(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, ulong v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_int(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, long v);
+        internal static extern int ramble_set_int(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, long v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_f64(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, double v);
+        internal static extern int ramble_set_f64(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, double v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_f32(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, float v);
+        internal static extern int ramble_set_f32(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, float v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_array(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, DartBytes elems);
+        internal static extern int ramble_set_array(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RambleBytes elems);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_string(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, DartStringView v);
+        internal static extern int ramble_set_string(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RambleStringView v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_string_at(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field,
-            ushort index, DartStringView v);
+        internal static extern int ramble_set_string_at(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field,
+            ushort index, RambleStringView v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_get_value(DartBytes msg, IntPtr s, ushort field, out DartValue outv);
+        internal static extern int ramble_get_value(RambleBytes msg, IntPtr s, ushort field, out RambleValue outv);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint dart_schema_msg_min(IntPtr s);
+        internal static extern uint ramble_schema_msg_min(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint dart_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
+        internal static extern uint ramble_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_set_map(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, DartBytes map);
+        internal static extern int ramble_set_map(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RambleBytes map);
 
         // node lock (bracket zero-copy views) + match-wait companions
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_node_lock(IntPtr node);
+        internal static extern void ramble_node_lock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_node_unlock(IntPtr node);
+        internal static extern void ramble_node_unlock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_node_settle(IntPtr node, int timeout_ms);
+        internal static extern int ramble_node_settle(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_ready(IntPtr ch);
+        internal static extern int ramble_topic_ready(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_topic_pending_count(IntPtr ch);
+        internal static extern int ramble_topic_pending_count(IntPtr ch);
 
         // patterns: functions
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_function_definition(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr rsp_schema, DartRequestFn on_request, IntPtr user,
-            ref DartFunctionOpts opts);
+        internal static extern IntPtr ramble_node_create_function_definition(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr rsp_schema, RambleRequestFn on_request, IntPtr user,
+            ref RambleFunctionOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_remote_function(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr rsp_schema, ref DartFunctionOpts opts);
+        internal static extern IntPtr ramble_node_create_remote_function(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr rsp_schema, ref RambleFunctionOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_call(IntPtr fn, DartBytes req,
-            out DartResponseNative response, int timeout_ms, IntPtr opts);
+        internal static extern int ramble_function_call(IntPtr fn, RambleBytes req,
+            out RambleResponseNative response, int timeout_ms, IntPtr opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_call_async(IntPtr fn, DartBytes req,
-            DartResponseFn on_response, IntPtr user, IntPtr opts);
+        internal static extern int ramble_function_call_async(IntPtr fn, RambleBytes req,
+            RambleResponseFn on_response, IntPtr user, IntPtr opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_match_count(IntPtr fn);
+        internal static extern int ramble_function_match_count(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_retire(IntPtr fn);
+        internal static extern int ramble_function_retire(IntPtr fn);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_refresh(IntPtr fn);
+        internal static extern int ramble_function_refresh(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_request_reply(IntPtr request, DartBytes rsp);
+        internal static extern void ramble_request_reply(IntPtr request, RambleBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void dart_request_fail(IntPtr request, byte[] message, DartBytes rsp);
+        internal static extern void ramble_request_fail(IntPtr request, byte[] message, RambleBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ulong dart_request_defer(IntPtr request);
+        internal static extern ulong ramble_request_defer(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_complete(IntPtr fn, ulong token, int status, byte[] message, DartBytes rsp);
+        internal static extern int ramble_function_complete(IntPtr fn, ulong token, int status, byte[] message, RambleBytes rsp);
 
         // patterns: tasks
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_task_definition(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, DartRequestFn on_request,
-            IntPtr user, ref DartTaskOpts opts);
+        internal static extern IntPtr ramble_node_create_task_definition(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, RambleRequestFn on_request,
+            IntPtr user, ref RambleTaskOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_remote_task(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, ref DartTaskOpts opts);
+        internal static extern IntPtr ramble_node_create_remote_task(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, ref RambleTaskOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_request_start(IntPtr request);
+        internal static extern int ramble_request_start(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_progress(IntPtr fn, ulong token, DartBytes progress);
+        internal static extern int ramble_function_progress(IntPtr fn, ulong token, RambleBytes progress);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_cancelled(IntPtr fn, ulong token);
+        internal static extern int ramble_function_cancelled(IntPtr fn, ulong token);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_on_cancel(IntPtr fn, DartCancelFn on_cancel, IntPtr user);
+        internal static extern int ramble_function_on_cancel(IntPtr fn, RambleCancelFn on_cancel, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_function_cancel(IntPtr fn, uint call_id);
+        internal static extern int ramble_function_cancel(IntPtr fn, uint call_id);
 
         // patterns: variables
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_variable_definition(IntPtr node, byte[] name,
-            IntPtr schema, ref DartVariableOpts opts);
+        internal static extern IntPtr ramble_node_create_variable_definition(IntPtr node, byte[] name,
+            IntPtr schema, ref RambleVariableOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr dart_node_create_remote_variable(IntPtr node, byte[] name,
-            IntPtr schema, ref DartVariableOpts opts);
+        internal static extern IntPtr ramble_node_create_remote_variable(IntPtr node, byte[] name,
+            IntPtr schema, ref RambleVariableOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_get(IntPtr var, out DartBytes value);
+        internal static extern int ramble_variable_get(IntPtr var, out RambleBytes value);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_set(IntPtr var, DartBytes value);
+        internal static extern int ramble_variable_set(IntPtr var, RambleBytes value);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_force(IntPtr var, DartBytes value);
+        internal static extern int ramble_variable_force(IntPtr var, RambleBytes value);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_unforce(IntPtr var);
+        internal static extern int ramble_variable_unforce(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_forced(IntPtr var);
+        internal static extern int ramble_variable_forced(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_wait(IntPtr var, int timeout_ms);
+        internal static extern int ramble_variable_wait(IntPtr var, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_match_count(IntPtr var);
+        internal static extern int ramble_variable_match_count(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_retire(IntPtr var);
+        internal static extern int ramble_variable_retire(IntPtr var);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_refresh(IntPtr var);
+        internal static extern int ramble_variable_refresh(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_on_change(IntPtr var, DartVariableUpdateFn on_change, IntPtr user);
+        internal static extern int ramble_variable_on_change(IntPtr var, RambleVariableUpdateFn on_change, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int dart_variable_on_write(IntPtr var, DartVariableUpdateFn on_write, IntPtr user);
+        internal static extern int ramble_variable_on_write(IntPtr var, RambleVariableUpdateFn on_write, IntPtr user);
     }
 
     // ---- config + reflection attributes -----------------------------------------
 
-    /// <summary>Per topic QoS, the C DartQos as a class. Every field zero means the default,
+    /// <summary>Per topic QoS, the C RambleQos as a class. Every field zero means the default,
     /// so a null Qos is every default. docs/topics.md explains them.</summary>
     public sealed class Qos
     {
@@ -638,9 +638,9 @@ namespace Dart
             ReflectFromMesh = other.ReflectFromMesh;
         }
 
-        internal DartQos ToNative()
+        internal RambleQos ToNative()
         {
-            return new DartQos
+            return new RambleQos
             {
                 reliability = (int)Reliability,
                 keep_last = KeepLast,
@@ -660,86 +660,86 @@ namespace Dart
     /// <summary>Override the wire type name of a message struct or class, the class name by
     /// default. Never required.</summary>
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
-    public sealed class DartSchemaAttribute : Attribute
+    public sealed class RambleSchemaAttribute : Attribute
     {
         public string Name;
-        public DartSchemaAttribute(string name = null) { Name = name; }
+        public RambleSchemaAttribute(string name = null) { Name = name; }
     }
 
     /// <summary>A fixed length array field with this element count. Without it an array
     /// field is a variable array whose length rides the message tail.</summary>
     [AttributeUsage(AttributeTargets.Field)]
-    public sealed class DartArrayAttribute : Attribute
+    public sealed class RambleArrayAttribute : Attribute
     {
         public int Count;
-        public DartArrayAttribute(int count) { Count = count; }
+        public RambleArrayAttribute(int count) { Count = count; }
     }
 
     /// <summary>A capped string field, the max UTF-8 byte length. Without it a string is
-    /// unbounded. On a string[] it makes a variable array, with [DartArray] a fixed one.</summary>
+    /// unbounded. On a string[] it makes a variable array, with [RambleArray] a fixed one.</summary>
     [AttributeUsage(AttributeTargets.Field)]
-    public sealed class DartStringAttribute : Attribute
+    public sealed class RambleStringAttribute : Attribute
     {
         public int Cap;
-        public DartStringAttribute(int cap) { Cap = cap; }
+        public RambleStringAttribute(int cap) { Cap = cap; }
     }
 
     /// <summary>Name a field's type with a standard type (docs/stdtypes.md), so the name
     /// narrows matching. The shape must be the canonical one or compiling fails.</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Struct | AttributeTargets.Class)]
-    public sealed class DartTypeNameAttribute : Attribute
+    public sealed class RambleTypeNameAttribute : Attribute
     {
         public string Name;
-        public DartTypeNameAttribute(string name) { Name = name; }
+        public RambleTypeNameAttribute(string name) { Name = name; }
     }
 
     // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). The
-    // [DartField] overrides give the canonical lowercase wire names every language agrees on.
-    [DartTypeName("Float2")] public struct Float2
-    { [DartField("x")] public float X; [DartField("y")] public float Y; }
-    [DartTypeName("Float3")] public struct Float3
-    { [DartField("x")] public float X; [DartField("y")] public float Y;
-      [DartField("z")] public float Z; }
-    [DartTypeName("Float4")] public struct Float4
-    { [DartField("x")] public float X; [DartField("y")] public float Y;
-      [DartField("z")] public float Z; [DartField("w")] public float W; }
-    [DartTypeName("Double2")] public struct Double2
-    { [DartField("x")] public double X; [DartField("y")] public double Y; }
-    [DartTypeName("Double3")] public struct Double3
-    { [DartField("x")] public double X; [DartField("y")] public double Y;
-      [DartField("z")] public double Z; }
-    [DartTypeName("Double4")] public struct Double4
-    { [DartField("x")] public double X; [DartField("y")] public double Y;
-      [DartField("z")] public double Z; [DartField("w")] public double W; }
-    [DartTypeName("Int2")] public struct Int2
-    { [DartField("x")] public int X; [DartField("y")] public int Y; }
-    [DartTypeName("Int3")] public struct Int3
-    { [DartField("x")] public int X; [DartField("y")] public int Y; [DartField("z")] public int Z; }
-    [DartTypeName("Int4")] public struct Int4
-    { [DartField("x")] public int X; [DartField("y")] public int Y;
-      [DartField("z")] public int Z; [DartField("w")] public int W; }
-    [DartTypeName("Quaternion")] public struct Quaternion    // stored x, y, z, w
-    { [DartField("x")] public double X; [DartField("y")] public double Y;
-      [DartField("z")] public double Z; [DartField("w")] public double W; }
-    [DartTypeName("Color")] public struct Color              // sRGB, straight alpha
-    { [DartField("r")] public byte R; [DartField("g")] public byte G;
-      [DartField("b")] public byte B; [DartField("a")] public byte A; }
-    [DartTypeName("Rect")] public struct Rect
-    { [DartField("x")] public float X; [DartField("y")] public float Y;
-      [DartField("w")] public float W; [DartField("h")] public float H; }
-    [DartTypeName("RectI")] public struct RectI
-    { [DartField("x")] public int X; [DartField("y")] public int Y;
-      [DartField("w")] public int W; [DartField("h")] public int H; }
+    // [RambleField] overrides give the canonical lowercase wire names every language agrees on.
+    [RambleTypeName("Float2")] public struct Float2
+    { [RambleField("x")] public float X; [RambleField("y")] public float Y; }
+    [RambleTypeName("Float3")] public struct Float3
+    { [RambleField("x")] public float X; [RambleField("y")] public float Y;
+      [RambleField("z")] public float Z; }
+    [RambleTypeName("Float4")] public struct Float4
+    { [RambleField("x")] public float X; [RambleField("y")] public float Y;
+      [RambleField("z")] public float Z; [RambleField("w")] public float W; }
+    [RambleTypeName("Double2")] public struct Double2
+    { [RambleField("x")] public double X; [RambleField("y")] public double Y; }
+    [RambleTypeName("Double3")] public struct Double3
+    { [RambleField("x")] public double X; [RambleField("y")] public double Y;
+      [RambleField("z")] public double Z; }
+    [RambleTypeName("Double4")] public struct Double4
+    { [RambleField("x")] public double X; [RambleField("y")] public double Y;
+      [RambleField("z")] public double Z; [RambleField("w")] public double W; }
+    [RambleTypeName("Int2")] public struct Int2
+    { [RambleField("x")] public int X; [RambleField("y")] public int Y; }
+    [RambleTypeName("Int3")] public struct Int3
+    { [RambleField("x")] public int X; [RambleField("y")] public int Y; [RambleField("z")] public int Z; }
+    [RambleTypeName("Int4")] public struct Int4
+    { [RambleField("x")] public int X; [RambleField("y")] public int Y;
+      [RambleField("z")] public int Z; [RambleField("w")] public int W; }
+    [RambleTypeName("Quaternion")] public struct Quaternion    // stored x, y, z, w
+    { [RambleField("x")] public double X; [RambleField("y")] public double Y;
+      [RambleField("z")] public double Z; [RambleField("w")] public double W; }
+    [RambleTypeName("Color")] public struct Color              // sRGB, straight alpha
+    { [RambleField("r")] public byte R; [RambleField("g")] public byte G;
+      [RambleField("b")] public byte B; [RambleField("a")] public byte A; }
+    [RambleTypeName("Rect")] public struct Rect
+    { [RambleField("x")] public float X; [RambleField("y")] public float Y;
+      [RambleField("w")] public float W; [RambleField("h")] public float H; }
+    [RambleTypeName("RectI")] public struct RectI
+    { [RambleField("x")] public int X; [RambleField("y")] public int Y;
+      [RambleField("w")] public int W; [RambleField("h")] public int H; }
     // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
-    [DartTypeName("Transform")] public struct Transform
-    { [DartField("translation")] public Double3 Translation;
-      [DartField("rotation")] public Quaternion Rotation;
-      [DartField("parent")] [DartString(30)] public string Parent; }
-    [DartTypeName("Twist")] public struct Twist               // m/s and rad/s
-    { [DartField("linear")] public Double3 Linear; [DartField("angular")] public Double3 Angular; }
-    [DartTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
-    { [DartField("lat")] public double Lat; [DartField("lon")] public double Lon;
-      [DartField("alt")] public double Alt; }
+    [RambleTypeName("Transform")] public struct Transform
+    { [RambleField("translation")] public Double3 Translation;
+      [RambleField("rotation")] public Quaternion Rotation;
+      [RambleField("parent")] [RambleString(30)] public string Parent; }
+    [RambleTypeName("Twist")] public struct Twist               // m/s and rad/s
+    { [RambleField("linear")] public Double3 Linear; [RambleField("angular")] public Double3 Angular; }
+    [RambleTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
+    { [RambleField("lat")] public double Lat; [RambleField("lon")] public double Lon;
+      [RambleField("alt")] public double Alt; }
 
     /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
     /// container, so data holds the file bytes rather than pixels.</summary>
@@ -752,52 +752,52 @@ namespace Dart
     /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
     public enum VideoStreamKind : byte
     { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
-    [DartTypeName("Image")] public struct Image               // stride 0 = packed rows
-    { [DartField("width")] public uint Width; [DartField("height")] public uint Height;
-      [DartField("stride")] public uint Stride;
-      [DartField("format")] public ImageFormat Format;
-      [DartField("data")] public byte[] Data; }               // pixels, or the file bytes
-    [DartTypeName("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
-    { [DartField("codec")] public VideoCodec Codec;
-      [DartField("width")] public uint Width; [DartField("height")] public uint Height;
-      [DartField("keyframe")] public bool Keyframe;
-      [DartField("pts")] [DartTypeName("Timestamp")] public long Pts;   // the Timestamp clock
-      [DartField("data")] public byte[] Data; }
+    [RambleTypeName("Image")] public struct Image               // stride 0 = packed rows
+    { [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
+      [RambleField("stride")] public uint Stride;
+      [RambleField("format")] public ImageFormat Format;
+      [RambleField("data")] public byte[] Data; }               // pixels, or the file bytes
+    [RambleTypeName("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
+    { [RambleField("codec")] public VideoCodec Codec;
+      [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
+      [RambleField("keyframe")] public bool Keyframe;
+      [RambleField("pts")] [RambleTypeName("Timestamp")] public long Pts;   // the Timestamp clock
+      [RambleField("data")] public byte[] Data; }
     // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
     // Width and Height are hints for pickers, the stream stays authoritative once connected.
-    [DartTypeName("ExternalVideoStream")] public struct ExternalVideoStream
-    { [DartField("kind")] public VideoStreamKind Kind;
-      [DartField("codec")] public VideoCodec Codec;
-      [DartField("width")] public uint Width; [DartField("height")] public uint Height;
-      [DartField("url")] [DartTypeName("Uri")] [DartString(256)] public string Url;
-      [DartField("name")] [DartString(32)] public string Name; }
+    [RambleTypeName("ExternalVideoStream")] public struct ExternalVideoStream
+    { [RambleField("kind")] public VideoStreamKind Kind;
+      [RambleField("codec")] public VideoCodec Codec;
+      [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
+      [RambleField("url")] [RambleTypeName("Uri")] [RambleString(256)] public string Url;
+      [RambleField("name")] [RambleString(32)] public string Name; }
 
     /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
     public enum DistortionModel : byte
     { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
     // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
-    [DartTypeName("CameraIntrinsics")] public struct CameraIntrinsics
-    { [DartField("width")] public uint Width; [DartField("height")] public uint Height;
-      [DartField("fx")] public double Fx; [DartField("fy")] public double Fy;
-      [DartField("cx")] public double Cx; [DartField("cy")] public double Cy;
-      [DartField("model")] public DistortionModel Model;
-      [DartField("coeffs")] [DartArray(8)] public double[] Coeffs; }
+    [RambleTypeName("CameraIntrinsics")] public struct CameraIntrinsics
+    { [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
+      [RambleField("fx")] public double Fx; [RambleField("fy")] public double Fy;
+      [RambleField("cx")] public double Cx; [RambleField("cy")] public double Cy;
+      [RambleField("model")] public DistortionModel Model;
+      [RambleField("coeffs")] [RambleArray(8)] public double[] Coeffs; }
     // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
     // may be empty. The names ride a JointNames variable, not every sample.
-    [DartTypeName("JointState")] public struct JointState
-    { [DartField("position")] public double[] Position;
-      [DartField("velocity")] public double[] Velocity;
-      [DartField("effort")] public double[] Effort; }
+    [RambleTypeName("JointState")] public struct JointState
+    { [RambleField("position")] public double[] Position;
+      [RambleField("velocity")] public double[] Velocity;
+      [RambleField("effort")] public double[] Effort; }
     // Published once as a variable. The order every JointState array follows.
-    [DartTypeName("JointNames")] public struct JointNames
-    { [DartField("name")] [DartString(32)] public string[] Name; }
+    [RambleTypeName("JointNames")] public struct JointNames
+    { [RambleField("name")] [RambleString(32)] public string[] Name; }
 
     /// <summary>The standard-type values that need a platform.</summary>
     public static class Std
     {
         /// <summary>Now in Timestamp units, microseconds since the Unix epoch UTC, the clock a
         /// message's WrittenUs uses.</summary>
-        public static long Now() => Native.dart_timestamp_now();
+        public static long Now() => Native.ramble_timestamp_now();
         /// <summary>An identity Quaternion (w = 1).</summary>
         public static Quaternion IdentityRotation() => new Quaternion { W = 1.0 };
         /// <summary>A Color from 0xRRGGBBAA.</summary>
@@ -808,10 +808,10 @@ namespace Dart
 
     /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
     [AttributeUsage(AttributeTargets.Field)]
-    public sealed class DartFieldAttribute : Attribute
+    public sealed class RambleFieldAttribute : Attribute
     {
         public string Name;
-        public DartFieldAttribute(string name) { Name = name; }
+        public RambleFieldAttribute(string name) { Name = name; }
     }
 
     public class SchemaException : Exception
@@ -821,13 +821,13 @@ namespace Dart
 
     /// <summary>A call was refused: a non Ok SendStatus surfaced through a throwing surface
     /// such as the VariableDefinition&lt;T&gt;.Value setter.</summary>
-    public class DartException : Exception
+    public class RambleException : Exception
     {
         public SendStatus Status;
-        public DartException(SendStatus status, string m) : base(m) { Status = status; }
+        public RambleException(SendStatus status, string m) : base(m) { Status = status; }
     }
 
-    /// <summary>Reading DartResponse&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
+    /// <summary>Reading RambleResponse&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
     public class CallException : Exception
     {
         public CallStatus Status;
@@ -845,7 +845,7 @@ namespace Dart
         public Schema(string text)
         {
             IntPtr err;
-            IntPtr h = Native.dart_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
+            IntPtr h = Native.ramble_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
             if (h == IntPtr.Zero)
                 throw new SchemaException("schema compile failed near: " + Codec.PtrToStr(err));
             Handle = h;
@@ -859,11 +859,11 @@ namespace Dart
         /// publisher's. Freeing it is this object's job from here on.</summary>
         internal Schema(IntPtr owned) { Handle = owned; }
 
-        public string Name => Codec.Str(Native.dart_schema_name(Handle));
-        public uint Size => Native.dart_schema_size(Handle);
-        public ulong Hash => Native.dart_schema_hash(Handle);
-        public ushort FieldCount => Native.dart_schema_field_count(Handle);
-        public byte[] Wire => Codec.Bytes(Native.dart_schema_wire(Handle));
+        public string Name => Codec.Str(Native.ramble_schema_name(Handle));
+        public uint Size => Native.ramble_schema_size(Handle);
+        public ulong Hash => Native.ramble_schema_hash(Handle);
+        public ushort FieldCount => Native.ramble_schema_field_count(Handle);
+        public byte[] Wire => Codec.Bytes(Native.ramble_schema_wire(Handle));
 
         /// <summary>The DSL text reconstructed from the compiled schema (works for any
         /// schema, including one parsed from a peer). Paste into a C node for interop.</summary>
@@ -883,7 +883,7 @@ namespace Dart
 
         /// <summary>Can a reader declaring this schema read messages written with pub? Type
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
-        public bool CanRead(Schema pub) => Native.dart_schema_subset(Handle, pub.Handle) != 0;
+        public bool CanRead(Schema pub) => Native.ramble_schema_subset(Handle, pub.Handle) != 0;
 
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
         /// <summary>The decoded fields by name. A bare type schema yields its one value under
@@ -899,7 +899,7 @@ namespace Dart
         {
             if (Handle != IntPtr.Zero)
             {
-                Native.dart_schema_free(Handle, Codec.SchemaAlloc, IntPtr.Zero);
+                Native.ramble_schema_free(Handle, Codec.SchemaAlloc, IntPtr.Zero);
                 Handle = IntPtr.Zero;
             }
             GC.SuppressFinalize(this);
@@ -912,7 +912,7 @@ namespace Dart
     /// <summary>A delivered message. The payload is copied out so it outlives the callback,
     /// but the decode happens on the first read of Fields or Value and never if neither is
     /// read. Read it from one thread, as handlers do.</summary>
-    public sealed class DartMessage
+    public sealed class RambleMessage
     {
         public ushort TopicIndex;
         public uint PublisherId;
@@ -959,15 +959,15 @@ namespace Dart
                 _value = _clrType != null ? Codec.ToObject(_clrType, _fields)
                                           : Codec.RootOrFields(_schema.Handle, _fields);
             }
-            catch (Exception e) { Console.Error.WriteLine("dart decode: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble decode: " + e); }
         }
 
         public string Text => Encoding.UTF8.GetString(Data);
         public T As<T>() => (T)Value;
 
-        internal static DartMessage FromNative(ref DartMsg m, Type clrType, Schema ownedSchema)
+        internal static RambleMessage FromNative(ref RambleMsg m, Type clrType, Schema ownedSchema)
         {
-            return new DartMessage
+            return new RambleMessage
             {
                 TopicIndex = m.topic_index,
                 PublisherId = m.publisher_id,
@@ -983,10 +983,10 @@ namespace Dart
         }
 
         public override string ToString()
-            => $"DartMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
+            => $"RambleMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
     }
 
-    public sealed class DartEvent
+    public sealed class RambleEvent
     {
         public EventKind Kind;
         public ErrorKind Error;   // the error when Kind == EventKind.Error, else None
@@ -1004,20 +1004,20 @@ namespace Dart
         /// <summary>True if this event reports something going wrong.</summary>
         public bool IsError => Kind == EventKind.Error;
 
-        // format an event returned BY VALUE (dart_last_error): dart_event_str wants a
+        // format an event returned BY VALUE (ramble_last_error): ramble_event_str wants a
         // pointer, so briefly marshal the struct to unmanaged memory.
-        internal static DartEvent FromValue(DartEventNative e)
+        internal static RambleEvent FromValue(RambleEventNative e)
         {
-            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<DartEventNative>());
+            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<RambleEventNative>());
             try { Marshal.StructureToPtr(e, p, false); return FromNative(p, ref e); }
             finally { Marshal.FreeHGlobal(p); }
         }
 
-        internal static DartEvent FromNative(IntPtr evPtr, ref DartEventNative e)
+        internal static RambleEvent FromNative(IntPtr evPtr, ref RambleEventNative e)
         {
             var buf = new byte[192];
-            Native.dart_event_str(evPtr, buf, (UIntPtr)buf.Length);
-            return new DartEvent
+            Native.ramble_event_str(evPtr, buf, (UIntPtr)buf.Length);
+            return new RambleEvent
             {
                 Kind = (EventKind)e.kind,
                 Error = (ErrorKind)e.error,
@@ -1037,9 +1037,9 @@ namespace Dart
         public override string ToString() => _line;
     }
 
-    /// <summary>One decoded @dart/log line for a DartNode.OnLog handler. WallUs is epoch us,
+    /// <summary>One decoded @ramble/log line for a RambleNode.OnLog handler. WallUs is epoch us,
     /// MonoUs the publisher's monotonic clock, RecvUs this node's clock at receipt.</summary>
-    public sealed class DartLogLine
+    public sealed class RambleLogLine
     {
         public LogLevel Level;
         public string Node;      // the publishing node's name
@@ -1047,16 +1047,16 @@ namespace Dart
         public ulong WallUs;
         public ulong MonoUs;
         public ulong RecvUs;
-        /// <summary>The carrying message's source stamp (see DartMessage.WrittenUs).</summary>
+        /// <summary>The carrying message's source stamp (see RambleMessage.WrittenUs).</summary>
         public ulong WrittenUs;
         public string Text;
 
         public override string ToString() => $"[{Level}] {Node}: {Text}";
     }
 
-    /// <summary>A decoded @dart/meta reply. The node and proc scalars are fields, the full
+    /// <summary>A decoded @ramble/meta reply. The node and proc scalars are fields, the full
     /// body stays in Info. Absent sections leave zeros and HaveProc false.</summary>
-    public sealed class DartMetaSnapshot
+    public sealed class RambleMetaSnapshot
     {
         public bool Valid;
         public CallStatus Status = CallStatus.Timeout;
@@ -1079,9 +1079,9 @@ namespace Dart
         private static string S(Dictionary<string, object> d, string k)
             => d.TryGetValue(k, out var o) ? o as string ?? "" : "";
 
-        internal static DartMetaSnapshot FromResponse(DartResponse r)
+        internal static RambleMetaSnapshot FromResponse(RambleResponse r)
         {
-            var s = new DartMetaSnapshot { Status = r.Status, Provider = r.Provider };
+            var s = new RambleMetaSnapshot { Status = r.Status, Provider = r.Provider };
             if (r.Status != CallStatus.Ok || r.SchemaPtr == IntPtr.Zero) return s;
             var top = Codec.DecodeDict(r.SchemaPtr, r.Data);
             if (!(top.TryGetValue("info", out var io) && io is Dictionary<string, object> info)) return s;
@@ -1113,7 +1113,7 @@ namespace Dart
     }
 
     // A wrapper handle pointing into the node's arena. Close frees that arena, so the node
-    // zeroes every handle there: the C refuses a NULL one (DART_ERR_NO_TOPIC) instead of
+    // zeroes every handle there: the C refuses a NULL one (RAMBLE_ERR_NO_TOPIC) instead of
     // reading freed memory.
     internal interface INodeHandle { void Invalidate(); }
 
@@ -1121,7 +1121,7 @@ namespace Dart
 
     public class Topic : INodeHandle
     {
-        internal readonly DartNode _node;
+        internal readonly RambleNode _node;
         internal IntPtr _handle;   // zeroed by Retire, and by the node at Close
 
         void INodeHandle.Invalidate() { _handle = IntPtr.Zero; }
@@ -1129,13 +1129,13 @@ namespace Dart
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
         /// UTF-8 strings. A null qos is every default.</summary>
-        public Topic(DartNode node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(RambleNode node, string name, Role role = Role.PubSub, Qos qos = null)
             : this(node, name, (Schema)null, role, qos) { }
 
         /// <summary>Create a typed topic with an explicit Schema. Topic&lt;T&gt; is the shorthand
         /// for the reflected case. Same-name topics on one node share the native slot with a
-        /// widened role (registry in DartNode).</summary>
-        public Topic(DartNode node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+        /// widened role (registry in RambleNode).</summary>
+        public Topic(RambleNode node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
         {
             _node = node;
             Schema = schema;
@@ -1143,9 +1143,9 @@ namespace Dart
             node.RegisterHandle(this);
         }
 
-        // Wrap an already-existing native handle (e.g. a @dart/log topic from the node):
+        // Wrap an already-existing native handle (e.g. a @ramble/log topic from the node):
         // no name registry entry, no schema. Query/send/set-role like any topic.
-        internal Topic(DartNode node, IntPtr handle)
+        internal Topic(RambleNode node, IntPtr handle)
         {
             _node = node;
             Schema = null;
@@ -1163,13 +1163,13 @@ namespace Dart
             var h = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
-                var b = new DartBytes
+                var b = new RambleBytes
                 {
                     data = data != null && data.Length > 0 ? h.AddrOfPinnedObject() : IntPtr.Zero,
                     len = (UIntPtr)(data?.Length ?? 0)
                 };
-                var o = new DartSendOpts { capture_us = (ulong)captureUs };
-                r = Native.dart_topic_send(_handle, b, ref o);
+                var o = new RambleSendOpts { capture_us = (ulong)captureUs };
+                r = Native.ramble_topic_send(_handle, b, ref o);
             }
             finally { h.Free(); }
             return (SendStatus)r;
@@ -1193,7 +1193,7 @@ namespace Dart
 
         public SendStatus SetRole(Role role)
         {
-            return (SendStatus)Native.dart_topic_set_role(_handle, (int)role);
+            return (SendStatus)Native.ramble_topic_set_role(_handle, (int)role);
         }
 
         /// <summary>Retire the topic so the name can be re created with another schema
@@ -1202,36 +1202,36 @@ namespace Dart
 
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
         /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => _handle != IntPtr.Zero && Native.dart_topic_refresh(_handle) == 1;
+        public bool Refresh() => _handle != IntPtr.Zero && Native.ramble_topic_refresh(_handle) == 1;
 
-        public ushort Index => Native.dart_topic_index(_handle);
+        public ushort Index => Native.ramble_topic_index(_handle);
 
         public int MatchCount()
         {
-            return Native.dart_topic_match_count(_handle);
+            return Native.ramble_topic_match_count(_handle);
         }
 
         /// <summary>True when a send would not wait on the match wait: a subscriber is matched
         /// or matching has converged. For a GUI: park payloads while false.</summary>
-        public bool Ready => Native.dart_topic_ready(_handle) == 1;
+        public bool Ready => Native.ramble_topic_ready(_handle) == 1;
 
         /// <summary>Unresolved candidate matches right now. 0 = matching has converged for
         /// every known peer.</summary>
-        public int PendingCount => Native.dart_topic_pending_count(_handle);
+        public int PendingCount => Native.ramble_topic_pending_count(_handle);
 
         public bool Drain(int timeoutMs)
         {
-            return Native.dart_topic_drain(_handle, timeoutMs) == 1;
+            return Native.ramble_topic_drain(_handle, timeoutMs) == 1;
         }
 
         /// <summary>Pop the next queued message, fully copied out. The first TryTake or Dispatch
         /// queues the topic (docs/node.md). timeoutMs 0 = check, negative = forever.</summary>
-        public bool TryTake(out DartMessage message, int timeoutMs = 0)
+        public bool TryTake(out RambleMessage message, int timeoutMs = 0)
         {
             message = null;
-            var m = new DartMsg();
-            if (Native.dart_topic_take(_handle, ref m, timeoutMs) != 1) return false;
-            message = DartMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index),
+            var m = new RambleMsg();
+            if (Native.ramble_topic_take(_handle, ref m, timeoutMs) != 1) return false;
+            message = RambleMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index),
                                              _node.OwnedSchema(m.schema));
             return true;
         }
@@ -1239,20 +1239,20 @@ namespace Dart
         /// <summary>Drain the queue by running OnMessage on the calling thread, oldest first, up
         /// to maxMsgs (0 = all), waiting like TryTake. These run without the node lock.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
-            => Native.dart_topic_dispatch(_handle, maxMsgs, timeoutMs);
+            => Native.ramble_topic_dispatch(_handle, maxMsgs, timeoutMs);
 
         /// <summary>Consumer queue observability, all zeros when not queued.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
-            Native.dart_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
+            Native.ramble_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
             return (m, b, c, d);
         }
 
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
-        /// it. Always on, and in the @dart/meta snapshot.</summary>
+        /// it. Always on, and in the @ramble/meta snapshot.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
         {
-            Native.dart_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
+            Native.ramble_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
             return (tm, tb, rm, rb);
         }
     }
@@ -1261,7 +1261,7 @@ namespace Dart
     /// itself and Send and TryTake carry the plain value (docs/csharp.md).</summary>
     public sealed class Topic<T> : Topic
     {
-        public Topic(DartNode node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(RambleNode node, string name, Role role = Role.PubSub, Qos qos = null)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
         public SendStatus Send(T value, long captureUs = 0) => Send((object)value, captureUs);
@@ -1270,7 +1270,7 @@ namespace Dart
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
-            DartMessage m;
+            RambleMessage m;
             if (!TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
             value = (T)m.Value;
             return true;
@@ -1279,15 +1279,15 @@ namespace Dart
 
     // ---- node -------------------------------------------------------------------
 
-    public sealed class DartNode : IDisposable
+    public sealed class RambleNode : IDisposable
     {
         private IntPtr _handle;
         private long _id;
-        private DartAllocator _alloc;
+        private RambleAllocator _alloc;
         private IntPtr _discGroup;   // native strings the node retains for its lifetime
         private IntPtr _mcastIf;
-        private Action<DartMessage> _onMsg;
-        private Action<DartEvent> _onEvt;
+        private Action<RambleMessage> _onMsg;
+        private Action<RambleEvent> _onEvt;
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
         // A publisher's schema is a node owned view good only until the next poll, so a
@@ -1303,7 +1303,7 @@ namespace Dart
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
         // takes more than a volatile fetch
-        private volatile Dictionary<ushort, Action<DartMessage>[]> _subHandlers = new Dictionary<ushort, Action<DartMessage>[]>();
+        private volatile Dictionary<ushort, Action<RambleMessage>[]> _subHandlers = new Dictionary<ushort, Action<RambleMessage>[]>();
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
         private readonly List<long> _patternBoxes = new List<long>();
@@ -1312,17 +1312,17 @@ namespace Dart
         internal readonly object PatternLock = new object();
 
         // rooted so the GC never collects the trampolines handed to native code.
-        private static readonly DartMsgFn s_onMsg = OnMessageTramp;
-        private static readonly DartEventFn s_onEvt = OnEventTramp;
+        private static readonly RambleMsgFn s_onMsg = OnMessageTramp;
+        private static readonly RambleEventFn s_onEvt = OnEventTramp;
         // Read once per delivered message and per event, written only at open and close, so
         // it is replaced whole under s_reg and read without a lock.
-        private static volatile Dictionary<long, DartNode> s_nodes = new Dictionary<long, DartNode>();
+        private static volatile Dictionary<long, RambleNode> s_nodes = new Dictionary<long, RambleNode>();
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
         /// <summary>Open a node. onMessage may be null, onEvent is required and both are wired
         /// before the constructor returns. Options are named parameters (docs/csharp.md).</summary>
-        public DartNode(string name, Action<DartMessage> onMessage, Action<DartEvent> onEvent,
+        public RambleNode(string name, Action<RambleMessage> onMessage, Action<RambleEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
                     bool disableLogs = false, bool disableMeta = false, bool disableErrorLogs = false,
@@ -1342,11 +1342,11 @@ namespace Dart
             lock (s_reg)
             {
                 _id = s_nextId++;
-                var next = new Dictionary<long, DartNode>(s_nodes) { [_id] = this };
+                var next = new Dictionary<long, RambleNode>(s_nodes) { [_id] = this };
                 s_nodes = next;
             }
 
-            var co = new DartNodeOpts
+            var co = new RambleNodeOpts
             {
                 domain = (ushort)domain,
                 max_topics = (ushort)maxTopics,
@@ -1386,17 +1386,17 @@ namespace Dart
 
             _alloc = Codec.DefaultAllocator();
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
-            IntPtr h = Native.dart_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
+            IntPtr h = Native.ramble_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
             Codec.FreeCStr(selfIpPtr);
 
             if (h == IntPtr.Zero)
             {
-                lock (s_reg) { var next = new Dictionary<long, DartNode>(s_nodes); next.Remove(_id); s_nodes = next; }
+                lock (s_reg) { var next = new Dictionary<long, RambleNode>(s_nodes); next.Remove(_id); s_nodes = next; }
                 Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
-                DartEvent err = LastOpenError();
-                throw new InvalidOperationException("dart_node_open failed: " + err);
+                RambleEvent err = LastOpenError();
+                throw new InvalidOperationException("ramble_node_open failed: " + err);
             }
             _handle = h;
         }
@@ -1407,7 +1407,7 @@ namespace Dart
         {
             count = 0;
             if (seeds == null || seeds.Length == 0) return IntPtr.Zero;
-            int stride = Marshal.SizeOf<DartDiscoveryAddr>();
+            int stride = Marshal.SizeOf<RambleDiscoveryAddr>();
             IntPtr block = Marshal.AllocHGlobal(stride * seeds.Length);
             try
             {
@@ -1418,7 +1418,7 @@ namespace Dart
                     string[] oct = (colon < 0 ? s : s.Substring(0, colon)).Split('.');
                     if (oct.Length != 4)
                         throw new ArgumentException("seedPeers entry '" + s + "' is not an IPv4 address");
-                    var a = new DartDiscoveryAddr { ip = new byte[16], ip_len = 4 };
+                    var a = new RambleDiscoveryAddr { ip = new byte[16], ip_len = 4 };
                     for (int k = 0; k < 4; k++) a.ip[k] = byte.Parse(oct[k]);
                     if (colon >= 0) a.port = ushort.Parse(s.Substring(colon + 1));
                     Marshal.StructureToPtr(a, IntPtr.Add(block, i * stride), false);
@@ -1431,7 +1431,7 @@ namespace Dart
 
         /// <summary>Rebind the message handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
-        public DartNode OnMessage(Action<DartMessage> fn) { _onMsg = fn; return this; }
+        public RambleNode OnMessage(Action<RambleMessage> fn) { _onMsg = fn; return this; }
 
         /// <summary>Where this node's callbacks run. Null runs them inline on the polling or
         /// service thread. Set it and every event, pattern handler, variable observer, progress
@@ -1445,11 +1445,11 @@ namespace Dart
             Action<Action> d = CallbackDispatcher;
             if (d == null) { a(); return; }
             try { d(a); }
-            catch (Exception e) { Console.Error.WriteLine("dart callback dispatcher: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble callback dispatcher: " + e); }
         }
         /// <summary>Rebind the event handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
-        public DartNode OnEvent(Action<DartEvent> fn) { _onEvt = fn; return this; }
+        public RambleNode OnEvent(Action<RambleEvent> fn) { _onEvt = fn; return this; }
 
         // The native create behind the Topic constructors. Same name creates on this node share
         // the native slot with a widened role, and a different schema is refused.
@@ -1469,7 +1469,7 @@ namespace Dart
                     byte bits = (byte)(rec.Bits | RoleBits(role));
                     if (bits != rec.Bits)
                     {
-                        Native.dart_topic_set_role(rec.Handle, (int)RoleFromBits(bits));
+                        Native.ramble_topic_set_role(rec.Handle, (int)RoleFromBits(bits));
                         rec.Bits = bits;
                     }
                     if (schema != null) _schemas.Add(schema);
@@ -1477,16 +1477,16 @@ namespace Dart
                 }
 
                 qos = qos ?? new Qos();
-                var co = new DartTopicOpts
+                var co = new RambleTopicOpts
                 {
                     qos = qos.ToNative(),
                     reflect_from_mesh = (byte)(qos.ReflectFromMesh ? 1 : 0),
                 };
-                IntPtr h = Native.dart_node_create_topic(_handle, Codec.CStr(name), (int)role,
+                IntPtr h = Native.ramble_node_create_topic(_handle, Codec.CStr(name), (int)role,
                     schema != null ? schema.Handle : IntPtr.Zero, ref co);
                 if (h == IntPtr.Zero)
                     throw new InvalidOperationException("topic create failed: " + LastError);
-                ushort idx = Native.dart_topic_index(h);
+                ushort idx = Native.ramble_topic_index(h);
                 if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
                 _topicsByName[name] = new TopicRec { Handle = h, Bits = RoleBits(role), SchemaHash = sh };
                 return h;
@@ -1500,8 +1500,8 @@ namespace Dart
             lock (_createLock)
             {
                 if (t._handle == IntPtr.Zero) return SendStatus.NoTopic;
-                ushort idx = Native.dart_topic_index(t._handle);
-                int r = Native.dart_topic_retire(t._handle);
+                ushort idx = Native.ramble_topic_index(t._handle);
+                int r = Native.ramble_topic_retire(t._handle);
                 if (r != 0) return (SendStatus)r;
                 string dead = null;
                 foreach (var kv in _topicsByName)
@@ -1510,7 +1510,7 @@ namespace Dart
                 _topicTypes.Remove(idx);
                 lock (_subLock)
             {
-                var next = new Dictionary<ushort, Action<DartMessage>[]>(_subHandlers);
+                var next = new Dictionary<ushort, Action<RambleMessage>[]>(_subHandlers);
                 next.Remove(idx);
                 _subHandlers = next;
             }
@@ -1528,14 +1528,14 @@ namespace Dart
 
         // Subscriber handlers per topic index, copy on write. When any exist for an index they
         // receive the message instead of the node wide onMessage.
-        internal void AddSubHandler(ushort index, Action<DartMessage> fn)
+        internal void AddSubHandler(ushort index, Action<RambleMessage> fn)
         {
             lock (_subLock)
             {
-                var next = new Dictionary<ushort, Action<DartMessage>[]>(_subHandlers);
-                Action<DartMessage>[] cur;
-                if (!next.TryGetValue(index, out cur)) cur = Array.Empty<Action<DartMessage>>();
-                var nv = new Action<DartMessage>[cur.Length + 1];
+                var next = new Dictionary<ushort, Action<RambleMessage>[]>(_subHandlers);
+                Action<RambleMessage>[] cur;
+                if (!next.TryGetValue(index, out cur)) cur = Array.Empty<Action<RambleMessage>>();
+                var nv = new Action<RambleMessage>[cur.Length + 1];
                 Array.Copy(cur, nv, cur.Length);
                 nv[cur.Length] = fn;
                 next[index] = nv;
@@ -1545,9 +1545,9 @@ namespace Dart
 
         // No lock: the map is replaced whole on every write, so this volatile read gets one
         // consistent version. Runs once per delivered message.
-        private Action<DartMessage>[] SubHandlersOf(ushort index)
+        private Action<RambleMessage>[] SubHandlersOf(ushort index)
         {
-            Action<DartMessage>[] hs;
+            Action<RambleMessage>[] hs;
             _subHandlers.TryGetValue(index, out hs);
             return hs;
         }
@@ -1557,12 +1557,12 @@ namespace Dart
         internal Schema OwnedSchema(IntPtr view)
         {
             if (view == IntPtr.Zero) return null;
-            ulong hash = Native.dart_schema_hash(view);
+            ulong hash = Native.ramble_schema_hash(view);
             lock (_msgSchemaLock)
             {
                 Schema owned;
                 if (_msgSchemas.TryGetValue(hash, out owned)) return owned;
-                IntPtr h = Native.dart_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
+                IntPtr h = Native.ramble_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
                 if (h == IntPtr.Zero) return null;
                 owned = new Schema(h);
                 _msgSchemas[hash] = owned;
@@ -1584,40 +1584,40 @@ namespace Dart
         /// timeoutMs in the socket wait, 0 = non blocking. State while Start() runs.</summary>
         public int Poll(int timeoutMs = 0)
         {
-            return Native.dart_node_poll(_handle, timeoutMs);
+            return Native.ramble_node_poll(_handle, timeoutMs);
         }
 
         /// <summary>Run the C service thread. Handlers fire on it, never two at once, and every
         /// call stays safe from any thread. False if already started or threads are out.</summary>
         public bool Start()
         {
-            return Native.dart_node_start(_handle) == 0;
+            return Native.ramble_node_start(_handle) == 0;
         }
 
         /// <summary>Stop and join the service thread. Idempotent, implied by Close.</summary>
-        public void Stop() => Native.dart_node_stop(_handle);
+        public void Stop() => Native.ramble_node_stop(_handle);
 
-        public bool IsStarted => Native.dart_node_is_started(_handle) == 1;
+        public bool IsStarted => Native.ramble_node_is_started(_handle) == 1;
 
         /// <summary>Block until discovery and matching settle, so everything sent now reaches
         /// everyone. Call after creating the topics. timeoutMs &lt; 0 = 3 intervals.</summary>
-        public bool Settle(int timeoutMs = -1) => Native.dart_node_settle(_handle, timeoutMs) == 1;
+        public bool Settle(int timeoutMs = -1) => Native.ramble_node_settle(_handle, timeoutMs) == 1;
 
         internal IntPtr Handle => _handle;
 
         /// <summary>Dispatch every queued topic on the calling thread, waiting up to timeoutMs
         /// for any to hold data. Per frame in Unity, so every queued handler runs there.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
-            => Native.dart_node_dispatch(_handle, maxMsgs, timeoutMs);
+            => Native.ramble_node_dispatch(_handle, maxMsgs, timeoutMs);
 
-        // ---- built-in logs (the @dart/log/{error,warn,info} topics) --------------------
+        // ---- built-in logs (the @ramble/log/{error,warn,info} topics) --------------------
 
         /// <summary>Publish a line on a level's log topic (already-formatted text, truncated
-        /// at DART_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread-safe.</summary>
+        /// at RAMBLE_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread-safe.</summary>
         public SendStatus Log(LogLevel level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
-            return (SendStatus)Native.dart_node_log_text(_handle, (int)level, b, b.Length);
+            return (SendStatus)Native.ramble_node_log_text(_handle, (int)level, b, b.Length);
         }
         public SendStatus LogError(string text) => Log(LogLevel.Error, text);
         public SendStatus LogWarn(string text) => Log(LogLevel.Warn, text);
@@ -1627,20 +1627,20 @@ namespace Dart
         /// widen its role and read it like any topic, or use OnLog.</summary>
         public Topic LogTopic(LogLevel level)
         {
-            IntPtr ch = Native.dart_node_log_topic(_handle, (int)level);
+            IntPtr ch = Native.ramble_node_log_topic(_handle, (int)level);
             return ch == IntPtr.Zero ? null : new Topic(this, ch);
         }
 
         /// <summary>Subscribe to a level's mesh wide log stream: every other node's lines at that
-        /// level as a DartLogLine, on the polling thread. False when logs are disabled.</summary>
-        public bool OnLog(LogLevel level, Action<DartLogLine> handler)
+        /// level as a RambleLogLine, on the polling thread. False when logs are disabled.</summary>
+        public bool OnLog(LogLevel level, Action<RambleLogLine> handler)
         {
             if (handler == null) return false;
-            IntPtr ch = Native.dart_node_log_topic(_handle, (int)level);
+            IntPtr ch = Native.ramble_node_log_topic(_handle, (int)level);
             if (ch == IntPtr.Zero) return false;
-            if (Native.dart_topic_set_role(ch, (int)Role.PubSub) != 0) return false;
-            ushort idx = Native.dart_topic_index(ch);
-            AddSubHandler(idx, m => handler(new DartLogLine
+            if (Native.ramble_topic_set_role(ch, (int)Role.PubSub) != 0) return false;
+            ushort idx = Native.ramble_topic_index(ch);
+            AddSubHandler(idx, m => handler(new RambleLogLine
             {
                 Level = level, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
                 WrittenUs = m.WrittenUs,
@@ -1650,30 +1650,30 @@ namespace Dart
             return true;
         }
 
-        private static ulong LogFieldU(DartMessage m, string k)
+        private static ulong LogFieldU(RambleMessage m, string k)
             => m.Fields != null && m.Fields.TryGetValue(k, out var o)
                ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
 
-        // ---- @dart/meta introspection --------------------------------------------------
+        // ---- @ramble/meta introspection --------------------------------------------------
 
-        /// <summary>The local @dart/meta caller handle, null when meta is disabled. Direct it at
+        /// <summary>The local @ramble/meta caller handle, null when meta is disabled. Direct it at
         /// a peer id. Most callers want MetaAsync.</summary>
         public RemoteFunction MetaFunction()
         {
-            IntPtr fn = Native.dart_node_meta_function(_handle);
+            IntPtr fn = Native.ramble_node_meta_function(_handle);
             return fn == IntPtr.Zero ? null : new RemoteFunction(this, fn);
         }
 
-        /// <summary>Fetch a peer's snapshot: a directed @dart/meta call decoded into a
-        /// DartMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
-        public async Task<DartMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
+        /// <summary>Fetch a peer's snapshot: a directed @ramble/meta call decoded into a
+        /// RambleMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
+        public async Task<RambleMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
         {
             RemoteFunction fn = MetaFunction();
-            if (fn == null) return new DartMetaSnapshot { Status = CallStatus.NoHandler };
+            if (fn == null) return new RambleMetaSnapshot { Status = CallStatus.NoHandler };
             byte[] req = sections == MetaSection.All
                 ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
-            DartResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
-            return DartMetaSnapshot.FromResponse(r);
+            RambleResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
+            return RambleMetaSnapshot.FromResponse(r);
         }
 
         internal Type ClrTypeOf(ushort index)
@@ -1684,28 +1684,28 @@ namespace Dart
         }
 
         /// <summary>The most recent error this node reported (also delivered via OnEvent).
-        /// DartEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
-        public DartEvent LastError => DartEvent.FromValue(Native.dart_last_error(_handle));
+        /// RambleEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
+        public RambleEvent LastError => RambleEvent.FromValue(Native.ramble_last_error(_handle));
 
         /// <summary>Why the most recent node open failed, from the process global slot. The
         /// constructor already throws with this message.</summary>
-        public static DartEvent LastOpenError() => DartEvent.FromValue(Native.dart_last_error(IntPtr.Zero));
+        public static RambleEvent LastOpenError() => RambleEvent.FromValue(Native.ramble_last_error(IntPtr.Zero));
 
         /// <summary>Sends that evicted never-sent history after the bounded wait (the
         /// ErrorKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
-        public uint EvictedUnsent => Native.dart_node_evicted_unsent(_handle);
+        public uint EvictedUnsent => Native.ramble_node_evicted_unsent(_handle);
 
         public (ulong inUse, ulong peak, ulong allocCalls) MemoryStats()
         {
             UIntPtr u, p; ulong c;
-            Native.dart_node_mem_stats(_handle, out u, out p, out c);
+            Native.ramble_node_mem_stats(_handle, out u, out p, out c);
             return ((ulong)u, (ulong)p, c);
         }
 
         public (ulong waitedUs, uint waitedSends) BackpressureStats()
         {
             ulong us; uint n;
-            Native.dart_node_backpressure_stats(_handle, out us, out n);
+            Native.ramble_node_backpressure_stats(_handle, out us, out n);
             return (us, n);
         }
 
@@ -1715,10 +1715,10 @@ namespace Dart
         {
             if (_handle != IntPtr.Zero)
             {
-                if (Native.dart_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
+                if (Native.ramble_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
                 _handle = IntPtr.Zero;
             }
-            lock (s_reg) { var next = new Dictionary<long, DartNode>(s_nodes); next.Remove(_id); s_nodes = next; }
+            lock (s_reg) { var next = new Dictionary<long, RambleNode>(s_nodes); next.Remove(_id); s_nodes = next; }
             // reap this node's pattern handler boxes and complete any still-pending
             // async calls (the C never fires their callbacks after close)
             lock (PatternLock)
@@ -1737,7 +1737,7 @@ namespace Dart
             }
             foreach (var s in _schemas) s.Dispose();
             _schemas.Clear();
-            // Not disposed: a DartMessage taken before Close may still decode against one.
+            // Not disposed: a RambleMessage taken before Close may still decode against one.
             // Dropping the node's reference leaves each to its finalizer.
             lock (_msgSchemaLock) _msgSchemas.Clear();
             Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
@@ -1746,42 +1746,42 @@ namespace Dart
         }
 
         public void Dispose() { Close(); GC.SuppressFinalize(this); }
-        ~DartNode() { try { Close(); } catch { } }
+        ~RambleNode() { try { Close(); } catch { } }
 
-        [MonoPInvokeCallback(typeof(DartMsgFn))]
+        [MonoPInvokeCallback(typeof(RambleMsgFn))]
         private static void OnMessageTramp(IntPtr msgPtr)
         {
             try
             {
-                var m = Marshal.PtrToStructure<DartMsg>(msgPtr);
-                DartNode node; Type clr = null;
+                var m = Marshal.PtrToStructure<RambleMsg>(msgPtr);
+                RambleNode node; Type clr = null;
                 s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null) return;
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null && node._onMsg == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
                 // the payload is copied and the schema is ours, so a later decode is safe
-                var msg = DartMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
+                var msg = RambleMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
                 if (hs != null) { foreach (var h in hs) h(msg); }
                 else node._onMsg(msg);
             }
-            catch (Exception e) { Console.Error.WriteLine("dart on_message: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble on_message: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(DartEventFn))]
+        [MonoPInvokeCallback(typeof(RambleEventFn))]
         private static void OnEventTramp(IntPtr evPtr)
         {
             try
             {
-                var e = Marshal.PtrToStructure<DartEventNative>(evPtr);
-                DartNode node;
+                var e = Marshal.PtrToStructure<RambleEventNative>(evPtr);
+                RambleNode node;
                 s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                DartEvent ev = DartEvent.FromNative(evPtr, ref e);   // copied past the callback
-                Action<DartEvent> fn = node._onEvt;
+                RambleEvent ev = RambleEvent.FromNative(evPtr, ref e);   // copied past the callback
+                Action<RambleEvent> fn = node._onEvt;
                 node.RunCallback(() => fn(ev));
             }
-            catch (Exception ex) { Console.Error.WriteLine("dart on_event: " + ex); }
+            catch (Exception ex) { Console.Error.WriteLine("ramble on_event: " + ex); }
         }
     }
 
@@ -1791,18 +1791,18 @@ namespace Dart
     internal struct PinnedBytes : IDisposable
     {
         private GCHandle _h;
-        internal DartBytes B;
+        internal RambleBytes B;
         internal PinnedBytes(byte[] d)
         {
             if (d == null || d.Length == 0)
             {
                 _h = default(GCHandle);
-                B = new DartBytes { data = IntPtr.Zero, len = UIntPtr.Zero };
+                B = new RambleBytes { data = IntPtr.Zero, len = UIntPtr.Zero };
             }
             else
             {
                 _h = GCHandle.Alloc(d, GCHandleType.Pinned);
-                B = new DartBytes { data = _h.AddrOfPinnedObject(), len = (UIntPtr)d.Length };
+                B = new RambleBytes { data = _h.AddrOfPinnedObject(), len = (UIntPtr)d.Length };
             }
         }
         public void Dispose() { if (_h.IsAllocated) _h.Free(); }
@@ -1819,19 +1819,19 @@ namespace Dart
 
         internal sealed class RequestBox
         {
-            public Action<DartRequest> Handler;
+            public Action<RambleRequest> Handler;
             public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
-            public DartNode Node;
+            public RambleNode Node;
         }
         internal sealed class VarBox
         {
             public Action<VariableUpdate> Handler;
-            public DartNode Node;
+            public RambleNode Node;
         }
         internal sealed class AsyncCall
         {
-            public TaskCompletionSource<DartResponse> Tcs;
-            public DartNode DartNode;
+            public TaskCompletionSource<RambleResponse> Tcs;
+            public RambleNode RambleNode;
             public Action<TaskProgress> OnProgress;   // task calls only, else null
         }
 
@@ -1853,7 +1853,7 @@ namespace Dart
                     CancellationTokenSource cts;
                     if (_live.TryGetValue(token, out cts))
                         try { cts.Cancel(); }
-                        catch (Exception e) { Console.Error.WriteLine("dart on_cancel: " + e); }
+                        catch (Exception e) { Console.Error.WriteLine("ramble on_cancel: " + e); }
                 }
             }
             public void Drop(ulong token)
@@ -1897,28 +1897,28 @@ namespace Dart
         internal static void AbandonAsync(long id)
         {
             AsyncCall c = TakeAsync(id);
-            if (c != null) c.Tcs.TrySetResult(new DartResponse { Status = CallStatus.Cancelled, Message = "cancelled" });
+            if (c != null) c.Tcs.TrySetResult(new RambleResponse { Status = CallStatus.Cancelled, Message = "cancelled" });
         }
 
         // rooted delegates handed to native code
-        internal static readonly DartRequestFn OnRequest = OnRequestTramp;
-        internal static readonly DartResponseFn OnResponse = OnResponseTramp;
-        internal static readonly DartVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
-        internal static readonly DartProgressFn OnProgress = OnProgressTramp;
-        internal static readonly DartCancelFn OnCancel = OnCancelTramp;
+        internal static readonly RambleRequestFn OnRequest = OnRequestTramp;
+        internal static readonly RambleResponseFn OnResponse = OnResponseTramp;
+        internal static readonly RambleVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
+        internal static readonly RambleProgressFn OnProgress = OnProgressTramp;
+        internal static readonly RambleCancelFn OnCancel = OnCancelTramp;
 
         // A thrown handler's response message.
         internal static string FailText(Exception e)
             => string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message;
 
-        [MonoPInvokeCallback(typeof(DartRequestFn))]
+        [MonoPInvokeCallback(typeof(RambleRequestFn))]
         private static void OnRequestTramp(IntPtr reqPtr, IntPtr user)
         {
             try
             {
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
-                var r = new DartRequest(reqPtr, box.Fn);
+                var r = new RambleRequest(reqPtr, box.Fn);
                 // The handler runs after this callback returns, where the native request is
                 // dead, so park the reply now and answer through the Deferred instead.
                 if (box.Node != null && box.Node.CallbackDispatcher != null)
@@ -1931,7 +1931,7 @@ namespace Dart
                         catch (Exception e)
                         {
                             r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
-                            Console.Error.WriteLine("dart on_request: " + e);
+                            Console.Error.WriteLine("ramble on_request: " + e);
                         }
                     });
                     return;
@@ -1942,23 +1942,23 @@ namespace Dart
                     // a thrown handler answers AppError with the exception's text, which never
                     // crosses into C
                     r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
-                    Console.Error.WriteLine("dart on_request: " + e);
+                    Console.Error.WriteLine("ramble on_request: " + e);
                 }
                 finally { r.Expire(); }
             }
-            catch (Exception e) { Console.Error.WriteLine("dart on_request: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble on_request: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(DartResponseFn))]
+        [MonoPInvokeCallback(typeof(RambleResponseFn))]
         private static void OnResponseTramp(IntPtr rspPtr)
         {
             try
             {
-                var o = Marshal.PtrToStructure<DartResponseNative>(rspPtr);
+                var o = Marshal.PtrToStructure<RambleResponseNative>(rspPtr);
                 AsyncCall call = TakeAsync((long)o.user);
                 if (call == null) return;
-                call.DartNode.UnregisterAsync((long)o.user);
-                var r = new DartResponse
+                call.RambleNode.UnregisterAsync((long)o.user);
+                var r = new RambleResponse
                 {
                     Status = (CallStatus)o.status,
                     Provider = o.provider,
@@ -1967,18 +1967,18 @@ namespace Dart
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                     Message = Codec.Str(o.message),
                 };
-                if (call.DartNode != null) call.DartNode.RunCallback(() => call.Tcs.TrySetResult(r));
+                if (call.RambleNode != null) call.RambleNode.RunCallback(() => call.Tcs.TrySetResult(r));
                 else call.Tcs.TrySetResult(r);
             }
-            catch (Exception e) { Console.Error.WriteLine("dart on_response: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble on_response: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(DartProgressFn))]
+        [MonoPInvokeCallback(typeof(RambleProgressFn))]
         private static void OnProgressTramp(IntPtr prgPtr)
         {
             try
             {
-                var p = Marshal.PtrToStructure<DartProgressNative>(prgPtr);
+                var p = Marshal.PtrToStructure<RambleProgressNative>(prgPtr);
                 AsyncCall call = PeekAsync((long)p.user);
                 if (call == null || call.OnProgress == null) return;
                 var prg = new TaskProgress
@@ -1991,13 +1991,13 @@ namespace Dart
                     SchemaPtr = p.schema,
                 };
                 Action<TaskProgress> sink = call.OnProgress;
-                if (call.DartNode != null) call.DartNode.RunCallback(() => sink(prg));
+                if (call.RambleNode != null) call.RambleNode.RunCallback(() => sink(prg));
                 else sink(prg);
             }
-            catch (Exception e) { Console.Error.WriteLine("dart on_progress: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble on_progress: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(DartCancelFn))]
+        [MonoPInvokeCallback(typeof(RambleCancelFn))]
         private static void OnCancelTramp(ulong token, IntPtr user)
         {
             try
@@ -2005,17 +2005,17 @@ namespace Dart
                 var box = GetBox((long)user) as TaskCancelBox;
                 if (box != null) box.Cancel(token);
             }
-            catch (Exception e) { Console.Error.WriteLine("dart on_cancel: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble on_cancel: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(DartVariableUpdateFn))]
+        [MonoPInvokeCallback(typeof(RambleVariableUpdateFn))]
         private static void OnVarUpdateTramp(IntPtr updPtr, IntPtr user)
         {
             try
             {
                 var box = GetBox((long)user) as VarBox;
                 if (box == null) return;
-                var u = Marshal.PtrToStructure<DartVariableUpdateNative>(updPtr);
+                var u = Marshal.PtrToStructure<RambleVariableUpdateNative>(updPtr);
                 var vu = new VariableUpdate
                 {
                     Name = Codec.Str(u.name),
@@ -2031,7 +2031,7 @@ namespace Dart
                 if (box.Node != null) box.Node.RunCallback(() => fn(vu));
                 else fn(vu);
             }
-            catch (Exception e) { Console.Error.WriteLine("dart on_variable_update: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("ramble on_variable_update: " + e); }
         }
 
         // Decode wire bytes to a typed value: prefer the wire schema (the publisher's
@@ -2055,7 +2055,7 @@ namespace Dart
 
     /// <summary>The request seen by a FunctionDefinition handler, valid only inside the
     /// callback. Reply there, or Defer() and complete later. No reply acknowledges Ok.</summary>
-    public sealed class DartRequest
+    public sealed class RambleRequest
     {
         private IntPtr _ptr;          // the exact native pointer, zeroed when the callback returns
         private readonly IntPtr _fn;
@@ -2073,11 +2073,11 @@ namespace Dart
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
-        internal DartRequest(IntPtr ptr, IntPtr fn)
+        internal RambleRequest(IntPtr ptr, IntPtr fn)
         {
             _ptr = ptr;
             _fn = fn;
-            var r = Marshal.PtrToStructure<DartRequestNative>(ptr);
+            var r = Marshal.PtrToStructure<RambleRequestNative>(ptr);
             Data = Codec.Bytes(r.data);
             Caller = r.caller;
             CallerName = Codec.Str(r.caller_name);
@@ -2093,7 +2093,7 @@ namespace Dart
             Guard();
             _done = true;
             if (_deferred != null) { _deferred.Complete(rsp); return; }
-            using (var p = new PinnedBytes(rsp)) Native.dart_request_reply(_ptr, p.B);
+            using (var p = new PinnedBytes(rsp)) Native.ramble_request_reply(_ptr, p.B);
         }
 
         /// <summary>Answer AppError. message is the text shown on the caller, truncated at 255
@@ -2104,7 +2104,7 @@ namespace Dart
             _done = true;
             if (_deferred != null) { _deferred.Fail(message, rsp); return; }
             using (var p = new PinnedBytes(rsp))
-                Native.dart_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
+                Native.ramble_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
         }
 
         /// <summary>Park the reply and return now. The Deferred completes the call later from
@@ -2114,7 +2114,7 @@ namespace Dart
             Guard();
             _done = true;
             if (_deferred != null) return _deferred;
-            ulong token = Native.dart_request_defer(_ptr);
+            ulong token = Native.ramble_request_defer(_ptr);
             return new Deferred(_fn, token);
         }
 
@@ -2136,7 +2136,7 @@ namespace Dart
         }
     }
 
-    /// <summary>A parked function reply (from DartRequest.Defer): complete exactly once,
+    /// <summary>A parked function reply (from RambleRequest.Defer): complete exactly once,
     /// from any thread. Dropping it leaves the caller to its timeout.</summary>
     public sealed class Deferred
     {
@@ -2147,7 +2147,7 @@ namespace Dart
 
         public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
 
-        /// <summary>message as in DartRequest.Fail, also carried on Ok as debug text.</summary>
+        /// <summary>message as in RambleRequest.Fail, also carried on Ok as debug text.</summary>
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
         public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
         /// <summary>Complete Cancelled, the cooperative honor of a task cancel.</summary>
@@ -2161,7 +2161,7 @@ namespace Dart
             long token = Interlocked.Exchange(ref _token, 0);   // single-shot
             if (_fn == IntPtr.Zero || token == 0) return false;
             using (var p = new PinnedBytes(rsp))
-                return Native.dart_function_complete(_fn, (ulong)token, (int)status,
+                return Native.ramble_function_complete(_fn, (ulong)token, (int)status,
                     string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B) == 0;
         }
     }
@@ -2171,16 +2171,16 @@ namespace Dart
     public class FunctionDefinition : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly DartNode DartNode;
+        internal readonly RambleNode RambleNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Action<DartRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
+        public FunctionDefinition(RambleNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Action<RambleRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
                                   int keepLast = 0, bool reflectFromMesh = false)
         {
-            DartNode = node;
-            var co = new DartFunctionOpts
+            RambleNode = node;
+            var co = new RambleFunctionOpts
             {
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
@@ -2194,7 +2194,7 @@ namespace Dart
                 box = new Patterns.RequestBox { Handler = handler, Node = node };
                 id = Patterns.AddBox(box);
             }
-            Fn = Native.dart_node_create_function_definition(node.Handle, Codec.CStr(name),
+            Fn = Native.ramble_node_create_function_definition(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
                 box != null ? Patterns.OnRequest : null, (IntPtr)id, ref co);
@@ -2211,8 +2211,8 @@ namespace Dart
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
-        public FunctionDefinition(DartNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Func<DartRequest, Task<byte[]>> handler,
+        public FunctionDefinition(RambleNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Func<RambleRequest, Task<byte[]>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
                                   bool reflectFromMesh = false)
             : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler),
@@ -2220,7 +2220,7 @@ namespace Dart
 
         // Defer FIRST (a continuation may finish before the invocation returns), then the
         // Task's completion answers through the Deferred.
-        internal static Action<DartRequest> AsyncAdapter(Func<DartRequest, Task<byte[]>> handler)
+        internal static Action<RambleRequest> AsyncAdapter(Func<RambleRequest, Task<byte[]>> handler)
         {
             if (handler == null) return null;
             return r =>
@@ -2240,25 +2240,25 @@ namespace Dart
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
-        public int CallerCount => Native.dart_function_match_count(Fn);
+        public int CallerCount => Native.ramble_function_match_count(Fn);
 
         /// <summary>Retire the definition: park its channels and release the name, else a re
         /// created same name handle is shadowed. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            var rc = (SendStatus)Native.ramble_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
     }
 
     /// <summary>An owning call outcome, the payload copied out. SendStatus carries a
     /// synchronous refusal, and Status stays Timeout then.</summary>
-    public sealed class DartResponse
+    public sealed class RambleResponse
     {
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
@@ -2278,23 +2278,23 @@ namespace Dart
     public class RemoteFunction : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly DartNode DartNode;
+        internal readonly RambleNode RambleNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public RemoteFunction(DartNode node, string name, Schema requestSchema = null,
+        public RemoteFunction(RambleNode node, string name, Schema requestSchema = null,
                               Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0,
                               int keepLast = 0, bool reflectFromMesh = false)
         {
-            DartNode = node;
-            var co = new DartFunctionOpts
+            RambleNode = node;
+            var co = new RambleFunctionOpts
             {
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
                 keep_last = (ushort)keepLast,
                 reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
             };
-            Fn = Native.dart_node_create_remote_function(node.Handle, Codec.CStr(name),
+            Fn = Native.ramble_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
@@ -2304,19 +2304,19 @@ namespace Dart
             node.RegisterHandle(this);
         }
 
-        // Wrap an existing node-owned function handle (the @dart/meta endpoint): callable,
+        // Wrap an existing node-owned function handle (the @ramble/meta endpoint): callable,
         // never created or destroyed here.
-        internal RemoteFunction(DartNode node, IntPtr fn)
+        internal RemoteFunction(RambleNode node, IntPtr fn)
         {
-            DartNode = node; Fn = fn;
+            RambleNode = node; Fn = fn;
             node.RegisterHandle(this);
         }
 
-        // Pin a DartCallOpts for one native call (IntPtr.Zero when undirected).
+        // Pin a RambleCallOpts for one native call (IntPtr.Zero when undirected).
         private static GCHandle OptsHandle(uint provider, out IntPtr ptr)
         {
             if (provider == 0) { ptr = IntPtr.Zero; return default(GCHandle); }
-            var g = GCHandle.Alloc(new DartCallOpts[] { new DartCallOpts { provider = provider } },
+            var g = GCHandle.Alloc(new RambleCallOpts[] { new RambleCallOpts { provider = provider } },
                                    GCHandleType.Pinned);
             ptr = g.AddrOfPinnedObject();
             return g;
@@ -2324,16 +2324,16 @@ namespace Dart
 
         /// <summary>Blocking call: drives the loop until the response or timeoutMs, negative =
         /// the default. Refused from a callback or under a service thread. Never throws.</summary>
-        public DartResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
+        public RambleResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
-            var r = new DartResponse();
-            DartResponseNative o;
+            var r = new RambleResponse();
+            RambleResponseNative o;
             int rc;
             GCHandle og = OptsHandle(provider, out IntPtr optp);
             try
             {
                 using (var p = new PinnedBytes(request))
-                    rc = Native.dart_function_call(Fn, p.B, out o, timeoutMs, optp);
+                    rc = Native.ramble_function_call(Fn, p.B, out o, timeoutMs, optp);
             }
             finally { if (og.IsAllocated) og.Free(); }
             if (rc == 1)
@@ -2355,48 +2355,48 @@ namespace Dart
 
         /// <summary>Async call: the Task completes with the outcome and never faults. The
         /// response fires from the polling thread and continuations run off it.</summary>
-        public Task<DartResponse> CallAsync(byte[] request, uint provider = 0)
+        public Task<RambleResponse> CallAsync(byte[] request, uint provider = 0)
         {
             // A dispatcher already completes on the thread the caller chose, so continuations
             // belong there. With none, keep them off the polling thread.
-            var tcs = new TaskCompletionSource<DartResponse>(
-                DartNode.CallbackDispatcher != null ? TaskCreationOptions.None
+            var tcs = new TaskCompletionSource<RambleResponse>(
+                RambleNode.CallbackDispatcher != null ? TaskCreationOptions.None
                                                     : TaskCreationOptions.RunContinuationsAsynchronously);
-            long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, DartNode = DartNode });
-            DartNode.RegisterAsync(id);
+            long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, RambleNode = RambleNode });
+            RambleNode.RegisterAsync(id);
             int rc;
             GCHandle og = OptsHandle(provider, out IntPtr optp);
             try
             {
                 using (var p = new PinnedBytes(request))
-                    rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
+                    rc = Native.ramble_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
             }
             finally { if (og.IsAllocated) og.Free(); }
             if (rc != 0)
             {
                 Patterns.TakeAsync(id);
-                DartNode.UnregisterAsync(id);
-                tcs.TrySetResult(new DartResponse { SendStatus = (SendStatus)rc });
+                RambleNode.UnregisterAsync(id);
+                tcs.TrySetResult(new RambleResponse { SendStatus = (SendStatus)rc });
             }
             return tcs.Task;
         }
 
         /// <summary>Providers currently matched (the definition side present).</summary>
-        public int MatchCount => Native.dart_function_match_count(Fn);
+        public int MatchCount => Native.ramble_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
 
         /// <summary>Retire the remote: park its channels and release the name. Every outstanding
         /// call completes Cancelled. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            var rc = (SendStatus)Native.ramble_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: tasks --------------------------------------------------------
@@ -2416,7 +2416,7 @@ namespace Dart
         public ulong RecvUs { get; }
         public ulong WrittenUs { get; }
 
-        internal TaskContext(IntPtr fn, ulong token, CancellationToken ct, DartRequest r)
+        internal TaskContext(IntPtr fn, ulong token, CancellationToken ct, RambleRequest r)
         {
             _fn = fn; _token = token;
             CancellationToken = ct;
@@ -2429,13 +2429,13 @@ namespace Dart
         public SendStatus Progress(byte[] value)
         {
             using (var p = new PinnedBytes(value))
-                return (SendStatus)Native.dart_function_progress(_fn, _token, p.B);
+                return (SendStatus)Native.ramble_function_progress(_fn, _token, p.B);
         }
 
         /// <summary>Convenience view of CancellationToken (with the native flag as a
         /// backstop).</summary>
         public bool Cancelled => CancellationToken.IsCancellationRequested
-            || Native.dart_function_cancelled(_fn, _token) == 1;
+            || Native.ramble_function_cancelled(_fn, _token) == 1;
     }
 
     /// <summary>The untyped implementation side of a task. The handler is an async delegate
@@ -2443,19 +2443,19 @@ namespace Dart
     public class TaskDefinition : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly DartNode DartNode;
+        internal readonly RambleNode RambleNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public TaskDefinition(DartNode node, string name, Schema requestSchema, Schema progressSchema,
-                              Schema responseSchema, Func<DartRequest, TaskContext, Task<byte[]>> handler,
+        public TaskDefinition(RambleNode node, string name, Schema requestSchema, Schema progressSchema,
+                              Schema responseSchema, Func<RambleRequest, TaskContext, Task<byte[]>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
                               int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
                               bool reflectFromMesh = false)
         {
-            DartNode = node;
-            var co = new DartTaskOpts
+            RambleNode = node;
+            var co = new RambleTaskOpts
             {
                 keep_last = (ushort)keepLast,
                 reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
@@ -2479,7 +2479,7 @@ namespace Dart
                 box.Handler = r => RunCall(b, c, handler, r);
                 id = Patterns.AddBox(box);
             }
-            Fn = Native.dart_node_create_task_definition(node.Handle, Codec.CStr(name),
+            Fn = Native.ramble_node_create_task_definition(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
@@ -2495,7 +2495,7 @@ namespace Dart
                 node.RegisterPatternBox(id);
                 node.RegisterPatternBox(cancelId);
                 // the definition's ONE native cancel slot fans out to the per-call CTSes
-                Native.dart_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
+                Native.ramble_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
             }
             node.RetainSchema(requestSchema);
             node.RetainSchema(progressSchema);
@@ -2506,7 +2506,7 @@ namespace Dart
         // Poll thread: defer, which implies RUNNING, arm the per call CancellationTokenSource,
         // invoke the async delegate. Wherever its completion lands answers the call.
         private static void RunCall(Patterns.RequestBox box, Patterns.TaskCancelBox cancels,
-                                    Func<DartRequest, TaskContext, Task<byte[]>> handler, DartRequest r)
+                                    Func<RambleRequest, TaskContext, Task<byte[]>> handler, RambleRequest r)
         {
             Deferred d = r.Defer();
             ulong token = d.Token;
@@ -2530,20 +2530,20 @@ namespace Dart
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
-        public int CallerCount => Native.dart_function_match_count(Fn);
+        public int CallerCount => Native.ramble_function_match_count(Fn);
 
         /// <summary>Retire the definition: every live deferred call answers Cancelled while the
         /// channels are up, a later completion is refused. Refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            var rc = (SendStatus)Native.ramble_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
     }
 
     /// <summary>One task progress update, the untyped form. Value is the payload copied out,
@@ -2565,18 +2565,18 @@ namespace Dart
     public class RemoteTask : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly DartNode DartNode;
+        internal readonly RambleNode RambleNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public RemoteTask(DartNode node, string name, Schema requestSchema = null,
+        public RemoteTask(RambleNode node, string name, Schema requestSchema = null,
                           Schema progressSchema = null, Schema responseSchema = null,
                           bool progressBestEffort = false, int progressKeepLast = 0,
                           int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
                           bool reflectFromMesh = false)
         {
-            DartNode = node;
-            var co = new DartTaskOpts
+            RambleNode = node;
+            var co = new RambleTaskOpts
             {
                 keep_last = (ushort)keepLast,
                 reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
@@ -2585,7 +2585,7 @@ namespace Dart
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
             };
-            Fn = Native.dart_node_create_remote_task(node.Handle, Codec.CStr(name),
+            Fn = Native.ramble_node_create_remote_task(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
@@ -2599,13 +2599,13 @@ namespace Dart
 
         /// <summary>Start the task: the Task completes with the terminal outcome and never
         /// faults. progress fires per update, null for RUNNING. The token cancels.</summary>
-        public Task<DartResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
+        public Task<RambleResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
                                             CancellationToken cancellationToken = default, uint provider = 0)
             => CallAsync(request, out _, progress, cancellationToken, provider);
 
         /// <summary>As above, and callId receives the call id at commit, the handle for Cancel
         /// from anywhere. 0 when the request never committed.</summary>
-        public Task<DartResponse> CallAsync(byte[] request, out uint callId,
+        public Task<RambleResponse> CallAsync(byte[] request, out uint callId,
                                             IProgress<TaskProgress> progress = null,
                                             CancellationToken cancellationToken = default, uint provider = 0)
         {
@@ -2614,20 +2614,20 @@ namespace Dart
             return CallCore(request, out callId, sink, cancellationToken, provider);
         }
 
-        internal Task<DartResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
+        internal Task<RambleResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
                                              CancellationToken cancellationToken, uint provider)
         {
             // A dispatcher already completes on the thread the caller chose, so continuations
             // belong there. With none, keep them off the polling thread.
-            var tcs = new TaskCompletionSource<DartResponse>(
-                DartNode.CallbackDispatcher != null ? TaskCreationOptions.None
+            var tcs = new TaskCompletionSource<RambleResponse>(
+                RambleNode.CallbackDispatcher != null ? TaskCreationOptions.None
                                                     : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall
             {
-                Tcs = tcs, DartNode = DartNode, OnProgress = sink,
+                Tcs = tcs, RambleNode = RambleNode, OnProgress = sink,
             });
-            DartNode.RegisterAsync(id);
-            var opts = new DartCallOpts[1];
+            RambleNode.RegisterAsync(id);
+            var opts = new RambleCallOpts[1];
             opts[0].provider = provider;
             if (sink != null)
             {
@@ -2642,7 +2642,7 @@ namespace Dart
             {
                 opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit
                 using (var p = new PinnedBytes(request))
-                    rc = Native.dart_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
+                    rc = Native.ramble_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
                                                          optsHandle.AddrOfPinnedObject());
             }
             finally
@@ -2654,8 +2654,8 @@ namespace Dart
             if (rc != 0)
             {
                 Patterns.TakeAsync(id);
-                DartNode.UnregisterAsync(id);
-                tcs.TrySetResult(new DartResponse { SendStatus = (SendStatus)rc });
+                RambleNode.UnregisterAsync(id);
+                tcs.TrySetResult(new RambleResponse { SendStatus = (SendStatus)rc });
                 return tcs.Task;
             }
             if (cancellationToken.CanBeCanceled)
@@ -2672,24 +2672,24 @@ namespace Dart
 
         /// <summary>Request cancellation of the call. Cooperative and never acked, the terminal
         /// status answers. BadRole when the provider declared noCancel, State if done.</summary>
-        public SendStatus Cancel(uint callId) => (SendStatus)Native.dart_function_cancel(Fn, callId);
+        public SendStatus Cancel(uint callId) => (SendStatus)Native.ramble_function_cancel(Fn, callId);
 
         /// <summary>Providers currently matched (the definition side present).</summary>
-        public int MatchCount => Native.dart_function_match_count(Fn);
+        public int MatchCount => Native.ramble_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
 
         /// <summary>Retire the remote: every outstanding call completes Cancelled. Unusable
         /// after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.dart_function_retire(Fn);
+            var rc = (SendStatus)Native.ramble_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.dart_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: variables ----------------------------------------------------
@@ -2715,26 +2715,26 @@ namespace Dart
     public class VariableDefinition : INodeHandle
     {
         internal IntPtr Var;   // zeroed by Retire, and by the node at Close
-        internal readonly DartNode DartNode;
+        internal readonly RambleNode RambleNode;
 
         void INodeHandle.Invalidate() { Var = IntPtr.Zero; }
         internal readonly string Name;
 
-        public VariableDefinition(DartNode node, string name, Schema schema, byte[] initial = null,
+        public VariableDefinition(RambleNode node, string name, Schema schema, byte[] initial = null,
                                   bool readOnly = false, bool allowForce = false,
                                   int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
                                   bool reflectFromMesh = false)
             : this(node, name, schema, initial, readOnly, allowForce, catchUp, keepLast,
                    backpressureWaitMs, reflectFromMesh, true) { }
 
-        private protected VariableDefinition(DartNode node, string name, Schema schema, byte[] initial,
+        private protected VariableDefinition(RambleNode node, string name, Schema schema, byte[] initial,
                                              bool readOnly, bool allowForce, int catchUp,
                                              int keepLast, int backpressureWaitMs,
                                              bool reflectFromMesh, bool definition)
         {
-            DartNode = node;
+            RambleNode = node;
             Name = name;
-            var co = new DartVariableOpts
+            var co = new RambleVariableOpts
             {
                 access = (byte)(readOnly ? 1 : 0),
                 allow_force = (byte)(allowForce ? 1 : 0),
@@ -2747,9 +2747,9 @@ namespace Dart
             {
                 co.initial = p.B;
                 Var = definition
-                    ? Native.dart_node_create_variable_definition(node.Handle, Codec.CStr(name),
+                    ? Native.ramble_node_create_variable_definition(node.Handle, Codec.CStr(name),
                           schema != null ? schema.Handle : IntPtr.Zero, ref co)
-                    : Native.dart_node_create_remote_variable(node.Handle, Codec.CStr(name),
+                    : Native.ramble_node_create_remote_variable(node.Handle, Codec.CStr(name),
                           schema != null ? schema.Handle : IntPtr.Zero, ref co);
             }
             if (Var == IntPtr.Zero)
@@ -2765,40 +2765,40 @@ namespace Dart
         {
             value = null;
             // the returned view is valid only until the next poll: copy under the node lock
-            Native.dart_node_lock(DartNode.Handle);
+            Native.ramble_node_lock(RambleNode.Handle);
             try
             {
-                DartBytes b;
-                if (Native.dart_variable_get(Var, out b) != 1) return false;
+                RambleBytes b;
+                if (Native.ramble_variable_get(Var, out b) != 1) return false;
                 value = Codec.Bytes(b);
                 return true;
             }
-            finally { Native.dart_node_unlock(DartNode.Handle); }
+            finally { Native.ramble_node_unlock(RambleNode.Handle); }
         }
 
         /// <summary>Set the value: apply and publish, or send over the set channel. BadRole =
         /// the owner advertises no set channel.</summary>
         public SendStatus Set(byte[] value)
         {
-            using (var p = new PinnedBytes(value)) return (SendStatus)Native.dart_variable_set(Var, p.B);
+            using (var p = new PinnedBytes(value)) return (SendStatus)Native.ramble_variable_set(Var, p.B);
         }
 
         /// <summary>Force the value: writes are absorbed into the shadow source until Unforce
         /// restores the latest absorbed set. Needs allowForce on the definition.</summary>
         public SendStatus Force(byte[] value)
         {
-            using (var p = new PinnedBytes(value)) return (SendStatus)Native.dart_variable_force(Var, p.B);
+            using (var p = new PinnedBytes(value)) return (SendStatus)Native.ramble_variable_force(Var, p.B);
         }
-        public SendStatus Unforce() => (SendStatus)Native.dart_variable_unforce(Var);
-        public bool Forced => Native.dart_variable_forced(Var) == 1;
+        public SendStatus Unforce() => (SendStatus)Native.ramble_variable_unforce(Var);
+        public bool Forced => Native.ramble_variable_forced(Var) == 1;
 
         /// <summary>Remotes matched to this definition (on a RemoteVariable: owners
         /// matched, 0 = no owner present).</summary>
-        public int RemoteCount => Native.dart_variable_match_count(Var);
+        public int RemoteCount => Native.ramble_variable_match_count(Var);
 
         /// <summary>Block driving the loop until a value exists or timeoutMs elapses. Refused
         /// from a callback or under a service thread.</summary>
-        public bool Wait(int timeoutMs) => Native.dart_variable_wait(Var, timeoutMs) == 1;
+        public bool Wait(int timeoutMs) => Native.ramble_variable_wait(Var, timeoutMs) == 1;
 
         /// <summary>Observe changes: fires on every state change and replays the current value
         /// at registration, inline on the thread that applied the write. Null clears.</summary>
@@ -2822,8 +2822,8 @@ namespace Dart
             if (handler == null)
             {
                 lock (list) list.Clear();
-                if (change) { Native.dart_variable_on_change(Var, null, IntPtr.Zero); _changeBound = false; }
-                else { Native.dart_variable_on_write(Var, null, IntPtr.Zero); _writeBound = false; }
+                if (change) { Native.ramble_variable_on_change(Var, null, IntPtr.Zero); _changeBound = false; }
+                else { Native.ramble_variable_on_write(Var, null, IntPtr.Zero); _writeBound = false; }
                 return null;
             }
             bool bound = change ? _changeBound : _writeBound;
@@ -2835,11 +2835,11 @@ namespace Dart
                 long id = Patterns.AddBox(new Patterns.VarBox
                 {
                     Handler = u => Fan(l, ch, u),
-                    Node = DartNode,
+                    Node = RambleNode,
                 });
-                DartNode.RegisterPatternBox(id);
-                if (change) { Native.dart_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
-                else { Native.dart_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
+                RambleNode.RegisterPatternBox(id);
+                if (change) { Native.ramble_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
+                else { Native.ramble_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
             }
             else if (change)
             {
@@ -2848,7 +2848,7 @@ namespace Dart
                 if (had)
                 {
                     try { handler(last); }     // late observer: the replay it missed
-                    catch (Exception e) { Console.Error.WriteLine("dart variable observer: " + e); }
+                    catch (Exception e) { Console.Error.WriteLine("ramble variable observer: " + e); }
                 }
             }
             return new Observer(list, handler);
@@ -2865,7 +2865,7 @@ namespace Dart
             for (int i = 0; i < hs.Length; i++)
             {
                 try { hs[i](u); }
-                catch (Exception e) { Console.Error.WriteLine("dart variable observer: " + e); }
+                catch (Exception e) { Console.Error.WriteLine("ramble variable observer: " + e); }
             }
         }
 
@@ -2890,21 +2890,21 @@ namespace Dart
         /// same name handle is shadowed. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.dart_variable_retire(Var);
+            var rc = (SendStatus)Native.ramble_variable_retire(Var);
             if (rc == SendStatus.Ok) Var = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Var != IntPtr.Zero && Native.dart_variable_refresh(Var) == 1;
+        public bool Refresh() => Var != IntPtr.Zero && Native.ramble_variable_refresh(Var) == 1;
     }
 
     /// <summary>A reference to a variable owned by another node (untyped): reads see
     /// the cached latest, writes go over the set channel (dumb writes, no response).</summary>
     public class RemoteVariable : VariableDefinition
     {
-        public RemoteVariable(DartNode node, string name, Schema schema = null,
+        public RemoteVariable(RambleNode node, string name, Schema schema = null,
                               int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
                               bool reflectFromMesh = false)
             : base(node, name, schema, null, false, false, catchUp, keepLast,
@@ -2923,7 +2923,7 @@ namespace Dart
     {
         internal readonly Topic T;
 
-        public Publisher(DartNode node, string name, Schema schema = null, Qos qos = null)
+        public Publisher(RambleNode node, string name, Schema schema = null, Qos qos = null)
         {
             T = new Topic(node, name, schema, Role.PubOnly, qos);
         }
@@ -2942,14 +2942,14 @@ namespace Dart
     {
         internal readonly Topic T;
 
-        public Subscriber(DartNode node, string name, Schema schema = null,
-                          Action<DartMessage> handler = null, Qos qos = null)
+        public Subscriber(RambleNode node, string name, Schema schema = null,
+                          Action<RambleMessage> handler = null, Qos qos = null)
         {
             T = new Topic(node, name, schema, Role.SubOnly, qos);
             if (handler != null) node.AddSubHandler(T.Index, handler);
         }
 
-        public bool TryTake(out DartMessage message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
+        public bool TryTake(out RambleMessage message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => T.Dispatch(maxMsgs, timeoutMs);
         public Topic Topic => T;
     }
@@ -2958,12 +2958,12 @@ namespace Dart
 
     /// <summary>The typed request view inside a full-form function handler: reply with
     /// a typed value, Fail, or Defer. Valid only inside the handler callback.</summary>
-    public sealed class DartRequest<TRsp>
+    public sealed class RambleRequest<TRsp>
     {
-        private readonly DartRequest _core;
+        private readonly RambleRequest _core;
         private readonly Schema _rsp;
 
-        internal DartRequest(DartRequest core, Schema rsp) { _core = core; _rsp = rsp; }
+        internal RambleRequest(RambleRequest core, Schema rsp) { _core = core; _rsp = rsp; }
 
         public byte[] Data => _core.Data;
         public uint Caller => _core.Caller;
@@ -2991,19 +2991,19 @@ namespace Dart
     }
 
     /// <summary>The typed implementation side. Simple form: the return value is the reply
-    /// and a thrown exception answers AppError. Full form: DartRequest&lt;TRsp&gt;.</summary>
+    /// and a thrown exception answers AppError. Full form: RambleRequest&lt;TRsp&gt;.</summary>
     public sealed class FunctionDefinition<TReq, TRsp>
     {
         private readonly FunctionDefinition _core;
         private readonly Schema _req, _rsp;
 
-        public FunctionDefinition(DartNode node, string name, Func<TReq, TRsp> handler,
+        public FunctionDefinition(RambleNode node, string name, Func<TReq, TRsp> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
                                   bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Action<DartRequest> h = null;
+            Action<RambleRequest> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3021,13 +3021,13 @@ namespace Dart
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
-        public FunctionDefinition(DartNode node, string name, Func<TReq, Task<TRsp>> handler,
+        public FunctionDefinition(RambleNode node, string name, Func<TReq, Task<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
                                   bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Func<DartRequest, Task<byte[]>> h = null;
+            Func<RambleRequest, Task<byte[]>> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3044,13 +3044,13 @@ namespace Dart
                                            reflectFromMesh: reflectFromMesh);
         }
 
-        public FunctionDefinition(DartNode node, string name, Action<TReq, DartRequest<TRsp>> handler,
+        public FunctionDefinition(RambleNode node, string name, Action<TReq, RambleRequest<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
                                   bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Action<DartRequest> h = null;
+            Action<RambleRequest> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3058,7 +3058,7 @@ namespace Dart
                 {
                     object q;
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail("request decode failed"); return; }
-                    handler((TReq)q, new DartRequest<TRsp>(r, rsp));
+                    handler((TReq)q, new RambleRequest<TRsp>(r, rsp));
                 };
             }
             _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
@@ -3074,9 +3074,9 @@ namespace Dart
 
     /// <summary>The typed owning call outcome. Reading Value when not Ok throws
     /// CallException. Status never throws.</summary>
-    public sealed class DartResponse<TRsp>
+    public sealed class RambleResponse<TRsp>
     {
-        internal DartResponse Core;
+        internal RambleResponse Core;
         internal Schema RspSchema;
 
         public CallStatus Status => Core.Status;
@@ -3084,7 +3084,7 @@ namespace Dart
         public uint Provider => Core.Provider;
         public ulong WrittenUs => Core.WrittenUs;
         public SendStatus SendStatus => Core.SendStatus;
-        /// <summary>Human-readable outcome text (see DartResponse.Message).</summary>
+        /// <summary>Human-readable outcome text (see RambleResponse.Message).</summary>
         public string Message => Core.Message;
 
         public TRsp Value
@@ -3109,7 +3109,7 @@ namespace Dart
         private readonly RemoteFunction _core;
         private readonly Schema _req, _rsp;
 
-        public RemoteFunction(DartNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
+        public RemoteFunction(RambleNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
                               bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
@@ -3120,14 +3120,14 @@ namespace Dart
 
         /// <summary>BLOCKING call (see the untyped RemoteFunction.Call). provider directs it
         /// at one definition by peer id (0 = undirected, first answer wins).</summary>
-        public DartResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
-            => new DartResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs, provider), RspSchema = _rsp };
+        public RambleResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
+            => new RambleResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs, provider), RspSchema = _rsp };
 
         /// <summary>Async call: the Task NEVER faults, inspect Status.</summary>
-        public async Task<DartResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
+        public async Task<RambleResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
         {
-            DartResponse core = await _core.CallAsync(_req.Encode(request), provider).ConfigureAwait(false);
-            return new DartResponse<TRsp> { Core = core, RspSchema = _rsp };
+            RambleResponse core = await _core.CallAsync(_req.Encode(request), provider).ConfigureAwait(false);
+            return new RambleResponse<TRsp> { Core = core, RspSchema = _rsp };
         }
 
         public int MatchCount => _core.MatchCount;
@@ -3163,7 +3163,7 @@ namespace Dart
         private readonly TaskDefinition _core;
         private readonly Schema _req, _prg, _rsp;
 
-        public TaskDefinition(DartNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+        public TaskDefinition(RambleNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
                               int backpressureWaitMs = 0, int timeoutMs = 0,
@@ -3172,7 +3172,7 @@ namespace Dart
             _req = new Schema(typeof(TReq));
             _prg = new Schema(typeof(TPrg));
             _rsp = new Schema(typeof(TRsp));
-            Func<DartRequest, TaskContext, Task<byte[]>> h = null;
+            Func<RambleRequest, TaskContext, Task<byte[]>> h = null;
             if (handler != null)
             {
                 Schema req = _req, prg = _prg, rsp = _rsp;
@@ -3204,7 +3204,7 @@ namespace Dart
         private readonly RemoteTask _core;
         private readonly Schema _req, _prg, _rsp;
 
-        public RemoteTask(DartNode node, string name, bool progressBestEffort = false,
+        public RemoteTask(RambleNode node, string name, bool progressBestEffort = false,
                           int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0,
                           bool reflectFromMesh = false)
         {
@@ -3218,14 +3218,14 @@ namespace Dart
 
         /// <summary>Start the task: the Task never faults. progress fires per typed update and
         /// skips the valueless RUNNING ack. The token requests cooperative cancellation.</summary>
-        public Task<DartResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
+        public Task<RambleResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
                                                   uint provider = 0)
             => CallAsync(request, out _, progress, cancellationToken, provider);
 
         /// <summary>As above, and callId receives the call id at commit, the handle for Cancel.
         /// 0 when the request never committed.</summary>
-        public Task<DartResponse<TRsp>> CallAsync(TReq request, out uint callId,
+        public Task<RambleResponse<TRsp>> CallAsync(TReq request, out uint callId,
                                                   IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
                                                   uint provider = 0)
@@ -3243,13 +3243,13 @@ namespace Dart
                         pr.Report((TPrg)v);
                 };
             }
-            Task<DartResponse> core = _core.CallCore(_req.Encode(request), out callId, sink,
+            Task<RambleResponse> core = _core.CallCore(_req.Encode(request), out callId, sink,
                                                      cancellationToken, provider);
             return Wrap(core);
         }
 
-        private async Task<DartResponse<TRsp>> Wrap(Task<DartResponse> core)
-            => new DartResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
+        private async Task<RambleResponse<TRsp>> Wrap(Task<RambleResponse> core)
+            => new RambleResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
 
         /// <summary>Cancel the call callId, see the untyped RemoteTask.Cancel.</summary>
         public SendStatus Cancel(uint callId) => _core.Cancel(callId);
@@ -3262,7 +3262,7 @@ namespace Dart
     }
 
     /// <summary>The typed authoritative variable. Value get throws while no value exists,
-    /// Value set throws DartException on a non Ok status. Set returns the status.</summary>
+    /// Value set throws RambleException on a non Ok status. Set returns the status.</summary>
     public class VariableDefinition<T>
     {
         private protected VariableDefinition _core;
@@ -3270,7 +3270,7 @@ namespace Dart
 
         private protected VariableDefinition() { }
 
-        public VariableDefinition(DartNode node, string name, bool readOnly = false,
+        public VariableDefinition(RambleNode node, string name, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
                                   int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
@@ -3280,7 +3280,7 @@ namespace Dart
         }
 
         /// <summary>Overload with an initial value (the value before any set).</summary>
-        public VariableDefinition(DartNode node, string name, T initial, bool readOnly = false,
+        public VariableDefinition(RambleNode node, string name, T initial, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
                                   int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
@@ -3303,7 +3303,7 @@ namespace Dart
             {
                 SendStatus st = Set(value);
                 if (st != SendStatus.Ok)
-                    throw new DartException(st, "variable '" + _core.Name + "' set refused: " + st);
+                    throw new RambleException(st, "variable '" + _core.Name + "' set refused: " + st);
             }
         }
 
@@ -3354,7 +3354,7 @@ namespace Dart
     /// definition plus HasDefinition and MatchCount.</summary>
     public sealed class RemoteVariable<T> : VariableDefinition<T>
     {
-        public RemoteVariable(DartNode node, string name, int catchUp = 0, int keepLast = 0,
+        public RemoteVariable(RambleNode node, string name, int catchUp = 0, int keepLast = 0,
                               int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
             _schema = new Schema(typeof(T));
@@ -3373,7 +3373,7 @@ namespace Dart
         private readonly Publisher _core;
         private readonly Schema _schema;
 
-        public Publisher(DartNode node, string name, Qos qos = null)
+        public Publisher(RambleNode node, string name, Qos qos = null)
         {
             _schema = new Schema(typeof(T));
             _core = new Publisher(node, name, _schema, qos);
@@ -3393,14 +3393,14 @@ namespace Dart
     {
         private readonly Subscriber _core;
 
-        public Subscriber(DartNode node, string name, Action<T> handler = null, Qos qos = null)
+        public Subscriber(RambleNode node, string name, Action<T> handler = null, Qos qos = null)
         {
             _core = new Subscriber(node, name, new Schema(typeof(T)),
-                handler == null ? (Action<DartMessage>)null : m => { if (m.Value is T v) handler(v); },
+                handler == null ? (Action<RambleMessage>)null : m => { if (m.Value is T v) handler(v); },
                 qos);
         }
 
-        public Subscriber(DartNode node, string name, Action<T, DartMessage> handler,
+        public Subscriber(RambleNode node, string name, Action<T, RambleMessage> handler,
                           Qos qos = null)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
@@ -3412,7 +3412,7 @@ namespace Dart
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
-            DartMessage m;
+            RambleMessage m;
             if (!_core.TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
             value = (T)m.Value;
             return true;
@@ -3425,7 +3425,7 @@ namespace Dart
     // ---- marshaling, allocators, schema codec + reflection ----------------------
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate IntPtr DartPageFn(IntPtr ptr, UIntPtr size);
+    internal delegate IntPtr RamblePageFn(IntPtr ptr, UIntPtr size);
 
     internal static class Codec
     {
@@ -3447,10 +3447,10 @@ namespace Dart
         };
 
         // --- allocators: managed realloc/free, works on plain .NET and Unity/IL2CPP ---
-        private static readonly DartPageFn s_page = PageRealloc;
-        internal static readonly DartAllocFn SchemaAlloc = SchemaReAlloc;
+        private static readonly RamblePageFn s_page = PageRealloc;
+        internal static readonly RambleAllocFn SchemaAlloc = SchemaReAlloc;
 
-        [MonoPInvokeCallback(typeof(DartPageFn))]
+        [MonoPInvokeCallback(typeof(RamblePageFn))]
         private static IntPtr PageRealloc(IntPtr ptr, UIntPtr size)
         {
             if ((ulong)size == 0) { if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr); return IntPtr.Zero; }
@@ -3458,7 +3458,7 @@ namespace Dart
             return ptr == IntPtr.Zero ? Marshal.AllocHGlobal(cb) : Marshal.ReAllocHGlobal(ptr, cb);
         }
 
-        [MonoPInvokeCallback(typeof(DartAllocFn))]
+        [MonoPInvokeCallback(typeof(RambleAllocFn))]
         private static IntPtr SchemaReAlloc(IntPtr user, IntPtr ptr, UIntPtr size)
         {
             if ((ulong)size == 0) { if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr); return IntPtr.Zero; }
@@ -3466,9 +3466,9 @@ namespace Dart
             return ptr == IntPtr.Zero ? Marshal.AllocHGlobal(cb) : Marshal.ReAllocHGlobal(ptr, cb);
         }
 
-        internal static DartAllocator DefaultAllocator()
+        internal static RambleAllocator DefaultAllocator()
         {
-            return new DartAllocator
+            return new RambleAllocator
             {
                 page_realloc = Marshal.GetFunctionPointerForDelegate(s_page),
                 page_size = 64u * 1024u,
@@ -3497,7 +3497,7 @@ namespace Dart
 
         internal static void FreeCStr(IntPtr p) { if (p != IntPtr.Zero) Marshal.FreeHGlobal(p); }
 
-        internal static string Str(DartStringView s)
+        internal static string Str(RambleStringView s)
         {
             if (s.data == IntPtr.Zero || (ulong)s.len == 0) return "";
             int n = (int)(ulong)s.len;
@@ -3506,7 +3506,7 @@ namespace Dart
             return Encoding.UTF8.GetString(b);
         }
 
-        internal static byte[] Bytes(DartBytes d)
+        internal static byte[] Bytes(RambleBytes d)
         {
             if (d.data == IntPtr.Zero || (ulong)d.len == 0) return Array.Empty<byte>();
             int n = (int)(ulong)d.len;
@@ -3599,47 +3599,47 @@ namespace Dart
                     s_specs[t] = cached;
                     return cached;
                 }
-                var attr = (DartSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(DartSchemaAttribute));
+                var attr = (RambleSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(RambleSchemaAttribute));
                 string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : t.Name;
                 FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
                 Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));
                 var plans = new List<FieldPlan>();
                 foreach (var f in fields)
                 {
-                    var fa = (DartFieldAttribute)Attribute.GetCustomAttribute(f, typeof(DartFieldAttribute));
-                    var arr = (DartArrayAttribute)Attribute.GetCustomAttribute(f, typeof(DartArrayAttribute));
-                    var str = (DartStringAttribute)Attribute.GetCustomAttribute(f, typeof(DartStringAttribute));
+                    var fa = (RambleFieldAttribute)Attribute.GetCustomAttribute(f, typeof(RambleFieldAttribute));
+                    var arr = (RambleArrayAttribute)Attribute.GetCustomAttribute(f, typeof(RambleArrayAttribute));
+                    var str = (RambleStringAttribute)Attribute.GetCustomAttribute(f, typeof(RambleStringAttribute));
                     var plan = new FieldPlan { Field = f, WireName = fa != null ? fa.Name : f.Name };
                     byte k;
-                    if (arr != null)   // [DartArray(N)]: a fixed array
+                    if (arr != null)   // [RambleArray(N)]: a fixed array
                     {
                         Type et = f.FieldType.GetElementType();
                         if (et == typeof(string))
                         {
                             if (str == null)
                                 throw new SchemaException("string array field " + f.Name
-                                    + " needs [DartString(cap)] for its element capacity");
+                                    + " needs [RambleString(cap)] for its element capacity");
                             plan.Kind = ARR; plan.Elem = STR; plan.Count = arr.Count; plan.StrCap = str.Cap;
                         }
                         else if (et != null && ScalarKind.TryGetValue(et, out k))
                         { plan.Kind = ARR; plan.Elem = k; plan.Count = arr.Count; }
                         else throw new SchemaException("array field " + f.Name
-                            + " element must be a scalar or a [DartString] string");
+                            + " element must be a scalar or a [RambleString] string");
                     }
-                    else if (f.FieldType.IsArray)   // T[] without [DartArray]: a variable array
+                    else if (f.FieldType.IsArray)   // T[] without [RambleArray]: a variable array
                     {
                         Type et = f.FieldType.GetElementType();
                         if (et == typeof(string))
                         {
                             if (str == null)
                                 throw new SchemaException("variable string array field " + f.Name
-                                    + " needs [DartString(cap)] for its element capacity");
+                                    + " needs [RambleString(cap)] for its element capacity");
                             plan.Kind = VARR; plan.Elem = STR; plan.StrCap = str.Cap;
                         }
                         else if (et != null && ScalarKind.TryGetValue(et, out k))
                         { plan.Kind = VARR; plan.Elem = k; }
                         else throw new SchemaException("variable array field " + f.Name
-                            + " element must be a scalar or a [DartString] string");
+                            + " element must be a scalar or a [RambleString] string");
                     }
                     else if (f.FieldType == typeof(string))
                     {
@@ -3656,13 +3656,13 @@ namespace Dart
                     else if (ScalarKind.TryGetValue(f.FieldType, out k)) { plan.Kind = k; }
                     else if (StructLike(f.FieldType)) { plan.Kind = STRUCT; plan.Nested = f.FieldType; }
                     else throw new SchemaException("unsupported field type " + f.FieldType + " on " + f.Name
-                        + " (use scalars, strings ([DartString] = capped, plain = variable), arrays "
-                        + "([DartArray] = fixed, plain = variable), a Dictionary<string,object> map, "
+                        + " (use scalars, strings ([RambleString] = capped, plain = variable), arrays "
+                        + "([RambleArray] = fixed, plain = variable), a Dictionary<string,object> map, "
                         + "or nested structs)");
                     // a standard type names the field's type: on the field, or on its struct
-                    var tn = (DartTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(DartTypeNameAttribute));
+                    var tn = (RambleTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(RambleTypeNameAttribute));
                     if (tn == null && plan.Nested != null)
-                        tn = (DartTypeNameAttribute)Attribute.GetCustomAttribute(plan.Nested, typeof(DartTypeNameAttribute));
+                        tn = (RambleTypeNameAttribute)Attribute.GetCustomAttribute(plan.Nested, typeof(RambleTypeNameAttribute));
                     if (tn != null) plan.TypeName = tn.Name;
                     plans.Add(plan);
                 }
@@ -3730,12 +3730,12 @@ namespace Dart
         // one implementation of the spelling across every binding.
         internal static string SchemaDsl(IntPtr s)
         {
-            uint need = Native.dart_schema_print(s, IntPtr.Zero, UIntPtr.Zero);
+            uint need = Native.ramble_schema_print(s, IntPtr.Zero, UIntPtr.Zero);
             if (need == 0) return "";
             IntPtr buf = Marshal.AllocHGlobal((int)need + 1);
             try
             {
-                Native.dart_schema_print(s, buf, (UIntPtr)(need + 1));
+                Native.ramble_schema_print(s, buf, (UIntPtr)(need + 1));
                 return Marshal.PtrToStringAnsi(buf) ?? "";
             }
             finally { Marshal.FreeHGlobal(buf); }
@@ -3745,10 +3745,10 @@ namespace Dart
         // so its message is a single value (encode takes it, decode returns it).
         internal static bool IsValueRoot(IntPtr s)
         {
-            if (s == IntPtr.Zero || Native.dart_schema_field_count(s) != 1) return false;
-            if ((ulong)Native.dart_schema_name(s).len != 0) return false;
-            DartSchemaFieldInfo info;
-            if (Native.dart_schema_field_at(s, 0, out info) == 0) return false;
+            if (s == IntPtr.Zero || Native.ramble_schema_field_count(s) != 1) return false;
+            if ((ulong)Native.ramble_schema_name(s).len != 0) return false;
+            RambleSchemaFieldInfo info;
+            if (Native.ramble_schema_field_at(s, 0, out info) == 0) return false;
             return info.depth == 0 && (ulong)info.name.len == 0 && info.kind != STRUCT;
         }
 
@@ -3787,11 +3787,11 @@ namespace Dart
         private static string EnumBodyFromSchema(IntPtr s, ushort field)
         {
             var parts = new List<string>();
-            ushort n = Native.dart_schema_enum_count(s, field);
+            ushort n = Native.ramble_schema_enum_count(s, field);
             for (ushort k = 0; k < n; k++)
             {
-                long val; DartStringView nm;
-                if (Native.dart_schema_enum_variant(s, field, k, out val, out nm) != 0)
+                long val; RambleStringView nm;
+                if (Native.ramble_schema_enum_variant(s, field, k, out val, out nm) != 0)
                     parts.Add(Str(nm) + "=" + val.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             return "{ " + string.Join(", ", parts) + " }";
@@ -3824,15 +3824,15 @@ namespace Dart
 
             // msg_min is the fixed section plus one empty frame per variable field, and each
             // variable frame then grows by exactly its payload length
-            long cap = (long)Native.dart_schema_msg_min(s) + varBytes;
+            long cap = (long)Native.ramble_schema_msg_min(s) + varBytes;
             byte[] buf = new byte[cap > 0 ? cap : 1];
             GCHandle gh = GCHandle.Alloc(buf, GCHandleType.Pinned);
             try
             {
                 IntPtr p = gh.AddrOfPinnedObject();
-                Native.dart_schema_message_default(s, p, (UIntPtr)buf.Length);
+                Native.ramble_schema_message_default(s, p, (UIntPtr)buf.Length);
                 foreach (var op in ops) ExecuteOp(s, p, (UIntPtr)buf.Length, op);
-                uint n = Native.dart_schema_msg_len(s, p, (UIntPtr)buf.Length);
+                uint n = Native.ramble_schema_msg_len(s, p, (UIntPtr)buf.Length);
                 if (n == buf.Length) return buf;
                 byte[] outb = new byte[n];
                 Array.Copy(buf, outb, n);
@@ -3844,8 +3844,8 @@ namespace Dart
         // a bare type root: one op on the empty path, the schema's single anonymous field
         private static void CollectRootValue(IntPtr s, object value, List<SetOp> ops, ref long varBytes)
         {
-            DartSchemaFieldInfo info;
-            if (value == null || Native.dart_schema_field_at(s, 0, out info) == 0) return;
+            RambleSchemaFieldInfo info;
+            if (value == null || Native.ramble_schema_field_at(s, 0, out info) == 0) return;
             var op = new SetOp { Cpath = CStr(""), Path = "", Kind = info.kind, Elem = info.elem,
                                  Count = info.count, StrCap = info.str_cap };
             PrepareOp(op, value, ref varBytes);
@@ -3876,11 +3876,11 @@ namespace Dart
         {
             var names = new List<string>();
             var srcs = new List<System.Collections.IDictionary> { root };
-            ushort n = Native.dart_schema_field_count(s);
+            ushort n = Native.ramble_schema_field_count(s);
             for (ushort i = 0; i < n; i++)
             {
-                DartSchemaFieldInfo info;
-                Native.dart_schema_field_at(s, i, out info);
+                RambleSchemaFieldInfo info;
+                Native.ramble_schema_field_at(s, i, out info);
                 string name = Str(info.name);
                 int d = info.depth;
                 while (names.Count <= d) names.Add(null);
@@ -3947,17 +3947,17 @@ namespace Dart
                 if (!SetMapBytes(s, buf, cap, cpath, op.Prepared))
                     throw new SchemaException("invalid map for " + op.Path);
             }
-            else if (op.Kind == F32) Native.dart_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
-            else if (op.Kind == F64) Native.dart_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
+            else if (op.Kind == F32) Native.ramble_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
+            else if (op.Kind == F64) Native.ramble_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
             else if (op.Kind == ENUM)   // the backing integer, signed or unsigned per Elem
             {
                 object raw = op.Value is Enum ? Convert.ChangeType(op.Value, Enum.GetUnderlyingType(op.Value.GetType())) : op.Value;
-                if (op.Elem >= I8 && op.Elem <= I64) Native.dart_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
-                else Native.dart_set_uint(buf, cap, s, cpath, Convert.ToUInt64(raw));
+                if (op.Elem >= I8 && op.Elem <= I64) Native.ramble_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
+                else Native.ramble_set_uint(buf, cap, s, cpath, Convert.ToUInt64(raw));
             }
-            else if (op.Kind >= I8 && op.Kind <= I64) Native.dart_set_int(buf, cap, s, cpath, Convert.ToInt64(op.Value));
-            else if (op.Kind == BOOL) Native.dart_set_uint(buf, cap, s, cpath, (bool)op.Value ? 1UL : 0UL);
-            else Native.dart_set_uint(buf, cap, s, cpath, Convert.ToUInt64(op.Value));
+            else if (op.Kind >= I8 && op.Kind <= I64) Native.ramble_set_int(buf, cap, s, cpath, Convert.ToInt64(op.Value));
+            else if (op.Kind == BOOL) Native.ramble_set_uint(buf, cap, s, cpath, (bool)op.Value ? 1UL : 0UL);
+            else Native.ramble_set_uint(buf, cap, s, cpath, Convert.ToUInt64(op.Value));
         }
 
         private static bool SetString(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, string v)
@@ -3966,8 +3966,8 @@ namespace Dart
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var ds = new DartStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
-                return Native.dart_set_string(buf, cap, s, cpath, ds) != 0;
+                var ds = new RambleStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
+                return Native.ramble_set_string(buf, cap, s, cpath, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -3978,8 +3978,8 @@ namespace Dart
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var ds = new DartStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
-                return Native.dart_set_string_at(buf, cap, s, cpath, index, ds) != 0;
+                var ds = new RambleStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
+                return Native.ramble_set_string_at(buf, cap, s, cpath, index, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -3990,8 +3990,8 @@ namespace Dart
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var ds = new DartStringView { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                return Native.dart_set_string(buf, cap, s, cpath, ds) != 0;
+                var ds = new RambleStringView { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
+                return Native.ramble_set_string(buf, cap, s, cpath, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -4001,8 +4001,8 @@ namespace Dart
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var db = new DartBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                Native.dart_set_array(buf, cap, s, cpath, db);
+                var db = new RambleBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
+                Native.ramble_set_array(buf, cap, s, cpath, db);
             }
             finally { gh.Free(); }
         }
@@ -4012,8 +4012,8 @@ namespace Dart
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var db = new DartBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                return Native.dart_set_map(buf, cap, s, cpath, db) != 0;
+                var db = new RambleBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
+                return Native.ramble_set_map(buf, cap, s, cpath, db) != 0;
             }
             finally { gh.Free(); }
         }
@@ -4170,18 +4170,18 @@ namespace Dart
             GCHandle gh = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
-                var mb = new DartBytes
+                var mb = new RambleBytes
                 {
                     data = data.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero,
                     len = (UIntPtr)data.Length
                 };
                 var root = new Dictionary<string, object>();
                 var dests = new List<Dictionary<string, object>> { root };
-                ushort n = Native.dart_schema_field_count(s);
+                ushort n = Native.ramble_schema_field_count(s);
                 for (ushort i = 0; i < n; i++)
                 {
-                    DartSchemaFieldInfo info;
-                    Native.dart_schema_field_at(s, i, out info);
+                    RambleSchemaFieldInfo info;
+                    Native.ramble_schema_field_at(s, i, out info);
                     string name = Str(info.name);
                     int d = info.depth;
                     var parent = dests[d];
@@ -4194,8 +4194,8 @@ namespace Dart
                     }
                     else
                     {
-                        DartValue v;
-                        Native.dart_get_value(mb, s, i, out v);
+                        RambleValue v;
+                        Native.ramble_get_value(mb, s, i, out v);
                         parent[name] = ValueToObj(v);
                     }
                 }
@@ -4204,7 +4204,7 @@ namespace Dart
             finally { gh.Free(); }
         }
 
-        private static object ValueToObj(DartValue v)
+        private static object ValueToObj(RambleValue v)
         {
             if (v.kind == STR || v.kind == VSTR)
                 return Encoding.UTF8.GetString(Bytes(v.bytes));
@@ -4241,7 +4241,7 @@ namespace Dart
         private static Dictionary<string, object> DecodeMapBody(byte[] buf, ref int off, int end, int depth)
         {
             var outd = new Dictionary<string, object>();
-            if (depth > 8 || off + 2 > end) { off = end; return outd; }   // DART_SCHEMA_MAX_DEPTH
+            if (depth > 8 || off + 2 > end) { off = end; return outd; }   // RAMBLE_SCHEMA_MAX_DEPTH
             int n = (int)ReadLE(buf, off, 2); off += 2;
             for (int e = 0; e < n; e++)
             {

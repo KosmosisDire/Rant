@@ -2,7 +2,7 @@
 # CMake fetches IXWebSocket, nlohmann/json and libdatachannel over MbedTLS (spec/bridge.md).
 
 cmake_minimum_required(VERSION 3.21)
-project(dart_bridge C CXX)
+project(ramble_bridge C CXX)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -12,13 +12,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static CRT (see the module): a copied exe must run with no VC++ redistributable.
 include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/static_runtime.cmake")
 
-option(DART_BRIDGE_WEBRTC "WebRTC data path (fetches libdatachannel + MbedTLS)" ON)
+option(RAMBLE_BRIDGE_WEBRTC "WebRTC data path (fetches libdatachannel + MbedTLS)" ON)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
-# Standalone: own the output dir and define a minimal dart target over ../dist. Under the
-# root build the dart target already exists.
-if(NOT TARGET dart)
+# Standalone: own the output dir and define a minimal ramble target over ../dist. Under the
+# root build the ramble target already exists.
+if(NOT TARGET ramble)
   if(CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Release;Debug;RelWithDebInfo;MinSizeRel"
         CACHE STRING "Build configs (Release first = the default)" FORCE)
@@ -29,9 +29,9 @@ if(NOT TARGET dart)
     string(TOUPPER "${_cfg}" _CFG)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${REPO_ROOT}/bin")
   endforeach()
-  add_library(dart INTERFACE)
-  target_include_directories(dart INTERFACE "${REPO_ROOT}/dist")
-  include("${REPO_ROOT}/tools/dart_platform.cmake")
+  add_library(ramble INTERFACE)
+  target_include_directories(ramble INTERFACE "${REPO_ROOT}/dist")
+  include("${REPO_ROOT}/tools/ramble_platform.cmake")
 endif()
 
 include(FetchContent)
@@ -54,7 +54,7 @@ FetchContent_Declare(nlohmann_json
 
 FetchContent_MakeAvailable(ixwebsocket nlohmann_json)
 
-if(DART_BRIDGE_WEBRTC)
+if(RAMBLE_BRIDGE_WEBRTC)
   # MbedTLS: the DTLS (and SRTP crypto) backend. Pure CMake, no perl/python at build
   # time (the release tarball ships its generated sources). Static, no programs/tests.
   set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -91,16 +91,16 @@ if(DART_BRIDGE_WEBRTC)
   FetchContent_MakeAvailable(libdatachannel)
 endif()
 
-# Two C++ translation units: bridge.cpp is the server, dist/dart.cpp the generated anchor.
-add_executable(dart_bridge bridge.cpp "${REPO_ROOT}/dist/dart.cpp")
-target_link_libraries(dart_bridge PRIVATE dart dart_platform
+# Two C++ translation units: bridge.cpp is the server, dist/ramble.cpp the generated anchor.
+add_executable(ramble_bridge bridge.cpp "${REPO_ROOT}/dist/ramble.cpp")
+target_link_libraries(ramble_bridge PRIVATE ramble ramble_platform
                       ixwebsocket::ixwebsocket nlohmann_json::nlohmann_json)
-if(DART_BRIDGE_WEBRTC)
-  target_compile_definitions(dart_bridge PRIVATE DART_BRIDGE_WEBRTC=1)
-  target_link_libraries(dart_bridge PRIVATE LibDataChannel::LibDataChannelStatic)
+if(RAMBLE_BRIDGE_WEBRTC)
+  target_compile_definitions(ramble_bridge PRIVATE RAMBLE_BRIDGE_WEBRTC=1)
+  target_link_libraries(ramble_bridge PRIVATE LibDataChannel::LibDataChannelStatic)
 endif()
 
 # regenerate dist/ before building when the root build owns that target
 if(TARGET dist)
-  add_dependencies(dart_bridge dist)
+  add_dependencies(ramble_bridge dist)
 endif()

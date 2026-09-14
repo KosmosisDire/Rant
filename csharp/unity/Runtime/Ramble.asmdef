@@ -1,6 +1,6 @@
 {
-  "name": "RANT.Dart",
-  "rootNamespace": "Dart",
+  "name": "RANT.Ramble",
+  "rootNamespace": "Ramble",
   "references": [],
   "includePlatforms": [],
   "excludePlatforms": [],

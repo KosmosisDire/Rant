@@ -9,12 +9,12 @@ inside.
 ## Peer lifecycle
 
 A peer heard within `peer_timeout_us` (default 12 s) is ACTIVE. On silence past that it
-is DROPPED: `DART_PEER_DOWN` fires and the peer leaves flow control, but its transport
-state is kept. If the same node returns it resumes where it left off: `DART_PEER_UP`
+is DROPPED: `RAMBLE_PEER_DOWN` fires and the peer leaves flow control, but its transport
+state is kept. If the same node returns it resumes where it left off: `RAMBLE_PEER_UP`
 fires again, the subscriber keeps its position and the writer fills only the gap. A
 restarted node is a new peer and gets `catch_up`. A dropped peer silent for 2 minutes is
 GONE and its slot is freed. When a new peer needs a slot the oldest dropped one is
-evicted. A table full of active peers refuses a new one with `DART_E_PEER_REFUSED`, which
+evicted. A table full of active peers refuses a new one with `RAMBLE_E_PEER_REFUSED`, which
 means raise `opts.discovery.max_peers` (default 16).
 
 ## Interfaces
@@ -52,7 +52,7 @@ address peers treat as authoritative. Use them when the address peers must reach
 is not the one our packets appear to come from and the mapping is static and one to one:
 a cloud elastic IP, or a container published with `-p 7400:7400`. State the port whenever
 it is translated. One address goes to every peer. Neither option creates an inbound path.
-An unparseable address refuses the open with `DART_E_BAD_ADDRESS`. A VLAN does not
+An unparseable address refuses the open with `RAMBLE_E_BAD_ADDRESS`. A VLAN does not
 translate addresses, so it needs only the relay above.
 
 ## Network options
@@ -66,7 +66,7 @@ translate addresses, so it needs only the relay above.
 | `seed_peers`, `n_seed_peers` | addresses to also unicast announces to. Port 0 = the discovery port |
 | `unicast_only` | join no group. Rely on seeds and relays |
 | `recv_buffer_bytes`, `send_buffer_bytes` | data socket OS buffers. 0 = OS default |
-| `fragment_size` | UDP payload bytes per fragment. 0 = `DART_FRAG_SIZE`. One size per node |
+| `fragment_size` | UDP payload bytes per fragment. 0 = `RAMBLE_FRAG_SIZE`. One size per node |
 | `self_ip`, `advertise_port` | state our own locator |
 
 `opts.discovery` holds `announce_interval_us` (3 s), `peer_timeout_us` (12 s) and
@@ -80,7 +80,7 @@ takes both under its own name.
 
 ## Peer information
 
-`dart_node_peers_next` walks the peers with a `DartPeerInfo`: id, uuid, name, address,
+`ramble_node_peers_next` walks the peers with a `RamblePeerInfo`: id, uuid, name, address,
 liveness, last heard time, an epoch that bumps on every change, fragment size, and the
 measured round trip (`rtt_us`, `rtt_jitter_us`, `rtt_min_us`, `rtt_samples`). A dropped
 peer is still listed. Gate on `.liveness`. See docs/reflection.md.

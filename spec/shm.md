@@ -1,8 +1,8 @@
-# DART shared memory
+# Ramble shared memory
 
 SHM is the same-host fast path. A publisher delivers to a subscriber on the same
 machine through shared memory instead of fragmenting the payload over UDP. It is on
-by default. Build with `DART_NO_SHM` to strip it.
+by default. Build with `RAMBLE_NO_SHM` to strip it.
 
 ## What rides the wire
 
@@ -10,7 +10,7 @@ A normal large message goes out as many UDP fragment datagrams. An SHM message g
 out as one 37 byte SHM-DATA submessage. The payload is not on the wire. It sits in a
 shared chunk that the reader maps and reads.
 
-The SHM-DATA submessage is a DATA submessage with the `DART_F_SHM` flag set.
+The SHM-DATA submessage is a DATA submessage with the `RAMBLE_F_SHM` flag set.
 
 | field | bytes |
 |-------|-------|
@@ -26,7 +26,7 @@ The descriptor is segment id (8), chunk index (4), length (4), generation (8).
 
 The node picks SHM per message. All of these must hold.
 
-- The build has SHM (no `DART_NO_SHM`).
+- The build has SHM (no `RAMBLE_NO_SHM`).
 - The node has an allocator. The default dynamic mode sets one. Fixed mode and `--max` do not.
 - Every matched reader is on the same host and is SHM capable.
 - The message fits a size class.
@@ -47,7 +47,7 @@ spec/allocation.md for sizes.
 
 There is one segment per topic and size class, and its chunk count is the topic's
 `keep_last`, so history slot i binds chunk i and no free list is needed. Class k holds
-chunks of `DART_SHM_CLASS_BASE << (k * DART_SHM_CLASS_SHIFT)` bytes. The defaults are 64K,
+chunks of `RAMBLE_SHM_CLASS_BASE << (k * RAMBLE_SHM_CLASS_SHIFT)` bytes. The defaults are 64K,
 256K, 1M, 4M, 16M, 64M, 256M. A publish takes the smallest class that fits. There is
 no size based fallback to UDP. A message larger than the wire cap is refused on both
 paths. The wire cap is 65535 times the fragment size.
@@ -56,7 +56,7 @@ Segments are lazy. The node creates a segment only when a same host SHM reader e
 and a publish needs that topic and class. A node with no same host reader maps nothing.
 
 The low 3 bits of the segment id are the class and the next 16 bits are the topic index.
-The rest is a per node base with the pid folded in. The OS object name is `/dart.shm.`
+The rest is a per node base with the pid folded in. The OS object name is `/ramble.shm.`
 plus the id in hex, valid on POSIX and Windows. The reader attaches the segment on first
 use and reads its geometry from the header the writer stamped, after checking the magic,
 version and host id.
@@ -91,9 +91,9 @@ reader NACKs the gap and the writer re-sends the descriptor.
 
 A reader that cannot resolve a descriptor does not ack. A recycled chunk resolves to
 a skip through the normal heartbeat path. A transient failure resolves on the
-re-send. A descriptor that stays unresolvable, such as mismatched `DART_SHM_*`
-constants between nodes, is skipped after `DART_SHM_MAX_RETRY` tries with a
-`DART_MSG_LOST` event. The reader does not wedge.
+re-send. A descriptor that stays unresolvable, such as mismatched `RAMBLE_SHM_*`
+constants between nodes, is skipped after `RAMBLE_SHM_MAX_RETRY` tries with a
+`RAMBLE_MSG_LOST` event. The reader does not wedge.
 
 Best effort topics do not repair. A reader that falls behind misses recycled
 messages, same as best effort over UDP.
@@ -114,20 +114,20 @@ process domain base so concurrent selftests do not collide.
 ## Build
 
 SHM needs `shm_open` and `mmap`. On POSIX link `-lrt`. On Windows it uses
-`CreateFileMapping`. Strip it all with `DART_NO_SHM`.
+`CreateFileMapping`. Strip it all with `RAMBLE_NO_SHM`.
 
 ```sh
 cc  -std=c99 -Idist app.c -o app -lrt           # POSIX, SHM on
 gcc -std=c99 -Idist app.c -o app -lws2_32 -lbcrypt   # Windows, SHM on
-cc  -std=c99 -DDART_NO_SHM -Idist app.c -o app  # SHM off
+cc  -std=c99 -DRAMBLE_NO_SHM -Idist app.c -o app  # SHM off
 ```
 
 ## Tunables
 
 | tunable | default | effect |
 |---------|---------|--------|
-| DART_SHM_CLASS_BASE | 64K | smallest chunk |
-| DART_SHM_CLASS_SHIFT | 2 | class growth ratio |
-| DART_SHM_N_CLASSES | 7 | number of classes |
-| DART_SHM_CHUNKS | 4 | chunks per segment when the node gives no keep_last |
-| DART_SHM_MAX_RETRY | 8 | resolve tries before skip |
+| RAMBLE_SHM_CLASS_BASE | 64K | smallest chunk |
+| RAMBLE_SHM_CLASS_SHIFT | 2 | class growth ratio |
+| RAMBLE_SHM_N_CLASSES | 7 | number of classes |
+| RAMBLE_SHM_CHUNKS | 4 | chunks per segment when the node gives no keep_last |
+| RAMBLE_SHM_MAX_RETRY | 8 | resolve tries before skip |

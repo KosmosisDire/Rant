@@ -1,4 +1,4 @@
-/* The bridge client: one DartNode is one full node on the mesh, spoken through the bridge
+/* The bridge client: one RambleNode is one full node on the mesh, spoken through the bridge
  * over a WebSocket with a WebRTC data path. docs/javascript.md explains how to use it. */
 /* Data-plane frame: ONE header for every op, both directions, little-endian:
  *   [u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u64 capture_us]
@@ -44,7 +44,7 @@ function parseFrame(b) {
 }
 const MEDIA_TYPES = new Set(["VideoFrame", "Image", "ExternalVideoStream"]);
 const CALL_STATUS = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled"];
-/* the @dart/meta section mask, OR the bits. 0 = every section. Mirrors DART_META_*. */
+/* the @ramble/meta section mask, OR the bits. 0 = every section. Mirrors RAMBLE_META_*. */
 const MetaSection = { Node: 0x1, Proc: 0x2, Topics: 0x4, Peers: 0x8, All: 0 };
 /* one reflected entity reply row to an Entity, camel casing the hex hash fields */
 function toEntity(e) {
@@ -441,7 +441,7 @@ class Layout {
                 out.push({ path: f.path, type: f.named });
         return out;
     }
-    /* one field by dotted path (see DartMessage.get) */
+    /* one field by dotted path (see RambleMessage.get) */
     getField(data, view, path) {
         const f = this.fields.get(path);
         if (!f)
@@ -533,7 +533,7 @@ class Layout {
     }
 }
 /* A delivered message: raw bytes plus typed reads through the entity's field table. */
-class DartMessage {
+class RambleMessage {
     constructor(layout, topic, publisher, data, writtenUs = 0, captureUs = 0) {
         this._layout = layout;
         this.topic = topic;
@@ -560,7 +560,7 @@ class DartMessage {
 }
 /* Everything created on a node: one client-chosen id (also its WebRTC data channel id),
  * one match summary from the bridge's pushes, one frame inbox. */
-class DartEntity {
+class RambleEntity {
     constructor(node, name, r, dc) {
         this._node = node;
         this.id = r.id;
@@ -589,8 +589,8 @@ class DartEntity {
         this._node._sendFrame(this, buildFrame(op, flags, this.id, seq, text, payload, captureUs));
     }
 }
-/* One topic on the node (the dynamic form). Returned by DartNode.topic(). */
-class DartTopic extends DartEntity {
+/* One topic on the node (the dynamic form). Returned by RambleNode.topic(). */
+class RambleTopic extends RambleEntity {
     constructor(node, name, r, dc) {
         super(node, name, r, dc);
         this.layout = new Layout(r.schema);
@@ -620,7 +620,7 @@ class DartTopic extends DartEntity {
     _frame(f) {
         if (f.op !== OP_DATA)
             return;
-        const msg = new DartMessage(this.layout, this, f.peer, f.payload, f.writtenUs, f.captureUs);
+        const msg = new RambleMessage(this.layout, this, f.peer, f.payload, f.writtenUs, f.captureUs);
         this.onMessage?.(msg);
         if (this._taps.length)
             this._tap(msg.value());
@@ -649,7 +649,7 @@ function replyFrame(entity, reqId, status, err, rsp) {
 }
 /* The implementation side of a function: the bridge defers every request here, the
  * handler's return value is the reply and a throw answers "app_error". One per name. */
-class FunctionDefinition extends DartEntity {
+class FunctionDefinition extends RambleEntity {
     constructor(node, name, r, dc, handler) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
@@ -674,7 +674,7 @@ class FunctionDefinition extends DartEntity {
 }
 /* A reference to a function definition on another node. call() resolves with the
  * outcome and NEVER rejects on a status (only on connection loss). */
-class RemoteFunction extends DartEntity {
+class RemoteFunction extends RambleEntity {
     constructor(node, name, r, dc) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
@@ -704,7 +704,7 @@ class RemoteFunction extends DartEntity {
 }
 /* The implementation side of a task: the bridge defers every request here, the async
  * handler streams ctx.progress() and its settlement is the one terminal answer. */
-class TaskDefinition extends DartEntity {
+class TaskDefinition extends RambleEntity {
     constructor(node, name, r, dc, handler) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
@@ -801,7 +801,7 @@ class TaskRun {
 }
 /* A reference to a task defined elsewhere. call() returns a TaskRun synchronously and the
  * timeout bounds only the first response, so there is no client side timer. */
-class RemoteTask extends DartEntity {
+class RemoteTask extends RambleEntity {
     constructor(node, name, r, dc) {
         super(node, name, r, dc);
         this.reqLayout = new Layout(r.req);
@@ -829,7 +829,7 @@ class RemoteTask extends DartEntity {
     }
 }
 /* Shared variable-handle core: the client-cached latest value fed by pushed updates. */
-class VarHandle extends DartEntity {
+class VarHandle extends RambleEntity {
     constructor(node, name, r, dc) {
         super(node, name, r, dc);
         this.layout = new Layout(r.schema);
@@ -1405,7 +1405,7 @@ function iceServerFromUrl(url) {
     }
     return out;
 }
-class DartNode {
+class RambleNode {
     /* Connect to a bridge and open the node. WebRTC is tried first (opts.transport
      * "auto", the default) and the WebSocket carries the data if it cannot connect. */
     static async connect(url, opts = {}) {
@@ -1415,7 +1415,7 @@ class DartNode {
             ws.onopen = res;
             ws.onerror = () => rej(new Error(`connect failed: ${url}`));
         });
-        const c = new DartNode(ws);
+        const c = new RambleNode(ws);
         const { onEvent, transport, rtcTimeoutMs, iceServers, ...open } = opts;
         if (onEvent)
             c.onEvent = onEvent;
@@ -1494,7 +1494,7 @@ class DartNode {
                     this._request({ op: "rtc", candidate: e.candidate.candidate, mid: e.candidate.sdpMid ?? "" }).catch(() => { });
             };
             /* the anchor channel puts the SCTP line in the offer (entity ids start at 1) */
-            this._anchor = pc.createDataChannel("dart", { negotiated: true, id: 0 });
+            this._anchor = pc.createDataChannel("ramble", { negotiated: true, id: 0 });
             for (const v of this._views)
                 this._addVideoLine(v);
             const connected = new Promise((res, rej) => {
@@ -1741,7 +1741,7 @@ class DartNode {
     /* Create a topic, the dynamic form. opts.schema is DSL text for a typed topic, omit it
      * for raw bytes. */
     async topic(name, role = "pubsub", opts = {}) {
-        return this._create("topic", name, !!opts.reliable, { role, ...opts }, (r, dc) => new DartTopic(this, name, r, dc));
+        return this._create("topic", name, !!opts.reliable, { role, ...opts }, (r, dc) => new RambleTopic(this, name, r, dc));
     }
     /* Typed publish side: schema is the DSL text (null = raw bytes). */
     async publisher(name, schema, opts = {}) {
@@ -1817,7 +1817,7 @@ class DartNode {
         const r = await this._request({ op: "settle", timeout_ms: timeoutMs });
         return r.settled;
     }
-    /* Publish a line on a level's built-in @dart/log topic (mesh-wide, rosout-style).
+    /* Publish a line on a level's built-in @ramble/log topic (mesh-wide, rosout-style).
      * Every node that subscribed to that level receives it. */
     async log(level, text) {
         await this._request({ op: "log", level, text });
@@ -1864,7 +1864,7 @@ class DartNode {
         const r = await this._request({ op: "mesh_find", kind, name });
         return r.entity ? toEntity(r.entity) : null;
     }
-    /* Fetch a peer's @dart/meta snapshot by an async directed call. Never rejects on status.
+    /* Fetch a peer's @ramble/meta snapshot by an async directed call. Never rejects on status.
      * sections is a MetaSection mask, default All. */
     async meta(peerId, sections = MetaSection.All) {
         const r = await this._request({ op: "meta", peer: peerId, sections });
@@ -1880,8 +1880,8 @@ class DartNode {
     }
 }
 /* the constant tables, reachable from the classic-script build (one global) */
-DartNode.MetaSection = MetaSection;
-DartNode.VideoCodec = VideoCodec;
-DartNode.ImageFormat = ImageFormat;
-DartNode.StreamKind = StreamKind;
-globalThis.DartNode = DartNode;
+RambleNode.MetaSection = MetaSection;
+RambleNode.VideoCodec = VideoCodec;
+RambleNode.ImageFormat = ImageFormat;
+RambleNode.StreamKind = StreamKind;
+export { RambleNode, RambleEntity, RambleTopic, RambleMessage, Layout, Publisher, Subscriber, FunctionDefinition, RemoteFunction, TaskDefinition, RemoteTask, TaskRun, VariableDefinition, RemoteVariable, VideoView, VideoCodec, ImageFormat, StreamKind, VIDEO_FRAME, IMAGE, EXTERNAL_VIDEO_STREAM, MetaSection, };

@@ -8,5 +8,5 @@
         "useDefineForClassFields": false,
         "outDir": "../../dist"
     },
-    "files": ["dart.ts"]
+    "files": ["ramble.ts"]
 }

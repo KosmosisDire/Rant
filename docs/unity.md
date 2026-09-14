@@ -1,41 +1,41 @@
 # Unity
 
-DART in Unity is the C# wrapper of docs/csharp.md plus one component that owns the node for
+Ramble in Unity is the C# wrapper of docs/csharp.md plus one component that owns the node for
 the whole scene. Every script talks to that component instead of opening its own node.
 csharp/unity/README.md covers installing the package. This page is what the component adds,
 and everything it does not mention behaves as docs/csharp.md describes.
 
 ## Set it up
 
-Add one **DartNodeUnity** component to any GameObject in the scene (Add Component > DART >
-DART DartNode). That is the whole setup. It opens the node, finds peers, and shuts down with
+Add one **RambleNodeUnity** component to any GameObject in the scene (Add Component > Ramble >
+Ramble RambleNode). That is the whole setup. It opens the node, finds peers, and shuts down with
 the scene. Only one is allowed, and a second warns and stays inactive.
 
 ## Send and receive
 
 ```csharp
-using Dart;
+using Ramble;
 using UnityEngine;
 
 public struct Pose { public float X, Y, Z; }
 
 public class PoseSender : MonoBehaviour {
-    DartTopic<Pose> pose;
-    void OnEnable() { pose = DartNodeUnity.Topic<Pose>("player/pose"); }
+    RambleTopic<Pose> pose;
+    void OnEnable() { pose = RambleNodeUnity.Topic<Pose>("player/pose"); }
     void Update()   { pose.Publish(new Pose { X = transform.position.x,
                                               Y = transform.position.y,
                                               Z = transform.position.z }); }
 }
 
 public class PoseReceiver : MonoBehaviour {
-    void OnEnable() => DartNodeUnity.Topic<Pose>("player/pose").Subscribe(this, OnPose);
+    void OnEnable() => RambleNodeUnity.Topic<Pose>("player/pose").Subscribe(this, OnPose);
     void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
 }
 ```
 
-`DartNodeUnity.Topic<T>(name)` gives you the topic of that name. Ask for the same name from
-ten scripts and you get the same `DartTopic<T>` back, so a topic is shared across the scene
-rather than duplicated. `DartNodeUnity.Topic(name)` is the raw form carrying `byte[]` or a
+`RambleNodeUnity.Topic<T>(name)` gives you the topic of that name. Ask for the same name from
+ten scripts and you get the same `RambleTopic<T>` back, so a topic is shared across the scene
+rather than duplicated. `RambleNodeUnity.Topic(name)` is the raw form carrying `byte[]` or a
 UTF-8 `string`.
 
 Message types are written as docs/csharp.md describes, and the field names have to match on
@@ -71,8 +71,8 @@ topic.Subscribe(this, OnPose);
 ```
 
 It stops when that component is destroyed and is skipped while it is disabled. This is what
-you want almost always. Leave the owner out and you get a `DartSubscription` to dispose
-yourself. Both forms have an overload taking `(T value, DartMessage message)` when you want
+you want almost always. Leave the owner out and you get a `RambleSubscription` to dispose
+yourself. Both forms have an overload taking `(T value, RambleMessage message)` when you want
 the sender or the clocks beside the value.
 
 ## QoS
@@ -81,7 +81,7 @@ QoS is the `Qos` object of docs/csharp.md, passed the first time a name is reque
 callers share the topic that already exists, so their QoS is ignored and the Console says so.
 
 ```csharp
-DartNodeUnity.Topic<Pose>("player/pose", new Qos { MaxRateHz = 30 })
+RambleNodeUnity.Topic<Pose>("player/pose", new Qos { MaxRateHz = 30 })
              .Subscribe(this, OnPose);
 ```
 
@@ -103,8 +103,8 @@ scripts can use one variable.
 public class MotorPanel : MonoBehaviour {
     RemoteVariable<float> speed;
     void OnEnable() {
-        speed = DartNodeUnity.RemoteVariable<float>("motor/speed");
-        DartNodeUnity.Bind(this, speed.OnChange(v => slider.value = v));
+        speed = RambleNodeUnity.RemoteVariable<float>("motor/speed");
+        RambleNodeUnity.Bind(this, speed.OnChange(v => slider.value = v));
     }
 }
 ```
@@ -116,11 +116,11 @@ The shorthands are `VariableDefinition<T>(name)`, `VariableDefinition<T>(name, i
 not cover, build the handle yourself and let the component share it:
 
 ```csharp
-DartNodeUnity.Shared("motor/speed",
+RambleNodeUnity.Shared("motor/speed",
     n => new RemoteVariable<float>(n, "motor/speed", catchUp: 5));
 ```
 
-`DartNodeUnity.Bind(component, subscription)` disposes an observer when that component is
+`RambleNodeUnity.Bind(component, subscription)` disposes an observer when that component is
 destroyed, which is the pattern side of an owner bound subscription.
 
 ## Edit mode and reopening
@@ -152,11 +152,11 @@ misbehaves.
 
 ## Watching what happens
 
-`DartNodeUnity.Events` reports peers joining and leaving, lost messages and errors, on the
-main thread. With Log Events on they also go to the Console. On a `DartTopic`, `Matches`
+`RambleNodeUnity.Events` reports peers joining and leaving, lost messages and errors, on the
+main thread. With Log Events on they also go to the Console. On a `RambleTopic`, `Matches`
 counts matched remote endpoints and `SubscriberCount` your own handlers.
 
-`DartNodeUnity.Main.Raw` is the underlying `DartNode` and `topic.Raw` the underlying `Topic`,
+`RambleNodeUnity.Main.Raw` is the underlying `RambleNode` and `topic.Raw` the underlying `Topic`,
 which is where the rest of docs/csharp.md lives. The plain wrapper also works on its own in
 Unity without the component.
 

@@ -1,4 +1,4 @@
-// The DartNodeUnity component, the scene's shared node. It lives in its own file because
+// The RambleNodeUnity component, the scene's shared node. It lives in its own file because
 // Unity registers only a MonoBehaviour whose class name matches the file name.
 #if UNITY_5_3_OR_NEWER
 using System;
@@ -6,15 +6,15 @@ using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 
-namespace Dart
+namespace Ramble
 {
     /// <summary>The scene's shared node. Add exactly one, every other script reaches it through
     /// the static API. Runs in edit mode too when Run In Edit Mode is on.</summary>
     [ExecuteAlways]
     [DefaultExecutionOrder(-1000)]   // dispatch before other scripts' Update
     [DisallowMultipleComponent]
-    [AddComponentMenu("DART/DartNode")]
-    public sealed class DartNodeUnity : MonoBehaviour
+    [AddComponentMenu("Ramble/RambleNode")]
+    public sealed class RambleNodeUnity : MonoBehaviour
     {
         [Tooltip("Human-readable node name, synced to peers; empty = auto node-XXXXXXXX.")]
         [SerializeField] private string nodeName = "";
@@ -39,106 +39,106 @@ namespace Dart
         // budget: nothing is dropped, but the console says so.
         private const int CallbackBacklogWarn = 4096;
 
-        private static DartNodeUnity s_main;
+        private static RambleNodeUnity s_main;
 
-        private DartNode _node;
+        private RambleNode _node;
         private bool _pollFallback;      // service thread unavailable: pump polls instead
         private bool _configDirty;
         private int _frame;
-        private readonly Dictionary<string, DartTopicBase> _topics = new Dictionary<string, DartTopicBase>();
+        private readonly Dictionary<string, RambleTopicBase> _topics = new Dictionary<string, RambleTopicBase>();
         private readonly Dictionary<string, SharedEntry> _shared = new Dictionary<string, SharedEntry>();
         private readonly List<Action> _callbacks = new List<Action>();   // node threads to the frame
         private readonly List<Action> _drain = new List<Action>();
         private readonly object _cbLock = new object();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
 
-        /// <summary>The scene's DartNodeUnity (found lazily), or null if none exists.</summary>
-        public static DartNodeUnity Main
+        /// <summary>The scene's RambleNodeUnity (found lazily), or null if none exists.</summary>
+        public static RambleNodeUnity Main
         {
             get
             {
                 if (s_main == null)
                 {
 #if UNITY_2023_1_OR_NEWER
-                    s_main = FindAnyObjectByType<DartNodeUnity>();
+                    s_main = FindAnyObjectByType<RambleNodeUnity>();
 #else
-                    s_main = FindObjectOfType<DartNodeUnity>();
+                    s_main = FindObjectOfType<RambleNodeUnity>();
 #endif
                 }
                 return s_main;
             }
         }
 
-        /// <summary>The underlying wrapper DartNode, null while closed. The escape hatch to the
+        /// <summary>The underlying wrapper RambleNode, null while closed. The escape hatch to the
         /// full API.</summary>
-        public DartNode Raw => _node;
+        public RambleNode Raw => _node;
         public bool IsOpen => _node != null;
-        internal DartNode NativeNode => _node;
+        internal RambleNode NativeNode => _node;
 
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
-        public static event Action<DartEvent> Events;
+        public static event Action<RambleEvent> Events;
 
         // ---- topics -----------------------------------------------------------------
 
         /// <summary>The shared topic of this name on the scene node, created on first request.
         /// The QoS applies only to that first request, later callers share it.</summary>
-        public static DartTopic<T> Topic<T>(string name, Qos qos = null)
+        public static RambleTopic<T> Topic<T>(string name, Qos qos = null)
             => RequireMain().GetTopic<T>(name, qos);
 
         /// <summary>The shared raw (bytes) topic of this name.</summary>
-        public static DartTopic Topic(string name, Qos qos = null)
+        public static RambleTopic Topic(string name, Qos qos = null)
             => RequireMain().GetTopic(name, qos);
 
         /// <summary>The instance form of the static Topic&lt;T&gt;().</summary>
-        public DartTopic<T> GetTopic<T>(string name, Qos qos = null)
+        public RambleTopic<T> GetTopic<T>(string name, Qos qos = null)
         {
-            DartTopicBase ch = LookupOrNull(name, qos != null);
+            RambleTopicBase ch = LookupOrNull(name, qos != null);
             if (ch != null)
             {
-                var typed = ch as DartTopic<T>;
-                if (typed == null) throw ShapeMismatch(name, ch, "DartTopic<" + typeof(T).Name + ">");
+                var typed = ch as RambleTopic<T>;
+                if (typed == null) throw ShapeMismatch(name, ch, "RambleTopic<" + typeof(T).Name + ">");
                 return typed;
             }
-            var c = new DartTopic<T>(this, name, EffectiveQos(qos));
+            var c = new RambleTopic<T>(this, name, EffectiveQos(qos));
             _topics.Add(name, c);
             return c;
         }
 
         /// <summary>Instance form of the static raw Topic().</summary>
-        public DartTopic GetTopic(string name, Qos qos = null)
+        public RambleTopic GetTopic(string name, Qos qos = null)
         {
-            DartTopicBase ch = LookupOrNull(name, qos != null);
+            RambleTopicBase ch = LookupOrNull(name, qos != null);
             if (ch != null)
             {
-                var raw = ch as DartTopic;
-                if (raw == null) throw ShapeMismatch(name, ch, "a raw DartTopic");
+                var raw = ch as RambleTopic;
+                if (raw == null) throw ShapeMismatch(name, ch, "a raw RambleTopic");
                 return raw;
             }
-            var c = new DartTopic(this, name, EffectiveQos(qos));
+            var c = new RambleTopic(this, name, EffectiveQos(qos));
             _topics.Add(name, c);
             return c;
         }
 
-        private DartTopicBase LookupOrNull(string name, bool customQos)
+        private RambleTopicBase LookupOrNull(string name, bool customQos)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
-            DartTopicBase ch;
+            RambleTopicBase ch;
             if (!_topics.TryGetValue(name, out ch)) return null;
             if (customQos)
-                Debug.LogWarning("[DART] topic '" + name + "' already exists: the QoS passed here is ignored (first request wins)", this);
+                Debug.LogWarning("[Ramble] topic '" + name + "' already exists: the QoS passed here is ignored (first request wins)", this);
             return ch;
         }
 
-        private static InvalidOperationException ShapeMismatch(string name, DartTopicBase have, string want)
+        private static InvalidOperationException ShapeMismatch(string name, RambleTopicBase have, string want)
             => new InvalidOperationException("topic '" + name + "' already exists as " + have.GetType().Name
                 + ", requested as " + want + ": one name = one message type per node");
 
-        private static DartNodeUnity RequireMain()
+        private static RambleNodeUnity RequireMain()
         {
-            DartNodeUnity m = Main;
+            RambleNodeUnity m = Main;
             if (m == null)
                 throw new InvalidOperationException(
-                    "no DartNodeUnity in the scene: add the DartNodeUnity component to a GameObject (it owns the shared node)");
+                    "no RambleNodeUnity in the scene: add the RambleNodeUnity component to a GameObject (it owns the shared node)");
             return m;
         }
 
@@ -155,18 +155,18 @@ namespace Dart
 
         /// <summary>The scene shared handle of this key, built on first request against the open
         /// node. Use it for a pattern that needs options the shorthands below do not take.</summary>
-        public static T Shared<T>(string key, Func<DartNode, T> make) where T : class
+        public static T Shared<T>(string key, Func<RambleNode, T> make) where T : class
             => RequireMain().GetShared(key, make);
 
         // The recipe is kept beside the handle: the handle belongs to the native node, so a
         // reopen has to build a new one, exactly as a topic re creates itself.
         private sealed class SharedEntry
         {
-            internal Func<DartNode, object> Make;
+            internal Func<RambleNode, object> Make;
             internal object Handle;
         }
 
-        public T GetShared<T>(string key, Func<DartNode, T> make) where T : class
+        public T GetShared<T>(string key, Func<RambleNode, T> make) where T : class
         {
             if (string.IsNullOrEmpty(key)) throw new ArgumentException("name required", nameof(key));
             if (make == null) throw new ArgumentNullException(nameof(make));
@@ -184,7 +184,7 @@ namespace Dart
             if (_node == null) Reconcile();     // acquiring one is a reason to open
             if (_node == null)
                 throw new InvalidOperationException(
-                    "DART node is not open: '" + key + "' cannot be created (component disabled, "
+                    "Ramble node is not open: '" + key + "' cannot be created (component disabled, "
                     + "Run In Edit Mode off, or open failed)");
             var e = new SharedEntry { Make = n => make(n) };
             e.Handle = make(_node);
@@ -258,7 +258,7 @@ namespace Dart
         {
             if (s_main != null && s_main != this)
             {
-                Debug.LogWarning("[DART] a DartNodeUnity already exists on '" + s_main.gameObject.name
+                Debug.LogWarning("[Ramble] a RambleNodeUnity already exists on '" + s_main.gameObject.name
                     + "'; the one on '" + gameObject.name + "' stays inactive", this);
                 return;
             }
@@ -319,7 +319,7 @@ namespace Dart
         {
             try
             {
-                _node = new DartNode(string.IsNullOrEmpty(nodeName) ? null : nodeName,
+                _node = new RambleNode(string.IsNullOrEmpty(nodeName) ? null : nodeName,
                                  null, OnNodeEvent,
                                  domain: Mathf.Clamp(domain, 0, ushort.MaxValue),
                                  maxTopics: Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
@@ -331,7 +331,7 @@ namespace Dart
             }
             catch (Exception e)
             {
-                Debug.LogError("[DART] node open failed: " + e.Message, this);
+                Debug.LogError("[Ramble] node open failed: " + e.Message, this);
                 _node = null;
                 return;
             }
@@ -339,14 +339,14 @@ namespace Dart
             // handlers, variable observers, awaited call results. Messages ride the C queue.
             _node.CallbackDispatcher = PostToFrame;
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
-            _pollFallback = !_node.Start();     // DART_NO_THREADS builds: pump polls
-            foreach (DartTopicBase ch in _topics.Values) ch.OnNodeOpened();
+            _pollFallback = !_node.Start();     // RAMBLE_NO_THREADS builds: pump polls
+            foreach (RambleTopicBase ch in _topics.Values) ch.OnNodeOpened();
             foreach (KeyValuePair<string, SharedEntry> kv in _shared)
             {
                 try { kv.Value.Handle = kv.Value.Make(_node); }
                 catch (Exception e)
                 {
-                    Debug.LogError("[DART] '" + kv.Key + "' could not be re created: " + e.Message, this);
+                    Debug.LogError("[Ramble] '" + kv.Key + "' could not be re created: " + e.Message, this);
                 }
             }
         }
@@ -354,7 +354,7 @@ namespace Dart
         private void CloseNativeNode()
         {
             if (_node == null) return;
-            foreach (DartTopicBase ch in _topics.Values) ch.OnNodeClosed();
+            foreach (RambleTopicBase ch in _topics.Values) ch.OnNodeClosed();
             _bound.Clear();           // the observers those handles carried died with the node
             _node.Close();
             _node = null;
@@ -372,7 +372,7 @@ namespace Dart
             DrainCallbacks();
             if ((++_frame & 0xFF) == 0)
             {
-                foreach (DartTopicBase ch in _topics.Values) ch.PruneDeadOwners();
+                foreach (RambleTopicBase ch in _topics.Values) ch.PruneDeadOwners();
                 PruneBound();
             }
         }
@@ -393,7 +393,7 @@ namespace Dart
                 _callbacks.Clear();
             }
             if (_drain.Count > CallbackBacklogWarn)
-                Debug.LogWarning("[DART] " + _drain.Count + " callbacks parked for one frame: "
+                Debug.LogWarning("[Ramble] " + _drain.Count + " callbacks parked for one frame: "
                     + "the frame is behind the wire", this);
             for (int i = 0; i < _drain.Count; i++)
             {
@@ -404,15 +404,15 @@ namespace Dart
         }
 
         // Already on the frame: the node hands its events here through the dispatcher.
-        private void OnNodeEvent(DartEvent e)
+        private void OnNodeEvent(RambleEvent e)
         {
             if (logEvents)
             {
-                if (e.IsError) Debug.LogError("[DART] " + e, this);
-                else if (e.Kind == EventKind.MessageLost) Debug.LogWarning("[DART] " + e, this);
-                else Debug.Log("[DART] " + e, this);
+                if (e.IsError) Debug.LogError("[Ramble] " + e, this);
+                else if (e.Kind == EventKind.MessageLost) Debug.LogWarning("[Ramble] " + e, this);
+                else Debug.Log("[Ramble] " + e, this);
             }
-            Action<DartEvent> handler = Events;
+            Action<RambleEvent> handler = Events;
             if (handler == null) return;
             try { handler(e); }
             catch (Exception ex) { Debug.LogException(ex); }

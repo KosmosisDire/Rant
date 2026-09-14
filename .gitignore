@@ -5,8 +5,8 @@ old
 /Debug/
 # cross-compiled / native binaries (no extension), repo-root only so they do not
 # also match source dirs like src/node/
-/dart_test
-/dart_test_noshm
+/ramble_test
+/ramble_test_noshm
 /example
 /node
 /pack
@@ -14,19 +14,19 @@ old
 *.png
 *.jpg
 # explorer UI: handoff package + fetched reference docs + standalone build tree
-/DART Network Debugging Interface.zip
+/Ramble Network Debugging Interface.zip
 /_unzipped/
 /_ref/
 /explore/build/
 *.pdb
-# C# / .NET wrapper build output (csharp/*/{bin,obj}); the wrapper source is csharp/Dart.cs
+# C# / .NET wrapper build output (csharp/*/{bin,obj}); the wrapper source is csharp/Ramble.cs
 [Bb]in/
 [Oo]bj/
 # The release workflow's staging folders
 /artifacts/
 /wheelhouse/
 /release/
-# The shared library the CMake target dart_shared builds, one folder per platform. The
+# The shared library the CMake target ramble_shared builds, one folder per platform. The
 # packages bundle it. Never committed.
 /dist/native/
 # Packages built into dist/ by dotnet pack, pip wheel and tools/unity.cmake. Never committed.
@@ -34,7 +34,7 @@ old
 /dist/*.whl
 /dist/*.tar.gz
 /dist/*.unitypackage
-/dist/com.rant.dart/
+/dist/com.rant.ramble/
 # Python build/cache artifacts (pip build, bytecode)
 __pycache__/
 *.egg-info/

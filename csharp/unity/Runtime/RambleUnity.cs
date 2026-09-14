@@ -1,18 +1,18 @@
-// DART for Unity: shared, name keyed topics handed out by the scene's DartNodeUnity
+// Ramble for Unity: shared, name keyed topics handed out by the scene's RambleNodeUnity
 // component, which lives in its own file. csharp/unity/README.md explains the model.
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Dart
+namespace Ramble
 {
     /// <summary>A live subscription. Dispose() unsubscribes, and an owner bound one disposes
     /// itself when the owner is destroyed.</summary>
-    public sealed class DartSubscription : IDisposable
+    public sealed class RambleSubscription : IDisposable
     {
         private Action _unsub;
-        internal DartSubscription(Action unsub) { _unsub = unsub; }
+        internal RambleSubscription(Action unsub) { _unsub = unsub; }
         public void Dispose()
         {
             Action u = _unsub;
@@ -21,19 +21,19 @@ namespace Dart
         }
     }
 
-    /// <summary>A shared, name keyed topic on the scene's DartNodeUnity, one instance per name.
+    /// <summary>A shared, name keyed topic on the scene's RambleNodeUnity, one instance per name.
     /// It survives the native node closing and reopening by re creating its topic lazily.</summary>
-    public abstract class DartTopicBase
+    public abstract class RambleTopicBase
     {
         internal sealed class Sub
         {
-            internal Action<DartMessage> Fn;
+            internal Action<RambleMessage> Fn;
             internal Component Owner;
             internal bool HasOwner;
             internal bool Dead;
         }
 
-        private readonly DartNodeUnity _owner;
+        private readonly RambleNodeUnity _owner;
         private readonly string _name;
         private readonly Qos _qos;
         private readonly List<Sub> _subs = new List<Sub>();
@@ -43,7 +43,7 @@ namespace Dart
         private bool _wantPub;
         private bool _warnedClosed;
 
-        internal DartTopicBase(DartNodeUnity owner, string name, Qos qos)
+        internal RambleTopicBase(RambleNodeUnity owner, string name, Qos qos)
         {
             _owner = owner; _name = name; _qos = qos;
         }
@@ -61,7 +61,7 @@ namespace Dart
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
             => _raw != null ? _raw.QueueStats() : (0u, 0u, 0u, 0u);
 
-        internal abstract Topic CreateRaw(DartNode node, string name, Role role, Qos qos);
+        internal abstract Topic CreateRaw(RambleNode node, string name, Role role, Qos qos);
 
         // The advertised role mirrors actual local use: create the native topic on first use and
         // flip the role on later changes. SetRole re advertises at once, so this is cheap.
@@ -75,7 +75,7 @@ namespace Dart
                 return;
             }
             if (want == Role.Inactive) return;
-            DartNode node = _owner != null ? _owner.NativeNode : null;
+            RambleNode node = _owner != null ? _owner.NativeNode : null;
             if (node == null) return;               // deferred until the node opens
             _raw = CreateRaw(node, _name, want, _qos);
             _appliedRole = want;
@@ -88,7 +88,7 @@ namespace Dart
         {
             _warnedClosed = false;
             try { ApplyRole(); }
-            catch (Exception e) { Debug.LogError("[DART] topic '" + _name + "' create failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Ramble] topic '" + _name + "' create failed: " + e.Message); }
         }
 
         internal void OnNodeClosed()
@@ -104,18 +104,18 @@ namespace Dart
             if (_raw == null && !_warnedClosed)
             {
                 _warnedClosed = true;
-                Debug.LogWarning("[DART] publish on '" + _name + "' dropped: no open DartNodeUnity "
+                Debug.LogWarning("[Ramble] publish on '" + _name + "' dropped: no open RambleNodeUnity "
                     + "(component disabled, Run In Edit Mode off, or open failed)");
             }
             return _raw;
         }
 
-        internal DartSubscription AddSub(Action<DartMessage> fn, Component owner, bool hasOwner)
+        internal RambleSubscription AddSub(Action<RambleMessage> fn, Component owner, bool hasOwner)
         {
             var s = new Sub { Fn = fn, Owner = owner, HasOwner = hasOwner };
             _subs.Add(s); _live++;
             ApplyRole();
-            return new DartSubscription(() => RemoveSub(s));
+            return new RambleSubscription(() => RemoveSub(s));
         }
 
         internal void RemoveSub(Sub s)
@@ -127,7 +127,7 @@ namespace Dart
 
         // Main thread, from the node's per-frame dispatch. Handlers may subscribe, unsubscribe
         // and publish freely from inside a delivery.
-        internal void Deliver(DartMessage m)
+        internal void Deliver(RambleMessage m)
         {
             bool sawDead = false;
             int n = _subs.Count;   // additions during the loop wait for the next message
@@ -168,11 +168,11 @@ namespace Dart
     }
 
     /// <summary>A raw (schemaless) shared topic: bytes or UTF-8 strings.</summary>
-    public sealed class DartTopic : DartTopicBase
+    public sealed class RambleTopic : RambleTopicBase
     {
-        internal DartTopic(DartNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
+        internal RambleTopic(RambleNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Topic CreateRaw(DartNode node, string name, Role role, Qos qos)
+        internal override Topic CreateRaw(RambleNode node, string name, Role role, Qos qos)
             => new Topic(node, name, (Schema)null, role, qos);
 
         public SendStatus Publish(byte[] data)
@@ -187,7 +187,7 @@ namespace Dart
             return r != null ? r.Send(text) : SendStatus.NoTopic;
         }
 
-        public DartSubscription Subscribe(Action<DartMessage> handler)
+        public RambleSubscription Subscribe(Action<RambleMessage> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             return AddSub(handler, null, false);
@@ -195,7 +195,7 @@ namespace Dart
 
         /// <summary>Owner-bound: auto-unsubscribes when owner is destroyed, skipped
         /// while it is disabled.</summary>
-        public DartSubscription Subscribe(Component owner, Action<DartMessage> handler)
+        public RambleSubscription Subscribe(Component owner, Action<RambleMessage> handler)
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));
@@ -205,11 +205,11 @@ namespace Dart
 
     /// <summary>A typed shared topic: T's public fields are the schema, as in the core
     /// wrapper's Topic&lt;T&gt;.</summary>
-    public sealed class DartTopic<T> : DartTopicBase
+    public sealed class RambleTopic<T> : RambleTopicBase
     {
-        internal DartTopic(DartNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
+        internal RambleTopic(RambleNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Topic CreateRaw(DartNode node, string name, Role role, Qos qos)
+        internal override Topic CreateRaw(RambleNode node, string name, Role role, Qos qos)
             => new Topic<T>(node, name, role, qos);
 
         public SendStatus Publish(T message)
@@ -218,14 +218,14 @@ namespace Dart
             return r != null ? ((Topic<T>)r).Send(message) : SendStatus.NoTopic;
         }
 
-        public DartSubscription Subscribe(Action<T> handler)
+        public RambleSubscription Subscribe(Action<T> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             return AddSub(m => { if (m.Value is T v) handler(v); }, null, false);
         }
 
         /// <summary>With the message beside the value: sender, both clocks, raw bytes.</summary>
-        public DartSubscription Subscribe(Action<T, DartMessage> handler)
+        public RambleSubscription Subscribe(Action<T, RambleMessage> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             return AddSub(m => { if (m.Value is T v) handler(v, m); }, null, false);
@@ -233,7 +233,7 @@ namespace Dart
 
         /// <summary>Owner-bound: auto-unsubscribes when owner is destroyed, skipped
         /// while it is disabled.</summary>
-        public DartSubscription Subscribe(Component owner, Action<T> handler)
+        public RambleSubscription Subscribe(Component owner, Action<T> handler)
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));
@@ -241,7 +241,7 @@ namespace Dart
         }
 
         /// <summary>Owner-bound, with the message beside the value.</summary>
-        public DartSubscription Subscribe(Component owner, Action<T, DartMessage> handler)
+        public RambleSubscription Subscribe(Component owner, Action<T, RambleMessage> handler)
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));

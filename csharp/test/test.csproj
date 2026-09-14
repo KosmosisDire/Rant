@@ -1,18 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Compiles the wrapper (../Dart.cs) and copies the native library next to the exe so
-       [DllImport("dart")] resolves. Build it first: the CMake target dart_shared. -->
+  <!-- Compiles the wrapper (../Ramble.cs) and copies the native library next to the exe so
+       [DllImport("ramble")] resolves. Build it first: the CMake target ramble_shared. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>dart_test</AssemblyName>
-    <RootNamespace>DartTest</RootNamespace>
+    <AssemblyName>ramble_test</AssemblyName>
+    <RootNamespace>RambleTest</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="../Dart.cs" />
+    <Compile Include="../Ramble.cs" />
     <None Include="../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DART bridge example</title>
+<title>Ramble bridge example</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
@@ -21,11 +21,11 @@
 </style>
 </head>
 <body>
-<h1>DART bridge &mdash; typed pub/sub example</h1>
+<h1>Ramble bridge &mdash; typed pub/sub example</h1>
 <p class="hint">
-  Serve the <b>repo root</b> over http (the page loads <code>dist/dart.js</code>), e.g.
+  Serve the <b>repo root</b> over http (the page loads <code>dist/ramble.js</code>), e.g.
   <code>python -m http.server</code> from the repository top, then open
-  <code>/bridge/client/example.html</code> with <code>dart_bridge</code> running. Open
+  <code>/bridge/client/example.html</code> with <code>ramble_bridge</code> running. Open
   this page in <b>two tabs</b> to chat between them: each tab is its own node on the mesh.
 </p>
 
@@ -39,8 +39,8 @@
 
 <ul id="log"></ul>
 
-<!-- the classic-script build: one global, DartNode (no module MIME pitfalls) -->
-<script src="../../dist/dart.js"></script>
+<!-- the classic-script build: one global, RambleNode (no module MIME pitfalls) -->
+<script src="../../dist/ramble.js"></script>
 <script>
 (async () => {
   const status = document.getElementById("status");
@@ -58,8 +58,8 @@
     log.prepend(li);
   }
 
-  const node = await DartNode.connect(`ws://${location.hostname || "localhost"}:7480`, {
-    onEvent: (ev) => { if (ev.event === "error") console.warn("dart:", ev.text); },
+  const node = await RambleNode.connect(`ws://${location.hostname || "localhost"}:7480`, {
+    onEvent: (ev) => { if (ev.event === "error") console.warn("ramble:", ev.text); },
   });
   status.textContent = `connected as node "${node.name}" (data over ${node.transport})`;
 

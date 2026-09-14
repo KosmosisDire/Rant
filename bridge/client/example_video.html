@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DART bridge video example</title>
+<title>Ramble bridge video example</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
@@ -15,7 +15,7 @@
 </style>
 </head>
 <body>
-<h1>DART bridge &mdash; video over WebRTC</h1>
+<h1>Ramble bridge &mdash; video over WebRTC</h1>
 <p class="hint">
   Two nodes in this page: a <b>camera</b> that encodes an animated test pattern with
   WebCodecs (H264) and publishes it inside a <code>CamSample { pose: Pose, frame: VideoFrame }</code>
@@ -28,14 +28,14 @@
   the mesh what NAME is (a topic or a variable), opens it typed by reflection, and attaches
   the view to the first <code>VideoFrame</code>, <code>Image</code> or
   <code>ExternalVideoStream</code> in its type (try <code>?topic=snapshot</code>). Open with
-  <code>dart_bridge</code> running (<code>?bridge=ws://host:7480</code> for a remote one).
+  <code>ramble_bridge</code> running (<code>?bridge=ws://host:7480</code> for a remote one).
 </p>
 
 <video id="v" autoplay muted playsinline></video>
 <pre id="log"></pre>
 
-<!-- the classic-script build: one global, DartNode (no module MIME pitfalls) -->
-<script src="../../dist/dart.js"></script>
+<!-- the classic-script build: one global, RambleNode (no module MIME pitfalls) -->
+<script src="../../dist/ramble.js"></script>
 <script>
 (async () => {
   const q = new URLSearchParams(location.search);
@@ -68,7 +68,7 @@
   /* ---- the camera: WebCodecs H264 from a canvas -> CamSample messages ---------------- */
   let sent = 0, keyframes = 0, snapshots = 0, frames = 0;
   if (webcodecs) {
-  const camera = await DartNode.connect(url, { name: "camera", transport, ...net, onEvent: onEvent("camera") });
+  const camera = await RambleNode.connect(url, { name: "camera", transport, ...net, onEvent: onEvent("camera") });
   const pub = await camera.publisher("camera", SAMPLE);
   const snapshot = await camera.variableDefinition("snapshot", "Image");   /* the latest frame as a JPEG */
   const W = 320, H = 240;
@@ -80,7 +80,7 @@
       const keyframe = chunk.type === "key";
       if (keyframe) keyframes++;
       pub.send({ pose: { position: { x: sent, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
-                 frame: { codec: DartNode.VideoCodec.H264, width: W, height: H, keyframe,
+                 frame: { codec: RambleNode.VideoCodec.H264, width: W, height: H, keyframe,
                           pts: BigInt(Date.now()) * 1000n, data } });
       sent++;
     },
@@ -100,7 +100,7 @@
     if (mjpeg) {
       canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 }).then(async (b) => {
         pub.send({ pose: { position: { x: sent, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
-                   frame: { codec: DartNode.VideoCodec.Mjpeg, width: W, height: H, keyframe: true,
+                   frame: { codec: RambleNode.VideoCodec.Mjpeg, width: W, height: H, keyframe: true,
                             pts: BigInt(Date.now()) * 1000n, data: new Uint8Array(await b.arrayBuffer()) } });
         sent++; keyframes++;
       });
@@ -111,7 +111,7 @@
     }
     if (i % 6 === 0)                                   /* 5 Hz JPEG into the variable */
       canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 }).then(async (b) => {
-        snapshot.set({ width: W, height: H, stride: 0, format: DartNode.ImageFormat.Jpeg,
+        snapshot.set({ width: W, height: H, stride: 0, format: RambleNode.ImageFormat.Jpeg,
                        data: new Uint8Array(await b.arrayBuffer()) });
         snapshots++;
       });
@@ -120,7 +120,7 @@
   }
 
   /* ---- the viewer -------------------------------------------------------------------- */
-  const viewer = await DartNode.connect(url, { name: "viewer", transport, fetch_details: true, ...net,
+  const viewer = await RambleNode.connect(url, { name: "viewer", transport, fetch_details: true, ...net,
                                                onEvent: onEvent("viewer") });
   viewer.onClose = (e) => log(`viewer: connection closed (${e.code})`);
   const video = document.getElementById("v");
