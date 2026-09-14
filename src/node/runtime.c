@@ -2060,17 +2060,17 @@ const uint8_t *i_ramble_node_uuid(RambleNode *n){
 uint8_t    i_ramble_topic_kind (const RambleTopic *topic){ return topic ? topic->kind : 0; }
 uint8_t    i_ramble_topic_role (const RambleTopic *topic){ return topic ? topic->role : (uint8_t)RAMBLE_INACTIVE; }
 uint8_t    i_ramble_topic_reliability(const RambleTopic *topic){ return topic ? (uint8_t)topic->qos.reliability : 0; }
-const uint8_t *i_ramble_node_peer_uuid(RambleNode *n, uint32_t peer){
-    const RambleDiscoveryState *st; uint16_t q, np; int acquired; const uint8_t *out = NULL;
-    RambleDiscoveryPeer v;   /* the uuid is a view into discovery state, the copy only carries it */
-    if (!n) return NULL;
+int i_ramble_node_peer_uuid(RambleNode *n, uint32_t peer, uint8_t out[16]){
+    const RambleDiscoveryState *st; uint16_t q, np; int acquired, found = 0;
+    RambleDiscoveryPeer v;
+    if (!n) return 0;
     acquired = i_ramble_node_lock(n);
     st = ramble_discovery_state(n->discovery);
     np = ramble_discovery_max_peers(st);
     for (q = 0; q < np; q++)
-        if (ramble_discovery_peer_at(st, q, &v) && v.id == peer){ out = v.uuid; break; }
+        if (ramble_discovery_peer_at(st, q, &v) && v.id == peer){ memcpy(out, v.uuid, 16); found = 1; break; }
     i_ramble_node_unlock(n, acquired);
-    return out;
+    return found;
 }
 RambleString i_ramble_topic_name (const RambleTopic *topic){
     return topic ? ramble_string(topic->name, topic->name_len) : ramble_string(NULL, 0);

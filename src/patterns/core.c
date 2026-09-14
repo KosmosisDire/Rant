@@ -38,8 +38,8 @@ static void i_ramble_pat_dup_sweep(RambleNode *n, RambleTopic *primary, RambleEn
                                  uint32_t **ids, uint16_t *n_ids, uint16_t *cap);
 /* a peer's uuid low 32, the task wire's caller discriminator */
 static uint32_t i_ramble_pat_peer_lo(RambleNode *n, uint32_t peer){
-    const uint8_t *u = i_ramble_node_peer_uuid(n, peer);
-    return u ? i_ramble_le_r32(u) : 0;
+    uint8_t u[16];
+    return i_ramble_node_peer_uuid(n, peer, u) ? i_ramble_le_r32(u) : 0;
 }
 
 /* the entity channel belongs to as peer advertises it, by kind and base name. 1 + *out */

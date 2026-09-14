@@ -342,7 +342,7 @@ uint8_t      i_ramble_topic_kind (const RambleTopic *topic);   /* RambleTopicKin
 uint8_t      i_ramble_topic_role (const RambleTopic *topic);   /* the current RambleRole */
 RambleString i_ramble_topic_name (const RambleTopic *topic);   /* the stable name copy */
 uint8_t      i_ramble_topic_reliability(const RambleTopic *topic);   /* the create qos reliability */
-const uint8_t *i_ramble_node_peer_uuid(RambleNode *n, uint32_t peer);   /* NULL if unknown, a view */
+int          i_ramble_node_peer_uuid(RambleNode *n, uint32_t peer, uint8_t out[16]);   /* 1 = found, 0 = unknown */
 uint16_t   i_ramble_node_topic_count(RambleNode *n);         /* one past the highest defined index */
 /* Builds the RAMBLE_META_* snapshot (0 = all sections) as a map body into a node owned grown
  * buffer. A view valid until the next call, {NULL,0} on OOM. Under the node lock. */
