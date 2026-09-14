@@ -24,4 +24,4 @@ node.start()
 pose.send(Pose(stamp=1, x=1.0, frame="map"))
 ```
 
-The guide is docs/python.md in the repository: https://github.com/KosmosisDire/DART
+The guide is docs/python.md in the repository: https://github.com/KosmosisDire/Ramble

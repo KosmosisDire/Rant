@@ -12,7 +12,7 @@ keeps one copy of the code and no binaries.
 
 Add it in the Package Manager (`+`, then "Add package from git URL"):
 ```
-https://github.com/KosmosisDire/DART.git#upm
+https://github.com/KosmosisDire/Ramble.git#upm
 ```
 The `upm` branch is published by CI on each release: it carries the assembled `Ramble.cs` +
 native plugins (`main` stays binary-free). Or download `ramble-<version>.unitypackage` from

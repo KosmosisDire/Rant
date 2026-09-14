@@ -56,7 +56,7 @@ tools, explorer or bridge are built.
 
 ```cmake
 CPMAddPackage(NAME ramble
-              GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
+              GIT_REPOSITORY https://github.com/KosmosisDire/Ramble.git
               GIT_TAG v0.0.13)
 
 target_link_libraries(app PRIVATE ramble::ramble_host)

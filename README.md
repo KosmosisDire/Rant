@@ -10,7 +10,7 @@ Wrappers for C, C++, Python, C# / .NET, and Unity share one core.
 ## Install
 
 Every package is on the latest
-[GitHub Release](https://github.com/KosmosisDire/DART/releases), and on the registries
+[GitHub Release](https://github.com/KosmosisDire/Ramble/releases), and on the registries
 once a release has been published there.
 
 ### C and C++ with CMake
@@ -18,7 +18,7 @@ Fetch Ramble with CPM (or plain `FetchContent`) and link the target that carries
 platform libraries:
 ```cmake
 CPMAddPackage(NAME ramble
-              GIT_REPOSITORY https://github.com/KosmosisDire/DART.git
+              GIT_REPOSITORY https://github.com/KosmosisDire/Ramble.git
               GIT_TAG v0.0.13)
 
 target_link_libraries(app PRIVATE ramble::ramble_host)
@@ -53,7 +53,7 @@ its folder first: `dotnet nuget add source <folder> -n ramble`.
 ### Unity
 Add it in the Package Manager (`+`, then "Add package from git URL"):
 ```
-https://github.com/KosmosisDire/DART.git#upm
+https://github.com/KosmosisDire/Ramble.git#upm
 ```
 Or download `ramble-<version>.unitypackage` from the release and use `Assets > Import Package
 > Custom Package` (it imports into `Assets/Ramble/`, native plugins included).
