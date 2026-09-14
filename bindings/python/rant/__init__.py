@@ -1,4 +1,4 @@
-"""The Ramble Python wrapper: ctypes over the shared library the CMake target ramble_shared
+"""The Rant Python wrapper: ctypes over the shared library the CMake target rant_shared
 builds. docs/python.md explains how to use it."""
 
 import dataclasses as _dataclasses
@@ -41,11 +41,11 @@ class SendStatus(_pyenum.IntEnum):
     BAD_ROLE = -3
     OUT_OF_MEMORY = -4
     STATE = -5       # wrong state: poll while started, or a call a callback may not make
-    NOSYS = -6       # not compiled in (start() under RAMBLE_NO_THREADS)
+    NOSYS = -6       # not compiled in (start() under RANT_NO_THREADS)
 
 
 class CallStatus(_pyenum.IntEnum):
-    """A call's outcome, mirrors RambleCallStatus. TIMEOUT and PEER_LOST are synthesized on the
+    """A call's outcome, mirrors RantCallStatus. TIMEOUT and PEER_LOST are synthesized on the
         caller, RUNNING is task only and the one non terminal status (docs/tasks.md)."""
     OK = 0
     APP_ERROR = 1
@@ -57,14 +57,14 @@ class CallStatus(_pyenum.IntEnum):
 
 
 class LogLevel(_pyenum.IntEnum):
-    """Severity of a built-in @ramble/log line. Mirrors RambleLogLevel."""
+    """Severity of a built-in @rant/log line. Mirrors RantLogLevel."""
     ERROR = 0
     WARN = 1
     INFO = 2
 
 
 class MetaSection(_pyenum.IntFlag):
-    """A @ramble/meta request's section mask, OR the bits. ALL or 0 = every section."""
+    """A @rant/meta request's section mask, OR the bits. ALL or 0 = every section."""
     NODE = 0x1
     PROC = 0x2
     TOPICS = 0x4
@@ -81,7 +81,7 @@ class EventKind(_pyenum.IntEnum):
 
 
 class ErrorKind(_pyenum.IntEnum):
-    """The specific error carried by an EventKind.ERROR event (mirrors RambleErrorKind)."""
+    """The specific error carried by an EventKind.ERROR event (mirrors RantErrorKind)."""
     NONE = 0
     NAME_COLLISION = 1
     QOS_INCOMPATIBLE = 2
@@ -147,7 +147,7 @@ class CancelledError(Exception):
 
 @_dataclasses.dataclass
 class LogLine:
-    """One decoded @ramble/log line for a node.log.on handler. wall_us is epoch us, mono_us the
+    """One decoded @rant/log line for a node.log.on handler. wall_us is epoch us, mono_us the
         publisher's monotonic clock and recv_us this node's clock at receipt."""
     level: LogLevel
     node: str           # the publishing node's name
@@ -161,7 +161,7 @@ class LogLine:
 
 @_dataclasses.dataclass
 class MetaSnapshot:
-    """A decoded @ramble/meta reply. The node and proc scalars are fields, the full body stays
+    """A decoded @rant/meta reply. The node and proc scalars are fields, the full body stays
         in info. Absent sections leave zeros and have_proc False."""
     valid: bool = False
     status: CallStatus = CallStatus.TIMEOUT
@@ -236,35 +236,35 @@ class MetaSnapshot:
 # Reflection: the field type markers and the lazy per class schema specs.
 
 class _Type:
-    """A Ramble scalar field-type marker (ramble.u8 ... ramble.f64)."""
+    """A Rant scalar field-type marker (rant.u8 ... rant.f64)."""
     def __init__(self, kind, token):
         self.kind = kind
         self.token = token
 
     def __getitem__(self, count):
         if not isinstance(count, int) or count <= 0:
-            raise TypeError("array size must be a positive int, e.g. ramble.f64[9]")
+            raise TypeError("array size must be a positive int, e.g. rant.f64[9]")
         return _Array(self, count)
 
     def __repr__(self):
-        return "ramble." + self.token
+        return "rant." + self.token
 
 
 class _String:
-    """A capped string field marker: ramble.string(16) is string<16>. Subscript it for a
-        fixed array: ramble.string(8)[4]."""
+    """A capped string field marker: rant.string(16) is string<16>. Subscript it for a
+        fixed array: rant.string(8)[4]."""
     def __init__(self, cap):
         if not isinstance(cap, int) or cap <= 0:
-            raise TypeError("string cap must be a positive int, e.g. ramble.string(16)")
+            raise TypeError("string cap must be a positive int, e.g. rant.string(16)")
         self.cap = cap
 
     def __getitem__(self, count):
         if not isinstance(count, int) or count <= 0:
-            raise TypeError("array size must be a positive int, e.g. ramble.string(8)[4]")
+            raise TypeError("array size must be a positive int, e.g. rant.string(8)[4]")
         return _Array(self, count)
 
     def __repr__(self):
-        return "ramble.string(%d)" % self.cap
+        return "rant.string(%d)" % self.cap
 
 
 class _Array:
@@ -289,8 +289,8 @@ f64 = _Type(_F64, "f64")
 
 
 def string(cap):
-    """A capped UTF-8 string field: ramble.string(16) is string<16> in the DSL. Every string
-        field needs a cap, and ramble.string(8)[4] is a fixed array of them."""
+    """A capped UTF-8 string field: rant.string(16) is string<16> in the DSL. Every string
+        field needs a cap, and rant.string(8)[4] is a fixed array of them."""
     return _String(cap)
 
 
@@ -299,7 +299,7 @@ def string(cap):
 
 def _infer_enum_backing(cls):
     """Smallest scalar kind that fits every member value: unsigned when all >= 0, else
-    signed. Cross-language matching wants an explicit backing (ramble.enum(cls, ramble.u8))."""
+    signed. Cross-language matching wants an explicit backing (rant.enum(cls, rant.u8))."""
     vals = [int(m.value) for m in cls] or [0]
     lo, hi = min(vals), max(vals)
     if lo >= 0:
@@ -314,17 +314,17 @@ class _Enum:
     values ride the wire, plus the backing scalar kind."""
     def __init__(self, cls, backing=None):
         if not (isinstance(cls, type) and issubclass(cls, _pyenum.Enum)):
-            raise TypeError("ramble.enum expects an enum.Enum subclass")
+            raise TypeError("rant.enum expects an enum.Enum subclass")
         self.cls = cls
         if isinstance(backing, _Type):
             self.kind = backing.kind
         elif backing is None:
             self.kind = _infer_enum_backing(cls)
         else:
-            raise TypeError("enum backing must be a ramble scalar type, e.g. ramble.u8")
+            raise TypeError("enum backing must be a rant scalar type, e.g. rant.u8")
 
     def __repr__(self):
-        return "ramble.enum(%s)" % self.cls.__name__
+        return "rant.enum(%s)" % self.cls.__name__
 
 
 def enum(cls, backing=None):
@@ -344,14 +344,14 @@ class _StdAlias:
         self.under = under      # a _Type, _Array or _String
 
     def __repr__(self):
-        return "ramble.types." + self.name
+        return "rant.types." + self.name
 
 
 def _std(name):
     """Class decorator: this class IS the standard type `name`, so a field of it spells
     as the name (and must have the canonical shape, else compiling the schema fails)."""
     def wrap(cls):
-        cls.__ramble_std__ = name
+        cls.__rant_std__ = name
         return _dataclasses.dataclass(cls)
     return wrap
 
@@ -406,7 +406,7 @@ def _marker_from_dsl(text):
         in a fixed [N] or variable [] array."""
     m = _DSL_FIELD.match(text.replace(" ", ""))
     if not m:
-        raise SchemaError("ramble schema: %r is not a DSL field type (u8..f64, bool, "
+        raise SchemaError("rant schema: %r is not a DSL field type (u8..f64, bool, "
                           "string<N>, or one of those followed by [N] or [])" % text)
     base = _String(int(m.group(2))) if m.group(2) else _Type(_KIND_OF[m.group(1)], m.group(1))
     if m.group(3) is None:
@@ -431,7 +431,7 @@ def _resolve(ann, g):
 
 
 def _var_array_spec(name, elem):
-    """A VARR field spec from a list[...] element annotation (ramble.<t>, ramble.string(N),
+    """A VARR field spec from a list[...] element annotation (rant.<t>, rant.string(N),
     or int/float/bool). elem is the message tail's live element count, so no count here."""
     if isinstance(elem, _String):
         return _FieldSpec(name, _VARR, elem=_STR, str_cap=elem.cap)
@@ -443,8 +443,8 @@ def _var_array_spec(name, elem):
         return _FieldSpec(name, _VARR, elem=_F64, token="f64")
     if elem is bool:
         return _FieldSpec(name, _VARR, elem=_BOOL, token="bool")
-    raise SchemaError("ramble schema: variable array %r element must be ramble.<t>, "
-                      "ramble.string(N), or int/float/bool (got %r)" % (name, elem))
+    raise SchemaError("rant schema: variable array %r element must be rant.<t>, "
+                      "rant.string(N), or int/float/bool (got %r)" % (name, elem))
 
 
 def _field_spec(name, ann, g):
@@ -475,15 +475,15 @@ def _field_spec(name, ann, g):
         return _FieldSpec(name, _F64, token="f64")
     if ann is bool:
         return _FieldSpec(name, _BOOL, token="bool")
-    if isinstance(ann, _Enum):                                  # ramble.enum(cls[, backing])
+    if isinstance(ann, _Enum):                                  # rant.enum(cls[, backing])
         return _FieldSpec(name, _ENUM, elem=ann.kind, enum_cls=ann.cls)
     if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):   # a bare enum
         return _FieldSpec(name, _ENUM, elem=_infer_enum_backing(ann), enum_cls=ann)
     if isinstance(ann, type):                                    # a nested schema class,
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann),    # or a standard composite
-                          type_name=getattr(ann, "__ramble_std__", None))
-    raise SchemaError("ramble schema: field %r has unsupported type %r (use ramble.u8..f64, "
-                      "ramble.string(N), ramble.<t>[N], str, list[ramble.<t>], dict, a nested "
+                          type_name=getattr(ann, "__rant_std__", None))
+    raise SchemaError("rant schema: field %r has unsupported type %r (use rant.u8..f64, "
+                      "rant.string(N), rant.<t>[N], str, list[rant.<t>], dict, a nested "
                       "schema class, or int/float/bool)" % (name, ann))
 
 
@@ -492,8 +492,8 @@ def _build_spec(cls):
     g = getattr(mod, "__dict__", {})
     anns = getattr(cls, "__annotations__", {})
     if not anns:
-        raise SchemaError("ramble schema: %s has no annotated fields to map" % cls.__name__)
-    name = getattr(cls, "__ramble_name__", None) or cls.__name__
+        raise SchemaError("rant schema: %s has no annotated fields to map" % cls.__name__)
+    name = getattr(cls, "__rant_name__", None) or cls.__name__
     return _Spec(name, [_field_spec(n, a, g) for n, a in anns.items()], cls)
 
 
@@ -546,10 +546,10 @@ def _spec_text(spec):
 def _enum_body_from_schema(lib, s, field):
     """`{ Name=value, ... }` read from a compiled schema's enum option table."""
     parts = []
-    for k in range(lib.ramble_schema_enum_count(s, field)):
+    for k in range(lib.rant_schema_enum_count(s, field)):
         val = _c.c_int64()
-        nm = _c.RambleStringView()
-        if lib.ramble_schema_enum_variant(s, field, k, _c.byref(val), _c.byref(nm)):
+        nm = _c.RantStringView()
+        if lib.rant_schema_enum_variant(s, field, k, _c.byref(val), _c.byref(nm)):
             parts.append("%s=%d" % (_dstr(nm), val.value))
     return "{ %s }" % ", ".join(parts)
 
@@ -557,21 +557,21 @@ def _enum_body_from_schema(lib, s, field):
 def _is_value_root(lib, s):
     """True when the schema is a BARE TYPE: an unnamed root of one anonymous field, so its
     message is a single value (encode/decode take and give that value, not a dict)."""
-    if lib.ramble_schema_field_count(s) != 1 or lib.ramble_schema_name(s).len != 0:
+    if lib.rant_schema_field_count(s) != 1 or lib.rant_schema_name(s).len != 0:
         return False
-    info = _c.RambleSchemaFieldInfo()
-    return (bool(lib.ramble_schema_field_at(s, 0, _c.byref(info)))
+    info = _c.RantSchemaFieldInfo()
+    return (bool(lib.rant_schema_field_at(s, 0, _c.byref(info)))
             and info.depth == 0 and info.name.len == 0 and info.kind != _STRUCT)
 
 
 def _schema_dsl(lib, s):
     """The DSL text of any compiled schema, straight from the C printer, so there is exactly
         one implementation of the spelling."""
-    need = lib.ramble_schema_print(s, None, 0)
+    need = lib.rant_schema_print(s, None, 0)
     if not need:
         return ""
     buf = _c.create_string_buffer(need + 1)
-    lib.ramble_schema_print(s, buf, need + 1)
+    lib.rant_schema_print(s, buf, need + 1)
     return buf.value.decode("utf-8", "replace")
 
 
@@ -585,7 +585,7 @@ def _dstr(s):
 def _compile_dsl(text):
     lib = _c.load()
     err = _c.c_char_p()
-    s = lib.ramble_schema_compile(_c.schema_alloc(), None, text.encode("utf-8"), _c.byref(err))
+    s = lib.rant_schema_compile(_c.schema_alloc(), None, text.encode("utf-8"), _c.byref(err))
     if not s:
         near = err.value.decode("utf-8", "replace") if err.value else "?"
         raise SchemaError("schema compile failed near: " + near)
@@ -644,36 +644,36 @@ class Schema:
         if self._spec is None:
             if not isinstance(source, type):
                 raise TypeError("Schema(...) expects DSL text, a schema class, or a bare "
-                                "type (ramble.u8, ramble.string(16), list[ramble.f32], dict, ...)")
+                                "type (rant.u8, rant.string(16), list[rant.f32], dict, ...)")
             self._spec = _spec_of(source)
         self._s = _compile_dsl(_spec_text(self._spec))
 
     @property
     def name(self):
-        return _dstr(_c.load().ramble_schema_name(self._s))
+        return _dstr(_c.load().rant_schema_name(self._s))
 
     @property
     def size(self):
-        return _c.load().ramble_schema_size(self._s)
+        return _c.load().rant_schema_size(self._s)
 
     @property
     def hash(self):
-        return _c.load().ramble_schema_hash(self._s)
+        return _c.load().rant_schema_hash(self._s)
 
     @property
     def wire(self):
-        b = _c.load().ramble_schema_wire(self._s)
+        b = _c.load().rant_schema_wire(self._s)
         return _c.string_at(b.data, b.len) if b.data and b.len else b""
 
     @property
     def dsl(self):
         """The schema's DSL text, reconstructed from the compiled form. Paste this
-        into a C/C++ node's ramble_schema_compile for interop, or just print it."""
+        into a C/C++ node's rant_schema_compile for interop, or just print it."""
         return _schema_dsl(_c.load(), self._s)
 
     @property
     def field_count(self):
-        return _c.load().ramble_schema_field_count(self._s)
+        return _c.load().rant_schema_field_count(self._s)
 
     @property
     def is_value_root(self):
@@ -686,14 +686,14 @@ class Schema:
     def can_read(self, pub):
         """Can a reader declaring this schema read messages written with pub? Type names
                 narrow: an anonymous type reads a named one of the same shape, never the reverse."""
-        return bool(_c.load().ramble_schema_subset(self._s, pub._s))
+        return bool(_c.load().rant_schema_subset(self._s, pub._s))
 
     def fields(self):
         lib = _c.load()
         out = []
-        info = _c.RambleSchemaFieldInfo()
-        for i in range(lib.ramble_schema_field_count(self._s)):
-            if lib.ramble_schema_field_at(self._s, i, _c.byref(info)):
+        info = _c.RantSchemaFieldInfo()
+        for i in range(lib.rant_schema_field_count(self._s)):
+            if lib.rant_schema_field_at(self._s, i, _c.byref(info)):
                 out.append(Schema.Field(_dstr(info.name), Schema.FieldType(info.kind),
                                         Schema.FieldType(info.elem), info.count, info.depth,
                                  info.offset, info.size, info.str_cap,
@@ -713,7 +713,7 @@ class Schema:
     def __del__(self):
         try:
             if self._s:
-                _c.load().ramble_schema_free(self._s, _c.schema_alloc(), None)
+                _c.load().rant_schema_free(self._s, _c.schema_alloc(), None)
                 self._s = None
         except Exception:
             pass
@@ -763,12 +763,12 @@ def _pack_array(elem_kind, val):
 def _str_view(val, keep):
     sb = val.encode("utf-8") if isinstance(val, str) else bytes(val)
     keep.append(sb)   # keep the buffer alive across the setter call
-    return _c.RambleStringView(_c.cast(_c.c_char_p(sb), _c.c_void_p) if sb else None, len(sb))
+    return _c.RantStringView(_c.cast(_c.c_char_p(sb), _c.c_void_p) if sb else None, len(sb))
 
 
 def _bytes_view(b, keep):
     keep.append(b)    # keep the buffer alive across the setter call
-    return _c.RambleBytes(_c.cast(_c.c_char_p(b), _c.c_void_p) if b else None, len(b))
+    return _c.RantBytes(_c.cast(_c.c_char_p(b), _c.c_void_p) if b else None, len(b))
 
 
 def _pack_string_slots(strings, cap):
@@ -814,20 +814,20 @@ def _encode_map_value(v):
         return bytes((_MAP,)) + _encode_map_body(v)
     if isinstance(v, (list, tuple)):
         return bytes((_VARR,)) + _struct.pack("<H", len(v)) + b"".join(_encode_map_value(x) for x in v)
-    raise SchemaError("ramble map: unsupported value type %r (use int/float/bool/str/dict/list)"
+    raise SchemaError("rant map: unsupported value type %r (use int/float/bool/str/dict/list)"
                       % type(v).__name__)
 
 
 def _encode_map_body(d):
     if not isinstance(d, dict):
-        raise SchemaError("ramble map field expects a dict, got %r" % type(d).__name__)
+        raise SchemaError("rant map field expects a dict, got %r" % type(d).__name__)
     parts = []
     for key, val in d.items():
         if val is None:
             continue                    # a map has no null kind, omit the key
         kb = str(key).encode("utf-8")
         if len(kb) > 255:
-            raise SchemaError("ramble map: key too long (max 255 bytes): %r" % key)
+            raise SchemaError("rant map: key too long (max 255 bytes): %r" % key)
         parts.append(bytes((len(kb),)) + kb + _encode_map_value(val))
     return _struct.pack("<H", len(parts)) + b"".join(parts)
 
@@ -839,9 +839,9 @@ def _encode(lib, s, src):
         src = {"": src}              # a bare type: the value IS the one anonymous field
     names, srcs, ops = [], [src], []
     var_bytes = 0
-    for i in range(lib.ramble_schema_field_count(s)):
-        info = _c.RambleSchemaFieldInfo()
-        lib.ramble_schema_field_at(s, i, _c.byref(info))
+    for i in range(lib.rant_schema_field_count(s)):
+        info = _c.RantSchemaFieldInfo()
+        lib.rant_schema_field_at(s, i, _c.byref(info))
         name = _dstr(info.name)
         d = info.depth
         while len(names) <= d:
@@ -875,51 +875,51 @@ def _encode(lib, s, src):
 
     # msg_min is the fixed section plus one empty frame per variable field, and each
     # variable frame then grows by exactly its payload length
-    size = lib.ramble_schema_msg_min(s) + var_bytes
+    size = lib.rant_schema_msg_min(s) + var_bytes
     buf = (_c.c_ubyte * (size or 1))()
-    lib.ramble_schema_message_default(s, buf, size)
+    lib.rant_schema_message_default(s, buf, size)
     keep = []
     for kind, elem, count, cap, path, val in ops:
         if kind == _STR:
-            if not lib.ramble_set_string(buf, size, s, path, _str_view(val, keep)):
+            if not lib.rant_set_string(buf, size, s, path, _str_view(val, keep)):
                 raise SchemaError("string too long for %s (cap %d)" % (path.decode("utf-8"), cap))
         elif kind == _VSTR:
-            lib.ramble_set_string(buf, size, s, path, _str_view(val, keep))
+            lib.rant_set_string(buf, size, s, path, _str_view(val, keep))
         elif kind == _ARR and elem == _STR:
             for j, item in enumerate(val):
                 if j >= count:
                     break
-                if not lib.ramble_set_string_at(buf, size, s, path, j, _str_view(item, keep)):
+                if not lib.rant_set_string_at(buf, size, s, path, j, _str_view(item, keep)):
                     raise SchemaError("string too long for %s[%d] (cap %d)"
                                       % (path.decode("utf-8"), j, cap))
         elif kind == _ARR:
-            lib.ramble_set_array(buf, size, s, path, _bytes_view(_pack_array(elem, val), keep))
+            lib.rant_set_array(buf, size, s, path, _bytes_view(_pack_array(elem, val), keep))
         elif kind == _VARR:
-            lib.ramble_set_array(buf, size, s, path, _bytes_view(val, keep))
+            lib.rant_set_array(buf, size, s, path, _bytes_view(val, keep))
         elif kind == _MAP:
-            if not lib.ramble_set_map(buf, size, s, path, _bytes_view(val, keep)):
+            if not lib.rant_set_map(buf, size, s, path, _bytes_view(val, keep)):
                 raise SchemaError("invalid map for %s" % path.decode("utf-8"))
         elif kind == _F32:
-            lib.ramble_set_f32(buf, size, s, path, float(val))
+            lib.rant_set_f32(buf, size, s, path, float(val))
         elif kind == _F64:
-            lib.ramble_set_f64(buf, size, s, path, float(val))
+            lib.rant_set_f64(buf, size, s, path, float(val))
         elif kind == _ENUM:
             if isinstance(val, str):                       # by option name
-                if not lib.ramble_set_enum(buf, size, s, path, val.encode("utf-8")):
+                if not lib.rant_set_enum(buf, size, s, path, val.encode("utf-8")):
                     raise SchemaError("unknown enum option %r for %s" % (val, path.decode("utf-8")))
             else:                                          # by number (an int or an enum member)
                 n = int(val.value if isinstance(val, _pyenum.Enum) else val)
                 if elem in _SIGNED:
-                    lib.ramble_set_int(buf, size, s, path, n)
+                    lib.rant_set_int(buf, size, s, path, n)
                 else:
-                    lib.ramble_set_uint(buf, size, s, path, n)
+                    lib.rant_set_uint(buf, size, s, path, n)
         elif kind in _SIGNED:
-            lib.ramble_set_int(buf, size, s, path, int(val))
+            lib.rant_set_int(buf, size, s, path, int(val))
         elif kind == _BOOL:
-            lib.ramble_set_uint(buf, size, s, path, 1 if val else 0)
+            lib.rant_set_uint(buf, size, s, path, 1 if val else 0)
         else:
-            lib.ramble_set_uint(buf, size, s, path, int(val))
-    return bytes(buf)[:lib.ramble_schema_msg_len(s, buf, size)]
+            lib.rant_set_uint(buf, size, s, path, int(val))
+    return bytes(buf)[:lib.rant_schema_msg_len(s, buf, size)]
 
 
 # string array slots are [u16 len][cap bytes] each. Clamp len like the C reader so a
@@ -981,7 +981,7 @@ def _decode_map_value(buf, off, end, depth):
 
 
 def _decode_map_body(buf, off, end, depth=1):
-    if depth > 8 or off + 2 > end:      # RAMBLE_SCHEMA_MAX_DEPTH
+    if depth > 8 or off + 2 > end:      # RANT_SCHEMA_MAX_DEPTH
         return {}, end
     n = buf[off] | (buf[off + 1] << 8)
     off += 2
@@ -1027,16 +1027,16 @@ def _value_to_py(val):
 
 
 def _decode(lib, s, msg):
-    mb = _c.RambleBytes(_c.cast(_c.c_char_p(msg), _c.c_void_p) if msg else None, len(msg))
+    mb = _c.RantBytes(_c.cast(_c.c_char_p(msg), _c.c_void_p) if msg else None, len(msg))
     if _is_value_root(lib, s):       # a bare type: hand back the value, not a one-key dict
-        val = _c.RambleValue()
-        lib.ramble_get_value(mb, s, 0, _c.byref(val))
+        val = _c.RantValue()
+        lib.rant_get_value(mb, s, 0, _c.byref(val))
         return _value_to_py(val)
     root = {}
     dests = [root]
-    for i in range(lib.ramble_schema_field_count(s)):
-        info = _c.RambleSchemaFieldInfo()
-        lib.ramble_schema_field_at(s, i, _c.byref(info))
+    for i in range(lib.rant_schema_field_count(s)):
+        info = _c.RantSchemaFieldInfo()
+        lib.rant_schema_field_at(s, i, _c.byref(info))
         name = _dstr(info.name)
         d = info.depth
         parent = dests[d]
@@ -1047,8 +1047,8 @@ def _decode(lib, s, msg):
                 dests.append(None)
             dests[d + 1] = child
         else:
-            val = _c.RambleValue()
-            lib.ramble_get_value(mb, s, i, _c.byref(val))
+            val = _c.RantValue()
+            lib.rant_get_value(mb, s, i, _c.byref(val))
             parent[name] = _value_to_py(val)
     return root
 
@@ -1112,8 +1112,8 @@ def _us(seconds):
 
 
 def _c_view(payload):
-    """(RambleBytes, keepalive buffer) over a bytes payload. Hold the buffer across the call."""
-    b = _c.RambleBytes()
+    """(RantBytes, keepalive buffer) over a bytes payload. Hold the buffer across the call."""
+    b = _c.RantBytes()
     buf = None
     if payload:
         buf = (_c.c_ubyte * len(payload)).from_buffer_copy(payload)
@@ -1252,7 +1252,7 @@ class Event:
                 v = v.decode("utf-8", "replace") if v else None
             self.details[n] = v
         buf = _c.create_string_buffer(192)
-        _c.load().ramble_event_str(_c.byref(e), buf, len(buf))
+        _c.load().rant_event_str(_c.byref(e), buf, len(buf))
         self._line = buf.value.decode("utf-8", "replace")
         return self
 
@@ -1280,7 +1280,7 @@ class _TypedTopic:
         return Topic(node, name, self._type, **opts)
 
     def __repr__(self):
-        return "ramble.Topic[%s]" % getattr(self._type, "__name__", self._type)
+        return "rant.Topic[%s]" % getattr(self._type, "__name__", self._type)
 
 
 class _TopicStats:
@@ -1294,14 +1294,14 @@ class _TopicStats:
         """(tx_msgs, tx_bytes, rx_msgs, rx_bytes), the cumulative traffic this node committed to
                 the topic and delivered from it. Always on."""
         tm, tb, rm, rb = _c.c_uint64(), _c.c_uint64(), _c.c_uint64(), _c.c_uint64()
-        self._topic._node._lib.ramble_topic_counts(self._topic._ptr(), _c.byref(tm), _c.byref(tb),
+        self._topic._node._lib.rant_topic_counts(self._topic._ptr(), _c.byref(tm), _c.byref(tb),
                                                  _c.byref(rm), _c.byref(rb))
         return tm.value, tb.value, rm.value, rb.value
 
     def queue(self):
         """(messages, bytes, capacity, dropped) of the consumer queue, zeros when not queued."""
         m, b, c, d = _c.c_uint32(), _c.c_uint32(), _c.c_uint32(), _c.c_uint32()
-        self._topic._node._lib.ramble_topic_queue_stats(self._topic._ptr(), _c.byref(m),
+        self._topic._node._lib.rant_topic_queue_stats(self._topic._ptr(), _c.byref(m),
                                                       _c.byref(b), _c.byref(c), _c.byref(d))
         return m.value, b.value, c.value, d.value
 
@@ -1323,7 +1323,7 @@ class Topic:
         self._name = name
         self._schema = sch
         self._stats = _TopicStats(self)
-        co = _c.RambleTopicOpts()
+        co = _c.RantTopicOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.qos.reliability = 1 if reliable else 0
         co.qos.keep_last = keep_last
@@ -1340,7 +1340,7 @@ class Topic:
 
     @classmethod
     def _from_handle(cls, node, handle):
-        # wrap an already-existing native handle (e.g. a @ramble/log topic): no name
+        # wrap an already-existing native handle (e.g. a @rant/log topic): no name
         # registry entry, no schema. send/set_role/counts/query like any topic.
         t = cls.__new__(cls)
         t._node = node
@@ -1380,13 +1380,13 @@ class Topic:
                                 "topic with a schema to send objects/dicts")
             payload = self._schema.encode(data)
         b, buf = _c_view(payload)
-        o = _c.RambleSendOpts(capture_us=int(capture_us or 0))
-        r = self._node._lib.ramble_topic_send(self._ptr(), b, _c.byref(o))
+        o = _c.RantSendOpts(capture_us=int(capture_us or 0))
+        r = self._node._lib.rant_topic_send(self._ptr(), b, _c.byref(o))
         del buf
         return _send_status(r)
 
     def set_role(self, role):
-        return _send_status(self._node._lib.ramble_topic_set_role(self._ptr(), int(role)))
+        return _send_status(self._node._lib.rant_topic_set_role(self._ptr(), int(role)))
 
     def retire(self):
         """Retire the topic so the name can be re created with another schema (docs/topics.md).
@@ -1395,8 +1395,8 @@ class Topic:
         with node._create_lock:
             if not self._ptr():
                 return _send_status(-1)
-            idx = node._lib.ramble_topic_index(self._ptr())
-            r = node._lib.ramble_topic_retire(self._h)
+            idx = node._lib.rant_topic_index(self._ptr())
+            r = node._lib.rant_topic_retire(self._h)
             if r == 0:
                 for nm, rec in list(node._topics_by_name.items()):
                     if rec[0] == self._h:
@@ -1411,32 +1411,32 @@ class Topic:
 
     @property
     def _index(self):
-        return self._node._lib.ramble_topic_index(self._ptr())
+        return self._node._lib.rant_topic_index(self._ptr())
 
     def match_count(self):
-        return self._node._lib.ramble_topic_match_count(self._ptr())
+        return self._node._lib.rant_topic_match_count(self._ptr())
 
     def ready(self):
         """True when a send would not wait on the match wait: a subscriber is matched, or
                 matching has converged. For a GUI: disable the wait, park payloads while False."""
-        return self._node._lib.ramble_topic_ready(self._ptr()) == 1
+        return self._node._lib.rant_topic_ready(self._ptr()) == 1
 
     def pending_count(self):
         """Unresolved candidate matches right now. 0 = matching has converged for every known
                 peer."""
-        return self._node._lib.ramble_topic_pending_count(self._ptr())
+        return self._node._lib.rant_topic_pending_count(self._ptr())
 
     def drain(self, timeout):
         """Pump until every reader has acked, or timeout seconds. Call before close."""
-        return self._node._lib.ramble_topic_drain(self._ptr(), _ms(timeout)) == 1
+        return self._node._lib.rant_topic_drain(self._ptr(), _ms(timeout)) == 1
 
     def take(self, timeout=0.0):
         """Pop the next queued message, copied out, or None if nothing arrived in timeout
                 seconds (0 = check, None = forever). The first take or dispatch queues the topic."""
         if self._ptr() is None:
             return None
-        m = _c.RambleMsg()
-        r = self._node._lib.ramble_topic_take(self._ptr(), _c.byref(m), _ms(timeout))
+        m = _c.RantMsg()
+        r = self._node._lib.rant_topic_take(self._ptr(), _c.byref(m), _ms(timeout))
         if r < 0:
             raise RuntimeError("take failed (%s)" % (SendStatus(r)
                                if r in SendStatus._value2member_map_ else r))
@@ -1447,7 +1447,7 @@ class Topic:
     def dispatch(self, max_msgs=0, timeout=0.0):
         """Drain the queue by running on_message on the calling thread, oldest first, up to
                 max_msgs (0 = all), waiting like take. These run without the node lock."""
-        return self._node._lib.ramble_topic_dispatch(self._ptr(), max_msgs, _ms(timeout))
+        return self._node._lib.rant_topic_dispatch(self._ptr(), max_msgs, _ms(timeout))
 
     @property
     def schema(self):
@@ -1455,7 +1455,7 @@ class Topic:
 
 
 class _NodeLog:
-    """node.log: the built in @ramble/log/{error,warn,info} topics. Callable with a level and
+    """node.log: the built in @rant/log/{error,warn,info} topics. Callable with a level and
         a line, or through error, warn and info."""
     __slots__ = ("_node",)
 
@@ -1463,10 +1463,10 @@ class _NodeLog:
         self._node = node
 
     def __call__(self, level, text):
-        """Publish a formatted line on a level's log topic, truncated at RAMBLE_LOG_MAX. Returns
+        """Publish a formatted line on a level's log topic, truncated at RANT_LOG_MAX. Returns
                 a SendStatus, NOSYS when logs are disabled."""
         b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
-        return _send_status(self._node._lib.ramble_node_log_text(self._node._h, int(level), b, len(b)))
+        return _send_status(self._node._lib.rant_node_log_text(self._node._h, int(level), b, len(b)))
 
     def error(self, text):
         return self(LogLevel.ERROR, text)
@@ -1480,19 +1480,19 @@ class _NodeLog:
     def topic(self, level):
         """This node's own handle for a level's log topic (None when disabled): widen its role
                 and read it like any topic, or use on()."""
-        h = self._node._lib.ramble_node_log_topic(self._node._h, int(level))
+        h = self._node._lib.rant_node_log_topic(self._node._h, int(level))
         return Topic._from_handle(self._node, h) if h else None
 
     def on(self, level, handler):
         """Subscribe to a level's mesh wide log stream: every other node's lines at that level
                 as a LogLine, on the polling thread. Returns False when logs are disabled."""
         node = self._node
-        h = node._lib.ramble_node_log_topic(node._h, int(level))
+        h = node._lib.rant_node_log_topic(node._h, int(level))
         if not h:
             return False
-        if node._lib.ramble_topic_set_role(h, int(Role.PUBSUB)) != 0:
+        if node._lib.rant_topic_set_role(h, int(Role.PUBSUB)) != 0:
             return False
-        idx = node._lib.ramble_topic_index(h)
+        idx = node._lib.rant_topic_index(h)
         lvl = LogLevel(int(level))
 
         def _wrap(m):
@@ -1515,25 +1515,25 @@ class _NodeStats:
     def evicted_unsent(self):
         """Sends that evicted never sent history after the bounded wait (the EVICTED_UNSENT
                 error count): the send burst or overload indicator."""
-        return self._node._lib.ramble_node_evicted_unsent(self._node._h)
+        return self._node._lib.rant_node_evicted_unsent(self._node._h)
 
     def memory(self):
         """(in_use, peak, alloc_calls). A flat alloc_calls over a window proves the hot path
                 is allocation free."""
         in_use, peak, calls = _c.c_size_t(), _c.c_size_t(), _c.c_uint64()
-        self._node._lib.ramble_node_mem_stats(self._node._h, _c.byref(in_use), _c.byref(peak),
+        self._node._lib.rant_node_mem_stats(self._node._h, _c.byref(in_use), _c.byref(peak),
                                             _c.byref(calls))
         return in_use.value, peak.value, calls.value
 
     def backpressure(self):
         """(waited_us, waited_sends) since open."""
         us, n = _c.c_uint64(), _c.c_uint32()
-        self._node._lib.ramble_node_backpressure_stats(self._node._h, _c.byref(us), _c.byref(n))
+        self._node._lib.rant_node_backpressure_stats(self._node._h, _c.byref(us), _c.byref(n))
         return us.value, n.value
 
 
 class Node:
-    """A Ramble node: owns sockets, discovery, and topics. Construct it directly:
+    """A Rant node: owns sockets, discovery, and topics. Construct it directly:
     Node(name, **options)."""
 
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_msg", "_on_evt",
@@ -1577,7 +1577,7 @@ class Node:
             _NEXT_ID += 1
             _NODES[self._id] = self
 
-        co = _c.RambleNodeOpts()
+        co = _c.RantNodeOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.domain = domain
         co.max_topics = max_topics
@@ -1607,16 +1607,16 @@ class Node:
         co.discovery.peer_timeout_us = _us(peer_timeout)
         co.discovery.max_peers = max_peers
 
-        alloc = lib.ramble_allocator_heap(_c.RAMBLE_ALLOCATOR_PAGE)
+        alloc = lib.rant_allocator_heap(_c.RANT_ALLOCATOR_PAGE)
         self._alloc = alloc
 
         cname = name.encode("utf-8") if name else None
-        h = lib.ramble_node_open(_c.byref(alloc), cname, _on_message, _on_event, _c.byref(co))
+        h = lib.rant_node_open(_c.byref(alloc), cname, _on_message, _on_event, _c.byref(co))
         if not h:
             with _REG_LOCK:
                 _NODES.pop(self._id, None)
             # no handle on failure: read the reason from the process-global slot
-            err = Event._from_c(lib.ramble_last_error(None))
+            err = Event._from_c(lib.rant_last_error(None))
             raise RuntimeError("Node(...) failed: %s" % err)
         self._h = h
 
@@ -1627,7 +1627,7 @@ class Node:
 
     def _print_event(self, e):
         # the default on_event: nothing goes unseen when the caller registered no handler
-        print("ramble[%s]: %s" % (self._name or "node", e), file=_sys.stderr)
+        print("rant[%s]: %s" % (self._name or "node", e), file=_sys.stderr)
 
     @property
     def log(self):
@@ -1663,10 +1663,10 @@ class Node:
                                        "different schema" % name)
                 bits = rec[1] | _role_bits(role)
                 if bits != rec[1]:
-                    self._lib.ramble_topic_set_role(rec[0], int(_role_from_bits(bits)))
+                    self._lib.rant_topic_set_role(rec[0], int(_role_from_bits(bits)))
                     rec[1] = bits
                 if sch is not None:
-                    idx = self._lib.ramble_topic_index(rec[0])
+                    idx = self._lib.rant_topic_index(rec[0])
                     if self._topic_specs.get(idx) is None:
                         self._topic_specs[idx] = sch._spec
                     self._schemas.append(sch)
@@ -1680,12 +1680,12 @@ class Node:
     # the native create: makes the handle and registers the schema (kept alive)
     # + decode spec against the topic index.
     def _create_native(self, name, role, sch, opts):
-        h = self._lib.ramble_node_create_topic(
+        h = self._lib.rant_node_create_topic(
             self._h, name.encode("utf-8"), int(role),
             sch._s if sch else None, _c.byref(opts))
         if not h:
             raise RuntimeError("Topic(%r) create failed: %s" % (name, self.last_error()))
-        idx = self._lib.ramble_topic_index(h)
+        idx = self._lib.rant_topic_index(h)
         self._topic_specs[idx] = sch._spec if sch else None
         if sch is not None:
             self._schemas.append(sch)
@@ -1694,39 +1694,39 @@ class Node:
     def poll(self, timeout=0.0):
         """One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout
                 seconds in the socket wait, 0 = non blocking, None = until something happens. Returns STATE while start() runs."""
-        return self._lib.ramble_node_poll(self._h, _ms(timeout))
+        return self._lib.rant_node_poll(self._h, _ms(timeout))
 
     def start(self):
         """Run the C service thread. Handlers fire on it under the GIL, never two at once, and
                 every call stays safe from any thread. Returns True on success."""
-        return self._lib.ramble_node_start(self._h) == 0
+        return self._lib.rant_node_start(self._h) == 0
 
     def stop(self):
         """Stop and join the service thread. Idempotent, implied by close."""
-        self._lib.ramble_node_stop(self._h)
+        self._lib.rant_node_stop(self._h)
 
     def is_started(self):
-        return self._lib.ramble_node_is_started(self._h) == 1
+        return self._lib.rant_node_is_started(self._h) == 1
 
     def dispatch(self, max_msgs=0, timeout=0.0):
         """Dispatch every queued topic on the calling thread, waiting up to timeout seconds for any
                 to hold data. The one liner for a frame paced consumer."""
-        return self._lib.ramble_node_dispatch(self._h, max_msgs, _ms(timeout))
+        return self._lib.rant_node_dispatch(self._h, max_msgs, _ms(timeout))
 
     def settle(self, timeout=None):
         """Block until discovery and matching settle, so everything sent now reaches everyone.
                 Call after creating the topics. timeout None = 3 announce intervals."""
-        return self._lib.ramble_node_settle(self._h, _ms(timeout)) == 1
+        return self._lib.rant_node_settle(self._h, _ms(timeout)) == 1
 
-    # ---- @ramble/meta introspection ----
+    # ---- @rant/meta introspection ----
 
     def _meta_function(self):
-        # the local @ramble/meta caller handle, None when meta is disabled
-        h = self._lib.ramble_node_meta_function(self._h)
+        # the local @rant/meta caller handle, None when meta is disabled
+        h = self._lib.rant_node_meta_function(self._h)
         return RemoteFunction._from_handle(self, h) if h else None
 
     def meta(self, peer, sections=MetaSection.ALL, timeout=1.0):
-        """Blocking: a @ramble/meta call directed at peer, decoded into a MetaSnapshot. Drives the
+        """Blocking: a @rant/meta call directed at peer, decoded into a MetaSnapshot. Drives the
                 loop, so never under start() or from a callback. sections is a MetaSection mask."""
         fn = self._meta_function()
         if fn is None:
@@ -1735,7 +1735,7 @@ class Node:
         return MetaSnapshot._from_response(fn.call(req, timeout, provider=peer))
 
     def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
-        """Async: a @ramble/meta call directed at peer. on_snapshot fires once from the polling
+        """Async: a @rant/meta call directed at peer. on_snapshot fires once from the polling
                 thread. Works under start(). Returns the launch SendStatus."""
         fn = self._meta_function()
         if fn is None:
@@ -1770,13 +1770,13 @@ class Node:
     def last_error(self):
         """The most recent error this node reported, as an Event (also delivered via
         on_event). kind is PEER_UP with error == ErrorKind.NONE if none has occurred."""
-        return Event._from_c(self._lib.ramble_last_error(self._h))
+        return Event._from_c(self._lib.rant_last_error(self._h))
 
     def close(self, send_bye=True):
         """Stop the service thread and tear the node down. Returns True, or False when refused
                 from inside a handler, where the node stays live."""
         if self._h:
-            if self._lib.ramble_node_close(self._h, 1 if send_bye else 0) != 0:
+            if self._lib.rant_node_close(self._h, 1 if send_bye else 0) != 0:
                 return False
             self._h = None
         with _REG_LOCK:
@@ -1832,7 +1832,7 @@ class _TypedPattern:
         return self._cls(*args, **kwargs)
 
     def __repr__(self):
-        return "ramble.%s[%s]" % (self._cls.__name__, ", ".join(
+        return "rant.%s[%s]" % (self._cls.__name__, ", ".join(
             getattr(t, "__name__", str(t)) for t in self._schemas.values()))
 
 
@@ -1870,7 +1870,7 @@ class Request:
         """Answer CallStatus.OK with rsp (bytes/str, or a typed value)."""
         self._guard()
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        _c.load().ramble_request_reply(self._ptr, b)
+        _c.load().rant_request_reply(self._ptr, b)
         del buf
         self._done = True
 
@@ -1879,7 +1879,7 @@ class Request:
                 empty = the default. rsp may still carry structured failure data."""
         self._guard()
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        _c.load().ramble_request_fail(self._ptr, message.encode("utf-8") if message else None, b)
+        _c.load().rant_request_fail(self._ptr, message.encode("utf-8") if message else None, b)
         del buf
         self._done = True
 
@@ -1887,7 +1887,7 @@ class Request:
         """Park the reply: suppresses the auto-ack and lets the handler return
         now. The returned Deferred completes the call later, from any thread."""
         self._guard()
-        token = _c.load().ramble_request_defer(self._ptr)
+        token = _c.load().rant_request_defer(self._ptr)
         if not token:
             raise RuntimeError("defer failed")
         self._done = True
@@ -1934,7 +1934,7 @@ class Deferred:
         if not token:
             return False
         b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        r = _c.load().ramble_function_complete(self._fn, token, int(status),
+        r = _c.load().rant_function_complete(self._fn, token, int(status),
                                            message.encode("utf-8") if message else None, b)
         del buf
         return r == 0
@@ -2100,7 +2100,7 @@ class TaskRequest:
         """Broadcast a progress update, encoded via the prg schema. Returns a SendStatus, STATE
                 once the call completed."""
         b, buf = _c_view(_payload_bytes(self._prg_schema, value))
-        r = _c.load().ramble_function_progress(self._fn, self._token, b)
+        r = _c.load().rant_function_progress(self._fn, self._token, b)
         del buf
         return _send_status(r)
 
@@ -2110,7 +2110,7 @@ class TaskRequest:
                 CancelledError, or run to completion. cancel_event is the same signal."""
         if self.cancel_event.is_set():
             return True
-        if _c.load().ramble_function_cancelled(self._fn, self._token) == 1:
+        if _c.load().rant_function_cancelled(self._fn, self._token) == 1:
             self.cancel_event.set()   # backstop: a cancel that beat the C slot
             return True
         return False
@@ -2137,11 +2137,11 @@ class _TaskBox:
         data = _c.string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
         val, ok = _decode_payload(r.schema, self.req_schema, data)
         if not ok:
-            lib.ramble_request_fail(req_ptr, b"request decode failed", _c.RambleBytes())
+            lib.rant_request_fail(req_ptr, b"request decode failed", _c.RantBytes())
             return
-        token = lib.ramble_request_defer(req_ptr)   # implies RUNNING to the caller
+        token = lib.rant_request_defer(req_ptr)     # implies RUNNING to the caller
         if not token:
-            lib.ramble_request_fail(req_ptr, b"defer failed", _c.RambleBytes())
+            lib.rant_request_fail(req_ptr, b"defer failed", _c.RantBytes())
             return
         task = TaskRequest(self.fn, self.prg_schema, token, r, val, data)
         with self.lock:
@@ -2174,7 +2174,7 @@ class _TaskBox:
         b, buf = _c_view(payload)
         # a stale token (the definition retired / node closed mid-run) returns
         # STATE: swallowed, the caller already got its one CANCELLED outcome
-        _c.load().ramble_function_complete(self.fn, task._token, int(status),
+        _c.load().rant_function_complete(self.fn, task._token, int(status),
                                        message.encode("utf-8") if message else None, b)
         del buf
 
@@ -2223,13 +2223,13 @@ class FunctionDefinition:
         self._name = name
         self._req_schema = _as_schema(req_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = _c.RambleFunctionOpts(_us(backpressure_wait), _us(timeout), keep_last)
+        co = _c.RantFunctionOpts(_us(backpressure_wait), _us(timeout), keep_last)
         box_id = 0
         box = None
         if handler is not None:
             box = _FnBox(handler, self._req_schema, self._rsp_schema)
             box_id = _pbox_add(box)
-        h = node._lib.ramble_node_create_function_definition(
+        h = node._lib.rant_node_create_function_definition(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._rsp_schema._s if self._rsp_schema else None,
@@ -2258,12 +2258,12 @@ class FunctionDefinition:
 
     def match_count(self):
         """Callers currently matched to this definition."""
-        return self._node._lib.ramble_function_match_count(self._ptr())
+        return self._node._lib.rant_function_match_count(self._ptr())
 
     def retire(self):
         """Retire the definition: park its channels and release the name for a successor. The
                 handle is unusable after. Refused with STATE from a callback."""
-        rc = self._node._lib.ramble_function_retire(self._ptr())
+        rc = self._node._lib.rant_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -2280,8 +2280,8 @@ class RemoteFunction:
         self._name = name
         self._req_schema = _as_schema(req_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = _c.RambleFunctionOpts(_us(backpressure_wait), _us(timeout), keep_last)
-        h = node._lib.ramble_node_create_remote_function(
+        co = _c.RantFunctionOpts(_us(backpressure_wait), _us(timeout), keep_last)
+        h = node._lib.rant_node_create_remote_function(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
@@ -2304,7 +2304,7 @@ class RemoteFunction:
 
     @classmethod
     def _from_handle(cls, node, handle, req_schema=None, rsp_schema=None):
-        # wrap a node-owned function handle (the @ramble/meta endpoint): callable,
+        # wrap a node-owned function handle (the @rant/meta endpoint): callable,
         # never created or destroyed here.
         self = cls.__new__(cls)
         self._node = node
@@ -2318,9 +2318,9 @@ class RemoteFunction:
         """Blocking call: drives the loop until the response or timeout seconds, None = the
                 default. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        out = _c.RambleResponse()
-        co = _c.RambleCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.ramble_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
+        out = _c.RantResponse()
+        co = _c.RantCallOpts(int(provider)) if provider else None
+        rc = self._node._lib.rant_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
                                                 _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
         if rc == 1:
@@ -2342,8 +2342,8 @@ class RemoteFunction:
         box.id = box_id
         self._node._register_async(box_id)
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        co = _c.RambleCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.ramble_function_call_async(self._ptr(), b, _on_response,
+        co = _c.RantCallOpts(int(provider)) if provider else None
+        rc = self._node._lib.rant_function_call_async(self._ptr(), b, _on_response,
                                                       _c.c_void_p(box_id),
                                                       _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
@@ -2361,12 +2361,12 @@ class RemoteFunction:
 
     def match_count(self):
         """Providers currently matched (the definition side present)."""
-        return self._node._lib.ramble_function_match_count(self._ptr())
+        return self._node._lib.rant_function_match_count(self._ptr())
 
     def retire(self):
         """Retire the remote: park its channels and release the name. Every outstanding call
                 completes CANCELLED. Unusable after, refused with STATE from a callback."""
-        rc = self._node._lib.ramble_function_retire(self._ptr())
+        rc = self._node._lib.rant_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -2374,7 +2374,7 @@ class RemoteFunction:
 
 class TaskDefinition:
     """The implementation side of a task. The handler runs on a worker thread per call with a
-        TaskRequest (docs/python.md). None answers NO_HANDLER, the options mirror RambleTaskOpts."""
+        TaskRequest (docs/python.md). None answers NO_HANDLER, the options mirror RantTaskOpts."""
     __slots__ = ("_node", "_fn", "_req_schema", "_prg_schema", "_rsp_schema", "_name")
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
@@ -2386,7 +2386,7 @@ class TaskDefinition:
         self._req_schema = _as_schema(req_schema)
         self._prg_schema = _as_schema(prg_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = _c.RambleTaskOpts()
+        co = _c.RantTaskOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.progress_best_effort = 1 if progress_best_effort else 0
         co.progress_keep_last = progress_keep_last
@@ -2402,7 +2402,7 @@ class TaskDefinition:
             box = _TaskBox(handler, self._req_schema, self._prg_schema,
                            self._rsp_schema)
             box_id = _pbox_add(box)
-        h = node._lib.ramble_node_create_task_definition(
+        h = node._lib.rant_node_create_task_definition(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._prg_schema._s if self._prg_schema else None,
@@ -2418,7 +2418,7 @@ class TaskDefinition:
             box.fn = h
             node._register_box(box_id)
             # the one C cancel slot: fans out to the per-call cancel Events
-            node._lib.ramble_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
+            node._lib.rant_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
         node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
 
     @property
@@ -2434,12 +2434,12 @@ class TaskDefinition:
 
     def match_count(self):
         """Callers currently matched to this definition."""
-        return self._node._lib.ramble_function_match_count(self._ptr())
+        return self._node._lib.rant_function_match_count(self._ptr())
 
     def retire(self):
         """Retire the definition: every live deferred call answers CANCELLED while the channels
                 are up, a later worker completion is refused silently. Refused from a callback."""
-        rc = self._node._lib.ramble_function_retire(self._ptr())
+        rc = self._node._lib.rant_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -2458,14 +2458,14 @@ class RemoteTask:
         self._req_schema = _as_schema(req_schema)
         self._prg_schema = _as_schema(prg_schema)
         self._rsp_schema = _as_schema(rsp_schema)
-        co = _c.RambleTaskOpts()
+        co = _c.RantTaskOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.progress_best_effort = 1 if progress_best_effort else 0
         co.progress_keep_last = progress_keep_last
         co.timeout_us = _us(timeout)
         co.backpressure_wait_us = _us(backpressure_wait)
         co.keep_last = keep_last
-        h = node._lib.ramble_node_create_remote_task(
+        h = node._lib.rant_node_create_remote_task(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._prg_schema._s if self._prg_schema else None,
@@ -2491,15 +2491,15 @@ class RemoteTask:
         """Blocking call: drives the loop until the terminal outcome, with on_progress on this
                 thread. Refused from a callback or under a service thread. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
-        out = _c.RambleResponse()
-        co = _c.RambleCallOpts()
+        out = _c.RantResponse()
+        co = _c.RantCallOpts()
         co.provider = int(provider)
         keep_cb = None
         if on_progress is not None:
-            # fires only inside ramble_function_call, so the local ref holds it
+            # fires only inside rant_function_call, so the local ref holds it
             keep_cb = _progress_cb(on_progress, self._prg_schema)
             co.on_progress = keep_cb
-        rc = self._node._lib.ramble_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
+        rc = self._node._lib.rant_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
                                                 _c.cast(_c.byref(co), _c.c_void_p))
         del buf, keep_cb
         if rc == 1:
@@ -2522,13 +2522,13 @@ class RemoteTask:
         self._node._register_async(box_id)
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         call_id = _c.c_uint32(0)
-        co = _c.RambleCallOpts()
+        co = _c.RantCallOpts()
         co.provider = int(provider)
         co.id_out = _c.pointer(call_id)
         if on_progress is not None:
             box.progress_cb = _progress_cb(on_progress, self._prg_schema)
             co.on_progress = box.progress_cb
-        rc = self._node._lib.ramble_function_call_async(self._ptr(), b, _on_response,
+        rc = self._node._lib.rant_function_call_async(self._ptr(), b, _on_response,
                                                       _c.c_void_p(box_id),
                                                       _c.cast(_c.byref(co), _c.c_void_p))
         del buf
@@ -2547,17 +2547,17 @@ class RemoteTask:
     def cancel(self, call_id):
         """Request cancellation of the call. Cooperative and never acked, the terminal status
                 answers. BAD_ROLE when the provider declared no_cancel, STATE when not pending."""
-        return _send_status(self._node._lib.ramble_function_cancel(self._ptr(),
+        return _send_status(self._node._lib.rant_function_cancel(self._ptr(),
                                                                  int(call_id)))
 
     def match_count(self):
         """Providers currently matched (the definition side present)."""
-        return self._node._lib.ramble_function_match_count(self._ptr())
+        return self._node._lib.rant_function_match_count(self._ptr())
 
     def retire(self):
         """Retire the remote: every outstanding call completes CANCELLED. Unusable after,
                 refused with STATE from a callback."""
-        rc = self._node._lib.ramble_function_retire(self._ptr())
+        rc = self._node._lib.rant_function_retire(self._ptr())
         if rc == 0:
             self._fn = None
         return _send_status(rc)
@@ -2582,7 +2582,7 @@ class VariableDefinition:
         self._node = node
         self._name = name
         sch = self._schema = _as_schema(schema)
-        co = _c.RambleVariableOpts()
+        co = _c.RantVariableOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.access = 1 if read_only else 0
         co.allow_force = 1 if allow_force else 0
@@ -2591,8 +2591,8 @@ class VariableDefinition:
         co.backpressure_wait_us = _us(backpressure_wait)
         b, buf = _c_view(_payload_bytes(sch, initial) if initial is not None else b"")
         co.initial = b
-        create = (node._lib.ramble_node_create_remote_variable if self._remote
-                  else node._lib.ramble_node_create_variable_definition)
+        create = (node._lib.rant_node_create_remote_variable if self._remote
+                  else node._lib.rant_node_create_variable_definition)
         h = create(node._h, name.encode("utf-8"), sch._s if sch else None, _c.byref(co))
         del buf
         if not h:
@@ -2608,14 +2608,14 @@ class VariableDefinition:
         """The current value, the store or the cached latest, copied out under the node lock.
                 None when no value exists yet."""
         lib = self._node._lib
-        lib.ramble_node_lock(self._node._h)
+        lib.rant_node_lock(self._node._h)
         try:
-            b = _c.RambleBytes()
-            if lib.ramble_variable_get(self._ptr(), _c.byref(b)) != 1:
+            b = _c.RantBytes()
+            if lib.rant_variable_get(self._ptr(), _c.byref(b)) != 1:
                 return None
             data = _c.string_at(b.data, b.len) if b.data and b.len else b""
         finally:
-            lib.ramble_node_unlock(self._node._h)
+            lib.rant_node_unlock(self._node._h)
         if self._schema is None:
             return data
         val, ok = _decode_payload(None, self._schema, data)
@@ -2625,7 +2625,7 @@ class VariableDefinition:
         """Set the value: apply and publish, or send over the set channel. NO_TOPIC = no owner
                 matched, BAD_ROLE = the owner advertises no set channel."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.ramble_variable_set(self._ptr(), b)
+        r = self._node._lib.rant_variable_set(self._ptr(), b)
         del buf
         return _send_status(r)
 
@@ -2633,26 +2633,26 @@ class VariableDefinition:
         """Force the value: sets are absorbed into the shadow source until unforce restores the
                 latest absorbed set. Needs allow_force on the definition, else STATE."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.ramble_variable_force(self._ptr(), b)
+        r = self._node._lib.rant_variable_force(self._ptr(), b)
         del buf
         return _send_status(r)
 
     def unforce(self):
-        return _send_status(self._node._lib.ramble_variable_unforce(self._ptr()))
+        return _send_status(self._node._lib.rant_variable_unforce(self._ptr()))
 
     def forced(self):
         """True while forced: authoritative on the definition, the last received flag on a
                 remote."""
-        return self._node._lib.ramble_variable_forced(self._ptr()) == 1
+        return self._node._lib.rant_variable_forced(self._ptr()) == 1
 
     def wait(self, timeout):
         """Block driving the loop until a value exists or timeout seconds elapse. Refused from a
                 callback or under a service thread."""
-        return self._node._lib.ramble_variable_wait(self._ptr(), _ms(timeout)) == 1
+        return self._node._lib.rant_variable_wait(self._ptr(), _ms(timeout)) == 1
 
     def match_count(self):
         """The other side currently matched: remotes on a definition, owners on a remote."""
-        return self._node._lib.ramble_variable_match_count(self._ptr())
+        return self._node._lib.rant_variable_match_count(self._ptr())
 
     def on_change(self, handler):
         """Observe changes: fires on every state change and replays the current value at
@@ -2666,7 +2666,7 @@ class VariableDefinition:
 
     def _observe(self, handler, change):
         lib = self._node._lib
-        reg = lib.ramble_variable_on_change if change else lib.ramble_variable_on_write
+        reg = lib.rant_variable_on_change if change else lib.rant_variable_on_write
         if handler is None:
             reg(self._ptr(), _c.NULL_VAR_FN, None)
             return None
@@ -2678,7 +2678,7 @@ class VariableDefinition:
     def retire(self):
         """Retire the handle: park its channels and release the name, else a re created same
                 name handle is shadowed by the live twin. Refused with STATE from a callback."""
-        rc = self._node._lib.ramble_variable_retire(self._ptr())
+        rc = self._node._lib.rant_variable_retire(self._ptr())
         if rc == 0:
             self._var = None
         return _send_status(rc)
@@ -2768,8 +2768,8 @@ class Subscriber:
         return self.topic.dispatch(max_msgs, timeout)
 
 
-# Callback dispatch. The C callbacks carry no user pointer, but every RambleMsg and
-# RambleEvent carries the node id stashed in user. One trampoline per module serves all.
+# Callback dispatch. The C callbacks carry no user pointer, but every RantMsg and
+# RantEvent carries the node id stashed in user. One trampoline per module serves all.
 _NODES = {}
 _REG_LOCK = _threading.Lock()
 _NEXT_ID = 1
@@ -2898,4 +2898,4 @@ def _on_var_update(upd_ptr, user):
         _traceback.print_exc()
 
 
-from . import types   # noqa: E402  the standard type roster, ramble.types.*
+from . import types   # noqa: E402  the standard type roster, rant.types.*

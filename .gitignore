@@ -5,8 +5,8 @@ old
 /Debug/
 # cross-compiled / native binaries (no extension), repo-root only so they do not
 # also match source dirs like src/node/
-/ramble_test
-/ramble_test_noshm
+/rant_test
+/rant_test_noshm
 /example
 /node
 /pack
@@ -14,12 +14,12 @@ old
 *.png
 *.jpg
 # explorer UI: handoff package + fetched reference docs + standalone build tree
-/Ramble Network Debugging Interface.zip
+/Rant Network Debugging Interface.zip
 /_unzipped/
 /_ref/
 /explore/build/
 *.pdb
-# C# / .NET wrapper build output (bindings/csharp/*/{bin,obj}); the wrapper source is bindings/csharp/Ramble.cs
+# C# / .NET wrapper build output (bindings/csharp/*/{bin,obj}); the wrapper source is bindings/csharp/Rant.cs
 [Bb]in/
 [Oo]bj/
 # The release workflow's staging folders

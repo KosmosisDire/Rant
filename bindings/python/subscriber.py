@@ -6,15 +6,15 @@ import time
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import ramble  # noqa: E402
+import rant    # noqa: E402
 
 
 @dataclass
 class Tick:
-    seq: ramble.u64 = 0
-    when: ramble.types.Timestamp = 0                                  # Unix-epoch microseconds, UTC
-    value: ramble.f64 = 0.0
-    at: ramble.types.Transform = field(default_factory=ramble.types.Transform)   # meters and a quaternion
+    seq: rant.u64 = 0
+    when: rant.types.Timestamp = 0                                    # Unix-epoch microseconds, UTC
+    value: rant.f64 = 0.0
+    at: rant.types.Transform = field(default_factory=rant.types.Transform)       # meters and a quaternion
 
 
 count = 0
@@ -30,8 +30,8 @@ def on_message(msg):
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = ramble.Node("py-subscriber", on_message=on_message, multicast_interface=iface)
-    ramble.Topic[Tick](node, "tick", role=ramble.Role.SUB_ONLY)
+    node = rant.Node("py-subscriber", on_message=on_message, multicast_interface=iface)
+    rant.Topic[Tick](node, "tick", role=rant.Role.SUB_ONLY)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 
     start = time.perf_counter()
@@ -44,7 +44,7 @@ def main():
                 rate = (count - last_count) / (now - last_report)
                 # `when` is the publisher's wall clock in the same units everywhere, so the
                 # difference against ours is one-way latency plus clock skew.
-                age_ms = (ramble.types.now() - last.when) / 1000.0 if last.when else 0.0
+                age_ms = (rant.types.now() - last.when) / 1000.0 if last.when else 0.0
                 p = last.at.translation
                 print("received=%d  rate=%.0f Hz  age=%.1f ms  at=(%.2f, %.2f, %.2f)"
                       % (count, rate, age_ms, p.x, p.y, p.z))

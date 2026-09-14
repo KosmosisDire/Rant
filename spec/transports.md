@@ -1,6 +1,6 @@
 # Layers and transports
 
-Ramble separates what decides which bytes move from what moves them. The sans-IO cores
+Rant separates what decides which bytes move from what moves them. The sans-IO cores
 decide. A runtime moves the bytes. Adding a new transport (serial, Bluetooth, a second
 link) is a new runtime over the same cores with no change to any sans-IO file.
 
@@ -14,7 +14,7 @@ link) is a new runtime over the same cores with no change to any sans-IO file.
 
   runtimes           own the sockets and the clock and drive the cores
     discovery runtime
-    node runtime      the public ramble_node_* API (UDP today)
+    node runtime      the public rant_node_* API (UDP today)
 ```
 
 A core never calls the platform. A runtime is the only thing that does IO.
@@ -24,7 +24,7 @@ A core never calls the platform. A runtime is the only thing that does IO.
 Discovery is generic peer discovery, liftable into a non pub sub system. It carries an
 opaque meta blob and knows nothing of transport or node. The transport knows nothing of
 discovery or node. The node is the only layer that combines them. Two attempts were
-rejected as coupling and are not to be retried: a shared `RambleEvent` in `common/` (it
+rejected as coupling and are not to be retried: a shared `RantEvent` in `common/` (it
 drags transport kinds into a generic discovery), and moving the blob parsers into
 discovery. Each layer owns its own event type and the node maps between them. In the
 combined header all enum constants share one scope, so the three event enums use distinct
@@ -43,7 +43,7 @@ never their runtimes. That is its role as the combiner.
 
 The transport core never names a wire address. Every datagram it emits is addressed to a
 peer id. The node core owns the peer id to address map and resolves it
-(`ramble_node_core_resolve`, `ramble_node_core_id_for_addr`). The runtime owns the wire
+(`rant_node_core_resolve`, `rant_node_core_id_for_addr`). The runtime owns the wire
 convention and the send. That is the one place a transport shows through, and why a
 serial transport needs no sans-IO change: it resolves the same peer ids to serial
 addresses, frames the same datagram bytes, and feeds received frames back to the core.
@@ -58,11 +58,11 @@ resolve the locator. So it earns four small core hooks and otherwise lives in th
 and the shm module:
 
 - a per peer capability bit (`peer_shm`),
-- a wire flag and a fixed locator size (`RAMBLE_F_SHM`, the 24 byte descriptor),
+- a wire flag and a fixed locator size (`RANT_F_SHM`, the 24 byte descriptor),
 - a callback to hand the locator up (`on_shm`, where 0 means unresolved and the
   reliability layer repairs or skips),
 - a publish entry that references an external buffer plus its locator
-  (`ramble_transport_send_shm`).
+  (`rant_transport_send_shm`).
 
 The core never decodes the locator, maps memory or checks a host id. The node core decides
 a peer is out of band reachable when its host id equals ours (`oob_capable`, `oob_host`).

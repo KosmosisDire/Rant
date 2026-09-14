@@ -1,25 +1,25 @@
 # Memory
 
-`RambleAllocator` in `src/common/alloc.h` is the memory model at every layer. It is header
+`RantAllocator` in `src/common/alloc.h` is the memory model at every layer. It is header
 only, depends on nothing but stddef, stdint and string, and the backing is injected, so
 `common/` never calls the platform.
 
 ## Modes and intents
 
-Two modes. `ramble_allocator_static(buf, size)` bumps one caller buffer, never grows, and
-returns NULL on overflow, for embedded no heap use. `ramble_allocator_dynamic(backing,
-page_size)` bumps within pages and takes a new page through the injected `RamblePageFn`
-when full. `ramble_allocator_heap(page_size)` is that over the process heap and is what a
+Two modes. `rant_allocator_static(buf, size)` bumps one caller buffer, never grows, and
+returns NULL on overflow, for embedded no heap use. `rant_allocator_dynamic(backing,
+page_size)` bumps within pages and takes a new page through the injected `RantPageFn`
+when full. `rant_allocator_heap(page_size)` is that over the process heap and is what a
 caller with no page source of its own uses, including every binding. Exhaustion surfaces
-as `RAMBLE_E_OOM`. `max_bytes` is a runaway guard (0 = `RAMBLE_MEM_DEFAULT_MAX`).
+as `RANT_E_OOM`. `max_bytes` is a runaway guard (0 = `RANT_MEM_DEFAULT_MAX`).
 
-`ramble_heap_realloc` is the same heap in `RambleAllocFn` shape, for `ramble_schema_compile`
-and `ramble_schema_free`.
+`rant_heap_realloc` is the same heap in `RantAllocFn` shape, for `rant_schema_compile`
+and `rant_schema_free`.
 
-Two intents, explicit not size based. `ramble_allocator_fixed` bumps a shared page,
-cheapest, never individually freed. `ramble_allocator_alloc` is a `RambleAllocFn` (pass `&a`
+Two intents, explicit not size based. `rant_allocator_fixed` bumps a shared page,
+cheapest, never individually freed. `rant_allocator_alloc` is a `RantAllocFn` (pass `&a`
 as user) and returns a freeable block. Anything that grows uses the freeable form, so it
-is freeable by construction. `ramble_allocator_reset` frees everything in both intents, so
+is freeable by construction. `rant_allocator_reset` frees everything in both intents, so
 no per allocation free is required. In static mode both intents bump and free is a no op.
 
 Freed blocks go to a reuse pool in both modes and never back to the backing heap, so
@@ -31,7 +31,7 @@ The page allocator halves its request on failure for fragmented heaps.
 
 ## The copied pool rule
 
-`ramble_node_open` and `ramble_discovery_open` copy the caller's allocator by value into their
+`rant_node_open` and `rant_discovery_open` copy the caller's allocator by value into their
 own struct, so the caller may pass a stack temporary. Every close and every failure path
 must copy the pool value out, then reset the copy, because the reset frees the very page
 holding the struct that holds the pool field. Copy it out LAST, after every hook free has
@@ -60,11 +60,11 @@ message size and of how many peers or matches exist. Nothing in it is freed unti
 |---|---|---|
 | peer ids, used, dormant, frag, shm | max_peers | 1 to 4 bytes |
 | interest bitmaps (pub, sub, sub reliable) | max_peers x ceil(n_topics/8) | 1 byte |
-| topics | n_topics | i_RambleTopic |
+| topics | n_topics | i_RantTopic |
 | lane ticket table | n_topics x max_peers | 2 bytes |
 | lane scheduler (dest lists and queue) | max_peers | 1 to 4 bytes |
 | index and verdict map pointers | max_peers | 8 + 4 + 8 bytes |
-| name pool | n_topics x (RAMBLE_TOPIC_NAME_MAX + 1) | 1 byte |
+| name pool | n_topics x (RANT_TOPIC_NAME_MAX + 1) | 1 byte |
 
 ## Hook allocations
 
@@ -73,14 +73,14 @@ These scale with real traffic and real matches, never with worst case tables.
 | buffer | when | size |
 |---|---|---|
 | writer history slot | first send that needs it | grows to the largest message sent |
-| lane record pool | first match (doubles from 8) | live matches x sizeof(i_RambleLane) |
+| lane record pool | first match (doubles from 8) | live matches x sizeof(i_RantLane) |
 | reader reassembly and bitmap, two slots | per matched lane, on receive | grows to the largest message received |
 | per peer index and verdict maps | peer's first matched topic | that peer's advertised entry count |
 | announce blob | first build | actual overlay size |
 | per peer interest and detail buffers | on fetch | actual length, freed on GONE |
 
 A grown buffer never shrinks. Freeing returns the block to the reuse pool. The sparse
-matched lane record (`i_RambleLane`, both proxies inline plus back references) is allocated
+matched lane record (`i_RantLane`, both proxies inline plus back references) is allocated
 on the match edge and freed to a free list on unmatch, with a u16 ticket table for
 lookup. Topics carry a lane chain, so commit, eviction, drain and repair walk O(matched),
 not O(max_peers). Every proxy accessor returns NULL for an unmatched lane, so every entry
@@ -89,11 +89,11 @@ apply time, so a later local subscribe never forces a regrow.
 
 Rules from the footprint work:
 
-- Never hold an `i_RambleLane*` across `i_ramble_lane_ensure`. The pool reallocs and records
+- Never hold an `i_RantLane*` across `i_rant_lane_ensure`. The pool reallocs and records
   move. Durable references are pool indices.
 - Releasing a lane must drop it from the scheduler, or a recycled record on a destination
   list misroutes submessages to the old peer.
-- Our own announce blob is allocated at `ramble_transport_meta_size`, which mirrors
+- Our own announce blob is allocated at `rant_transport_meta_size`, which mirrors
   `meta_build` byte for byte. Keep the two in sync.
 - Peer removal frees the lane's assembly buffers and bitmaps.
 - The per lane and per sample structs are laid out widest field first, so they carry no
@@ -104,9 +104,9 @@ Rules from the footprint work:
 ## Sends larger than the wire cap
 
 There is no per topic message cap. `qos.max_message_bytes` is a hint that pins the SHM
-size class. The only hard limit is the wire's 65535 fragment cap (`RAMBLE_MESSAGE_MAX`). A
+size class. The only hard limit is the wire's 65535 fragment cap (`RANT_MESSAGE_MAX`). A
 receive that cannot allocate its reassembly buffer skips the sample and fires
-`RAMBLE_E_MSG_TOO_BIG`.
+`RANT_E_MSG_TOO_BIG`.
 
 ## Outside the arena
 
@@ -114,12 +114,12 @@ receive that cannot allocate its reassembly buffer skips the sample and fires
 |---|---|
 | socket receive buffer | `net.recv_buffer_bytes` (OS) |
 | socket send buffer | `net.send_buffer_bytes` (OS) |
-| per datagram stack buffer | `RAMBLE_DGRAM_MAX` = `RAMBLE_FRAG_SIZE_MAX` + 40 |
+| per datagram stack buffer | `RANT_DGRAM_MAX` = `RANT_FRAG_SIZE_MAX` + 40 |
 | SHM segments | OS mapped, lazy, see spec/shm.md |
 | SHM receive scratch | grows via the hook, one per node |
 
-The serializer takes the same `RambleAllocFn` hook as the transport core, not the
-`RambleAllocator`, so it stays a sans-IO core. SHM shared segments cannot use the allocator
+The serializer takes the same `RantAllocFn` hook as the transport core, not the
+`RantAllocator`, so it stays a sans-IO core. SHM shared segments cannot use the allocator
 (cross process mmap, fixed geometry), only their control state does.
 
 ## Footprint
@@ -132,10 +132,10 @@ patterns.
 
 Where the RAM goes, in order: writer history (`keep_last` times message size, never
 shrinks), the builtin topics (about 5 kB), the fixed node buffers sized by the compile
-time `RAMBLE_FRAG_SIZE` (not the runtime `net.fragment_size`), per topic repair stats and
+time `RANT_FRAG_SIZE` (not the runtime `net.fragment_size`), per topic repair stats and
 qos, and the lane record, which carries both sides even when one is used.
 
-Config only wins: drop a deep `keep_last` when `catch_up` is 0, set `RAMBLE_FRAG_SIZE`
+Config only wins: drop a deep `keep_last` when `catch_up` is 0, set `RANT_FRAG_SIZE`
 smaller at compile time, set `qos.queue_bytes` to cap take rings, and call `take(0)`
 beside an explicit poll, since a timed take on an empty queue drives a full nested poll
 pass.
@@ -149,8 +149,8 @@ functional, so make them cheap rather than leaning on `disable_logs` and `disabl
 
 | tunable | default | effect |
 |---|---|---|
-| RAMBLE_FRAG_SIZE | 1350 | fragment payload bytes, MIN and MAX bound the range |
-| RAMBLE_FRAG_SIZE_MAX | RAMBLE_FRAG_SIZE | sizes the datagram buffers |
-| RAMBLE_SHM_CLASS_BASE | 64K | smallest SHM chunk |
-| RAMBLE_SHM_CLASS_SHIFT | 2 | SHM class growth ratio |
-| RAMBLE_SHM_N_CLASSES | 7 | number of SHM classes |
+| RANT_FRAG_SIZE | 1350 | fragment payload bytes, MIN and MAX bound the range |
+| RANT_FRAG_SIZE_MAX | RANT_FRAG_SIZE | sizes the datagram buffers |
+| RANT_SHM_CLASS_BASE | 64K | smallest SHM chunk |
+| RANT_SHM_CLASS_SHIFT | 2 | SHM class growth ratio |
+| RANT_SHM_N_CLASSES | 7 | number of SHM classes |

@@ -11,7 +11,7 @@ from typing import Annotated
 # Import the package from the source checkout, which finds the library in dist/native.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-import ramble  # noqa: E402
+import rant    # noqa: E402
 
 DOMAIN = 42
 IFACE = "127.0.0.1"   # pin discovery to loopback for a single-host run
@@ -20,15 +20,15 @@ IFACE = "127.0.0.1"   # pin discovery to loopback for a single-host run
 # any annotated class is a schema, @dataclass just gives a handy constructor
 @dataclass
 class Twist:
-    dx: ramble.f32 = 0.0
-    dy: ramble.f32 = 0.0
+    dx: rant.f32 = 0.0
+    dy: rant.f32 = 0.0
 
 
 @dataclass
 class Pose:
-    stamp: ramble.u64 = 0
-    x:     ramble.f64 = 0.0
-    y:     ramble.f64 = 0.0
+    stamp: rant.u64 = 0
+    x:     rant.f64 = 0.0
+    y:     rant.f64 = 0.0
     uuid:  Annotated[bytes, "u8[4]"] = b""
     frame: Annotated[str, "string<16>"] = ""             # a capped UTF-8 string
     tags:  Annotated[list[str], "string<8>[2]"] = field(default_factory=list)  # a fixed array of capped strings
@@ -39,10 +39,10 @@ class Pose:
 # variable string array, and a self-describing map.
 @dataclass
 class Sensor:
-    id:      ramble.u32 = 0
+    id:      rant.u32 = 0
     name:    Annotated[str, "string<16>"] = ""                 # capped (fixed)
     note:    str = ""                                          # variable string
-    samples: list[ramble.f32] = field(default_factory=list)     # variable scalar array
+    samples: list[rant.f32] = field(default_factory=list)       # variable scalar array
     labels:  Annotated[list[str], "string<8>[]"] = field(default_factory=list)  # variable string array
     extras:  dict = field(default_factory=dict)               # self-describing map
 
@@ -56,7 +56,7 @@ def round_trip():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    sch = ramble.Schema(Sensor)
+    sch = rant.Schema(Sensor)
     print("Sensor DSL:\n" + sch.dsl)
     src = Sensor(id=42, name="lidar",
                  note="a long unbounded note that exceeds sixteen bytes easily",
@@ -82,14 +82,14 @@ def round_trip():
     try:
         sch.encode(Sensor(labels=["toolongforcap"]))
         check("over-cap raises", False)
-    except ramble.SchemaError:
+    except rant.SchemaError:
         check("over-cap raises", True)
     print("variable-kinds round-trip: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
 
 # The canonical wire of a bare type is its kind alone, so these hashes are the same in
-# every language binding (pinned in C by ramble_test's schema-root phase).
+# every language binding (pinned in C by rant_test's schema-root phase).
 HASH_BOOL = 0xEE90234F61D2520B
 HASH_F32ARR = 0x314844E3386A1FC4
 
@@ -101,7 +101,7 @@ class Mode(_enum.IntEnum):
 
 
 # The Float3 schema is the shared cross-language golden vector: the same wire and the
-# same hash from C, C++, C# and Python (pinned in C by ramble_test's stdtypes phase).
+# same hash from C, C++, C# and Python (pinned in C by rant_test's stdtypes phase).
 HASH_FLOAT3 = 0x04AA9469CD08B1DD
 
 
@@ -109,11 +109,11 @@ HASH_FLOAT3 = 0x04AA9469CD08B1DD
 class Track:
     """Standard types as ordinary annotations: an alias spells as its name and carries a
         plain value, a composite is a shipped dataclass. Both narrow matching."""
-    at: ramble.types.Transform = field(default_factory=ramble.types.Transform)
-    when: ramble.types.Timestamp = 0
-    tag: ramble.types.Color = field(default_factory=ramble.types.Color)
-    id: ramble.types.Uuid = bytes(16)
-    velocity: ramble.types.Float3 = field(default_factory=ramble.types.Float3)
+    at: rant.types.Transform = field(default_factory=rant.types.Transform)
+    when: rant.types.Timestamp = 0
+    tag: rant.types.Color = field(default_factory=rant.types.Color)
+    id: rant.types.Uuid = bytes(16)
+    velocity: rant.types.Float3 = field(default_factory=rant.types.Float3)
 
 
 def std_types():
@@ -125,42 +125,42 @@ def std_types():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    f3 = ramble.Schema("Float3")
+    f3 = rant.Schema("Float3")
     check("Float3 compiles by name alone, golden hash", f3.hash == HASH_FLOAT3)
     check("Float3 is 12 message bytes", f3.size == 12)
-    check("the mirror dataclass IS that type", ramble.Schema(ramble.types.Float3).hash == HASH_FLOAT3)
+    check("the mirror dataclass IS that type", rant.Schema(rant.types.Float3).hash == HASH_FLOAT3)
 
     # a name narrows: an anonymous field of the same shape reads a Transform field, never
     # the reverse, and Transform/Twist are distinct names never mistaken for each other
-    named = ramble.Schema("W { at: Transform }")
-    bare = ramble.Schema("W { at: { translation: { x: f64, y: f64, z: f64 },"
+    named = rant.Schema("W { at: Transform }")
+    bare = rant.Schema("W { at: { translation: { x: f64, y: f64, z: f64 },"
                        "         rotation: { x: f64, y: f64, z: f64, w: f64 },"
                        "         parent: string<30> } }")
     check("an anonymous field of the same shape reads a Transform field",
           bare.can_read(named) and not named.can_read(bare))
     check("Transform and Twist never cross-wire",
-          not ramble.Schema("Twist").can_read(ramble.Schema("Transform")))
+          not rant.Schema("Twist").can_read(rant.Schema("Transform")))
 
-    sch = ramble.Schema(Track)
-    text = " ".join(ramble.dsl(Track).split())
+    sch = rant.Schema(Track)
+    text = " ".join(rant.dsl(Track).split())
     check("the reflected schema spells the names, not the shapes",
           text == "Track { at: Transform, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
     check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.size == 128)
 
-    t = Track(at=ramble.types.Transform(translation=ramble.types.Double3(4.5, -1.25, 9.0)),
-              when=ramble.types.now(), tag=ramble.types.Color(0x11, 0x22, 0x33, 0xFF),
-              id=bytes(range(16)), velocity=ramble.types.Float3(1.0, 2.0, 3.0))
+    t = Track(at=rant.types.Transform(translation=rant.types.Double3(4.5, -1.25, 9.0)),
+              when=rant.types.now(), tag=rant.types.Color(0x11, 0x22, 0x33, 0xFF),
+              id=bytes(range(16)), velocity=rant.types.Float3(1.0, 2.0, 3.0))
     back = sch.decode(sch.encode(t))
     check("a Track round-trips whole",
           back.at.translation.x == 4.5 and back.at.rotation.w == 1.0
           and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
-    check("types.now is Unix-epoch microseconds", ramble.types.now() > 1600000000000000)
+    check("types.now is Unix-epoch microseconds", rant.types.now() > 1600000000000000)
     return ok
 
 
 # The video family: golden wire shared with the C, C++ and C# bindings (pinned in
-# bindings/cpp/test.cpp and by ramble_test's stdtypes phase).
+# bindings/cpp/test.cpp and by rant_test's stdtypes phase).
 HASH_IMAGE = 0x489841F99F392B85
 HASH_VIDEO_FRAME = 0xF677BD147B513FBC
 HASH_EXT_STREAM = 0xAAE502077016AC13
@@ -170,8 +170,8 @@ HASH_EXT_STREAM = 0xAAE502077016AC13
 class Clip:
     """The video mirrors used as FIELDS: each spells as its name, so the schema is the
     same as the text form and needs no definition of its own."""
-    cover: ramble.types.Image = field(default_factory=ramble.types.Image)
-    live: ramble.types.ExternalVideoStream = field(default_factory=ramble.types.ExternalVideoStream)
+    cover: rant.types.Image = field(default_factory=rant.types.Image)
+    live: rant.types.ExternalVideoStream = field(default_factory=rant.types.ExternalVideoStream)
 
 
 def video_types():
@@ -185,30 +185,30 @@ def video_types():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    for name, cls, golden in (("Image", ramble.types.Image, HASH_IMAGE),
-                              ("VideoFrame", ramble.types.VideoFrame, HASH_VIDEO_FRAME),
-                              ("ExternalVideoStream", ramble.types.ExternalVideoStream,
+    for name, cls, golden in (("Image", rant.types.Image, HASH_IMAGE),
+                              ("VideoFrame", rant.types.VideoFrame, HASH_VIDEO_FRAME),
+                              ("ExternalVideoStream", rant.types.ExternalVideoStream,
                                HASH_EXT_STREAM)):
         check("%s compiles by name alone, golden hash" % name,
-              ramble.Schema(name).hash == golden)
-        check("the %s mirror IS that type" % name, ramble.Schema(cls).hash == golden)
+              rant.Schema(name).hash == golden)
+        check("the %s mirror IS that type" % name, rant.Schema(cls).hash == golden)
     check("a video mirror nests as a named field",
-          ramble.Schema(Clip).hash
-          == ramble.Schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
+          rant.Schema(Clip).hash
+          == rant.Schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
 
     got = {}
-    a = ramble.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE)
-    b = ramble.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE)
+    a = rant.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE)
+    b = rant.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE)
     try:
-        pub = ramble.Publisher[ramble.types.Image](a, "frame", reliable=True, keep_last=4)
-        ramble.Subscriber[ramble.types.Image](b, "frame", lambda i: got.setdefault("img", i),
+        pub = rant.Publisher[rant.types.Image](a, "frame", reliable=True, keep_last=4)
+        rant.Subscriber[rant.types.Image](b, "frame", lambda i: got.setdefault("img", i),
                                           reliable=True, keep_last=4)
-        stream = ramble.types.ExternalVideoStream(kind=ramble.types.VideoStreamKind.Rtsp,
-                                          codec=ramble.types.VideoCodec.H264,
+        stream = rant.types.ExternalVideoStream(kind=rant.types.VideoStreamKind.Rtsp,
+                                          codec=rant.types.VideoCodec.H264,
                                           width=1920, height=1080,
                                           url="rtsp://cam.local/main", name="front door")
-        vd = ramble.VariableDefinition[ramble.types.ExternalVideoStream](a, "stream", initial=stream)
-        rv = ramble.RemoteVariable[ramble.types.ExternalVideoStream](b, "stream")
+        vd = rant.VariableDefinition[rant.types.ExternalVideoStream](a, "stream", initial=stream)
+        rv = rant.RemoteVariable[rant.types.ExternalVideoStream](b, "stream")
         check("handles created", all(h is not None for h in (pub, vd, rv)))
         deadline = time.time() + 8.0
         while time.time() < deadline and (pub.match_count() == 0 or rv.get() is None):
@@ -217,9 +217,9 @@ def video_types():
         check("image pair matched", pub.match_count() == 1)
 
         pixels = bytes((i * 7) & 0xFF for i in range(384))
-        img = ramble.types.Image(width=32, height=4, stride=96,
-                         format=ramble.types.ImageFormat.Rgb8, data=pixels)
-        check("image send", pub.send(img) == ramble.SendStatus.OK)
+        img = rant.types.Image(width=32, height=4, stride=96,
+                         format=rant.types.ImageFormat.Rgb8, data=pixels)
+        check("image send", pub.send(img) == rant.SendStatus.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and "img" not in got:
             a.poll(0.001)
@@ -227,12 +227,12 @@ def video_types():
         r = got.get("img")
         check("an Image crosses whole",
               r is not None and r.width == 32 and r.height == 4 and r.stride == 96
-              and r.format == ramble.types.ImageFormat.Rgb8 and bytes(r.data) == pixels)
+              and r.format == rant.types.ImageFormat.Rgb8 and bytes(r.data) == pixels)
 
         v = rv.get()
         check("the stream variable replicated",
-              v is not None and v.kind == ramble.types.VideoStreamKind.Rtsp
-              and v.codec == ramble.types.VideoCodec.H264
+              v is not None and v.kind == rant.types.VideoStreamKind.Rtsp
+              and v.codec == rant.types.VideoCodec.H264
               and v.width == 1920 and v.height == 1080
               and v.url == "rtsp://cam.local/main" and v.name == "front door")
     finally:
@@ -251,21 +251,21 @@ def value_roots():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    check("bool canonical hash", ramble.Schema(bool).hash == HASH_BOOL)
-    check("f32[] canonical hash", ramble.Schema(list[ramble.f32]).hash == HASH_F32ARR)
-    check("bool dsl", ramble.dsl(bool) == "bool\n")
-    check("f32[] dsl", ramble.dsl(list[ramble.f32]) == "f32[]\n")
-    check("string(16) dsl", ramble.dsl(ramble.string(16)) == "string<16>\n")
+    check("bool canonical hash", rant.Schema(bool).hash == HASH_BOOL)
+    check("f32[] canonical hash", rant.Schema(list[rant.f32]).hash == HASH_F32ARR)
+    check("bool dsl", rant.dsl(bool) == "bool\n")
+    check("f32[] dsl", rant.dsl(list[rant.f32]) == "f32[]\n")
+    check("string(16) dsl", rant.dsl(rant.string(16)) == "string<16>\n")
     check("bare root reflects as one anonymous field",
-          ramble.Schema(ramble.f64).field_count == 1
-          and ramble.Schema(ramble.f64).name == ""
-          and ramble.Schema(ramble.f64).fields()[0].name == "")
-    for src, value in ((bool, True), (ramble.u8, 200), (ramble.i32, -7),
-                       (ramble.f32, 1.5), (ramble.f64, -2.25), (int, 5), (float, 0.5),
-                       (bool, False), (ramble.string(16), "capped"), (str, "unbounded"),
-                       (list[ramble.f32], [1.5, -2.5]), (dict, {"battery": 87}),
+          rant.Schema(rant.f64).field_count == 1
+          and rant.Schema(rant.f64).name == ""
+          and rant.Schema(rant.f64).fields()[0].name == "")
+    for src, value in ((bool, True), (rant.u8, 200), (rant.i32, -7),
+                       (rant.f32, 1.5), (rant.f64, -2.25), (int, 5), (float, 0.5),
+                       (bool, False), (rant.string(16), "capped"), (str, "unbounded"),
+                       (list[rant.f32], [1.5, -2.5]), (dict, {"battery": 87}),
                        ("u8[4]", b"\x01\x02\x03\x04"), (Mode, Mode.FAULT)):
-        sch = ramble.Schema(src)
+        sch = rant.Schema(src)
         out = sch.decode(sch.encode(value))
         if isinstance(value, list):
             same = [round(x, 3) for x in out] == [round(x, 3) for x in value]
@@ -275,13 +275,13 @@ def value_roots():
             same = bytes(out) == value
         else:
             same = out == value
-        check("round-trip %s -> %r" % (ramble.dsl(src).strip(), out), same)
+        check("round-trip %s -> %r" % (rant.dsl(src).strip(), out), same)
     # text DSL and the bare type agree, and a named bare root is an error
-    check("text `bool` == plain bool", ramble.Schema("bool").hash == HASH_BOOL)
+    check("text `bool` == plain bool", rant.Schema("bool").hash == HASH_BOOL)
     try:
-        ramble.Schema("Temperature: f32")
+        rant.Schema("Temperature: f32")
         check("named bare root refused", False)
-    except ramble.SchemaError:
+    except rant.SchemaError:
         check("named bare root refused", True)
     print("bare-type roots: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
@@ -298,16 +298,16 @@ def value_roots_live():
         ok = ok and cond
 
     got = {}
-    a = ramble.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
-    b = ramble.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
+    a = rant.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
+    b = rant.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
     try:
-        pub_flag = ramble.Publisher[bool](a, "flag", reliable=True, keep_last=4)
-        sub_flag = ramble.Topic[bool](b, "flag", role=ramble.Role.SUB_ONLY, reliable=True, keep_last=4)
-        pub_note = ramble.Publisher[str](a, "note", reliable=True, keep_last=4)
-        sub_note = ramble.Topic[str](b, "note", role=ramble.Role.SUB_ONLY, reliable=True, keep_last=4)
+        pub_flag = rant.Publisher[bool](a, "flag", reliable=True, keep_last=4)
+        sub_flag = rant.Topic[bool](b, "flag", role=rant.Role.SUB_ONLY, reliable=True, keep_last=4)
+        pub_note = rant.Publisher[str](a, "note", reliable=True, keep_last=4)
+        sub_note = rant.Topic[str](b, "note", role=rant.Role.SUB_ONLY, reliable=True, keep_last=4)
         b.on_message(lambda m: got.setdefault(m.topic_name, m.value))
-        vd = ramble.VariableDefinition[ramble.f64](a, "gain", initial=1.25)
-        rv = ramble.RemoteVariable[ramble.f64](b, "gain")
+        vd = rant.VariableDefinition[rant.f64](a, "gain", initial=1.25)
+        rv = rant.RemoteVariable[rant.f64](b, "gain")
         check("handles created", all(h is not None for h in
                                     (pub_flag, sub_flag, pub_note, sub_note, vd, rv)))
         deadline = time.time() + 8.0
@@ -343,18 +343,18 @@ def value_roots_live():
 # patterns leg types
 @dataclass
 class AddReq:
-    a: ramble.i32 = 0
-    b: ramble.i32 = 0
+    a: rant.i32 = 0
+    b: rant.i32 = 0
 
 
 @dataclass
 class AddRsp:
-    sum: ramble.i32 = 0
+    sum: rant.i32 = 0
 
 
 @dataclass
 class Level:
-    value: ramble.i32 = 0
+    value: rant.i32 = 0
 
 
 def patterns():
@@ -367,35 +367,35 @@ def patterns():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    srv = ramble.Node("srv", on_event=on_event("srv"),
+    srv = rant.Node("srv", on_event=on_event("srv"),
                     domain=43, multicast_interface=IFACE, max_topics=32)
-    cli = ramble.Node("cli", on_event=on_event("cli"),
+    cli = rant.Node("cli", on_event=on_event("cli"),
                     domain=43, multicast_interface=IFACE, max_topics=32)
 
     # definitions on srv: the simple form, a raiser giving APP_ERROR, and a full form that
     # defers and completes off thread
-    add = ramble.FunctionDefinition[AddReq, AddRsp](srv, "add",
+    add = rant.FunctionDefinition[AddReq, AddRsp](srv, "add",
                                                   lambda q: AddRsp(sum=q.a + q.b))
 
     def _boom(q):
         raise RuntimeError("kaboom")   # noqa: the traceback print is expected
-    ramble.FunctionDefinition[AddReq, AddRsp](srv, "boom", _boom)
+    rant.FunctionDefinition[AddReq, AddRsp](srv, "boom", _boom)
 
     def _late(q, request):
         d = request.defer()
         threading.Timer(0.05, lambda: d.complete(AddRsp(sum=q.a + q.b))).start()
-    ramble.FunctionDefinition[AddReq, AddRsp](srv, "late", _late)
+    rant.FunctionDefinition[AddReq, AddRsp](srv, "late", _late)
 
-    lvl_def = ramble.VariableDefinition[Level](srv, "level", initial=Level(value=5),
+    lvl_def = rant.VariableDefinition[Level](srv, "level", initial=Level(value=5),
                                              allow_force=True)
 
     srv.start()   # the service thread owns srv's loop, handlers fire on it
 
     # remotes on cli (manual poll: blocking calls drive cli's loop themselves)
-    add_r = ramble.RemoteFunction[AddReq, AddRsp](cli, "add")
-    boom_r = ramble.RemoteFunction[AddReq, AddRsp](cli, "boom")
-    late_r = ramble.RemoteFunction[AddReq, AddRsp](cli, "late")
-    lvl = ramble.RemoteVariable[Level](cli, "level")
+    add_r = rant.RemoteFunction[AddReq, AddRsp](cli, "add")
+    boom_r = rant.RemoteFunction[AddReq, AddRsp](cli, "boom")
+    late_r = rant.RemoteFunction[AddReq, AddRsp](cli, "late")
+    lvl = rant.RemoteVariable[Level](cli, "level")
 
     deadline = time.time() + 8.0
     while time.time() < deadline and not (add_r.match_count() > 0
@@ -407,16 +407,16 @@ def patterns():
 
     # blocking calls
     r = add_r.call(AddReq(a=2, b=3), 3.0)
-    check("blocking call ok", r.ok and r.status == ramble.CallStatus.OK)
+    check("blocking call ok", r.ok and r.status == rant.CallStatus.OK)
     check("blocking call value", r.ok and r.value.sum == 5)
     check("provider set", r.ok and r.provider != 0)
 
     rb = boom_r.call(AddReq(a=1, b=1), 3.0)
-    check("raising handler -> APP_ERROR", rb.status == ramble.CallStatus.APP_ERROR)
+    check("raising handler -> APP_ERROR", rb.status == rant.CallStatus.APP_ERROR)
     threw = False
     try:
         _ = rb.value
-    except ramble.CallError:
+    except rant.CallError:
         threw = True
     check(".value on not-ok raises CallError", threw)
 
@@ -429,7 +429,7 @@ def patterns():
     v = lvl.get()
     check("initial value", v is not None and v.value == 5)
     check("owner matched", lvl.match_count() > 0)
-    check("remote set accepted", lvl.set(Level(value=9)) == ramble.SendStatus.OK)
+    check("remote set accepted", lvl.set(Level(value=9)) == rant.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
         cli.poll(0.005)
@@ -437,13 +437,13 @@ def patterns():
     check("definition applied it", (v := lvl_def.get()) is not None and v.value == 9)
 
     # force overrides with a shadow source, unforce restores the latest set
-    check("force", lvl_def.force(Level(value=99)) == ramble.SendStatus.OK)
+    check("force", lvl_def.force(Level(value=99)) == rant.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
         cli.poll(0.005)
     check("forced value visible remotely", (v := lvl.get()) is not None and v.value == 99)
     check("remote sees forced()", lvl.forced())
-    check("unforce", lvl_def.unforce() == ramble.SendStatus.OK)
+    check("unforce", lvl_def.unforce() == rant.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
         cli.poll(0.005)
@@ -457,9 +457,9 @@ def patterns():
     check("on_change replays current at registration", len(chg) == 1 and chg[0][0] == 9)
     lvl_def.on_write(lambda v: wr.append(v.value))
     check("on_write does not replay", len(wr) == 0)
-    check("identical re-set accepted", lvl_def.set(Level(value=9)) == ramble.SendStatus.OK)
+    check("identical re-set accepted", lvl_def.set(Level(value=9)) == rant.SendStatus.OK)
     check("identical re-set is a write, not a change", len(chg) == 1 and len(wr) == 1)
-    check("new set accepted", lvl_def.set(Level(value=12)) == ramble.SendStatus.OK)
+    check("new set accepted", lvl_def.set(Level(value=12)) == rant.SendStatus.OK)
     check("change fires inline with the new value",
           len(chg) == 2 and chg[1][0] == 12 and chg[1][2] == 0 and len(wr) == 2)
     rchg = []
@@ -488,12 +488,12 @@ def patterns():
     # a blocking call is refused while the service thread owns the loop, loudly
     rr = add_r.call(AddReq(a=1, b=2), 0.1)
     check("blocking call refused under service thread",
-          rr.status == ramble.CallStatus.TIMEOUT
-          and rr.send_status == ramble.SendStatus.STATE)
+          rr.status == rant.CallStatus.TIMEOUT
+          and rr.send_status == rant.SendStatus.STATE)
     cli.stop()
 
     # a call still pending at close gets exactly one CANCELLED outcome, never hangs
-    never = ramble.RemoteFunction(cli, "never-served", timeout=60.0)
+    never = rant.RemoteFunction(cli, "never-served", timeout=60.0)
     cancelled = []
     cdone = threading.Event()
 
@@ -504,7 +504,7 @@ def patterns():
     srv.close()
     cli.close()
     check("pending call_async settles CANCELLED at close",
-          cdone.wait(2.0) and cancelled[0].status == ramble.CallStatus.CANCELLED)
+          cdone.wait(2.0) and cancelled[0].status == rant.CallStatus.CANCELLED)
     print("patterns: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
@@ -512,17 +512,17 @@ def patterns():
 # tasks leg types
 @dataclass
 class JobReq:
-    count: ramble.i32 = 0
+    count: rant.i32 = 0
 
 
 @dataclass
 class JobPrg:
-    done: ramble.i32 = 0
+    done: rant.i32 = 0
 
 
 @dataclass
 class JobRsp:
-    total: ramble.i32 = 0
+    total: rant.i32 = 0
 
 
 def tasks():
@@ -535,9 +535,9 @@ def tasks():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    srv = ramble.Node("tsrv", on_event=on_event("tsrv"),
+    srv = rant.Node("tsrv", on_event=on_event("tsrv"),
                     domain=46, multicast_interface=IFACE, max_topics=32)
-    cli = ramble.Node("tcli", on_event=on_event("tcli"),
+    cli = rant.Node("tcli", on_event=on_event("tcli"),
                     domain=46, multicast_interface=IFACE, max_topics=32)
     try:
         # work: streams progress then returns a result
@@ -547,29 +547,29 @@ def tasks():
                 total += i + 1
                 task.progress(JobPrg(done=i + 1))
             return JobRsp(total=total)
-        work = ramble.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "work", _work)
+        work = rant.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "work", _work)
 
         # grind: runs until cancelled, honors the cancel
         def _grind(task):
             task.progress(JobPrg(done=0))
             if not task.cancel_event.wait(8.0) or not task.cancelled:
                 return JobRsp(total=-1)   # cancel never arrived: a visible failure
-            raise ramble.CancelledError("stopped")
-        ramble.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "grind", _grind)
+            raise rant.CancelledError("stopped")
+        rant.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "grind", _grind)
 
         # rigid: declares no_cancel, completes regardless
         def _rigid(task):
             task.progress(JobPrg(done=1))
             time.sleep(0.3)
             return JobRsp(total=7)
-        ramble.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "rigid", _rigid,
+        rant.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "rigid", _rigid,
                                                     no_cancel=True)
 
         srv.start()   # the service thread owns srv's loop, workers spawn off it
 
-        work_r = ramble.RemoteTask[JobReq, JobPrg, JobRsp](cli, "work")
-        grind_r = ramble.RemoteTask[JobReq, JobPrg, JobRsp](cli, "grind")
-        rigid_r = ramble.RemoteTask[JobReq, JobPrg, JobRsp](cli, "rigid")
+        work_r = rant.RemoteTask[JobReq, JobPrg, JobRsp](cli, "work")
+        grind_r = rant.RemoteTask[JobReq, JobPrg, JobRsp](cli, "grind")
+        rigid_r = rant.RemoteTask[JobReq, JobPrg, JobRsp](cli, "rigid")
 
         deadline = time.time() + 8.0
         while time.time() < deadline and not (work_r.match_count() > 0
@@ -611,9 +611,9 @@ def tasks():
             gdone.set()
         gid = grind_r.call_async(JobReq(count=1), grsp, on_progress=gprog)
         check("grind running", grunning.wait(5.0))
-        check("cancel accepted", grind_r.cancel(gid) == ramble.SendStatus.OK)
+        check("cancel accepted", grind_r.cancel(gid) == rant.SendStatus.OK)
         check("terminal CANCELLED with the handler's message",
-              gdone.wait(5.0) and grsps[0].status == ramble.CallStatus.CANCELLED
+              gdone.wait(5.0) and grsps[0].status == rant.CallStatus.CANCELLED
               and grsps[0].message == "stopped")
         check("progress carries the call id and provider",
               bool(ginfo) and all(c == gid and p != 0 for _, c, p in ginfo))
@@ -626,7 +626,7 @@ def tasks():
                                  on_progress=lambda v: nrunning.set())
         check("rigid running", nrunning.wait(5.0))
         check("cancel refused (no_cancel)",
-              rigid_r.cancel(nid) == ramble.SendStatus.BAD_ROLE)
+              rigid_r.cancel(nid) == rant.SendStatus.BAD_ROLE)
         check("rigid completes anyway",
               ndone.wait(5.0) and nrsps[0].ok and nrsps[0].value.total == 7)
 
@@ -673,13 +673,13 @@ def main():
     if not std_types():
         return 1
     print("opening nodes...")
-    sub = ramble.Node("sub", on_message=on_message, on_event=on_event("sub"),
+    sub = rant.Node("sub", on_message=on_message, on_event=on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE)
-    pub = ramble.Node("pub", on_event=on_event("pub"),
+    pub = rant.Node("pub", on_event=on_event("pub"),
                     domain=DOMAIN, multicast_interface=IFACE)
 
-    ramble.Topic[Pose](sub, "pose", role=ramble.Role.SUB_ONLY, reliable=True, keep_last=8)
-    pubch = ramble.Topic[Pose](pub, "pose", role=ramble.Role.PUB_ONLY, reliable=True, keep_last=8)
+    rant.Topic[Pose](sub, "pose", role=rant.Role.SUB_ONLY, reliable=True, keep_last=8)
+    pubch = rant.Topic[Pose](pub, "pose", role=rant.Role.PUB_ONLY, reliable=True, keep_last=8)
 
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
                 frame="map", tags=["fast", "ok"], vel=Twist(dx=0.5, dy=0.25))
@@ -699,7 +699,7 @@ def main():
               and r.frame == "map" and list(r.tags) == ["fast", "ok"]
               and abs(r.vel.dx - 0.5) < 1e-6 and abs(r.vel.dy - 0.25) < 1e-6)
         print("PASS" if ok else "FAIL: decoded value mismatch: %r" % (r,))
-        print("Pose DSL (for C interop):\n" + ramble.dsl(Pose))
+        print("Pose DSL (for C interop):\n" + rant.dsl(Pose))
     else:
         print("FAIL: no message delivered within timeout")
 
@@ -709,7 +709,7 @@ def main():
             pubch.send(Pose(frame="way-too-long-for-sixteen-bytes"))
             print("FAIL: over-cap string did not raise")
             ok = False
-        except ramble.SchemaError:
+        except rant.SchemaError:
             print("PASS: over-cap string refused")
 
     # threaded: both nodes on their service threads, sent from this thread, delivered
@@ -718,7 +718,7 @@ def main():
         if not pub.start() or not sub.start():
             print("FAIL: start")
             ok = False
-        elif pub.poll(0) != ramble.SendStatus.STATE:
+        elif pub.poll(0) != rant.SendStatus.STATE:
             print("FAIL: poll not refused while started")
             ok = False
         else:
@@ -736,7 +736,7 @@ def main():
 
     # A handle outliving its node answers NO_TOPIC instead of touching freed memory.
     if ok:
-        ok = (pubch.send(sent) == ramble.SendStatus.NO_TOPIC and pubch.match_count() == 0
+        ok = (pubch.send(sent) == rant.SendStatus.NO_TOPIC and pubch.match_count() == 0
               and pubch.take() is None and pubch.name == "pose" and pub.name == "pub")
         print("PASS: handle after close" if ok else "FAIL: handle after close")
 

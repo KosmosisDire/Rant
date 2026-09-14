@@ -1,6 +1,6 @@
 # Testing and measuring
 
-`tests/ramble_test.c` holds the selftest phases, the sweep harness and the benches. The
+`tests/rant_test.c` holds the selftest phases, the sweep harness and the benches. The
 commands are in docs/building.md. This file holds what makes a test or a measurement
 trustworthy.
 
@@ -10,13 +10,13 @@ trustworthy.
   call inside a check macro.
 - Launch paired processes in one shell command. The gap between two tool calls fakes a
   peer drop.
-- Both `ramble_test selftest` and `ramble_test_noshm selftest` must pass, plus a sweep for
+- Both `rant_test selftest` and `rant_test_noshm selftest` must pass, plus a sweep for
   transport changes. A comment only change must leave code byte identical.
 - The selftests use `"127.0.0.1"` as the discovery interface to stay off the LAN, and a
   per process domain base so concurrent runs and the SHM module test (segment names carry
   it) do not collide.
 - A raw transport `on_message` sees the 8 byte source stamp first. A payload tag sits at
-  `data[RAMBLE_TIMESTAMP_BYTES]`.
+  `data[RANT_TIMESTAMP_BYTES]`.
 - A wall clock threshold check (waker under 400 ms, varwait under 250 ms) can flake once
   under load. Suspect those before the code.
 - A nested wait only pumps the calling node, so a peer in the same process must answer
@@ -28,8 +28,8 @@ trustworthy.
 
 ## Selftest phases
 
-What each phase of `ramble_test selftest` pins. The phase names match the comments in
-`tests/ramble_test.c`. Every phase runs on loopback on its own domain, offset from a per
+What each phase of `rant_test selftest` pins. The phase names match the comments in
+`tests/rant_test.c`. Every phase runs on loopback on its own domain, offset from a per
 process base picked from the clock so concurrent runs never join each other.
 
 ### Transport core, sans IO with a controlled clock
@@ -98,8 +98,8 @@ process base picked from the clock so concurrent runs never join each other.
   refused while the table is full of active peers and the node forwards the event.
 - Open failure paths: a forced failure at each staged cleanup label returns NULL and
   leaves the platform balanced. A non multicast group fails the join and
-  `ramble_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the
-  unicast bind takes no reuse, and names RAMBLE_E_BIND with the port and errno. An over
+  `rant_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the
+  unicast bind takes no reuse, and names RANT_E_BIND with the port and errno. An over
   long topic name is refused at create and the node stays usable.
 - User data forwarding: a shared memory capable node rewraps the transport callbacks, and a
   transport fired event must still reach `on_event` with the app's user data. A crafted
@@ -119,7 +119,7 @@ process base picked from the clock so concurrent runs never join each other.
   the detail exchange.
 - Subset binding: a subscriber declaring a subset of the publisher's schema by name in
   any order matches and receives a rebased schema. A same field with a different kind is
-  refused on both sides with RAMBLE_SCHEMA_MISMATCH and a wrong size message is dropped.
+  refused on both sides with RANT_SCHEMA_MISMATCH and a wrong size message is dropped.
 - A 1024 option u16 enum round trips, and identical lists on both nodes send no schema
   wire. A differing large enum would inline about 11 KB and IP fragment, which is left for
   a within entry paging pass.
@@ -148,7 +148,7 @@ process base picked from the clock so concurrent runs never join each other.
   domain or garbage datagrams are ignored.
 - External interest: a publisher with about 300 topics cannot inline its interest, so the
   announce ships a sub MTU bootstrap and the subscriber pulls the blob by byte range
-  paging. No datagram ever exceeds RAMBLE_DGRAM_MAX, the match forms through the fetch, and
+  paging. No datagram ever exceeds RANT_DGRAM_MAX, the match forms through the fetch, and
   steady state announces trigger no re fetch. Reflection reads the assembled interest and
   the interest epoch is the observer cache key.
 
@@ -159,7 +159,7 @@ process base picked from the clock so concurrent runs never join each other.
 - BURST: 64 back to back best effort sends from one thread all reach the wire.
 - HOSTILE (Windows): transport sends forced to would block. The first pass parks one
   datagram in `tx_hold`, past that the burst overwrites truly unsent history, which must
-  surface as RAMBLE_EVICTED_UNSENT so every send is delivered or accounted.
+  surface as RANT_EVICTED_UNSENT so every send is delivered or accounted.
 - WAKER: an idle started pair delivers a single send within milliseconds, not at the next
   announce capped wakeup.
 - REENTRANT: a callback echo works, and create, set_role and a foreign poll refuse loudly.
@@ -213,7 +213,7 @@ process base picked from the clock so concurrent runs never join each other.
 - Match wait: a sample committed after our side matched but before the peer verified us
   heals through reliable repair once its verdict lands, so delivery is writer
   authoritative. A first send waits for an already present subscriber. A disabled wait
-  drops at once but loudly with RAMBLE_E_UNMATCHED_SEND.
+  drops at once but loudly with RANT_E_UNMATCHED_SEND.
 
 ### End to end
 
@@ -272,7 +272,7 @@ golden hash vectors are shared by every binding and pinned in C by the schema ro
 ## Measurement traps
 
 - Never redirect a child's stdout through a PowerShell pipe. The pipe fills and an
-  unbuffered printf in the child blocks for seconds. `ramble_test sweep` spawns children
+  unbuffered printf in the child blocks for seconds. `rant_test sweep` spawns children
   itself and redirects to files.
 - A load generator that repays its backlog invents drops: a stall becomes one burst from
   every node, receive buffers overflow, and the drop percentage reads as stall over
@@ -294,21 +294,21 @@ sustains 50 kHz per node at zero drops and 0.26 ms round trip. Reliable is clean
 45 kHz per node, and 50 kHz hits the repair ceiling (the 32 seqno NACK window). Mesh
 datagrams grow as N squared times the rate. Idle topics cost nothing.
 
-Threaded (`ramble_test threadbench`): flat out 688k msg/s UDP and 452k SHM on loopback with
+Threaded (`rant_test threadbench`): flat out 688k msg/s UDP and 452k SHM on loopback with
 zero evictions. Queued delivery (`queuebench`) costs 14% at 1 KB up to 35% at 1 MB.
 Reliable same host SHM at keep_last 4 went from 92 to 2300 msg/s with the immediate in
-order ack. A zero subscriber send costs 52 ns. `ramble_topic_match_count` costs 11 ns, so an
+order ack. A zero subscriber send costs 52 ns. `rant_topic_match_count` costs 11 ns, so an
 app that builds an expensive payload should gate on it.
 
 ## Live debugging
 
-A `probe.c` that defines `RAMBLE_IMPLEMENTATION` against `dist/ramble.h` can read every
+A `probe.c` that defines `RANT_IMPLEMENTATION` against `dist/rant.h` can read every
 internal struct (discovery peer flags, observed sources) and wrap `sendto` and `recvfrom`
 with macros to log all discovery and detail traffic. Interest lines stuck at a fixed
 publish count while liveness continues mean the peer's detail egress is black holed. Do
 not trust a peer down time at seconds granularity to tell a BYE from a timeout.
 
-Repair diagnostics (`ramble_repair_stats`): `frags_dup` should stay near 0. Rising
+Repair diagnostics (`rant_repair_stats`): `frags_dup` should stay near 0. Rising
 `nacks_sent` with a flat reader position is a wedge. `frags_ahead` tracking the live
 fragment rate with `msgs_skipped` tracking the message rate was the lapped treadmill.
 Reproduce with a pub sub pair on loopback, `disable_shm`, 200 KB at 30 Hz and a queued

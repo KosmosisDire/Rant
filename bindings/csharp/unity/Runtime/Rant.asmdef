@@ -1,6 +1,6 @@
 {
-  "name": "RANT.Ramble",
-  "rootNamespace": "Ramble",
+  "name": "Rant",
+  "rootNamespace": "Rant",
   "references": [],
   "includePlatforms": [],
   "excludePlatforms": [],

@@ -1,14 +1,14 @@
 # Reflection
 
-How the node builds the views behind `ramble_node_peers_next`, `ramble_node_entities_next`
-and `ramble_node_mesh_next`. The API is in docs/reflection.md.
+How the node builds the views behind `rant_node_peers_next`, `rant_node_entities_next`
+and `rant_node_mesh_next`. The API is in docs/reflection.md.
 
 ## Tables, not scans
 
 The node fills tables as announces and details arrive. Every detail received feeds them,
 and `opts.fetch_details` only widens what an observer asks for. A walk never hashes a
 name, rescans an interest list or allocates. The per peer fold and the mesh table are
-rebuilt lazily after a change, and `ramble_node_mesh_epoch` bumps when a walk should run
+rebuilt lazily after a change, and `rant_node_mesh_epoch` bumps when a walk should run
 again. Each peer carries an `epoch` that bumps on every reflected change.
 
 Entity kinds ride the announce, so the walks work with or without the patterns layer.
@@ -17,7 +17,7 @@ Entity kinds ride the announce, so the walks work with or without the patterns l
 
 An entity is never a channel. A function's `@req` and `@rsp` pair is one function, a
 task's three channels are one task, a variable's `@set` folds in as `writable`, and the
-`@ramble/` builtins are hidden. Partners are found by hashing the base name plus the suffix
+`@rant/` builtins are hidden. Partners are found by hashing the base name plus the suffix
 and verified against the fetched name when it is known, since 32 bit hashes collide. A
 pattern primary missing a partner, or a partner missing its primary, is surfaced
 `incomplete`. The per peer tables are hook allocated and freed when the peer goes.
@@ -54,9 +54,9 @@ stand beside a restarted live one. The `ghost:` selftests pin it.
 
 ## Limits
 
-There is no public subscriber side match count. `ramble_topic_match_count` is publisher
+There is no public subscriber side match count. `rant_topic_match_count` is publisher
 side, so a sub only topic reads 0, and the bridge's `match` push reports the same. The
 entity name is a placeholder until details arrive, and `incomplete` says so. The old per
-name schema ranking (`ramble_node_mesh_schema`) is gone: the provider rule plus writer side
+name schema ranking (`rant_node_mesh_schema`) is gone: the provider rule plus writer side
 width covers the case that forced it, a caller adopting a fellow caller's anonymous struct
 over the definition's `Color`.

@@ -1,28 +1,28 @@
 # C++
 
-`dist/ramble.hpp` is a header only C++17 wrapper over the C library, and the one file a
+`dist/rant.hpp` is a header only C++17 wrapper over the C library, and the one file a
 consumer needs: the C single header is embedded inside it. The semantics are the C ones,
 so docs/node.md, docs/topics.md, docs/patterns.md and docs/tasks.md apply. This page says
 what is different in C++.
 
 ## The implementation anchor
 
-Exactly one translation unit defines `RAMBLE_IMPLEMENTATION` before the include. That unit
+Exactly one translation unit defines `RANT_IMPLEMENTATION` before the include. That unit
 emits the C implementation at global scope with C linkage. It may be a `.cpp` file, so a
 pure C++ project needs no C compiler, or a `.c` file, and a `.c` file that includes the
 header with nothing defined is treated as the anchor. Every other translation unit gets
-the C declarations inside `ramble::detail` and nothing at global scope.
+the C declarations inside `rant::detail` and nothing at global scope.
 
 ```cpp
-#define RAMBLE_IMPLEMENTATION
-#include "ramble.hpp"
+#define RANT_IMPLEMENTATION
+#include "rant.hpp"
 ```
 
-`dist/ramble.cpp` is exactly that, generated, so a project compiles it instead of writing one.
+`dist/rant.cpp` is exactly that, generated, so a project compiles it instead of writing one.
 
 ```sh
-g++ -std=c++17 -Idist bindings/cpp/example.cpp dist/ramble.cpp -o example -lrt -lpthread
-g++ -std=c++17 -Idist bindings/cpp/example.cpp dist/ramble.cpp -o example.exe -lws2_32 -lbcrypt -lwinmm
+g++ -std=c++17 -Idist bindings/cpp/example.cpp dist/rant.cpp -o example -lrt -lpthread
+g++ -std=c++17 -Idist bindings/cpp/example.cpp dist/rant.cpp -o example.exe -lws2_32 -lbcrypt -lwinmm
 ```
 
 The header is clean under `-fno-exceptions -fno-rtti` and is verified on MinGW g++,
@@ -31,12 +31,12 @@ clang++, clang-cl and MSVC.
 ## A node
 
 ```cpp
-ramble::Node node("robot1",
-    [](const ramble::MessageView& m){ /* every delivery */ },
-    [](const ramble::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); },
+rant::Node node("robot1",
+    [](const rant::MessageView& m){ /* every delivery */ },
+    [](const rant::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); },
     { .domain = 7 });
-ramble::Topic chat(node, "chat", ramble::Role::PubSub, nullptr,
-                 { .reliability = ramble::Reliability::Reliable });
+rant::Topic chat(node, "chat", rant::Role::PubSub, nullptr,
+                 { .reliability = rant::Reliability::Reliable });
 node.start();
 chat.send("hello");
 ```
@@ -46,7 +46,7 @@ own. The event handler is required. Options are plain structs mirroring the C on
 all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
 `Qos::no_timestamp` are the C fields of the same meaning.
 
-Every failed constructor throws `ramble::Error`, which carries the error kind, the OS errno
+Every failed constructor throws `rant::Error`, which carries the error kind, the OS errno
 of a socket fault and the formatted text as `what()`. With `-fno-exceptions` nothing
 throws: the object is not `valid()` and `Node::last_open_error()` holds the text. Data
 path results are `SendStatus` and the status enums in both modes.
@@ -94,13 +94,13 @@ kinds, and a type mismatch yields the zero value rather than throwing.
 ## Typed messages
 
 ```cpp
-struct Pose { double x, y; ramble::String<16> frame; };
-RAMBLE_SCHEMA(Pose, x, y, frame);
-ramble::Publisher<Pose> pub(node, "pose");
+struct Pose { double x, y; rant::String<16> frame; };
+RANT_SCHEMA(Pose, x, y, frame);
+rant::Publisher<Pose> pub(node, "pose");
 pub.send({ 1.0, 2.0, {} });
 ```
 
-`RAMBLE_SCHEMA(T, fields...)` goes at global scope after the struct, listing up to 64
+`RANT_SCHEMA(T, fields...)` goes at global scope after the struct, listing up to 64
 members in wire order. The wire name is the type name with namespace qualifiers stripped.
 On first use the codec synthesizes the DSL, compiles it through the C compiler, and builds
 a flat copy table. A padding free struct on a little endian host encodes and decodes with
@@ -108,36 +108,36 @@ one memcpy, anything else runs a per field loop. A delivery whose schema hash di
 ours rebuilds the offsets from the incoming schema and caches them per schema pointer.
 
 Wire types are the sized integers, float, double, bool, `T[N]` and `std::array<U, N>` of
-those, `ramble::String<N>` for a capped string, nested reflected structs, and the variable
+those, `rant::String<N>` for a capped string, nested reflected structs, and the variable
 members `std::vector<scalar>` and `std::string`. A variable member rides the message tail
 as a length framed section, so a type with one encodes into scratch and its decode
 allocates into the member. Refused at compile time: pointers, maps, `std::vector<bool>`,
 vectors of structs or strings, and struct array members. Those shapes use the dynamic
 `Schema` and `MessageBuilder` API.
 
-Any wire type used directly as a handle's type is a bare schema with no `RAMBLE_SCHEMA`:
+Any wire type used directly as a handle's type is a bare schema with no `RANT_SCHEMA`:
 `Publisher<bool>`, `RemoteVariable<float>`, `Subscriber<std::string>` or
 `Publisher<std::vector<float>>`. A bare type is anonymous, so it is the same bytes and
 the same hash from every language.
 
-`RAMBLE_ENUM(E, options...)` registers an `enum class` so a member ships as a named
+`RANT_ENUM(E, options...)` registers an `enum class` so a member ships as a named
 `enum<uN>` with the enumerators as options. An unregistered enum ships as its backing
 integer and matches an `enum<uN>` by width only.
 
-`ramble::String<N>` is the capped string slot. `assign()` refuses an over capacity value and
+`rant::String<N>` is the capped string slot. `assign()` refuses an over capacity value and
 `view()` clamps a hostile length.
 
 ## Standard types
 
-The roster in docs/stdtypes.md is mirrored as `ramble::Timestamp`, `ramble::Transform`,
-`ramble::Color`, `ramble::Uuid` and the rest. Each fixed mirror is standard layout and
+The roster in docs/stdtypes.md is mirrored as `rant::Timestamp`, `rant::Transform`,
+`rant::Color`, `rant::Uuid` and the rest. Each fixed mirror is standard layout and
 identical to the wire, so the memcpy path applies. `Image` and `VideoFrame` carry a
 `std::vector<uint8_t>` data member, so they take the tail path, and they nest as a member
-but never as an array element. `ramble::now()` and `ramble::new_uuid()` are the two values
+but never as an array element. `rant::now()` and `rant::new_uuid()` are the two values
 that need the platform.
 
-Name your own type the same way: `RAMBLE_STD_STRUCT(T, fields...)` reflects the members and
-names the type, and `RAMBLE_STD_ALIAS(T, R)` names a type that copies as `R`.
+Name your own type the same way: `RANT_STD_STRUCT(T, fields...)` reflects the members and
+names the type, and `RANT_STD_ALIAS(T, R)` names a type that copies as `R`.
 
 ## Functions, tasks and variables
 
@@ -176,7 +176,7 @@ on every state change. `on_write` fires on every applied write, identical bytes 
 Both run inline on the thread that applied the write. `RemoteVariable::wait()` blocks,
 driving the loop, until a value exists.
 
-Pass `ramble::reflect_from_mesh` where a constructor takes a schema pointer and the handle
+Pass `rant::reflect_from_mesh` where a constructor takes a schema pointer and the handle
 types itself from the mesh: a reader takes its provider's schema, a writer the widest
 every reader accepts. `refresh()` re types the handle in place when the mesh moved.
 
@@ -187,11 +187,11 @@ with `CallStatus::Cancelled`.
 ## Logs, meta and reflection
 
 `Node::log(level, text)` publishes on a level's built in topic, with printf style
-overloads that truncate at `RAMBLE_LOG_MAX`. `on_log(level, handler)` widens the node's own
+overloads that truncate at `RANT_LOG_MAX`. `on_log(level, handler)` widens the node's own
 log handle and delivers every other node's lines at that level as a `LogLine`, whose views
 are valid for the callback only. Call it once per level from setup.
 
-`meta_request(peer, handler, sections)` sends a directed `@ramble/meta` call and decodes the
+`meta_request(peer, handler, sections)` sends a directed `@rant/meta` call and decodes the
 reply into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole
 body stays in `info` as a `MapDict`. `sections` is a mask of `MetaSection` bits, 0 for all.
 `meta()` is the raw caller handle for anything else.

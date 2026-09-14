@@ -22,7 +22,7 @@ and which costs nothing when unset. See spec/node.md.
 
 There is no GAP submessage. A writer that cannot satisfy a NACK, or that overran its
 ring, answers with an HB whose `first` advertises its floor. The reader's HB handler
-skips past the dropped range with one `RAMBLE_MSG_LOST` counted in seqnos (fragments, not
+skips past the dropped range with one `RANT_MSG_LOST` counted in seqnos (fragments, not
 messages) and restarts at the writer's oldest cached sample.
 
 ## Scheduling
@@ -30,13 +30,13 @@ messages) and restarts at the writer's oldest cached sample.
 Sending is driven by an active lane queue. The event that gives a (topic, peer) lane
 work also enqueues it, so poll cost scales with traffic, not with how many topics exist.
 Heartbeats and delayed acks are clock driven and found by an amortized sweep that covers
-the lane table every `RAMBLE_HB_SWEEP_US`. The sweep skips a whole topic row when nothing
+the lane table every `RANT_HB_SWEEP_US`. The sweep skips a whole topic row when nothing
 reliable is matched on it.
 
 A send with zero matched writers skips the grow, the memcpy and the commit unless the
 topic retains history (reliable with `catch_up` above 0). The match count is O(1) off a
 cached counter. The send path kicks the waker only when it committed something
-(`ramble_transport_tx_pending`): the waker is a loopback send that costs about 36 us on
+(`rant_transport_tx_pending`): the waker is a loopback send that costs about 36 us on
 Windows, and an idle publisher used to pay it once per poller sleep.
 
 The poll wait is capped at `next_deadline_us`, the earliest armed timer, fed at the arm
@@ -48,8 +48,8 @@ which fire at their timer instead of up to a sweep period later.
 
 A reliable send that would overwrite unacked history waits up to
 `qos.backpressure_wait_us`. In threaded mode a send that would overwrite history not yet
-handed to the wire waits one TX pass, bounded by `RAMBLE_UNSENT_WAIT_US`. If it still must
-evict, KEEP_LAST proceeds and `RAMBLE_E_EVICTED_UNSENT` fires. Evicting sent but unacked
+handed to the wire waits one TX pass, bounded by `RANT_UNSENT_WAIT_US`. If it still must
+evict, KEEP_LAST proceeds and `RANT_E_EVICTED_UNSENT` fires. Evicting sent but unacked
 history is ordinary KEEP_LAST and fires no event.
 
 A best effort reader on a reliable topic is fire and forget: out of flow control, no
@@ -70,7 +70,7 @@ highest seqno actually received, kept separate from `hb_last`, which is only the
 claim). Each floor is requested once. `nack_high` is the top of the last request, so a
 refill asks only for the new part. A stalled floor re asks only after the
 `nack_retransmit_us` backstop, which is also the one path allowed to chase `hb_last` for
-tail loss. Outstanding repair is capped at one `RAMBLE_NACK_WINDOW` (32) and clocked to
+tail loss. Outstanding repair is capped at one `RANT_NACK_WINDOW` (32) and clocked to
 delivery. `nack_high` is not reset when a sample's assembly starts, or a whole message
 request already in flight would be re asked.
 
@@ -96,7 +96,7 @@ for as long as the stream lasts.
 
 So when the floor passes a sample the reader was still FETCHING for the second time with
 nothing delivered in between, the reader rejoins at the writer's head. The cached window
-is given up (that one `RAMBLE_MSG_LOST` covers it) and the next message arrives in order. A
+is given up (that one `RANT_MSG_LOST` covers it) and the next message arrives in order. A
 skip of a PARKED sample (the consumer refused it) is the consumer's stall, so it neither
 counts nor resets. Any delivery resets. Single fragment and shared memory paths never lap.
 The `lapped:` selftests pin it.
@@ -133,7 +133,7 @@ per topic and node owned).
 
 ## Round trip estimate
 
-The transport keeps one estimator per peer (`RamblePeerRtt`, RFC 6298 shape: smoothed
+The transport keeps one estimator per peer (`RantPeerRtt`, RFC 6298 shape: smoothed
 value, mean deviation, floor, sample count), fed by the reliable path with no probe
 traffic. The first sample seeds srtt = R and rttvar = R/2, then rttvar = (3v + |srtt - R|)
 / 4 and srtt = (7s + R) / 8. A writer times the push of a sample's LAST fragment to the
@@ -146,16 +146,16 @@ publishes measures from its acks. The estimator is per peer slot, carried across
 zeroed on peer add and remove.
 
 The bound is the smoothed value plus max(1 ms, 4 times the deviation), never under
-`RAMBLE_RTO_MIN_US` (the poll wait is millisecond granular). It drives the reader's re ask
+`RANT_RTO_MIN_US` (the poll wait is millisecond granular). It drives the reader's re ask
 backstop (`qos.repair_delay_us` 0 = adaptive, a nonzero value pins it, 50 ms until the
-first sample) and the writer's tail heartbeat (`RAMBLE_HB_TAIL_US` until the first sample).
+first sample) and the writer's tail heartbeat (`RANT_HB_TAIL_US` until the first sample).
 One lost resend then costs one round trip instead of 50 ms. Read it through
-`RamblePeerInfo.rtt_*`, the `@ramble/meta` peers section, or `ramble_transport_peer_rtt`. The
+`RantPeerInfo.rtt_*`, the `@rant/meta` peers section, or `rant_transport_peer_rtt`. The
 `rtt:` selftests pin it with a virtual clock.
 
 ## Tail heartbeat
 
-When a reliable lane's send queue drains, the next HB comes after `RAMBLE_HB_TAIL_US` (or
+When a reliable lane's send queue drains, the next HB comes after `RANT_HB_TAIL_US` (or
 the peer's measured bound) instead of `heartbeat_us`, so a lost final message repairs
 fast. The reader's immediate ack suppresses it when nothing was lost.
 
@@ -227,7 +227,7 @@ teardown because a graceful restart regenerates its uuid anyway.
 
 A message that would fragment to a same host subscriber goes through shared memory
 instead: one 37 byte descriptor on the wire and the payload in a shared chunk. The cutoff
-is this node's own fragment size (`ramble_transport_frag`), since a writer fragments its
+is this node's own fragment size (`rant_transport_frag`), since a writer fragments its
 whole seqno line with one size. A message that fits one datagram goes inline either way,
 because the shared memory path still costs a descriptor plus pool and attach work. Same
 host is a host id match, not an address match. See spec/shm.md.

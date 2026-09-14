@@ -1,7 +1,7 @@
-# Build Ramble on every push and pull request, on the three desktop platforms.
+# Build Rant on every push and pull request, on the three desktop platforms.
 #
 # The test suites are deliberately not run here yet. The test rework lands first and the
-# suites (bin/ramble_test selftest, bindings/cpp/test.cpp, bindings/csharp/test, bindings/python/test.py) get wired in
+# suites (bin/rant_test selftest, bindings/cpp/test.cpp, bindings/csharp/test, bindings/python/test.py) get wired in
 # after it, so a red build here means a build broke, never a flaky network leg.
 name: build
 
@@ -39,7 +39,7 @@ jobs:
       - name: A consumer builds from an install
         run: |
           cmake --install build --prefix "${{ runner.temp }}/prefix"
-          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DRAMBLE_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
+          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DRANT_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
           cmake --build build/findpkg --config Release
 
       # The build above already made the shared library. This is where the packages read it.
@@ -51,7 +51,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: NuGet package
-        run: dotnet pack bindings/csharp/Ramble.csproj -c Release -o dist
+        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 
       - uses: actions/setup-python@v7
         with:

@@ -1,35 +1,35 @@
-# The Python package: the wrapper in bindings/python/ramble plus the shared library the CMake target
-# ramble_shared builds. scikit-build-core runs that CMake, so pip install . works from a
+# The Python package: the wrapper in bindings/python/rant plus the shared library the CMake target
+# rant_shared builds. scikit-build-core runs that CMake, so pip install . works from a
 # checkout and the release workflow builds one wheel per platform (spec/build.md).
 [build-system]
 requires = ["scikit-build-core>=0.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "ramble-middleware"
+name = "rant-middleware"
 dynamic = ["version"]
-description = "Ramble: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
+description = "Rant: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
 readme = "bindings/python/README.md"
 requires-python = ">=3.8"
-keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "ramble", "rant"]
+keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "rant", "rant"]
 authors = [{ name = "Nathan George" }]
 
 [project.urls]
-Homepage = "https://github.com/KosmosisDire/Ramble"
+Homepage = "https://github.com/KosmosisDire/Rant"
 
 [tool.scikit-build]
 metadata.version.provider = "scikit_build_core.metadata.regex"
 metadata.version.input = "VERSION"
 metadata.version.regex = "(?P<value>[0-9.]+)"
-wheel.packages = ["bindings/python/ramble"]
+wheel.packages = ["bindings/python/rant"]
 # ctypes needs no Python ABI, so the wheel is py3-none-<platform>: one per platform.
 wheel.py-api = "py3"
 cmake.build-type = "Release"
 sdist.exclude = [".github", "artifacts", "bin", "bindings/csharp", "release", "tests", "wheelhouse", "Logo.ai", "Logo.svg"]
 
 [tool.scikit-build.cmake.define]
-RAMBLE_BUILD_TOOLS = "OFF"
-RAMBLE_INSTALL = "OFF"
+RANT_BUILD_TOOLS = "OFF"
+RANT_INSTALL = "OFF"
 
 # The release workflow runs cibuildwheel. One interpreter per platform is enough since the
 # wheel is py3-none. Linux builds inside manylinux, so the library needs glibc 2.28 or

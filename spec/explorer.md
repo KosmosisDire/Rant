@@ -1,6 +1,6 @@
 # Explorer
 
-`explore/` is the debugger UI: a real Ramble node, not a passive sniffer, with a Nodes tab
+`explore/` is the debugger UI: a real Rant node, not a passive sniffer, with a Nodes tab
 and a Topics tab, greyscale plus one teal accent, dark and light. Clay (v0.14) does the
 layout, since the design is CSS flexbox and Clay is a flexbox engine. SDL3 with SDL3_ttf
 renders through FreeType, whose hinting keeps text crisp. FetchContent builds SDL3 and
@@ -8,9 +8,9 @@ SDL3_ttf static, clay.h and nanosvg are downloaded.
 
 ## Build
 
-`explore/CMakeLists.txt` is dual mode, detected by `if(NOT TARGET ramble)`: standalone, or
-from the root with `-DRAMBLE_BUILD_EXPLORER=ON` (what the presets do), where it links the
-root `ramble` target and depends on `dist`. Build it from the root, since the root build is
+`explore/CMakeLists.txt` is dual mode, detected by `if(NOT TARGET rant)`: standalone, or
+from the root with `-DRANT_BUILD_EXPLORER=ON` (what the presets do), where it links the
+root `rant` target and depends on `dist`. Build it from the root, since the root build is
 MSVC and MSVC has no VLAs. The SDL3_ttf release tarball omits vendored freetype, so it is
 fetched by git with `GIT_SUBMODULES external/freetype` and `SDLTTF_VENDORED ON`. We own
 `main()`: `SDL_MAIN_HANDLED`, `<SDL3/SDL_main.h>`, `SDL_SetMainReady()` before `SDL_Init`.
@@ -18,7 +18,7 @@ Rebuild the explorer after any announce overlay version bump or it cannot see no
 
 ## Architecture
 
-Two translation units. `net_capture.c` is the Ramble side and owns the amalgamation and
+Two translation units. `net_capture.c` is the Rant side and owns the amalgamation and
 winsock. `discovery_explorer.c` is the UI. `net_capture.h` is plain types only, so a
 headless test can `#include "net_capture.c"` and drive `cap_start`, `cap_subscribe` and
 `cap_poll` against real nodes. Headers: `ui_render.h` (Clay to SDL3 renderer, LCD text,
@@ -26,15 +26,15 @@ texture cache and pool), `ui_theme.h`, `ui_fonts.h`, `ui_model.h` and `ui_data.h
 (CapSnapshot to Dataset), `ui_tree.h`, `ui_icons.h`, `ui_app.h`, `ui_widgets.h`,
 `ui_textbox.h`, `ui_tab_*.h`, `ui_shell.h`.
 
-Threading: `cap_start` runs `ramble_node_start` and `cap_poll` calls `ramble_node_dispatch`
+Threading: `cap_start` runs `rant_node_start` and `cap_poll` calls `rant_node_dispatch`
 per frame, so message callbacks land on the UI thread, but `cap_on_event` still fires on
-the service thread. UI reads of shared state bracket with `ramble_node_lock` and
-`ramble_node_unlock`. That bracket is not nestable and refuses create or set_role while
+the service thread. UI reads of shared state bracket with `rant_node_lock` and
+`rant_node_unlock`. That bracket is not nestable and refuses create or set_role while
 held, so bracketed code never calls another bracketing helper and never logs. Topics are
-queue enabled by a `ramble_topic_dispatch` right after create.
+queue enabled by a `rant_topic_dispatch` right after create.
 
 The send path match wait is disabled (`match_wait_ms = -1`, never stall the UI). The
-async form is a per topic pending slot: park the payload while `ramble_topic_ready` is 0,
+async form is a per topic pending slot: park the payload while `rant_topic_ready` is 0,
 flush on resolve or drop loudly after 3 s, with an amber SENDING chip.
 
 The explorer crafts every pattern channel raw, never through handles. The per peer demux
@@ -45,9 +45,9 @@ the subscription adopted, retires the channels and re runs `cap_sub_reconcile` w
 moved. Triggered by PEER_UP, PEER_DOWN, PEER_INTEREST, SCHEMA_MISMATCH and a 1 s fallback.
 Observers key cached reflection walks on the per peer interest epoch alone.
 
-Meta: the watched node's `@ramble/meta` is polled once per second with a directed call. The
+Meta: the watched node's `@rant/meta` is polled once per second with a directed call. The
 poll sends a section mask: node, proc and peers every time, topics every fifth poll (the
-section is about 250 B per topic). The log sidebar drains the three `@ramble/log` topics,
+section is about 250 B per topic). The log sidebar drains the three `@rant/log` topics,
 widened to PUBSUB at `cap_start`, into a 512 line ring.
 
 The topic list VALUE column renders the newest value per standard type (Color swatch,
@@ -61,7 +61,7 @@ printable head, a plain struct stays blank. Larger previews are deferred.
   never refuses. `CAP_MAX_SUBS` matches the announce topic ceiling of about 13000. A
   CapSub is about 300 B, so the fixed table is about 4.8 MB, and a feed ring is allocated
   on the first message, since 512 eager rings would reserve about 275 MB.
-- An observed topic owns up to two Ramble topics, one best effort and one reliable, created
+- An observed topic owns up to two Rant topics, one best effort and one reliable, created
   on demand with exactly one live at a time, and the live one's role is the union of what
   the explorer wants, since two live topics of one identity would misroute.
   `cap_sub_reconcile` keeps it in sync. Publishers offer reliable by default, because a
@@ -183,8 +183,8 @@ printable head, a plain struct stays blank. Larger previews are deferred.
 - `ui_textbox.h` is the text input widget with one global focus slot. Code that rewrites a
   field's buffer must call `ui_tb_reset`.
 - Screenshots from a shell need the window foregrounded first. `F12` toggles the Clay
-  inspector. `RAMBLE_UI_TAB` and `RAMBLE_UI_TOPIC` deep link. `RAMBLE_UI_FPS=1` prints fps.
+  inspector. `RANT_UI_TAB` and `RANT_UI_TOPIC` deep link. `RANT_UI_FPS=1` prints fps.
 - `demo_scene.c` spins up the sample mesh, one node per process, since several discovery
   participants in one process share the port and come up nameless. `run_demo.ps1` drives
-  it. Pace a test publisher by wall clock, since `ramble_node_poll` returns early under
+  it. Pace a test publisher by wall clock, since `rant_node_poll` returns early under
   traffic.

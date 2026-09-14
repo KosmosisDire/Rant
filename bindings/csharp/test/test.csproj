@@ -1,18 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Compiles the wrapper (../Ramble.cs) and copies the native library next to the exe so
-       [DllImport("ramble")] resolves. Build it first: the CMake target ramble_shared. -->
+  <!-- Compiles the wrapper (../Rant.cs) and copies the native library next to the exe so
+       [DllImport("rant")] resolves. Build it first: the CMake target rant_shared. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>ramble_test</AssemblyName>
-    <RootNamespace>RambleTest</RootNamespace>
+    <AssemblyName>rant_test</AssemblyName>
+    <RootNamespace>RantTest</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="../Ramble.cs" />
+    <Compile Include="../Rant.cs" />
     <None Include="../../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

@@ -1,6 +1,6 @@
-# The Unity package. Assembles dist/com.rant.ramble/, which Unity adds from disk and the
-# release pushes to the upm branch, and dist/ramble-<version>.unitypackage, from
-# bindings/csharp/Ramble.cs, bindings/csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
+# The Unity package. Assembles dist/com.rant.rant/, which Unity adds from disk and the
+# release pushes to the upm branch, and dist/rant-<version>.unitypackage, from
+# bindings/csharp/Rant.cs, bindings/csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
 # immutable package cache synthesizes no .meta files, so every entry gets one here, with a
 # GUID that is the md5 of its path so an upgrade keeps references (spec/bindings.md).
 #   cmake -P tools/unity.cmake        (or the unity_package target)
@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.18)
 
 get_filename_component(ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 file(STRINGS "${ROOT}/VERSION" VERSION LIMIT_COUNT 1)
-set(PKG com.rant.ramble)
+set(PKG com.rant.rant)
 set(OUT "${ROOT}/dist/${PKG}")
 set(SRC "${ROOT}/bindings/csharp/unity")
 
@@ -45,7 +45,7 @@ set(META_TEXT "TextScriptImporter:
 ")
 
 # A native plugin enabled for exactly one platform: the Editor on that OS and its
-# standalone player. Three libraries share the name ramble, so nothing may say Any.
+# standalone player. Three libraries share the name rant, so nothing may say Any.
 function(plugin_meta out os)
   set(cpu_win None)
   set(cpu_linux None)
@@ -141,20 +141,20 @@ file(MAKE_DIRECTORY "${OUT}/Runtime/Plugins")
 write_lf("${OUT}/package.json" "{
   \"name\": \"${PKG}\",
   \"version\": \"${VERSION}\",
-  \"displayName\": \"Ramble\",
+  \"displayName\": \"Rant\",
   \"description\": \"Peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages. Desktop standalone (Windows, macOS, Linux) and the Editor.\",
   \"unity\": \"2021.3\",
-  \"keywords\": [\"networking\", \"pubsub\", \"udp\", \"discovery\", \"realtime\", \"middleware\", \"ramble\", \"rant\"],
+  \"keywords\": [\"networking\", \"pubsub\", \"udp\", \"discovery\", \"realtime\", \"middleware\", \"rant\", \"rant\"],
   \"author\": { \"name\": \"Nathan George\" }
 }
 ")
 file(COPY "${SRC}/README.md" DESTINATION "${OUT}")
 file(GLOB runtime_files "${SRC}/Runtime/*")
-file(COPY "${ROOT}/bindings/csharp/Ramble.cs" ${runtime_files} DESTINATION "${OUT}/Runtime")
+file(COPY "${ROOT}/bindings/csharp/Rant.cs" ${runtime_files} DESTINATION "${OUT}/Runtime")
 
 # Unity targets these three desktops. win-arm64 and linux-arm64 would collide on the
 # library name, and no standalone player exists for them.
-foreach(entry "win-x64/ramble.dll" "linux-x64/libramble.so" "osx/libramble.dylib")
+foreach(entry "win-x64/rant.dll" "linux-x64/librant.so" "osx/librant.dylib")
   if(EXISTS "${ROOT}/dist/native/${entry}")
     get_filename_component(rid "${entry}" DIRECTORY)
     file(COPY "${ROOT}/dist/native/${entry}" DESTINATION "${OUT}/Runtime/Plugins/${rid}")
@@ -173,17 +173,17 @@ endforeach()
 message(STATUS "wrote ${OUT}")
 
 # 3. The .unitypackage: a gzipped tar of one folder per asset holding its path, its
-#    bytes and its .meta, imported under Assets/Ramble.
+#    bytes and its .meta, imported under Assets/Rant.
 set(WORK "${ROOT}/build/unitypackage")
 file(REMOVE_RECURSE "${WORK}")
 file(GLOB_RECURSE assets LIST_DIRECTORIES true RELATIVE "${OUT}/Runtime" "${OUT}/Runtime/*")
 list(FILTER assets EXCLUDE REGEX "[.]meta$")
-set(paths "Assets/Ramble")
+set(paths "Assets/Rant")
 foreach(rel IN LISTS assets)
-  list(APPEND paths "Assets/Ramble/${rel}")
+  list(APPEND paths "Assets/Rant/${rel}")
 endforeach()
 foreach(apath IN LISTS paths)
-  string(REGEX REPLACE "^Assets/Ramble" "Runtime" rel "${apath}")
+  string(REGEX REPLACE "^Assets/Rant" "Runtime" rel "${apath}")
   string(MD5 guid "${apath}")
   file(MAKE_DIRECTORY "${WORK}/${guid}")
   file(WRITE "${WORK}/${guid}/pathname" "${apath}")
@@ -194,7 +194,7 @@ foreach(apath IN LISTS paths)
   write_lf("${WORK}/${guid}/asset.meta" "fileFormatVersion: 2\nguid: ${guid}\n${body}")
 endforeach()
 file(GLOB guid_dirs RELATIVE "${WORK}" "${WORK}/*")
-set(UNITYPACKAGE "${ROOT}/dist/ramble-${VERSION}.unitypackage")
+set(UNITYPACKAGE "${ROOT}/dist/rant-${VERSION}.unitypackage")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E tar czf "${UNITYPACKAGE}" ${guid_dirs}
                 WORKING_DIRECTORY "${WORK}" RESULT_VARIABLE rc)
 if(NOT rc EQUAL 0)

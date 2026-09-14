@@ -14,14 +14,14 @@ whatever the declaration position, and a type agnostic length hop walk of the fi
 Content typing is the schema, except MAP, whose payload is a tagged value tree that
 reuses the same kind bytes.
 
-- `ramble_schema_size` is the fixed size.
-- `ramble_schema_msg_min` is fixed plus 4 bytes per variable field. `message_default`
+- `rant_schema_size` is the fixed size.
+- `rant_schema_msg_min` is fixed plus 4 bytes per variable field. `message_default`
   writes that.
-- `ramble_schema_msg_len` is the live length to send. 0 means malformed.
+- `rant_schema_msg_len` is the live length to send. 0 means malformed.
 
 Setters resize frames in place (they memmove the tail), refuse an over cap write and never
 truncate. Readers clamp a hostile live length to the cap. A short string write zero fills
-the slot tail so it stays canonical. `RambleValue.count` is u16 and saturates at 65535 for
+the slot tail so it stays canonical. `RantValue.count` is u16 and saturates at 65535 for
 VARR and MAP, where `bytes.len` is authoritative.
 
 ## Kinds and wire
@@ -44,7 +44,7 @@ A root name with a non STRUCT type is a named alias root. The root name never en
 NAMED, so there is exactly one spelling and the hash stays canonical. The bounds checked
 parser enforces every rule against hostile wire: NAMED never double wraps, array elements
 must be fixed, an array of arrays is refused, VSTR, VARR and MAP are legal at any struct
-depth except inside array elements, and `RAMBLE_SCHEMA_MAX_DEPTH` caps recursion. An older
+depth except inside array elements, and `RANT_SCHEMA_MAX_DEPTH` caps recursion. An older
 wire version is refused at parse.
 
 Settled calls: distinct kind bytes rather than a cap of 0 as a sentinel, so a C switch
@@ -84,32 +84,32 @@ stores flat: it claims a top level tail frame in depth first declaration order.
 
 A reader declares the subset of fields it needs. A match means the same topic, the root
 name rule, and the reader's fields a subset of the writer's fields by name with the kind
-rules (`ramble_schema_subset`). Subset applies at the top level only. Nested structs compare
+rules (`rant_schema_subset`). Subset applies at the top level only. Nested structs compare
 exactly and recursively. Delivery uses the writer's layout through a rebased schema
-(`ramble_schema_rebase`: the reader's fields, order and indices with the writer's offsets
-and size), surfaced as `RambleMsg.schema`, so reader code keeps its own indices. Rebase walks
+(`rant_schema_rebase`: the reader's fields, order and indices with the writer's offsets
+and size), surfaced as `RantMsg.schema`, so reader code keeps its own indices. Rebase walks
 both subtrees in lockstep, which handles nested frames and struct arrays.
 
 A raw reader accepts anything. A typed reader refuses an untyped or unverifiable writer.
 An identical hash skips the parse. A peer schema is interned once per hash, and the claimed hash must equal the parsed wire's hash, or a lying peer could poison the intern for every honest one. Both directions advertise and run the same gate, so a
 refused pair forms no proxy on either side. The node validates the message length against
-the sender's schema before delivery and fires `RAMBLE_E_SCHEMA_MISMATCH` with a per field
-`schema_detail` from `ramble_schema_subset_why`. There is deliberately no boot time
+the sender's schema before delivery and fires `RANT_E_SCHEMA_MISMATCH` with a per field
+`schema_detail` from `rant_schema_subset_why`. There is deliberately no boot time
 validator API.
 
 ## DSL
 
-`ramble_schema_compile` takes name first IDL text: `Pose { stamp: u64, velocity: { dx: f32 } }`.
+`rant_schema_compile` takes name first IDL text: `Pose { stamp: u64, velocity: { dx: f32 } }`.
 Commas are optional and `--` comments run to the end of the line. The text is the cross
 language interchange: reflecting languages generate it, others paste it, and identical
-text gives identical wire and hash. `ramble_schema_print` is the exact inverse. It always
+text gives identical wire and hash. `rant_schema_print` is the exact inverse. It always
 emits a definition for every named type in dependency order, so its text is self
-contained and recompiles to identical bytes under `RAMBLE_NO_STDTYPES` too. Only
-`ramble_schema_print` spells DSL. The C#, Python and explorer emitters call it.
+contained and recompiles to identical bytes under `RANT_NO_STDTYPES` too. Only
+`rant_schema_print` spells DSL. The C#, Python and explorer emitters call it.
 
 Statements compile into their own scratch arena first, so resolving a reference mid
 definition (which may pull in a standard type) never interleaves bytes. The final wire is
-assembled and fed to `ramble_schema_parse`. `ramble_std_recognize*` take the allocator hook
+assembled and fed to `rant_schema_parse`. `rant_std_recognize*` take the allocator hook
 because verifying a shape means compiling the canonical type.
 
 Gotcha: a `--` comment inside concatenated C string literals eats the rest of the schema
@@ -120,26 +120,26 @@ newline for the same reason.
 
 Access is by name, nested members by dotted path, array elements by index
 (`corners[2].x`). The compiled schema flattens every field at every depth into one depth
-first table (`ramble_schema_field_count`, `ramble_schema_field_at`, `.depth`). Reflection
-tools use `ramble_get_value` and `ramble_set_value` over the flat index with a tagged
-`RambleValue`. Standard mirrors are layout identical to the wire on a little endian target,
+first table (`rant_schema_field_count`, `rant_schema_field_at`, `.depth`). Reflection
+tools use `rant_get_value` and `rant_set_value` over the flat index with a tagged
+`RantValue`. Standard mirrors are layout identical to the wire on a little endian target,
 which the header asserts.
 
 ## Map
 
 MAP is a tagged value tree: `[u16 n]([u8 klen][key][u8 kind]payload)*`. Only scalars,
 VSTR, VARR and MAP are legal inside. Integers store as the smallest kind that fits. An
-empty frame is an empty map. `ramble_set_map` runs `ramble_map_valid` first so malformed
-bytes never enter a message. C and C++ wrap the real `RambleMapWriter`. C# and Python build
+empty frame is an empty map. `rant_set_map` runs `rant_map_valid` first so malformed
+bytes never enter a message. C and C++ wrap the real `RantMapWriter`. C# and Python build
 and parse the map body in managed code on purpose, since struct mirrors are the standing
 footgun (spec/bindings.md).
 
 ## Allocation and ownership
 
-Allocation is a `RambleAllocFn` hook (realloc style: a NULL pointer allocates, size 0
+Allocation is a `RantAllocFn` hook (realloc style: a NULL pointer allocates, size 0
 frees), the same hook the transport core takes. The read path allocates nothing. A
-compiled `RambleSchema` is one block: wire bytes, FNV-1a hash, size and offset table.
-`ramble_node_create_topic` parses its own copy into node memory, so the caller may free its
+compiled `RantSchema` is one block: wire bytes, FNV-1a hash, size and offset table.
+`rant_node_create_topic` parses its own copy into node memory, so the caller may free its
 schema at once. Build a schema from the same allocator the node opens with and do not free
 it explicitly, because the node copies the pool by value and close frees the page.
 
@@ -149,7 +149,7 @@ f677bd147b513fbc, `ExternalVideoStream` aae502077016ac13.
 
 ## Not done
 
-A standalone `dist/ramble_serialize.h`. Eigen, GLM, numpy and Unity converters. In C# and
+A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters. In C# and
 Python a standard type cannot be an array element and user named types are unsupported,
 since neither emitter can hoist a `Name = type` definition. C, C++ and DSL text handle
 both.
@@ -185,5 +185,5 @@ offset and length, so two fields have the same type exactly when the bytes agree
 
 The compiled block is the wire bytes, an 8 aligned handle and the field table. Statements
 compile into their own scratch builder first and are appended to one definition arena,
-so resolving a reference mid definition never interleaves bytes. `ramble_schema_print`
+so resolving a reference mid definition never interleaves bytes. `rant_schema_print`
 hoists at most 48 named type definitions, beyond that the tail spells by reference.

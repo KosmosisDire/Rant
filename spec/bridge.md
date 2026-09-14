@@ -1,7 +1,7 @@
 # WebSocket bridge
 
-`bridge/` builds `ramble_bridge`, a C++17 server where one WebSocket connection is one full
-Ramble node, built on `dist/ramble.hpp`. `bridge/PROTOCOL.md` is the wire spec (v11) and must
+`bridge/` builds `rant_bridge`, a C++17 server where one WebSocket connection is one full
+Rant node, built on `dist/rant.hpp`. `bridge/PROTOCOL.md` is the wire spec (v11) and must
 stay in sync with `bridge.cpp`. Scope is firm: pub/sub, the patterns and pull only
 introspection (peers, entities, mesh, meta). No retire op, no auth, no TLS, not a mesh
 debugger.
@@ -37,7 +37,7 @@ debugger.
   `mesh` and `mesh_find` ops.
 - Variable updates are pushed off the `on_change` hook, no polling.
 - `log` and `log_subscribe` ops exist. Meta is deliberately not exposed, though the bridge
-  node still hosts `@ramble/meta`.
+  node still hosts `@rant/meta`.
 
 ## The DTLS role trap
 
@@ -51,11 +51,11 @@ offer back to the bridge.
 ## Build
 
 libdatachannel v0.23.2 with its submodules plus MbedTLS 3.6.4 via FetchContent, behind
-`RAMBLE_BRIDGE_WEBRTC`. `bridge/cmake/FindMbedTLS.cmake` shadows the finders the fetched
+`RANT_BRIDGE_WEBRTC`. `bridge/cmake/FindMbedTLS.cmake` shadows the finders the fetched
 projects ship. `mbedtls_user_config.h` enables DTLS SRTP. Flags: `--ice`, `--rtc-ports`,
 `--mtu` (default 1200, since libdatachannel's 1280 failed on a VPN path), `--no-webrtc`,
 `--webrtc-debug`. No bridge lock or poll thread: node handlers send on the service thread,
 libdatachannel callbacks reach the connection through a weak pointer, and close tears
-WebRTC down first, then the node. A background `ramble_bridge.exe` blocks the link of a
+WebRTC down first, then the node. A background `rant_bridge.exe` blocks the link of a
 rebuild. Tests run `example.mjs` over real data channels with the `node-datachannel`
 polyfill, or under headless Chrome.

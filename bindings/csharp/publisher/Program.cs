@@ -1,17 +1,17 @@
 // A typed 'tick' publisher at 1000 Hz on the default interface and domain, sharing its
-// schema with bindings/python/publisher.py. The [RambleField] overrides give the lowercase wire names.
+// schema with bindings/python/publisher.py. The [RantField] overrides give the lowercase wire names.
 
 using System;
 using System.Diagnostics;
 using System.Threading;
-using Ramble;
+using Rant;
 
 struct Tick
 {
-    [RambleField("seq")]   public ulong Seq;
-    [RambleField("when")] [RambleTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
-    [RambleField("value")] public double Value;
-    [RambleField("at")]    public Pose At;                                // meters + a quaternion
+    [RantField("seq")]   public ulong Seq;
+    [RantField("when")] [RantTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
+    [RantField("value")] public double Value;
+    [RantField("at")]    public Pose At;                                // meters + a quaternion
 }
 
 static class Program
@@ -22,7 +22,7 @@ static class Program
     {
         double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 = run forever
         string iface = args.Length > 1 ? args[1] : null;                 // optional: pin the interface
-        var node = new RambleNode("cs-publisher", null, e => Console.Error.WriteLine("event: " + e),
+        var node = new RantNode("cs-publisher", null, e => Console.Error.WriteLine("event: " + e),
                             multicastInterface: iface);
         // keep_last deep enough that a small per-loop burst is not evicted before it flushes.
         var ch = new Topic<Tick>(node, "tick", Role.PubOnly, new Qos { KeepLast = 64 });

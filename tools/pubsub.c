@@ -1,23 +1,23 @@
 /* A small pub sub command line tool over one node. --help lists the modes and flags.
  * Same host traffic rides shared memory, which needs -lrt on Linux. */
 
-#define RAMBLE_IMPLEMENTATION
-#include "ramble.h"
+#define RANT_IMPLEMENTATION
+#include "rant.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 /* The tool creates its topics in index order, so these shims keep a (node, index) call
- * form: ramble_node_topic maps a creation index back to its handle. */
-#define ramble_node_send(n, idx, d, l)         ramble_topic_send(ramble_node_topic((n),(idx)), ramble_bytes((d),(l)), NULL)
-#define ramble_node_drain(n, idx, ms)          ramble_topic_drain(ramble_node_topic((n),(idx)), (ms))
-#define ramble_node_publisher_match_count(n, idx) ramble_topic_match_count(ramble_node_topic((n),(idx)))
-#define ramble_node_repair_stats(n, idx, o)    ramble_topic_repair_stats(ramble_node_topic((n),(idx)), (o))
-#define ramble_node_subscriber_progress(n, idx, p, b, h, t) \
-        ramble_topic_subscriber_progress(ramble_node_topic((n),(idx)), (p),(b),(h),(t))
+ * form: rant_node_topic maps a creation index back to its handle. */
+#define rant_node_send(n, idx, d, l)           rant_topic_send(rant_node_topic((n),(idx)), rant_bytes((d),(l)), NULL)
+#define rant_node_drain(n, idx, ms)            rant_topic_drain(rant_node_topic((n),(idx)), (ms))
+#define rant_node_publisher_match_count(n, idx) rant_topic_match_count(rant_node_topic((n),(idx)))
+#define rant_node_repair_stats(n, idx, o)      rant_topic_repair_stats(rant_node_topic((n),(idx)), (o))
+#define rant_node_subscriber_progress(n, idx, p, b, h, t) \
+        rant_topic_subscriber_progress(rant_node_topic((n),(idx)), (p),(b),(h),(t))
 
-/* A node only does discovery, liveness and repair inside ramble_node_poll, so a background
+/* A node only does discovery, liveness and repair inside rant_node_poll, so a background
  * thread keeps polling while main blocks on stdin, and one lock serializes every call. */
 #ifdef _WIN32
   #include <windows.h>
@@ -58,7 +58,7 @@ static long now_ms(void){
 #endif
 }
 
-static RambleNode  *g_node;
+static RantNode    *g_node;
 static lock_t      g_lock;
 static volatile int g_pumping = 1;
 static FILE        *g_outfile = NULL; /* sub --file: received messages saved here */
@@ -79,7 +79,7 @@ static void *pump_thread(void *arg){
 #endif
     (void)arg;
     while (g_pumping){
-        lock_get(&g_lock); ramble_node_poll(g_node, 0); lock_put(&g_lock);
+        lock_get(&g_lock); rant_node_poll(g_node, 0); lock_put(&g_lock);
         sleep_ms(5);
     }
 #ifdef _WIN32
@@ -105,7 +105,7 @@ static int parse_ipv4(const char *s, uint8_t out[4]){
 
 /* Called by the node every 200 ms while a send is blocked in backpressure, so the repair
  * series is visible inside a stall (spec/testing.md). Stderr, apart from the rate lines. */
-static void pump_probe(void *u, const RamblePumpSample *s){
+static void pump_probe(void *u, const RantPumpSample *s){
     double secs = s->interval_us/1e6;
     (void)u;
     fprintf(stderr, "[pub]   in-pump @%.2fs: resent %.0f/s  nacks %.0f/s  idle %u/%u polls\n",
@@ -124,8 +124,8 @@ static size_t parse_size(const char *s){
     return (value > 0) ? (size_t)(value*mult) : 0;
 }
 
-static void on_message(const RambleMsg *msg){
-    char topic[RAMBLE_TOPIC_NAME_MAX + 1];   /* NUL terminated copy: topic_name is a RambleString */
+static void on_message(const RantMsg *msg){
+    char topic[RANT_TOPIC_NAME_MAX + 1];     /* NUL terminated copy: topic_name is a RantString */
     uint32_t from = msg->publisher_id; const void *data = msg->data.data; size_t len = msg->data.len;
     size_t tn = msg->topic_name.len < sizeof topic - 1 ? msg->topic_name.len : sizeof topic - 1;
     if (tn) memcpy(topic, msg->topic_name.data, tn);
@@ -145,10 +145,10 @@ static void on_message(const RambleMsg *msg){
     }
 }
 
-static void on_event(const RambleEvent *ev)
+static void on_event(const RantEvent *ev)
 {
     char line[160];
-    printf("  <event> %s\n", ramble_event_str(ev, line, sizeof line));
+    printf("  <event> %s\n", rant_event_str(ev, line, sizeof line));
 }
 
 static void usage(void){
@@ -158,7 +158,7 @@ static void usage(void){
         "  pubsub pub <topic> [text...] [opts]      (no text = read lines from stdin)\n"
         "opts: --domain N  --mcast (same-host: discovery on loopback)  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
         "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
-        "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DRAMBLE_FRAG_SIZE_MAX>=N)\n"
+        "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DRANT_FRAG_SIZE_MAX>=N)\n"
         "      --unicast-only  (this host cannot multicast: announce only to --peer and peers already known,\n"
         "                       and be re-announced onward by whoever hears us, so one --peer reaches the whole mesh)\n"
         "      --self-ip <ip>  (advertise THIS address as our locator instead of the one our packets come from:\n"
@@ -167,19 +167,19 @@ static void usage(void){
 
 /* Pump the node until at least one subscriber has matched and the count has held for a
  * short quiet window, so peers found together are all captured. 0 on timeout with none. */
-static int wait_for_sub(RambleNode *n, uint16_t topic, int timeout_ms){
+static int wait_for_sub(RantNode *n, uint16_t topic, int timeout_ms){
     int t, count = 0, stable = 0, printed_wait = 0;
     /* just longer than the startup solicit reply jitter of about 20 ms, so a burst of
        subscribers is captured and a lone one is not made to wait */
     const int QUIET_WINDOW_MS = 60;
     for (t = 0; t < timeout_ms; t += 20){
-        int match_count = ramble_node_publisher_match_count(n, topic);
+        int match_count = rant_node_publisher_match_count(n, topic);
         if (match_count > count){ count = match_count; stable = 0; }   /* a new sub: keep waiting */
         else if (count > 0 && (stable += 20) >= QUIET_WINDOW_MS) return 1;
         if (!printed_wait && count == 0 && t >= 400){ printf("[pub] waiting for a subscriber...\n"); printed_wait = 1; }
-        ramble_node_poll(n, 20);
+        rant_node_poll(n, 20);
     }
-    return ramble_node_publisher_match_count(n, topic) > 0;
+    return rant_node_publisher_match_count(n, topic) > 0;
 }
 
 /* Read all of file into a malloc'd buffer the caller frees, refusing input over cap bytes
@@ -212,7 +212,7 @@ static char *read_all(FILE *file, size_t cap, size_t *out_len, int *too_big){
 
 /* Publish the whole file as one message, refusing input over cap. Settles first so a
  * fresh subscriber is matched, then drains delivery before returning. */
-static int publish_stream(RambleNode *n, uint16_t topic, FILE *file, int wait_ms, size_t cap){
+static int publish_stream(RantNode *n, uint16_t topic, FILE *file, int wait_ms, size_t cap){
     size_t len = 0; int too_big, t;
     char *buf;
     if (!wait_for_sub(n, topic, wait_ms)){
@@ -226,26 +226,26 @@ static int publish_stream(RambleNode *n, uint16_t topic, FILE *file, int wait_ms
         else      fprintf(stderr, "out of memory\n");
         return -1;
     }
-    if (ramble_node_send(n, topic, buf, len) < 0){ fprintf(stderr, "send failed\n"); free(buf); return -1; }
+    if (rant_node_send(n, topic, buf, len) < 0){ fprintf(stderr, "send failed\n"); free(buf); return -1; }
     printf("[pub] sent %lu bytes\n", (unsigned long)len);
     /* wait until the receiver has acked every byte: the BYE that follows makes the
        reader abandon in flight data, so a fixed grace would cut off a slow transfer */
-    if (!ramble_node_drain(n, topic, 30000))
+    if (!rant_node_drain(n, topic, 30000))
         fprintf(stderr, "[pub] warning: delivery incomplete (reader slow or gone)\n");
-    for (t = 0; t < 200; t += 20) ramble_node_poll(n, 20);   /* a brief best effort flush */
+    for (t = 0; t < 200; t += 20) rant_node_poll(n, 20);     /* a brief best effort flush */
     free(buf);
     return 0;
 }
 
 /* --rate: repeat the payload at hz until Ctrl-C, publishing even with no subscriber since
  * keep_last catches late joiners. The pacing rules are in spec/testing.md. Never returns. */
-static void publish_rate(RambleNode *n, uint16_t topic, const void *data, size_t len,
+static void publish_rate(RantNode *n, uint16_t topic, const void *data, size_t len,
                          double hz, int wait_ms){
     uint64_t period_us = (uint64_t)(1000000.0/hz + 0.5);
     uint64_t next, now, last_print;
     unsigned long sent = 0, last_sent = 0;
     uint64_t backpressure_us = 0; uint32_t backpressure_waits = 0, last_backpressure_waits = 0;
-    RambleRepairStats repair_stats, prev_repair_stats;   /* reliable repair throughput, writer side */
+    RantRepairStats repair_stats, prev_repair_stats;     /* reliable repair throughput, writer side */
     memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
     if (period_us == 0) period_us = 1;                 /* clamp absurd rates to about 1 MHz */
     /* lag under this is jitter and is made up one send per spin. Lag over it is a
@@ -254,27 +254,27 @@ static void publish_rate(RambleNode *n, uint16_t topic, const void *data, size_t
     if (!wait_for_sub(n, topic, wait_ms))
         fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
     printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
-    now = i_ramble_plat_now_us(); next = now; last_print = now;
+    now = i_rant_plat_now_us(); next = now; last_print = now;
     for (;;){
-        now = i_ramble_plat_now_us();
+        now = i_rant_plat_now_us();
         if (now >= next){
-            if (ramble_node_send(n, topic, data, len) >= 0) sent++;  /* may block in backpressure */
+            if (rant_node_send(n, topic, data, len) >= 0) sent++;    /* may block in backpressure */
             next += period_us;
-            now = i_ramble_plat_now_us();                  /* a blocking send moved the clock */
+            now = i_rant_plat_now_us();                    /* a blocking send moved the clock */
             if (next + RESYNC_LAG_US < now) next = now; /* a real block: resync, never burst */
         }
         /* sleep only with at least 1 ms of slack, else spin with a non blocking poll so high
            rates are not capped near 1 kHz */
-        ramble_node_poll(n, (next > now && next - now >= 1000) ? 1 : 0);
-        now = i_ramble_plat_now_us();
+        rant_node_poll(n, (next > now && next - now >= 1000) ? 1 : 0);
+        now = i_rant_plat_now_us();
         if (now - last_print >= 1000000u){   /* one real second: the true rate and flow control */
             double secs = (now - last_print)/1e6;
-            ramble_node_backpressure_stats(n, &backpressure_us, &backpressure_waits);
+            rant_node_backpressure_stats(n, &backpressure_us, &backpressure_waits);
             printf("[pub] %.1f msg/s (sent %lu)  matched=%d  bp_waits=+%u  bp_total=%.2fs\n",
                    (sent - last_sent)/secs, sent,
-                   ramble_node_publisher_match_count(n, topic),
+                   rant_node_publisher_match_count(n, topic),
                    backpressure_waits - last_backpressure_waits, backpressure_us/1e6);
-            ramble_node_repair_stats(n, topic, &repair_stats);   /* meaningful only when reliable */
+            rant_node_repair_stats(n, topic, &repair_stats);     /* meaningful only when reliable */
             if (repair_stats.nacks_recv != prev_repair_stats.nacks_recv || repair_stats.frags_resent != prev_repair_stats.frags_resent){
                 uint64_t delta_sent = repair_stats.frags_sent - prev_repair_stats.frags_sent;
                 uint64_t delta_resent  = repair_stats.frags_resent - prev_repair_stats.frags_resent;
@@ -353,15 +353,15 @@ int main(int argc, char **argv){
     if (g_n_topics == 0){ usage(); return 2; }
 
     int dynamic = !max_set;                 /* no --max: grow buffers via malloc */
-    size_t send_limit = dynamic ? RAMBLE_MESSAGE_MAX : cap;
+    size_t send_limit = dynamic ? RANT_MESSAGE_MAX : cap;
 
     /* the publisher sends on the first topic, index 0 */
     const uint16_t topic = 0;
 
     /* A big message profile shared by every topic: shallow keep_last since messages can be
        megabytes, fast repair, and a long backpressure window so a file drains before eviction. */
-    RambleQos qos = {
-        .reliability         = reliable ? RAMBLE_RELIABLE : RAMBLE_BEST_EFFORT,
+    RantQos qos = {
+        .reliability         = reliable ? RANT_RELIABLE : RANT_BEST_EFFORT,
         .keep_last           = 4,
         .catch_up            = 2,
         .max_message_bytes   = dynamic ? 0u : (uint32_t)cap,
@@ -373,22 +373,22 @@ int main(int argc, char **argv){
 
     /* announce and timeout stay at their defaults: the startup solicit makes discovery
        near instant. data_port 0 is an OS assigned ephemeral port. */
-    RambleNodeOpts opts; memset(&opts, 0, sizeof opts);
+    RantNodeOpts opts; memset(&opts, 0, sizeof opts);
     opts.domain       = domain;
     opts.max_topics = (uint16_t)g_n_topics;
     opts.discovery.max_peers = max_peers;
     /* A big message has no flow control inside it, so the receive socket must hold it whole
        or fragments drop and repair crawls. Linux also needs net.core.rmem_max raised. */
-    { size_t sb = dynamic ? RAMBLE_MESSAGE_MAX : cap;
+    { size_t sb = dynamic ? RANT_MESSAGE_MAX : cap;
       if (sb < (8u<<20))  sb = 8u<<20;
       if (sb > (64u<<20)) sb = 64u<<20;
       opts.net.recv_buffer_bytes = (uint32_t)sb;
       opts.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
-    if (frag) opts.net.fragment_size = (uint16_t)frag;   /* needs -DRAMBLE_FRAG_SIZE_MAX>=frag */
+    if (frag) opts.net.fragment_size = (uint16_t)frag;   /* needs -DRANT_FRAG_SIZE_MAX>=frag */
     if (if_ip)      opts.net.multicast_interface = if_ip;          /* multihomed: pin it */
     else if (mcast) opts.net.multicast_interface = "127.0.0.1";    /* same host: stay local */
 
-    RambleDiscoveryAddr seed;
+    RantDiscoveryAddr seed;
     if (peer_ip){
         memset(&seed, 0, sizeof seed);
         if (parse_ipv4(peer_ip, seed.ip) < 0){ fprintf(stderr, "bad --peer ip %s\n", peer_ip); return 2; }
@@ -400,27 +400,27 @@ int main(int argc, char **argv){
 
     /* Dynamic mode grows message buffers from the heap. Fixed mode (--max) is a static
        allocator over one block sized for history plus reassembly, live for the whole process. */
-    RambleAllocator alloc;
+    RantAllocator alloc;
     if (dynamic){
-        alloc = ramble_allocator_heap(0);
+        alloc = rant_allocator_heap(0);
     } else {
         size_t mem_size = (8u<<20)
                         + (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
         void *block = malloc(mem_size);
         if (!block){ fprintf(stderr, "out of memory (arena %lu bytes)\n", (unsigned long)mem_size); return 1; }
-        alloc = ramble_allocator_static(block, mem_size);
+        alloc = rant_allocator_static(block, mem_size);
     }
-    RambleNode *n = ramble_node_open(&alloc, NULL, on_message, on_event, &opts);
-    if (!n){ fprintf(stderr, "ramble_node_open failed\n"); return 1; }
+    RantNode *n = rant_node_open(&alloc, NULL, on_message, on_event, &opts);
+    if (!n){ fprintf(stderr, "rant_node_open failed\n"); return 1; }
 
     /* Topics are created in index order, so topic index i is g_topics[i] and the shims
        resolve an index straight to its handle. */
     for (i = 0; i < g_n_topics; i++){
-        RambleTopicOpts co; memset(&co, 0, sizeof co);
+        RantTopicOpts co; memset(&co, 0, sizeof co);
         co.qos = qos;
-        if (!ramble_node_create_topic(n, g_topics[i], is_pub ? RAMBLE_PUB_ONLY : RAMBLE_SUB_ONLY, NULL, &co)){
+        if (!rant_node_create_topic(n, g_topics[i], is_pub ? RANT_PUB_ONLY : RANT_SUB_ONLY, NULL, &co)){
             fprintf(stderr, "create topic '%s' failed\n", g_topics[i]);
-            ramble_node_close(n, 0); return 1;
+            rant_node_close(n, 0); return 1;
         }
     }
 
@@ -428,7 +428,7 @@ int main(int argc, char **argv){
         if (file_name){
             g_outfile = fopen(file_name, "wb");   /* truncate, on_sample appends and flushes */
             if (!g_outfile){ fprintf(stderr, "cannot open %s for writing\n", file_name);
-                             ramble_node_close(n, 1); return 1; }
+                             rant_node_close(n, 1); return 1; }
         }
         g_rate_mode = rate_set;   /* --rate on a sub: report the throughput, not each message */
         printf("[sub] %d topic(s):", g_n_topics);
@@ -441,23 +441,23 @@ int main(int argc, char **argv){
         if (g_rate_mode){
             /* print the measured receive rate once a second over the real elapsed interval, and
                stay quiet until the first message so an idle wait is not a stream of zeros */
-            uint64_t last = i_ramble_plat_now_us(), repair_last = last; int seen = 0;
-            RambleRepairStats repair_stats, prev_repair_stats; memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
+            uint64_t last = i_rant_plat_now_us(), repair_last = last; int seen = 0;
+            RantRepairStats repair_stats, prev_repair_stats; memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
             for (;;){
                 uint64_t now, rate_elapsed, repair_elapsed;
-                ramble_node_poll(n, 2);
-                now = i_ramble_plat_now_us();
+                rant_node_poll(n, 2);
+                now = i_rant_plat_now_us();
                 if (g_rx_msgs) seen = 1;
                 /* a 250 ms reader repair series, finer than the rate line so a stall plateau
                    shows (spec/testing.md reads it). Gated on activity so idle stays quiet. */
                 repair_elapsed = now - repair_last;
                 if (repair_elapsed >= 250000u){
                     double repair_secs = repair_elapsed/1e6;
-                    ramble_node_repair_stats(n, topic, &repair_stats);
+                    rant_node_repair_stats(n, topic, &repair_stats);
                     if (repair_stats.nacks_sent != prev_repair_stats.nacks_sent || repair_stats.frags_recv != prev_repair_stats.frags_recv
                         || repair_stats.frags_old != prev_repair_stats.frags_old || repair_stats.frags_ahead != prev_repair_stats.frags_ahead){
                         uint64_t base; uint32_t have, total;
-                        int mid_reassembly = ramble_node_subscriber_progress(n, topic, g_last_peer, &base, &have, &total);
+                        int mid_reassembly = rant_node_subscriber_progress(n, topic, g_last_peer, &base, &have, &total);
                         /* recv counts accepted fragments, old and ahead the rejected ones */
                         printf("[sub]   repair: nacks %.0f/s  recv %.0f/s  dup %.0f/s  old %.0f/s  ahead %.0f/s  arms(d/hb) %.0f/%.0f",
                                (repair_stats.nacks_sent - prev_repair_stats.nacks_sent)/repair_secs,
@@ -482,7 +482,7 @@ int main(int argc, char **argv){
             }
             /* not reached */
         }
-        for (;;) ramble_node_poll(n, 2);
+        for (;;) rant_node_poll(n, 2);
         /* not reached */
     }
 
@@ -490,17 +490,17 @@ int main(int argc, char **argv){
     printf("[pub] topic %s, domain %u, %s.\n",
            g_topics[0], domain, reliable ? "reliable" : "best-effort");
     /* fires only while a send is blocked in backpressure, so healthy operation is silent */
-    ramble_node_set_pump_probe(n, pump_probe, 200000u, NULL);
+    rant_node_set_pump_probe(n, pump_probe, 200000u, NULL);
 
     /* pub --rate must carry a positive HZ. A sub ignores the value. */
     if (rate_set && rate_hz <= 0){
         fprintf(stderr, "pub --rate needs a positive HZ, e.g. --rate 100\n");
-        ramble_node_close(n, 1); return 2;
+        rant_node_close(n, 1); return 2;
     }
     /* --rate needs a fixed payload to repeat: CLI text or --file, not stdin */
     if (rate_hz > 0 && !msg_len && !file_name){
         fprintf(stderr, "--rate needs data to repeat: give a message or --file\n");
-        ramble_node_close(n, 1); return 2;
+        rant_node_close(n, 1); return 2;
     }
 
     /* --file <name>: publish the file whole, framed like piped stdin, whatever the terminal.
@@ -508,7 +508,7 @@ int main(int argc, char **argv){
     if (file_name){
         FILE *file = fopen(file_name, "rb");
         if (!file){ fprintf(stderr, "cannot open %s\n", file_name);
-                 ramble_node_close(n, 1); return 1; }
+                 rant_node_close(n, 1); return 1; }
         if (rate_hz > 0){                    /* load once, then repeat at the rate */
             size_t len; int too_big;
             char *buf = read_all(file, send_limit, &len, &too_big);
@@ -517,13 +517,13 @@ int main(int argc, char **argv){
                 if (too_big) fprintf(stderr, "[pub] %s exceeds the %lu-byte message limit; raise --max\n",
                                   file_name, (unsigned long)send_limit);
                 else      fprintf(stderr, "out of memory\n");
-                ramble_node_close(n, 1); return 1;
+                rant_node_close(n, 1); return 1;
             }
             publish_rate(n, topic, buf, len, rate_hz, wait_ms);   /* never returns */
         }
         int rc = publish_stream(n, topic, file, wait_ms, send_limit);
         fclose(file);
-        ramble_node_close(n, 1);
+        rant_node_close(n, 1);
         return rc < 0 ? 1 : 0;
     }
 
@@ -535,15 +535,15 @@ int main(int argc, char **argv){
          * then exit */
         if (!wait_for_sub(n, topic, wait_ms)){
             fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
-            ramble_node_close(n, 1); return 1;
+            rant_node_close(n, 1); return 1;
         }
-        if (ramble_node_send(n, topic, msg, msg_len) < 0)
+        if (rant_node_send(n, topic, msg, msg_len) < 0)
             fprintf(stderr, "send failed\n");
         else
             printf("[pub] sent %lu bytes\n", (unsigned long)msg_len);
-        ramble_node_drain(n, topic, 30000);      /* wait for delivery, not a fixed grace */
-        for (t = 0; t < 200; t += 20) ramble_node_poll(n, 20);   /* brief flush */
-        ramble_node_close(n, 1);   /* BYE: peers drop us now, not after timeout */
+        rant_node_drain(n, topic, 30000);        /* wait for delivery, not a fixed grace */
+        for (t = 0; t < 200; t += 20) rant_node_poll(n, 20);     /* brief flush */
+        rant_node_close(n, 1);     /* BYE: peers drop us now, not after timeout */
         return 0;
     }
 
@@ -551,7 +551,7 @@ int main(int argc, char **argv){
      * intact, splitting only at the 64 KB sample cap, never per line */
     if (!stdin_is_tty()){
         int rc = publish_stream(n, topic, stdin, wait_ms, send_limit);
-        ramble_node_close(n, 1);
+        rant_node_close(n, 1);
         return rc < 0 ? 1 : 0;
     }
 
@@ -570,7 +570,7 @@ int main(int argc, char **argv){
             while (line_len && (line[line_len-1] == '\n' || line[line_len-1] == '\r')) line[--line_len] = '\0';
             if (!line_len) continue;
             lock_get(&g_lock);
-            if (ramble_node_send(n, topic, line, line_len) < 0) fprintf(stderr, "send failed\n");
+            if (rant_node_send(n, topic, line, line_len) < 0) fprintf(stderr, "send failed\n");
             lock_put(&g_lock);
         }
         g_pumping = 0;              /* stop the pump first: only we touch the node now */
@@ -579,9 +579,9 @@ int main(int argc, char **argv){
 #else
         pthread_join(th, NULL);
 #endif
-        ramble_node_drain(n, topic, 30000);   /* deliver the last typed messages before BYE */
+        rant_node_drain(n, topic, 30000);     /* deliver the last typed messages before BYE */
     }
 
-    ramble_node_close(n, 1);   /* BYE: peers drop us now instead of after timeout */
+    rant_node_close(n, 1);     /* BYE: peers drop us now instead of after timeout */
     return 0;
 }

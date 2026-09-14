@@ -2,63 +2,63 @@
 
 ## Threading
 
-Every `ramble_node_*` and `ramble_topic_*` call is thread safe. A node level lock serializes
+Every `rant_node_*` and `rant_topic_*` call is thread safe. A node level lock serializes
 them and is never held across a blocking wait.
 
 Drive a node one of two ways:
 
-- Call `ramble_node_poll` from your own loop, from one thread or several. A send on another
+- Call `rant_node_poll` from your own loop, from one thread or several. A send on another
   thread wakes a blocked poll.
-- Call `ramble_node_start`. A background service thread owns the loop, `ramble_node_poll` then
-  returns `RAMBLE_ERR_STATE`, and callbacks fire on that thread, never two at once per node.
-  `ramble_node_stop` joins it. `ramble_node_close` implies stop.
+- Call `rant_node_start`. A background service thread owns the loop, `rant_node_poll` then
+  returns `RANT_ERR_STATE`, and callbacks fire on that thread, never two at once per node.
+  `rant_node_stop` joins it. `rant_node_close` implies stop.
 
-Inside `on_message` or `on_event` you may call `ramble_topic_send` and read only queries.
+Inside `on_message` or `on_event` you may call `rant_topic_send` and read only queries.
 Poll, create topic, set role, drain, start, stop and close are refused with
-`RAMBLE_ERR_STATE` (or NULL or 0). Nothing is corrupted.
+`RANT_ERR_STATE` (or NULL or 0). Nothing is corrupted.
 
 Flow control needs no poll cadence. A send that would overwrite unacked reliable history
 sleeps, bounded by `qos.backpressure_wait_us`. A send that would overwrite history not yet
-handed to the wire waits one TX pass, bounded by `RAMBLE_UNSENT_WAIT_US`. If it still must
-evict, KEEP_LAST proceeds and a `RAMBLE_E_EVICTED_UNSENT` error fires.
-`ramble_node_evicted_unsent` counts them.
+handed to the wire waits one TX pass, bounded by `RANT_UNSENT_WAIT_US`. If it still must
+evict, KEEP_LAST proceeds and a `RANT_E_EVICTED_UNSENT` error fires.
+`rant_node_evicted_unsent` counts them.
 
-Reflection views (the names, addresses and schemas the `ramble_node_*_next` walks return)
-are bracketed with `ramble_node_lock` and `ramble_node_unlock` when a poller runs on another
+Reflection views (the names, addresses and schemas the `rant_node_*_next` walks return)
+are bracketed with `rant_node_lock` and `rant_node_unlock` when a poller runs on another
 thread.
 
 ## Consumer queues
 
 By default callbacks run on whichever thread polls, so a heavy handler lags the whole
-node. A topic becomes queued on its first `ramble_topic_take` or `ramble_topic_dispatch`, or
+node. A topic becomes queued on its first `rant_topic_take` or `rant_topic_dispatch`, or
 from creation with `qos.queue_bytes`. The poll thread then only copies its messages into a
 per topic ring and one consumer thread of your choice drains it. Different topics can go
 to different threads.
 
-- `ramble_topic_take` pops a zero copy view valid until that topic's next take or dispatch.
-- `ramble_topic_dispatch` runs `on_message` on the calling thread outside the node lock, so
+- `rant_topic_take` pops a zero copy view valid until that topic's next take or dispatch.
+- `rant_topic_dispatch` runs `on_message` on the calling thread outside the node lock, so
   those callbacks may use the whole API.
-- `ramble_node_dispatch` drains every queued topic. Call it from a Unity `Update()` or a UI
+- `rant_node_dispatch` drains every queued topic. Call it from a Unity `Update()` or a UI
   frame.
-- `ramble_topic_queue_stats` observes the queue.
+- `rant_topic_queue_stats` observes the queue.
 
-The ring starts small and grows to `qos.queue_bytes` (0 = `RAMBLE_QUEUE_CAP`, 1 MB). One
+The ring starts small and grows to `qos.queue_bytes` (0 = `RANT_QUEUE_CAP`, 1 MB). One
 bigger message still fits. At the cap the reliability QoS decides: best effort overwrites
-the oldest and fires `RAMBLE_MSG_LOST`, reliable parks delivery so the publisher's send
+the oldest and fires `RANT_MSG_LOST`, reliable parks delivery so the publisher's send
 blocks on normal flow control. Draining the queue unparks it. Size the queue to cover the
 writer's burst (at least `keep_last` times the message size), or a parked reader heals
 through the slow repair path.
 
 Timeouts on take and dispatch: 0 checks, positive waits that long, negative waits forever.
 They work under a service thread, with a manual poll cadence, single threaded and under
-`RAMBLE_NO_THREADS`. From inside a callback they cannot wait.
+`RANT_NO_THREADS`. From inside a callback they cannot wait.
 
 The queue's extra copy costs about 15% of peak goodput at small payloads and up to 35% at
-1 MB. Measure with `ramble_test queuebench`.
+1 MB. Measure with `rant_test queuebench`.
 
 ## Timestamps
 
-Every `RambleMsg` carries three clocks.
+Every `RantMsg` carries three clocks.
 
 - `recv_us` is this node's monotonic clock when the poll received the message (at enqueue
   for a queued topic). Use it for rates and jitter.
@@ -75,8 +75,8 @@ The publisher sets it per message, and it costs 8 wire bytes only on the message
 carry one:
 
 ```c
-ramble_topic_send(topic, frame, &(RambleSendOpts){ .capture_us = exposed_at });
-ramble_topic_send(topic, frame, NULL);        /* no capture time, no extra bytes */
+rant_topic_send(topic, frame, &(RantSendOpts){ .capture_us = exposed_at });
+rant_topic_send(topic, frame, NULL);          /* no capture time, no extra bytes */
 ```
 
 The two together measure the pipeline: `written_us - capture_us` is how long the sensor
@@ -84,18 +84,18 @@ and the driver took, and the rest of the way to `recv_us` is transport.
 
 A publisher opts out of both stamps per topic with `qos.no_timestamp`. `written_us` and
 `capture_us` are then 0 and a capture time cannot ride that topic. The patterns layer
-forwards the commit stamp as `written_us` on `RambleRequest`, `RambleResponse`,
-`RambleProgress` and `RambleVariableUpdate`, and carries no capture time: it describes
+forwards the commit stamp as `written_us` on `RantRequest`, `RantResponse`,
+`RantProgress` and `RantVariableUpdate`, and carries no capture time: it describes
 sensor data on a topic, not a call or a write.
 
 ## Errors and events
 
-Everything that goes wrong arrives the same way: a `RambleEvent` with kind `RAMBLE_ERROR` and
-an `.error` code (`RAMBLE_E_*`) naming the fault. `if (ev->kind == RAMBLE_ERROR)` is the one
-"did something break" test, and `ramble_event_str` prints the full text.
+Everything that goes wrong arrives the same way: a `RantEvent` with kind `RANT_ERROR` and
+an `.error` code (`RANT_E_*`) naming the fault. `if (ev->kind == RANT_ERROR)` is the one
+"did something break" test, and `rant_event_str` prints the full text.
 
-The four other kinds are `RAMBLE_PEER_UP`, `RAMBLE_PEER_DOWN`, `RAMBLE_PEER_INTEREST` (peer
-lifecycle) and `RAMBLE_MSG_LOST` (best effort loss, expected, not an error).
+The four other kinds are `RANT_PEER_UP`, `RANT_PEER_DOWN`, `RANT_PEER_INTEREST` (peer
+lifecycle) and `RANT_MSG_LOST` (best effort loss, expected, not an error).
 
 | group | codes |
 |---|---|
@@ -103,23 +103,23 @@ lifecycle) and `RAMBLE_MSG_LOST` (best effort loss, expected, not an error).
 | IO and setup | `OOM`, `PLATFORM`, `SOCKET`, `BIND`, `MCAST_JOIN`, `SEND`, `RECV`, `POLL`, `WAKER`, `BAD_ADDRESS` |
 
 Socket faults carry the OS errno in `.os_error`. Topic scoped ones carry the name in
-`.topic_name`. `ramble_last_error(node)` returns the last error by value. Pass `NULL` for
-the process global slot that records why `ramble_node_open` failed. `RambleResult` (the
-negative `RAMBLE_ERR_*` returned by `ramble_topic_send` and friends) is separate. Error
-reporting costs nothing on the data path, and `RAMBLE_NO_DIAG` strips the text.
+`.topic_name`. `rant_last_error(node)` returns the last error by value. Pass `NULL` for
+the process global slot that records why `rant_node_open` failed. `RantResult` (the
+negative `RANT_ERR_*` returned by `rant_topic_send` and friends) is separate. Error
+reporting costs nothing on the data path, and `RANT_NO_DIAG` strips the text.
 
 ## Built in logs and meta
 
-Every node hosts three shared reliable log topics: `@ramble/log/error`, `@ramble/log/warn` and
-`@ramble/log/info`. `ramble_node_log(n, level, fmt, ...)` publishes a line, also from inside
-callbacks. To read other nodes' lines, take your own handle with `ramble_node_log_topic`,
-widen its role to `RAMBLE_PUBSUB`, and read it like any topic. A node never receives its
+Every node hosts three shared reliable log topics: `@rant/log/error`, `@rant/log/warn` and
+`@rant/log/info`. `rant_node_log(n, level, fmt, ...)` publishes a line, also from inside
+callbacks. To read other nodes' lines, take your own handle with `rant_node_log_topic`,
+widen its role to `RANT_PUBSUB`, and read it like any topic. A node never receives its
 own lines. A late subscriber gets each node's last lines per level. A slow subscriber never
 blocks the app, it only loses the oldest lines. `opts.disable_logs` strips the topics.
-Internal `RAMBLE_ERROR` events are mirrored to the error level unless
+Internal `RANT_ERROR` events are mirrored to the error level unless
 `opts.disable_error_logs` is set.
 
-Every node also hosts the `@ramble/meta` function, which answers a snapshot of its peers,
+Every node also hosts the `@rant/meta` function, which answers a snapshot of its peers,
 topics and counters for tools like the explorer. `opts.disable_meta` strips it.
-`ramble_topic_counts` reads the per topic message and byte counters directly. Builtins are
+`rant_topic_counts` reads the per topic message and byte counters directly. Builtins are
 hidden from every reflection walk.

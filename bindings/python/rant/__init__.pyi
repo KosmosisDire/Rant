@@ -1,4 +1,4 @@
-"""The public surface of the ramble package as the type checker sees it. The runtime is
+"""The public surface of the rant package as the type checker sees it. The runtime is
 __init__.py, and docs/python.md explains the API. Handles are generic in their schema class,
 so Publisher[Pose] sends Pose and Subscriber[Pose].take() returns Pose or None."""
 
@@ -206,7 +206,7 @@ class LogLine:
     text: str
 
 class MetaSnapshot:
-    """A decoded @ramble/meta reply: the node and proc scalars, and the whole body in info."""
+    """A decoded @rant/meta reply: the node and proc scalars, and the whole body in info."""
     valid: bool
     status: CallStatus
     provider: int
@@ -260,7 +260,7 @@ class _TopicStats:
     def queue(self) -> tuple[int, int, int, int]: ...
 
 class Node:
-    """A Ramble node: sockets, discovery and topics. Options are docs/getting-started.md's,
+    """A Rant node: sockets, discovery and topics. Options are docs/getting-started.md's,
     durations in seconds with 0 = the default. on_event prints to stderr when None."""
     def __init__(self, name: str | None = None, *,
                  on_message: Callable[[Message[Any]], object] | None = None,

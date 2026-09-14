@@ -1,9 +1,9 @@
-# Ramble
+# Rant
 
-C# wrapper for **Ramble**: peer discovery over UDP
+C# wrapper for **Rant**: peer discovery over UDP
 multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
 
-`Ramble.cs` is a thin P/Invoke layer over a **prebuilt native library** (`ramble`), bundled
+`Rant.cs` is a thin P/Invoke layer over a **prebuilt native library** (`rant`), bundled
 per-platform (win-x64, linux-x64, linux-arm64, osx). Every call is **thread-safe** (a node-level lock in
 the C core): drive a node with `Start()` (a C background service thread runs the loop
 and fires handlers) or by calling `Poll()` from your own loop.
@@ -12,9 +12,9 @@ and fires handlers) or by calling `Poll()` from your own loop.
 
 ```
 bindings/csharp/
-  Ramble.cs               the wrapper (the one source; compiled by the package + examples)
-  Ramble.csproj           NuGet package: Ramble.cs + ../../dist/native/<rid>/  ->  .nupkg
-  test/ publisher/ subscriber/    console examples (compile ../Ramble.cs)
+  Rant.cs                 the wrapper (the one source; compiled by the package + examples)
+  Rant.csproj             NuGet package: Rant.cs + ../../dist/native/<rid>/    ->  .nupkg
+  test/ publisher/ subscriber/    console examples (compile ../Rant.cs)
   unity/                Unity package (see unity/README.md)
 ```
 
@@ -23,43 +23,43 @@ bindings/csharp/
 ```sh
 # 1. build the native library (on each target OS, or let the release workflow do it)
 cmake -S . -B build
-cmake --build build --config Release --target ramble_shared   # -> dist/native/<rid>/
+cmake --build build --config Release --target rant_shared     # -> dist/native/<rid>/
 # 2. pack the NuGet
-dotnet pack bindings/csharp/Ramble.csproj -c Release -o dist
+dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 ```
 
 The binaries are **not committed** to git. The CMake target (or the release workflow)
-produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Ramble.dll` +
+produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Rant.dll` +
 `runtimes/<rid>/native/*`.
 
 ## Install
 
 ```sh
-dotnet add package Ramble
+dotnet add package Rant
 ```
 
 Before the package is on nuget.org, download the `.nupkg` from the GitHub Release and
 register its folder as a source first:
 
 ```sh
-dotnet nuget add source ./path/to/that/folder -n ramble
-dotnet add package Ramble
+dotnet nuget add source ./path/to/that/folder -n rant
+dotnet add package Rant
 ```
 
 ## Use
 
 ```csharp
-using Ramble;
+using Rant;
 
 public struct Twist { public float Dx; public float Dy; }
 public struct Pose  {
     public ulong Stamp; public double X; public double Y;
-    [RambleArray(4)] public byte[] Uuid;
-    [RambleString(16)] public string Frame;
+    [RantArray(4)] public byte[] Uuid;
+    [RantString(16)] public string Frame;
     public Twist Vel;
 }
 
-var node = new RambleNode("robot1",
+var node = new RantNode("robot1",
                     onMessage: m => Console.WriteLine(m.As<Pose>()),
                     onEvent: e => Console.Error.WriteLine(e),   // required: it carries the diagnostics
                     domain: 7);                                 // all options are named parameters
@@ -76,7 +76,7 @@ The patterns layer is bound too, untyped (`Schema` + `byte[]`) and typed:
 var def = new FunctionDefinition<AddReq, AddRsp>(node, "add", q => new AddRsp { Sum = q.A + q.B });
 var fn  = new RemoteFunction<AddReq, AddRsp>(other, "add");
 var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking; rsp.Ok / rsp.Value
-var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<RambleResponse<AddRsp>>, never faults
+var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<RantResponse<AddRsp>>, never faults
 
 // replicated state: ONE owner, remotes read the cached latest and push writes
 var own = new VariableDefinition<Level>(node, "level", new Level { Value = 5 });
@@ -88,9 +88,9 @@ var sub = new Subscriber<Pose>(other, "pose", p => Console.WriteLine(p.X));
 ```
 
 Any struct/class with public fields is a message type: the fields become the schema in
-declaration order. `[RambleArray(n)]` fixes an array's element count, `[RambleString(cap)]`
+declaration order. `[RantArray(n)]` fixes an array's element count, `[RantString(cap)]`
 fixes a string's UTF-8 byte capacity (required on every string, combine both for a
-`string[]`), `[RambleField("stamp")]` overrides a wire field name, and `[RambleSchema("Name")]`
+`string[]`), `[RantField("stamp")]` overrides a wire field name, and `[RantSchema("Name")]`
 optionally overrides the wire type name. Wire names must match on every node for a
 topic. `new Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
 Handlers fire on the service thread (never two at once for one node). From inside a

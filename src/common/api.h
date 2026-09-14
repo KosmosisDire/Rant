@@ -1,20 +1,20 @@
 /* The linkage of every public entry point. spec/build.md explains the three builds. */
-#ifndef RAMBLE_API_H
-#define RAMBLE_API_H
+#ifndef RANT_API_H
+#define RANT_API_H
 
-/* Default: the single header build, where the caller compiles Ramble into its own binary
- * and needs no decoration. RAMBLE_BUILD_SHARED builds the shared library, RAMBLE_LINK_SHARED
+/* Default: the single header build, where the caller compiles Rant into its own binary
+ * and needs no decoration. RANT_BUILD_SHARED builds the shared library, RANT_LINK_SHARED
  * consumes one. */
-#if defined(RAMBLE_BUILD_SHARED)
+#if defined(RANT_BUILD_SHARED)
   #if defined(_WIN32)
-    #define RAMBLE_API __declspec(dllexport)
+    #define RANT_API __declspec(dllexport)
   #else
-    #define RAMBLE_API __attribute__((visibility("default")))
+    #define RANT_API __attribute__((visibility("default")))
   #endif
-#elif defined(RAMBLE_LINK_SHARED) && defined(_WIN32)
-  #define RAMBLE_API __declspec(dllimport)
+#elif defined(RANT_LINK_SHARED) && defined(_WIN32)
+  #define RANT_API __declspec(dllimport)
 #else
-  #define RAMBLE_API
+  #define RANT_API
 #endif
 
-#endif /* RAMBLE_API_H */
+#endif /* RANT_API_H */

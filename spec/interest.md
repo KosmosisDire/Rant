@@ -9,8 +9,8 @@ handle is the topic's index in creation order. Peers match on the identity whate
 each created its topics in.
 
 Topics are created at runtime against a fixed reserve. The sans-IO core takes them at
-init or reserves slots that `ramble_topic_define` fills later, which is how
-`ramble_node_create_topic` works.
+init or reserves slots that `rant_topic_define` fills later, which is how
+`rant_node_create_topic` works.
 
 ## The announce interest list
 
@@ -30,7 +30,7 @@ discovery's store and repeat model. Details are a per request subset computed fr
 requester's index list, so they never belonged there. The old design carried names and
 schemas in the announce, and a 2000 topic node truncated its own announce.
 
-The list inlines while the whole datagram fits `RAMBLE_DGRAM_MAX` (about 250 topics at
+The list inlines while the whole datagram fits `RANT_DGRAM_MAX` (about 250 topics at
 defaults). Past that the announce ships a fixed size bootstrap (locator, frag, shared
 memory host, version and the `INTEREST_EXTERNAL` flag) and peers pull the identical blob
 over the unicast `uDTL` channel as byte range pages (`INTEREST_REQ` = 3, `INTEREST_RESP`
@@ -44,7 +44,7 @@ blob feeds the unchanged interest apply. A match wait treats a fetch in flight a
 resolving, so a permanent poisoning by an unresolvable peer is impossible.
 
 Rule: every consumer of a peer's interest reads through `interest_of` or
-`ramble_node_peer_interest_next`, never `ramble_meta_interest(v.meta)` directly. The
+`rant_node_peer_interest_next`, never `rant_meta_interest(v.meta)` directly. The
 reflection walk once read the blob directly and showed zero entities for an external
 peer. Observers key cached reflection walks on the per peer interest epoch, which bumps
 at the one funnel for inline apply, external assembly and fresh verdicts.
@@ -56,11 +56,11 @@ detail exchange on the unicast data socket, a third datagram family `uDTL` besid
 and the transport's. The requester batches one `DETAIL_REQ` per peer, each entry carrying
 its own schema hash. The responder answers statelessly to the request's source (which is
 why an explorer that is not even a peer can be answered) with each topic's name, its
-attrs byte (`RAMBLE_ATTR_*`: no timestamp, multi, forceable, cancellable, exclusive), its
+attrs byte (`RANT_ATTR_*`: no timestamp, multi, forceable, cancellable, exclusive), its
 schema hash, and the schema wire only where the two hashes differ.
 
 Verdicts run at intake: name equality against the full 64 bit identity first (a same hash
-different name peer fires `RAMBLE_E_NAME_COLLISION` and is refused), then the schema gate
+different name peer fires `RANT_E_NAME_COLLISION` and is refused), then the schema gate
 per direction. Both sides need the other's facts, whoever lacks them requests, and
 simultaneous requests are harmless. Nobody tells the publisher it wants to match: once
 both hold the same facts they run the same deterministic gates and form the match
@@ -77,7 +77,7 @@ one request datagram, not a lane.
 The gotcha that cache caused: a DISSOLVED verdict (details arrived, no local topic
 matched) is judged against the local topic set, which grows. A `fetch_details` observer
 dissolves every index the moment a peer appears, so a later subscribe created the topic
-but the cached non match made apply skip it forever. `ramble_transport_topic_define` sends
+but the cached non match made apply skip it forever. `rant_transport_topic_define` sends
 every dissolved verdict of every peer back to pending (name bound verdicts stay), and
 create's replay re requests them. Cleared indices are only re fetched if the hash matches
 a local topic. Re pending must not clear cached peer attrs: an observer never re asks a
@@ -92,12 +92,12 @@ schema still inlines whole.
 Observer mode (`opts.fetch_details`) makes the normal detail cycle request every
 advertised index of every peer and cache (peer, index) to name, schema hash and interned
 schema. INACTIVE entries must be skipped or the responder's skip re requests forever.
-`ramble_node_peer_topic_name` and `ramble_node_peer_topic_schema` return that node owned
+`rant_node_peer_topic_name` and `rant_node_peer_topic_schema` return that node owned
 data. The explorer, the bridge and the C++ wrapper use this rather than sniffing blobs.
 
 Rejected at design time: a cuckoo filter (membership only, so a fetch per prospective
 match), metadata over a reliable topic. An app level introspection channel must never
-become load bearing for matching. `@ramble/meta` is that facility, kept out of the
+become load bearing for matching. `@rant/meta` is that facility, kept out of the
 matching path.
 
 ## The demux table
@@ -106,18 +106,18 @@ The data path never carries the topic name. The receiver builds a per peer table
 (peer, index) to our topic. Only name verified indices map, so no unverified index can
 ever demux. The data path carries the 2 byte index. Each peer's index and verdict maps
 are allocated at its announced entry count, about 3 bytes per entry, so there is no index
-ceiling. A failed map allocation surfaces as `RAMBLE_E_INTEREST_OVERFLOW`. The maps bind a
+ceiling. A failed map allocation surfaces as `RANT_E_INTEREST_OVERFLOW`. The maps bind a
 name to ONE local topic, preferring the oldest active one.
 
 ## Matching rules
 
 Every interest apply applies the RxO rule: offered reliability must be at least the
 requested one. A best effort publisher never serves a reliable subscriber. That match is
-refused with `RAMBLE_E_QOS_INCOMPATIBLE` and forms on its own if the publisher upgrades. On
+refused with `RANT_E_QOS_INCOMPATIBLE` and forms on its own if the publisher upgrades. On
 the allowed downgrade the writer reads the reader's requested reliability from the sub
 entry's flags and keeps a best effort reader out of flow control.
 
-A role flip via `ramble_topic_set_role` re advertises at once. A (re)subscribe joins like a
+A role flip via `rant_topic_set_role` re advertises at once. A (re)subscribe joins like a
 late joiner and gets `catch_up` cached messages.
 
 Delivery is WRITER AUTHORITATIVE. Our verdict alone forms the lane. A sample committed
@@ -127,7 +127,7 @@ that swallows detail responses to one port.
 
 ## Slot lifecycle: retire and reuse
 
-`ramble_topic_retire` parks the slot (role INACTIVE plus a retired flag), releases every
+`rant_topic_retire` parks the slot (role INACTIVE plus a retired flag), releases every
 lane, frees the history ring, sample buffers, consumer queue, node schema copy and the
 handle. The slot keeps identity, name, kind, qos, generation and next seqno for the reuse
 compare, is announced as a hole run, and is invisible to identity lookups and detail
@@ -161,7 +161,7 @@ at the older of the fresh match join point and its acked floor, so a sample comm
 inside the re create window is re pushed. A genuine unsubscribe and resubscribe keeps
 late joiner semantics (its announce change re forms the writer proxy, epoch 0).
 
-`ramble_transport_topic_seqno` is the slot's next write seqno. It continues across retire
+`rant_transport_topic_seqno` is the slot's next write seqno. It continues across retire
 and reuse so a successor can seed its counters above everything its predecessor
 published. Gotchas: destroy must skip NULL history (retired slots freed theirs), and an
 untyped reuse over a typed retired slot must still clear the schema or the stale
@@ -182,7 +182,7 @@ once, and the converged state is memoized per topology epoch (bumped on PEER_UP,
 PEER_INTEREST, create and set role) so steady state costs one compare. Entries with no
 verdict storage are not counted, since they never resolve. A wait that cannot happen
 (disabled, or a reentrant send) or that times out proceeds and fires
-`RAMBLE_E_UNMATCHED_SEND`. `ramble_topic_ready` shares the exact predicate. A variable
+`RANT_E_UNMATCHED_SEND`. `rant_topic_ready` shares the exact predicate. A variable
 accessor's first write rides the same wait without the send and without the error. The
 `matchwait:` selftests pin it.
 
@@ -192,11 +192,11 @@ a blocking create (100 creates would be 100 serialized round trips).
 
 ## Sans-IO surface
 
-A sans-IO caller runs the exchange itself: `ramble_transport_build_interest` and
-`ramble_transport_apply_peer_interest` for announces, the detail codec
-(`ramble_transport_detail_wants`, `ramble_detail_req_build`, `ramble_transport_detail_respond`,
-`ramble_transport_apply_peer_details`), and the paging codec (`ramble_interest_req_build`,
-`ramble_interest_resp_head`, `ramble_interest_resp_parse`, `ramble_transport_interest_size`).
+A sans-IO caller runs the exchange itself: `rant_transport_build_interest` and
+`rant_transport_apply_peer_interest` for announces, the detail codec
+(`rant_transport_detail_wants`, `rant_detail_req_build`, `rant_transport_detail_respond`,
+`rant_transport_apply_peer_details`), and the paging codec (`rant_interest_req_build`,
+`rant_interest_resp_head`, `rant_interest_resp_parse`, `rant_transport_interest_size`).
 The interest codec measures and builds in one walk (a NULL out means measure). The node
 wires all of it into discovery and its data socket. The transport's linear hash to topic
 scans run only per PENDING entry and cost about 25 us per announce at 1600 by 1600. A
@@ -213,7 +213,7 @@ The interest blob is `[u16 n]` then one `[u32 hash][u8 flags]` cell per slot up 
 highest announced one, where a run of undefined or retired slots collapses to one cell
 flagged with bit 7 whose hash field is the run length. Then the rate section
 `[u16 n][(u16 index)(u16 rate_hz)]*` and the generation section
-`[u16 n][(u16 index)(u8 gen)]*`. `ramble_interest_max` bounds it at 5 bytes per slot plus
+`[u16 n][(u16 index)(u8 gen)]*`. `rant_interest_max` bounds it at 5 bytes per slot plus
 both sections at every topic.
 
 Every uDTL datagram starts with `['u','D','T','L'][u8 kind][u8 ver 2][u16 domain]
@@ -227,7 +227,7 @@ interest paging kinds carry n = 0 and the bodies given above.
 One node cannot define the same name under two kinds. The per peer maps bind an entry to
 one local topic by identity, so local cross kind twins would cross bind and refuse
 forever. Across nodes a name verified peer that advertises the name under another kind is
-refused with `RAMBLE_E_KIND_MISMATCH`, never cross wired. Retired slots are exempt from the
+refused with `RANT_E_KIND_MISMATCH`, never cross wired. Retired slots are exempt from the
 local check.
 
 A node may hold two topics of one identity with different QoS and switch which is live by

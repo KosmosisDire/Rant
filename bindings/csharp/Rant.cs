@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 using MonoPInvokeCallbackAttribute = AOT.MonoPInvokeCallbackAttribute;
 #endif
 
-namespace Ramble
+namespace Rant
 {
 #if !UNITY_5_3_OR_NEWER
     // Off Unity this attribute is synthesized as a no op, so the callback methods stay
@@ -31,7 +31,7 @@ namespace Ramble
     {
         Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
         State = -5,   // wrong state: Poll while started, or a call a handler may not make
-        NoSys = -6    // not compiled in (Start under RAMBLE_NO_THREADS)
+        NoSys = -6    // not compiled in (Start under RANT_NO_THREADS)
     }
 
     public enum EventKind
@@ -39,7 +39,7 @@ namespace Ramble
         PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
     }
 
-    // The error carried by an EventKind.Error event, RambleEvent.Error and RambleNode.LastError.
+    // The error carried by an EventKind.Error event, RantEvent.Error and RantNode.LastError.
     public enum ErrorKind
     {
         None = 0,
@@ -57,7 +57,7 @@ namespace Ramble
         VString, VArray, Map, Enum, Named
     }
 
-    // A call's outcome, mirrors RambleCallStatus. Timeout and PeerLost are synthesized on the
+    // A call's outcome, mirrors RantCallStatus. Timeout and PeerLost are synthesized on the
     // caller, and Cancelled also for calls still pending when the node closes.
     public enum CallStatus
     {
@@ -65,25 +65,25 @@ namespace Ramble
         Running = 6   // task, the one NON-terminal status: accepted and running
     }
 
-    // Severity of a built-in @ramble/log line. Mirrors RambleLogLevel.
+    // Severity of a built-in @rant/log line. Mirrors RantLogLevel.
     public enum LogLevel { Error = 0, Warn = 1, Info = 2 }
 
-    // A @ramble/meta request's section mask, OR the bits. 0 = every section. Mirrors RAMBLE_META_*.
+    // A @rant/meta request's section mask, OR the bits. 0 = every section. Mirrors RANT_META_*.
     [Flags]
     public enum MetaSection : uint { Node = 0x1, Proc = 0x2, Topics = 0x4, Peers = 0x8, All = 0 }
 
     // ---- native struct layouts (mirror the C exactly) ---------------------------
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleBytes { public IntPtr data; public UIntPtr len; }
+    internal struct RantBytes { public IntPtr data; public UIntPtr len; }
 
-    // the C RambleString, a length carrying view. Named View so the [RambleString] attribute
+    // the C RantString, a length carrying view. Named View so the [RantString] attribute
     // owns the public name
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleStringView { public IntPtr data; public UIntPtr len; }
+    internal struct RantStringView { public IntPtr data; public UIntPtr len; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleQos
+    internal struct RantQos
     {
         public int reliability;
         public ushort keep_last;
@@ -99,17 +99,17 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleTopicOpts { public RambleQos qos; public byte reflect_from_mesh; }
+    internal struct RantTopicOpts { public RantQos qos; public byte reflect_from_mesh; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleNodeNet
+    internal struct RantNodeNet
     {
         public ushort data_port;
         public IntPtr discovery_group;         // const char*
         public ushort discovery_port;
         public IntPtr multicast_interface;     // const char*
         public byte multicast_ttl;
-        public IntPtr seed_peers;              // const RambleDiscoveryAddr*
+        public IntPtr seed_peers;              // const RantDiscoveryAddr*
         public ushort n_seed_peers;
         public byte unicast_only;
         public uint recv_buffer_bytes;
@@ -120,7 +120,7 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleDiscoveryAddr
+    internal struct RantDiscoveryAddr
     {
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
         public byte ip_len;                    // 4 = IPv4, 16 = IPv6
@@ -128,7 +128,7 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleNodeDiscovery
+    internal struct RantNodeDiscovery
     {
         public uint announce_interval_us;
         public uint peer_timeout_us;
@@ -136,7 +136,7 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleNodeOpts
+    internal struct RantNodeOpts
     {
         public ushort domain;
         public ushort max_topics;
@@ -144,24 +144,24 @@ namespace Ramble
         public byte disable_shm;
         public byte fetch_details;
         public int match_wait_ms;              // send path match wait, 0 = 1 s, negative = off
-        public byte disable_logs;              // strip the built-in @ramble/log topics
-        public byte disable_meta;              // do not host the @ramble/meta endpoint
-        public byte disable_error_logs;   // no error mirroring onto @ramble/log/error
-        public RambleNodeNet net;
-        public RambleNodeDiscovery discovery;
+        public byte disable_logs;              // strip the built-in @rant/log topics
+        public byte disable_meta;              // do not host the @rant/meta endpoint
+        public byte disable_error_logs;   // no error mirroring onto @rant/log/error
+        public RantNodeNet net;
+        public RantNodeDiscovery discovery;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleMsg
+    internal struct RantMsg
     {
         public IntPtr node;
         public IntPtr user;
         public ushort topic_index;
         public uint publisher_id;
-        public RambleStringView publisher_name;
-        public RambleStringView topic_name;
-        public RambleBytes header;   // the pattern header view, null on a plain topic
-        public RambleBytes data;
+        public RantStringView publisher_name;
+        public RantStringView topic_name;
+        public RantBytes header;     // the pattern header view, null on a plain topic
+        public RantBytes data;
         public IntPtr schema;
         public ulong recv_us;
         public ulong written_us;
@@ -170,16 +170,16 @@ namespace Ramble
 
     // Optional per send config. capture_us 0 = unstated, and costs no wire bytes.
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleSendOpts
+    internal struct RantSendOpts
     {
         public ulong capture_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleEventNative
+    internal struct RantEventNative
     {
         public int kind;
-        public int error;                      // RambleErrorKind (Error events)
+        public int error;                      // RantErrorKind (Error events)
         public IntPtr topic_name;            // const char*, topic scoped events only
         public IntPtr user;
         public uint peer;
@@ -199,7 +199,7 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleAllocator
+    internal struct RantAllocator
     {
         public IntPtr page_realloc;
         public IntPtr shared;
@@ -215,11 +215,11 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleSchemaFieldInfo
+    internal struct RantSchemaFieldInfo
     {
-        public RambleStringView name;
-        public RambleStringView type_name;   // the field type's NAME, empty when anonymous
-        public RambleStringView elem_name;   // an array ELEMENT type's name, empty when anonymous
+        public RantStringView name;
+        public RantStringView type_name;     // the field type's NAME, empty when anonymous
+        public RantStringView elem_name;     // an array ELEMENT type's name, empty when anonymous
         public byte kind;
         public byte elem;
         public ushort count;
@@ -232,7 +232,7 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Explicit)]
-    internal struct RambleValueUnion
+    internal struct RantValueUnion
     {
         [FieldOffset(0)] public ulong u;
         [FieldOffset(0)] public long i;
@@ -240,60 +240,60 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleValue
+    internal struct RantValue
     {
         public byte kind;
         public byte elem;
         public ushort count;
         public ushort str_cap;
-        public RambleValueUnion v;
-        public RambleBytes bytes;
+        public RantValueUnion v;
+        public RantBytes bytes;
     }
 
     // the pattern struct mirrors of src/patterns/core.h, field order and types exact
 
-    // The public head of the C RambleRequest, only ever read through the callback's pointer:
+    // The public head of the C RantRequest, only ever read through the callback's pointer:
     // the reply machinery lives behind the struct, so the exact pointer is what reply takes.
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleRequestNative
+    internal struct RantRequestNative
     {
         public IntPtr node;
-        public RambleStringView function_name;
-        public RambleBytes data;
-        public IntPtr schema;                  // const RambleSchema*
+        public RantStringView function_name;
+        public RantBytes data;
+        public IntPtr schema;                  // const RantSchema*
         public uint caller;
-        public RambleStringView caller_name;
+        public RantStringView caller_name;
         public ulong recv_us;
         public ulong written_us;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleResponseNative
+    internal struct RantResponseNative
     {
-        public int status;                     // RambleCallStatus
-        public RambleBytes data;
-        public IntPtr schema;                  // const RambleSchema*
+        public int status;                     // RantCallStatus
+        public RantBytes data;
+        public IntPtr schema;                  // const RantSchema*
         public uint provider;
         public IntPtr user;
         public ulong written_us;
-        public RambleStringView message;         // outcome text (default status text if none sent)
+        public RantStringView message;           // outcome text (default status text if none sent)
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleFunctionOpts
+    internal struct RantFunctionOpts
     {
         public uint backpressure_wait_us;
         public uint timeout_us;
         public ushort keep_last;        // req and rsp ring depth, 0 = 10
         public byte reflect_from_mesh;
-        public byte multi;              // duplicate-authority diagnostic suppressed (@ramble/meta)
+        public byte multi;              // duplicate-authority diagnostic suppressed (@rant/meta)
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleVariableOpts
+    internal struct RantVariableOpts
     {
-        public RambleBytes initial;
-        public byte access;                    // RambleVarAccess
+        public RantBytes initial;
+        public byte access;                    // RantVarAccess
         public byte allow_force;
         public ushort catch_up;
         public ushort keep_last;
@@ -302,11 +302,11 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleVariableUpdateNative
+    internal struct RantVariableUpdateNative
     {
         public IntPtr variable;
-        public RambleStringView name;
-        public RambleBytes value;
+        public RantStringView name;
+        public RantBytes value;
         public IntPtr schema;
         public byte forced;
         public uint write_seq;
@@ -316,16 +316,16 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleCallOpts
+    internal struct RantCallOpts
     {
         public uint provider;        // direct a call at one definition by peer id (0 = undirected)
-        public IntPtr on_progress;   // RambleProgressFn for task calls, null = updates discarded
-        public IntPtr progress_user; // handed back as RambleProgress.user
+        public IntPtr on_progress;   // RantProgressFn for task calls, null = updates discarded
+        public IntPtr progress_user; // handed back as RantProgress.user
         public IntPtr id_out;        // uint32_t*: filled with the call id at commit
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleTaskOpts
+    internal struct RantTaskOpts
     {
         public byte progress_best_effort;
         public ushort progress_keep_last;
@@ -339,267 +339,267 @@ namespace Ramble
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RambleProgressNative
+    internal struct RantProgressNative
     {
         public uint call_id;
         public uint provider;
-        public RambleBytes data;
-        public IntPtr schema;                  // const RambleSchema*
+        public RantBytes data;
+        public IntPtr schema;                  // const RantSchema*
         public ulong written_us;
         public ulong recv_us;
-        public IntPtr user;                    // RambleCallOpts.progress_user
+        public IntPtr user;                    // RantCallOpts.progress_user
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleMsgFn(IntPtr msg);
+    internal delegate void RantMsgFn(IntPtr msg);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleEventFn(IntPtr ev);
+    internal delegate void RantEventFn(IntPtr ev);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate IntPtr RambleAllocFn(IntPtr user, IntPtr ptr, UIntPtr size);
+    internal delegate IntPtr RantAllocFn(IntPtr user, IntPtr ptr, UIntPtr size);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleRequestFn(IntPtr request, IntPtr user);
+    internal delegate void RantRequestFn(IntPtr request, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleResponseFn(IntPtr response);
+    internal delegate void RantResponseFn(IntPtr response);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleVariableUpdateFn(IntPtr update, IntPtr user);
+    internal delegate void RantVariableUpdateFn(IntPtr update, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleProgressFn(IntPtr progress);
+    internal delegate void RantProgressFn(IntPtr progress);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RambleCancelFn(ulong token, IntPtr user);
+    internal delegate void RantCancelFn(ulong token, IntPtr user);
 
     // ---- native entry points ----------------------------------------------------
 
     internal static class Native
     {
-        internal const string LIB = "ramble";
+        internal const string LIB = "rant";
         private const CallingConvention CC = CallingConvention.Cdecl;
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_open(ref RambleAllocator alloc, byte[] name,
-            RambleMsgFn on_message, RambleEventFn on_event, ref RambleNodeOpts opts);
+        internal static extern IntPtr rant_node_open(ref RantAllocator alloc, byte[] name,
+            RantMsgFn on_message, RantEventFn on_event, ref RantNodeOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern RambleEventNative ramble_last_error(IntPtr node);
+        internal static extern RantEventNative rant_last_error(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_poll(IntPtr node, int timeout_ms);
+        internal static extern int rant_node_poll(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_close(IntPtr node, int send_bye);
+        internal static extern int rant_node_close(IntPtr node, int send_bye);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_start(IntPtr node);
+        internal static extern int rant_node_start(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_stop(IntPtr node);
+        internal static extern int rant_node_stop(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_is_started(IntPtr node);
+        internal static extern int rant_node_is_started(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint ramble_node_evicted_unsent(IntPtr node);
+        internal static extern uint rant_node_evicted_unsent(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_topic(IntPtr node, byte[] name, int role,
-            IntPtr schema, ref RambleTopicOpts opts);
+        internal static extern IntPtr rant_node_create_topic(IntPtr node, byte[] name, int role,
+            IntPtr schema, ref RantTopicOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_topic(IntPtr node, ushort index);
+        internal static extern IntPtr rant_node_topic(IntPtr node, ushort index);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_send(IntPtr ch, RambleBytes data,
-                                                   ref RambleSendOpts opts);
+        internal static extern int rant_topic_send(IntPtr ch, RantBytes data,
+                                                   ref RantSendOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_set_role(IntPtr ch, int role);
+        internal static extern int rant_topic_set_role(IntPtr ch, int role);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_retire(IntPtr ch);
+        internal static extern int rant_topic_retire(IntPtr ch);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_refresh(IntPtr ch);
+        internal static extern int rant_topic_refresh(IntPtr ch);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_topic_schema(IntPtr ch);
+        internal static extern IntPtr rant_topic_schema(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort ramble_topic_index(IntPtr ch);
+        internal static extern ushort rant_topic_index(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_match_count(IntPtr ch);
+        internal static extern int rant_topic_match_count(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_drain(IntPtr ch, int timeout_ms);
+        internal static extern int rant_topic_drain(IntPtr ch, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_take(IntPtr ch, ref RambleMsg msg, int timeout_ms);
+        internal static extern int rant_topic_take(IntPtr ch, ref RantMsg msg, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
+        internal static extern int rant_topic_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
+        internal static extern int rant_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_topic_queue_stats(IntPtr ch, out uint msgs,
+        internal static extern void rant_topic_queue_stats(IntPtr ch, out uint msgs,
             out uint bytes, out uint capacity, out uint dropped);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_node_mem_stats(IntPtr node, out UIntPtr in_use,
+        internal static extern void rant_node_mem_stats(IntPtr node, out UIntPtr in_use,
             out UIntPtr peak, out ulong alloc_calls);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_node_backpressure_stats(IntPtr node, out ulong waited_us,
+        internal static extern void rant_node_backpressure_stats(IntPtr node, out ulong waited_us,
             out uint waited_sends);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_topic_counts(IntPtr ch, out ulong tx_msgs, out ulong tx_bytes,
+        internal static extern void rant_topic_counts(IntPtr ch, out ulong tx_msgs, out ulong tx_bytes,
             out ulong rx_msgs, out ulong rx_bytes);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_log_text(IntPtr node, int level, byte[] text, int len);
+        internal static extern int rant_node_log_text(IntPtr node, int level, byte[] text, int len);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_log_topic(IntPtr node, int level);
+        internal static extern IntPtr rant_node_log_topic(IntPtr node, int level);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_meta_function(IntPtr node);
+        internal static extern IntPtr rant_node_meta_function(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_event_str(IntPtr ev, byte[] buf, UIntPtr cap);
+        internal static extern IntPtr rant_event_str(IntPtr ev, byte[] buf, UIntPtr cap);
 
         // serialize / schema
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_schema_compile(RambleAllocFn alloc, IntPtr user,
+        internal static extern IntPtr rant_schema_compile(RantAllocFn alloc, IntPtr user,
             byte[] text, out IntPtr err);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_schema_free(IntPtr s, RambleAllocFn alloc, IntPtr user);
+        internal static extern void rant_schema_free(IntPtr s, RantAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern RambleBytes ramble_schema_wire(IntPtr s);
+        internal static extern RantBytes rant_schema_wire(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ulong ramble_schema_hash(IntPtr s);
+        internal static extern ulong rant_schema_hash(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_schema_copy(IntPtr s, RambleAllocFn alloc, IntPtr user);
+        internal static extern IntPtr rant_schema_copy(IntPtr s, RantAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern RambleStringView ramble_schema_name(IntPtr s);
+        internal static extern RantStringView rant_schema_name(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint ramble_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
+        internal static extern uint rant_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_schema_subset(IntPtr sub, IntPtr pub);
+        internal static extern int rant_schema_subset(IntPtr sub, IntPtr pub);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_std_recognize(IntPtr s, RambleAllocFn alloc, IntPtr user);
+        internal static extern int rant_std_recognize(IntPtr s, RantAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_std_recognize_field(IntPtr s, ushort field,
-                                                            RambleAllocFn alloc, IntPtr user);
+        internal static extern int rant_std_recognize_field(IntPtr s, ushort field,
+                                                            RantAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern long ramble_timestamp_now();
+        internal static extern long rant_timestamp_now();
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint ramble_schema_size(IntPtr s);
+        internal static extern uint rant_schema_size(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort ramble_schema_field_count(IntPtr s);
+        internal static extern ushort rant_schema_field_count(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_schema_field_at(IntPtr s, ushort i, out RambleSchemaFieldInfo info);
+        internal static extern int rant_schema_field_at(IntPtr s, ushort i, out RantSchemaFieldInfo info);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ushort ramble_schema_enum_count(IntPtr s, ushort field);
+        internal static extern ushort rant_schema_enum_count(IntPtr s, ushort field);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_schema_enum_variant(IntPtr s, ushort field, ushort i,
-            out long value, out RambleStringView name);
+        internal static extern int rant_schema_enum_variant(IntPtr s, ushort field, ushort i,
+            out long value, out RantStringView name);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_schema_message_default(IntPtr s, IntPtr buf, UIntPtr cap);
+        internal static extern int rant_schema_message_default(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_uint(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, ulong v);
+        internal static extern int rant_set_uint(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, ulong v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_int(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, long v);
+        internal static extern int rant_set_int(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, long v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_f64(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, double v);
+        internal static extern int rant_set_f64(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, double v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_f32(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, float v);
+        internal static extern int rant_set_f32(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, float v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_array(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RambleBytes elems);
+        internal static extern int rant_set_array(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RantBytes elems);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_string(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RambleStringView v);
+        internal static extern int rant_set_string(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RantStringView v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_string_at(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field,
-            ushort index, RambleStringView v);
+        internal static extern int rant_set_string_at(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field,
+            ushort index, RantStringView v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_get_value(RambleBytes msg, IntPtr s, ushort field, out RambleValue outv);
+        internal static extern int rant_get_value(RantBytes msg, IntPtr s, ushort field, out RantValue outv);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint ramble_schema_msg_min(IntPtr s);
+        internal static extern uint rant_schema_msg_min(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint ramble_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
+        internal static extern uint rant_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_set_map(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RambleBytes map);
+        internal static extern int rant_set_map(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RantBytes map);
 
         // node lock (bracket zero-copy views) + match-wait companions
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_node_lock(IntPtr node);
+        internal static extern void rant_node_lock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_node_unlock(IntPtr node);
+        internal static extern void rant_node_unlock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_node_settle(IntPtr node, int timeout_ms);
+        internal static extern int rant_node_settle(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_ready(IntPtr ch);
+        internal static extern int rant_topic_ready(IntPtr ch);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_topic_pending_count(IntPtr ch);
+        internal static extern int rant_topic_pending_count(IntPtr ch);
 
         // patterns: functions
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_function_definition(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr rsp_schema, RambleRequestFn on_request, IntPtr user,
-            ref RambleFunctionOpts opts);
+        internal static extern IntPtr rant_node_create_function_definition(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr rsp_schema, RantRequestFn on_request, IntPtr user,
+            ref RantFunctionOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_remote_function(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr rsp_schema, ref RambleFunctionOpts opts);
+        internal static extern IntPtr rant_node_create_remote_function(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr rsp_schema, ref RantFunctionOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_call(IntPtr fn, RambleBytes req,
-            out RambleResponseNative response, int timeout_ms, IntPtr opts);
+        internal static extern int rant_function_call(IntPtr fn, RantBytes req,
+            out RantResponseNative response, int timeout_ms, IntPtr opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_call_async(IntPtr fn, RambleBytes req,
-            RambleResponseFn on_response, IntPtr user, IntPtr opts);
+        internal static extern int rant_function_call_async(IntPtr fn, RantBytes req,
+            RantResponseFn on_response, IntPtr user, IntPtr opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_match_count(IntPtr fn);
+        internal static extern int rant_function_match_count(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_retire(IntPtr fn);
+        internal static extern int rant_function_retire(IntPtr fn);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_refresh(IntPtr fn);
+        internal static extern int rant_function_refresh(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_request_reply(IntPtr request, RambleBytes rsp);
+        internal static extern void rant_request_reply(IntPtr request, RantBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void ramble_request_fail(IntPtr request, byte[] message, RambleBytes rsp);
+        internal static extern void rant_request_fail(IntPtr request, byte[] message, RantBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern ulong ramble_request_defer(IntPtr request);
+        internal static extern ulong rant_request_defer(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_complete(IntPtr fn, ulong token, int status, byte[] message, RambleBytes rsp);
+        internal static extern int rant_function_complete(IntPtr fn, ulong token, int status, byte[] message, RantBytes rsp);
 
         // patterns: tasks
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_task_definition(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, RambleRequestFn on_request,
-            IntPtr user, ref RambleTaskOpts opts);
+        internal static extern IntPtr rant_node_create_task_definition(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, RantRequestFn on_request,
+            IntPtr user, ref RantTaskOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_remote_task(IntPtr node, byte[] name,
-            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, ref RambleTaskOpts opts);
+        internal static extern IntPtr rant_node_create_remote_task(IntPtr node, byte[] name,
+            IntPtr req_schema, IntPtr prg_schema, IntPtr rsp_schema, ref RantTaskOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_request_start(IntPtr request);
+        internal static extern int rant_request_start(IntPtr request);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_progress(IntPtr fn, ulong token, RambleBytes progress);
+        internal static extern int rant_function_progress(IntPtr fn, ulong token, RantBytes progress);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_cancelled(IntPtr fn, ulong token);
+        internal static extern int rant_function_cancelled(IntPtr fn, ulong token);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_on_cancel(IntPtr fn, RambleCancelFn on_cancel, IntPtr user);
+        internal static extern int rant_function_on_cancel(IntPtr fn, RantCancelFn on_cancel, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_function_cancel(IntPtr fn, uint call_id);
+        internal static extern int rant_function_cancel(IntPtr fn, uint call_id);
 
         // patterns: variables
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_variable_definition(IntPtr node, byte[] name,
-            IntPtr schema, ref RambleVariableOpts opts);
+        internal static extern IntPtr rant_node_create_variable_definition(IntPtr node, byte[] name,
+            IntPtr schema, ref RantVariableOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr ramble_node_create_remote_variable(IntPtr node, byte[] name,
-            IntPtr schema, ref RambleVariableOpts opts);
+        internal static extern IntPtr rant_node_create_remote_variable(IntPtr node, byte[] name,
+            IntPtr schema, ref RantVariableOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_get(IntPtr var, out RambleBytes value);
+        internal static extern int rant_variable_get(IntPtr var, out RantBytes value);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_set(IntPtr var, RambleBytes value);
+        internal static extern int rant_variable_set(IntPtr var, RantBytes value);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_force(IntPtr var, RambleBytes value);
+        internal static extern int rant_variable_force(IntPtr var, RantBytes value);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_unforce(IntPtr var);
+        internal static extern int rant_variable_unforce(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_forced(IntPtr var);
+        internal static extern int rant_variable_forced(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_wait(IntPtr var, int timeout_ms);
+        internal static extern int rant_variable_wait(IntPtr var, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_match_count(IntPtr var);
+        internal static extern int rant_variable_match_count(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_retire(IntPtr var);
+        internal static extern int rant_variable_retire(IntPtr var);
 
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_refresh(IntPtr var);
+        internal static extern int rant_variable_refresh(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_on_change(IntPtr var, RambleVariableUpdateFn on_change, IntPtr user);
+        internal static extern int rant_variable_on_change(IntPtr var, RantVariableUpdateFn on_change, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int ramble_variable_on_write(IntPtr var, RambleVariableUpdateFn on_write, IntPtr user);
+        internal static extern int rant_variable_on_write(IntPtr var, RantVariableUpdateFn on_write, IntPtr user);
     }
 
     // ---- config + reflection attributes -----------------------------------------
 
-    /// <summary>Per topic QoS, the C RambleQos as a class. Every field zero means the default,
+    /// <summary>Per topic QoS, the C RantQos as a class. Every field zero means the default,
     /// so a null Qos is every default. docs/topics.md explains them.</summary>
     public sealed class Qos
     {
@@ -638,9 +638,9 @@ namespace Ramble
             ReflectFromMesh = other.ReflectFromMesh;
         }
 
-        internal RambleQos ToNative()
+        internal RantQos ToNative()
         {
-            return new RambleQos
+            return new RantQos
             {
                 reliability = (int)Reliability,
                 keep_last = KeepLast,
@@ -660,86 +660,86 @@ namespace Ramble
     /// <summary>Override the wire type name of a message struct or class, the class name by
     /// default. Never required.</summary>
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
-    public sealed class RambleSchemaAttribute : Attribute
+    public sealed class RantSchemaAttribute : Attribute
     {
         public string Name;
-        public RambleSchemaAttribute(string name = null) { Name = name; }
+        public RantSchemaAttribute(string name = null) { Name = name; }
     }
 
     /// <summary>A fixed length array field with this element count. Without it an array
     /// field is a variable array whose length rides the message tail.</summary>
     [AttributeUsage(AttributeTargets.Field)]
-    public sealed class RambleArrayAttribute : Attribute
+    public sealed class RantArrayAttribute : Attribute
     {
         public int Count;
-        public RambleArrayAttribute(int count) { Count = count; }
+        public RantArrayAttribute(int count) { Count = count; }
     }
 
     /// <summary>A capped string field, the max UTF-8 byte length. Without it a string is
-    /// unbounded. On a string[] it makes a variable array, with [RambleArray] a fixed one.</summary>
+    /// unbounded. On a string[] it makes a variable array, with [RantArray] a fixed one.</summary>
     [AttributeUsage(AttributeTargets.Field)]
-    public sealed class RambleStringAttribute : Attribute
+    public sealed class RantStringAttribute : Attribute
     {
         public int Cap;
-        public RambleStringAttribute(int cap) { Cap = cap; }
+        public RantStringAttribute(int cap) { Cap = cap; }
     }
 
     /// <summary>Name a field's type with a standard type (docs/stdtypes.md), so the name
     /// narrows matching. The shape must be the canonical one or compiling fails.</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Struct | AttributeTargets.Class)]
-    public sealed class RambleTypeNameAttribute : Attribute
+    public sealed class RantTypeNameAttribute : Attribute
     {
         public string Name;
-        public RambleTypeNameAttribute(string name) { Name = name; }
+        public RantTypeNameAttribute(string name) { Name = name; }
     }
 
     // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). The
-    // [RambleField] overrides give the canonical lowercase wire names every language agrees on.
-    [RambleTypeName("Float2")] public struct Float2
-    { [RambleField("x")] public float X; [RambleField("y")] public float Y; }
-    [RambleTypeName("Float3")] public struct Float3
-    { [RambleField("x")] public float X; [RambleField("y")] public float Y;
-      [RambleField("z")] public float Z; }
-    [RambleTypeName("Float4")] public struct Float4
-    { [RambleField("x")] public float X; [RambleField("y")] public float Y;
-      [RambleField("z")] public float Z; [RambleField("w")] public float W; }
-    [RambleTypeName("Double2")] public struct Double2
-    { [RambleField("x")] public double X; [RambleField("y")] public double Y; }
-    [RambleTypeName("Double3")] public struct Double3
-    { [RambleField("x")] public double X; [RambleField("y")] public double Y;
-      [RambleField("z")] public double Z; }
-    [RambleTypeName("Double4")] public struct Double4
-    { [RambleField("x")] public double X; [RambleField("y")] public double Y;
-      [RambleField("z")] public double Z; [RambleField("w")] public double W; }
-    [RambleTypeName("Int2")] public struct Int2
-    { [RambleField("x")] public int X; [RambleField("y")] public int Y; }
-    [RambleTypeName("Int3")] public struct Int3
-    { [RambleField("x")] public int X; [RambleField("y")] public int Y; [RambleField("z")] public int Z; }
-    [RambleTypeName("Int4")] public struct Int4
-    { [RambleField("x")] public int X; [RambleField("y")] public int Y;
-      [RambleField("z")] public int Z; [RambleField("w")] public int W; }
-    [RambleTypeName("Quaternion")] public struct Quaternion    // stored x, y, z, w
-    { [RambleField("x")] public double X; [RambleField("y")] public double Y;
-      [RambleField("z")] public double Z; [RambleField("w")] public double W; }
-    [RambleTypeName("Color")] public struct Color              // sRGB, straight alpha
-    { [RambleField("r")] public byte R; [RambleField("g")] public byte G;
-      [RambleField("b")] public byte B; [RambleField("a")] public byte A; }
-    [RambleTypeName("Rect")] public struct Rect
-    { [RambleField("x")] public float X; [RambleField("y")] public float Y;
-      [RambleField("w")] public float W; [RambleField("h")] public float H; }
-    [RambleTypeName("RectI")] public struct RectI
-    { [RambleField("x")] public int X; [RambleField("y")] public int Y;
-      [RambleField("w")] public int W; [RambleField("h")] public int H; }
+    // [RantField] overrides give the canonical lowercase wire names every language agrees on.
+    [RantTypeName("Float2")] public struct Float2
+    { [RantField("x")] public float X; [RantField("y")] public float Y; }
+    [RantTypeName("Float3")] public struct Float3
+    { [RantField("x")] public float X; [RantField("y")] public float Y;
+      [RantField("z")] public float Z; }
+    [RantTypeName("Float4")] public struct Float4
+    { [RantField("x")] public float X; [RantField("y")] public float Y;
+      [RantField("z")] public float Z; [RantField("w")] public float W; }
+    [RantTypeName("Double2")] public struct Double2
+    { [RantField("x")] public double X; [RantField("y")] public double Y; }
+    [RantTypeName("Double3")] public struct Double3
+    { [RantField("x")] public double X; [RantField("y")] public double Y;
+      [RantField("z")] public double Z; }
+    [RantTypeName("Double4")] public struct Double4
+    { [RantField("x")] public double X; [RantField("y")] public double Y;
+      [RantField("z")] public double Z; [RantField("w")] public double W; }
+    [RantTypeName("Int2")] public struct Int2
+    { [RantField("x")] public int X; [RantField("y")] public int Y; }
+    [RantTypeName("Int3")] public struct Int3
+    { [RantField("x")] public int X; [RantField("y")] public int Y; [RantField("z")] public int Z; }
+    [RantTypeName("Int4")] public struct Int4
+    { [RantField("x")] public int X; [RantField("y")] public int Y;
+      [RantField("z")] public int Z; [RantField("w")] public int W; }
+    [RantTypeName("Quaternion")] public struct Quaternion    // stored x, y, z, w
+    { [RantField("x")] public double X; [RantField("y")] public double Y;
+      [RantField("z")] public double Z; [RantField("w")] public double W; }
+    [RantTypeName("Color")] public struct Color              // sRGB, straight alpha
+    { [RantField("r")] public byte R; [RantField("g")] public byte G;
+      [RantField("b")] public byte B; [RantField("a")] public byte A; }
+    [RantTypeName("Rect")] public struct Rect
+    { [RantField("x")] public float X; [RantField("y")] public float Y;
+      [RantField("w")] public float W; [RantField("h")] public float H; }
+    [RantTypeName("RectI")] public struct RectI
+    { [RantField("x")] public int X; [RantField("y")] public int Y;
+      [RantField("w")] public int W; [RantField("h")] public int H; }
     // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
-    [RambleTypeName("Transform")] public struct Transform
-    { [RambleField("translation")] public Double3 Translation;
-      [RambleField("rotation")] public Quaternion Rotation;
-      [RambleField("parent")] [RambleString(30)] public string Parent; }
-    [RambleTypeName("Twist")] public struct Twist               // m/s and rad/s
-    { [RambleField("linear")] public Double3 Linear; [RambleField("angular")] public Double3 Angular; }
-    [RambleTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
-    { [RambleField("lat")] public double Lat; [RambleField("lon")] public double Lon;
-      [RambleField("alt")] public double Alt; }
+    [RantTypeName("Transform")] public struct Transform
+    { [RantField("translation")] public Double3 Translation;
+      [RantField("rotation")] public Quaternion Rotation;
+      [RantField("parent")] [RantString(30)] public string Parent; }
+    [RantTypeName("Twist")] public struct Twist               // m/s and rad/s
+    { [RantField("linear")] public Double3 Linear; [RantField("angular")] public Double3 Angular; }
+    [RantTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
+    { [RantField("lat")] public double Lat; [RantField("lon")] public double Lon;
+      [RantField("alt")] public double Alt; }
 
     /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
     /// container, so data holds the file bytes rather than pixels.</summary>
@@ -752,52 +752,52 @@ namespace Ramble
     /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
     public enum VideoStreamKind : byte
     { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
-    [RambleTypeName("Image")] public struct Image               // stride 0 = packed rows
-    { [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
-      [RambleField("stride")] public uint Stride;
-      [RambleField("format")] public ImageFormat Format;
-      [RambleField("data")] public byte[] Data; }               // pixels, or the file bytes
-    [RambleTypeName("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
-    { [RambleField("codec")] public VideoCodec Codec;
-      [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
-      [RambleField("keyframe")] public bool Keyframe;
-      [RambleField("pts")] [RambleTypeName("Timestamp")] public long Pts;   // the Timestamp clock
-      [RambleField("data")] public byte[] Data; }
+    [RantTypeName("Image")] public struct Image               // stride 0 = packed rows
+    { [RantField("width")] public uint Width; [RantField("height")] public uint Height;
+      [RantField("stride")] public uint Stride;
+      [RantField("format")] public ImageFormat Format;
+      [RantField("data")] public byte[] Data; }               // pixels, or the file bytes
+    [RantTypeName("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
+    { [RantField("codec")] public VideoCodec Codec;
+      [RantField("width")] public uint Width; [RantField("height")] public uint Height;
+      [RantField("keyframe")] public bool Keyframe;
+      [RantField("pts")] [RantTypeName("Timestamp")] public long Pts;   // the Timestamp clock
+      [RantField("data")] public byte[] Data; }
     // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
     // Width and Height are hints for pickers, the stream stays authoritative once connected.
-    [RambleTypeName("ExternalVideoStream")] public struct ExternalVideoStream
-    { [RambleField("kind")] public VideoStreamKind Kind;
-      [RambleField("codec")] public VideoCodec Codec;
-      [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
-      [RambleField("url")] [RambleTypeName("Uri")] [RambleString(256)] public string Url;
-      [RambleField("name")] [RambleString(32)] public string Name; }
+    [RantTypeName("ExternalVideoStream")] public struct ExternalVideoStream
+    { [RantField("kind")] public VideoStreamKind Kind;
+      [RantField("codec")] public VideoCodec Codec;
+      [RantField("width")] public uint Width; [RantField("height")] public uint Height;
+      [RantField("url")] [RantTypeName("Uri")] [RantString(256)] public string Url;
+      [RantField("name")] [RantString(32)] public string Name; }
 
     /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
     public enum DistortionModel : byte
     { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
     // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
-    [RambleTypeName("CameraIntrinsics")] public struct CameraIntrinsics
-    { [RambleField("width")] public uint Width; [RambleField("height")] public uint Height;
-      [RambleField("fx")] public double Fx; [RambleField("fy")] public double Fy;
-      [RambleField("cx")] public double Cx; [RambleField("cy")] public double Cy;
-      [RambleField("model")] public DistortionModel Model;
-      [RambleField("coeffs")] [RambleArray(8)] public double[] Coeffs; }
+    [RantTypeName("CameraIntrinsics")] public struct CameraIntrinsics
+    { [RantField("width")] public uint Width; [RantField("height")] public uint Height;
+      [RantField("fx")] public double Fx; [RantField("fy")] public double Fy;
+      [RantField("cx")] public double Cx; [RantField("cy")] public double Cy;
+      [RantField("model")] public DistortionModel Model;
+      [RantField("coeffs")] [RantArray(8)] public double[] Coeffs; }
     // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
     // may be empty. The names ride a JointNames variable, not every sample.
-    [RambleTypeName("JointState")] public struct JointState
-    { [RambleField("position")] public double[] Position;
-      [RambleField("velocity")] public double[] Velocity;
-      [RambleField("effort")] public double[] Effort; }
+    [RantTypeName("JointState")] public struct JointState
+    { [RantField("position")] public double[] Position;
+      [RantField("velocity")] public double[] Velocity;
+      [RantField("effort")] public double[] Effort; }
     // Published once as a variable. The order every JointState array follows.
-    [RambleTypeName("JointNames")] public struct JointNames
-    { [RambleField("name")] [RambleString(32)] public string[] Name; }
+    [RantTypeName("JointNames")] public struct JointNames
+    { [RantField("name")] [RantString(32)] public string[] Name; }
 
     /// <summary>The standard-type values that need a platform.</summary>
     public static class Std
     {
         /// <summary>Now in Timestamp units, microseconds since the Unix epoch UTC, the clock a
         /// message's WrittenUs uses.</summary>
-        public static long Now() => Native.ramble_timestamp_now();
+        public static long Now() => Native.rant_timestamp_now();
         /// <summary>An identity Quaternion (w = 1).</summary>
         public static Quaternion IdentityRotation() => new Quaternion { W = 1.0 };
         /// <summary>A Color from 0xRRGGBBAA.</summary>
@@ -808,10 +808,10 @@ namespace Ramble
 
     /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
     [AttributeUsage(AttributeTargets.Field)]
-    public sealed class RambleFieldAttribute : Attribute
+    public sealed class RantFieldAttribute : Attribute
     {
         public string Name;
-        public RambleFieldAttribute(string name) { Name = name; }
+        public RantFieldAttribute(string name) { Name = name; }
     }
 
     public class SchemaException : Exception
@@ -821,13 +821,13 @@ namespace Ramble
 
     /// <summary>A call was refused: a non Ok SendStatus surfaced through a throwing surface
     /// such as the VariableDefinition&lt;T&gt;.Value setter.</summary>
-    public class RambleException : Exception
+    public class RantException : Exception
     {
         public SendStatus Status;
-        public RambleException(SendStatus status, string m) : base(m) { Status = status; }
+        public RantException(SendStatus status, string m) : base(m) { Status = status; }
     }
 
-    /// <summary>Reading RambleResponse&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
+    /// <summary>Reading RantResponse&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
     public class CallException : Exception
     {
         public CallStatus Status;
@@ -845,7 +845,7 @@ namespace Ramble
         public Schema(string text)
         {
             IntPtr err;
-            IntPtr h = Native.ramble_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
+            IntPtr h = Native.rant_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
             if (h == IntPtr.Zero)
                 throw new SchemaException("schema compile failed near: " + Codec.PtrToStr(err));
             Handle = h;
@@ -859,11 +859,11 @@ namespace Ramble
         /// publisher's. Freeing it is this object's job from here on.</summary>
         internal Schema(IntPtr owned) { Handle = owned; }
 
-        public string Name => Codec.Str(Native.ramble_schema_name(Handle));
-        public uint Size => Native.ramble_schema_size(Handle);
-        public ulong Hash => Native.ramble_schema_hash(Handle);
-        public ushort FieldCount => Native.ramble_schema_field_count(Handle);
-        public byte[] Wire => Codec.Bytes(Native.ramble_schema_wire(Handle));
+        public string Name => Codec.Str(Native.rant_schema_name(Handle));
+        public uint Size => Native.rant_schema_size(Handle);
+        public ulong Hash => Native.rant_schema_hash(Handle);
+        public ushort FieldCount => Native.rant_schema_field_count(Handle);
+        public byte[] Wire => Codec.Bytes(Native.rant_schema_wire(Handle));
 
         /// <summary>The DSL text reconstructed from the compiled schema (works for any
         /// schema, including one parsed from a peer). Paste into a C node for interop.</summary>
@@ -883,7 +883,7 @@ namespace Ramble
 
         /// <summary>Can a reader declaring this schema read messages written with pub? Type
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
-        public bool CanRead(Schema pub) => Native.ramble_schema_subset(Handle, pub.Handle) != 0;
+        public bool CanRead(Schema pub) => Native.rant_schema_subset(Handle, pub.Handle) != 0;
 
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
         /// <summary>The decoded fields by name. A bare type schema yields its one value under
@@ -899,7 +899,7 @@ namespace Ramble
         {
             if (Handle != IntPtr.Zero)
             {
-                Native.ramble_schema_free(Handle, Codec.SchemaAlloc, IntPtr.Zero);
+                Native.rant_schema_free(Handle, Codec.SchemaAlloc, IntPtr.Zero);
                 Handle = IntPtr.Zero;
             }
             GC.SuppressFinalize(this);
@@ -912,7 +912,7 @@ namespace Ramble
     /// <summary>A delivered message. The payload is copied out so it outlives the callback,
     /// but the decode happens on the first read of Fields or Value and never if neither is
     /// read. Read it from one thread, as handlers do.</summary>
-    public sealed class RambleMessage
+    public sealed class RantMessage
     {
         public ushort TopicIndex;
         public uint PublisherId;
@@ -959,15 +959,15 @@ namespace Ramble
                 _value = _clrType != null ? Codec.ToObject(_clrType, _fields)
                                           : Codec.RootOrFields(_schema.Handle, _fields);
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble decode: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant decode: " + e); }
         }
 
         public string Text => Encoding.UTF8.GetString(Data);
         public T As<T>() => (T)Value;
 
-        internal static RambleMessage FromNative(ref RambleMsg m, Type clrType, Schema ownedSchema)
+        internal static RantMessage FromNative(ref RantMsg m, Type clrType, Schema ownedSchema)
         {
-            return new RambleMessage
+            return new RantMessage
             {
                 TopicIndex = m.topic_index,
                 PublisherId = m.publisher_id,
@@ -983,10 +983,10 @@ namespace Ramble
         }
 
         public override string ToString()
-            => $"RambleMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
+            => $"RantMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
     }
 
-    public sealed class RambleEvent
+    public sealed class RantEvent
     {
         public EventKind Kind;
         public ErrorKind Error;   // the error when Kind == EventKind.Error, else None
@@ -1004,20 +1004,20 @@ namespace Ramble
         /// <summary>True if this event reports something going wrong.</summary>
         public bool IsError => Kind == EventKind.Error;
 
-        // format an event returned BY VALUE (ramble_last_error): ramble_event_str wants a
+        // format an event returned BY VALUE (rant_last_error): rant_event_str wants a
         // pointer, so briefly marshal the struct to unmanaged memory.
-        internal static RambleEvent FromValue(RambleEventNative e)
+        internal static RantEvent FromValue(RantEventNative e)
         {
-            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<RambleEventNative>());
+            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<RantEventNative>());
             try { Marshal.StructureToPtr(e, p, false); return FromNative(p, ref e); }
             finally { Marshal.FreeHGlobal(p); }
         }
 
-        internal static RambleEvent FromNative(IntPtr evPtr, ref RambleEventNative e)
+        internal static RantEvent FromNative(IntPtr evPtr, ref RantEventNative e)
         {
             var buf = new byte[192];
-            Native.ramble_event_str(evPtr, buf, (UIntPtr)buf.Length);
-            return new RambleEvent
+            Native.rant_event_str(evPtr, buf, (UIntPtr)buf.Length);
+            return new RantEvent
             {
                 Kind = (EventKind)e.kind,
                 Error = (ErrorKind)e.error,
@@ -1037,9 +1037,9 @@ namespace Ramble
         public override string ToString() => _line;
     }
 
-    /// <summary>One decoded @ramble/log line for a RambleNode.OnLog handler. WallUs is epoch us,
+    /// <summary>One decoded @rant/log line for a RantNode.OnLog handler. WallUs is epoch us,
     /// MonoUs the publisher's monotonic clock, RecvUs this node's clock at receipt.</summary>
-    public sealed class RambleLogLine
+    public sealed class RantLogLine
     {
         public LogLevel Level;
         public string Node;      // the publishing node's name
@@ -1047,16 +1047,16 @@ namespace Ramble
         public ulong WallUs;
         public ulong MonoUs;
         public ulong RecvUs;
-        /// <summary>The carrying message's source stamp (see RambleMessage.WrittenUs).</summary>
+        /// <summary>The carrying message's source stamp (see RantMessage.WrittenUs).</summary>
         public ulong WrittenUs;
         public string Text;
 
         public override string ToString() => $"[{Level}] {Node}: {Text}";
     }
 
-    /// <summary>A decoded @ramble/meta reply. The node and proc scalars are fields, the full
+    /// <summary>A decoded @rant/meta reply. The node and proc scalars are fields, the full
     /// body stays in Info. Absent sections leave zeros and HaveProc false.</summary>
-    public sealed class RambleMetaSnapshot
+    public sealed class RantMetaSnapshot
     {
         public bool Valid;
         public CallStatus Status = CallStatus.Timeout;
@@ -1079,9 +1079,9 @@ namespace Ramble
         private static string S(Dictionary<string, object> d, string k)
             => d.TryGetValue(k, out var o) ? o as string ?? "" : "";
 
-        internal static RambleMetaSnapshot FromResponse(RambleResponse r)
+        internal static RantMetaSnapshot FromResponse(RantResponse r)
         {
-            var s = new RambleMetaSnapshot { Status = r.Status, Provider = r.Provider };
+            var s = new RantMetaSnapshot { Status = r.Status, Provider = r.Provider };
             if (r.Status != CallStatus.Ok || r.SchemaPtr == IntPtr.Zero) return s;
             var top = Codec.DecodeDict(r.SchemaPtr, r.Data);
             if (!(top.TryGetValue("info", out var io) && io is Dictionary<string, object> info)) return s;
@@ -1113,7 +1113,7 @@ namespace Ramble
     }
 
     // A wrapper handle pointing into the node's arena. Close frees that arena, so the node
-    // zeroes every handle there: the C refuses a NULL one (RAMBLE_ERR_NO_TOPIC) instead of
+    // zeroes every handle there: the C refuses a NULL one (RANT_ERR_NO_TOPIC) instead of
     // reading freed memory.
     internal interface INodeHandle { void Invalidate(); }
 
@@ -1121,7 +1121,7 @@ namespace Ramble
 
     public class Topic : INodeHandle
     {
-        internal readonly RambleNode _node;
+        internal readonly RantNode _node;
         internal IntPtr _handle;   // zeroed by Retire, and by the node at Close
 
         void INodeHandle.Invalidate() { _handle = IntPtr.Zero; }
@@ -1129,13 +1129,13 @@ namespace Ramble
 
         /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
         /// UTF-8 strings. A null qos is every default.</summary>
-        public Topic(RambleNode node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(RantNode node, string name, Role role = Role.PubSub, Qos qos = null)
             : this(node, name, (Schema)null, role, qos) { }
 
         /// <summary>Create a typed topic with an explicit Schema. Topic&lt;T&gt; is the shorthand
         /// for the reflected case. Same-name topics on one node share the native slot with a
-        /// widened role (registry in RambleNode).</summary>
-        public Topic(RambleNode node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+        /// widened role (registry in RantNode).</summary>
+        public Topic(RantNode node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
         {
             _node = node;
             Schema = schema;
@@ -1143,9 +1143,9 @@ namespace Ramble
             node.RegisterHandle(this);
         }
 
-        // Wrap an already-existing native handle (e.g. a @ramble/log topic from the node):
+        // Wrap an already-existing native handle (e.g. a @rant/log topic from the node):
         // no name registry entry, no schema. Query/send/set-role like any topic.
-        internal Topic(RambleNode node, IntPtr handle)
+        internal Topic(RantNode node, IntPtr handle)
         {
             _node = node;
             Schema = null;
@@ -1163,13 +1163,13 @@ namespace Ramble
             var h = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
-                var b = new RambleBytes
+                var b = new RantBytes
                 {
                     data = data != null && data.Length > 0 ? h.AddrOfPinnedObject() : IntPtr.Zero,
                     len = (UIntPtr)(data?.Length ?? 0)
                 };
-                var o = new RambleSendOpts { capture_us = (ulong)captureUs };
-                r = Native.ramble_topic_send(_handle, b, ref o);
+                var o = new RantSendOpts { capture_us = (ulong)captureUs };
+                r = Native.rant_topic_send(_handle, b, ref o);
             }
             finally { h.Free(); }
             return (SendStatus)r;
@@ -1193,7 +1193,7 @@ namespace Ramble
 
         public SendStatus SetRole(Role role)
         {
-            return (SendStatus)Native.ramble_topic_set_role(_handle, (int)role);
+            return (SendStatus)Native.rant_topic_set_role(_handle, (int)role);
         }
 
         /// <summary>Retire the topic so the name can be re created with another schema
@@ -1202,36 +1202,36 @@ namespace Ramble
 
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
         /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => _handle != IntPtr.Zero && Native.ramble_topic_refresh(_handle) == 1;
+        public bool Refresh() => _handle != IntPtr.Zero && Native.rant_topic_refresh(_handle) == 1;
 
-        public ushort Index => Native.ramble_topic_index(_handle);
+        public ushort Index => Native.rant_topic_index(_handle);
 
         public int MatchCount()
         {
-            return Native.ramble_topic_match_count(_handle);
+            return Native.rant_topic_match_count(_handle);
         }
 
         /// <summary>True when a send would not wait on the match wait: a subscriber is matched
         /// or matching has converged. For a GUI: park payloads while false.</summary>
-        public bool Ready => Native.ramble_topic_ready(_handle) == 1;
+        public bool Ready => Native.rant_topic_ready(_handle) == 1;
 
         /// <summary>Unresolved candidate matches right now. 0 = matching has converged for
         /// every known peer.</summary>
-        public int PendingCount => Native.ramble_topic_pending_count(_handle);
+        public int PendingCount => Native.rant_topic_pending_count(_handle);
 
         public bool Drain(int timeoutMs)
         {
-            return Native.ramble_topic_drain(_handle, timeoutMs) == 1;
+            return Native.rant_topic_drain(_handle, timeoutMs) == 1;
         }
 
         /// <summary>Pop the next queued message, fully copied out. The first TryTake or Dispatch
         /// queues the topic (docs/node.md). timeoutMs 0 = check, negative = forever.</summary>
-        public bool TryTake(out RambleMessage message, int timeoutMs = 0)
+        public bool TryTake(out RantMessage message, int timeoutMs = 0)
         {
             message = null;
-            var m = new RambleMsg();
-            if (Native.ramble_topic_take(_handle, ref m, timeoutMs) != 1) return false;
-            message = RambleMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index),
+            var m = new RantMsg();
+            if (Native.rant_topic_take(_handle, ref m, timeoutMs) != 1) return false;
+            message = RantMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index),
                                              _node.OwnedSchema(m.schema));
             return true;
         }
@@ -1239,20 +1239,20 @@ namespace Ramble
         /// <summary>Drain the queue by running OnMessage on the calling thread, oldest first, up
         /// to maxMsgs (0 = all), waiting like TryTake. These run without the node lock.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
-            => Native.ramble_topic_dispatch(_handle, maxMsgs, timeoutMs);
+            => Native.rant_topic_dispatch(_handle, maxMsgs, timeoutMs);
 
         /// <summary>Consumer queue observability, all zeros when not queued.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
-            Native.ramble_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
+            Native.rant_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
             return (m, b, c, d);
         }
 
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
-        /// it. Always on, and in the @ramble/meta snapshot.</summary>
+        /// it. Always on, and in the @rant/meta snapshot.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
         {
-            Native.ramble_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
+            Native.rant_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
             return (tm, tb, rm, rb);
         }
     }
@@ -1261,7 +1261,7 @@ namespace Ramble
     /// itself and Send and TryTake carry the plain value (docs/csharp.md).</summary>
     public sealed class Topic<T> : Topic
     {
-        public Topic(RambleNode node, string name, Role role = Role.PubSub, Qos qos = null)
+        public Topic(RantNode node, string name, Role role = Role.PubSub, Qos qos = null)
             : base(node, name, new Schema(typeof(T)), role, qos) { }
 
         public SendStatus Send(T value, long captureUs = 0) => Send((object)value, captureUs);
@@ -1270,7 +1270,7 @@ namespace Ramble
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
-            RambleMessage m;
+            RantMessage m;
             if (!TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
             value = (T)m.Value;
             return true;
@@ -1279,15 +1279,15 @@ namespace Ramble
 
     // ---- node -------------------------------------------------------------------
 
-    public sealed class RambleNode : IDisposable
+    public sealed class RantNode : IDisposable
     {
         private IntPtr _handle;
         private long _id;
-        private RambleAllocator _alloc;
+        private RantAllocator _alloc;
         private IntPtr _discGroup;   // native strings the node retains for its lifetime
         private IntPtr _mcastIf;
-        private Action<RambleMessage> _onMsg;
-        private Action<RambleEvent> _onEvt;
+        private Action<RantMessage> _onMsg;
+        private Action<RantEvent> _onEvt;
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
         // A publisher's schema is a node owned view good only until the next poll, so a
@@ -1303,7 +1303,7 @@ namespace Ramble
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
         // takes more than a volatile fetch
-        private volatile Dictionary<ushort, Action<RambleMessage>[]> _subHandlers = new Dictionary<ushort, Action<RambleMessage>[]>();
+        private volatile Dictionary<ushort, Action<RantMessage>[]> _subHandlers = new Dictionary<ushort, Action<RantMessage>[]>();
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
         private readonly List<long> _patternBoxes = new List<long>();
@@ -1312,17 +1312,17 @@ namespace Ramble
         internal readonly object PatternLock = new object();
 
         // rooted so the GC never collects the trampolines handed to native code.
-        private static readonly RambleMsgFn s_onMsg = OnMessageTramp;
-        private static readonly RambleEventFn s_onEvt = OnEventTramp;
+        private static readonly RantMsgFn s_onMsg = OnMessageTramp;
+        private static readonly RantEventFn s_onEvt = OnEventTramp;
         // Read once per delivered message and per event, written only at open and close, so
         // it is replaced whole under s_reg and read without a lock.
-        private static volatile Dictionary<long, RambleNode> s_nodes = new Dictionary<long, RambleNode>();
+        private static volatile Dictionary<long, RantNode> s_nodes = new Dictionary<long, RantNode>();
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
         /// <summary>Open a node. onMessage may be null, onEvent is required and both are wired
         /// before the constructor returns. Options are named parameters (docs/csharp.md).</summary>
-        public RambleNode(string name, Action<RambleMessage> onMessage, Action<RambleEvent> onEvent,
+        public RantNode(string name, Action<RantMessage> onMessage, Action<RantEvent> onEvent,
                     int domain = 0, int maxTopics = 0, bool disableShm = false,
                     bool fetchDetails = false, int matchWaitMs = 0,
                     bool disableLogs = false, bool disableMeta = false, bool disableErrorLogs = false,
@@ -1342,11 +1342,11 @@ namespace Ramble
             lock (s_reg)
             {
                 _id = s_nextId++;
-                var next = new Dictionary<long, RambleNode>(s_nodes) { [_id] = this };
+                var next = new Dictionary<long, RantNode>(s_nodes) { [_id] = this };
                 s_nodes = next;
             }
 
-            var co = new RambleNodeOpts
+            var co = new RantNodeOpts
             {
                 domain = (ushort)domain,
                 max_topics = (ushort)maxTopics,
@@ -1386,17 +1386,17 @@ namespace Ramble
 
             _alloc = Codec.DefaultAllocator();
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
-            IntPtr h = Native.ramble_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
+            IntPtr h = Native.rant_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
             Codec.FreeCStr(selfIpPtr);
 
             if (h == IntPtr.Zero)
             {
-                lock (s_reg) { var next = new Dictionary<long, RambleNode>(s_nodes); next.Remove(_id); s_nodes = next; }
+                lock (s_reg) { var next = new Dictionary<long, RantNode>(s_nodes); next.Remove(_id); s_nodes = next; }
                 Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
-                RambleEvent err = LastOpenError();
-                throw new InvalidOperationException("ramble_node_open failed: " + err);
+                RantEvent err = LastOpenError();
+                throw new InvalidOperationException("rant_node_open failed: " + err);
             }
             _handle = h;
         }
@@ -1407,7 +1407,7 @@ namespace Ramble
         {
             count = 0;
             if (seeds == null || seeds.Length == 0) return IntPtr.Zero;
-            int stride = Marshal.SizeOf<RambleDiscoveryAddr>();
+            int stride = Marshal.SizeOf<RantDiscoveryAddr>();
             IntPtr block = Marshal.AllocHGlobal(stride * seeds.Length);
             try
             {
@@ -1418,7 +1418,7 @@ namespace Ramble
                     string[] oct = (colon < 0 ? s : s.Substring(0, colon)).Split('.');
                     if (oct.Length != 4)
                         throw new ArgumentException("seedPeers entry '" + s + "' is not an IPv4 address");
-                    var a = new RambleDiscoveryAddr { ip = new byte[16], ip_len = 4 };
+                    var a = new RantDiscoveryAddr { ip = new byte[16], ip_len = 4 };
                     for (int k = 0; k < 4; k++) a.ip[k] = byte.Parse(oct[k]);
                     if (colon >= 0) a.port = ushort.Parse(s.Substring(colon + 1));
                     Marshal.StructureToPtr(a, IntPtr.Add(block, i * stride), false);
@@ -1431,7 +1431,7 @@ namespace Ramble
 
         /// <summary>Rebind the message handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
-        public RambleNode OnMessage(Action<RambleMessage> fn) { _onMsg = fn; return this; }
+        public RantNode OnMessage(Action<RantMessage> fn) { _onMsg = fn; return this; }
 
         /// <summary>Where this node's callbacks run. Null runs them inline on the polling or
         /// service thread. Set it and every event, pattern handler, variable observer, progress
@@ -1445,11 +1445,11 @@ namespace Ramble
             Action<Action> d = CallbackDispatcher;
             if (d == null) { a(); return; }
             try { d(a); }
-            catch (Exception e) { Console.Error.WriteLine("ramble callback dispatcher: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant callback dispatcher: " + e); }
         }
         /// <summary>Rebind the event handler set at construction. Rarely needed: the
         /// constructor already requires an initial one.</summary>
-        public RambleNode OnEvent(Action<RambleEvent> fn) { _onEvt = fn; return this; }
+        public RantNode OnEvent(Action<RantEvent> fn) { _onEvt = fn; return this; }
 
         // The native create behind the Topic constructors. Same name creates on this node share
         // the native slot with a widened role, and a different schema is refused.
@@ -1469,7 +1469,7 @@ namespace Ramble
                     byte bits = (byte)(rec.Bits | RoleBits(role));
                     if (bits != rec.Bits)
                     {
-                        Native.ramble_topic_set_role(rec.Handle, (int)RoleFromBits(bits));
+                        Native.rant_topic_set_role(rec.Handle, (int)RoleFromBits(bits));
                         rec.Bits = bits;
                     }
                     if (schema != null) _schemas.Add(schema);
@@ -1477,16 +1477,16 @@ namespace Ramble
                 }
 
                 qos = qos ?? new Qos();
-                var co = new RambleTopicOpts
+                var co = new RantTopicOpts
                 {
                     qos = qos.ToNative(),
                     reflect_from_mesh = (byte)(qos.ReflectFromMesh ? 1 : 0),
                 };
-                IntPtr h = Native.ramble_node_create_topic(_handle, Codec.CStr(name), (int)role,
+                IntPtr h = Native.rant_node_create_topic(_handle, Codec.CStr(name), (int)role,
                     schema != null ? schema.Handle : IntPtr.Zero, ref co);
                 if (h == IntPtr.Zero)
                     throw new InvalidOperationException("topic create failed: " + LastError);
-                ushort idx = Native.ramble_topic_index(h);
+                ushort idx = Native.rant_topic_index(h);
                 if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
                 _topicsByName[name] = new TopicRec { Handle = h, Bits = RoleBits(role), SchemaHash = sh };
                 return h;
@@ -1500,8 +1500,8 @@ namespace Ramble
             lock (_createLock)
             {
                 if (t._handle == IntPtr.Zero) return SendStatus.NoTopic;
-                ushort idx = Native.ramble_topic_index(t._handle);
-                int r = Native.ramble_topic_retire(t._handle);
+                ushort idx = Native.rant_topic_index(t._handle);
+                int r = Native.rant_topic_retire(t._handle);
                 if (r != 0) return (SendStatus)r;
                 string dead = null;
                 foreach (var kv in _topicsByName)
@@ -1510,7 +1510,7 @@ namespace Ramble
                 _topicTypes.Remove(idx);
                 lock (_subLock)
             {
-                var next = new Dictionary<ushort, Action<RambleMessage>[]>(_subHandlers);
+                var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
                 next.Remove(idx);
                 _subHandlers = next;
             }
@@ -1528,14 +1528,14 @@ namespace Ramble
 
         // Subscriber handlers per topic index, copy on write. When any exist for an index they
         // receive the message instead of the node wide onMessage.
-        internal void AddSubHandler(ushort index, Action<RambleMessage> fn)
+        internal void AddSubHandler(ushort index, Action<RantMessage> fn)
         {
             lock (_subLock)
             {
-                var next = new Dictionary<ushort, Action<RambleMessage>[]>(_subHandlers);
-                Action<RambleMessage>[] cur;
-                if (!next.TryGetValue(index, out cur)) cur = Array.Empty<Action<RambleMessage>>();
-                var nv = new Action<RambleMessage>[cur.Length + 1];
+                var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
+                Action<RantMessage>[] cur;
+                if (!next.TryGetValue(index, out cur)) cur = Array.Empty<Action<RantMessage>>();
+                var nv = new Action<RantMessage>[cur.Length + 1];
                 Array.Copy(cur, nv, cur.Length);
                 nv[cur.Length] = fn;
                 next[index] = nv;
@@ -1545,9 +1545,9 @@ namespace Ramble
 
         // No lock: the map is replaced whole on every write, so this volatile read gets one
         // consistent version. Runs once per delivered message.
-        private Action<RambleMessage>[] SubHandlersOf(ushort index)
+        private Action<RantMessage>[] SubHandlersOf(ushort index)
         {
-            Action<RambleMessage>[] hs;
+            Action<RantMessage>[] hs;
             _subHandlers.TryGetValue(index, out hs);
             return hs;
         }
@@ -1557,12 +1557,12 @@ namespace Ramble
         internal Schema OwnedSchema(IntPtr view)
         {
             if (view == IntPtr.Zero) return null;
-            ulong hash = Native.ramble_schema_hash(view);
+            ulong hash = Native.rant_schema_hash(view);
             lock (_msgSchemaLock)
             {
                 Schema owned;
                 if (_msgSchemas.TryGetValue(hash, out owned)) return owned;
-                IntPtr h = Native.ramble_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
+                IntPtr h = Native.rant_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
                 if (h == IntPtr.Zero) return null;
                 owned = new Schema(h);
                 _msgSchemas[hash] = owned;
@@ -1584,40 +1584,40 @@ namespace Ramble
         /// timeoutMs in the socket wait, 0 = non blocking. State while Start() runs.</summary>
         public int Poll(int timeoutMs = 0)
         {
-            return Native.ramble_node_poll(_handle, timeoutMs);
+            return Native.rant_node_poll(_handle, timeoutMs);
         }
 
         /// <summary>Run the C service thread. Handlers fire on it, never two at once, and every
         /// call stays safe from any thread. False if already started or threads are out.</summary>
         public bool Start()
         {
-            return Native.ramble_node_start(_handle) == 0;
+            return Native.rant_node_start(_handle) == 0;
         }
 
         /// <summary>Stop and join the service thread. Idempotent, implied by Close.</summary>
-        public void Stop() => Native.ramble_node_stop(_handle);
+        public void Stop() => Native.rant_node_stop(_handle);
 
-        public bool IsStarted => Native.ramble_node_is_started(_handle) == 1;
+        public bool IsStarted => Native.rant_node_is_started(_handle) == 1;
 
         /// <summary>Block until discovery and matching settle, so everything sent now reaches
         /// everyone. Call after creating the topics. timeoutMs &lt; 0 = 3 intervals.</summary>
-        public bool Settle(int timeoutMs = -1) => Native.ramble_node_settle(_handle, timeoutMs) == 1;
+        public bool Settle(int timeoutMs = -1) => Native.rant_node_settle(_handle, timeoutMs) == 1;
 
         internal IntPtr Handle => _handle;
 
         /// <summary>Dispatch every queued topic on the calling thread, waiting up to timeoutMs
         /// for any to hold data. Per frame in Unity, so every queued handler runs there.</summary>
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
-            => Native.ramble_node_dispatch(_handle, maxMsgs, timeoutMs);
+            => Native.rant_node_dispatch(_handle, maxMsgs, timeoutMs);
 
-        // ---- built-in logs (the @ramble/log/{error,warn,info} topics) --------------------
+        // ---- built-in logs (the @rant/log/{error,warn,info} topics) --------------------
 
         /// <summary>Publish a line on a level's log topic (already-formatted text, truncated
-        /// at RAMBLE_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread-safe.</summary>
+        /// at RANT_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread-safe.</summary>
         public SendStatus Log(LogLevel level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
-            return (SendStatus)Native.ramble_node_log_text(_handle, (int)level, b, b.Length);
+            return (SendStatus)Native.rant_node_log_text(_handle, (int)level, b, b.Length);
         }
         public SendStatus LogError(string text) => Log(LogLevel.Error, text);
         public SendStatus LogWarn(string text) => Log(LogLevel.Warn, text);
@@ -1627,20 +1627,20 @@ namespace Ramble
         /// widen its role and read it like any topic, or use OnLog.</summary>
         public Topic LogTopic(LogLevel level)
         {
-            IntPtr ch = Native.ramble_node_log_topic(_handle, (int)level);
+            IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
             return ch == IntPtr.Zero ? null : new Topic(this, ch);
         }
 
         /// <summary>Subscribe to a level's mesh wide log stream: every other node's lines at that
-        /// level as a RambleLogLine, on the polling thread. False when logs are disabled.</summary>
-        public bool OnLog(LogLevel level, Action<RambleLogLine> handler)
+        /// level as a RantLogLine, on the polling thread. False when logs are disabled.</summary>
+        public bool OnLog(LogLevel level, Action<RantLogLine> handler)
         {
             if (handler == null) return false;
-            IntPtr ch = Native.ramble_node_log_topic(_handle, (int)level);
+            IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
             if (ch == IntPtr.Zero) return false;
-            if (Native.ramble_topic_set_role(ch, (int)Role.PubSub) != 0) return false;
-            ushort idx = Native.ramble_topic_index(ch);
-            AddSubHandler(idx, m => handler(new RambleLogLine
+            if (Native.rant_topic_set_role(ch, (int)Role.PubSub) != 0) return false;
+            ushort idx = Native.rant_topic_index(ch);
+            AddSubHandler(idx, m => handler(new RantLogLine
             {
                 Level = level, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
                 WrittenUs = m.WrittenUs,
@@ -1650,30 +1650,30 @@ namespace Ramble
             return true;
         }
 
-        private static ulong LogFieldU(RambleMessage m, string k)
+        private static ulong LogFieldU(RantMessage m, string k)
             => m.Fields != null && m.Fields.TryGetValue(k, out var o)
                ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
 
-        // ---- @ramble/meta introspection --------------------------------------------------
+        // ---- @rant/meta introspection --------------------------------------------------
 
-        /// <summary>The local @ramble/meta caller handle, null when meta is disabled. Direct it at
+        /// <summary>The local @rant/meta caller handle, null when meta is disabled. Direct it at
         /// a peer id. Most callers want MetaAsync.</summary>
         public RemoteFunction MetaFunction()
         {
-            IntPtr fn = Native.ramble_node_meta_function(_handle);
+            IntPtr fn = Native.rant_node_meta_function(_handle);
             return fn == IntPtr.Zero ? null : new RemoteFunction(this, fn);
         }
 
-        /// <summary>Fetch a peer's snapshot: a directed @ramble/meta call decoded into a
-        /// RambleMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
-        public async Task<RambleMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
+        /// <summary>Fetch a peer's snapshot: a directed @rant/meta call decoded into a
+        /// RantMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
+        public async Task<RantMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
         {
             RemoteFunction fn = MetaFunction();
-            if (fn == null) return new RambleMetaSnapshot { Status = CallStatus.NoHandler };
+            if (fn == null) return new RantMetaSnapshot { Status = CallStatus.NoHandler };
             byte[] req = sections == MetaSection.All
                 ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
-            RambleResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
-            return RambleMetaSnapshot.FromResponse(r);
+            RantResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
+            return RantMetaSnapshot.FromResponse(r);
         }
 
         internal Type ClrTypeOf(ushort index)
@@ -1684,28 +1684,28 @@ namespace Ramble
         }
 
         /// <summary>The most recent error this node reported (also delivered via OnEvent).
-        /// RambleEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
-        public RambleEvent LastError => RambleEvent.FromValue(Native.ramble_last_error(_handle));
+        /// RantEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
+        public RantEvent LastError => RantEvent.FromValue(Native.rant_last_error(_handle));
 
         /// <summary>Why the most recent node open failed, from the process global slot. The
         /// constructor already throws with this message.</summary>
-        public static RambleEvent LastOpenError() => RambleEvent.FromValue(Native.ramble_last_error(IntPtr.Zero));
+        public static RantEvent LastOpenError() => RantEvent.FromValue(Native.rant_last_error(IntPtr.Zero));
 
         /// <summary>Sends that evicted never-sent history after the bounded wait (the
         /// ErrorKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
-        public uint EvictedUnsent => Native.ramble_node_evicted_unsent(_handle);
+        public uint EvictedUnsent => Native.rant_node_evicted_unsent(_handle);
 
         public (ulong inUse, ulong peak, ulong allocCalls) MemoryStats()
         {
             UIntPtr u, p; ulong c;
-            Native.ramble_node_mem_stats(_handle, out u, out p, out c);
+            Native.rant_node_mem_stats(_handle, out u, out p, out c);
             return ((ulong)u, (ulong)p, c);
         }
 
         public (ulong waitedUs, uint waitedSends) BackpressureStats()
         {
             ulong us; uint n;
-            Native.ramble_node_backpressure_stats(_handle, out us, out n);
+            Native.rant_node_backpressure_stats(_handle, out us, out n);
             return (us, n);
         }
 
@@ -1715,10 +1715,10 @@ namespace Ramble
         {
             if (_handle != IntPtr.Zero)
             {
-                if (Native.ramble_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
+                if (Native.rant_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
                 _handle = IntPtr.Zero;
             }
-            lock (s_reg) { var next = new Dictionary<long, RambleNode>(s_nodes); next.Remove(_id); s_nodes = next; }
+            lock (s_reg) { var next = new Dictionary<long, RantNode>(s_nodes); next.Remove(_id); s_nodes = next; }
             // reap this node's pattern handler boxes and complete any still-pending
             // async calls (the C never fires their callbacks after close)
             lock (PatternLock)
@@ -1737,7 +1737,7 @@ namespace Ramble
             }
             foreach (var s in _schemas) s.Dispose();
             _schemas.Clear();
-            // Not disposed: a RambleMessage taken before Close may still decode against one.
+            // Not disposed: a RantMessage taken before Close may still decode against one.
             // Dropping the node's reference leaves each to its finalizer.
             lock (_msgSchemaLock) _msgSchemas.Clear();
             Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
@@ -1746,42 +1746,42 @@ namespace Ramble
         }
 
         public void Dispose() { Close(); GC.SuppressFinalize(this); }
-        ~RambleNode() { try { Close(); } catch { } }
+        ~RantNode() { try { Close(); } catch { } }
 
-        [MonoPInvokeCallback(typeof(RambleMsgFn))]
+        [MonoPInvokeCallback(typeof(RantMsgFn))]
         private static void OnMessageTramp(IntPtr msgPtr)
         {
             try
             {
-                var m = Marshal.PtrToStructure<RambleMsg>(msgPtr);
-                RambleNode node; Type clr = null;
+                var m = Marshal.PtrToStructure<RantMsg>(msgPtr);
+                RantNode node; Type clr = null;
                 s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null) return;
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null && node._onMsg == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
                 // the payload is copied and the schema is ours, so a later decode is safe
-                var msg = RambleMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
+                var msg = RantMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
                 if (hs != null) { foreach (var h in hs) h(msg); }
                 else node._onMsg(msg);
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble on_message: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant on_message: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(RambleEventFn))]
+        [MonoPInvokeCallback(typeof(RantEventFn))]
         private static void OnEventTramp(IntPtr evPtr)
         {
             try
             {
-                var e = Marshal.PtrToStructure<RambleEventNative>(evPtr);
-                RambleNode node;
+                var e = Marshal.PtrToStructure<RantEventNative>(evPtr);
+                RantNode node;
                 s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null || node._onEvt == null) return;
-                RambleEvent ev = RambleEvent.FromNative(evPtr, ref e);   // copied past the callback
-                Action<RambleEvent> fn = node._onEvt;
+                RantEvent ev = RantEvent.FromNative(evPtr, ref e);       // copied past the callback
+                Action<RantEvent> fn = node._onEvt;
                 node.RunCallback(() => fn(ev));
             }
-            catch (Exception ex) { Console.Error.WriteLine("ramble on_event: " + ex); }
+            catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
         }
     }
 
@@ -1791,18 +1791,18 @@ namespace Ramble
     internal struct PinnedBytes : IDisposable
     {
         private GCHandle _h;
-        internal RambleBytes B;
+        internal RantBytes B;
         internal PinnedBytes(byte[] d)
         {
             if (d == null || d.Length == 0)
             {
                 _h = default(GCHandle);
-                B = new RambleBytes { data = IntPtr.Zero, len = UIntPtr.Zero };
+                B = new RantBytes { data = IntPtr.Zero, len = UIntPtr.Zero };
             }
             else
             {
                 _h = GCHandle.Alloc(d, GCHandleType.Pinned);
-                B = new RambleBytes { data = _h.AddrOfPinnedObject(), len = (UIntPtr)d.Length };
+                B = new RantBytes { data = _h.AddrOfPinnedObject(), len = (UIntPtr)d.Length };
             }
         }
         public void Dispose() { if (_h.IsAllocated) _h.Free(); }
@@ -1819,19 +1819,19 @@ namespace Ramble
 
         internal sealed class RequestBox
         {
-            public Action<RambleRequest> Handler;
+            public Action<RantRequest> Handler;
             public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
-            public RambleNode Node;
+            public RantNode Node;
         }
         internal sealed class VarBox
         {
             public Action<VariableUpdate> Handler;
-            public RambleNode Node;
+            public RantNode Node;
         }
         internal sealed class AsyncCall
         {
-            public TaskCompletionSource<RambleResponse> Tcs;
-            public RambleNode RambleNode;
+            public TaskCompletionSource<RantResponse> Tcs;
+            public RantNode RantNode;
             public Action<TaskProgress> OnProgress;   // task calls only, else null
         }
 
@@ -1853,7 +1853,7 @@ namespace Ramble
                     CancellationTokenSource cts;
                     if (_live.TryGetValue(token, out cts))
                         try { cts.Cancel(); }
-                        catch (Exception e) { Console.Error.WriteLine("ramble on_cancel: " + e); }
+                        catch (Exception e) { Console.Error.WriteLine("rant on_cancel: " + e); }
                 }
             }
             public void Drop(ulong token)
@@ -1897,28 +1897,28 @@ namespace Ramble
         internal static void AbandonAsync(long id)
         {
             AsyncCall c = TakeAsync(id);
-            if (c != null) c.Tcs.TrySetResult(new RambleResponse { Status = CallStatus.Cancelled, Message = "cancelled" });
+            if (c != null) c.Tcs.TrySetResult(new RantResponse { Status = CallStatus.Cancelled, Message = "cancelled" });
         }
 
         // rooted delegates handed to native code
-        internal static readonly RambleRequestFn OnRequest = OnRequestTramp;
-        internal static readonly RambleResponseFn OnResponse = OnResponseTramp;
-        internal static readonly RambleVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
-        internal static readonly RambleProgressFn OnProgress = OnProgressTramp;
-        internal static readonly RambleCancelFn OnCancel = OnCancelTramp;
+        internal static readonly RantRequestFn OnRequest = OnRequestTramp;
+        internal static readonly RantResponseFn OnResponse = OnResponseTramp;
+        internal static readonly RantVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
+        internal static readonly RantProgressFn OnProgress = OnProgressTramp;
+        internal static readonly RantCancelFn OnCancel = OnCancelTramp;
 
         // A thrown handler's response message.
         internal static string FailText(Exception e)
             => string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message;
 
-        [MonoPInvokeCallback(typeof(RambleRequestFn))]
+        [MonoPInvokeCallback(typeof(RantRequestFn))]
         private static void OnRequestTramp(IntPtr reqPtr, IntPtr user)
         {
             try
             {
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
-                var r = new RambleRequest(reqPtr, box.Fn);
+                var r = new RantRequest(reqPtr, box.Fn);
                 // The handler runs after this callback returns, where the native request is
                 // dead, so park the reply now and answer through the Deferred instead.
                 if (box.Node != null && box.Node.CallbackDispatcher != null)
@@ -1931,7 +1931,7 @@ namespace Ramble
                         catch (Exception e)
                         {
                             r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
-                            Console.Error.WriteLine("ramble on_request: " + e);
+                            Console.Error.WriteLine("rant on_request: " + e);
                         }
                     });
                     return;
@@ -1942,23 +1942,23 @@ namespace Ramble
                     // a thrown handler answers AppError with the exception's text, which never
                     // crosses into C
                     r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
-                    Console.Error.WriteLine("ramble on_request: " + e);
+                    Console.Error.WriteLine("rant on_request: " + e);
                 }
                 finally { r.Expire(); }
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble on_request: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant on_request: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(RambleResponseFn))]
+        [MonoPInvokeCallback(typeof(RantResponseFn))]
         private static void OnResponseTramp(IntPtr rspPtr)
         {
             try
             {
-                var o = Marshal.PtrToStructure<RambleResponseNative>(rspPtr);
+                var o = Marshal.PtrToStructure<RantResponseNative>(rspPtr);
                 AsyncCall call = TakeAsync((long)o.user);
                 if (call == null) return;
-                call.RambleNode.UnregisterAsync((long)o.user);
-                var r = new RambleResponse
+                call.RantNode.UnregisterAsync((long)o.user);
+                var r = new RantResponse
                 {
                     Status = (CallStatus)o.status,
                     Provider = o.provider,
@@ -1967,18 +1967,18 @@ namespace Ramble
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                     Message = Codec.Str(o.message),
                 };
-                if (call.RambleNode != null) call.RambleNode.RunCallback(() => call.Tcs.TrySetResult(r));
+                if (call.RantNode != null) call.RantNode.RunCallback(() => call.Tcs.TrySetResult(r));
                 else call.Tcs.TrySetResult(r);
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble on_response: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant on_response: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(RambleProgressFn))]
+        [MonoPInvokeCallback(typeof(RantProgressFn))]
         private static void OnProgressTramp(IntPtr prgPtr)
         {
             try
             {
-                var p = Marshal.PtrToStructure<RambleProgressNative>(prgPtr);
+                var p = Marshal.PtrToStructure<RantProgressNative>(prgPtr);
                 AsyncCall call = PeekAsync((long)p.user);
                 if (call == null || call.OnProgress == null) return;
                 var prg = new TaskProgress
@@ -1991,13 +1991,13 @@ namespace Ramble
                     SchemaPtr = p.schema,
                 };
                 Action<TaskProgress> sink = call.OnProgress;
-                if (call.RambleNode != null) call.RambleNode.RunCallback(() => sink(prg));
+                if (call.RantNode != null) call.RantNode.RunCallback(() => sink(prg));
                 else sink(prg);
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble on_progress: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant on_progress: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(RambleCancelFn))]
+        [MonoPInvokeCallback(typeof(RantCancelFn))]
         private static void OnCancelTramp(ulong token, IntPtr user)
         {
             try
@@ -2005,17 +2005,17 @@ namespace Ramble
                 var box = GetBox((long)user) as TaskCancelBox;
                 if (box != null) box.Cancel(token);
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble on_cancel: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant on_cancel: " + e); }
         }
 
-        [MonoPInvokeCallback(typeof(RambleVariableUpdateFn))]
+        [MonoPInvokeCallback(typeof(RantVariableUpdateFn))]
         private static void OnVarUpdateTramp(IntPtr updPtr, IntPtr user)
         {
             try
             {
                 var box = GetBox((long)user) as VarBox;
                 if (box == null) return;
-                var u = Marshal.PtrToStructure<RambleVariableUpdateNative>(updPtr);
+                var u = Marshal.PtrToStructure<RantVariableUpdateNative>(updPtr);
                 var vu = new VariableUpdate
                 {
                     Name = Codec.Str(u.name),
@@ -2031,7 +2031,7 @@ namespace Ramble
                 if (box.Node != null) box.Node.RunCallback(() => fn(vu));
                 else fn(vu);
             }
-            catch (Exception e) { Console.Error.WriteLine("ramble on_variable_update: " + e); }
+            catch (Exception e) { Console.Error.WriteLine("rant on_variable_update: " + e); }
         }
 
         // Decode wire bytes to a typed value: prefer the wire schema (the publisher's
@@ -2055,7 +2055,7 @@ namespace Ramble
 
     /// <summary>The request seen by a FunctionDefinition handler, valid only inside the
     /// callback. Reply there, or Defer() and complete later. No reply acknowledges Ok.</summary>
-    public sealed class RambleRequest
+    public sealed class RantRequest
     {
         private IntPtr _ptr;          // the exact native pointer, zeroed when the callback returns
         private readonly IntPtr _fn;
@@ -2073,11 +2073,11 @@ namespace Ramble
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
-        internal RambleRequest(IntPtr ptr, IntPtr fn)
+        internal RantRequest(IntPtr ptr, IntPtr fn)
         {
             _ptr = ptr;
             _fn = fn;
-            var r = Marshal.PtrToStructure<RambleRequestNative>(ptr);
+            var r = Marshal.PtrToStructure<RantRequestNative>(ptr);
             Data = Codec.Bytes(r.data);
             Caller = r.caller;
             CallerName = Codec.Str(r.caller_name);
@@ -2093,7 +2093,7 @@ namespace Ramble
             Guard();
             _done = true;
             if (_deferred != null) { _deferred.Complete(rsp); return; }
-            using (var p = new PinnedBytes(rsp)) Native.ramble_request_reply(_ptr, p.B);
+            using (var p = new PinnedBytes(rsp)) Native.rant_request_reply(_ptr, p.B);
         }
 
         /// <summary>Answer AppError. message is the text shown on the caller, truncated at 255
@@ -2104,7 +2104,7 @@ namespace Ramble
             _done = true;
             if (_deferred != null) { _deferred.Fail(message, rsp); return; }
             using (var p = new PinnedBytes(rsp))
-                Native.ramble_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
+                Native.rant_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
         }
 
         /// <summary>Park the reply and return now. The Deferred completes the call later from
@@ -2114,7 +2114,7 @@ namespace Ramble
             Guard();
             _done = true;
             if (_deferred != null) return _deferred;
-            ulong token = Native.ramble_request_defer(_ptr);
+            ulong token = Native.rant_request_defer(_ptr);
             return new Deferred(_fn, token);
         }
 
@@ -2136,7 +2136,7 @@ namespace Ramble
         }
     }
 
-    /// <summary>A parked function reply (from RambleRequest.Defer): complete exactly once,
+    /// <summary>A parked function reply (from RantRequest.Defer): complete exactly once,
     /// from any thread. Dropping it leaves the caller to its timeout.</summary>
     public sealed class Deferred
     {
@@ -2147,7 +2147,7 @@ namespace Ramble
 
         public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
 
-        /// <summary>message as in RambleRequest.Fail, also carried on Ok as debug text.</summary>
+        /// <summary>message as in RantRequest.Fail, also carried on Ok as debug text.</summary>
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
         public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
         /// <summary>Complete Cancelled, the cooperative honor of a task cancel.</summary>
@@ -2161,7 +2161,7 @@ namespace Ramble
             long token = Interlocked.Exchange(ref _token, 0);   // single-shot
             if (_fn == IntPtr.Zero || token == 0) return false;
             using (var p = new PinnedBytes(rsp))
-                return Native.ramble_function_complete(_fn, (ulong)token, (int)status,
+                return Native.rant_function_complete(_fn, (ulong)token, (int)status,
                     string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B) == 0;
         }
     }
@@ -2171,16 +2171,16 @@ namespace Ramble
     public class FunctionDefinition : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly RambleNode RambleNode;
+        internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public FunctionDefinition(RambleNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Action<RambleRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
+        public FunctionDefinition(RantNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Action<RantRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
                                   int keepLast = 0, bool reflectFromMesh = false)
         {
-            RambleNode = node;
-            var co = new RambleFunctionOpts
+            RantNode = node;
+            var co = new RantFunctionOpts
             {
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
@@ -2194,7 +2194,7 @@ namespace Ramble
                 box = new Patterns.RequestBox { Handler = handler, Node = node };
                 id = Patterns.AddBox(box);
             }
-            Fn = Native.ramble_node_create_function_definition(node.Handle, Codec.CStr(name),
+            Fn = Native.rant_node_create_function_definition(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
                 box != null ? Patterns.OnRequest : null, (IntPtr)id, ref co);
@@ -2211,8 +2211,8 @@ namespace Ramble
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
-        public FunctionDefinition(RambleNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Func<RambleRequest, Task<byte[]>> handler,
+        public FunctionDefinition(RantNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Func<RantRequest, Task<byte[]>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
                                   bool reflectFromMesh = false)
             : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler),
@@ -2220,7 +2220,7 @@ namespace Ramble
 
         // Defer FIRST (a continuation may finish before the invocation returns), then the
         // Task's completion answers through the Deferred.
-        internal static Action<RambleRequest> AsyncAdapter(Func<RambleRequest, Task<byte[]>> handler)
+        internal static Action<RantRequest> AsyncAdapter(Func<RantRequest, Task<byte[]>> handler)
         {
             if (handler == null) return null;
             return r =>
@@ -2240,25 +2240,25 @@ namespace Ramble
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
-        public int CallerCount => Native.ramble_function_match_count(Fn);
+        public int CallerCount => Native.rant_function_match_count(Fn);
 
         /// <summary>Retire the definition: park its channels and release the name, else a re
         /// created same name handle is shadowed. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.ramble_function_retire(Fn);
+            var rc = (SendStatus)Native.rant_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
     /// <summary>An owning call outcome, the payload copied out. SendStatus carries a
     /// synchronous refusal, and Status stays Timeout then.</summary>
-    public sealed class RambleResponse
+    public sealed class RantResponse
     {
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
@@ -2278,23 +2278,23 @@ namespace Ramble
     public class RemoteFunction : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly RambleNode RambleNode;
+        internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public RemoteFunction(RambleNode node, string name, Schema requestSchema = null,
+        public RemoteFunction(RantNode node, string name, Schema requestSchema = null,
                               Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0,
                               int keepLast = 0, bool reflectFromMesh = false)
         {
-            RambleNode = node;
-            var co = new RambleFunctionOpts
+            RantNode = node;
+            var co = new RantFunctionOpts
             {
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
                 keep_last = (ushort)keepLast,
                 reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
             };
-            Fn = Native.ramble_node_create_remote_function(node.Handle, Codec.CStr(name),
+            Fn = Native.rant_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
@@ -2304,19 +2304,19 @@ namespace Ramble
             node.RegisterHandle(this);
         }
 
-        // Wrap an existing node-owned function handle (the @ramble/meta endpoint): callable,
+        // Wrap an existing node-owned function handle (the @rant/meta endpoint): callable,
         // never created or destroyed here.
-        internal RemoteFunction(RambleNode node, IntPtr fn)
+        internal RemoteFunction(RantNode node, IntPtr fn)
         {
-            RambleNode = node; Fn = fn;
+            RantNode = node; Fn = fn;
             node.RegisterHandle(this);
         }
 
-        // Pin a RambleCallOpts for one native call (IntPtr.Zero when undirected).
+        // Pin a RantCallOpts for one native call (IntPtr.Zero when undirected).
         private static GCHandle OptsHandle(uint provider, out IntPtr ptr)
         {
             if (provider == 0) { ptr = IntPtr.Zero; return default(GCHandle); }
-            var g = GCHandle.Alloc(new RambleCallOpts[] { new RambleCallOpts { provider = provider } },
+            var g = GCHandle.Alloc(new RantCallOpts[] { new RantCallOpts { provider = provider } },
                                    GCHandleType.Pinned);
             ptr = g.AddrOfPinnedObject();
             return g;
@@ -2324,16 +2324,16 @@ namespace Ramble
 
         /// <summary>Blocking call: drives the loop until the response or timeoutMs, negative =
         /// the default. Refused from a callback or under a service thread. Never throws.</summary>
-        public RambleResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
+        public RantResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
-            var r = new RambleResponse();
-            RambleResponseNative o;
+            var r = new RantResponse();
+            RantResponseNative o;
             int rc;
             GCHandle og = OptsHandle(provider, out IntPtr optp);
             try
             {
                 using (var p = new PinnedBytes(request))
-                    rc = Native.ramble_function_call(Fn, p.B, out o, timeoutMs, optp);
+                    rc = Native.rant_function_call(Fn, p.B, out o, timeoutMs, optp);
             }
             finally { if (og.IsAllocated) og.Free(); }
             if (rc == 1)
@@ -2355,48 +2355,48 @@ namespace Ramble
 
         /// <summary>Async call: the Task completes with the outcome and never faults. The
         /// response fires from the polling thread and continuations run off it.</summary>
-        public Task<RambleResponse> CallAsync(byte[] request, uint provider = 0)
+        public Task<RantResponse> CallAsync(byte[] request, uint provider = 0)
         {
             // A dispatcher already completes on the thread the caller chose, so continuations
             // belong there. With none, keep them off the polling thread.
-            var tcs = new TaskCompletionSource<RambleResponse>(
-                RambleNode.CallbackDispatcher != null ? TaskCreationOptions.None
+            var tcs = new TaskCompletionSource<RantResponse>(
+                RantNode.CallbackDispatcher != null ? TaskCreationOptions.None
                                                     : TaskCreationOptions.RunContinuationsAsynchronously);
-            long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, RambleNode = RambleNode });
-            RambleNode.RegisterAsync(id);
+            long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, RantNode = RantNode });
+            RantNode.RegisterAsync(id);
             int rc;
             GCHandle og = OptsHandle(provider, out IntPtr optp);
             try
             {
                 using (var p = new PinnedBytes(request))
-                    rc = Native.ramble_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
+                    rc = Native.rant_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
             }
             finally { if (og.IsAllocated) og.Free(); }
             if (rc != 0)
             {
                 Patterns.TakeAsync(id);
-                RambleNode.UnregisterAsync(id);
-                tcs.TrySetResult(new RambleResponse { SendStatus = (SendStatus)rc });
+                RantNode.UnregisterAsync(id);
+                tcs.TrySetResult(new RantResponse { SendStatus = (SendStatus)rc });
             }
             return tcs.Task;
         }
 
         /// <summary>Providers currently matched (the definition side present).</summary>
-        public int MatchCount => Native.ramble_function_match_count(Fn);
+        public int MatchCount => Native.rant_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
 
         /// <summary>Retire the remote: park its channels and release the name. Every outstanding
         /// call completes Cancelled. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.ramble_function_retire(Fn);
+            var rc = (SendStatus)Native.rant_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: tasks --------------------------------------------------------
@@ -2416,7 +2416,7 @@ namespace Ramble
         public ulong RecvUs { get; }
         public ulong WrittenUs { get; }
 
-        internal TaskContext(IntPtr fn, ulong token, CancellationToken ct, RambleRequest r)
+        internal TaskContext(IntPtr fn, ulong token, CancellationToken ct, RantRequest r)
         {
             _fn = fn; _token = token;
             CancellationToken = ct;
@@ -2429,13 +2429,13 @@ namespace Ramble
         public SendStatus Progress(byte[] value)
         {
             using (var p = new PinnedBytes(value))
-                return (SendStatus)Native.ramble_function_progress(_fn, _token, p.B);
+                return (SendStatus)Native.rant_function_progress(_fn, _token, p.B);
         }
 
         /// <summary>Convenience view of CancellationToken (with the native flag as a
         /// backstop).</summary>
         public bool Cancelled => CancellationToken.IsCancellationRequested
-            || Native.ramble_function_cancelled(_fn, _token) == 1;
+            || Native.rant_function_cancelled(_fn, _token) == 1;
     }
 
     /// <summary>The untyped implementation side of a task. The handler is an async delegate
@@ -2443,19 +2443,19 @@ namespace Ramble
     public class TaskDefinition : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly RambleNode RambleNode;
+        internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public TaskDefinition(RambleNode node, string name, Schema requestSchema, Schema progressSchema,
-                              Schema responseSchema, Func<RambleRequest, TaskContext, Task<byte[]>> handler,
+        public TaskDefinition(RantNode node, string name, Schema requestSchema, Schema progressSchema,
+                              Schema responseSchema, Func<RantRequest, TaskContext, Task<byte[]>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
                               int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
                               bool reflectFromMesh = false)
         {
-            RambleNode = node;
-            var co = new RambleTaskOpts
+            RantNode = node;
+            var co = new RantTaskOpts
             {
                 keep_last = (ushort)keepLast,
                 reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
@@ -2479,7 +2479,7 @@ namespace Ramble
                 box.Handler = r => RunCall(b, c, handler, r);
                 id = Patterns.AddBox(box);
             }
-            Fn = Native.ramble_node_create_task_definition(node.Handle, Codec.CStr(name),
+            Fn = Native.rant_node_create_task_definition(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
@@ -2495,7 +2495,7 @@ namespace Ramble
                 node.RegisterPatternBox(id);
                 node.RegisterPatternBox(cancelId);
                 // the definition's ONE native cancel slot fans out to the per-call CTSes
-                Native.ramble_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
+                Native.rant_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
             }
             node.RetainSchema(requestSchema);
             node.RetainSchema(progressSchema);
@@ -2506,7 +2506,7 @@ namespace Ramble
         // Poll thread: defer, which implies RUNNING, arm the per call CancellationTokenSource,
         // invoke the async delegate. Wherever its completion lands answers the call.
         private static void RunCall(Patterns.RequestBox box, Patterns.TaskCancelBox cancels,
-                                    Func<RambleRequest, TaskContext, Task<byte[]>> handler, RambleRequest r)
+                                    Func<RantRequest, TaskContext, Task<byte[]>> handler, RantRequest r)
         {
             Deferred d = r.Defer();
             ulong token = d.Token;
@@ -2530,20 +2530,20 @@ namespace Ramble
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
-        public int CallerCount => Native.ramble_function_match_count(Fn);
+        public int CallerCount => Native.rant_function_match_count(Fn);
 
         /// <summary>Retire the definition: every live deferred call answers Cancelled while the
         /// channels are up, a later completion is refused. Refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.ramble_function_retire(Fn);
+            var rc = (SendStatus)Native.rant_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
     /// <summary>One task progress update, the untyped form. Value is the payload copied out,
@@ -2565,18 +2565,18 @@ namespace Ramble
     public class RemoteTask : INodeHandle
     {
         internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
-        internal readonly RambleNode RambleNode;
+        internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public RemoteTask(RambleNode node, string name, Schema requestSchema = null,
+        public RemoteTask(RantNode node, string name, Schema requestSchema = null,
                           Schema progressSchema = null, Schema responseSchema = null,
                           bool progressBestEffort = false, int progressKeepLast = 0,
                           int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
                           bool reflectFromMesh = false)
         {
-            RambleNode = node;
-            var co = new RambleTaskOpts
+            RantNode = node;
+            var co = new RantTaskOpts
             {
                 keep_last = (ushort)keepLast,
                 reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
@@ -2585,7 +2585,7 @@ namespace Ramble
                 backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
                 timeout_us = (uint)timeoutMs * 1000u,
             };
-            Fn = Native.ramble_node_create_remote_task(node.Handle, Codec.CStr(name),
+            Fn = Native.rant_node_create_remote_task(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
@@ -2599,13 +2599,13 @@ namespace Ramble
 
         /// <summary>Start the task: the Task completes with the terminal outcome and never
         /// faults. progress fires per update, null for RUNNING. The token cancels.</summary>
-        public Task<RambleResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
+        public Task<RantResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
                                             CancellationToken cancellationToken = default, uint provider = 0)
             => CallAsync(request, out _, progress, cancellationToken, provider);
 
         /// <summary>As above, and callId receives the call id at commit, the handle for Cancel
         /// from anywhere. 0 when the request never committed.</summary>
-        public Task<RambleResponse> CallAsync(byte[] request, out uint callId,
+        public Task<RantResponse> CallAsync(byte[] request, out uint callId,
                                             IProgress<TaskProgress> progress = null,
                                             CancellationToken cancellationToken = default, uint provider = 0)
         {
@@ -2614,20 +2614,20 @@ namespace Ramble
             return CallCore(request, out callId, sink, cancellationToken, provider);
         }
 
-        internal Task<RambleResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
+        internal Task<RantResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
                                              CancellationToken cancellationToken, uint provider)
         {
             // A dispatcher already completes on the thread the caller chose, so continuations
             // belong there. With none, keep them off the polling thread.
-            var tcs = new TaskCompletionSource<RambleResponse>(
-                RambleNode.CallbackDispatcher != null ? TaskCreationOptions.None
+            var tcs = new TaskCompletionSource<RantResponse>(
+                RantNode.CallbackDispatcher != null ? TaskCreationOptions.None
                                                     : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall
             {
-                Tcs = tcs, RambleNode = RambleNode, OnProgress = sink,
+                Tcs = tcs, RantNode = RantNode, OnProgress = sink,
             });
-            RambleNode.RegisterAsync(id);
-            var opts = new RambleCallOpts[1];
+            RantNode.RegisterAsync(id);
+            var opts = new RantCallOpts[1];
             opts[0].provider = provider;
             if (sink != null)
             {
@@ -2642,7 +2642,7 @@ namespace Ramble
             {
                 opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit
                 using (var p = new PinnedBytes(request))
-                    rc = Native.ramble_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
+                    rc = Native.rant_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
                                                          optsHandle.AddrOfPinnedObject());
             }
             finally
@@ -2654,8 +2654,8 @@ namespace Ramble
             if (rc != 0)
             {
                 Patterns.TakeAsync(id);
-                RambleNode.UnregisterAsync(id);
-                tcs.TrySetResult(new RambleResponse { SendStatus = (SendStatus)rc });
+                RantNode.UnregisterAsync(id);
+                tcs.TrySetResult(new RantResponse { SendStatus = (SendStatus)rc });
                 return tcs.Task;
             }
             if (cancellationToken.CanBeCanceled)
@@ -2672,24 +2672,24 @@ namespace Ramble
 
         /// <summary>Request cancellation of the call. Cooperative and never acked, the terminal
         /// status answers. BadRole when the provider declared noCancel, State if done.</summary>
-        public SendStatus Cancel(uint callId) => (SendStatus)Native.ramble_function_cancel(Fn, callId);
+        public SendStatus Cancel(uint callId) => (SendStatus)Native.rant_function_cancel(Fn, callId);
 
         /// <summary>Providers currently matched (the definition side present).</summary>
-        public int MatchCount => Native.ramble_function_match_count(Fn);
+        public int MatchCount => Native.rant_function_match_count(Fn);
         public bool HasDefinition => MatchCount > 0;
 
         /// <summary>Retire the remote: every outstanding call completes Cancelled. Unusable
         /// after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.ramble_function_retire(Fn);
+            var rc = (SendStatus)Native.rant_function_retire(Fn);
             if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Fn != IntPtr.Zero && Native.ramble_function_refresh(Fn) == 1;
+        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: variables ----------------------------------------------------
@@ -2715,26 +2715,26 @@ namespace Ramble
     public class VariableDefinition : INodeHandle
     {
         internal IntPtr Var;   // zeroed by Retire, and by the node at Close
-        internal readonly RambleNode RambleNode;
+        internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Var = IntPtr.Zero; }
         internal readonly string Name;
 
-        public VariableDefinition(RambleNode node, string name, Schema schema, byte[] initial = null,
+        public VariableDefinition(RantNode node, string name, Schema schema, byte[] initial = null,
                                   bool readOnly = false, bool allowForce = false,
                                   int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
                                   bool reflectFromMesh = false)
             : this(node, name, schema, initial, readOnly, allowForce, catchUp, keepLast,
                    backpressureWaitMs, reflectFromMesh, true) { }
 
-        private protected VariableDefinition(RambleNode node, string name, Schema schema, byte[] initial,
+        private protected VariableDefinition(RantNode node, string name, Schema schema, byte[] initial,
                                              bool readOnly, bool allowForce, int catchUp,
                                              int keepLast, int backpressureWaitMs,
                                              bool reflectFromMesh, bool definition)
         {
-            RambleNode = node;
+            RantNode = node;
             Name = name;
-            var co = new RambleVariableOpts
+            var co = new RantVariableOpts
             {
                 access = (byte)(readOnly ? 1 : 0),
                 allow_force = (byte)(allowForce ? 1 : 0),
@@ -2747,9 +2747,9 @@ namespace Ramble
             {
                 co.initial = p.B;
                 Var = definition
-                    ? Native.ramble_node_create_variable_definition(node.Handle, Codec.CStr(name),
+                    ? Native.rant_node_create_variable_definition(node.Handle, Codec.CStr(name),
                           schema != null ? schema.Handle : IntPtr.Zero, ref co)
-                    : Native.ramble_node_create_remote_variable(node.Handle, Codec.CStr(name),
+                    : Native.rant_node_create_remote_variable(node.Handle, Codec.CStr(name),
                           schema != null ? schema.Handle : IntPtr.Zero, ref co);
             }
             if (Var == IntPtr.Zero)
@@ -2765,40 +2765,40 @@ namespace Ramble
         {
             value = null;
             // the returned view is valid only until the next poll: copy under the node lock
-            Native.ramble_node_lock(RambleNode.Handle);
+            Native.rant_node_lock(RantNode.Handle);
             try
             {
-                RambleBytes b;
-                if (Native.ramble_variable_get(Var, out b) != 1) return false;
+                RantBytes b;
+                if (Native.rant_variable_get(Var, out b) != 1) return false;
                 value = Codec.Bytes(b);
                 return true;
             }
-            finally { Native.ramble_node_unlock(RambleNode.Handle); }
+            finally { Native.rant_node_unlock(RantNode.Handle); }
         }
 
         /// <summary>Set the value: apply and publish, or send over the set channel. BadRole =
         /// the owner advertises no set channel.</summary>
         public SendStatus Set(byte[] value)
         {
-            using (var p = new PinnedBytes(value)) return (SendStatus)Native.ramble_variable_set(Var, p.B);
+            using (var p = new PinnedBytes(value)) return (SendStatus)Native.rant_variable_set(Var, p.B);
         }
 
         /// <summary>Force the value: writes are absorbed into the shadow source until Unforce
         /// restores the latest absorbed set. Needs allowForce on the definition.</summary>
         public SendStatus Force(byte[] value)
         {
-            using (var p = new PinnedBytes(value)) return (SendStatus)Native.ramble_variable_force(Var, p.B);
+            using (var p = new PinnedBytes(value)) return (SendStatus)Native.rant_variable_force(Var, p.B);
         }
-        public SendStatus Unforce() => (SendStatus)Native.ramble_variable_unforce(Var);
-        public bool Forced => Native.ramble_variable_forced(Var) == 1;
+        public SendStatus Unforce() => (SendStatus)Native.rant_variable_unforce(Var);
+        public bool Forced => Native.rant_variable_forced(Var) == 1;
 
         /// <summary>Remotes matched to this definition (on a RemoteVariable: owners
         /// matched, 0 = no owner present).</summary>
-        public int RemoteCount => Native.ramble_variable_match_count(Var);
+        public int RemoteCount => Native.rant_variable_match_count(Var);
 
         /// <summary>Block driving the loop until a value exists or timeoutMs elapses. Refused
         /// from a callback or under a service thread.</summary>
-        public bool Wait(int timeoutMs) => Native.ramble_variable_wait(Var, timeoutMs) == 1;
+        public bool Wait(int timeoutMs) => Native.rant_variable_wait(Var, timeoutMs) == 1;
 
         /// <summary>Observe changes: fires on every state change and replays the current value
         /// at registration, inline on the thread that applied the write. Null clears.</summary>
@@ -2822,8 +2822,8 @@ namespace Ramble
             if (handler == null)
             {
                 lock (list) list.Clear();
-                if (change) { Native.ramble_variable_on_change(Var, null, IntPtr.Zero); _changeBound = false; }
-                else { Native.ramble_variable_on_write(Var, null, IntPtr.Zero); _writeBound = false; }
+                if (change) { Native.rant_variable_on_change(Var, null, IntPtr.Zero); _changeBound = false; }
+                else { Native.rant_variable_on_write(Var, null, IntPtr.Zero); _writeBound = false; }
                 return null;
             }
             bool bound = change ? _changeBound : _writeBound;
@@ -2835,11 +2835,11 @@ namespace Ramble
                 long id = Patterns.AddBox(new Patterns.VarBox
                 {
                     Handler = u => Fan(l, ch, u),
-                    Node = RambleNode,
+                    Node = RantNode,
                 });
-                RambleNode.RegisterPatternBox(id);
-                if (change) { Native.ramble_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
-                else { Native.ramble_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
+                RantNode.RegisterPatternBox(id);
+                if (change) { Native.rant_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
+                else { Native.rant_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
             }
             else if (change)
             {
@@ -2848,7 +2848,7 @@ namespace Ramble
                 if (had)
                 {
                     try { handler(last); }     // late observer: the replay it missed
-                    catch (Exception e) { Console.Error.WriteLine("ramble variable observer: " + e); }
+                    catch (Exception e) { Console.Error.WriteLine("rant variable observer: " + e); }
                 }
             }
             return new Observer(list, handler);
@@ -2865,7 +2865,7 @@ namespace Ramble
             for (int i = 0; i < hs.Length; i++)
             {
                 try { hs[i](u); }
-                catch (Exception e) { Console.Error.WriteLine("ramble variable observer: " + e); }
+                catch (Exception e) { Console.Error.WriteLine("rant variable observer: " + e); }
             }
         }
 
@@ -2890,21 +2890,21 @@ namespace Ramble
         /// same name handle is shadowed. Unusable after, refused from a callback.</summary>
         public SendStatus Retire()
         {
-            var rc = (SendStatus)Native.ramble_variable_retire(Var);
+            var rc = (SendStatus)Native.rant_variable_retire(Var);
             if (rc == SendStatus.Ok) Var = IntPtr.Zero;
             return rc;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => Var != IntPtr.Zero && Native.ramble_variable_refresh(Var) == 1;
+        public bool Refresh() => Var != IntPtr.Zero && Native.rant_variable_refresh(Var) == 1;
     }
 
     /// <summary>A reference to a variable owned by another node (untyped): reads see
     /// the cached latest, writes go over the set channel (dumb writes, no response).</summary>
     public class RemoteVariable : VariableDefinition
     {
-        public RemoteVariable(RambleNode node, string name, Schema schema = null,
+        public RemoteVariable(RantNode node, string name, Schema schema = null,
                               int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
                               bool reflectFromMesh = false)
             : base(node, name, schema, null, false, false, catchUp, keepLast,
@@ -2923,7 +2923,7 @@ namespace Ramble
     {
         internal readonly Topic T;
 
-        public Publisher(RambleNode node, string name, Schema schema = null, Qos qos = null)
+        public Publisher(RantNode node, string name, Schema schema = null, Qos qos = null)
         {
             T = new Topic(node, name, schema, Role.PubOnly, qos);
         }
@@ -2942,14 +2942,14 @@ namespace Ramble
     {
         internal readonly Topic T;
 
-        public Subscriber(RambleNode node, string name, Schema schema = null,
-                          Action<RambleMessage> handler = null, Qos qos = null)
+        public Subscriber(RantNode node, string name, Schema schema = null,
+                          Action<RantMessage> handler = null, Qos qos = null)
         {
             T = new Topic(node, name, schema, Role.SubOnly, qos);
             if (handler != null) node.AddSubHandler(T.Index, handler);
         }
 
-        public bool TryTake(out RambleMessage message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
+        public bool TryTake(out RantMessage message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => T.Dispatch(maxMsgs, timeoutMs);
         public Topic Topic => T;
     }
@@ -2958,12 +2958,12 @@ namespace Ramble
 
     /// <summary>The typed request view inside a full-form function handler: reply with
     /// a typed value, Fail, or Defer. Valid only inside the handler callback.</summary>
-    public sealed class RambleRequest<TRsp>
+    public sealed class RantRequest<TRsp>
     {
-        private readonly RambleRequest _core;
+        private readonly RantRequest _core;
         private readonly Schema _rsp;
 
-        internal RambleRequest(RambleRequest core, Schema rsp) { _core = core; _rsp = rsp; }
+        internal RantRequest(RantRequest core, Schema rsp) { _core = core; _rsp = rsp; }
 
         public byte[] Data => _core.Data;
         public uint Caller => _core.Caller;
@@ -2991,19 +2991,19 @@ namespace Ramble
     }
 
     /// <summary>The typed implementation side. Simple form: the return value is the reply
-    /// and a thrown exception answers AppError. Full form: RambleRequest&lt;TRsp&gt;.</summary>
+    /// and a thrown exception answers AppError. Full form: RantRequest&lt;TRsp&gt;.</summary>
     public sealed class FunctionDefinition<TReq, TRsp>
     {
         private readonly FunctionDefinition _core;
         private readonly Schema _req, _rsp;
 
-        public FunctionDefinition(RambleNode node, string name, Func<TReq, TRsp> handler,
+        public FunctionDefinition(RantNode node, string name, Func<TReq, TRsp> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
                                   bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Action<RambleRequest> h = null;
+            Action<RantRequest> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3021,13 +3021,13 @@ namespace Ramble
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
-        public FunctionDefinition(RambleNode node, string name, Func<TReq, Task<TRsp>> handler,
+        public FunctionDefinition(RantNode node, string name, Func<TReq, Task<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
                                   bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Func<RambleRequest, Task<byte[]>> h = null;
+            Func<RantRequest, Task<byte[]>> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3044,13 +3044,13 @@ namespace Ramble
                                            reflectFromMesh: reflectFromMesh);
         }
 
-        public FunctionDefinition(RambleNode node, string name, Action<TReq, RambleRequest<TRsp>> handler,
+        public FunctionDefinition(RantNode node, string name, Action<TReq, RantRequest<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
                                   bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
             _rsp = new Schema(typeof(TRsp));
-            Action<RambleRequest> h = null;
+            Action<RantRequest> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3058,7 +3058,7 @@ namespace Ramble
                 {
                     object q;
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail("request decode failed"); return; }
-                    handler((TReq)q, new RambleRequest<TRsp>(r, rsp));
+                    handler((TReq)q, new RantRequest<TRsp>(r, rsp));
                 };
             }
             _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
@@ -3074,9 +3074,9 @@ namespace Ramble
 
     /// <summary>The typed owning call outcome. Reading Value when not Ok throws
     /// CallException. Status never throws.</summary>
-    public sealed class RambleResponse<TRsp>
+    public sealed class RantResponse<TRsp>
     {
-        internal RambleResponse Core;
+        internal RantResponse Core;
         internal Schema RspSchema;
 
         public CallStatus Status => Core.Status;
@@ -3084,7 +3084,7 @@ namespace Ramble
         public uint Provider => Core.Provider;
         public ulong WrittenUs => Core.WrittenUs;
         public SendStatus SendStatus => Core.SendStatus;
-        /// <summary>Human-readable outcome text (see RambleResponse.Message).</summary>
+        /// <summary>Human-readable outcome text (see RantResponse.Message).</summary>
         public string Message => Core.Message;
 
         public TRsp Value
@@ -3109,7 +3109,7 @@ namespace Ramble
         private readonly RemoteFunction _core;
         private readonly Schema _req, _rsp;
 
-        public RemoteFunction(RambleNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
+        public RemoteFunction(RantNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
                               bool reflectFromMesh = false)
         {
             _req = new Schema(typeof(TReq));
@@ -3120,14 +3120,14 @@ namespace Ramble
 
         /// <summary>BLOCKING call (see the untyped RemoteFunction.Call). provider directs it
         /// at one definition by peer id (0 = undirected, first answer wins).</summary>
-        public RambleResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
-            => new RambleResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs, provider), RspSchema = _rsp };
+        public RantResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
+            => new RantResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs, provider), RspSchema = _rsp };
 
         /// <summary>Async call: the Task NEVER faults, inspect Status.</summary>
-        public async Task<RambleResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
+        public async Task<RantResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
         {
-            RambleResponse core = await _core.CallAsync(_req.Encode(request), provider).ConfigureAwait(false);
-            return new RambleResponse<TRsp> { Core = core, RspSchema = _rsp };
+            RantResponse core = await _core.CallAsync(_req.Encode(request), provider).ConfigureAwait(false);
+            return new RantResponse<TRsp> { Core = core, RspSchema = _rsp };
         }
 
         public int MatchCount => _core.MatchCount;
@@ -3163,7 +3163,7 @@ namespace Ramble
         private readonly TaskDefinition _core;
         private readonly Schema _req, _prg, _rsp;
 
-        public TaskDefinition(RambleNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+        public TaskDefinition(RantNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
                               int backpressureWaitMs = 0, int timeoutMs = 0,
@@ -3172,7 +3172,7 @@ namespace Ramble
             _req = new Schema(typeof(TReq));
             _prg = new Schema(typeof(TPrg));
             _rsp = new Schema(typeof(TRsp));
-            Func<RambleRequest, TaskContext, Task<byte[]>> h = null;
+            Func<RantRequest, TaskContext, Task<byte[]>> h = null;
             if (handler != null)
             {
                 Schema req = _req, prg = _prg, rsp = _rsp;
@@ -3204,7 +3204,7 @@ namespace Ramble
         private readonly RemoteTask _core;
         private readonly Schema _req, _prg, _rsp;
 
-        public RemoteTask(RambleNode node, string name, bool progressBestEffort = false,
+        public RemoteTask(RantNode node, string name, bool progressBestEffort = false,
                           int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0,
                           bool reflectFromMesh = false)
         {
@@ -3218,14 +3218,14 @@ namespace Ramble
 
         /// <summary>Start the task: the Task never faults. progress fires per typed update and
         /// skips the valueless RUNNING ack. The token requests cooperative cancellation.</summary>
-        public Task<RambleResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
+        public Task<RantResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
                                                   uint provider = 0)
             => CallAsync(request, out _, progress, cancellationToken, provider);
 
         /// <summary>As above, and callId receives the call id at commit, the handle for Cancel.
         /// 0 when the request never committed.</summary>
-        public Task<RambleResponse<TRsp>> CallAsync(TReq request, out uint callId,
+        public Task<RantResponse<TRsp>> CallAsync(TReq request, out uint callId,
                                                   IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
                                                   uint provider = 0)
@@ -3243,13 +3243,13 @@ namespace Ramble
                         pr.Report((TPrg)v);
                 };
             }
-            Task<RambleResponse> core = _core.CallCore(_req.Encode(request), out callId, sink,
+            Task<RantResponse> core = _core.CallCore(_req.Encode(request), out callId, sink,
                                                      cancellationToken, provider);
             return Wrap(core);
         }
 
-        private async Task<RambleResponse<TRsp>> Wrap(Task<RambleResponse> core)
-            => new RambleResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
+        private async Task<RantResponse<TRsp>> Wrap(Task<RantResponse> core)
+            => new RantResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
 
         /// <summary>Cancel the call callId, see the untyped RemoteTask.Cancel.</summary>
         public SendStatus Cancel(uint callId) => _core.Cancel(callId);
@@ -3262,7 +3262,7 @@ namespace Ramble
     }
 
     /// <summary>The typed authoritative variable. Value get throws while no value exists,
-    /// Value set throws RambleException on a non Ok status. Set returns the status.</summary>
+    /// Value set throws RantException on a non Ok status. Set returns the status.</summary>
     public class VariableDefinition<T>
     {
         private protected VariableDefinition _core;
@@ -3270,7 +3270,7 @@ namespace Ramble
 
         private protected VariableDefinition() { }
 
-        public VariableDefinition(RambleNode node, string name, bool readOnly = false,
+        public VariableDefinition(RantNode node, string name, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
                                   int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
@@ -3280,7 +3280,7 @@ namespace Ramble
         }
 
         /// <summary>Overload with an initial value (the value before any set).</summary>
-        public VariableDefinition(RambleNode node, string name, T initial, bool readOnly = false,
+        public VariableDefinition(RantNode node, string name, T initial, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
                                   int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
@@ -3303,7 +3303,7 @@ namespace Ramble
             {
                 SendStatus st = Set(value);
                 if (st != SendStatus.Ok)
-                    throw new RambleException(st, "variable '" + _core.Name + "' set refused: " + st);
+                    throw new RantException(st, "variable '" + _core.Name + "' set refused: " + st);
             }
         }
 
@@ -3354,7 +3354,7 @@ namespace Ramble
     /// definition plus HasDefinition and MatchCount.</summary>
     public sealed class RemoteVariable<T> : VariableDefinition<T>
     {
-        public RemoteVariable(RambleNode node, string name, int catchUp = 0, int keepLast = 0,
+        public RemoteVariable(RantNode node, string name, int catchUp = 0, int keepLast = 0,
                               int backpressureWaitMs = 0, bool reflectFromMesh = false)
         {
             _schema = new Schema(typeof(T));
@@ -3373,7 +3373,7 @@ namespace Ramble
         private readonly Publisher _core;
         private readonly Schema _schema;
 
-        public Publisher(RambleNode node, string name, Qos qos = null)
+        public Publisher(RantNode node, string name, Qos qos = null)
         {
             _schema = new Schema(typeof(T));
             _core = new Publisher(node, name, _schema, qos);
@@ -3393,14 +3393,14 @@ namespace Ramble
     {
         private readonly Subscriber _core;
 
-        public Subscriber(RambleNode node, string name, Action<T> handler = null, Qos qos = null)
+        public Subscriber(RantNode node, string name, Action<T> handler = null, Qos qos = null)
         {
             _core = new Subscriber(node, name, new Schema(typeof(T)),
-                handler == null ? (Action<RambleMessage>)null : m => { if (m.Value is T v) handler(v); },
+                handler == null ? (Action<RantMessage>)null : m => { if (m.Value is T v) handler(v); },
                 qos);
         }
 
-        public Subscriber(RambleNode node, string name, Action<T, RambleMessage> handler,
+        public Subscriber(RantNode node, string name, Action<T, RantMessage> handler,
                           Qos qos = null)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
@@ -3412,7 +3412,7 @@ namespace Ramble
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
-            RambleMessage m;
+            RantMessage m;
             if (!_core.TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
             value = (T)m.Value;
             return true;
@@ -3425,7 +3425,7 @@ namespace Ramble
     // ---- marshaling, allocators, schema codec + reflection ----------------------
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate IntPtr RamblePageFn(IntPtr ptr, UIntPtr size);
+    internal delegate IntPtr RantPageFn(IntPtr ptr, UIntPtr size);
 
     internal static class Codec
     {
@@ -3447,10 +3447,10 @@ namespace Ramble
         };
 
         // --- allocators: managed realloc/free, works on plain .NET and Unity/IL2CPP ---
-        private static readonly RamblePageFn s_page = PageRealloc;
-        internal static readonly RambleAllocFn SchemaAlloc = SchemaReAlloc;
+        private static readonly RantPageFn s_page = PageRealloc;
+        internal static readonly RantAllocFn SchemaAlloc = SchemaReAlloc;
 
-        [MonoPInvokeCallback(typeof(RamblePageFn))]
+        [MonoPInvokeCallback(typeof(RantPageFn))]
         private static IntPtr PageRealloc(IntPtr ptr, UIntPtr size)
         {
             if ((ulong)size == 0) { if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr); return IntPtr.Zero; }
@@ -3458,7 +3458,7 @@ namespace Ramble
             return ptr == IntPtr.Zero ? Marshal.AllocHGlobal(cb) : Marshal.ReAllocHGlobal(ptr, cb);
         }
 
-        [MonoPInvokeCallback(typeof(RambleAllocFn))]
+        [MonoPInvokeCallback(typeof(RantAllocFn))]
         private static IntPtr SchemaReAlloc(IntPtr user, IntPtr ptr, UIntPtr size)
         {
             if ((ulong)size == 0) { if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr); return IntPtr.Zero; }
@@ -3466,9 +3466,9 @@ namespace Ramble
             return ptr == IntPtr.Zero ? Marshal.AllocHGlobal(cb) : Marshal.ReAllocHGlobal(ptr, cb);
         }
 
-        internal static RambleAllocator DefaultAllocator()
+        internal static RantAllocator DefaultAllocator()
         {
-            return new RambleAllocator
+            return new RantAllocator
             {
                 page_realloc = Marshal.GetFunctionPointerForDelegate(s_page),
                 page_size = 64u * 1024u,
@@ -3497,7 +3497,7 @@ namespace Ramble
 
         internal static void FreeCStr(IntPtr p) { if (p != IntPtr.Zero) Marshal.FreeHGlobal(p); }
 
-        internal static string Str(RambleStringView s)
+        internal static string Str(RantStringView s)
         {
             if (s.data == IntPtr.Zero || (ulong)s.len == 0) return "";
             int n = (int)(ulong)s.len;
@@ -3506,7 +3506,7 @@ namespace Ramble
             return Encoding.UTF8.GetString(b);
         }
 
-        internal static byte[] Bytes(RambleBytes d)
+        internal static byte[] Bytes(RantBytes d)
         {
             if (d.data == IntPtr.Zero || (ulong)d.len == 0) return Array.Empty<byte>();
             int n = (int)(ulong)d.len;
@@ -3599,47 +3599,47 @@ namespace Ramble
                     s_specs[t] = cached;
                     return cached;
                 }
-                var attr = (RambleSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(RambleSchemaAttribute));
+                var attr = (RantSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(RantSchemaAttribute));
                 string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : t.Name;
                 FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
                 Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));
                 var plans = new List<FieldPlan>();
                 foreach (var f in fields)
                 {
-                    var fa = (RambleFieldAttribute)Attribute.GetCustomAttribute(f, typeof(RambleFieldAttribute));
-                    var arr = (RambleArrayAttribute)Attribute.GetCustomAttribute(f, typeof(RambleArrayAttribute));
-                    var str = (RambleStringAttribute)Attribute.GetCustomAttribute(f, typeof(RambleStringAttribute));
+                    var fa = (RantFieldAttribute)Attribute.GetCustomAttribute(f, typeof(RantFieldAttribute));
+                    var arr = (RantArrayAttribute)Attribute.GetCustomAttribute(f, typeof(RantArrayAttribute));
+                    var str = (RantStringAttribute)Attribute.GetCustomAttribute(f, typeof(RantStringAttribute));
                     var plan = new FieldPlan { Field = f, WireName = fa != null ? fa.Name : f.Name };
                     byte k;
-                    if (arr != null)   // [RambleArray(N)]: a fixed array
+                    if (arr != null)   // [RantArray(N)]: a fixed array
                     {
                         Type et = f.FieldType.GetElementType();
                         if (et == typeof(string))
                         {
                             if (str == null)
                                 throw new SchemaException("string array field " + f.Name
-                                    + " needs [RambleString(cap)] for its element capacity");
+                                    + " needs [RantString(cap)] for its element capacity");
                             plan.Kind = ARR; plan.Elem = STR; plan.Count = arr.Count; plan.StrCap = str.Cap;
                         }
                         else if (et != null && ScalarKind.TryGetValue(et, out k))
                         { plan.Kind = ARR; plan.Elem = k; plan.Count = arr.Count; }
                         else throw new SchemaException("array field " + f.Name
-                            + " element must be a scalar or a [RambleString] string");
+                            + " element must be a scalar or a [RantString] string");
                     }
-                    else if (f.FieldType.IsArray)   // T[] without [RambleArray]: a variable array
+                    else if (f.FieldType.IsArray)   // T[] without [RantArray]: a variable array
                     {
                         Type et = f.FieldType.GetElementType();
                         if (et == typeof(string))
                         {
                             if (str == null)
                                 throw new SchemaException("variable string array field " + f.Name
-                                    + " needs [RambleString(cap)] for its element capacity");
+                                    + " needs [RantString(cap)] for its element capacity");
                             plan.Kind = VARR; plan.Elem = STR; plan.StrCap = str.Cap;
                         }
                         else if (et != null && ScalarKind.TryGetValue(et, out k))
                         { plan.Kind = VARR; plan.Elem = k; }
                         else throw new SchemaException("variable array field " + f.Name
-                            + " element must be a scalar or a [RambleString] string");
+                            + " element must be a scalar or a [RantString] string");
                     }
                     else if (f.FieldType == typeof(string))
                     {
@@ -3656,13 +3656,13 @@ namespace Ramble
                     else if (ScalarKind.TryGetValue(f.FieldType, out k)) { plan.Kind = k; }
                     else if (StructLike(f.FieldType)) { plan.Kind = STRUCT; plan.Nested = f.FieldType; }
                     else throw new SchemaException("unsupported field type " + f.FieldType + " on " + f.Name
-                        + " (use scalars, strings ([RambleString] = capped, plain = variable), arrays "
-                        + "([RambleArray] = fixed, plain = variable), a Dictionary<string,object> map, "
+                        + " (use scalars, strings ([RantString] = capped, plain = variable), arrays "
+                        + "([RantArray] = fixed, plain = variable), a Dictionary<string,object> map, "
                         + "or nested structs)");
                     // a standard type names the field's type: on the field, or on its struct
-                    var tn = (RambleTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(RambleTypeNameAttribute));
+                    var tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(RantTypeNameAttribute));
                     if (tn == null && plan.Nested != null)
-                        tn = (RambleTypeNameAttribute)Attribute.GetCustomAttribute(plan.Nested, typeof(RambleTypeNameAttribute));
+                        tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(plan.Nested, typeof(RantTypeNameAttribute));
                     if (tn != null) plan.TypeName = tn.Name;
                     plans.Add(plan);
                 }
@@ -3730,12 +3730,12 @@ namespace Ramble
         // one implementation of the spelling across every binding.
         internal static string SchemaDsl(IntPtr s)
         {
-            uint need = Native.ramble_schema_print(s, IntPtr.Zero, UIntPtr.Zero);
+            uint need = Native.rant_schema_print(s, IntPtr.Zero, UIntPtr.Zero);
             if (need == 0) return "";
             IntPtr buf = Marshal.AllocHGlobal((int)need + 1);
             try
             {
-                Native.ramble_schema_print(s, buf, (UIntPtr)(need + 1));
+                Native.rant_schema_print(s, buf, (UIntPtr)(need + 1));
                 return Marshal.PtrToStringAnsi(buf) ?? "";
             }
             finally { Marshal.FreeHGlobal(buf); }
@@ -3745,10 +3745,10 @@ namespace Ramble
         // so its message is a single value (encode takes it, decode returns it).
         internal static bool IsValueRoot(IntPtr s)
         {
-            if (s == IntPtr.Zero || Native.ramble_schema_field_count(s) != 1) return false;
-            if ((ulong)Native.ramble_schema_name(s).len != 0) return false;
-            RambleSchemaFieldInfo info;
-            if (Native.ramble_schema_field_at(s, 0, out info) == 0) return false;
+            if (s == IntPtr.Zero || Native.rant_schema_field_count(s) != 1) return false;
+            if ((ulong)Native.rant_schema_name(s).len != 0) return false;
+            RantSchemaFieldInfo info;
+            if (Native.rant_schema_field_at(s, 0, out info) == 0) return false;
             return info.depth == 0 && (ulong)info.name.len == 0 && info.kind != STRUCT;
         }
 
@@ -3787,11 +3787,11 @@ namespace Ramble
         private static string EnumBodyFromSchema(IntPtr s, ushort field)
         {
             var parts = new List<string>();
-            ushort n = Native.ramble_schema_enum_count(s, field);
+            ushort n = Native.rant_schema_enum_count(s, field);
             for (ushort k = 0; k < n; k++)
             {
-                long val; RambleStringView nm;
-                if (Native.ramble_schema_enum_variant(s, field, k, out val, out nm) != 0)
+                long val; RantStringView nm;
+                if (Native.rant_schema_enum_variant(s, field, k, out val, out nm) != 0)
                     parts.Add(Str(nm) + "=" + val.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             return "{ " + string.Join(", ", parts) + " }";
@@ -3824,15 +3824,15 @@ namespace Ramble
 
             // msg_min is the fixed section plus one empty frame per variable field, and each
             // variable frame then grows by exactly its payload length
-            long cap = (long)Native.ramble_schema_msg_min(s) + varBytes;
+            long cap = (long)Native.rant_schema_msg_min(s) + varBytes;
             byte[] buf = new byte[cap > 0 ? cap : 1];
             GCHandle gh = GCHandle.Alloc(buf, GCHandleType.Pinned);
             try
             {
                 IntPtr p = gh.AddrOfPinnedObject();
-                Native.ramble_schema_message_default(s, p, (UIntPtr)buf.Length);
+                Native.rant_schema_message_default(s, p, (UIntPtr)buf.Length);
                 foreach (var op in ops) ExecuteOp(s, p, (UIntPtr)buf.Length, op);
-                uint n = Native.ramble_schema_msg_len(s, p, (UIntPtr)buf.Length);
+                uint n = Native.rant_schema_msg_len(s, p, (UIntPtr)buf.Length);
                 if (n == buf.Length) return buf;
                 byte[] outb = new byte[n];
                 Array.Copy(buf, outb, n);
@@ -3844,8 +3844,8 @@ namespace Ramble
         // a bare type root: one op on the empty path, the schema's single anonymous field
         private static void CollectRootValue(IntPtr s, object value, List<SetOp> ops, ref long varBytes)
         {
-            RambleSchemaFieldInfo info;
-            if (value == null || Native.ramble_schema_field_at(s, 0, out info) == 0) return;
+            RantSchemaFieldInfo info;
+            if (value == null || Native.rant_schema_field_at(s, 0, out info) == 0) return;
             var op = new SetOp { Cpath = CStr(""), Path = "", Kind = info.kind, Elem = info.elem,
                                  Count = info.count, StrCap = info.str_cap };
             PrepareOp(op, value, ref varBytes);
@@ -3876,11 +3876,11 @@ namespace Ramble
         {
             var names = new List<string>();
             var srcs = new List<System.Collections.IDictionary> { root };
-            ushort n = Native.ramble_schema_field_count(s);
+            ushort n = Native.rant_schema_field_count(s);
             for (ushort i = 0; i < n; i++)
             {
-                RambleSchemaFieldInfo info;
-                Native.ramble_schema_field_at(s, i, out info);
+                RantSchemaFieldInfo info;
+                Native.rant_schema_field_at(s, i, out info);
                 string name = Str(info.name);
                 int d = info.depth;
                 while (names.Count <= d) names.Add(null);
@@ -3947,17 +3947,17 @@ namespace Ramble
                 if (!SetMapBytes(s, buf, cap, cpath, op.Prepared))
                     throw new SchemaException("invalid map for " + op.Path);
             }
-            else if (op.Kind == F32) Native.ramble_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
-            else if (op.Kind == F64) Native.ramble_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
+            else if (op.Kind == F32) Native.rant_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
+            else if (op.Kind == F64) Native.rant_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
             else if (op.Kind == ENUM)   // the backing integer, signed or unsigned per Elem
             {
                 object raw = op.Value is Enum ? Convert.ChangeType(op.Value, Enum.GetUnderlyingType(op.Value.GetType())) : op.Value;
-                if (op.Elem >= I8 && op.Elem <= I64) Native.ramble_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
-                else Native.ramble_set_uint(buf, cap, s, cpath, Convert.ToUInt64(raw));
+                if (op.Elem >= I8 && op.Elem <= I64) Native.rant_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
+                else Native.rant_set_uint(buf, cap, s, cpath, Convert.ToUInt64(raw));
             }
-            else if (op.Kind >= I8 && op.Kind <= I64) Native.ramble_set_int(buf, cap, s, cpath, Convert.ToInt64(op.Value));
-            else if (op.Kind == BOOL) Native.ramble_set_uint(buf, cap, s, cpath, (bool)op.Value ? 1UL : 0UL);
-            else Native.ramble_set_uint(buf, cap, s, cpath, Convert.ToUInt64(op.Value));
+            else if (op.Kind >= I8 && op.Kind <= I64) Native.rant_set_int(buf, cap, s, cpath, Convert.ToInt64(op.Value));
+            else if (op.Kind == BOOL) Native.rant_set_uint(buf, cap, s, cpath, (bool)op.Value ? 1UL : 0UL);
+            else Native.rant_set_uint(buf, cap, s, cpath, Convert.ToUInt64(op.Value));
         }
 
         private static bool SetString(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, string v)
@@ -3966,8 +3966,8 @@ namespace Ramble
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var ds = new RambleStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
-                return Native.ramble_set_string(buf, cap, s, cpath, ds) != 0;
+                var ds = new RantStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
+                return Native.rant_set_string(buf, cap, s, cpath, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -3978,8 +3978,8 @@ namespace Ramble
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var ds = new RambleStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
-                return Native.ramble_set_string_at(buf, cap, s, cpath, index, ds) != 0;
+                var ds = new RantStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
+                return Native.rant_set_string_at(buf, cap, s, cpath, index, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -3990,8 +3990,8 @@ namespace Ramble
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var ds = new RambleStringView { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                return Native.ramble_set_string(buf, cap, s, cpath, ds) != 0;
+                var ds = new RantStringView { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
+                return Native.rant_set_string(buf, cap, s, cpath, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -4001,8 +4001,8 @@ namespace Ramble
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var db = new RambleBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                Native.ramble_set_array(buf, cap, s, cpath, db);
+                var db = new RantBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
+                Native.rant_set_array(buf, cap, s, cpath, db);
             }
             finally { gh.Free(); }
         }
@@ -4012,8 +4012,8 @@ namespace Ramble
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var db = new RambleBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                return Native.ramble_set_map(buf, cap, s, cpath, db) != 0;
+                var db = new RantBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
+                return Native.rant_set_map(buf, cap, s, cpath, db) != 0;
             }
             finally { gh.Free(); }
         }
@@ -4170,18 +4170,18 @@ namespace Ramble
             GCHandle gh = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
-                var mb = new RambleBytes
+                var mb = new RantBytes
                 {
                     data = data.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero,
                     len = (UIntPtr)data.Length
                 };
                 var root = new Dictionary<string, object>();
                 var dests = new List<Dictionary<string, object>> { root };
-                ushort n = Native.ramble_schema_field_count(s);
+                ushort n = Native.rant_schema_field_count(s);
                 for (ushort i = 0; i < n; i++)
                 {
-                    RambleSchemaFieldInfo info;
-                    Native.ramble_schema_field_at(s, i, out info);
+                    RantSchemaFieldInfo info;
+                    Native.rant_schema_field_at(s, i, out info);
                     string name = Str(info.name);
                     int d = info.depth;
                     var parent = dests[d];
@@ -4194,8 +4194,8 @@ namespace Ramble
                     }
                     else
                     {
-                        RambleValue v;
-                        Native.ramble_get_value(mb, s, i, out v);
+                        RantValue v;
+                        Native.rant_get_value(mb, s, i, out v);
                         parent[name] = ValueToObj(v);
                     }
                 }
@@ -4204,7 +4204,7 @@ namespace Ramble
             finally { gh.Free(); }
         }
 
-        private static object ValueToObj(RambleValue v)
+        private static object ValueToObj(RantValue v)
         {
             if (v.kind == STR || v.kind == VSTR)
                 return Encoding.UTF8.GetString(Bytes(v.bytes));
@@ -4241,7 +4241,7 @@ namespace Ramble
         private static Dictionary<string, object> DecodeMapBody(byte[] buf, ref int off, int end, int depth)
         {
             var outd = new Dictionary<string, object>();
-            if (depth > 8 || off + 2 > end) { off = end; return outd; }   // RAMBLE_SCHEMA_MAX_DEPTH
+            if (depth > 8 || off + 2 > end) { off = end; return outd; }   // RANT_SCHEMA_MAX_DEPTH
             int n = (int)ReadLE(buf, off, 2); off += 2;
             for (int e = 0; e < n; e++)
             {

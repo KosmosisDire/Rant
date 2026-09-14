@@ -1,4 +1,4 @@
-/* The Windows and POSIX implementation. The only file in Ramble with an OS ifdef. */
+/* The Windows and POSIX implementation. The only file in Rant with an OS ifdef. */
 
 /* feature test macros must precede the first system header */
 #if !defined(_WIN32)
@@ -38,8 +38,8 @@
   #ifndef SIO_UDP_CONNRESET
   #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
   #endif
-  typedef int i_RambleSocklen;
-  #define RAMBLE__FD(s) ((SOCKET)(s))
+  typedef int i_RantSocklen;
+  #define RANT__FD(s) ((SOCKET)(s))
 #else
   #include <sys/socket.h>
   #include <netinet/in.h>
@@ -55,7 +55,7 @@
     #include <poll.h>
   #endif
   #include <time.h>
-  #ifdef RAMBLE_THREADS
+  #ifdef RANT_THREADS
     #include <pthread.h>
     #if defined(ESP_PLATFORM)
       #include <freertos/FreeRTOS.h>
@@ -66,7 +66,7 @@
   #include <errno.h>
   #include <stdio.h>
   #include <stdlib.h>           /* arc4random_buf */
-  #ifdef RAMBLE_PROC_STATS
+  #ifdef RANT_PROC_STATS
     #if defined(ESP_PLATFORM)
       #include <esp_heap_caps.h>  /* heap_caps_get_* */
       #include <freertos/FreeRTOS.h>
@@ -89,41 +89,41 @@
   #elif defined(__linux__)
     #include <sys/random.h>     /* getrandom */
   #endif
-  typedef socklen_t i_RambleSocklen;
-  #define RAMBLE__FD(s) ((int)(s))
+  typedef socklen_t i_RantSocklen;
+  #define RANT__FD(s) ((int)(s))
 #endif
 
 /* lifecycle */
 #ifdef _WIN32
-static LARGE_INTEGER i_ramble_plat_qpc_freq;   /* set in startup, lazily elsewhere */
-int i_ramble_plat_startup(void){
+static LARGE_INTEGER i_rant_plat_qpc_freq;     /* set in startup, lazily elsewhere */
+int i_rant_plat_startup(void){
     WSADATA w;
     /* both calls are refcounted by the OS per process, so matched calls need no counter here */
     if (WSAStartup(MAKEWORD(2,2), &w) != 0) return 0;
-  #ifndef RAMBLE_NO_HIGHRES_TIMER
+  #ifndef RANT_NO_HIGHRES_TIMER
     timeBeginPeriod(1);  /* the default 15.6 ms tick throttles ACK and repair rates */
   #endif
-    QueryPerformanceFrequency(&i_ramble_plat_qpc_freq);
+    QueryPerformanceFrequency(&i_rant_plat_qpc_freq);
     return 1;
 }
-void i_ramble_plat_cleanup(void){
-  #ifndef RAMBLE_NO_HIGHRES_TIMER
+void i_rant_plat_cleanup(void){
+  #ifndef RANT_NO_HIGHRES_TIMER
     timeEndPeriod(1);
   #endif
     WSACleanup();
 }
 #else
-int  i_ramble_plat_startup(void){ return 1; }
-void i_ramble_plat_cleanup(void){}
+int  i_rant_plat_startup(void){ return 1; }
+void i_rant_plat_cleanup(void){}
 #endif
 
 /* clock */
-uint64_t i_ramble_plat_now_us(void){
+uint64_t i_rant_plat_now_us(void){
 #ifdef _WIN32
     LARGE_INTEGER c;
-    if (!i_ramble_plat_qpc_freq.QuadPart) QueryPerformanceFrequency(&i_ramble_plat_qpc_freq);
+    if (!i_rant_plat_qpc_freq.QuadPart) QueryPerformanceFrequency(&i_rant_plat_qpc_freq);
     QueryPerformanceCounter(&c);
-    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)i_ramble_plat_qpc_freq.QuadPart);
+    return (uint64_t)((c.QuadPart * 1000000ull) / (uint64_t)i_rant_plat_qpc_freq.QuadPart);
 #else
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
@@ -131,7 +131,7 @@ uint64_t i_ramble_plat_now_us(void){
 }
 
 /* entropy and host */
-int i_ramble_plat_random(void *buf, size_t len){
+int i_rant_plat_random(void *buf, size_t len){
 #if defined(_WIN32)
     /* a NULL handle selects the system preferred RNG, 0 is success */
     return BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
@@ -167,7 +167,7 @@ int i_ramble_plat_random(void *buf, size_t len){
 #endif
 }
 
-size_t i_ramble_plat_hostname(char *buf, size_t cap){
+size_t i_rant_plat_hostname(char *buf, size_t cap){
     if (!buf || cap == 0) return 0;
     buf[0] = 0;
 #if defined(ESP_PLATFORM)
@@ -191,7 +191,7 @@ size_t i_ramble_plat_hostname(char *buf, size_t cap){
     return strlen(buf);
 }
 
-uint64_t i_ramble_plat_pid(void){
+uint64_t i_rant_plat_pid(void){
 #ifdef _WIN32
     return (uint64_t)GetCurrentProcessId();
 #else
@@ -200,8 +200,8 @@ uint64_t i_ramble_plat_pid(void){
 }
 
 /* process usage and wall clock */
-#ifdef RAMBLE_PROC_STATS
-int i_ramble_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
+#ifdef RANT_PROC_STATS
+int i_rant_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
                            int *have_cpu){
 #if defined(_WIN32)
     FILETIME created, exited, kern, user; PROCESS_MEMORY_COUNTERS pmc;
@@ -290,7 +290,7 @@ esp_cpu_done:
 #endif
 }
 
-int i_ramble_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
+int i_rant_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
                            uint64_t *min_free_bytes, uint64_t *largest_free_block_bytes){
 #if defined(ESP_PLATFORM)
     if (total_bytes)              *total_bytes = (uint64_t)heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
@@ -304,9 +304,9 @@ int i_ramble_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
     return 0;
 #endif
 }
-#endif /* RAMBLE_PROC_STATS */
+#endif /* RANT_PROC_STATS */
 
-uint64_t i_ramble_plat_wall_us(void){
+uint64_t i_rant_plat_wall_us(void){
 #ifdef _WIN32
     FILETIME ft; ULARGE_INTEGER u;
     GetSystemTimeAsFileTime(&ft);
@@ -318,24 +318,24 @@ uint64_t i_ramble_plat_wall_us(void){
 #endif
 }
 
-void *i_ramble_plat_realloc(void *ptr, size_t size){
+void *i_rant_plat_realloc(void *ptr, size_t size){
     if (size == 0){ free(ptr); return NULL; }
     return realloc(ptr, size);
 }
 
 /* UDP sockets */
-i_RambleSock i_ramble_plat_udp_open(void){
+i_RantSock i_rant_plat_udp_open(void){
 #ifdef _WIN32
     SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
-    return (fd == INVALID_SOCKET) ? RAMBLE_SOCK_BAD : (i_RambleSock)fd;
+    return (fd == INVALID_SOCKET) ? RANT_SOCK_BAD : (i_RantSock)fd;
 #else
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    return (fd < 0) ? RAMBLE_SOCK_BAD : (i_RambleSock)fd;
+    return (fd < 0) ? RANT_SOCK_BAD : (i_RantSock)fd;
 #endif
 }
 
-void i_ramble_plat_close(i_RambleSock s){
-    if (s == RAMBLE_SOCK_BAD) return;
+void i_rant_plat_close(i_RantSock s){
+    if (s == RANT_SOCK_BAD) return;
 #ifdef _WIN32
     closesocket((SOCKET)s);
 #else
@@ -343,30 +343,30 @@ void i_ramble_plat_close(i_RambleSock s){
 #endif
 }
 
-int i_ramble_plat_bind(i_RambleSock s, uint32_t if_naddr, uint16_t port, int reuse){
+int i_rant_plat_bind(i_RantSock s, uint32_t if_naddr, uint16_t port, int reuse){
     struct sockaddr_in a;
     if (reuse){
         int on = 1;
-        setsockopt(RAMBLE__FD(s), SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on);
+        setsockopt(RANT__FD(s), SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on);
 #ifdef SO_REUSEPORT
-        setsockopt(RAMBLE__FD(s), SOL_SOCKET, SO_REUSEPORT, (const char*)&on, sizeof on);
+        setsockopt(RANT__FD(s), SOL_SOCKET, SO_REUSEPORT, (const char*)&on, sizeof on);
 #endif
     }
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = if_naddr;
     a.sin_port = htons(port);
-    return bind(RAMBLE__FD(s), (struct sockaddr*)&a, sizeof a) == 0;
+    return bind(RANT__FD(s), (struct sockaddr*)&a, sizeof a) == 0;
 }
 
-uint16_t i_ramble_plat_local_port(i_RambleSock s){
-    struct sockaddr_in a; i_RambleSocklen ll = sizeof a;
+uint16_t i_rant_plat_local_port(i_RantSock s){
+    struct sockaddr_in a; i_RantSocklen ll = sizeof a;
     memset(&a, 0, sizeof a);
-    if (getsockname(RAMBLE__FD(s), (struct sockaddr*)&a, &ll) != 0) return 0;
+    if (getsockname(RANT__FD(s), (struct sockaddr*)&a, &ll) != 0) return 0;
     return ntohs(a.sin_port);
 }
 
-void i_ramble_plat_set_nonblock(i_RambleSock s){
+void i_rant_plat_set_nonblock(i_RantSock s){
 #ifdef _WIN32
     u_long nb = 1; ioctlsocket((SOCKET)s, FIONBIO, &nb);
 #else
@@ -375,14 +375,14 @@ void i_ramble_plat_set_nonblock(i_RambleSock s){
 #endif
 }
 
-void i_ramble_plat_set_rcvbuf(i_RambleSock s, int bytes){
-    setsockopt(RAMBLE__FD(s), SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof bytes);
+void i_rant_plat_set_rcvbuf(i_RantSock s, int bytes){
+    setsockopt(RANT__FD(s), SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof bytes);
 }
-void i_ramble_plat_set_sndbuf(i_RambleSock s, int bytes){
-    setsockopt(RAMBLE__FD(s), SOL_SOCKET, SO_SNDBUF, (const char*)&bytes, sizeof bytes);
+void i_rant_plat_set_sndbuf(i_RantSock s, int bytes){
+    setsockopt(RANT__FD(s), SOL_SOCKET, SO_SNDBUF, (const char*)&bytes, sizeof bytes);
 }
 
-void i_ramble_plat_suppress_connreset(i_RambleSock s){
+void i_rant_plat_suppress_connreset(i_RantSock s){
 #ifdef _WIN32
     BOOL off = FALSE; DWORD bv = 0;
     WSAIoctl((SOCKET)s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bv, NULL, NULL);
@@ -392,50 +392,50 @@ void i_ramble_plat_suppress_connreset(i_RambleSock s){
 }
 
 /* multicast */
-void i_ramble_plat_mcast_setif(i_RambleSock s, uint32_t if_naddr){
-    setsockopt(RAMBLE__FD(s), IPPROTO_IP, IP_MULTICAST_IF, (const char*)&if_naddr, sizeof if_naddr);
+void i_rant_plat_mcast_setif(i_RantSock s, uint32_t if_naddr){
+    setsockopt(RANT__FD(s), IPPROTO_IP, IP_MULTICAST_IF, (const char*)&if_naddr, sizeof if_naddr);
 }
-void i_ramble_plat_mcast_ttl(i_RambleSock s, uint8_t ttl){
+void i_rant_plat_mcast_ttl(i_RantSock s, uint8_t ttl){
     unsigned char t = ttl;
-    setsockopt(RAMBLE__FD(s), IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&t, sizeof t);
+    setsockopt(RANT__FD(s), IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&t, sizeof t);
 }
-void i_ramble_plat_mcast_loop(i_RambleSock s, int on){
+void i_rant_plat_mcast_loop(i_RantSock s, int on){
     unsigned char l = (unsigned char)(on ? 1 : 0);
-    setsockopt(RAMBLE__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
+    setsockopt(RANT__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
 }
-int i_ramble_plat_mcast_join(i_RambleSock s, uint32_t group_naddr, uint32_t if_naddr){
+int i_rant_plat_mcast_join(i_RantSock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
     mr.imr_multiaddr.s_addr = group_naddr;
     mr.imr_interface.s_addr = if_naddr;
-    return setsockopt(RAMBLE__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+    return setsockopt(RANT__FD(s), IPPROTO_IP, IP_ADD_MEMBERSHIP,
                       (const char*)&mr, sizeof mr) == 0;
 }
 /* Best effort. An interface that went away may have dropped its membership already. */
-void i_ramble_plat_mcast_leave(i_RambleSock s, uint32_t group_naddr, uint32_t if_naddr){
+void i_rant_plat_mcast_leave(i_RantSock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
     mr.imr_multiaddr.s_addr = group_naddr;
     mr.imr_interface.s_addr = if_naddr;
-    setsockopt(RAMBLE__FD(s), IPPROTO_IP, IP_DROP_MEMBERSHIP, (const char*)&mr, sizeof mr);
+    setsockopt(RANT__FD(s), IPPROTO_IP, IP_DROP_MEMBERSHIP, (const char*)&mr, sizeof mr);
 }
 
 /* datagram IO */
-int i_ramble_plat_send(i_RambleSock s, const void *buf, size_t len,
+int i_rant_plat_send(i_RantSock s, const void *buf, size_t len,
                    const uint8_t ip[4], uint16_t port){
     struct sockaddr_in d;
     memset(&d, 0, sizeof d);
     d.sin_family = AF_INET;
     memcpy(&d.sin_addr.s_addr, ip, 4);
     d.sin_port = htons(port);
-    return (int)sendto(RAMBLE__FD(s), (const char*)buf, (int)len, 0,
+    return (int)sendto(RANT__FD(s), (const char*)buf, (int)len, 0,
                        (struct sockaddr*)&d, sizeof d);
 }
 
-int i_ramble_plat_recv(i_RambleSock s, void *buf, size_t cap,
+int i_rant_plat_recv(i_RantSock s, void *buf, size_t cap,
                    uint8_t src_ip[4], uint16_t *src_port){
-    struct sockaddr_in src; i_RambleSocklen sl = sizeof src;
+    struct sockaddr_in src; i_RantSocklen sl = sizeof src;
     int n;
     memset(&src, 0, sizeof src);
-    n = (int)recvfrom(RAMBLE__FD(s), (char*)buf, (int)cap, 0,
+    n = (int)recvfrom(RANT__FD(s), (char*)buf, (int)cap, 0,
                       (struct sockaddr*)&src, &sl);
 #ifdef _WIN32
     /* Windows fails an oversized datagram with WSAEMSGSIZE after filling the buffer. POSIX
@@ -449,7 +449,7 @@ int i_ramble_plat_recv(i_RambleSock s, void *buf, size_t cap,
     return n;
 }
 
-int i_ramble_plat_would_block(void){
+int i_rant_plat_would_block(void){
 #ifdef _WIN32
     return WSAGetLastError() == WSAEWOULDBLOCK;
 #else
@@ -457,7 +457,7 @@ int i_ramble_plat_would_block(void){
 #endif
 }
 
-int i_ramble_plat_last_socket_error(void){
+int i_rant_plat_last_socket_error(void){
 #ifdef _WIN32
     return WSAGetLastError();   /* winsock keeps its error off errno */
 #else
@@ -465,7 +465,7 @@ int i_ramble_plat_last_socket_error(void){
 #endif
 }
 
-int i_ramble_plat_poll(i_RamblePollfd *fds, int n, int timeout_ms){
+int i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms){
     /* callers poll a few sockets, so the translation buffer lives on the stack */
 #ifdef _WIN32
     WSAPOLLFD p[8];
@@ -477,8 +477,8 @@ int i_ramble_plat_poll(i_RamblePollfd *fds, int n, int timeout_ms){
     if (n > 8) n = 8;
     memset(p, 0, sizeof p);
     for (i = 0; i < n; i++){
-        p[i].fd = RAMBLE__FD(fds[i].fd);
-        p[i].events = (short)((fds[i].events & RAMBLE_POLLIN) ? POLLIN : 0);
+        p[i].fd = RANT__FD(fds[i].fd);
+        p[i].events = (short)((fds[i].events & RANT_POLLIN) ? POLLIN : 0);
     }
 #ifdef _WIN32
     r = WSAPoll(p, (ULONG)n, timeout_ms);
@@ -486,38 +486,38 @@ int i_ramble_plat_poll(i_RamblePollfd *fds, int n, int timeout_ms){
     r = poll(p, (nfds_t)n, timeout_ms);
 #endif
     for (i = 0; i < n; i++)
-        fds[i].revents = (short)((p[i].revents & POLLIN) ? RAMBLE_POLLIN : 0);
+        fds[i].revents = (short)((p[i].revents & POLLIN) ? RANT_POLLIN : 0);
     return r;
 }
 
 /* address helpers */
-uint32_t i_ramble_plat_parse_ip(const char *dotted){
+uint32_t i_rant_plat_parse_ip(const char *dotted){
     return dotted ? (uint32_t)inet_addr(dotted) : 0;
 }
-uint32_t i_ramble_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d){
+uint32_t i_rant_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d){
     return htonl(((uint32_t)a << 24) | ((uint32_t)b << 16) |
                  ((uint32_t)c << 8)  |  (uint32_t)d);
 }
-uint32_t i_ramble_plat_ip4_to_naddr(const uint8_t ip[4]){
+uint32_t i_rant_plat_ip4_to_naddr(const uint8_t ip[4]){
     uint32_t n; memcpy(&n, ip, 4); return n;
 }
-void i_ramble_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
+void i_rant_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
     memcpy(out, &naddr, 4);
 }
 
-uint32_t i_ramble_plat_route_src(uint32_t dst_naddr, uint16_t port){
-    i_RambleSock s = i_ramble_plat_udp_open();
+uint32_t i_rant_plat_route_src(uint32_t dst_naddr, uint16_t port){
+    i_RantSock s = i_rant_plat_udp_open();
     struct sockaddr_in a;
     uint32_t ip = 0;                         /* INADDR_ANY on failure */
-    if (s == RAMBLE_SOCK_BAD) return ip;
+    if (s == RANT_SOCK_BAD) return ip;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_addr.s_addr = dst_naddr; a.sin_port = htons(port);
-    if (connect(RAMBLE__FD(s), (struct sockaddr*)&a, sizeof a) == 0){
-        struct sockaddr_in loc; i_RambleSocklen ll = sizeof loc;
-        if (getsockname(RAMBLE__FD(s), (struct sockaddr*)&loc, &ll) == 0)
+    if (connect(RANT__FD(s), (struct sockaddr*)&a, sizeof a) == 0){
+        struct sockaddr_in loc; i_RantSocklen ll = sizeof loc;
+        if (getsockname(RANT__FD(s), (struct sockaddr*)&loc, &ll) == 0)
             ip = loc.sin_addr.s_addr;
     }
-    i_ramble_plat_close(s);
+    i_rant_plat_close(s);
     return ip;
 }
 
@@ -529,7 +529,7 @@ uint32_t i_ramble_plat_route_src(uint32_t dst_naddr, uint16_t port){
 #ifndef IFF_LOOPBACK
 #define IFF_LOOPBACK 0x00000004
 #endif
-int i_ramble_plat_local_ifaces(i_RambleIface *out, int max){
+int i_rant_plat_local_ifaces(i_RantIface *out, int max){
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
     INTERFACE_INFO info[32];
     DWORD bytes = 0;
@@ -554,7 +554,7 @@ int i_ramble_plat_local_ifaces(i_RambleIface *out, int max){
 #elif defined(ESP_PLATFORM)
 /* lwIP has no getifaddrs, so name the netifs the IDF defines. WiFi or Ethernet must be up
  * before the node opens. */
-int i_ramble_plat_local_ifaces(i_RambleIface *out, int max){
+int i_rant_plat_local_ifaces(i_RantIface *out, int max){
     static const char *const keys[] = { "WIFI_STA_DEF", "ETH_DEF", "WIFI_AP_DEF" };
     int n = 0; unsigned i;
     if (!out || max <= 0) return 0;
@@ -570,7 +570,7 @@ int i_ramble_plat_local_ifaces(i_RambleIface *out, int max){
     return n;
 }
 #else
-int i_ramble_plat_local_ifaces(i_RambleIface *out, int max){
+int i_rant_plat_local_ifaces(i_RantIface *out, int max){
     struct ifaddrs *ifs = NULL, *p;
     int n = 0;
     if (!out || max <= 0 || getifaddrs(&ifs) != 0) return 0;
@@ -590,76 +590,76 @@ int i_ramble_plat_local_ifaces(i_RambleIface *out, int max){
 #endif
 
 /* threads */
-#ifdef RAMBLE_THREADS
+#ifdef RANT_THREADS
 
 /* The opaque blobs must fit the real OS types. C99 has no _Static_assert. */
-#define RAMBLE__FITS(name, real, blob) \
+#define RANT__FITS(name, real, blob) \
     typedef char name[(sizeof(real) <= sizeof(blob)) ? 1 : -1]
 
 #ifdef _WIN32
 
-typedef struct { HANDLE h; void (*fn)(void *); void *arg; } i_RambleThreadImpl;
-RAMBLE__FITS(i_ramble_plat_mutex_fits,  SRWLOCK,            i_RambleMutex);
-RAMBLE__FITS(i_ramble_plat_cond_fits,   CONDITION_VARIABLE, i_RambleCond);
-RAMBLE__FITS(i_ramble_plat_thread_fits, i_RambleThreadImpl, i_RambleThread);
+typedef struct { HANDLE h; void (*fn)(void *); void *arg; } i_RantThreadImpl;
+RANT__FITS(i_rant_plat_mutex_fits,      SRWLOCK,            i_RantMutex);
+RANT__FITS(i_rant_plat_cond_fits,       CONDITION_VARIABLE, i_RantCond);
+RANT__FITS(i_rant_plat_thread_fits, i_RantThreadImpl, i_RantThread);
 
-static DWORD WINAPI i_ramble_plat_thread_tramp(LPVOID p){
-    i_RambleThreadImpl *t = (i_RambleThreadImpl *)p;
+static DWORD WINAPI i_rant_plat_thread_tramp(LPVOID p){
+    i_RantThreadImpl *t = (i_RantThreadImpl *)p;
     t->fn(t->arg);
     return 0;
 }
-int i_ramble_plat_thread_start(i_RambleThread *t, void (*fn)(void *), void *arg){
-    i_RambleThreadImpl *ti = (i_RambleThreadImpl *)t;
+int i_rant_plat_thread_start(i_RantThread *t, void (*fn)(void *), void *arg){
+    i_RantThreadImpl *ti = (i_RantThreadImpl *)t;
     ti->fn = fn; ti->arg = arg;
-    ti->h = CreateThread(NULL, 0, i_ramble_plat_thread_tramp, ti, 0, NULL);
+    ti->h = CreateThread(NULL, 0, i_rant_plat_thread_tramp, ti, 0, NULL);
     return ti->h != NULL;
 }
-void i_ramble_plat_thread_join(i_RambleThread *t){
-    i_RambleThreadImpl *ti = (i_RambleThreadImpl *)t;
+void i_rant_plat_thread_join(i_RantThread *t){
+    i_RantThreadImpl *ti = (i_RantThreadImpl *)t;
     if (!ti->h) return;
     WaitForSingleObject(ti->h, INFINITE);
     CloseHandle(ti->h);
     ti->h = NULL;
 }
-uint64_t i_ramble_plat_thread_id(void){ return (uint64_t)GetCurrentThreadId(); }
+uint64_t i_rant_plat_thread_id(void){ return (uint64_t)GetCurrentThreadId(); }
 
 /* SRWLOCK is pointer sized, pairs with condvars and is not recursive, which the condvar
    contract needs. Node reentrancy is an owner id check above this layer. */
-void i_ramble_plat_mutex_init   (i_RambleMutex *m){ InitializeSRWLock((PSRWLOCK)m); }
-void i_ramble_plat_mutex_destroy(i_RambleMutex *m){ (void)m; }
-void i_ramble_plat_mutex_lock   (i_RambleMutex *m){ AcquireSRWLockExclusive((PSRWLOCK)m); }
-void i_ramble_plat_mutex_unlock (i_RambleMutex *m){ ReleaseSRWLockExclusive((PSRWLOCK)m); }
+void i_rant_plat_mutex_init     (i_RantMutex *m){ InitializeSRWLock((PSRWLOCK)m); }
+void i_rant_plat_mutex_destroy(i_RantMutex *m){ (void)m; }
+void i_rant_plat_mutex_lock     (i_RantMutex *m){ AcquireSRWLockExclusive((PSRWLOCK)m); }
+void i_rant_plat_mutex_unlock (i_RantMutex *m){ ReleaseSRWLockExclusive((PSRWLOCK)m); }
 
-void i_ramble_plat_cond_init   (i_RambleCond *c){ InitializeConditionVariable((PCONDITION_VARIABLE)c); }
-void i_ramble_plat_cond_destroy(i_RambleCond *c){ (void)c; }
-void i_ramble_plat_cond_wait(i_RambleCond *c, i_RambleMutex *m, uint32_t timeout_us){
+void i_rant_plat_cond_init     (i_RantCond *c){ InitializeConditionVariable((PCONDITION_VARIABLE)c); }
+void i_rant_plat_cond_destroy(i_RantCond *c){ (void)c; }
+void i_rant_plat_cond_wait(i_RantCond *c, i_RantMutex *m, uint32_t timeout_us){
     /* round up in 64 bits: 0xFFFFFFFF + 999 would wrap and make the longest waits 1 ms spins */
     DWORD ms = (DWORD)(((uint64_t)timeout_us + 999u) / 1000u);
     SleepConditionVariableSRW((PCONDITION_VARIABLE)c, (PSRWLOCK)m, ms ? ms : 1, 0);
 }
-void i_ramble_plat_cond_broadcast(i_RambleCond *c){ WakeAllConditionVariable((PCONDITION_VARIABLE)c); }
+void i_rant_plat_cond_broadcast(i_RantCond *c){ WakeAllConditionVariable((PCONDITION_VARIABLE)c); }
 
 #else /* POSIX */
 
-typedef struct { pthread_t t; void (*fn)(void *); void *arg; } i_RambleThreadImpl;
-RAMBLE__FITS(i_ramble_plat_mutex_fits,  pthread_mutex_t,    i_RambleMutex);
-RAMBLE__FITS(i_ramble_plat_cond_fits,   pthread_cond_t,     i_RambleCond);
-RAMBLE__FITS(i_ramble_plat_thread_fits, i_RambleThreadImpl, i_RambleThread);
+typedef struct { pthread_t t; void (*fn)(void *); void *arg; } i_RantThreadImpl;
+RANT__FITS(i_rant_plat_mutex_fits,      pthread_mutex_t,    i_RantMutex);
+RANT__FITS(i_rant_plat_cond_fits,       pthread_cond_t,     i_RantCond);
+RANT__FITS(i_rant_plat_thread_fits, i_RantThreadImpl, i_RantThread);
 
-static void *i_ramble_plat_thread_tramp(void *p){
-    i_RambleThreadImpl *t = (i_RambleThreadImpl *)p;
+static void *i_rant_plat_thread_tramp(void *p){
+    i_RantThreadImpl *t = (i_RantThreadImpl *)p;
     t->fn(t->arg);
     return NULL;
 }
-int i_ramble_plat_thread_start(i_RambleThread *t, void (*fn)(void *), void *arg){
-    i_RambleThreadImpl *ti = (i_RambleThreadImpl *)t;
+int i_rant_plat_thread_start(i_RantThread *t, void (*fn)(void *), void *arg){
+    i_RantThreadImpl *ti = (i_RantThreadImpl *)t;
     ti->fn = fn; ti->arg = arg;
-    return pthread_create(&ti->t, NULL, i_ramble_plat_thread_tramp, ti) == 0;
+    return pthread_create(&ti->t, NULL, i_rant_plat_thread_tramp, ti) == 0;
 }
-void i_ramble_plat_thread_join(i_RambleThread *t){
-    pthread_join(((i_RambleThreadImpl *)t)->t, NULL);
+void i_rant_plat_thread_join(i_RantThread *t){
+    pthread_join(((i_RantThreadImpl *)t)->t, NULL);
 }
-uint64_t i_ramble_plat_thread_id(void){
+uint64_t i_rant_plat_thread_id(void){
 #if defined(ESP_PLATFORM)
     /* pthread_self aborts on ESP-IDF from a task not made by pthread_create, like the
        Arduino loopTask. The task handle is a unique id on any task. */
@@ -669,12 +669,12 @@ uint64_t i_ramble_plat_thread_id(void){
 #endif
 }
 
-void i_ramble_plat_mutex_init   (i_RambleMutex *m){ pthread_mutex_init((pthread_mutex_t *)m, NULL); }
-void i_ramble_plat_mutex_destroy(i_RambleMutex *m){ pthread_mutex_destroy((pthread_mutex_t *)m); }
-void i_ramble_plat_mutex_lock   (i_RambleMutex *m){ pthread_mutex_lock((pthread_mutex_t *)m); }
-void i_ramble_plat_mutex_unlock (i_RambleMutex *m){ pthread_mutex_unlock((pthread_mutex_t *)m); }
+void i_rant_plat_mutex_init     (i_RantMutex *m){ pthread_mutex_init((pthread_mutex_t *)m, NULL); }
+void i_rant_plat_mutex_destroy(i_RantMutex *m){ pthread_mutex_destroy((pthread_mutex_t *)m); }
+void i_rant_plat_mutex_lock     (i_RantMutex *m){ pthread_mutex_lock((pthread_mutex_t *)m); }
+void i_rant_plat_mutex_unlock (i_RantMutex *m){ pthread_mutex_unlock((pthread_mutex_t *)m); }
 
-void i_ramble_plat_cond_init(i_RambleCond *c){
+void i_rant_plat_cond_init(i_RantCond *c){
 #if defined(__linux__)
     /* the monotonic clock, so a wall clock step cannot stretch a timeout */
     pthread_condattr_t a;
@@ -686,8 +686,8 @@ void i_ramble_plat_cond_init(i_RambleCond *c){
     pthread_cond_init((pthread_cond_t *)c, NULL);
 #endif
 }
-void i_ramble_plat_cond_destroy(i_RambleCond *c){ pthread_cond_destroy((pthread_cond_t *)c); }
-void i_ramble_plat_cond_wait(i_RambleCond *c, i_RambleMutex *m, uint32_t timeout_us){
+void i_rant_plat_cond_destroy(i_RantCond *c){ pthread_cond_destroy((pthread_cond_t *)c); }
+void i_rant_plat_cond_wait(i_RantCond *c, i_RantMutex *m, uint32_t timeout_us){
 #if defined(__APPLE__)
     struct timespec rel;
     rel.tv_sec  = (time_t)(timeout_us / 1000000u);
@@ -708,52 +708,52 @@ void i_ramble_plat_cond_wait(i_RambleCond *c, i_RambleMutex *m, uint32_t timeout
     pthread_cond_timedwait((pthread_cond_t *)c, (pthread_mutex_t *)m, &ts);
 #endif
 }
-void i_ramble_plat_cond_broadcast(i_RambleCond *c){ pthread_cond_broadcast((pthread_cond_t *)c); }
+void i_rant_plat_cond_broadcast(i_RantCond *c){ pthread_cond_broadcast((pthread_cond_t *)c); }
 
 #endif /* _WIN32 */
 
 /* Bound to loopback and connected to itself, so only its own signals ever arrive. */
-int i_ramble_plat_waker_open(i_RambleWaker *w){
-    struct sockaddr_in a; i_RambleSocklen al = sizeof a;
-    w->fd = i_ramble_plat_udp_open();
-    if (w->fd == RAMBLE_SOCK_BAD) return 0;
+int i_rant_plat_waker_open(i_RantWaker *w){
+    struct sockaddr_in a; i_RantSocklen al = sizeof a;
+    w->fd = i_rant_plat_udp_open();
+    if (w->fd == RANT_SOCK_BAD) return 0;
     memset(&a, 0, sizeof a);
-    if (!i_ramble_plat_bind(w->fd, i_ramble_plat_ipv4(127, 0, 0, 1), 0, 0)) goto fail;
-    if (getsockname(RAMBLE__FD(w->fd), (struct sockaddr *)&a, &al) != 0) goto fail;
-    if (connect(RAMBLE__FD(w->fd), (struct sockaddr *)&a, sizeof a) != 0) goto fail;
-    i_ramble_plat_set_nonblock(w->fd);
+    if (!i_rant_plat_bind(w->fd, i_rant_plat_ipv4(127, 0, 0, 1), 0, 0)) goto fail;
+    if (getsockname(RANT__FD(w->fd), (struct sockaddr *)&a, &al) != 0) goto fail;
+    if (connect(RANT__FD(w->fd), (struct sockaddr *)&a, sizeof a) != 0) goto fail;
+    i_rant_plat_set_nonblock(w->fd);
     return 1;
 fail:
-    i_ramble_plat_close(w->fd);
-    w->fd = RAMBLE_SOCK_BAD;
+    i_rant_plat_close(w->fd);
+    w->fd = RANT_SOCK_BAD;
     return 0;
 }
-int i_ramble_plat_waker_signal(i_RambleWaker *w){
+int i_rant_plat_waker_signal(i_RantWaker *w){
     char b = 1;
-    if (w->fd == RAMBLE_SOCK_BAD) return 0;
-    return (int)send(RAMBLE__FD(w->fd), &b, 1, 0) == 1;
+    if (w->fd == RANT_SOCK_BAD) return 0;
+    return (int)send(RANT__FD(w->fd), &b, 1, 0) == 1;
 }
-void i_ramble_plat_waker_drain(i_RambleWaker *w){
+void i_rant_plat_waker_drain(i_RantWaker *w){
     char b[64];
-    if (w->fd == RAMBLE_SOCK_BAD) return;
-    while (recv(RAMBLE__FD(w->fd), b, sizeof b, 0) > 0) {}
+    if (w->fd == RANT_SOCK_BAD) return;
+    while (recv(RANT__FD(w->fd), b, sizeof b, 0) > 0) {}
 }
-void i_ramble_plat_waker_close(i_RambleWaker *w){
-    i_ramble_plat_close(w->fd);
-    w->fd = RAMBLE_SOCK_BAD;
+void i_rant_plat_waker_close(i_RantWaker *w){
+    i_rant_plat_close(w->fd);
+    w->fd = RANT_SOCK_BAD;
 }
 
-#endif /* RAMBLE_THREADS */
+#endif /* RANT_THREADS */
 
 /* shared memory */
-#ifdef RAMBLE_SHM
+#ifdef RANT_SHM
 #ifndef _WIN32
   #include <sys/mman.h>            /* shm_open and mmap */
   #include <sys/stat.h>            /* fstat */
 #endif
 
 /* A 128 bit id from bytes, two FNV-1a passes with distinct seeds. Not cryptographic. */
-static void i_ramble_plat_hash16(const void *data, size_t len, uint8_t out[16]){
+static void i_rant_plat_hash16(const void *data, size_t len, uint8_t out[16]){
     const uint8_t *p = (const uint8_t*)data; size_t i;
     uint64_t a = 14695981039346656037ull, b = 1099511628211ull;
     for (i = 0; i < len; i++){
@@ -763,7 +763,7 @@ static void i_ramble_plat_hash16(const void *data, size_t len, uint8_t out[16]){
     for (i = 0; i < 8; i++){ out[i] = (uint8_t)(a >> (8*i)); out[8+i] = (uint8_t)(b >> (8*i)); }
 }
 
-void i_ramble_plat_host_uuid(uint8_t out[16]){
+void i_rant_plat_host_uuid(uint8_t out[16]){
 #if defined(__linux__)
     FILE *f = fopen("/etc/machine-id", "rb");   /* 32 hex chars, a 128 bit id */
     if (f){
@@ -778,14 +778,14 @@ void i_ramble_plat_host_uuid(uint8_t out[16]){
         if (ok) return;
     }
 #endif
-    {   char host[256]; size_t n = i_ramble_plat_hostname(host, sizeof host);
+    {   char host[256]; size_t n = i_rant_plat_hostname(host, sizeof host);
         if (n == 0){ host[0] = '?'; n = 1; }
-        i_ramble_plat_hash16(host, n, out);
+        i_rant_plat_hash16(host, n, out);
     }
 }
 
 #ifdef _WIN32
-void *i_ramble_plat_shm_create(const char *name, size_t bytes, void **handle){
+void *i_rant_plat_shm_create(const char *name, size_t bytes, void **handle){
     HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                   (DWORD)((uint64_t)bytes >> 32),
                                   (DWORD)(bytes & 0xFFFFFFFFu), name);
@@ -796,7 +796,7 @@ void *i_ramble_plat_shm_create(const char *name, size_t bytes, void **handle){
     *handle = h;
     return base;
 }
-void *i_ramble_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
+void *i_rant_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
     void *base; MEMORY_BASIC_INFORMATION mbi;
     if (!h) return NULL;
@@ -806,19 +806,19 @@ void *i_ramble_plat_shm_attach(const char *name, size_t *out_bytes, void **handl
     *handle = h;
     return base;
 }
-void i_ramble_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+void i_rant_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
     (void)bytes; (void)unlink_it;   /* the object dies when the last handle closes */
     if (base) UnmapViewOfFile(base);
     if (handle) CloseHandle((HANDLE)handle);
 }
-uint64_t i_ramble_plat_atomic_load64(volatile uint64_t *p){
+uint64_t i_rant_plat_atomic_load64(volatile uint64_t *p){
     return (uint64_t)InterlockedCompareExchange64((volatile LONGLONG*)p, 0, 0);
 }
-void i_ramble_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+void i_rant_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
     InterlockedExchange64((volatile LONGLONG*)p, (LONGLONG)v);
 }
 #else /* POSIX */
-void *i_ramble_plat_shm_create(const char *name, size_t bytes, void **handle){
+void *i_rant_plat_shm_create(const char *name, size_t bytes, void **handle){
     int fd = shm_open(name, O_CREAT|O_RDWR, 0600);
     void *base; char *nm;
     if (fd < 0) return NULL;
@@ -831,7 +831,7 @@ void *i_ramble_plat_shm_create(const char *name, size_t bytes, void **handle){
     *handle = nm;
     return base;
 }
-void *i_ramble_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
+void *i_rant_plat_shm_attach(const char *name, size_t *out_bytes, void **handle){
     int fd = shm_open(name, O_RDWR, 0600);
     void *base; struct stat st;
     if (fd < 0) return NULL;
@@ -843,18 +843,18 @@ void *i_ramble_plat_shm_attach(const char *name, size_t *out_bytes, void **handl
     *handle = NULL;                             /* a reader never unlinks */
     return base;
 }
-void i_ramble_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
+void i_rant_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it){
     if (base && base != MAP_FAILED) munmap(base, bytes);
     if (handle){
         if (unlink_it) shm_unlink((const char*)handle);
         free(handle);
     }
 }
-uint64_t i_ramble_plat_atomic_load64(volatile uint64_t *p){
+uint64_t i_rant_plat_atomic_load64(volatile uint64_t *p){
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 }
-void i_ramble_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
+void i_rant_plat_atomic_store64(volatile uint64_t *p, uint64_t v){
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
 }
 #endif /* _WIN32 */
-#endif /* RAMBLE_SHM */
+#endif /* RANT_SHM */

@@ -1,41 +1,41 @@
 # Unity
 
-Ramble in Unity is the C# wrapper of docs/csharp.md plus one component that owns the node for
+Rant in Unity is the C# wrapper of docs/csharp.md plus one component that owns the node for
 the whole scene. Every script talks to that component instead of opening its own node.
 bindings/csharp/unity/README.md covers installing the package. This page is what the component adds,
 and everything it does not mention behaves as docs/csharp.md describes.
 
 ## Set it up
 
-Add one **RambleNodeUnity** component to any GameObject in the scene (Add Component > Ramble >
-Ramble RambleNode). That is the whole setup. It opens the node, finds peers, and shuts down with
+Add one **RantNodeUnity** component to any GameObject in the scene (Add Component > Rant >
+Rant RantNode). That is the whole setup. It opens the node, finds peers, and shuts down with
 the scene. Only one is allowed, and a second warns and stays inactive.
 
 ## Send and receive
 
 ```csharp
-using Ramble;
+using Rant;
 using UnityEngine;
 
 public struct Pose { public float X, Y, Z; }
 
 public class PoseSender : MonoBehaviour {
-    RambleTopic<Pose> pose;
-    void OnEnable() { pose = RambleNodeUnity.Topic<Pose>("player/pose"); }
+    RantTopic<Pose> pose;
+    void OnEnable() { pose = RantNodeUnity.Topic<Pose>("player/pose"); }
     void Update()   { pose.Publish(new Pose { X = transform.position.x,
                                               Y = transform.position.y,
                                               Z = transform.position.z }); }
 }
 
 public class PoseReceiver : MonoBehaviour {
-    void OnEnable() => RambleNodeUnity.Topic<Pose>("player/pose").Subscribe(this, OnPose);
+    void OnEnable() => RantNodeUnity.Topic<Pose>("player/pose").Subscribe(this, OnPose);
     void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
 }
 ```
 
-`RambleNodeUnity.Topic<T>(name)` gives you the topic of that name. Ask for the same name from
-ten scripts and you get the same `RambleTopic<T>` back, so a topic is shared across the scene
-rather than duplicated. `RambleNodeUnity.Topic(name)` is the raw form carrying `byte[]` or a
+`RantNodeUnity.Topic<T>(name)` gives you the topic of that name. Ask for the same name from
+ten scripts and you get the same `RantTopic<T>` back, so a topic is shared across the scene
+rather than duplicated. `RantNodeUnity.Topic(name)` is the raw form carrying `byte[]` or a
 UTF-8 `string`.
 
 Message types are written as docs/csharp.md describes, and the field names have to match on
@@ -71,8 +71,8 @@ topic.Subscribe(this, OnPose);
 ```
 
 It stops when that component is destroyed and is skipped while it is disabled. This is what
-you want almost always. Leave the owner out and you get a `RambleSubscription` to dispose
-yourself. Both forms have an overload taking `(T value, RambleMessage message)` when you want
+you want almost always. Leave the owner out and you get a `RantSubscription` to dispose
+yourself. Both forms have an overload taking `(T value, RantMessage message)` when you want
 the sender or the clocks beside the value.
 
 ## QoS
@@ -81,7 +81,7 @@ QoS is the `Qos` object of docs/csharp.md, passed the first time a name is reque
 callers share the topic that already exists, so their QoS is ignored and the Console says so.
 
 ```csharp
-RambleNodeUnity.Topic<Pose>("player/pose", new Qos { MaxRateHz = 30 })
+RantNodeUnity.Topic<Pose>("player/pose", new Qos { MaxRateHz = 30 })
              .Subscribe(this, OnPose);
 ```
 
@@ -103,8 +103,8 @@ scripts can use one variable.
 public class MotorPanel : MonoBehaviour {
     RemoteVariable<float> speed;
     void OnEnable() {
-        speed = RambleNodeUnity.RemoteVariable<float>("motor/speed");
-        RambleNodeUnity.Bind(this, speed.OnChange(v => slider.value = v));
+        speed = RantNodeUnity.RemoteVariable<float>("motor/speed");
+        RantNodeUnity.Bind(this, speed.OnChange(v => slider.value = v));
     }
 }
 ```
@@ -116,11 +116,11 @@ The shorthands are `VariableDefinition<T>(name)`, `VariableDefinition<T>(name, i
 not cover, build the handle yourself and let the component share it:
 
 ```csharp
-RambleNodeUnity.Shared("motor/speed",
+RantNodeUnity.Shared("motor/speed",
     n => new RemoteVariable<float>(n, "motor/speed", catchUp: 5));
 ```
 
-`RambleNodeUnity.Bind(component, subscription)` disposes an observer when that component is
+`RantNodeUnity.Bind(component, subscription)` disposes an observer when that component is
 destroyed, which is the pattern side of an owner bound subscription.
 
 ## Edit mode and reopening
@@ -152,11 +152,11 @@ misbehaves.
 
 ## Watching what happens
 
-`RambleNodeUnity.Events` reports peers joining and leaving, lost messages and errors, on the
-main thread. With Log Events on they also go to the Console. On a `RambleTopic`, `Matches`
+`RantNodeUnity.Events` reports peers joining and leaving, lost messages and errors, on the
+main thread. With Log Events on they also go to the Console. On a `RantTopic`, `Matches`
 counts matched remote endpoints and `SubscriberCount` your own handlers.
 
-`RambleNodeUnity.Main.Raw` is the underlying `RambleNode` and `topic.Raw` the underlying `Topic`,
+`RantNodeUnity.Main.Raw` is the underlying `RantNode` and `topic.Raw` the underlying `Topic`,
 which is where the rest of docs/csharp.md lives. The plain wrapper also works on its own in
 Unity without the component.
 

@@ -239,8 +239,8 @@ class JointNames:
 def now():
     """The wall clock in Timestamp units, microseconds since the Unix epoch UTC, the clock a
         message's written_us uses."""
-    return int(_c.load().ramble_timestamp_now())
+    return int(_c.load().rant_timestamp_now())
 
 
-# the vocabulary only built the roster, so it stays on ramble. and not on ramble.types.
+# the vocabulary only built the roster, so it stays on rant. and not on rant.types.
 del _StdAlias, _std, _String, u8, u32, i32, i64, f32, f64, string, enum
